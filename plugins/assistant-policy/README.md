@@ -48,15 +48,17 @@ dsh --profile web --dump-config
 
 ## 三档即时审批
 
-当前适配 DSH `0.2.0-rc.2`：`auto` 是上游保留档位，由 Policy 在权限服务就绪期间通过 `permissionPresets.registerAuto()` 动态注册；meta-bundle 不配置同名静态项。定向测试覆盖注册、服务换代、撤销及 Session format v4；完整部署仍需独立验收。
+Harness 原生「自动审查」独占保留档位 `auto`，由官方组件注册和逐次审查。Policy 不注册、接管或撤销该档位，也不会把原生 `permission/preset: auto` 当作助手内部自动审批授权。二者可同时加载，卸载 Policy 不撤销官方档位。
 
-生产三档由标准 `permission/preset`、`sandbox/mode` 与 `approval/policy` 共同决定：官方 id `workspace-write` / `auto` / `danger-full-access` 分别映射 reviewer `user` / `auto-review` / `none`，而且日志中更晚的官方选择会覆盖更早的旧 reviewer 事件。`assistant-policy/approval-reviewer` 仍保留为旧 session、单 workspace preset 或第三方动态 id 的兼容事实；无论意图来自哪一种事件，执行状态仍逐项核验：
+助手自身的「帮我批准」使用已有的 `assistant-policy/approval-reviewer: auto-review` 持久事件，要求同时有显式 `workspace-write + ask`。已鉴权的 Delivery `/permission auto` 负责写入；支持会话格式 0、3、4，未知格式和不完整状态均回退人工。最新原生权限选择会覆盖旧的助手审批意图：
 
-- **请求批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `user`。低风险精确 allowlist 直接继续，其余动作交给人工。
-- **帮我批准**：DSH `0.2.0-rc.2` 的保留 Auto bundle 使用 `danger-full-access + ask`，由 Policy 的实时注册控制；只有 format v4 且有效 preset 为 `auto` 才识别该组合。format v3 中残留的 `auto` 选择不能授权 full-access 自动审核，未知会话格式也不会启用自动审核。内置只读网络工具、workspace 内文件读写、非凭据本地文件只读、单个命名 Skill 的加载、普通前台 Bash（含测试、构建、非敏感管道/重定向和依赖安装）以及专用 `ask_user_question` 直接继续，不再消耗 reviewer 或打断用户；未知插件工具仍进入隔离 reviewer。凭据、后台进程、破坏性命令、提权、workspace 外写入、任意 `run_code` / PowerShell，以及显式原生 sandbox escalation 仍交人工。
-- **完全访问权限**：只有显式且同时生效的 `sandbox/mode: danger-full-access` + `approval/policy: never` + reviewer `none` 才会绕过参数级即时风险门。单独的 `never`、缺少 sandbox 事件、事件畸形或三者暂时不一致都会失败关闭，绝不会把 headless 的“不询问”误解成 full；此时敏感工具直接返回稳定的 `[approval-disabled]` 诊断，并明确说明没有向用户展示审批，不再制造 `the user rejected tool` 的错误归因。`tools.guard()` 的显式 deny、紧急停止、身份和预算检查仍然单调生效；若希望未匹配工具也可执行，需要显式配置 `toolDefaultEffect: allow`。
+- **请求批准**：`workspace-write + ask` + reviewer `user`。低风险精确 allowlist 直接继续，其余动作交给人工。
+- **帮我批准**：`workspace-write + ask` + 显式项目 reviewer `auto-review`。内置只读工具、workspace 内文件读写和限定的普通 Bash 沿用确定性检查，未知插件工具才进入助手的独立模型复核。凭据、后台进程、破坏性命令、提权、workspace 外写入、`run_code` / PowerShell 与原生 sandbox escalation 仍需人工。
+- **完全访问权限**：显式且一致的 `danger-full-access + never` + reviewer `none` 才绕过参数级即时风险门。缺项、畸形事件或切换中间态均失败关闭；`tools.guard()` 的显式 deny、紧急停止、身份与预算仍生效。
 
-包根导出 `approvalReviewerOf(events)`、`getApprovalReviewer(session)` 和兼容 setter `setApprovalReviewer(session, reviewer)`；setter 只接受 `user | auto-review | none`。auto 与 full 都要求 preset 意图、显式 approval 和显式 sandbox 完整一致；缺项、畸形事件或切换中的中间状态只会折回 `user`。因此 Web 的 full→auto、ask→auto，以及 Delivery auto→Web ask 都由最新官方 preset 直接串行折叠，不再依赖另写 custom reviewer。
+原生 Auto 生效时，普通调用交由 Harness 审查，Policy 不再追加模型复核或接管官方的人工审批。项目已有的高风险人工要求（包括官方跳过审查的顶层 `run_code`）、明确拒绝和预算仍保留。历史会话选择了原生 `auto` 而当前没有活跃的原生注册时，工具执行被拒绝，不能沿用缺少审查器的完全访问沙箱。
+
+包根保留 `approvalReviewerOf(events, sessionFormat)`、`getApprovalReviewer(session)` 与 `setApprovalReviewer(session, reviewer)`，setter 仅接受 `user | auto-review | none`。这些接口报告助手审批意图；原生 Auto 返回 `user` 表示由官方处理，不代表官方模型审查被关闭。Owner 记忆/知识库复核与后台任务的有限预授权继续使用项目自身的授权、证据和预算。
 
 canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
 
@@ -72,8 +74,8 @@ Auto 还会直接执行一种严格限定的公共 HTTP GET/HEAD `curl` 读取�
 
 - `read` / `read_image` 只有一个可证明位于 workspace 内且不带 credential-sensitive 标记的本地路径时可继续；`glob` / `grep` 只接受已知参数形态，并对 search root、glob/include 做同样的词法范围检查。workspace 外、`.env`、`.ssh`、`.codex/auth.json` 等敏感目标、URL、缺失路径或未知参数一律交人工；
 - `pwd`、受限 `ls`、`git status --short|--porcelain`、`git rev-parse --show-toplevel|--abbrev-ref HEAD`、`git diff --no-ext-diff` 的 `--stat|--stat --cached|--name-only`、`git log --oneline -n 10|20`，以及 `node/npm/pnpm/python3/cargo/rustc/tsc/git --version`、`node -v`、`go version`、`uname -s|-m` 等少量精确 argv 形态可继续。允许的条件是只读、不触网、不读 credential 路径且不接受可逃出 workspace 的操作数：带操作数的命令（如 `ls`）由独立分类器做范围检查，`git log --oneline -n 50`、`uname -a`、`go get`、`npm install`、`cargo install` 等相邻形态不在名单内。其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
-- 简单但未分类的前台 Bash（例如 `pnpm test`）先归为 `ask-review`；显式 `ask` 档仍提示人工，默认 `auto` 档则直接继续。未知插件工具保持 `ask-review` 并在 auto 中交隔离 reviewer，不因本次放宽自动执行。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，因此在 ask/auto 档始终进入 `ask-human`；
-- 内置只读 `web_search` / `web_fetch` 与专用 `ask_user_question` 确定性放行。上述限定读取之外的 `curl`、`ssh`、`git push` 等网络命令，以及 credential 痕迹、外部路径中的 credential 关键词搜索、后台执行、破坏性操作、提权、workspace 外写入仍进入 `ask-human`。普通外部本地只读与 Skill 加载只在默认 `auto` 直放，显式 `ask` 仍会询问。复杂 shell 会先做高召回敏感扫描；未命中时仅在默认 auto 直接继续，在显式 ask 仍展示授权。`npx`、`npm exec`、`pnpm/yarn dlx` 及依赖安装属于默认 auto 的普通操作；`git submodule update` 仍按潜在远端执行归入 `ask-human`；
+- 简单但未分类的前台 Bash（例如 `pnpm test`）先归为 `ask-review`；显式 `ask` 档仍提示人工，助手 `auto` 档则直接继续。未知插件工具保持 `ask-review` 并在 auto 中交隔离 reviewer，不因本次放宽自动执行。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，因此在 ask/auto 档始终进入 `ask-human`；
+- 内置只读 `web_search` / `web_fetch` 与专用 `ask_user_question` 确定性放行。上述限定读取之外的 `curl`、`ssh`、`git push` 等网络命令，以及 credential 痕迹、外部路径中的 credential 关键词搜索、后台执行、破坏性操作、提权、workspace 外写入仍进入 `ask-human`。普通外部本地只读与 Skill 加载只在默认 `auto` 直放，显式 `ask` 仍会询问。复杂 shell 会先做高召回敏感扫描；未命中时仅在助手 auto 直接继续，在显式 ask 仍展示授权。`npx`、`npm exec`、`pnpm/yarn dlx` 及依赖安装属于助手 auto 的普通操作；`git submodule update` 仍按潜在远端执行归入 `ask-human`；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；
 - `bash` / `pwsh` / `write` / `edit` 已携带合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
 

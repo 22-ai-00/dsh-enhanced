@@ -18,7 +18,7 @@ import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@de
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { setApprovalReviewer } from '../src/approval-reviewer.ts'
 import { isAutoReviewEscalation } from '../src/auto-review.ts'
 import { AssistantPolicyService, type Config } from '../src/service.ts'
@@ -170,9 +170,8 @@ async function fixture(
     agent.session.append('approval/policy', { policy: options.approvalPolicy ?? 'ask' })
   }
   if (options.sandboxMode !== 'missing') {
-    appendSandboxMode(agent, options.sandboxMode ?? 'danger-full-access')
+    appendSandboxMode(agent, options.sandboxMode ?? 'workspace-write')
   }
-  if ((options.reviewer ?? 'auto-review') === 'auto-review') appendPermissionPreset(agent, 'auto')
   const callId = ToolCallId('exact-review-call')
   const exactToolName = options.exactToolName ?? 'bash'
   if (options.historicalExactCall === true) {
@@ -370,7 +369,7 @@ describe('isolated automatic approval reviewer', () => {
       { approvalPolicy: 'missing' as const },
       { sandboxMode: 'missing' as const },
       { approvalPolicy: 'missing' as const, sandboxMode: 'missing' as const },
-      { sandboxMode: 'workspace-write' as const },
+      { sandboxMode: 'danger-full-access' as const },
     ]) {
       const current = await fixture([assessment()], options)
       await expect(current.request()).resolves.toBe('rejected')
@@ -379,10 +378,20 @@ describe('isolated automatic approval reviewer', () => {
     }
   })
 
-  test('does not review a stale Auto selector after sandbox knobs change', async () => {
-    const current = await fixture([assessment()], { sandboxMode: 'workspace-write' })
-    await expect(current.request()).resolves.toBe('rejected')
+  test('lets Harness route its own Auto approval without consulting the project model or owner router', async () => {
+    const current = await fixture([assessment()], { sandboxMode: 'danger-full-access' })
+    appendPermissionPreset(current.agent, 'auto')
+    const projectAnswerer = vi.fn(async () => 'allowed-once' as const)
+    current.ctx.effect(() => current.ctx.assistantPolicy.registerHumanApprovalAnswerer(projectAnswerer))
+    await expect(current.ctx.approval.request({
+      agent: current.agent,
+      toolName: 'bash',
+      callId: current.callId,
+      reason: 'Harness Auto declined this tool',
+    })).resolves.toBe('rejected')
+    expect(current.fallbackCalls).toBe(1)
     expect(current.adapter.requests).toHaveLength(0)
+    expect(projectAnswerer).not.toHaveBeenCalled()
   })
 
   test('binds a nested PTC dispatch to its exact start and refuses it after settlement', async () => {
@@ -701,7 +710,7 @@ describe('isolated automatic approval reviewer', () => {
     expect(executions).toBe(0)
   })
 
-  test('routes run_code to human approval in auto mode without invoking the model reviewer', async () => {
+  test.each([false, true])('requires human approval for run_code (Harness Auto: %s)', async (nativeAuto) => {
     const arguments_ = {
       code: 'return 42',
       description: 'Return one local constant.',
@@ -713,6 +722,11 @@ describe('isolated automatic approval reviewer', () => {
       toolMode: 'ptc',
       userIntent: 'Run the provided local code once.',
     })
+    if (nativeAuto) {
+      current.ctx.provide('permissionPresets' as never, { current: () => 'auto' } as never)
+      appendPermissionPreset(current.agent, 'auto')
+      appendSandboxMode(current.agent, 'danger-full-access')
+    }
 
     const result = await current.ctx.tools.execute({
       callId: current.callId,
@@ -726,7 +740,7 @@ describe('isolated automatic approval reviewer', () => {
     expect(JSON.stringify(result.content)).toContain('the user rejected tool')
     expect(current.adapter.requests).toHaveLength(0)
     expect(current.fallbackCalls).toBe(1)
-    expect(current.fallbackEscalations).toEqual([true])
+    expect(current.fallbackEscalations).toEqual([!nativeAuto])
   })
 
   test('does not model-review ask-human reasons even when invoked directly', async () => {
@@ -920,7 +934,7 @@ describe('isolated automatic approval reviewer', () => {
     }])
     const sandboxPending = sandboxDrift.request()
     while (sandboxDrift.adapter.requests.length === 0) await new Promise(resolve => setTimeout(resolve, 0))
-    appendSandboxMode(sandboxDrift.agent, 'workspace-write')
+    appendSandboxMode(sandboxDrift.agent, 'danger-full-access')
     releaseSandbox()
     await expect(sandboxPending).resolves.toBe('unavailable')
     expect(sandboxDrift.fallbackEscalations).toEqual([])
@@ -962,11 +976,10 @@ describe('isolated automatic approval reviewer', () => {
       await presetGate
       return assessment()
     }])
-    appendPermissionPreset(presetAba.agent, 'auto')
     const presetPending = presetAba.request()
     while (presetAba.adapter.requests.length === 0) await new Promise(resolve => setTimeout(resolve, 0))
-    appendPermissionPreset(presetAba.agent, 'ask')
-    appendPermissionPreset(presetAba.agent, 'auto')
+    appendPermissionPreset(presetAba.agent, 'workspace-write')
+    setApprovalReviewer(presetAba.agent.session, 'auto-review')
     releasePreset()
     await expect(presetPending).resolves.toBe('rejected')
     expect(presetAba.fallbackEscalations).toEqual([true])

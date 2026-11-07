@@ -84,25 +84,25 @@ export function hasCoherentFullAccess(events: readonly SessionEvent[]): boolean 
   const state = approvalPermissionStateOf(events)
   return state.approvalPolicyEvent && state.approvalPolicy === 'never'
     && reviewerIntentOf(events) === 'none'
+    && !hasNativeAutoSelection(events)
     && state.sandboxModeEvent && state.sandboxMode === 'danger-full-access'
+}
+
+/** A durable selection of the reserved Harness preset, which may be stale. */
+export function hasNativeAutoSelection(events: readonly SessionEvent[]): boolean {
+  return lastPermissionEvent(events, 'permission/preset').data?.preset === 'auto'
 }
 
 export function hasCoherentAutoReview(events: readonly SessionEvent[], sessionFormat = 3): boolean {
   const state = approvalPermissionStateOf(events)
-  // Format 4 identifies the verified fixed-Auto ABI. In format 3 a stale
-  // "auto" selector plus changed full-access knobs is custom, not Auto.
-  // Both supported Auto bundles keep approval on "ask" (a reviewer denial
-  // still routes to the human):
-  //   - DSH 0.1.5-rc.3 configured preset: workspace-write + ask
-  //   - DSH 0.1.7-rc.2 fixed AUTO_PRESET_SPEC: danger-full-access + ask
-  // danger-full-access + "never" is the separate full-access/no-reviewer bundle
-  // and is matched first by hasCoherentFullAccess().
+  // The project reviewer owns the explicit opt-in on the workspace sandbox.
+  // The reserved Harness Auto selection stays with its native integration.
   return state.approvalPolicyEvent && state.approvalPolicy === 'ask'
     && reviewerIntentOf(events) === 'auto-review'
+    && !hasNativeAutoSelection(events)
     && state.sandboxModeEvent
-    && (((sessionFormat === 0 || sessionFormat === 3) && state.sandboxMode === 'workspace-write')
-      || (sessionFormat === 4 && state.sandboxMode === 'danger-full-access'
-        && lastPermissionEvent(events, 'permission/preset').data?.preset === 'auto'))
+    && state.sandboxMode === 'workspace-write'
+    && (sessionFormat === 0 || sessionFormat === 3 || sessionFormat === 4)
 }
 
 /**
@@ -120,7 +120,6 @@ function reviewerIntentOf(events: readonly SessionEvent[]): ApprovalReviewer {
     }
     if (event.type !== 'permission/preset') continue
     const preset = event.data.preset
-    if (preset === 'auto') return 'auto-review'
     if (preset === 'danger-full-access') return 'none'
     return 'user'
   }

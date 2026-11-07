@@ -175,8 +175,8 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: {
   })
   if (options.auto) {
     const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
-    append.call(agent.session, 'permission/preset', { preset: 'auto' })
-    append.call(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
+    append.call(agent.session, 'permission/preset', { preset: 'workspace-write' })
+    append.call(agent.session, 'sandbox/mode', { mode: 'workspace-write' })
     agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
   }
   let executions = 0

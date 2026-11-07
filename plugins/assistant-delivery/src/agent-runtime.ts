@@ -774,20 +774,20 @@ interface PermissionPresetTargets {
 function permissionPresetTargets(service: PermissionPresets): Partial<PermissionPresetTargets> {
   const workspace: string[] = []
   const full: string[] = []
-  const nativeAuto: string[] = []
   const table: Array<readonly [string, string, string]> = []
   for (const name of service.names) {
     const spec = service.resolve(name)
     table.push([name, spec.sandbox, spec.approval])
+    // Keep the reserved Harness preset in the picker fence, but never select it.
+    if (name === 'auto') continue
     if (spec.sandbox === 'workspace-write' && spec.approval === 'ask') workspace.push(name)
     if (spec.sandbox === 'danger-full-access' && spec.approval === 'never') full.push(name)
-    if (name === 'auto' && spec.sandbox === 'danger-full-access' && spec.approval === 'ask') nativeAuto.push(name)
   }
-  if (workspace.length > 2 || full.length > 1 || nativeAuto.length > 1) {
+  if (workspace.length > 2 || full.length > 1) {
     throw new Error('ambiguous permission preset table')
   }
   const ask = workspace[0]
-  const auto = nativeAuto[0] ?? workspace[1] ?? ask
+  const auto = workspace[1] ?? ask
   return {
     ...(ask === undefined ? {} : { ask, auto: auto! }),
     ...(full[0] === undefined ? {} : { full: full[0] }),
@@ -830,6 +830,7 @@ function currentPermissionLevel(
   session: Session,
 ): 'ask' | 'auto' | 'full' | 'custom' {
   const events = session.snapshotEvents()
+  if (events.findLast(event => event.type === 'permission/preset')?.data.preset === 'auto') return 'custom'
   const current = service.current(session)
   const reviewer = approvalReviewerOf(events, session.header.version)
   if (current === targets.full) {
@@ -852,7 +853,6 @@ function currentPermissionLevel(
 
 function canonicalPresetReviewer(name: string): ApprovalReviewer | undefined {
   if (name === 'workspace-write') return 'user'
-  if (name === 'auto') return 'auto-review'
   if (name === 'danger-full-access') return 'none'
   return undefined
 }
@@ -862,7 +862,14 @@ async function ensurePermissionReviewer(
   preset: string,
   reviewer: ApprovalReviewer,
 ): Promise<void> {
-  if (approvalReviewerOf(session.snapshotEvents(), session.header.version) === reviewer) return
+  let events = session.snapshotEvents()
+  if (events.findLast(event => event.type === 'permission/preset')?.data.preset === 'auto') {
+    // Native set can be a no-op when the knobs already match the target.
+    // Supersede the stale reserved selector before opting into project review.
+    session.append('permission/preset', { preset })
+    events = session.snapshotEvents()
+  }
+  if (approvalReviewerOf(events, session.header.version) === reviewer) return
   if (canonicalPresetReviewer(preset) === reviewer) {
     // PermissionPresetService deliberately makes a net-zero selection a no-op.
     // Re-append its official event when an older legacy reviewer event would
@@ -2614,7 +2621,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         permissionPresets.set(session, target)
         // Legacy/seeded sessions may have no explicit knob events even when
         // their effective defaults match this preset. Materialize both facts
-        // before enabling either reviewer so Auto uses the Host's fixed bundle.
+        // before changing the project reviewer inside the workspace sandbox.
         ensureSandboxMode(session, permissionPresets.resolve(target).sandbox)
         ensureApprovalPolicy(session, 'ask')
         const reviewer: ApprovalReviewer = action.level === 'auto' ? 'auto-review' : 'user'

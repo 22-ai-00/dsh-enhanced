@@ -448,7 +448,7 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 
-新安装在没有用户权限设置时默认 **Full access**（`danger-full-access + never`），不逐次请求批准，可访问任意文件和网络；只应在信任的环境中使用。安装器仍默认 `--permission preserve`：已有用户设置原样保留，已记录的会话档位也不会被升级覆盖。需要更严格的后续会话默认，用 `--permission workspace-write`（人工批准）或 `--permission auto`（自动审核）。显式把既有默认改为完全访问时，使用：
+新安装在没有用户权限设置时默认 **Full access**（`danger-full-access + never`），不逐次请求批准，可访问任意文件和网络；只应在信任的环境中使用。安装器仍默认 `--permission preserve`：已有用户设置原样保留，已记录的会话档位也不会被升级覆盖。需要更严格的后续会话默认，用 `--permission workspace-write`（人工批准）；原生 Auto 在 Harness 当前会话选择，助手内部审批由已绑定主人发送 `/permission auto` 开启。显式把既有默认改为完全访问时，使用：
 
 ```sh
 ./scripts/install/install-local.sh --permission danger-full-access --confirm-dangerous-full-access

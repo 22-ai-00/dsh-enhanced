@@ -20,9 +20,9 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 默认安全状态
 
-`auto` 是上游保留的动态档位：`assistant-policy` 激活后通过 `permissionPresets.registerAuto()` 注册，卸载或权限服务换代时撤销。patch 不再配置静态 `auto`。
+`auto` 是 Harness 原生组件保留的当前会话档位，本项目不注册它。助手自身自动审批通过已鉴权的 Delivery `/permission auto` 选择，使用 `workspace-write + ask` 与项目专属 reviewer 事件。新会话默认仍为 `danger-full-access`，需要收紧时使用 `--permission workspace-write`；动态原生 Auto 不能配置为默认值。
 
-- 原生 Permission selector 有 `workspace-write`（请求批准）和 `danger-full-access`（完全访问）；Policy 就绪时动态加入 `auto`（帮我批准）。上游 Auto 固定为 `danger-full-access + ask`，低风险且满足 Policy 检查的可逆动作由隔离 reviewer 自动批准，其余仍交人工。没有用户层设置的新安装默认 `danger-full-access`（Full access）：可访问任意文件与网络，不逐次请求批准。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
+- 原生 Permission selector 的 `workspace-write` / `danger-full-access` 和官方组件提供的 `auto` 由 Harness 管理。Policy 不动态添加原生 Auto；助手 `/permission auto` 使用独立的项目 reviewer 与工作区沙箱。无用户设置的新安装默认仍为 `danger-full-access`，已有兼容的静态默认与会话记录保留。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
@@ -42,7 +42,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 权限与数据
 
-meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。没有用户覆盖的新 session 从 `danger-full-access + never` 开始，reviewer 为 `none`。完全访问允许 Host sandbox 访问任意文件与网络且不逐次询问；请仅在信任的运行环境使用。已有兼容的用户设置和已记录的会话权限不会被升级或重启覆盖。用户可在原生 Web Permission selector 切换当前会话；飞书发送 `/permission` 打开交互卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。安装时用 `--permission workspace-write` 或 `--permission auto` 设置更严格的后续会话默认值；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。权限档位不绕过 Policy 显式拒绝、紧急停止、身份校验和预算硬门。
+meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。没有用户覆盖的新 session 从 `danger-full-access + never` 开始，reviewer 为 `none`。完全访问允许 Host sandbox 访问任意文件与网络且不逐次询问；请仅在信任的运行环境使用。已有兼容的用户设置和已记录的会话权限不会被升级或重启覆盖。用户可在原生 Web Permission selector 切换当前会话；飞书发送 `/permission` 打开交互卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。安装时用 `--permission workspace-write` 设置更严格的后续会话默认值；原生 Auto 只在当前会话选择，助手 Auto 由上述已认证命令选择；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。权限档位不绕过 Policy 显式拒绝、紧急停止、身份校验和预算硬门。
 
 ## 兼容性
 

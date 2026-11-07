@@ -60,14 +60,15 @@ describe('shipped full-access default through the native Host permission service
     expectPermission(ctx, session(ctx), preset, reviewer)
   })
 
-  test('offers Auto only while its reviewer integration is registered', async () => {
+  test('keeps native Auto separate from the assistant reviewer', async () => {
     const ctx = await fixture()
     const current = session(ctx)
     expect(() => ctx.permissionPresets.set(current, 'auto')).toThrow()
     ctx.permissionPresets.registerAuto(() => {})
     expect(ctx.permissionPresets.names).toEqual(['workspace-write', 'danger-full-access', 'auto'])
     ctx.permissionPresets.set(current, 'auto')
-    expectPermission(ctx, current, 'auto', 'auto-review')
+    expectPermission(ctx, current, 'auto', 'user')
+    expect(current.snapshotEvents().some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
   })
 
   test('allows a live downgrade and preserves it on replay without widening it on restart', async () => {

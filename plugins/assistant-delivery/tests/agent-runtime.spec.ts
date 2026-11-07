@@ -32,9 +32,9 @@ import {
 import {
   KNOWN_SESSION_EVENT_TYPES,
   SESSION_FORMAT_VERSION,
+  Session,
   SessionLogOffset,
   SessionSeq,
-  type Session,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
@@ -7756,7 +7756,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('/permissions reports all three levels and rejects legacy dynamic Auto in a format-4 session', async () => {
+  test('/permissions reports all three levels and persists project auto with a shared workspace preset', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-fold-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7786,22 +7786,23 @@ describe('real native Delivery Agent runtime', () => {
     await first.service.acceptInbound(message('evt-permission-auto', '/permission auto', 'command'))
     await drive(first.service)
     const events = activeSessionEvents(first.service, saved)
-    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
+    expect(lastSandboxMode(events)).toBe('workspace-write')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
     expect(runtimeStore(first.service).getActiveBinding(conversation)?.sessionId).toBe(bindingBefore.sessionId)
     expect([...saved.keys()]).toEqual([bindingBefore.sessionId])
-    expect(first.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
+    expect(first.sends.at(-1)?.text).toContain('帮我批准（auto）')
     expect(first.llm.requests).toHaveLength(0)
     await first.ctx.fiber.restart()
 
     const restarted = await permissionRuntimeHarness(root, saved, {})
     await restarted.service.acceptInbound(message('evt-permissions-restart', '/permission', 'command'))
     await drive(restarted.service)
-    expect(restarted.sends.at(-1)?.text).toContain('当前权限：请求批准（ask）')
+    expect(restarted.sends.at(-1)?.text).toContain('当前权限：帮我批准（auto）')
     expect(restarted.llm.requests).toHaveLength(0)
     await restarted.ctx.fiber.restart()
   })
 
-  test('/permission refuses a dynamic workspace Auto bundle in format 4 and retains ask', async () => {
+  test('/permission uses a distinct workspace preset for project auto and can return to ask', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-distinct-dynamic-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7812,9 +7813,10 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-dynamic-auto', '/permission auto', 'command'))
     await drive(fixture.service)
     let events = activeSessionEvents(fixture.service, saved)
-    expect(lastPermissionPreset(events)).toBe('ask-dynamic-id')
-    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
-    expect(fixture.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
+    expect(lastPermissionPreset(events)).toBe('auto-dynamic-id')
+    expect(lastSandboxMode(events)).toBe('workspace-write')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
+    expect(fixture.sends.at(-1)?.text).toContain('帮我批准（auto）')
 
     await fixture.service.acceptInbound(message('evt-dynamic-ask', '/permission ask', 'command'))
     await drive(fixture.service)
@@ -7824,12 +7826,11 @@ describe('real native Delivery Agent runtime', () => {
     expect(fixture.permissionPresets?.set.mock.calls.map(([, name]) => name)).toEqual([
       'auto-dynamic-id',
       'ask-dynamic-id',
-      'ask-dynamic-id',
     ])
     await fixture.ctx.fiber.restart()
   })
 
-  test('/permission selects the Host fixed Auto bundle and restores ask without retaining full sandbox access', async () => {
+  test.each([false, true])('/permission separates project auto from Host Auto (stale selector: %s)', async stale => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-native-auto-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7840,15 +7841,26 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-native-auto', '/permission auto', 'command'))
     await drive(fixture.service)
     let events = activeSessionEvents(fixture.service, saved)
-    expect(lastPermissionPreset(events)).toBe('auto')
-    expect(lastSandboxMode(events)).toBe('danger-full-access')
+    expect(fixture.permissionPresets!.set.mock.calls.map(([, name]) => name)).toEqual(['workspace-write'])
+    expect(lastSandboxMode(events)).toBe('workspace-write')
     expect(lastApprovalPolicy(events)).toBe('ask')
     expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
+    expect(events.findLast(event => event.type === 'assistant-policy/approval-reviewer')?.data.reviewer).toBe('auto-review')
     expect(fixture.sends.at(-1)?.text).toContain('帮我批准（auto）')
 
     await fixture.service.acceptInbound(message('evt-native-auto-status', '/permission', 'command'))
     await drive(fixture.service)
     expect(fixture.sends.at(-1)?.text).toContain('当前权限：帮我批准（auto）')
+
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+    const persisted = saved.get(binding.sessionId)!
+    const session = Session.create(persisted.header.id, persisted.events, persisted.header)
+    fixture.permissionPresets!.set(session, 'auto')
+    if (stale) session.append('sandbox/mode', { mode: 'workspace-write' })
+    saved.set(binding.sessionId, { ...persisted, events: session.snapshotEvents() })
+    events = activeSessionEvents(fixture.service, saved)
+    expect(lastPermissionPreset(events)).toBe('auto')
+    expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('user')
 
     await fixture.service.acceptInbound(message('evt-native-auto-ask', '/permission ask', 'command'))
     await drive(fixture.service)
@@ -7860,7 +7872,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('/permission uses canonical preset intent without writing new legacy reviewer events', async () => {
+  test('/permission writes explicit project auto and uses canonical intent for full and ask', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-canonical-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -7871,9 +7883,8 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-canonical-auto', '/permission auto', 'command'))
     await drive(fixture.service)
     let events = activeSessionEvents(fixture.service, saved)
-    expect(lastPermissionPreset(events)).toBe('auto')
     expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
-    expect(events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
+    expect(events.filter(event => event.type === 'assistant-policy/approval-reviewer').map(event => event.data.reviewer)).toEqual(['auto-review'])
 
     await fixture.service.acceptInbound(message('evt-canonical-full', '/permission full confirm', 'command'))
     await drive(fixture.service)
@@ -7884,7 +7895,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-canonical-full-auto', '/permission auto', 'command'))
     await drive(fixture.service)
     events = activeSessionEvents(fixture.service, saved)
-    expect(lastPermissionPreset(events)).toBe('auto')
+    expect(lastPermissionPreset(events)).toBe('workspace-write')
     expect(approvalReviewerOf(events, SESSION_FORMAT_VERSION)).toBe('auto-review')
 
     await fixture.service.acceptInbound(message('evt-canonical-web-ask', '/permission ask', 'command'))
@@ -7892,7 +7903,8 @@ describe('real native Delivery Agent runtime', () => {
     events = activeSessionEvents(fixture.service, saved)
     expect(lastPermissionPreset(events)).toBe('workspace-write')
     expect(approvalReviewerOf(events)).toBe('user')
-    expect(events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
+    expect(events.filter(event => event.type === 'assistant-policy/approval-reviewer').map(event => event.data.reviewer))
+      .toEqual(['auto-review', 'auto-review'])
     await fixture.ctx.fiber.restart()
   })
 
@@ -9176,18 +9188,17 @@ describe('real native Delivery Agent runtime', () => {
     },
   )
 
-  test('format-4 dynamic Auto stays ask even when the legacy reviewer reader is unavailable', async () => {
+  test('canonical workspace ask revokes project auto without its custom-event reader', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permission-reader-compensation-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
-    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const fixture = await permissionRuntimeHarness(root, saved, { presets: canonicalPermissionPresets })
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await fixture.service.acceptInbound(message('evt-permission-reader-compensation-seed', '/permission auto', 'command'))
     await drive(fixture.service)
     const before = activeSessionEvents(fixture.service, saved)
-    expectSafeAskPermission(fixture.permissionPresets!, before)
-    expect(fixture.sends.at(-1)?.text).toContain('已安全恢复并持久化为请求批准（ask）')
+    expect(approvalReviewerOf(before, SESSION_FORMAT_VERSION)).toBe('auto-review')
     const sendsBefore = fixture.sends.length
     const restoreReader = suspendApprovalReviewerReader(fixture.ctx)
     const accepted = await fixture.service.acceptInbound(
@@ -9197,12 +9208,15 @@ describe('real native Delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
       const held = activeSessionEvents(fixture.service, saved)
-      expectSafeAskPermission(fixture.permissionPresets!, held)
+      expect(lastPermissionPreset(held)).toBe('workspace-write')
+      expect(lastSandboxMode(held)).toBe('workspace-write')
+      expect(lastApprovalPolicy(held)).toBe('ask')
+      expect(approvalReviewerOf(held, SESSION_FORMAT_VERSION)).toBe('user')
       expect(held.filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual(
         before.filter(event => event.type === 'assistant-policy/approval-reviewer'),
       )
       expect(fixture.sends).toHaveLength(sendsBefore + 1)
-      expect(fixture.sends.at(-1)?.text).toContain('当前已是 请求批准（ask）')
+      expect(fixture.sends.at(-1)?.text).toContain('已切换到 请求批准（ask）')
     } finally {
       restoreReader()
       await fixture.ctx.fiber.restart()

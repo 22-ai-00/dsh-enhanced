@@ -15,6 +15,7 @@ import {
   approvalPermissionFingerprint,
   approvalPermissionStateOf,
   getApprovalReviewer,
+  hasNativeAutoSelection,
   setApprovalReviewer,
 } from './approval-reviewer.js'
 import { registerApprovalReviewerSessionEvent } from './session-event-registration.js'
@@ -376,7 +377,6 @@ export class AssistantPolicyService extends Service {
       }
       permissionCtx.on('session/created', adopt)
       for (const session of permissionCtx.sessions.list()) adopt(session)
-      this.publishAutoPreset(permissionCtx)
     })
 
     ctx.effect(() => () => {
@@ -399,6 +399,43 @@ export class AssistantPolicyService extends Service {
       }, 'assistant-policy.proposal-maintenance')
     }
     ctx.inject(['tools'], (toolsCtx) => {
+      const starts = new WeakMap<Readonly<ToolExecution>, {
+        nativeAuto: boolean
+        nativeAutoLive: boolean
+        fingerprint?: string
+      }>()
+      const nativeAutoLive = (session: Session) => toolsCtx.get('permissionPresets')?.current(session) === 'auto'
+      // Cordis reports the dispatch synchronously, before any pre-execute
+      // listener runs. A prepended Harness reviewer can await before calling
+      // the Policy listener, so sampling at that listener would be too late.
+      toolsCtx.on('internal/dispatch', (mode, name, args) => {
+        if (mode !== 'waterfall' || name !== 'tools/pre-execute') return
+        const execution = args[0] as Readonly<ToolExecution>
+        const session = execution.agent?.session
+        if (session === undefined) return
+        const events = session.snapshotEvents()
+        const nativeAuto = hasNativeAutoSelection(events)
+        starts.set(execution, {
+          nativeAuto,
+          nativeAutoLive: nativeAuto && nativeAutoLive(session),
+          ...(nativeAuto ? { fingerprint: approvalPermissionFingerprint(events) } : {}),
+        })
+      })
+      const nativeAutoFenceFailure = (execution: Readonly<ToolExecution>): string | undefined => {
+        const session = execution.agent?.session
+        if (session === undefined) return undefined
+        const start = starts.get(execution)
+        if (start === undefined) return 'assistant-policy: tool execution has no permission start snapshot'
+        const events = session.snapshotEvents()
+        const nativeAuto = hasNativeAutoSelection(events)
+        const changed = 'assistant-policy: Harness Auto permission changed during this tool call; retry the call'
+        if (start.nativeAuto !== nativeAuto) return changed
+        if (!nativeAuto) return undefined
+        if (!nativeAutoLive(session)) {
+          return 'assistant-policy: Harness Auto is unavailable; choose a live permission preset before running tools'
+        }
+        if (!start.nativeAutoLive || approvalPermissionFingerprint(events) !== start.fingerprint) return changed
+      }
       toolsCtx.on('tools/pre-execute', async (execution, next) => {
         const agent = execution.agent
         const workspace = agent?.session.header.cwd
@@ -414,11 +451,16 @@ export class AssistantPolicyService extends Service {
         // permission change can win after that promise resolves but before
         // this continuation runs, so authorization must always fold the live
         // three-dimensional state again at the final synchronous boundary.
-        const reviewer = getApprovalReviewer(agent.session)
+        const session = agent.session
+        const fenceFailure = nativeAutoFenceFailure(execution)
+        if (fenceFailure !== undefined) return { kind: 'deny', reason: fenceFailure }
+        const events = session.snapshotEvents()
+        const reviewer = getApprovalReviewer(session)
         if (reviewer === 'none') return next()
         const preauthorization = this.preauthorizedToolDecision(execution)
-        if (preauthorization?.kind === 'allow') return next()
         if (preauthorization?.kind === 'deny') return preauthorization
+        const nativeAutoSelected = hasNativeAutoSelection(events)
+        if (preauthorization?.kind === 'allow') return next()
         // Skill invocations only load instruction bundles; they perform no OS
         // or network operation of their own, and the nested tool calls still
         // pass through this same gate. In the auto preset they are approved
@@ -428,16 +470,21 @@ export class AssistantPolicyService extends Service {
         // point. The ask (user) preset intentionally keeps prompting for
         // every step, so it is not widened here.
         if ((execution.name === 'skill_run' || execution.name === 'skill_status')
-          && getApprovalReviewer(agent.session) === 'auto-review') return next()
+          && reviewer === 'auto-review') return next()
         const risk = classifyToolRisk({
           name: execution.name,
           arguments: execution.arguments,
           workspace,
         })
+        // Harness owns interactive review in its Auto mode. The Policy guard
+        // below still enforces rules and budgets. Keep the mandatory human
+        // boundary for sensitive actions, including top-level run_code which
+        // the native reviewer does not inspect.
+        if (nativeAutoSelected && risk !== 'ask-human') return next()
         if (risk === 'allow'
           || (risk === 'allow-auto' && reviewer === 'auto-review')
           || (risk === 'ask-review' && reviewer === 'auto-review' && execution.name === 'bash')) return next()
-        const permission = approvalPermissionStateOf(agent.session.snapshotEvents())
+        const permission = approvalPermissionStateOf(events)
         const configuredApproval = toolsCtx.get('approval')?.config.policy
         const approval = permission.approvalPolicyEvent
           ? permission.approvalPolicy
@@ -457,52 +504,14 @@ export class AssistantPolicyService extends Service {
             : HUMAN_APPROVAL_REASON,
         }
       })
-      toolsCtx.tools.guard(createPolicyToolGuard(this))
+      const guard = createPolicyToolGuard(this)
+      toolsCtx.tools.guard(execution => nativeAutoFenceFailure(execution) ?? guard(execution))
+      toolsCtx.on('tools/execute', (execution, next) => {
+        const fenceFailure = nativeAutoFenceFailure(execution)
+        if (fenceFailure !== undefined) throw new Error(fenceFailure)
+        return next()
+      })
     })
-  }
-
-  /**
-   * Publish the fixed live Auto permission preset when the host supports it.
-   *
-   * In 0.2.0-rc.2 "auto" is a reserved preset name: it cannot appear in the
-   * static table (the service construction throws), and is instead exposed only
-   * while an integration registers the host's fixed bundle through
-   * `permissionPresets.registerAuto(admit)`. The host owns the bundle
-   * (danger-full-access sandbox + "ask" approval on 0.2.0-rc.2) and invokes the
-   * synchronous `admit` gate immediately before selecting or restoring Auto;
-   * per-call risk gating is unrelated and stays in tools/pre-execute. This
-   * adapter therefore only proves the integration is still alive, and hands the
-   * disposer returned by registerAuto() to OUR injected fiber so Auto is
-   * withdrawn the moment this plugin (or the permissionPresets generation) goes
-   * away. Older 0.1.5-rc.3 hosts lack this API and expose their configured
-   * static Auto without dynamic registration.
-   */
-  private publishAutoPreset(permissionCtx: Context): void {
-    type RegisterAuto = (admit: () => void) => () => Promise<void>
-    permissionCtx.effect(() => {
-      const service = permissionCtx.permissionPresets as unknown as { registerAuto?: unknown }
-      const registerAuto = typeof service.registerAuto === 'function'
-        ? service.registerAuto as RegisterAuto
-        : undefined
-      if (registerAuto === undefined) return () => {}
-      let integrationActive = true
-      const admit = (): void => {
-        if (!this.active || !integrationActive) {
-          throw new Error('assistant-policy: cannot select preset "auto" while its reviewer integration is inactive')
-        }
-      }
-      // Preserve the contextual service proxy as `this`: registerAuto owns its
-      // internal Cordis effect through the calling integration's fiber.
-      const dispose = registerAuto.call(service as never, admit)
-      if (typeof dispose !== 'function') {
-        integrationActive = false
-        throw new Error('assistant-policy: permissionPresets.registerAuto returned no disposer')
-      }
-      return async () => {
-        integrationActive = false
-        await dispose()
-      }
-    }, 'assistant-policy.auto-preset')
   }
 
   /**

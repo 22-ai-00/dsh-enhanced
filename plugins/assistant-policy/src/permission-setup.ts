@@ -4,7 +4,7 @@ import { isAbsolute, join } from 'node:path'
 import { type Document, isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 import { type EffectiveProfileConfigReader, readEffectiveProfileConfig } from './profile-setup.js'
 
-export type PermissionPreset = 'workspace-write' | 'auto' | 'danger-full-access'
+export type PermissionPreset = 'workspace-write' | 'danger-full-access'
 
 export interface PermissionSetupArgs {
   dshHome: string
@@ -13,8 +13,16 @@ export interface PermissionSetupArgs {
   help: boolean
 }
 
-const allowedPresets = new Set<PermissionPreset>(['workspace-write', 'auto', 'danger-full-access'])
 const profileNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+
+function assertDefaultPreset(preset: string): asserts preset is PermissionPreset {
+  if (preset === 'auto') {
+    throw new Error('assistant-policy permission setup: auto is only available for the current session. Select native Auto in Harness, or use /permission auto in an authenticated assistant session.')
+  }
+  if (preset !== 'workspace-write' && preset !== 'danger-full-access') {
+    throw new Error('assistant-policy permission setup: preset must be workspace-write or danger-full-access')
+  }
+}
 
 function argumentValue(argv: readonly string[], index: number, option: string): string {
   const value = argv[index + 1]
@@ -43,18 +51,17 @@ export function parsePermissionSetupArgs(argv: readonly string[]): PermissionSet
   if (result.profile !== undefined && !profileNamePattern.test(result.profile)) {
     throw new Error('assistant-policy permission setup: --profile must be a valid profile name')
   }
-  if (!allowedPresets.has(result.preset)) {
-    throw new Error('assistant-policy permission setup: preset must be workspace-write, auto, or danger-full-access')
-  }
+  assertDefaultPreset(result.preset)
   return result
 }
 
 export function permissionSetupUsage(): string {
   return [
-    'Usage: dsh-permission-setup [--dsh-home <absolute-path>] [--profile <name>] [--preset <workspace-write|auto|danger-full-access>]',
+    'Usage: dsh-permission-setup [--dsh-home <absolute-path>] [--profile <name>] [--preset <workspace-write|danger-full-access>]',
     '',
     'Default preset: danger-full-access (full file/network access, no approval prompts).',
-    'An explicit --preset workspace-write or --preset auto selects a more restrictive default.',
+    'An explicit --preset workspace-write selects a more restrictive default.',
+    'Select native Auto in the current Harness session, or use /permission auto in an authenticated assistant session.',
     'With --profile, writes permission.defaultPreset into that profile\'s cordis.patch.yml.',
     'Without --profile, writes legacy settings.yaml; DSH imports it into the first started profile once.',
   ].join('\n')
@@ -64,6 +71,7 @@ export async function setPermissionDefault(
   input: Pick<PermissionSetupArgs, 'dshHome' | 'profile' | 'preset'>,
   readConfig: EffectiveProfileConfigReader = readEffectiveProfileConfig,
 ): Promise<string> {
+  assertDefaultPreset(input.preset)
   if (input.profile !== undefined) {
     if (!profileNamePattern.test(input.profile)) {
       throw new Error('assistant-policy permission setup: --profile must be a valid profile name')

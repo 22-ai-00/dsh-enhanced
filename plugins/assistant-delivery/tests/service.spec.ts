@@ -251,10 +251,10 @@ function appendSandboxMode(session: Session, mode: 'workspace-write' | 'danger-f
   append.call(session, 'sandbox/mode', { mode })
 }
 
-function selectNativeAutoReview(session: Session): void {
+function selectProjectAutoReview(session: Session): void {
   const append = session.append as unknown as (type: string, data: unknown) => unknown
-  append.call(session, 'permission/preset', { preset: 'auto' })
-  appendSandboxMode(session, 'danger-full-access')
+  append.call(session, 'permission/preset', { preset: 'workspace-write' })
+  appendSandboxMode(session, 'workspace-write')
   session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
 }
 
@@ -2362,7 +2362,7 @@ describe('assistant delivery Cordis service', () => {
 
     const flush = vi.fn()
     const bound = await boundApprovalHarness({ flush, sessionId: 'approval-waterfall' })
-    selectNativeAutoReview(bound.agent.session)
+    selectProjectAutoReview(bound.agent.session)
     const next = vi.fn(async () => 'rejected' as const)
     bound.ctx.on('approval/request', next)
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
@@ -2483,7 +2483,7 @@ describe('assistant delivery Cordis service', () => {
       const fixture = await boundApprovalHarness({ sessionId, reviewer: modelReviewer,
         ...(reviewerMountOrder === undefined ? {} : { reviewerMountOrder }) })
       contexts.push(fixture.ctx)
-      if (reviewer === 'auto-review') selectNativeAutoReview(fixture.agent.session)
+      if (reviewer === 'auto-review') selectProjectAutoReview(fixture.agent.session)
       else fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer })
       const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
       await fixture.service.registerAdapter({
@@ -2568,7 +2568,7 @@ describe('assistant delivery Cordis service', () => {
       reviewerAssessment('escalate'), reviewerAssessment('escalate'),
     ])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-concurrent', reviewer: modelReviewer })
-    selectNativeAutoReview(fixture.agent.session)
+    selectProjectAutoReview(fixture.agent.session)
     fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     const answers = new Map<string, (outcome: 'allowed-once') => void>()
@@ -2600,7 +2600,7 @@ describe('assistant delivery Cordis service', () => {
   test('does not leak one live auto-review escalation marker into a concurrent request', async () => {
     const modelReviewer = new DeliveryReviewerAdapter([reviewerAssessment('escalate')])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-isolation', reviewer: modelReviewer })
-    selectNativeAutoReview(fixture.agent.session)
+    selectProjectAutoReview(fixture.agent.session)
     fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     let answer!: (outcome: 'allowed-once') => void

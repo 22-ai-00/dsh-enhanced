@@ -12,6 +12,7 @@ import {
   approvalPermissionFingerprint,
   approvalReviewerOf,
   hasCoherentAutoReview,
+  hasNativeAutoSelection,
 } from './approval-reviewer.js'
 import { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
 import type { HumanApprovalAnswerer } from './approval-routing.js'
@@ -522,8 +523,11 @@ export function registerAutoReviewAnswerer(
       }, 'assistant-policy.approval-review-provider')
     })
     runtimeCtx.on('approval/request', async (request, next): Promise<ApprovalOutcome> => {
+      const session = request.agent.session
+      const events = session.snapshotEvents()
+      if (hasNativeAutoSelection(events)) return next()
       const human = () => answerHuman(request, next)
-      if (approvalReviewerOf(request.agent.session.snapshotEvents(), request.agent.session.header.version) !== 'auto-review') return human()
+      if (approvalReviewerOf(events, session.header.version) !== 'auto-review') return human()
       if (request.reason === HUMAN_APPROVAL_REASON) return escalateToHuman(request, human)
       if (isExactNativeSandboxApproval(request)) return escalateToHuman(request, human)
       if (request.reason !== AUTO_REVIEW_APPROVAL_REASON) return next()

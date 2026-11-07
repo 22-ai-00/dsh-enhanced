@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { AssistantPolicyService } from '../../lib/service.js'
 
 // Run against a separately installed DSH CLI. This exercises its real
-// PermissionPresetService.registerAuto rather than a local method double.
+// PermissionPresetService.registerAuto and effect ownership.
 const [cliPath] = process.argv.slice(2)
 if (cliPath === undefined) throw new Error('usage: node auto-preset-host-probe.mjs /absolute/path/to/dsh')
 const require = createRequire(await realpath(cliPath))
@@ -23,38 +23,40 @@ try {
     register() {},
     stateOf() { return { preset: null, sandbox: null, approval: null, seeded: false } },
   })
-  const policy = ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
-  await policy
-  const mountPermission = () => ctx.plugin(PermissionPresetService, {
+  await ctx.plugin(PermissionPresetService, {
     presets: {
       'workspace-write': { sandbox: 'workspace-write', approval: 'ask', name: 'Ask' },
       'danger-full-access': { sandbox: 'danger-full-access', approval: 'never', name: 'Full' },
     },
   })
+  const mountPolicy = () => ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
+  const mountNativeAuto = () => ctx.plugin({
+    inject: ['permissionPresets'],
+    apply(nativeCtx) {
+      nativeCtx.permissionPresets.registerAuto(() => {})
+    },
+  })
 
-  const first = mountPermission()
-  await first
-  assert.ok(ctx.permissionPresets.names.includes('auto'))
-  assert.deepEqual(ctx.permissionPresets.resolve('auto'), { sandbox: 'danger-full-access', approval: 'ask' })
-  const firstAdmit = ctx.permissionPresets.autoAdmit
-  assert.equal(typeof firstAdmit, 'function')
-  firstAdmit()
-  await first.dispose()
-  assert.throws(firstAdmit, /integration is inactive/)
+  for (const policyFirst of [true, false]) {
+    const first = policyFirst ? mountPolicy() : mountNativeAuto()
+    await first
+    assert.equal(ctx.permissionPresets.names.includes('auto'), !policyFirst)
+    const second = policyFirst ? mountNativeAuto() : mountPolicy()
+    await second
+    assert.equal(ctx.assistantPolicy.health().emergencyStop, false)
+    assert.equal(ctx.permissionPresets.names.filter(name => name === 'auto').length, 1)
+    assert.deepEqual(ctx.permissionPresets.resolve('auto'), { sandbox: 'danger-full-access', approval: 'ask' })
+    const [policy, nativeAuto] = policyFirst ? [first, second] : [second, first]
+    await policy.dispose()
+    assert.ok(ctx.permissionPresets.names.includes('auto'))
+    await nativeAuto.dispose()
+    assert.ok(!ctx.permissionPresets.names.includes('auto'))
+  }
 
-  const second = mountPermission()
-  await second
-  assert.ok(ctx.permissionPresets.names.includes('auto'))
-  const secondAdmit = ctx.permissionPresets.autoAdmit
-  secondAdmit()
-  await policy.dispose()
-  assert.ok(!ctx.permissionPresets.names.includes('auto'))
-  assert.throws(secondAdmit, /integration is inactive/)
-  await second.dispose()
   console.log(JSON.stringify({
     status: 'passed',
     host: require('@deepseek-ai/dsh/package.json').version,
-    checks: ['actual-registerAuto', 'dependency-replacement', 'inactive-admission'],
+    checks: ['native-only-registerAuto', 'both-mount-orders', 'independent-disposal'],
   }))
 } finally {
   await ctx.fiber.restart().catch(() => {})

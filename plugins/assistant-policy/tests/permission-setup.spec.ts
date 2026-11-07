@@ -88,7 +88,7 @@ describe('permission setup', () => {
     await mkdir(profileDir, { recursive: true })
     const path = join(profileDir, 'cordis.patch.yml')
     await writeFile(path, 'notASequence: true\n', 'utf8')
-    await expect(setPermissionDefault({ dshHome: home, profile: 'web', preset: 'auto' }))
+    await expect(setPermissionDefault({ dshHome: home, profile: 'web', preset: 'workspace-write' }))
       .rejects.toThrow('top-level YAML sequence')
     expect(await readFile(path, 'utf8')).toBe('notASequence: true\n')
   })
@@ -109,8 +109,24 @@ describe('permission setup', () => {
     expect(args.preset).toBe('danger-full-access')
   })
 
-  test.each(['workspace-write', 'auto', 'danger-full-access'])('honors an explicit %s override', preset => {
+  test.each(['workspace-write', 'danger-full-access'])('honors an explicit %s override', preset => {
     expect(parsePermissionSetupArgs(['--dsh-home', '/tmp/dsh', '--preset', preset]).preset).toBe(preset)
+  })
+
+  test.each([undefined, 'web'])('rejects native Auto as a default before writing settings (profile %s)', async profile => {
+    const home = await temporaryHome()
+    const path = profile === undefined
+      ? join(home, 'settings.yaml')
+      : join(home, 'profiles', profile, 'cordis.patch.yml')
+    if (profile !== undefined) await mkdir(join(home, 'profiles', profile), { recursive: true })
+    const original = Buffer.from('# original settings\n')
+    await writeFile(path, original)
+
+    expect(() => parsePermissionSetupArgs(['--dsh-home', home, '--preset', 'auto']))
+      .toThrow('auto is only available for the current session')
+    await expect(setPermissionDefault({ dshHome: home, ...(profile === undefined ? {} : { profile }), preset: 'auto' as never }))
+      .rejects.toThrow('/permission auto')
+    expect(await readFile(path)).toEqual(original)
   })
 
   test('fails closed for unsafe paths and invalid preset names', () => {

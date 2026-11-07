@@ -94,7 +94,7 @@ Options:
                             Acknowledge existing active/paused jobs when enabling the RSI scheduler
   --lark <mode>             auto, keep, configure, or skip (default: auto)
   --agent-tools <mode>      auto, allow, preserve, or disable (default: auto)
-  --permission <preset>     preserve, workspace-write, auto, or danger-full-access (default: preserve)
+  --permission <preset>     preserve, workspace-write, or danger-full-access (default: preserve)
   --confirm-dangerous-full-access
                             Required together with --permission danger-full-access
   --model-route <mode>      auto, verify, or skip (default: auto; a verify call may incur model cost)
@@ -697,13 +697,17 @@ dsh_enhanced_validate_permission_default() {
     return $?
   }
   case "$preset" in
-    __absent__|workspace-write|auto|danger-full-access) return 0 ;;
+    __absent__|workspace-write|danger-full-access) return 0 ;;
+    auto)
+      dsh_enhanced_fail 2 '现有 permission.defaultPreset=auto 只适用于当前会话；不会覆盖用户设置。请先显式修改默认值，再在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
+      return $?
+      ;;
     __unparseable__)
       dsh_enhanced_fail 2 "无法安全解析 $settings_path 中的 permission.defaultPreset；不会覆盖用户设置。"
       return $?
       ;;
     *)
-      dsh_enhanced_fail 2 "现有 permission.defaultPreset=$preset 不受三档配置支持；不会覆盖用户设置。请先显式改为 workspace-write、auto 或 danger-full-access。"
+      dsh_enhanced_fail 2 "现有 permission.defaultPreset=$preset 不受默认权限配置支持；不会覆盖用户设置。请先显式改为 workspace-write 或 danger-full-access。"
       return $?
       ;;
   esac
@@ -2722,7 +2726,7 @@ dsh_enhanced_apply_permission_choice() {
   local dry_run="$5"
 
   if [[ "$preset" == 'preserve' ]]; then
-    printf '权限默认值：保留现有 Settings 和已有会话选择；没有用户设置的新会话默认 danger-full-access（Full access，可访问任意文件和网络，不逐次请求批准）。可用 --permission auto 或 --permission workspace-write 选择更严格的默认值。\n'
+    printf '权限默认值：保留现有 Settings 和已有会话选择；没有用户设置的新会话默认 danger-full-access（Full access，可访问任意文件和网络，不逐次请求批准）。可用 --permission workspace-write 选择更严格的默认值。\n'
     return 0
   fi
   if [[ "$preset" == 'danger-full-access' && "$confirmed" != '1' ]]; then
@@ -3800,9 +3804,16 @@ dsh_enhanced_install() {
   if [[ "$operation" != 'install' && "$agent_tools_mode" == 'auto' ]]; then
     agent_tools_mode='preserve'
   fi
-  case "$permission_preset" in preserve|workspace-write|auto|danger-full-access) ;; *)
-    dsh_enhanced_fail 2 '--permission 只能是 preserve、workspace-write、auto 或 danger-full-access。'
-    return $?
+  case "$permission_preset" in
+    preserve|workspace-write|danger-full-access) ;;
+    auto)
+      dsh_enhanced_fail 2 '--permission auto 只适用于当前会话。请在 Harness 会话中选择自动审查，或在已认证的助手会话中使用 /permission auto。'
+      return $?
+      ;;
+    *)
+      dsh_enhanced_fail 2 '--permission 只能是 preserve、workspace-write 或 danger-full-access。'
+      return $?
+      ;;
   esac
   if [[ "$permission_preset" == 'danger-full-access' && "$confirm_dangerous_full_access" != '1' ]]; then
     dsh_enhanced_fail 2 '--permission danger-full-access 需要同时传入 --confirm-dangerous-full-access。'

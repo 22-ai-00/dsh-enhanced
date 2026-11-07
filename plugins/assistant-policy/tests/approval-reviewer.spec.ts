@@ -40,13 +40,13 @@ describe('durable approval reviewer', () => {
     original.append('approval/policy', { policy: 'ask' })
     expect(getApprovalReviewer(original)).toBe('user')
     appendSandboxMode(original, 'workspace-write')
-    expect(getApprovalReviewer(original)).toBe('user')
+    expect(getApprovalReviewer(original)).toBe('auto-review')
     expect(approvalReviewerOf(original.snapshotEvents(), 3)).toBe('auto-review')
 
     const replayed = session(structuredClone(original.snapshotEvents()))
     expect(foldApprovalReviewer(replayed.snapshotEvents())).toBe('auto-review')
-    expect(approvalReviewerOf(replayed.snapshotEvents(), 4)).toBe('user')
-    expect(getApprovalReviewer(replayed)).toBe('user')
+    expect(approvalReviewerOf(replayed.snapshotEvents(), 4)).toBe('auto-review')
+    expect(getApprovalReviewer(replayed)).toBe('auto-review')
   })
 
   test('validates values and does not append the current effective value', () => {
@@ -107,14 +107,14 @@ describe('durable approval reviewer', () => {
     expect(getApprovalReviewer(invalidSandbox)).toBe('user')
   })
 
-  test('uses the latest official three-level preset as reviewer intent without a custom event', () => {
+  test('keeps native Auto separate while recognizing canonical full access', () => {
     const current = session()
     appendSandboxMode(current, 'danger-full-access')
     current.append('approval/policy', { policy: 'ask' })
 
     appendPermissionPreset(current, 'auto')
     expect(foldApprovalReviewer(current.snapshotEvents())).toBeUndefined()
-    expect(getApprovalReviewer(current)).toBe('auto-review')
+    expect(getApprovalReviewer(current)).toBe('user')
 
     appendPermissionPreset(current, 'workspace-write')
     expect(getApprovalReviewer(current)).toBe('user')
@@ -126,46 +126,37 @@ describe('durable approval reviewer', () => {
     expect(current.snapshotEvents().some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
   })
 
-  test('folds official preset and legacy reviewer events in durable log order', () => {
+  test('requires a fresh project opt-in after a native permission selection', () => {
     const current = session()
-    appendSandboxMode(current, 'danger-full-access')
+    appendSandboxMode(current, 'workspace-write')
     current.append('approval/policy', { policy: 'ask' })
-
     setApprovalReviewer(current, 'auto-review')
+    expect(getApprovalReviewer(current)).toBe('auto-review')
+
     appendPermissionPreset(current, 'workspace-write')
     expect(getApprovalReviewer(current)).toBe('user')
+    expect(setApprovalReviewer(current, 'auto-review')).toBe(true)
+    expect(getApprovalReviewer(current)).toBe('auto-review')
+    expect(approvalReviewerOf(current.snapshotEvents(), 0)).toBe('auto-review')
+    expect(approvalReviewerOf(current.snapshotEvents(), 5)).toBe('user')
 
+    appendPermissionPreset(current, 'auto')
+    expect(getApprovalReviewer(current)).toBe('user')
     setApprovalReviewer(current, 'auto-review')
     expect(getApprovalReviewer(current)).toBe('user')
 
-    appendPermissionPreset(current, 'auto')
-    setApprovalReviewer(current, 'user')
-    appendPermissionPreset(current, 'auto')
-    expect(getApprovalReviewer(current)).toBe('auto-review')
+    appendSandboxMode(current, 'danger-full-access')
+    current.append('approval/policy', { policy: 'never' })
+    setApprovalReviewer(current, 'none')
+    expect(getApprovalReviewer(current)).toBe('user')
   })
 
-  test('fails closed when official reviewer intent and execution knobs are incoherent', () => {
+  test('rejects incoherent project Auto and full-access bundles', () => {
     const auto = session()
-    appendPermissionPreset(auto, 'auto')
-    expect(getApprovalReviewer(auto)).toBe('user')
-    auto.append('approval/policy', { policy: 'ask' })
     appendSandboxMode(auto, 'danger-full-access')
-    expect(getApprovalReviewer(auto)).toBe('auto-review')
-    expect(approvalReviewerOf(auto.snapshotEvents(), 3)).toBe('user')
-    expect(approvalReviewerOf(auto.snapshotEvents(), 4)).toBe('auto-review')
-    expect(approvalReviewerOf(auto.snapshotEvents(), 5)).toBe('user')
-    // approval "never" with only an Auto intent is the host's delegated-child
-    // case, not a local full-access reviewer: fail closed to the human.
-    auto.append('approval/policy', { policy: 'never' })
+    auto.append('approval/policy', { policy: 'ask' })
+    setApprovalReviewer(auto, 'auto-review')
     expect(getApprovalReviewer(auto)).toBe('user')
-
-    const legacyAuto = session()
-    appendPermissionPreset(legacyAuto, 'auto')
-    legacyAuto.append('approval/policy', { policy: 'ask' })
-    appendSandboxMode(legacyAuto, 'workspace-write')
-    expect(getApprovalReviewer(legacyAuto)).toBe('user')
-    expect(approvalReviewerOf(legacyAuto.snapshotEvents(), 3)).toBe('auto-review')
-    expect(approvalReviewerOf(legacyAuto.snapshotEvents(), 4)).toBe('user')
 
     const full = session()
     appendPermissionPreset(full, 'danger-full-access')

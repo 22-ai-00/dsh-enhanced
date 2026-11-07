@@ -9478,7 +9478,7 @@ cp "$REMOTE_COMMON" "$4"
   })
 
   test('refuses incompatible stored permission defaults before changing the installation', async () => {
-    for (const preset of ['read-only', 'unrecognized-local-preset']) {
+    for (const preset of ['read-only', 'unrecognized-local-preset', 'auto']) {
       const dshHome = await temporaryDshHome()
       const settingsPath = join(dshHome, 'settings.yaml')
       await writeFile(settingsPath, `permission:\n  defaultPreset: ${preset}\n`, 'utf8')
@@ -9495,7 +9495,7 @@ cp "$REMOTE_COMMON" "$4"
   })
 
   test('preserves every supported stored permission default', async () => {
-    for (const preset of ['workspace-write', 'auto', 'danger-full-access']) {
+    for (const preset of ['workspace-write', 'danger-full-access']) {
       const dshHome = await temporaryDshHome()
       const settingsPath = join(dshHome, 'settings.yaml')
       await writeFile(settingsPath, `permission:\n  defaultPreset: ${preset}\n`, 'utf8')
@@ -9506,6 +9506,21 @@ cp "$REMOTE_COMMON" "$4"
       expect(result.status, result.stderr).toBe(0)
       expect(await readFile(settingsPath, 'utf8')).toBe(before)
     }
+  })
+
+  test('rejects explicit native Auto before changing the installation', async () => {
+    const dshHome = await temporaryDshHome()
+    const settingsPath = join(dshHome, 'settings.yaml')
+    const before = Buffer.from('permission:\n  defaultPreset: workspace-write\n')
+    await writeFile(settingsPath, before)
+
+    const result = runInstaller(localInstaller, ['--permission', 'auto', '--lark', 'skip'], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('--permission auto 只适用于当前会话')
+    expect(result.stderr).toContain('/permission auto')
+    expect(await readdir(dshHome)).toEqual(['settings.yaml'])
+    expect(await readFile(settingsPath)).toEqual(before)
   })
 
   test('Recovery README primary command installs every activator dependency then invokes it after Lark onboarding', async () => {

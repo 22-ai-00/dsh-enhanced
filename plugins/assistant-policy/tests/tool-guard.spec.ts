@@ -630,7 +630,139 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     await ctx.fiber.restart()
   })
 
-  test('runs read-only web and user-question bridge tools in auto mode without creating approval events', async () => {
+  test.each(['ask', 'never'] as const)(
+    'lets live Harness Auto own tool review while enforcing the Policy guard (%s)',
+    async approval => {
+      const { ctx, service } = await serviceWithConfig({ toolDefaultEffect: 'allow', rules: [] })
+      try {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRuntime)
+        await ctx.plugin(ApprovalService, { policy: 'ask' })
+        let nativeAutoLive = true
+        ctx.provide('permissionPresets' as never, {
+          current: () => nativeAutoLive ? 'auto' : 'custom',
+        } as never)
+        const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
+        owner.session.append('permission/preset', { preset: 'auto' })
+        appendSandboxMode(owner, 'danger-full-access')
+        owner.session.append('approval/policy', { policy: approval })
+        owner.session.append('turn/start', { turn: 1 })
+        let executions = 0
+        ctx.tools.register(defineTool({
+          name: 'future_external_tool',
+          description: 'Native Auto coexistence fixture',
+          parameters: {},
+          output: { schema: { type: 'string' }, render: (_arguments, value) => [{ type: 'text', text: value }] },
+          async execute() { executions += 1; return 'executed' },
+        }))
+        let approvalRequests = 0
+        ctx.on('approval/request', async () => {
+          approvalRequests += 1
+          return 'rejected'
+        })
+        const run = (id: string) => ctx.tools.execute({
+          callId: ToolCallId(id), name: 'future_external_tool', arguments: {},
+          signal: new AbortController().signal, agent: owner,
+        })
+        // Unknown tools require a second approval in project Ask. With live
+        // Harness Auto the Policy waterfall leaves that decision to Harness.
+        const allowed = await run('native-auto-allowed')
+        expect(allowed.isError, JSON.stringify(allowed.content)).toBe(false)
+        expect(approvalRequests).toBe(0)
+
+        service.setEmergencyStop({ enabled: true, actor: 'owner', reason: 'incident' })
+        const stopped = await run('native-auto-stopped')
+        expect(stopped.isError).toBe(true)
+        expect(JSON.stringify(stopped.content)).toContain('emergency-stop')
+
+        nativeAutoLive = false
+        const stale = await run('native-auto-stale')
+        expect(stale.isError).toBe(true)
+        expect(JSON.stringify(stale.content)).toContain('Harness Auto is unavailable')
+        expect(executions).toBe(1)
+      } finally {
+        await ctx.fiber.restart()
+      }
+    },
+  )
+
+  test.each(['native-to-project', 'project-to-native', 'native-aba', 'after-human-approval', 'before-tool-body'] as const)(
+    'rejects a tool when Harness Auto ownership changes during dispatch (%s)',
+    async race => {
+      const { ctx } = await serviceWithConfig({ toolDefaultEffect: 'allow', rules: [] })
+      try {
+        await ctx.plugin(SystemPrompt)
+        await ctx.plugin(ToolRuntime)
+        await ctx.plugin(ApprovalService, { policy: 'ask' })
+        const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
+        let native = false
+        ctx.provide('permissionPresets' as never, {
+          current: () => native ? 'auto' : 'workspace-write',
+        } as never)
+        const select = (nextNative: boolean) => {
+          native = nextNative
+          owner.session.append('permission/preset', { preset: native ? 'auto' : 'workspace-write' })
+          appendSandboxMode(owner, native ? 'danger-full-access' : 'workspace-write')
+          if (!native) setApprovalReviewer(owner.session, 'auto-review')
+        }
+        owner.session.append('approval/policy', { policy: 'ask' })
+        select(race !== 'project-to-native')
+        owner.session.append('turn/start', { turn: 1 })
+
+        // Model the ordering of the native hook. It checks the selected
+        // preset before awaiting its decision, then preserves a downstream
+        // deny or ask. A project ask must never replace that native denial.
+        ctx.on('tools/pre-execute', async (_execution, next) => {
+          if (!native) {
+            const downstream = next()
+            select(true)
+            return downstream
+          }
+          await Promise.resolve()
+          if (race === 'native-to-project' || race === 'native-aba') select(false)
+          if (race === 'native-aba') select(true)
+          const downstream = await next()
+          if (race === 'before-tool-body' || downstream.kind !== 'allow') return downstream
+          return { kind: 'ask', reason: 'Harness Auto declined this tool' }
+        }, { prepend: true })
+        let approvalRequests = 0
+        ctx.on('approval/request', async () => {
+          approvalRequests += 1
+          if (race === 'after-human-approval') select(false)
+          return 'allowed-once'
+        })
+        if (race === 'before-tool-body') {
+          ctx.on('tools/execute', (_execution, next) => {
+            select(false)
+            return next()
+          }, { prepend: true })
+        }
+        const execute = vi.fn(async () => 'executed')
+        ctx.tools.register(defineTool({
+          name: 'future_external_tool',
+          description: 'Native Auto transition fixture',
+          parameters: {},
+          output: { schema: { type: 'string' }, render: (_arguments, value) => [{ type: 'text', text: value }] },
+          execute,
+        }))
+        const result = await ctx.tools.execute({
+          callId: ToolCallId('native-auto-transition'),
+          name: 'future_external_tool',
+          arguments: {},
+          signal: new AbortController().signal,
+          agent: owner,
+        })
+        expect(result.isError).toBe(true)
+        expect(JSON.stringify(result.content)).toContain('Harness Auto permission changed during this tool call')
+        expect(approvalRequests).toBe(race === 'after-human-approval' ? 1 : 0)
+        expect(execute).not.toHaveBeenCalled()
+      } finally {
+        await ctx.fiber.restart()
+      }
+    },
+  )
+
+  test('runs read-only web and user-question bridge tools in project auto mode without creating approval events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-policy-default-auto-tools-'))
     temporaryRoots.push(root)
     const ctx = new Context()
@@ -653,8 +785,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       rules: [],
     })
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
-    owner.session.append('permission/preset', { preset: 'auto' })
-    appendSandboxMode(owner, 'danger-full-access')
+    owner.session.append('permission/preset', { preset: 'workspace-write' })
+    appendSandboxMode(owner, 'workspace-write')
     owner.session.append('approval/policy', { policy: 'ask' })
     setApprovalReviewer(owner.session, 'auto-review')
     owner.session.append('turn/start', { turn: 1 })

@@ -6,7 +6,7 @@
 
 - 推荐安装 [Node.js 24 LTS](https://nodejs.org/en/download)（也支持 22.19 及以上的 22.x、24 以上版本），确保 `node`、`npm` 可在终端运行。安装器会检查和准备兼容的 DSH 与 pnpm。
 - 默认安装需要飞书账号，以及已登录的 TraeX 或模型服务的 API Key。按向导选择机器人、发送验证码绑定本人；服务启动后再发送 `/model`，建立真实聊天会话。步骤见[连接飞书](../../plugins/lark-channel/docs/setup.md)。暂不接飞书可选下方[只用本机 Web](#只用本机-web)。
-- 在信任的机器和账号上运行。新安装且没有既有权限设置时，后续新会话默认 **Full access**：可访问文件和网络，不逐次请求批准。已有权限设置和会话选择会保留。若需收紧新会话默认，安装时加 `--permission workspace-write`（人工批准）或 `--permission auto`（自动审核）。
+- 在信任的机器和账号上运行。新安装且没有既有权限设置时，后续新会话默认 **Full access**：可访问文件和网络，不逐次请求批准。已有权限设置和会话选择会保留。若需收紧新会话默认，安装时加 `--permission workspace-write`（人工批准）。原生自动审查在 Harness 当前会话中选择，助手内部自动审批由已绑定主人发送 `/permission auto` 开启。
 - macOS 原生安装、新工具构建与验证无需 Docker。Linux 新安装的默认完整学习场景采用原生隔离，需要可用的 systemd 用户服务、bubblewrap（`bwrap`）与已委派的 cgroup v1 资源；环境不足时可能只能完成普通助理安装，学习授权会报告未就绪。旧部署不会自动切换 backend。完整环境前提与实验性 `autonomy` 的边界见[维护说明](maintenance.md#实验性-web-与-autonomy)。
 
 ## 安装：默认 supervised

@@ -4419,7 +4419,7 @@ export class AssistantDeliveryService extends Service {
     const sessions = ctx.get('sessions')
     const agent = request.agent
     const events = agent.session.snapshotEvents()
-    const reviewer = approvalReviewerOf(events)
+    const reviewer = approvalReviewerOf(events, agent.session.header.version)
     const reviewRoute = reviewer === 'user'
       ? 'user'
       : reviewer === 'auto-review' && ctx.assistantPolicy.isAutoReviewEscalation(request)
@@ -4558,7 +4558,8 @@ export class AssistantDeliveryService extends Service {
     if (initialRoute.state === 'none') return next()
     let reviewer: ApprovalReviewer
     try {
-      reviewer = approvalReviewerOf(request.agent.session.snapshotEvents())
+      const session = request.agent.session
+      reviewer = approvalReviewerOf(session.snapshotEvents(), session.header.version)
     } catch {
       return 'unavailable'
     }
