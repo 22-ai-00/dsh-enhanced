@@ -68,6 +68,13 @@ describe('Lark inbound normalization', () => {
     expect(thread(first)).toMatch(/^dsh-lark-topic\//u)
     expect(thread(reply)).toBe(thread(first))
     expect(thread(first)).not.toMatch(/sfhk3Pg9/u)
+    // Delivery binds one principal per conversation; an allowlisted peer bot
+    // in the same topic must get its own lane instead of colliding.
+    const peer = normalizeLarkMessage(topicConfig, message({
+      messageId: 'om_peer', chatType: 'group', mentionedBot: true, threadId: 'omt_topic_1', senderId: 'ou_peer_bot',
+    }), 100_100)
+    expect(thread(peer)).toMatch(/^dsh-lark-topic\//u)
+    expect(thread(peer)).not.toBe(thread(first))
   })
 
   test('topic lanes stay off without the explicit opt-in', () => {

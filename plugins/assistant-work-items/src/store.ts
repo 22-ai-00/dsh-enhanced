@@ -2826,14 +2826,15 @@ export class WorkItemStore {
    * item ended an unprocessed follow-up belongs to judgment and cannot be
    * claimed as processed any more, whether or not the release sweep ran.
    */
-  markFollowUpProcessed(itemId: string, messageId: string): WorkItemFollowUpRecord {
+  markFollowUpProcessed(itemId: string, messageId: string,
+    options: { readonly allowEnded?: boolean } = {}): WorkItemFollowUpRecord {
     const now = this.#now()
     return this.#transaction(() => {
       const item = this.#requireItem(itemId)
       const current = this.#followUps(item).find(record => record.messageId === messageId)
       if (current === undefined) fail('not-found', 'follow-up is not owned by this item')
       if (current.state === 'processed') return current
-      if (current.state === 'released' || !OPEN_STATES.includes(item.state)) {
+      if (current.state === 'released' || (!OPEN_STATES.includes(item.state) && options.allowEnded !== true)) {
         fail('invalid-state', 'follow-up was released to judgment when the item ended')
       }
       this.#appendEvent(item.id, FOLLOW_UP_PROCESSED_EVENT, 'host', { messageId }, now)

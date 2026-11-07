@@ -99,7 +99,7 @@ config:
   userQuestionTtlMs: 86400000
 ```
 
-`requireMentionInGroups` 控制群内是否必须直接 @ 机器人。`groupTopicThreads`（默认关）开启后，飞书话题群消息以 `thread_id` 作为会话 lane：首条消息与其后续回复落在同一 Delivery conversation，回复通过 `reply_in_thread` 留在同一话题，而不是新开顶层消息；关闭时保持按发送者合成的顶层 lane。
+`requireMentionInGroups` 控制群内是否必须直接 @ 机器人。`groupTopicThreads`（默认关）开启后，飞书话题群消息以 `thread_id` + 发送者 principal 作为会话 lane：首条消息与其后续回复落在同一 Delivery conversation，回复通过 `reply_in_thread` 留在同一话题，而不是新开顶层消息；principal 参与 key，owner 与 allowlisted peer bot 在同一话题不会互相占用 binding。限制：没有 `replyToEventId` 的后台通知（例如 WorkItem 报告）仍按顶层发送，会新建一个话题；owner/工作项回复携带 `replyToEventId`，不受影响。关闭时保持按发送者合成的顶层 lane。
 
 `credentialHandle` 应由 `@dsh-enhanced/credentials-keychain` 提供，并只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
 

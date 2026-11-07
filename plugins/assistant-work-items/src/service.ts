@@ -661,6 +661,10 @@ export class AssistantWorkItemsService extends Service {
       })
       if (result.outcome !== 'noticed') return
       if (result.next === null) {
+        // A transient Policy failure leaves affected items unassessed. Do not
+        // record the version as complete: the next wake must retry the same
+        // configuration so those items still get their notices after recovery.
+        if (result.unavailable.length > 0) return
         components.store.setMeta(POLICY_NOTICE_VERSION_META, version)
         if (result.notified.length > 0) {
           this.ctx.logger.debug(`assistant-work-items: recorded ${result.notified.length} Policy-change notice(s)`)

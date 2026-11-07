@@ -60,7 +60,7 @@ export function normalizeLarkMessage(
     ? { channel: 'lark', account, tenant, kind: 'dm', chat }
     : { channel: 'lark', account, tenant, kind: 'group', chat,
         thread: input.threadId !== undefined && config.groupTopicThreads === true
-          ? larkTopicThread(key(input.threadId, 'threadId'))
+          ? larkTopicThread(key(input.threadId, 'threadId'), user)
           : input.rootId === undefined
             ? larkTopLevelSenderThread(user)
             : larkProviderReplyThread(key(input.rootId, 'rootId')) }

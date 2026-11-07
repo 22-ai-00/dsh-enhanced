@@ -4863,16 +4863,23 @@ export class AssistantDeliveryService extends Service {
     }
     // An explicitly allowlisted peer bot enters its own linked-principal lane.
     // It is still subject to the ordinary Policy ingest decision below and never
-    // receives owner feedback/continuation behavior.
-    if (!this.deliveryStore.isAuthorizedPrincipal(envelope.principal)
-      && this.peerAgentAuthority(envelope) !== undefined) {
+    // receives owner feedback/continuation behavior. The allowlist is re-read
+    // for every provider-declared bot message: removing an entry revokes the
+    // lane even while the old linked principal row is still active.
+    const senderIsBot = envelope.metadata?.senderIsBot === 'true'
+    const peerAuthority = senderIsBot ? this.peerAgentAuthority(envelope) : undefined
+    if (senderIsBot && peerAuthority === undefined) {
+      record = this.deliveryStore.deadLetterInbox(record.id, 'unauthorized-principal')
+      return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+    }
+    if (peerAuthority !== undefined && !this.deliveryStore.isAuthorizedPrincipal(envelope.principal)) {
       const owner = this.deliveryStore.activeOwnerPrincipal()
       if (owner === undefined) {
         record = this.deliveryStore.deadLetterInbox(record.id, 'peer-owner-unavailable')
         return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
       }
       try {
-        this.deliveryStore.ensurePeerPrincipal(envelope.principal, owner.id)
+        this.deliveryStore.ensurePeerPrincipal(envelope.principal, owner.id, { reauthorize: true })
       } catch (error) {
         this.context.logger.warn(`assistant-delivery: peer principal admission failed: ${String(error)}`)
         record = this.deliveryStore.deadLetterInbox(record.id, 'peer-principal-unavailable')
@@ -5377,7 +5384,11 @@ export class AssistantDeliveryService extends Service {
       || (input.contentDigest !== undefined && !/^[0-9a-f]{64}$/u.test(input.contentDigest))
       || !/^[a-z][a-z0-9-]{0,54}$/u.test(principal.channel)) return undefined
     const key: ExternalPrincipalKey = { channel: principal.channel, account: principal.account, tenant: principal.tenant, user: principal.user }
-    const senderAllowlisted = this.deliveryStore.isAuthorizedPrincipal(key)
+    // Only the owner role is a trusted intake sender. A linked peer bot is
+    // authorized to converse, but its messages must stay `inferred`/filtered
+    // rather than entering the owner work-item allowlist.
+    const principalRecord = this.deliveryStore.getPrincipal(key)
+    const senderAllowlisted = principalRecord?.status === 'active' && principalRecord.role === 'owner'
     // A follow-up counts only from an allowlisted sender replying, in the same
     // conversation, to a delivered WorkItems report.
     let threadFollowUp = false

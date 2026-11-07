@@ -27,6 +27,7 @@ afterEach(async () => {
 class PolicyPeer extends Service {
   readonly denied = new Set<string>()
   denyAll = false
+  failEvaluate = false
   version = 0
   constructor(ctx: Context) { super(ctx, 'assistantPolicy') }
   authorize(_request: PeerPolicyRequest, options?: { idempotencyKey?: string }) {
@@ -35,6 +36,7 @@ class PolicyPeer extends Service {
       : { effect: 'allow' as const, reasonCode: 'rule-allow' }
   }
   evaluate(_request: PeerPolicyRequest) {
+    if (this.failEvaluate) throw new Error('policy temporarily unavailable')
     return this.denyAll
       ? { effect: 'deny' as const, reasonCode: 'test-denial' }
       : { effect: 'allow' as const, reasonCode: 'rule-allow' }
@@ -339,6 +341,19 @@ test('a changed Policy configuration notices live items on the native wake', asy
   peer.wake()
   expect(fixture.service.policyNotices(item.id)).toMatchObject([{ itemId: item.id, reasonCode: 'test-denial' }])
   // Replaying the same Policy configuration writes nothing new.
+  peer.wake()
+  expect(fixture.service.policyNotices(item.id)).toHaveLength(1)
+})
+
+test('a transient Policy failure does not mark the notice version complete', async () => {
+  const fixture = await setup()
+  const item = await waiting(fixture)
+  const peer = fixture.ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
+  fixture.policy!.failEvaluate = true
+  peer.wake()
+  expect(fixture.service.policyNotices(item.id)).toEqual([])
+  fixture.policy!.failEvaluate = false
+  fixture.policy!.denyAll = true
   peer.wake()
   expect(fixture.service.policyNotices(item.id)).toHaveLength(1)
 })

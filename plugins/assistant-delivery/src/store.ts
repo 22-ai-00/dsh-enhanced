@@ -2580,7 +2580,8 @@ export class DeliveryStore {
    * the peer lane is an exact owner-configured authorization, not pairing or a
    * silent upgrade of an existing identity.
    */
-  ensurePeerPrincipal(input: ExternalPrincipalKey, ownerPrincipalId: string): DeliveryPrincipal {
+  ensurePeerPrincipal(input: ExternalPrincipalKey, ownerPrincipalId: string,
+    options: { readonly reauthorize?: boolean } = {}): DeliveryPrincipal {
     this.assertOpen()
     const principal = canonicalPrincipal(input)
     const json = JSON.stringify(principal)
@@ -2610,11 +2611,35 @@ export class DeliveryStore {
           FROM delivery_principals WHERE id = ?
         `).get(id) as unknown as PrincipalRow)
       }
-      if (existing.role !== 'linked' || existing.linked_to_id !== owner.id) {
+      const reauthorize = options.reauthorize === true
+      if (existing.role !== 'linked' || (existing.linked_to_id !== owner.id && !reauthorize)) {
         throw new DeliveryStoreError('unauthorized-principal', 'peer agent identity is not linked to the active owner')
       }
       if (existing.status !== 'active') {
-        throw new DeliveryStoreError('unauthorized-principal', 'peer agent identity was revoked; re-authorize it explicitly')
+        if (!reauthorize) {
+          throw new DeliveryStoreError('unauthorized-principal', 'peer agent identity was revoked; re-authorize it explicitly')
+        }
+        // The caller re-read the exact allowlisted tuple for this message. A
+        // previous owner handoff may have revoked the link; re-link it to the
+        // current owner rather than stranding the configured peer forever.
+        this.database.prepare(`
+          UPDATE delivery_principals
+          SET status = 'active', linked_to_id = ?, updated_at = ?, version = version + 1
+          WHERE id = ?
+        `).run(owner.id, this.now(), existing.id)
+        return principalFromRow(this.database.prepare(`
+          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          FROM delivery_principals WHERE id = ?
+        `).get(existing.id) as unknown as PrincipalRow)
+      }
+      if (existing.linked_to_id !== owner.id) {
+        this.database.prepare(`
+          UPDATE delivery_principals SET linked_to_id = ?, updated_at = ?, version = version + 1 WHERE id = ?
+        `).run(owner.id, this.now(), existing.id)
+        return principalFromRow(this.database.prepare(`
+          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          FROM delivery_principals WHERE id = ?
+        `).get(existing.id) as unknown as PrincipalRow)
       }
       return principalFromRow(existing)
     })

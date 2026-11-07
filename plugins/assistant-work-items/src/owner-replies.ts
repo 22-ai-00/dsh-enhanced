@@ -161,12 +161,17 @@ export class WorkItemOwnerReplies {
     // A reply on a still-live item belongs to that item's work thread; it must
     // not mint a continuation child. The Delivery source stays pending, and the
     // terminal release sweep hands it back to judgment if the item later ends.
-    const owned = (() => {
-      try {
-        return store.ownFollowUp({ itemId: source.executionParentItemId,
-          bindingId: source.binding.id, messageId: source.id, sourceDigest: source.sourceDigest })
-      } catch { return undefined }
-    })()
+    let owned: ReturnType<WorkItemStore['ownFollowUp']> | undefined
+    try {
+      owned = store.ownFollowUp({ itemId: source.executionParentItemId,
+        bindingId: source.binding.id, messageId: source.id, sourceDigest: source.sourceDigest })
+    } catch (error) {
+      const parent = store.findItemById(source.executionParentItemId)
+      if (parent !== undefined && OPEN_STATES.includes(parent.state)) {
+        this.#lastError = error instanceof WorkItemError ? error.code : 'follow-up-ownership-failed'
+        return
+      }
+    }
     if (owned?.outcome === 'owned') {
       this.#lastError = null
       return
@@ -201,6 +206,11 @@ export class WorkItemOwnerReplies {
     const acknowledged=peer.acknowledgeWorkItemReply!({id:source.id,expectedSourceDigest:source.sourceDigest,
       childItemId:record.itemId,childPlanDigest:record.planDigest})
     if(acknowledged.state!=='routed' || acknowledged.child?.itemId!==record.itemId || acknowledged.child.planDigest!==record.planDigest) fail('child acknowledgement incomplete')
+    // The reply is now routed to a continuation child. If this item owned the
+    // follow-up before it ended, settle that ledger row too; otherwise the
+    // terminal release sweep would later mark the same message as released and
+    // invite a second judgment of an already-routed reply.
+    try { store.markFollowUpProcessed(source.executionParentItemId,source.id,{allowEnded:true}) } catch { /* not owned here */ }
     this.#lastError=null
     // No external occurrence may be created before this durable ACK exists.
     runtime.wakePending()

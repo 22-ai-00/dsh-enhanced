@@ -11,8 +11,13 @@ export const LARK_TOP_LEVEL_SENDER_THREAD_PREFIX = 'dsh-lark-top-sender/'
 /** Opt-in lane for a Feishu topic-group thread (`message.thread_id`). */
 export const LARK_TOPIC_THREAD_PREFIX = 'dsh-lark-topic/'
 
-export function larkTopicThread(threadId: string): string {
-  const digest = createHash('sha256').update(threadId, 'utf8').digest('base64url')
+/**
+ * Opt-in lane for a Feishu topic-group thread (`message.thread_id`). The
+ * principal is part of the key: Delivery binds one principal per conversation,
+ * so the owner and an allowlisted peer bot in the same topic must not collide.
+ */
+export function larkTopicThread(threadId: string, principalId: string): string {
+  const digest = createHash('sha256').update(`${threadId}\u0000${principalId}`, 'utf8').digest('base64url')
   return `${LARK_TOPIC_THREAD_PREFIX}${digest}`
 }
 

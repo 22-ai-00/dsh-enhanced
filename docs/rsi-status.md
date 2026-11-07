@@ -10,7 +10,8 @@
 - P1-1：native wake 释放已结束工作项的跟进（`c2d2ff32`）、Policy 配置变化为受影响活项记通知（`628bd293`）、活项的线程回复归该工作项（`e3fde052`）、事件订阅/结果窗口在 wake 上被动结算（`0e6f7559`）。均为既有 wake 上的有界扫描，无新 Loop/timer。
 - P1-2：Delivery 新增 owner 通知回复注册与精确匹配，Evaluation 只整句接受 `authorize-once`/`decline`，在一个事务内记录回复并创建一次性授权或写 `owner-declined`；被质疑提议保持未决，下一次既有 tick 独立留出重放后才采用。默认关闭（`2b0b97a3`），关闭时行为不变；启用部署须显式添加 `answer-attention-question` Policy 规则。
 - 其他：recommended 预设纳入自然 owner 反馈解析（`b4234591`）；文档清理删除唯一无人引用的过期研究、补 PTC 索引并修正 ACP/Provider 版本陈述（`4f43e7db`）。
-- 本地 `assistant` profile 已装入 0.1.67 本地包并部署上述飞书能力；最终跨切片根检查在合并 P0-3 后重跑，未通过前不把本轮计为完整验收。
+- 独立复核修复：`peerAgents` 对每条 bot 消息实时重检（移除白名单即失效，revoked 行可在白名单在列时重授权到当前 owner）；话题 lane 以 `thread_id + principal` 为 key，owner 与 peer 在同一话题不互相占用 binding；Policy 通知在个别项评估失败时不把版本记为完成、下次 wake 重试；已路由的续办回复同步结算 follow-up 行，避免释放扫描重复判定；peer 消息不再计入 WorkItems intake 的主人白名单（保持 inferred/filtered）。已确认限制：话题 lane 中无 `replyToEventId` 的后台通知仍按顶层发送（见 lark-channel README）。
+- 本地 `assistant` profile 已装入 0.1.67 本地包并部署上述飞书能力；最终跨切片根检查在复核修复提交上重跑，未通过前不把本轮计为完整验收。
 
 ## 2026-11-07 发布与桌面面板收口
 
