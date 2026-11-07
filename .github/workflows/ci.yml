@@ -137,6 +137,13 @@ jobs:
   linux-root-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        # The root suite is the longest lane. Two shards halve its wall clock;
+        # a failing shard never cancels the sibling, so a real failure is
+        # reported with its own log.
+        shard: [1, 2]
 
     steps:
       - name: Check out repository
@@ -237,8 +244,8 @@ jobs:
       - name: Build root test dependencies
         run: pnpm run build
 
-      - name: Verify root tests
-        run: pnpm run test:root
+      - name: Verify root tests (shard)
+        run: pnpm exec vitest run --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2
 
   verify:
     needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]

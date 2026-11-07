@@ -1195,7 +1195,7 @@ describe('release version workflow', () => {
     expect(linuxPackages).toContain('run: pnpm run test:packages')
     expect(linuxPackages).toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toContain('run: pnpm run test:root')
-    expect(linuxRoot).toContain('run: pnpm run test:root')
+    expect(linuxRoot).toContain('--dir tests --shard=${{ matrix.shard }}/2')
     expect(linuxRoot).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
     expect(linuxRoot).not.toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toMatch(/^\s+needs:/mu)
