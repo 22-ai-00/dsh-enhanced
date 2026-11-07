@@ -9,6 +9,7 @@ import {
   createLarkProgressRequest,
   larkRequestUuid,
   OfficialLarkTransport,
+  rawSenderIsBot,
   readLarkImageResourceResponse,
   renderLarkMessage,
   toSafeLarkMessage,
@@ -39,6 +40,15 @@ async function settleBeforeTestDeadline<T>(promise: Promise<T>, timeoutMs = 250)
 }
 
 describe('Lark SDK boundary', () => {
+  test('recognizes both event and message-API bot sender labels', () => {
+    expect(rawSenderIsBot({ sender: { sender_type: 'bot' } })).toBe(true)
+    expect(rawSenderIsBot({ sender: { sender_type: 'app' } })).toBe(true)
+    expect(rawSenderIsBot({ sender: { sender_type: 'BOT' } })).toBe(true)
+    expect(rawSenderIsBot({ sender: { sender_type: 'user' } })).toBe(false)
+    expect(rawSenderIsBot({ sender: {} })).toBe(false)
+    expect(rawSenderIsBot(undefined)).toBe(false)
+  })
+
   test('reads one encoded Calendar v4 page with fixed query fields and maps cancellation and provider errors', async () => {
     const request = vi.spyOn(Client.prototype, 'request').mockResolvedValue({ code: 0, data: { items: [] } })
     const transport = new OfficialLarkTransport({ appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu', handshakeTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000 })

@@ -1202,10 +1202,10 @@ function safeNormalizedContent(message: NormalizedMessage): string {
   return content.trim()
 }
 
-/** Feishu marks an application/bot sender with `sender_type: 'app'` (case-insensitive). */
-function rawSenderIsBot(raw: unknown): boolean {
+/** Feishu event payloads mark an application sender as `bot`; the message API may say `app`. */
+export function rawSenderIsBot(raw: unknown): boolean {
   const senderType = (raw as { sender?: { sender_type?: unknown } } | null)?.sender?.sender_type
-  return typeof senderType === 'string' && senderType.toLowerCase() === 'app'
+  return typeof senderType === 'string' && ['app', 'bot'].includes(senderType.toLowerCase())
 }
 
 export function toSafeLarkMessage(message: NormalizedMessage, senderIsBot = false): LarkMessage {  return {
