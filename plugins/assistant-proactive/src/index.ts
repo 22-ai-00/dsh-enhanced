@@ -1,5 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -11,20 +12,55 @@ import { OpportunityEngine, validateProfile } from './engine.js'
 import type { OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 import { reminderText, reminderExpiresAt } from './reminder.js'
 import { attentionOverlay, proactiveAttentionCohort, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
+import {
+  DISABLED_INTAKE_EVALUATION_HEALTH, IntakeEvaluationProducer, normalizeIntakeEvaluation,
+  type IntakeEvaluationConfig, type IntakeWorkItemsRegistration, type ProactiveIntakeEvaluationHealth,
+} from './intake-evaluation.js'
 import { PreparationRuntime } from './preparation.js'
 import { PreparationStore } from './preparation-store.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-proactive'
 export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProfile, proactiveAttentionCohort }
+export {
+  DISABLED_INTAKE_EVALUATION_HEALTH, INTAKE_EVALUATION_LEVELS, IntakeEvaluationError, IntakeEvaluationProducer,
+  intakeEvaluationPolicy, MAX_INTAKE_EVALUATION_QUOTES, MAX_INTAKE_EVALUATION_RULES, MAX_INTAKE_EVALUATION_QUOTE_CHARS,
+  MAX_INTAKE_SOURCE_TEXT, normalizeIntakeEvaluation,
+} from './intake-evaluation.js'
+export type {
+  IntakeEvaluationConfig, IntakeEvaluationErrorCode, IntakeEvaluationLevel, IntakeEvaluationPolicy,
+  IntakeEvaluationRule, IntakeEvaluationRuleConfig, IntakeEvaluationVerdict, IntakeModelRequest,
+  IntakeWorkItemsRegistration, NormalizedIntakeEvaluation, ProactiveIntakeEvaluationHealth,
+  ProactiveIntakeEvaluationReadiness,
+} from './intake-evaluation.js'
 export type { AttentionOverlay }
 export type * from './types.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
 interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): unknown }
-export interface Config { databasePath?: string; profiles?: OpportunityProfile[] }
+export interface Config {
+  databasePath?: string
+  profiles?: OpportunityProfile[]
+  /** WP20 stage 3 producer: absent or disabled keeps the plugin behavior identical. */
+  intakeEvaluation?: IntakeEvaluationConfig
+}
 const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max).required()
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-proactive.sqlite')),
+  // WP20 stage 3 producer: off by default. Enabling it names the frozen
+  // provider/model and the Host rules; assistant-work-items must also enable
+  // its own intakeLedger.evaluation for the registration to be accepted.
+  intakeEvaluation: Schema.object({
+    enabled: Schema.boolean().default(false),
+    rules: Schema.array(Schema.object({
+      ruleId: Schema.string().required(),
+      ceiling: Schema.union(['ignore', 'digest', 'notify', 'accept']).required(),
+    })).default([]),
+    provider: Schema.string(),
+    model: Schema.string(),
+    maxCallsPerHour: Schema.number().step(1).min(1).max(1_000),
+    timeoutMs: Schema.number().step(1).min(1_000).max(600_000),
+    maxConsecutiveFailures: Schema.number().step(1).min(1).max(10),
+  }),
   profiles: Schema.array(Schema.object({
     preparation: Schema.union([Schema.object({ provider: Schema.string().required(), model: Schema.string().required(), budgetId: Schema.string().required(), maxOutputTokens: Schema.number().step(1).min(1).max(32_768).required(), timeoutMs: Schema.number().step(1).min(1_000).max(300_000).required() })]),
     id: Schema.string().required(), mode: Schema.union(['prepare', 'remind', 'execute']).required(),
@@ -43,9 +79,14 @@ export class AssistantProactiveService extends Service {
   readonly #preparations: PreparationRuntime
   readonly #engine: OpportunityEngine
   readonly #profiles = new Map<string, OpportunityProfile>()
+  /** Present only when intakeEvaluation is explicitly enabled; otherwise the plugin is byte-identical to before. */
+  readonly #intakeEvaluation: IntakeEvaluationProducer | undefined
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantProactive')
+    const intakeEvaluation = normalizeIntakeEvaluation(config.intakeEvaluation)
+    const producer = intakeEvaluation === undefined ? undefined : new IntakeEvaluationProducer({ config: intakeEvaluation })
+    this.#intakeEvaluation = producer
     for (const input of config.profiles ?? []) {
       const profile = validateProfile(input)
       if (this.#profiles.has(profile.id)) throw new Error('assistant-proactive: duplicate profile')
@@ -77,7 +118,38 @@ export class AssistantProactiveService extends Service {
         execute: async (args, execution) => { return { context: JSON.stringify(this.feedback(execution.agent, args.decision_id, args.feedback as 'accepted' | 'rejected')) } },
       }))
     })
+    if (producer !== undefined) this.#registerIntakeEvaluation(ctx, producer)
   }
+  /**
+   * WP20 stage 3 production wiring: register the intake evaluator only while
+   * the LLM and WorkItems services are both active. Both are optional peers, so
+   * a deployment without them (or with WorkItems' evaluation disabled) keeps
+   * the plugin loaded and behavior unchanged; the health snapshot reports why.
+   */
+  #registerIntakeEvaluation(ctx: Context, producer: IntakeEvaluationProducer): void {
+    ctx.inject(['llm', 'assistantWorkItems'] as never, runtime => {
+      const llm = runtime.get('llm' as never) as LlmRuntime | undefined
+      const workItems = runtime.get('assistantWorkItems' as never) as
+        { registerIntakeEvaluator?: (registration: IntakeWorkItemsRegistration) => () => void } | undefined
+      if (llm === undefined || typeof workItems?.registerIntakeEvaluator !== 'function') return
+      producer.attach(llm)
+      runtime.effect(() => () => producer.detach(llm), 'assistant-proactive.intake-evaluation-llm')
+      let unregister: () => void
+      try {
+        unregister = workItems.registerIntakeEvaluator(producer.registration())
+      } catch (error) {
+        // WorkItems refuses when its own intakeLedger.evaluation is disabled or
+        // another supplier is registered. Nothing was registered, so nothing changes.
+        producer.markUnavailable(error)
+        runtime.logger.warn(`assistant-proactive: intake evaluator not registered: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      producer.markRegistered(true)
+      runtime.effect(() => () => { producer.markRegistered(false); unregister() }, 'assistant-proactive.intake-evaluation')
+    })
+  }
+  /** Host-only read-only readiness/health for operators and doctor; grants nothing. */
+  intakeEvaluationHealth = (): ProactiveIntakeEvaluationHealth => this.#intakeEvaluation?.health() ?? DISABLED_INTAKE_EVALUATION_HEALTH
   assertProfile = (profileId: string): void => {
     if (!this.#active || !this.#profiles.has(profileId)) throw new Error('assistant-proactive: configured active opportunity profile required')
     if (this.#profiles.get(profileId)!.preparation && !this.#preparations.available()) throw new Error('assistant-proactive: preparation services unavailable')
