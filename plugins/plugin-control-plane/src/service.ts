@@ -3,6 +3,9 @@ import { cleanedLinuxSourceBuildFailure, cleanedLinuxSourcePreflight, consumeCle
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
+import { RevisionCapabilityJournal, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
+import { RevisionCapabilityRuntime } from './revision-capability-runtime.js'
+import type { RevisionCapabilityConfig, RevisionCapabilityReadiness } from './revision-capability-types.js'
 import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
   inspectCreationCapabilityOrdinaryUseTrend, inspectCreationCapabilityTaskAssociations,
   type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
@@ -88,6 +91,8 @@ export interface Config {
   creationVerifications?: { authority: CreationAcceptanceAuthorityRef; publicKey: string }
   /** Separate finite owner grant for dynamically adopted isolated tools. */
   creationCapabilities?: CreationCapabilityConfig
+  /** Separate finite owner grant for replacing an adopted stable tool entry with a verified revision. */
+  revisionCapabilities?: RevisionCapabilityConfig
   /** A new finite preparation/verification lane, with no execution authority. */
   revisionVerifications?: { authority: RevisionAcceptanceAuthorityRef; publicKey: string }
   revisionRegressions?: { authority: RevisionRegressionAcceptanceAuthorityRef; publicKey: string }
@@ -122,8 +127,8 @@ type CreationVerifierPort = {
 const CREATION_UNKNOWN_CODES = new Set(['schema-observation-unknown', 'case-observation-unknown', 'contract-insufficient',
   'interrupted', 'stale-source', 'verification-unknown', 'previous-unknown'])
 const CREATION_REJECTED_CODES = new Set(['case-mismatch', 'source-review-rejected', 'request-invalid'])
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'revisionCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'revisionVerifications' | 'revisionRegressions' | 'creationCapabilities' | 'revisionCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
@@ -133,6 +138,7 @@ const schema = Schema.object({
   revisionVerifications: Schema.any(),
   revisionRegressions: Schema.any(),
   creationCapabilities: Schema.any(),
+  revisionCapabilities: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
   sourceReleaseExecution: Schema.any(),
@@ -212,7 +218,8 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   }
   if (config.sourceBuild !== undefined && 'backend' in config.sourceBuild && config.sourceBuild.backend === 'linux-native') {
     if (!config.sourceJobs) throw new Error('plugin-control-plane: Linux repository preparation requires durable sourceJobs')
-    if ((config.creationVerifications || config.creationCapabilities || config.revisionVerifications || config.revisionRegressions)
+    if ((config.creationVerifications || config.creationCapabilities || config.revisionVerifications || config.revisionRegressions
+      || config.revisionCapabilities)
       && (!config.sourceBuild.userNamespace || !config.sourceBuild.systemSnapshot)) {
       throw new Error('plugin-control-plane: Linux independent verification requires the dual-UID repository boundary')
     }
@@ -312,6 +319,39 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
     const verificationKey = createPublicKey(verification.publicKey).export({ format: 'der', type: 'spki' })
     if (adoptionKey.equals(verificationKey)) throw new Error('plugin-control-plane: adoption and verification signing keys must be separate')
   }
+  if (config.revisionCapabilities !== undefined) {
+    validateRevisionCapabilityConfig(config.revisionCapabilities)
+    const capability = config.revisionCapabilities
+    const creation = config.creationCapabilities
+    const verification = config.revisionVerifications
+    const jobs = config.sourceJobs
+    const build = config.sourceBuild
+    if (!creation || !verification || !jobs?.revision || !build) {
+      throw new Error('plugin-control-plane: revision adoption requires creation capabilities, revision verification and finite revision source')
+    }
+    const buildBackend = 'backend' in build ? build.backend : 'docker'
+    const runnerBackend = 'backend' in creation.runner ? creation.runner.backend : 'docker'
+    if (buildBackend !== runnerBackend
+      || capability.namePrefix !== creation.namePrefix || capability.namePrefix !== jobs.revision.namePrefix
+      || controlPlaneDigest(capability.owner) !== controlPlaneDigest(creation.owner)
+      || capability.expiresAt > creation.expiresAt) {
+      throw new Error('plugin-control-plane: revision adoption authority does not match its authenticated creation lane')
+    }
+    if (capability.authorityId === creation.authorityId || capability.authorityId === verification.authority.authorityId
+      || capability.rollback.authorityId === capability.authorityId || capability.rollback.authorityId === creation.authorityId
+      || capability.rollback.authorityId === verification.authority.authorityId) {
+      throw new Error('plugin-control-plane: revision adoption, rollback, verification and creation authorities must be separate')
+    }
+    if (capability.keyId === creation.keyId || capability.keyId === verification.authority.keyId) {
+      throw new Error('plugin-control-plane: revision adoption signing key must differ from acceptance and creation keys')
+    }
+    const revisionKey = createPublicKey(revisionCapabilityPublicKey(capability)).export({ format: 'der', type: 'spki' })
+    const creationKey = createPublicKey(creationCapabilityPublicKey(creation)).export({ format: 'der', type: 'spki' })
+    const verificationKey = createPublicKey(verification.publicKey).export({ format: 'der', type: 'spki' })
+    if (revisionKey.equals(creationKey) || revisionKey.equals(verificationKey)) {
+      throw new Error('plugin-control-plane: revision adoption signing key material must be separate')
+    }
+  }
   if (![config.catalogPath, config.statePath, config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
   return config
 }
@@ -336,6 +376,7 @@ export class PluginControlPlaneService extends Service {
     | { backend: 'linux-native'; runner: LinuxRepositoryRunner } | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
   private creationCapabilityRuntime: CreationCapabilityRuntime | undefined
+  private revisionCapabilityRuntime: RevisionCapabilityRuntime | undefined
   private readonly creationCapabilityRuntimes = new Set<CreationCapabilityRuntime>()
   private readonly creationCapabilityFlights = new Set<Promise<unknown>>()
   private creationCapabilityReconcileRequested = false
@@ -660,6 +701,82 @@ export class PluginControlPlaneService extends Service {
             throw error
           }
         }
+        let revisionCapabilities: RevisionCapabilityRuntime | undefined
+        if (this.config.revisionCapabilities) {
+          const config = this.config.revisionCapabilities
+          const delivery = current('delivery') as AssistantDeliveryService
+          if (typeof delivery.validateOwnerAgentForRoute !== 'function') {
+            throw new Error('plugin-control-plane: revision adoption requires authenticated live owner Agent admission')
+          }
+          const journal = new RevisionCapabilityJournal({ path: join(this.config.statePath, 'revision-adoptions.sqlite'), config })
+          try {
+            revisionCapabilities = new RevisionCapabilityRuntime({ ctx: jobsCtx, config, journal,
+              regressionRequired: this.config.revisionRegressions !== undefined,
+              ports: {
+                inspect: planId => {
+                  const certificate = this.inspectVerifiedRevision(planId)
+                  if (!certificate) throw new Error('revision adoption requires a fresh independent certificate')
+                  const prepared = this.inspectPreparedRevision(planId)
+                  const source = this.store.readRevisionSource(planId)
+                  if (!source) throw new Error('revision adoption source archive unavailable')
+                  const regression = this.config.revisionRegressions === undefined
+                    ? undefined : this.inspectVerifiedRevisionRegression(planId)
+                  return { certificate, artifact: Buffer.from(prepared.artifact), source,
+                    plan: { id: prepared.plan.id, digest: prepared.plan.digest, name: prepared.plan.name },
+                    ...(regression === undefined ? {} : { regression }), owner: config.owner }
+                },
+                recheck: async (planId, signal) => {
+                  await this.inspectPreparedRevisionReviewContext(planId, signal)
+                  if (this.config.sourceBuild && 'backend' in this.config.sourceBuild
+                    && this.config.sourceBuild.backend === 'linux-native') {
+                    await this.inspectPreparedRevisionLinuxBuild(planId, signal)
+                  }
+                  if (!this.inspectVerifiedRevision(planId)) throw new Error('revision adoption independent certificate changed')
+                },
+                parent: planId => {
+                  const adoption = capabilities?.inspectAdoptionVersion(planId)
+                  if (!adoption) throw new Error('revision adoption parent adoption unavailable')
+                  return adoption
+                },
+                recheckParent: async (planId, signal) => {
+                  if (!capabilities) throw new Error('revision adoption parent adoption unavailable')
+                  await capabilities.recheckAdoptionVersion(planId, signal)
+                },
+                inFlightParentCalls: planId => capabilities?.inspectInFlightCalls(planId) ?? 0,
+                suspendParent: async planId => {
+                  if (!capabilities) throw new Error('revision adoption parent adoption unavailable')
+                  await capabilities.suspendEntry(planId)
+                },
+                resumeParent: async planId => {
+                  if (!capabilities) throw new Error('revision adoption parent adoption unavailable')
+                  await capabilities.resumeEntry(planId)
+                },
+                runVersion: input => {
+                  if (!capabilities) throw new Error('revision adoption runner unavailable')
+                  return capabilities.runRevisionArtifact(input)
+                },
+                recheckExecution: async (certificate, signal) => {
+                  if (!capabilities) throw new Error('revision adoption runner unavailable')
+                  await capabilities.verifyArtifactExecution(certificate, signal)
+                },
+                matchesExecution: certificate => capabilities?.matchesArtifactExecution(certificate) === true,
+                assertCaller: execution => {
+                  if (!execution.agent) throw new Error('revision capability requires an authenticated owner Agent')
+                  const receipt = delivery.validateOwnerAgentForRoute(execution.agent, config.owner.authorityId)
+                  if (!receipt || Object.keys(config.owner).some(key =>
+                    receipt[key as keyof typeof config.owner] !== config.owner[key as keyof typeof config.owner])) {
+                    throw new Error('revision capability caller is not the current authorized owner')
+                  }
+                },
+              } })
+          } catch (error) { journal.close(); throw error }
+        }
+        const closeRevision = async (): Promise<void> => {
+          const currentRuntime = revisionCapabilities
+          revisionCapabilities = undefined
+          if (this.revisionCapabilityRuntime === currentRuntime) this.revisionCapabilityRuntime = undefined
+          if (currentRuntime) await currentRuntime.close()
+        }
         const sourceBuild = this.config.sourceBuild!
         let nativeRunner: typeof this.nativeSourceRunner
         try {
@@ -683,6 +800,7 @@ export class PluginControlPlaneService extends Service {
                 tmpMiB: sourceBuild.temporaryMiB, tmpInodes: sourceBuild.temporaryInodes, inputMiB: 65, inputInodes: 16 } }) }
         } catch (error) {
           unsubscribeTaskChanges?.()
+          try { await closeRevision() } catch { /* original error wins */ }
           if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
           throw error
         }
@@ -693,6 +811,7 @@ export class PluginControlPlaneService extends Service {
           // Restored fresh adoptions read their original Linux build receipt.
           // Their source runner must exist before capability reconciliation.
           await capabilities?.start()
+          await revisionCapabilities?.start()
           this.abort.signal.throwIfAborted()
           runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: sourceBuild, statePath: this.config.statePath, store: this.store,
           ports: {
@@ -720,6 +839,11 @@ export class PluginControlPlaneService extends Service {
             adoptVerifiedCreation: async (job: SourceJobRecord, signal: AbortSignal) => {
               if (!job.planId) throw new Error('created capability has no prepared source plan')
               await capabilities!.adopt(job.planId, signal)
+            } } : {}),
+          ...(revisionCapabilities ? { revisionAdoptionEligible: (planId: string) => revisionCapabilities!.eligible(planId),
+            adoptVerifiedRevision: async (job: SourceJobRecord, signal: AbortSignal) => {
+              if (!job.planId) throw new Error('revision adoption has no prepared source plan')
+              await revisionCapabilities!.adopt(job.planId, signal)
             } } : {}),
           ...(this.config.sourceApprovals ? { approvePrepared: async (job: SourceJobRecord, signal: AbortSignal) => {
             if (!job.planId) throw new Error('source job has no prepared plan')
@@ -750,11 +874,13 @@ export class PluginControlPlaneService extends Service {
           if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
           await nativeRunner?.runner.close()
           unsubscribeTaskChanges?.()
+          try { await closeRevision() } catch { /* original error wins */ }
           if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
           throw error
         }
         this.sourceRuntimes.add(runtime)
         this.creationCapabilityRuntime = capabilities
+        this.revisionCapabilityRuntime = revisionCapabilities
         const close = async (): Promise<void> => {
           unsubscribeTaskChanges?.()
           if (this.sourceRuntime === runtime) this.sourceRuntime = undefined
@@ -763,11 +889,14 @@ export class PluginControlPlaneService extends Service {
           if (this.nativeSourceRunner === nativeRunner) this.nativeSourceRunner = undefined
           this.sourceRuntimes.delete(runtime)
           if (this.creationCapabilityRuntime === capabilities) this.creationCapabilityRuntime = undefined
+          let revisionCloseError: unknown
+          try { await closeRevision() } catch (error) { revisionCloseError = error }
           const results = await Promise.allSettled([nativeRunner?.runner.close(), capabilities?.close()])
           if (capabilities) this.creationCapabilityRuntimes.delete(capabilities)
           const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-          if (closeError !== undefined || failures.length) {
-            throw new AggregateError([...(closeError === undefined ? [] : [closeError]), ...failures.map(result => result.reason)],
+          if (closeError !== undefined || revisionCloseError !== undefined || failures.length) {
+            throw new AggregateError([...(closeError === undefined ? [] : [closeError]),
+              ...(revisionCloseError === undefined ? [] : [revisionCloseError]), ...failures.map(result => result.reason)],
               'source runtime cleanup failed')
           }
         }
@@ -1070,6 +1199,46 @@ export class PluginControlPlaneService extends Service {
     this.abort.signal.throwIfAborted()
     return this.creationCapabilityRuntime?.inspectCallEvidence(planId) ?? []
   }
+  /** Host-only read-only revision adoption readiness; undefined when not configured or not admitting. */
+  inspectRevisionAdoptionReadiness = (): RevisionCapabilityReadiness | undefined => {
+    this.abort.signal.throwIfAborted()
+    return this.revisionCapabilityRuntime?.inspectReadiness()
+  }
+
+  /** Host-only current stable entry version; no certificate, artifact bytes or key material escape. */
+  inspectRevisionCapabilityEntry = (entryId: string) => {
+    this.abort.signal.throwIfAborted()
+    return this.revisionCapabilityRuntime?.inspectEntry(entryId)
+  }
+
+  /** Host-only bounded call attribution of one stable entry, including the exact version per call. */
+  inspectRevisionCapabilityCalls = (entryId: string) => {
+    this.abort.signal.throwIfAborted()
+    return this.revisionCapabilityRuntime?.inspectCallEvidence(entryId) ?? []
+  }
+
+  /**
+   * Host-only authenticated-owner exact parent rollback under its own finite grant. The parent
+   * adoption receipt must still be current and the entry must be on the exact expected revision.
+   */
+  rollbackRevisionCapabilityAdoption = async (input: { entryId: string; expectedVersionPlanId: string }) => {
+    this.abort.signal.throwIfAborted()
+    const runtime = this.revisionCapabilityRuntime
+    const config = this.config.revisionCapabilities
+    if (!runtime || !config) throw new Error('revision adoption is not configured')
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!delivery || typeof delivery.validateOwnerRoute !== 'function') throw new Error('revision rollback requires Delivery owner validation')
+    const receipt = delivery.validateOwnerRoute({ authorityId: config.owner.authorityId, principalId: config.owner.principalId,
+      workspace: config.owner.workspace, agentPreset: config.owner.agentPreset })
+    if (!receipt || receipt.authorityId !== config.owner.authorityId || receipt.authorityHash !== config.owner.authorityHash
+      || receipt.principalId !== config.owner.principalId || receipt.principalRecordId !== config.owner.principalRecordId
+      || receipt.principalVersion !== config.owner.principalVersion || receipt.workspace !== config.owner.workspace
+      || receipt.agentPreset !== config.owner.agentPreset) {
+      throw new Error('revision rollback caller is not the current authorized owner')
+    }
+    return runtime.rollback({ entryId: input.entryId, expectedCurrentPlanId: input.expectedVersionPlanId })
+  }
+
 
   /** Host-only historical source data. It grants no continuation, activation or replacement. */
   inspectCreatedCapabilitySource = (planId: string) => {

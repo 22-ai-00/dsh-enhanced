@@ -32,7 +32,9 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
  * The real revision enqueue, certificates and native definition are exercised
  * in source-create-service.spec.ts; these tests inspect the dispatched signals. */
 function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: number; revision?: boolean; regression?: boolean;
-  sourceBuild?: sourceBuild.SourceBuildConfig; create?: boolean; creationReview?: boolean; workItem?: boolean } = {}) {
+  sourceBuild?: sourceBuild.SourceBuildConfig; create?: boolean; creationReview?: boolean; workItem?: boolean
+  revisionAdoption?: boolean; revisionAdoptionEligible?: boolean; revisionAdoptionFailure?: boolean
+  regressionAlreadyVerified?: boolean } = {}) {
   const now = Date.now(), expiry = now + (options.remainingMs ?? 10_800_000)
   const config: SourceJobsConfig = { authorityId: 'revision-timeouts', expiresAt: expiry, maxSubmissions: 1,
     repository: '/repository', allowedModes: [options.create ? 'create' : 'revise-created'], ownerRouteId: OWNER.ownerRouteId,
@@ -85,7 +87,7 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
         : { revision: { grant: config.revision!, generatorDigest: hex('generator'), parent, growthRun } }) } }
   let revisionStatus: 'verified' | undefined = options.revision === false ? 'verified' : undefined
   let creationStatus: 'verified' | undefined
-  let regressionStatus: 'verified' | undefined
+  let regressionStatus: 'verified' | undefined = options.regressionAlreadyVerified ? 'verified' : undefined
   const store = { interruptSourceJobs: () => {}, listSourceJobs: () => [job], getSourceJob: () => job,
     getSourceJobByAutomation: () => job, getOwnerTaskFailureReference: () => durableReference, getGap: () => gap,
     listPreparedSourceApprovalJobs: () => job.status === 'prepared' ? [job] : [],
@@ -114,6 +116,14 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
   const regression = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); regressionStatus = 'verified' })
   const creationReview = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signals.push(signal); creationStatus = 'verified' })
   const adoption = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => { signal.throwIfAborted(); signals.push(signal) })
+  let revisionAdoptionEligible = options.revisionAdoptionEligible !== false
+  const revisionAdoption = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal) => {
+    signal.throwIfAborted(); signals.push(signal)
+    if (options.revisionAdoptionFailure === true) {
+      revisionAdoptionEligible = false
+      throw new Error('fixture revision adoption failed')
+    }
+  })
   const prepare = vi.fn(async (_job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => {
     await assertCurrent(); signals.push(signal); job = { ...job, status: 'prepared', planId: 'revision-plan' }
     return store.getSourcePlan() as PluginSourcePlan
@@ -125,7 +135,9 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
     inspectRevisionParent: () => ({ name: job.intent.name, parent, source: {} as never, certificate: {} as never }),
     prepare, ...(options.creationReview === false ? {} : { verifyPreparedCreation: creationReview }),
     ...(options.create ? { creationAdoptionEligible: () => true, adoptVerifiedCreation: adoption } : {}), ...(options.revision === false ? {} : { verifyPreparedRevision: review }),
-    ...(options.regression === false ? {} : { verifyPreparedRevisionRegression: regression }) })
+    ...(options.regression === false ? {} : { verifyPreparedRevisionRegression: regression }),
+    ...(options.revisionAdoption ? { revisionAdoptionEligible: () => revisionAdoptionEligible,
+      adoptVerifiedRevision: revisionAdoption } : {}) })
   runtime.start()
   const execute = (continuation = false, signal = new AbortController().signal) => {
     const automationId = continuation ? 'source-job-prepared-continuations' : job.automationId
@@ -135,7 +147,7 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
       executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
       ownerRouteId: OWNER.ownerRouteId, activationNonce: registration.activationNonce, catalogDigest: executor.descriptor.catalogDigest, signal })
   }
-  return { runtime, execute, review, regression, creationReview, adoption, prepare, signals, reconciles, config, get job() { return job } }
+  return { runtime, execute, review, regression, creationReview, adoption, revisionAdoption, prepare, signals, reconciles, config, get job() { return job } }
 }
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -256,6 +268,41 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).toHaveBeenCalledOnce(); expect(f.creationReview).toHaveBeenCalledOnce(); expect(f.adoption).toHaveBeenCalledOnce()
       expect(f.signals.every(signal => signal === f.signals[0])).toBe(true)
       expect({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt }).toEqual(frozen)
+    } finally { await f.runtime.close() }
+  })
+
+  it('adopts a verified revision onto its stable entry after independent review and parent regression', async () => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true })
+    const frozen = structuredClone({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(f.review).toHaveBeenCalledOnce()
+      expect(f.regression).toHaveBeenCalledOnce()
+      expect(f.revisionAdoption).toHaveBeenCalledOnce()
+      expect(f.signals.every(signal => signal === f.signals[0])).toBe(true)
+      expect({ config: f.config, intent: f.job.intent, expiresAt: f.job.expiresAt }).toEqual(frozen)
+    } finally { await f.runtime.close() }
+  })
+
+  it('never adopts a verified revision without the separate finite adoption grant', async () => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true, revisionAdoptionEligible: false })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(f.review).toHaveBeenCalledOnce()
+      expect(f.regression).toHaveBeenCalledOnce()
+      expect(f.revisionAdoption).not.toHaveBeenCalled()
+    } finally { await f.runtime.close() }
+  })
+
+  it('reports an unsettled revision adoption once and never replays it on a later continuation', async () => {
+    const f = revisionTimeoutFixture({ prepared: true, revision: false, regressionAlreadyVerified: true,
+      revisionAdoption: true, revisionAdoptionFailure: true })
+    try {
+      expect(await f.execute(true)).toMatchObject({ outcome: 'unknown', failureCode: 'source-continuation-unsettled' })
+      expect(f.revisionAdoption).toHaveBeenCalledOnce()
+      expect(await f.execute(true)).toMatchObject({ outcome: 'succeeded' })
+      expect(f.revisionAdoption).toHaveBeenCalledOnce()
+      expect(f.job.status).toBe('prepared')
     } finally { await f.runtime.close() }
   })
 

@@ -396,7 +396,7 @@ Host 从当前受信任基线生成同名 scaffold，将父归档的候选文件
 
 Linux 修订的原生自动化等待窗口覆盖构建、独立修订验收和可选父行为回归；两项验收分别预留最多 30 分钟。执行及续办仍受原任务/授权期限和各阶段预算约束，不延长已授权期限、不重派 unknown。历史 Docker/macOS 自动化定义保持原样。
 
-Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当前 owner，可在来源更正/撤回、授权和证书到期、制品/worktree 回收及 Host 冷启动后读取历史候选。该候选没有执行回执，不注册工具、不替换父版本、不扩大或续期旧创建/采用额度；后续版本切换须另有有限授权和父版本回归验证。旧配置不会自动获得修订能力，owner 安装器目前不生成这一授权。
+Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当前 owner，可在来源更正/撤回、授权和证书到期、制品/worktree 回收及 Host 冷启动后读取历史候选。该候选没有执行回执，不注册工具、不替换父版本、不扩大或续期旧创建/采用额度；配置下节的 `revisionCapabilities` 后，修复完成的计划会在独立验收（及配置的回归门）之后自动替换稳定入口，否则仍停在候选，须另有有限授权和父版本回归验证。旧配置不会自动获得修订能力，owner 安装器目前不生成这一授权。
 
 ### 修订候选的独立父行为回归门
 
@@ -407,6 +407,46 @@ Host-only `inspectCreatedCapabilityRevisionCandidate(planId)` 验签并核对当
 Host-only `inspectPreparedRevisionRegression` 提供精确父/候选不可变制品；`withPreparedRevisionRegressionFence` 核对当前新任务、model/run、父归档、候选验收、源码与回归引用后同步落账。主账本 schema 34 的 `source_revision_regressions` 独立保存结果，冷启动不重派 settled/claimed 操作；旧计划和额度不改写。`inspectVerifiedRevisionRegression` 只在新窗口与当前来源有效时返回签名证书。成功仍为 `pending-approval`，没有工具、采用收据或版本切换；稳定入口切换与回退必须另外获得有限授权。配置和私有用例读取细节见 [Verifier](../assistant-verifier/README.md)。
 
 主账本在入库和历史回读时独立核对 Linux 修订证书的构建运行时及完整准备证据摘要；回归证书须绑定精确候选证书和同族父证书，并匹配双方共享观察器的边界、运行时与准备回执。历史回读只核对保留的不可变元数据，不重建产物、不要求旧授权仍有效，也不授予新的执行权限。
+
+### 修订采用的稳定入口替换与精确父版本回退
+
+已动态采用的稳定工具入口可以被独立验收的修订版本替换，同时保留精确父版本回退。该路径默认关闭：未配置 `revisionCapabilities` 时，修订验收与回归门之后的计划仍停在 `pending-approval`，旧计划、旧配置和 `control.sqlite` 行为完全不变。启用须同时具备既有 `creationCapabilities`、`revisionVerifications` 和 `sourceJobs.revision`，且采用后端与创建采用 runner 一致：
+
+```yaml
+revisionCapabilities:
+  authorityId: owner-revision-adoption-1
+  keyId: owner-revision-adoption-key
+  keyPath: /private/owner/revision-adoption.pem
+  owner:
+    authorityId: configured-delivery-owner-route
+    authorityHash: <delivery-route-sha256>
+    principalId: configured-principal
+    principalRecordId: <delivery-principal-record>
+    principalVersion: 1
+    workspace: /absolute/owner/workspace
+    agentPreset: primary
+  namePrefix: owner-tool-          # 须与 creationCapabilities.namePrefix、sourceJobs.revision.namePrefix 相同
+  expiresAt: 1800000000000         # 不得晚于 creationCapabilities.expiresAt
+  maxAdoptions: 2
+  maxInputBytes: 4096
+  maxCallRecords: 60
+  rollback:                        # 独立 host-only 回退授权，期限与次数单独计算
+    authorityId: owner-revision-rollback-1
+    expiresAt: 1800000000000
+    maxRollbacks: 1
+  retention:                       # 可选；缺省按验收窗口截止
+    maximumLifetimeMs: 2592000000
+```
+
+采用、回退、修订验收和创建采用是四份互异授权：回退 `authorityId`、采用 `authorityId`/`keyId` 及 Ed25519 key material 必须分别不同于 `revisionVerifications` 与 `creationCapabilities`；owner 七个稳定字段和 namePrefix 须与创建采用一致。旧配置不自动获得该能力，安装器/预设不生成密钥，只报未配置。
+
+原生 SourceJobs 在 `prepared-revise` 续跑中于独立修订验收（以及配置回归时的回归门）都通过后自动采用：先在独立账本 `statePath/revision-adoptions.sqlite` 持久 claim（幂等、先于任何外部动作），再复核当前 owner、精确修订来源与父采用回执；签发专用签名域的回执，绑定父采用回执摘要、父证书与制品、候选制品、新任务/model/run、稳定 alias 摘要和回退期限。随后执行父版本 CAS：只有该稳定入口当前活动版本仍等于父版本时才允许切换，否则失败关闭且不替换。切换顺序是「移交父别名挂载 → 注册候选别名 → 落账 CAS」，落账失败会卸载候选并恢复父挂载；落账成功后才对外视为新版本。失败或 unknown 都消费采用额度且不自动重放；重启只按账本恢复已落账版本，不重新发现、不重签。
+
+稳定入口沿用父采用的原生 alias 组，候选工具名、顺序、参数 schema 必须与父版本完全一致（`schemaDigest` 相等）；修订只能改变行为/实现，新增工具须走新的创建采用。已挂载的入口按账本当前版本路由每次调用：调用 claim 时冻结版本，之后发生替换或回退不会 mid-call 切换；回退前已开始的父/候选调用继续以原制品完成并记录 `versionPlanId` 归属，后续新调用使用新当前版本。父版本的真实创建运行时在移交时只卸下别名、不取消在途调用；重启时先由创建运行时恢复父挂载，再由修订运行时按账本重新移交，避免别名冲突。
+
+Host-only `rollbackRevisionCapabilityAdoption({ entryId, expectedVersionPlanId })` 是唯一回退入口：要求当前认证 owner、独立回退授权未过期且次数未用尽、入口当前活动版本精确等于 `expectedVersionPlanId`，并按修订采用回执恢复父采用回执对应的 exact 父版本。父采用回执缺失/不匹配、父版本已回收/过期或版本链不符一律拒绝；回退不重新验证父版本、不延长任何期限、不返还已用额度，每次记录只追加回退事件。只读诊断有 `inspectRevisionAdoptionReadiness()`（未配置或未就绪返回 `undefined`，就绪返回协议 `dsh-created-capability-revision-adoption-readiness/v1`、剩余采用/回退额度和期限）、`inspectRevisionCapabilityEntry(entryId)` 和 `inspectRevisionCapabilityCalls(entryId)`；均不返回证书、制品字节或密钥材料。
+
+边界：修订采用复用同一份有限行为 runner（创建采用授权），不新增加执行预算；账本 schema 1 自行校验 application id、user_version、权威行和精确表集合，未知漂移或改写拒绝打开，升级只允许追加表/列。当前验收覆盖账本、授权校验、采用/父 CAS/入口路由/回退机制与失败关闭路径，使用本地注入的父采用/runner 端口；真实 Verifier + Growth 生产的完整 live 采用、活 Host 冷启动重挂和「修订的再修订」（v2→v3，需要扩展 Verifier 父版本 lane）不在本切片内，未验收。
 
 ### 新工具插件的有限动态采用
 
@@ -473,7 +513,7 @@ Host-only `inspectCreatedCapabilitySource(planId)` 返回冻结的历史源码�
 
 同一主人 `/new` 后的新任务可在使用授权截止前调用已有入口。任务来源保留原执行绑定，源码作业、Growth run、验收与采用凭证的完整摘要不改写；当前 route 必须仍属于同一主人记录、版本和授权，且会话代次不能倒退。已采用 v2 版本在单个创建作业、计划 TTL、Growth run 和证书到期后，仍可在原使用授权期限内，从冻结的签名 journal 和 Store 计划/作业/来源核对历史证据，并继续检查当前主人和 canonical 纠正/撤回；即使原准备制品被 GC，也只执行 journal 中冻结的包。切换 Session 不续期、不补充额度、不重新派发 unknown，也不授予版本替换权限。
 
-Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
+Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。旧 v1 模式的源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。v2 已采用版本不依赖过期的原 Growth producer；其历史验签时间固定为采用时刻，不可用于首次采用或新签收据。源计划可以按原规则从 `pending-approval` 过期并清理原制品；旧修改审批、PR、npm 发布和整 profile 采用门不变。Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径；修订版本替换与精确父版本回退见下节，真实后续收益和普通使用部署仍属完整目标的下一次验收。
 
 ### 空业务采用账本的内部维护组件
 

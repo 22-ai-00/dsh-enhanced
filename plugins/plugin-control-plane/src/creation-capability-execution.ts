@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { nativeMacRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, type PluginCreationVerificationCertificate,
+  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { CreationCapabilityConfig } from './creation-capability-types.js'
 
 // Verifier is optional for a plain Control Plane deployment. Only explicit
@@ -36,6 +37,44 @@ export function creationCapabilityExecutionMatches(certificate: PluginCreationVe
       && certificate.execution?.boundary === 'linux-native-process-seccomp-v1'
       && certificate.execution.runtimeDigest === linuxRuntimeModule().linuxPluginBehaviorRuntimeDigest(runner.runtime)
   } catch { return false }
+}
+
+/** Exact protocol/backend identity of an independently verified revision artifact. */
+export function revisionCapabilityExecutionMatches(certificate: PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate,
+  runner: CreationCapabilityConfig['runner']): boolean {
+  try {
+    if (certificate.protocol === 'assistant-growth/revision-verification/v1') return !('backend' in runner)
+    return certificate.protocol === 'assistant-growth/revision-verification/v2'
+      && 'backend' in runner && runner.backend === 'linux-native'
+      && certificate.execution?.boundary === 'linux-native-process-seccomp-v1'
+      && certificate.execution.runtimeDigest === linuxRuntimeModule().linuxPluginBehaviorRuntimeDigest(runner.runtime)
+  } catch { return false }
+}
+
+/** Read-only proof that a revision artifact still matches its fixed execution boundary. */
+export async function verifyRevisionCapabilityExecution(certificate: PluginRevisionVerificationCertificate,
+  runner: CreationCapabilityConfig['runner'], signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  if (!revisionCapabilityExecutionMatches(certificate, runner)) throw new Error('revision capability verification runtime changed')
+  if (!('backend' in runner) || runner.backend !== 'linux-native') return
+  const snapshot = canonicalGrowthJson({ certificate, runner })
+  const pinnedCertificate = structuredClone(certificate), pinnedRunner = structuredClone(runner)
+  if (canonicalGrowthJson({ certificate: pinnedCertificate, runner: pinnedRunner }) !== snapshot)
+    throw new Error('revision capability Linux inputs changed during snapshot')
+  if (pinnedCertificate.execution?.boundary !== 'linux-native-process-seccomp-v1') throw new Error('revision capability Linux provenance unavailable')
+  const remaining = pinnedRunner.expiresAt - Date.now()
+  if (remaining <= 0) throw new Error('revision capability Linux runner expired')
+  const bounded = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.min(120_000, remaining)))])
+  const { verifyLinuxPluginBehaviorAdoptionRuntime } = await import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')
+  bounded.throwIfAborted()
+  await verifyLinuxPluginBehaviorAdoptionRuntime({ runtime: pinnedRunner.runtime,
+    buildRuntimeDigest: pinnedCertificate.execution.buildRuntimeDigest,
+    preparationDigest: pinnedCertificate.execution.observerPreparationDigest, signal: bounded })
+  bounded.throwIfAborted()
+  if (Date.now() >= pinnedRunner.expiresAt || canonicalGrowthJson({ certificate, runner }) !== snapshot
+    || !revisionCapabilityExecutionMatches(certificate, runner)) {
+    throw new Error('revision capability Linux runtime authority changed')
+  }
 }
 
 /** Read-only proof for adoption, restore and each invocation. It cannot rebuild

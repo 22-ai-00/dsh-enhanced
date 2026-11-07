@@ -121,6 +121,9 @@ export class SourceJobRuntime {
     verifyPreparedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     creationAdoptionEligible?: (planId: string) => boolean
     adoptVerifiedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
+    /** A verified revision may replace its stable adopted entry only under a separate finite grant. */
+    revisionAdoptionEligible?: (planId: string) => boolean
+    adoptVerifiedRevision?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     advanceReleased?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releaseTimeoutMs?: number
@@ -220,6 +223,14 @@ export class SourceJobRuntime {
     return Promise.allSettled(this.growthFlights).then(() => undefined)
   }
 
+  /** A revision is adoptable only when its independent review, and any configured regression, verified. */
+  private revisionAdoptionReady(job: SourceJobRecord, planId: string): boolean {
+    if (this.options.store.getRevisionVerificationStatus(planId) !== 'verified') return false
+    if (job.intent.revision?.growthRun.revisionRegressionAcceptance === undefined) return true
+    return this.options.verifyPreparedRevisionRegression !== undefined
+      && this.options.store.getRevisionRegressionStatus(planId) === 'verified'
+  }
+
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
     if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
     if (this.continuing.has(job.id)) return
@@ -253,6 +264,13 @@ export class SourceJobRuntime {
         && job.intent.revision.growthRun.revisionRegressionAcceptance && this.options.verifyPreparedRevisionRegression) {
         await assertCurrent()
         await this.options.verifyPreparedRevisionRegression(job, signal)
+      }
+      // Verified acceptance and the optional independent parent regression end the review lane.
+      // Replacing the stable adopted entry is a separately authorized continuation.
+      if (this.revisionAdoptionReady(job, planId)
+        && this.options.revisionAdoptionEligible?.(planId) && this.options.adoptVerifiedRevision) {
+        await assertCurrent()
+        await this.options.adoptVerifiedRevision(job, signal)
       }
       return
     }
@@ -549,6 +567,7 @@ export class SourceJobRuntime {
     if (!('backend' in this.options.build) || this.options.build.backend !== 'linux-native') return 0
     return (this.options.verifyPreparedRevision ? 1_800_000 : 0)
       + (this.options.verifyPreparedRevisionRegression ? 1_800_000 : 0)
+      + (this.options.adoptVerifiedRevision ? 180_000 : 0)
   }
 
   private definition(job: SourceJobRecord): HostAutomationDefinition {
@@ -634,13 +653,17 @@ export class SourceJobRuntime {
   }
 
   private hasContinuations(): boolean {
-    return !!(this.options.approvePrepared || this.options.verifyPreparedRevisionRegression || this.options.verifyPreparedRevision || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+    return !!(this.options.approvePrepared || this.options.verifyPreparedRevisionRegression || this.options.verifyPreparedRevision
+      || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.adoptVerifiedRevision
+      || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
   }
 
   private continuationJobs(): readonly SourceJobRecord[] {
     if (!this.hasContinuations()) return []
     return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined,
-      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined, this.options.verifyPreparedRevision !== undefined, this.options.verifyPreparedRevisionRegression !== undefined)
+      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined,
+      this.options.verifyPreparedRevision !== undefined, this.options.verifyPreparedRevisionRegression !== undefined,
+      this.options.adoptVerifiedRevision !== undefined)
       .filter(job => this.modeAllowed(job.intent.mode) && this.eligibleContinuation(job))
   }
 
@@ -655,7 +678,9 @@ export class SourceJobRuntime {
       const verify = status === undefined && this.options.verifyPreparedRevision !== undefined
       const regression = status === 'verified' && plan.sourceRevision.growthRun.revisionRegressionAcceptance !== undefined
         && this.options.store.getRevisionRegressionStatus(plan.id) === undefined && this.options.verifyPreparedRevisionRegression !== undefined
-      if (!verify && !regression) return false
+      const adoption = this.options.revisionAdoptionEligible !== undefined && this.options.adoptVerifiedRevision !== undefined
+        && this.revisionAdoptionReady(job, plan.id) && this.options.revisionAdoptionEligible(plan.id) === true
+      if (!verify && !regression && !adoption) return false
       try { this.assertOwner(job) } catch { return false }
       return plan.expiresAt > Date.now()
     }

@@ -25,6 +25,15 @@ export type { CreationCapabilityTrendSnapshot, CreationCapabilityTrendSnapshotPa
   CreationCapabilityTrendSnapshotRecord } from './creation-capability-trend-snapshot.js'
 export { creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig,
   verifyCreationCapabilityReceipt } from './creation-capability-journal.js'
+export { RevisionCapabilityJournal, revisionCapabilityAuthorityDigest, revisionCapabilityPublicKey,
+  validateRevisionCapabilityConfig, verifyRevisionCapabilityAdoptionReceipt } from './revision-capability-journal.js'
+export { RevisionCapabilityRejected, RevisionCapabilityRuntime } from './revision-capability-runtime.js'
+export type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord,
+  RevisionCapabilityAdoptionStatus, RevisionCapabilityCall, RevisionCapabilityCallEvidence,
+  RevisionCapabilityConfig, RevisionCapabilityEntry, RevisionCapabilityInspection,
+  RevisionCapabilityJournalPort, RevisionCapabilityModel, RevisionCapabilityParentAdoption,
+  RevisionCapabilityPorts, RevisionCapabilityReadiness, RevisionCapabilityRollbackGrant,
+  RevisionCapabilityRollbackRecord, RevisionCapabilitySourceRef, RevisionCapabilityVersion } from './revision-capability-types.js'
 export * from './catalog.js'
 export * from './errors.js'
 export * from './source-workspace.js'

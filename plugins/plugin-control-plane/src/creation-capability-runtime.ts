@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { creationCapabilityExecutionMatches, verifyCreationCapabilityExecution } from './creation-capability-execution.js'
+import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, validateAnySourceGrowthRunBinding,
+  type AnySourceGrowthRunBinding, type PluginCreationVerificationCertificate,
+  type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { creationCapabilityExecutionMatches, revisionCapabilityExecutionMatches,
+  verifyCreationCapabilityExecution, verifyRevisionCapabilityExecution } from './creation-capability-execution.js'
 import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
 
@@ -106,6 +109,8 @@ export class CreationCapabilityRuntime {
   private runner?: CreationCapabilityRunner
   private validateSchema?: (schema: unknown) => void
   private readonly mounted = new Map<string, Mounted>()
+  /** Aliases handed to a separately authorized revision entry; reconciliation must not remount them. */
+  private readonly suspended = new Set<string>()
   private readonly flights = new Set<Promise<unknown>>()
   private readonly invocationPlans = new Map<Promise<unknown>, string>()
   private readonly cancellations = new Map<AbortController, string>()
@@ -457,6 +462,7 @@ export class CreationCapabilityRuntime {
     if (this.closed || !this.started) return
     for (const record of this.journal.list()) {
       if (record.status !== 'authorized' && record.status !== 'active') continue
+      if (this.suspended.has(record.planId)) continue
       if (this.closed) return
       const controller = new AbortController()
       this.operations.add(controller)
@@ -486,6 +492,94 @@ export class CreationCapabilityRuntime {
   inspectStatus(planId: string): { status: CreationCapabilityRecord['status']; aliases: readonly string[] } | undefined {
     const record = this.journal.inspect(planId)
     return record && { status: record.status, aliases: record.tools?.map(tool => tool.name) ?? [] }
+  }
+
+  /** Host-only parent snapshot for a separately authorized revision entry; never a model tool. */
+  inspectAdoptionVersion(planId: string): { planId: string; name: string; owner: CreationCapabilityConfig['owner'];
+    certificate: PluginCreationVerificationCertificate; artifact: Buffer;
+    tools: readonly CreationCapabilityTool[]; receiptJson: string; receiptDigest: string } | undefined {
+    try {
+      if (this.closed || !this.started) return undefined
+      const record = this.journal.inspect(planId)
+      if (!record || record.status !== 'active' || !record.receipt || !record.tools?.length) return undefined
+      const receipt = record.receipt
+      if (receipt.protocol !== 'dsh-created-capability-adoption/v1' && receipt.protocol !== 'dsh-created-capability-adoption/v2') return undefined
+      const receiptJson = canonicalGrowthJson(receipt)
+      return { planId, name: record.certificate.plan.name, owner: structuredClone(this.config.owner),
+        certificate: structuredClone(record.certificate), artifact: Buffer.from(record.artifact),
+        tools: record.tools.map(tool => ({ originalName: tool.originalName, name: tool.name,
+          description: tool.description, parameters: structuredClone(tool.parameters) })),
+        receiptJson, receiptDigest: sha(receiptJson) }
+    } catch { return undefined }
+  }
+
+  /** Host-only recheck of the current owner/source for a parent adoption before a switch. */
+  async recheckAdoptionVersion(planId: string, signal: AbortSignal): Promise<void> {
+    const record = this.journal.inspect(planId)
+    if (!record || record.status !== 'active' || !record.receipt) fail('parent adoption unavailable')
+    await this.checked(record, signal)
+  }
+
+  /** Parent calls already running at a switch; evidence only, never an authorization. */
+  inspectInFlightCalls(planId: string): number {
+    let count = 0
+    for (const plan of this.invocationPlans.values()) if (plan === planId) count++
+    return count
+  }
+
+  /** Host-only alias handover: already running calls keep their exact parent artifact. */
+  suspendEntry(planId: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.closed) return
+      this.suspended.add(planId)
+      if (this.mounted.has(planId)) await this.unmount(planId)
+    })
+  }
+
+  /** Host-only recovery: restore the parent mount after a failed switch. */
+  resumeEntry(planId: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.closed) return
+      this.suspended.delete(planId)
+      const record = this.journal.inspect(planId)
+      if (!record || (record.status !== 'authorized' && record.status !== 'active') || this.mounted.has(record.planId)) return
+      const controller = new AbortController()
+      this.operations.add(controller)
+      try { await this.mount(record, controller.signal); this.armExpiry(record) } finally { this.operations.delete(controller) }
+    })
+  }
+
+  /** Synchronous, read-only execution-boundary identity of a verified revision artifact. */
+  matchesArtifactExecution(certificate: PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate): boolean {
+    return certificate.protocol.startsWith('assistant-growth/revision-verification/')
+      ? revisionCapabilityExecutionMatches(certificate, this.config.runner)
+      : creationCapabilityExecutionMatches(certificate as PluginCreationVerificationCertificate, this.config.runner)
+  }
+
+  /** Read-only proof that a verified revision artifact still matches its fixed execution boundary. */
+  async verifyArtifactExecution(certificate: PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate,
+    signal: AbortSignal): Promise<void> {
+    if (certificate.protocol.startsWith('assistant-growth/revision-verification/')) {
+      await verifyRevisionCapabilityExecution(certificate as PluginRevisionVerificationCertificate, this.config.runner, signal)
+    } else await verifyCreationCapabilityExecution(certificate as PluginCreationVerificationCertificate, this.config.runner, signal)
+  }
+
+  /**
+   * Host-only: execute one verified parent/revision artifact under the same finite behavior runner
+   * as creation adoption. It records no call here; the revision journal owns entry-call attribution.
+   */
+  async runRevisionArtifact(input: { certificate: PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate
+    artifact: Buffer; operation: { kind: 'discover' }
+      | { kind: 'invoke'; calls: readonly { id: string; toolName: string; arguments: unknown }[] }
+    key: string; signal: AbortSignal }): Promise<CreationCapabilityObservation> {
+    if (!this.runner || !this.started || this.closed) fail('revision artifact runner unavailable')
+    input.signal.throwIfAborted()
+    if (!this.matchesArtifactExecution(input.certificate)) fail('revision artifact execution boundary changed')
+    if (!Buffer.isBuffer(input.artifact) || input.artifact.length !== input.certificate.plan.artifactBytes
+      || sha(input.artifact) !== input.certificate.plan.artifactSha256) fail('revision artifact changed')
+    const operation = input.operation.kind === 'discover' ? { kind: 'discover' as const }
+      : { kind: 'invoke' as const, schemaDigest: input.certificate.schemaDigest, calls: input.operation.calls }
+    return this.runner.run({ key: input.key, artifact: Buffer.from(input.artifact), operation, signal: input.signal })
   }
 
   /** Host-only evidence lookup remains available for terminal adoptions. */
