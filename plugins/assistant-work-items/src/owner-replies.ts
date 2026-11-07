@@ -8,7 +8,7 @@ import { immutableReply, isReplyContinuationPlan, parseStoredContinuationPlan } 
 import { workItemReportDigest } from './feedback-targets.js'
 import type { PeerDeliveryService, WorkItemReplyConsumerRegistration, WorkItemReplySource, WorkItemReportTarget } from './peers.js'
 import type { WorkItemStore } from './store.js'
-import { WorkItemError, type WorkItemAdmitInput, type WorkItemAdmitResult, type WorkItemNotification, type WorkItemRecord, type WorkItemReportRecord } from './types.js'
+import { OPEN_STATES, WorkItemError, type WorkItemAdmitInput, type WorkItemAdmitResult, type WorkItemNotification, type WorkItemRecord, type WorkItemReportRecord } from './types.js'
 
 const CURSOR_KEY='reply-continuation.scan/v1'
 const identity=(peer:object):unknown=>(peer as Record<symbol,unknown>)[symbols.original]??peer
@@ -158,6 +158,28 @@ export class WorkItemOwnerReplies {
         || acceptanceCanonicalJson(immutableReply(current))!==acceptanceCanonicalJson(immutableReply(source))) fail('source changed before acknowledgement')
     }
     assertCurrent()
+    // A reply on a still-live item belongs to that item's work thread; it must
+    // not mint a continuation child. The Delivery source stays pending, and the
+    // terminal release sweep hands it back to judgment if the item later ends.
+    const owned = (() => {
+      try {
+        return store.ownFollowUp({ itemId: source.executionParentItemId,
+          bindingId: source.binding.id, messageId: source.id, sourceDigest: source.sourceDigest })
+      } catch { return undefined }
+    })()
+    if (owned?.outcome === 'owned') {
+      this.#lastError = null
+      return
+    }
+    if (owned?.outcome === 'already-owned') {
+      const parent = store.findItemById(source.executionParentItemId)
+      if (parent !== undefined && OPEN_STATES.includes(parent.state)) {
+        this.#lastError = null
+        return
+      }
+      // The item already ended: leave the owned row to the release sweep and
+      // let the ordinary continuation path decide this reply now.
+    }
     // Crash recovery looks up the durable child before attempting to mint a
     // second plan or re-evaluate a parent whose history may have advanced.
     let record=store.findContinuationBySourceKey(sourceKey)

@@ -17,7 +17,7 @@ import type { PeerDeliveryService, PeerOwnerForegroundTaskSource, WorkItemReplyC
 import { isReplyContinuationPlan, parseStoredContinuationPlan } from '../src/reply-contract.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemAdmitInput, WorkItemRecord } from '../src/types.ts'
-import { harness, readyItem, receipt } from './fixtures.ts'
+import { harness, readyItem, receipt, admitted } from './fixtures.ts'
 
 // Component boundary: real SQLite/admission/claim/report and recorded Delivery/
 // Automations peers. This file does not prove real owner/provider authentication.
@@ -195,6 +195,26 @@ test('the independent root opt-in preserves existing continuation and diagnosis 
     f.cold();expect(f.store.getContinuation(f.root.id)!.planJson).toBe(before)
     expect(parseStoredContinuationPlan(before).protocol).toBe('assistant-work-items/owner-continuation-plan/v1')
   }finally{f.close()}
+})
+
+test('a live item owns a thread reply without minting a continuation child',async()=>{
+  const f=await fixture()
+  try {
+    const live=await admitted(f.f,{externalId:'live-parent',title:'Live parent',brief:'Still running'})
+    const source:WorkItemReplySource={protocol:'assistant-delivery/work-item-reply/v1',id:'reply-live',sourceDigest:'e'.repeat(64),
+      admissionCursor:{epoch:'fixture-epoch',sequence:1},inputText:'follow up',inputSha256:continuationDigest('follow up'),
+      inputBytes:9,scope:{workspace:f.config.scope!.workspace,preset:f.config.scope!.preset},principalId:f.config.scope!.principalId,
+      owner:{principalRecordId:f.root.owner.principalRecordId,principalVersion:f.root.owner.principalVersion},
+      binding:{id:live.originBindingId,version:f.root.owner.bindingVersion,generation:f.root.owner.generation},
+      target:{outboxId:'outbox-live',providerMessageId:'provider-live',itemId:live.id,reportRevision:1,
+        reportDigest:'d'.repeat(64),streamId:live.id},state:'pending'}
+    f.sources.set(source.id,source)
+    f.consumer.drain()
+    expect(f.consumer.health().lastError).toBeNull()
+    expect(f.acknowledged).toEqual([])
+    expect(f.ingested).toEqual([])
+    expect(f.store.followUps(live.id).map(record=>record.state)).toEqual(['owned'])
+  } finally { f.close() }
 })
 
 test('typed report selection retains ordinary reports and the digest ignores later delivery bookkeeping',async()=>{
