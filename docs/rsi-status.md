@@ -4,6 +4,14 @@
 
 当前接手入口：`docs/evidence/handover/CURRENT.md`。先核对该入口的源码清单，再续做下一步。
 
+## 2026-11-07 主动协作与 P1-1/P1-2 接线
+
+- 飞书 peer bot 入站：lark-channel 上报事件 `sender_type=bot/app`，Delivery `peerAgents` 精确白名单把 peer 激活为 owner 的 linked principal，保留独立 Policy subject；暖树 @ 柳七月在【DSH开发群】实测收到并回复。话题群 `groupTopicThreads` 用 `thread_id` 做稳定 lane，回复经 `reply_in_thread` 留在同一话题，连续回复复用同一 binding/session（`fda21804`、`66a2b2cf`、`a67dcb63`）。
+- P1-1：native wake 释放已结束工作项的跟进（`c2d2ff32`）、Policy 配置变化为受影响活项记通知（`628bd293`）、活项的线程回复归该工作项（`e3fde052`）、事件订阅/结果窗口在 wake 上被动结算（`0e6f7559`）。均为既有 wake 上的有界扫描，无新 Loop/timer。
+- P1-2：Delivery 新增 owner 通知回复注册与精确匹配，Evaluation 只整句接受 `authorize-once`/`decline`，在一个事务内记录回复并创建一次性授权或写 `owner-declined`；被质疑提议保持未决，下一次既有 tick 独立留出重放后才采用。默认关闭（`2b0b97a3`），关闭时行为不变；启用部署须显式添加 `answer-attention-question` Policy 规则。
+- 其他：recommended 预设纳入自然 owner 反馈解析（`b4234591`）；文档清理删除唯一无人引用的过期研究、补 PTC 索引并修正 ACP/Provider 版本陈述（`4f43e7db`）。
+- 本地 `assistant` profile 已装入 0.1.67 本地包并部署上述飞书能力；最终跨切片根检查在合并 P0-3 后重跑，未通过前不把本轮计为完整验收。
+
 ## 2026-11-07 发布与桌面面板收口
 
 - `@dsh-enhanced/*` 0.1.66 已通过 tag `v0.1.66`（`main` = `48fa40fa`）由 GitHub Actions `release.yml` 发布 40 包，未本地 `npm publish`。`dev` 上 `819cd190` 同步发布记录、`f1740a64` 准备 0.1.67。
