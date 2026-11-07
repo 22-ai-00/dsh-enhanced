@@ -22,7 +22,7 @@ import { createSourceModelControlFixture } from './source-model-control-fixture.
 assert.equal(process.env.DSH_SOURCE_MODEL_LIVE, '1', 'explicitly set DSH_SOURCE_MODEL_LIVE=1 for the real day1 request')
 const image = process.env.DSH_SOURCE_BUILD_IMAGE
 assert.match(image ?? '', /^(?:[^\s]+@)?sha256:[a-f0-9]{64}$/)
-const dshPackage = resolve(process.env.DSH_SOURCE_MODEL_DSH_PACKAGE ?? '/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/lib/node_modules/@deepseek-ai/dsh/package.json')
+const dshPackage = resolve(process.env.DSH_SOURCE_MODEL_DSH_PACKAGE ?? require.resolve('@deepseek-ai/dsh/package.json'))
 const installed = createRequire(dshPackage)
 const Pi = await import(pathToFileURL(installed.resolve('@deepseek-ai/dsh-llm-pi-ai')).href)
 const { createLaunchEnvironmentSnapshot } = await import(pathToFileURL(installed.resolve('@deepseek-ai/dsh-launch-environment')).href)

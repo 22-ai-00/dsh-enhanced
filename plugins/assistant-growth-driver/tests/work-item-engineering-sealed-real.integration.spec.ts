@@ -23,7 +23,7 @@ import { prepareRealRoute } from '../../../scripts/e2e/web-owner-real-route.mjs'
 
 const live = process.platform === 'linux' && process.env['DSH_SEALED_REAL_LIVE'] === '1'
   && !!process.env['DSH_WORK_ITEM_ENGINEERING_RESOURCES']
-const PROVIDER = process.env['DSH_WEB_REAL_PROVIDER'] ?? 'llmgw-default'
+const PROVIDER = process.env['DSH_WEB_REAL_PROVIDER'] ?? 'benchmark-gateway'
 const MODEL = process.env['DSH_WEB_REAL_MODEL'] ?? 'deepseek-v4.1-flash'
 // Author 10 model calls + creation verifier 2. Attempt 3 used all 5 author calls and was cut off; attempt 5 used 5 of 7
 // and failed its native tsc check with no repair: the author now waits for the build and may repair once (docs/rsi-status.md).
@@ -32,7 +32,7 @@ const MAX_SOURCE_JOBS = 2
 const SEALED_ID = 'sealed-docker-normalize'
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const dshPackage = () => process.env['DSH_SEALED_REAL_DSH_PACKAGE']
-  ?? '/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/lib/node_modules/@deepseek-ai/dsh/package.json'
+  ?? resolve(require.resolve('@deepseek-ai/dsh/package.json'))
 
 /** Selected public route only; the credential stays in the child env and is never logged or written. */
 async function realRoute(workspace: string) {
@@ -230,7 +230,7 @@ describe.skipIf(!(process.platform === 'linux' && process.env['DSH_SEALED_REAL_P
     const workspace = await mkdtemp(join(tmpdir(), 'sealed-real-probe-'))
     try {
       const routeHome = join(workspace, 'route'), env: Record<string, string | undefined> = { DSH_WEB_REAL_PROVIDER: PROVIDER, DSH_WEB_REAL_MODEL: MODEL,
-        DSH_WEB_REAL_SOURCE_PROFILE: process.env['DSH_WEB_REAL_SOURCE_PROFILE'] ?? 'web', DSH_WEB_REAL_SOURCE_HOME: process.env['DSH_WEB_REAL_SOURCE_HOME'], LLMGW_API_KEY: 'dummy-probe-value' }
+        DSH_WEB_REAL_SOURCE_PROFILE: process.env['DSH_WEB_REAL_SOURCE_PROFILE'] ?? 'web', DSH_WEB_REAL_SOURCE_HOME: process.env['DSH_WEB_REAL_SOURCE_HOME'], BENCHMARK_API_KEY: 'dummy-probe-value' }
       const route = await prepareRealRoute({ env, home: routeHome, workspace })
       expect(route).toMatchObject({ provider: PROVIDER, model: MODEL })
     } finally { await rm(workspace, { recursive: true, force: true }) }

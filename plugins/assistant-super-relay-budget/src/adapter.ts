@@ -2,10 +2,9 @@ import { Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import { normalizeConfig, type SuperRelayGoalMeteredConfig } from './config.js'
+import { normalizeConfig, type NormalizedSuperRelayConfig, type SuperRelayGoalMeteredConfig } from './config.js'
 import { assertCurrentContract, isSuperRelayModel, SUPER_RELAY_MODELS, SUPER_RELAY_PROVIDER } from './contract.js'
 
-const ENDPOINT = 'https://super-relay.byted.org/v1/responses'
 const MAX_TEXT_BYTES = 8 * 1024 * 1024
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024
 const integer = (value: unknown, maximum = 2_097_152): value is number => Number.isSafeInteger(value) && typeof value === 'number' && value >= 0 && value <= maximum
@@ -214,9 +213,9 @@ export class SuperRelayGoalMeteredAdapter extends LlmAdapter {
   #credentialServiceSeen = false
   #active = true
   constructor(input: SuperRelayGoalMeteredConfig, dependencies: SuperRelayAdapterDependencies = {}) {
-    super(); this.config = normalizeConfig(input); this.#fetch = dependencies.fetch ?? fetch; this.#now = dependencies.now ?? Date.now; this.#environment = dependencies.environment ?? process.env; this.#resolver = dependencies.credentialResolver
+    super(); this.config = normalizeConfig(input, dependencies.environment ?? process.env); this.#fetch = dependencies.fetch ?? fetch; this.#now = dependencies.now ?? Date.now; this.#environment = dependencies.environment ?? process.env; this.#resolver = dependencies.credentialResolver
   }
-  readonly config: Readonly<Required<SuperRelayGoalMeteredConfig>>
+  readonly config: Readonly<NormalizedSuperRelayConfig>
   shutdown(): void { if (this.#active) { this.#active = false; this.#lifecycle.abort(new Error('assistant-super-relay-budget unloaded')) } }
   override providerInfo(provider: string) { if (provider !== SUPER_RELAY_PROVIDER) fail('provider', 'INVALID_PROVIDER'); return { id: SUPER_RELAY_PROVIDER, name: 'Super Relay (goal-metered)' } }
   override providerRetryPolicy(_provider: string) { return { mode: 'normal' as const, maxRetries: 0, retryableCodes: [], initialDelayMs: 500, maxDelayMs: 500, jitterRatio: 0 } }
@@ -230,6 +229,7 @@ export class SuperRelayGoalMeteredAdapter extends LlmAdapter {
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const model = options.model
     if (!this.#active || options.provider !== SUPER_RELAY_PROVIDER || !isSuperRelayModel(model)) fail('route', 'INVALID_PROVIDER')
+    if (this.config.baseUrl.length === 0) requestError('SUPER_RELAY_BASE_URL_UNCONFIGURED')
     assertCurrentContract(this.#now())
     const maxTokens = options.maxTokens ?? this.config.defaultMaxTokens
     if (!integer(maxTokens, 32_768) || maxTokens < 1) fail('max tokens', 'INVALID_MAX_TOKENS')
@@ -264,7 +264,7 @@ export class SuperRelayGoalMeteredAdapter extends LlmAdapter {
         headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json' },
         body,
       }
-      const received = await bounded(this.#fetch(ENDPOINT, init), requestSignal)
+      const received = await bounded(this.#fetch(`${this.config.baseUrl}/responses`, init), requestSignal)
       if (!received.ok) { try { await bounded(received.body?.cancel() ?? Promise.resolve(), requestSignal) } catch {}; requestError(`SUPER_RELAY_HTTP_${received.status}`) }
       wire = await boundedJson(received, this.config.maxResponseBytes, requestSignal)
     } catch (error) { if (error instanceof LlmError) throw error; requestError(requestSignal.aborted ? 'SUPER_RELAY_ABORTED' : 'SUPER_RELAY_TRANSPORT') }

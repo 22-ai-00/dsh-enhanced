@@ -8,12 +8,94 @@
   <img src="plugins/owner-console/assets/hero.webp" width="720" alt="文鳐 Ray logo">
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/@dsh-enhanced/dsh-rsi-cli"><img alt="npm" src="https://img.shields.io/npm/v/@dsh-enhanced/dsh-rsi-cli?color=2f6f6f"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="node" src="https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933">
+  <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
+</p>
+
 在本机运行的个人 AI 助手，通过 **Web 或飞书**聊天、处理任务、积累记忆，也可接入你自己的模型。基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
 
 助手名叫 **文鳐**（英文 Ray，小名小鳐）。文鳐出自《山海经》，是鱼身有翼、夜间飞行的祥瑞之鱼；
 定位是突破型、创造力型助手，口号「小鳐小鳐，游而化飞」。包名与插件 id 仍沿用 `dsh-enhanced` / `@dsh-enhanced/*`。
 
 项目希望让助手从日常使用和纠正中持续改进。**目前是实验版，完整的自动改进闭环仍在验证中。** 已支持的能力与限制见[当前状态](docs/rsi-status.md)。
+
+## 架构一览
+
+每个能力都是可独立安装的 Cordis 插件；下图是主要引用关系（箭头表示运行时依赖或数据流向，虚线表示管理/凭据关系）：
+
+```mermaid
+flowchart TB
+  subgraph ingress["💬 渠道入口"]
+    LK["lark-channel<br/>飞书长连接"]
+    WEB["assistant-web-owner<br/>原生 Web owner"]
+    CON["owner-console<br/>文鳐左栏控制台"]
+  end
+  subgraph core["🔐 持久消息与授权"]
+    DL["assistant-delivery<br/>inbox/outbox · 配对 · 重试"]
+    POL["assistant-policy<br/>默认拒绝 · 硬预算 · 审批"]
+    AUTO["assistant-automations<br/>冷启动可恢复调度"]
+  end
+  subgraph task["🧩 持久任务与验收"]
+    WI["assistant-work-items<br/>持久工作项 · 跟进 · 准入"]
+    GO["assistant-goals<br/>原生目标 · 事件等待"]
+    VER["assistant-verifier<br/>独立验收 · 证书"]
+  end
+  subgraph learn["🌱 学习与自我成长"]
+    MEM["personal-memory"]
+    ML["assistant-memory-learning"]
+    GR["assistant-growth-driver<br/>技能 / 工作流 / 插件候选"]
+    CP["plugin-control-plane<br/>隔离验证 · 采用 · 回滚"]
+    ISO["assistant-isolation<br/>Linux/沙箱执行"]
+    SK["assistant-skills"]
+    EV["assistant-evolution"]
+  end
+  subgraph aware["🎯 评测 / 主动 / 事件"]
+    EVA["assistant-evaluation<br/>结果与注意力账本"]
+    PRO["assistant-proactive"]
+    ET["event-triggers"]
+    HB["assistant-heartbeat"]
+  end
+  subgraph ops["🛡 安全与运维"]
+    KC["credentials-keychain"]
+    HEA["assistant-health"]
+    REC["assistant-recovery"]
+  end
+
+  LK --> DL
+  WEB --> DL
+  CON -.-> LK
+  CON -.-> CP
+  DL --> POL
+  DL --> AUTO
+  KC -.-> LK
+  KC -.-> POL
+  AUTO --> WI
+  AUTO --> GO
+  WI --> VER
+  GO --> VER
+  WI --> ML
+  ML --> MEM
+  DL --> GR
+  GR --> CP
+  GR --> SK
+  GR --> EV
+  CP --> ISO
+  CP --> VER
+  DL --> EVA
+  WI --> EVA
+  GO --> EVA
+  EVA --> PRO
+  PRO --> GO
+  ET --> WI
+  ET --> GO
+  HB --> AUTO
+  HEA --> REC
+```
+
+完整包清单与各自边界见[插件目录](plugins/README.md)；共享库在 `packages/*`，不自动启用。
 
 ## 开始使用
 

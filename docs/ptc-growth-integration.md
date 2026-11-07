@@ -1,7 +1,7 @@
 # PTC 执行模式与持续成长
 
 研究日期：2026-11-07。来源：飞书文章《打造 Personal Agent（四）：从 ReAct 到 CodeAct》
-（<https://my.feishu.cn/wiki/CYANw7pSNiEhVckqaNXcCS8inAh>，revision 356，本地快照见忽略目录
+（内部飞书文章（链接不随仓库公开），本地快照见忽略目录
 `docs/evidence/ptc-research-20261107/`），以及当前 Harness 的 `dsh-tools` PTC 实现
 （`mode`/`presentAs`、`run_code`、生成 SDK、`@deepseek-ai/dsh-ptc-runtime-node`）。
 

@@ -1,40 +1,40 @@
 // Operator-selected adapter for public development benchmarks; never loaded by a candidate.
-// One fixed route (llmgw-default / deepseek-v4.1-flash) over an OpenAI-compatible
+// One fixed generic route (benchmark-gateway / benchmark-model) over an OpenAI-compatible
 // streaming chat/completions endpoint. Endpoint and key come only from the environment:
-//   DSH_BENCH_LLMBOX_BASE_URL   base URL ending before /chat/completions (http/https)
-//   LLMGW_API_KEY               bearer key, never logged or traced
-//   DSH_BENCH_LLMBOX_CALL_LEDGER  file appended once per outbound request (required)
-//   DSH_BENCH_LLMBOX_MAX_CALLS    hard cap on ledger lines across processes (required, 1..1000)
+//   DSH_BENCH_GATEWAY_BASE_URL   base URL ending before /chat/completions (http/https)
+//   BENCHMARK_API_KEY               bearer key, never logged or traced
+//   DSH_BENCH_GATEWAY_CALL_LEDGER  file appended once per outbound request (required)
+//   DSH_BENCH_GATEWAY_MAX_CALLS    hard cap on ledger lines across processes (required, 1..1000)
 //   DSH_BENCHMARK_TRACE         optional NDJSON trace of public inputs/outputs (no credentials)
 // adapterDigest and tokenCounterDigest in the benchmark config are both the SHA-256 of this file.
 import { appendFileSync, closeSync, openSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { LlmAdapter, LlmError, assertUsableApiKey, attributionHeaders, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 
-export const LLMBOX_PROVIDER = 'llmgw-default'
-export const LLMBOX_MODEL = 'deepseek-v4.1-flash'
-const PACKAGE = 'llmbox-openai-adapter'
+export const BENCHMARK_PROVIDER = 'benchmark-gateway'
+export const BENCHMARK_MODEL = 'benchmark-model'
+const PACKAGE = 'gateway-openai-adapter'
 const TIMEOUT_MS = 110_000
 
 function endpoint(env) {
-  const raw = env.DSH_BENCH_LLMBOX_BASE_URL
-  if (typeof raw !== 'string' || raw.trim() === '') throw new Error('DSH_BENCH_LLMBOX_BASE_URL is required')
+  const raw = env.DSH_BENCH_GATEWAY_BASE_URL
+  if (typeof raw !== 'string' || raw.trim() === '') throw new Error('DSH_BENCH_GATEWAY_BASE_URL is required')
   let url
-  try { url = new URL(raw.trim()) } catch { throw new Error('DSH_BENCH_LLMBOX_BASE_URL is not a valid URL') }
-  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || url.search || url.hash) throw new Error('DSH_BENCH_LLMBOX_BASE_URL must be a plain http(s) base URL')
+  try { url = new URL(raw.trim()) } catch { throw new Error('DSH_BENCH_GATEWAY_BASE_URL is not a valid URL') }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password || url.search || url.hash) throw new Error('DSH_BENCH_GATEWAY_BASE_URL must be a plain http(s) base URL')
   return `${url.href.replace(/\/+$/u, '')}/chat/completions`
 }
 
 function callGuard(env) {
-  const ledger = env.DSH_BENCH_LLMBOX_CALL_LEDGER
-  const max = Number(env.DSH_BENCH_LLMBOX_MAX_CALLS)
-  if (typeof ledger !== 'string' || !ledger.startsWith('/')) throw new Error('DSH_BENCH_LLMBOX_CALL_LEDGER must be an absolute path')
-  if (!Number.isSafeInteger(max) || max < 1 || max > 1000) throw new Error('DSH_BENCH_LLMBOX_MAX_CALLS must be an integer in 1..1000')
+  const ledger = env.DSH_BENCH_GATEWAY_CALL_LEDGER
+  const max = Number(env.DSH_BENCH_GATEWAY_MAX_CALLS)
+  if (typeof ledger !== 'string' || !ledger.startsWith('/')) throw new Error('DSH_BENCH_GATEWAY_CALL_LEDGER must be an absolute path')
+  if (!Number.isSafeInteger(max) || max < 1 || max > 1000) throw new Error('DSH_BENCH_GATEWAY_MAX_CALLS must be an integer in 1..1000')
   return () => {
     // Count before sending: a refused call is never sent; a sent call is always counted.
     closeSync(openSync(ledger, 'a', 0o600))
     const used = readFileSync(ledger, 'utf8').split('\n').filter(line => line !== '').length
-    if (used >= max) throw new LlmError(`LLMBox call cap reached (${used}/${max})`, 'CALL_CAP')
+    if (used >= max) throw new LlmError(`Gateway call cap reached (${used}/${max})`, 'CALL_CAP')
     appendFileSync(ledger, `${JSON.stringify({ n: used + 1, at: new Date().toISOString() })}\n`, { mode: 0o600 })
     return used + 1
   }
@@ -103,30 +103,30 @@ export class LlmboxOpenAiAdapter extends LlmAdapter {
     super()
     this.#env = env
     this.#url = endpoint(env)
-    this.#key = assertUsableApiKey(env.LLMGW_API_KEY ?? '', PACKAGE, 'env:LLMGW_API_KEY')
+    this.#key = assertUsableApiKey(env.BENCHMARK_API_KEY ?? '', PACKAGE, 'env:BENCHMARK_API_KEY')
     this.#guard = callGuard(env)
     this.#fetch = fetchImpl
   }
   providerInfo(provider) {
-    if (provider !== LLMBOX_PROVIDER) throw new LlmError(`unknown provider ${provider}`, 'NO_ADAPTER')
-    return { id: LLMBOX_PROVIDER, name: 'LLMBox gateway (OpenAI-compatible)' }
+    if (provider !== BENCHMARK_PROVIDER) throw new LlmError(`unknown provider ${provider}`, 'NO_ADAPTER')
+    return { id: BENCHMARK_PROVIDER, name: 'Gateway gateway (OpenAI-compatible)' }
   }
   // The benchmark counts every outbound request; provider-side retries are disabled.
   providerRetryPolicy() { return resolveRetryPolicy({ mode: 'normal', maxRetries: 0 }, PACKAGE) }
   async listModels(provider) {
     this.providerInfo(provider)
-    return [{ provider: LLMBOX_PROVIDER, id: LLMBOX_MODEL, name: LLMBOX_MODEL, inputModalities: ['text'] }]
+    return [{ provider: BENCHMARK_PROVIDER, id: BENCHMARK_MODEL, name: BENCHMARK_MODEL, inputModalities: ['text'] }]
   }
   async resolveModel(provider, model) {
     this.providerInfo(provider)
-    if (model !== LLMBOX_MODEL) throw new LlmError(`unknown model ${model}`, 'NO_MODEL')
-    return { provider: LLMBOX_PROVIDER, id: LLMBOX_MODEL, name: LLMBOX_MODEL, inputModalities: ['text'] }
+    if (model !== BENCHMARK_MODEL) throw new LlmError(`unknown model ${model}`, 'NO_MODEL')
+    return { provider: BENCHMARK_PROVIDER, id: BENCHMARK_MODEL, name: BENCHMARK_MODEL, inputModalities: ['text'] }
   }
   async *stream(options) {
-    if (options.provider !== LLMBOX_PROVIDER || options.model !== LLMBOX_MODEL) throw new LlmError('LLMBox adapter serves only llmgw-default/deepseek-v4.1-flash', 'NO_MODEL')
-    if ((options.tools?.length ?? 0) !== 0) throw new LlmError('LLMBox benchmark adapter does not send tools', 'UNSUPPORTED_CONTENT')
+    if (options.provider !== BENCHMARK_PROVIDER || options.model !== BENCHMARK_MODEL) throw new LlmError('Gateway adapter serves only benchmark-gateway/benchmark-model', 'NO_MODEL')
+    if ((options.tools?.length ?? 0) !== 0) throw new LlmError('Gateway benchmark adapter does not send tools', 'UNSUPPORTED_CONTENT')
     const messages = openAiMessages(options)
-    const body = { model: LLMBOX_MODEL, messages, stream: true, stream_options: { include_usage: true } }
+    const body = { model: BENCHMARK_MODEL, messages, stream: true, stream_options: { include_usage: true } }
     if (options.temperature !== undefined) body.temperature = options.temperature
     if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
     if (options.stop?.length) body.stop = options.stop
@@ -141,23 +141,23 @@ export class LlmboxOpenAiAdapter extends LlmAdapter {
       status = response.status
       if (!response.ok || !response.body) {
         await response.body?.cancel?.().catch(() => {})
-        throw new LlmError(`LLMBox request failed with HTTP ${response.status}`, code(response.status), { status: response.status })
+        throw new LlmError(`Gateway request failed with HTTP ${response.status}`, code(response.status), { status: response.status })
       }
       let reasoningOpen = false; let textOpen = false; let index = -1; let textIndex = -1; let reasoningIndex = -1; let native
       for await (const data of sseData(response.body, signal)) {
         if (data === '') continue
         if (data === '[DONE]') break
         let event
-        try { event = JSON.parse(data) } catch { throw new LlmError('LLMBox stream returned invalid JSON', 'PROTOCOL') }
-        if (event.error) throw new LlmError('LLMBox stream reported an error', 'PROVIDER')
+        try { event = JSON.parse(data) } catch { throw new LlmError('Gateway stream returned invalid JSON', 'PROTOCOL') }
+        if (event.error) throw new LlmError('Gateway stream reported an error', 'PROVIDER')
         if (event.usage) usage = dshUsage(event.usage) ?? usage
         const choice = event.choices?.[0]
         if (!choice) continue
         const delta = choice.delta ?? {}
-        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) throw new LlmError('LLMBox returned an unexpected tool call', 'PROTOCOL')
+        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) throw new LlmError('Gateway returned an unexpected tool call', 'PROTOCOL')
         const thought = delta.reasoning_content ?? delta.reasoning
         if (typeof thought === 'string' && thought !== '') {
-          if (textOpen) throw new LlmError('LLMBox interleaved reasoning after text', 'PROTOCOL')
+          if (textOpen) throw new LlmError('Gateway interleaved reasoning after text', 'PROTOCOL')
           if (!reasoningOpen) { reasoningOpen = true; reasoningIndex = ++index; yield { type: 'block-start', index: reasoningIndex, blockType: 'reasoning' } }
           reasoningText += thought
           yield { type: 'reasoning-delta', index: reasoningIndex, text: thought }
@@ -172,9 +172,9 @@ export class LlmboxOpenAiAdapter extends LlmAdapter {
       }
       if (reasoningOpen) yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoningText } }
       if (textOpen) yield { type: 'block-end', index: textIndex, block: { type: 'text', text: output } }
-      if (native === undefined) throw new LlmError('LLMBox stream ended without finish_reason', 'PROTOCOL')
-      if (native !== 'stop' && native !== 'length') throw new LlmError(`LLMBox finish_reason ${native} is not supported`, 'PROTOCOL')
-      if (usage === undefined) throw new LlmError('LLMBox stream ended without usage', 'PROTOCOL')
+      if (native === undefined) throw new LlmError('Gateway stream ended without finish_reason', 'PROTOCOL')
+      if (native !== 'stop' && native !== 'length') throw new LlmError(`Gateway finish_reason ${native} is not supported`, 'PROTOCOL')
+      if (usage === undefined) throw new LlmError('Gateway stream ended without usage', 'PROTOCOL')
       yield { type: 'usage', usage }
       finish = native === 'length' ? 'max-tokens' : 'stop'
       yield { type: 'finish', reason: { kind: finish } }
@@ -191,10 +191,10 @@ export class LlmboxOpenAiAdapter extends LlmAdapter {
 }
 
 export function createNativeAdapter(model, { ctx: _ctx, workspace: _workspace } = {}, overrides = {}) {
-  if (model.provider !== LLMBOX_PROVIDER || model.model !== LLMBOX_MODEL) throw new Error('LLMBox benchmark adapter accepts only llmgw-default/deepseek-v4.1-flash')
+  if (model.provider !== BENCHMARK_PROVIDER || model.model !== BENCHMARK_MODEL) throw new Error('Gateway benchmark adapter accepts only benchmark-gateway/benchmark-model')
   if (model.inputLimitMode !== 'estimate' || model.inputUsdMicrosPerMillionTokens !== null || model.outputUsdMicrosPerMillionTokens !== null
     || (model.cacheReadUsdMicrosPerMillionTokens ?? null) !== null || (model.cacheWriteUsdMicrosPerMillionTokens ?? null) !== null) {
-    throw new Error('LLMBox benchmark requires inputLimitMode "estimate" and null tariffs')
+    throw new Error('Gateway benchmark requires inputLimitMode "estimate" and null tariffs')
   }
   const adapter = new LlmboxOpenAiAdapter(overrides)
   return {

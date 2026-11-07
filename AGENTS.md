@@ -19,7 +19,7 @@ Keep one active delivery in context. Completed work is a capability boundary, no
 | Add/restructure a plugin | [Creating a plugin](docs/creating-a-plugin.md); finish package, patch, tests, README and catalog row together. |
 | Package boundaries, shared code, Host/Web | [Architecture](docs/architecture.md); preserve independent publication and composition. |
 | DSH/Cordis dependency or new upstream API | [Compatibility](docs/compatibility.md); keep baseline and affected packages consistent. |
-| Lifecycle, injection, config, effects, isolation, Loader or HMR | [Cordis runtime contracts](docs/cordis-runtime-contracts.md) and `/home/jiataorui/work/github/cordis`; verify executable behavior against this lockfile's installed fork and Loader/Include versions. |
+| Lifecycle, injection, config, effects, isolation, Loader or HMR | [Cordis runtime contracts](docs/cordis-runtime-contracts.md) and a local checkout of the locked Cordis fork; verify executable behavior against this lockfile's installed fork and Loader/Include versions. |
 | Acceptance or release | Relevant rows of [acceptance contract](docs/rsi-acceptance.md) and [release guide](docs/releasing.md). |
 
 ## Implementation discipline
@@ -57,6 +57,6 @@ Run root `pnpm check` before final delivery/publication: manifest validation, ze
 
 Scope changes to the requested capability/shared contract. Keep generated `lib/`, coverage, tarballs and caches untracked; raw JSON, logs and runtime evidence belong in ignored `docs/evidence/` or CI artifacts. Commit concise commands, results and limitations.
 
-On the Linux validation host, keep build/test workspaces, caches and evidence on `/data00`. Set `TMPDIR=/data00/home/jiataorui/t` for large runs and verify its filesystem before starting; avoid bulk writes to system `/tmp` and preserve live resources when cleaning retired test data.
+On the Linux validation host, keep build/test workspaces, caches and evidence on `/data00`. Set a large-volume absolute `TMPDIR` (for example `/data00/<user>/t`) for large runs and verify its filesystem before starting; avoid bulk writes to system `/tmp` and preserve live resources when cleaning retired test data.
 
 Keep [current status](docs/rsi-status.md) short: goal, capability boundaries, active blockers, next acceptance and latest verification only. Replace superseded entries; remove completed implementation/test/deployment narratives instead of creating another history ledger. Update maintained guides and incoming links when behavior changes; use Git for history and dated research only for rationale.

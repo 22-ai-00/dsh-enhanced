@@ -66,7 +66,7 @@ Evaluation 还发布 `@dsh-enhanced/assistant-evaluation/benchmark/super-relay`�
 node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-enhanced/assistant-evaluation/benchmark/super-relay"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
 ```
 
-计划和每次父请求的源码核对会额外冻结实际解析的 `@dsh-enhanced/assistant-super-relay-budget` 生产 lib 与 `@deepseek-ai/dsh-credentials`。模型线路、输出限制、温度、费用声明、生命周期或协议契约漂移均拒绝；契约（`super-relay-responses-2026-09-14`，**2026-10-14 到期**）到期后拒绝计数和派发，须用真实、非合成探针复核后续期，再创建新计划，旧报告仍保留历史含义。该入口的注入式工程层测试（stub `fetch`、不触网）只验证请求契约与生命周期，**不构成真实供应商证据**；策略是否优于直接执行，只认 Docker 隔离 + 真实 `https://super-relay.byted.org/v1/responses` endpoint 跑出来的配对结果（允许如实记录"无收益/不确定"）。
+计划和每次父请求的源码核对会额外冻结实际解析的 `@dsh-enhanced/assistant-super-relay-budget` 生产 lib 与 `@deepseek-ai/dsh-credentials`。模型线路、输出限制、温度、费用声明、生命周期或协议契约漂移均拒绝；契约（`super-relay-responses-2026-09-14`，**2026-10-14 到期**）到期后拒绝计数和派发，须用真实、非合成探针复核后续期，再创建新计划，旧报告仍保留历史含义。该入口的注入式工程层测试（stub `fetch`、不触网）只验证请求契约与生命周期，**不构成真实供应商证据**；策略是否优于直接执行，只认 Docker 隔离 + 真实部署 `<baseUrl>/responses` endpoint 跑出来的配对结果（允许如实记录"无收益/不确定"）。
 
 ## TraeX 本地 call-count 入口
 

@@ -10,9 +10,8 @@ export const SUPER_RELAY_RESPONSES_CONTRACT = Object.freeze({
   id: 'super-relay-responses-2026-09-14',
   checkedAt: '2026-09-14T00:00:00.000Z',
   expiresAt: '2026-10-14T00:00:00.000Z',
-  links: Object.freeze([
-    'https://super-relay.byted.org/v1',
-  ]),
+  /** Endpoint identity is deployment configuration; no gateway address is compiled in. */
+  links: Object.freeze([] as string[]),
 })
 
 export const SUPER_RELAY_PROVIDER = 'super-relay'

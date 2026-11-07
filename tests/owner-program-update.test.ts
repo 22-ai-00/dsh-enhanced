@@ -97,16 +97,16 @@ test('carries an owner model-provider edit and rejects any other drift from the 
 `
   const edited = signed.replace('{ api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }',
     `{ api: anthropic-messages, baseURL: https://relay.example.invalid, contextWindow: 1000000 }
-      llmgw-default: { api: openai-completions, apiKeyEnv: LLMGW_KEY, models: [glm-5.3-flash, deepseek-v4-flash] }`)
+      benchmark-gateway-default: { api: openai-completions, apiKeyEnv: BENCH_KEY, models: [glm-5.3-flash, deepseek-v4-flash] }`)
   const check = (current: string) => ownerProviderEditEquivalent({ yaml: yamlApi, signed, current })
   expect(check(signed)).toBe(true)
   expect(check(edited)).toBe(true)
-  expect(check(edited.replace('defaultProvider: super-relay', 'defaultProvider: llmgw-default'))).toBe(false)
+  expect(check(edited.replace('defaultProvider: super-relay', 'defaultProvider: benchmark-gateway-default'))).toBe(false)
   expect(check(edited.replace('name: llm-pi-ai', 'name: other'))).toBe(false)
   expect(check(edited.replace('targets: []', 'targets: [x]'))).toBe(false)
   expect(check(edited.replace("dshHomePath('personal/state.sqlite')", "dshHomePath('escape.sqlite')"))).toBe(false)
   expect(check(edited.replace('models: [glm-5.3-flash, deepseek-v4-flash]', 'models: !!js "process.exit()"'))).toBe(false)
-  expect(check(edited.replace('apiKeyEnv: LLMGW_KEY', 'apiKeyEnv: &key LLMGW_KEY'))).toBe(false)
+  expect(check(edited.replace('apiKeyEnv: BENCH_KEY', 'apiKeyEnv: &key BENCH_KEY'))).toBe(false)
   const reordered = edited.split('\n- id: ')
   expect(check([reordered[0], reordered[2], reordered[1]].join('\n- id: '))).toBe(false)
   expect(check('not: [valid')).toBe(false)

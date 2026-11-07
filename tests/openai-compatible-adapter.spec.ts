@@ -4,21 +4,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { createNativeAdapter, dshUsage } from '../scripts/benchmark/llmbox-openai-adapter.mjs'
+import { createNativeAdapter, dshUsage } from '../scripts/benchmark/openai-compatible-adapter.mjs'
 import { developmentCorpus } from '../plugins/assistant-evaluation/src/benchmark/corpus.ts'
 import { createNativeBenchmarkExecutor, nativeBenchmarkPlan, type NativeBenchmarkConfig } from '../plugins/assistant-evaluation/src/benchmark/native.ts'
 import { benchmarkSchedule } from '../plugins/assistant-evaluation/src/benchmark/schema.ts'
 
-const adapterPath = join(import.meta.dirname, '..', 'scripts', 'benchmark', 'llmbox-openai-adapter.mjs')
+const adapterPath = join(import.meta.dirname, '..', 'scripts', 'benchmark', 'openai-compatible-adapter.mjs')
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function environment(max = 4) {
-  const root = await mkdtemp(join(tmpdir(), 'llmbox-adapter-')); roots.push(root)
+  const root = await mkdtemp(join(tmpdir(), 'gateway-adapter-')); roots.push(root)
   const ledger = join(root, 'calls.ndjson'); const trace = join(root, 'trace.ndjson')
   return { root, ledger, trace, env: {
-    DSH_BENCH_LLMBOX_BASE_URL: 'https://llmbox.invalid/v1/', LLMGW_API_KEY: 'test-key-not-secret',
-    DSH_BENCH_LLMBOX_CALL_LEDGER: ledger, DSH_BENCH_LLMBOX_MAX_CALLS: String(max), DSH_BENCHMARK_TRACE: trace,
+    DSH_BENCH_GATEWAY_BASE_URL: 'https://gateway.invalid/v1/', BENCHMARK_API_KEY: 'test-key-not-secret',
+    DSH_BENCH_GATEWAY_CALL_LEDGER: ledger, DSH_BENCH_GATEWAY_MAX_CALLS: String(max), DSH_BENCHMARK_TRACE: trace,
   } as Record<string, string> }
 }
 
@@ -28,12 +28,12 @@ function sse(events: readonly unknown[], status = 200): Response {
 }
 
 const model = (overrides: Record<string, unknown> = {}) => ({
-  provider: 'llmgw-default', model: 'deepseek-v4.1-flash', temperature: 0, inputLimitMode: 'estimate', outputLimitMode: 'provider', maxOutputTokens: 100,
+  provider: 'benchmark-gateway', model: 'benchmark-model', temperature: 0, inputLimitMode: 'estimate', outputLimitMode: 'provider', maxOutputTokens: 100,
   inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'a'.repeat(64), ...overrides,
 })
 
 const request = (overrides: Partial<GenerateOptions> = {}): GenerateOptions => ({
-  provider: 'llmgw-default', model: 'deepseek-v4.1-flash', temperature: 0, maxTokens: 50,
+  provider: 'benchmark-gateway', model: 'benchmark-model', temperature: 0, maxTokens: 50,
   messages: [{ role: 'system', content: [{ type: 'text', text: 'persona' }] } as never, { role: 'user', content: [{ type: 'text', text: 'question' }] }],
   ...overrides,
 })
@@ -44,29 +44,29 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks
 }
 
-describe('LLMBox OpenAI benchmark adapter', () => {
+describe('Gateway OpenAI benchmark adapter', () => {
   test('fails closed for any other route, priced budget, or missing environment', async () => {
     const { env } = await environment()
     expect(() => createNativeAdapter(model({ provider: 'other' }), {}, { env, fetch: () => { throw new Error('no network') } })).toThrow('accepts only')
     expect(() => createNativeAdapter(model({ model: 'deepseek-chat' }), {}, { env })).toThrow('accepts only')
     expect(() => createNativeAdapter(model({ inputLimitMode: 'upper-bound' }), {}, { env })).toThrow('estimate')
     expect(() => createNativeAdapter(model({ inputUsdMicrosPerMillionTokens: 1, outputUsdMicrosPerMillionTokens: 1 }), {}, { env })).toThrow('null tariffs')
-    for (const key of ['DSH_BENCH_LLMBOX_BASE_URL', 'LLMGW_API_KEY', 'DSH_BENCH_LLMBOX_CALL_LEDGER', 'DSH_BENCH_LLMBOX_MAX_CALLS']) {
+    for (const key of ['DSH_BENCH_GATEWAY_BASE_URL', 'BENCHMARK_API_KEY', 'DSH_BENCH_GATEWAY_CALL_LEDGER', 'DSH_BENCH_GATEWAY_MAX_CALLS']) {
       const partial = { ...env }; delete partial[key]
       expect(() => createNativeAdapter(model(), {}, { env: partial })).toThrow()
     }
-    expect(() => createNativeAdapter(model(), {}, { env: { ...env, DSH_BENCH_LLMBOX_BASE_URL: 'https://u:p@llmbox.invalid/v1' } })).toThrow('plain')
+    expect(() => createNativeAdapter(model(), {}, { env: { ...env, DSH_BENCH_GATEWAY_BASE_URL: 'https://u:p@gateway.invalid/v1' } })).toThrow('plain')
   })
 
   test('declares one route with retries disabled', async () => {
     const { env } = await environment()
     const { adapter, dispose } = createNativeAdapter(model(), {}, { env })
-    expect(adapter.providerInfo('llmgw-default')).toEqual({ id: 'llmgw-default', name: expect.any(String) })
+    expect(adapter.providerInfo('benchmark-gateway')).toEqual({ id: 'benchmark-gateway', name: expect.any(String) })
     expect(() => adapter.providerInfo('deepseek')).toThrow()
-    expect(adapter.providerRetryPolicy('llmgw-default')).toMatchObject({ mode: 'normal', maxRetries: 0 })
-    expect((await adapter.listModels('llmgw-default')).map((item: { id: string }) => item.id)).toEqual(['deepseek-v4.1-flash'])
-    await expect(adapter.resolveModel('llmgw-default', 'deepseek-v4.1-flash')).resolves.toMatchObject({ id: 'deepseek-v4.1-flash' })
-    await expect(adapter.resolveModel('llmgw-default', 'other')).rejects.toThrow()
+    expect(adapter.providerRetryPolicy('benchmark-gateway')).toMatchObject({ mode: 'normal', maxRetries: 0 })
+    expect((await adapter.listModels('benchmark-gateway')).map((item: { id: string }) => item.id)).toEqual(['benchmark-model'])
+    await expect(adapter.resolveModel('benchmark-gateway', 'benchmark-model')).resolves.toMatchObject({ id: 'benchmark-model' })
+    await expect(adapter.resolveModel('benchmark-gateway', 'other')).rejects.toThrow()
     await dispose()
   })
 
@@ -86,12 +86,12 @@ describe('LLMBox OpenAI benchmark adapter', () => {
     const { adapter, inputTokenEstimate } = createNativeAdapter(model(), {}, { env, fetch })
     const chunks = await collect(adapter.stream(request()))
     expect(seen).toHaveLength(1)
-    expect(seen[0]!.url).toBe('https://llmbox.invalid/v1/chat/completions')
+    expect(seen[0]!.url).toBe('https://gateway.invalid/v1/chat/completions')
     expect(seen[0]!.init.method).toBe('POST')
     const headers = seen[0]!.init.headers as Record<string, string>
     expect(headers.authorization).toBe('Bearer test-key-not-secret'); expect(headers['user-agent'] ?? headers['User-Agent']).toBeTruthy()
     expect(JSON.parse(String(seen[0]!.init.body))).toEqual({
-      model: 'deepseek-v4.1-flash', stream: true, stream_options: { include_usage: true }, temperature: 0, max_tokens: 50,
+      model: 'benchmark-model', stream: true, stream_options: { include_usage: true }, temperature: 0, max_tokens: 50,
       messages: [{ role: 'system', content: 'persona' }, { role: 'user', content: 'question' }],
     })
     expect(chunks).toEqual([
@@ -104,7 +104,7 @@ describe('LLMBox OpenAI benchmark adapter', () => {
     ])
     expect((await readFile(ledger, 'utf8')).trim().split('\n')).toHaveLength(1)
     const traced = await readFile(trace, 'utf8')
-    expect(traced).toContain('"output":"Hello"'); expect(traced).not.toContain('test-key-not-secret'); expect(traced).not.toContain('llmbox.invalid')
+    expect(traced).toContain('"output":"Hello"'); expect(traced).not.toContain('test-key-not-secret'); expect(traced).not.toContain('gateway.invalid')
     expect(inputTokenEstimate(request())).toBeGreaterThan(2_048)
   })
 
@@ -154,7 +154,7 @@ describe('LLMBox OpenAI benchmark adapter', () => {
       { choices: [], usage: { prompt_tokens: 400, completion_tokens: 40, total_tokens: 440 } }, '[DONE]',
     ])
     const config: NativeBenchmarkConfig = {
-      id: 'llmbox-offline', suite: 'research-v1', cases: [task.id],
+      id: 'gateway-offline', suite: 'research-v1', cases: [task.id],
       variants: [{ id: 'baseline', role: 'baseline', persona: 'Answer JSON.' }, { id: 'candidate', role: 'candidate', persona: 'Answer JSON carefully.' }],
       model: model({ adapterDigest: digest, tokenCounterDigest: digest }) as NativeBenchmarkConfig['model'],
       budget: { durationMs: 10_000, inputTokens: 40_000, outputTokens: 100, costUsdMicros: null, toolCalls: 0 }, repeats: 2, seed: 1,

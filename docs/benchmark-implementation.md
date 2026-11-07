@@ -98,7 +98,7 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 [Codex 适配器](../scripts/benchmark/codex-subscription-adapter.mjs) 使用真实 CodingSubscriptionAdapter、live SessionStore 与 AgentRegistry attestation，复用现有登录，不启动外部编码 CLI，不自动重试。配置 `provider: "codex-subscription"`、指定实际 model，使用 `temperature: null`、`inputLimitMode: "estimate"`、`outputLimitMode: "observed"`，价格与 cost budget 为 null。工厂在原生服务初始化之后接收 `{ ctx, workspace }`，确保 cwd 和 live Session 身份一致。
 
-[LLMBox 适配器](../scripts/benchmark/llmbox-openai-adapter.mjs) 只接受 `provider: "llmgw-default"`、`model: "deepseek-v4.1-flash"`，经 OpenAI 兼容的流式 `chat/completions` 发送纯文本请求（拒绝工具、图片与其他路由），关闭重试；base URL 只读 `DSH_BENCH_LLMBOX_BASE_URL`，key 只读 `LLMGW_API_KEY`，均不入仓库、不写 trace。必须设置 `DSH_BENCH_LLMBOX_CALL_LEDGER`（绝对路径）与 `DSH_BENCH_LLMBOX_MAX_CALLS`，发送前按 ledger 计数、达上限即拒绝，跨进程共享同一上限。配置使用 `inputLimitMode: "estimate"`、四项费率与 cost budget 为 null；`adapterDigest` 与 `tokenCounterDigest` 均为该文件的 SHA-256（`shasum -a 256` / `sha256sum`）。
+[OpenAI 兼容基准适配器](../scripts/benchmark/openai-compatible-adapter.mjs) 只接受 `provider: "benchmark-gateway"`、`model: "benchmark-model"`，经 OpenAI 兼容的流式 `chat/completions` 发送纯文本请求（拒绝工具、图片与其他路由），关闭重试；base URL 只读 `DSH_BENCH_GATEWAY_BASE_URL`，key 只读 `BENCHMARK_API_KEY`，均不入仓库、不写 trace。必须设置 `DSH_BENCH_GATEWAY_CALL_LEDGER`（绝对路径）与 `DSH_BENCH_GATEWAY_MAX_CALLS`，发送前按 ledger 计数、达上限即拒绝，跨进程共享同一上限。配置使用 `inputLimitMode: "estimate"`、四项费率与 cost budget 为 null；`adapterDigest` 与 `tokenCounterDigest` 均为该文件的 SHA-256（`shasum -a 256` / `sha256sum`）。
 
 该线路不支持远端 max-output 参数，因此 `maxOutputTokens` 在 observed 模式只参与完成后核验，不发送为提供商控制。输入估算不是 tokenizer；actual usage 超过估算但仍在预算内可记录，超过预算则 unknown 并停止后续样本。计划将 `maximumInputTokens`/`maximumOutputTokens` 标为 null，另列观测核验阈值。此模式不能保证硬性 token/费用上限。
 
@@ -112,4 +112,4 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 早期公开开发集实验包括 persona 配对持平，以及 Memory 检索在修订引用约定后的开发题上改善。它们使用历史供应和版本，只支持当时任务上的有限结论，不是当前版本验收、隐藏留出或基础模型提升证据。逐轮时间、计量和诊断从 Git 历史或本地原始证据查阅；旧失败和 unknown 不改判、不重放。
 
-历史 Day1 实验使用 `super-relay / auto_model/alwaysday1`；真实技能复用入口见[原生技能复用](native-skill-reuse.md)，剩余门槛见 [RSI 验收合同](rsi-acceptance.md)，逐次结果查 Git 历史与本地证据。当前开发优先级见 [RSI 当前状态](rsi-status.md)。
+历史 Day1 实验使用一个内部 OpenAI Responses 兼容网关（provider 别名已随部署移除）；真实技能复用入口见[原生技能复用](native-skill-reuse.md)，剩余门槛见 [RSI 验收合同](rsi-acceptance.md)，逐次结果查 Git 历史与本地证据。当前开发优先级见 [RSI 当前状态](rsi-status.md)。

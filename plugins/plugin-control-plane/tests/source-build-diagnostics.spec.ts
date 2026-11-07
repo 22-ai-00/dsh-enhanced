@@ -34,7 +34,7 @@ describe('source build diagnostics', () => {
   })
 
   it('redacts token-like values and strips control characters', () => {
-    const text = sanitizeBuildText(`LLMGW_API_KEY=abc123 Authorization: Bearer sk-abcdefghijklmnop ${ESC}[31mred ` + 'A'.repeat(48))
+    const text = sanitizeBuildText(`BENCHMARK_API_KEY=abc123 Authorization: Bearer sk-abcdefghijklmnop ${ESC}[31mred ` + 'A'.repeat(48))
     expect(text).not.toContain('abc123'); expect(text).not.toContain('sk-abcdefghijklmnop'); expect(text).not.toContain('A'.repeat(48))
     expect(text).not.toMatch(/\p{Cc}/u)
     expect(text).toContain('<redacted>')
@@ -113,7 +113,7 @@ describe('source build diagnostics', () => {
       'source build phase failed: check',
       "src/index.ts(12,3): error TS2304: Cannot find name 'records'.",
       ` FAIL  tests/index.spec.ts > auth > rejects ${'n'.repeat(400)}`,
-      'AssertionError: expected LLMGW_API_KEY=abc123 to be undefined',
+      'AssertionError: expected BENCHMARK_API_KEY=abc123 to be undefined',
       ' ❯ tests/index.spec.ts:21:7',
       '⎯⎯⎯⎯[1/1]⎯',
       ...Array.from({ length: 25 }, (_, index) => ` FAIL  tests/many.spec.ts > case ${index}`),

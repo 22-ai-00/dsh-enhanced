@@ -35,7 +35,7 @@
 
 ## 协议契约与限制
 
-固定使用 `POST https://super-relay.byted.org/v1/responses`（OpenAI **Responses** 协议，不是 Chat Completions）、`stream: false`、`redirect: 'error'`、`credentials: 'omit'`，没有自动重试、图片/文件 API、全局 fetch patch 或额外 wire 字段。
+固定使用 `POST <baseUrl>/responses`（OpenAI **Responses** 协议，不是 Chat Completions）；`baseUrl` 由部署配置 `baseUrl` 或环境变量 `SUPER_RELAY_BASE_URL` 提供，包内不内置任何网关地址、`stream: false`、`redirect: 'error'`、`credentials: 'omit'`，没有自动重试、图片/文件 API、全局 fetch patch 或额外 wire 字段。
 
 - AgentLoop 原生请求中，开头连续的纯文本 `system` role 消息投影到顶层 `instructions`；单次调用的 `options.system` 排在它们前面，非空文本按原顺序以换行分隔。空的原生 system 内容不产生指令；非文本或出现在普通消息之后的 system 消息在发送前拒绝。
 - 工具以 Responses `tools` 发送；响应中的 `function_call` item 映射为 DSH `tool-call` block，finish 置为 `tool-calls`。

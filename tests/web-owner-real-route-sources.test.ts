@@ -14,14 +14,14 @@ async function fixture() {
   await Promise.all([mkdir(source), mkdir(home), mkdir(workspace)])
   return { source, home, workspace }
 }
-const doubao = { displayName: 'LLMBox doubao', api: 'openai-completions', baseURL: 'https://gateway.example/v1',
-  apiKeyEnv: 'LLMGW_API_KEY', headers: { 'x-source': 'doubao_model_dogfooding' }, compat: { maxTokensField: 'max_tokens' },
-  models: [{ id: 'doubao-seed-evolving', name: 'doubao', contextWindow: 256000 }] }
-const deepseek = { displayName: 'LLMBox default', api: 'openai-completions', baseURL: 'https://gateway.example/v1',
-  apiKeyEnv: 'LLMGW_API_KEY', compat: { maxTokensField: 'max_tokens' },
-  models: [{ id: 'deepseek-v4.1-flash', name: 'flash' }, { id: 'glm-5.3-flash', name: 'glm' }] }
+const doubao = { displayName: 'Benchmark chat provider', api: 'openai-completions', baseURL: 'https://gateway.example/v1',
+  apiKeyEnv: 'BENCHMARK_API_KEY', headers: { 'x-source': 'x-benchmark-source' }, compat: { maxTokensField: 'max_tokens' },
+  models: [{ id: 'benchmark-chat-model', name: 'benchmark-chat', contextWindow: 256000 }] }
+const deepseek = { displayName: 'Benchmark general provider', api: 'openai-completions', baseURL: 'https://gateway.example/v1',
+  apiKeyEnv: 'BENCHMARK_API_KEY', compat: { maxTokensField: 'max_tokens' },
+  models: [{ id: 'benchmark-general-model', name: 'flash' }, { id: 'glm-5.3-flash', name: 'glm' }] }
 const env = (source: string, extra: Record<string, string> = {}) => ({ DSH_WEB_REAL_SOURCE_HOME: source,
-  DSH_WEB_REAL_PROVIDER: 'llmgw', DSH_WEB_REAL_MODEL: 'doubao-seed-evolving', LLMGW_API_KEY: 'child-only', ...extra }) as Record<string, string | undefined>
+  DSH_WEB_REAL_PROVIDER: 'benchmark-gateway', DSH_WEB_REAL_MODEL: 'benchmark-chat-model', BENCHMARK_API_KEY: 'child-only', ...extra }) as Record<string, string | undefined>
 const settingsWith = (providers: Record<string, unknown>) => JSON.stringify({ 'llm-pi-ai': { providers } })
 // Mirrors the real web profile: other rows use !!js, the gateway row is plain YAML.
 const profilePatch = (rows: string) => `- id: dsh-enhanced-personal-assistant
@@ -39,11 +39,11 @@ async function exists(path: string) { return stat(path).then(() => true, () => f
 describe('web owner real route headers', () => {
   test('copies a vetted public routing header and records only its name', async () => {
     const { source, home, workspace } = await fixture()
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ llmgw: { ...doubao, headers: { 'X-Source': 'doubao_model_dogfooding' } } }))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: { ...doubao, headers: { 'X-Source': 'x-benchmark-source' } } }))
     const prepared = await prepareRealRoute({ env: env(source), home, workspace })
     const written = parse(await readFile(join(home, 'settings.yaml'), 'utf8'))
-    expect(written['llm-pi-ai'].providers.llmgw).toEqual(doubao)
-    expect(prepared.proof).toEqual({ provider: 'llmgw', model: 'doubao-seed-evolving', api: 'openai-completions', headerNames: ['x-source'] })
+    expect(written['llm-pi-ai'].providers.benchmark-gateway).toEqual(doubao)
+    expect(prepared.proof).toEqual({ provider: 'benchmark-gateway', model: 'benchmark-chat-model', api: 'openai-completions', headerNames: ['x-source'] })
     expect(JSON.stringify(prepared.proof)).not.toContain('dogfooding')
   })
 
@@ -70,7 +70,7 @@ describe('web owner real route headers', () => {
     ['array', ['secret-value-1']],
   ])('refuses %s without disclosing names or values', async (_name, headers) => {
     const { source, home, workspace } = await fixture()
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ llmgw: { ...doubao, headers } }))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: { ...doubao, headers } }))
     const error = await prepareRealRoute({ env: env(source), home, workspace }).then(() => undefined, (e: Error) => e)
     expect(error?.message).toBe('web-owner real route: gateway route headers are unsupported or sensitive')
     expect(error?.message).not.toMatch(/secret-value|authorization|cookie|x-api|x-auth/iu)
@@ -81,43 +81,43 @@ describe('web owner real route headers', () => {
 describe('web owner real route profile-patch source', () => {
   test('reads the plain llm-pi-ai row when settings.yaml is absent', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao, 'llmgw-general': deepseek })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao, 'benchmark-general': deepseek })))
     const doubaoRoute = await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
-    expect(doubaoRoute.proof).toMatchObject({ provider: 'llmgw', model: 'doubao-seed-evolving', headerNames: ['x-source'] })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers).toEqual({ llmgw: doubao })
+    expect(doubaoRoute.proof).toMatchObject({ provider: 'benchmark-gateway', model: 'benchmark-chat-model', headerNames: ['x-source'] })
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers).toEqual({ benchmark-gateway: doubao })
     const other = join(home, '..', 'home-2'); await mkdir(other)
     const deepseekRoute = await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web',
-      DSH_WEB_REAL_PROVIDER: 'llmgw-general', DSH_WEB_REAL_MODEL: 'deepseek-v4.1-flash' }), home: other, workspace })
-    expect(deepseekRoute.proof).toEqual({ provider: 'llmgw-general', model: 'deepseek-v4.1-flash', api: 'openai-completions' })
+      DSH_WEB_REAL_PROVIDER: 'benchmark-general', DSH_WEB_REAL_MODEL: 'benchmark-general-model' }), home: other, workspace })
+    expect(deepseekRoute.proof).toEqual({ provider: 'benchmark-general', model: 'benchmark-general-model', api: 'openai-completions' })
   })
 
   test('keeps settings.yaml as the first choice', async () => {
     const { source, home, workspace } = await fixture()
     const preferred = { ...doubao, displayName: 'from settings' }
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ llmgw: preferred }))
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: { ...doubao, displayName: 'from profile' } })))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: preferred }))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...doubao, displayName: 'from profile' } })))
     await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.llmgw.displayName).toBe('from settings')
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.benchmark-gateway.displayName).toBe('from settings')
   })
 
   test('falls back to the profile only when settings.yaml lacks the provider', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), settingsWith({ unrelated: deepseek }))
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace }))
-      .resolves.toMatchObject({ provider: 'llmgw' })
+      .resolves.toMatchObject({ provider: 'benchmark-gateway' })
   })
 
   test('ignores a disabled duplicate row and refuses a profile whose only match is disabled', async () => {
     const { source, home, workspace } = await fixture()
     // The disabled row even carries !!js: tags are refused only in the selected row.
-    const disabled = piAiRow({ llmgw: { ...doubao, displayName: 'disabled' } }, '  disabled: true\n')
+    const disabled = piAiRow({ benchmark-gateway: { ...doubao, displayName: 'disabled' } }, '  disabled: true\n')
       .replace('baseURL: https://gateway.example/v1', 'baseURL: !!js "process.env.URL"')
-    await writeProfile(source, profilePatch(`${disabled}${piAiRow({ llmgw: { ...doubao, displayName: 'enabled' } })}`))
+    await writeProfile(source, profilePatch(`${disabled}${piAiRow({ benchmark-gateway: { ...doubao, displayName: 'enabled' } })}`))
     await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.llmgw.displayName).toBe('enabled')
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.benchmark-gateway.displayName).toBe('enabled')
     const other = await fixture()
-    await writeProfile(other.source, profilePatch(piAiRow({ llmgw: doubao }, '  disabled: true\n')))
+    await writeProfile(other.source, profilePatch(piAiRow({ benchmark-gateway: doubao }, '  disabled: true\n')))
     await expect(prepareRealRoute({ env: env(other.source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home: other.home, workspace: other.workspace }))
       .rejects.toThrow('web-owner real route: could not read a valid selected gateway route')
     expect(await exists(join(other.home, 'settings.yaml'))).toBe(false)
@@ -125,11 +125,11 @@ describe('web owner real route profile-patch source', () => {
 
   test.each([
     ['missing provider', () => profilePatch(piAiRow({ other: doubao }))],
-    ['ambiguous rows', () => profilePatch(`${piAiRow({ llmgw: doubao })}${piAiRow({ llmgw: doubao }).replace('llm-pi-ai', 'llm-pi-ai-2')}`)],
-    ['row that is not llm-pi-ai', () => profilePatch(piAiRow({ llmgw: doubao }).replace('id: llm-pi-ai', 'id: lookalike'))],
-    ['disabled row', () => profilePatch(piAiRow({ llmgw: doubao }, '  disabled: true\n'))],
-    ['!!js in the selected row', () => profilePatch(piAiRow({ llmgw: doubao }).replace("baseURL: https://gateway.example/v1", 'baseURL: !!js "process.env.URL"'))],
-    ['mapping at the top level', () => stringify({ 'llm-pi-ai': { providers: { llmgw: doubao } } })],
+    ['ambiguous rows', () => profilePatch(`${piAiRow({ benchmark-gateway: doubao })}${piAiRow({ benchmark-gateway: doubao }).replace('llm-pi-ai', 'llm-pi-ai-2')}`)],
+    ['row that is not llm-pi-ai', () => profilePatch(piAiRow({ benchmark-gateway: doubao }).replace('id: llm-pi-ai', 'id: lookalike'))],
+    ['disabled row', () => profilePatch(piAiRow({ benchmark-gateway: doubao }, '  disabled: true\n'))],
+    ['!!js in the selected row', () => profilePatch(piAiRow({ benchmark-gateway: doubao }).replace("baseURL: https://gateway.example/v1", 'baseURL: !!js "process.env.URL"'))],
+    ['mapping at the top level', () => stringify({ 'llm-pi-ai': { providers: { benchmark-gateway: doubao } } })],
     ['malformed YAML', () => '- id: llm-pi-ai\n  config: [unterminated\n'],
   ])('refuses a profile with a %s', async (_name, text) => {
     const { source, home, workspace } = await fixture()
@@ -141,7 +141,7 @@ describe('web owner real route profile-patch source', () => {
 
   test('refuses an alias in the selected row and a missing profile file', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, `- id: llm-pi-ai\n  config:\n    providers:\n      llmgw:\n        displayName: &name shared\n        api: openai-completions\n        baseURL: https://gateway.example/v1\n        apiKeyEnv: LLMGW_API_KEY\n        models: [{ id: doubao-seed-evolving, name: *name }]\n`)
+    await writeProfile(source, `- id: llm-pi-ai\n  config:\n    providers:\n      benchmark-gateway:\n        displayName: &name shared\n        api: openai-completions\n        baseURL: https://gateway.example/v1\n        apiKeyEnv: BENCHMARK_API_KEY\n        models: [{ id: doubao-seed-evolving, name: *name }]\n`)
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })).rejects.toThrow('not plain YAML data')
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'absent' }), home, workspace }))
       .rejects.toThrow('could not read a valid selected gateway route')
@@ -149,7 +149,7 @@ describe('web owner real route profile-patch source', () => {
 
   test.each(['../web', 'web/../web', '.hidden', ''.padEnd(65, 'a')])('refuses profile name %j', async profile => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: profile }), home, workspace }))
       .rejects.toThrow('invalid DSH_WEB_REAL_SOURCE_PROFILE')
   })
@@ -157,24 +157,24 @@ describe('web owner real route profile-patch source', () => {
   test('a malformed settings.yaml still fails closed instead of falling back', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), 'llm-pi-ai: [unterminated\n')
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace }))
       .rejects.toThrow('could not read a valid selected gateway route')
   })
 
   test('without a profile, a missing settings.yaml behaves as before', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao })))
     await expect(prepareRealRoute({ env: env(source), home, workspace })).rejects.toThrow('could not read a valid selected gateway route')
   })
 
   test('profile routes keep every existing route check', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: { ...doubao, baseURL: 'https://user:pw@gateway.example/v1' } })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...doubao, baseURL: 'https://user:pw@gateway.example/v1' } })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })).rejects.toThrow('must not contain credentials')
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: { ...doubao, apiKey: 'inline' } })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...doubao, apiKey: 'inline' } })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })).rejects.toThrow('unsupported or sensitive fields')
-    await writeProfile(source, profilePatch(piAiRow({ llmgw: doubao })))
+    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: doubao })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home: source, workspace })).rejects.toThrow('source and target')
   })
 })
