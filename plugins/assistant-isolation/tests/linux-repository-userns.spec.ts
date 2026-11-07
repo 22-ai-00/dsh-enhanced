@@ -148,8 +148,7 @@ assert os.stat('/etc/hostname').st_uid==0 and stat.S_IMODE(os.stat('/etc/hostnam
 assert os.statvfs('/tmp').f_files==128
 assert os.statvfs('/etc').f_files==16384 and os.statvfs('/etc').f_blocks*os.statvfs('/etc').f_frsize==8*1024**2
 assert all(int(fd)<3 or not os.path.exists('/proc/self/fd/'+fd) for fd in os.listdir('/proc/self/fd'))
-const home = osHomedir();
-for p in [home, `/proc/self/root${home}`, `/proc/1/root${home}`]:
+for p in ['${osHomedir()}','/proc/self/root${osHomedir()}','/proc/1/root${osHomedir()}']:
  try: os.stat(p); raise AssertionError('Host visible')
  except OSError as e: assert e.errno in [errno.ENOENT,errno.EACCES]
 try: os.setresuid(0,0,0); raise AssertionError('root regained')

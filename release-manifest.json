@@ -51,7 +51,7 @@
   },
   "pending": {
     "version": "0.1.67",
-    "preparedAt": "2026-11-06T23:21:37.129Z",
+    "preparedAt": "2026-11-07T12:31:50.183Z",
     "verifiedHostRange": ">=0.2.1-rc.2 <0.3.0",
     "pinnedHostVersion": "0.2.2-rc.1",
     "packages": {
@@ -77,7 +77,6 @@
       "@dsh-enhanced/assistant-proactive": "0.1.67",
       "@dsh-enhanced/assistant-recovery": "0.1.67",
       "@dsh-enhanced/assistant-skills": "0.1.67",
-      "@dsh-enhanced/assistant-super-relay-budget": "0.1.67",
       "@dsh-enhanced/assistant-verifier": "0.1.67",
       "@dsh-enhanced/assistant-web-owner": "0.1.67",
       "@dsh-enhanced/assistant-work-items": "0.1.67",

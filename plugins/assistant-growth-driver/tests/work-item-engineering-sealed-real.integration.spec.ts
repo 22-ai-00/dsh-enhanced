@@ -32,7 +32,7 @@ const MAX_SOURCE_JOBS = 2
 const SEALED_ID = 'sealed-docker-normalize'
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const dshPackage = () => process.env['DSH_SEALED_REAL_DSH_PACKAGE']
-  ?? resolve(require.resolve('@deepseek-ai/dsh/package.json'))
+  ?? createRequire(import.meta.url).resolve('@deepseek-ai/dsh/package.json')
 
 /** Selected public route only; the credential stays in the child env and is never logged or written. */
 async function realRoute(workspace: string) {

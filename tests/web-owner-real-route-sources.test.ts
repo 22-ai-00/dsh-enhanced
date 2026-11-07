@@ -39,10 +39,10 @@ async function exists(path: string) { return stat(path).then(() => true, () => f
 describe('web owner real route headers', () => {
   test('copies a vetted public routing header and records only its name', async () => {
     const { source, home, workspace } = await fixture()
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: { ...chat, headers: { 'X-Source': 'x-benchmark-source' } } }))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ 'benchmark-gateway': { ...chat, headers: { 'X-Source': 'x-benchmark-source' } } }))
     const prepared = await prepareRealRoute({ env: env(source), home, workspace })
     const written = parse(await readFile(join(home, 'settings.yaml'), 'utf8'))
-    expect(written['llm-pi-ai'].providers.benchmark-gateway).toEqual(chat)
+    expect(written['llm-pi-ai'].providers['benchmark-gateway']).toEqual(chat)
     expect(prepared.proof).toEqual({ provider: 'benchmark-gateway', model: 'benchmark-chat-model', api: 'openai-completions', headerNames: ['x-source'] })
     expect(JSON.stringify(prepared.proof)).not.toContain('dogfooding')
   })
@@ -70,7 +70,7 @@ describe('web owner real route headers', () => {
     ['array', ['secret-value-1']],
   ])('refuses %s without disclosing names or values', async (_name, headers) => {
     const { source, home, workspace } = await fixture()
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: { ...chat, headers } }))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ 'benchmark-gateway': { ...chat, headers } }))
     const error = await prepareRealRoute({ env: env(source), home, workspace }).then(() => undefined, (e: Error) => e)
     expect(error?.message).toBe('web-owner real route: gateway route headers are unsupported or sensitive')
     expect(error?.message).not.toMatch(/secret-value|authorization|cookie|x-api|x-auth/iu)
@@ -81,10 +81,10 @@ describe('web owner real route headers', () => {
 describe('web owner real route profile-patch source', () => {
   test('reads the plain llm-pi-ai row when settings.yaml is absent', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat, 'benchmark-general': deepseek })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat, 'benchmark-general': deepseek })))
     const chatRoute = await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
     expect(chatRoute.proof).toMatchObject({ provider: 'benchmark-gateway', model: 'benchmark-chat-model', headerNames: ['x-source'] })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers).toEqual({ benchmark-gateway: chat })
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers).toEqual({ 'benchmark-gateway': chat })
     const other = join(home, '..', 'home-2'); await mkdir(other)
     const deepseekRoute = await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web',
       DSH_WEB_REAL_PROVIDER: 'benchmark-general', DSH_WEB_REAL_MODEL: 'benchmark-general-model' }), home: other, workspace })
@@ -94,16 +94,16 @@ describe('web owner real route profile-patch source', () => {
   test('keeps settings.yaml as the first choice', async () => {
     const { source, home, workspace } = await fixture()
     const preferred = { ...chat, displayName: 'from settings' }
-    await writeFile(join(source, 'settings.yaml'), settingsWith({ benchmark-gateway: preferred }))
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...chat, displayName: 'from profile' } })))
+    await writeFile(join(source, 'settings.yaml'), settingsWith({ 'benchmark-gateway': preferred }))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': { ...chat, displayName: 'from profile' } })))
     await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.benchmark-gateway.displayName).toBe('from settings')
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers['benchmark-gateway'].displayName).toBe('from settings')
   })
 
   test('falls back to the profile only when settings.yaml lacks the provider', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), settingsWith({ unrelated: deepseek }))
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace }))
       .resolves.toMatchObject({ provider: 'benchmark-gateway' })
   })
@@ -111,13 +111,13 @@ describe('web owner real route profile-patch source', () => {
   test('ignores a disabled duplicate row and refuses a profile whose only match is disabled', async () => {
     const { source, home, workspace } = await fixture()
     // The disabled row even carries !!js: tags are refused only in the selected row.
-    const disabled = piAiRow({ benchmark-gateway: { ...chat, displayName: 'disabled' } }, '  disabled: true\n')
+    const disabled = piAiRow({ 'benchmark-gateway': { ...chat, displayName: 'disabled' } }, '  disabled: true\n')
       .replace('baseURL: https://gateway.example/v1', 'baseURL: !!js "process.env.URL"')
-    await writeProfile(source, profilePatch(`${disabled}${piAiRow({ benchmark-gateway: { ...chat, displayName: 'enabled' } })}`))
+    await writeProfile(source, profilePatch(`${disabled}${piAiRow({ 'benchmark-gateway': { ...chat, displayName: 'enabled' } })}`))
     await prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })
-    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers.benchmark-gateway.displayName).toBe('enabled')
+    expect(parse(await readFile(join(home, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers['benchmark-gateway'].displayName).toBe('enabled')
     const other = await fixture()
-    await writeProfile(other.source, profilePatch(piAiRow({ benchmark-gateway: chat }, '  disabled: true\n')))
+    await writeProfile(other.source, profilePatch(piAiRow({ 'benchmark-gateway': chat }, '  disabled: true\n')))
     await expect(prepareRealRoute({ env: env(other.source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home: other.home, workspace: other.workspace }))
       .rejects.toThrow('web-owner real route: could not read a valid selected gateway route')
     expect(await exists(join(other.home, 'settings.yaml'))).toBe(false)
@@ -125,11 +125,11 @@ describe('web owner real route profile-patch source', () => {
 
   test.each([
     ['missing provider', () => profilePatch(piAiRow({ other: chat }))],
-    ['ambiguous rows', () => profilePatch(`${piAiRow({ benchmark-gateway: chat })}${piAiRow({ benchmark-gateway: chat }).replace('llm-pi-ai', 'llm-pi-ai-2')}`)],
-    ['row that is not llm-pi-ai', () => profilePatch(piAiRow({ benchmark-gateway: chat }).replace('id: llm-pi-ai', 'id: lookalike'))],
-    ['disabled row', () => profilePatch(piAiRow({ benchmark-gateway: chat }, '  disabled: true\n'))],
-    ['!!js in the selected row', () => profilePatch(piAiRow({ benchmark-gateway: chat }).replace("baseURL: https://gateway.example/v1", 'baseURL: !!js "process.env.URL"'))],
-    ['mapping at the top level', () => stringify({ 'llm-pi-ai': { providers: { benchmark-gateway: chat } } })],
+    ['ambiguous rows', () => profilePatch(`${piAiRow({ 'benchmark-gateway': chat })}${piAiRow({ 'benchmark-gateway': chat }).replace('llm-pi-ai', 'llm-pi-ai-2')}`)],
+    ['row that is not llm-pi-ai', () => profilePatch(piAiRow({ 'benchmark-gateway': chat }).replace('id: llm-pi-ai', 'id: lookalike'))],
+    ['disabled row', () => profilePatch(piAiRow({ 'benchmark-gateway': chat }, '  disabled: true\n'))],
+    ['!!js in the selected row', () => profilePatch(piAiRow({ 'benchmark-gateway': chat }).replace("baseURL: https://gateway.example/v1", 'baseURL: !!js "process.env.URL"'))],
+    ['mapping at the top level', () => stringify({ 'llm-pi-ai': { providers: { 'benchmark-gateway': chat } } })],
     ['malformed YAML', () => '- id: llm-pi-ai\n  config: [unterminated\n'],
   ])('refuses a profile with a %s', async (_name, text) => {
     const { source, home, workspace } = await fixture()
@@ -149,7 +149,7 @@ describe('web owner real route profile-patch source', () => {
 
   test.each(['../web', 'web/../web', '.hidden', ''.padEnd(65, 'a')])('refuses profile name %j', async profile => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: profile }), home, workspace }))
       .rejects.toThrow('invalid DSH_WEB_REAL_SOURCE_PROFILE')
   })
@@ -157,24 +157,24 @@ describe('web owner real route profile-patch source', () => {
   test('a malformed settings.yaml still fails closed instead of falling back', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), 'llm-pi-ai: [unterminated\n')
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace }))
       .rejects.toThrow('could not read a valid selected gateway route')
   })
 
   test('without a profile, a missing settings.yaml behaves as before', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat })))
     await expect(prepareRealRoute({ env: env(source), home, workspace })).rejects.toThrow('could not read a valid selected gateway route')
   })
 
   test('profile routes keep every existing route check', async () => {
     const { source, home, workspace } = await fixture()
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...chat, baseURL: 'https://user:pw@gateway.example/v1' } })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': { ...chat, baseURL: 'https://user:pw@gateway.example/v1' } })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })).rejects.toThrow('must not contain credentials')
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: { ...chat, apiKey: 'inline' } })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': { ...chat, apiKey: 'inline' } })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home, workspace })).rejects.toThrow('unsupported or sensitive fields')
-    await writeProfile(source, profilePatch(piAiRow({ benchmark-gateway: chat })))
+    await writeProfile(source, profilePatch(piAiRow({ 'benchmark-gateway': chat })))
     await expect(prepareRealRoute({ env: env(source, { DSH_WEB_REAL_SOURCE_PROFILE: 'web' }), home: source, workspace })).rejects.toThrow('source and target')
   })
 })
