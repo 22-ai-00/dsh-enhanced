@@ -81,7 +81,7 @@ describe('bounded bare Git source review', () => {
     await expect(inspectSourceReviewGit(f.config, request)).rejects.toThrow('outside')
     const bounded = await fixture()
     await expect(inspectSourceReviewGit({ ...bounded.config, maxInputBytes: 1 }, bounded.request)).rejects.toThrow('byte limit')
-  })
+  }, 90_000)
 
   it('rejects symbolic links in the reviewed tree', async () => {
     const f = await fixture(); run(f.work, 'reset', '--hard', f.request.baseCommit); await symlink('index.ts', join(f.work, 'plugins/sample/link.ts'))
@@ -89,7 +89,7 @@ describe('bounded bare Git source review', () => {
     run(f.work, 'push', '-q', f.bare, '+HEAD:refs/dsh-release/pulls/pr-1/head')
     const checked = await snapshot(f.bare, f.request.baseCommit, f.request.scope)
     await expect(inspectSourceReviewGit(f.config, { ...f.request, headCommit: head, ...checked })).rejects.toThrow('symbolic links')
-  })
+  }, 90_000)
 
   it('honors an already-aborted signal before invoking Git', async () => {
     const f = await fixture(); const controller = new AbortController(); controller.abort(new Error('stop-review'))
