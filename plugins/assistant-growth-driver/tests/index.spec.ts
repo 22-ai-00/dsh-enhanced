@@ -10,13 +10,15 @@
  * seam and the fail-closed preflight order.
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ReasoningEffortId, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { mountAgentLoopTestDependencies, provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
@@ -28,7 +30,7 @@ import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceG
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
-import { SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE } from '../src/growth-agent.ts'
+import { ptcTrajectory, runGrowthAgent, SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE, splitGrowthToolSurface } from '../src/growth-agent.ts'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
 
 const contractState = vi.hoisted(() => ({ expired: false }))
@@ -229,6 +231,51 @@ function successTurns(): ScriptedTurn[] {
   ]
 }
 
+
+/**
+ * Minimal engineering fake for `ctx.ptcRuntime`. This package deliberately does
+ * NOT depend on the published @deepseek-ai/dsh-ptc-runtime-node package (no
+ * root lockfile change in this slice), so no real program isolation or sandbox
+ * execution is exercised here. The fake supports exactly one awaited
+ * `tools.<name>(<json args>)` directive per program - enough to drive the real
+ * Host `run_code` bridge, nested dispatch scheduling, policy/guard pipeline and
+ * session log - and is not a general interpreter. Its surface mirrors the
+ * abstract Service Definition a PTC deployment must mount.
+ */
+class FakePtcRuntime {
+  readonly language = 'typescript'
+  readonly isolation = 'worker-thread'
+  readonly programFormat = 'function-body'
+  readonly executionInstructions = 'Engineering fake: one awaited tools.<name>({...}) directive per program.'
+  readonly sandboxMode = undefined
+  readonly timeout = undefined
+  releases = 0
+  readonly programs: string[] = []
+  resolve(request: Record<string, unknown> & { cwd?: string; timeoutMs?: number | null }) {
+    return { ...request, cwd: request.cwd ?? process.cwd(), timeoutMs: request.timeoutMs ?? null }
+  }
+  async release(): Promise<void> { this.releases += 1 }
+  async run(spec: { program: string; bindings: ReadonlyArray<{ global: string; functions: Record<string, (args: unknown) => Promise<unknown>> }> }):
+  Promise<{ logs: string[]; value?: unknown; error?: { kind: string; message: string } }> {
+    this.programs.push(spec.program)
+    const tools = spec.bindings.find(namespace => namespace.global === 'tools')?.functions
+    const match = /^await\s+tools\.([A-Za-z0-9_]+)\((.*)\)$/su.exec(spec.program.trim())
+    if (tools === undefined || match === null) {
+      return { logs: [], error: { kind: 'exception', message: 'fake PTC runtime expects one awaited tools call' } }
+    }
+    let args: unknown
+    try { args = match[2]!.trim() === '' ? {} : JSON.parse(match[2]!) } catch {
+      return { logs: [], error: { kind: 'exception', message: 'fake PTC runtime could not parse call arguments' } }
+    }
+    try {
+      const value = await tools[match[1]!]!(args)
+      return { logs: [], value: JSON.parse(JSON.stringify(value ?? null)) as unknown }
+    } catch (error) {
+      return { logs: [], error: { kind: 'exception', message: error instanceof Error ? error.message : String(error) } }
+    }
+  }
+}
+
 function firstGrowthPrompt(adapter: ScriptedAdapter): string {
   const messages = JSON.parse(adapter.messageTranscripts[0]!) as Array<{
     role: string; content: Array<{ type: string; text?: string }>
@@ -258,6 +305,12 @@ interface MountOptions {
   commitResultById?: ReadonlyMap<string, unknown>
   /** Goals whose commit throws an AssistantDeliveryError-shaped exception. */
   commitThrowById?: ReadonlyMap<string, { code: string; message: string }>
+  /**
+   * Engineering opt-in: append the minimal assistant-policy allow rule for the
+   * reserved PTC `run_code` tool. Growth RSI profiles intentionally do not
+   * grant it (README precondition), so tests opt in explicitly.
+   */
+  allowRunCodeTool?: boolean
 }
 
 const contexts: Context[] = []
@@ -347,6 +400,12 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
           actions: ['execute'], resource: { kind: 'tool', id: 'plugin_source_*' },
           context: { initiators: ['background'] },
         },
+        ...(opts.allowRunCodeTool === true ? [{
+          id: 'run-code-execute', effect: 'allow',
+          subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
+          actions: ['execute'], resource: { kind: 'tool', id: RUN_CODE_NAME },
+          context: { initiators: ['background'] },
+        } as never] : []),
       ],
     })
   }
@@ -2276,5 +2335,194 @@ describe('opt-in plugin source proposals', () => {
     await wake
     await service!.wake()
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+  })
+
+  describe('PTC presentation (opt-in toolPresentation: "ptc")', () => {
+    const ptcProgram = 'await tools.growth_list_owner_goals({})'
+    const REAL_RUNTIME_SPECIFIER: string = '@deepseek-ai/dsh-ptc-runtime-node'
+    let realRuntimeAvailable = false
+    try { createRequire(import.meta.url).resolve(REAL_RUNTIME_SPECIFIER); realRuntimeAvailable = true } catch { realRuntimeAvailable = false }
+
+    async function mountPtc(adapter: ScriptedAdapter, opts: { allowRunCodeTool?: boolean } = {}) {
+      const h = await mount({ adapter, ...(opts.allowRunCodeTool === true ? { allowRunCodeTool: true } : {}) })
+      const runtime = new FakePtcRuntime()
+      h.ctx.provide('ptcRuntime' as never, runtime as never)
+      provideWorkingDirectoryFixture(h.ctx, h.root)
+      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      return { h, runtime }
+    }
+
+    it('defaults to native and validates the toolPresentation enum', () => {
+      expect(normalizeConfig({})).toMatchObject({ toolPresentation: 'native' })
+      expect(normalizeConfig({ toolPresentation: 'ptc' })).toMatchObject({ toolPresentation: 'ptc' })
+      expect(() => normalizeConfig({ toolPresentation: 'code' as never })).toThrow()
+    })
+
+    it('fails closed before any model call when ptc is configured without ctx.ptcRuntime', async () => {
+      const adapter = new ScriptedAdapter([])
+      const h = await mount({ adapter })
+      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { toolPresentation: 'ptc' }))
+      await runWake(service)
+      expect(service.health()).toMatchObject({ outcome: 'failed', reason: expect.stringMatching(/ptcRuntime/u) })
+      expect(adapter.calls).toBe(0)
+    })
+
+    it('presents only the reserved run_code transport plus the generated SDK and counts nested calls in the budget', async () => {
+      const adapter = new ScriptedAdapter([{ name: RUN_CODE_NAME, args: { code: ptcProgram, description: 'List owner goals' } }])
+      const { h, runtime } = await mountPtc(adapter, { allowRunCodeTool: true })
+      const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { toolPresentation: 'ptc' }))
+      await runWake(service)
+      const health = service.health()
+      expect(health).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+      // Only the reserved transport reaches the model as a tool schema; the
+      // generated SDK (system prompt) still describes every allowlisted tool.
+      expect(adapter.surfaces[0]).toEqual([RUN_CODE_NAME])
+      const transcript = adapter.messageTranscripts[0]!
+      expect(transcript).toContain('is the only tool you can call directly')
+      expect(transcript).toContain('growth_list_owner_goals')
+      expect(transcript).toContain('growth_propose_skill_candidate')
+      const usage = health.run!.usage
+      // One model-direct run_code plus its one nested growth call both spend the
+      // same maxToolCalls budget.
+      expect(usage.toolCalls).toBe(2)
+      const ptc = usage.ptc!
+      expect(ptc).toEqual({ protocol: 'assistant-growth/ptc-trajectory/v1',
+        runCodeCalls: 1, failedRunCodeCalls: 0,
+        scriptBytes: Buffer.byteLength(ptcProgram, 'utf8'), scriptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        nestedCalls: 1, failedNestedCalls: 0, unadmittedNestedCalls: 0,
+        toolCallsByName: { growth_list_owner_goals: 1 },
+        longestSubCallMs: expect.any(Number), longestRunCodeMs: expect.any(Number) })
+      // Bounded structural summary only: no program source, nested arguments,
+      // tool results or per-call bodies survive into the run result.
+      expect(JSON.stringify(ptc)).not.toContain('await tools')
+      expect(Object.keys(ptc).sort()).toEqual(['failedNestedCalls', 'failedRunCodeCalls', 'longestRunCodeMs', 'longestSubCallMs', 'nestedCalls', 'protocol', 'runCodeCalls', 'scriptBytes', 'scriptDigest', 'toolCallsByName', 'unadmittedNestedCalls'])
+      expect(runtime.releases).toBeGreaterThanOrEqual(1)
+    })
+
+    it('keeps the allowlist contract digest independent from the PTC wire digest', async () => {
+      // Unit contract: the reserved transport never enters the allowlist digest,
+      // so native and PTC runs of one configuration persist the same contract.
+      const allowlistSchemas = [{ name: 'growth_list_owner_goals' }, { name: 'growth_list_skills' }]
+      const nativeView = splitGrowthToolSurface(allowlistSchemas)
+      expect(nativeView.reserved).toEqual([])
+      const ptcView = splitGrowthToolSurface([...allowlistSchemas, { name: RUN_CODE_NAME }])
+      expect(ptcView.reserved.map(schema => schema.name)).toEqual([RUN_CODE_NAME])
+      expect(acceptanceDigest([...ptcView.surface].sort((a, b) => a.name.localeCompare(b.name))))
+        .toBe(acceptanceDigest([...allowlistSchemas].sort((a, b) => a.name.localeCompare(b.name))))
+      // End to end: the actual requests differ in exactly this way, both wire
+      // digests have the stable digest shape and they are mutually different.
+      const nativeAdapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
+      const nativeHarness = await mount({ adapter: nativeAdapter })
+      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      const nativeService = new AssistantGrowthDriverService(nativeHarness.ctx, driverConfig(nativeHarness.root))
+      await runWake(nativeService)
+      expect(nativeService.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+      const nativeTools = nativeAdapter.requestTools[0]!
+      expect(nativeTools.map(tool => tool.name)).toEqual(['growth_list_owner_goals', 'growth_list_skills', 'growth_propose_skill_candidate', 'growth_read_verified_workflow'])
+      const ptcAdapter = new ScriptedAdapter([{ name: RUN_CODE_NAME, args: { code: ptcProgram, description: 'List owner goals' } }])
+      const ptcHarness = await mountPtc(ptcAdapter, { allowRunCodeTool: true })
+      const ptcService = new AssistantGrowthDriverService(ptcHarness.h.ctx, driverConfig(ptcHarness.h.root, { toolPresentation: 'ptc' }))
+      await runWake(ptcService)
+      expect(ptcService.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+      const ptcTools = ptcAdapter.requestTools[0]!
+      expect(ptcTools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
+      expect(acceptanceDigest(nativeTools)).toMatch(/^[a-f0-9]{64}$/u)
+      expect(acceptanceDigest(ptcTools)).toMatch(/^[a-f0-9]{64}$/u)
+      expect(acceptanceDigest(ptcTools)).not.toBe(acceptanceDigest(nativeTools))
+    })
+
+    it('fails the run_code call closed under the real Policy guard but leaves the native path untouched', async () => {
+      // RSI-generated profiles grant only growth_*/plugin_source_* execute rules;
+      // the reserved run_code therefore hits Policy default-deny. The wake must
+      // stay honest: presentation works, the tool call fails, usage records the
+      // failure and nothing claims success.
+      const adapter = new ScriptedAdapter([{ name: RUN_CODE_NAME, args: { code: ptcProgram, description: 'List owner goals' } }])
+      const { h } = await mountPtc(adapter)
+      const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { toolPresentation: 'ptc' }))
+      await runWake(service)
+      const health = service.health()
+      expect(health).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+      expect(adapter.surfaces[0]).toEqual([RUN_CODE_NAME])
+      // The denied execution never reaches the growth guard/budget, so the
+      // nested-call counter stays zero; the failure is recorded structurally.
+      expect(health.run!.usage.toolCalls).toBe(0)
+      expect(health.run!.usage.ptc).toMatchObject({ runCodeCalls: 1, failedRunCodeCalls: 1, nestedCalls: 0, toolCallsByName: {} })
+    })
+
+    it('keeps the native presentation and usage shape unchanged (default native)', async () => {
+      const adapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
+      const h = await mount({ adapter })
+      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+      await runWake(service)
+      const health = service.health()
+      expect(health).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+      expect(adapter.surfaces[0]).toEqual(['growth_list_owner_goals', 'growth_list_skills', 'growth_propose_skill_candidate', 'growth_read_verified_workflow'])
+      expect(health.run!.usage).not.toHaveProperty('ptc')
+      expect(Object.keys(health.run!.usage).sort()).toEqual(['cacheReadTokens', 'cacheWriteTokens', 'inputTokens', 'modelCalls', 'outputTokens', 'reasoningTokens', 'toolCalls'])
+      expect(health.run!.usage.toolCalls).toBe(1)
+    })
+
+    it('rejects PTC presentation for the WorkItem author lane before creating an Agent', async () => {
+      const config = normalizeConfig({ enabled: true, toolPresentation: 'ptc',
+        scope: { workspace: '/work', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' } })
+      await expect(runGrowthAgent({} as never, { wakeId: 'work-item-ptc-wake', authority: {} as never, config,
+        model: { provider: 'p', model: 'm' } as never, goals: {} as never, skills: {} as never,
+        feedback: { protocol: 'assistant-delivery/work-item-engineering-context/v1' } as never }))
+        .rejects.toThrow(/WorkItem author lane/u)
+    })
+
+    it('projects bounded PTC trajectory counters from synthetic session events without retaining bodies', () => {
+      const events = [
+        { type: 'tool/call', seq: 1, time: 1_000, data: { callId: 'call-1', name: RUN_CODE_NAME,
+          arguments: JSON.stringify({ code: 'SCRIPT_ONE', description: 'x' }) } },
+        { type: 'tool/ptc-dispatch-start', seq: 2, time: 1_010, data: { rootCallId: 'call-1', parentCallId: 'call-1',
+          subCallId: 'call-1:ptc:1', name: 'growth_list_owner_goals', arguments: { body: 'ARG_BODY_ONE' } } },
+        { type: 'tool/ptc-dispatch', seq: 3, time: 1_030, data: { rootCallId: 'call-1', parentCallId: 'call-1',
+          subCallId: 'call-1:ptc:1', name: 'growth_list_owner_goals', isError: false, content: [{ type: 'text', text: 'RESULT_BODY' }] } },
+        { type: 'tool/ptc-dispatch-start', seq: 4, time: 1_040, data: { rootCallId: 'call-1', parentCallId: 'call-1',
+          subCallId: 'call-1:ptc:2', name: 'not_in_allowlist', arguments: { body: 'ARG_BODY_TWO' } } },
+        { type: 'tool/ptc-dispatch', seq: 5, time: 1_075, data: { rootCallId: 'call-1', parentCallId: 'call-1',
+          subCallId: 'call-1:ptc:2', name: 'not_in_allowlist', isError: true, content: [{ type: 'text', text: 'FAIL_BODY' }] } },
+        { type: 'tool/result', seq: 6, time: 1_100, data: { message: { role: 'tool', toolCallId: 'call-1', isError: false } } },
+      ]
+      const trajectory = ptcTrajectory(events, new Set(['growth_list_owner_goals']))
+      expect(trajectory).toMatchObject({ protocol: 'assistant-growth/ptc-trajectory/v1',
+        runCodeCalls: 1, failedRunCodeCalls: 0, scriptBytes: Buffer.byteLength('SCRIPT_ONE', 'utf8'),
+        nestedCalls: 2, failedNestedCalls: 1, unadmittedNestedCalls: 1,
+        toolCallsByName: { growth_list_owner_goals: 1 }, longestSubCallMs: 35, longestRunCodeMs: 100 })
+      expect(trajectory.scriptDigest).toMatch(/^[a-f0-9]{64}$/u)
+      // No program source, nested arguments or tool result bodies survive.
+      const serialized = JSON.stringify(trajectory)
+      expect(serialized).not.toContain('SCRIPT_ONE')
+      expect(serialized).not.toContain('ARG_BODY')
+      expect(serialized).not.toContain('RESULT_BODY')
+      expect(serialized).not.toContain('FAIL_BODY')
+      // The digest is stable for identical scripts and different for new content.
+      expect(ptcTrajectory(events, new Set(['growth_list_owner_goals'])).scriptDigest).toBe(trajectory.scriptDigest)
+      const changed = [{ type: 'tool/call', seq: 1, time: 1_000, data: { callId: 'call-2', name: RUN_CODE_NAME,
+        arguments: JSON.stringify({ code: 'SCRIPT_TWO', description: 'x' }) } }]
+      expect(ptcTrajectory(changed, new Set()).scriptDigest).not.toBe(trajectory.scriptDigest)
+      // Malformed records are skipped rather than trusted or rejected.
+      const malformed = ptcTrajectory([
+        null,
+        { type: 'tool/call', seq: 1, time: 1, data: { callId: 7, name: RUN_CODE_NAME, arguments: '{not json' } },
+        { type: 'tool/ptc-dispatch', seq: 2, time: 2, data: { name: 42, subCallId: null } },
+      ], new Set())
+      expect(malformed).toMatchObject({ runCodeCalls: 1, scriptBytes: 0, scriptDigest: null,
+        nestedCalls: 1, unadmittedNestedCalls: 1 })
+    })
+
+    it.skipIf(!realRuntimeAvailable)('executes a program through the published node PTC runtime when it is installed', async () => {
+      // Intentionally skipped in this repository: @deepseek-ai/dsh-ptc-runtime-node
+      // is not a dependency (Lead decision: no root lockfile change in this
+      // slice), so a real sandboxed PTC program execution is NOT covered here.
+      // This test starts running only in a deployment that installs the package;
+      // until then the fake-runtime tests above are engineering-layer evidence,
+      // not proof of real runtime behavior.
+      const imported = await import(REAL_RUNTIME_SPECIFIER) as { default?: unknown; PtcRuntimeNode?: unknown }
+      expect(typeof (imported.PtcRuntimeNode ?? imported.default)).toBe('function')
+    })
   })
 })

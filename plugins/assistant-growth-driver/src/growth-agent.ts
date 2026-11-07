@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { defineTool, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, RUN_CODE_NAME, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -204,6 +204,39 @@ export interface GrowthSourceWakeCounters {
   readonly rejected: number
 }
 
+/**
+ * Bounded structural summary of one PTC-presented growth wake. It exists so a
+ * trajectory can inform later RSI work without ever retaining the program
+ * source, nested call arguments, parameter bodies or tool result bodies: every
+ * field is a counter, a byte length, a time span or a digest.
+ *
+ * `toolCallsByName` is bounded by the frozen allowlist (unknown nested names
+ * are counted in `unadmittedNestedCalls` instead), and the script digest is a
+ * one-way SHA-256 over length-prefixed scripts, never the scripts themselves.
+ */
+export interface GrowthPtcTrajectory {
+  readonly protocol: 'assistant-growth/ptc-trajectory/v1'
+  /** Model-direct `run_code` calls in this wake. */
+  readonly runCodeCalls: number
+  /** `run_code` calls whose final tool result was an error. */
+  readonly failedRunCodeCalls: number
+  /** Total UTF-8 bytes of all program sources (a size, never the source). */
+  readonly scriptBytes: number
+  /** SHA-256 over the ordered, length-prefixed program sources; null when none ran. */
+  readonly scriptDigest: string | null
+  /** Settled nested sub-dispatches across every program. */
+  readonly nestedCalls: number
+  readonly failedNestedCalls: number
+  /** Nested sub-dispatches naming a tool outside the frozen allowlist (all denied). */
+  readonly unadmittedNestedCalls: number
+  /** Nested sub-dispatch counts keyed by allowlisted tool name; bounded by the allowlist. */
+  readonly toolCallsByName: Readonly<Record<string, number>>
+  /** Longest settled nested sub-dispatch in milliseconds. */
+  readonly longestSubCallMs: number
+  /** Longest model-direct `run_code` call in milliseconds. */
+  readonly longestRunCodeMs: number
+}
+
 export interface GrowthAgentRunResult {
   readonly model: Readonly<ModelSelection>
   readonly sessionId: string
@@ -217,6 +250,11 @@ export interface GrowthAgentRunResult {
     reasoningTokens: number
     modelCalls: number
     toolCalls: number
+    /**
+     * Present only when the wake ran with `toolPresentation: 'ptc'`; native runs
+     * keep exactly their previous usage shape (zero behavior change when off).
+     */
+    ptc?: GrowthPtcTrajectory
   }
   /** Zeroed unless the owner opted into pluginSourceProposals and a source port is bound. */
   readonly sourceProposals: GrowthSourceWakeCounters
@@ -916,7 +954,119 @@ function registerGrowthTools(
   agentCtx.effect(() => () => disposers.forEach(dispose => dispose()), 'assistant-growth-driver.realm-tools')
 }
 
-function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: number, toolCalls: number): { outcome: GrowthAgentRunResult['outcome']; output: string; usage: GrowthAgentRunResult['usage'] } {
+/** Extract only the program source from one raw `tool/call` arguments JSON string. */
+function runCodeSource(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const parsed = JSON.parse(raw) as { code?: unknown }
+    return typeof parsed.code === 'string' ? parsed.code : undefined
+  } catch { return undefined }
+}
+
+const eventId = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value : typeof value === 'number' && Number.isFinite(value) ? String(value) : undefined
+
+/**
+ * Project a bounded structural trajectory from the session's PTC log events.
+ * Deliberately reads only names, ids, times, error flags and byte lengths: the
+ * nested `arguments` and `content` carried by `tool/ptc-dispatch`/`-start`
+ * and the program source in `tool/call` never survive into the returned
+ * object, and unknown/malformed records are skipped rather than trusted.
+ * Bounded by the frozen tool allowlist and by plain integer counters.
+ */
+export function ptcTrajectory(events: readonly unknown[], admittedToolNames: ReadonlySet<string>): GrowthPtcTrajectory {
+  let runCodeCalls = 0, failedRunCodeCalls = 0, scriptsHashed = 0, scriptBytes = 0
+  let nestedCalls = 0, failedNestedCalls = 0, unadmittedNestedCalls = 0
+  let longestSubCallMs = 0, longestRunCodeMs = 0
+  const scriptHash = createHash('sha256')
+  const runCodeStarts = new Map<string, number>()
+  const subCallStarts = new Map<string, number>()
+  const byName = new Map<string, number>()
+  const timeOf = (event: { time?: unknown }): number | undefined =>
+    typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined
+  for (const raw of events as Array<{ type?: unknown; time?: unknown; data?: unknown }>) {
+    if (raw === null || typeof raw !== 'object') continue
+    const data = raw.data as Record<string, unknown> | undefined
+    if (data === undefined || data === null || typeof data !== 'object') continue
+    const time = timeOf(raw)
+    if (raw.type === 'tool/call') {
+      if (data.name !== RUN_CODE_NAME) continue
+      runCodeCalls += 1
+      const callId = eventId(data.callId)
+      if (callId !== undefined && time !== undefined) runCodeStarts.set(callId, time)
+      const code = runCodeSource(data.arguments)
+      if (code !== undefined) {
+        const bytes = Buffer.byteLength(code, 'utf8')
+        if (Number.isSafeInteger(scriptBytes + bytes)) scriptBytes += bytes
+        // Length-prefix keeps the aggregate digest unambiguous across scripts.
+        scriptHash.update(`${bytes}\0`)
+        scriptHash.update(code)
+        scriptsHashed += 1
+      }
+      continue
+    }
+    if (raw.type === 'tool/result') {
+      // ToolResultMessage carries the call identity as `toolCallId`; older
+      // projections used `callId`, so accept either without trusting anything
+      // else from the message.
+      const message = data.message as { toolCallId?: unknown; callId?: unknown; isError?: unknown } | undefined
+      if (message === undefined || message === null || typeof message !== 'object') continue
+      const callId = eventId(message.toolCallId) ?? eventId(message.callId)
+      const start = callId === undefined ? undefined : runCodeStarts.get(callId)
+      if (callId === undefined || start === undefined) continue
+      runCodeStarts.delete(callId)
+      if (message.isError === true) failedRunCodeCalls += 1
+      if (time !== undefined) longestRunCodeMs = Math.max(longestRunCodeMs, Math.max(0, time - start))
+      continue
+    }
+    if (raw.type === 'tool/ptc-dispatch-start') {
+      const subCallId = eventId(data.subCallId)
+      if (subCallId !== undefined && time !== undefined) subCallStarts.set(subCallId, time)
+      continue
+    }
+    if (raw.type === 'tool/ptc-dispatch') {
+      nestedCalls += 1
+      const name = typeof data.name === 'string' ? data.name : undefined
+      if (name !== undefined && admittedToolNames.has(name)) byName.set(name, (byName.get(name) ?? 0) + 1)
+      else unadmittedNestedCalls += 1
+      if (data.isError === true) failedNestedCalls += 1
+      const subCallId = eventId(data.subCallId)
+      const start = subCallId === undefined ? undefined : subCallStarts.get(subCallId)
+      if (subCallId !== undefined && start !== undefined) {
+        subCallStarts.delete(subCallId)
+        if (time !== undefined) longestSubCallMs = Math.max(longestSubCallMs, Math.max(0, time - start))
+      }
+    }
+  }
+  return Object.freeze({
+    protocol: 'assistant-growth/ptc-trajectory/v1',
+    runCodeCalls, failedRunCodeCalls, scriptBytes,
+    scriptDigest: scriptsHashed > 0 ? scriptHash.digest('hex') : null,
+    nestedCalls, failedNestedCalls, unadmittedNestedCalls,
+    toolCallsByName: Object.freeze(Object.fromEntries([...byName.entries()].sort(([left], [right]) => left.localeCompare(right)))),
+    longestSubCallMs, longestRunCodeMs,
+  })
+}
+
+/**
+ * Split the registry's presentation-agnostic visibility view into the frozen
+ * allowlist surface and the reserved PTC transport. `schemas(scope)` stays
+ * presentation-agnostic for everything the growth agent registered, but under
+ * `ptc` the Host registry appends its own reserved `run_code` definition.
+ * Keeping the split in one pure helper means the contract digest can never
+ * accidentally include the presentation transport (native and PTC runs of the
+ * same configuration persist the identical tool contract digest) while the
+ * fail-closed surface check can still require exactly one reserved transport.
+ */
+export function splitGrowthToolSurface<T extends { name: string }>(schemas: readonly T[]): { surface: T[]; reserved: T[] } {
+  const surface: T[] = []
+  const reserved: T[] = []
+  for (const schema of schemas) (schema.name === RUN_CODE_NAME ? reserved : surface).push(schema)
+  return { surface, reserved }
+}
+
+function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: number, toolCalls: number,
+  presentation: 'native' | 'ptc', admittedToolNames: ReadonlySet<string>): { outcome: GrowthAgentRunResult['outcome']; output: string; usage: GrowthAgentRunResult['usage'] } {
   let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0, reasoningTokens = 0
   let output = ''
   let outcome: GrowthAgentRunResult['outcome'] = 'unknown'
@@ -951,7 +1101,10 @@ function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: 
       else if (kind === 'blocked' || kind === 'error') outcome = 'failed'
     }
   }
-  return { outcome, output, usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens, modelCalls, toolCalls } }
+  return { outcome, output, usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens, modelCalls, toolCalls,
+    // Native wakes keep exactly the previous usage shape; the PTC block is
+    // opt-in and structural only.
+    ...(presentation === 'ptc' ? { ptc: ptcTrajectory(events, admittedToolNames) } : {}) } }
 }
 
 /**
@@ -963,6 +1116,25 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
   const workItemSource = input.feedback?.protocol === 'assistant-delivery/work-item-engineering-context/v1'
   if (workItemSource) input = { ...input, config: { ...input.config, pluginSourceProposals: { ...input.config.pluginSourceProposals, allowModification: false, allowRevision: false } } }
   const { authority, config, model } = input
+  const presentation = config.toolPresentation
+  if (presentation === 'ptc') {
+    // The WorkItem author lane freezes a four-tool preauthorization set and its
+    // own execution contract; the reserved transport is not part of it, so a
+    // PTC wake there would fail mid-run with a misleading authorization error.
+    // Reject the combination before any Agent is created and tell the owner why.
+    if (workItemSource) {
+      throw new Error('assistant-growth-driver: PTC presentation is not supported for the WorkItem author lane yet: '
+        + 'the reserved run_code transport is not in its frozen preauthorization; '
+        + 'use toolPresentation "native" for workItemFailures or wait for a Host-owned preauthorization')
+    }
+    // Fail closed and loudly, never fall back to native: the model surface is
+    // an owner-declared contract, and a profile that opted into PTC but does not
+    // mount the runtime seam cannot honestly honor it. No Agent is created.
+    if (ctx.get('ptcRuntime' as never, false) === undefined) {
+      throw new Error('assistant-growth-driver: toolPresentation "ptc" requires a mounted ctx.ptcRuntime implementation '
+        + '(e.g. @deepseek-ai/dsh-ptc-runtime-node); load a PTC runtime in this profile or set toolPresentation to "native"')
+    }
+  }
   const sourcePlane = config.pluginSourceProposals.enabled ? input.sourcePlane : undefined
   let creationNamespace: string | undefined
   if (sourcePlane !== undefined && config.pluginSourceProposals.allowCreation
@@ -1124,12 +1296,44 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         // that restrict() cannot remove. Verify the complete frozen realm below.
         const denied = globalNames.filter(name => !allowedTools.has(name))
         if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
-        const finalNames = agentCtx.tools.schemas(agent).map(schema => schema.name)
-        const outsideAllowlist = finalNames.filter(name => !allowedTools.has(name))
-        if (outsideAllowlist.length > 0 || finalNames.length !== allowedTools.size) {
-          throw new Error(`assistant-growth-driver: growth Agent tool surface is not exactly the frozen allowlist: ${outsideAllowlist.join(', ')}`)
+        if (presentation === 'ptc') {
+          // PTC is presentation only. The single reserved `run_code` transport is
+          // appended by the Host registry through this scoped presentAs() effect
+          // (an effect owned by the Agent realm, released with it); the driver
+          // never registers, wraps or overrides that reserved name. Refuse any
+          // pre-existing definition before the declaration so a forged or
+          // duplicate transport can never be mistaken for the Host one.
+          if (typeof agentCtx.tools.presentAs !== 'function') {
+            throw new Error('assistant-growth-driver: toolPresentation "ptc" requires a Host tool registry with presentAs()')
+          }
+          if (agentCtx.tools.schemas(agent).some(schema => schema.name === RUN_CODE_NAME)) {
+            throw new Error('assistant-growth-driver: reserved run_code transport is already visible before PTC presentation')
+          }
+          agentCtx.tools.presentAs('ptc')
+          const reserved = agentCtx.tools.get(RUN_CODE_NAME, agent)
+          if (reserved === undefined || reserved.name !== RUN_CODE_NAME || agentCtx.tools.get(RUN_CODE_NAME, agent) !== reserved) {
+            throw new Error('assistant-growth-driver: PTC growth Agent does not expose the Host reserved run_code transport')
+          }
         }
-        const pinnedDigest = acceptanceDigest(agentCtx.tools.schemas(agent).sort((a, b) => a.name.localeCompare(b.name)))
+        const finalSchemas = agentCtx.tools.schemas(agent)
+        const { surface: allowlistedSchemas, reserved: reservedSchemas } = splitGrowthToolSurface(finalSchemas)
+        const outsideAllowlist = allowlistedSchemas.filter(schema => !allowedTools.has(schema.name)).map(schema => schema.name)
+        const missing = [...allowedTools].filter(name => !allowlistedSchemas.some(schema => schema.name === name))
+        // Exactly the frozen allowlist plus, only under PTC, exactly one reserved
+        // transport definition. Missing, extra, duplicated or foreign entries all
+        // fail closed before any model request.
+        if (outsideAllowlist.length > 0 || missing.length > 0
+          || reservedSchemas.length !== (presentation === 'ptc' ? 1 : 0)
+          || reservedSchemas.some(schema => schema.name !== RUN_CODE_NAME)) {
+          throw new Error(`assistant-growth-driver: growth Agent tool surface is not exactly the frozen allowlist: ${[...outsideAllowlist, ...missing].join(', ')}`)
+        }
+        // Contract digest: allowlist-only, so the same configuration persists the
+        // identical tool contract digest under native and PTC presentation.
+        const pinnedDigest = acceptanceDigest([...allowlistedSchemas].sort((a, b) => a.name.localeCompare(b.name)))
+        // Model-visible wire digest, deliberately separate from pinnedDigest:
+        // native presents the allowlist surface, PTC presents only the reserved
+        // transport. Recomputed from the filtered assembly before every request.
+        let wireDigest: string | undefined
         const session = agent.session
         const definitions = new Map<string, ToolDefinition>()
         let binding: Readonly<WorkItemSourceGrowthRunBinding> | undefined
@@ -1139,7 +1343,9 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
             || agent.session !== session || String(session.id) !== String(sessionId) || agent.ctx !== agentCtx
             || session.header.cwd !== authority.scope.workspace || session.header.agentPreset !== authority.scope.preset
             || preauthorizationRemovers.length !== 4 || anySourceGrowthRunDigest(binding) !== bindingDigest
-            || acceptanceDigest(agentCtx.tools.schemas(agent).sort((a, b) => a.name.localeCompare(b.name))) !== pinnedDigest
+            // Digest the allowlist surface only: the PTC presentation transport is
+            // never part of the frozen tool contract.
+            || acceptanceDigest([...splitGrowthToolSurface(agentCtx.tools.schemas(agent)).surface].sort((a, b) => a.name.localeCompare(b.name))) !== pinnedDigest
             || WORK_ITEM_SOURCE_TOOL_NAMES.some(name => agentCtx.tools.get(name, agent) !== definitions.get(name))) return false
           if (!execution) return true
           return execution.agent === agent && execution.agent.session === session && !execution.signal.aborted
@@ -1170,7 +1376,19 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
           const assembly = await next()
           if (context.agent !== agent) return assembly
-          return { ...assembly, tools: assembly.tools.filter(tool => allowedTools.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name)) }
+          if (presentation === 'ptc') {
+            // The Host assembles the collapsed PTC wire surface; anything other
+            // than exactly the reserved transport means the presentation did not
+            // take effect and must fail closed, never leak the native surface.
+            if (assembly.tools.length !== 1 || assembly.tools[0]?.name !== RUN_CODE_NAME) {
+              throw new Error('assistant-growth-driver: PTC growth Agent must present exactly the reserved run_code transport')
+            }
+            wireDigest = acceptanceDigest(assembly.tools)
+            return { ...assembly, tools: assembly.tools }
+          }
+          const tools = assembly.tools.filter(tool => allowedTools.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name))
+          wireDigest = acceptanceDigest(tools)
+          return { ...assembly, tools }
         })
 
         agentCtx.on('llm/stream', async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
@@ -1182,7 +1400,9 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
           if (options.provider !== model.provider || options.model !== model.model
             || model.reasoningEffort !== undefined && options.reasoningEffort !== model.reasoningEffort
             || options.maxTokens === undefined || options.maxTokens > config.maxOutputTokens
-            || acceptanceDigest(options.tools ?? []) !== pinnedDigest
+            // The wire digest is pinned separately from the allowlist contract
+            // digest: under PTC the request carries only the reserved transport.
+            || wireDigest === undefined || acceptanceDigest(options.tools ?? []) !== wireDigest
             || modelCalls >= config.maxModelCalls) {
             agent.cancel({ kind: 'hook', reason: 'assistant-growth-driver-model-rejected' })
             throw new Error('assistant-growth-driver: growth model request rejected by the frozen contract')
@@ -1197,7 +1417,14 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.tools.guard(execution => {
           try { if (workItemSource) { assertWorkItemBound(execution); if (guardedExecutions.has(execution)) throw new Error('work item execution already guarded') }; authority.assertCurrent() } catch (error) { agent.cancel({ kind: 'hook', reason: 'assistant-growth-driver-authority-expired' }); throw error }
           combined.throwIfAborted()
-          if (!allowedTools.has(execution.name) || totalToolCalls >= config.maxToolCalls) {
+          // The reserved PTC transport is the ONLY name outside the frozen
+          // allowlist that may execute, and only under the declared PTC mode.
+          // Every execution that reaches this guard - model-direct `run_code`
+          // and each nested sub-dispatch, failed or cancelled included after
+          // admission - counts against the same maxToolCalls budget.
+          const admitted = allowedTools.has(execution.name)
+            || (presentation === 'ptc' && execution.name === RUN_CODE_NAME)
+          if (!admitted || totalToolCalls >= config.maxToolCalls) {
             agent.cancel({ kind: 'hook', reason: 'assistant-growth-driver-tool-limit' })
             return 'assistant-growth-driver: tool request rejected by the frozen allowlist'
           }
@@ -1242,6 +1469,10 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
             executionContractDigest: acceptanceDigest({
               protocol: 'assistant-growth/execution-contract/v1',
               prompt: executionPrompt,
+              // Native keeps the historical contract shape byte-for-byte; PTC
+              // additionally freezes which presentation the wake was authorized
+              // for. The model surface difference can never be silent.
+              ...(presentation === 'ptc' ? { toolPresentation: 'ptc' as const } : {}),
               guardVersion: 1, toolContractDigest: pinnedDigest, model,
               bounds: { maxModelCalls: config.maxModelCalls, maxToolCalls: config.maxToolCalls,
                 maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
@@ -1283,7 +1514,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         source: { kind: 'assistant-growth-driver', form: 'notice', summary: 'Growth review wake' },
       }))
       await agent.whenIdle()
-      const summary = summarize(agent.session.snapshotEvents(), combined, modelCalls, totalToolCalls)
+      const summary = summarize(agent.session.snapshotEvents(), combined, modelCalls, totalToolCalls, presentation, allowedTools)
       await sessions.flush(agent.session)
       return { sessionId: String(sessionId), model, ...summary, sourceProposals: Object.freeze({ ...sourceCounters }) }
     } finally {

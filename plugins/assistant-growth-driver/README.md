@@ -33,6 +33,48 @@ dsh --profile web --dump-config
    - `growth_propose_skill_candidate`：唯一的写工具，只产「提议」。
 3. **Host 侧复核沉淀（系统 authority，非模型）**：提议携带的每个 `{session_id, goal_id}` 都由 skills 服务经 goals 独立重读、逐条重新验收；必须有 **≥ `minRepeatedSuccesses` 个不同** 的 owner-verified 成功（模型无法把门槛降到配置值以下，谎报/伪造/重复 locator 一律拒绝且零写入），同名 active / pending / retired 冲突不写。通过后只 `stageCandidate` 产一条 **pending candidate**（TTL ≤ 7 天，带 reason/trigger/parentVersion）：不进 current 版本，`skill_run` 不可达。
 
+## PTC 呈现（可选，默认 native）
+
+`toolPresentation: ptc` 只把**模型看到的工具形态**从「逐条 schema」换成 Host 原生的 PTC 模式：
+模型只看到保留传输 `run_code` 与由冻结 allowlist 生成的 TypeScript SDK，可在一次模型回合内用程序
+编排多次嵌套工具调用，嵌套结果不逐条进入上下文，只有脚本 curated 输出回到模型。它**不改变**工具
+许可、审批、预算或输出上限：PTC 不是安全边界，脚本只能经冻结工具面触达宿主。
+
+- **冻结工具面不变**：工具集合、`tools.guard` allowlist、每轮 `maxToolCalls`、Policy 预授权与
+  `health().run.sourceProposals` 语义都保持；`schemas()` 仍返回完整 allowlist（`toolContractDigest`
+  与执行契约摘要只对 allowlist 计算，native 与 PTC 对同一配置得到相同摘要）。PTC 下 registry 会追加
+  唯一的保留 `run_code` 传输：driver 不注册、不覆盖它；setup 会核对它的存在与身份，并拒绝任何多余/
+  缺失/重复的工具；模型可见 wire schema 摘要另算，native 与 PTC 各自稳定。
+- **预算语义**：`maxToolCalls` 统计 `run_code` 本身与每个通过 guard 的嵌套子调用（含其后失败或取消
+  的调用）；被预算拒绝而未执行的调用不计数。嵌套调用仍逐次经过同一 `tools/pre-execute`、Policy
+  guard、审批与输出上限。
+- **轨迹摘要**：PTC 运行结果的 `usage.ptc` 只含 `assistant-growth/ptc-trajectory/v1` 有界结构化计数
+  （`run_code` 调用/失败数、脚本总字节与 SHA-256 摘要、嵌套调用/失败/非 allowlist 计数、按工具名
+  计数、最长子调用与 `run_code` 耗时）。脚本正文、嵌套参数和工具结果正文不进入运行结果；native
+  运行的 `usage` 形状与旧版逐字段一致（没有 `ptc` 键）。
+
+**前置条件（缺一不可；不满足时 fail-closed，绝不静默回退 native）：**
+
+1. profile 挂载 `ctx.ptcRuntime`（例如 `@deepseek-ai/dsh-ptc-runtime-node`）；缺省时 Host 的
+   `dsh-tools` 会拒绝 PTC prompt。driver 在创建 Agent 前检查，缺失即失败并给出可操作错误。
+   PTC 的 `run_code` 还要求 Host 有 `workingDirectory` 服务。
+2. 审批策略不得对 `run_code` 请求人工审批：后台 Agent 无法回答交互审批。`assistant-policy` 把顶层
+   `run_code` 归为 `ask-human`，因此默认 `never` 会直接拒绝（`approval-disabled`），其他弹审批的
+   profile 也不可用。默认关闭；只有明确不请求人工审批的后台策略才可开启。
+3. Policy 需要为 growth agent 的 background `run_code` 建立精确 allow 规则（`action: execute`,
+   `resource: {kind: tool, id: run_code}`）。RSI 生成 profile 目前只给 `growth_*` / `plugin_source_*`
+   建规则，**本切片不生成该规则、也不改 assistant-policy**；缺失时 `run_code` 按 default-deny 失败
+   关闭（计入 `health().run.usage.ptc.failedRunCodeCalls`），wake 不会伪造成功。
+4. WorkItem author lane（`usageLearning.workItemFailures`）暂不支持 PTC：其冻结预授权只有 4 个
+   `plugin_source_*` 工具，保留传输不在其中。driver 在创建 Agent 前直接拒绝
+   （`PTC presentation is not supported for the WorkItem author lane yet`）；启用该 lane 时需要
+   Host 侧预授权或规则后才可开启，本切片不生成。
+
+**未覆盖**：真实 `@deepseek-ai/dsh-ptc-runtime-node` 的沙箱执行与真实模型长跑未验收（本切片不新增
+devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime` 驱动 Host 原生 `run_code` 桥、
+嵌套调度、Policy/guard 与 session 事件，属工程层证据；真实执行测试仅在 runtime 包可解析时运行，
+当前跳过。
+
 ## 配置与使用
 
 所有配置项 fail-closed；未知字段直接报错。
@@ -47,6 +89,7 @@ dsh --profile web --dump-config
 | `candidateTtlMs` | `86400000` | pending candidate TTL，schema 硬顶 7 天。 |
 | `maxModelCalls` / `maxToolCalls` / `maxOutputTokens` | `8` / `24` / `8192` | 单轮预算，到顶即 abort/cancel。 |
 | `maxDurationMs` | `120000` | 单轮墙钟上限，**硬顶 300000ms**（安全根，配置不可越过）。 |
+| `toolPresentation` | `native` | 工具呈现模式：`native` 直接发送冻结 allowlist 的每个 schema；`ptc` 只发送 Host 保留的 `run_code` 传输与生成 SDK（见 [PTC 呈现](#ptc-呈现可选默认-native)）。只改呈现，不改 allowlist/审批/预算/输出上限；开启需满足该节全部前置条件，默认关闭且关闭时行为与旧版完全一致。 |
 | `budgetId` / `budgetAmount` | 均无 | 必须**同时出现**；显式 wake 经 Policy 预留；usage 作业由 Automations 预留，避免重复扣取。已提交的未知消耗不退回。 |
 | `provider` / `model` | 继承会话 | 同时配置以固定修复/成长模型；只配置一个会拒绝。不会自动回退到 Day1。 |
 | `reasoningEffort` | 继承会话；固定模型时用供应默认 | 只有同时配置固定 provider/model 时可覆盖。 |
@@ -127,7 +170,7 @@ rules:
 
 ### 观察与关闭
 
-- 服务方法 `health()` 返回最近一次唤醒的 `lastWakeAt` / `outcome`（`never-run`/`ran`/`skipped`/`failed`）/ `reason` / 运行用量；跳过原因包括 `missing-scope`、`missing-binding:*`、`contract-expired:*`、`missing-credential`、`missing-policy`、`budget:*`。
+- 服务方法 `health()` 返回最近一次唤醒的 `lastWakeAt` / `outcome`（`never-run`/`ran`/`skipped`/`failed`）/ `reason` / 运行用量；PTC 呈现下运行用量另含 `usage.ptc`（有界轨迹摘要，见上文），native 下没有该键。跳过原因包括 `missing-scope`、`missing-binding:*`、`contract-expired:*`、`missing-credential`、`missing-policy`、`budget:*`。
 - `health().ownerAnchored`（仅该轨启用且本轮跑过时存在）给本地轨计数：`considered`（窗口内完成的 goal）/ `attempted`（实际尝试提交）/ `recorded`（新沉淀）/ `replayed`（幂等重放）/ `abstained`（多工具等无法归约为单步 agent-turn，诚实跳过）/ `stopped`（非空时为 fail-closed 中断原因，如 `inspect:*`、`authority:*`、`runtime-unavailable:*`）。
 - 停用：把 `enabled` 置回 `false`（或移除插件配置）即恢复休眠，不影响已经 staged 的 pending candidate——它们仍只由 owner 在既有 skills/automations 审批面处理。
 

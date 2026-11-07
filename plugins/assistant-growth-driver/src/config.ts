@@ -73,6 +73,16 @@ export interface AssistantGrowthDriverConfig {
   maxToolCalls?: number
   maxOutputTokens?: number
   maxDurationMs?: number
+  /**
+   * How the model sees the frozen growth tool surface. `native` (default) sends
+   * every allowlisted schema directly; `ptc` presents only the Host's reserved
+   * `run_code` transport plus a generated SDK, so one model turn can orchestrate
+   * several nested tool calls whose intermediate results stay out of context.
+   * PTC changes presentation only: the allowlist, approvals, budget and output
+   * caps are unchanged. It requires a mounted `ctx.ptcRuntime` and fails closed
+   * when that runtime is absent.
+   */
+  toolPresentation?: 'native' | 'ptc'
   /** Omit both to inherit the owner conversation; specify both for a fixed route. */
   provider?: string
   model?: string
@@ -116,7 +126,8 @@ export interface NormalizedPluginSourceProposalsConfig {
   readonly planTtlMs: number
 }
 
-export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals' | 'usageLearning'>> {
+export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals' | 'usageLearning' | 'toolPresentation'>> {
+  readonly toolPresentation: 'native' | 'ptc'
   readonly provider: string | null
   readonly model: string | null
   readonly reasoningEffort: string | null
@@ -140,6 +151,7 @@ const fields = new Set([
   'maxToolCalls',
   'maxOutputTokens',
   'maxDurationMs',
+  'toolPresentation',
   'provider',
   'model',
   'reasoningEffort',
@@ -210,6 +222,10 @@ const schema = Schema.object({
   maxOutputTokens: Schema.natural().min(1).max(32_768).default(8_192),
   // Security root: a growth authority may never live longer than 300000 ms.
   maxDurationMs: Schema.natural().min(1_000).max(300_000).default(120_000),
+  // Presentation only; the frozen allowlist/approval/budget contract below is
+  // identical in both modes. Absence of a PTC runtime is a runtime failure, not
+  // a config-time fallback.
+  toolPresentation: Schema.union(['native', 'ptc']).default('native'),
   provider: boundedText(256),
   model: boundedText(256),
   reasoningEffort: boundedText(128),
@@ -257,6 +273,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     maxToolCalls: config.maxToolCalls ?? 24,
     maxOutputTokens: config.maxOutputTokens ?? 8_192,
     maxDurationMs: config.maxDurationMs ?? 120_000,
+    toolPresentation: config.toolPresentation ?? 'native',
     provider: config.provider ?? null,
     model: config.model ?? null,
     reasoningEffort: config.reasoningEffort ?? null,
