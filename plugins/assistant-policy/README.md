@@ -216,6 +216,7 @@ $bin preset recommended --yes
 | `assistant-work-items` | `intakeLedger.evaluation.enabled: true` | `assistant-proactive.intakeEvaluation` 已显式配置合法的 `rules`（1–16 条，唯一 `ruleId`，`ceiling` ∈ `ignore|digest|notify|accept`）、`provider`、`model` |
 | `assistant-proactive` | `intakeEvaluation.enabled: true`（observe-only 的生产 intake 评估器） | 同上；预设绝不猜测模型路由或规则 |
 | `assistant-delivery` | `attentionAttachOverCap: true` | 无 |
+| `assistant-delivery` | `naturalFeedback.coverage: true`、`naturalFeedback.mixedIntent: true`（自然结果同义/带原因与结果+续办混合意图） | 无；仍要求认证主人、准确报告回复与既有 work-item 反馈/续办授权 |
 | `assistant-evaluation` | `notificationOutcomesEnabled: true` | 无 |
 | `event-triggers` | `pollerEnabled: true` | 无 |
 | `assistant-memory-learning` | `workItemExperiences: true` | `assistant-verifier.memoryReviews.workItemExperiences` 与 `personal-assistant.personalMemory.automaticLearning.workItemExperiences` 已由 owner 显式开启（新签名授权）；预设不生成授权 |

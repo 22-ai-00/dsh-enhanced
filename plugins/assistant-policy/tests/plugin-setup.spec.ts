@@ -275,6 +275,8 @@ describe('plugin setup: recommended preset', () => {
       { id: 'dsh-enhanced-assistant-work-items', key: 'enabled', from: false, to: true },
       { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
       { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
       { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
     expect(result.skipped).toEqual([
@@ -303,7 +305,9 @@ describe('plugin setup: recommended preset', () => {
       '- id: dsh-enhanced-assistant-work-items', '  config:', '    enabled: false', '    mode: active', '',
     ].join('\n'), 'utf8')
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
-    expect(result.changes.map(change => change.id)).toEqual(['dsh-enhanced-assistant-delivery'])
+    expect(result.changes.map(change => change.id)).toEqual([
+      'dsh-enhanced-assistant-delivery', 'dsh-enhanced-assistant-delivery', 'dsh-enhanced-assistant-delivery',
+    ])
     expect(result.skipped.map(skip => skip.id)).toEqual(expect.arrayContaining(['dsh-enhanced-event-triggers', 'dsh-enhanced-assistant-work-items']))
     const workItemsSkips = result.skipped.filter(skip => skip.id === 'dsh-enhanced-assistant-work-items')
     expect(workItemsSkips).toEqual([{ id: 'dsh-enhanced-assistant-work-items', reason: 'mode is active but not enabled; complete the active config deliberately' }])
@@ -406,6 +410,8 @@ describe('plugin setup: assembly preset guards', () => {
       { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: false, to: true },
       { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.enabled', from: false, to: true },
       { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
       { id: 'dsh-enhanced-assistant-evaluation', key: 'notificationOutcomesEnabled', from: false, to: true },
       { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])

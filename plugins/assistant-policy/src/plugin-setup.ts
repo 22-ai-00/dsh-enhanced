@@ -678,6 +678,11 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
     set: [['attentionAttachOverCap', true]],
   },
   {
+    id: 'dsh-enhanced-assistant-delivery',
+    purpose: 'recognize natural owner replies — synonyms, a reason after a result, and one reply carrying both a result and a continuation — as trusted work-item feedback',
+    set: [['naturalFeedback.coverage', true], ['naturalFeedback.mixedIntent', true]],
+  },
+  {
     id: 'dsh-enhanced-assistant-evaluation',
     purpose: 'sync Delivery notification outcome facts into the evaluation ledger (WP22)',
     set: [['notificationOutcomesEnabled', true]],

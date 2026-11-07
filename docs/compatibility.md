@@ -16,7 +16,7 @@ Policy 与 Delivery 须成套升级。Policy 不再注册保留档位 `auto`，�
 
 ## 插件配置 CLI 与 recommended 预设
 
-`@dsh-enhanced/assistant-policy` 新增安装期 bin `dsh-plugin-setup` 与导出子路径 `./plugin-setup`（`@dsh-enhanced/personal-assistant` 同名 bin 转发）。它只改写所选 profile 的 `cordis.patch.yml`，不新增数据库 schema、运行时服务或 DSH/Cordis 依赖。没有任何插件或权限默认值改变：WorkItems、intake 账本、Delivery `attentionAttachOverCap`、Evaluation `notificationOutcomesEnabled` 与 event-triggers `pollerEnabled` 仍默认关闭，`permission.defaultPreset` 仍为原有的 `danger-full-access`。`preset recommended` 由 owner 或 onboarding 显式执行，才写入上述开关（WorkItems 保持 `observe`），未安装或未加载的插件跳过。安装器只在引导式首装（`--guided` 或首个问题选推荐）时询问是否应用（默认是），或在显式传 `--plugin-preset <name>` 时应用；`--yes`、非交互和逐项自定义安装默认不应用。Policy 与 Control Plane 配置、Policy 停用、Delivery `ownerRoutes`/`policyRef`、秘密值及占位飞书凭据的启用均拒绝写入。
+`@dsh-enhanced/assistant-policy` 新增安装期 bin `dsh-plugin-setup` 与导出子路径 `./plugin-setup`（`@dsh-enhanced/personal-assistant` 同名 bin 转发）。它只改写所选 profile 的 `cordis.patch.yml`，不新增数据库 schema、运行时服务或 DSH/Cordis 依赖。没有任何插件或权限默认值改变：WorkItems、intake 账本、Delivery `attentionAttachOverCap`/`naturalFeedback`、Evaluation `notificationOutcomesEnabled` 与 event-triggers `pollerEnabled` 仍默认关闭，`permission.defaultPreset` 仍为原有的 `danger-full-access`。`preset recommended` 由 owner 或 onboarding 显式执行，才写入上述开关（WorkItems 保持 `observe`），未安装或未加载的插件跳过。安装器只在引导式首装（`--guided` 或首个问题选推荐）时询问是否应用（默认是），或在显式传 `--plugin-preset <name>` 时应用；`--yes`、非交互和逐项自定义安装默认不应用。Policy 与 Control Plane 配置、Policy 停用、Delivery `ownerRoutes`/`policyRef`、秘密值及占位飞书凭据的启用均拒绝写入。
 
 ## 统一 intake 账本（WorkItems 10）
 
