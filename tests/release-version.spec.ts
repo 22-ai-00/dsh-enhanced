@@ -1215,7 +1215,7 @@ describe('release version workflow', () => {
     // repository check stays on the Linux lanes.
     expect(ciWorkflow.match(/run: pnpm check\n/gu) ?? []).toHaveLength(0)
     expect(ciWorkflow).not.toContain('Collect remaining package test failures')
-    expect(ciWorkflow).toContain("VITEST_MAX_WORKERS: '4'")
+    expect(ciWorkflow).toContain("VITEST_MAX_WORKERS: '2'")
     const workerLimit = /^ {2}VITEST_MAX_WORKERS: '([1-9]\d*)'$/mu
     expect(releaseWorkflow.match(workerLimit)?.[1]).toBe(ciWorkflow.match(workerLimit)?.[1])
     expect(ciWorkflow).toContain('cancel-in-progress: true')

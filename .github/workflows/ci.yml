@@ -13,10 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Ubuntu runners have 4 vCPU; the package suite is CPU-bound but each vitest
-  # worker stays single-threaded, so 4 workers use the machine without
-  # oversubscribing it. macOS runners (3 vCPU) override these in their job.
-  VITEST_MAX_WORKERS: '4'
+  # Ubuntu runners have 4 vCPU. Keep two workers per package (timing-sensitive
+  # suites starve at higher oversubscription) and run four packages at once,
+  # which is still twice the old 2/2 shape without re-introducing timeouts.
+  # macOS runners (3 vCPU) override these in their job.
+  VITEST_MAX_WORKERS: '2'
   DSH_TEST_CONCURRENCY: '4'
 
 jobs:
@@ -278,7 +279,7 @@ jobs:
     timeout-minutes: 30
     env:
       # macOS runners expose 3 vCPU; cap workers to that instead of the global 4.
-      VITEST_MAX_WORKERS: '3'
+      VITEST_MAX_WORKERS: '2'
       DSH_TEST_CONCURRENCY: '3'
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: '2'
       DSH_NATIVE_LAUNCHD_TEST: '1'

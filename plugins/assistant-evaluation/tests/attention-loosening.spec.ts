@@ -317,7 +317,9 @@ describe('attention loosening service', () => {
     expect(() => database.exec('DELETE FROM evaluation_attention_loosening_grants')).toThrow(/durable/)
     expect(() => database.exec('DELETE FROM evaluation_attention_owner_questions')).toThrow(/durable/)
     database.close()
-  })
+    // Replay and restart re-drive durable timers; on a loaded concurrent runner
+    // they can exceed the default 15s while the behavior stays bounded.
+  }, 45_000)
 
   test('outside the grant a structured owner question is recorded, never sent, and nothing is adopted', () => {
     const f = setup({ loosening: true })

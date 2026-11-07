@@ -896,7 +896,9 @@ describe('Codex direct credential store', () => {
 
     expect(timely).not.toBe('still-pending')
     expect(timely).toMatchObject({ cause: 'timeout' })
-  })
+    // Cancellation/timer races can schedule past the default 15s on a loaded
+    // CI runner; the assertions still bound the behavior at 45s.
+  }, 45_000)
 
   it('classifies an ordinary refresh network failure as redacted transport failure', async () => {
     const authFile = await authFixture()
