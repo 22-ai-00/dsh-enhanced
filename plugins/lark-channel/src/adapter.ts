@@ -716,8 +716,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         principal: { channel: 'lark', account: this.config.account, tenant: this.config.tenant, user: message.senderId },
         conversation: { kind: message.chatType === 'p2p' ? 'dm' : 'group', chat: message.chatId },
         addressed,
-        // The normalized SDK message carries no sender type; bot senders are not distinguished yet.
-        senderIsBot: false,
+        // The transport reports Feishu's provider-declared sender type; older
+        // transports omit it and are treated as user senders.
+        senderIsBot: message.senderIsBot === true,
         ...(message.replyToMessageId === undefined ? {} : { replyToProviderMessageId: message.replyToMessageId }),
         // `text` is transient: Delivery forwards it only to an opted-in observer and never stores it.
         ...(normalized.length === 0 ? {} : { contentDigest: createHash('sha256').update(normalized, 'utf8').digest('hex'), text: normalized }),

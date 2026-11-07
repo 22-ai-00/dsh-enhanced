@@ -44,6 +44,18 @@ describe('Lark inbound normalization', () => {
     })
   })
 
+  test('labels a provider-declared bot sender only when it is explicitly true', () => {
+    const peer = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, senderId: 'ou_peer_bot', senderIsBot: true,
+    }), 100_100)
+    expect(peer).toMatchObject({ outcome: 'accept', envelope: { metadata: { senderIsBot: 'true' } } })
+    const user = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, senderId: 'ou_peer_bot',
+    }), 100_100)
+    expect(user).toMatchObject({ outcome: 'accept' })
+    expect((user as { envelope: { metadata: Record<string, string> } }).envelope.metadata).not.toHaveProperty('senderIsBot')
+  })
+
   test('preserves an exact provider reply target as bounded non-prompt metadata', () => {
     expect(normalizeLarkMessage(config, message({
       messageId: 'om_feedback', content: '/feedback helpful', replyToMessageId: 'om_answer',

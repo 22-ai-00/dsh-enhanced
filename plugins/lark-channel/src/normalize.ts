@@ -77,6 +77,7 @@ export function normalizeLarkMessage(
         providerMessageId: eventId,
         rawContentType: key(input.rawContentType, 'rawContentType'),
         resourceCount: String(Math.min(input.resources.length, 999)),
+        ...(input.senderIsBot === true ? { senderIsBot: 'true' } : {}),
         ...(input.replyToMessageId === undefined
           ? {}
           : { replyToProviderMessageId: providerCapability(input.replyToMessageId, 'replyToMessageId') }),

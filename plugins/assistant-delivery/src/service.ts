@@ -476,6 +476,19 @@ export interface OwnerForegroundLearningTask {
   readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean; quiescent: boolean; modelSelectionState: 'missing' | 'frozen' | 'inconsistent'; modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>; reply?: Readonly<Pick<OwnerForegroundTaskSourceContent['reply'], 'outboxId' | 'intentDigest' | 'fullTextDigest'> & { text: string; truncated: boolean; redacted: boolean }> }>
 }
 
+/**
+ * One explicitly allowlisted provider bot. The exact channel/account/tenant/user
+ * tuple is the trust anchor; `senderIsBot` only labels the provider's declaration.
+ * A peer keeps its own Policy subject and conversation binding, so it never
+ * inherits the owner's tools, memory, work-item feedback or continuation lanes.
+ */
+export interface PeerAgentAuthority {
+  readonly channel: string
+  readonly account: string
+  readonly tenant: string
+  readonly user: string
+}
+
 export interface Config {
   databasePath: string
   spoolPath: string
@@ -542,6 +555,14 @@ export interface Config {
    *   admission is recorded. Ignored unless `coverage` is also on.
    */
   naturalFeedback?: { coverage?: boolean; mixedIntent?: boolean }
+  /**
+   * Opt-in peer-agent allowlist (default empty). A group message whose provider
+   * envelope carries `senderIsBot=true` and whose exact principal tuple is
+   * listed here is admitted into its own linked-principal lane. The peer keeps a
+   * distinct Policy subject and never inherits owner tools, memory, work-item
+   * feedback or continuation lanes. No peer is trusted by default.
+   */
+  peerAgents?: readonly PeerAgentAuthority[]
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -790,6 +811,12 @@ const configSchema = Schema.object({
     coverage: Schema.boolean().default(false),
     mixedIntent: Schema.boolean().default(false),
   }),
+  peerAgents: Schema.array(Schema.object({
+    channel: Schema.string().min(1).required(),
+    account: Schema.string().min(1).required(),
+    tenant: Schema.string().min(1).required(),
+    user: Schema.string().min(1).required(),
+  })).default([]),
   ownerRoutes: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
     conversation: Schema.object({
@@ -3430,6 +3457,17 @@ export class AssistantDeliveryService extends Service {
       && this.isInboundAuthorized(binding, inbox.envelope)
   }
 
+  /**
+   * Exact owner-configured peer bot, or `undefined`. `senderIsBot` is only the
+   * provider's declaration; the allowlisted tuple is the actual authority.
+   */
+  private peerAgentAuthority(envelope: Readonly<InboundEnvelope>): PeerAgentAuthority | undefined {
+    if (envelope.metadata?.senderIsBot !== 'true') return undefined
+    return this.config.peerAgents?.find(peer =>
+      peer.channel === envelope.channel && peer.account === envelope.account
+      && peer.tenant === envelope.principal.tenant && peer.user === envelope.principal.user)
+  }
+
   private isInboundAuthorized(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
@@ -4773,6 +4811,24 @@ export class AssistantDeliveryService extends Service {
     let record = accepted.record
     if (!['received', 'authorized'].includes(record.status)) {
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+    }
+    // An explicitly allowlisted peer bot enters its own linked-principal lane.
+    // It is still subject to the ordinary Policy ingest decision below and never
+    // receives owner feedback/continuation behavior.
+    if (!this.deliveryStore.isAuthorizedPrincipal(envelope.principal)
+      && this.peerAgentAuthority(envelope) !== undefined) {
+      const owner = this.deliveryStore.activeOwnerPrincipal()
+      if (owner === undefined) {
+        record = this.deliveryStore.deadLetterInbox(record.id, 'peer-owner-unavailable')
+        return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+      }
+      try {
+        this.deliveryStore.ensurePeerPrincipal(envelope.principal, owner.id)
+      } catch (error) {
+        this.context.logger.warn(`assistant-delivery: peer principal admission failed: ${String(error)}`)
+        record = this.deliveryStore.deadLetterInbox(record.id, 'peer-principal-unavailable')
+        return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+      }
     }
     if (!this.deliveryStore.isAuthorizedPrincipal(envelope.principal)) {
       record = this.deliveryStore.deadLetterInbox(record.id, 'unauthorized-principal')

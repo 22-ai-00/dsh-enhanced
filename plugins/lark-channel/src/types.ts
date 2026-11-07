@@ -19,6 +19,8 @@ export interface LarkMessage {
   chatId: string
   chatType: 'group' | 'p2p'
   senderId: string
+  /** Provider-declared app/bot sender; absent means a user or an older transport. */
+  senderIsBot?: boolean
   content: string
   rawContentType: string
   resources: readonly LarkResource[]

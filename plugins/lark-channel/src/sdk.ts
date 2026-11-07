@@ -1202,12 +1202,18 @@ function safeNormalizedContent(message: NormalizedMessage): string {
   return content.trim()
 }
 
-export function toSafeLarkMessage(message: NormalizedMessage): LarkMessage {
-  return {
+/** Feishu marks an application/bot sender with `sender_type: 'app'` (case-insensitive). */
+function rawSenderIsBot(raw: unknown): boolean {
+  const senderType = (raw as { sender?: { sender_type?: unknown } } | null)?.sender?.sender_type
+  return typeof senderType === 'string' && senderType.toLowerCase() === 'app'
+}
+
+export function toSafeLarkMessage(message: NormalizedMessage, senderIsBot = false): LarkMessage {  return {
     messageId: message.messageId,
     chatId: message.chatId,
     chatType: message.chatType,
     senderId: message.senderId,
+    ...(senderIsBot ? { senderIsBot: true } : {}),
     content: safeNormalizedContent(message),
     rawContentType: message.rawContentType,
     resources: message.resources,
@@ -1272,7 +1278,7 @@ export class OfficialLarkTransport implements LarkTransport {
           botIdentity: this.identity,
           stripBotMentions: true,
         })
-        await this.handlers.message(toSafeLarkMessage(message))
+        await this.handlers.message(toSafeLarkMessage(message, rawSenderIsBot(raw)))
       },
       'card.action.trigger': async (raw: unknown) => {
         if (this.handlers === undefined) return

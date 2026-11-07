@@ -174,7 +174,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。
 - 私聊详细进度只使用 Delivery 生成的限长、常见凭据脱敏 preview；它不是秘密扫描器。群聊始终不发送参数或结果，reasoning/thinking 内容在任何会话都不外发。
 - 群消息默认必须直接提及机器人；`@all` 不等于提及。最终授权始终由 Delivery/Policy 决定。
-- 若 Delivery 提供 `observe`（WorkItems `intakeLedger.enabled` 时才有 observer），每条规范化、未过期、非问题/审批答复的消息（含因未 @ 而丢弃的群消息）额外上报一次元数据观察：事件 ID、时间、发送者、会话、是否寄址（私聊/@机器人/命令）、回复目标和正文 SHA-256，不含正文；观察失败不影响接收。当前 `senderIsBot` 恒为 `false`。
+- 若 Delivery 提供 `observe`（WorkItems `intakeLedger.enabled` 时才有 observer），每条规范化、未过期、非问题/审批答复的消息（含因未 @ 而丢弃的群消息）额外上报一次元数据观察：事件 ID、时间、发送者、会话、是否寄址（私聊/@机器人/命令）、回复目标和正文 SHA-256，不含正文；观察失败不影响接收。`senderIsBot` 取飞书事件 `sender.sender_type`（`app` 为 true），旧 transport 不提供时按 false；它只是观察标签，是否接受仍由 Delivery/Policy 决定。
 
 完整的文件系统、子进程、浏览器、审批签名和 Policy 说明见[进度与安全文档](docs/progress-security.md)。
 

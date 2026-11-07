@@ -2564,6 +2564,62 @@ export class DeliveryStore {
     return row?.status === 'active'
   }
 
+  /** The single active owner, or `undefined` while owner authority is absent/ambiguous. */
+  activeOwnerPrincipal(): DeliveryPrincipal | undefined {
+    this.assertOpen()
+    const rows = this.database.prepare(`
+      SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+      FROM delivery_principals WHERE role = 'owner' AND status = 'active' ORDER BY id LIMIT 2
+    `).all() as unknown as PrincipalRow[]
+    return rows.length === 1 ? principalFromRow(rows[0]!) : undefined
+  }
+
+  /**
+   * Activate one explicitly allowlisted peer bot as a linked principal of the
+   * current owner. This never creates an owner and never revives a revoked row:
+   * the peer lane is an exact owner-configured authorization, not pairing or a
+   * silent upgrade of an existing identity.
+   */
+  ensurePeerPrincipal(input: ExternalPrincipalKey, ownerPrincipalId: string): DeliveryPrincipal {
+    this.assertOpen()
+    const principal = canonicalPrincipal(input)
+    const json = JSON.stringify(principal)
+    const hash = principalHash(principal)
+    return this.transaction(() => {
+      const owner = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE id = ?
+      `).get(ownerPrincipalId) as PrincipalRow | undefined
+      if (owner === undefined || owner.role !== 'owner' || owner.status !== 'active') {
+        throw new DeliveryStoreError('unauthorized-principal', 'peer agent requires the single active owner')
+      }
+      const existing = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE key_hash = ?
+      `).get(hash) as PrincipalRow | undefined
+      if (existing === undefined) {
+        const id = `principal_${randomUUID()}`
+        const now = this.now()
+        this.database.prepare(`
+          INSERT INTO delivery_principals (
+            id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          ) VALUES (?, ?, ?, 'linked', 'active', ?, ?, ?, 1)
+        `).run(id, hash, json, owner.id, now, now)
+        return principalFromRow(this.database.prepare(`
+          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          FROM delivery_principals WHERE id = ?
+        `).get(id) as unknown as PrincipalRow)
+      }
+      if (existing.role !== 'linked' || existing.linked_to_id !== owner.id) {
+        throw new DeliveryStoreError('unauthorized-principal', 'peer agent identity is not linked to the active owner')
+      }
+      if (existing.status !== 'active') {
+        throw new DeliveryStoreError('unauthorized-principal', 'peer agent identity was revoked; re-authorize it explicitly')
+      }
+      return principalFromRow(existing)
+    })
+  }
+
   getPrincipal(input: ExternalPrincipalKey): DeliveryPrincipal | undefined {
     this.assertOpen()
     const row = this.database.prepare(`

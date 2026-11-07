@@ -83,6 +83,7 @@ Host-only 工程来源使用独立 `assistant-delivery/work-item-engineering-con
 | `ownerReportRouting.orderAcrossLanes` | `false` | 仅在 `linkedFallback` 报告路由已启用时有实际意义：同一工作项仍有未结算的早期报告时，新报告沿用该报告的 origin 或同一合格别名，由既有 per-lane claim 顺序按 revision 先后发送；保序限于同一 lane（typed 与普通 background 分开），origin 已被 `/new` 轮换时不粘滞 origin；sticky 去向不可用时回退普通路由，不阻塞投递 |
 | `naturalFeedback.coverage` | `false` | 可选：启用加宽的自然结果解析（同义/多语言、结果后允许附带原因或证据）。关闭时行为与旧版完全一致：前台仍只按旧版短语解析（含“还是不行，<原因>”形式），后台报告反馈仍只接受旧版整句白名单。开启后问句、假设/条件、引号内文本、否定引用（“并没有解决”）、矛盾陈述、含糊情绪与撤回命令仍不产生结果证据 |
 | `naturalFeedback.mixedIntent` | `false` | 可选，依赖 `naturalFeedback.coverage`：同一条认证主人的 WorkItems 报告回复同时含结果判断与明确续办指令时，拆成两件各自鉴权/幂等/目标绑定的决定——先记 canonical 结果，再按既有续办队列入队；任一侧未获授权时只做允许的一件并在 Host 日志记录原因。关闭时不拆分，行为与旧版一致 |
+| `peerAgents` | `[]` | 可选、默认空的精确 peer bot 白名单（channel/account/tenant/user）。仅当入站 envelope 带 `senderIsBot=true` 且完整元组匹配时，才把该 bot 激活为当前 owner 的 linked principal 并进入它自己的会话；它保留独立 Policy subject，不继承 owner 的工具、记忆、WorkItem 反馈或续办通道。未列入的 bot 仍是 `unauthorized-principal` |
 | `ownerRoutes` | `[]` | Host-owned 稳定 owner 路由；每项精确固定 id、conversation、principal、绝对 workspace、preset、policyRef 和 minimumGeneration |
 
 所有可变部署值都经过 Schemastery 校验。每个 binding 会持久固定 workspace 与已解析的 preset id；有 roster 时，fresh create 和 cold resume 都在 Agent 发布前挂载该 preset，不能把 session header 中的 `agentPreset` 当成已经完成组合。fresh create 的新 workspace 使用 `0700` 请求模式，已有目录的权限不会被改写；cold resume 只验证持久 workspace 仍是目录，不会在仓库被删除或网络盘掉线时悄悄创建一个空目录。SQLite 使用 `WAL`、`synchronous=FULL`、foreign keys、busy timeout 和 forward-only schema；私有目录/数据库权限分别收窄为 `0700` / `0600`，未来 schema 会拒绝打开。
