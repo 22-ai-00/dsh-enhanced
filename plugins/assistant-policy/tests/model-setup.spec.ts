@@ -84,8 +84,8 @@ describe('model setup', () => {
   test('declares a custom gateway route under llm-pi-ai and stores the key from the environment', async () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1', '--display-name', 'Super Relay', '--store-key',
+      '--dsh-home', home, '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1', '--display-name', 'Custom Gateway', '--store-key',
     ]))
 
     const previous = process.env.DSH_ENHANCED_MODEL_API_KEY
@@ -99,16 +99,16 @@ describe('model setup', () => {
     }
 
     const settings = parse(await readFile(result.settingsPath, 'utf8')) as any
-    expect(settings['agent-default-model']).toEqual({ provider: 'super-relay', model: 'glm5.2' })
-    expect(settings['llm-pi-ai'].providers['super-relay']).toEqual({
-      displayName: 'Super Relay',
-      apiKeyEnv: 'SUPER_RELAY_API_KEY',
+    expect(settings['agent-default-model']).toEqual({ provider: 'custom-gateway', model: 'glm5.2' })
+    expect(settings['llm-pi-ai'].providers['custom-gateway']).toEqual({
+      displayName: 'Custom Gateway',
+      apiKeyEnv: 'CUSTOM_GATEWAY_API_KEY',
       api: 'openai-completions',
-      baseURL: 'https://super-relay.example/v1',
+      baseURL: 'https://gateway.example/v1',
       models: [{ id: 'glm5.2', name: 'glm5.2' }],
     })
     const credentials = parse(await readFile(result.credentialsPath!, 'utf8')) as any
-    expect(credentials.SUPER_RELAY_API_KEY).toBe('plat-secret-value')
+    expect(credentials.CUSTOM_GATEWAY_API_KEY).toBe('plat-secret-value')
   })
 
   test('writes native defaults to separate profiles and preserves whole gateway config', async () => {
@@ -124,8 +124,8 @@ describe('model setup', () => {
       '--dsh-home', home, '--profile', 'web', '--provider', 'deepseek-official',
     ])))
     const configured = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--profile', 'assistant', '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1',
+      '--dsh-home', home, '--profile', 'assistant', '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1',
     ]))
     await applyModelSetup(configured)
 
@@ -134,12 +134,12 @@ describe('model setup', () => {
     expect(web).toContain('# web owner')
     expect(web).toContain('path: !!js dshHomePath("web")')
     expect(web).toContain('provider: deepseek-official')
-    expect(web).not.toContain('super-relay')
+    expect(web).not.toContain('custom-gateway')
     expect(assistant).toContain('# assistant owner')
     expect(assistant).toContain('reasoningEffort: high')
     expect(assistant).toContain('retained:')
-    expect(assistant).toContain('provider: super-relay')
-    expect(assistant).toContain('baseURL: https://super-relay.example/v1')
+    expect(assistant).toContain('provider: custom-gateway')
+    expect(assistant).toContain('baseURL: https://gateway.example/v1')
     await applyModelSetup(configured)
     expect(await readFile(assistantPath, 'utf8')).toBe(assistant)
     await expect(readFile(join(home, 'settings.yaml'), 'utf8')).rejects.toThrow()
@@ -148,35 +148,35 @@ describe('model setup', () => {
   test('copies an existing native gateway provider when creating the profile override', async () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1',
+      '--dsh-home', home, '--profile', 'web', '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1',
     ]))
     const result = await applyModelSetup(resolved)
     const patch = await readFile(result.profilePatchPath!, 'utf8')
     expect(patch).toContain('bundled:')
     expect(patch).toContain('https://bundled.example/v1')
-    expect(patch).toContain('super-relay:')
+    expect(patch).toContain('custom-gateway:')
   })
 
   test('creates a provider map when the native gateway row has no config', async () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1',
+      '--dsh-home', home, '--profile', 'web', '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1',
     ]))
     const result = await applyModelSetupWithReader(resolved, async (_home, _profile, rowId) => {
       return rowId === 'llm-pi-ai' ? new YAMLMap() : fixtureEffectiveConfig(_home, _profile, rowId)
     })
     const patch = await readFile(result.profilePatchPath!, 'utf8')
     expect(patch).toContain('providers:')
-    expect(patch).toContain('super-relay:')
+    expect(patch).toContain('custom-gateway:')
   })
 
   test('refuses a failed native config read before writing credentials or profile patch', async () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1', '--store-key',
+      '--dsh-home', home, '--profile', 'web', '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1', '--store-key',
     ]))
     await expect(applyModelSetupWithReader(resolved, async () => {
       throw new Error('native dump failed')
@@ -209,8 +209,8 @@ describe('model setup', () => {
 
     await writeFile(settingsPath, 'llm-pi-ai:\n  providers:\n    retained: {}\n', 'utf8')
     const gateway = resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', home, '--profile', 'web', '--provider', 'super-relay', '--model', 'glm5.2',
-      '--base-url', 'https://super-relay.example/v1', '--store-key',
+      '--dsh-home', home, '--profile', 'web', '--provider', 'custom-gateway', '--model', 'glm5.2',
+      '--base-url', 'https://gateway.example/v1', '--store-key',
     ]))
     await expect(applyModelSetup(gateway)).rejects.toThrow('pending legacy settings.yaml model section')
     await expect(readFile(join(home, '.credentials.yaml'), 'utf8')).rejects.toThrow()
@@ -218,14 +218,14 @@ describe('model setup', () => {
 
   test('derives POSIX credential references and defaults deepseek to DEEPSEEK_API_KEY', () => {
     expect(deriveApiKeyEnv('deepseek-official')).toBe('DEEPSEEK_API_KEY')
-    expect(deriveApiKeyEnv('super-relay')).toBe('SUPER_RELAY_API_KEY')
+    expect(deriveApiKeyEnv('custom-gateway')).toBe('CUSTOM_GATEWAY_API_KEY')
     expect(deriveApiKeyEnv('acme.gateway')).toBe('ACME_GATEWAY_API_KEY')
   })
 
   test('fails closed for unsafe paths, missing custom base url, and misapplied transport fields', () => {
     expect(() => resolveModelSetup(parseModelSetupArgs(['--dsh-home', 'relative']))).toThrow('absolute path')
     expect(() => resolveModelSetup(parseModelSetupArgs([
-      '--dsh-home', '/tmp/dsh', '--provider', 'super-relay', '--model', 'glm5.2',
+      '--dsh-home', '/tmp/dsh', '--provider', 'custom-gateway', '--model', 'glm5.2',
     ]))).toThrow('requires --base-url')
     expect(() => resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', '/tmp/dsh', '--base-url', 'https://x/v1',
@@ -352,8 +352,8 @@ describe('model setup', () => {
   })
 
   test.each([
-    'agent-default-model: { provider: super-relay, model: custom }\n',
-    'theme: dark\nagent-default-model:\n  provider: super-relay\n  model: custom\n  reasoningEffort: high\n',
+    'agent-default-model: { provider: custom-gateway, model: custom }\n',
+    'theme: dark\nagent-default-model:\n  provider: custom-gateway\n  model: custom\n  reasoningEffort: high\n',
   ])('default-if-absent preserves an explicit settings selection (%s)', async settingsSource => {
     const home = await temporaryHome()
     await writeFile(join(home, 'settings.yaml'), settingsSource, 'utf8')
@@ -393,7 +393,7 @@ describe('model setup', () => {
 
   test('default-if-absent recognizes an inserted home default row', async () => {
     const home = await temporaryHome()
-    const source = '- insert:\n    - id: agent-default-model\n      config: { provider: super-relay, model: custom }\n'
+    const source = '- insert:\n    - id: agent-default-model\n      config: { provider: custom-gateway, model: custom }\n'
     await writeFile(join(home, 'cordis.patch.yml'), source, 'utf8')
     const result = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
       '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--default-if-absent',

@@ -40,10 +40,6 @@
       "types": "./lib/benchmark/traex.d.ts",
       "default": "./lib/benchmark/traex.js"
     },
-    "./benchmark/super-relay": {
-      "types": "./lib/benchmark/super-relay.d.ts",
-      "default": "./lib/benchmark/super-relay.js"
-    },
     "./benchmark/skills": {
       "types": "./lib/benchmark/native-skills.d.ts",
       "default": "./lib/benchmark/native-skills.js"
@@ -109,7 +105,6 @@
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-super-relay-budget": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/llm-route-capabilities": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/personal-memory": ">=0.1.24 <0.2.0",
@@ -192,9 +187,6 @@
     "@dsh-enhanced/traex-acp-provider": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-super-relay-budget": {
-      "optional": true
-    },
     "@dsh-enhanced/llm-route-capabilities": {
       "optional": true
     },
@@ -234,7 +226,6 @@
     "@dsh-enhanced/assistant-isolation": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/assistant-super-relay-budget": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/llm-route-capabilities": "workspace:*",
     "@dsh-enhanced/personal-memory": "workspace:*",

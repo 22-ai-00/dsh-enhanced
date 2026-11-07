@@ -86,7 +86,7 @@ function yamlId(row: unknown): string | undefined {
   const id = isMap(row) ? row.get('id', true) : undefined
   return isScalar(id) && typeof id.value === 'string' ? id.value : undefined
 }
-const repositoryRoute = { provider: 'super-relay', model: 'relay-v2' }
+const repositoryRoute = { provider: 'custom-gateway', model: 'relay-v2' }
 function repositoryTask(repositoryDelivery: Record<string, unknown> = {}): string {
   const value = JSON.parse(task({ version: 2, route: repositoryRoute, model: undefined,
     executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [repositoryRoute] } })) as Record<string, unknown>
@@ -223,16 +223,16 @@ describe('goal admission planning', () => {
 
   test('v2 uses the DSH settings overlay during formal setup and rejects malformed public routes', async () => {
     const f = await fixture(); const taskPath = join(f.input.dshHome, 'v2-task.json')
-    const route = { provider: 'super-relay', model: 'auto_model' }
+    const route = { provider: 'custom-gateway', model: 'configured-model' }
     const v2Task = task({ version: 2, route, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [route] } })
     await writeFile(taskPath, v2Task, { mode: 0o600 })
     await writeFile(join(f.input.dshHome, 'settings.yaml'), `agent-default-model:
-  provider: super-relay
-  model: auto_model
+  provider: custom-gateway
+  model: configured-model
 llm-pi-ai:
   providers:
-    super-relay:
+    custom-gateway:
       apiKeyEnv: PRIVATE_DO_NOT_READ
 `, { mode: 0o600 })
     await expect(configureGoalAdmission(f.input, f.effective, taskPath)).resolves.toMatchObject({ sessionId: 'session-a' })
@@ -240,8 +240,8 @@ llm-pi-ai:
     expect(config(configured, 'dsh-enhanced-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
     expect(config(configured, 'dsh-enhanced-assistant-delivery')).toMatchObject({ agentProvider: route.provider, agentModel: route.model, agentMaxOutputTokens: 8192 })
     expect(configured).not.toContain('PRIVATE_DO_NOT_READ')
-    expect(parseSettingsDefaultModelRoute('{ agent-default-model: { provider: super-relay, model: auto_model } }')).toEqual(route)
-    for (const source of ['[]', 'agent-default-model: super-relay', 'agent-default-model: { provider: super-relay }', 'agent-default-model: { provider: 3, model: auto_model }']) {
+    expect(parseSettingsDefaultModelRoute('{ agent-default-model: { provider: custom-gateway, model: configured-model } }')).toEqual(route)
+    for (const source of ['[]', 'agent-default-model: custom-gateway', 'agent-default-model: { provider: custom-gateway }', 'agent-default-model: { provider: 3, model: configured-model }']) {
       expect(() => parseSettingsDefaultModelRoute(source)).toThrow(/settings/)
     }
 
@@ -250,7 +250,7 @@ llm-pi-ai:
     const effectivePath = join(cli.input.dshHome, 'effective.yaml'); const dshPath = join(bin, 'dsh')
     await writeFile(effectivePath, cli.effective, { mode: 0o600 })
     await writeFile(dshPath, '#!/bin/sh\ncat "$DSH_WEB_OWNER_EFFECTIVE"\n', { mode: 0o700 })
-    await writeFile(join(cli.input.dshHome, 'settings.yaml'), 'agent-default-model: { provider: super-relay, model: auto_model }\n', { mode: 0o600 })
+    await writeFile(join(cli.input.dshHome, 'settings.yaml'), 'agent-default-model: { provider: custom-gateway, model: configured-model }\n', { mode: 0o600 })
     const previousPath = process.env.PATH; const previousEffective = process.env.DSH_WEB_OWNER_EFFECTIVE
     process.env.PATH = `${bin}:${previousPath ?? ''}`; process.env.DSH_WEB_OWNER_EFFECTIVE = effectivePath
     try {
@@ -265,17 +265,17 @@ llm-pi-ai:
 
   test('v2 admits only the exact already configured route and calls budget without writing a credential', async () => {
     const f = await fixture()
-    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'super-relay', model: 'relay-v2' } })
+    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'custom-gateway', model: 'relay-v2' } })
     const configured = effective.toString()
-    const input = task({ version: 2, route: { provider: 'super-relay', model: 'relay-v2' }, model: undefined,
-      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] } })
+    const input = task({ version: 2, route: { provider: 'custom-gateway', model: 'relay-v2' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] } })
     const plan = prepareGoalAdmission(f.input, f.prepared.patch, configured, input, f.snapshot)
-    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').executionBudget).toEqual({ mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] })
-    expect(config(plan.patch, 'dsh-enhanced-assistant-delivery')).toMatchObject({ agentProvider: 'super-relay', agentModel: 'relay-v2', agentMaxOutputTokens: 8192 })
-    expect(() => parseGoalAdmissionTask(task({ version: 2, route: { provider: 'super-relay', model: 'wrong' }, model: undefined,
-      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] } }))).toThrow(/budget route/)
-    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, configured, task({ version: 2, route: { provider: 'super-relay', model: 'wrong' }, model: undefined,
-      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'wrong' }] } }), f.snapshot)).toThrow(/configured default/)
+    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').executionBudget).toEqual({ mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] })
+    expect(config(plan.patch, 'dsh-enhanced-assistant-delivery')).toMatchObject({ agentProvider: 'custom-gateway', agentModel: 'relay-v2', agentMaxOutputTokens: 8192 })
+    expect(() => parseGoalAdmissionTask(task({ version: 2, route: { provider: 'custom-gateway', model: 'wrong' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'relay-v2' }] } }))).toThrow(/budget route/)
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, configured, task({ version: 2, route: { provider: 'custom-gateway', model: 'wrong' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'custom-gateway', model: 'wrong' }] } }), f.snapshot)).toThrow(/configured default/)
   })
 
   test('v2 repository delivery derives one bounded Actions grant, a finite wake, and exact policy permissions', async () => {
@@ -524,8 +524,8 @@ llm-pi-ai:
   test('v2 is not bound to the expired DeepSeek contract while v1 remains protected', async () => {
     const contractExpiry = Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)
     const f = await fixture(contractExpiry)
-    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'super-relay', model: 'auto_model' } })
-    const route = { provider: 'super-relay', model: 'auto_model' }
+    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'custom-gateway', model: 'configured-model' } })
+    const route = { provider: 'custom-gateway', model: 'configured-model' }
     const v2Task = task({ version: 2, route, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [route] } })
     expect(() => prepareGoalAdmission(f.input, f.prepared.patch, effective.toString(), v2Task, f.snapshot, contractExpiry)).not.toThrow()

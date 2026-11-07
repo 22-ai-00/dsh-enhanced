@@ -12,7 +12,7 @@
 
 ## 安装
 
-先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 和所用模型 adapter，再安装本包。只有选用 super-relay 时才需要安装并启用 `assistant-super-relay-budget`：
+先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 和所用模型 adapter，再安装本包。模型供应完全由 owner 配置的 provider/model 与对应 adapter 决定：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/assistant-growth-driver
@@ -25,7 +25,7 @@ dsh --profile web --dump-config
 
 每次唤醒（`intervalMs > 0` 的 unref timer，或显式调用 `wake()`）：
 
-1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；读取并冻结所选模型；仅使用 super-relay 时检查其契约和默认凭据引用，其他供应由对应 DSH adapter 管理凭据；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
+1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；读取并冻结所选模型；若配置了 `apiKeyEnv` 则按该引用解析凭据，否则由对应 DSH adapter 管理凭据；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
 2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加三个基础 `plugin_source_*` 工具；可选 provider 另有目标发现、durable 状态或创建接口时按配置追加相应工具。任何其它可见工具都会在发请求前被拒绝。
    - `growth_list_owner_goals`：列最近的 owner-root goal（只读投影）。
    - `growth_read_verified_workflow`：读一条已完成 goal 的**脱敏**摘要；Host 独立复核 owner-root（非 subagent、无 parent session、delegationDepth=0）、whole-goal succeeded 且 quiescent，cwd/preset 精确匹配；不返回步骤参数与验收回执。
@@ -93,7 +93,7 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 | `budgetId` / `budgetAmount` | 均无 | 必须**同时出现**；显式 wake 经 Policy 预留；usage 作业由 Automations 预留，避免重复扣取。已提交的未知消耗不退回。 |
 | `provider` / `model` | 继承会话 | 同时配置以固定修复/成长模型；只配置一个会拒绝。不会自动回退到 Day1。 |
 | `reasoningEffort` | 继承会话；固定模型时用供应默认 | 只有同时配置固定 provider/model 时可覆盖。 |
-| `apiKeyEnv` | 随供应 | 可选凭据引用名；未设置时，super-relay 使用 `SUPER_RELAY_API_KEY`，其他供应由对应 adapter 管理。引用优先经 credentials 解析，再读同名环境变量；不接受或打印明文 key。 |
+| `apiKeyEnv` | 随供应 | 可选凭据引用名；未设置时由对应 adapter 管理凭据。引用优先经 credentials 解析，再读同名环境变量；不接受或打印明文 key。 |
 | `workflowOwnerAnchored.enabled` | `false` | owner-anchored workflow 轨独立开关；置 `true` 时要求驱动本体 `enabled: true` 且已声明 `scope`，否则启动报错。 |
 | `workflowOwnerAnchored.maxCommitsPerWake` | `5` | 单轮最多尝试提交的候选数（1–50）；goals/delivery 不可用、authority/route 漂移即中断本轮。幂等重放代价很低。 |
 | `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
@@ -114,7 +114,7 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 | `usageLearning.maxPending` | `16` | 同时 queued/running 上限（1–100）；满时保留未消费游标，释放容量后继续。 |
 | `usageLearning.lookbackMs` | `86400000` | 来源结果最大年龄与排队 TTL（1 分钟–7 天）。 |
 
-super-relay 自身的 5 个键（`enabled` / `apiKeyEnv` / `timeoutMs` / `maxResponseBytes` / `defaultMaxTokens`）在 `assistant-super-relay-budget` 插件上配置；driver 不重复定义。
+所选供应自身的配置键由对应 adapter/插件定义；driver 不重复定义。
 
 ### copy-paste opt-in 片段
 
@@ -130,8 +130,8 @@ super-relay 自身的 5 个键（`enabled` / `apiKeyEnv` / `timeoutMs` / `maxRes
         minRepeatedSuccesses: 3
         maxDurationMs: 120000
         # 默认继承会话；需要固定模型时添加以下两项：
-        # provider: super-relay
-        # model: auto_model/alwaysday1
+        # provider: custom-gateway
+        # model: configured-model-id
         scope:
           workspace: /abs/path/to/owner/workspace
           preset: primary
@@ -302,7 +302,7 @@ Linux 需要预先存在的 delegated cgroups/user namespace helpers；准备命
 - 不 activate / install / retire / rollback、不扩权、不改 policy 规则表、不碰预算上限与急停等安全根。
 - owner-anchored 轨只提交 locator：证据（objective、步骤、验收结论）一律由 Delivery 持 goals 独立重取，driver 不接受调用方自带 prompt，也不自造 trace source/authority。
 - 源码轨只到经过检查的 pending 提案；owner 签名、发布、生产启用和 HMR reload 由独立控制面处理。
-- owner-anchored 轨的证据是 Delivery 在进程内对真实 goals SQLite 的独立复核（工程层）；真实 super-relay 端到端与真实外部平台深评测均不在本期，前者仅由 owner 显式 opt-in 后手动触发一次。
+- owner-anchored 轨的证据是 Delivery 在进程内对真实 goals SQLite 的独立复核（工程层）；真实外部供应商端到端与真实外部平台深评测均不在本期，前者仅由 owner 显式 opt-in 后手动触发一次。
 
 ## 兼容性
 

@@ -4,7 +4,7 @@ These opt-in probes have separate prerequisites and evidence boundaries; they ar
 
 ## Real Day1 native skill comparison
 
-`native-skill-day1.mjs` runs the approved Super Relay Day1 route through a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, an immutable local Docker image containing `sh` and `node`, and the existing credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
+The approved Day1 native-skill comparison is run by a trusted Host-provided adapter module that satisfies the native adapter contract; it drives a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, an immutable local Docker image containing `sh` and `node`, and a resolvable credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
 
 ## Linux native boundary (real kernel)
 
@@ -53,7 +53,7 @@ To reuse an already configured gateway through the production `llm-pi-ai` adapte
 ```sh
 CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
   DSH_WEB_REAL_SOURCE_HOME="$HOME/.dsh" \
-  DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 \
+  DSH_WEB_REAL_PROVIDER=custom-gateway DSH_WEB_REAL_MODEL=<configured-model-id> \
   pnpm test:web-owner:real
 ```
 
@@ -377,12 +377,14 @@ This probe runs the actual source builder in Docker and asserts a nonroot user, 
 ```sh
 DSH_SOURCE_MODEL_LIVE=1 \
 DSH_WEB_REAL_SOURCE_HOME="$HOME/.dsh" \
+DSH_WEB_REAL_PROVIDER=custom-gateway \
+DSH_WEB_REAL_MODEL=<configured-model-id> \
 DSH_SOURCE_BUILD_IMAGE='your-local-builder@sha256:<64-hex-digest>' \
 DSH_SOURCE_MODEL_EVIDENCE=/tmp/day1-source-proof.json \
   node scripts/e2e/source-model-smoke.mjs
 ```
 
-Build the workspace first (`pnpm build`). The script uses the existing `super-relay` / `auto_model/alwaysday1` route and credential reference through `prepareRealRoute`; it never changes that source profile or writes its key into evidence. It resolves the native pi adapter from the installed DSH package; set `DSH_SOURCE_MODEL_DSH_PACKAGE` to that installation's absolute `package.json` path when it differs from the local default. The tested installation uses pi adapter/runtime `0.1.2-rc.1` and Cordis `4.0.2`, matching the workspace runtime.
+Build the workspace first (`pnpm build`). The script uses the existing route selected by `DSH_WEB_REAL_PROVIDER` / `DSH_WEB_REAL_MODEL` and its credential reference through `prepareRealRoute`; it never changes that source profile or writes its key into evidence. It resolves the native pi adapter from the installed DSH package; set `DSH_SOURCE_MODEL_DSH_PACKAGE` to that installation's absolute `package.json` path when it differs from the local default. The tested installation uses pi adapter/runtime `0.1.2-rc.1` and Cordis `4.0.2`, matching the workspace runtime.
 
 One wake permits at most 12 model calls, 20 tool calls, 4,096 output tokens per request, and 240 seconds. It provides a broken synthetic clamp plugin in a temporary Git repository, a fixture owner route and empty history, and a one-wake Policy budget. The actual Growth Driver's seven-tool surface lets the real model inspect the committed source and propose one patch; the production Control Plane runs offline Docker checks and persists a pending plan. Assertions compare read/plan base commits, model patch, successful check/pack evidence, SQLite pending state, and unchanged original source. The temporary Context and repository are disposed on exit.
 

@@ -24,6 +24,9 @@ import { createSourceModelControlFixture } from './source-model-control-fixture.
 assert.equal(process.env.DSH_SOURCE_MODEL_LIVE, '1', 'set DSH_SOURCE_MODEL_LIVE=1')
 const image = process.env.DSH_SOURCE_BUILD_IMAGE
 assert.match(image ?? '', /^(?:[^\s]+@)?sha256:[a-f0-9]{64}$/)
+const provider = process.env.DSH_WEB_REAL_PROVIDER
+const modelId = process.env.DSH_WEB_REAL_MODEL
+assert.ok(provider && modelId, 'set DSH_WEB_REAL_PROVIDER and DSH_WEB_REAL_MODEL to an existing real route')
 assert.ok(process.env.DSH_SOURCE_MODEL_EVIDENCE, 'set DSH_SOURCE_MODEL_EVIDENCE')
 assert.ok(process.env.DSH_SOURCE_MODEL_TASK, 'set DSH_SOURCE_MODEL_TASK')
 const task = JSON.parse(await readFile(resolve(process.env.DSH_SOURCE_MODEL_TASK), 'utf8'))
@@ -124,13 +127,13 @@ try {
     proof.preflight = { schemaVersion: 4, queuedAfterContextReplacement: true, noModelOrDocker: true }; proof.passed = true; mark('preflight-passed')
   } else {
   const routeHome = join(root, 'route'); await mkdir(routeHome)
-  const env = { ...process.env, DSH_WEB_REAL_PROVIDER: 'super-relay', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1' }
+  const env = { ...process.env, DSH_WEB_REAL_PROVIDER: provider, DSH_WEB_REAL_MODEL: modelId }
   const route = await prepareRealRoute({ env, home: routeHome, workspace: repository }); proof.route = route.proof
-  const routeConfig = parse(await readFile(join(routeHome, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers['super-relay']
+  const routeConfig = parse(await readFile(join(routeHome, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers[provider]
   if (reasoningProbe !== undefined) {
     // Owner-run configuration experiment in this private Context only. Dispatch
     // alone proves neither effective effort selection nor gateway enforcement.
-    routeConfig.models = routeConfig.models.map(model => model.id === 'auto_model/alwaysday1'
+    routeConfig.models = routeConfig.models.map(model => model.id === modelId
       ? { ...model, reasoningEfforts: { low: 'low' } } : model)
     routeConfig.reasoning = reasoningProbe
     proof.reasoningProbe = { requested: reasoningProbe, mapping: { low: 'low' }, gatewayEnforcementVerified: false }
@@ -141,7 +144,7 @@ try {
   first.provide('approval', { config: { policy: 'ask' }, request: async () => 'allowed-once' })
   first.provide('assistantGoals', { inspectOwnerGoals: () => [], inspectOwnerVerifiedWorkflowSource: () => { throw new Error('fixture has no verified history') } })
   first.provide('assistantSkills', { inspectOwnerActiveSkills: () => [], inspectOwnerSkillCandidates: () => [], stageOwnerVerifiedSuccessCandidate: () => { throw new Error('outside source proof') } })
-  await mountAgentLoopTestDependencies(first, { systemPrompt: { persona: '' } }); await first.plugin(SessionProjectionRegistry); await first.plugin(Pi, { providers: { 'super-relay': routeConfig } }); await first.plugin(AgentLoop, { agents: [] })
+  await mountAgentLoopTestDependencies(first, { systemPrompt: { persona: '' } }); await first.plugin(SessionProjectionRegistry); await first.plugin(Pi, { providers: { [provider]: routeConfig } }); await first.plugin(AgentLoop, { agents: [] })
   first.on('llm/stream', async function* (options, next) {
     const call = { provider: options.provider, model: options.model, maxTokens: options.maxTokens, reasoningEffort: options.reasoningEffort,
       tools: (options.tools ?? []).map(tool => tool.name).sort(), startedAt: Date.now(),
@@ -163,10 +166,10 @@ try {
     } finally { call.endedAt = Date.now() }
   })
   const gap = cp.recordGap({ idempotencyKey: 'day1-personal-memory-source', capability: task.capability, context: task.context, expectedValue: 100, frequency: 1, estimatedCost: 1, risk: 0.1 })
-  const driver = new AssistantGrowthDriverService(first, { enabled: true, provider: 'super-relay', model: 'auto_model/alwaysday1', scope, intervalMs: 0, maxDurationMs: 240_000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 8_192, apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-model-wakes', budgetAmount: 1, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60_000, offline: true, planTtlMs: 3_600_000 } })
+  const driver = new AssistantGrowthDriverService(first, { enabled: true, provider, model: modelId, scope, intervalMs: 0, maxDurationMs: 240_000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 8_192, apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-model-wakes', budgetAmount: 1, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60_000, offline: true, planTtlMs: 3_600_000 } })
   await new Promise(resolvePromise => setImmediate(resolvePromise)); mark('wake-start'); await driver.wake(); mark('wake-end')
   const health = driver.health(); proof.wake = health;
-  assert.ok(proof.modelCalls.length > 0 && proof.modelCalls.every(call => call.provider === 'super-relay' && call.model === 'auto_model/alwaysday1' && call.tools.length === 8))
+  assert.ok(proof.modelCalls.length > 0 && proof.modelCalls.every(call => call.provider === provider && call.model === modelId && call.tools.length === 8))
   assert.equal(health.run?.sourceProposals.prepared, 0);
   assert.equal(health.run?.sourceProposals.queued, 1, JSON.stringify(health))
   const jobs = new DatabaseSync(join(control.statePath, 'control.sqlite'), { readOnly: true }); let row

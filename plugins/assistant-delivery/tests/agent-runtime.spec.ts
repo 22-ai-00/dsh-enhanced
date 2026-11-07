@@ -5686,7 +5686,7 @@ describe('real native Delivery Agent runtime', () => {
       'cursor-subscription',
       'grok-subscription',
       'traex-agent',
-      'super-relay',
+      'custom-provider',
     ].entries()) {
       const root = await mkdtemp(join(tmpdir(), `assistant-delivery-model-equality-${index}-`))
       roots.push(root)

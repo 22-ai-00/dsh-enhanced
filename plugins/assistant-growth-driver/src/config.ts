@@ -8,8 +8,6 @@ import { validateWorkItemGrowthAuthorityPins, type WorkItemGrowthAuthorityPins }
  * follows the owner's conversation unless an explicit fixed pair overrides it.
  */
 
-export const DEFAULT_API_KEY_ENV = 'SUPER_RELAY_API_KEY' as const
-
 export interface GrowthOwnerScopeConfig {
   workspace: string
   preset: string

@@ -8,7 +8,7 @@ import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@ds
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
-import { Config, DEFAULT_API_KEY_ENV, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
+import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
 import { version } from './version.js'
@@ -333,10 +333,10 @@ export class AssistantGrowthDriverService extends Service {
     return flight
   }
 
-  async #resolveCredential(provider: string): Promise<boolean> {
-    const env = this.#config.apiKeyEnv ?? (provider === 'super-relay' ? DEFAULT_API_KEY_ENV : null)
-    // Other adapters own their credentials; do not require a Super Relay key
-    // merely because the growth plugin happens to be installed.
+  async #resolveCredential(): Promise<boolean> {
+    // Without an explicit credential reference the adapter/provider owns its
+    // own credential, so the driver has nothing to resolve.
+    const env = this.#config.apiKeyEnv
     if (env === null) return true
     const credentials = this.ctx.get('credentials' as never, false) as CredentialService | undefined
     const resolved = credentials === undefined ? undefined : (await credentials.resolve(credentialRef(env)))?.value
@@ -389,8 +389,8 @@ export class AssistantGrowthDriverService extends Service {
     } catch (error) { modelFailure = errorMessage(error) }
     // Owner-anchored workflow learning is a separate, purely Host-local track.
     // It needs only the anchored owner authority and performs no model/network
-    // call, so it runs before the super-relay credential/budget gates. Failure
-    // here never blocks the model-driven skill track below.
+    // call, so it runs before the credential/budget gates. Failure here never
+    // blocks the model-driven skill track below.
     let ownerAnchored: OwnerAnchoredWakeSummary | undefined
     if (config.workflowOwnerAnchored.enabled && workItemUsage === undefined) {
       ownerAnchored = await this.#runOwnerAnchoredTrack({
@@ -401,16 +401,7 @@ export class AssistantGrowthDriverService extends Service {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored }
       return
     }
-    try {
-      if (model.provider === 'super-relay') {
-        const { assertCurrentContract } = await import('@dsh-enhanced/assistant-super-relay-budget')
-        assertCurrentContract()
-      }
-    } catch (error) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `contract-expired:${errorMessage(error)}`, run: null, ownerAnchored }
-      return
-    }
-    if (!await this.#resolveCredential(model.provider)) {
+    if (!await this.#resolveCredential()) {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored }
       return
     }

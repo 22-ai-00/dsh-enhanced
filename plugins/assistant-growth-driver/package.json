@@ -68,7 +68,6 @@
     "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-super-relay-budget": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -105,9 +104,6 @@
     "@dsh-enhanced/assistant-skills": {
       "optional": true
     },
-    "@dsh-enhanced/assistant-super-relay-budget": {
-      "optional": true
-    },
     "@dsh-enhanced/plugin-control-plane": {
       "optional": true
     },
@@ -140,7 +136,6 @@
     "@dsh-enhanced/assistant-isolation": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@dsh-enhanced/assistant-skills": "workspace:*",
-    "@dsh-enhanced/assistant-super-relay-budget": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/assistant-work-items": "workspace:*",
     "@dsh-enhanced/lark-channel": "workspace:*",

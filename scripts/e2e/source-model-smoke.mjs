@@ -22,6 +22,9 @@ import { createSourceModelControlFixture } from './source-model-control-fixture.
 assert.equal(process.env.DSH_SOURCE_MODEL_LIVE, '1', 'explicitly set DSH_SOURCE_MODEL_LIVE=1 for the real day1 request')
 const image = process.env.DSH_SOURCE_BUILD_IMAGE
 assert.match(image ?? '', /^(?:[^\s]+@)?sha256:[a-f0-9]{64}$/)
+const provider = process.env.DSH_WEB_REAL_PROVIDER
+const modelId = process.env.DSH_WEB_REAL_MODEL
+assert.ok(provider && modelId, 'set DSH_WEB_REAL_PROVIDER and DSH_WEB_REAL_MODEL to an existing real route')
 const dshPackage = resolve(process.env.DSH_SOURCE_MODEL_DSH_PACKAGE ?? require.resolve('@deepseek-ai/dsh/package.json'))
 const installed = createRequire(dshPackage)
 const Pi = await import(pathToFileURL(installed.resolve('@deepseek-ai/dsh-llm-pi-ai')).href)
@@ -61,9 +64,9 @@ assert.equal(clamp(10, 2, 2), 2); assert.equal(clamp(-10, 2, 2), 2);
   assert.equal(baselineFailed, true)
 
   const routeHome = join(root, 'route'); await mkdir(routeHome)
-  const env = { ...process.env, DSH_WEB_REAL_PROVIDER: 'super-relay', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1' }
+  const env = { ...process.env, DSH_WEB_REAL_PROVIDER: provider, DSH_WEB_REAL_MODEL: modelId }
   const route = await prepareRealRoute({ env, home: routeHome, workspace: repository })
-  const routeConfig = parse(await readFile(join(routeHome, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers['super-relay']
+  const routeConfig = parse(await readFile(join(routeHome, 'settings.yaml'), 'utf8'))['llm-pi-ai'].providers[provider]
   const secret = env[routeConfig.apiKeyEnv]
   assert.ok(secret)
   ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([{ source: 'process', values: { [routeConfig.apiKeyEnv]: secret } }]))
@@ -71,7 +74,7 @@ assert.equal(clamp(10, 2, 2), 2); assert.equal(clamp(-10, 2, 2), 2);
   ctx.provide('credentials', { resolve: async ref => String(ref) === routeConfig.apiKeyEnv ? { value: secret } : undefined })
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(Pi, { providers: { 'super-relay': routeConfig } })
+  await ctx.plugin(Pi, { providers: { [provider]: routeConfig } })
   ctx.on('llm/stream', async function* (options, next) {
     observations.modelCalls.push({ provider: options.provider, model: options.model, maxTokens: options.maxTokens, toolNames: (options.tools ?? []).map(tool => tool.name).sort() })
     progress('model-call')
@@ -109,7 +112,7 @@ assert.equal(clamp(10, 2, 2), 2); assert.equal(clamp(-10, 2, 2), 2);
   const gap = service.recordGap({ idempotencyKey: 'source-model-clamp-gap', capability: 'clamp finite numbers to inclusive bounds',
     context: 'Existing plugin clamp-helper has a broken clamp function in src/index.js: it returns the input unchanged. Read the README and source, then fix clamp(value, minimum, maximum) for finite inputs with minimum <= maximum. Preserve the native Cordis default plugin. Prepare one pending source modification. No repeated skill history exists in this fixture; use the separate source-proposal capability.',
     expectedValue: 100, frequency: 10, estimatedCost: 1, risk: 0.1 })
-  const driver = new AssistantGrowthDriverService(ctx, { enabled: true, provider: 'super-relay', model: 'auto_model/alwaysday1', scope, intervalMs: 0, maxDurationMs: 240000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 4096,
+  const driver = new AssistantGrowthDriverService(ctx, { enabled: true, provider, model: modelId, scope, intervalMs: 0, maxDurationMs: 240000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 4096,
     apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-smoke-wake', budgetAmount: 1,
     pluginSourceProposals: { enabled: true, repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60000 } })
   await new Promise(resolvePromise => setImmediate(resolvePromise))
@@ -126,7 +129,7 @@ assert.equal(clamp(10, 2, 2), 2); assert.equal(clamp(-10, 2, 2), 2);
   assert.equal(expectedBaseCommit, baseCommit); assert.equal(plan.baseCommit, baseCommit)
   assert.ok(observations.reads.some(read => read.baseCommit === baseCommit && read.paths.includes('src/index.js')))
   assert.ok(files.some(file => file.path === 'src/index.js' && file.content !== original))
-  assert.ok(observations.modelCalls.length > 0 && observations.modelCalls.every(call => call.provider === 'super-relay' && call.model === 'auto_model/alwaysday1' && call.toolNames.length === 7))
+  assert.ok(observations.modelCalls.length > 0 && observations.modelCalls.every(call => call.provider === provider && call.model === modelId && call.toolNames.length === 7))
   assert.equal(await readFile(join(pluginRoot, 'src/index.js'), 'utf8'), original)
   const db = new DatabaseSync(join(control.statePath, 'control.sqlite'), { readOnly: true })
   try { assert.deepEqual(db.prepare('SELECT status, base_commit FROM source_plans').all().map(row => ({ ...row })), [{ status: 'pending-approval', base_commit: baseCommit }]) } finally { db.close() }

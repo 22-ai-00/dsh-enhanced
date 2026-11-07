@@ -358,10 +358,10 @@ describe('RSI profile compiler', () => {
       const repeatedBudget = structuredClone(value); repeatedBudget.coordinator.budgetId = 'review'
       await expect(compileRsiProfiles({ ...input, manifest: repeatedBudget })).rejects.toThrow('budget ids')
       await expect(compileRsiProfiles({ ...input, targetEffective: targetEffective.replace('budgets: []', 'budgets: [{ id: conflicting-global, metric: automation-runs, limit: 2, periodMs: 60000, scope: global }]') })).rejects.toThrow('global automation-runs budget conflicts')
-      const fixed = structuredClone(value); fixed.growthDriver.provider = 'super-relay'; fixed.growthDriver.model = 'day1'; fixed.growthDriver.reasoningEffort = 'high'
+      const fixed = structuredClone(value); fixed.growthDriver.provider = 'custom-gateway'; fixed.growthDriver.model = 'day1'; fixed.growthDriver.reasoningEffort = 'high'
       const fixedOutput = await compileRsiProfiles({ ...input, manifest: fixed })
       const fixedRows = parse(fixedOutput.targetPatch) as Array<{ id: string; config: any }>
-      expect(fixedRows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!.config).toMatchObject({ provider: 'super-relay', model: 'day1', reasoningEffort: 'high' })
+      expect(fixedRows.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')!.config).toMatchObject({ provider: 'custom-gateway', model: 'day1', reasoningEffort: 'high' })
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })

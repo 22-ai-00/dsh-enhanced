@@ -13,7 +13,8 @@ AgentLoop, Policy, Automations Host executor and Control Plane. The model reads
 one plugin at a pinned Git commit and submits one bounded modification. Its wake
 ends before a fresh Cordis Context performs the offline repository check.
 
-The model supplier is `super-relay / auto_model/alwaysday1`. The model authority
+The model supplier is whatever route the owner configures through
+`DSH_WEB_REAL_PROVIDER` / `DSH_WEB_REAL_MODEL`. The model authority
 remains 240 seconds, with at most 12 model calls, 20 tool calls and 8,192 output
 tokens per model request; the separately authorized Host check may take 30 minutes.
 The result is a persisted `pending-approval` source plan. This command does not
@@ -21,8 +22,10 @@ approve, publish, install or activate that plan.
 
 ## Prerequisites
 
-- Build this checkout with `pnpm build` and provide the configured Super Relay
-  route used by [the real-route helper](../scripts/e2e/web-owner-real-route.mjs).
+- Build this checkout with `pnpm build` and provide a configured route and
+  credential reference for
+  [the real-route helper](../scripts/e2e/web-owner-real-route.mjs), selected
+  with `DSH_WEB_REAL_PROVIDER` / `DSH_WEB_REAL_MODEL`.
 - Build the owner-controlled offline image using
   `node scripts/isolation/build-source-image.mjs`. Retain its immutable image ID,
   manifest inventory and lock digest; rebuild when the lock changes.
@@ -49,6 +52,8 @@ path, byte, cancellation or provider-generation checks.
 
 ```sh
 DSH_SOURCE_MODEL_LIVE=1 \
+DSH_WEB_REAL_PROVIDER=custom-gateway \
+DSH_WEB_REAL_MODEL=<configured-model-id> \
 DSH_SOURCE_BUILD_IMAGE=sha256:<local-image-id> \
 DSH_SOURCE_MODEL_TASK=/absolute/task.json \
 DSH_SOURCE_MODEL_EVIDENCE=/absolute/evidence.json \

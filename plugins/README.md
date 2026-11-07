@@ -10,7 +10,6 @@
 | [coding-subscription-provider](coding-subscription-provider) | `@dsh-enhanced/coding-subscription-provider` | 实验性 | 将本机已登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 编程套餐注册为 DSH 模型 provider；四者动态发现模型，Codex/Claude/Grok 支持逐模型 reasoning effort。 |
 | [traex-acp-provider](traex-acp-provider) | `@dsh-enhanced/traex-acp-provider` | 实验性 | 让 DSH 作为 ACP client 调用本机 TraeX coding agent，并实时发现可选模型及逐模型 reasoning effort。 |
 | [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
-| [assistant-super-relay-budget](assistant-super-relay-budget) | `@dsh-enhanced/assistant-super-relay-budget` | 实验性 | 固定 Super Relay OpenAI Responses 路由（`auto_model/alwaysday1`）的目标 token 预算计量；真实 usage 计数、费率与金额恒为 null 不估算，凭据经 dsh-credentials 引用，契约到期 fail-closed，每个异步边界硬竞速。 |
 
 ## 个人助理核心
 

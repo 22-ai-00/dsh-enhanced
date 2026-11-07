@@ -3,8 +3,7 @@
  *
  * IMPORTANT — these are NOT real external-provider evidence: every model
  * interaction is served by a scripted in-process LlmAdapter registered for the
- * 'super-relay' provider and nothing here touches the network or a real Super
- * Relay account.  What IS exercised for real is the Host control plane:
+ * 'test-provider' provider and nothing here touches the network or a real model account.  What IS exercised for real is the Host control plane:
  * the frozen realm tool surface, the independent owner-success re-verification
  * inside assistant-skills, the real sqlite policy/skills stores, the approval
  * seam and the fail-closed preflight order.
@@ -32,20 +31,6 @@ import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, ver
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
 import { ptcTrajectory, runGrowthAgent, SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE, splitGrowthToolSurface } from '../src/growth-agent.ts'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
-
-const contractState = vi.hoisted(() => ({ expired: false }))
-vi.mock('@dsh-enhanced/assistant-super-relay-budget', async importOriginal => {
-  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-super-relay-budget')>()
-  return {
-    ...actual,
-    assertCurrentContract(now?: number): void {
-      const contractNow = contractState.expired
-        ? Date.parse(actual.SUPER_RELAY_RESPONSES_CONTRACT.expiresAt)
-        : now ?? Date.parse(actual.SUPER_RELAY_RESPONSES_CONTRACT.checkedAt) + 1_000
-      actual.assertCurrentContract(contractNow)
-    },
-  }
-})
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 
@@ -169,7 +154,7 @@ function verifiedSource(workspace: string, sessionId: string, goalId: string): V
 interface ScriptedTurn { name: string; args: Record<string, unknown> }
 
 /**
- * Scripted model (engineering layer only — replaces a real Super Relay call):
+ * Scripted model (engineering layer only — replaces a real model call):
  * emits one tool-call turn per scripted entry, then a final stop text turn.
  * reset() replays the same script for a second wake on the same adapter
  * instance (registerAdapter binds one process-lifetime adapter per provider).
@@ -350,7 +335,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
     return opts.commitResultById?.get(input.locator.goalId)
       ?? { outcome: 'trace-recorded' as const, revision: 1, template: {}, replayed: false }
   })
-  const modelSelection = vi.fn(() => ({ provider: 'super-relay', model: 'auto_model/alwaysday1' }))
+  const modelSelection = vi.fn(() => ({ provider: 'test-provider', model: 'test-model' }))
   const learningSource = vi.fn()
   ctx.provide('assistantDelivery' as never, {
     validateOwnerRoute: receipts,
@@ -370,7 +355,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   }
   ctx.provide('assistantGoals' as never, goalsApi as never)
 
-  if (opts.adapter !== undefined) ctx.llm.registerAdapter([opts.provider ?? 'super-relay'], opts.adapter)
+  if (opts.adapter !== undefined) ctx.llm.registerAdapter([opts.provider ?? 'test-provider'], opts.adapter)
   await ctx.plugin(AgentLoop, { agents: [] })
 
   if (opts.withPolicy !== false) {
@@ -432,8 +417,6 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
 }
 
 afterEach(async () => {
-  contractState.expired = false
-  delete process.env.SUPER_RELAY_API_KEY
   vi.restoreAllMocks()
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose().catch(() => undefined)
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -530,9 +513,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     const selected = { provider: 'conversation-provider', model: 'conversation-model' }
     h.modelSelection.mockReturnValue(selected)
     adapter.onRequest = () => { selected.model = 'next-model' }
-    // An unrelated supplier's expired contract and absent credential must not
-    // disable the conversation's own adapter.
-    contractState.expired = true
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await service.wake()
     expect(service.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded',
@@ -603,7 +583,7 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
 
   it('supports wake and health through a real injected Cordis service proxy', async () => {
     const h = await mount()
-    new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { apiKeyEnv: 'TEST_PROVIDER_API_KEY' }))
     let consumer: Context | undefined
     await h.ctx.inject(['assistantGrowthDriver' as never], ctx => { consumer = ctx })
     const proxy = consumer!.get('assistantGrowthDriver' as never) as unknown as Pick<AssistantGrowthDriverService, 'wake' | 'health'>
@@ -620,19 +600,9 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(tableCounts(h)).toMatchObject({ candidates: 0 })
   })
 
-  it('skips fail-closed when the super-relay contract has expired (contract-expired; engineering layer)', async () => {
+  it('skips fail-closed when the configured credential reference does not resolve (missing-credential)', async () => {
     const h = await mount()
-    contractState.expired = true
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
-    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
-    await runWake(service)
-    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^contract-expired:/) })
-    expect(tableCounts(h)).toMatchObject({ candidates: 0 })
-  })
-
-  it('skips fail-closed when no super-relay credential resolves (missing-credential)', async () => {
-    const h = await mount()
-    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { apiKeyEnv: 'TEST_PROVIDER_API_KEY' }))
     await runWake(service)
     expect(service.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-credential' })
     expect(tableCounts(h)).toMatchObject({ candidates: 0 })
@@ -640,7 +610,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
 
   it('skips fail-closed when no policy service is mounted (missing-policy)', async () => {
     const h = await mount({ withPolicy: false })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await runWake(service)
     expect(service.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-policy' })
@@ -648,7 +617,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
 
   it('skips fail-closed when the wake budget reservation is rejected (budget-exhausted)', async () => {
     const h = await mount({ budgetLimit: 5 })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 6 }))
     await runWake(service)
     expect(service.health()).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^budget:/) })
@@ -659,7 +627,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     const turns = successTurns()
     const adapter = new ScriptedAdapter(turns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 1 }))
     await runWake(service)
 
@@ -702,7 +669,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
   it('is idempotent: a second identical wake keeps the single pending candidate id', async () => {
     const adapter = new ScriptedAdapter(successTurns())
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await runWake(service)
     expect(tableCounts(h)).toMatchObject({ candidates: 1 })
@@ -729,7 +695,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
       },
     ]
     const h = await mount({ adapter: new ScriptedAdapter(turns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { minRepeatedSuccesses: 3 }))
     await runWake(service)
     expect(service.health()).toMatchObject({ outcome: 'ran' })
@@ -751,7 +716,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
       },
     ]
     const h = await mount({ adapter: new ScriptedAdapter(turns), rejectedGoals: new Set(['goal-2']) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await runWake(service)
     expect(service.health()).toMatchObject({ outcome: 'ran' })
@@ -760,7 +724,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
 
   it('skips before model dispatch with zero writes when the owner route is re-bound during selection', async () => {
     const h = await mount({ adapter: new ScriptedAdapter(successTurns()), rebindGeneration: 2 })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await runWake(service)
     const health = service.health()
@@ -774,7 +737,6 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
   it('enforces the frozen tool-call budget and the proposal never lands (engineering layer)', async () => {
     // 6 scripted tool calls, but the frozen contract allows only 2.
     const h = await mount({ adapter: new ScriptedAdapter(successTurns()) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { maxToolCalls: 2, maxModelCalls: 8 }))
     await runWake(service)
     const health = service.health()
@@ -790,7 +752,7 @@ const OA_WS = 'owner-anchored-ws'
 
 // The owner-anchored track runs purely Host-local (Goals re-read + Delivery
 // commit, no model/network), so these tests need NO scripted LLM adapter and
-// exercise the track ahead of the super-relay credential gate. Every Goals and
+// exercise the track ahead of the credential gate. Every Goals and
 // Delivery response is a scripted engineering-layer fixture — never real
 // owner-root evidence or a real external provider.
 describe('assistant-growth-driver owner-anchored workflow track (engineering layer, not real Goals/provider evidence)', () => {
@@ -937,7 +899,6 @@ describe('assistant-growth-driver owner-anchored workflow track (engineering lay
       ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3),
       commitThrowById: new Map([['oa-goal-1', { code: 'policy-denied', message: 'assistant-delivery: authority scope mismatch' }]]),
     })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
       workflowOwnerAnchored: { enabled: true },
@@ -1002,7 +963,6 @@ describe('opt-in plugin source proposals', () => {
   async function inventoryWake(source: ReturnType<typeof inventoryService>, turns: ScriptedTurn[]) {
     const adapter = new ScriptedAdapter(turns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
     await new Promise(resolve => setImmediate(resolve))
@@ -1099,7 +1059,6 @@ describe('opt-in plugin source proposals', () => {
     }))
     const adapter = new ScriptedAdapter([sourceTurns[0]!, targetsTurn, ...sourceTurns.slice(1)])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const provider = h.ctx.plugin({ name: 'inventory-provider', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
     await provider
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
@@ -1217,7 +1176,6 @@ describe('opt-in plugin source proposals', () => {
     const adapter = new ScriptedAdapter(input.turns)
     adapter.onRequest = () => input.onRequest?.(adapter)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = input.source ?? creationService()
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
@@ -2001,7 +1959,6 @@ describe('opt-in plugin source proposals', () => {
   it.each([false, true])('keeps four tools when source enabled=%s but its peer is absent', async enabled => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: { ...options(h.root), enabled } }))
     await service.wake()
     expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 0 })
@@ -2012,7 +1969,6 @@ describe('opt-in plugin source proposals', () => {
   it('keeps the baseline when the installed source provider has no configured builder', async () => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     h.ctx.provide('pluginControlPlane' as never, { ...sourceService(), canPrepareSource: () => false } as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
     await new Promise(resolve => setImmediate(resolve))
@@ -2024,7 +1980,6 @@ describe('opt-in plugin source proposals', () => {
   it('keeps the baseline when durable source enqueue authority is unavailable', async () => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     h.ctx.provide('pluginControlPlane' as never, sourceService() as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       pluginSourceProposals: { ...options(h.root), preparationMode: 'durable' },
@@ -2038,7 +1993,6 @@ describe('opt-in plugin source proposals', () => {
   it('uses durable source seams after their live authority becomes available without provider reload', async () => {
     const adapter = new ScriptedAdapter(sourceTurns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     let available = false
     const source = {
       ...sourceService(), canEnqueueSource: () => available,
@@ -2062,7 +2016,6 @@ describe('opt-in plugin source proposals', () => {
   it('late-binds the optional provider and forwards only frozen Host settings to one pending plan', async () => {
     const adapter = new ScriptedAdapter(sourceTurns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
     const source = sourceService()
     await h.ctx.plugin({ name: 'source-fixture', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
@@ -2093,7 +2046,6 @@ describe('opt-in plugin source proposals', () => {
       } },
     ]
     const h = await mount({ adapter: new ScriptedAdapter(turns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = preparationMode === 'inline' ? sourceService() : {
       ...sourceService(), canEnqueueSource: () => true,
       enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => ({
@@ -2120,7 +2072,6 @@ describe('opt-in plugin source proposals', () => {
     const durableTurns = [...sourceTurns, { name: 'plugin_source_job_status', args: { id: 'source-job-1' } }]
     const adapter = new ScriptedAdapter(durableTurns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = {
       ...sourceService(),
       canEnqueueSource: () => true,
@@ -2159,7 +2110,6 @@ describe('opt-in plugin source proposals', () => {
   it('keeps the four-tool baseline for an older provider without source inspection', async () => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     h.ctx.provide('pluginControlPlane' as never, { ...sourceService(), inspectSource: undefined } as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
     await new Promise(resolve => setImmediate(resolve))
@@ -2172,7 +2122,6 @@ describe('opt-in plugin source proposals', () => {
       : mode === 'manifest-only' ? [sourceTurns[0]!, sourceTurns[1]!, sourceTurns[3]!]
         : [...sourceTurns.slice(0, 3), { name: 'plugin_source_prepare', args: { ...sourceArgs, files: [{ path: 'src/index.ts', content: 'replacement' }] } }]
     const h = await mount({ adapter: new ScriptedAdapter(turns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
@@ -2184,7 +2133,6 @@ describe('opt-in plugin source proposals', () => {
 
   it('does not accept a changed base from a later source read', async () => {
     const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     let reads = 0
     source.inspectSource.mockImplementation(async input => ({ name: input.name, baseCommit: (++reads === 1 ? 'c' : 'd').repeat(40),
@@ -2201,7 +2149,6 @@ describe('opt-in plugin source proposals', () => {
     const reread = { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: ['README.md'] } }
     const turns = [...sourceTurns.slice(0, 3), reread, reread, sourceTurns[3]!]
     const h = await mount({ adapter: new ScriptedAdapter(turns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     let reads = 0
     source.inspectSource.mockImplementation(async input => ({ name: input.name, baseCommit: 'c'.repeat(40),
@@ -2218,7 +2165,6 @@ describe('opt-in plugin source proposals', () => {
   it.each(['../secret.ts', '.env', 'lib/index.js', 'src/../../other.ts'])('rejects source read path %s before calling its provider', async path => {
     const h = await mount({ adapter: new ScriptedAdapter([sourceTurns[0]!, { name: 'plugin_source_read',
       args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: [path] } }]) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
@@ -2229,7 +2175,6 @@ describe('opt-in plugin source proposals', () => {
 
   it('cancels source reads when the optional provider is removed', async () => {
     const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     let signal: AbortSignal | undefined
     source.inspectSource.mockImplementation(input => new Promise((_resolve, reject) => {
@@ -2251,7 +2196,6 @@ describe('opt-in plugin source proposals', () => {
   it('caps attempts even after a build rejection and never calls approval/release capabilities', async () => {
     const adapter = new ScriptedAdapter([...sourceTurns, sourceTurns[3]!])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     source.prepareModifySourcePlan.mockRejectedValue(new Error('isolated check failed'))
     h.ctx.provide('pluginControlPlane' as never, source as never)
@@ -2265,7 +2209,6 @@ describe('opt-in plugin source proposals', () => {
   it.each(['assistant-policy', 'assistant-skills', '../outside'])('refuses protected/invalid target %s before calling the Host', async plugin_name => {
     const adapter = new ScriptedAdapter([sourceTurns[0]!, { name: 'plugin_source_prepare', args: { ...sourceArgs, plugin_name } }])
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
@@ -2278,7 +2221,6 @@ describe('opt-in plugin source proposals', () => {
   it('coalesces explicit wakes and cancels on provider replacement before binding the new generation', async () => {
     const adapter = new ScriptedAdapter(sourceTurns)
     const h = await mount({ adapter })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     let observedSignal: AbortSignal | undefined
     source.prepareModifySourcePlan.mockImplementation(input => new Promise((_resolve, reject) => {
@@ -2312,7 +2254,6 @@ describe('opt-in plugin source proposals', () => {
 
   it('aborts and drains the active build before the driver Fiber finishes disposal', async () => {
     const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
-    process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
     let signal: AbortSignal | undefined
     let settled = false
@@ -2348,7 +2289,7 @@ describe('opt-in plugin source proposals', () => {
       const runtime = new FakePtcRuntime()
       h.ctx.provide('ptcRuntime' as never, runtime as never)
       provideWorkingDirectoryFixture(h.ctx, h.root)
-      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      process.env.TEST_PROVIDER_API_KEY = 'test-key'
       return { h, runtime }
     }
 
@@ -2361,7 +2302,7 @@ describe('opt-in plugin source proposals', () => {
     it('fails closed before any model call when ptc is configured without ctx.ptcRuntime', async () => {
       const adapter = new ScriptedAdapter([])
       const h = await mount({ adapter })
-      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      process.env.TEST_PROVIDER_API_KEY = 'test-key'
       const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { toolPresentation: 'ptc' }))
       await runWake(service)
       expect(service.health()).toMatchObject({ outcome: 'failed', reason: expect.stringMatching(/ptcRuntime/u) })
@@ -2414,7 +2355,7 @@ describe('opt-in plugin source proposals', () => {
       // digests have the stable digest shape and they are mutually different.
       const nativeAdapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
       const nativeHarness = await mount({ adapter: nativeAdapter })
-      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      process.env.TEST_PROVIDER_API_KEY = 'test-key'
       const nativeService = new AssistantGrowthDriverService(nativeHarness.ctx, driverConfig(nativeHarness.root))
       await runWake(nativeService)
       expect(nativeService.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
@@ -2453,7 +2394,7 @@ describe('opt-in plugin source proposals', () => {
     it('keeps the native presentation and usage shape unchanged (default native)', async () => {
       const adapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
       const h = await mount({ adapter })
-      process.env.SUPER_RELAY_API_KEY = 'test-key'
+      process.env.TEST_PROVIDER_API_KEY = 'test-key'
       const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
       await runWake(service)
       const health = service.health()

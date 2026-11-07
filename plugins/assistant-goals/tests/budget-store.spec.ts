@@ -17,7 +17,7 @@ const request = (id = 'request-a') => ({ id, runId: 'run-a', inputTokens: 6, out
 describe('GoalBudgetStore', () => {
   it('persists calls-only authority and retains failed dispatch reservations across restart', async () => {
     const path = join(await mkdtemp(join(tmpdir(), 'goal-budget-calls-')), 'budget.sqlite')
-    const calls = { mode: 'calls' as const, routes: [{ provider: 'relay', model: 'alwaysday1' }], modelCalls: 1, toolCalls: 1, inputTokens: null, outputTokens: null, costUsdMicros: null, expiresAt: 100 }
+    const calls = { mode: 'calls' as const, routes: [{ provider: 'relay', model: 'test-model' }], modelCalls: 1, toolCalls: 1, inputTokens: null, outputTokens: null, costUsdMicros: null, expiresAt: 100 }
     const first = new GoalBudgetStore(path)
     first.configure(binding, calls)
     first.reserve(binding, { id: 'calls-failed-dispatch', runId: 'run-a', inputTokens: 0, outputTokens: 0, costUsdMicros: null }, 1)
@@ -33,7 +33,7 @@ describe('GoalBudgetStore', () => {
 
   it('rejects mixed calls-only configuration and retains legacy token defaults', () => {
     expect(validateGoalBudgetConfig({ modelCalls: 1, toolCalls: 0, inputTokens: 1, outputTokens: 1, durationMs: 1, maxOutputTokensPerCall: 1 })).toMatchObject({ inputTokens: 1, outputTokens: 1 })
-    expect(() => validateGoalBudgetConfig({ mode: 'calls', modelCalls: 1, toolCalls: 0, durationMs: 1, maxOutputTokensPerCall: 1, routes: [{ provider: 'relay', model: 'alwaysday1' }], inputTokens: 1 } as never)).toThrow(/execution budget/)
+    expect(() => validateGoalBudgetConfig({ mode: 'calls', modelCalls: 1, toolCalls: 0, durationMs: 1, maxOutputTokensPerCall: 1, routes: [{ provider: 'relay', model: 'test-model' }], inputTokens: 1 } as never)).toThrow(/execution budget/)
   })
 
   it('attributes settled and uncertain child cost within the exact parent goal budget', () => {
@@ -145,13 +145,13 @@ describe('GoalBudgetStore', () => {
       expect(migrated.snapshot(binding)).toMatchObject({ limits: { mode: 'tokens', routes: [], inputTokens: 10, outputTokens: 10 }, modelCalls: 1, heldCalls: 1 })
       expect(() => migrated.reserve(binding, { id: 'after-migration', runId: 'run-a', inputTokens: 0, outputTokens: 0, costUsdMicros: null }, 2)).toThrow(GoalStoreError)
       const callsBinding = { ...binding, goalId: 'calls-after-v1' }
-      const calls = { mode: 'calls' as const, routes: [{ provider: 'relay', model: 'auto_model/alwaysday1' }], modelCalls: 1, toolCalls: 0, inputTokens: null, outputTokens: null, costUsdMicros: null, expiresAt: 100 }
+      const calls = { mode: 'calls' as const, routes: [{ provider: 'relay', model: 'test-model' }], modelCalls: 1, toolCalls: 0, inputTokens: null, outputTokens: null, costUsdMicros: null, expiresAt: 100 }
       migrated.configure(callsBinding, calls)
       migrated.reserve(callsBinding, { id: 'calls-after-v1-request', runId: 'run-a', inputTokens: 0, outputTokens: 0, costUsdMicros: null }, 2)
       expect(migrated.snapshot(callsBinding)).toMatchObject({ limits: { mode: 'calls' }, modelCalls: 1, inputTokens: null, outputTokens: null })
     } finally { migrated.close() }
     const reopened = new GoalBudgetStore(path)
-    try { expect(reopened.snapshot({ ...binding, goalId: 'calls-after-v1' })).toMatchObject({ limits: { mode: 'calls', routes: [{ provider: 'relay', model: 'auto_model/alwaysday1' }] }, heldCalls: 1, inputTokens: null }) } finally { reopened.close() }
+    try { expect(reopened.snapshot({ ...binding, goalId: 'calls-after-v1' })).toMatchObject({ limits: { mode: 'calls', routes: [{ provider: 'relay', model: 'test-model' }] }, heldCalls: 1, inputTokens: null }) } finally { reopened.close() }
   })
 
   it('rejects invalid payloads and corrupt persisted schemas', async () => {

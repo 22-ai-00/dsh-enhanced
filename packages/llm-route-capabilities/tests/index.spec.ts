@@ -268,12 +268,12 @@ describe('Agent Loop request attestor', () => {
 
   test('accepts only the forAdapter replayState-removal clone of derived history', () => {
     const historical = createAssistantMessage({
-      source: { provider: 'super-relay', model: 'relay-model', replayState: { cursor: 'private' } },
+      source: { provider: 'custom-gateway', model: 'relay-model', replayState: { cursor: 'private' } },
       content: [{ type: 'text', text: 'prior answer' }],
     })
     const stripped = freezeMessage({
       ...historical,
-      source: { kind: 'model' as const, provider: 'super-relay', model: 'relay-model' },
+      source: { kind: 'model' as const, provider: 'custom-gateway', model: 'relay-model' },
     })
     const fixture = attestorFixture([historical])
 
@@ -404,12 +404,12 @@ describe('Agent Loop request attestor', () => {
 
   test('accepts only cross-adapter replayState removal in the compacted head prefix', () => {
     const historical = createAssistantMessage({
-      source: { provider: 'super-relay', model: 'relay-model', replayState: { cursor: 'private' } },
+      source: { provider: 'custom-gateway', model: 'relay-model', replayState: { cursor: 'private' } },
       content: [{ type: 'text', text: 'prior answer' }],
     })
     const stripped = freezeMessage({
       ...historical,
-      source: { kind: 'model' as const, provider: 'super-relay', model: 'relay-model' },
+      source: { kind: 'model' as const, provider: 'custom-gateway', model: 'relay-model' },
     })
     const tail = createMessage({
       role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'latest' }],

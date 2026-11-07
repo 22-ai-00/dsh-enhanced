@@ -241,11 +241,6 @@ export function createFixedStrategyCapabilityExpectation(input: FixedStrategyCap
     loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/assistant-deepseek-budget'))
     loaded.push(fixedModule(resolverDirectory, '@deepseek-ai/dsh-credentials'))
   }
-  if (input.modelProvider === 'super-relay') {
-    // Token-metered Responses route with real usage; credential reference resolved via dsh-credentials.
-    loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/assistant-super-relay-budget'))
-    loaded.push(fixedModule(resolverDirectory, '@deepseek-ai/dsh-credentials'))
-  }
   if (input.modelProvider === 'traex-agent') {
     // Call-count route: the ACP provider carries no credentials package and emits no token usage.
     loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/traex-acp-provider'))

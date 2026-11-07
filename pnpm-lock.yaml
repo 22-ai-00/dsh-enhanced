@@ -944,9 +944,6 @@ importers:
       '@dsh-enhanced/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-super-relay-budget':
-        specifier: workspace:*
-        version: link:../assistant-super-relay-budget
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
@@ -1190,9 +1187,6 @@ importers:
       '@dsh-enhanced/assistant-skills':
         specifier: workspace:*
         version: link:../assistant-skills
-      '@dsh-enhanced/assistant-super-relay-budget':
-        specifier: workspace:*
-        version: link:../assistant-super-relay-budget
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
@@ -1664,34 +1658,6 @@ importers:
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.20.0
-      typescript:
-        specifier: 'catalog:'
-        version: 6.0.3
-      vitest:
-        specifier: 'catalog:'
-        version: 4.1.8(@types/node@22.20.0)(jsdom@29.1.1)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
-
-  plugins/assistant-super-relay-budget:
-    dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: 'catalog:'
-        version: 3.18.5
-    devDependencies:
-      '@deepseek-ai/cordis':
-        specifier: 'catalog:'
-        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
-      '@deepseek-ai/dsh-credentials':
-        specifier: 'catalog:'
-        version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)
-      '@deepseek-ai/dsh-llm':
-        specifier: 'catalog:'
-        version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)
-      '@dsh-enhanced/assistant-goals':
-        specifier: workspace:*
-        version: link:../assistant-goals
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

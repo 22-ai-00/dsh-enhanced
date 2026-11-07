@@ -162,11 +162,9 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
       const provider = (configured as { model?: { provider?: unknown } } | undefined)?.model?.provider
       const providerPackages = provider === 'deepseek-goal-metered'
         ? ['@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials']
-        : provider === 'super-relay'
-          ? ['@dsh-enhanced/assistant-super-relay-budget', '@deepseek-ai/dsh-credentials']
-          : provider === 'traex-agent'
-            ? ['@dsh-enhanced/traex-acp-provider']
-            : []
+        : provider === 'traex-agent'
+          ? ['@dsh-enhanced/traex-acp-provider']
+          : []
       const selectedPackages = [...strategyRuntimePackages, ...providerPackages]
       const packages = selectedPackages.map(name => {
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }

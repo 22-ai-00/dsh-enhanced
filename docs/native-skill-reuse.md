@@ -56,15 +56,9 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 
 ## 真实 Day1 探针
 
-先运行 `pnpm build`，准备已存在、包含 `/bin/sh` 与 `node` 的不可变本地 Docker 镜像。使用 [native-skill-day1.mjs](../scripts/e2e/native-skill-day1.mjs) 在全新私有目录运行；父目录须已存在，探针拒绝覆盖或恢复已有实验，不拉取镜像、不安装插件、不修改日常 profile。
+先运行 `pnpm build`，准备已存在、包含 `/bin/sh` 与 `node` 的不可变本地 Docker 镜像。真实 Day1 探针须由可信 Host 提供一个固定 adapter 模块（导出一个满足 native adapter 契约的工厂），在全新私有目录运行；探针拒绝覆盖或恢复已有实验，不拉取镜像、不安装插件、不修改日常 profile。
 
-```sh
-DSH_NATIVE_SKILL_EVIDENCE_ROOT=/absolute/private/new-experiment \
-DSH_NATIVE_SKILL_IMAGE=sha256:LOCAL_IMMUTABLE_IMAGE \
-node scripts/e2e/native-skill-day1.mjs
-```
-
-凭据使用运行环境的 `SUPER_RELAY_API_KEY` 引用；若需已有 DSH 本地凭据服务，同时设置 `DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）。文件内容不会写入证据。可用 `DSH_NATIVE_SKILL_DOCKER` 指定绝对 Docker 路径，默认 `/usr/bin/docker`。
+凭据由 Host 的 adapter 或本地凭据服务按引用解析，不接受明文 key；`DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）须同时设置。文件内容不会写入证据。可用 `DSH_NATIVE_SKILL_DOCKER` 指定绝对 Docker 路径，默认 `/usr/bin/docker`。
 
 探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 Goal 回合（`stepMaxDurationMs`）240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。回合期限覆盖该轮所有模型和工具调用；它不会随每次调用重置。期限中断了已派发请求且 usage 未结算时，该实验保持 unknown，即使本地最后一个产物作业成功也不能据此捕获候选。
 

@@ -156,19 +156,19 @@ dsh --profile web --no-open
 
 该 v1 格式保留固定 `deepseek-v4-flash` 或 `deepseek-v4-pro` 路径，endpoint 不可配置。每次目标模型调用会保守预留至少 `2,097,152` 输入 tokens；当前没有 USD 硬预算，任务不得添加 `costUsdMicros`。
 
-v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任意精确 provider/model，例如 `super-relay`、`auto_model` 或 `alwaysday1`。它不会写入 provider、endpoint 或 secret 配置：`route` 必须与已配置默认 route 完全相等，且 calls budget 的唯一 `routes` 项必须与它相同。启用后台唤醒时，setup 同时将 Delivery 的默认 provider/model 和输出上限设为这条已授权线路，保证恢复使用相同线路；运行时仍逐次检查预算。
+v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任意精确 provider/model，例如 `custom-gateway` / `configured-model-id`。它不会写入 provider、endpoint 或 secret 配置：`route` 必须与已配置默认 route 完全相等，且 calls budget 的唯一 `routes` 项必须与它相同。启用后台唤醒时，setup 同时将 Delivery 的默认 provider/model 和输出上限设为这条已授权线路，保证恢复使用相同线路；运行时仍逐次检查预算。
 
 ```json
 {
   "version": 2,
   "objective": "Verify the generated artifact",
-  "route": { "provider": "super-relay", "model": "relay-v2" },
+  "route": { "provider": "custom-gateway", "model": "configured-model-id" },
   "maxGoalRounds": 2,
   "stepMaxDurationMs": 60000,
   "executionBudget": {
     "mode": "calls", "modelCalls": 3, "toolCalls": 3,
     "durationMs": 120000, "maxOutputTokensPerCall": 8192,
-    "routes": [{ "provider": "super-relay", "model": "relay-v2" }]
+    "routes": [{ "provider": "custom-gateway", "model": "configured-model-id" }]
   },
   "verification": { "artifactPath": "result.txt", "command": "node verify.mjs", "maxRuns": 4, "maxTotalDurationMs": 100000, "maxDurationMs": 20000, "maxOutputBytes": 4096, "cases": [{ "stdin": "one\n", "expectedStdout": "one\n", "expectedExitCode": 0 }] }
 }

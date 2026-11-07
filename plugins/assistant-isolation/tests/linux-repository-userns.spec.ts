@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir as osHomedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
 import { describe, expect, test, vi } from 'vitest'
@@ -148,7 +148,8 @@ assert os.stat('/etc/hostname').st_uid==0 and stat.S_IMODE(os.stat('/etc/hostnam
 assert os.statvfs('/tmp').f_files==128
 assert os.statvfs('/etc').f_files==16384 and os.statvfs('/etc').f_blocks*os.statvfs('/etc').f_frsize==8*1024**2
 assert all(int(fd)<3 or not os.path.exists('/proc/self/fd/'+fd) for fd in os.listdir('/proc/self/fd'))
-for p in ['/data00/home/jiataorui','/proc/self/root/data00/home/jiataorui','/proc/1/root/data00/home/jiataorui']:
+const home = osHomedir();
+for p in [home, `/proc/self/root${home}`, `/proc/1/root${home}`]:
  try: os.stat(p); raise AssertionError('Host visible')
  except OSError as e: assert e.errno in [errno.ENOENT,errno.EACCES]
 try: os.setresuid(0,0,0); raise AssertionError('root regained')

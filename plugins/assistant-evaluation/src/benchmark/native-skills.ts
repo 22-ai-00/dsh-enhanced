@@ -67,12 +67,11 @@ export function nativeSkillRuntimeIdentity(provider: string): string {
     '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-persistence-jsonl', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools',
     '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@dsh-enhanced/assistant-evaluation', '@dsh-enhanced/assistant-delivery',
     '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-skills', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier']
-  if (provider === 'super-relay') names.push('@dsh-enhanced/assistant-super-relay-budget', '@deepseek-ai/dsh-credentials')
   if (provider === 'deepseek-goal-metered') names.push('@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials')
   const require = createRequire(import.meta.url)
   return acceptanceDigest(names.map(packageName => {
     const moduleResolverDirectory = packageName === '@deepseek-ai/dsh-credentials'
-      ? dirname(require.resolve(provider === 'super-relay' ? '@dsh-enhanced/assistant-super-relay-budget' : '@dsh-enhanced/assistant-deepseek-budget')) : resolverDirectory
+      ? dirname(require.resolve('@dsh-enhanced/assistant-deepseek-budget')) : resolverDirectory
     const moduleRequire = createRequire(join(moduleResolverDirectory, 'native-skill-resolver.cjs'))
     let root = dirname(realpathSync(moduleRequire.resolve(packageName)))
     while (!existsSync(join(root, 'package.json')) || JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).name !== packageName) {

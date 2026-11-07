@@ -131,8 +131,8 @@ executionBudget:
   durationMs: 300000
   maxOutputTokensPerCall: 1024
   routes:
-    - provider: super-relay
-      model: auto_model/alwaysday1
+    - provider: custom-gateway
+      model: configured-model-id
 ```
 
 该模式只能含上述字段，`inputTokens`、`outputTokens` 和 `costUsdMicros` 会被拒绝。`routes` 是精确的 provider/model allowlist，并和 `mode` 一起在每个业务目标首次运行时写入预算账本；重启、编辑目标或之后修改 Host 配置均不能放宽它。每次 DSH `llm/stream` 调用仍在分派前原子占用一次 `modelCalls`，失败、中断、DSH 重试和崩溃保留占额；任意适配器内部的 HTTP 重试不是可由此账本观察或限制的次数。工具和绝对期限照常硬限制。`maxOutputTokensPerCall` 只是发送给提供商的最佳努力提示，不能当作已验证的输出或账单上限。流可以没有 usage；如果有 usage 会校验其内部一致性，但 calls-only 的 `executionBudget` 和 `runUsage` 将 token 与费用显示为 `null`（未知），绝不伪装为零。calls-only 路线不需要注册 meter；严格 token 模式的 meter、预留和缺失/超额 usage 拒绝行为保持不变。

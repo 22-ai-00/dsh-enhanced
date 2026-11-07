@@ -897,7 +897,7 @@ dsh_enhanced_prompt_model_route() {
       printf -v "$display_var" '%s' ''
       ;;
     '2')
-      printf 'Provider route 名称（如 super-relay）：' >&2
+      printf 'Provider route 名称（如 custom-gateway）：' >&2
       local provider
       IFS= read -r provider
       if [[ -z "$provider" || "$provider" == 'deepseek-official' ]]; then

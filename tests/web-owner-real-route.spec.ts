@@ -13,43 +13,43 @@ async function fixture() {
   await Promise.all([mkdir(source), mkdir(home), mkdir(workspace)])
   return { root, source, home, workspace }
 }
-const route = { displayName: 'Super Relay', apiKeyEnv: 'SUPER_RELAY_API_KEY', api: 'openai-responses', baseURL: 'https://relay.example/v1', models: [{ id: 'auto_model/alwaysday1', name: 'alwaysday1' }, { id: 'other' }] }
+const route = { displayName: 'Custom Gateway', apiKeyEnv: 'CUSTOM_GATEWAY_API_KEY', api: 'openai-responses', baseURL: 'https://relay.example/v1', models: [{ id: 'test-model', name: 'test-model' }, { id: 'other' }] }
 afterEach(async () => { await Promise.all(paths.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 describe('web owner real route preparation', () => {
   test('copies only the selected gateway route and keeps a credential in child env', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ unrelated: { value: true }, 'llm-pi-ai': { providers: { selected: route, other: { ...route, apiKeyEnv: 'OTHER_KEY' } } } }))
-    await writeFile(join(source, '.credentials.yaml'), 'refs:\n  SUPER_RELAY_API_KEY: private-test-value\n', { mode: 0o600 })
-    const env: Record<string, string | undefined> = { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1', DSH_WEB_REAL_SOURCE_HOME: source }
+    await writeFile(join(source, '.credentials.yaml'), 'refs:\n  CUSTOM_GATEWAY_API_KEY: private-test-value\n', { mode: 0o600 })
+    const env: Record<string, string | undefined> = { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'test-model', DSH_WEB_REAL_SOURCE_HOME: source }
     const prepared = await prepareRealRoute({ env, home, workspace })
     const settings = parse(await readFile(join(home, 'settings.yaml'), 'utf8'))
-    expect(settings).toEqual({ 'agent-default-model': { provider: 'selected', model: 'auto_model/alwaysday1' }, 'llm-pi-ai': { providers: { selected: route } } })
+    expect(settings).toEqual({ 'agent-default-model': { provider: 'selected', model: 'test-model' }, 'llm-pi-ai': { providers: { selected: route } } })
     expect(await readFile(join(home, 'settings.yaml'), 'utf8')).not.toContain('private-test-value')
-    expect(env.SUPER_RELAY_API_KEY).toBe('private-test-value')
-    expect(prepared).toMatchObject({ provider: 'selected', model: 'auto_model/alwaysday1', bundles: [], proof: { provider: 'selected', model: 'auto_model/alwaysday1', api: 'openai-responses' } })
+    expect(env.CUSTOM_GATEWAY_API_KEY).toBe('private-test-value')
+    expect(prepared).toMatchObject({ provider: 'selected', model: 'test-model', bundles: [], proof: { provider: 'selected', model: 'test-model', api: 'openai-responses' } })
     expect(JSON.stringify(prepared.proof)).not.toContain('relay.example')
   })
 
   test('refuses unsafe sources without disclosing secret values', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ 'llm-pi-ai': { providers: { selected: { ...route, baseURL: 'https://private:test-secret@relay.example/v1' } } } }))
-    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1', DSH_WEB_REAL_SOURCE_HOME: source }, home, workspace })).rejects.toThrow('must not contain credentials')
+    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'test-model', DSH_WEB_REAL_SOURCE_HOME: source }, home, workspace })).rejects.toThrow('must not contain credentials')
     await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'missing', DSH_WEB_REAL_SOURCE_HOME: source }, home, workspace })).rejects.toThrow('could not read a valid selected gateway route')
     await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_SOURCE_HOME: source }, home: source, workspace })).rejects.toThrow('source and target')
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ 'llm-pi-ai': { providers: { selected: { ...route, headers: { Authorization: 'Bearer test-secret' } } } } }))
-    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1', DSH_WEB_REAL_SOURCE_HOME: source }, home, workspace })).rejects.toThrow('unsupported or sensitive')
+    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'test-model', DSH_WEB_REAL_SOURCE_HOME: source }, home, workspace })).rejects.toThrow('unsupported or sensitive')
     await writeFile(join(home, 'settings.yaml'), 'existing: true\n')
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ 'llm-pi-ai': { providers: { selected: route } } }))
-    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'auto_model/alwaysday1', DSH_WEB_REAL_SOURCE_HOME: source, SUPER_RELAY_API_KEY: 'child-only' }, home, workspace })).rejects.toThrow('target settings.yaml already exists')
+    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_MODEL: 'test-model', DSH_WEB_REAL_SOURCE_HOME: source, CUSTOM_GATEWAY_API_KEY: 'child-only' }, home, workspace })).rejects.toThrow('target settings.yaml already exists')
   })
 
   test('requires a selected model unless the route has one clear model', async () => {
     const { source, home, workspace } = await fixture()
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ 'llm-pi-ai': { providers: { selected: route } } }))
-    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_SOURCE_HOME: source, SUPER_RELAY_API_KEY: 'child-only' }, home, workspace })).rejects.toThrow('DSH_WEB_REAL_MODEL is required')
+    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_SOURCE_HOME: source, CUSTOM_GATEWAY_API_KEY: 'child-only' }, home, workspace })).rejects.toThrow('DSH_WEB_REAL_MODEL is required')
     await writeFile(join(source, 'settings.yaml'), JSON.stringify({ 'llm-pi-ai': { providers: { selected: { ...route, models: [route.models[0]] } } } }))
-    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_SOURCE_HOME: source, SUPER_RELAY_API_KEY: 'child-only' }, home, workspace })).resolves.toMatchObject({ model: 'auto_model/alwaysday1' })
+    await expect(prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'selected', DSH_WEB_REAL_SOURCE_HOME: source, CUSTOM_GATEWAY_API_KEY: 'child-only' }, home, workspace })).resolves.toMatchObject({ model: 'test-model' })
   })
 
   test('preserves the direct Responses codex default', async () => {

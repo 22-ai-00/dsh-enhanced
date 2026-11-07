@@ -112,4 +112,4 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 早期公开开发集实验包括 persona 配对持平，以及 Memory 检索在修订引用约定后的开发题上改善。它们使用历史供应和版本，只支持当时任务上的有限结论，不是当前版本验收、隐藏留出或基础模型提升证据。逐轮时间、计量和诊断从 Git 历史或本地原始证据查阅；旧失败和 unknown 不改判、不重放。
 
-历史 Day1 实验使用一个内部 OpenAI Responses 兼容网关（provider 别名已随部署移除）；真实技能复用入口见[原生技能复用](native-skill-reuse.md)，剩余门槛见 [RSI 验收合同](rsi-acceptance.md)，逐次结果查 Git 历史与本地证据。当前开发优先级见 [RSI 当前状态](rsi-status.md)。
+历史 Day1 实验使用一个内部 OpenAI-compatible 网关（固定 provider/model）；真实技能复用入口见[原生技能复用](native-skill-reuse.md)，剩余门槛见 [RSI 验收合同](rsi-acceptance.md)，逐次结果查 Git 历史与本地证据。当前开发优先级见 [RSI 当前状态](rsi-status.md)。

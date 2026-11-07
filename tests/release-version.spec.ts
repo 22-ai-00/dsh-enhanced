@@ -1153,7 +1153,6 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-recovery run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-goals run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-skills run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-super-relay-budget run build'
       + ' && pnpm --filter @dsh-enhanced/plugin-control-plane run build'
       + ' && pnpm --filter @dsh-enhanced/personal-memory run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-memory-learning run build'

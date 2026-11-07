@@ -35,12 +35,12 @@ function fixture(path = ':memory:', modelCalls = 2, toolCalls = 1, createdAt = D
     effect(callback: () => () => void) { cleanup = callback() },
     get(name: string) { return name === 'agents' ? { currentInitiator: () => agent, get: (id: string) => id === agent.id ? agent : undefined } : undefined },
   } as unknown as Context
-  const runtime = new GoalBudgetRuntime(ctx, path, { mode: 'calls', routes: [{ provider: 'relay', model: 'auto_model/alwaysday1' }], modelCalls, toolCalls, durationMs: 60_000, maxOutputTokensPerCall: 16 }, () => ({ record, run, signal: signal.signal }))
+  const runtime = new GoalBudgetRuntime(ctx, path, { mode: 'calls', routes: [{ provider: 'relay', model: 'test-model' }], modelCalls, toolCalls, durationMs: 60_000, maxOutputTokensPerCall: 16 }, () => ({ record, run, signal: signal.signal }))
   const result = { runtime, record, agent, signal, stream: hooks.get('llm/stream') as StreamHook, request: hooks.get('agent/request') as RequestHook, tool: hooks.get('tools/execute') as ToolHook, dispose: () => cleanup?.() }
   contexts.push(result)
   return result
 }
-const options = (model = 'auto_model/alwaysday1'): GenerateOptions => ({ provider: 'relay', model, messages: [], maxTokens: 16 })
+const options = (model = 'test-model'): GenerateOptions => ({ provider: 'relay', model, messages: [], maxTokens: 16 })
 
 describe('calls-only goal budget runtime', () => {
   it('normalizes explicit tokens mode to the legacy strict token configuration and rejects an unknown mode', () => {
@@ -52,9 +52,9 @@ describe('calls-only goal budget runtime', () => {
   it('admits an exact slash route without a meter, caps the provider hint, and accepts a finished stream without usage', async () => {
     const value = fixture()
     await expect(value.request({ agent: value.agent }, async () => ({ ...options(), maxTokens: 99 }))).resolves.toMatchObject({ maxTokens: 16 })
-    await expect(consume(value.stream(options('auto_model/alwaysday1'), () => complete()))).resolves.toBeUndefined()
-    expect(value.runtime.inspect(value.record)).toMatchObject({ modelCalls: 1, heldCalls: 0, inputTokens: null, outputTokens: null, costUsdMicros: null, limits: { mode: 'calls', routes: [{ provider: 'relay', model: 'auto_model/alwaysday1' }] } })
-    expect(value.runtime.hasMeter({ provider: 'relay', model: 'auto_model/alwaysday1' })).toBe(true)
+    await expect(consume(value.stream(options('test-model'), () => complete()))).resolves.toBeUndefined()
+    expect(value.runtime.inspect(value.record)).toMatchObject({ modelCalls: 1, heldCalls: 0, inputTokens: null, outputTokens: null, costUsdMicros: null, limits: { mode: 'calls', routes: [{ provider: 'relay', model: 'test-model' }] } })
+    expect(value.runtime.hasMeter({ provider: 'relay', model: 'test-model' })).toBe(true)
   })
 
   it('rejects a non-allowlisted route before downstream dispatch and retains the independent call allowance', async () => {

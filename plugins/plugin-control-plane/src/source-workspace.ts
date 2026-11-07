@@ -40,7 +40,6 @@ export const PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
   'assistant-evaluation', // 评测答案根
   'assistant-verifier', // 验证/私钥评测根
   'assistant-deepseek-budget', // 预算上限根
-  'assistant-super-relay-budget', // 预算上限根
   'assistant-skills', // sealed holdout 私钥与 holdout 数据集
   'assistant-isolation', // 隔离沙箱机制本身
   'assistant-web-owner', // owner 安全控制台

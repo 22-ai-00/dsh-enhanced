@@ -10906,7 +10906,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     }
 
     expect(await read('{ agent-default-model: { provider: traex-agent, model: default } }\n')).toBe('traex-agent')
-    expect(await read('{ ui-theme: { preference: dark }, agent-default-model: { provider: super-relay, model: glm5.2 } }\n')).toBe('super-relay')
+    expect(await read('{ ui-theme: { preference: dark }, agent-default-model: { provider: custom-gateway, model: glm5.2 } }\n')).toBe('custom-gateway')
     expect(await read('ui-theme:\n  preference: dark\n')).toBe('')
   })
 
@@ -11024,14 +11024,14 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(localInstaller, [
-      '--dry-run', '--lark', 'skip', '--model-provider', 'super-relay', '--model-name', 'glm5.2',
-      '--model-base-url', 'https://super-relay.example/v1', '--model-api', 'openai-completions',
-      '--model-display-name', 'Super Relay',
+      '--dry-run', '--lark', 'skip', '--model-provider', 'custom-gateway', '--model-name', 'glm5.2',
+      '--model-base-url', 'https://custom-gateway.example/v1', '--model-api', 'openai-completions',
+      '--model-display-name', 'Custom Gateway',
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(
-      '--provider super-relay --model glm5.2 --base-url https://super-relay.example/v1'
+      '--provider custom-gateway --model glm5.2 --base-url https://custom-gateway.example/v1'
       + ' --api openai-completions --display-name Super\\ Relay',
     )
   })
@@ -11040,7 +11040,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     const dshHome = await temporaryDshHome()
 
     const missingBaseUrl = runInstaller(localInstaller, [
-      '--dry-run', '--lark', 'skip', '--model-provider', 'super-relay', '--model-name', 'glm5.2',
+      '--dry-run', '--lark', 'skip', '--model-provider', 'custom-gateway', '--model-name', 'glm5.2',
     ], dshHome)
     expect(missingBaseUrl.status).toBe(2)
     expect(missingBaseUrl.stderr).toContain('自定义模型 provider 需要 --model-base-url')
@@ -11346,7 +11346,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
   test('auto-enabling TraeX preserves an explicit profile-local default without creating settings.yaml', async () => {
     const fixture = await autoTraexSetupFixture('traex', true)
     const patchPath = join(fixture.dshHome, 'profiles', 'web', 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: agent-default-model\n  config:\n    provider: super-relay\n    model: glm5.2\n')
+    await writeFile(patchPath, '- id: agent-default-model\n  config:\n    provider: custom-gateway\n    model: glm5.2\n')
 
     const result = spawnSync('/bin/bash', [
       '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
@@ -11356,7 +11356,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.status, result.stderr).toBe(0)
     const patch = await readFile(patchPath, 'utf8')
     expect(patch.match(/id: agent-default-model/gu)).toHaveLength(1)
-    expect(patch).toContain('provider: super-relay')
+    expect(patch).toContain('provider: custom-gateway')
     expect(patch).toContain('model: glm5.2')
     expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
     expect(patch).toContain('enabled: true')

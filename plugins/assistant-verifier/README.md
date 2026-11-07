@@ -221,7 +221,7 @@ sourceReviews:
   maxOutputTokens: 4096
   timeoutMs: 120000
   # 不填 model 时继承原任务的 provider/model/reasoningEffort；缺失或不一致则等待。
-  # model: { provider: super-relay, model: day1 }
+  # model: { provider: custom-gateway, model: configured-model-id }
 ```
 
 Host 独立读取精确 PR ref、单一 base parent、改动范围和已检查 tree/patch digest，再给全新、无 preset、无工具的原生 Agent 审查。候选代码和任务文本仅作为不可信数据；固定政策、模型、一次调用、输入字节、输出 token、期限与累计调用数构成审查边界。完整 `completed` 回合、用量和严格 JSON 结果缺一不可；源码审查不等于行为改善证明，后续构建、签名和采用仍有各自检查。

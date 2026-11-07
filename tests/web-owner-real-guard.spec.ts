@@ -31,7 +31,7 @@ describe('real-model browser experiment guard', () => {
   })
   test('permits only the explicitly selected existing provider', async () => {
     const records: unknown[] = []
-    const guard = createRunGuard({ provider: 'super-relay', record: (entry: unknown) => records.push(entry) })
+    const guard = createRunGuard({ provider: 'custom-gateway', record: (entry: unknown) => records.push(entry) })
     const agent = { cancel: vi.fn() }
     const next = vi.fn(async function* () {
       yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }
@@ -40,9 +40,9 @@ describe('real-model browser experiment guard', () => {
     try {
       await expect(guard.stream({ provider: 'codex-subscription', model: 'default' }, agent, next).next()).rejects.toThrow('route')
       expect(next).not.toHaveBeenCalled()
-      for await (const _chunk of guard.stream({ provider: 'super-relay', model: 'selected-model' }, agent, next)) { /* drain */ }
+      for await (const _chunk of guard.stream({ provider: 'custom-gateway', model: 'selected-model' }, agent, next)) { /* drain */ }
       expect(records).toEqual([
-        { event: 'dispatch', call: 1, provider: 'super-relay', model: 'selected-model' },
+        { event: 'dispatch', call: 1, provider: 'custom-gateway', model: 'selected-model' },
         { event: 'settled', call: 1, drained: true, finish: 'stop', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } },
       ])
     } finally { guard.stop() }

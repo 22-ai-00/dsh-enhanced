@@ -89,19 +89,19 @@ test('carries an owner model-provider edit and rejects any other drift from the 
 - id: llm-pi-ai
   name: llm-pi-ai
   config:
-    defaultProvider: super-relay
+    defaultProvider: custom-gateway
     providers:
-      super-relay: { api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }
+      custom-gateway: { api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }
 - id: dsh-enhanced-plugin-control-plane
   config: { runtimeObserver: { targets: [] } }
 `
   const edited = signed.replace('{ api: openai-completions, baseURL: https://relay.example.invalid/v1, contextWindow: 200000 }',
     `{ api: anthropic-messages, baseURL: https://relay.example.invalid, contextWindow: 1000000 }
-      benchmark-gateway-default: { api: openai-completions, apiKeyEnv: BENCH_KEY, models: [glm-5.3-flash, deepseek-v4-flash] }`)
+      benchmark-gateway: { api: openai-completions, apiKeyEnv: BENCH_KEY, models: [glm-5.3-flash, deepseek-v4-flash] }`)
   const check = (current: string) => ownerProviderEditEquivalent({ yaml: yamlApi, signed, current })
   expect(check(signed)).toBe(true)
   expect(check(edited)).toBe(true)
-  expect(check(edited.replace('defaultProvider: super-relay', 'defaultProvider: benchmark-gateway-default'))).toBe(false)
+  expect(check(edited.replace('defaultProvider: custom-gateway', 'defaultProvider: benchmark-gateway'))).toBe(false)
   expect(check(edited.replace('name: llm-pi-ai', 'name: other'))).toBe(false)
   expect(check(edited.replace('targets: []', 'targets: [x]'))).toBe(false)
   expect(check(edited.replace("dshHomePath('personal/state.sqlite')", "dshHomePath('escape.sqlite')"))).toBe(false)

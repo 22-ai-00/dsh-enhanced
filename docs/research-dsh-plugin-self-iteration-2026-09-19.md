@@ -37,7 +37,7 @@ The matrix's own evidence boundary matters: local tests, fixtures, a dry-run pac
 
 ## Keep supplier changes separate from agent learning
 
-The current growth driver intentionally pins `super-relay` / `auto_model/alwaysday1`: see [config.ts](../plugins/assistant-growth-driver/src/config.ts) and the preflight in [index.ts](../plugins/assistant-growth-driver/src/index.ts). Keep this route for current real-model acceptance runs. Its global hard-coding is a future decoupling target: supplier choice should become deployment configuration while run identity and accumulated capabilities remain stable.
+The growth driver takes its supplier route from deployment configuration: see [config.ts](../plugins/assistant-growth-driver/src/config.ts) and the preflight in [index.ts](../plugins/assistant-growth-driver/src/index.ts). Supplier choice is deployment configuration while run identity and accumulated capabilities remain stable.
 
 Evolve the hard-coded route toward an **owner-configured supplier contract selected before each run and frozen into that run's immutable contract**, reusing native DSH provider routing. Add an adapter only where the existing provider interface lacks a required contract. The supplier contract must expose a capability identity, route/model revision, budget-meter identity, limits, and credential reference; it must not expose a generic raw token to the agent. The Growth Driver should select only from an administrator/owner allowlist, persist the selected contract plus digest before first provider dispatch, and reject provider/model/meter/configuration generation drift during `llm/stream`. Existing tool digest, deadline, cancellation, budget reservation, and post-run evidence checks stay mandatory. A provider removal or reload cancels/settles the run as `unknown` or failed according to the existing ledger semantics; it must never silently fall back to another supplier.
 
@@ -53,9 +53,9 @@ Acceptance: a controlled external environment demonstrates `prepare → owner ap
 
 ### 2. Decouple Growth Driver model supplier without weakening its frozen-run gates
 
-Expose the supplier contract above through existing DSH routing, initially retaining the current Super Relay route; add a narrow adapter only if required. Keep route choice out of model-visible tools. Place deployment-specific adapter configuration in validated Config, use live Cordis injection for the selected provider (owned nested injection if optional), and own any subscription/timer through the driver's Fiber.
+Expose the supplier contract above through existing DSH routing, using the owner-configured route; add a narrow adapter only if required. Keep route choice out of model-visible tools. Place deployment-specific adapter configuration in validated Config, use live Cordis injection for the selected provider (owned nested injection if optional), and own any subscription/timer through the driver's Fiber.
 
-Acceptance: two approved supplier configurations can run equivalent bounded wakes; every run records one immutable route/meter/limit digest; provider replacement/removal before dispatch prevents dispatch, and after dispatch produces an explicit non-success terminal state with no fallback; the existing Super Relay behavior remains covered as one adapter fixture.
+Acceptance: two approved supplier configurations can run equivalent bounded wakes; every run records one immutable route/meter/limit digest; provider replacement/removal before dispatch prevents dispatch, and after dispatch produces an explicit non-success terminal state with no fallback; both configurations are covered as adapter fixtures.
 
 ### 3. Use verifier strength to determine what may iterate automatically
 
