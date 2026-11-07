@@ -156,6 +156,44 @@ describe('native owner learning profile', () => {
     expect(compileNativeRsiProfile({ ...input, targetPatch: first.targetPatch }).targetPatch).toBe(first.targetPatch)
   })
 
+  test('compiles the fresh ordinary-use evaluator, flagged memory grants and final observation digests', async () => {
+    const input = await fixture()
+    const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; config?: Record<string, any> }>
+    rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config = {
+      ...rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config,
+      agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash',
+    }
+    rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
+    rows.push({ id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items',
+      config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } } })
+    const compiled = compileNativeRsiProfile({ ...input, targetEffective: stringify(rows), enableOrdinaryUseLearning: true })
+    expect(compiled.manifest.ordinaryUseLearning).toEqual({ intakeEvaluation: { enabled: true,
+      rules: [{ ruleId: 'ordinary-use-intake', ceiling: 'digest' }],
+      provider: 'deepseek-official', model: 'deepseek-v4-flash' } })
+    expect(compiled.manifest.memoryLearning).toMatchObject({ learning: { workItemExperiences: true },
+      reviews: { workItemExperiences: true }, adoption: { workItemExperiences: true, kinds: ['fact', 'experience'] } })
+    const patch = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
+    const configOf = (id: string) => patch.find(row => row.id === id)!.config
+    expect(configOf('dsh-enhanced-assistant-proactive').intakeEvaluation).toEqual(compiled.manifest.ordinaryUseLearning!.intakeEvaluation)
+    expect(configOf('dsh-enhanced-assistant-work-items').intakeLedger).toMatchObject({ enabled: true, evaluation: { enabled: true } })
+    expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
+    expect(configOf('dsh-enhanced-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
+    expect(configOf('dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(true)
+    const targets = compiled.manifest.controlPlane.runtimeObserver!.targets
+    for (const id of ['dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+      expect(targets.find(target => target.entryId === id)?.configDigest).toBe(runtimeConfigDigest(configOf(id)))
+    }
+    expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-proactive')?.services).toEqual(['assistantProactive'])
+    expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
+    expect(compileNativeRsiProfile({ ...input, targetEffective: stringify(rows), enableOrdinaryUseLearning: true })).toEqual(compiled)
+    rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {
+      intakeEvaluation: { enabled: true, rules: [{ ruleId: 'owner-rule', ceiling: 'notify' }],
+        provider: 'owner-provider', model: 'owner-model' },
+    }
+    expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows), enableOrdinaryUseLearning: true }))
+      .toThrow('intake evaluation conflicts with native grant')
+  })
+
   test('rejects changed owner, existing learning grants and source build drift', async () => {
     const input = await fixture()
     expect(() => compileNativeRsiProfile({ ...input, owner: { ...input.owner, workspace: '/tmp/other' } })).toThrow('owner')

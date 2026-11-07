@@ -72,6 +72,10 @@ export interface RsiSetupArgs {
   /** Read-only onboarding wait: poll until the owner's first Lark DM binding exists. */
   waitOwnerDm?: boolean; timeoutSeconds?: number
   ackExistingAutomations?: boolean
+  /** Fresh-install-only ordinary-use learning assembly; retries preserve the stored opt-in. */
+  enableOrdinaryUseLearning?: boolean
+  intakeProvider?: string
+  intakeModel?: string
   /** Installer's pre-stop source and destination inventories; never parsed from CLI. */
   expectedAutomationInventories?: RsiAutomationInventories
   installLocalCohort?: boolean; bundles?: string[]
@@ -102,6 +106,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
       result.timeoutSeconds = Number(value)
     }
     else if (key === '--ack-existing-automations') result.ackExistingAutomations = true
+    else if (key === '--enable-ordinary-use-learning') result.enableOrdinaryUseLearning = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
     else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
     else if (key === '--add-memory-learning') result.addMemoryLearning = true
@@ -111,23 +116,32 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
       ;(result.bundles ??= []).push(value)
     }
     else if (key === '--optional-build') result.optionalBuild = true
-    else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository' || key === '--docker-path') {
+    else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository' || key === '--docker-path'
+      || key === '--intake-provider' || key === '--intake-model') {
       const value = argv[++i]
       if (!value || value.startsWith('--')) fail(`${key} needs a value`)
       if (key === '--manifest') result.manifestPath = resolve(value!)
       else if (key === '--profile') result.profile = value
       else if (key === '--source-repository') result.sourceRepository = value
       else if (key === '--docker-path') result.dockerPath = value
+      else if (key === '--intake-provider') result.intakeProvider = value
+      else if (key === '--intake-model') result.intakeModel = value
       else result.dshHome = value!
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.enableOrdinaryUseLearning && !result.installOwner) fail('--enable-ordinary-use-learning requires --install-owner')
+  if ((result.intakeProvider === undefined) !== (result.intakeModel === undefined)) fail('--intake-provider and --intake-model must be provided together')
+  if ((result.intakeProvider !== undefined || result.intakeModel !== undefined) && result.enableOrdinaryUseLearning !== true) {
+    fail('--intake-provider/--intake-model require --enable-ordinary-use-learning')
+  }
   if (result.timeoutSeconds !== undefined && !result.waitOwnerDm) fail('--timeout-seconds requires --wait-owner-dm')
   if (result.waitOwnerDm) {
     if (result.manifestPath || result.apply || result.rollback || result.start || result.confirmStopped || result.installOwner
       || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.optionalBuild || result.dockerPath
       || result.sourceRepository || result.ackExistingAutomations || result.installLocalCohort || result.bundles
-      || result.prepareLocalUpdate || result.addMemoryLearning) {
+      || result.prepareLocalUpdate || result.addMemoryLearning || result.enableOrdinaryUseLearning
+      || result.intakeProvider || result.intakeModel) {
       fail('owner DM wait cannot be combined with other operations')
     }
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('owner DM wait requires --profile and absolute DSH_HOME')
@@ -584,7 +598,7 @@ sleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) => new
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime by default and exports its release toolchain/store/cache (--docker-path instead prepares the legacy offline image); --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations] [--enable-ordinary-use-learning [--intake-provider <id> --intake-model <id>]]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\n--enable-ordinary-use-learning is accepted only with --install-owner and only on a fresh profile: it emits the observe-only intake evaluator (rules plus the Delivery or explicit provider/model) and the flagged memory grants. A retry preserves the stored opt-in and never expands an existing installation; no admission, revision key or Growth failure pin is added.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime by default and exports its release toolchain/store/cache (--docker-path instead prepares the legacy offline image); --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
     process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --docker-path is rejected and --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning] [--docker-path <absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. Linux builds with the native runtime by default; --docker-path keeps the legacy image builder. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
@@ -644,7 +658,10 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
         ? (await import('./rsi-native-install.js')).installNativeRsiOwnerDeployment
         : (await import('./rsi-install.js')).installRsiOwnerDeployment
       const result = await install({ dshHome: args.dshHome, profile: args.profile!,
-        sourceRepository: args.sourceRepository, ackExistingAutomations: args.ackExistingAutomations, signal: controller.signal })
+        sourceRepository: args.sourceRepository, ackExistingAutomations: args.ackExistingAutomations, signal: controller.signal,
+        enableOrdinaryUseLearning: args.enableOrdinaryUseLearning === true,
+        ...(args.intakeProvider !== undefined ? { intakeProvider: args.intakeProvider } : {}),
+        ...(args.intakeModel !== undefined ? { intakeModel: args.intakeModel } : {}) })
       process.stdout.write(`${JSON.stringify(result)}\n`)
       process.stderr.write(result.mode === 'ready' ? (process.platform === 'darwin'
         ? '原生 macOS 学习已启动并通过就绪检查：持久记忆、新工具独立验证与动态采用。\n'

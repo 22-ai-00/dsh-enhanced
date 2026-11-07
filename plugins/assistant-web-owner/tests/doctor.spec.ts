@@ -268,6 +268,19 @@ describe('autonomy doctor static readiness snapshot', () => {
     expect(JSON.parse(JSON.stringify(report))).toEqual(report)
   })
 
+  it('reports the RSI intake evaluator and memory flags ready while naming the remaining growth pin gap', () => {
+    const report = inspectAutonomyReadiness(
+      readinessBundles.replace('      workItemFailures: true', '      workItemFailures: false'), 'web')
+    expect(readinessCheck(report, 'intake-evaluator')).toMatchObject({ status: 'ready',
+      details: { configured: true, workItemsEvaluationEnabled: true } })
+    const learning = readinessCheck(report, 'background-learning')
+    expect(learning.status).toBe('not-ready')
+    expect(learning.reasons.map(reason => reason.code)).toEqual(['growth-work-item-failures-not-authorized'])
+    expect(learning.details).toMatchObject({ memoryWorkItemExperiences: true, memoryReviewGrant: true,
+      memoryAdoptionGrant: true, growthWorkItemFailures: false })
+    expect(report.ready).toBe(false)
+  })
+
   it('reports missing rings fail-closed instead of throwing', () => {
     const partial = `
 - id: dsh-enhanced-assistant-delivery

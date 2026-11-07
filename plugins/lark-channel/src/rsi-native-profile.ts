@@ -11,6 +11,7 @@ import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import type { NativeRsiBuildEnvironment, NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
 import { createRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { createRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi-plugin-creation.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
@@ -33,6 +34,11 @@ export interface NativeRsiProfileInput {
   creationBuild: RsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment
   executor: PluginControlTrustConfig['executor']; now: number; expiresAt: number
   observer: { socketPath: string; keyPath: string }
+  /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
+  enableOrdinaryUseLearning?: boolean
+  /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
+  intakeProvider?: string
+  intakeModel?: string
 }
 export interface NativeRsiSetupManifest {
   schemaVersion: 1; kind: 'native-plugin-learning'; targetProfile: string
@@ -40,6 +46,8 @@ export interface NativeRsiSetupManifest {
     principalVersion: number; workspace: string; agentPreset: string }
   now: number; expiresAt: number; controlPlane: ControlPlaneConfig; growthDriver: AssistantGrowthDriverConfig
   memoryLearning: RsiMemoryLearningSetup; pluginCreation: RsiPluginCreationSetup
+  /** Fresh-install ordinary-use rings that need no new signing-key material. */
+  ordinaryUseLearning?: RsiOrdinaryUseLearningSetup
   limits: { periodMs: number; reviews: number; discovery: number; source: number; memoryExtractions: number; memoryScans: number }
 }
 export interface NativeRsiCompiledProfile { manifest: NativeRsiSetupManifest; targetPatch: string; trust: PluginControlTrustConfig }
@@ -92,6 +100,36 @@ function copyConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typ
   row.set('config', source.clone())
   return options(row, key)
 }
+/** Copy one optional ordinary-use row by exact id and package; never guess its location. */
+function copyNamedConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typeof parseRows>,
+  id: string, name: string, label: string): YAMLMap {
+  const source = effective.byId.get(id)
+  if (!source || source.get('name') !== name || source.get('disabled') === true) fail(`${label} bundle missing or disabled`)
+  const sourceConfig = source.get('config', true) as Node | undefined
+  if (sourceConfig !== undefined && !isMap(sourceConfig)) fail(`${label} config must be a mapping`)
+  let row = out.byId.get(id)
+  if (!row) { row = mapping(out.document.createNode({ id }), label); out.rows.add(row); out.byId.set(id, row) }
+  if (row.get('name') !== undefined && row.get('name') !== name || row.get('disabled') === true) fail(`${label} patch override differs`)
+  row.set('config', sourceConfig === undefined ? out.document.createNode({}) : sourceConfig.clone())
+  return options(row, label)
+}
+/** Set one leaf exactly while creating only missing parent mappings. */
+function setExactAt(document: Document, node: YAMLMap, path: readonly string[], value: unknown, label: string): void {
+  let current = node
+  for (const key of path.slice(0, -1)) {
+    const next = current.get(key, true) as Node | undefined
+    if (next === undefined) {
+      const created = mapping(document.createNode({}), `${label}.${key}`)
+      current.set(key, created)
+      current = created
+    } else current = mapping(next, `${label}.${key}`)
+  }
+  const leaf = path[path.length - 1]!
+  if (current.has(leaf) && !isDeepStrictEqual((current.get(leaf, true) as Node).toJSON(), value)) {
+    fail(`${label} conflicts with native grant`)
+  }
+  current.set(leaf, document.createNode(value))
+}
 function chooseModel(growth: YAMLMap): Partial<AssistantGrowthDriverConfig> {
   const value = plain(growth, 'growth')
   if (value.provider === undefined && value.model === undefined && value.reasoningEffort === undefined) return {}
@@ -130,6 +168,9 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   }
   if (!/^[a-f0-9]{64}$/u.test(input.executor.sha256) || !input.executor.id || !input.executor.version
     || !Array.isArray(input.executor.environmentAllowlist)) fail('executor pin is invalid')
+  if (input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
+    || input.intakeProvider !== undefined && typeof input.intakeProvider !== 'string'
+    || input.intakeModel !== undefined && typeof input.intakeModel !== 'string') fail('ordinary-use learning inputs are invalid')
   const effective = parseRows(input.targetEffective, 'effective profile'), out = parseRows(input.targetPatch, 'target patch')
   for (const key of Object.keys(managed) as (keyof typeof managed)[]) effectiveRow(effective.byId, key, key === 'memory')
   for (const [id, row] of effective.byId) if (id.startsWith('dsh-enhanced-')) {
@@ -141,14 +182,21 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   const standaloneMemory = effective.byId.get('dsh-enhanced-personal-memory')
   if (standaloneMemory && standaloneMemory.get('disabled') !== true) fail('standalone Memory conflicts with embedded provider')
   const delivery = options(effectiveRow(effective.byId, 'delivery'), 'delivery')
-  const resolved = resolveRsiOwnerRoute(plain(delivery, 'delivery'), input.owner, input.dshHome)
+  const deliveryConfig = plain(delivery, 'delivery')
+  const resolved = resolveRsiOwnerRoute(deliveryConfig, input.owner, input.dshHome)
   const owner = { authorityId: resolved.route.id, authorityHash: resolved.route.authorityHash, principalId: resolved.principal,
     principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version,
     workspace: resolved.workspace, agentPreset: resolved.preset }
   const scope = { ownerRouteId: owner.authorityId, principalId: owner.principalId, workspace: owner.workspace, preset: owner.agentPreset }
+  const ordinary = input.enableOrdinaryUseLearning === true
+    ? createRsiOrdinaryUseLearningSetup({ deliveryConfig, intakeProvider: input.intakeProvider, intakeModel: input.intakeModel })
+    : undefined
+  if (ordinary === undefined && (input.intakeProvider !== undefined || input.intakeModel !== undefined)) {
+    fail('an explicit intake route requires enableOrdinaryUseLearning')
+  }
   const creation = createRsiPluginCreationSetup({ resources, build: input.creationBuild, owner, now: input.now, expiresAt: input.expiresAt })
   const memory = createRsiMemoryLearningSetup({ installationId: installation, stateRoot: resources.stateRoot,
-    owner, now: input.now, expiresAt: input.expiresAt })
+    owner, now: input.now, expiresAt: input.expiresAt, workItemExperiences: ordinary !== undefined })
   const currentLearner = effectiveRow(effective.byId, 'memory', true)
   if (currentLearner.get('disabled') !== true && !isDeepStrictEqual(plain(options(currentLearner, 'memory'), 'memory'), memory.learning)) fail('existing memory learner grant differs')
   const growthCurrent = effectiveRow(effective.byId, 'growth')
@@ -236,6 +284,20 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     if (controlRow.has(key) && !isDeepStrictEqual((controlRow.get(key, true) as Node).toJSON(), control[key as keyof ControlPlaneConfig])) fail(`existing ${key} grant differs`)
   }
   out.byId.get(ids.control)!.set('config', out.document.createNode(control))
+  if (ordinary) {
+    const proactive = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-proactive',
+      '@dsh-enhanced/assistant-proactive', 'assistant-proactive')
+    setExact(out.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation, 'intake evaluation')
+    const workItems = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-work-items',
+      '@dsh-enhanced/assistant-work-items', 'assistant-work-items')
+    if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
+    const ledger = workItems.get('intakeLedger', true) as Node | undefined
+    if (ledger !== undefined && !isMap(ledger)) fail('assistant-work-items intakeLedger must be a mapping')
+    if (ledger === undefined || ledger.get('enabled') !== true) {
+      fail('ordinary-use learning requires assistant-work-items.intakeLedger.enabled: true')
+    }
+    setExactAt(out.document, workItems, ['intakeLedger', 'evaluation', 'enabled'], true, 'work-items intake evaluation')
+  }
   const final = parseRows(out.document.toString({ lineWidth: 0 }), 'compiled target')
   const targets: RuntimeObserverTarget[] = []
   for (const [key, services] of [['personal', ['personalMemory', 'assistantPolicy', 'assistantAutomations']],
@@ -249,6 +311,17 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   targets.push({ entryId: 'dsh-enhanced-lark-channel', module: '@dsh-enhanced/lark-channel',
     configDigest: runtimeConfigDigest(rawLoaderConfig(larkRow.get('config', true) as Node, 'lark-channel')),
     services: ['larkChannel'] })
+  if (ordinary) {
+    for (const [id, name, services] of [['dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive',
+      ['assistantProactive']], ['dsh-enhanced-assistant-work-items', '@dsh-enhanced/assistant-work-items',
+      ['assistantWorkItems']]] as const) {
+      const finalRow = final.byId.get(id)
+      if (!finalRow || finalRow.get('disabled') === true
+        || finalRow.get('name') !== undefined && finalRow.get('name') !== name) fail(`${name} final row is unavailable`)
+      targets.push({ entryId: id, module: name,
+        configDigest: runtimeConfigDigest(rawLoaderConfig(finalRow.get('config', true) as Node, name)), services: [...services] })
+    }
+  }
   control.runtimeObserver!.targets = targets
   normalizeControlPlaneConfig(control)
   final.byId.get(ids.control)!.set('config', final.document.createNode(control))
@@ -262,6 +335,6 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
       publicKeyPem: resources.identities.host.publicKeyPem }] } as unknown as PluginControlTrustConfig
   const manifest: NativeRsiSetupManifest = { schemaVersion: 1, kind: 'native-plugin-learning', targetProfile: input.targetProfile,
     owner, now: input.now, expiresAt: input.expiresAt, controlPlane: control, growthDriver: growth, memoryLearning: memory,
-    pluginCreation: creation, limits }
+    pluginCreation: creation, limits, ...(ordinary !== undefined ? { ordinaryUseLearning: ordinary } : {}) }
   return { manifest, targetPatch: final.document.toString({ lineWidth: 0 }), trust }
 }

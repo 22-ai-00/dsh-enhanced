@@ -40,7 +40,12 @@ const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 function fail(message: string): never { throw new Error(`rsi install: ${message}`) }
-export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal; ackExistingAutomations?: boolean | undefined }
+export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal; ackExistingAutomations?: boolean | undefined
+  /** Fresh-install-only ordinary-use learning; a retry preserves the stored opt-in and never expands it. */
+  enableOrdinaryUseLearning?: boolean | undefined
+  /** Explicit evaluator route when the composition has no Delivery agentProvider/agentModel. */
+  intakeProvider?: string | undefined
+  intakeModel?: string | undefined }
 export type RsiInstallResult = { mode: 'not-ready'; reason: string } | { mode: 'ready'; profiles: readonly string[]; manifestPath: string }
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false }
@@ -313,6 +318,8 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     const storedManifest = join(resources.configRoot, 'manifest.json')
     let now = Date.now(), expiresAt = now + 365 * 86_400_000
     let enableCreation = true
+    let enableOrdinaryUseLearning = input.enableOrdinaryUseLearning === true
+    let intakeProvider = input.intakeProvider, intakeModel = input.intakeModel
     let previousManifest: RsiSetupManifest | undefined
     if (await exists(storedManifest)) {
       // A retry reuses the original installation's finite terms, never renews them.
@@ -322,12 +329,22 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       now = host.grant.notBefore; expiresAt = previous.sourceReviews.expiresAt
       // Replaying a legacy installation must not silently add a new authority.
       enableCreation = previous.pluginCreation !== undefined
+      const storedOrdinary = previous.ordinaryUseLearning?.intakeEvaluation
+      if (input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
+        fail('existing installation cannot be expanded with ordinary-use learning; install a fresh profile instead')
+      }
+      // A retry preserves exactly the stored opt-in and route, like enableRevision.
+      enableOrdinaryUseLearning = storedOrdinary !== undefined
+      if (storedOrdinary !== undefined) { intakeProvider = storedOrdinary.provider; intakeModel = storedOrdinary.model }
     }
     const manifest = createRsiBootstrapManifest({ dshHome: input.dshHome, targetProfile: pair[0], coordinatorProfile: pair[1],
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
       ...(enableCreation && prepared.creationBuild ? { creationBuild: prepared.creationBuild } : {}),
       ...(prepared.runnerStates ? { runnerStates: prepared.runnerStates } : {}),
       ...(previousManifest ? { enableRevision: previousManifest.pluginRevision !== undefined } : {}),
+      enableOrdinaryUseLearning,
+      ...(intakeProvider !== undefined ? { intakeProvider } : {}),
+      ...(intakeModel !== undefined ? { intakeModel } : {}),
       git: installed.git, now, expiresAt, plugins: installed.plugins,
       observerTargets: installed.observerTargets, hostDeploymentInputs: installed.hostDeploymentInputs })
     if (previousManifest && !isDeepStrictEqual(previousManifest, manifest)) fail('existing manifest differs before stopping Hosts')

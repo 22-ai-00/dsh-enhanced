@@ -83,26 +83,34 @@ export function validateRsiMemoryLearningSetup(input: unknown, expectedOwner: Me
   return { learning, reviews, adoption, limits: { extractions: limits.extractions, scans: limits.scans } }
 }
 
-/** Compile the same finite memory terms for native and dual-Host deployments. */
+/**
+ * Compile the same finite memory terms for native and dual-Host deployments.
+ * `workItemExperiences` is the fresh-install ordinary-use opt-in: it must be
+ * present consistently on the learning, review and adoption grants because
+ * both the verifier and Memory refuse a work-item experience without it.
+ */
 export function createRsiMemoryLearningSetup(input: {
   installationId: string; stateRoot: string; owner: MemoryLearningOwner; now: number; expiresAt: number
+  workItemExperiences?: boolean
 }): RsiMemoryLearningSetup {
   const { installationId: installation, stateRoot: state, owner, now, expiresAt } = input
   const day = 86_400_000
+  const workItemExperiences = input.workItemExperiences === true
+  const experience = workItemExperiences ? { workItemExperiences: true as const } : {}
   const { validateLearningConfig, validateMemoryReviewConfig, validateMemoryLearningAdoptionGrant } = getRsiMemoryLearningValidators()
   const memoryReview = validateMemoryReviewConfig({ authorityId: `memory-review-${installation}`,
-    owner: owner, expiresAt: expiresAt, maxReviews: 1000,
+    owner: owner, expiresAt: expiresAt, maxReviews: 1000, ...experience,
     policy: 'Independently verify exact owner statements for facts and trusted owner objectives with canonical outcomes for experiences. Reject unsupported claims, withdrawn sources, and ambiguous mutations.',
     maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000 })
   const memoryAdoption = validateMemoryLearningAdoptionGrant({ authorityId: `memory-adopt-${installation}`,
     owner: owner, reviewAuthorityId: memoryReview.authorityId,
     reviewAuthorityDigest: growthObjectDigest(memoryReview), expiresAt: expiresAt,
     maxMutations: 1000, maxTotalContentBytes: 4_096_000, maxRecordTtlMs: 30 * day,
-    kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] })
+    kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'], ...experience })
   return validateRsiMemoryLearningSetup({
     learning: validateLearningConfig({ databasePath: join(state, 'memory-learning.sqlite'),
       authorityId: `memory-extract-${installation}`, owner: owner, expiresAt: expiresAt,
-      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day,
+      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day, ...experience,
       policy: 'Extract only explicit owner facts or experience grounded in a trusted owner objective and canonical outcome. Do not infer success from a reply. Prefer noop when evidence is insufficient.',
       maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000,
       budgetId: `rsi-memory-learning-${installation}`, budgetAmount: 1,

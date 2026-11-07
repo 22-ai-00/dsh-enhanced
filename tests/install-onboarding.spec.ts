@@ -155,6 +155,7 @@ describe('guided onboarding installer dry-run', () => {
     const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
     expect(ownerInstall).toBeGreaterThanOrEqual(0)
     expect(preset).toBeGreaterThan(ownerInstall)
+    expect(result.stdout).toContain('--enable-ordinary-use-learning')
     expect(result.stdout).toContain('常驻服务：将重启以加载自治学习装配')
 
     const skipped = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', '--plugin-preset', 'skip'], home)
@@ -171,6 +172,7 @@ describe('guided onboarding installer dry-run', () => {
     expect(kept.status, kept.stderr).toBe(0)
     expect(kept.stdout).toContain('现有 profile 保留显式插件配置')
     expect(kept.stdout).not.toContain('dsh-plugin-setup preset recommended --yes')
+    expect(kept.stdout).not.toContain('--enable-ordinary-use-learning')
   })
 
   test('supervised learning assembly helper honors explicit, declined, dry-run and existing decisions', async () => {

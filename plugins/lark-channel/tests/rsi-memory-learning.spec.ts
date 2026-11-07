@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { growthObjectDigest, type MemoryLearningOwner } from '@dsh-enhanced/assistant-growth-contract'
-import { validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
+import { createRsiMemoryLearningSetup, validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
 
 const owner: MemoryLearningOwner = { authorityId: 'owner-route', authorityHash: 'a'.repeat(64),
   principalId: 'lark/account/tenant/owner', principalRecordId: 'principal-record', principalVersion: 3,
@@ -70,5 +70,21 @@ describe('RSI memory learning setup admission', () => {
     expect(() => validateRsiMemoryLearningSetup(extract, owner, 100_000)).toThrow('limits')
     const scan = setup(); scan.learning.scanBudgetAmount = scan.limits.scans + 1
     expect(() => validateRsiMemoryLearningSetup(scan, owner, 100_000)).toThrow('limits')
+  })
+
+  test('adds the work-item experience flag consistently to the learning, review and adoption grants', () => {
+    const legacy = createRsiMemoryLearningSetup({ installationId: 'legacy', stateRoot: '/tmp/state',
+      owner, now: 100_000, expiresAt: 300_000 })
+    for (const grant of [legacy.learning, legacy.reviews, legacy.adoption]) expect(grant).not.toHaveProperty('workItemExperiences')
+    const optedIn = createRsiMemoryLearningSetup({ installationId: 'opted-in', stateRoot: '/tmp/state',
+      owner, now: 100_000, expiresAt: 300_000, workItemExperiences: true })
+    expect(optedIn.learning.workItemExperiences).toBe(true)
+    expect(optedIn.reviews.workItemExperiences).toBe(true)
+    expect(optedIn.adoption.workItemExperiences).toBe(true)
+    expect(optedIn.adoption.kinds).toContain('experience')
+    expect(optedIn.learning.reviewAuthorityDigest).toBe(growthObjectDigest(optedIn.reviews))
+    expect(optedIn.adoption.reviewAuthorityDigest).toBe(growthObjectDigest(optedIn.reviews))
+    expect(optedIn.learning.adoptionGrantDigest).toBe(growthObjectDigest(optedIn.adoption))
+    expect(validateRsiMemoryLearningSetup(structuredClone(optedIn), owner, 100_000)).toEqual(optedIn)
   })
 })

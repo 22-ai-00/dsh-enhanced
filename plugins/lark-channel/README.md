@@ -25,7 +25,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 - [日常使用自迭代的双 Host 配置](docs/rsi-setup.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
-Linux `supervised` 新安装在模型、TraeX、飞书配置与 doctor 后自动取得当前 owner、生成有限授权与 manifest，并部署目标和独立协调器两个 systemd Host。新 owner 安装接通有界新工具创建、任务派生独立验收与动态采用；旧安装重试保留原授权，不自动增加创建通道。未就绪会以非零状态停止安装完成提示；重试不续期授权。当前尚未完成真实普通任务驱动的修复、采用和观察验收，见上述配置指南。
+Linux `supervised` 新安装在模型、TraeX、飞书配置与 doctor 后自动取得当前 owner、生成有限授权与 manifest，并部署目标和独立协调器两个 systemd Host。新 owner 安装接通有界新工具创建、任务派生独立验收与动态采用；旧安装重试保留原授权，不自动增加创建通道。未就绪会以非零状态停止安装完成提示；重试不续期授权。全新 `--install-owner` 可显式传入 `--enable-ordinary-use-learning`：从 Delivery `agentProvider`/`agentModel` 或显式 `--intake-provider`/`--intake-model` 生成单规则、ceiling 为 `digest` 的只观察 intake evaluator，打开 WorkItems `intakeLedger.evaluation.enabled`，并在 learning、review、adoption 三份记忆授权上一致开启 `workItemExperiences`；重试保留原 opt-in，拒绝扩展已有安装。非 LLM 的 agentProvider（如 `traex-agent`）不能用于该 evaluator，需另给 LLM route。当前尚未完成真实普通任务驱动的修复、采用和观察验收，见上述配置指南。
 
 Linux 成对升级会在候选 Host 首次启动前，核验旧 manifest 的冻结 owner 来源及 Delivery 撤权记录，并通过原 Policy/Automations 服务停用对应的四类旧扫描。维护只写已停服的私有 Home 副本，使用固定操作标识和原预算账户，保留任务历史与 unknown；来源读取与维护子进程都有有限期限。升级事务保存原配置、身份、数据库及完整迁移证据；切换后不能自动退回会复活旧扫描的状态，成功清理将证据整体保留在事务同级的 `.completed-<事务 ID>` 目录。此路径只处理旧扫描退出，不签发新 owner 授权，也不把旧授权转给其他身份。安装器依赖可信的已安装代码及完整依赖集合；来源摘要不是对任意 JavaScript 依赖的安全证明。
 

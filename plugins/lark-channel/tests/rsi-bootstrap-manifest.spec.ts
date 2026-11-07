@@ -97,6 +97,25 @@ async function fixture() {
   return { root, input }
 }
 
+/** Add the two ordinary-use rows and the deployment model route to the base fixture. */
+function addOrdinaryUseLearning(input: RsiBootstrapManifestInput): void {
+  const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>
+  const delivery = rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+  delivery.config = { ...delivery.config, agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }
+  rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
+  rows.push({ id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items',
+    config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } } })
+  input.targetEffective = stringify(rows)
+  input.plugins = [...input.plugins, 'assistant-proactive', 'assistant-work-items']
+  input.hostDeploymentInputs = [...input.hostDeploymentInputs,
+    ...['assistant-proactive', 'assistant-work-items'].flatMap(name => [
+      `node_modules/@dsh-enhanced/${name}/package.json`,
+      `node_modules/@dsh-enhanced/${name}/cordis.patch.yml`,
+      `node_modules/@dsh-enhanced/${name}/lib/index.js`,
+    ])]
+  input.enableOrdinaryUseLearning = true
+}
+
 describe('ordinary-use RSI manifest factory', () => {
   test('compiles the complete finite created-tool chain and fences mismatched setup fields', async () => {
     const { root, input } = await fixture()
@@ -327,6 +346,67 @@ describe('ordinary-use RSI manifest factory', () => {
       const manifest = createRsiBootstrapManifest({ ...input, targetEffective,
         observerTargets: [{ ...input.observerTargets[0]!, configDigest: runtimeConfigDigest({ enabled: { __jsExpr: "dshHomePath('never-execute')" } }) }] })
       expect(manifest.controlPlane.runtimeObserver?.targets[0]?.configDigest).toBe(runtimeConfigDigest({ enabled: { __jsExpr: "dshHomePath('never-execute')" } }))
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('fresh ordinary-use opt-in emits the evaluator, flagged memory grants and final observer digests', async () => {
+    const { root, input } = await fixture()
+    try {
+      addOrdinaryUseLearning(input)
+      const manifest = createRsiBootstrapManifest(input)
+      expect(manifest.ordinaryUseLearning).toEqual({ intakeEvaluation: { enabled: true,
+        rules: [{ ruleId: 'ordinary-use-intake', ceiling: 'digest' }],
+        provider: 'deepseek-official', model: 'deepseek-v4-flash' } })
+      expect(manifest.memoryLearning).toMatchObject({
+        learning: { workItemExperiences: true },
+        reviews: { workItemExperiences: true },
+        adoption: { workItemExperiences: true, kinds: ['fact', 'experience'] },
+      })
+      expect(manifest.memoryLearning!.learning.reviewAuthorityDigest).toBe(growthObjectDigest(manifest.memoryLearning!.reviews))
+      expect(manifest.memoryLearning!.learning.adoptionGrantDigest).toBe(growthObjectDigest(manifest.memoryLearning!.adoption))
+      const compiled = await compileRsiProfiles({ manifest, dshHome: input.dshHome, targetPatch: '[]\n',
+        targetEffective: input.targetEffective, coordinatorPatch: '[]\n',
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner })
+      const patched = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
+      const configOf = (id: string) => patched.find(row => row.id === id)!.config
+      expect(configOf('dsh-enhanced-assistant-proactive').intakeEvaluation).toEqual(manifest.ordinaryUseLearning!.intakeEvaluation)
+      expect(configOf('dsh-enhanced-assistant-work-items').intakeLedger).toMatchObject({
+        enabled: true, evaluation: { enabled: true } })
+      expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews.workItemExperiences).toBe(true)
+      expect(configOf('dsh-enhanced-personal-assistant').personalMemory.automaticLearning.workItemExperiences).toBe(true)
+      expect(configOf('dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(true)
+      const targets = manifest.controlPlane.runtimeObserver!.targets
+      for (const id of ['dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+        expect(targets.find(target => target.entryId === id)?.configDigest).toBe(runtimeConfigDigest(configOf(id)))
+      }
+      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-proactive')?.services).toEqual(['assistantProactive'])
+      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('fresh ordinary-use opt-in fails closed on a differing existing grant or evaluator section', async () => {
+    const { root, input } = await fixture()
+    try {
+      addOrdinaryUseLearning(input)
+      const rows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, any>; disabled?: boolean }>
+      rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {
+        intakeEvaluation: { enabled: true, rules: [{ ruleId: 'owner-rule', ceiling: 'notify' }],
+          provider: 'owner-provider', model: 'owner-model' },
+      }
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
+        .toThrow('existing assistant-proactive intake evaluation differs')
+      rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')!.config = {}
+      const learner = rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+      learner.disabled = false
+      learner.config = { authorityId: 'foreign', owner: { authorityId: 'foreign' } }
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
+        .toThrow('existing memory learner config differs from frozen owner grant')
+      delete learner.config
+      learner.disabled = true
+      const workItems = rows.find(row => row.id === 'dsh-enhanced-assistant-work-items')!
+      workItems.config = { ...workItems.config, intakeLedger: { enabled: true, evaluation: { enabled: false } } }
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: stringify(rows) }))
+        .toThrow('existing assistant-work-items intake evaluation is disabled')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })

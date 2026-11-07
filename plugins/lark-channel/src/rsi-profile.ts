@@ -9,6 +9,7 @@ import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, ty
 import type { RsiServiceEnvironments } from './rsi-service-setup.js'
 import { resolveRsiOwnerRoute, rsiCoordinatorAutomationDatabasePath } from './rsi-owner-profile.js'
 import { validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { validateRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
 import { validateRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi-plugin-creation.js'
 import { validateRsiPluginRevisionSetup, type RsiPluginRevisionSetup } from './rsi-plugin-revision.js'
 
@@ -22,6 +23,8 @@ export interface RsiSetupManifest {
   growthDriver: AssistantGrowthDriverConfig
   sourceReviews: SourceReviewConfig
   memoryLearning?: RsiMemoryLearningSetup
+  /** Fresh-install ordinary-use rings that need no new signing-key material. */
+  ordinaryUseLearning?: RsiOrdinaryUseLearningSetup
   pluginCreation?: RsiPluginCreationSetup
   pluginRevision?: RsiPluginRevisionSetup
   /** Frozen initial Linux build/observer pairing; retained generations require a separate handoff. */
@@ -82,6 +85,7 @@ function json(item: YAMLMap, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} must be an object`)
   return value as Record<string, any>
 }
+function nodeJson(node: Node): unknown { return (node as unknown as { toJSON(): unknown }).toJSON() }
 function profile(value: string, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) fail(`invalid ${label}`)
   return value
@@ -185,6 +189,12 @@ function assertManifest(input: RsiSetupManifest): void {
   if (input.targetProfile === input.coordinatorProfile) fail('target and coordinator profiles must differ')
   const l = input.limits
   if (!l || !['periodMs', 'reviews', 'discovery', 'source', 'observations', 'coordinator'].every(key => Object.hasOwn(l, key)) || !Number.isSafeInteger(l.periodMs) || l.periodMs < 1_000 || Object.values(l).some(value => !Number.isSafeInteger(value) || value < 1)) fail('invalid limits')
+  if (input.ordinaryUseLearning !== undefined) {
+    validateRsiOrdinaryUseLearningSetup(input.ordinaryUseLearning)
+    const memory = input.memoryLearning
+    if (!memory || memory.learning.workItemExperiences !== true || memory.reviews.workItemExperiences !== true
+      || memory.adoption.workItemExperiences !== true) fail('ordinary-use learning requires the flagged memory learning, review and adoption grants')
+  }
 }
 function assertBudget(document: Document, policy: YAMLMap, id: string, limit: number, periodMs: number, scope: string): void {
   const budgets = seq(policy.get('budgets', true) as Node | undefined, 'assistantPolicy.budgets')
@@ -261,6 +271,10 @@ function configurePersonal(document: Document, personal: YAMLMap, manifest: RsiS
   memory?: RsiMemoryLearningSetup, creation?: RsiPluginCreationSetup): void {
   if (memory) {
     const personalMemory = map(personal.get('personalMemory', true) as Node | undefined, 'personalMemory config')
+    const existing = personalMemory.get('automaticLearning', true) as Node | undefined
+    if (existing !== undefined && !isDeepStrictEqual(nodeJson(existing), memory.adoption)) {
+      fail('existing memory adoption grant differs from the frozen owner grant')
+    }
     replaceNode(document, personalMemory, 'automaticLearning', memory.adoption)
   }
   targetPolicy(document, personal, manifest, scope, budgetIds, memory, creation)
@@ -310,6 +324,8 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   validateSourceReviewConfig(input.manifest.sourceReviews)
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, expectedOwner)
+  const ordinary = input.manifest.ordinaryUseLearning === undefined ? undefined
+    : validateRsiOrdinaryUseLearningSetup(input.manifest.ordinaryUseLearning)
   const creation = validatedCreation(input.manifest, expectedOwner)
   const revision = validatedRevision(input.manifest, expectedOwner, creation)
 
@@ -358,7 +374,13 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
-  if (memory) replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
+  if (memory) {
+    const existing = verifier.get('memoryReviews', true) as Node | undefined
+    if (existing !== undefined && !isDeepStrictEqual(nodeJson(existing), memory.reviews)) {
+      fail('existing memory review grant differs from the frozen owner grant')
+    }
+    replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
+  }
   if (creation) replaceNode(target.document, verifier, 'creationReviews', creation.reviews)
   if (revision) {
     replaceNode(target.document, verifier, 'revisionReviews', revision.reviews)
@@ -375,6 +397,33 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     learner.set('name', '@dsh-enhanced/assistant-memory-learning')
     learner.set('disabled', false)
     replaceNode(target.document, learner, 'config', memory.learning)
+  }
+  if (ordinary) {
+    const proactiveEntry = required(effective.rows, 'dsh-enhanced-assistant-proactive', 'target effective profile')
+    if (proactiveEntry.get('name') !== '@dsh-enhanced/assistant-proactive') fail('assistant-proactive row has a different package')
+    const proactive = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-proactive', true)
+    const currentEvaluation = proactive.get('intakeEvaluation', true) as Node | undefined
+    if (currentEvaluation !== undefined && !isDeepStrictEqual(nodeJson(currentEvaluation), ordinary.intakeEvaluation)) {
+      fail('existing assistant-proactive intake evaluation differs from the frozen fresh-install setup')
+    }
+    replaceNode(target.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation)
+    const workItemsEntry = required(effective.rows, 'dsh-enhanced-assistant-work-items', 'target effective profile')
+    if (workItemsEntry.get('name') !== '@dsh-enhanced/assistant-work-items') fail('assistant-work-items row has a different package')
+    const workItems = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-work-items', true)
+    if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
+    const ledgerNode = workItems.get('intakeLedger', true) as Node | undefined
+    const ledger = ledgerNode === undefined ? map(target.document.createNode({}), 'assistant-work-items intakeLedger') : map(ledgerNode, 'assistant-work-items intakeLedger')
+    if (ledgerNode === undefined) workItems.set('intakeLedger', ledger)
+    if (ledger.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.intakeLedger.enabled: true')
+    const evaluationNode = ledger.get('evaluation', true) as Node | undefined
+    const evaluation = evaluationNode === undefined
+      ? map(target.document.createNode({}), 'assistant-work-items intake evaluation')
+      : map(evaluationNode, 'assistant-work-items intake evaluation')
+    if (evaluationNode === undefined) ledger.set('evaluation', evaluation)
+    if (evaluation.get('enabled') !== undefined && evaluation.get('enabled') !== true) {
+      fail('existing assistant-work-items intake evaluation is disabled; a retry cannot silently re-enable it')
+    }
+    evaluation.set('enabled', true)
   }
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true)
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)

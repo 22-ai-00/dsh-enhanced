@@ -91,6 +91,24 @@ describe('supervised RSI source and build preparation', () => {
     ])
   })
 
+  it('requests ordinary-use learning only for a fresh profile', async () => {
+    const { home, log } = await fixture()
+    const invoke = (fresh: string) => spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
+      common, 'web', home, 'npm', repoRoot, '0', '0', fresh], {
+      cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
+        PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`, RSI_ARGS_LOG: log },
+    })
+    expect(invoke('1').status).toBe(0)
+    expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner', '--profile', 'web', '--dsh-home', home, '--enable-ordinary-use-learning',
+    ])
+    await writeFile(log, '')
+    expect(invoke('0').status).toBe(0)
+    expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner', '--profile', 'web', '--dsh-home', home,
+    ])
+  })
+
   it('prints the new supervised cohort and preparation between install and final setup without writing source', async () => {
     const { home } = await fixture()
     const result = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'supervised',

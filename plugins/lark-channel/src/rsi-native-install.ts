@@ -141,9 +141,20 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
     if (old && !isDeepStrictEqual(old.owner, owner)) fail('owner changed; frozen grants cannot be reused')
     const now = old?.now ?? ports.now(), expiresAt = old?.expiresAt ?? now + 365 * 86_400_000
     if (expiresAt <= ports.now()) fail('native grant expired; reinstall does not renew it')
+    const storedOrdinary = old?.compiled.manifest.ordinaryUseLearning?.intakeEvaluation
+    if (old && input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
+      fail('frozen native installation cannot be expanded with ordinary-use learning; install a fresh profile instead')
+    }
+    // A retry preserves exactly the frozen opt-in and evaluator route.
+    const enableOrdinaryUseLearning = old ? storedOrdinary !== undefined : input.enableOrdinaryUseLearning === true
+    const intakeProvider = storedOrdinary?.provider ?? input.intakeProvider
+    const intakeModel = storedOrdinary?.model ?? input.intakeModel
     const compiled = ports.compile({ dshHome: input.dshHome, targetProfile: input.profile,
       targetPatch: old?.beforePatch ?? targetPatch, targetEffective: old?.beforeEffective ?? effective,
-      owner, resources, source, sourceBuild: build.sourceBuild, creationBuild, executor, now, expiresAt, observer })
+      owner, resources, source, sourceBuild: build.sourceBuild, creationBuild, executor, now, expiresAt, observer,
+      enableOrdinaryUseLearning,
+      ...(intakeProvider !== undefined ? { intakeProvider } : {}),
+      ...(intakeModel !== undefined ? { intakeModel } : {}) })
     if (old && !isDeepStrictEqual(old.compiled, compiled)) fail('native compiled grant differs from the frozen plan')
     const currentPlist = await optional(paths.plistPath, false)
     if (currentPlist !== null) ports.validatePlist(currentPlist, serviceInput)

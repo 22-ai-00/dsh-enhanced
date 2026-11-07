@@ -12,6 +12,7 @@ import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { createRsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
 import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
@@ -45,6 +46,11 @@ export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild
   creationBuild?: RsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
   /** A retry explicitly preserves the original revision opt-in. */
   enableRevision?: boolean
+  /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
+  enableOrdinaryUseLearning?: boolean
+  /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
+  intakeProvider?: string
+  intakeModel?: string
   runnerStates?: RsiLinuxRunnerStates
   git: Pin
   now: number
@@ -58,6 +64,10 @@ export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild
 }
 
 function fail(message: string): never { throw new Error(`rsi bootstrap manifest: ${message}`) }
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+}
 function canonical(path: string, label: string): void {
   if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path || path.includes('\0') || /[\r\n]/u.test(path)) fail(`${label} must be canonical absolute`)
 }
@@ -129,7 +139,10 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   if (!input.resources || input.resources.schemaVersion !== 1 || !input.runtime || input.runtime.schemaVersion !== 1
     || !input.source || input.source.schemaVersion !== 1 || !input.sourceBuild
     || !('backend' in input.sourceBuild) && input.sourceBuild.versioning !== 'patch'
-    || input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean') fail('prepared RSI inputs are incomplete')
+    || input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean'
+    || input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
+    || input.intakeProvider !== undefined && typeof input.intakeProvider !== 'string'
+    || input.intakeModel !== undefined && typeof input.intakeModel !== 'string') fail('prepared RSI inputs are incomplete')
   for (const [label, path] of [['resource root', input.resources.root], ['state root', input.resources.stateRoot],
     ['config root', input.resources.configRoot], ['source checkout', input.source.repository], ['source release remote', input.source.baseline.remote],
     ['runtime root', input.runtime.root], ['git', input.git?.path]] as const) canonical(path, label)
@@ -193,6 +206,49 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   const reviewOwner = { authorityId: routeId, authorityHash: resolvedOwner.route.authorityHash, principalId,
     principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version,
     workspace: input.owner.workspace, agentPreset: input.owner.agentPreset }
+  let ordinaryUseLearning: RsiOrdinaryUseLearningSetup | undefined
+  if (input.enableOrdinaryUseLearning === true) {
+    const proactive = rows.get('dsh-enhanced-assistant-proactive')
+    if (!proactive || proactive.get('disabled') === true || proactive.get('name') !== '@dsh-enhanced/assistant-proactive') {
+      fail('ordinary-use learning requires an enabled installed assistant-proactive bundle')
+    }
+    const workItems = rows.get('dsh-enhanced-assistant-work-items')
+    if (!workItems || workItems.get('disabled') === true || workItems.get('name') !== '@dsh-enhanced/assistant-work-items') {
+      fail('ordinary-use learning requires an enabled installed assistant-work-items bundle')
+    }
+    ordinaryUseLearning = createRsiOrdinaryUseLearningSetup({ deliveryConfig,
+      intakeProvider: input.intakeProvider, intakeModel: input.intakeModel })
+    const proactiveConfig = proactive.has('config')
+      ? plain(rowConfig(proactive, 'assistant-proactive'), 'assistant-proactive config') : {}
+    if (proactiveConfig.intakeEvaluation !== undefined
+      && !isDeepStrictEqual(proactiveConfig.intakeEvaluation, ordinaryUseLearning.intakeEvaluation)) {
+      fail('existing assistant-proactive intake evaluation differs from the frozen fresh-install setup')
+    }
+    const workItemsConfig = workItems.has('config')
+      ? plain(rowConfig(workItems, 'assistant-work-items'), 'assistant-work-items config') : {}
+    if (workItemsConfig.enabled !== true) {
+      fail('ordinary-use learning requires assistant-work-items.enabled: true (run dsh-plugin-setup preset recommended first)')
+    }
+    const ledger = workItemsConfig.intakeLedger
+    if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) {
+      fail('ordinary-use learning requires assistant-work-items.intakeLedger.enabled: true')
+    }
+    if ((ledger as Record<string, unknown>).enabled !== true) {
+      fail('ordinary-use learning requires assistant-work-items.intakeLedger.enabled: true')
+    }
+    const evaluation = (ledger as Record<string, unknown>).evaluation
+    if (evaluation !== undefined) {
+      if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
+        fail('assistant-work-items.intakeLedger.evaluation must be an object')
+      }
+      if ((evaluation as Record<string, unknown>).enabled !== undefined
+        && (evaluation as Record<string, unknown>).enabled !== true) {
+        fail('existing assistant-work-items intake evaluation is disabled; a retry cannot silently re-enable it')
+      }
+    }
+  } else if (input.intakeProvider !== undefined || input.intakeModel !== undefined) {
+    fail('an explicit intake route requires enableOrdinaryUseLearning')
+  }
   const nativeBuild = 'backend' in input.sourceBuild ? input.sourceBuild : undefined
   const enableRevision = input.enableRevision ?? (nativeBuild !== undefined && input.creationBuild !== undefined)
   if (nativeBuild && !input.runnerStates) fail('native installation requires frozen runner states')
@@ -268,7 +324,8 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   const profilePath = join(input.dshHome, 'profiles', input.targetProfile)
   const installation = input.resources.installationId
   const memoryLearning = createRsiMemoryLearningSetup({ installationId: installation,
-    stateRoot: state, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt })
+    stateRoot: state, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
+    workItemExperiences: ordinaryUseLearning !== undefined })
   if (learner.get('disabled') !== true) {
     if (!learner.has('config') || !isDeepStrictEqual(plain(rowConfig(learner, 'memory learner'), 'memory learner'), memoryLearning.learning)) {
       fail('existing memory learner config differs from frozen owner grant')
@@ -314,6 +371,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       policy: 'Review the exact owner-bound source repair and its acceptance evidence independently.',
       maxChangedFiles: 256, maxInputBytes: 2_097_152, maxOutputTokens: 8192, timeoutMs: 300_000 },
     memoryLearning,
+    ...(ordinaryUseLearning !== undefined ? { ordinaryUseLearning } : {}),
     coordinator: { budgetId: `rsi-coordinator-${installation}`, budgetAmount: 1, timeoutMs: 300_000 },
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
       coordinator: 1440, qualification: 1440 },
@@ -381,6 +439,30 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     { entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
       configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] },
   )
+  if (ordinaryUseLearning !== undefined) {
+    // These rows are modified by the profile compiler, so observe the final raw
+    // options rather than the pre-install dump. Recompute on every retry from
+    // the same effective inputs; the compiler preserves unrelated keys.
+    const proactiveRow = rows.get('dsh-enhanced-assistant-proactive')!
+    const proactiveRaw = proactiveRow.has('config')
+      ? rawLoaderConfig(proactiveRow.get('config', true) as Node, 'assistant-proactive') : null
+    const proactiveFinal = { ...(record(proactiveRaw) ? proactiveRaw : {}),
+      intakeEvaluation: ordinaryUseLearning.intakeEvaluation }
+    const workItemsRow = rows.get('dsh-enhanced-assistant-work-items')!
+    const workItemsRaw = workItemsRow.has('config')
+      ? rawLoaderConfig(workItemsRow.get('config', true) as Node, 'assistant-work-items') : null
+    const workItemsBase = record(workItemsRaw) ? workItemsRaw : {}
+    const ledger = record(workItemsBase.intakeLedger) ? workItemsBase.intakeLedger : {}
+    const evaluation = record(ledger.evaluation) ? ledger.evaluation : {}
+    const workItemsFinal = { ...workItemsBase,
+      intakeLedger: { ...ledger, evaluation: { ...evaluation, enabled: true } } }
+    manifest.controlPlane.runtimeObserver!.targets.push(
+      { entryId: 'dsh-enhanced-assistant-proactive', module: '@dsh-enhanced/assistant-proactive',
+        configDigest: runtimeConfigDigest(proactiveFinal), services: ['assistantProactive'] },
+      { entryId: 'dsh-enhanced-assistant-work-items', module: '@dsh-enhanced/assistant-work-items',
+        configDigest: runtimeConfigDigest(workItemsFinal), services: ['assistantWorkItems'] },
+    )
+  }
   const deliveryTarget = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')
   if (deliveryTarget) {
     // The input observer digest was validated above against the original dump.

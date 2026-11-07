@@ -107,6 +107,15 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     expect(await readFile(path, 'utf8')).toBe(bytes)
   }, 120_000)
 
+  test('refuses to expand an existing installation with the fresh ordinary-use learning opt-in', async () => {
+    const f = await fixture()
+    expect((await installRsiOwnerDeployment(f.input, f.ports)).mode).toBe('ready')
+    vi.mocked(f.ports.stop).mockClear()
+    await expect(installRsiOwnerDeployment({ ...f.input, enableOrdinaryUseLearning: true }, f.ports))
+      .rejects.toThrow('existing installation cannot be expanded with ordinary-use learning')
+    expect(f.ports.stop).not.toHaveBeenCalled()
+  }, 120_000)
+
   test('rejects persisted creation, receipt and grant file drift before either Host is stopped', async () => {
     const f = await fixture()
     for (const name of ['creation-review-runner', 'creation-adoption-runner']) {

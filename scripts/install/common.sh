@@ -2907,11 +2907,15 @@ dsh_enhanced_prepare_rsi_source() {
 }
 
 dsh_enhanced_install_rsi_owner() {
-  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}"
+  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}" fresh="${7:-0}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
   local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
   if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
+  # Only a brand-new profile asks the RSI generator to assemble the
+  # no-signing-key ordinary-use rings. An existing installation keeps its
+  # stored opt-in and the generator refuses to expand it.
+  if [[ "$fresh" == '1' ]]; then args+=(--enable-ordinary-use-learning); fi
   printf '\nsupervised-growth：自动配置当前 owner 的学习与能力进化。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
@@ -4811,7 +4815,7 @@ NODE
     dsh_enhanced_wait_owner_dm "$profile" "$dsh_home" "$owner_wait_seconds" "$dry_run"
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" || return $?
+    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" "$fresh_profile" || return $?
   fi
 
   # Fresh managed supervised installs get the audited ordinary-use learning
