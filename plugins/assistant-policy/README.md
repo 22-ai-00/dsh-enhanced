@@ -210,14 +210,19 @@ $bin preset recommended --yes
 
 `preset recommended` 一次打开以下默认关闭的可选功能，仅作用于已安装且已加载的插件，其余记为 skipped，可重复执行：
 
-| 插件 | 写入 |
-| --- | --- |
-| `assistant-work-items` | `enabled: true`、`intakeLedger.enabled: true`（`mode` 保持 `observe`；若已设 active 且尚未启用则跳过） |
-| `assistant-delivery` | `attentionAttachOverCap: true` |
-| `assistant-evaluation` | `notificationOutcomesEnabled: true` |
-| `event-triggers` | `pollerEnabled: true` |
+| 插件 | 写入 | 前置（不满足则跳过并报告原因） |
+| --- | --- | --- |
+| `assistant-work-items` | `enabled: true`、`intakeLedger.enabled: true`（`mode` 保持 `observe`；若已设 active 且尚未启用则跳过） | 无 |
+| `assistant-work-items` | `intakeLedger.evaluation.enabled: true` | `assistant-proactive.intakeEvaluation` 已显式配置合法的 `rules`（1–16 条，唯一 `ruleId`，`ceiling` ∈ `ignore|digest|notify|accept`）、`provider`、`model` |
+| `assistant-proactive` | `intakeEvaluation.enabled: true`（observe-only 的生产 intake 评估器） | 同上；预设绝不猜测模型路由或规则 |
+| `assistant-delivery` | `attentionAttachOverCap: true` | 无 |
+| `assistant-evaluation` | `notificationOutcomesEnabled: true` | 无 |
+| `event-triggers` | `pollerEnabled: true` | 无 |
+| `assistant-memory-learning` | `workItemExperiences: true` | `assistant-verifier.memoryReviews.workItemExperiences` 与 `personal-assistant.personalMemory.automaticLearning.workItemExperiences` 已由 owner 显式开启（新签名授权）；预设不生成授权 |
+| `assistant-growth-driver` | 不写入（manual） | `usageLearning.workItemFailures` 需要签名的 `workItemAuthorities` pin；预设不发明、不扩展现有授权 |
+| `plugin-control-plane` | 不写入（manual） | 修订采用需要 owner 自备 ed25519 密钥与独立采用/回退授权；预设不写凭据或授权材料 |
 
-包默认值不变。onboarding 等程序可直接调用：
+两项 `manual` 在每次运行都以 skipped 原因出现，表示"需要显式 owner 动作"，不是失败。预设不改包默认值、不改 Policy/owner routes/密封状态，也不加载已禁用的插件。onboarding 等程序可直接调用：
 
 ```ts
 import { applyRecommendedPluginPreset } from '@dsh-enhanced/assistant-policy/plugin-setup'
@@ -226,4 +231,4 @@ const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun
 // result: { profile, patchPath, changed, dryRun, changes: [{ id, key, from, to }], skipped: [{ id, reason }] }
 ```
 
-安装脚本可用 `scripts/install/common.sh` 中的 `dsh_enhanced_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`，没有场景会隐式调用它。
+安装脚本可用 `scripts/install/common.sh` 中的 `dsh_enhanced_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`。全新 managed supervised 安装会在 owner 学习配置生成后隐式再应用一次 `recommended`（幂等；显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式配置优先），其他场景不隐式调用。

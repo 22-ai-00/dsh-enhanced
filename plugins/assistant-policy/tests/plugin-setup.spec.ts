@@ -277,13 +277,23 @@ describe('plugin setup: recommended preset', () => {
       { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
       { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
-    expect(result.skipped).toEqual([{ id: 'dsh-enhanced-assistant-evaluation', reason: 'not installed' }])
+    expect(result.skipped).toEqual([
+      { id: 'dsh-enhanced-assistant-work-items', reason: 'waiting for explicit configuration: dsh-enhanced-assistant-proactive is not installed' },
+      { id: 'dsh-enhanced-assistant-proactive', reason: 'not installed' },
+      { id: 'dsh-enhanced-assistant-evaluation', reason: 'not installed' },
+      { id: 'dsh-enhanced-assistant-memory-learning', reason: 'plugin is disabled in this profile; enable it first' },
+      { id: 'dsh-enhanced-assistant-growth-driver', reason: 'not installed' },
+      { id: 'dsh-enhanced-plugin-control-plane', reason: 'not installed' },
+    ])
     const source = await profilePatch(home)
     expect(source).toContain('mode: observe')
     expect(source).not.toContain('dsh-enhanced-lark-channel')
     expect(source).not.toContain('dsh-enhanced-assistant-policy')
     expect(source).not.toContain('dsh-enhanced-assistant-memory-learning')
-    expect((await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)).changed).toBe(false)
+    const again = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
+    expect(again.changed).toBe(false)
+    expect(again.changes).toEqual([])
+    expect(again.skipped).toEqual(result.skipped)
   })
 
   test('skips disabled plugins and active work-items that are not yet enabled', async () => {
@@ -295,6 +305,153 @@ describe('plugin setup: recommended preset', () => {
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, options)
     expect(result.changes.map(change => change.id)).toEqual(['dsh-enhanced-assistant-delivery'])
     expect(result.skipped.map(skip => skip.id)).toEqual(expect.arrayContaining(['dsh-enhanced-event-triggers', 'dsh-enhanced-assistant-work-items']))
+    const workItemsSkips = result.skipped.filter(skip => skip.id === 'dsh-enhanced-assistant-work-items')
+    expect(workItemsSkips).toEqual([{ id: 'dsh-enhanced-assistant-work-items', reason: 'mode is active but not enabled; complete the active config deliberately' }])
+    expect(await profilePatch(home)).not.toContain('intakeLedger')
+  })
+})
+
+/**
+ * The assembly fixture emulates the effective profile after an owner setup:
+ * model route and rule ceilings exist for the intake evaluator, but every
+ * owner-signed grant is still un-expanded on purpose.
+ */
+const assemblyBundles = `
+- id: dsh-enhanced-assistant-work-items
+  name: '@dsh-enhanced/assistant-work-items'
+  config:
+    enabled: false
+    mode: observe
+    intakeLedger:
+      evaluation:
+        enabled: false
+- id: dsh-enhanced-assistant-proactive
+  name: '@dsh-enhanced/assistant-proactive'
+  config:
+    intakeEvaluation:
+      enabled: false
+      rules:
+        - ruleId: triage
+          ceiling: digest
+      provider: deepseek-official
+      model: deepseek-v4-flash
+- id: dsh-enhanced-assistant-delivery
+  name: '@dsh-enhanced/assistant-delivery'
+  config:
+    schedulerEnabled: true
+- id: dsh-enhanced-assistant-evaluation
+  name: '@dsh-enhanced/assistant-evaluation'
+  config:
+    notificationOutcomesEnabled: false
+- id: dsh-enhanced-event-triggers
+  name: '@dsh-enhanced/event-triggers'
+  config:
+    pollerEnabled: false
+- id: dsh-enhanced-assistant-memory-learning
+  name: '@dsh-enhanced/assistant-memory-learning'
+  config:
+    databasePath: /tmp/learning.sqlite
+- id: dsh-enhanced-assistant-verifier
+  name: '@dsh-enhanced/assistant-verifier'
+  config:
+    memoryReviews:
+      workItemExperiences: false
+- id: dsh-enhanced-personal-assistant
+  name: '@dsh-enhanced/personal-assistant'
+  config:
+    personalMemory:
+      automaticLearning:
+        workItemExperiences: false
+- id: dsh-enhanced-assistant-growth-driver
+  name: '@dsh-enhanced/assistant-growth-driver'
+  config:
+    enabled: true
+    usageLearning:
+      enabled: true
+- id: dsh-enhanced-plugin-control-plane
+  name: '@dsh-enhanced/plugin-control-plane'
+  config:
+    catalogPath: /tmp/catalog.json
+`
+
+function dumpFixture(source: string) {
+  return async (home: string, profile: string): Promise<YAMLSeq> => {
+    const rows = parseDocument(source).contents as YAMLSeq
+    for (const path of [join(home, 'cordis.patch.yml'), join(home, 'profiles', profile, 'cordis.patch.yml')]) {
+      let patchSource: string
+      try { patchSource = await readFile(path, 'utf8') } catch { continue }
+      const patch = parseDocument(patchSource)
+      if (patch.errors.length > 0 || !isSeq(patch.contents)) continue
+      for (const entry of patch.contents.items) {
+        if (!isMap(entry)) continue
+        const target = rows.items.find(row => isMap(row) && row.get('id') === entry.get('id')) as YAMLMap | undefined
+        if (target === undefined) continue
+        if (entry.has('disabled')) target.set('disabled', entry.get('disabled'))
+        const config = entry.get('config', true)
+        if (isMap(config)) target.set('config', config.clone())
+      }
+    }
+    return rows
+  }
+}
+
+describe('plugin setup: assembly preset guards', () => {
+  test('enables the declared intake evaluator but never guesses owner-generated authorization', async () => {
+    const home = await temporaryHome()
+    const assemblyOptions = { readDump: dumpFixture(assemblyBundles) }
+    const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, assemblyOptions)
+    expect(result.changes).toEqual([
+      { id: 'dsh-enhanced-assistant-work-items', key: 'enabled', from: false, to: true },
+      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.enabled', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-work-items', key: 'intakeLedger.evaluation.enabled', from: false, to: true },
+      { id: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.enabled', from: false, to: true },
+      { id: 'dsh-enhanced-assistant-delivery', key: 'attentionAttachOverCap', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-evaluation', key: 'notificationOutcomesEnabled', from: false, to: true },
+      { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
+    ])
+    expect(result.skipped.map(skip => skip.id)).toEqual([
+      'dsh-enhanced-assistant-memory-learning',
+      'dsh-enhanced-assistant-growth-driver',
+      'dsh-enhanced-plugin-control-plane',
+    ])
+    expect(result.skipped[0]!.reason).toMatch(/waiting for explicit configuration: .*memoryReviews\.workItemExperiences/u)
+    expect(result.skipped[1]!.reason).toMatch(/signed workItemAuthorities pins/u)
+    expect(result.skipped[2]!.reason).toMatch(/ed25519 key material/u)
+    const source = await profilePatch(home)
+    const patchRows = parseDocument(source, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }).toJSON() as Array<Record<string, any>>
+    const configOf = (id: string) => patchRows.find(row => row.id === id)?.config
+    expect(configOf('dsh-enhanced-assistant-work-items')).toMatchObject({
+      enabled: true, mode: 'observe', intakeLedger: { enabled: true, evaluation: { enabled: true } },
+    })
+    expect(configOf('dsh-enhanced-assistant-proactive')).toMatchObject({ intakeEvaluation: { enabled: true } })
+    expect(source).not.toContain('workItemExperiences')
+    expect(source).not.toContain('workItemFailures')
+    expect(source).not.toContain('revisionCapabilities')
+    // The same run twice reports no changes and the identical skip reasons.
+    const again = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, assemblyOptions)
+    expect(again.changed).toBe(false)
+    expect(again.changes).toEqual([])
+    expect(again.skipped).toEqual(result.skipped)
+  })
+
+  test('turns on a memory experience flag only when both signed grants already carry it', async () => {
+    const home = await temporaryHome()
+    const expanded = assemblyBundles
+      .replace('    memoryReviews:\n      workItemExperiences: false', '    memoryReviews:\n      workItemExperiences: true')
+      .replace('      automaticLearning:\n        workItemExperiences: false', '      automaticLearning:\n        workItemExperiences: true')
+    const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, { readDump: dumpFixture(expanded) })
+    expect(result.changes).toContainEqual({ id: 'dsh-enhanced-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true })
+    expect(result.skipped.map(skip => skip.id)).toEqual(['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-plugin-control-plane'])
+    expect(await profilePatch(home)).toContain('workItemExperiences: true')
+  })
+
+  test('rejects malformed intake rules rather than enabling the producer', async () => {
+    const home = await temporaryHome()
+    const invalid = assemblyBundles.replace('        - ruleId: triage\n          ceiling: digest', '        - ruleId: triage\n          ceiling: execute')
+    const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, { readDump: dumpFixture(invalid) })
+    expect(result.changes.map(change => `${change.id}.${change.key}`)).not.toContain('dsh-enhanced-assistant-proactive.intakeEvaluation.enabled')
+    expect(result.skipped).toContainEqual({ id: 'dsh-enhanced-assistant-work-items', reason: expect.stringMatching(/rules is missing or invalid/u) })
+    expect(result.skipped).toContainEqual({ id: 'dsh-enhanced-assistant-proactive', reason: expect.stringMatching(/rules is missing or invalid/u) })
   })
 })
 

@@ -9022,6 +9022,9 @@ printf '%s\\n' '{not-json'
       'personal-assistant', 'assistant-delivery', 'assistant-evaluation',
       'assistant-evolution', 'assistant-growth-experiments', 'preference-learning', 'assistant-heartbeat',
       'assistant-health', 'assistant-goals', 'assistant-recovery', 'lark-channel', 'event-triggers', 'assistant-proactive',
+      // The observe-only work-item ledger is part of the supervised cohort so a
+      // fresh managed install records ordinary authenticated intake.
+      'assistant-work-items',
     ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
     expect(result.stdout).toContain('env npm_config_loglevel=error dsh plugin --profile web add')
     expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')

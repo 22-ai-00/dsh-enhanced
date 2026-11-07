@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { deliverySchemaVersion, ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
-import { inspectAutonomyOwner, inspectAutonomyProfile } from '../src/doctor.js'
+import { formatAutonomyReadiness, inspectAutonomyOwner, inspectAutonomyProfile, inspectAutonomyReadiness, runAutonomyDoctor } from '../src/doctor.js'
 
 const roots: string[] = []
 function databaseFingerprint(path: string) {
@@ -158,5 +158,211 @@ describe('autonomy doctor profile and persisted owner checks', () => {
       expect(() => inspectAutonomyProfile(known.replace("dshHomePath('delivery/state.sqlite')", expression), 'web', home)).toThrow()
     }
     expect(() => inspectAutonomyProfile(source.replace('preset: standard', 'preset: !!js standard'), 'web', home)).toThrow(/literal/)
+  })
+})
+/**
+ * Static readiness fixtures. They are composed-YAML snapshots only: the doctor
+ * never activates a Host, calls a model or reads a database for this section.
+ */
+const readinessBundles = `
+- id: dsh-enhanced-personal-assistant
+  name: '@dsh-enhanced/personal-assistant'
+  config:
+    personalMemory:
+      automaticLearning:
+        workItemExperiences: true
+- id: dsh-enhanced-assistant-work-items
+  name: '@dsh-enhanced/assistant-work-items'
+  config:
+    enabled: true
+    mode: observe
+    intakeLedger:
+      enabled: true
+      evaluation:
+        enabled: true
+- id: dsh-enhanced-assistant-delivery
+  name: '@dsh-enhanced/assistant-delivery'
+  config:
+    schedulerEnabled: true
+- id: dsh-enhanced-assistant-evaluation
+  name: '@dsh-enhanced/assistant-evaluation'
+  config:
+    notificationOutcomesEnabled: true
+- id: dsh-enhanced-assistant-verifier
+  name: '@dsh-enhanced/assistant-verifier'
+  config:
+    memoryReviews:
+      workItemExperiences: true
+- id: dsh-enhanced-event-triggers
+  name: '@dsh-enhanced/event-triggers'
+  config:
+    pollerEnabled: true
+    triggers:
+      - id: daily
+- id: dsh-enhanced-assistant-memory-learning
+  name: '@dsh-enhanced/assistant-memory-learning'
+  config:
+    workItemExperiences: true
+- id: dsh-enhanced-assistant-growth-driver
+  name: '@dsh-enhanced/assistant-growth-driver'
+  config:
+    enabled: true
+    usageLearning:
+      enabled: true
+      workItemFailures: true
+- id: dsh-enhanced-assistant-proactive
+  name: '@dsh-enhanced/assistant-proactive'
+  config:
+    intakeEvaluation:
+      enabled: true
+      rules:
+        - ruleId: triage
+          ceiling: digest
+      provider: deepseek-official
+      model: deepseek-v4-flash
+- id: dsh-enhanced-plugin-control-plane
+  name: '@dsh-enhanced/plugin-control-plane'
+  config:
+    creationCapabilities:
+      authorityId: create
+    revisionVerifications:
+      authority:
+        authorityId: revision
+    sourceBuild:
+      stateRoot: /tmp/native-source-build
+    sourceJobs:
+      revision:
+        authorityId: revision-jobs
+    revisionCapabilities:
+      authorityId: adopt-revision
+      keyId: revision-key
+      namePrefix: 'agent-'
+      expiresAt: 4102444800000
+`
+
+function readinessCheck(report: ReturnType<typeof inspectAutonomyReadiness>, id: string) {
+  const check = report.checks.find(candidate => candidate.id === id)
+  expect(check, `missing readiness check ${id}`).toBeDefined()
+  return check!
+}
+
+describe('autonomy doctor static readiness snapshot', () => {
+  it('reports a fully assembled ordinary-use profile as ready with deterministic text and JSON', () => {
+    const report = inspectAutonomyReadiness(readinessBundles, 'web')
+    expect(report).toMatchObject({ protocol: 'dsh-enhanced/autonomy-readiness/v1', profile: 'web',
+      scope: 'ordinary-use-learning', ready: true, runtime: { observed: false } })
+    expect(report.checks.map(check => [check.id, check.status])).toEqual([
+      ['bundles', 'ready'],
+      ['work-items-observe-intake', 'ready'],
+      ['intake-evaluator', 'ready'],
+      ['delivery-natural-feedback', 'ready'],
+      ['background-learning', 'ready'],
+      ['revision-adoption', 'ready'],
+      ['event-poller', 'ready'],
+      ['ptc-presentation', 'ready'],
+    ])
+    const text = formatAutonomyReadiness(report)
+    expect(text).toContain('READY')
+    expect(text).toContain('runtime: not observed')
+    expect(formatAutonomyReadiness(inspectAutonomyReadiness(readinessBundles, 'web'))).toBe(text)
+    expect(JSON.parse(JSON.stringify(report))).toEqual(report)
+  })
+
+  it('reports missing rings fail-closed instead of throwing', () => {
+    const partial = `
+- id: dsh-enhanced-assistant-delivery
+  name: '@dsh-enhanced/assistant-delivery'
+  config:
+    schedulerEnabled: true
+`
+    const report = inspectAutonomyReadiness(partial, 'web')
+    expect(report.ready).toBe(false)
+    expect(readinessCheck(report, 'delivery-natural-feedback').status).toBe('ready')
+    const codes = report.checks.flatMap(check => check.reasons.map(reason => reason.code))
+    expect(codes).toEqual(expect.arrayContaining([
+      'bundle-missing:assistant-work-items',
+      'bundle-missing:assistant-proactive',
+      'work-items-unavailable',
+      'intake-evaluator-work-items-missing',
+      'memory-learning-unavailable',
+      'growth-driver-unavailable',
+      'evaluation-unavailable',
+      'control-plane-unavailable',
+      'event-triggers-unavailable',
+    ]))
+    expect(report.checks.find(check => check.id === 'intake-evaluator')?.details).toMatchObject({ configured: false, runtimeRegistration: 'not-observed' })
+    expect(() => formatAutonomyReadiness(report)).not.toThrow()
+  })
+
+  it('marks an unsafe or incomplete assembly not-ready with the exact reason', () => {
+    const wrongMode = readinessBundles.replace('    mode: observe', '    mode: active')
+    const mode = inspectAutonomyReadiness(wrongMode, 'web')
+    expect(readinessCheck(mode, 'work-items-observe-intake').reasons.map(reason => reason.code))
+      .toContain('work-items-not-observe')
+
+    const invalidRules = readinessBundles.replace('          ceiling: digest', '          ceiling: execute')
+    const rules = inspectAutonomyReadiness(invalidRules, 'web')
+    expect(readinessCheck(rules, 'intake-evaluator').reasons.map(reason => reason.code))
+      .toContain('intake-evaluator-rules-invalid')
+
+    const noRevision = readinessBundles.replace(/\n    revisionCapabilities:[\s\S]*$/, '\n')
+    const revision = inspectAutonomyReadiness(noRevision, 'web')
+    expect(readinessCheck(revision, 'revision-adoption').reasons.map(reason => reason.code))
+      .toContain('revision-capabilities-not-configured')
+
+    const disabled = readinessBundles.replace("- id: dsh-enhanced-event-triggers\n  name: '@dsh-enhanced/event-triggers'",
+      "- id: dsh-enhanced-event-triggers\n  name: '@dsh-enhanced/event-triggers'\n  disabled: true")
+    const poller = inspectAutonomyReadiness(disabled, 'web')
+    expect(readinessCheck(poller, 'event-poller').reasons.map(reason => reason.code)).toContain('event-triggers-unavailable')
+    expect(readinessCheck(poller, 'bundles').reasons.map(reason => reason.code)).toContain('bundle-disabled:event-triggers')
+  })
+
+  it('keeps the optional PTC ring not-verified and out of the exit decision', () => {
+    const ptc = readinessBundles.replace('    enabled: true\n    usageLearning:', '    enabled: true\n    toolPresentation: ptc\n    usageLearning:')
+    const report = inspectAutonomyReadiness(ptc, 'web')
+    const check = readinessCheck(report, 'ptc-presentation')
+    expect(check).toMatchObject({ required: false, status: 'not-verified' })
+    expect(check.details).toEqual({ toolPresentation: 'ptc' })
+    expect(report.ready).toBe(true)
+  })
+
+  it('prints a parseable readiness JSON line, fails closed with an exit code and never throws', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-cli-')))
+    roots.push(root)
+    const bin = join(root, 'bin')
+    mkdirSync(bin)
+    const dumpPath = join(root, 'dump.yml')
+    writeFileSync(dumpPath, readinessBundles)
+    const host = join(bin, 'dsh')
+    writeFileSync(host, '#!/bin/bash\ncat "$READINESS_FIXTURE"\n')
+    chmodSync(host, 0o755)
+    const savedPath = process.env.PATH
+    const savedFixture = process.env.READINESS_FIXTURE
+    const chunks: string[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => { chunks.push(String(chunk)); return true }) as never)
+    try {
+      process.env.PATH = `${bin}:${savedPath ?? ''}`
+      process.env.READINESS_FIXTURE = dumpPath
+      await runAutonomyDoctor(['--readiness', '--dsh-home', root, '--profile', 'web'])
+      const readyOutput = chunks.join('')
+      expect(readyOutput).toContain('Autonomy readiness')
+      expect(JSON.parse(readyOutput.trim().split('\n').at(-1)!)).toMatchObject({ protocol: 'dsh-enhanced/autonomy-readiness/v1', ready: true })
+      expect(process.exitCode ?? 0).toBe(0)
+
+      chunks.length = 0
+      writeFileSync(dumpPath, "- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config: {}\n")
+      await runAutonomyDoctor(['--readiness', '--dsh-home', root, '--profile', 'web'])
+      const blocked = JSON.parse(chunks.join('').trim().split('\n').at(-1)!) as { ready: boolean; checks: Array<{ id: string }> }
+      expect(blocked.ready).toBe(false)
+      expect(blocked.checks.some(check => check.id === 'bundles')).toBe(true)
+      expect(process.exitCode).toBe(1)
+    } finally {
+      process.exitCode = undefined
+      spy.mockRestore()
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedFixture === undefined) delete process.env.READINESS_FIXTURE
+      else process.env.READINESS_FIXTURE = savedFixture
+    }
   })
 })

@@ -20,7 +20,9 @@ dsh-rsi install
 
 默认 `supervised` 包含飞书常驻助理、持久学习、有限授权下的能力改进。安装器解析并固定兼容的 DSH Host 和同批插件版本；遇到未知 Host 版本会拒绝安装。第一次安装请按终端向导完成飞书应用、本人绑定、模型和授权步骤。
 
-交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”。直接回车即采用推荐项：DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时只隐藏输入一次，存入 `$DSH_HOME/.credentials.yaml`，权限 `0600`）、连接飞书、在 Key 已存储时验证模型 route；随后提示你给机器人发一条私聊（如 `/model`），安装器自动等待首次 owner 会话（默认最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），不必再手动续跑。最后询问是否启用推荐插件功能（默认是，即 `dsh-plugin-setup preset recommended`）；非引导安装可显式加 `--plugin-preset recommended`，默认不改插件配置。显式参数始终优先；`--guided` / `--customize` 可跳过这个问题。已有模型或飞书配置会保留。
+交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”。直接回车即采用推荐项：DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时只隐藏输入一次，存入 `$DSH_HOME/.credentials.yaml`，权限 `0600`）、连接飞书、在 Key 已存储时验证模型 route；随后提示你给机器人发一条私聊（如 `/model`），安装器自动等待首次 owner 会话（默认最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），不必再手动续跑。最后询问是否启用推荐插件功能（默认是，即 `dsh-plugin-setup preset recommended`）；非引导安装可显式加 `--plugin-preset recommended`。显式参数始终优先；`--guided` / `--customize` 可跳过这个问题。已有模型或飞书配置会保留。
+
+全新 managed `supervised` 安装还会在 owner 学习配置生成后自动、幂等地再应用一次 `recommended` 装配（步骤显示为“自治学习装配”）：WorkItems 以 `enabled: true`、`mode: observe`、`intakeLedger.enabled: true` 落库，交付/评测/事件轮询等有限开关一并打开。该装配只修改已安装且未禁用的插件行，不打开 admit/auto/worker，也不改 Policy、凭据、ownerRoutes 或密封状态；模型路由与 intake 规则、签名 `workItemAuthorities` pin、修订采用密钥等 owner 授权材料一律不自动生成，缺前置时在输出中逐项 skipped。显式 `--plugin-preset skip`、引导中选择否，或对已有 profile 重跑安装时都不会隐式改写其显式插件配置。
 
 `--yes` 跳过场景菜单；若环境中已有 `DEEPSEEK_API_KEY`（或 `DSH_ENHANCED_MODEL_API_KEY`）且尚未存储 Key，会自动配置上述默认模型并把 Key 写入 `.credentials.yaml`。`--yes` **不能跳过首次本人绑定**（飞书应用确认和 `DSH-CONNECT` 短语仍需本人完成，之后只有已绑定的 owner 能操作和授权），也不能确认已有 active/paused Automation；后者需要显式 `--ack-existing-automations`。
 
@@ -77,13 +79,15 @@ $bin preset recommended --yes
 dsh-rsi restart --profile web         # 改动重启后生效
 ```
 
-CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 只是显式打开 work-items 与 intake 账本（observe）、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询。安装器的 `--plugin-preset <name>` 与引导式首装的最后一问都调用 `dsh_enhanced_apply_plugin_preset`，写入后自动重启已注册的常驻服务。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 显式打开 work-items observe 台账与 intake 账本、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询，并在 owner 已声明前置时打开 intake 评估生产者、后台 WorkItem 经验/失败学习开关；模型路由与规则、签名 pin、修订密钥等不会由预设生成，未满足前置的项以 skipped 原因列出。安装器的 `--plugin-preset <name>` 与引导式首装的最后一问都调用 `dsh_enhanced_apply_plugin_preset`，写入后自动重启已注册的常驻服务；全新 supervised 安装的学习装配另见上文。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+
+逐环节就绪状态可用只读 `dsh-autonomy-doctor --readiness`（`assistant-web-owner` 提供，需匹配版本；Web/autonomy 场景的 Home 自带该入口）查看：它读取组合后的 profile，输出确定性文本加一行 JSON，覆盖安装/启用、WorkItems observe+intake、intake 评估生产者配置、交付自然反馈入口、后台学习开关、修订采用授权和 event poller；缺项标 not-ready 并给原因，必需环节未就绪时退出码为 1。它不激活 Host、不请求模型，因此不能证明运行时注册、Policy 或外部送达。
 
 ## 场景与参数入口
 
 | 场景 | 适用情况 |
 | --- | --- |
-| 默认 `supervised` | 首次交互式安装；飞书常驻、学习与有限采用。 |
+| 默认 `supervised` | 首次交互式安装；飞书常驻、学习与有限采用，含 WorkItems observe 台账与首装学习装配。 |
 | `--scenario lark` | 飞书常驻与偏好学习，无 supervised 成长层。 |
 | `--scenario core` | 本机轻量核心，无飞书渠道和后台学习。**不默认注册常驻服务**，不能直接使用上面的 `web-url` / `start` 步骤。 |
 | `--scenario web` / `autonomy` | 实验性本机 owner/隔离执行；不默认注册常驻服务。见[维护说明](maintenance.md#实验性-web-与-autonomy)。 |

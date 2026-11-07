@@ -585,23 +585,92 @@ export async function unsetPluginConfigValue(
   return commit(target, installed, patch, changes, [], [], [], options)
 }
 
+/**
+ * A setting that must already be configured by an owner-facing setup before this
+ * preset may turn on the feature that depends on it. The preset never invents
+ * model routes, evaluation rules, signed pins or signing keys.
+ */
+export interface PresetRequirement {
+  /** Installed plugin (row id, package name or short slug) that owns the setting. */
+  plugin: string
+  /** Dotted config path that must already be present in the effective profile. */
+  key: string
+  /** Exact value the existing setting must have. Absent means presence only. */
+  equals?: boolean | string
+  /** The existing value must be a non-empty array. */
+  nonEmptyArray?: boolean
+  /** Extra structural check on the existing value. */
+  validate?: (value: unknown) => boolean
+  /** Shown as the skip reason when this requirement is not met. */
+  reason: string
+}
+
 export interface PresetItem {
   id: string
   purpose: string
   set: ReadonlyArray<readonly [key: string, value: boolean | string]>
+  /** Only applied when every requirement is already configured; never generated here. */
+  requires?: readonly PresetRequirement[]
+  /** Reported as skipped with this reason instead of guessing an ambiguous value. */
+  manual?: string
 }
+
+/** Work-item intake evaluation levels; mirrors the work-items INTAKE_EVALUATION_LEVELS enum. */
+const intakeEvaluationCeilings: ReadonlySet<string> = new Set(['ignore', 'digest', 'notify', 'accept'])
+const intakeRuleIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+
+/** Refuse to enable a producer whose declared rules could not pass the work-items intake contract. */
+function validIntakeEvaluationRules(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 16) return false
+  const ids = new Set<string>()
+  return value.every(rule => {
+    if (rule === null || typeof rule !== 'object' || Array.isArray(rule)) return false
+    const record = rule as Record<string, unknown>
+    if (Object.keys(record).sort().join(',') !== 'ceiling,ruleId') return false
+    const { ruleId, ceiling } = record
+    if (typeof ruleId !== 'string' || !intakeRuleIdPattern.test(ruleId) || ids.has(ruleId)) return false
+    ids.add(ruleId)
+    return typeof ceiling === 'string' && intakeEvaluationCeilings.has(ceiling)
+  })
+}
+
+const intakeEvaluationAuthorization: readonly PresetRequirement[] = [
+  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.rules', validate: validIntakeEvaluationRules,
+    reason: 'assistant-proactive.intakeEvaluation.rules is missing or invalid; the preset never invents evaluation rules or ceilings' },
+  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.provider',
+    reason: 'assistant-proactive.intakeEvaluation.provider is not configured; the preset never guesses a model route' },
+  { plugin: 'dsh-enhanced-assistant-proactive', key: 'intakeEvaluation.model',
+    reason: 'assistant-proactive.intakeEvaluation.model is not configured; the preset never guesses a model route' },
+]
 
 /**
  * The `recommended` preset deliberately turns on opt-in features that stay off
  * by default. It edits only plugins that are installed and loaded, never loads
  * a disabled plugin, never touches credentials, Policy, owner routes or sealed
  * plugin state, and leaves the automations scheduler to the RSI/supervised setup.
+ *
+ * Settings whose authorization is owner-generated (model route and rules for the
+ * intake evaluator, signed background-engineering pins, revision adoption keys)
+ * are never guessed: an item either waits for the explicit configuration and is
+ * skipped with the concrete reason, or is permanently reported as manual.
  */
 export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
   {
     id: 'dsh-enhanced-assistant-work-items',
     purpose: 'work-item ledger in observe mode plus the deterministic intake ledger (WP20); no admission, worker wake, Delivery or model calls',
     set: [['enabled', true], ['intakeLedger.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-work-items',
+    purpose: 'let an owner-authorized intake evaluator evaluate stored inferred rows; the model route and rule ceilings remain explicit assistant-proactive configuration',
+    requires: intakeEvaluationAuthorization,
+    set: [['intakeLedger.evaluation.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-proactive',
+    purpose: 'register the production intake evaluator in observe-only mode using the provider, model and rule ceilings already declared by the owner (WS1)',
+    requires: intakeEvaluationAuthorization,
+    set: [['intakeEvaluation.enabled', true]],
   },
   {
     id: 'dsh-enhanced-assistant-delivery',
@@ -618,9 +687,52 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
     purpose: 'run the trigger poller so configured triggers fire without a second switch (allowlists stay empty until configured)',
     set: [['pollerEnabled', true]],
   },
+  {
+    id: 'dsh-enhanced-assistant-memory-learning',
+    purpose: 'ordinary background work-item outcomes become experiences; the owner-signed review and adoption grants must already carry the same flag',
+    requires: [
+      { plugin: 'dsh-enhanced-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
+        reason: 'assistant-verifier.memoryReviews.workItemExperiences is not enabled; work-item experience review needs a fresh explicit grant' },
+      { plugin: 'dsh-enhanced-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
+        reason: 'personal-assistant.personalMemory.automaticLearning.workItemExperiences is not enabled; work-item experience adoption needs a fresh explicit grant' },
+      { plugin: 'dsh-enhanced-assistant-memory-learning', key: 'databasePath',
+        reason: 'assistant-memory-learning has no finite owner learning configuration; run the owner RSI setup first' },
+    ],
+    set: [['workItemExperiences', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-growth-driver',
+    purpose: 'background work-item failures as an engineering growth source',
+    set: [],
+    manual: 'usageLearning.workItemFailures requires signed workItemAuthorities pins (source, creation, acceptance and adoption grants); the preset never invents or extends those grants, so the owner/RSI setup must issue them explicitly',
+  },
+  {
+    id: 'dsh-enhanced-plugin-control-plane',
+    purpose: 'verified revision adoption and exact parent rollback',
+    set: [],
+    manual: 'revision adoption requires owner-generated ed25519 key material and explicit adoption/rollback grants; the preset never writes credentials or authority material',
+  },
 ])
 
 export const pluginPresets: ReadonlyMap<string, readonly PresetItem[]> = new Map([['recommended', recommendedPluginPreset]])
+
+function addPresetSkip(skipped: PluginSkip[], id: string, reason: string): void {
+  if (!skipped.some(skip => skip.id === id && skip.reason === reason)) skipped.push({ id, reason })
+}
+
+/** Undefined when the requirement is already satisfied; otherwise the owner-facing reason. */
+function unmetRequirement(requirement: PresetRequirement, installed: InstalledPlugins): string | undefined {
+  const id = resolvePluginId(requirement.plugin, installed.rows.keys())
+  if (id === undefined) return `${requirement.plugin} is not installed`
+  const row = installed.rows.get(id)!
+  if (row.get('disabled') === true) return `${requirement.plugin} is disabled in this profile`
+  const value = nodeValue(rowConfig(row).getIn(splitKey(requirement.key), true))
+  if (value === undefined) return requirement.reason
+  if (requirement.equals !== undefined && !sameValue(value, requirement.equals)) return requirement.reason
+  if (requirement.nonEmptyArray === true && (!Array.isArray(value) || value.length === 0)) return requirement.reason
+  if (requirement.validate !== undefined && !requirement.validate(value)) return requirement.reason
+  return undefined
+}
 
 /**
  * Apply a named plugin preset (default `recommended`) to one profile in a
@@ -631,6 +743,8 @@ export const pluginPresets: ReadonlyMap<string, readonly PresetItem[]> = new Map
  * const result = await applyRecommendedPluginPreset({ dshHome, profile: 'web' })
  * ```
  *
+ * Items whose prerequisites are missing are skipped with a concrete reason
+ * instead of being guessed; a manual item is reported as skipped on every run.
  * Idempotent: re-running reports no changes.
  */
 export async function applyPluginPreset(
@@ -647,17 +761,22 @@ export async function applyPluginPreset(
   const verify: PendingEdit[] = []
   for (const item of preset) {
     const row = installed.rows.get(item.id)
-    if (row === undefined) { skipped.push({ id: item.id, reason: 'not installed' }); continue }
-    if (row.get('disabled') === true) { skipped.push({ id: item.id, reason: 'plugin is disabled in this profile; enable it first' }); continue }
+    if (row === undefined) { addPresetSkip(skipped, item.id, 'not installed'); continue }
+    if (row.get('disabled') === true) { addPresetSkip(skipped, item.id, 'plugin is disabled in this profile; enable it first'); continue }
     const effective = rowConfig(row)
     if (item.id === 'dsh-enhanced-assistant-work-items' && effective.get('mode') === 'active' && effective.get('enabled') !== true) {
-      skipped.push({ id: item.id, reason: 'mode is active but not enabled; complete the active config deliberately' })
+      addPresetSkip(skipped, item.id, 'mode is active but not enabled; complete the active config deliberately')
       continue
     }
+    if (item.manual !== undefined) { addPresetSkip(skipped, item.id, item.manual); continue }
+    const unmet = [...new Set((item.requires ?? [])
+      .map(requirement => unmetRequirement(requirement, installed))
+      .filter((reason): reason is string => reason !== undefined))]
+    if (unmet.length > 0) { addPresetSkip(skipped, item.id, `waiting for explicit configuration: ${unmet.join('; ')}`); continue }
     for (const [key, value] of item.set) {
       const segments = splitKey(key)
       const parent = segments.length > 1 ? effective.getIn(segments.slice(0, -1), true) : effective
-      if (parent !== undefined && !isMap(parent)) { skipped.push({ id: item.id, reason: `${key} parent is not a mapping` }); continue }
+      if (parent !== undefined && !isMap(parent)) { addPresetSkip(skipped, item.id, `${key} parent is not a mapping`); continue }
       const from = nodeValue(effective.getIn(segments, true))
       if (sameValue(from, value)) continue
       profileRowConfig(patch, item.id, effective).setIn(segments, value)
@@ -749,7 +868,8 @@ export function pluginSetupUsage(): string {
     '  set <plugin> <key> [<value>]   set one config key (dotted, e.g. intakeLedger.enabled);',
     '                                 the value is checked against the current type; prompts if omitted',
     '  unset <plugin> <key>           drop one key from the profile override (plugin default applies)',
-    '  preset [recommended]           turn on the recommended opt-in features of installed plugins',
+    '  preset [recommended]           turn on the recommended opt-in features of installed plugins;',
+    '                                 owner-generated routes, rules, pins and keys are never guessed',
     '',
     'Options:',
     '  --profile <name>   target profile (default: $DSH_PROFILE, or the only profile in the home)',

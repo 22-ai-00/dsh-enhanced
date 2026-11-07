@@ -64,6 +64,8 @@ macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home
 
 三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`。`0.1.49` 起，`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`；当前 checkout 的 shell 安装脚本在 Linux/macOS 默认准备持久记忆学习、普通任务成长、新工具独立验收和有限采用，Linux 另配置独立采用协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 supervised 安装需要交互式飞书 onboarding；尚未配对时，`--yes` 或管道执行会在安装前停止。显式 `--scenario core` 保留无渠道、无后台学习的轻量安装；`--lark skip` 或 `--no-service` 保留有限场景。macOS 使用原生 launchd Host，支持记忆学习、新工具独立验证与动态采用；源码替换发布轨仍限 Linux。也可显式选择 `core` 等轻量场景。
 
+全新 managed supervised 安装的顶层集合还包含 observe-only 的 `assistant-work-items`：owner 学习配置生成后自动幂等应用一次 `recommended` 装配，使 WorkItems 以 `enabled: true`、`mode: observe`、`intakeLedger.enabled: true` 生成 profile 配置行，并打开交付/评测/事件轮询等既有有限开关。装配不打开 admit/auto/worker，不改 Policy、凭据、ownerRoutes 或密封状态；模型路由与规则、签名 `workItemAuthorities` pin、修订采用密钥不由装配生成，缺前置时以 skipped 原因列出。显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式插件配置优先。逐环节只读就绪快照见 `dsh-autonomy-doctor --readiness`（匹配版本的 `assistant-web-owner`，需从自带该入口的 Home 运行并指向目标 `--dsh-home`/`--profile`）：输出确定性文本加一行 JSON，缺项标 not-ready 并给原因，必需环节未就绪时退出码 1；它只读组合配置，不验证运行时注册、模型或外部送达。
+
 默认启用流程不会给缺配置的 bundle 强行打开开关。安装器复用可信飞书私聊配对确定 owner，保留已有模型选择；首次没有可用模型时须在安装引导中配置，数据库路径、独立身份、构建资源、有限授权与预算由现有 RSI 安装器生成。新授权默认记忆提取每日最多 7 次、成长复盘每日最多 7 次（既有合法聚合预算优先），独立审查另有有限额度并可能增加模型调用；授权有固定期限，重试不续期、不返还消耗、不重放 unknown。缺少模型、owner、Linux systemd / macOS launchd 或隔离构建前提时应按具体提示完成配置，不能把未启用的学习报告成安装成功。已有 active/paused Automation 仍须显式确认 `--ack-existing-automations`；`--yes` 不代替该确认。新会话默认 Full access，可访问任意文件及网络、不逐次审批；显式收紧权限见下文。
 
 ```sh

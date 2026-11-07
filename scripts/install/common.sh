@@ -39,6 +39,11 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-skills'
   'assistant-verifier'
   'assistant-growth-driver'
+  # The observe-only work-item ledger records ordinary authenticated intake and
+  # needs no worker, model or delivery authority of its own. A fresh supervised
+  # install enables it with the deterministic intake ledger through the plugin
+  # preset; admission, worker wake, Delivery routing and model calls stay off.
+  'assistant-work-items'
   # Memory is already provided by personal-assistant. The learner remains
   # disabled until owner setup supplies finite review/adoption grants.
   'assistant-memory-learning'
@@ -115,7 +120,8 @@ Options:
                             for the owner's first Lark DM before owner learning setup
   --plugin-preset <name>    Install: apply a dsh-plugin-setup preset (e.g. recommended) as the
                             last configuration step; `skip` never applies one. Guided installs
-                            offer `recommended` (default yes); other runs skip unless set
+                            offer `recommended` (default yes); a fresh supervised install also
+                            applies it after the owner RSI setup; other runs skip unless set
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help
 EOF
@@ -154,6 +160,8 @@ Scenarios:
   supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
              Recovery is model-free; TraeX remains an optional foreground model route (`--with traex`).
              Requires a resident service and installs content-free Health/bootstrap gates.
+             Includes the observe-only WorkItems intake ledger and, on a fresh managed
+             install, the audited ordinary-use learning assembly preset.
   full       Compatibility migration set containing every previous default top-level bundle.
 EOF
 }
@@ -2743,8 +2751,8 @@ dsh_enhanced_apply_permission_choice() {
 }
 
 # Apply a dsh-plugin-setup preset (default: recommended) to one installed profile.
-# Opt-in: no scenario calls this implicitly; onboarding flows call it after the
-# profile's plugins are installed. Usage: <profile> <dsh_home> <dry_run> [preset]
+# Onboarding flows call it after the profile's plugins are installed.
+# Usage: <profile> <dsh_home> <dry_run> [preset]
 dsh_enhanced_apply_plugin_preset() {
   local profile="$1"
   local dsh_home="$2"
@@ -2761,6 +2769,39 @@ dsh_enhanced_apply_plugin_preset() {
   fi
   printf '插件预设：为 profile %s 应用 %s。\n' "$profile" "$preset"
   dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-plugin-setup preset "$preset" --yes --dsh-home "$dsh_home" --profile "$profile"
+}
+
+# Managed supervised installs assemble ordinary-use learning in two passes: the
+# preset before `dsh-rsi-setup --install-owner` can only touch already-loaded
+# bundles, so after the finite owner grants exist the same idempotent preset runs
+# once more. Only a fresh profile is assembled implicitly; explicit
+# `--plugin-preset`, a guided decline, and existing profiles keep their owner
+# decisions. Missing owner-generated authorization (model route and rules,
+# signed pins, revision keys) is reported as skipped by the preset, never guessed.
+# Usage: <profile> <dsh_home> <dry_run> <requested_preset|auto|skip> <guided_declined 0|1> <fresh_profile 0|1>
+# Returns 0 when a preset was applied, 2 when nothing is assembled, otherwise the
+# dsh-plugin-setup exit status.
+dsh_enhanced_apply_supervised_learning_assembly() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  local requested="$4"
+  local declined="$5"
+  local fresh="$6"
+  if [[ "$requested" == 'skip' || "$declined" == '1' ]]; then
+    return 2
+  fi
+  local preset=''
+  if [[ "$requested" != 'auto' ]]; then
+    preset="$requested"
+  elif [[ "$fresh" == '1' ]]; then
+    preset='recommended'
+  else
+    printf '\n自治学习装配：现有 profile 保留显式插件配置；如需同一套有限开关，先运行 dsh-plugin-setup preset recommended --dry-run 审核，再应用。\n'
+    return 2
+  fi
+  printf '\n自治学习装配：owner 学习配置生成后再次应用 %s 预设（只改已安装且未禁用的插件；授权、密钥与签名 pin 不自动生成）。\n' "$preset"
+  dsh_enhanced_apply_plugin_preset "$profile" "$dsh_home" "$dry_run" "$preset"
 }
 
 dsh_enhanced_apply_lark() {
@@ -3868,6 +3909,11 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 'DSH_HOME 必须是绝对路径。'
     return $?
   fi
+  # Capture profile freshness before `dsh plugin add` creates the profile. Only a
+  # brand-new managed supervised install auto-applies the learning assembly after
+  # the owner setup; an existing profile keeps its explicit plugin configuration.
+  local fresh_profile='0'
+  if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then fresh_profile='1'; fi
   if [[ "$source_mode" == 'local' ]]; then
     if [[ ! -f "$repo_root/package.json" || ! -d "$repo_root/plugins" ]]; then
       dsh_enhanced_fail 1 "无法识别 dsh-enhanced 仓库根目录：$repo_root"
@@ -4696,13 +4742,16 @@ NODE
   # Optional plugin preset: the last configuration write, before the final
   # dump-config and postflight doctor verify the composed profile. Guided runs
   # offer `recommended` (default yes); an explicit --plugin-preset is honored
-  # in any mode; everything else keeps package defaults.
+  # in any mode; everything else keeps package defaults. The requested value and
+  # a guided decline are kept for the post-owner-setup assembly pass below.
+  local plugin_preset_requested="$plugin_preset"
+  local plugin_preset_declined='0'
   local plugin_preset_explicit='1'
   if [[ "$plugin_preset" == 'auto' ]]; then
     plugin_preset_explicit='0'
     plugin_preset='skip'
     if [[ "$operation" == 'install' && "$guided" == '1' ]]; then
-      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; fi
+      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
     fi
   fi
   if [[ "$operation" == 'install' && "$plugin_preset" != 'skip' ]]; then
@@ -4763,6 +4812,28 @@ NODE
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" || return $?
+  fi
+
+  # Fresh managed supervised installs get the audited ordinary-use learning
+  # assembly by default: WorkItems observe + deterministic intake ledger plus the
+  # other opt-in switches that do not need owner-generated material. The pass runs
+  # after the owner RSI setup so owner-dependent prerequisites exist; it is
+  # idempotent, and an explicit --plugin-preset, a guided decline or an existing
+  # profile's explicit configuration wins over this implicit default.
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" != 'skip' ]]; then
+    local assembly_status=0
+    dsh_enhanced_apply_supervised_learning_assembly "$profile" "$dsh_home" "$dry_run" \
+      "$plugin_preset_requested" "$plugin_preset_declined" "$fresh_profile" || assembly_status=$?
+    if [[ "$assembly_status" -eq 2 ]]; then
+      :
+    elif [[ "$assembly_status" -ne 0 ]]; then
+      if [[ "$plugin_preset_requested" != 'auto' ]]; then
+        return "$assembly_status"
+      fi
+      printf '自治学习装配：未应用（退出码 %s），其余安装不受影响；可稍后运行 dsh-plugin-setup preset recommended。\n' "$assembly_status"
+    elif [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" '自治学习装配' || return $?
+    fi
   fi
 
   local slug effective_traex_command=''

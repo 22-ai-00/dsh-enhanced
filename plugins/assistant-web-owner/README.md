@@ -91,7 +91,7 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 setup 在 profile 锁内先静态验证合并配置、受管 grant、backend 与路径，再冻结来源、准备/读取工具链、发现 cgroup 根并执行真实 native probe；这些资源失败发生在 owner 配对与 grant/patch 写入之前。runtime 位于真实 `DSH_HOME/rsi-linux-runtimes/<profile>/runtime`，不得与 Isolation stateRoot 重叠；其 source/lock/tree/收据身份由共享资源 API 核对。Docker 继续用配置中的 Docker executable 和生产 supervisor 探测。二者通过后才初始化 owner 并原子写入有限 grant。相同配置重放只读取已有 native 收据，不重新构建、不延长 grant、不重置持久用量、不更换 revision，也不替换或复活 owner；source/descriptor/backend/grant 漂移拒绝并要求明确迁移。
 
-`dsh-autonomy-doctor` 根据持久 backend 描述选择探测：native 校验既有 runtime 并 probe，Docker 运行既有镜像 probe。它不调用 freeze/prepare、不下载、不配对、不写授权或续期，不激活第二个 Host；通过仅是当前资源、owner 与有限 grant 的诊断快照，不证明模型、Goal 独立验收或外部 Actions 已配置。
+`dsh-autonomy-doctor` 根据持久 backend 描述选择探测：native 校验既有 runtime 并 probe，Docker 运行既有镜像 probe。它不调用 freeze/prepare、不下载、不配对、不写授权或续期，不激活第二个 Host；通过仅是当前资源、owner 与有限 grant 的诊断快照，不证明模型、Goal 独立验收或外部 Actions 已配置。同一入口还提供只读的普通使用学习就绪快照（`--readiness`，见下文）。
 
 Isolation、Actions、Keychain、Skills 与 Proactive 的可变状态路径均规范化到真实 `DSH_HOME` 内，Skills 的嵌套比较/留出 `stateRoot` 也受同一约束；已有祖先 symlink 逃逸拒绝。旧 Skills/Proactive published-default SQLite 或 sidecar 若已有数据，不静默切换位置，必须先停 Host 并显式离线迁移。setup 在失败前可能创建工作区/资源目录，owner 数据库与 patch 不能跨库原子提交。
 
@@ -231,6 +231,23 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再按持久 backend 运行独立的固定 Docker 或 native runtime 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持已审查的 Delivery schema 24–31、Isolation schema 7/8/9 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。安装或升级时应使用同一套件版本的 Web owner 与 Isolation，以保持此诊断接口一致。
 
 结果只说明有限隔离检查，不能替代动态 Policy、实时资源准入、模型硬预算、Goal 验收或外部 Actions 检查。该 CLI 的临时探测使用现有 Isolation 资源边界和清理规则；未知清理保留证据，不消耗业务 grant。
+
+### 只读自治就绪快照（`--readiness`）
+
+`dsh-autonomy-doctor --readiness [--profile <name>] [--dsh-home <absolute>]` 只读取组合后的有效 profile（`dsh --dump-config`），输出确定性文本和最终一行可解析 JSON（协议 `dsh-enhanced/autonomy-readiness/v1`）。它不激活 Host、不请求模型、不写状态、不读数据库，也不读取凭据内容。检查环：
+
+| 环节 | 就绪条件（静态） | 未就绪时的典型原因 |
+| --- | --- | --- |
+| `bundles` | personal-assistant、WorkItems、Delivery、Evaluation、Verifier、event-triggers、Memory learning、Growth Driver、Proactive、Control Plane 均已安装且 loader 行未禁用 | 缺包、行 disabled |
+| `work-items-observe-intake` | `enabled: true`、`mode: observe`、`intakeLedger.enabled: true` | 未启用、active 模式、intake 关闭 |
+| `intake-evaluator` | WorkItems `intakeLedger.evaluation.enabled` 与 Proactive `intakeEvaluation.enabled/provider/model/rules` 合法 | 生产者关闭、模型/规则缺失或非法 |
+| `delivery-natural-feedback` | Delivery 已加载（自然反馈解析随包提供）；同时报告 WorkItems 报告反馈/续办开关 | Delivery 缺失 |
+| `background-learning` | Memory `workItemExperiences` 且两份签名 grant 同开、Growth `enabled+usageLearning.enabled+workItemFailures`、Evaluation `notificationOutcomesEnabled` | 授权未扩权、驱动关闭 |
+| `revision-adoption` | Control Plane `revisionCapabilities` 及 `creationCapabilities`/`revisionVerifications`/`sourceJobs.revision` 前置 | 未配置（需要 owner 密钥，预设/doctor 不生成） |
+| `event-poller` | event-triggers 已加载且 `pollerEnabled: true`（trigger 数量一并报告） | 轮询关闭、包缺失 |
+| `ptc-presentation`（可选，不计入退出码） | Growth `toolPresentation` 为 `native` 时 ready；为 `ptc` 时标 `not-verified` | PTC 仍需运行时/审批/Policy，静态无法证明 |
+
+必需环节全部 ready 时退出码 0；任一 not-ready 时退出码 1（fail-closed），但 doctor 本身不会因缺服务或配置不符而崩溃：解析失败、dump 失败都降级为一条 not-ready 原因。JSON 每环包含 `id`、`required`、`status`（`ready`/`not-ready`/`not-verified`）、`summary`、`reasons[{code,message}]` 与 `details`，顶层 `runtime.observed` 恒为 `false`。因此它只能证明“配置声明就绪”，不能证明运行时注册、模型调用、Policy 或外部送达；这些仍需真实 Host 与一次真实使用验收。
 
 要为这份目标配置启用原生策略建议，可在私有 admission JSON 中增加 `"strategy": { "maxRunsPerGoal": 4 }`。setup 写入有界策略配置及精确 owner/workspace/preset 的 `goal_strategy`/`delegate` 规则；启用 wake 时同样覆盖该目标的后台路径。父子模型调用共用原来的 `executionBudget`，不会增加预算或延长隔离授权。省略该字段保持默认关闭。重新启动 Host 后生效；策略建议仍需原有独立验收，不能直接作为目标完成依据。
 

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -144,6 +144,79 @@ describe('guided onboarding installer dry-run', () => {
     const invalid = installer(['--dry-run', '--plugin-preset', 'Bad!'], home)
     expect(invalid.status).toBe(2)
     expect(invalid.stderr).toContain('--plugin-preset 只能是预设名')
+  })
+
+  test('fresh supervised install auto-applies the learning assembly after owner setup', async () => {
+    const home = await temporaryHome()
+    const result = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure'], home)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('自治学习装配')
+    const preset = result.stdout.indexOf('dsh-plugin-setup preset recommended --yes')
+    const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    expect(ownerInstall).toBeGreaterThanOrEqual(0)
+    expect(preset).toBeGreaterThan(ownerInstall)
+    expect(result.stdout).toContain('常驻服务：将重启以加载自治学习装配')
+
+    const skipped = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', '--plugin-preset', 'skip'], home)
+    expect(skipped.status, skipped.stderr).toBe(0)
+    expect(skipped.stdout).not.toContain('dsh-plugin-setup preset')
+    expect(skipped.stdout).not.toContain('自治学习装配')
+
+    // An existing profile keeps its explicit plugin configuration: the implicit
+    // pass never rewrites an owner's decisions.
+    const existing = await temporaryHome()
+    await mkdir(join(existing, 'profiles', 'web'), { recursive: true })
+    await writeFile(join(existing, 'profiles', 'web', 'package.json'), '{"name":"dsh-profile-web","type":"module","dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
+    const kept = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure'], existing)
+    expect(kept.status, kept.stderr).toBe(0)
+    expect(kept.stdout).toContain('现有 profile 保留显式插件配置')
+    expect(kept.stdout).not.toContain('dsh-plugin-setup preset recommended --yes')
+  })
+
+  test('supervised learning assembly helper honors explicit, declined, dry-run and existing decisions', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-assembly-'))
+    temporaryRoots.push(root)
+    const home = join(root, 'home')
+    const bin = join(home, 'profiles', 'web', 'node_modules', '.bin')
+    await mkdir(bin, { recursive: true })
+    const log = join(root, 'calls.log')
+    await writeFile(log, '')
+    await writeFile(join(bin, 'dsh-plugin-setup'), '#!/bin/bash\nprintf \'%s\\n\' "$*" >> "$ASSEMBLY_LOG"\n', { mode: 0o755 })
+    // No real dsh on PATH: the helper's native Host branch is not under test here,
+    // only which decisions it forwards to dsh-plugin-setup.
+    const assembly = (args: string) => library(
+      `ASSEMBLY_LOG=${JSON.stringify(log)} dsh_enhanced_apply_supervised_learning_assembly ${args}`,
+      { PATH: '/usr/bin:/bin' },
+    )
+    const calls = async () => (await readFile(log, 'utf8')).trim()
+
+    const fresh = assembly(`web ${JSON.stringify(home)} 0 auto 0 1`)
+    expect(fresh.status, fresh.stderr).toBe(0)
+    expect(await calls()).toBe(`preset recommended --yes --dsh-home ${home} --profile web`)
+    expect(fresh.stdout).toContain('自治学习装配')
+
+    await writeFile(log, '')
+    const existing = assembly(`web ${JSON.stringify(home)} 0 auto 0 0`)
+    expect(existing.status).toBe(2)
+    expect(await calls()).toBe('')
+    expect(existing.stdout).toContain('现有 profile 保留显式插件配置')
+
+    for (const [requested, declined] of [['skip', '0'], ['recommended', '1']] as const) {
+      const refused = assembly(`web ${JSON.stringify(home)} 0 ${requested} ${declined} 1`)
+      expect(refused.status, `${requested}/${declined}`).toBe(2)
+      expect(await calls()).toBe('')
+    }
+
+    await writeFile(log, '')
+    const explicit = assembly(`web ${JSON.stringify(home)} 0 recommended 0 0`)
+    expect(explicit.status, explicit.stderr).toBe(0)
+    expect(await calls()).toBe(`preset recommended --yes --dsh-home ${home} --profile web`)
+
+    await writeFile(log, '')
+    const dryRun = assembly(`web ${JSON.stringify(home)} 1 auto 0 1`)
+    expect(dryRun.status, dryRun.stderr).toBe(0)
+    expect(await calls()).toBe('')
+    expect(dryRun.stdout).toContain(`dsh-plugin-setup preset recommended --yes --dsh-home ${home} --profile web`)
   })
 
   test('plugin preset confirmation declines without a terminal', () => {
