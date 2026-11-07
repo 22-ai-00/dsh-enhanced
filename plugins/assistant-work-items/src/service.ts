@@ -192,6 +192,10 @@ const WORKER_RUN_BIND_SKIP_LIMIT = 1_000
 const WORKER_RUN_DRIFT_WARN_AFTER = 5
 /** Held reports released per scheduler wake; a full page advances the in-memory round-robin cursor. */
 const HELD_REPORT_RELEASE_LIMIT = 10
+/** Meta cursor: last fully-noticed Policy configuration digest. */
+const POLICY_NOTICE_VERSION_META = 'policy.notice.version'
+/** Bound one wake's Policy-notice paging; an incomplete pass retries next wake. */
+const POLICY_NOTICE_PAGE_LIMIT = 10
 /**
  * `bindWorkerRun` refusals that cannot change while the item keeps its
  * occurrence: an expired, mismatched (ref, owner scope, digest), settled or
@@ -631,7 +635,36 @@ export class AssistantWorkItemsService extends Service {
           this.ctx.logger.debug(`assistant-work-items: released ${released.length} ended follow-up(s)`)
         }
       } catch (error) { this.ctx.logger.warn(`assistant-work-items: terminal follow-up release scan failed: ${describe(error)}`) }
+      try { this.workItemsNoticePolicyChange(components) }
+      catch (error) { this.ctx.logger.warn(`assistant-work-items: policy notice scan failed: ${describe(error)}`) }
       this.workItemsSchedulerWaking = false
+    }
+  }
+
+  /**
+   * P1-1: a changed Policy configuration notices every live item whose frozen
+   * mandate basis no longer matches. The digest is read from the detached Policy
+   * host snapshot; no Policy audit or budget is consumed. Notices are durable
+   * and idempotent, and this path never cancels, parks or wakes an item.
+   */
+  private workItemsNoticePolicyChange(components: Components): void {
+    const version = components.authority.policyVersion()
+    if (version === null || components.store.meta(POLICY_NOTICE_VERSION_META) === version) return
+    let after: Readonly<{ createdAt: number; id: string }> | undefined
+    for (let page = 0; page < POLICY_NOTICE_PAGE_LIMIT; page += 1) {
+      const result = noticePolicyChange(components.store, components.authority, {
+        protocol: 'work-items/policy-change/v1', policyVersion: version,
+        ...(after === undefined ? {} : { after }),
+      })
+      if (result.outcome !== 'noticed') return
+      if (result.next === null) {
+        components.store.setMeta(POLICY_NOTICE_VERSION_META, version)
+        if (result.notified.length > 0) {
+          this.ctx.logger.debug(`assistant-work-items: recorded ${result.notified.length} Policy-change notice(s)`)
+        }
+        return
+      }
+      after = result.next
     }
   }
 

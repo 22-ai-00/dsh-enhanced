@@ -26,11 +26,21 @@ afterEach(async () => {
 
 class PolicyPeer extends Service {
   readonly denied = new Set<string>()
+  denyAll = false
+  version = 0
   constructor(ctx: Context) { super(ctx, 'assistantPolicy') }
   authorize(_request: PeerPolicyRequest, options?: { idempotencyKey?: string }) {
     return this.denied.has(options?.idempotencyKey ?? '')
       ? { effect: 'deny' as const, reasonCode: 'test-denial' }
       : { effect: 'allow' as const, reasonCode: 'rule-allow' }
+  }
+  evaluate(_request: PeerPolicyRequest) {
+    return this.denyAll
+      ? { effect: 'deny' as const, reasonCode: 'test-denial' }
+      : { effect: 'allow' as const, reasonCode: 'rule-allow' }
+  }
+  inspectHostConfiguration() {
+    return { rules: [], toolDefaultEffect: 'deny' as const, budgets: [], autoReview: null, version: this.version }
   }
 }
 
@@ -316,6 +326,21 @@ test('a native wake releases an owned follow-up after its item ends', async () =
   const peer = fixture.ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
   peer.wake()
   expect(fixture.service.followUps(admitted.item.id).map(record => record.state)).toEqual(['released'])
+})
+
+test('a changed Policy configuration notices live items on the native wake', async () => {
+  const fixture = await setup()
+  const item = await waiting(fixture)
+  const peer = fixture.ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
+  peer.wake()
+  expect(fixture.service.policyNotices(item.id)).toEqual([])
+  fixture.policy!.denyAll = true
+  fixture.policy!.version += 1
+  peer.wake()
+  expect(fixture.service.policyNotices(item.id)).toMatchObject([{ itemId: item.id, reasonCode: 'test-denial' }])
+  // Replaying the same Policy configuration writes nothing new.
+  peer.wake()
+  expect(fixture.service.policyNotices(item.id)).toHaveLength(1)
 })
 
 test('schema 7 migration preserves every historical row and real keyset queries use bounded indexes', async () => {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { PeerPolicyDecision, PeerPolicyRequest, PeerPolicyService } from './peers.ts'
 import type { WorkItemAuthorityBasis, WorkItemMandateBasis, WorkItemRecord } from './types.ts'
 import { decisionExternalId, mandateIsUsable } from './mandate.ts'
@@ -21,6 +22,14 @@ export type AuthorityCheck =
   | Readonly<{ kind: 'legacy' }>
   | Readonly<{ kind: 'revoked'; reasonCode: string }>
   | Readonly<{ kind: 'unavailable'; detail: string }>
+
+/** Deterministic JSON for a detached Policy snapshot (object keys sorted). */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+}
 
 /** One peer failure rendered as a bounded, path-free detail string. */
 function describe(error: unknown): string {
@@ -216,6 +225,21 @@ export class WorkItemAuthority {
     const policy = this.#policy()
     if (policy === undefined) return 'missing-policy'
     return typeof policy.evaluate === 'function' ? null : 'missing-evaluate'
+  }
+
+  /**
+   * Deterministic digest of the current Policy host configuration, or `null`
+   * when this peer cannot expose one. WorkItems uses it only to decide whether
+   * to recompute durable Policy-change notices; it grants no authority and is
+   * never stored as a Policy decision.
+   */
+  policyVersion(): string | null {
+    const policy = this.#policy()
+    if (policy === undefined || typeof policy.inspectHostConfiguration !== 'function') return null
+    try {
+      const snapshot = policy.inspectHostConfiguration()
+      return createHash('sha256').update(canonicalJson(snapshot)).digest('hex')
+    } catch { return null }
   }
 
   assess(item: WorkItemRecord): AuthorityAssessment {
