@@ -621,6 +621,16 @@ export class AssistantWorkItemsService extends Service {
       // decides the same pass whether the held report is sent or blocked.
       try { this.workItemsReleaseHeldReports(components) }
       catch (error) { this.ctx.logger.warn(`assistant-work-items: acceptance held-report scan failed: ${describe(error)}`) }
+      // P1-1: materialize terminal follow-up releases on the same bounded wake.
+      // The store derives them from durable state, so this is restart-safe and a
+      // second pass releases nothing new. Delivery still owns the authenticated
+      // reply text and decides whether a released follow-up re-enters judgment.
+      try {
+        const released = components.store.releaseEndedFollowUps(100)
+        if (released.length > 0) {
+          this.ctx.logger.debug(`assistant-work-items: released ${released.length} ended follow-up(s)`)
+        }
+      } catch (error) { this.ctx.logger.warn(`assistant-work-items: terminal follow-up release scan failed: ${describe(error)}`) }
       this.workItemsSchedulerWaking = false
     }
   }

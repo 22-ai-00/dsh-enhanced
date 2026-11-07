@@ -304,6 +304,20 @@ describe('native scheduler-driven waiting continuation', () => {
   })
 })
 
+test('a native wake releases an owned follow-up after its item ends', async () => {
+  const fixture = await setup()
+  const admitted = fixture.service.admit({ kind: 'review', externalId: 'release', title: 'release', brief: 'x', originBindingId: 'owner-binding' })
+  const occurrenceId = admitted.dispatch.occurrenceId!
+  fixture.service.claim(worker(occurrenceId))
+  expect(fixture.service.ownFollowUp({ protocol: 'work-items/follow-up/v1', itemId: admitted.item.id,
+    bindingId: 'owner-binding', messageId: 'msg-release', sourceDigest: 'sha256:x' })).toMatchObject({ outcome: 'owned' })
+  await fixture.service.report(worker(occurrenceId), { status: 'failed', summary: 'terminal', idempotencyKey: 'release-failed' })
+  expect(fixture.service.followUps(admitted.item.id).map(record => record.state)).toEqual(['owned'])
+  const peer = fixture.ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
+  peer.wake()
+  expect(fixture.service.followUps(admitted.item.id).map(record => record.state)).toEqual(['released'])
+})
+
 test('schema 7 migration preserves every historical row and real keyset queries use bounded indexes', async () => {
   const fixture = await setup()
   await waiting(fixture)
