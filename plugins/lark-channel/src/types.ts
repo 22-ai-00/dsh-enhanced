@@ -2,6 +2,8 @@ export interface LarkInboundConfig {
   account: string
   tenant: string
   requireMentionInGroups: boolean
+  /** Opt-in: a group topic (`thread_id`) is the conversation lane, so replies stay in that topic. */
+  groupTopicThreads?: boolean
   maxTextBytes: number
   staleAfterMs: number
 }

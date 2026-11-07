@@ -56,6 +56,28 @@ describe('Lark inbound normalization', () => {
     expect((user as { envelope: { metadata: Record<string, string> } }).envelope.metadata).not.toHaveProperty('senderIsBot')
   })
 
+  test('opt-in topic groups keep the first message and its replies on one topic lane', () => {
+    const topicConfig = { ...config, groupTopicThreads: true }
+    const first = normalizeLarkMessage(topicConfig, message({
+      chatType: 'group', mentionedBot: true, threadId: 'omt_topic_1',
+    }), 100_100)
+    const reply = normalizeLarkMessage(topicConfig, message({
+      messageId: 'om_2', chatType: 'group', mentionedBot: true, threadId: 'omt_topic_1', rootId: 'om_1',
+    }), 100_100)
+    const thread = (result: typeof first) => (result as { envelope: { conversation: { thread?: string } } }).envelope.conversation.thread
+    expect(thread(first)).toMatch(/^dsh-lark-topic\//u)
+    expect(thread(reply)).toBe(thread(first))
+    expect(thread(first)).not.toMatch(/sfhk3Pg9/u)
+  })
+
+  test('topic lanes stay off without the explicit opt-in', () => {
+    const result = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, threadId: 'omt_topic_1',
+    }), 100_100)
+    expect((result as { envelope: { conversation: { thread?: string } } }).envelope.conversation.thread)
+      .toMatch(/^dsh-lark-top-sender\//u)
+  })
+
   test('preserves an exact provider reply target as bounded non-prompt metadata', () => {
     expect(normalizeLarkMessage(config, message({
       messageId: 'om_feedback', content: '/feedback helpful', replyToMessageId: 'om_answer',

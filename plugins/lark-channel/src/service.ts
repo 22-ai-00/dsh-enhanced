@@ -204,6 +204,7 @@ export class LarkChannelService extends Service {
       account: config.account,
       tenant: config.tenant,
       requireMentionInGroups: config.requireMentionInGroups,
+      groupTopicThreads: config.groupTopicThreads,
       maxTextBytes: config.maxTextBytes,
       staleAfterMs: config.staleAfterMs,
     }, transport, {

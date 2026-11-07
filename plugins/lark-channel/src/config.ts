@@ -13,6 +13,8 @@ export interface Config {
   credentialLeaseMs?: number
   domain?: 'feishu' | 'lark'
   requireMentionInGroups?: boolean
+  /** Opt-in: use Feishu's topic thread_id as the conversation lane and reply inside it. */
+  groupTopicThreads?: boolean
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
   /** WP19 stage 2c: render background progress (native Goal rounds). Default false. */
@@ -40,6 +42,7 @@ const schema = Schema.object({
   credentialLeaseMs: Schema.number().step(1).min(1_000).max(86_400_000).default(86_400_000),
   domain: Schema.union(['feishu', 'lark'] as const).default('feishu'),
   requireMentionInGroups: Schema.boolean().default(true),
+  groupTopicThreads: Schema.boolean().default(false),
   showProgress: Schema.boolean().default(true),
   progressDetails: Schema.union(['off', 'direct'] as const).default('direct'),
   showBackgroundProgress: Schema.boolean().default(false),
@@ -64,6 +67,7 @@ const fields = new Set([
   'credentialPurpose',
   'domain',
   'enabled',
+  'groupTopicThreads',
   'handshakeTimeoutMs',
   'requestTimeoutMs',
   'imageDownloadTimeoutMs',

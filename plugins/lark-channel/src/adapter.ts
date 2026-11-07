@@ -34,7 +34,7 @@ import {
   type LarkModelPickerActionPayload,
   type LarkModelPickerCallbackValue,
 } from './model-picker.js'
-import { isLarkTopLevelSenderThread } from './group-thread.js'
+import { isLarkTopicThread, isLarkTopLevelSenderThread } from './group-thread.js'
 import { normalizeLarkMessage } from './normalize.js'
 import {
   LarkPermissionPickerError,
@@ -1143,10 +1143,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     // lane top-level so later standalone messages retain the same context.
     const syntheticTopLevelGroup = conversation.kind === 'group'
       && isLarkTopLevelSenderThread(conversation.thread)
-    const providerReplyTarget = syntheticTopLevelGroup
-      ? undefined
-      : (intent.replyToEventId
-        ?? (conversation.kind === 'group' ? conversation.thread : undefined))
+    const topicGroup = conversation.kind === 'group' && isLarkTopicThread(conversation.thread)
+    const providerReplyTarget = topicGroup
+      ? intent.replyToEventId
+      : syntheticTopLevelGroup
+        ? undefined
+        : (intent.replyToEventId
+          ?? (conversation.kind === 'group' ? conversation.thread : undefined))
     const options: LarkSendOptions = {
       requestKey: intent.idempotencyKey,
       ...(providerReplyTarget === undefined ? {} : { replyTo: providerReplyTarget }),
@@ -1295,6 +1298,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     const conversation = pending.input.target.conversation
     const providerReplyTarget = conversation.kind === 'group'
       && !isLarkTopLevelSenderThread(conversation.thread)
+      && !isLarkTopicThread(conversation.thread)
       ? conversation.thread
       : undefined
     return {

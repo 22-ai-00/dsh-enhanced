@@ -89,6 +89,8 @@ config:
   allowedCalendarIds: []
   domain: feishu
   requireMentionInGroups: true
+  # Opt-in: topic-group thread_id is the conversation lane; replies stay in that topic.
+  groupTopicThreads: false
   showProgress: true
   progressDetails: direct
   showBackgroundProgress: false
@@ -96,6 +98,8 @@ config:
   imageDownloadTimeoutMs: 30000
   userQuestionTtlMs: 86400000
 ```
+
+`requireMentionInGroups` 控制群内是否必须直接 @ 机器人。`groupTopicThreads`（默认关）开启后，飞书话题群消息以 `thread_id` 作为会话 lane：首条消息与其后续回复落在同一 Delivery conversation，回复通过 `reply_in_thread` 留在同一话题，而不是新开顶层消息；关闭时保持按发送者合成的顶层 lane。
 
 `credentialHandle` 应由 `@dsh-enhanced/credentials-keychain` 提供，并只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
 

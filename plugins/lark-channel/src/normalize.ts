@@ -1,5 +1,5 @@
 import type { InboundEnvelope } from '@dsh-enhanced/assistant-delivery'
-import { larkProviderReplyThread, larkTopLevelSenderThread } from './group-thread.js'
+import { larkProviderReplyThread, larkTopicThread, larkTopLevelSenderThread } from './group-thread.js'
 import type { LarkInboundConfig, LarkMessage } from './types.js'
 
 export type LarkIgnoreReason = 'bot-mention-required' | 'empty-content' | 'stale-event'
@@ -59,9 +59,11 @@ export function normalizeLarkMessage(
   const conversation: InboundEnvelope['conversation'] = input.chatType === 'p2p'
     ? { channel: 'lark', account, tenant, kind: 'dm', chat }
     : { channel: 'lark', account, tenant, kind: 'group', chat,
-        thread: input.rootId === undefined
-          ? larkTopLevelSenderThread(user)
-          : larkProviderReplyThread(key(input.rootId, 'rootId')) }
+        thread: input.threadId !== undefined && config.groupTopicThreads === true
+          ? larkTopicThread(key(input.threadId, 'threadId'))
+          : input.rootId === undefined
+            ? larkTopLevelSenderThread(user)
+            : larkProviderReplyThread(key(input.rootId, 'rootId')) }
   return {
     outcome: 'accept',
     envelope: {
