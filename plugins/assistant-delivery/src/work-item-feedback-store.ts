@@ -16,16 +16,23 @@ export class WorkItemFeedbackStore {
       ...(row.proof_digest===null?{}:{proofDigest:row.proof_digest}),...(row.canonical_json===null?{}:{canonical:JSON.parse(row.canonical_json) as NonNullable<WorkItemFeedbackIntent['canonical']>})}
   }
   admit(source:WorkItemFeedbackSource,fence:()=>void):WorkItemFeedbackIntent{
-    return this.transaction(()=>{
-      fence()
-      const inbox=this.getInbox(source.inboxId)
-      if(!inbox || !['received','authorized'].includes(inbox.status) || inbox.envelopeHash!==source.envelopeHash || inbox.envelope.text!==source.inputText)throw new Error('feedback Inbox changed')
-      this.database.prepare(`INSERT INTO delivery_work_item_feedback(inbox_id,operation_id,admission_sequence,item_id,source_digest,source_json,state) VALUES(?,?,?,?,?,?,'pending')`)
-        .run(source.inboxId,source.operationId,source.admissionCursor.sequence,source.target.itemId,workItemReplyDigest(source),workItemReplyCanonical(source))
-      const handed=this.database.prepare("UPDATE inbox_messages SET status='processed',binding_id=?,failure_code=NULL WHERE id=? AND status IN ('received','authorized')").run(source.binding.id,source.inboxId)
-      if(handed.changes!==1)throw new Error('feedback Inbox handoff lost')
-      return this.get(source.inboxId)!
-    })
+    return this.transaction(()=>this.admitInTransaction(source,fence))
+  }
+  /**
+   * Insert the result intent and hand the Inbox off exactly once. A mixed
+   * result+continuation reply runs this and the continuation insert in one
+   * outer transaction, so the canonical result owns the handoff and the
+   * continuation reuses the processed Inbox.
+   */
+  admitInTransaction(source:WorkItemFeedbackSource,fence:()=>void):WorkItemFeedbackIntent{
+    fence()
+    const inbox=this.getInbox(source.inboxId)
+    if(!inbox || !['received','authorized'].includes(inbox.status) || inbox.envelopeHash!==source.envelopeHash || inbox.envelope.text!==source.inputText)throw new Error('feedback Inbox changed')
+    this.database.prepare(`INSERT INTO delivery_work_item_feedback(inbox_id,operation_id,admission_sequence,item_id,source_digest,source_json,state) VALUES(?,?,?,?,?,?,'pending')`)
+      .run(source.inboxId,source.operationId,source.admissionCursor.sequence,source.target.itemId,workItemReplyDigest(source),workItemReplyCanonical(source))
+    const handed=this.database.prepare("UPDATE inbox_messages SET status='processed',binding_id=?,failure_code=NULL WHERE id=? AND status IN ('received','authorized')").run(source.binding.id,source.inboxId)
+    if(handed.changes!==1)throw new Error('feedback Inbox handoff lost')
+    return this.get(source.inboxId)!
   }
   pending(afterSequence:number,limit:number):readonly WorkItemFeedbackIntent[]{
     const rows=this.database.prepare(`SELECT inbox_id FROM delivery_work_item_feedback WHERE state IN ('pending','frozen') AND admission_sequence>? ORDER BY admission_sequence LIMIT ?`)

@@ -275,6 +275,7 @@ interface PermissionHarnessOptions {
   taskTimeoutMs?: number
   allowPresetProbeExecution?: boolean
   attentionEnforce?: boolean
+  naturalFeedback?: { coverage?: boolean; mixedIntent?: boolean }
 }
 
 const testPermissionPresets = {
@@ -732,7 +733,8 @@ async function runtimeHarness(
       : { agentMaxAutoContinuationTurns: permissions.maxAutoContinuationTurns }),
     ...(permissions?.goalContinuationTimeoutMs === undefined
       ? {}
-      : { agentGoalContinuationTimeoutMs: permissions.goalContinuationTimeoutMs }) })
+      : { agentGoalContinuationTimeoutMs: permissions.goalContinuationTimeoutMs }),
+    ...(permissions?.naturalFeedback === undefined ? {} : { naturalFeedback: permissions.naturalFeedback }) })
   const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
@@ -7217,6 +7219,68 @@ describe('real native Delivery Agent runtime', () => {
       expect((runtimeStore(fixture.service) as unknown as DeliveryStore).getNaturalObjectiveIntent(inbox.id))
         .toMatchObject({ status: 'projected' })
     }
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('widened natural feedback coverage is opt-in and records ordinary owner replies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-widened-natural-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, ['plain', 'markdown'], root, undefined, 'primary', true, 'probe', undefined,
+      { naturalFeedback: { coverage: true } })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await fixture.service.acceptInbound({ ...message('widened-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const source = store.getInboxByProviderEvent('lark', 'bot-1', 'widened-source')!
+    const target = replyProviderMessageId(fixture.service, 'widened-source')
+    for (const [index, text, status] of [
+      [0, '现在可以正常用了，谢谢', 'achieved'],
+      [1, '返回值仍然是空的，请检查分页', 'not-achieved'],
+    ] as const) {
+      await fixture.service.acceptInbound({ ...message(`widened-feedback-${index}`, text), occurredAt: 2_000 + index,
+        metadata: { replyToProviderMessageId: target } })
+      await drive(fixture.service)
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } }))
+        .toEqual([expect.objectContaining({ objectiveStatus: status,
+          projection: expect.objectContaining({ subjectRef: source.id }) })])
+      const inbox = store.getInboxByProviderEvent('lark', 'bot-1', `widened-feedback-${index}`)!
+      expect(store.getNaturalObjectiveIntent(inbox.id)).toMatchObject({ status: 'projected' })
+    }
+    // The same opt-in keeps questions, quotes and contradictions out of evidence.
+    for (const [index, text] of ['问题解决了吗？', '她说“问题解决了”', '问题解决了，但是保存还是报错'].entries()) {
+      await fixture.service.acceptInbound({ ...message(`widened-protected-${index}`, text), occurredAt: 3_000 + index,
+        metadata: { replyToProviderMessageId: target } })
+      await drive(fixture.service)
+      const inbox = store.getInboxByProviderEvent('lark', 'bot-1', `widened-protected-${index}`)!
+      expect(store.getNaturalObjectiveIntent(inbox.id)).toBeUndefined()
+    }
+    expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } }))
+      .toEqual([expect.objectContaining({ objectiveStatus: 'not-achieved' })])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('default natural feedback path still abstains from widened phrases', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-default-natural-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await fixture.service.acceptInbound({ ...message('default-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const target = replyProviderMessageId(fixture.service, 'default-source')
+    const before = fixture.llm.requests.length
+    await fixture.service.acceptInbound({ ...message('default-widened', '现在可以正常用了，谢谢'), occurredAt: 2_000,
+      metadata: { replyToProviderMessageId: target } })
+    await drive(fixture.service)
+    const inbox = store.getInboxByProviderEvent('lark', 'bot-1', 'default-widened')!
+    expect(store.getNaturalObjectiveIntent(inbox.id)).toBeUndefined()
+    expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })).toEqual([])
+    // The reply still runs as an ordinary authenticated Agent turn.
+    expect(fixture.llm.requests.length).toBe(before + 1)
     await fixture.ctx.fiber.restart()
   })
 

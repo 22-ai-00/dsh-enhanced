@@ -18,16 +18,16 @@ const authority={id:'owner-route',conversation,principal,workspace:scope.workspa
 const sql=<T>(path:string,fn:(db:DatabaseSync)=>T):T=>{const db=new DatabaseSync(path);try{return fn(db)}finally{db.close()}}
 afterEach(async()=>{for(const ctx of contexts.splice(0))await ctx.fiber.dispose();for(const path of roots.splice(0))await rm(path,{recursive:true,force:true})})
 function currentTestStack():string{const old=Error.stackTraceLimit;try{Error.stackTraceLimit=50;return new Error().stack??''}finally{Error.stackTraceLimit=old}}
-async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowSend?:boolean;unknownAck?:boolean;enforce?:boolean}={}){
+async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowContinuation?:boolean;allowSend?:boolean;unknownAck?:boolean;enforce?:boolean;naturalFeedback?:{coverage?:boolean;mixedIntent?:boolean}}={}){
  const root=options.root??await mkdtemp(join(tmpdir(),'delivery-work-item-feedback-'));if(!options.root)roots.push(root)
  const ctx=new Context();contexts.push(ctx);const path=join(root,'delivery.sqlite')
  await ctx.plugin(AssistantPolicyService,{databasePath:join(root,'policy.sqlite'),rules:[
   {id:'ingest',effect:'allow',subject:{kind:'external',id:'lark/feedback/tenant/owner'},actions:['ingest'],resource:{kind:'message',id:'*'},context:{initiators:['external']}},
   {id:'send',effect:'allow',subject:{kind:'background',id:sourceId,workspace:scope.workspace,principal:'lark/feedback/tenant/owner'},actions:['send'],resource:{kind:'message',id:'*'},context:{initiators:['background']}},
   ...(options.allowFeedback===false?[]:[{id:'feedback',effect:'allow' as const,subject:{kind:'external' as const,id:'lark/feedback/tenant/owner',workspace:scope.workspace,principal:'lark/feedback/tenant/owner'},actions:['feedback-work-items'],resource:{kind:'automation' as const,id:automationId},context:{initiators:['external' as const]}}]),
-  ...(options.continuation?[{id:'continue',effect:'allow' as const,subject:{kind:'external' as const,id:'lark/feedback/tenant/owner'},actions:['continue-work-items-from-reply'],resource:{kind:'automation' as const,id:automationId},context:{initiators:['external' as const]}}]:[]),
+  ...(options.continuation&&options.allowContinuation!==false?[{id:'continue',effect:'allow' as const,subject:{kind:'external' as const,id:'lark/feedback/tenant/owner'},actions:['continue-work-items-from-reply'],resource:{kind:'automation' as const,id:automationId},context:{initiators:['external' as const]}}]:[]),
  ]})
- await ctx.plugin(AssistantDeliveryService,{databasePath:path,spoolPath:join(root,'spool'),schedulerEnabled:false,ownerRoutes:[authority],...(options.enforce===undefined?{}:{attentionEnforce:options.enforce})})
+ await ctx.plugin(AssistantDeliveryService,{databasePath:path,spoolPath:join(root,'spool'),schedulerEnabled:false,ownerRoutes:[authority],...(options.enforce===undefined?{}:{attentionEnforce:options.enforce}),...(options.naturalFeedback===undefined?{}:{naturalFeedback:options.naturalFeedback})})
  const service=ctx.assistantDelivery,store=(service as unknown as {deliveryStore:DeliveryStore}).deliveryStore
  if(!store.getPrincipal(principal)){const pair=store.issuePairing(principal,{ttlMs:60000,maxAttempts:3});store.confirmPairing({challengeId:pair.challenge.id,principal,code:pair.code})}
  const binding=store.getActiveBinding(conversation)??store.createBinding({conversation,principal,workspace:scope.workspace,agentPreset:scope.preset,sessionId:'session-1',policyRef:'owner'})
@@ -172,6 +172,60 @@ describe('owner work-item result feedback through real Delivery and Evaluation',
  })
  test('preserves mixed negative feedback plus explicit further instructions as an ordinary continuation request',async()=>{
   const f=await fixture({continuation:true});await f.report();const input=await f.service.acceptInbound(f.envelope('mixed','还是不行，继续修复'));await f.settle();expect(input.status).toBe('processed');expect(f.canonical()).toBeUndefined()
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
+ })
+ test('widened coverage records ordinary synonyms only behind the opt-in and keeps default routing unchanged',async()=>{
+  const off=await fixture({continuation:true});await off.report();const offInput=await off.service.acceptInbound(off.envelope('widened-off','现在可以正常用了，谢谢'));await off.settle()
+  expect(offInput.status).toBe('processed');expect(off.canonical()).toBeUndefined()
+  sql(off.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
+  const on=await fixture({continuation:true,naturalFeedback:{coverage:true}});await on.report();const onInput=await on.service.acceptInbound(on.envelope('widened-on','现在可以正常用了，谢谢'));await on.settle()
+  expect(onInput.status).toBe('processed');expect(on.canonical()?.objective?.status).toBe('achieved')
+  sql(on.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
+ })
+ test('mixed result plus continuation records the canonical result and queues the continuation',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:true,mixedIntent:true}});await f.report()
+  const input=await f.service.acceptInbound(f.envelope('mixed-both','还是不行，继续修复'));await f.settle()
+  expect(input.status).toBe('processed');expect(f.canonical()?.objective?.status).toBe('not-achieved')
+  expect(f.store.workItemFeedback.get(input.inboxId)).toMatchObject({state:'recorded'})
+  const replies=f.service.listPendingWorkItemReplies({scope,owner:f.owner,limit:10}).items
+  expect(replies.map(reply=>reply.inputText)).toEqual(['还是不行，继续修复'])
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
+ })
+ test('mixed continuation stays closed when only widened result coverage is enabled',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:true}});await f.report()
+  const input=await f.service.acceptInbound(f.envelope('mixed-coverage-only','还是不行，继续修复'));await f.settle()
+  expect(input.status).toBe('processed');expect(f.canonical()?.objective?.status).toBe('not-achieved')
+  sql(f.path,db=>expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0))
+ })
+ test('mixed reply with feedback permission denied admits only the authorized continuation',async()=>{
+  const f=await fixture({continuation:true,allowFeedback:false,naturalFeedback:{coverage:true,mixedIntent:true}})
+  const warn=vi.spyOn(f.ctx.logger,'warn');await f.report()
+  const input=await f.service.acceptInbound(f.envelope('mixed-feedback-denied','还是不行，继续修复'));await f.settle()
+  expect(input.status).toBe('processed');expect(f.canonical()).toBeUndefined()
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
+  expect(warn.mock.calls.map(call=>String(call[0])).some(line=>line.includes('feedback-not-admitted'))).toBe(true)
+ })
+ test('mixed reply with continuation permission denied records only the authorized result',async()=>{
+  const f=await fixture({continuation:true,allowContinuation:false,naturalFeedback:{coverage:true,mixedIntent:true}})
+  const warn=vi.spyOn(f.ctx.logger,'warn');await f.report()
+  await f.service.acceptInbound(f.envelope('mixed-continuation-denied','还是不行，继续修复'));await f.settle()
+  expect(f.canonical()?.objective?.status).toBe('not-achieved')
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
+  expect(warn.mock.calls.map(call=>String(call[0])).some(line=>line.includes('continuation-not-admitted'))).toBe(true)
+ })
+ test('mixed reply rolls back both lanes when the continuation insert fails and records the result alone',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:true,mixedIntent:true}});await f.report()
+  sql(f.path,db=>db.exec("CREATE TRIGGER test_mixed_reply_failure BEFORE INSERT ON delivery_work_item_replies BEGIN SELECT RAISE(ABORT,'mixed continuation unavailable'); END"))
+  const warn=vi.spyOn(f.ctx.logger,'warn')
+  await f.service.acceptInbound(f.envelope('mixed-rollback','还是不行，继续修复'));await f.settle()
+  expect(f.canonical()?.objective?.status).toBe('not-achieved')
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
+  expect(warn.mock.calls.map(call=>String(call[0])).some(line=>line.includes('continuation-not-admitted'))).toBe(true)
+ })
+ test('widened coverage still refuses questions as result evidence while ordinary continuation is unchanged',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:true,mixedIntent:true}});await f.report()
+  const input=await f.service.acceptInbound(f.envelope('widened-question','问题解决了吗？'));await f.settle()
+  expect(input.status).toBe('processed');expect(f.canonical()).toBeUndefined()
   sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
  })
  test('uses the exact original report item instead of the continuation stream head for feedback',async()=>{

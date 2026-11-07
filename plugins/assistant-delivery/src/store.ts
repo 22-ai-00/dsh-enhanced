@@ -57,7 +57,10 @@ import {
   permissionDispatchRecoveryFromFailureCode,
   workflowDispatchRecoveryCode,
 } from './session-commands.js'
-import { parseFeedbackCommand, parseNaturalObjectiveFeedback, type ObjectiveCommand, type ObjectiveFeedbackStatus } from './feedback-command.js'
+import { parseFeedbackCommand, parseNaturalOwnerReply, type ObjectiveCommand, type ObjectiveFeedbackStatus } from './feedback-command.js'
+import type { WorkItemFeedbackIntent, WorkItemFeedbackSource } from './work-item-feedback.js'
+import type { StoredWorkItemReport } from './work-item-replies-store.js'
+import type { WorkItemReplySource } from './work-item-replies.js'
 import {
   validateOwnerGoalOutcomeFeedbackLocator,
   validateOwnerGoalOutcomeFeedbackProof,
@@ -7450,6 +7453,26 @@ export class DeliveryStore {
     })
   }
 
+  /**
+   * Atomically admit one authenticated owner work-item result and the explicit
+   * continuation requested in the same reply. The result insert owns the single
+   * Inbox handoff; the continuation insert reuses that processed Inbox in the
+   * same transaction. A failure in either lane leaves neither row behind, so a
+   * provider retry can attempt both again instead of losing one silently.
+   */
+  admitOwnerWorkItemFeedbackWithReply(input: Readonly<{
+    feedback: WorkItemFeedbackSource
+    binding: Readonly<ConversationBinding>
+    report: StoredWorkItemReport
+    fence: () => void
+  }>): Readonly<{ feedback: WorkItemFeedbackIntent; reply: WorkItemReplySource }> {
+    this.assertOpen()
+    return this.transaction(() => Object.freeze({
+      feedback: this.workItemFeedback.admitInTransaction(input.feedback, input.fence),
+      reply: this.workItemReplies.admitInTransaction(input.feedback.inboxId, input.binding, input.report, { handoff: false }),
+    }))
+  }
+
   getNaturalObjectiveIntent(inboxId: string): NaturalObjectiveIntent | undefined {
     this.assertOpen()
     const row = this.database.prepare('SELECT * FROM delivery_natural_objective_intents WHERE inbox_id = ?')
@@ -7529,7 +7552,7 @@ export class DeliveryStore {
         || binding.conversation.kind !== 'dm' || owner?.status !== 'active' || owner.role !== 'owner'
         || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id || inbox.envelope.kind !== 'text'
         || (inbox.envelope.attachments?.length ?? 0) !== 0
-        || parseNaturalObjectiveFeedback(inbox.envelope.text) !== input.selection
+        || parseNaturalOwnerReply(inbox.envelope.text)?.status !== input.selection
         || !this.isVerifiedForegroundObjectiveTarget(binding, input.sourceInboxId, input.sourceOutboxId)
         || source === undefined || outbox === undefined
         || inbox.envelope.metadata?.replyToProviderMessageId !== outbox.providerMessageId
@@ -7670,7 +7693,7 @@ export class DeliveryStore {
       const derived = `owner-feedback:${createHash('sha256').update(JSON.stringify([candidate.inbox_id, candidate.envelope_hash])).digest('hex')}`
       if (derived !== operationId) continue
       const envelope = JSON.parse(candidate.envelope_json) as InboundEnvelope
-      if (envelope.kind !== 'text' || parseNaturalObjectiveFeedback(envelope.text) === undefined) continue
+      if (envelope.kind !== 'text' || parseNaturalOwnerReply(envelope.text) === undefined) continue
       return Object.freeze({ inboxId: candidate.inbox_id, text: envelope.text.slice(0, 4096), truncated: envelope.text.length > 4096 })
     }
     return undefined
@@ -7746,7 +7769,7 @@ export class DeliveryStore {
         && naturalIntent.principalRecordId === owner.id && naturalIntent.principalVersion === owner.version
         && naturalIntent.admissionEpoch === feedbackInbox.admissionCursor.epoch
         && naturalIntent.admissionSequence === feedbackInbox.admissionCursor.sequence
-        && parseNaturalObjectiveFeedback(feedbackInbox.envelope.text) === naturalIntent.selection)
+        && parseNaturalOwnerReply(feedbackInbox.envelope.text)?.status === naturalIntent.selection)
       if ((feedbackInbox?.status !== 'claimed' && !(naturalIntent !== undefined
         && (feedbackInbox?.status === 'processed' || feedbackInbox?.status === 'dead_letter')))
         || feedbackInbox?.bindingId !== binding.id || !naturalMatches

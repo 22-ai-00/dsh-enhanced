@@ -81,6 +81,8 @@ Host-only 工程来源使用独立 `assistant-delivery/work-item-engineering-con
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
 | `toolApprovalPreparationTimeoutMs` | `10000` | 卡片前持久化准备上限；范围 100–30000 毫秒，且不超过即时审批总有效期；超时不出卡、不执行 |
 | `ownerReportRouting.orderAcrossLanes` | `false` | 仅在 `linkedFallback` 报告路由已启用时有实际意义：同一工作项仍有未结算的早期报告时，新报告沿用该报告的 origin 或同一合格别名，由既有 per-lane claim 顺序按 revision 先后发送；保序限于同一 lane（typed 与普通 background 分开），origin 已被 `/new` 轮换时不粘滞 origin；sticky 去向不可用时回退普通路由，不阻塞投递 |
+| `naturalFeedback.coverage` | `false` | 可选：启用加宽的自然结果解析（同义/多语言、结果后允许附带原因或证据）。关闭时行为与旧版完全一致：前台仍只按旧版短语解析（含“还是不行，<原因>”形式），后台报告反馈仍只接受旧版整句白名单。开启后问句、假设/条件、引号内文本、否定引用（“并没有解决”）、矛盾陈述、含糊情绪与撤回命令仍不产生结果证据 |
+| `naturalFeedback.mixedIntent` | `false` | 可选，依赖 `naturalFeedback.coverage`：同一条认证主人的 WorkItems 报告回复同时含结果判断与明确续办指令时，拆成两件各自鉴权/幂等/目标绑定的决定——先记 canonical 结果，再按既有续办队列入队；任一侧未获授权时只做允许的一件并在 Host 日志记录原因。关闭时不拆分，行为与旧版一致 |
 | `ownerRoutes` | `[]` | Host-owned 稳定 owner 路由；每项精确固定 id、conversation、principal、绝对 workspace、preset、policyRef 和 minimumGeneration |
 
 所有可变部署值都经过 Schemastery 校验。每个 binding 会持久固定 workspace 与已解析的 preset id；有 roster 时，fresh create 和 cold resume 都在 Agent 发布前挂载该 preset，不能把 session header 中的 `agentPreset` 当成已经完成组合。fresh create 的新 workspace 使用 `0700` 请求模式，已有目录的权限不会被改写；cold resume 只验证持久 workspace 仍是目录，不会在仓库被删除或网络盘掉线时悄悄创建一个空目录。SQLite 使用 `WAL`、`synchronous=FULL`、foreign keys、busy timeout 和 forward-only schema；私有目录/数据库权限分别收窄为 `0700` / `0600`，未来 schema 会拒绝打开。
@@ -278,6 +280,8 @@ Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlement
 结果已经取得 provider message id 后，exact owner 可以直接回复该消息，沿用 `/feedback status`、`/feedback correct <version> <previous-status> <new-status>` 与 `/feedback withdraw <version> <previous-status>`。首次 `status` 已显示从 Verifier baseline 采纳的 revision 1；单词形式的初始判断只有与该 baseline 状态相同才幂等成功，任何不同判断都必须使用 `status` 返回的 version/status 做显式 `correct`，不能用裸命令覆盖。历史 Verifier receipt 此时允许超过原 freshness window，因为 owner 正在标注一份不可变的历史结果；但 Delivery、Goals 和 Evaluation 仍会重验同一个 sidecar、owner lineage、route/binding、Goal definition、assessment、run、profile、contract 与 receipt identity。原消息、当前 Goals provider 或任一身份不匹配时拒绝，不会仅凭过期 metadata 产生修订。Web `native-session` 返回值没有外部 Outbox/provider reply identity，因此当前不支持这条 whole-goal reply-feedback 路径。
 
 普通前台任务也支持自然反馈：同一 owner 直接回复原任务结果，说“问题解决了”“还是不行，保存报错”或“撤回刚才的任务反馈”，Host 会记录明确判断，原文仍交给 Agent 正常续答。已有判断会自动按当前版本更正，无需先查询版本。只有明确、可确定解析的表述才记录；感谢、疑问、假设、引用、附件和没有精确回复目标的文字仍按普通聊天处理。该入口不覆盖 Automation、whole-goal 或原生 Web 结果；这些结果继续使用原有入口。
+
+可选配置 `naturalFeedback.coverage`（默认关闭）把同一个解析器扩展到明确的结果同义族：中文“已解决/问题已修复/修好了/恢复正常了/现在可以正常用了/现在没问题了/可以了”与“不行/仍然不行/还是失败/没有修复/返回值仍然是空的/仍有报错”等，英文 `fixed` / `resolved` / `works now` / `not fixed` / `still broken` / `still empty` 等，并允许结果后附带原因或证据（如“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”）。结果判断仍必须是整条消息开头的直接断言；附带部分只是不可信上下文，不进入证据等级、版本、预算或 Growth 采用判定。问句、假设/条件、引号内文本、否定引用（“并没有解决”）、与结果相反的矛盾断言、单独的情绪（“谢谢”“太好了”“还行”）以及撤回命令仍然不产生结果证据。关闭该开关时前台行为与旧版完全一致；该开关不改变 `/feedback` 显式命令、Automation/whole-goal 反馈或 Evaluation 的任何既有入口。
 
 自然反馈使用 Delivery schema 24 的持久日志，绑定原始 Inbox、目标 Outbox、owner、入站顺序和一次冻结的修订参数。Evaluation 暂不可用时，普通聊天继续，日志等待后续补记；恢复只重试反馈记录，不重新运行用户的 Agent 请求。若旁路反馈日志本身未能持久化，Host 记诊断并继续普通聊天，不声称该条反馈已保存；普通派发仍须通过自身授权与持久化检查。版本冲突不自动改用新版本重试；明显早于当前反馈或无法确定顺序的相反判断不会覆盖当前结果。自然纠正原因可随精确 canonical 修订交给 Growth，最多 4096 字，作为不可信任务材料，不授予任何新权限。
 
@@ -529,6 +533,8 @@ schema 29 保存 typed WorkItems 报告 sidecar、不可变回复原文、独占
 schema 30 为显式启用 `ownerReportFeedback` 的 WorkItems 保存独占反馈意图、原文摘要、冻结 CAS 与稳定 operation ID，保持 schema 29 的回复队列和 stream head 原样。真实 typed 报告的主人回复“问题解决了”“还是不行”，以及 `/feedback achieved|partial|not-achieved`、`status`、`correct`、`withdraw`，先进入结果反馈路径；它们评价原报告 itemId，不评价后续续办子项。权限是独立的 external `feedback-work-items`，不消费执行额度；反馈功能本身不启用 continuation。
 
 生产终态、静止及预算结算证明尚未就绪时，反馈持久等待，不伪造成功、不派新 worker。结果是主人证言，不是独立 verifier 验收；更正和撤回使用冻结版本 CAS，重投、冷恢复或丢失 ACK 不增加票数。`/stop`、`/new`、`/clear` 持久取消较早未完成意图。实际状态通过既有 background send 权限发送稳定 ACK；没有票的 `status` 明确返回暂无反馈，不造 revision。发送拒绝或 unknown 不回滚已记录结果、不盲目重发。
+
+可选 `naturalFeedback.coverage`（默认关闭）对该入口同样生效：报告回复可以是同义/多语言结果并附带原因（“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”），后台仍只做确定性分类，不把任意文本当结果、不调用模型。可选 `naturalFeedback.mixedIntent`（默认关闭，依赖 `coverage`）把一条混合回复拆成两件事：先按独立的 `feedback-work-items` 权限形成 canonical 结果证据（既有 feedback intent → Evaluation 通道），再按独立的 `continue-work-items-from-reply` 权限把同一原文放进既有续办队列。两件事沿用同一 Inbox 的确定性幂等键，并各自重验当前 owner/binding/report/Policy 与目标绑定；两件都允许时在同一个 Delivery 事务内原子写入（结果行拥有唯一 Inbox handoff，续办行复用已处理 Inbox），任一侧未授权或写入不可用时只做允许的一件，并通过 Host 日志记录 `continuation-not-admitted` / `feedback-not-admitted` / `neither-lane-admitted`。该拆分不新增 schema、无新 Loop/timer、无模型调用；关闭时“还是不行，继续修复”仍沿用旧行为（只进续办队列、不写 canonical 结果），而纯结果回复（“问题解决了”“还是不行”）不会因为该开关变成一次执行。
 
 Host-only `inspectOwnerWorkItemLearningTask` 使用独立 `assistant-delivery/owner-work-item-learning/v1` 协议，重验当前主人、报告生产者、全量 WorkItems proof 与 canonical owner 修订。返回去正文的 `proofIdentity`，其 proofDigest 绑定内部原文；`presentation` 的 brief/report/feedback 独立限长与常见凭据过滤，presentationDigest 不冒充原文摘要。sourceDigest 绑定持久来源及修订，不绑定读取时的新 Session 代次；同主人 `/new` 后仍可召回已记录反馈，撤回、更正、换主人或失效证明会拒绝旧来源。它不冒充前台来源，不授予学习、采用或修复执行权限；Growth 后续消费仍是另一项能力。
 

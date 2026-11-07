@@ -6,6 +6,7 @@ import {
   parseNaturalPreferenceCorrection,
   parseFeedbackCommand,
   parseNaturalObjectiveFeedback,
+  parseNaturalOwnerReply,
 } from '../src/feedback-command.ts'
 import type { ConversationBinding, InboundEnvelope } from '../src/types.ts'
 
@@ -226,6 +227,127 @@ describe('Delivery feedback command grammar', () => {
       principalLineage: { principalRecordId: 'principal-record-1', principalVersion: 5 },
       admissionCursor: { epoch: '0123456789abcdef0123456789abcdef', sequence: 7 },
     }).idempotencyKey).not.toBe(event.idempotencyKey)
+  })
+})
+
+describe('widened natural owner reply grammar (opt-in parser)', () => {
+  test.each([
+    // P0-4 audit reproduction under the widened opt-in.
+    ['问题解决了', 'achieved', false],
+    ['还是不行', 'not-achieved', false],
+    ['现在可以正常用了，谢谢', 'achieved', false],
+    ['返回值仍然是空的，请检查分页', 'not-achieved', true],
+    ['还是不行，保存报错', 'not-achieved', false],
+    ['还是不行，继续修复', 'not-achieved', true],
+    // Chinese success synonyms.
+    ['已经解决了', 'achieved', false],
+    ['现在解决了', 'achieved', false],
+    ['已解决', 'achieved', false],
+    ['问题已修复', 'achieved', false],
+    ['已修复', 'achieved', false],
+    ['修好了', 'achieved', false],
+    ['问题已修复，谢谢', 'achieved', false],
+    ['恢复正常了', 'achieved', false],
+    ['功能正常了', 'achieved', false],
+    ['现在没问题了', 'achieved', false],
+    ['已经可以用了', 'achieved', false],
+    ['可以了', 'achieved', false],
+    ['这次问题解决了', 'achieved', false],
+    ['已经修好了', 'achieved', false],
+    ['弄好了', 'achieved', false],
+    ['搞定了', 'achieved', false],
+    ['现在能用了', 'achieved', false],
+    ['一切正常了', 'achieved', false],
+    // Chinese failure synonyms.
+    ['这次还是不行', 'not-achieved', false],
+    ['不行', 'not-achieved', false],
+    ['仍然不行', 'not-achieved', false],
+    ['还是失败', 'not-achieved', false],
+    ['没有修复', 'not-achieved', false],
+    ['没修好', 'not-achieved', false],
+    ['返回值仍然是空的', 'not-achieved', false],
+    ['仍有报错', 'not-achieved', false],
+    ['还是有问题', 'not-achieved', false],
+    ['还是不行，不能用了', 'not-achieved', false],
+    ['还是不行，还没弄好', 'not-achieved', false],
+    ['又不行了', 'not-achieved', false],
+    ['还没弄好', 'not-achieved', false],
+    ['still wrong', 'not-achieved', false],
+    ['returns null', 'not-achieved', false],
+    ['no change', 'not-achieved', false],
+    // English families.
+    ['fixed', 'achieved', false],
+    ['It works now, thanks', 'achieved', false],
+    ["That's fixed", 'achieved', false],
+    ['the issue is resolved', 'achieved', false],
+    ['all good now', 'achieved', false],
+    ['all fixed', 'achieved', false],
+    ['no errors', 'achieved', false],
+    ['not fixed', 'not-achieved', false],
+    ["it's not fixed", 'not-achieved', false],
+    ['still broken', 'not-achieved', false],
+    ["still doesn't work", 'not-achieved', false],
+    ['still empty', 'not-achieved', false],
+    ['the return value is still empty', 'not-achieved', false],
+    ['still broken, please fix it', 'not-achieved', true],
+    // Withdrawal keeps its own status.
+    ['撤回刚才的任务反馈', 'withdraw', false],
+    ['撤回我刚才的任务反馈。', 'withdraw', false],
+  ] as const)('classifies %j as %s (continuation %s)', (text, status, continuation) => {
+    expect(parseNaturalOwnerReply(text)).toMatchObject({ status, continuation })
+  })
+
+  test('extracts the trailing clause as untrusted detail that never changes the result', () => {
+    expect(parseNaturalOwnerReply('还是不行，保存报错')).toMatchObject({ status: 'not-achieved', detail: '保存报错' })
+    expect(parseNaturalOwnerReply('现在可以正常用了，谢谢')).toMatchObject({ status: 'achieved', detail: '谢谢' })
+    expect(parseNaturalOwnerReply('返回值仍然是空的，请检查分页')).toMatchObject({ status: 'not-achieved', detail: '请检查分页', continuation: true })
+    expect(parseNaturalOwnerReply('还是不行，报错：' + 'x'.repeat(5_000))).toMatchObject({ status: 'not-achieved' })
+    expect(parseNaturalOwnerReply('问题解决了')?.detail).toBeUndefined()
+    // Quoted prose never enters the untrusted detail or the contradiction scan.
+    expect(parseNaturalOwnerReply('还是不行，日志写着“保存成功了”，但文件仍报错'))
+      .toMatchObject({ status: 'not-achieved', detail: '日志写着，但文件仍报错' })
+  })
+
+  test.each([
+    '问题解决了吗？',
+    '问题解决了吗',
+    '还是不行？',
+    '还没有解决吗？',
+    '问题解决了？',
+    '撤回刚才的任务反馈吗？',
+    '她说“问题解决了”',
+    '“问题解决了”',
+    '她说“现在可以正常用了”',
+    '如果还是不行，怎么办？',
+    '如果问题解决了就告诉我',
+    '还是不行，如果失败再说',
+    '还是不行，但现在解决了',
+    '还是不行，虽然现在已经解决了',
+    '还是不行，后来保存成功了',
+    '问题解决了，但是保存还是报错',
+    '还是不行，但是已经修好了',
+    '问题解决了，如果还有问题再说',
+    '问题解决了，可能吧',
+    '还是不行，后来弄好了',
+    '问题解决了，还没弄好',
+    '并没有解决',
+    '谢谢',
+    '太好了',
+    '还行',
+    '不错',
+    '成功了吗',
+    'fixed?',
+    'was it fixed',
+  ])('abstains on questions, hypotheticals, quotes, negations, contradictions and emotion %j', text => {
+    expect(parseNaturalOwnerReply(text)).toBeUndefined()
+  })
+
+  test('keeps the legacy exact-phrase parser unchanged for the default-off path', () => {
+    expect(parseNaturalObjectiveFeedback('问题解决了')).toBe('achieved')
+    expect(parseNaturalObjectiveFeedback('还是不行')).toBe('not-achieved')
+    expect(parseNaturalObjectiveFeedback('现在可以正常用了，谢谢')).toBeUndefined()
+    expect(parseNaturalObjectiveFeedback('返回值仍然是空的，请检查分页')).toBeUndefined()
+    expect(parseNaturalObjectiveFeedback('还是不行，保存报错')).toBe('not-achieved')
   })
 })
 

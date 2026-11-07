@@ -5,6 +5,7 @@ import { engineeringContextData, validateWorkItemEngineeringMaterial, frameWorkI
 import type { WorkItemFeedbackIntent, WorkItemFeedbackSource, WorkItemFeedbackSelection, OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 import type { TrustedWorkItemOwnerFeedbackProof } from '@dsh-enhanced/assistant-evaluation'
 import { workItemReplyCanonical, workItemReplyDigest, type WorkItemReportTarget, type WorkItemReplySource, type WorkItemReplyConsumerRegistration, type WorkItemReplyReadInput, type WorkItemReplyListInput } from './work-item-replies.js'
+import type { StoredWorkItemReport } from './work-item-replies-store.js'
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { isProxy } from 'node:util/types'
@@ -114,6 +115,7 @@ import {
   feedbackSignalInput,
   parseFeedbackCommand,
   parseNaturalObjectiveFeedback,
+  parseNaturalOwnerReply,
   objectiveStateMessage,
   classifyNaturalPreferenceDirective,
   observedResponseLanguage,
@@ -524,6 +526,22 @@ export interface Config {
    * the same item's earlier still-unsettled report, so one lane orders both.
    */
   ownerReportRouting?: { orderAcrossLanes?: boolean }
+  /**
+   * Opt-in (default off): widen the deterministic grammar for authenticated
+   * owner replies to one exact result. Off means the legacy exact-phrase parser
+   * and its admission fences are unchanged.
+   * - `coverage`: accept synonym/multilingual result assertions plus an
+   *   untrusted trailing reason/evidence clause. Questions, hypotheticals,
+   *   quoted prose, negated reports, contradictions, hedges and withdrawal
+   *   commands still abstain.
+   * - `mixedIntent`: when one authenticated work-item report reply carries a
+   *   result assertion and an explicit continuation request, record the
+   *   canonical result and admit the continuation as two independent decisions
+   *   (each with its own permission, idempotency, budget fence and target). If
+   *   one lane is not permitted the other still proceeds and the partial
+   *   admission is recorded. Ignored unless `coverage` is also on.
+   */
+  naturalFeedback?: { coverage?: boolean; mixedIntent?: boolean }
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -768,6 +786,10 @@ const configSchema = Schema.object({
   attentionAttachOverCap: Schema.boolean().default(false),
   attentionEnforce: Schema.boolean().default(false),
   ownerReportRouting: Schema.object({ orderAcrossLanes: Schema.boolean().default(false) }),
+  naturalFeedback: Schema.object({
+    coverage: Schema.boolean().default(false),
+    mixedIntent: Schema.boolean().default(false),
+  }),
   ownerRoutes: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
     conversation: Schema.object({
@@ -3908,6 +3930,28 @@ export class AssistantDeliveryService extends Service {
     return 'recorded'
   }
 
+  /** Opt-in widened deterministic grammar; off keeps the legacy exact phrases. */
+  private widenedNaturalFeedbackCoverage(): boolean {
+    return this.config.naturalFeedback?.coverage === true
+  }
+
+  /** Splitting one reply into result + continuation requires both opt-ins. */
+  private mixedNaturalFeedbackIntent(): boolean {
+    return this.config.naturalFeedback?.coverage === true
+      && this.config.naturalFeedback?.mixedIntent === true
+  }
+
+  /**
+   * One canonical selection for admission and its later re-derivation fences.
+   * The widened parser is a pure function, so a frozen intent keeps verifying
+   * even after a restart that toggles the opt-in.
+   */
+  private naturalObjectiveSelection(text: string): import('./feedback-command.js').ObjectiveFeedbackStatus | 'withdraw' | undefined {
+    return this.widenedNaturalFeedbackCoverage()
+      ? parseNaturalOwnerReply(text)?.status
+      : parseNaturalObjectiveFeedback(text)
+  }
+
   /**
    * Convert only an authenticated reply to one exact Automation delivery into
    * a trusted objective label. The original run timestamp is retained because
@@ -3918,7 +3962,7 @@ export class AssistantDeliveryService extends Service {
     binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>,
   ): Promise<void> {
     const selection = envelope.kind === 'text' && (envelope.attachments?.length ?? 0) === 0
-      ? parseNaturalObjectiveFeedback(envelope.text) : undefined
+      ? this.naturalObjectiveSelection(envelope.text) : undefined
     if (selection === undefined || !this.isOwnerFeedbackController(binding, envelope)) return
     const replyTarget = envelope.metadata?.replyToProviderMessageId
     if (typeof replyTarget !== 'string') return
@@ -4019,7 +4063,7 @@ export class AssistantDeliveryService extends Service {
     const naturalMatches = naturalIntent !== undefined && inbox.envelope.kind === 'text'
       && naturalIntent.envelopeHash === inbox.envelopeHash
       && naturalIntent.sourceOutboxId === target.id
-      && parseNaturalObjectiveFeedback(inbox.envelope.text) === naturalIntent.selection
+      && this.naturalObjectiveSelection(inbox.envelope.text) === naturalIntent.selection
       && (parsed.kind === 'objective-status' || (naturalIntent.status === 'frozen'
         && JSON.stringify(naturalIntent.command) === JSON.stringify(parsed)))
     if ((inbox.envelope.attachments?.length ?? 0) !== 0 || (!typedMatches && !naturalMatches)) return 'invalid-target'
@@ -4838,64 +4882,132 @@ export class AssistantDeliveryService extends Service {
         const failed = this.deliveryStore.getInbox(record.id)!
         return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
       }
-      const feedback = this.admitOwnerWorkItemFeedback(record,binding)
-      if (feedback === 'handled') {
+      const feedback = this.inspectOwnerWorkItemFeedback(record, binding)
+      const splitContinuation = feedback.kind !== 'none' && feedback.continuation
+      if (feedback.kind === 'ready') {
+        // One reply may carry a result and an explicit continuation. They are two
+        // independently fenced decisions: admit both atomically when both lanes
+        // are permitted, otherwise record the result alone and record the reason.
+        let admittedContinuation = false
+        if (splitContinuation) {
+          const report = this.prepareWorkItemReply(record, binding)
+          if (report !== undefined) {
+            try {
+              this.deliveryStore.admitOwnerWorkItemFeedbackWithReply({ feedback: feedback.source, binding, report, fence: feedback.fence })
+              admittedContinuation = true
+            } catch (error) {
+              // The combined transaction rolled back; fall back to the result lane
+              // only. A failed result fence re-throws on that fallback, as before.
+              this.context.logger.warn(`assistant-delivery: mixed owner feedback continuation admission failed: ${String(error)}`)
+            }
+          }
+        }
+        if (!admittedContinuation) {
+          this.deliveryStore.workItemFeedback.admit(feedback.source, feedback.fence)
+          if (splitContinuation) this.recordPartialMixedFeedbackAdmission(record, 'continuation-not-admitted')
+        }
+        if (admittedContinuation) this.notifyWorkItemReplyPending()
         void this.drainWorkItemFeedback().catch(() => { /* durable intent retries on maintenance */ })
         return { duplicate: accepted.duplicate, inboxId: record.id, status: 'processed' }
       }
-      if (feedback !== 'ordinary' && this.admitWorkItemReply(record, binding)) {
+      // A pure recognized result never becomes execution when feedback permission
+      // is absent; only an explicit continuation in the same reply may proceed.
+      const continuationAllowed = feedback.kind === 'none'
+        || (feedback.kind === 'ordinary' && splitContinuation)
+      if (continuationAllowed && this.admitWorkItemReply(record, binding)) {
         const handedOff = this.deliveryStore.getInbox(record.id)!
         this.notifyWorkItemReplyPending()
+        if (feedback.kind === 'ordinary') this.recordPartialMixedFeedbackAdmission(record, 'feedback-not-admitted')
         return { duplicate: accepted.duplicate, inboxId: handedOff.id, status: handedOff.status }
       }
+      if (feedback.kind === 'ordinary' && splitContinuation) this.recordPartialMixedFeedbackAdmission(record, 'neither-lane-admitted')
       record = this.deliveryStore.queueInbox(record.id, binding.id)
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
     })
   }
 
-  private parseWorkItemFeedback(envelope: InboundEnvelope): WorkItemFeedbackSelection | undefined {
+  /**
+   * Deterministic backend classification of one authenticated owner reply to an
+   * exact report. The legacy closed whole-sentence grammar stays in force unless
+   * the widened coverage opt-in is on; no caller text is reinterpreted as an
+   * instruction, and no model is called.
+   */
+  private parseWorkItemFeedback(envelope: InboundEnvelope): Readonly<{
+    selection: WorkItemFeedbackSelection
+    continuation: boolean
+  }> | undefined {
     if ((envelope.attachments?.length ?? 0) !== 0) return undefined
     if (envelope.kind === 'text') {
-      const text=envelope.text.trim()
-      if(!/^(?:问题解决了|已经解决了|现在解决了|还是不行|还没解决|问题还没解决|撤回刚才的任务反馈|撤回我刚才的任务反馈)[。.!！]?$/u.test(text))return undefined
-      const value = parseNaturalObjectiveFeedback(text)
-      return value === undefined ? undefined : { kind:'natural',value }
+      const text = envelope.text.trim()
+      if (!this.widenedNaturalFeedbackCoverage()) {
+        if (!/^(?:问题解决了|已经解决了|现在解决了|还是不行|还没解决|问题还没解决|撤回刚才的任务反馈|撤回我刚才的任务反馈)[。.!！]?$/u.test(text)) return undefined
+        const value = parseNaturalObjectiveFeedback(text)
+        return value === undefined ? undefined : { selection: { kind: 'natural', value }, continuation: false }
+      }
+      const parsed = parseNaturalOwnerReply(text)
+      return parsed === undefined ? undefined : {
+        selection: { kind: 'natural', value: parsed.status },
+        continuation: parsed.continuation && this.mixedNaturalFeedbackIntent(),
+      }
     }
     const command = parseDeliveryCommand(envelope)
     if (command?.name !== 'feedback') return undefined
     const parsed = parseFeedbackCommand(command.rawInput)
     return ['objective','objective-status','objective-revision'].includes(parsed.kind)
-      ? {kind:'explicit',command:parsed as import('./feedback-command.js').ObjectiveCommand} : undefined
+      ? { selection: { kind: 'explicit', command: parsed as import('./feedback-command.js').ObjectiveCommand }, continuation: false }
+      : undefined
   }
   private workItemFeedbackPermission(binding: ConversationBinding, registration: WorkItemReplyConsumerRegistration): boolean {
     return this.policy.evaluate({ subject:{kind:'external',id:externalPrincipalId(binding.principal),workspace:binding.workspace,principal:externalPrincipalId(binding.principal)},
       action:'feedback-work-items',resource:{kind:'automation',id:registration.continuationAutomationId},context:{initiator:'external'} }).effect === 'allow'
   }
-  private admitOwnerWorkItemFeedback(inbox: InboxRecord,binding: ConversationBinding): 'handled'|'ordinary'|'none' {
-    const registration=this.currentWorkItemReplyConsumer(), selection=this.parseWorkItemFeedback(inbox.envelope)
-    if (!registration || registration.feedbackEnabled !== true || !selection || !inbox.envelope.metadata?.replyToProviderMessageId) return 'none'
-    const report=this.deliveryStore.workItemReplies.replyReport(inbox.channel,inbox.account,inbox.envelope.metadata.replyToProviderMessageId)
-    if (!report || !['accepted','delivered','read'].includes(report.outbox.status) || !report.outbox.providerMessageId
-      || workItemReplyCanonical(report.outbox.intent.target.conversation)!==workItemReplyCanonical(inbox.envelope.conversation)
-      || workItemReplyCanonical(report.outbox.intent.target.principal)!==workItemReplyCanonical(binding.principal)) return 'none'
-    let target:WorkItemReportTarget
-    try {target=this.inspectWorkItemReport({sourceId:registration.sourceId,itemId:report.target.itemId,reportRevision:report.target.reportRevision,
-      bindingId:report.outbox.intent.bindingId,idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,
-      format:report.outbox.intent.format==='markdown'?'markdown':'plain'},true)}catch{return 'none'}
-    if(workItemReplyCanonical(target)!==workItemReplyCanonical(report.target))return 'none'
+  /**
+   * Inspect one Inbox as an authenticated owner result reply to an exact report.
+   * `ready` carries the frozen source plus its live admission fence; `ordinary`
+   * keeps the historical "recognized result but separate feedback permission
+   * absent" outcome and never admits the result lane by itself. The
+   * `continuation` flag is a deterministic classification only.
+   */
+  private inspectOwnerWorkItemFeedback(inbox: InboxRecord, binding: ConversationBinding):
+    | Readonly<{ kind: 'none' }>
+    | Readonly<{ kind: 'ordinary'; continuation: boolean }>
+    | Readonly<{ kind: 'ready'; source: WorkItemFeedbackSource; fence: () => void; continuation: boolean }> {
+    const registration = this.currentWorkItemReplyConsumer()
+    const parsed = this.parseWorkItemFeedback(inbox.envelope)
+    if (!registration || registration.feedbackEnabled !== true || parsed === undefined || !inbox.envelope.metadata?.replyToProviderMessageId) return { kind: 'none' }
+    const report = this.deliveryStore.workItemReplies.replyReport(inbox.channel, inbox.account, inbox.envelope.metadata.replyToProviderMessageId)
+    if (!report || !['accepted', 'delivered', 'read'].includes(report.outbox.status) || !report.outbox.providerMessageId
+      || workItemReplyCanonical(report.outbox.intent.target.conversation) !== workItemReplyCanonical(inbox.envelope.conversation)
+      || workItemReplyCanonical(report.outbox.intent.target.principal) !== workItemReplyCanonical(binding.principal)) return { kind: 'none' }
+    let target: WorkItemReportTarget
+    try {
+      target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId, reportRevision: report.target.reportRevision,
+        bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey, text: report.outbox.intent.text,
+        format: report.outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+    } catch { return { kind: 'none' } }
+    if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return { kind: 'none' }
+    const continuation = parsed.continuation
     // A recognized result must not be converted into execution when its separate feedback permission is absent.
-    if(!this.workItemFeedbackPermission(binding,registration))return 'ordinary'
-    const source:WorkItemFeedbackSource={protocol:'assistant-delivery/work-item-feedback/v1',inboxId:inbox.id,envelopeHash:inbox.envelopeHash,
-      inputText:inbox.envelope.text,inputSha256:createHash('sha256').update(inbox.envelope.text).digest('hex'),admissionCursor:inbox.admissionCursor,occurredAt:inbox.receivedAt,
-      owner:target.owner,principalId:externalPrincipalId(binding.principal),binding:{id:binding.id,version:binding.version,generation:binding.generation},scope:target.scope,
-      target:{outboxId:report.outbox.id,providerMessageId:report.outbox.providerMessageId,itemId:target.itemId,reportRevision:target.reportRevision,reportDigest:target.reportDigest,streamId:target.streamId},selection,
-      operationId:`owner-work-item-feedback:${createHash('sha256').update(JSON.stringify([inbox.id,inbox.envelopeHash])).digest('hex')}`}
-    this.deliveryStore.workItemFeedback.admit(source,()=>{
-      const current=this.currentWorkItemReplyConsumer(), owner=this.ownerLineageForBinding(binding), active=this.deliveryStore.getBinding(binding.id)
-      if(current!==registration || current?.feedbackEnabled!==true || workItemReplyCanonical(owner)!==workItemReplyCanonical(source.owner)
-        || workItemReplyCanonical(active)!==workItemReplyCanonical(binding) || !this.workItemFeedbackPermission(binding,registration))throw new Error('feedback admission authority changed')
-    })
-    return 'handled'
+    if (!this.workItemFeedbackPermission(binding, registration)) return { kind: 'ordinary', continuation }
+    const source: WorkItemFeedbackSource = { protocol: 'assistant-delivery/work-item-feedback/v1', inboxId: inbox.id, envelopeHash: inbox.envelopeHash,
+      inputText: inbox.envelope.text, inputSha256: createHash('sha256').update(inbox.envelope.text).digest('hex'), admissionCursor: inbox.admissionCursor, occurredAt: inbox.receivedAt,
+      owner: target.owner, principalId: externalPrincipalId(binding.principal), binding: { id: binding.id, version: binding.version, generation: binding.generation }, scope: target.scope,
+      target: { outboxId: report.outbox.id, providerMessageId: report.outbox.providerMessageId, itemId: target.itemId, reportRevision: target.reportRevision, reportDigest: target.reportDigest, streamId: target.streamId }, selection: parsed.selection,
+      operationId: `owner-work-item-feedback:${createHash('sha256').update(JSON.stringify([inbox.id, inbox.envelopeHash])).digest('hex')}` }
+    const fence = () => {
+      const current = this.currentWorkItemReplyConsumer(), owner = this.ownerLineageForBinding(binding), active = this.deliveryStore.getBinding(binding.id)
+      if (current !== registration || current?.feedbackEnabled !== true || workItemReplyCanonical(owner) !== workItemReplyCanonical(source.owner)
+        || workItemReplyCanonical(active) !== workItemReplyCanonical(binding) || !this.workItemFeedbackPermission(binding, registration)) throw new Error('feedback admission authority changed')
+    }
+    return { kind: 'ready', source, fence, continuation }
+  }
+
+  /** One deterministic, non-durable record when a mixed reply could only admit one lane. */
+  private recordPartialMixedFeedbackAdmission(
+    inbox: Readonly<InboxRecord>,
+    reason: 'continuation-not-admitted' | 'feedback-not-admitted' | 'neither-lane-admitted',
+  ): void {
+    this.context.logger.warn(`assistant-delivery: mixed owner feedback ${inbox.id} admitted partially (${reason})`)
   }
   /** Passing an explicit registration makes this the callback-free final local authority check. */
   private workItemFeedbackFence(intent: WorkItemFeedbackIntent, recorded=false, expectedRegistration?:WorkItemReplyConsumerRegistration): WorkItemReplyConsumerRegistration {
@@ -5407,24 +5519,34 @@ export class AssistantDeliveryService extends Service {
       action: 'continue-work-items-from-reply', resource: { kind: 'automation', id: registration.continuationAutomationId },
       context: { initiator: 'external' } }).effect === 'allow'
   }
-  private admitWorkItemReply(inbox: InboxRecord, binding: ConversationBinding): boolean {
+  /**
+   * Validate the continuation lane of one reply to an exact report without
+   * writing it. Mixed-intent admission reuses this report inside its combined
+   * transaction; the ordinary path admits it through `admitWorkItemReply`.
+   */
+  private prepareWorkItemReply(inbox: InboxRecord, binding: ConversationBinding): StoredWorkItemReport | undefined {
     const registration = this.currentWorkItemReplyConsumer()
     const envelope = inbox.envelope
     if (!registration || registration.continuationEnabled === false || envelope.kind !== 'text' || envelope.text.trim().startsWith('/') || !envelope.text
-      || (envelope.attachments?.length ?? 0) > 0 || !envelope.metadata?.replyToProviderMessageId) return false
+      || (envelope.attachments?.length ?? 0) > 0 || !envelope.metadata?.replyToProviderMessageId) return undefined
     const report = this.deliveryStore.workItemReplies.replyReport(envelope.channel,envelope.account,envelope.metadata.replyToProviderMessageId)
     const outbox = report?.outbox
     if (!report || !outbox || !['accepted','delivered','read'].includes(outbox.status) || workItemReplyCanonical(outbox.intent.target.principal) !== workItemReplyCanonical(binding.principal)
-      || workItemReplyCanonical(outbox.intent.target.conversation) !== workItemReplyCanonical(envelope.conversation)) return false
+      || workItemReplyCanonical(outbox.intent.target.conversation) !== workItemReplyCanonical(envelope.conversation)) return undefined
     try {
       const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId,
         reportRevision: report.target.reportRevision, bindingId: outbox.intent.bindingId, idempotencyKey: outbox.intent.idempotencyKey,
         text: outbox.intent.text, format: outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
-      if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return false
+      if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return undefined
       if (registration.canContinueReport?.({ itemId:target.itemId,reportRevision:target.reportRevision,bindingId:outbox.intent.bindingId,
-        idempotencyKey:outbox.intent.idempotencyKey,text:outbox.intent.text,format:outbox.intent.format==='markdown'?'markdown':'plain' }) === false) return false
-      if (this.currentWorkItemReplyConsumer()!==registration || !this.workItemReplyPermission(binding,registration)) return false
-    } catch { return false }
+        idempotencyKey:outbox.intent.idempotencyKey,text:outbox.intent.text,format:outbox.intent.format==='markdown'?'markdown':'plain' }) === false) return undefined
+      if (this.currentWorkItemReplyConsumer()!==registration || !this.workItemReplyPermission(binding,registration)) return undefined
+    } catch { return undefined }
+    return report
+  }
+  private admitWorkItemReply(inbox: InboxRecord, binding: ConversationBinding): boolean {
+    const report = this.prepareWorkItemReply(inbox, binding)
+    if (report === undefined) return false
     // From here a failed durable handoff is an error, never ordinary fallback.
     this.deliveryStore.workItemReplies.admit(inbox.id,binding,report)
     return true

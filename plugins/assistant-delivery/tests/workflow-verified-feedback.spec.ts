@@ -339,6 +339,35 @@ test('natural intent freezes target and CAS, survives restart, and rejects older
   store.close()
 })
 
+test('widened natural grammar freezes ordinary owner wording and re-derives it deterministically', async () => {
+  const fixture = await createFixture()
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'widened-source',
+    text: 'prepare daily workspace status summary', providerMessageId: 'widened-result' })
+  const natural = (eventId: string, text: string) => {
+    const inbox = fixture.store.acceptInbound({ channel: fixture.principal.channel, account: fixture.principal.account,
+      eventId, occurredAt: 2_000, principal: fixture.principal, conversation: fixture.conversation,
+      kind: 'text', text, metadata: { replyToProviderMessageId: 'widened-result' } }).record
+    claimInbox(fixture.store, inbox.id, fixture.binding.id)
+    return inbox.id
+  }
+  for (const [eventId, text, selection] of [
+    ['widened-achieved', '现在可以正常用了，谢谢', 'achieved'],
+    ['widened-not-achieved', '返回值仍然是空的，请检查分页', 'not-achieved'],
+  ] as const) {
+    const inboxId = natural(eventId, text)
+    expect(fixture.store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: inboxId,
+      sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection })).toMatchObject({ status: 'awaiting-evaluation' })
+    expect(fixture.store.getNaturalObjectiveIntent(inboxId)?.selection).toBe(selection)
+    finishSourceInbox(fixture.store, inboxId)
+  }
+  const mismatched = natural('widened-mismatch', '现在可以正常用了，谢谢')
+  expect(() => fixture.store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: mismatched,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'not-achieved' })).toThrow(/completed owner turn/)
+  expect(fixture.store.getNaturalObjectiveIntent(mismatched)).toBeUndefined()
+  finishSourceInbox(fixture.store, mismatched)
+  fixture.store.close()
+})
+
 test('natural owner feedback cannot claim a forged result target or a linked principal', async () => {
   const fixture = await createFixture()
   const source = recordCompletedAgentReply({ ...fixture, eventId: 'natural-authority-source',

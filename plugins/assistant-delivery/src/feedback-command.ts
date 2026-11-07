@@ -34,6 +34,203 @@ export function parseNaturalObjectiveFeedback(text: string): ObjectiveFeedbackSt
     && !/(?:解决了|成功了|完成了|可以了)/u.test(unquoted)) return 'not-achieved'
   return undefined
 }
+/**
+ * One authenticated owner reply to an exact task result. Only `status` is
+ * evidence. `detail` is untrusted trailing text (reason, pasted evidence or a
+ * follow-up request) and must never prove, rank or widen a result; quoted spans
+ * are omitted from it. `continuation` is a deterministic classification of an
+ * explicit request inside that untrusted detail.
+ */
+export interface NaturalOwnerReplyParse {
+  readonly status: ObjectiveFeedbackStatus | 'withdraw'
+  /** Untrusted text after the assertion (reason/evidence/request); quoted spans are omitted. */
+  readonly detail?: string
+  /** Deterministic: the untrusted detail asks to keep working on this same item. */
+  readonly continuation: boolean
+}
+
+const naturalOwnerReplyQuotedSpans = (): RegExp =>
+  /** Fenced code, curly/double-quoted prose, inline code, and clearly quoted single spans. */
+  /```[\s\S]*?```|“[^”]*”|"[^"]*"|`[^`]*`|(?<![\p{L}\p{N}])'[^'\n]{1,200}'(?![\p{L}\p{N}])/gu
+
+function naturalOwnerReplyWithoutQuotes(text: string): string {
+  return text.replace(naturalOwnerReplyQuotedSpans(), '')
+}
+
+function naturalOwnerReplyAssertion(phrases: readonly string[], flags: string, prefix = '', suffix = ''): RegExp {
+  const alternatives = [...phrases].sort((left, right) => right.length - left.length).join('|')
+  return new RegExp(`^${prefix}(?:${alternatives})${suffix}`, flags)
+}
+
+const chineseAchievedPhrases = Object.freeze([
+  '现在已经可以正常使用了', '现在已经可以正常用了', '现在可以正常使用了', '现在可以正常用了',
+  '已经可以正常使用了', '已经可以正常用了', '可以正常使用了', '可以正常用了', '可以正常使用',
+  '问题已经解决了', '问题已解决了', '问题已经解决', '问题已解决', '问题解决了',
+  '已经解决了', '现在解决了', '已经解决', '已解决', '解决了',
+  '问题已经修复了', '问题已修复', '问题修好了', '已经修复了', '已修复', '修复了', '修好了', '已修好',
+  '已经修好了', '弄好了', '已经弄好了', '搞定了', '已经搞定了', '现在能用了', '一切正常了',
+  '现在已经没问题了', '已经没问题了', '现在没问题了', '没问题了',
+  '现在没有报错了', '已经没报错了', '没有报错了',
+  '已经恢复正常了', '恢复正常了', '恢复正常', '功能正常了', '现在正常了', '正常工作了',
+  '现在已经可以用了', '已经可以用了', '现在可以用了', '能正常工作了',
+  '可以了',
+] as const)
+
+const chineseNegativePhrases = Object.freeze([
+  '问题还没有解决', '问题还没解决', '问题没有解决', '问题仍然没有解决', '问题仍未解决',
+  '还没有解决', '还没解决', '没有解决', '没解决', '仍然没有解决', '仍未解决',
+  '问题还没有修复', '问题还没修复', '问题没有修复',
+  '还没有修复', '还没修复', '没有修复', '没修复',
+  '还没有修好', '还没修好', '没有修好', '没修好',
+  '还是不行', '仍然不行', '依然不行', '依旧不行', '仍旧不行', '还是不可以', '仍然不可以', '又不行了', '不行了', '不行',
+  '还不能用了', '还不能用', '不能正常用了', '不能正常用', '不能用了', '还没弄好', '没有弄好', '弄不好', '搞不定',
+  '还是失败', '仍然失败', '依然失败', '依旧失败', '还是没成功', '还没成功', '没有成功', '没成功',
+  '还是老样子', '仍然老样子', '依旧老样子', '老样子',
+  '返回值仍然是空的', '返回值还是空的', '返回值仍然是空', '返回值仍为空', '返回值还是空',
+  '结果仍然是空的', '结果还是空的', '结果仍然是空', '结果仍为空', '结果还是空',
+  '仍然是空的', '还是空的', '仍然是空', '仍为空', '还是空',
+  '仍然有报错', '仍有报错', '还有报错', '仍然报错', '还是报错', '依旧报错', '还在报错', '仍有错误', '还是有错误',
+  '结果还是不对', '结果仍然不对', '结果还是错的', '还是不对', '仍然不对', '依然不对',
+  '仍然有问题', '还是有问题', '依旧有问题', '还有问题',
+] as const)
+
+const englishAchievedPhrases = Object.freeze([
+  'all good now', 'no errors now', 'no error now', 'no more errors', 'no errors', 'all good', 'all fixed',
+  'working again', 'working fine', 'working now',
+  'works again', 'works fine', 'works now',
+  'resolved now', 'solved now', 'fixed now',
+  'resolved', 'solved', 'fixed', 'good now',
+] as const)
+
+const englishNegativePhrases = Object.freeze([
+  'still not fixed', 'not fixed', 'still broken', 'broken',
+  'still not working', 'not working', 'still does not work', "still doesn't work",
+  'does not work', "doesn't work", 'still did not work', "still didn't work", 'did not work', "didn't work",
+  'still failing', 'still fails', 'failing', 'fails', 'broken again',
+  'still returns nothing', 'returns nothing', 'still returns empty', 'returns empty', 'still empty', 'still returns null', 'returns null',
+  'unresolved', 'not resolved', 'not solved', 'still incorrect', 'still wrong',
+  'no luck', 'same error', 'same issue', 'same problem', 'same result', 'same as before',
+  'no change', 'unchanged',
+  'still erroring', 'still throws',
+] as const)
+
+const englishOwnerReplySubject = String.raw`(?:(?:it|that|this|everything|things|(?:the\s+)?(?:problem|issue|bug|page|pagination|result|return value))(?:'s|'re|\s+(?:is|are|was|were|has been|have been))?\s+)?`
+
+const chineseOwnerReplyScope = String.raw`(?:(?:这次|本次|上一次|刚才|刚刚)(?:的)?\s*)?`
+const chineseAchievedAssertion = naturalOwnerReplyAssertion(chineseAchievedPhrases, 'u', chineseOwnerReplyScope)
+const chineseNegativeAssertion = naturalOwnerReplyAssertion(chineseNegativePhrases, 'u', chineseOwnerReplyScope)
+const englishAchievedAssertion = naturalOwnerReplyAssertion(englishAchievedPhrases, 'iu', englishOwnerReplySubject, String.raw`\b`)
+const englishNegativeAssertion = naturalOwnerReplyAssertion(englishNegativePhrases, 'iu', englishOwnerReplySubject, String.raw`\b`)
+
+/** Assertive success wording used only to detect a contradiction of a negative assertion. */
+const chineseAchievedContradictionMarkers = Object.freeze([
+  '已经解决了', '已解决', '解决了', '修好了', '已修复', '修复了', '已修好',
+  '可以正常用了', '可以用了', '能用了', '恢复正常', '功能正常', '没问题了', '没有报错了', '成功了', '完成了',
+  '弄好了', '搞定了', '一切正常',
+])
+const englishAchievedContradictionMarkers = Object.freeze([
+  'works now', 'works again', 'working now', 'fixed', 'resolved', 'solved', 'all good', 'all fixed', 'no errors',
+])
+
+/** Assertive failure wording used only to detect a contradiction of a positive assertion. */
+const chineseFailureContradictionMarkers = Object.freeze([
+  '还是不行', '仍然不行', '依然不行', '依旧不行', '仍旧不行', '不行',
+  '还是失败', '仍然失败', '依然失败', '还没解决', '没有解决', '没解决', '没有修复', '没修复', '没修好', '还没修好',
+  '还是老样子', '仍然是空的', '还是空的', '仍然为空', '还是空',
+  '仍有报错', '还有报错', '仍然报错', '还是报错', '依旧报错', '还在报错',
+  '还是不对', '仍然不对', '仍然有问题', '还是有问题', '还有问题',
+  '不能用了', '不可以用了', '不能正常用了', '没法用了', '用不了',
+  '还不能用了', '还不能用', '不能正常用', '还没弄好', '没有弄好', '弄不好', '搞不定',
+])
+const englishFailureContradictionMarkers = Object.freeze([
+  'not fixed', 'still broken', 'still failing', 'still empty', "doesn't work", "didn't work", 'not working',
+  'unresolved', 'not resolved', 'not solved', 'no luck', 'same error', 'same issue', 'same problem',
+  'broken again', 'still wrong', 'still incorrect', 'no change', 'unchanged', 'same as before', 'returns null',
+])
+
+/** Word-bounded English markers never match inside a larger word (e.g. "resolved" in "unresolved"). */
+function contradictionPattern(chineseMarkers: readonly string[], englishMarkers: readonly string[]): RegExp {
+  const chinese = [...chineseMarkers].sort((left, right) => right.length - left.length).join('|')
+  const english = [...englishMarkers].sort((left, right) => right.length - left.length).join('|')
+  return new RegExp(`(?:${chinese}|\\b(?:${english})\\b)`, 'iu')
+}
+
+const failureContradictionPattern = contradictionPattern(chineseFailureContradictionMarkers, englishFailureContradictionMarkers)
+const failureContradictionGlobal = new RegExp(failureContradictionPattern.source, 'giu')
+const achievedContradictionPattern = contradictionPattern(chineseAchievedContradictionMarkers, englishAchievedContradictionMarkers)
+
+const naturalOwnerReplyHedge = /(?:如果|假如|假设|要是|万一|可能|也许|大概|恐怕|似乎|好像|不确定)|\b(?:if|maybe|perhaps|might|possibly|probably|not sure|unsure|i think|i guess)\b/iu
+const naturalOwnerReplyContrastingFailure = /(?:但是|但|不过|可是|然而|却)[^。！!\n]{0,60}(?:报错|错误|异常|失败|不行|没(?:有)?(?:解决|修复|成功|好)|问题|缺陷)|\b(?:but|however|though|although)\b[^.!?\n]{0,80}\b(?:error|errors?|fails?|failing|broken|not|never|issue|problem|bug)\b/iu
+const naturalOwnerReplyQuestionSuffix = /^(?:吗|么|呢|吧)/u
+
+const naturalOwnerReplyContinuationDirective = new RegExp([
+  '继续(?:修复|修|排查|检查|处理|优化|改进|跟进|尝试|看看|做|改)?',
+  '接着(?:修复|修|排查|检查|处理|做|来)?',
+  '再(?:修|试|检查|排查|看看|来)(?:一下|一次)?',
+  '重新(?:修复|检查|排查|试|做|来)',
+  '修复一下', '修一下', '检查一下', '排查一下', '请检查', '请排查', '请继续', '请再看',
+  '再看看', '再检查', '再试试', '再试一次', '重试',
+  '换个(?:方案|方法|思路|做法)', '换一种(?:方案|方法|思路|做法)',
+  '\\bcontinue\\b', '\\bkeep (?:fixing|going|working|trying)\\b', '\\bfix (?:it|this)\\b',
+  '\\btry again\\b', '\\bretry\\b', '\\binvestigate\\b', '\\blook into it\\b', '\\bcarry on\\b', '\\bgo on\\b',
+  '\\bplease (?:check|fix|retry|continue|investigate)\\b', '\\bcheck (?:again|it|this)\\b',
+].join('|'), 'iu')
+
+/** Deterministic follow-up detection inside the untrusted detail's first clause. */
+function naturalOwnerReplyContinuation(detail: string): boolean {
+  const firstClause = detail.split(/[。！!；;\n]/u)[0] ?? ''
+  return naturalOwnerReplyContinuationDirective.test(firstClause.slice(0, 240))
+}
+
+/**
+ * Widened deterministic parser for one ordinary owner reply to an exact task
+ * result. It is pure, never calls a model, never returns success from bare
+ * emotion, and abstains for questions, hypotheticals, quoted prose, negated
+ * reports, contradictions, hedges and withdrawal commands. Callers must gate
+ * admission behind an explicit opt-in; the untrusted `detail` never enters
+ * evidence.
+ */
+export function parseNaturalOwnerReply(text: string): NaturalOwnerReplyParse | undefined {
+  const value = text.trim()
+  if (value === '') return undefined
+  // A question about the result is never a result assertion, even if the
+  // phrase before the question mark looks like one.
+  if (/[?？]\s*$/u.test(value)) return undefined
+  const unquoted = naturalOwnerReplyWithoutQuotes(value).trim()
+  if (unquoted === '') return undefined
+  if (/^(?:撤回刚才的任务反馈|撤回我刚才的任务反馈)[。.!！]?$/u.test(unquoted)) {
+    return Object.freeze({ status: 'withdraw' as const, continuation: false })
+  }
+  const achieved = chineseAchievedAssertion.exec(unquoted) ?? englishAchievedAssertion.exec(unquoted)
+  const negative = achieved === null
+    ? chineseNegativeAssertion.exec(unquoted) ?? englishNegativeAssertion.exec(unquoted)
+    : null
+  const match = achieved ?? negative
+  if (match === null) return undefined
+  const status: ObjectiveFeedbackStatus = achieved === null ? 'not-achieved' : 'achieved'
+  const rest = unquoted.slice(match[0].length)
+  if (rest !== '' && !/^[\s，,。.!！；;：:]/u.test(rest)) return undefined
+  const detail = rest
+    .replace(/^[\s，,。.!！；;：:]+/u, '')
+    .replace(/[\s，,。.!！；;：:]+$/u, '')
+  // A trailing question particle turns the whole reply into a question.
+  if (naturalOwnerReplyQuestionSuffix.test(detail)) return undefined
+  if (detail !== '') {
+    if (naturalOwnerReplyHedge.test(detail)) return undefined
+    if (status === 'achieved') {
+      if (failureContradictionPattern.test(detail)) return undefined
+      if (naturalOwnerReplyContrastingFailure.test(detail)) return undefined
+    } else {
+      if (achievedContradictionPattern.test(detail.replace(failureContradictionGlobal, ' '))) return undefined
+    }
+  }
+  return Object.freeze({
+    status,
+    ...(detail === '' ? {} : { detail }),
+    continuation: detail !== '' && naturalOwnerReplyContinuation(detail),
+  })
+}
+
 export function objectiveStateMessage(state: Readonly<{ version: number; objectiveStatus: string }>): string {
   return `当前任务反馈：${state.objectiveStatus}，版本 ${state.version}。\n继续回复原任务结果：\n/feedback correct ${state.version} ${state.objectiveStatus} not-achieved\n/feedback withdraw ${state.version} ${state.objectiveStatus}\n/feedback status`
 }

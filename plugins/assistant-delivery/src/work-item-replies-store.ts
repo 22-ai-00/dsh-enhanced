@@ -48,39 +48,50 @@ export class WorkItemRepliesStore {
     return rows.length === 1 ? this.report(rows[0]!.id) : undefined
   }
   admit(inboxId: string, binding: ConversationBinding, report: StoredWorkItemReport): WorkItemReplySource {
-    return this.transaction(() => {
-      const inbox = this.getInbox(inboxId)
-      const current = this.getBinding(binding.id)
-      const observed = this.report(report.outbox.id)
-      const owner = current === undefined ? undefined : this.getOwner(current)
-      if (owner?.status !== 'active' || owner.role !== 'owner' || owner.id !== report.target.owner.principalRecordId || owner.version !== report.target.owner.principalVersion) fail()
-      if (!inbox || !current || !same(current, binding) || !same(observed, report)
-        || !['received','authorized'].includes(inbox.status) || current.status !== 'active'
-        || !['accepted','delivered','read'].includes(report.outbox.status) || !report.outbox.providerMessageId
-        || inbox.envelope.metadata?.replyToProviderMessageId !== report.outbox.providerMessageId
-        || !same(report.outbox.intent.target.conversation,inbox.envelope.conversation)
-        || !same(inbox.envelope.conversation, binding.conversation) || !same(inbox.envelope.principal, binding.principal)
-        || report.target.scope.workspace !== binding.workspace || report.target.scope.preset !== binding.agentPreset) fail()
-      const text = inbox.envelope.text
-      if (inbox.envelope.kind !== 'text' || text.trim().startsWith('/') || (inbox.envelope.attachments?.length ?? 0) > 0
-        || Buffer.from(text,'utf8').toString('utf8') !== text || Buffer.byteLength(text,'utf8') > 262144) fail()
-      const source: ImmutableSource = { protocol: 'assistant-delivery/work-item-reply/v1', id: inbox.id,
-        admissionCursor: inbox.admissionCursor, inputText: text, inputSha256: createHash('sha256').update(text).digest('hex'), inputBytes: Buffer.byteLength(text),
-        scope: report.target.scope, principalId: externalPrincipalId(binding.principal), owner: report.target.owner,
-        binding: { id: binding.id, version: binding.version, generation: binding.generation }, target: { outboxId: report.outbox.id, providerMessageId: report.outbox.providerMessageId,
-          itemId: report.target.itemId, reportRevision: report.target.reportRevision, reportDigest: report.target.reportDigest, streamId: report.target.streamId } }
-      const streamKey = workItemReplyDigest({ conversation: binding.conversation, owner: source.owner, scope: source.scope,
-        streamId: source.target.streamId, producer: report.target.sourceId })
-      const sourceDigest = workItemReplyDigest(source)
-      this.database.prepare('INSERT INTO delivery_work_item_reply_streams(stream_key,head_item_id,revision) VALUES(?,?,0) ON CONFLICT DO NOTHING')
-        .run(streamKey, source.target.streamId)
-      this.database.prepare(`INSERT INTO delivery_work_item_replies(inbox_id,stream_key,admission_sequence,source_digest,source_json,state) VALUES(?,?,?,?,?,'pending')`)
-        .run(inbox.id, streamKey, inbox.admissionCursor.sequence, sourceDigest, workItemReplyCanonical(source))
+    return this.transaction(() => this.admitInTransaction(inboxId, binding, report))
+  }
+  /**
+   * Insert the continuation source. By default this owns the Inbox handoff;
+   * `handoff: false` reuses the processed Inbox of an already-admitted result
+   * inside the same outer transaction (mixed result+continuation admission).
+   */
+  admitInTransaction(inboxId: string, binding: ConversationBinding, report: StoredWorkItemReport,
+    options?: Readonly<{ handoff?: boolean }>): WorkItemReplySource {
+    const handoff = options?.handoff !== false
+    const inbox = this.getInbox(inboxId)
+    const current = this.getBinding(binding.id)
+    const observed = this.report(report.outbox.id)
+    const owner = current === undefined ? undefined : this.getOwner(current)
+    if (owner?.status !== 'active' || owner.role !== 'owner' || owner.id !== report.target.owner.principalRecordId || owner.version !== report.target.owner.principalVersion) fail()
+    if (!inbox || !current || !same(current, binding) || !same(observed, report)
+      || !(handoff ? ['received','authorized'] : ['processed']).includes(inbox.status) || current.status !== 'active'
+      || (!handoff && inbox.bindingId !== binding.id)
+      || !['accepted','delivered','read'].includes(report.outbox.status) || !report.outbox.providerMessageId
+      || inbox.envelope.metadata?.replyToProviderMessageId !== report.outbox.providerMessageId
+      || !same(report.outbox.intent.target.conversation,inbox.envelope.conversation)
+      || !same(inbox.envelope.conversation, binding.conversation) || !same(inbox.envelope.principal, binding.principal)
+      || report.target.scope.workspace !== binding.workspace || report.target.scope.preset !== binding.agentPreset) fail()
+    const text = inbox.envelope.text
+    if (inbox.envelope.kind !== 'text' || text.trim().startsWith('/') || (inbox.envelope.attachments?.length ?? 0) > 0
+      || Buffer.from(text,'utf8').toString('utf8') !== text || Buffer.byteLength(text,'utf8') > 262144) fail()
+    const source: ImmutableSource = { protocol: 'assistant-delivery/work-item-reply/v1', id: inbox.id,
+      admissionCursor: inbox.admissionCursor, inputText: text, inputSha256: createHash('sha256').update(text).digest('hex'), inputBytes: Buffer.byteLength(text),
+      scope: report.target.scope, principalId: externalPrincipalId(binding.principal), owner: report.target.owner,
+      binding: { id: binding.id, version: binding.version, generation: binding.generation }, target: { outboxId: report.outbox.id, providerMessageId: report.outbox.providerMessageId,
+        itemId: report.target.itemId, reportRevision: report.target.reportRevision, reportDigest: report.target.reportDigest, streamId: report.target.streamId } }
+    const streamKey = workItemReplyDigest({ conversation: binding.conversation, owner: source.owner, scope: source.scope,
+      streamId: source.target.streamId, producer: report.target.sourceId })
+    const sourceDigest = workItemReplyDigest(source)
+    this.database.prepare('INSERT INTO delivery_work_item_reply_streams(stream_key,head_item_id,revision) VALUES(?,?,0) ON CONFLICT DO NOTHING')
+      .run(streamKey, source.target.streamId)
+    this.database.prepare(`INSERT INTO delivery_work_item_replies(inbox_id,stream_key,admission_sequence,source_digest,source_json,state) VALUES(?,?,?,?,?,'pending')`)
+      .run(inbox.id, streamKey, inbox.admissionCursor.sequence, sourceDigest, workItemReplyCanonical(source))
+    if (handoff) {
       const result = this.database.prepare(`UPDATE inbox_messages SET status='processed',binding_id=?,failure_code=NULL,updated_at=? WHERE id=? AND status IN ('received','authorized')`)
         .run(binding.id, inbox.updatedAt, inbox.id)
       if (result.changes !== 1) fail()
-      return this.read({ id: inbox.id, expectedSourceDigest: sourceDigest })
-    })
+    }
+    return this.read({ id: inbox.id, expectedSourceDigest: sourceDigest })
   }
   private row(id: string): ReplyRow | undefined {
     return this.database.prepare('SELECT * FROM delivery_work_item_replies WHERE inbox_id=?').get(id) as unknown as ReplyRow | undefined
