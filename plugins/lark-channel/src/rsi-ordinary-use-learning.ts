@@ -110,8 +110,18 @@ export function createRsiOrdinaryUseLearningSetup(input: {
   deliveryConfig: Record<string, unknown>
   intakeProvider?: string | undefined
   intakeModel?: string | undefined
+  /**
+   * Provider ids exposed by the composed profile's LLM rows. When non-empty,
+   * the chosen route must be one of them: a Delivery agent provider such as
+   * `traex-agent` is an ACP backend, not an LLM route, and would fail at run
+   * time even though the static config looks complete.
+   */
+  llmProviders?: ReadonlySet<string> | undefined
 }): RsiOrdinaryUseLearningSetup {
   const route = resolveRsiIntakeRoute(input)
+  if (input.llmProviders !== undefined && input.llmProviders.size > 0 && !input.llmProviders.has(route.provider)) {
+    fail(`intake route provider ${route.provider} is not configured as an LLM provider in this profile; pass --intake-provider/--intake-model with an LLM route`)
+  }
   return validateRsiOrdinaryUseLearningSetup({
     intakeEvaluation: {
       enabled: true,

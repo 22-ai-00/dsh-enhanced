@@ -5,7 +5,7 @@ import type { ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-enhanced/assistant-growth-driver'
 import { defaultHostAttestationPolicy, normalizeControlPlaneConfig, runtimeConfigDigest,
   type Config as ControlPlaneConfig, type PluginControlTrustConfig, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
-import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
@@ -130,6 +130,24 @@ function setExactAt(document: Document, node: YAMLMap, path: readonly string[], 
   }
   current.set(leaf, document.createNode(value))
 }
+/** Provider ids exposed by any composed LLM row's `providers` mapping. */
+function llmProviderIds(rows: ReadonlyMap<string, YAMLMap>): ReadonlySet<string> {
+  const ids = new Set<string>()
+  for (const row of rows.values()) {
+    if (row.get('disabled') === true) continue
+    const config = row.get('config', true)
+    if (!isMap(config)) continue
+    const providers = config.get('providers', true)
+    if (!isMap(providers)) continue
+    for (const pair of providers.items) {
+      const key = (pair as { key?: unknown }).key
+      const value = isScalar(key) ? key.value : key
+      if (typeof value === 'string' && value.length > 0) ids.add(value)
+    }
+  }
+  return ids
+}
+
 function chooseModel(growth: YAMLMap): Partial<AssistantGrowthDriverConfig> {
   const value = plain(growth, 'growth')
   if (value.provider === undefined && value.model === undefined && value.reasoningEffort === undefined) return {}
@@ -189,7 +207,8 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     workspace: resolved.workspace, agentPreset: resolved.preset }
   const scope = { ownerRouteId: owner.authorityId, principalId: owner.principalId, workspace: owner.workspace, preset: owner.agentPreset }
   const ordinary = input.enableOrdinaryUseLearning === true
-    ? createRsiOrdinaryUseLearningSetup({ deliveryConfig, intakeProvider: input.intakeProvider, intakeModel: input.intakeModel })
+    ? createRsiOrdinaryUseLearningSetup({ deliveryConfig, intakeProvider: input.intakeProvider,
+      intakeModel: input.intakeModel, llmProviders: llmProviderIds(effective.byId) })
     : undefined
   if (ordinary === undefined && (input.intakeProvider !== undefined || input.intakeModel !== undefined)) {
     fail('an explicit intake route requires enableOrdinaryUseLearning')

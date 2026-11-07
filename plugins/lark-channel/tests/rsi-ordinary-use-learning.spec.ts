@@ -59,6 +59,19 @@ describe('RSI ordinary-use evaluator setup', () => {
       .toThrow('digest or notify')
   })
 
+  test('fails closed when the route is not a composed LLM provider', () => {
+    expect(() => createRsiOrdinaryUseLearningSetup({ deliveryConfig: {
+      agentProvider: 'traex-agent', agentModel: 'default' }, llmProviders: new Set(['deepseek-official']) }))
+      .toThrow('not configured as an LLM provider')
+    expect(createRsiOrdinaryUseLearningSetup({ deliveryConfig: {
+      agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' },
+      llmProviders: new Set(['deepseek-official']) }).intakeEvaluation.provider).toBe('deepseek-official')
+    // An empty discovery result keeps legacy/simple profiles working; only a
+    // positively discovered registry can prove a provider is unusable.
+    expect(createRsiOrdinaryUseLearningSetup({ deliveryConfig: {
+      agentProvider: 'x', agentModel: 'y' }, llmProviders: new Set() }).intakeEvaluation.provider).toBe('x')
+  })
+
   test('the recommended preset flips only the switches whose RSI prerequisites already exist', async () => {
     const home = await mkdtemp(join(tmpdir(), 'rsi-ordinary-preset-')); roots.push(home)
     await mkdir(join(home, 'profiles', 'web'), { recursive: true })

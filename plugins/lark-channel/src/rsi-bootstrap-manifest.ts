@@ -71,6 +71,24 @@ function record(value: unknown): value is Record<string, unknown> {
 function canonical(path: string, label: string): void {
   if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path || path.includes('\0') || /[\r\n]/u.test(path)) fail(`${label} must be canonical absolute`)
 }
+
+/** Provider ids exposed by any composed LLM row's `providers` mapping. */
+function llmProviderIds(rows: ReadonlyMap<string, YAMLMap>): ReadonlySet<string> {
+  const ids = new Set<string>()
+  for (const row of rows.values()) {
+    if (row.get('disabled') === true) continue
+    const config = row.get('config', true)
+    if (!isMap(config)) continue
+    const providers = config.get('providers', true)
+    if (!isMap(providers)) continue
+    for (const pair of providers.items) {
+      const key = (pair as { key?: unknown }).key
+      const value = isScalar(key) ? key.value : key
+      if (typeof value === 'string' && value.length > 0) ids.add(value)
+    }
+  }
+  return ids
+}
 function positive(value: unknown, label: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) fail(`${label} must be a positive safe integer`)
   return value as number
@@ -217,7 +235,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       fail('ordinary-use learning requires an enabled installed assistant-work-items bundle')
     }
     ordinaryUseLearning = createRsiOrdinaryUseLearningSetup({ deliveryConfig,
-      intakeProvider: input.intakeProvider, intakeModel: input.intakeModel })
+      intakeProvider: input.intakeProvider, intakeModel: input.intakeModel, llmProviders: llmProviderIds(rows) })
     const proactiveConfig = proactive.has('config')
       ? plain(rowConfig(proactive, 'assistant-proactive'), 'assistant-proactive config') : {}
     if (proactiveConfig.intakeEvaluation !== undefined
