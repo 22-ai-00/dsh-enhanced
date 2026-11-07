@@ -12,8 +12,34 @@ import type { EvaluationScope } from './types.js'
 /** Delivery `sourceId` of owner-question notices; a distinct cohort, so they never feed attention tuning. */
 export const ATTENTION_OWNER_QUESTION_SOURCE_ID = 'assistant-evaluation/attention-owner-notice/v1' as const
 
+/**
+ * Slice 5 reply-consumer protocol: Delivery hands a genuine reply to one of
+ * its accepted/delivered/read owner notices to the live service in the
+ * registration's authority slot, which must vouch for the exact registration
+ * object through `ownsOwnerNotificationReply`.
+ */
+export const ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL = 'assistant-delivery/owner-notification-reply/v1' as const
+
 export const attentionOwnerQuestionChoices = ['authorize-once', 'decline'] as const
 export type AttentionOwnerQuestionChoice = typeof attentionOwnerQuestionChoices[number]
+
+/**
+ * Exact owner reply phrases. Only the whole trimmed reply is compared, case
+ * insensitively; nothing here is a model interpretation. A reply must already
+ * target the one delivered notice, so these short phrases are unambiguous.
+ */
+const attentionOwnerQuestionAuthorizeReplies = [
+  'authorize-once', 'authorize once', 'allow once', '同意一次', '授权一次', '批准一次',
+] as const
+const attentionOwnerQuestionDeclineReplies = ['decline', '拒绝', '不同意', '不用了'] as const
+
+export function parseAttentionOwnerQuestionChoice(input: unknown): AttentionOwnerQuestionChoice | undefined {
+  if (typeof input !== 'string') return undefined
+  const text = input.trim().toLowerCase()
+  if ((attentionOwnerQuestionAuthorizeReplies as readonly string[]).includes(text)) return 'authorize-once'
+  if ((attentionOwnerQuestionDeclineReplies as readonly string[]).includes(text)) return 'decline'
+  return undefined
+}
 
 /**
  * Terminal per-question delivery state, written at most once:
@@ -81,9 +107,12 @@ function valueText(value: number | boolean): string {
 /**
  * Deterministic plain-text notice for one owner question. It names the
  * human-readable parameter, never an internal id, digest or estimate term,
- * and stays well inside Delivery's `result` caps.
+ * and stays well inside Delivery's `result` caps. `repliesRead` is the
+ * slice-5 opt-in: only then does the notice invite an exact reply, because
+ * only then does Delivery route a reply back to this service.
  */
-export function attentionOwnerQuestionText(question: AttentionOwnerQuestion, scope: EvaluationScope): string {
+export function attentionOwnerQuestionText(question: AttentionOwnerQuestion, scope: EvaluationScope,
+  options: Readonly<{ repliesRead?: boolean }> = {}): string {
   const label = parameterLabels[question.change.parameter] ?? 'attention setting'
   const checked = question.replay.shared.decided + question.replay.discriminating.decided
   const reasons = question.exceeded.map(reason => exceededLabels[reason] ?? 'the grant does not cover it')
@@ -94,7 +123,9 @@ export function attentionOwnerQuestionText(question: AttentionOwnerQuestion, sco
     `Change: ${label} from ${valueText(question.change.from)} to ${valueText(question.change.to)} (${question.steps} step${question.steps === 1 ? '' : 's'}).`,
     `Held-out notices replayed: ${checked}.`,
     `Approval is needed because ${reasons.length === 0 ? 'no owner grant covers it' : reasons.join('; ')}.`,
-    'To allow this single change, record an owner grant through the host configuration. Replies to this message are not read. Nothing changes until an owner grant is recorded.',
+    ...(options.repliesRead === true
+      ? ['To allow this single change, reply exactly "authorize-once". To refuse it, reply "decline". Nothing changes until your reply is recorded.']
+      : ['To allow this single change, record an owner grant through the host configuration. Replies to this message are not read. Nothing changes until an owner grant is recorded.']),
   ].join('\n')
 }
 
@@ -167,25 +198,34 @@ export class AttentionOwnerQuestionLedger {
    */
   recordReply(scopeInput: EvaluationScope, cohortInput: AttentionCohort, questionId: string, choiceInput: unknown,
     open: boolean, expired: boolean): AttentionOwnerQuestionReplyResult {
+    return this.#transaction(() => this.recordReplyInTransaction(scopeInput, cohortInput, questionId, choiceInput, open, expired))
+  }
+
+  /**
+   * Same contract as `recordReply`, but the caller owns the surrounding
+   * `BEGIN IMMEDIATE`. Slice 5 uses it inside the tuning ledger's transaction
+   * so a recorded owner reply and the grant or proposal decision it applies to
+   * commit atomically. Never call it outside a transaction.
+   */
+  recordReplyInTransaction(scopeInput: EvaluationScope, cohortInput: AttentionCohort, questionId: string, choiceInput: unknown,
+    open: boolean, expired: boolean): AttentionOwnerQuestionReplyResult {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const cohort = normalizeAttentionCohort(cohortInput)
     if (typeof choiceInput !== 'string' || !(attentionOwnerQuestionChoices as readonly string[]).includes(choiceInput)) invalid('choice is not recognised')
     const choice = choiceInput as AttentionOwnerQuestionChoice
-    return this.#transaction(() => {
-      const existing = this.reply(questionId)
-      if (existing !== undefined) {
-        return existing.choice === choice
-          ? Object.freeze({ status: 'recorded' as const, questionId, choice, repliedAt: existing.repliedAt })
-          : Object.freeze({ status: 'rejected' as const, reason: 'reply-conflict' as const })
-      }
-      if (!open) return Object.freeze({ status: 'rejected' as const, reason: 'question-closed' as const })
-      if (expired) return Object.freeze({ status: 'rejected' as const, reason: 'question-expired' as const })
-      const repliedAt = this.#now()
-      this.#database.prepare(`INSERT INTO evaluation_attention_owner_question_replies
-        (question_id, scope_key, lane, source_id, choice, replied_at) VALUES (?,?,?,?,?,?)`)
-        .run(questionId, scopeKey, cohort.lane, cohort.sourceId, choice, repliedAt)
-      return Object.freeze({ status: 'recorded' as const, questionId, choice, repliedAt })
-    })
+    const existing = this.reply(questionId)
+    if (existing !== undefined) {
+      return existing.choice === choice
+        ? Object.freeze({ status: 'recorded' as const, questionId, choice, repliedAt: existing.repliedAt })
+        : Object.freeze({ status: 'rejected' as const, reason: 'reply-conflict' as const })
+    }
+    if (!open) return Object.freeze({ status: 'rejected' as const, reason: 'question-closed' as const })
+    if (expired) return Object.freeze({ status: 'rejected' as const, reason: 'question-expired' as const })
+    const repliedAt = this.#now()
+    this.#database.prepare(`INSERT INTO evaluation_attention_owner_question_replies
+      (question_id, scope_key, lane, source_id, choice, replied_at) VALUES (?,?,?,?,?,?)`)
+      .run(questionId, scopeKey, cohort.lane, cohort.sourceId, choice, repliedAt)
+    return Object.freeze({ status: 'recorded' as const, questionId, choice, repliedAt })
   }
 
   status(scopeInput: EvaluationScope, cohortInput: AttentionCohort, enabled: boolean, limit = 50): AttentionOwnerQuestionStatus {

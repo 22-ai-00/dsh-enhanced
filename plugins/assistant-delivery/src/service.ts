@@ -634,6 +634,53 @@ export interface OwnerNotificationRecordView {
   readonly status: OutboxRecord['status']
 }
 
+export const ownerNotificationReplyProtocol = 'assistant-delivery/owner-notification-reply/v1' as const
+
+/**
+ * Slice 5: authenticated owner reply handed to the consumer registered for
+ * the owner-notice source that produced the quoted message. Delivery has
+ * already matched the unique accepted/delivered/read Outbox by provider
+ * message id, the notice source, its authority, the frozen owner lineage,
+ * the registration's idempotency-key prefix and an `allow` Policy decision.
+ */
+export interface OwnerNotificationReplyInput {
+  readonly inboxId: string
+  readonly envelopeHash: string
+  readonly outboxId: string
+  readonly providerMessageId: string
+  readonly idempotencyKey: string
+  readonly sourceId: string
+  readonly principalId: string
+  readonly text: string
+  readonly receivedAt: number
+}
+
+/**
+ * `applied`: the consumer durably applied the reply; Delivery marks the Inbox
+ * processed. `ignored`: fall through to ordinary inbound handling. `transient`:
+ * the Inbox stays pending so the same reply is retried on provider redelivery
+ * or the next pending-inbound recovery.
+ */
+export type OwnerNotificationReplyOutcome = 'applied' | 'ignored' | 'transient'
+
+export interface OwnerNotificationReply {
+  readonly protocol: typeof ownerNotificationReplyProtocol
+  /** Cordis slot that owns the consumer; Delivery vouches the exact object there. */
+  readonly authority: string
+  readonly sourceId: string
+  /** Only notices whose idempotency key starts with this prefix are matched. */
+  readonly idempotencyKeyPrefix: string
+  consume(input: Readonly<OwnerNotificationReplyInput>): OwnerNotificationReplyOutcome
+}
+
+export interface OwnerNotificationReplyBinding {
+  unregister(): void
+}
+
+interface OwnerNotificationReplyAuthority {
+  ownsOwnerNotificationReply(registration: Readonly<OwnerNotificationReply>): boolean
+}
+
 export class AssistantDeliveryError extends Error {
   constructor(readonly code: AssistantDeliveryErrorCode, message: string) {
     super(message)
@@ -1294,6 +1341,8 @@ export class AssistantDeliveryService extends Service {
   private readonly ownerNotificationWithdrawals = new Map<string, Readonly<{ handle: string; authority: string; sourceId: string; registration: OwnerNotificationWithdrawal }>>()
   /** Live handles issued by `registerOwnerNotificationWithdrawal`, mapped to their (authority, source) key. */
   private readonly ownerNotificationWithdrawalHandles = new Map<string, string>()
+  /** Slice-5 reply consumers, one per (authority, canonical owner-notice source id). */
+  private readonly ownerNotificationReplies = new Map<string, Readonly<{ authority: string; sourceId: string; registration: OwnerNotificationReply }>>()
   private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
@@ -4938,6 +4987,14 @@ export class AssistantDeliveryService extends Service {
         const failed = this.deliveryStore.getInbox(record.id)!
         return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
       }
+      // Slice 5: a reply to the exact delivered owner-question notice is
+      // consumed here, before any Agent admission. Applied replies are
+      // processed; a transient consumer failure leaves the Inbox pending.
+      const attentionReply = this.inspectOwnerQuestionReply(record, binding)
+      if (attentionReply !== 'none') {
+        const current = this.deliveryStore.getInbox(record.id)!
+        return { duplicate: accepted.duplicate, inboxId: current.id, status: current.status }
+      }
       const feedback = this.inspectOwnerWorkItemFeedback(record, binding)
       const splitContinuation = feedback.kind !== 'none' && feedback.continuation
       if (feedback.kind === 'ready') {
@@ -6143,6 +6200,118 @@ export class AssistantDeliveryService extends Service {
     // binding at all) reads as absent, so the caller never adopts it.
     if (metadata['dsh.native-notice.withdrawalAuthority'] !== withdrawal.authority) return undefined
     return Object.freeze({ outboxId: record.id, status: record.status })
+  }
+
+  /**
+   * Register the slice-5 reply consumer for one owner-notice source (see
+   * `OwnerNotificationReply`). The service in the `authority` slot must vouch
+   * for the exact object; one live consumer per (authority, source). A
+   * registration its authority no longer vouches for is superseded by the
+   * next vouched one, so a restarted owner regains its replies without a new
+   * notice. Registering never sends anything and grants no send authority.
+   */
+  registerOwnerNotificationReply(registration: OwnerNotificationReply): OwnerNotificationReplyBinding {
+    this.assertActive()
+    if (!registration || registration.protocol !== ownerNotificationReplyProtocol
+      || typeof registration.authority !== 'string' || !ownerNotificationAuthorityPattern.test(registration.authority)
+      || typeof registration.sourceId !== 'string' || typeof registration.idempotencyKeyPrefix !== 'string'
+      || registration.idempotencyKeyPrefix.length < 1 || registration.idempotencyKeyPrefix.length > 128
+      || typeof registration.consume !== 'function') {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid owner notification reply consumer')
+    }
+    const authority = registration.authority
+    const sourceId = canonicalBackgroundSourceId(registration.sourceId)
+    if (!this.replyVouched(authority, registration)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification reply is not owned by its authority')
+    const key = ownerNotificationWithdrawalKey(authority, sourceId)
+    const existing = this.ownerNotificationReplies.get(key)
+    if (existing !== undefined) {
+      if (this.replyVouched(existing.authority, existing.registration)) throw new AssistantDeliveryError('runtime-conflict', 'owner notification reply already registered')
+      this.ownerNotificationReplies.delete(key)
+    }
+    const entry = Object.freeze({ authority, sourceId, registration })
+    this.ownerNotificationReplies.set(key, entry)
+    let live = true
+    return Object.freeze({ unregister: () => {
+      if (!live) return
+      live = false
+      if (this.ownerNotificationReplies.get(key) === entry) this.ownerNotificationReplies.delete(key)
+    } })
+  }
+
+  /** The service now in `authority`'s slot vouches for this exact reply registration. */
+  private replyVouched(authority: string, registration: Readonly<OwnerNotificationReply>): boolean {
+    try {
+      const owner = this.context.get(authority as never, false) as unknown as Partial<OwnerNotificationReplyAuthority> | undefined
+      return typeof owner?.ownsOwnerNotificationReply === 'function' && owner.ownsOwnerNotificationReply(registration) === true
+    } catch { return false }
+  }
+
+  /**
+   * Slice 5 matcher: bind one authenticated inbound text reply to exactly one
+   * accepted/delivered/read owner notice through `replyToProviderMessageId`,
+   * require the live registered consumer's source and idempotency-key prefix,
+   * an active owner binding/principal with the notice's frozen owner lineage,
+   * and an `allow` external `answer-attention-question` Policy decision. On
+   * `applied` the Inbox is marked processed; `transient` leaves it pending for
+   * a retry. Everything else falls through to ordinary inbound handling.
+   */
+  inspectOwnerQuestionReply(inbox: InboxRecord, binding: ConversationBinding): 'none' | 'handled' | 'transient' {
+    this.assertActive()
+    const envelope = inbox.envelope
+    const replyTo = envelope.metadata?.replyToProviderMessageId
+    if (typeof replyTo !== 'string' || replyTo.length === 0 || envelope.kind !== 'text' || (envelope.attachments?.length ?? 0) > 0) return 'none'
+    if (typeof envelope.text !== 'string' || envelope.text.length === 0 || Buffer.byteLength(envelope.text, 'utf8') > 256) return 'none'
+    // The reply must come from the active owner binding itself, not another
+    // conversation that happens to quote the provider message id.
+    if (binding.status !== 'active' || externalPrincipalId(binding.principal) !== externalPrincipalId(envelope.principal)
+      || workItemReplyCanonical(envelope.conversation) !== workItemReplyCanonical(binding.conversation)) return 'none'
+    const active = this.deliveryStore.getActiveBinding(binding.conversation)
+    if (active?.id !== binding.id) return 'none'
+    const owner = this.deliveryStore.getPrincipal(binding.principal)
+    if (owner?.status !== 'active' || owner.role !== 'owner') return 'none'
+    let outbox: OutboxRecord | undefined
+    try { outbox = this.deliveryStore.getUniqueOutboxByProviderMessage(inbox.channel, inbox.account, replyTo) } catch { return 'none' }
+    if (outbox === undefined || !['accepted', 'delivered', 'read'].includes(outbox.status)) return 'none'
+    const metadata = outbox.intent.metadata
+    if (metadata?.['dsh.native-notice'] !== 'v1' || typeof metadata['dsh.native-notice.sourceId'] !== 'string'
+      || typeof metadata['dsh.native-notice.withdrawalAuthority'] !== 'string') return 'none'
+    let sourceId: string
+    try { sourceId = canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']) } catch { return 'none' }
+    const entry = this.ownerNotificationReplies.get(ownerNotificationWithdrawalKey(metadata['dsh.native-notice.withdrawalAuthority'], sourceId))
+    if (entry === undefined || !this.replyVouched(entry.authority, entry.registration)) return 'none'
+    const registration = entry.registration
+    if (!outbox.intent.idempotencyKey.startsWith(registration.idempotencyKeyPrefix)) return 'none'
+    if (workItemReplyCanonical(outbox.intent.target.conversation) !== workItemReplyCanonical(envelope.conversation)
+      || workItemReplyCanonical(outbox.intent.target.principal) !== workItemReplyCanonical(envelope.principal)) return 'none'
+    // The notice froze an exact owner row; a re-paired/replaced owner does not
+    // inherit permission to answer the old owner's question.
+    if (metadata['dsh.native-notice.ownerRecordId'] !== owner.id
+      || metadata['dsh.native-notice.ownerVersion'] !== String(owner.version)) return 'none'
+    const decision = this.policy.evaluate({
+      subject: { kind: 'external', id: externalPrincipalId(binding.principal), workspace: binding.workspace, principal: externalPrincipalId(binding.principal) },
+      action: 'answer-attention-question', resource: { kind: 'message', id: binding.id }, context: { initiator: 'external' },
+    })
+    if (decision.effect !== 'allow') return 'none'
+    let outcome: OwnerNotificationReplyOutcome
+    try {
+      outcome = registration.consume(Object.freeze({
+        inboxId: inbox.id, envelopeHash: inbox.envelopeHash, outboxId: outbox.id, providerMessageId: replyTo,
+        idempotencyKey: outbox.intent.idempotencyKey, sourceId, principalId: externalPrincipalId(binding.principal),
+        text: envelope.text, receivedAt: inbox.receivedAt,
+      }))
+    } catch {
+      return 'transient'
+    }
+    if (outcome === 'ignored') return 'none'
+    if (outcome !== 'applied') return 'transient'
+    try {
+      this.deliveryStore.markInboxProcessed(inbox.id, binding.id)
+    } catch {
+      // The consumer's own durable effect already committed; if recording that
+      // here fails, never fall through and send the authorization to the Agent.
+      return this.deliveryStore.getInbox(inbox.id)?.status === 'processed' ? 'handled' : 'transient'
+    }
+    return 'handled'
   }
 
   /**
@@ -7838,6 +8007,11 @@ export class AssistantDeliveryService extends Service {
       signal?.throwIfAborted()
       if (binding === undefined) continue
       if (!reset && !stop) {
+        // A pending owner-question reply is finished (or held for a retry)
+        // before it can be queued to the Agent.
+        const attentionReply = this.inspectOwnerQuestionReply(pending, binding)
+        if (attentionReply === 'handled') continue
+        if (attentionReply === 'transient') return
         this.deliveryStore.queueInbox(pending.id, binding.id)
         continue
       }

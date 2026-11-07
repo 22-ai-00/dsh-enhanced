@@ -19,6 +19,9 @@ export {
 export type { ConfigType as AssistantEvaluationConfig }
 export type {
   EvaluationHostScope,
+  OwnerQuestionReplyInput,
+  OwnerQuestionReplyOutcome,
+  OwnerQuestionReplyRegistration,
   TrustedAutomationEvaluationProducer,
   TrustedDeliveryEvaluationProducer,
 } from './service.js'
@@ -77,6 +80,8 @@ export type {
   AttentionLooseningRejection,
   AttentionLooseningStatus,
   AttentionOwnerQuestion,
+  AttentionOwnerQuestionApplyResult,
+  AttentionOwnerQuestionLedgerPort,
   AttentionReplayFailure,
   AttentionReplayRecord,
   AttentionReplaySummary,
@@ -95,11 +100,13 @@ export type {
   AttentionTuningVersion,
 } from './attention-tuning.js'
 export {
+  ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL,
   ATTENTION_OWNER_QUESTION_SOURCE_ID,
   AttentionOwnerQuestionLedger,
   attentionOwnerQuestionChoices,
   attentionOwnerQuestionIdempotencyKey,
   attentionOwnerQuestionText,
+  parseAttentionOwnerQuestionChoice,
 } from './attention-owner-questions.js'
 export type {
   AttentionOwnerQuestionChoice,

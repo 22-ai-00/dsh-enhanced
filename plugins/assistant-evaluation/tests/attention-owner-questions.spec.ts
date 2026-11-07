@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantEvaluationService } from '../src/service.ts'
+import type { OwnerQuestionReplyInput } from '../src/service.ts'
 import { migrateEvaluationDatabase } from '../src/sqlite.ts'
 import { defaultAttentionTuningParameters, type AttentionTuningParameters } from '../src/attention-tuning.ts'
 import {
+  ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL,
   ATTENTION_OWNER_QUESTION_SOURCE_ID,
   attentionOwnerQuestionIdempotencyKey,
   attentionOwnerQuestionText,
@@ -33,6 +35,12 @@ type Fact = Record<string, unknown> & { outboxId: string; auditSequence: number 
 type Enqueue = { sourceId: string; ownerRouteId: string; scope: Record<string, unknown>; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: unknown; withdrawable?: boolean; withdrawalHandle?: string }
 type Withdrawal = { protocol: string; authority: string; sourceId: string; isWithdrawn(idempotencyKey: string): boolean }
 type WithdrawalEntry = { handle: string; registration: Withdrawal }
+type ReplyOutcome = 'applied' | 'ignored' | 'transient'
+type ReplyRegistration = {
+  protocol: string; authority: string; sourceId: string; idempotencyKeyPrefix: string
+  consume(input: OwnerQuestionReplyInput): ReplyOutcome
+}
+type ReplyEntry = { registration: ReplyRegistration; unregister: () => void }
 
 const withdrawalKey = (authority: string, sourceId: string) => `${authority}\u0000${sourceId}`
 
@@ -47,6 +55,7 @@ class FakeDelivery {
   readonly enqueued: Enqueue[] = []
   readonly outbox = new Map<string, { id: string; intent: string; sourceId: string; authority: string | undefined; status: string; withdrawable: boolean }>()
   readonly withdrawals = new Map<string, WithdrawalEntry>()
+  readonly replyConsumers = new Map<string, ReplyEntry>()
   ctx: Context | undefined
   sequence = 0
   handles = 0
@@ -54,9 +63,51 @@ class FakeDelivery {
   failEnqueue = false
   failInspect = false
   failRegister = false
+  failReplyRegister = false
   vouched(registration: Withdrawal): boolean {
     const owner = this.ctx?.get(registration.authority as never, false) as unknown as { ownsOwnerNotificationWithdrawal?: (value: object) => boolean } | undefined
     return owner?.ownsOwnerNotificationWithdrawal?.(registration) === true
+  }
+  replyVouched(registration: ReplyRegistration): boolean {
+    const owner = this.ctx?.get(registration.authority as never, false) as unknown as { ownsOwnerNotificationReply?: (value: object) => boolean } | undefined
+    return owner?.ownsOwnerNotificationReply?.(registration) === true
+  }
+  registerOwnerNotificationReply(registration: ReplyRegistration) {
+    if (this.failReplyRegister) throw new Error('reply registry unavailable')
+    if (registration.protocol !== ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL || !this.replyVouched(registration)) throw new Error('not owned by its authority')
+    const key = withdrawalKey(registration.authority, registration.sourceId)
+    const existing = this.replyConsumers.get(key)
+    if (existing !== undefined && this.replyVouched(existing.registration)) throw new Error('already registered')
+    let live = true
+    const entry: ReplyEntry = { registration, unregister: () => {
+      if (!live) return
+      live = false
+      if (this.replyConsumers.get(key) === entry) this.replyConsumers.delete(key)
+    } }
+    this.replyConsumers.set(key, entry)
+    return { unregister: entry.unregister }
+  }
+  /** The live Evaluation reply consumer, as Delivery would find it. */
+  replyRegistration(): ReplyRegistration | undefined {
+    const entry = this.replyConsumers.get(withdrawalKey('assistantEvaluation', ATTENTION_OWNER_QUESTION_SOURCE_ID))
+    return entry !== undefined && this.replyVouched(entry.registration) ? entry.registration : undefined
+  }
+  /**
+   * Simulate the Delivery side of a genuine reply to the queued question: the
+   * unique Outbox must already be accepted/delivered/read. Returns
+   * 'not-registered' when no live consumer exists, so a test can assert the
+   * opt-in really is off.
+   */
+  reply(questionId: string, text: string): ReplyOutcome | 'not-registered' {
+    const key = attentionOwnerQuestionIdempotencyKey(questionId)
+    const registration = this.replyRegistration()
+    const record = this.outbox.get(key)
+    if (registration === undefined || record === undefined || !['accepted', 'delivered', 'read'].includes(record.status)) return 'not-registered'
+    return registration.consume({
+      inboxId: `inbox-${questionId.slice(0, 8)}`, envelopeHash: 'e'.repeat(64), outboxId: record.id,
+      providerMessageId: `provider-${record.id}`, idempotencyKey: key, sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
+      principalId: owner.principalId, text, receivedAt: 1,
+    })
   }
   registerOwnerNotificationWithdrawal(registration: Withdrawal) {
     if (this.failRegister) throw new Error('delivery registry unavailable')
@@ -195,7 +246,7 @@ function crashEnqueue(f: ReturnType<typeof setup>, delivery: FakeDelivery, quest
   const question = f.evaluation.attentionLooseningStatus({ scope, cohort }).questions[0]!.question
   return delivery.enqueueOwnerNotification({ sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID, ownerRouteId: owner.ownerRouteId,
     scope: { principalId: owner.principalId, principalRecordId: 'principal-record-1', principalVersion: 3, ...scope }, sessionId: 'session-1',
-    idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), text: attentionOwnerQuestionText(question, scope),
+    idempotencyKey: attentionOwnerQuestionIdempotencyKey(questionId), text: attentionOwnerQuestionText(question, scope, { repliesRead: true }),
     expiresAt: question.createdAt + ttl, attention: { purpose: 'result' }, withdrawable: true,
     withdrawalHandle: delivery.withdrawals.get(withdrawalKey('assistantEvaluation', ATTENTION_OWNER_QUESTION_SOURCE_ID))!.handle })
 }
@@ -226,8 +277,11 @@ describe('attention owner question delivery', () => {
     const questionId = withQuestion(f)
     expect(f.deliver()).toEqual([])
     expect(f.delivery.enqueued).toEqual([])
+    expect(f.delivery.replyConsumers.size).toBe(0)
     expect(f.status()).toEqual({ enabled: false, deliveries: [], replies: [] })
     expect(f.evaluation.recordAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'decline' }))
+      .toEqual({ status: 'rejected', reason: 'delivery-disabled' })
+    expect(f.evaluation.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'authorize-once' }))
       .toEqual({ status: 'rejected', reason: 'delivery-disabled' })
     expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).questions[0]!.question).toMatchObject({ delivery: 'not-sent' })
   })
@@ -254,7 +308,7 @@ describe('attention owner question delivery', () => {
     })
     const question = f.evaluation.attentionLooseningStatus({ scope, cohort }).questions[0]!.question
     expect(call!.expiresAt).toBe(question.createdAt + day)
-    expect(call!.text).toBe(attentionOwnerQuestionText(question, scope))
+    expect(call!.text).toBe(attentionOwnerQuestionText(question, scope, { repliesRead: true }))
     expect(f.deliver()).toEqual([])
     expect(f.delivery.enqueued).toHaveLength(1)
     expect(f.status()).toMatchObject({ enabled: true, deliveries: [{ questionId, status: 'queued', outboxId: 'outbox-1' }], replies: [] })
@@ -267,14 +321,17 @@ describe('attention owner question delivery', () => {
     const text = f.delivery.enqueued[0]!.text
     expect(text).toContain('interruption cost offset from 10 to 0 (1 step)')
     expect(text).toContain('no owner grant is active')
-    // No inbound reply parsing exists, so the notice must not invite a reply as the way to authorize.
-    expect(text).toContain('record an owner grant through the host configuration')
-    expect(text).toContain('Replies to this message are not read')
-    expect(text).not.toMatch(/authorize once|reply "/iu)
+    // With the slice-5 reply loop on, the notice invites the exact reply it reads.
+    expect(text).toContain('reply exactly "authorize-once"')
+    expect(text).toContain('To refuse it, reply "decline"')
     expect(text).not.toMatch(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b[0-9a-f]{32,}\b/iu)
     expect(text).not.toMatch(/配置估值|净收益|预期收益|成功系数|执行成本|打扰成本|潜在损失|\butility\b/iu)
     expect(text.split(/\s+/u).length).toBeLessThan(400)
     expect(text.length).toBeLessThan(2_400)
+    // Without the reply loop the historical "replies are not read" text is byte-identical.
+    const question = f.evaluation.attentionLooseningStatus({ scope, cohort }).questions[0]!.question
+    expect(attentionOwnerQuestionText(question, scope)).toContain('Replies to this message are not read')
+    expect(attentionOwnerQuestionText(question, scope)).not.toContain('authorize-once')
   })
 
   test('never resends across a restart, and a crash before the ledger write adopts the same Outbox record', async () => {
@@ -605,5 +662,140 @@ describe('attention owner question delivery', () => {
       database.close()
       expect(() => setup({ path }), drift).toThrow(expect.objectContaining({ code: 'schema-drift' }))
     }
+  })
+})
+
+/**
+ * Slice 5: the authenticated owner reply loop. The fake Delivery below only
+ * exercises the Evaluation side of the protocol; real provider matching and
+ * Inbox transitions are covered in assistant-delivery's own tests.
+ */
+describe('attention owner question reply loop', () => {
+  function quoted(overrides: { enabled?: boolean; path?: string; delivery?: FakeDelivery; clock?: { now: number } } = {}) {
+    const f = setup(overrides)
+    const questionId = withQuestion(f)
+    f.deliver()
+    f.delivery.sendDue()
+    return { f, questionId }
+  }
+
+  test('authorize-once records the reply, creates exactly the questioned one-time grant, then the next tick adopts', () => {
+    const { f, questionId } = quoted()
+    expect(f.delivery.replyRegistration()).toBeDefined()
+    expect(f.evaluation.ownsOwnerNotificationReply(f.delivery.replyRegistration()!)).toBe(true)
+    expect(f.delivery.reply(questionId, 'authorize-once')).toBe('applied')
+    expect(f.status().replies).toMatchObject([{ questionId, choice: 'authorize-once', repliedAt: f.clock.now }])
+    const after = f.evaluation.attentionLooseningStatus({ scope, cohort })
+    // Deferred state: no decision yet, the proposal is still adoptable.
+    expect(after.proposals[0]!.decision).toBeNull()
+    expect(after.grant).toMatchObject({
+      grant: {
+        grantId: `owner-question:${questionId}`, maxAdoptions: 1, maxStepsPerAdoption: 1,
+        expiresAt: f.clock.now + day,
+      },
+      used: 0, remaining: 1,
+    })
+    expect(after.grant!.grant.lowerBound).toEqual(tuned({}))
+    expect(after.grant!.grant.upperBound).toEqual(tuned({ interruptionCostDelta: 10 }))
+    // Adoption still requires the independent holdout replay on the next tick.
+    expect(f.sync()).toMatchObject([{ result: {
+      action: 'loosening-adopted', version: 2, grantId: `owner-question:${questionId}`,
+    } }])
+    expect(f.evaluation.currentAttentionTuning({ scope, cohort })).toMatchObject({ version: 2 })
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort })).toMatchObject({
+      grant: { used: 1, remaining: 0 },
+      proposals: [{ decision: { decision: 'adopted', version: 2, grantId: `owner-question:${questionId}` } }],
+    })
+  })
+
+  test('a duplicate authorize-once reply is idempotent and never creates a second grant', () => {
+    const { f, questionId } = quoted()
+    expect(f.delivery.reply(questionId, 'authorize-once')).toBe('applied')
+    expect(f.delivery.reply(questionId, 'authorize-once')).toBe('applied')
+    expect(f.status().replies).toHaveLength(1)
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toMatchObject({ used: 0, remaining: 1 })
+    expect(f.sync()).toMatchObject([{ result: { action: 'loosening-adopted', version: 2 } }])
+    // A later replay after adoption changes nothing.
+    expect(f.evaluation.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'authorize-once' }))
+      .toMatchObject({ status: 'applied', adoption: 'proposal-terminal', grantId: null })
+  })
+
+  test('decline closes the proposal without a grant and reopens new proposals', () => {
+    const { f, questionId } = quoted()
+    expect(f.delivery.reply(questionId, '拒绝')).toBe('applied')
+    expect(f.status().replies).toMatchObject([{ questionId, choice: 'decline' }])
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toBeNull()
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).proposals[0]!.decision)
+      .toMatchObject({ decision: 'rejected', reason: 'owner-declined', version: null })
+    expect(f.sync()).toMatchObject([{ result: { action: 'no-op' } }])
+    expect(f.evaluation.currentAttentionTuning({ scope, cohort })).toMatchObject({ version: 1 })
+    // The recorded decline closes the question, so a new loosening may be sealed.
+    expect(f.request(tuned({}))).toMatchObject({ status: 'proposed' })
+  })
+
+  test('English and Chinese synonyms apply; any other text is ordinary input', () => {
+    const { f, questionId } = quoted()
+    expect(f.delivery.reply(questionId, ' maybe ')).toBe('ignored')
+    expect(f.status().replies).toEqual([])
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toBeNull()
+    expect(f.delivery.reply(questionId, '同意一次')).toBe('applied')
+    expect(f.status().replies).toMatchObject([{ questionId, choice: 'authorize-once' }])
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toMatchObject({ remaining: 1 })
+  })
+
+  test('an expired question consumes the reply but records nothing and closes the proposal', () => {
+    const { f, questionId } = quoted()
+    f.clock.now += day
+    expect(f.delivery.reply(questionId, 'authorize-once')).toBe('applied')
+    expect(f.status().replies).toEqual([])
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toBeNull()
+    const proposalId = f.evaluation.attentionLooseningStatus({ scope, cohort }).proposals[0]!.proposalId
+    expect(f.sync()).toMatchObject([{ result: { action: 'loosening-rejected', reason: 'owner-question-expired', proposalId } }])
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).proposals[0]!.decision)
+      .toMatchObject({ decision: 'rejected', reason: 'owner-question-expired' })
+  })
+
+  test('the public record-only seam never grants; the apply path is the only effectful one', () => {
+    const { f, questionId } = quoted()
+    expect(f.evaluation.recordAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'authorize-once' }))
+      .toMatchObject({ status: 'recorded' })
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toBeNull()
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).proposals[0]!.decision).toBeNull()
+    // Applying the same exact reply afterwards creates the one-time grant.
+    expect(f.evaluation.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'authorize-once' }))
+      .toMatchObject({ status: 'applied', adoption: 'deferred', grantId: `owner-question:${questionId}` })
+    expect(f.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toMatchObject({ remaining: 1 })
+  })
+
+  test('a proposal-terminal question recorded before the loop returns the typed result and creates no grant', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-eval-owner-q-slice5-legacy-')); directories.push(directory)
+    const path = join(directory, 'evaluation.sqlite')
+    const legacy = setup({ path, enabled: false })
+    const questionId = withQuestion(legacy)
+    expect(legacy.evaluation.attentionLooseningStatus({ scope, cohort }).proposals[0]!.decision)
+      .toMatchObject({ decision: 'owner-question' })
+    await legacy.ctx.fiber.restart(); contexts.splice(contexts.indexOf(legacy.ctx), 1)
+    const current = setup({ path, enabled: true })
+    expect(current.evaluation.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice: 'authorize-once' }))
+      .toMatchObject({ status: 'applied', adoption: 'proposal-terminal', grantId: null })
+    expect(current.evaluation.attentionLooseningStatus({ scope, cohort }).grant).toBeNull()
+    expect(current.status().replies).toMatchObject([{ questionId, choice: 'authorize-once' }])
+  })
+
+  test('the reply registration is released on stop and a failed registration never blocks notice delivery', async () => {
+    const { f, questionId } = quoted()
+    expect(f.delivery.replyConsumers.size).toBe(1)
+    expect(f.evaluation.ownsOwnerNotificationReply({ ...f.delivery.replyRegistration()! })).toBe(false)
+    await f.ctx.fiber.restart(); contexts.splice(contexts.indexOf(f.ctx), 1)
+    expect(f.delivery.replyConsumers.size).toBe(0)
+    expect(f.delivery.reply(questionId, 'authorize-once')).toBe('not-registered')
+
+    const delivery = new FakeDelivery()
+    delivery.failReplyRegister = true
+    const g = setup({ delivery })
+    expect(g.warnings.join('\n')).toMatch(/owner-question reply registration failed.*reply registry unavailable/u)
+    const other = withQuestion(g)
+    expect(g.deliver()).toMatchObject([{ result: { action: 'queued', questionId: other } }])
+    expect(delivery.reply(other, 'authorize-once')).toBe('not-registered')
   })
 })

@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { canonicalEvaluationScope, EvaluationStoreError } from './store.js'
+import type {
+  AttentionOwnerQuestionChoice,
+  AttentionOwnerQuestionReplyResult,
+} from './attention-owner-questions.js'
 import type { EvaluationScope, NotificationOutcome } from './types.js'
 
 /**
@@ -98,6 +102,11 @@ export type AttentionLooseningRejection =
   | 'insufficient-basis'
   | 'era-unverifiable'
   | 'holdout-failed'
+  /** Slice 5 deferred state: the owner refused, or the notice TTL elapsed first. */
+  | 'owner-declined'
+  | 'owner-question-expired'
+  /** The owner authorized exactly once, but that grant no longer permits this adoption. */
+  | 'owner-authorization-unusable'
 
 export interface AttentionTuningVersion {
   readonly protocol: typeof ATTENTION_TUNING_PROTOCOL
@@ -232,7 +241,35 @@ export interface AttentionLooseningStatus {
 }
 
 /** Present only when the slice-3 opt-in is on; absent options keep slice-2 behaviour byte for byte. */
-export interface AttentionLooseningOptions { readonly replayWindowMs: number }
+export interface AttentionLooseningOptions {
+  readonly replayWindowMs: number
+  /**
+   * Slice 5 opt-in. When present, an out-of-grant proposal stays pending (no
+   * terminal decision) so an exact owner reply can create a one-time grant
+   * that the next tick independently replays and adopts, or a decline/expiry
+   * can close it. Absent keeps the slice-3/4 terminal owner-question decision.
+   */
+  readonly ownerQuestionReplyLoop?: Readonly<{ noticeTtlMs: number }>
+}
+
+/**
+ * Outcome of applying one exact owner reply to the cohort's latest recorded
+ * question. `deferred` means the one-time grant exists and adoption is left
+ * to the next tuning tick's independent replay; `declined` means the
+ * proposal was closed without adoption; `proposal-terminal` means the
+ * proposal already had an immutable decision (a question recorded before the
+ * reply loop was enabled), so the reply is recorded but nothing can adopt.
+ */
+export type AttentionOwnerQuestionApplyResult =
+  | Readonly<{
+    status: 'applied'
+    questionId: string
+    choice: AttentionOwnerQuestionChoice
+    proposalId: string
+    grantId: string | null
+    adoption: 'deferred' | 'declined' | 'proposal-terminal'
+  }>
+  | Readonly<{ status: 'rejected'; reason: 'delivery-disabled' | 'unknown-question' | 'question-closed' | 'question-expired' | 'reply-conflict' }>
 
 function invalid(message: string): never {
   throw new EvaluationStoreError('invalid-input', `attention tuning: ${message}`)
@@ -501,7 +538,10 @@ export function normalizeAttentionLooseningGrant(input: unknown): AttentionLoose
   }
   return deepFreeze({
     grantId, lowerBound: { ...lowerBound }, upperBound: { ...upperBound },
-    maxStepsPerAdoption: integer('maxStepsPerAdoption', 1, 4),
+    // A sealed proposal moves one parameter by whole grid steps; the widest
+    // fixed grid (interruptionCostDelta 0..100 step 10) allows 10. Capping
+    // grants lower would make an exact one-time grant impossible to state.
+    maxStepsPerAdoption: integer('maxStepsPerAdoption', 1, 10),
     maxAdoptions: integer('maxAdoptions', 1, 10),
     expiresAt: integer('expiresAt', 0, Number.MAX_SAFE_INTEGER),
   })
@@ -568,6 +608,17 @@ const negativeOutcomes: readonly NotificationOutcome[] = ['rejected', 'expired-u
 const originRoute = `coalesce(json_extract(r.record_json, '$.route.kind'), 'origin')='origin'`
 
 /**
+ * Structural port to the slice-4 owner-question ledger. `AttentionTuningLedger`
+ * uses it only for the slice-5 reply loop: question openness and the atomic
+ * reply insert that must commit with the grant or proposal decision.
+ */
+export interface AttentionOwnerQuestionLedgerPort {
+  reply(questionId: string): Readonly<{ choice: AttentionOwnerQuestionChoice; repliedAt: number }> | undefined
+  recordReplyInTransaction(scope: EvaluationScope, cohort: AttentionCohort, questionId: string, choiceInput: unknown,
+    open: boolean, expired: boolean): AttentionOwnerQuestionReplyResult
+}
+
+/**
  * Durable ledger over the same Evaluation database as the notification canon.
  * All decisions recompute inside BEGIN IMMEDIATE so concurrent ticks or a
  * restart mid-observation converge on one head.
@@ -575,10 +626,12 @@ const originRoute = `coalesce(json_extract(r.record_json, '$.route.kind'), 'orig
 export class AttentionTuningLedger {
   readonly #database: DatabaseSync
   readonly #now: () => number
+  readonly #questions: AttentionOwnerQuestionLedgerPort | undefined
 
-  constructor(database: DatabaseSync, now: () => number) {
+  constructor(database: DatabaseSync, now: () => number, questions?: AttentionOwnerQuestionLedgerPort) {
     this.#database = database
     this.#now = now
+    this.#questions = questions
   }
 
   #transaction<T>(fn: () => T): T {
@@ -843,7 +896,7 @@ export class AttentionTuningLedger {
         // A sealed loosening proposal is judged before any new tightening so
         // its parent cannot move underneath it.
         const pending = this.#pendingProposal(scopeKey, cohort)
-        if (pending !== undefined) return this.#decideLoosening(scope, scopeKey, cohort, head, pending, policy, options.observationMs, now)
+        if (pending !== undefined) return this.#decideLoosening(scope, scopeKey, cohort, head, pending, policy, options.loosening, options.observationMs, now)
       }
       const current = this.#current(scopeKey, cohort)
       // Evidence is only counted since the last change, so an adopted or
@@ -944,27 +997,36 @@ export class AttentionTuningLedger {
   }
 
   /**
-   * The latest owner question stays open until a different grant is recorded:
-   * it names the latest grant row it was asked under (grant ids are unique
-   * per cohort), so only a new owner authorization reopens the path.
+   * A recorded owner reply closes the question even though the grant row it
+   * was asked under is unchanged; only a different grant or a reply closes
+   * it, and the latest question stays open until then.
    */
   #openQuestion(scopeKey: string, cohort: AttentionCohort): boolean {
-    const question = this.#database.prepare(`SELECT question_json FROM evaluation_attention_owner_questions
+    const question = this.#database.prepare(`SELECT question_id, question_json FROM evaluation_attention_owner_questions
       WHERE scope_key=? AND lane=? AND source_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
-      .get(scopeKey, cohort.lane, cohort.sourceId) as { question_json: string } | undefined
+      .get(scopeKey, cohort.lane, cohort.sourceId) as { question_id: string; question_json: string } | undefined
     if (question === undefined) return false
+    let parsed: AttentionOwnerQuestion
     try {
-      return (JSON.parse(question.question_json) as AttentionOwnerQuestion).grantId === this.#latestGrantId(scopeKey, cohort)
+      parsed = JSON.parse(question.question_json) as AttentionOwnerQuestion
     } catch {
       return true
     }
+    return parsed.grantId === this.#latestGrantId(scopeKey, cohort) && !this.#replied(question.question_id)
+  }
+
+  /** True once any reply (authorize or decline) is recorded for this exact question. */
+  #replied(questionId: string): boolean {
+    return this.#database.prepare('SELECT 1 AS present FROM evaluation_attention_owner_question_replies WHERE question_id=?')
+      .get(questionId) !== undefined
   }
 
   /**
    * WP22 slice 4: the latest owner question of a cohort, verified against its
-   * content id, and whether it is still open (same rule as `#openQuestion`).
-   * Older questions are always closed. A row whose body no longer hashes to
-   * its id is reported as `unverifiable` and must never be delivered.
+   * content id, and whether it is still open (same rule as `#openQuestion`,
+   * including the slice-5 rule that any recorded reply closes it). Older
+   * questions are always closed. A row whose body no longer hashes to its id
+   * is reported as `unverifiable` and must never be delivered.
    */
   latestOwnerQuestion(scopeInput: EvaluationScope, cohortInput: AttentionCohort):
     Readonly<{ questionId: string; question: AttentionOwnerQuestion; open: boolean }> | 'unverifiable' | undefined {
@@ -978,13 +1040,88 @@ export class AttentionTuningLedger {
     try { question = JSON.parse(row.question_json) as AttentionOwnerQuestion } catch { return 'unverifiable' }
     if (sha256(question) !== row.question_id || question.protocol !== ATTENTION_OWNER_QUESTION_PROTOCOL
       || question.scopeKey !== scopeKey || question.cohort?.lane !== cohort.lane || question.cohort?.sourceId !== cohort.sourceId) return 'unverifiable'
-    return deepFreeze({ questionId: row.question_id, question, open: question.grantId === this.#latestGrantId(scopeKey, cohort) })
+    return deepFreeze({ questionId: row.question_id, question,
+      open: question.grantId === this.#latestGrantId(scopeKey, cohort) && !this.#replied(row.question_id) })
   }
 
   #latestGrantId(scopeKey: string, cohort: AttentionCohort): string | null {
     return (this.#database.prepare(`SELECT grant_id FROM evaluation_attention_loosening_grants
       WHERE scope_key=? AND lane=? AND source_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(scopeKey, cohort.lane, cohort.sourceId) as { grant_id: string } | undefined)?.grant_id ?? null
+  }
+
+  /**
+   * Slice 5 evidence-backed apply path for one exact owner reply. Inside one
+   * transaction it verifies the cohort's latest question against its content
+   * id, records the reply, and then:
+   * - `decline` writes the proposal's one terminal `owner-declined` decision;
+   * - `authorize-once` creates a bounded one-time grant whose bounds are
+   *   exactly the questioned proposal's parent/candidate, charged once, and
+   *   leaves adoption to the next tuning tick's independent holdout replay;
+   * - a proposal that already has a decision (a question recorded before the
+   *   reply loop was enabled) returns `proposal-terminal` and changes nothing.
+   * Record-only callers keep using `AttentionOwnerQuestionLedger.recordReply`.
+   */
+  applyOwnerQuestionReply(scopeInput: EvaluationScope, cohortInput: AttentionCohort, questionIdInput: string,
+    choiceInput: unknown, options: Readonly<{ noticeTtlMs: number }>): AttentionOwnerQuestionApplyResult {
+    const { scope, scopeKey } = canonicalEvaluationScope(scopeInput)
+    const cohort = normalizeAttentionCohort(cohortInput)
+    if (typeof questionIdInput !== 'string' || !/^[a-f0-9]{64}$/u.test(questionIdInput)) invalid('question id is not recognised')
+    const choice: AttentionOwnerQuestionChoice | undefined = choiceInput === 'authorize-once' || choiceInput === 'decline'
+      ? choiceInput : undefined
+    if (choice === undefined) invalid('choice is not recognised')
+    if (!Number.isSafeInteger(options.noticeTtlMs) || options.noticeTtlMs < 1) invalid('owner question notice TTL is invalid')
+    const questions = this.#questions
+    if (questions === undefined) invalid('owner question ledger is unavailable')
+    return this.#transaction(() => {
+      const now = this.#now()
+      const latest = this.latestOwnerQuestion(scope, cohort)
+      if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionIdInput) {
+        return Object.freeze({ status: 'rejected' as const, reason: 'unknown-question' as const })
+      }
+      const question = latest.question
+      const questionId = latest.questionId
+      const expired = now >= question.createdAt + options.noticeTtlMs
+      const reply = questions.recordReplyInTransaction(scope, cohort, questionId, choice, latest.open, expired)
+      if (reply.status === 'rejected') return reply
+      const decided = this.#database.prepare('SELECT 1 AS present FROM evaluation_attention_loosening_decisions WHERE proposal_id=?')
+        .get(question.proposalId) !== undefined
+      if (decided) {
+        return Object.freeze({ status: 'applied' as const, questionId: questionId, choice,
+          proposalId: question.proposalId, grantId: null, adoption: 'proposal-terminal' as const })
+      }
+      if (choice === 'decline') {
+        const version = this.#current(scopeKey, cohort).version
+        this.#decision(scopeKey, cohort, question.proposalId, 'rejected', 'owner-declined', null, null, question.replay, now)
+        this.#event(scopeKey, cohort, 'request-rejected', version, version,
+          'owner-declined', { proposalId: question.proposalId, questionId: questionId, choice },
+          `owner-question:${questionId}`, now)
+        return Object.freeze({ status: 'applied' as const, questionId: questionId, choice,
+          proposalId: question.proposalId, grantId: null, adoption: 'declined' as const })
+      }
+      // Exactly the questioned proposal: parent as the tightest start, its
+      // candidate as the loosest end, one adoption, the proposal's step size.
+      const grant = normalizeAttentionLooseningGrant({
+        grantId: `owner-question:${questionId}`,
+        lowerBound: { ...question.candidate }, upperBound: { ...question.parent },
+        maxStepsPerAdoption: question.steps, maxAdoptions: 1, expiresAt: now + options.noticeTtlMs,
+      })
+      const digest = this.#grantDigest(scopeKey, cohort, grant)
+      const existing = this.#database.prepare(`SELECT digest FROM evaluation_attention_loosening_grants
+        WHERE scope_key=? AND lane=? AND source_id=? AND grant_id=?`)
+        .get(scopeKey, cohort.lane, cohort.sourceId, grant.grantId) as { digest: string } | undefined
+      if (existing === undefined) {
+        this.#database.prepare(`INSERT INTO evaluation_attention_loosening_grants
+          (scope_key, lane, source_id, grant_id, grant_json, digest, created_at) VALUES (?,?,?,?,?,?,?)`)
+          .run(scopeKey, cohort.lane, cohort.sourceId, grant.grantId, stable(grant), digest, now)
+      } else if (existing.digest !== digest) {
+        // Rolls the recorded reply back with this transaction; never leaves an
+        // authorization pointing at a grant id it did not create.
+        invalid('owner question grant conflicts with an existing grant')
+      }
+      return Object.freeze({ status: 'applied' as const, questionId: questionId, choice,
+        proposalId: question.proposalId, grantId: grant.grantId, adoption: 'deferred' as const })
+    })
   }
 
   #verifiedProposal(row: ProposalRow, scopeKey: string, cohort: AttentionCohort): AttentionLooseningProposal | undefined {
@@ -1059,7 +1196,7 @@ export class AttentionTuningLedger {
    * is one immutable decision row plus a schema-15 tuning event.
    */
   #decideLoosening(scope: EvaluationScope, scopeKey: string, cohort: AttentionCohort, head: HeadRow | undefined, row: ProposalRow,
-    policy: AttentionTuningPolicy, observationMs: number, now: number): AttentionTuningTickAction {
+    policy: AttentionTuningPolicy, loosening: AttentionLooseningOptions, observationMs: number, now: number): AttentionTuningTickAction {
     const proposalId = row.proposal_id
     const current = this.#current(scopeKey, cohort)
     const reject = (reason: AttentionLooseningRejection, replay: AttentionReplaySummary | null): AttentionTuningTickAction => {
@@ -1093,6 +1230,47 @@ export class AttentionTuningLedger {
       : attentionGrantExceeded(grant, grant === undefined ? 0 : this.#grantUsed(scopeKey, cohort, grant.grantId),
         proposal.parent, proposal.candidate, proposal.steps, now)
     if (exceeded.length > 0 || grant === undefined) {
+      const replyLoop = loosening.ownerQuestionReplyLoop
+      if (replyLoop !== undefined) {
+        const existing = this.#ownerQuestionForProposal(proposalId, scopeKey, cohort)
+        if (existing === 'unverifiable') return reject('proposal-unverifiable', replay)
+        if (existing !== undefined) {
+          // Slice 5 deferred state: the proposal stays undecided while the
+          // question is open, so the next tick can still adopt it. A terminal
+          // decision is written only on decline, unusable authorization or
+          // notice TTL expiry, never on first sight. Its event uses the
+          // question-scoped key because the question-created event already
+          // holds the proposal-scoped key.
+          const terminate = (reason: AttentionLooseningRejection): AttentionTuningTickAction => {
+            this.#decision(scopeKey, cohort, proposalId, 'rejected', reason, null, null, replay, now)
+            this.#event(scopeKey, cohort, 'request-rejected', current.version, current.version, reason,
+              { proposalId, questionId: existing.questionId, replay }, `owner-question:${existing.questionId}`, now)
+            return Object.freeze({ action: 'loosening-rejected' as const, reason, proposalId })
+          }
+          const reply = this.#questions?.reply(existing.questionId)
+          if (reply?.choice === 'decline') return terminate('owner-declined')
+          if (reply?.choice === 'authorize-once') return terminate('owner-authorization-unusable')
+          if (now >= existing.question.createdAt + replyLoop.noticeTtlMs) return terminate('owner-question-expired')
+          return deepFreeze({ action: 'owner-question' as const, questionId: existing.questionId, proposalId, exceeded: [...exceeded] })
+        }
+        const askedUnder = this.#latestGrantId(scopeKey, cohort)
+        const body: AttentionOwnerQuestion = {
+          protocol: ATTENTION_OWNER_QUESTION_PROTOCOL, kind: 'attention-loosening-authorization', scopeKey,
+          cohort: { lane: cohort.lane, sourceId: cohort.sourceId }, proposalId,
+          parentVersion: proposal.parentVersion, parentDigest: proposal.parentDigest, parent: proposal.parent, candidate: proposal.candidate,
+          change: proposal.change, steps: proposal.steps, replay, exceeded: [...exceeded], grantId: askedUnder,
+          choices: ['authorize-once', 'decline'], delivery: 'not-sent', createdAt: now,
+        }
+        const questionId = sha256(body)
+        this.#database.prepare(`INSERT INTO evaluation_attention_owner_questions
+          (question_id, proposal_id, scope_key, lane, source_id, question_json, created_at) VALUES (?,?,?,?,?,?,?)`)
+          .run(questionId, proposalId, scopeKey, cohort.lane, cohort.sourceId, stable(body), now)
+        // No decision row: the deferred proposal remains pending until the
+        // reply or TTL closes it, so a one-time grant can still adopt it.
+        this.#event(scopeKey, cohort, 'request-rejected', current.version, current.version, 'loosening-requires-owner',
+          { proposalId, questionId, exceeded }, `loosening:${proposalId}`, now)
+        return deepFreeze({ action: 'owner-question' as const, questionId, proposalId, exceeded: [...exceeded] })
+      }
       const askedUnder = this.#latestGrantId(scopeKey, cohort)
       const body: AttentionOwnerQuestion = {
         protocol: ATTENTION_OWNER_QUESTION_PROTOCOL, kind: 'attention-loosening-authorization', scopeKey,
@@ -1114,6 +1292,24 @@ export class AttentionTuningLedger {
       proposal.basis.stats, 'request', observationMs, now, { proposalId, grantId: grant.grantId })
     this.#decision(scopeKey, cohort, proposalId, 'adopted', 'holdout-accepted', grant.grantId, version, replay, now)
     return deepFreeze({ action: 'loosening-adopted' as const, version, change: { ...proposal.change }, proposalId, grantId: grant.grantId })
+  }
+
+  /** One immutable question row for a proposal, verified against its content id. */
+  #ownerQuestionForProposal(proposalId: string, scopeKey: string, cohort: AttentionCohort):
+    Readonly<{ questionId: string; question: AttentionOwnerQuestion }> | 'unverifiable' | undefined {
+    const row = this.#database.prepare(`SELECT question_id, question_json FROM evaluation_attention_owner_questions
+      WHERE proposal_id=? AND scope_key=? AND lane=? AND source_id=?`)
+      .get(proposalId, scopeKey, cohort.lane, cohort.sourceId) as { question_id: string; question_json: string } | undefined
+    if (row === undefined) return undefined
+    try {
+      const question = JSON.parse(row.question_json) as AttentionOwnerQuestion
+      if (sha256(question) !== row.question_id || question.protocol !== ATTENTION_OWNER_QUESTION_PROTOCOL
+        || question.proposalId !== proposalId || question.scopeKey !== scopeKey
+        || question.cohort?.lane !== cohort.lane || question.cohort?.sourceId !== cohort.sourceId) return 'unverifiable'
+      return deepFreeze({ questionId: row.question_id, question })
+    } catch {
+      return 'unverifiable'
+    }
   }
 
   /**

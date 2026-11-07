@@ -154,6 +154,10 @@ describe('pure loosening replay', () => {
     expect(() => normalizeAttentionLooseningGrant({ ...grant, lowerBound: tightest, upperBound: tuned({}) })).toThrow(/at least as tight/)
     expect(() => normalizeAttentionLooseningGrant({ ...grant, lowerBound: tuned({ interruptionCostDelta: 5 }) })).toThrow(/grid/)
     expect(() => normalizeAttentionLooseningGrant({ ...grant, maxAdoptions: 11 })).toThrow(/maxAdoptions/)
+    // A one-time grant must be able to state any single-parameter proposal on
+    // the widest fixed grid (interruptionCostDelta moves at most 10 steps).
+    expect(normalizeAttentionLooseningGrant({ ...grant, maxStepsPerAdoption: 10 })).toMatchObject({ maxStepsPerAdoption: 10 })
+    expect(() => normalizeAttentionLooseningGrant({ ...grant, maxStepsPerAdoption: 11 })).toThrow(/maxStepsPerAdoption/)
     const parent = tuned({ interruptionCostDelta: 30 })
     expect(attentionGrantExceeded(grant, 0, parent, tuned({ interruptionCostDelta: 20 }), 1, 50)).toEqual([])
     expect(attentionGrantExceeded(undefined, 0, parent, tuned({ interruptionCostDelta: 20 }), 1, 50)).toEqual(['no-grant'])

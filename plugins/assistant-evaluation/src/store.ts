@@ -587,8 +587,10 @@ export class EvaluationStore {
     this.#database = openEvaluationDatabase(options.path)
     this.#now = options.now ?? Date.now
     this.notifications = new NotificationOutcomeLedger(this.#database, this.#now)
-    this.attention = new AttentionTuningLedger(this.#database, this.#now)
     this.attentionQuestions = new AttentionOwnerQuestionLedger(this.#database, this.#now)
+    // The tuning ledger reads replies and records them atomically with a grant
+    // or a proposal decision (slice 5); all ledgers share one database handle.
+    this.attention = new AttentionTuningLedger(this.#database, this.#now, this.attentionQuestions)
     this.#maxQueryLimit = options.maxQueryLimit ?? 100
     this.#maxSituationBytes = options.maxSituationBytes ?? 200
     this.#maxMetricsBytes = options.maxMetricsBytes ?? 4_096

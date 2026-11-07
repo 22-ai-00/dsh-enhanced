@@ -519,6 +519,12 @@ Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始
 
 原生 Web 使用本地适配器将通知标为可读取，并由 `assistant-web-owner` 的会话输入区展示。通知不写入 Session 历史，不触发模型，也不表示目标已完成；`accepted` 不表示用户已阅读。读取沿用固定 Web 主人能力，并再次核验上述边界；不另设消息 `read` Policy。其他渠道复用已有适配器。对于已发生但结果未知的外部发送，重启恢复仅通过适配器查询结果；查到过去已发送不表示再次发送，也不会为重发授予权限。
 
+### 主人通知回复消费者（opt-in，默认无注册）
+
+`registerOwnerNotificationReply` 允许 owner 通知来源的当前 Cordis 槽位注册一个回复消费者。Delivery 只在同时满足以下条件时把一条认证入站**纯文本**回复交给它：`replyToProviderMessageId` 唯一解析到一条 `accepted`/`delivered`/`read` 的 owner 通知（schema 的唯一索引保证；查询仍按最多两行拒绝歧义）；通知元数据带 `dsh.native-notice`、规范来源和 `withdrawalAuthority`，与该消费者注册的 `sourceId` 及幂等键前缀匹配；回复来自当前 active binding、同一会话/主人，且通知入队时冻结的 owner 记录 id/version 仍是当前 owner 行；无附件且 UTF-8 文本不超过 256 字节；外部 `answer-attention-question` Policy 决策为 `allow`。不匹配、Policy 拒绝或消费者返回 `ignored` 时走普通入站路径；`applied` 时 Inbox 标为 `processed`，不再交给 Agent；`transient`（含消费者抛错）保持 `received`/`authorized`，等待 provider 重投或同会话下一条消息触发的 pending 恢复重试。恢复中遇到 `transient` 会停止本轮恢复，较旧的待处理回复仍留在队首。
+
+消费者按 `(authority, sourceId)` 至多一个，注册对象必须由 `authority` 槽位当前服务通过 `ownsOwnerNotificationReply` 亲自担保；槽位换服务后新的担保注册接管，`unregister` 后旧注册立即不再匹配。该接口只读取认证回复并更新 Inbox 状态，不新增发送权限、不调用网络或模型，也不保存回复正文到新表；正文仅在本次回调中交给消费者。已撤回（`dead`）、未发送或 unknown 状态的通知不能被回复匹配，这类回复按普通消息处理；附件、命令、超过 256 字节或无法唯一解析的引用同样不匹配。Evaluation 的 WP22 切片 5 是本接口的当前唯一使用方（精确 `authorize-once`/`decline` 语义见其 README）。
+
 
 ## WorkItems 报告回复交接
 

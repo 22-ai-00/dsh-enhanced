@@ -91,6 +91,11 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `attentionTuningRegressionMarginPpm` | `100000` | 观察期负向率高于采用依据负向率加此余量时回退。 |
 | `attentionTuningObservationMs` | 7 天 | 采用后的观察期，持久化，重启后继续。 |
 | `attentionTuningEvaluationWindowMs` | 7 天 | 提议所用证据的回看窗口（且不早于上一次版本变化）。 |
+| `attentionLooseningEnabled` | `false` | WP22 切片 3：放宽请求的密封留出重放与 owner 一次性授权；要求 `attentionTuningAutoAdopt`。 |
+| `attentionLooseningReplayWindowMs` | 30 天 | 放宽提议冻结的留出重放回看窗口。 |
+| `attentionOwnerQuestionDeliveryEnabled` | `false` | WP22 切片 4/5：最新 owner 问题经 Delivery 至多投递一次，并注册回复消费者把 exact 回复应用到授权/提议；要求 `attentionLooseningEnabled` 与 `attentionOwnerQuestionOwner`。 |
+| `attentionOwnerQuestionOwner` | 无 | 问题投递使用的 owner 路由 id 与外部 principal id。 |
+| `attentionOwnerQuestionNoticeTtlMs` | 1 天 | 未投递问题的过期时间、通知有效期，也是授权回复创建的一次性授权有效期。 |
 
 ## 权限与数据边界
 
@@ -134,6 +139,16 @@ Delivery 事实可带 `route: { kind: 'linked', originBindingId }`（经 owner l
 `reconcileAttentionTuning()` 在通知同步之后运行（同一节流与错误边界），每个 cohort 在一个 `BEGIN IMMEDIATE` 事务内：空闲时提议并采用一步（幂等键绑定父版本、父 digest、scope watermark 与变化），进入观察；观察中若当前版本 digest 校验失败，或观察期内样本足够且负向率高于依据率加余量，则回退到精确父版本（含版本 0 默认值）；正向或持平证据从不触发回退，观察期满记为 `settled`。被回退版本的证据不复用，须重新累积样本。`currentAttentionTuning({ scope, cohort })` 返回经 digest 校验的当前版本，校验失败时沿父链回落到最近可校验版本或默认值；开关关闭时返回 `undefined`。
 
 `requestAttentionTuning({ scope, cohort, parameters })` 是 Host 内部入口（不注册工具）：任何放宽（含与收紧混合）一律拒绝为 `loosening-requires-holdout` 并记录事件；越界、无变化、多于一步、开关关闭或观察中同样被拒绝并记录。合规的单步收紧以 `request` 来源采用并进入同样的观察与回退。`attentionTuningStatus({ scope, cohort })` 只读返回当前版本、全部版本和事件。本切片不实现放宽、留出重放或 owner 结构化问题，不写 Evolution，不触发 Growth。
+
+## owner 问题回复闭环（WP22 切片 5，opt-in）
+
+`attentionOwnerQuestionDeliveryEnabled`（默认关，须同时开 `attentionLooseningEnabled` 并配置 `attentionOwnerQuestionOwner`）同时启用两件事：既有 tick 仍按切片 4 至多投递一次最新问题，并额外向当前 Delivery 注册 `assistantEvaluation` 槽位自证的回复消费者（协议 `assistant-delivery/owner-notification-reply/v1`，来源固定、幂等键前缀 `attention-owner-question:`）。Delivery 只把引用唯一 `accepted`/`delivered`/`read` 通知、来自当前 owner binding/principal、通过外部 `answer-attention-question` Policy 的认证文本回复交给本服务；语音、模型理解或相似措辞都不参与。关闭开关时不注册消费者，问题正文保持切片 4 的“不读取回复”文案，零行为变化。
+
+消费者按通知正文的 `questionId` 逐个 cohort/scope 只匹配该 cohort 的**最新可校验问题**，只接受整句（去空白、ASCII 大小写不敏感）的 `authorize-once` / `decline`：`authorize-once`、`authorize once`、`allow once`、`同意一次`、`授权一次`、`批准一次`；`decline`、`拒绝`、`不同意`、`不用了`。其他文本返回 `ignored`，仍按普通消息交给 Agent；可识别但问题已关闭/过期时回复被消费（Delivery 标记 processed），不会作为授权文字进入 Agent。`applyAttentionOwnerQuestionReply` 是唯一有副作用的 Host 入口：它在一个 `BEGIN IMMEDIATE` 内重验最新问题正文 digest，记录回复，然后对 `decline` 写入该提议唯一的 `owner-declined` 终态，对 `authorize-once` 创建幂等于 `owner-question:<questionId>` 的一次性授权（下界恰为被质疑候选参数、上界恰为其父参数、`maxAdoptions: 1`、步幅等于提议步数、到期为回复时刻加通知 TTL）。`recordAttentionOwnerQuestionReply` 仍是公开的只记录入口，永不创建授权或改变版本。
+
+开启闭环时，超出授权范围的问题不再写切片 3/4 的终态 `owner-question` 决定：提议保持未决（deferred），问题开放期间阻止新的放宽提议，但下一次既有同步 tick 仍会先独立重算留出成员、重放父/候选、核对父版本与授权，只有全部通过才采用并写入唯一 `adopted` 决定；因此 owner 回复本身不等于采用，仍受独立验收。`decline`、通知 TTL 到期或授权不再可用分别以 `owner-declined`、`owner-question-expired`、`owner-authorization-unusable` 关闭提议；没有新的定时器或循环，全部复用既有同步 tick。TTL 之前回复到达但下一次 tick 已过问题 TTL 时，以回复时刻创建的一次性授权仍可在其有效期内采用（到期字段独立于问题时间戳）。
+
+限制：切片 4 之前已记录的实施问题已有不可改的终态决定，开启闭环后对其 `authorize-once` 回复只返回 `applied + adoption: 'proposal-terminal'`，记录回复但不创建授权、不采用；重新请求可产生新的提议。一次性授权绑定精确的父/候选参数（而非提议 id），若该提议因留出漂移被拒，未使用的授权在到期前仍可能覆盖一个父/候选完全相同的新提议——这与 owner 批准的那次变化一致，但不等同于对任意后续提议的授权。回复正文只在 Delivery 回调期间传给本服务，不入库；发给模型的普通回复路径、发送权限、Evolution/Growth 均不受影响。
 
 ## 限制
 

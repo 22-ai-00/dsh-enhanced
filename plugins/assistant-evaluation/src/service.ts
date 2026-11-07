@@ -17,6 +17,7 @@ import {
   type AttentionLooseningGrantResult,
   type AttentionLooseningOptions,
   type AttentionLooseningStatus,
+  type AttentionOwnerQuestionApplyResult,
   type AttentionTuningCurrent,
   type AttentionTuningParameters,
   type AttentionTuningPolicy,
@@ -28,6 +29,8 @@ import {
   ATTENTION_OWNER_QUESTION_SOURCE_ID,
   attentionOwnerQuestionIdempotencyKey,
   attentionOwnerQuestionText,
+  parseAttentionOwnerQuestionChoice,
+  ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL,
   type AttentionOwnerQuestionReplyResult,
   type AttentionOwnerQuestionStatus,
   type AttentionOwnerQuestionTickAction,
@@ -185,6 +188,40 @@ interface OwnerQuestionDeliveryPort {
   registerOwnerNotificationWithdrawal(registration: OwnerQuestionWithdrawalRegistration): { handle: string; unregister(): void }
 }
 
+/**
+ * Slice 5 reply port: Delivery matches an authenticated owner reply to the
+ * one delivered owner notice it quotes and hands it to the live service in
+ * the registration's authority slot. Delivery vouches the exact object via
+ * `ownsOwnerNotificationReply`; `consume` runs synchronously and returns
+ * `applied` (Inbox processed), `ignored` (fall through as ordinary input) or
+ * `transient` (Inbox stays pending and the reply is retried).
+ */
+interface OwnerQuestionReplyPort {
+  registerOwnerNotificationReply(registration: OwnerQuestionReplyRegistration): { unregister(): void }
+}
+
+export interface OwnerQuestionReplyInput {
+  readonly inboxId: string
+  readonly envelopeHash: string
+  readonly outboxId: string
+  readonly providerMessageId: string
+  readonly idempotencyKey: string
+  readonly sourceId: string
+  readonly principalId: string
+  readonly text: string
+  readonly receivedAt: number
+}
+
+export type OwnerQuestionReplyOutcome = 'applied' | 'ignored' | 'transient'
+
+export interface OwnerQuestionReplyRegistration {
+  readonly protocol: typeof ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL
+  readonly authority: 'assistantEvaluation'
+  readonly sourceId: string
+  readonly idempotencyKeyPrefix: string
+  consume(input: OwnerQuestionReplyInput): OwnerQuestionReplyOutcome
+}
+
 const OWNER_NOTIFICATION_WITHDRAWAL_PROTOCOL = 'assistant-delivery/owner-notification-withdrawal/v1' as const
 
 interface OwnerQuestionWithdrawalRegistration {
@@ -199,6 +236,11 @@ function isOwnerQuestionDeliveryPort(value: unknown): value is OwnerQuestionDeli
   return typeof port === 'object' && port !== null && typeof port.enqueueOwnerNotification === 'function'
     && typeof port.validateOwnerRoute === 'function' && typeof port.resolveOwnerRoute === 'function'
     && typeof port.inspectOwnerNotification === 'function' && typeof port.registerOwnerNotificationWithdrawal === 'function'
+}
+
+function isOwnerQuestionReplyPort(value: unknown): value is OwnerQuestionReplyPort {
+  const port = value as Partial<OwnerQuestionReplyPort> | null | undefined
+  return typeof port === 'object' && port !== null && typeof port.registerOwnerNotificationReply === 'function'
 }
 
 export const ASSISTANT_EVALUATION_SKILL = `# Personal assistant self-evaluation
@@ -562,6 +604,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
   private ownerQuestionWithdrawal: Readonly<{ source: object; handle: string; dispose: () => void }> | undefined
   private readonly activeOwnerQuestionWithdrawals = new WeakSet<object>()
+  private ownerQuestionReply: Readonly<{ source: object; registration: OwnerQuestionReplyRegistration; dispose: () => void }> | undefined
+  private readonly activeOwnerQuestionReplies = new WeakSet<object>()
   private readonly attentionCohorts: readonly AttentionCohort[]
   private active = true
 
@@ -700,6 +744,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (this.config.attentionOwnerQuestionDeliveryEnabled) {
       this.bindOwnerQuestionWithdrawal(currentDelivery)
       ctx.inject(['assistantDelivery' as never], deliveryCtx => this.bindOwnerQuestionWithdrawal(deliveryCtx.get('assistantDelivery' as never) as unknown))
+      this.bindOwnerQuestionReply(currentDelivery)
+      ctx.inject(['assistantDelivery' as never], deliveryCtx => this.bindOwnerQuestionReply(deliveryCtx.get('assistantDelivery' as never) as unknown))
     }
     const currentVerifier = ctx.get('assistantVerifier' as never) as unknown
     if (isTrustedVerifierEvaluationProducer(currentVerifier)) this.bindVerifierProducer(currentVerifier)
@@ -734,6 +780,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.projectionTimer = undefined
       this.notificationFacts = undefined
       this.ownerQuestionWithdrawal?.dispose()
+      this.ownerQuestionReply?.dispose()
       disposeCurrentProjector?.()
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
@@ -1326,7 +1373,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   }
 
   #looseningOptions(): AttentionLooseningOptions | undefined {
-    return this.config.attentionLooseningEnabled ? Object.freeze({ replayWindowMs: this.config.attentionLooseningReplayWindowMs }) : undefined
+    if (!this.config.attentionLooseningEnabled) return undefined
+    return Object.freeze({
+      replayWindowMs: this.config.attentionLooseningReplayWindowMs,
+      ...(this.config.attentionOwnerQuestionDeliveryEnabled
+        ? { ownerQuestionReplyLoop: Object.freeze({ noticeTtlMs: this.config.attentionOwnerQuestionNoticeTtlMs }) }
+        : {}),
+    })
   }
 
   #attentionCohort(input: unknown): AttentionCohort {
@@ -1469,6 +1522,83 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   }
 
   /**
+   * Register (once per Delivery instance) the slice-5 reply consumer. A
+   * Delivery without the reply port is treated as absent: slice-4 notice
+   * delivery keeps working, only replies are not read. A registration error
+   * only disables replies; it never blocks notice delivery.
+   */
+  private bindOwnerQuestionReply(source: unknown): (() => void) | undefined {
+    if (!this.active || !isOwnerQuestionReplyPort(source)) return undefined
+    if (this.ownerQuestionReply?.source === source) return undefined
+    const registration: OwnerQuestionReplyRegistration = Object.freeze({
+      protocol: ATTENTION_OWNER_QUESTION_REPLY_PROTOCOL,
+      authority: 'assistantEvaluation' as const,
+      sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
+      idempotencyKeyPrefix: attentionOwnerQuestionIdempotencyKey(''),
+      consume: (input: OwnerQuestionReplyInput) => this.#consumeOwnerQuestionReply(input),
+    })
+    this.activeOwnerQuestionReplies.add(registration)
+    let unregister: unknown
+    try {
+      unregister = source.registerOwnerNotificationReply(registration)?.unregister
+    } catch (error) {
+      this.activeOwnerQuestionReplies.delete(registration)
+      this.ctx.logger.warn(`assistant-evaluation: owner-question reply registration failed; replies are not read: ${String(error)}`)
+      return undefined
+    }
+    if (typeof unregister !== 'function') {
+      this.activeOwnerQuestionReplies.delete(registration)
+      this.ctx.logger.warn('assistant-evaluation: owner-question reply registration returned no unregister; replies are not read')
+      return undefined
+    }
+    const release = unregister as () => void
+    this.ownerQuestionReply?.dispose()
+    let live = true
+    const binding = Object.freeze({ source, registration, dispose: () => {
+      if (!live) return
+      live = false
+      this.activeOwnerQuestionReplies.delete(registration)
+      try { release() } catch { /* Delivery already gone */ }
+      if (this.ownerQuestionReply === binding) this.ownerQuestionReply = undefined
+    } })
+    this.ownerQuestionReply = binding
+    return binding.dispose
+  }
+
+  /**
+   * Synchronous Delivery callback for one authenticated reply to an exact
+   * owner-question notice. Only exact whole-phrase choices are accepted; a
+   * recognized choice is consumed even when its question is no longer open,
+   * so a stale "authorize-once" never reaches the Agent. Storage errors are
+   * `transient` and leave Delivery's Inbox pending for a bounded retry.
+   */
+  #consumeOwnerQuestionReply(input: OwnerQuestionReplyInput): OwnerQuestionReplyOutcome {
+    if (!this.active || !this.config.attentionOwnerQuestionDeliveryEnabled) return 'ignored'
+    if (typeof input?.idempotencyKey !== 'string' || typeof input.text !== 'string') return 'ignored'
+    const prefix = attentionOwnerQuestionIdempotencyKey('')
+    if (!input.idempotencyKey.startsWith(prefix)) return 'ignored'
+    const questionId = input.idempotencyKey.slice(prefix.length)
+    const choice = parseAttentionOwnerQuestionChoice(input.text)
+    if (choice === undefined || questionId.length === 0) return 'ignored'
+    try {
+      for (const cohort of this.attentionCohorts) {
+        for (const scope of this.store.attention.scopes(cohort)) {
+          const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
+          if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
+          this.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice })
+          return 'applied'
+        }
+      }
+      // The notice was genuinely issued under this source and key, but the
+      // local ledger no longer holds that exact question: consume the
+      // recognized choice instead of sending it to the Agent.
+      return 'applied'
+    } catch {
+      return 'transient'
+    }
+  }
+
+  /**
    * Send-time answer for one owner-question notice. It stays sendable only
    * while its question is still the cohort's latest, open, unanswered, inside
    * the notice TTL, and not recorded closed/expired. Anything else, including
@@ -1528,6 +1658,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         // Without Delivery no Outbox lookup is possible, so no terminal row is written either.
         if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
         this.bindOwnerQuestionWithdrawal(delivery)
+        // A replaced Delivery instance needs the reply consumer bound as well;
+        // the tick is the existing retry point, so no extra loop is added.
+        this.bindOwnerQuestionReply(delivery)
         // Only queue (or adopt) while this service's own withdrawal check is
         // bound to this exact Delivery instance; otherwise a closed question
         // could be sent unchecked.
@@ -1585,7 +1718,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
             scope: { principalId: owner.principalId, ...principal, workspace: scope.workspace, preset: scope.preset },
             sessionId,
             idempotencyKey,
-            text: attentionOwnerQuestionText(question, scope),
+            text: attentionOwnerQuestionText(question, scope, { repliesRead: true }),
             expiresAt,
             attention: { purpose: 'result' },
             withdrawable: true,
@@ -1608,8 +1741,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
 
   /**
    * Host-internal record-only owner reply to the cohort's latest question.
-   * It never records a grant or changes a tuning version; an owner who
-   * authorizes still records a grant through `grantAttentionLoosening`.
+   * It never records a grant or changes a tuning version, and it is not the
+   * slice-5 apply path; an owner who authorizes uses
+   * `applyAttentionOwnerQuestionReply` (the only path the Delivery reply
+   * consumer calls) or records a host grant through `grantAttentionLoosening`.
    */
   recordAttentionOwnerQuestionReply(input: { scope: EvaluationScope; cohort: AttentionCohort; questionId: string; choice: unknown }): AttentionOwnerQuestionReplyResult {
     this.assertActive()
@@ -1623,6 +1758,24 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const expired = this.store.attentionQuestions.delivery(latest.questionId)?.status === 'expired'
       || this.now() >= latest.question.createdAt + this.config.attentionOwnerQuestionNoticeTtlMs
     return this.store.attentionQuestions.recordReply(input.scope, cohort, latest.questionId, input.choice, latest.open, expired)
+  }
+
+  /**
+   * Slice 5 evidence-backed apply path for one exact owner reply; the
+   * Delivery consumer and Host callers use this instead of the record-only
+   * seam. `authorize-once` records the reply and creates one bounded one-time
+   * grant for exactly the questioned proposal (parent/candidate bounds, the
+   * proposal's step size, one adoption); the next tuning tick still re-runs
+   * the independent holdout replay before adopting. `decline` closes the
+   * proposal. A proposal that already had an immutable decision returns
+   * `proposal-terminal` and nothing adopts.
+   */
+  applyAttentionOwnerQuestionReply(input: { scope: EvaluationScope; cohort: AttentionCohort; questionId: string; choice: unknown }): AttentionOwnerQuestionApplyResult {
+    this.assertActive()
+    const cohort = this.#attentionCohort(input.cohort)
+    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
+    return this.store.attention.applyOwnerQuestionReply(input.scope, cohort, input.questionId, input.choice,
+      { noticeTtlMs: this.config.attentionOwnerQuestionNoticeTtlMs })
   }
 
   /** Per-question delivery decisions and recorded replies for one cohort. */
@@ -1660,6 +1813,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   ownsOwnerNotificationWithdrawal(registration: object): boolean {
     return this.active && typeof registration === 'object' && registration !== null
       && this.activeOwnerQuestionWithdrawals.has(registration)
+  }
+
+  /**
+   * Delivery's slot-anchored proof that the slice-5 reply consumer under the
+   * `assistantEvaluation` authority is this live service's own registration.
+   */
+  ownsOwnerNotificationReply(registration: object): boolean {
+    return this.active && typeof registration === 'object' && registration !== null
+      && this.activeOwnerQuestionReplies.has(registration)
   }
 
   /** Delivery uses the same ownership boundary as Automations. */

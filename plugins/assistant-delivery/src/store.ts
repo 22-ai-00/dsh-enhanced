@@ -3625,6 +3625,36 @@ export class DeliveryStore {
   }
 
   /**
+   * Finish an Inbox without dispatching it to the Agent. Slice-5 owner-question
+   * replies are admitted, applied by their registered consumer, and only then
+   * marked processed. Idempotent for an already-processed Inbox bound to the
+   * same binding; any later lifecycle state is a conflict.
+   */
+  markInboxProcessed(inboxId: string, bindingId: string): InboxRecord {
+    this.assertOpen()
+    const record = this.getInbox(inboxId)
+    const binding = this.getBinding(bindingId)
+    if (record === undefined || binding === undefined || binding.status !== 'active') {
+      throw new DeliveryStoreError('not-found', 'inbox or active binding was not found')
+    }
+    if (conversationHash(record.envelope.conversation) !== conversationHash(binding.conversation)
+      || principalHash(record.envelope.principal) !== principalHash(binding.principal)) {
+      throw new DeliveryStoreError('conflict', 'inbox envelope does not belong to the binding')
+    }
+    if (record.status === 'processed' && record.bindingId === bindingId) return record
+    if (record.status !== 'received' && record.status !== 'authorized') {
+      throw new DeliveryStoreError('conflict', `cannot mark inbox processed in ${record.status}`)
+    }
+    const changed = this.database.prepare(`
+      UPDATE inbox_messages SET status = 'processed', binding_id = ?, next_attempt_at = NULL,
+        failure_code = NULL, claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('received', 'authorized')
+    `).run(bindingId, this.now(), inboxId)
+    if (changed.changes !== 1) throw new DeliveryStoreError('conflict', 'inbox process transition lost a race')
+    return this.getInbox(inboxId)!
+  }
+
+  /**
    * Establish a durable command boundary before `/stop` or `/new` is queued.
    *
    * Every earlier record in the same binding that has not crossed the exact
@@ -5992,6 +6022,22 @@ export class DeliveryStore {
       WHERE channel = ? AND account = ? AND provider_message_id = ?`)
       .get(channel, account, providerMessageId) as OutboxRow | undefined
     return row === undefined ? undefined : outboxFromRow(row)
+  }
+
+  /**
+   * Exact provider-addressed lookup that refuses ambiguity. The schema's
+   * unique index already prevents duplicates; this is defense in depth for a
+   * reply binding that must never attach to the wrong message.
+   */
+  getUniqueOutboxByProviderMessage(channelInput: string, accountInput: string, providerMessageIdInput: string): OutboxRecord | undefined {
+    this.assertOpen()
+    const channel = validateBindingText(channelInput, 'channel', 256)
+    const account = validateBindingText(accountInput, 'account', 256)
+    const providerMessageId = validateBindingText(providerMessageIdInput, 'providerMessageId', 512)
+    const rows = this.database.prepare(`${outboxSelect}
+      WHERE channel = ? AND account = ? AND provider_message_id = ? LIMIT 2`)
+      .all(channel, account, providerMessageId) as unknown as OutboxRow[]
+    return rows.length === 1 ? outboxFromRow(rows[0]!) : undefined
   }
 
   getApprovalIntent(operationId: string, bindingId: string): NonNullable<OutboundIntent['approval']> | undefined {
