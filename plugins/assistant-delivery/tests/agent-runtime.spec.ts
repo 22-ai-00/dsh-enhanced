@@ -11620,18 +11620,22 @@ describe('real native Delivery Agent runtime', () => {
     } finally { database.close() }
     expect(steps).toHaveLength(2)
     expect(outcomes).toHaveLength(2)
-    expect(fixture.ctx.assistantVerifier.inspect(steps[0]!.id)).toMatchObject({
-      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
-    })
-    expect(fixture.ctx.assistantVerifier.inspect(steps[1]!.id)).toMatchObject({
-      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
-    })
-    expect(fixture.ctx.assistantVerifier.inspect(outcomes[0]!.id)).toMatchObject({
-      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'not-achieved' },
-    })
-    expect(fixture.ctx.assistantVerifier.inspect(outcomes[1]!.id)).toMatchObject({
-      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
-    })
+    // Under a loaded CI runner the second whole-goal outcome can still be
+    // verifying when the goal round returns; wait for the terminal receipt
+    // instead of asserting immediately on an in-flight attempt.
+    const settled = { state: 'done', execution: { status: 'succeeded', quiescent: true } }
+    await vi.waitFor(() => expect(fixture.ctx.assistantVerifier.inspect(steps[0]!.id)).toMatchObject({
+      ...settled, receipt: { objectiveStatus: 'achieved' },
+    }), { timeout: 20_000 })
+    await vi.waitFor(() => expect(fixture.ctx.assistantVerifier.inspect(steps[1]!.id)).toMatchObject({
+      ...settled, receipt: { objectiveStatus: 'achieved' },
+    }), { timeout: 20_000 })
+    await vi.waitFor(() => expect(fixture.ctx.assistantVerifier.inspect(outcomes[0]!.id)).toMatchObject({
+      ...settled, receipt: { objectiveStatus: 'not-achieved' },
+    }), { timeout: 20_000 })
+    await vi.waitFor(() => expect(fixture.ctx.assistantVerifier.inspect(outcomes[1]!.id)).toMatchObject({
+      ...settled, receipt: { objectiveStatus: 'achieved' },
+    }), { timeout: 20_000 })
     const first = JSON.parse(outcomes[0]!.payload) as Record<string, unknown>
     const second = JSON.parse(outcomes[1]!.payload) as Record<string, unknown>
     expect(first).toMatchObject({ protocol: 'task-acceptance/v3', objective,

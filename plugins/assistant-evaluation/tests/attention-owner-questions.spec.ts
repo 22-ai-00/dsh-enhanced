@@ -612,6 +612,8 @@ describe('attention owner question delivery', () => {
     await vi.waitFor(() => expect(f.delivery.enqueued).toHaveLength(1), { timeout: 5_000, interval: 10 })
   })
 
+  // The schema-16 migration replays a full database; under CI load it can
+  // exceed the default per-test budget, so give it an explicit one.
   test('migrates a genuine schema-16 database to the same schema as a fresh one and refuses a newer schema', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-eval-owner-q-mig-')); directories.push(directory)
     const path = join(directory, 'evaluation.sqlite')
@@ -631,7 +633,7 @@ describe('attention owner question delivery', () => {
     newer.exec("UPDATE evaluation_schema_meta SET value='18' WHERE key='schema-version'; PRAGMA user_version = 18")
     newer.close()
     expect(() => setup({ path, delivery, clock })).toThrow()
-  })
+  }, 45_000)
 
   test('drift: a schema-16 database that already holds the owner-question tables fails closed and stays at 16', () => {
     const directory = mkdtempSync(join(tmpdir(), 'dsh-eval-owner-q-drift16-')); directories.push(directory)
