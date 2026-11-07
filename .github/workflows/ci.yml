@@ -13,8 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  VITEST_MAX_WORKERS: '2'
-  DSH_TEST_CONCURRENCY: '2'
+  # Ubuntu runners have 4 vCPU; the package suite is CPU-bound but each vitest
+  # worker stays single-threaded, so 4 workers use the machine without
+  # oversubscribing it. macOS runners (3 vCPU) override these in their job.
+  VITEST_MAX_WORKERS: '4'
+  DSH_TEST_CONCURRENCY: '4'
 
 jobs:
   linux-packages:
@@ -126,7 +129,7 @@ jobs:
         run: pnpm run build && pnpm run typecheck:built
 
       - name: Verify package tests
-        run: pnpm run test:built
+        run: pnpm run test:packages
 
       - name: Verify package packs
         run: pnpm run pack:check
@@ -265,8 +268,11 @@ jobs:
     # verified instead of trusting the Linux job for it. Linux-only suites
     # (bubblewrap sandbox, root-owned system dirs) skip themselves by platform.
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
+      # macOS runners expose 3 vCPU; cap workers to that instead of the global 4.
+      VITEST_MAX_WORKERS: '3'
+      DSH_TEST_CONCURRENCY: '3'
       PNPM_CONFIG_WORKSPACE_CONCURRENCY: '2'
       DSH_NATIVE_LAUNCHD_TEST: '1'
 
@@ -313,9 +319,14 @@ jobs:
           pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000
           pnpm exec vitest run --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts
 
-      - name: Verify repository
+      # macOS only owns platform-specific behavior (launchd, /var symlinks,
+      # socket/state fixtures and the lark/rsi-cli native paths) covered by the
+      # early step above. Repository-wide validate/lint/build/package tests and
+      # pack checks already run on the Linux lanes, so a second full `pnpm check`
+      # here would duplicate ~20 minutes on the slower arm64 runner.
+      - name: Verify repository (macOS-specific only)
         id: repository
-        run: pnpm check
+        run: pnpm run validate && pnpm run lint
 
   windows-acp-smoke:
     runs-on: windows-2025

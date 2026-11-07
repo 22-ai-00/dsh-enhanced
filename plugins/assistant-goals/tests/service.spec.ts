@@ -1445,8 +1445,13 @@ describe('goal strategy compare concurrency', () => {
     const content = blocks[0]!.content
     const text = typeof content === 'string' ? content
       : Array.isArray(content) ? content.map(block => block.type === 'text' ? block.text : '').join('') : ''
-    return JSON.parse(text) as { strategyId: string; outcome: string; terminationReason: string; advice: string[]; unverified: boolean
-      children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: { output: string }; usage: { modelCalls: number } }> }
+    // A concurrent full-suite run can observe the tool result before its JSON
+    // body is complete (or as an error text). Treat that as not-yet-available
+    // so the caller's bounded waitFor keeps polling instead of throwing.
+    try {
+      return JSON.parse(text) as { strategyId: string; outcome: string; terminationReason: string; advice: string[]; unverified: boolean
+        children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: { output: string }; usage: { modelCalls: number } }> }
+    } catch { return undefined }
   }
 
   it('runs both compare personas with overlapping in-flight streams yet settles advice in deterministic persona order', async () => {
