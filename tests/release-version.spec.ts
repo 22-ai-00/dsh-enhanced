@@ -1162,7 +1162,8 @@ describe('release version workflow', () => {
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
     expect(manifest.scripts['test:root']).toBe('vitest run --testTimeout=15000 --dir tests')
-    expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000')
+    expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm run test:packages')
+    expect(manifest.scripts['test:packages']).toBe('pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000')
     expect(manifest.scripts['check:quick']).toBe('pnpm run validate && pnpm run lint && pnpm --filter "{origin/dev}..." --if-present run build && pnpm --filter "{origin/dev}..." --if-present run typecheck && pnpm --filter "{origin/dev}" --if-present run test --testTimeout=15000')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts['typecheck:built']).toBe('pnpm --recursive --if-present run typecheck')
@@ -1174,7 +1175,7 @@ describe('release version workflow', () => {
     expect(releaseWorkflow).toContain('/usr/bin/bwrap')
     expect(releaseWorkflow).toContain('--unshare-all')
     const ciWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
-    expect(ciWorkflow).toContain("DSH_TEST_CONCURRENCY: '2'")
+    expect(ciWorkflow).toContain("DSH_TEST_CONCURRENCY: '4'")
     const linuxPackages = ciWorkflow.split('  linux-packages:\n')[1]?.split('  linux-root-tests:\n')[0]
     const linuxRoot = ciWorkflow.split('  linux-root-tests:\n')[1]?.split('  verify:\n')[0]
     const linuxGate = ciWorkflow.split('  verify:\n')[1]?.split('  macos-verify:\n')[0]
@@ -1191,7 +1192,7 @@ describe('release version workflow', () => {
     }
     expect(linuxPackages).toContain('run: pnpm run validate && pnpm run lint')
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
-    expect(linuxPackages).toContain('run: pnpm run test:built')
+    expect(linuxPackages).toContain('run: pnpm run test:packages')
     expect(linuxPackages).toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toContain('run: pnpm run test:root')
     expect(linuxRoot).toContain('run: pnpm run test:root')
@@ -1210,9 +1211,11 @@ describe('release version workflow', () => {
     expect(linuxGate).toContain('test "$root" = success')
     expect(linuxGate).toContain('test "$macos" = success')
     expect(linuxGate).toContain('test "$windows" = success')
-    expect(ciWorkflow.match(/run: pnpm check\n/gu)).toHaveLength(1)
+    // macOS now runs only its platform-scoped validate/lint; the full
+    // repository check stays on the Linux lanes.
+    expect(ciWorkflow.match(/run: pnpm check\n/gu) ?? []).toHaveLength(0)
     expect(ciWorkflow).not.toContain('Collect remaining package test failures')
-    expect(ciWorkflow).toContain("VITEST_MAX_WORKERS: '2'")
+    expect(ciWorkflow).toContain("VITEST_MAX_WORKERS: '4'")
     const workerLimit = /^ {2}VITEST_MAX_WORKERS: '([1-9]\d*)'$/mu
     expect(releaseWorkflow.match(workerLimit)?.[1]).toBe(ciWorkflow.match(workerLimit)?.[1])
     expect(ciWorkflow).toContain('cancel-in-progress: true')

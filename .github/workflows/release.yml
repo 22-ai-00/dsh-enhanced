@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  VITEST_MAX_WORKERS: '2'
+  VITEST_MAX_WORKERS: '4'
   DSH_TEST_CONCURRENCY: '4'
 
 jobs:
