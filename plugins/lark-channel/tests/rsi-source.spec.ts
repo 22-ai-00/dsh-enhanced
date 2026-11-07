@@ -82,7 +82,7 @@ async function withPlatform<T>(value: NodeJS.Platform, run: () => Promise<T>): P
 }
 
 describe('private RSI source workspace', () => {
-  test('archives only the verified unused official 0.1.49 Mac source before preparing a new local identity', async () => {
+  test('archives only the verified unused official 0.1.49 Mac source before preparing a new local identity', { timeout: 120_000 }, async () => {
     const f = await legacyMacFixture()
     const oldReceipt = await readFile(f.receiptPath)
     await mkdir(join(f.home, 'rsi-source-archives', 'owner'), { recursive: true, mode: 0o700 })

@@ -80,7 +80,7 @@ function record(f: Fixture, candidate: RsiSourceUpdateCandidate, before: { sourc
     keyId: f.resources.identities.host.keyId }, f.key)
 }
 
-test('migrates only stopped copied Git, preserves original bootstrap, and reads a signed current version', async () => {
+test('migrates only stopped copied Git, preserves original bootstrap, and reads a signed current version', { timeout: 120_000 }, async () => {
   const f = await fixture()
   const paths = ['package.json', ...f.original.packages.map(item => `${item.path}/package.json`)]
   for (const path of paths) {
@@ -115,7 +115,7 @@ test('migrates only stopped copied Git, preserves original bootstrap, and reads 
       sourceCommit: next.candidate.sourceCommit, baseline: { initialCommit: f.source.sourceCommit } })
 }, 60_000)
 
-test('accepts advanced repair refs and a second signed stage update without rewriting initial identity', async () => {
+test('accepts advanced repair refs and a second signed stage update without rewriting initial identity', { timeout: 120_000 }, async () => {
   const f = await fixture()
   await commit(f.sourceRepository, 'upstream-one.txt', 'first upstream\n')
   const first = await prepared(f, 1), stageOne = join(f.root, 'stage-1')

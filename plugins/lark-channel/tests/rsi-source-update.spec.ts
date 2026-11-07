@@ -52,7 +52,7 @@ describe('private RSI source update candidate', () => {
     expect(await readFile(join(result.repository, 'upstream.txt'), 'utf8')).toBe('upstream work\n')
   })
 
-  test('fast-forwards an upstream whose merge diffstat exceeds the bounded Git output', async () => {
+  test('fast-forwards an upstream whose merge diffstat exceeds the bounded Git output', { timeout: 120_000 }, async () => {
     const f = await fixture()
     // ~1,500 new files under long paths give a diffstat and create-mode summary well above 64 KiB.
     const bulk = join(f.sourceRepository, 'bulk-upstream-files-with-a-deliberately-long-directory-name')

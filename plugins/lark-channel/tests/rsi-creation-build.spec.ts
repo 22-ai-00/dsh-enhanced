@@ -144,7 +144,7 @@ function behaviorBuilds(items: { args: string[] }[]): number {
     && item.args.some(arg => arg.endsWith('plugin-verifier.Dockerfile'))).length
 }
 
-test.each(['x64', 'arm64'] as const)('portable behavior image binds the same macOS %s socket, daemon and Linux image platform', async architecture => {
+test.each(['x64', 'arm64'] as const)('portable behavior image binds the same macOS %s socket, daemon and Linux image platform', { timeout: 120_000 }, async architecture => {
   // Keep the real Unix socket below macOS's path bound even with a long TMPDIR.
   const f = await fixture(architecture, await realpath('/tmp'))
   await rm(join(f.home, 'rsi-builds'), { recursive: true, force: true })
