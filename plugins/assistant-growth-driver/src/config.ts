@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
-import { validateWorkItemGrowthAuthorityPins, type WorkItemGrowthAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
+import { validateWorkItemGrowthAuthorityPins, validateWorkItemRevisionAuthorityPins,
+  type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
  * The growth driver is opt-in and fail-closed: it never runs until `enabled`
@@ -100,6 +101,8 @@ export interface AssistantGrowthDriverConfig {
     enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number
     workItemFailures?: boolean
     workItemAuthorities?: WorkItemGrowthAuthorityPins
+    /** Separately pinned revision corridor for already-adopted capabilities. */
+    workItemRevisionAuthorities?: WorkItemRevisionAuthorityPins
     /** Native discovery scans need their own explicit automation-runs allocation. */
     scanBudgetId?: string; scanBudgetAmount?: number
   }
@@ -136,7 +139,8 @@ export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGro
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
   readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
   readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number;
-    scanBudgetId: string | null; scanBudgetAmount: number | null; workItemFailures?: true; workItemAuthorities?: WorkItemGrowthAuthorityPins }>
+    scanBudgetId: string | null; scanBudgetAmount: number | null; workItemFailures?: true;
+    workItemAuthorities?: WorkItemGrowthAuthorityPins; workItemRevisionAuthorities?: WorkItemRevisionAuthorityPins }>
 }
 
 const fields = new Set([
@@ -233,7 +237,8 @@ const schema = Schema.object({
   scope: scopeSchema,
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
-  usageLearning: Schema.object({ workItemFailures: Schema.boolean(), workItemAuthorities: Schema.any(), enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
+  usageLearning: Schema.object({ workItemFailures: Schema.boolean(), workItemAuthorities: Schema.any(), workItemRevisionAuthorities: Schema.any(),
+    enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
     scanBudgetId: boundedText(128),
     scanBudgetAmount: Schema.natural().min(1).max(10_000_000),
     maxPending: Schema.natural().min(1).max(100).default(16),
@@ -258,9 +263,19 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   const pins = config.usageLearning?.workItemAuthorities
   if (pins !== undefined) validateWorkItemGrowthAuthorityPins(pins)
   if (pins !== undefined && config.usageLearning?.workItemFailures !== true) throw new Error('assistant-growth-driver: workItemAuthorities require workItemFailures')
+  const revisionPins = config.usageLearning?.workItemRevisionAuthorities
+  if (revisionPins !== undefined) validateWorkItemRevisionAuthorityPins(revisionPins)
+  if (revisionPins !== undefined && config.usageLearning?.workItemFailures !== true) {
+    throw new Error('assistant-growth-driver: workItemRevisionAuthorities require workItemFailures')
+  }
   const frozenPins = pins === undefined ? undefined : Object.freeze({ ...pins,
     sourceJobs: Object.freeze({ ...pins.sourceJobs }), creationGrant: Object.freeze({ ...pins.creationGrant }),
     creationAcceptance: Object.freeze({ ...pins.creationAcceptance }), adoption: Object.freeze({ ...pins.adoption }) })
+  const frozenRevisionPins = revisionPins === undefined ? undefined : Object.freeze({ ...revisionPins,
+    sourceJobs: Object.freeze({ ...revisionPins.sourceJobs }), revisionGrant: Object.freeze({ ...revisionPins.revisionGrant }),
+    revisionAcceptance: Object.freeze({ ...revisionPins.revisionAcceptance }),
+    ...(revisionPins.revisionRegressionAcceptance === undefined ? {} : { revisionRegressionAcceptance: Object.freeze({ ...revisionPins.revisionRegressionAcceptance }) }),
+    ...(revisionPins.revisionAdoption === undefined ? {} : { revisionAdoption: Object.freeze({ ...revisionPins.revisionAdoption }) }) })
   const normalized: NormalizedGrowthDriverConfig = Object.freeze({
     enabled: config.enabled ?? false,
     intervalMs: config.intervalMs ?? 0,
@@ -296,7 +311,9 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       offline: config.pluginSourceProposals?.offline ?? true,
       planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
     }),
-    usageLearning: Object.freeze({ ...(config.usageLearning?.workItemFailures === true ? { workItemFailures: true as const, workItemAuthorities: frozenPins! } : {}), enabled: config.usageLearning?.enabled ?? false,
+    usageLearning: Object.freeze({ ...(config.usageLearning?.workItemFailures === true ? { workItemFailures: true as const, workItemAuthorities: frozenPins! } : {}),
+      ...(frozenRevisionPins === undefined ? {} : { workItemRevisionAuthorities: frozenRevisionPins }),
+      enabled: config.usageLearning?.enabled ?? false,
       scanBudgetId: config.usageLearning?.scanBudgetId ?? null,
       scanBudgetAmount: config.usageLearning?.scanBudgetAmount ?? null,
       databasePath: config.usageLearning?.databasePath ?? null, maxPending: config.usageLearning?.maxPending ?? 16,
@@ -359,6 +376,10 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     || !normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'
     || !normalized.pluginSourceProposals.allowCreation || frozenPins === undefined)) {
     throw new Error('assistant-growth-driver: work item failures require durable creation, usage learning and explicit authorities')
+  }
+  if (frozenRevisionPins !== undefined && (!normalized.pluginSourceProposals.allowRevision
+    || normalized.pluginSourceProposals.preparationMode !== 'durable')) {
+    throw new Error('assistant-growth-driver: work item revision authorities require durable revision proposals')
   }
   if (normalized.usageLearning.enabled) {
     const path = normalized.usageLearning.databasePath

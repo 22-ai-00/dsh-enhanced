@@ -6,11 +6,15 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
   type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef,
   type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding,
+  type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
   validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, isWorkItemUsageIntent, type WorkItemUsageIntent, type ForegroundUsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 
-import { freezeWorkItemData, ownData, isWorkItemCreationReady, workItemAuthorityDeadline, workItemTextDigest, workItemRunSource, workItemStableOwner, type WorkItemCreationReadiness, type WorkItemUsageLocator, type WorkItemUsageSource } from './work-item-source.js'
+import { freezeWorkItemData, ownData, isWorkItemCreationReady, isWorkItemRevisionReady,
+  workItemAuthorityDeadline, workItemRevisionAuthorityDeadline, workItemTextDigest, workItemRunSource, workItemStableOwner,
+  type WorkItemCreationReadiness, type WorkItemUsageLocator, type WorkItemUsageSource } from './work-item-source.js'
+import { matchRevisionTarget, type RevisionTargetCandidate } from './revision-target-matcher.js'
 
 class WorkItemSourcePending extends Error {}
 class WorkItemSourceObsolete extends Error {}
@@ -34,9 +38,12 @@ export interface UsageReviewInput {
 }
 export interface WorkItemUsageReviewInput extends Omit<UsageReviewInput, 'source' | 'bindSourceRun'> {
   sourceKind: 'work-item'
+  /** Frozen when the job left the pending queue; the wake never changes it. */
+  corridor: 'create' | 'revise-created'
   assertFirstModelAdmission(): void
   source: WorkItemUsageSource
-  bindSourceRun(input: Parameters<UsageReviewInput['bindSourceRun']>[0]): WorkItemSourceGrowthRunBinding
+  bindSourceRun(input: Parameters<UsageReviewInput['bindSourceRun']>[0]):
+    WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding
 }
 export type AnyUsageReviewInput = UsageReviewInput | WorkItemUsageReviewInput
 export type UsageReviewResult = 'reviewed' | 'failed' | 'unknown'
@@ -66,6 +73,7 @@ export class UsageLearningRuntime {
     reviewWorkItem?(input: WorkItemUsageReviewInput): Promise<UsageReviewResult>
     inspectWorkItemCreationReadiness?(input: { owner: WorkItemUsageSource['task']['owner'] }): WorkItemCreationReadiness | undefined
     inspectWorkItemRevisionReadiness?(input: { owner: WorkItemUsageSource['task']['owner'] }): import('./work-item-source.js').WorkItemRevisionReadiness | undefined
+    inspectWorkItemRevisionTargets?(): readonly RevisionTargetCandidate[]
     review(input: UsageReviewInput): Promise<UsageReviewResult>
     inspectCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
     inspectRevisionAcceptanceAuthority?(): RevisionAcceptanceAuthorityRef | undefined
@@ -236,6 +244,46 @@ export class UsageLearningRuntime {
       throw new WorkItemSourcePending('work item engineering peers or authorizations unavailable')
     }
   }
+  private assertWorkItemRevisionReadiness(owner: WorkItemUsageSource['task']['owner'],
+    pins: WorkItemRevisionAuthorityPins, admission: boolean): void {
+    const currentOwner = this.owner()
+    if (!isSourceOwnerContinuation(currentOwner, owner)) throw new WorkItemSourceObsolete('work item source owner changed')
+    if (this.ports.inspectWorkItemToolPreauthorization?.() !== true
+      || !isWorkItemRevisionReady(this.ports.inspectWorkItemRevisionReadiness?.({ owner: currentOwner }), pins, Date.now(), admission)) {
+      throw new WorkItemSourcePending('work item revision peers or authorizations unavailable')
+    }
+  }
+  /**
+   * Freeze the corridor when the WorkItem leaves the pending queue. The
+   * revise-created corridor wins only when every revision peer is live AND the
+   * deterministic target matcher finds exactly one adopted capability named in
+   * the objective; otherwise the job keeps the fail-closed create-only corridor.
+   */
+  private resolveWorkItemCorridor(source: WorkItemUsageSource):
+    { corridor: 'create'; authorities: WorkItemGrowthAuthorityPins }
+    | { corridor: 'revise-created'; authorities: WorkItemRevisionAuthorityPins; revisionTarget: { parentPlanId: string; name: string } } {
+    const owner = this.owner()
+    if (!isSourceOwnerContinuation(owner, source.task.owner)) throw new WorkItemSourceObsolete('work item source owner changed')
+    if (this.ports.inspectWorkItemToolPreauthorization?.() !== true) {
+      throw new WorkItemSourcePending('work item tool preauthorization unavailable')
+    }
+    const revisionPins = this.config.usageLearning.workItemRevisionAuthorities
+    if (revisionPins !== undefined
+      && isWorkItemRevisionReady(this.ports.inspectWorkItemRevisionReadiness?.({ owner }), revisionPins, Date.now(), true)) {
+      const targets = this.ports.inspectWorkItemRevisionTargets?.() ?? []
+      const match = matchRevisionTarget(source.objective, targets)
+      if (match !== undefined) {
+        return { corridor: 'revise-created', authorities: structuredClone(revisionPins),
+          revisionTarget: { parentPlanId: match.parentPlanId, name: match.name } }
+      }
+    }
+    const creationPins = this.config.usageLearning.workItemAuthorities
+    if (this.config.usageLearning.workItemFailures && creationPins !== undefined
+      && isWorkItemCreationReady(this.ports.inspectWorkItemCreationReadiness?.({ owner }), creationPins, Date.now(), true)) {
+      return { corridor: 'create', authorities: structuredClone(creationPins) }
+    }
+    throw new WorkItemSourcePending('work item engineering peers or authorizations unavailable')
+  }
   private currentWorkItem(locator: WorkItemUsageLocator): void {
     if (locator.configDigest !== this.configDigest || locator.expiresAt <= Date.now()
       || !same(workItemStableOwner(this.owner()), locator.owner)) throw new WorkItemSourceObsolete('work item usage authority changed or expired')
@@ -264,12 +312,17 @@ export class UsageLearningRuntime {
   }
   private withWorkItemSource<T>(intent: WorkItemUsageIntent, callback: (source: Readonly<OwnerWorkItemEngineeringContextSource>) => T): T {
     this.abort.signal.throwIfAborted(); this.currentWorkItem(this.locatorFor(intent))
-    if (!same(intent.authorities, this.config.usageLearning.workItemAuthorities)) throw new WorkItemSourceObsolete('work item authority pins changed')
+    const expectedPins = intent.corridor === 'revise-created'
+      ? this.config.usageLearning.workItemRevisionAuthorities
+      : this.config.usageLearning.workItemAuthorities
+    if (expectedPins === undefined || !same(intent.authorities, expectedPins)) throw new WorkItemSourceObsolete('work item authority pins changed')
     const fence = this.ports.delivery.withOwnerWorkItemEngineeringContextFence
     if (!fence) throw new WorkItemSourcePending('work item engineering fence unavailable')
     return fence.call(this.ports.delivery, this.expectation(intent.source), source => {
       this.abort.signal.throwIfAborted()
-      if (!this.active || intent.configDigest !== this.configDigest || Date.now() >= Math.min(intent.expiresAt, workItemAuthorityDeadline(intent.authorities))) throw new WorkItemSourceObsolete('work item usage lifecycle or authority expired')
+      const authorityDeadline = intent.corridor === 'revise-created'
+        ? workItemRevisionAuthorityDeadline(intent.authorities) : workItemAuthorityDeadline(intent.authorities)
+      if (!this.active || intent.configDigest !== this.configDigest || Date.now() >= Math.min(intent.expiresAt, authorityDeadline)) throw new WorkItemSourceObsolete('work item usage lifecycle or authority expired')
       if (!same(workItemRunSource({ ...intent.source, ...source }), workItemRunSource(intent.source))
         || !isSourceOwnerContinuation(source.task.owner, intent.source.task.owner)
         || !same({ ...source.task, owner: intent.source.task.owner, canonical: intent.source.task.canonical }, intent.source.task)
@@ -339,14 +392,15 @@ export class UsageLearningRuntime {
       try {
         this.currentWorkItem(pending.locator)
         const source = this.readWorkItem(pending.locator)
-        this.assertWorkItemReadiness(source.task.owner)
+        const corridor = this.resolveWorkItemCorridor(source)
         const fixed = this.config.provider !== null && this.config.model !== null
         const intent: WorkItemUsageIntent = { sourceKind: 'work-item', configDigest: this.configDigest, source,
           model: fixed ? { provider: this.config.provider!, model: this.config.model!, ...(this.config.reasoningEffort === null ? {} : { reasoningEffort: this.config.reasoningEffort }) }
             : structuredClone(source.task.proofIdentity.supplier), modelOrigin: fixed ? 'explicit-growth-override' : 'inherited-owner-task',
           budget: { budgetId: this.config.budgetId!, amount: this.config.budgetAmount!, maxModelCalls: this.config.maxModelCalls,
             maxToolCalls: this.config.maxToolCalls, maxOutputTokens: this.config.maxOutputTokens, maxDurationMs: this.config.maxDurationMs,
-            maxPlansPerWake: this.config.pluginSourceProposals.maxPlansPerWake }, authorities: this.config.usageLearning.workItemAuthorities!,
+            maxPlansPerWake: this.config.pluginSourceProposals.maxPlansPerWake },
+          ...corridor,
           createdAt: pending.locator.createdAt, expiresAt: pending.locator.expiresAt }
         this.withWorkItemSource(intent, () => this.store.freezeWorkItem(pending.id, intent))
       } catch (error) {
@@ -361,11 +415,17 @@ export class UsageLearningRuntime {
     const job = this.store.get(request.runId)
     if (!job || !isWorkItemUsageIntent(job.intent)) return this.inspectSourceGrowthRun(request)
     try {
+      const expectedProtocol = job.intent.corridor === 'revise-created'
+        ? 'assistant-growth/source-run/v3' as const : 'assistant-growth/source-run/v2' as const
       if (job.digest !== request.intentDigest || !['running', 'reviewed'].includes(job.state) || !job.sourceRun
-        || job.sourceRun.protocol !== 'assistant-growth/source-run/v2') return undefined
-      this.assertWorkItemReadiness(job.intent.source.task.owner, false)
+        || job.sourceRun.protocol !== expectedProtocol) return undefined
+      if (job.intent.corridor === 'revise-created') {
+        this.assertWorkItemRevisionReadiness(job.intent.source.task.owner, job.intent.authorities, false)
+      } else {
+        this.assertWorkItemReadiness(job.intent.source.task.owner, false)
+      }
       return this.withWorkItemSource(job.intent, () => this.store.withWorkItemRunWriter(request, current => {
-        if (!current.sourceRun || current.sourceRun.protocol !== 'assistant-growth/source-run/v2') throw new Error('work item run absent')
+        if (!current.sourceRun || current.sourceRun.protocol !== expectedProtocol) throw new Error('work item run absent')
         this.assertWorkItemBinding(current, current.sourceRun); return freezeWorkItemData(current.sourceRun)
       }))
     } catch (error) {
@@ -383,19 +443,28 @@ export class UsageLearningRuntime {
     const job = this.store.get(input.runId)
     if (!job || job.digest !== input.intentDigest || !isWorkItemUsageIntent(job.intent)) throw new Error('work item run not found')
     const intent = job.intent
-    this.assertWorkItemReadiness(intent.source.task.owner, false)
+    if (intent.corridor === 'revise-created') {
+      this.assertWorkItemRevisionReadiness(intent.source.task.owner, intent.authorities, false)
+    } else {
+      this.assertWorkItemReadiness(intent.source.task.owner, false)
+    }
     return this.withWorkItemSource(intent, () => this.store.withWorkItemRunWriter(input, current => {
       const binding = current.sourceRun
-      if (!binding || binding.protocol !== 'assistant-growth/source-run/v2' || anySourceGrowthRunDigest(binding) !== input.expectedGrowthRunDigest
-        || binding.configDigest !== this.configDigest || !same(binding.authorities, this.config.usageLearning.workItemAuthorities)
+      if (!binding || binding.protocol === 'assistant-growth/source-run/v1'
+        || (intent.corridor === 'revise-created'
+          ? binding.protocol !== 'assistant-growth/source-run/v3' : binding.protocol !== 'assistant-growth/source-run/v2')
+        || anySourceGrowthRunDigest(binding) !== input.expectedGrowthRunDigest
+        || binding.configDigest !== this.configDigest || !same(binding.authorities, intent.authorities)
         || !same(binding.source, workItemRunSource(intent.source))) throw new Error('work item run binding changed')
       this.assertWorkItemBinding(current, binding)
       return callback(freezeWorkItemData(binding))
     }))
   }
-  private assertWorkItemBinding(job: UsageJob, binding: WorkItemSourceGrowthRunBinding): void {
+  private assertWorkItemBinding(job: UsageJob, binding: WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding): void {
     validateAnySourceGrowthRunBinding(binding)
-    if (!isWorkItemUsageIntent(job.intent) || binding.runId !== job.id || binding.intentDigest !== job.digest
+    if (!isWorkItemUsageIntent(job.intent)
+      || (binding.protocol === 'assistant-growth/source-run/v3') !== (job.intent.corridor === 'revise-created')
+      || binding.runId !== job.id || binding.intentDigest !== job.digest
       || binding.configDigest !== this.configDigest || binding.ownerDigest !== sourceGrowthEvidenceDigest(job.intent.source.task.owner)
       || binding.native.automationId !== job.id || binding.native.definitionHash !== job.definitionHash || binding.native.occurrenceId !== job.occurrenceId
       || !same(binding.source, workItemRunSource(job.intent.source)) || !same(binding.model, job.intent.model)
@@ -405,17 +474,25 @@ export class UsageLearningRuntime {
   private async executeWorkItem(input: HostAutomationExecutorInput, queued: UsageJob, result: (outcome: 'succeeded' | 'failed' | 'unknown') => HostAutomationExecutorResult): Promise<HostAutomationExecutorResult> {
     if (!isWorkItemUsageIntent(queued.intent)) throw new Error('work item usage expected')
     const intent = queued.intent
+    const revision = intent.corridor === 'revise-created'
+    const authorityDeadline = revision
+      ? workItemRevisionAuthorityDeadline(intent.authorities)
+      : workItemAuthorityDeadline(intent.authorities)
+    const assertReady = (admission: boolean): void => {
+      if (intent.corridor === 'revise-created') this.assertWorkItemRevisionReadiness(intent.source.task.owner, intent.authorities, admission)
+      else this.assertWorkItemReadiness(intent.source.task.owner, admission)
+    }
     let claimed = false
     try {
-      this.assertWorkItemReadiness(intent.source.task.owner)
+      assertReady(true)
       this.withWorkItemSource(intent, () => { this.store.claim(queued.id, input.definitionHash, input.occurrenceId); claimed = true })
       const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(Math.max(1,
-        Math.min(this.config.maxDurationMs, intent.expiresAt - Date.now(), workItemAuthorityDeadline(intent.authorities) - Date.now())))])
+        Math.min(this.config.maxDurationMs, intent.expiresAt - Date.now(), authorityDeadline - Date.now())))])
       const assertCurrent = () => {
         signal.throwIfAborted()
         // Peer/owner probes can synchronously change source state. Run them
         // before the final complete source frame; its callback is local only.
-        this.assertWorkItemReadiness(intent.source.task.owner, false)
+        assertReady(false)
         this.withWorkItemSource(intent, () => {
           signal.throwIfAborted()
           const current = this.store.get(queued.id)
@@ -424,29 +501,60 @@ export class UsageLearningRuntime {
         })
       }
       const bindSourceRun: WorkItemUsageReviewInput['bindSourceRun'] = actual => {
-        assertCurrent(); this.assertWorkItemReadiness(intent.source.task.owner)
-        if (!same(actual.model, intent.model) || !same(actual.creationAcceptance, intent.authorities.creationAcceptance)
-          || actual.revisionAcceptance !== undefined || actual.revisionRegressionAcceptance !== undefined
-          || actual.generationDeadlineAt > workItemAuthorityDeadline(intent.authorities)) throw new Error('work item run setup authority changed')
-        const binding: WorkItemSourceGrowthRunBinding = { protocol: 'assistant-growth/source-run/v2', mode: 'create',
-          runId: queued.id, intentDigest: queued.digest, configDigest: intent.configDigest, ownerDigest: sourceGrowthEvidenceDigest(intent.source.task.owner),
-          source: workItemRunSource(intent.source), model: actual.model, modelOrigin: intent.modelOrigin, budget: intent.budget,
-          creationAcceptance: structuredClone(intent.authorities.creationAcceptance), authorities: structuredClone(intent.authorities),
-          native: { owner: OWNER, automationId: queued.id, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
-          sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest, executionContractDigest: actual.executionContractDigest,
-          createdAt: actual.createdAt, generationDeadlineAt: actual.generationDeadlineAt, expiresAt: intent.expiresAt }
+        assertCurrent(); assertReady(true)
+        if (!same(actual.model, intent.model) || actual.generationDeadlineAt > authorityDeadline) {
+          throw new Error('work item run setup authority changed')
+        }
+        const binding = intent.corridor === 'revise-created'
+          ? this.bindWorkItemRevisionRun(actual, intent, queued, input)
+          : this.bindWorkItemCreationRun(actual, intent, queued, input)
         return this.withWorkItemSource(intent, () => this.store.bindWorkItemSourceRun(queued.id, queued.digest, input.definitionHash, input.occurrenceId, binding))
       }
-      this.assertWorkItemReadiness(intent.source.task.owner); assertCurrent()
+      assertReady(true); assertCurrent()
       const outcome = await this.ports.reviewWorkItem!({ sourceKind: 'work-item', id: queued.id, intentDigest: queued.digest,
-        definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, expiresAt: Math.min(intent.expiresAt, workItemAuthorityDeadline(intent.authorities)),
-        model: intent.model, source: intent.source, signal, assertCurrent, assertFirstModelAdmission: () => { this.assertWorkItemReadiness(intent.source.task.owner); assertCurrent() }, bindSourceRun })
+        definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, expiresAt: Math.min(intent.expiresAt, authorityDeadline),
+        corridor: intent.corridor, model: intent.model, source: intent.source, signal, assertCurrent,
+        assertFirstModelAdmission: () => { assertReady(true); assertCurrent() }, bindSourceRun })
       assertCurrent(); this.store.settle(queued.id, outcome, outcome === 'reviewed' ? 'review-complete-not-adopted' : 'review-incomplete', input.occurrenceId)
       return result(outcome === 'reviewed' ? 'succeeded' : outcome)
     } catch {
       if (claimed) this.store.settle(queued.id, 'unknown', 'interrupted-after-dispatch', input.occurrenceId)
       return result(claimed ? 'unknown' : 'failed')
     }
+  }
+  private bindWorkItemCreationRun(actual: Parameters<WorkItemUsageReviewInput['bindSourceRun']>[0],
+    intent: Extract<WorkItemUsageIntent, { corridor: 'create' }>, queued: UsageJob, input: HostAutomationExecutorInput): WorkItemSourceGrowthRunBinding {
+    if (!same(actual.creationAcceptance, intent.authorities.creationAcceptance)
+      || actual.revisionAcceptance !== undefined || actual.revisionRegressionAcceptance !== undefined) {
+      throw new Error('work item run setup authority changed')
+    }
+    return { protocol: 'assistant-growth/source-run/v2', mode: 'create',
+      runId: queued.id, intentDigest: queued.digest, configDigest: intent.configDigest, ownerDigest: sourceGrowthEvidenceDigest(intent.source.task.owner),
+      source: workItemRunSource(intent.source), model: actual.model, modelOrigin: intent.modelOrigin, budget: intent.budget,
+      creationAcceptance: structuredClone(intent.authorities.creationAcceptance), authorities: structuredClone(intent.authorities),
+      native: { owner: OWNER, automationId: queued.id, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
+      sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest, executionContractDigest: actual.executionContractDigest,
+      createdAt: actual.createdAt, generationDeadlineAt: actual.generationDeadlineAt, expiresAt: intent.expiresAt }
+  }
+  private bindWorkItemRevisionRun(actual: Parameters<WorkItemUsageReviewInput['bindSourceRun']>[0],
+    intent: Extract<WorkItemUsageIntent, { corridor: 'revise-created' }>, queued: UsageJob, input: HostAutomationExecutorInput): WorkItemRevisionSourceGrowthRunBinding {
+    if (actual.creationAcceptance !== undefined || actual.revisionAcceptance === undefined
+      || !same(actual.revisionAcceptance, intent.authorities.revisionAcceptance)
+      || (actual.revisionRegressionAcceptance === undefined) !== (intent.authorities.revisionRegressionAcceptance === undefined)
+      || (actual.revisionRegressionAcceptance !== undefined && intent.authorities.revisionRegressionAcceptance !== undefined
+        && !same(actual.revisionRegressionAcceptance, intent.authorities.revisionRegressionAcceptance))) {
+      throw new Error('work item revision run setup authority changed')
+    }
+    return { protocol: 'assistant-growth/source-run/v3', mode: 'revise-created',
+      runId: queued.id, intentDigest: queued.digest, configDigest: intent.configDigest, ownerDigest: sourceGrowthEvidenceDigest(intent.source.task.owner),
+      source: workItemRunSource(intent.source), model: actual.model, modelOrigin: intent.modelOrigin, budget: intent.budget,
+      revisionAcceptance: structuredClone(intent.authorities.revisionAcceptance),
+      ...(intent.authorities.revisionRegressionAcceptance === undefined ? {} : {
+        revisionRegressionAcceptance: structuredClone(intent.authorities.revisionRegressionAcceptance) }),
+      authorities: structuredClone(intent.authorities),
+      native: { owner: OWNER, automationId: queued.id, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
+      sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest, executionContractDigest: actual.executionContractDigest,
+      createdAt: actual.createdAt, generationDeadlineAt: actual.generationDeadlineAt, expiresAt: intent.expiresAt }
   }
 
   /** Synchronous nudge, bounded to 1000 heads. Native scan resumes the cursor. */

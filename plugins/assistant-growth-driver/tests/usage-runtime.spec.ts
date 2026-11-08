@@ -9,8 +9,8 @@ import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk }
 import { runGrowthAgent } from '../src/growth-agent.ts'
 import { mintGrowthAuthority } from '../src/deposit.ts'
 import type { GrowthSourcePlanePort } from '../src/source-port.ts'
-import { anySourceGrowthRunDigest, SourceGrowthRunUnavailableError, type WorkItemGrowthAuthorityPins, type CreationAcceptanceAuthorityRef,
-  type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+import { anySourceGrowthRunDigest, SourceGrowthRunUnavailableError, type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
+  type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
@@ -23,7 +23,8 @@ import { UsageLearningRuntime, type UsageReviewInput, type WorkItemUsageReviewIn
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { workItemTextDigest, type WorkItemCreationReadiness } from '../src/work-item-source.ts'
+import { workItemTextDigest, type WorkItemCreationReadiness, type WorkItemRevisionReadiness } from '../src/work-item-source.ts'
+import type { RevisionTargetCandidate } from '../src/revision-target-matcher.ts'
 import { UsageStore } from '../src/usage-store.ts'
 
 /** Fake Date fixed mid-minute so ticking a few seconds never crosses the
@@ -665,7 +666,8 @@ test('Usage close unregisters recovery before closing its store while Automation
 })
 
 /** Source/CP contracts are fixtures here; native scheduling, persistence and budget are real. */
-async function workItemFixture(options: { missing?: boolean; ready?: boolean; maxPending?: number; maxToolCalls?: number; toolPolicy?: 'allow' | 'deny' } = {}) {
+async function workItemFixture(options: { missing?: boolean; ready?: boolean; maxPending?: number; maxToolCalls?: number; toolPolicy?: 'allow' | 'deny';
+  revision?: { targets?: RevisionTargetCandidate[]; ready?: boolean } } = {}) {
   const f = await fixture({ ...(options.maxPending === undefined ? {} : { maxPending: options.maxPending }), ...(options.toolPolicy ? { toolPolicy: options.toolPolicy } : {}) })
   let growthCtx!: Context
   const growthFork = f.ctx.plugin({ name: 'dsh-enhanced-assistant-growth-driver', apply(ctx: Context) { growthCtx = ctx } }); await growthFork
@@ -676,11 +678,20 @@ async function workItemFixture(options: { missing?: boolean; ready?: boolean; ma
     sourceJobs: { authorityId: 'source', authorityDigest: 'a'.repeat(64), expiresAt: until },
     creationGrant: { id: 'create', digest: 'b'.repeat(64), expiresAt: until }, creationAcceptance: acceptance,
     adoption: { authorityId: 'adopt', authorityDigest: 'd'.repeat(64), expiresAt: until } }
+  const revisionAcceptance: RevisionAcceptanceAuthorityRef = { protocol: 'assistant-growth/revision-acceptance-authority/v1',
+    authorityId: 'wi-rev-review', authorityDigest: 'e'.repeat(64), keyId: 'wi-rev-key', namePrefix: 'created-', expiresAt: until }
+  const revisionPins: WorkItemRevisionAuthorityPins = { protocol: 'assistant-growth/work-item-revision-authorities/v1',
+    sourceJobs: { authorityId: 'source', authorityDigest: 'a'.repeat(64), expiresAt: until },
+    revisionGrant: { id: 'revise', digest: 'b'.repeat(64), expiresAt: until, workItemFailures: true }, revisionAcceptance }
+  const revisionReadiness: WorkItemRevisionReadiness = { protocol: 'assistant-growth/work-item-revision-readiness/v1',
+    sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v3',
+    workItemFailures: true, pins: revisionPins, remaining: { sourceSubmissions: 1, revisions: 1, verifications: 1 }, available: true }
   let missing = options.missing ?? false, version = 1, withdrawn = false, unrelatedWatermark = 0
   const config = normalizeConfig({ enabled: true, ...(options.maxToolCalls === undefined ? {} : { maxToolCalls: options.maxToolCalls }), scope: f.config.scope!, budgetId: 'growth-budget', budgetAmount: 1,
     usageLearning: { enabled: true, databasePath: join(f.root, 'usage.sqlite'), scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1,
-      maxPending: options.maxPending ?? 16, workItemFailures: true, workItemAuthorities: pins },
-    pluginSourceProposals: { enabled: true, allowCreation: true, preparationMode: 'durable', repository: f.root } })
+      maxPending: options.maxPending ?? 16, workItemFailures: true, workItemAuthorities: pins,
+      ...(options.revision === undefined ? {} : { workItemRevisionAuthorities: revisionPins }) },
+    pluginSourceProposals: { enabled: true, allowCreation: true, ...(options.revision === undefined ? {} : { allowRevision: true }), preparationMode: 'durable', repository: f.root } })
   const canonical = () => ({ triggerOutcomeId: 'unrelated-trigger', scope: { workspace: f.root, preset: 'primary' }, scopeKey: 'wi-scope',
     scopeWatermark: version + unrelatedWatermark, situation: 'work-item:child', projection: { subjectKind: 'work-item' as const, subjectRef: 'child', version,
       digest: acceptanceDigest(['canonical', version]), disposition: withdrawn ? 'retract' as const : 'upsert' as const },
@@ -720,19 +731,35 @@ async function workItemFixture(options: { missing?: boolean; ready?: boolean; ma
   let readiness: WorkItemCreationReadiness | undefined = options.ready === false ? undefined : { protocol: 'assistant-growth/work-item-creation-readiness/v1',
     sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true, pins,
     remaining: { sourceSubmissions: 1, creates: 1, verifications: 1, adoptions: 1 }, available: true }
+  let revisionReadyNow: WorkItemRevisionReadiness | undefined = options.revision?.ready === false ? undefined : revisionReadiness
+  // The canonical objective contains the lowercase token "child"; the default
+  // target therefore matches deterministically and uniquely.
+  let revisionTargets: RevisionTargetCandidate[] = options.revision?.targets
+    ?? (options.revision === undefined ? [] : [{ parentPlanId: 'plan-created-1', name: 'child', parentSourceDigest: 'a'.repeat(64) }])
   let readinessHook: (() => void) | undefined
   const review = vi.fn<(input: WorkItemUsageReviewInput) => Promise<UsageReviewResult>>(async input => {
-    input.assertCurrent(); input.assertFirstModelAdmission(); input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: acceptance }); return 'reviewed'
+    input.assertCurrent(); input.assertFirstModelAdmission()
+    if (input.corridor === 'revise-created') {
+      input.bindSourceRun({ ...actualSourceRun(input), revisionAcceptance: revisionAcceptance })
+    } else {
+      input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: acceptance })
+    }
+    return 'reviewed'
   })
   const create = () => {
     const runtime = new UsageLearningRuntime(config, { evaluation: f.evaluation, automations: f.automations, delivery, review: f.review,
       inspectWorkItemToolPreauthorization: () => f.policy.workItemGrowthToolPreauthorizationVersion?.() === 1 && typeof f.policy.registerPreauthorizedTool === 'function',
-      reviewWorkItem: review, inspectWorkItemCreationReadiness: () => { const result = readiness; readinessHook?.(); return result } })
+      reviewWorkItem: review,
+      inspectWorkItemCreationReadiness: () => { const result = readiness; readinessHook?.(); return result },
+      inspectWorkItemRevisionReadiness: () => revisionReadyNow,
+      inspectWorkItemRevisionTargets: () => revisionTargets })
     cleanup.push(() => runtime.close()); runtime.start(); return runtime
   }
   const tick = async () => { vi.setSystemTime(Date.now() + 1500); for (let i = 0; i < 3; i++) { await f.automations.tick(); await f.automations.whenIdle() } }
-  return { ...f, growthCtx, growthFork, config, pins, review, create, tick, source, delivery, setMissing: (value: boolean) => { missing = value },
+  return { ...f, growthCtx, growthFork, config, pins, revisionPins, revisionAcceptance, review, create, tick, source, delivery, setMissing: (value: boolean) => { missing = value },
     setReadiness: (value: WorkItemCreationReadiness | undefined) => { readiness = value }, setReadinessHook: (hook: (() => void) | undefined) => { readinessHook = hook }, readiness: () => readiness,
+    setRevisionReadiness: (value: WorkItemRevisionReadiness | undefined) => { revisionReadyNow = value },
+    setRevisionTargets: (value: RevisionTargetCandidate[]) => { revisionTargets = value },
     withdraw: () => { withdrawn = true; version++ }, correct: () => { version++ }, unrelatedChange: () => { unrelatedWatermark++ } }
 }
 
@@ -792,6 +819,63 @@ test('unknown work item author never supplies new producer authority or replays 
   const after = new DatabaseSync(join(f.root, 'policy.sqlite')); expect(after.prepare('SELECT * FROM budget_reservations ORDER BY id').all()).toEqual(reservations); after.close()
 })
 
+
+test('revise-created corridor freezes a v3 run when the objective names exactly one adopted target', async () => {
+  fakeClock(); const f = await workItemFixture({ revision: {} })
+  const runtime = f.create(); await f.tick()
+  const input = f.review.mock.calls[0]![0]
+  expect(input.corridor).toBe('revise-created')
+  const binding = runtime.inspectAnySourceGrowthRun({ runId: input.id, intentDigest: input.intentDigest })!
+  if (binding.protocol !== 'assistant-growth/source-run/v3') throw new Error('expected a v3 work item revision run')
+  expect(binding.mode).toBe('revise-created')
+  expect(binding.revisionAcceptance).toEqual(f.revisionAcceptance)
+  expect(binding.authorities).toEqual(f.revisionPins)
+  const store = new UsageStore(join(f.root, 'usage.sqlite')), job = store.get(input.id)!
+  expect(job.intent).toMatchObject({ corridor: 'revise-created', authorities: f.revisionPins,
+    revisionTarget: { parentPlanId: 'plan-created-1', name: 'child' } })
+  store.close()
+  const request = { runId: input.id, intentDigest: input.intentDigest, expectedGrowthRunDigest: anySourceGrowthRunDigest(binding) }
+  expect(runtime.withWorkItemRunFence(request, value => value.protocol)).toBe('assistant-growth/source-run/v3')
+  expect(() => runtime.withWorkItemRunFence({ ...request, expectedGrowthRunDigest: '0'.repeat(64) }, () => 'bad')).toThrow(/binding changed/)
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+})
+
+test('revise-created corridor falls back to the create corridor when the target match is absent or ambiguous', async () => {
+  fakeClock()
+  for (const targets of [
+    [{ parentPlanId: 'plan-1', name: 'unrelated-helper', parentSourceDigest: 'a'.repeat(64) }],
+    [{ parentPlanId: 'plan-1', name: 'child', parentSourceDigest: 'a'.repeat(64) },
+      { parentPlanId: 'plan-2', name: 'child', parentSourceDigest: 'b'.repeat(64) }],
+  ] satisfies RevisionTargetCandidate[][]) {
+    const f = await workItemFixture({ revision: { targets } })
+    const runtime = f.create(); await f.tick()
+    const input = f.review.mock.calls[0]![0]
+    expect(input.corridor).toBe('create')
+    expect(runtime.inspectAnySourceGrowthRun({ runId: input.id, intentDigest: input.intentDigest })?.protocol)
+      .toBe('assistant-growth/source-run/v2')
+    await runtime.close()
+  }
+})
+
+test('revise-created corridor is skipped while its readiness is offline and the create corridor is still used', async () => {
+  fakeClock(); const f = await workItemFixture({ revision: { ready: false } })
+  const runtime = f.create(); await f.tick()
+  expect(f.review.mock.calls[0]![0].corridor).toBe('create')
+  expect(runtime.health().counts).toEqual({ reviewed: 1 })
+})
+
+test('a revise-created binding rejects creation acceptance and never settles reviewed', async () => {
+  fakeClock(); const f = await workItemFixture({ revision: {} })
+  f.review.mockImplementation(async input => {
+    if (input.corridor === 'revise-created') {
+      input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: f.pins.creationAcceptance })
+      return 'reviewed'
+    }
+    input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: f.pins.creationAcceptance }); return 'reviewed'
+  })
+  const runtime = f.create(); await f.tick()
+  expect(runtime.health().counts).toEqual({ unknown: 1 })
+})
 
 test('producer UsageStore frame rejects same-instance mutations, rolls back throw/thenable and clears guard', async () => {
   fakeClock(); const f = await workItemFixture(), runtime = f.create(); await f.tick()
@@ -984,6 +1068,82 @@ for (const mode of ['allowed-last-slot', 'policy-deny', 'withdraw', 'expired', '
   }
   if (mode === 'policy-replaced-in-source-check') expect(replacements).toBe(1)
   expect(globalBodies).toBe(0)
+})
+
+test('real Policy revise-created WorkItem lane exposes exactly the six revision tools', async () => {
+  fakeClock()
+  const f = await workItemFixture({ maxToolCalls: 2, toolPolicy: 'allow', revision: {} })
+  await mountAgentLoopTestDependencies(f.ctx, { workingDirectory: true })
+  let count = 0
+  let capturedSurface: readonly string[] = []
+  const plane: GrowthSourcePlanePort = {
+    // The revision corridor never exposes creation seams (mirrors #runWake's
+    // taskPort, which deletes them for a revise-created wake).
+    listOpenGaps: () => [{ id: 'gap', capability: 'revision', context: 'authenticated failure', status: 'open' as const, createdAt: 1 }],
+    inspectSource: async () => { throw new Error('not used') }, inspectSourceTargets: async () => ({ baseCommit: 'a'.repeat(40), plugins: [] }),
+    prepareModifySourcePlan: async () => { throw new Error('not allowed') },
+    inspectSourceJob: input => ({ id: input.id, name: 'child', gapId: 'gap', baseCommit: 'a'.repeat(40), status: 'queued', createdAt: 1, expiresAt: 2 }),
+    getSourceRevisionNamespace: () => ({ namePrefix: 'created-' }),
+    inspectSourceRevisionAcceptanceAuthority: () => f.revisionAcceptance,
+    inspectCreatedCapabilityRevisionTargets: () => [{ parentPlanId: 'plan-created-1', name: 'child', parentSourceDigest: 'a'.repeat(64) }],
+    inspectRevisionSource: async () => ({ name: 'child', baseCommit: 'a'.repeat(40), files: [], contents: [] }),
+    enqueueSourceJob: async () => { throw new Error('not used') },
+  }
+  class Adapter extends LlmAdapter {
+    requests = 0
+    override async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
+    override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      this.requests++
+      const agent = f.ctx.agents.get(SessionId(options.sessionId!))!
+      agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
+      if (this.requests === 1) {
+        const result = await f.ctx.tools.execute({ name: 'plugin_source_gaps', arguments: {}, agent,
+          callId: ToolCallId(`revision-gap-${++count}`), signal: new AbortController().signal })
+        expect(result.isError).toBe(false)
+        capturedSurface = agent.ctx.tools.schemas(agent).map(schema => schema.name).sort()
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Revision lane complete.' } }
+      yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 10 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  f.ctx.llm.registerAdapter(['original-worker'], new Adapter()); await f.ctx.plugin(AgentLoop, { agents: [] })
+  let myMockRan = false
+  let agentError: string | undefined
+  f.review.mockImplementation(async input => {
+    myMockRan = true
+    expect(input.corridor).toBe('revise-created')
+    const authority = mintGrowthAuthority({ validateOwnerRoute: f.delivery.validateOwnerRoute, commitOwnerAnchoredWorkflowTrace: async () => { throw new Error('not used') } }, f.config.scope!, input.expiresAt, true)
+    let result
+    try {
+      result = await runGrowthAgent(f.growthCtx, { wakeId: input.id, authority, config: f.config, model: { provider: input.model.provider, model: input.model.model },
+        goals: { inspectOwnerGoals: () => [], inspectOwnerVerifiedWorkflowSource: () => { throw new Error('not used') } },
+        skills: { inspectOwnerActiveSkills: () => [], inspectOwnerSkillCandidates: () => [], stageOwnerVerifiedSuccessCandidate: async () => { throw new Error('not used') } },
+        sourcePlane: plane, feedback: input.source, signal: input.signal, generationDeadlineAt: input.expiresAt,
+        workItemAuthorization: { runId: input.id, intentDigest: input.intentDigest, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, assertCurrent: input.assertCurrent },
+        assertFirstModelAdmission: input.assertFirstModelAdmission,
+        onSourceExecution: actual => input.bindSourceRun(actual) })
+    } catch (error) {
+      agentError = (error as Error).message
+      throw error
+    }
+    if (result.outcome !== 'succeeded') agentError = `unexpected agent outcome: ${result.outcome}`
+    return result.outcome === 'succeeded' ? 'reviewed' : 'unknown'
+  })
+  f.create(); await f.tick()
+  expect(myMockRan).toBe(true)
+  expect(agentError).toBeUndefined()
+  expect(capturedSurface).toEqual(['plugin_source_gaps', 'plugin_source_job_status', 'plugin_source_read',
+    'plugin_source_revise', 'plugin_source_revision_inspect', 'plugin_source_revision_targets'])
+  expect(capturedSurface).not.toContain('plugin_source_create')
+  const runtimeInput = f.review.mock.calls[0]![0]
+  const ledger = new UsageStore(join(f.root, 'usage.sqlite'))
+  try {
+    const job = ledger.get(runtimeInput.id)!
+    expect(job.sourceRun?.protocol).toBe('assistant-growth/source-run/v3')
+    expect(ledger.counts(acceptanceDigest(f.config.scope))).toEqual({ reviewed: 1 })
+  } finally { ledger.close() }
 })
 
 test('missing Policy WorkItem capability keeps the same locator with zero paid author runs', async () => {

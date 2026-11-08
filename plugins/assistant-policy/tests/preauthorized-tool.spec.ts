@@ -595,11 +595,24 @@ describe('work-item Growth create-only preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test('does not expand Growth preauthorization to author aliases, preparation, targets or revisions', async () => {
+  test('does not expand Growth preauthorization to author aliases, preparation, targets, approval or release', async () => {
     const current = await fixture(), caller = trustedActionsCaller(current.ctx, fiberName)
-    for (const name of ['growth_create', 'growth_plugin_source_create', 'plugin_source_prepare', 'plugin_source_targets', 'plugin_source_revise', 'plugin_source_approve', 'plugin_source_release']) {
+    for (const name of ['growth_create', 'growth_plugin_source_create', 'plugin_source_prepare', 'plugin_source_targets', 'plugin_source_approve', 'plugin_source_release']) {
       expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(caller, definition(name, () => {}), () => true)).toThrow(/reserved/)
     }
+    await current.ctx.fiber.restart()
+  })
+
+  test('permits the revise-created Growth lane tools for the growth-driver Fiber only', async () => {
+    const current = await fixture(), caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-growth-driver')
+    const removers: Array<() => void> = []
+    for (const name of ['plugin_source_revision_targets', 'plugin_source_revision_inspect', 'plugin_source_revise']) {
+      const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, definition(name, () => {}), () => true)
+      expect(typeof remove).toBe('function'); removers.push(remove)
+    }
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(
+      trustedActionsCaller(current.ctx), definition('plugin_source_revise', () => {}), () => true)).toThrow(/reserved/)
+    for (const remove of removers) remove()
     await current.ctx.fiber.restart()
   })
 

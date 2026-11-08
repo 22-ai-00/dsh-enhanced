@@ -130,6 +130,11 @@ export class AssistantGrowthDriverService extends Service {
             const binding = this.#sourceBinding
             return binding?.available() && binding.workItemRevisionReady?.() ? binding.port.inspectWorkItemRevisionReadiness?.({ owner }) : undefined
           },
+          inspectWorkItemRevisionTargets: () => {
+            const binding = this.#sourceBinding
+            return binding?.available() && binding.workItemRevisionReady?.()
+              ? binding.port.inspectCreatedCapabilityRevisionTargets?.() ?? [] : []
+          },
           inspectCreationAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceCreationAcceptanceAuthority?.(),
           inspectRevisionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionAcceptanceAuthority?.(),
           inspectRevisionRegressionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionRegressionAcceptanceAuthority?.(),
@@ -363,7 +368,13 @@ export class AssistantGrowthDriverService extends Service {
     const wakeId = input.usage?.id ?? `growth-wake-${Date.now()}-${randomUUID()}`
     const startedAt = Date.now()
     const workItemUsage = input.usage !== undefined && 'sourceKind' in input.usage && input.usage.sourceKind === 'work-item' ? input.usage : undefined
-    const config = workItemUsage ? { ...this.#config, pluginSourceProposals: { ...this.#config.pluginSourceProposals, allowModification: false, allowRevision: false } } : this.#config
+    // The revision corridor is enabled per wake only for jobs frozen as
+    // revise-created; creation wakes keep the historical revision-forced-off
+    // configuration exactly.
+    const config = workItemUsage
+      ? { ...this.#config, pluginSourceProposals: { ...this.#config.pluginSourceProposals,
+        allowModification: false, allowRevision: workItemUsage.corridor === 'revise-created' } }
+      : this.#config
     if (!config.scope) {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-scope', run: null }
       return
@@ -470,10 +481,19 @@ export class AssistantGrowthDriverService extends Service {
           }
         }
         const taskPort: GrowthSourcePlanePort = { ...source.port, listOpenGaps: ownGaps,
-          prepareModifySourcePlan: request => { if (workItemUsage) throw new Error('work item growth only permits creation'); assertGap(request.gapId); return source.port.prepareModifySourcePlan(request) },
+          prepareModifySourcePlan: request => { if (workItemUsage) throw new Error('work item growth only permits creation or revision'); assertGap(request.gapId); return source.port.prepareModifySourcePlan(request) },
           enqueueSourceJob: request => {
             assertGap(request.gapId)
             const growthRun = this.#usage?.inspectAnySourceGrowthRun({ runId: usage.id, intentDigest: usage.intentDigest })
+            if (workItemUsage?.corridor === 'revise-created') {
+              // The corridor was frozen as revise-created: only that mode may
+              // cross this gate, under a current v3 binding and revision pins.
+              if (request.mode !== 'revise-created' || source.workItemRevisionReady?.() !== true
+                || growthRun?.protocol !== 'assistant-growth/source-run/v3' || growthRun.revisionAcceptance === undefined) {
+                throw new Error('assistant-growth-driver: work item revision lacks its current native source run')
+              }
+              return source.port.enqueueSourceJob({ ...request, growthRun })
+            }
             if (request.mode === 'create' && (!source.taskCreationReady() || growthRun === undefined)) {
               throw new Error('assistant-growth-driver: task-bound creation lacks a current native source run')
             }
@@ -485,11 +505,16 @@ export class AssistantGrowthDriverService extends Service {
               ? { ...request, growthRun } : request)
           },
         }
-        if (!source.taskCreationReady()) {
+        // A revise-created corridor never exposes the creation lane: its v3
+        // binding cannot authorize creates, so the tool must not appear either.
+        const creationSeamsReady = source.taskCreationReady() && workItemUsage?.corridor !== 'revise-created'
+        if (!creationSeamsReady) {
           delete taskPort.inspectCreateSource
           delete taskPort.getSourceCreationNamespace
         }
-        if (!source.taskRevisionReady()) {
+        const revisionSeamsReady = workItemUsage === undefined
+          ? source.taskRevisionReady() : workItemUsage.corridor === 'revise-created' && source.workItemRevisionReady?.() === true
+        if (!revisionSeamsReady) {
           delete taskPort.getSourceRevisionNamespace
           delete taskPort.inspectSourceRevisionAcceptanceAuthority
           delete taskPort.inspectSourceRevisionRegressionAcceptanceAuthority

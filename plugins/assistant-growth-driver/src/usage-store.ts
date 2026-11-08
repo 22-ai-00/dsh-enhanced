@@ -3,7 +3,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { types as utilTypes } from 'node:util'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { sourceGrowthEvidenceDigest, validateSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { sourceGrowthEvidenceDigest, validateSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { freezeWorkItemData, ownData, workItemRunSource, validateWorkItemUsageLocator, type WorkItemUsageLocator, type WorkItemUsageSource } from './work-item-source.js'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 
@@ -18,17 +18,25 @@ export interface ForegroundUsageIntent {
   createdAt: number
   expiresAt: number
 }
-export interface WorkItemUsageIntent {
+interface WorkItemUsageIntentBase {
   sourceKind: 'work-item'
   configDigest: string
   source: WorkItemUsageSource
   model: UsageModel
   modelOrigin: SourceGrowthRunBinding['modelOrigin']
   budget: SourceGrowthRunBinding['budget']
-  authorities: WorkItemGrowthAuthorityPins
   createdAt: number
   expiresAt: number
 }
+/**
+ * The corridor is frozen when the WorkItem is admitted to the queue and never
+ * changes for that job: create-only (v2) or revise-created (v3). The matching
+ * authority pin set travels with it, so a later configuration change can never
+ * silently switch an admitted job's authority shape.
+ */
+export type WorkItemUsageIntent = WorkItemUsageIntentBase & (
+  | { corridor: 'create'; authorities: WorkItemGrowthAuthorityPins }
+  | { corridor: 'revise-created'; authorities: WorkItemRevisionAuthorityPins; revisionTarget: { parentPlanId: string; name: string } })
 export type UsageIntent = ForegroundUsageIntent | WorkItemUsageIntent
 export const isWorkItemUsageIntent = (intent: UsageIntent): intent is WorkItemUsageIntent => 'sourceKind' in intent && intent.sourceKind === 'work-item'
 export interface UsageLocatorJob { id: string; locator: WorkItemUsageLocator; digest: string; state: 'pending' | 'frozen' | 'superseded'; jobId: string | null }
@@ -190,7 +198,9 @@ export class UsageStore {
       this.db.exec('COMMIT'); return this.get(id)!
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
-  bindWorkItemSourceRun(id: string, digest: string, definitionHash: string, occurrenceId: string, binding: WorkItemSourceGrowthRunBinding): WorkItemSourceGrowthRunBinding {
+  bindWorkItemSourceRun(id: string, digest: string, definitionHash: string, occurrenceId: string,
+    binding: WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding):
+    WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding {
     this.assertMutable()
     validateAnySourceGrowthRunBinding(binding)
     return this.withWorkItemRunWriter({ runId: id, intentDigest: digest }, job => {
@@ -201,6 +211,8 @@ export class UsageStore {
         || acceptanceDigest(binding.source) !== acceptanceDigest(workItemRunSource(job.intent.source))
         || acceptanceDigest(binding.model) !== acceptanceDigest(job.intent.model) || binding.modelOrigin !== job.intent.modelOrigin
         || acceptanceDigest(binding.budget) !== acceptanceDigest(job.intent.budget)
+        || (binding.protocol === 'assistant-growth/source-run/v3') !== (job.intent.corridor === 'revise-created')
+        || binding.mode !== (job.intent.corridor === 'revise-created' ? 'revise-created' : 'create')
         || acceptanceDigest(binding.authorities) !== acceptanceDigest(job.intent.authorities)) throw new Error('work item source run differs from frozen intent')
       if (job.sourceRun !== null) {
         if (anySourceGrowthRunDigest(job.sourceRun) !== anySourceGrowthRunDigest(binding)) throw new Error('usage source run binding conflict')
