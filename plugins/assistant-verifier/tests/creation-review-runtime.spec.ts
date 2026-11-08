@@ -435,13 +435,16 @@ test('work-item flag false preserves legacy authority bytes while true cannot re
   expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
 })
 
-test('revision and paired regression reject the creation-only opt-in; false keeps their legacy authority', async () => {
+test('revision and paired regression accept only a boolean opt-in; false keeps their legacy authority', async () => {
   const f = await fixture()
-  expect(() => compileRevisionReviewConfig({ ...f.config, workItemFailures: true })).toThrow('work-item revision')
+  expect(() => compileRevisionReviewConfig({ ...f.config, workItemFailures: true })).not.toThrow()
+  expect(() => compileRevisionReviewConfig({ ...f.config, workItemFailures: 'yes' as never })).toThrow('revision review invalid workItemFailures')
+  expect(() => compileRevisionReviewConfig({ ...f.config, workItemFailures: null as never })).toThrow('revision review invalid workItemFailures')
   expect(compileRevisionReviewConfig({ ...f.config, workItemFailures: false }).authority).toEqual(compileRevisionReviewConfig(f.config).authority)
   const { policy: _policy, maxInputBytes: _input, maxOutputTokens: _output, ...regression } = f.config
   regression.runner = { ...regression.runner, maxRuns: regression.maxVerifications * (2 + 2 * regression.maxCases) }
-  expect(() => compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: true })).toThrow('work-item revision regression')
+  expect(() => compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: true })).not.toThrow()
+  expect(() => compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: 'yes' as never })).toThrow('revision regression review invalid workItemFailures')
   expect(compileRevisionRegressionReviewConfig({ ...regression, workItemFailures: false }).authority).toEqual(compileRevisionRegressionReviewConfig(regression).authority)
 })
 

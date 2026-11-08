@@ -29,8 +29,8 @@ export interface RevisionRegressionReviewAuthorityInspection {
   available: boolean
 }
 
-function legacyConfig(input: RevisionRegressionReviewConfig): CreationReviewConfig {
-  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision regression is not supported')
+function baseConfig(input: RevisionRegressionReviewConfig): CreationReviewConfig {
+  if (Object.hasOwn(input, 'workItemFailures') && typeof input.workItemFailures !== 'boolean') throw new Error('revision regression review invalid workItemFailures')
   if (!input || typeof input !== 'object' || Array.isArray(input)
     || Object.getPrototypeOf(input) !== Object.prototype
     || Reflect.ownKeys(input).some(key => typeof key !== 'string')
@@ -40,15 +40,13 @@ function legacyConfig(input: RevisionRegressionReviewConfig): CreationReviewConf
     || Object.values(Object.getOwnPropertyDescriptors(input)).some(field => !field.enumerable || !('value' in field))) {
     throw new Error('revision regression review invalid config')
   }
-  if (Object.hasOwn(input, 'workItemFailures') && input.workItemFailures !== false) throw new Error('revision regression review invalid workItemFailures')
-  const { workItemFailures: _workItemFailures, ...legacy } = input
-  return { ...legacy, policy: RULES, maxInputBytes: 4096, maxOutputTokens: 2 }
+  return { ...input, policy: RULES, maxInputBytes: 4096, maxOutputTokens: 2 }
 }
 
 export function validateRevisionRegressionReviewConfig(input: RevisionRegressionReviewConfig): RevisionRegressionReviewConfig {
-  const legacy = legacyConfig(input)
-  validateCreationBehaviorDeploymentConfig(legacy.runner)
-  const checked = compileCreationReviewConfig(legacy).config
+  const base = baseConfig(input)
+  validateCreationBehaviorDeploymentConfig(base.runner)
+  const checked = compileCreationReviewConfig(base).config
   if (checked.runner.maxRuns < checked.maxVerifications * (2 + 2 * checked.maxCases)) {
     throw new Error('revision regression runner cannot cover paired observations')
   }
@@ -61,12 +59,13 @@ export function compileRevisionRegressionReviewConfig(input: RevisionRegressionR
   publicKey: string; privateKey: ReturnType<typeof import('node:crypto').createPrivateKey>
 } {
   const config = validateRevisionRegressionReviewConfig(input)
-  const checked = compileCreationReviewConfig(legacyConfig(config))
+  const checked = compileCreationReviewConfig(baseConfig(config))
   const authority: RevisionRegressionAcceptanceAuthorityRef = {
     protocol: 'assistant-growth/revision-regression-acceptance-authority/v1', authorityId: config.authorityId,
     keyId: config.keyId, namePrefix: config.namePrefix, expiresAt: config.expiresAt,
     authorityDigest: growthObjectDigest({ purpose: PURPOSE, rules: RULES, baseRules: RULES_VERSION,
       comparisonRules: COMPARISON_RULES, schemaRules: SCHEMA_RULES,
+      ...(checked.config.workItemFailures === true ? { workItemFailures: true } : {}),
       configurationDigest: checked.authority.authorityDigest }),
   }
   validateRevisionRegressionAcceptanceAuthorityRef(authority)

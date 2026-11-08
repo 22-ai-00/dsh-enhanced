@@ -37,8 +37,19 @@ export interface RevisionReviewAuthorityInspection {
   available: boolean
 }
 
+export interface WorkItemRevisionReviewReadiness {
+  protocol: 'assistant-growth/work-item-revision-review-readiness/v1'
+  sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1'
+  runProtocol: 'assistant-growth/source-run/v3'
+  workItemFailures: true
+  authority: RevisionAcceptanceAuthorityRef
+  publicKey: string
+  remainingVerifications: number
+  available: boolean
+}
+
 export function validateRevisionReviewConfig(input: RevisionReviewConfig): RevisionReviewConfig {
-  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision review is not supported')
+  if (Object.hasOwn(input, 'workItemFailures') && typeof input.workItemFailures !== 'boolean') throw new Error('revision review invalid workItemFailures')
   if (Object.hasOwn(input, 'history')) throw new Error('revision review history is not supported')
   validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   return compileCreationReviewConfig(input).config
@@ -47,13 +58,14 @@ export function validateRevisionReviewConfig(input: RevisionReviewConfig): Revis
 export function compileRevisionReviewConfig(input: RevisionReviewConfig): {
   config: RevisionReviewConfig; authority: RevisionAcceptanceAuthorityRef; publicKey: string; privateKey: KeyObject
 } {
-  if (Object.getOwnPropertyDescriptor(input, 'workItemFailures')?.value === true) throw new Error('work-item revision review is not supported')
+  if (Object.hasOwn(input, 'workItemFailures') && typeof input.workItemFailures !== 'boolean') throw new Error('revision review invalid workItemFailures')
   if (Object.hasOwn(input, 'history')) throw new Error('revision review history is not supported')
   validateCreationBehaviorDeploymentConfig(Object.getOwnPropertyDescriptor(input, 'runner')?.value)
   const checked = compileCreationReviewConfig(input)
   const authorityDigest = growthObjectDigest({ purpose: REVISION_PURPOSE,
     baseRules: RULES_VERSION, caseRules: CASE_RULES, comparisonRules: COMPARISON_RULES,
     schemaRules: SCHEMA_RULES, reviewRules: REVIEW_RULES, revisionRules: REVISION_RULES,
+    ...(checked.config.workItemFailures === true ? { workItemFailures: true } : {}),
     configurationDigest: checked.authority.authorityDigest })
   const authority: RevisionAcceptanceAuthorityRef = {
     protocol: 'assistant-growth/revision-acceptance-authority/v1', authorityId: checked.config.authorityId,

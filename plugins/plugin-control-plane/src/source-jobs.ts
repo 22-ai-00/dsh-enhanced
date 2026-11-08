@@ -418,6 +418,7 @@ export class SourceJobRuntime {
     if (growthRun === undefined) throw new Error('task-backed creation requires a frozen source growth run')
     validateSourceGrowthRunBinding(growthRun)
     if(growthRun.protocol==='assistant-growth/source-run/v2'&&(mode!=='create'||this.options.config.creation?.workItemFailures!==true||this.options.store.getOwnerTaskFailureReference(gapId)?.schemaVersion!==2))throw new Error('work item growth requires explicit create authority')
+    if(growthRun.protocol==='assistant-growth/source-run/v3'&&(mode!=='revise-created'||this.options.config.revision?.workItemFailures!==true||this.options.store.getOwnerTaskFailureReference(gapId)?.schemaVersion!==2||Date.now()>=this.options.config.revision.expiresAt))throw new Error('work item revision growth requires explicit current revision authority')
     if (!this.options.assertGrowthRun) throw new SourceGrowthRunUnavailableError('source growth run producer unavailable')
     this.options.assertGrowthRun(growthRun, gapId, owner, generation)
   }
@@ -425,6 +426,7 @@ export class SourceJobRuntime {
   enqueue(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
     this.assertMode(input.mode)
     if(input.growthRun?.protocol==='assistant-growth/source-run/v2'&&input.mode!=='create')throw new Error('work item growth only permits create')
+    if(input.growthRun?.protocol==='assistant-growth/source-run/v3'&&input.mode!=='revise-created')throw new Error('work item revision growth only permits revise-created')
     if (input.mode !== 'create' && input.mode !== 'revise-created' && input.growthRun !== undefined) throw new Error('modify source job cannot carry a growth run')
     if (input.mode === 'create' || input.mode === 'revise-created') validateSourceCreationFiles(input.files)
     else {
