@@ -176,7 +176,9 @@ function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty:
       const latencyMs = taskLatencyMs(originalSource.execution as typeof originalSource.execution | undefined)
       const outcomeMetrics = evaluation.inspectTrustedOutcomeMetrics?.({
         scope: evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset }),
-        outcomeId: source.canonical.triggerOutcomeId,
+        // The objective component's own outcome row carries the evaluator's
+        // resource claims; fall back to the trigger row when it is absent.
+        outcomeId: source.canonical.objective?.outcomeId ?? source.canonical.triggerOutcomeId,
       })
       const tokenUsage = outcomeMetrics === undefined
         || typeof outcomeMetrics.inputTokens !== 'number' || typeof outcomeMetrics.outputTokens !== 'number'
