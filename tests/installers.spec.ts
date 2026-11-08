@@ -4281,25 +4281,6 @@ describe('one-click installers', () => {
     expect(await readFile(f.systemdLog, 'utf8')).toBe('')
   })
 
-  test('the historical local upgrade AND chain continued after a failed repository install', async () => {
-    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
-    const fixtureCommon = await readFile(f.fixtureInstallerLibrary, 'utf8')
-    const oldCommon = fixtureCommon.replace(
-      'pnpm --dir "$repo_root" install --offline --frozen-lockfile || return $?\n      pnpm --dir "$repo_root" build || return $?',
-      'pnpm --dir "$repo_root" install --offline --frozen-lockfile && pnpm --dir "$repo_root" build',
-    )
-    expect(oldCommon).not.toBe(fixtureCommon)
-    await writeFile(f.fixtureInstallerLibrary, oldCommon)
-
-    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
-      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
-    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin, { localInstallFails: true }))
-
-    expect(result.status, result.stderr).toBe(0)
-    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
-    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
-  }, 15_000)
-
   test.each([
     ['install', { localInstallFails: true }, 71, 'local fixture pnpm install failed'],
     ['build', { localBuildFails: true }, 72, 'local fixture pnpm build failed'],
