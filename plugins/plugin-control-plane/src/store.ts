@@ -3031,7 +3031,8 @@ export class ControlPlaneStore {
 
   claimCreationVerification(planId: string): void {
     const job = this.getPreparedSourceJob(planId)
-    const pinned = job.intent.creation?.growthRun?.creationAcceptance
+    const run = job.intent.creation?.growthRun
+    const pinned = run && run.protocol !== 'assistant-growth/source-run/v3' ? run.creationAcceptance : undefined
     if (!pinned || this.#now() >= pinned.expiresAt) {
       throw new ControlPlaneStoreError('invalid-state', 'creation verification requires a current pre-author policy binding')
     }

@@ -11,7 +11,7 @@ import { captureCreationCapabilitySource, creationCapabilitySourceDigest,
 import { controlPlaneDigest } from '../src/store.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
 import { inspectSourceRevisionContext, prepareRevisedPluginWorkspace, validateSourceRevisionBinding,
-  validateSourceRevisionGrant, verifyRevisedPluginWorkspace, type SourceRevisionBinding,
+  validateSourceRevisionGrant, verifyRevisedPluginWorkspace, normalizeSourceRevisionGrant, type SourceRevisionBinding,
   type SourceRevisionGrant } from '../src/source-revision.js'
 import { checkedSourceSnapshot, createIsolatedWorktree } from '../src/source-workspace.js'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.js'
@@ -211,6 +211,14 @@ describe('revision of archived created plugin through the real Git generator', (
     await expect(prepareRevisedPluginWorkspace({ ...input, revision: { ...parent.binding,
       grant: expired } })).rejects.toThrow('grant expired')
     expect(() => validateSourceRevisionGrant({ ...grant(), maxRevisions: 0 })).toThrow()
+    expect(() => validateSourceRevisionGrant({ ...grant(), workItemFailures: true })).not.toThrow()
+    expect(() => validateSourceRevisionGrant({ ...grant(), workItemFailures: 'yes' })).toThrow()
+    expect(normalizeSourceRevisionGrant({ ...grant(), workItemFailures: true }))
+      .toEqual({ ...grant(), workItemFailures: true })
+    const withoutFlag = normalizeSourceRevisionGrant({ ...grant(), workItemFailures: false })
+    expect(withoutFlag).toEqual(grant())
+    expect(Object.hasOwn(withoutFlag, 'workItemFailures')).toBe(false)
+    expect(normalizeSourceRevisionGrant(grant())).toEqual(grant())
     expect(() => validateSourceRevisionBinding({ ...parent.binding, growthRun: {
       ...parent.binding.growthRun, revisionAcceptance: undefined } })).toThrow()
     const getter = { ...parent.binding }

@@ -479,6 +479,7 @@ export class CreationReviewRuntime {
       if ((snapshot.protocol === 'dsh-prepared-creation/v2') !== (frozen.protocol === 'assistant-growth/source-run/v2')) {
         throw new Error('creation source/run protocol mismatch')
       }
+      if (!('creationAcceptance' in frozen)) throw new Error('creation source/run protocol mismatch')
       validateCreationAcceptanceAuthorityRef(frozen.creationAcceptance)
       if (canonicalGrowthJson(frozen.creationAcceptance) !== canonicalGrowthJson(authority)
         || canonicalGrowthJson(plan.creation?.growthRun) !== canonicalGrowthJson(snapshot.job.intent.creation &&

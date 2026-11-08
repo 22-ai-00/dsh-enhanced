@@ -202,7 +202,38 @@ export interface WorkItemSourceGrowthRunBinding extends Omit<SourceGrowthRunBind
     context: { protocol: 'assistant-delivery/work-item-engineering-context/v1'; manifestDigest: string; objectiveDigest: string; objectiveBytes: number }
   }
 }
-export type AnySourceGrowthRunBinding = SourceGrowthRunBinding | WorkItemSourceGrowthRunBinding
+export type AnySourceGrowthRunBinding = SourceGrowthRunBinding | WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding
+
+/**
+ * Revision corridor authorities. Mirrors the v2 work-item pins but binds the
+ * revision grant (with explicit workItemFailures), the independent revision
+ * acceptance authority and, when present, the parent-behavior regression and
+ * version-switch adoption pins. These are pins, never candidate input.
+ */
+export interface WorkItemRevisionAuthorityPins {
+  protocol: 'assistant-growth/work-item-revision-authorities/v1'
+  sourceJobs: { authorityId: string; authorityDigest: string; expiresAt: number }
+  revisionGrant: { id: string; digest: string; expiresAt: number; workItemFailures: true }
+  revisionAcceptance: RevisionAcceptanceAuthorityRef
+  revisionRegressionAcceptance?: RevisionRegressionAcceptanceAuthorityRef
+  revisionAdoption?: { authorityId: string; authorityDigest: string; expiresAt: number }
+}
+
+/**
+ * v3 reuses the v2 work-item source provenance but switches the corridor from
+ * create-only to revising an already-adopted, owner-created capability. It is
+ * never a foreground source and never carries creation acceptance.
+ */
+export interface WorkItemRevisionSourceGrowthRunBinding extends Omit<SourceGrowthRunBinding,
+  'protocol' | 'source' | 'creationAcceptance' | 'revisionAcceptance' | 'revisionRegressionAcceptance'> {
+  protocol: 'assistant-growth/source-run/v3'
+  mode: 'revise-created'
+  revisionAcceptance: RevisionAcceptanceAuthorityRef
+  /** Present exactly when the revision must also prove retained parent behavior. */
+  revisionRegressionAcceptance?: RevisionRegressionAcceptanceAuthorityRef
+  authorities: WorkItemRevisionAuthorityPins
+  source: WorkItemSourceGrowthRunBinding['source']
+}
 export interface SourceGrowthRunProducerV2 {
   protocol: 'assistant-growth-source-run-producer/v2'
   inspect(input: SourceGrowthRunRequest): AnySourceGrowthRunBinding | undefined
@@ -320,9 +351,93 @@ export function validateAnySourceGrowthRunBinding(value: unknown): asserts value
     if (descriptor && descriptor.enumerable && 'value' in descriptor) {
       if (descriptor.value === 'assistant-growth/source-run/v1') return validateSourceGrowthRunBinding(value)
       if (descriptor.value === 'assistant-growth/source-run/v2') return validateWorkItemSourceGrowthRunBinding(value)
+      if (descriptor.value === 'assistant-growth/source-run/v3') return validateWorkItemRevisionSourceGrowthRunBinding(value)
     }
   }
   invalid('binding protocol')
+}
+
+export function validateWorkItemRevisionAuthorityPins(value: unknown): asserts value is WorkItemRevisionAuthorityPins {
+  workItemData(value)
+  const pins = record(value, ['protocol', 'sourceJobs', 'revisionGrant', 'revisionAcceptance',
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionRegressionAcceptance') ? ['revisionRegressionAcceptance'] : []),
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionAdoption') ? ['revisionAdoption'] : [])], 'work item revision authorities')
+  if (pins.protocol !== 'assistant-growth/work-item-revision-authorities/v1') invalid('work item revision authorities protocol')
+  const sourceJobs = record(pins.sourceJobs, ['authorityId', 'authorityDigest', 'expiresAt'], 'sourceJobs')
+  text(sourceJobs.authorityId, 'sourceJobs authorityId'); hash(sourceJobs.authorityDigest, 'sourceJobs authorityDigest')
+  workItemExpiry(sourceJobs.expiresAt)
+  const revision = record(pins.revisionGrant, ['id', 'digest', 'expiresAt', 'workItemFailures'], 'revision grant')
+  text(revision.id, 'revision grant id'); hash(revision.digest, 'revision grant digest'); workItemExpiry(revision.expiresAt)
+  if (revision.workItemFailures !== true) invalid('revision grant work item failures')
+  validateRevisionAcceptanceAuthorityRef(pins.revisionAcceptance)
+  if (Object.hasOwn(pins, 'revisionRegressionAcceptance')) validateRevisionRegressionAcceptanceAuthorityRef(pins.revisionRegressionAcceptance)
+  if (Object.hasOwn(pins, 'revisionAdoption')) {
+    const adoption = record(pins.revisionAdoption, ['authorityId', 'authorityDigest', 'expiresAt'], 'revisionAdoption')
+    text(adoption.authorityId, 'revisionAdoption authorityId'); hash(adoption.authorityDigest, 'revisionAdoption authorityDigest')
+    workItemExpiry(adoption.expiresAt)
+  }
+}
+
+export function workItemRevisionAuthorityPinsDigest(value: WorkItemRevisionAuthorityPins): string {
+  validateWorkItemRevisionAuthorityPins(value)
+  return sourceGrowthEvidenceDigest(value)
+}
+
+export function validateWorkItemRevisionSourceGrowthRunBinding(value: unknown): asserts value is WorkItemRevisionSourceGrowthRunBinding {
+  workItemData(value)
+  const binding = record(value, ['protocol', 'mode', 'runId', 'intentDigest', 'configDigest', 'ownerDigest', 'source', 'model',
+    'modelOrigin', 'revisionAcceptance', 'authorities', 'budget', 'native', 'sessionId', 'toolContractDigest',
+    'executionContractDigest', 'createdAt', 'generationDeadlineAt', 'expiresAt',
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'revisionRegressionAcceptance') ? ['revisionRegressionAcceptance'] : [])], 'work item revision binding')
+  if (binding.protocol !== 'assistant-growth/source-run/v3' || binding.mode !== 'revise-created') invalid('work item revision protocol or mode')
+  for (const key of ['runId', 'sessionId']) text(binding[key], key)
+  for (const key of ['intentDigest', 'configDigest', 'ownerDigest', 'toolContractDigest', 'executionContractDigest']) hash(binding[key], key)
+  const source = record(binding.source, ['protocol', 'itemId', 'outcomeId', 'projection', 'objectiveStatus', 'sourceDigest', 'presentationDigest', 'context'], 'work item source')
+  if (source.protocol !== 'assistant-growth/work-item-source/v1' || source.objectiveStatus !== 'not-achieved') invalid('work item source protocol or objective')
+  text(source.itemId, 'work item id'); text(source.outcomeId, 'outcomeId')
+  hash(source.sourceDigest, 'sourceDigest'); hash(source.presentationDigest, 'presentationDigest')
+  if (!isGrowthRecord(source.projection)) invalid('work item projection')
+  const projection = record(source.projection, ['subjectKind', 'subjectRef', 'version', 'digest', 'disposition',
+    ...(Object.hasOwn(source.projection, 'evidenceOutcomeId') ? ['evidenceOutcomeId'] : [])], 'work item projection')
+  if (projection.subjectKind !== 'work-item' || projection.subjectRef !== source.itemId || projection.disposition !== 'upsert') invalid('work item projection identity')
+  integer(projection.version, 'projection version'); hash(projection.digest, 'projection digest')
+  if (Object.hasOwn(projection, 'evidenceOutcomeId')) text(projection.evidenceOutcomeId, 'evidenceOutcomeId')
+  const context = record(source.context, ['protocol', 'manifestDigest', 'objectiveDigest', 'objectiveBytes'], 'work item context')
+  if (context.protocol !== 'assistant-delivery/work-item-engineering-context/v1') invalid('work item context protocol')
+  hash(context.manifestDigest, 'context manifestDigest'); hash(context.objectiveDigest, 'context objectiveDigest')
+  integer(context.objectiveBytes, 'context objectiveBytes')
+  if (context.objectiveBytes > 16_384) invalid('context objectiveBytes')
+  if (!isGrowthRecord(binding.model)) invalid('model')
+  const model = record(binding.model, ['provider', 'model', ...(Object.hasOwn(binding.model, 'reasoningEffort') ? ['reasoningEffort'] : [])], 'model')
+  text(model.provider, 'provider'); text(model.model, 'model')
+  if (Object.hasOwn(model, 'reasoningEffort')) text(model.reasoningEffort, 'reasoningEffort')
+  if (binding.modelOrigin !== 'explicit-growth-override' && binding.modelOrigin !== 'inherited-owner-task') invalid('model origin')
+  const budget = record(binding.budget, ['budgetId', 'amount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'maxDurationMs', 'maxPlansPerWake'], 'budget')
+  text(budget.budgetId, 'budgetId')
+  for (const key of ['amount', 'maxModelCalls', 'maxToolCalls', 'maxOutputTokens', 'maxDurationMs', 'maxPlansPerWake']) integer(budget[key], key)
+  const native = record(binding.native, ['owner', 'automationId', 'definitionHash', 'occurrenceId'], 'native')
+  if (native.owner !== 'assistant-growth-usage' || native.automationId !== binding.runId) invalid('native owner or identity')
+  text(native.occurrenceId, 'occurrenceId'); hash(native.definitionHash, 'definitionHash')
+  for (const key of ['createdAt', 'generationDeadlineAt', 'expiresAt']) {
+    integer(binding[key], key, 0)
+    if (Number(binding[key]) > 8_640_000_000_000_000) invalid(key)
+  }
+  if (Number(binding.createdAt) >= Number(binding.generationDeadlineAt) || Number(binding.generationDeadlineAt) > Number(binding.expiresAt)
+    || Number(binding.generationDeadlineAt) - Number(binding.createdAt) > Number(budget.maxDurationMs)) invalid('deadline')
+  validateWorkItemRevisionAuthorityPins(binding.authorities)
+  validateRevisionAcceptanceAuthorityRef(binding.revisionAcceptance)
+  if (sourceGrowthEvidenceDigest(binding.revisionAcceptance) !== sourceGrowthEvidenceDigest(binding.authorities.revisionAcceptance)) invalid('revision acceptance authority mismatch')
+  if (Object.hasOwn(binding, 'revisionRegressionAcceptance')) {
+    if (!Object.hasOwn(binding.authorities, 'revisionRegressionAcceptance')) invalid('revision regression authority missing')
+    validateRevisionRegressionAcceptanceAuthorityRef(binding.revisionRegressionAcceptance)
+    if (sourceGrowthEvidenceDigest(binding.revisionRegressionAcceptance) !== sourceGrowthEvidenceDigest(binding.authorities.revisionRegressionAcceptance)) invalid('revision regression authority mismatch')
+  }
+  const revisionAuthorities: Array<{ expiresAt: number }> = [binding.authorities.sourceJobs, binding.authorities.revisionGrant, binding.authorities.revisionAcceptance]
+  if (Object.hasOwn(binding.authorities, 'revisionRegressionAcceptance')) revisionAuthorities.push(binding.authorities.revisionRegressionAcceptance!)
+  if (Object.hasOwn(binding.authorities, 'revisionAdoption')) revisionAuthorities.push(binding.authorities.revisionAdoption!)
+  for (const authority of revisionAuthorities) {
+    if (authority.expiresAt <= Number(binding.createdAt) || Number(binding.generationDeadlineAt) > authority.expiresAt) invalid('work item revision authority expiry')
+  }
 }
 
 export function anySourceGrowthRunDigest(binding: AnySourceGrowthRunBinding): string {

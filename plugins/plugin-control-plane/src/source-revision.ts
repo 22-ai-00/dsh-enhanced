@@ -22,6 +22,7 @@ const MAX_TOTAL_BYTES = 262_144
 
 export interface SourceRevisionGrant {
   id: string
+  workItemFailures?: boolean
   expiresAt: number
   maxRevisions: number
   namePrefix: string
@@ -49,12 +50,23 @@ function exact(value: unknown, keys: readonly string[], label: string): Record<s
 
 /** Shape remains valid for historical grants after their expiry. */
 export function validateSourceRevisionGrant(value: unknown): asserts value is SourceRevisionGrant {
-  const grant = exact(value, ['id', 'expiresAt', 'maxRevisions', 'namePrefix'], 'grant')
+  const grant = exact(value, ['id', 'expiresAt', 'maxRevisions', 'namePrefix',
+    ...(value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Object.hasOwn(value as object, 'workItemFailures') ? ['workItemFailures'] : [])], 'grant')
+  if (Object.hasOwn(grant as object, 'workItemFailures') && typeof (grant as Record<string, unknown>)['workItemFailures'] !== 'boolean') fail('grant fields')
   if (typeof grant.id !== 'string' || !GRANT_ID.test(grant.id) || grant.id.normalize('NFC') !== grant.id
     || !Number.isSafeInteger(grant.expiresAt) || Number(grant.expiresAt) < 1
     || !Number.isSafeInteger(grant.maxRevisions) || Number(grant.maxRevisions) < 1 || Number(grant.maxRevisions) > 1_000
     || typeof grant.namePrefix !== 'string' || grant.namePrefix.length < 2 || grant.namePrefix.length > 48
     || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-$/u.test(grant.namePrefix)) fail('grant fields')
+}
+
+/** false and missing are equivalent; only an explicit true survives canonicalization. */
+export function normalizeSourceRevisionGrant(value: SourceRevisionGrant): SourceRevisionGrant {
+  validateSourceRevisionGrant(value)
+  const result = structuredClone(value)
+  if (result.workItemFailures !== true) delete result.workItemFailures
+  return result
 }
 
 export function validateSourceRevisionBinding(value: unknown): asserts value is SourceRevisionBinding {

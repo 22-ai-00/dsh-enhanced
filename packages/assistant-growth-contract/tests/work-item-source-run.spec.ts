@@ -1,7 +1,9 @@
 import { expect, test } from 'vitest'
 import { anySourceGrowthRunDigest, sourceGrowthRunDigest, validateAnySourceGrowthRunBinding,
   validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateWorkItemSourceGrowthRunBinding,
-  workItemGrowthAuthorityPinsDigest, type SourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '../src/source-run.js'
+  validateWorkItemRevisionSourceGrowthRunBinding, workItemGrowthAuthorityPinsDigest,
+  workItemRevisionAuthorityPinsDigest, type SourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding,
+  type WorkItemSourceGrowthRunBinding } from '../src/source-run.js'
 
 function binding(): WorkItemSourceGrowthRunBinding {
   const acceptance = { protocol: 'assistant-growth/creation-acceptance-authority/v1' as const, authorityId: 'creation-acceptance', keyId: 'key', authorityDigest: 'a'.repeat(64), namePrefix: 'assistant-', expiresAt: 60_000 }
@@ -108,4 +110,78 @@ test('accessors, thenables and proxies are rejected before user code can run', (
   Object.defineProperty(thenablePins, 'then', { enumerable: true, value: () => { calls++ } })
   expect(() => validateWorkItemGrowthAuthorityPins(thenablePins)).toThrow()
   expect(calls).toBe(0)
+})
+
+function revisionBinding(): WorkItemRevisionSourceGrowthRunBinding {
+  const base = structuredClone(binding())
+  const revisionAcceptance = { protocol: 'assistant-growth/revision-acceptance-authority/v1' as const, authorityId: 'revision-acceptance', keyId: 'revision-key', authorityDigest: 'b'.repeat(64), namePrefix: 'assistant-', expiresAt: 61_000 }
+  const revisionGrant = { id: 'revision-grant', digest: 'c'.repeat(64), expiresAt: 64_000, workItemFailures: true as const }
+  const { creationAcceptance: _drop, ...rest } = base
+  return { ...rest, protocol: 'assistant-growth/source-run/v3', mode: 'revise-created',
+    revisionAcceptance,
+    authorities: { protocol: 'assistant-growth/work-item-revision-authorities/v1',
+      sourceJobs: { authorityId: 'source-jobs', authorityDigest: '4'.repeat(64), expiresAt: 65_000 },
+      revisionGrant, revisionAcceptance } }
+}
+
+test('typed revision provenance keeps work-item identity and never widens create or foreground APIs', () => {
+  const value = revisionBinding()
+  validateWorkItemRevisionSourceGrowthRunBinding(value); validateAnySourceGrowthRunBinding(value)
+  expect(anySourceGrowthRunDigest(JSON.parse(JSON.stringify(value)))).toBe(anySourceGrowthRunDigest(value))
+  expect(() => validateWorkItemSourceGrowthRunBinding(value)).toThrow()
+  expect(() => validateSourceGrowthRunBinding(value)).toThrow()
+  expect(Object.hasOwn(value, 'creationAcceptance')).toBe(false)
+})
+
+test('all revision authority pins participate in the canonical digest', () => {
+  const original = revisionBinding(), digest = anySourceGrowthRunDigest(original)
+  for (const change of [
+    (v: WorkItemRevisionSourceGrowthRunBinding) => { v.authorities.sourceJobs.authorityDigest = 'a'.repeat(64) },
+    (v: WorkItemRevisionSourceGrowthRunBinding) => { v.authorities.revisionGrant.digest = 'a'.repeat(64) },
+    (v: WorkItemRevisionSourceGrowthRunBinding) => { v.authorities.revisionGrant.expiresAt = 63_500 },
+    (v: WorkItemRevisionSourceGrowthRunBinding) => { v.revisionAcceptance.keyId = 'other-key' },
+  ]) { const value = structuredClone(original); change(value); expect(anySourceGrowthRunDigest(value)).not.toBe(digest) }
+  expect(workItemRevisionAuthorityPinsDigest(original.authorities)).toHaveLength(64)
+})
+
+const revisionCorrupt: Array<[string, (v: WorkItemRevisionSourceGrowthRunBinding) => void]> = [
+  ['create mode', v => { Object.assign(v, { mode: 'create' }) }],
+  ['v2 protocol', v => { Object.assign(v, { protocol: 'assistant-growth/source-run/v2' }) }],
+  ['missing revision acceptance', v => { Reflect.deleteProperty(v, 'revisionAcceptance') }],
+  ['missing revision pins', v => { Reflect.deleteProperty(v, 'authorities') }],
+  ['wrong pins protocol', v => { Object.assign(v.authorities, { protocol: 'assistant-growth/work-item-authorities/v1' }) }],
+  ['no work item failures', v => { Object.assign(v.authorities.revisionGrant, { workItemFailures: false }) }],
+  ['acceptance mismatch', v => { v.revisionAcceptance = { ...v.revisionAcceptance, keyId: 'other-key' } }],
+  ['regression without pin', v => { Object.assign(v, { revisionRegressionAcceptance: v.revisionAcceptance }) }],
+  ['expired pin', v => { v.authorities.revisionGrant.expiresAt = v.createdAt }],
+]
+test.each(revisionCorrupt)('rejects %s revision binding without falling back to creation', (_label, change) => {
+  const value = structuredClone(revisionBinding()); change(value)
+  expect(() => validateWorkItemRevisionSourceGrowthRunBinding(value)).toThrow()
+  expect(() => validateAnySourceGrowthRunBinding(value)).toThrow()
+})
+
+test('revision with regression acceptance requires the matching pin and participates in expiry', () => {
+  const regression = { protocol: 'assistant-growth/revision-regression-acceptance-authority/v1' as const, authorityId: 'revision-regression', keyId: 'regression-key', authorityDigest: 'd'.repeat(64), namePrefix: 'assistant-', expiresAt: 62_000 }
+  const withRegression = { ...structuredClone(revisionBinding()), revisionRegressionAcceptance: regression }
+  withRegression.authorities.revisionRegressionAcceptance = regression
+  validateWorkItemRevisionSourceGrowthRunBinding(withRegression)
+  const expired = structuredClone(withRegression)
+  expired.authorities.revisionRegressionAcceptance = { ...regression, expiresAt: expired.createdAt }
+  expect(() => validateWorkItemRevisionSourceGrowthRunBinding(expired)).toThrow()
+})
+
+test('generation never outlives any revision pin', () => {
+  for (const key of ['sourceJobs', 'revisionGrant', 'revisionAcceptance'] as const) {
+    const value = structuredClone(revisionBinding())
+    value.authorities[key].expiresAt = value.createdAt
+    if (key === 'revisionAcceptance') value.revisionAcceptance = { ...value.authorities.revisionAcceptance }
+    expect(() => validateWorkItemRevisionSourceGrowthRunBinding(value)).toThrow()
+value.authorities[key].expiresAt = value.generationDeadlineAt - 1
+    if (key === 'revisionAcceptance') value.revisionAcceptance = { ...value.authorities.revisionAcceptance }
+    expect(() => validateWorkItemRevisionSourceGrowthRunBinding(value)).toThrow()
+    value.authorities[key].expiresAt = value.generationDeadlineAt
+    if (key === 'revisionAcceptance') value.revisionAcceptance = { ...value.authorities.revisionAcceptance }
+    validateWorkItemRevisionSourceGrowthRunBinding(value)
+  }
 })

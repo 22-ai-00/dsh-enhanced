@@ -1393,7 +1393,8 @@ export class PluginControlPlaneService extends Service {
     const growth = plan.creation?.growthRun
     const artifactSha256 = createHash('sha256').update(record.artifact).digest('hex')
     if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)
-      || !growth || !plan.creation || !job.intent.creation?.growthRun || !plan.sourceCheck || !plan.preparedEvidence
+      || !growth || growth.protocol === 'assistant-growth/source-run/v3'
+      || !plan.creation || !job.intent.creation?.growthRun || !plan.sourceCheck || !plan.preparedEvidence
       || plan.id !== receipt.planId || plan.digest !== receipt.planDigest
       || plan.name !== record.certificate.plan.name || plan.generatorDigest !== record.certificate.plan.generatorDigest
       || plan.sourceCheck.treeDigest !== record.certificate.plan.sourceTreeDigest
@@ -1447,7 +1448,8 @@ export class PluginControlPlaneService extends Service {
       const ownerGrant = this.config.creationCapabilities?.owner
       const artifactSha256 = createHash('sha256').update(record.artifact).digest('hex')
       if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)
-        || !growth || !creation || !ownerGrant || !job.intent.creation?.growthRun
+        || !growth || growth.protocol === 'assistant-growth/source-run/v3'
+        || !creation || !ownerGrant || !job.intent.creation?.growthRun
         || !plan.sourceCheck || !plan.preparedEvidence
         || plan.id !== receipt.planId || plan.digest !== receipt.planDigest
         || plan.name !== record.certificate.plan.name || plan.generatorDigest !== record.certificate.plan.generatorDigest
@@ -1572,7 +1574,7 @@ export class PluginControlPlaneService extends Service {
         || controlPlaneDigest(expected.revisionRegressionAcceptance) !== controlPlaneDigest(this.config.revisionRegressions.authority))) {
       throw new Error('source growth run regression policy changed or was not pinned before authoring')
     }
-    if (expected.creationAcceptance !== undefined
+    if ('creationAcceptance' in expected && expected.creationAcceptance !== undefined
       && (policy === undefined || controlPlaneDigest(policy) !== controlPlaneDigest(expected.creationAcceptance))) {
       throw new Error('source growth run creation acceptance policy changed or was not pinned before authoring')
     }
@@ -1650,6 +1652,7 @@ export class PluginControlPlaneService extends Service {
       const current = this.store.getSourcePlan(input.planId)
       const job = this.store.getPreparedSourceJob(input.planId)
       if (current.digest !== input.planDigest || current.mode !== 'prepared-create' || !current.creation?.growthRun
+        || current.creation.growthRun.protocol === 'assistant-growth/source-run/v3'
         || !job.intent.creation?.growthRun || !current.sourceCheck || !current.preparedEvidence
         || current.preparedEvidence.pack.sha256 !== input.artifactSha256
         || controlPlaneDigest(reference) !== input.referenceDigest

@@ -10,7 +10,7 @@ import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScope
 import { assertManagedVersionPaths } from './source-versioning.js'
 import { resolveSourceBaseline, validateSourceBaselineConfig } from './source-baseline.js'
 import { removeSourceJobContainer, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
-import { inspectSourceRevisionContext, validateSourceRevisionGrant } from './source-revision.js'
+import { inspectSourceRevisionContext, normalizeSourceRevisionGrant, validateSourceRevisionGrant } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { inspectSourceCreationContext, validateSourceCreationFiles, validateSourceCreationGrant } from './source-creation.js'
@@ -77,7 +77,9 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
 
 export function normalizeSourceJobsConfig(value:SourceJobsConfig,build?:SourceBuildConfig):SourceJobsConfig{
   validateSourceJobsConfig(value,build)
-  return {...structuredClone(value),...(value.creation?{creation:normalizeSourceCreationGrant(value.creation)}:{})}
+  return {...structuredClone(value),
+    ...(value.creation?{creation:normalizeSourceCreationGrant(value.creation)}:{}),
+    ...(value.revision?{revision:normalizeSourceRevisionGrant(value.revision)}:{})}
 }
 
 function projection(job: SourceJobRecord, diagnostics?: SourceBuildDiagnostics): SourceJobProjection {
@@ -275,8 +277,12 @@ export class SourceJobRuntime {
       return
     }
     if (initial.mode === 'prepared-create') {
+      const initialRun = initial.creation?.growthRun
       if (job.intent.mode !== 'create'
-        || !job.intent.creation?.growthRun?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance) return
+        || job.intent.creation?.growthRun?.protocol !== 'assistant-growth/source-run/v2'
+        || !job.intent.creation.growthRun.creationAcceptance
+        || !initialRun || initialRun.protocol === 'assistant-growth/source-run/v3'
+        || !initialRun.creationAcceptance) return
       await assertCurrent()
       if (this.options.store.getCreationVerificationStatus(planId) === undefined && this.options.verifyPreparedCreation) {
         await this.options.verifyPreparedCreation(job, signal)
@@ -685,8 +691,12 @@ export class SourceJobRuntime {
       return plan.expiresAt > Date.now()
     }
     if (plan.mode === 'prepared-create') {
+      const planRun = plan.creation?.growthRun
       if (job.intent.mode !== 'create' || plan.status !== 'pending-approval'
-        || !job.intent.creation?.growthRun?.creationAcceptance || !plan.creation?.growthRun?.creationAcceptance) return false
+        || job.intent.creation?.growthRun?.protocol !== 'assistant-growth/source-run/v2'
+        || !job.intent.creation.growthRun.creationAcceptance
+        || !planRun || planRun.protocol === 'assistant-growth/source-run/v3'
+        || !planRun.creationAcceptance) return false
       const verification = this.options.store.getCreationVerificationStatus(plan.id)
       const verify = verification === undefined && this.options.verifyPreparedCreation !== undefined
       const adopt = verification === 'verified' && this.options.adoptVerifiedCreation !== undefined
