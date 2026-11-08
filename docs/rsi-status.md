@@ -18,7 +18,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 - **原生 Goal**：真实 Cordis/Loader/NativeWeb/AgentLoop 贯通，产物绑定独立 Linux 验收；正确产物 achieved、错误产物被拒；冷账本与资源清理核验。供应商为本地脚本，不证明任意任务能力。
 - **持久工作项（默认关、observe）**：准入、认领、报告、有界 resume、显式诊断、owner 召回/续办/结果反馈；事件跟随（Event Triggers、订阅）、Policy 变更通知、跟进归属与终态释放、结果窗口结算均搭既有 native scheduler wake，无新 Loop/timer。独立验收绑定（句柄晚绑定）、裁决门、held 报告均为 opt-in 切片，合同见 WP21。
 - **普通使用学习**：认证主人事实/经验→三份显式授权（学习/审查/采用）→独立审查→有限召回；后台 WorkItem 结果可进入经验（`workItemExperiences`），更正/撤回/unknown 有界。2026-11-07 起全新 supervised/native 安装可 `--enable-ordinary-use-learning` 自动生成只观察 intake evaluator（ceiling `digest`，从 Delivery 模型路由或显式 `--intake-provider/--intake-model`）、WorkItems 评估开关与三份带经验标记的记忆授权；非 LLM provider（如 `traex-agent`）会 fail-closed。`revisionCapabilities` 与 growth `workItemFailures` 签名 pin 仍未自动生成。
-- **自改进插件**：`assistant-growth-driver` 把完整原任务父链送入工具创建/修订 Growth；`plugin-control-plane` 管理隔离验证、采用/回滚与修订父版本；`assistant-evolution` 只允许经 owner 批准的 guidance 注入与退化精确回退。后台 WorkItem 失败走廊的修订能力（P1-3）已落地 wire/授权/准入/验证层：`source-run/v3` + revision authorities pins（`b2e784b7`）、准入守卫与 verifier 开关（`a9b906e6`）、控制面 revision readiness/frame/prepared-revision v2 handoff（`f9dec899`）、verifier work-item 修订验证（`18b57a1d`）、v1 验证路径回归修复（`dd902af2`，CI 六 lane 全绿、control-plane 1732/1732）；全部 fail-closed，growth 走廊工具层尚未放开。完整长期“新版本更好”收益（同供应商同预算比较）尚未用连续普通使用验收。
+- **自改进插件**：`assistant-growth-driver` 把完整原任务父链送入工具创建/修订 Growth；`plugin-control-plane` 管理隔离验证、采用/回滚与修订父版本；`assistant-evolution` 只允许经 owner 批准的 guidance 注入与退化精确回退。后台 WorkItem 失败走廊的修订能力（P1-3）已落地 wire/授权/准入/验证层：`source-run/v3` + revision authorities pins（`b2e784b7`）、准入守卫与 verifier 开关（`a9b906e6`）、控制面 revision readiness/frame/prepared-revision v2 handoff（`f9dec899`）、verifier work-item 修订验证（`18b57a1d`）、v1 验证路径回归修复（`dd902af2`，CI 六 lane 全绿、control-plane 1732/1732）；growth-driver 修订走廊（`74090b9e`）在入队时按确定性目标匹配冻结 create/revise-created 走廊，bindSourceRun 构造 v2/v3 binding，工具面按走廊冻结为 4 创建工具或 6 修订工具并由 policy 仅对 growth-driver Fiber 预授权，匹配不到/歧义/peer 离线全部 fail-closed 回退创建；`e31ce7cb` 补齐两份受保护插件 denylist（growth-driver 自身等 11 个信任根）。全部默认关、显式授权才开。剩余可选 regression/adoption v3 分支；完整长期“新版本更好”收益（同供应商同预算比较）尚未用连续普通使用验收。
 - **渠道与主动性**：Delivery 持久 inbox/outbox、owner 配对、会话 generation、Policy 硬预算与默认拒绝；lark-channel 飞书长连接、脱敏进度、卡片；可选 peer bot 白名单（linked principal，精确白名单每条消息重检，peer 不继承 owner 权限/记忆/反馈通道）；话题群可按 `thread_id + principal` 做 lane，回复留在话题。Proactive 提醒、Evaluation 通知结果账本、注意力参数收紧自动回退、放宽留出重放 + 一次性授权 + 结构化 owner 问题（P1-2 起回复可在显式开关与 `answer-attention-question` Policy 规则下生效）。
 - **安装与配置**：引导安装只问一次；fresh supervised 安装自动应用 recommended 预设（observe work-items、自然反馈、通知结果、事件 poller）；权限默认 danger-full-access；owner 鉴权、封存验收与日志脱敏保留。owner-console 左栏控制台可管理飞书/TraeX/本项目 bundle，doctor `--readiness` 报告普通学习装配各环。
 - **Web**：原生 Web owner 固定；owner-console GUI 冒烟通过，真实明暗主题长跑未验收。
@@ -26,10 +26,10 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 ## 下一批（按目标优先级）
 
 1. **触发→自动准入闭环**：在 fresh install 显式开关下生成 `accept` ceiling + `intakeLedger.evaluation.admit` + auto 有界预算，使普通消息→模型判断→自动 WorkItem→执行→独立验收形成全自动闭环（确定性 gate 与预算仍 fail-closed）。
-2. **P1-3 后台失败任务的工具修订（进行中）**：wire（v3 协议+revision grant）、准入守卫、控制面 readiness/frame/handoff、verifier 修订验证已提交且 fail-closed；剩余 growth-driver 走廊（7 工具集、identity、usage-runtime v3 构造）与可选的 regression/adoption v3 分支。完成后后台作者可修订既有插件。
+2. **P1-3 收尾（可选 v3 分支）**：growth-driver 修订走廊已落地；剩余可选的 revision regression 与 revision adoption 的 v3 work-item 分支（两者均为可选 pin，默认不触发）。
 3. **P1-4 后续收益**：同供应商、同预算的前后版本质量/返工/成本/延迟比较与回退，用连续 3–5 类真实任务完成“新版本更好”的普通使用验收。
 4. 终态释放 follow-up 重新进入判断的生产消费方；话题 lane 后台通知仍按顶层发送（无 `replyToEventId`）。
-5. **CI 提速（已建夜间门禁，待分批落地）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）。后续按风险从低到高：合并三个安装成功事务、delivery schema 23–31 矩阵分层（日常只跑首尾版、夜间全矩阵）、release-adapter 无缓存全链转夜间、删除复现旧 AND 链 bug 的重复测试；最大收益项是把 12k 行/353 用例的 `tests/installers.spec.ts` 按安装/升级/回滚/原生拆文件并重分片（注意共享清理状态，不能简单并发），以及 registry-fetch 证书复用与重复构建去重（需先实测）。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
+5. **CI 提速（已建夜间门禁，待分批落地）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）；已删除复现旧 AND 链 bug 的重复测试（`6d1afd2d`）。后续按风险从低到高：合并三个安装成功事务、delivery schema 23–31 矩阵分层（日常只跑首尾版、夜间全矩阵）、release-adapter 无缓存全链转夜间；最大收益项是把 12k 行/353 用例的 `tests/installers.spec.ts` 按安装/升级/回滚/原生拆文件并重分片（注意共享清理状态，不能简单并发），以及 registry-fetch 证书复用与重复构建去重（需先实测）。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
 
 ## 延后验收
 
