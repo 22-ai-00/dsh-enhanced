@@ -4742,7 +4742,14 @@ describe('one-click installers', () => {
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
-  test.each([23, 24, 25, 26, 27, 28, 29, 30, 31] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
+  // Delivery schema 23-31 migration matrix: daily gate keeps the first and
+  // last versions plus a missing-schema case; the nightly full gate runs every
+  // version. The intermediate-only cases are skipped on push runs.
+  const fullDeliverySchemaMatrix = [23, 24, 25, 26, 27, 28, 29, 30, 31] as const
+  const gatedDeliverySchemaMatrix = (process.env.DSH_NIGHTLY_FULL_MATRIX === '1'
+    ? fullDeliverySchemaMatrix
+    : [fullDeliverySchemaMatrix[0]!, fullDeliverySchemaMatrix.at(-1)!]) as readonly number[]
+  test.each(gatedDeliverySchemaMatrix)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })
     const result = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },
@@ -8019,36 +8026,40 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     },
   )
 
-  test('remote npm bootstrap accepts a private custom TMPDIR', async () => {
+  test.each([
+    { label: 'a private custom TMPDIR', build: async () => ({}), cleanup: (fixture: Awaited<ReturnType<typeof remoteBootstrapFixture>>) => fixture.temporaryDirectory },
+    { label: 'the macOS default TMPDIR beneath a root-owned /var alias',
+      build: async (fixture: Awaited<ReturnType<typeof remoteBootstrapFixture>>) => {
+        const root = dirname(fixture.dshHome)
+        const privateVar = join(root, 'private', 'var')
+        const macTmp = join(privateVar, 'folders', 'd5', 'T')
+        await mkdir(macTmp, { mode: 0o700, recursive: true })
+        await symlink('private/var', join(root, 'var'))
+        return { rootStatPaths: [join(root, 'var')], temporaryDirectory: join(root, 'var', 'folders', 'd5', 'T') }
+      },
+      cleanup: async (fixture: Awaited<ReturnType<typeof remoteBootstrapFixture>>) => {
+        const root = dirname(fixture.dshHome)
+        return join(root, 'private', 'var', 'folders', 'd5', 'T')
+      } },
+    { label: 'a TMPDIR containing spaces and glob metacharacters',
+      build: async (fixture: Awaited<ReturnType<typeof remoteBootstrapFixture>>) => {
+        const root = dirname(fixture.dshHome)
+        const specialTmp = join(root, 'tmp two', 'star*dir', 'T')
+        await mkdir(specialTmp, { mode: 0o700, recursive: true })
+        return { temporaryDirectory: specialTmp }
+      },
+      cleanup: async (fixture: Awaited<ReturnType<typeof remoteBootstrapFixture>>) =>
+        join(dirname(fixture.dshHome), 'tmp two', 'star*dir', 'T') },
+  ] as const)('remote npm bootstrap accepts $label', async ({ build, cleanup }) => {
     const fixture = await remoteBootstrapFixture()
     const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
 
-    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'])
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], await build(fixture))
 
     expect(result.status, result.stderr).toBe(0)
     expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
     expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
-    expect(await readdir(fixture.temporaryDirectory)).toEqual([])
-  })
-
-  test('remote npm bootstrap accepts the macOS default TMPDIR beneath a root-owned /var alias', async () => {
-    const fixture = await remoteBootstrapFixture()
-    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
-    const root = dirname(fixture.dshHome)
-    const privateVar = join(root, 'private', 'var')
-    const macTmp = join(privateVar, 'folders', 'd5', 'T')
-    await mkdir(macTmp, { mode: 0o700, recursive: true })
-    await symlink('private/var', join(root, 'var'))
-
-    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
-      rootStatPaths: [join(root, 'var')],
-      temporaryDirectory: join(root, 'var', 'folders', 'd5', 'T'),
-    })
-
-    expect(result.status, result.stderr).toBe(0)
-    expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
-    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
-    expect(await readdir(macTmp)).toEqual([])
+    expect(await readdir(await cleanup(fixture))).toEqual([])
   })
 
   test('remote npm bootstrap rejects TMPDIR through a non-root-owned directory symlink', async () => {
@@ -8183,23 +8194,6 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
       await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
     },
   )
-
-  test('remote npm bootstrap accepts a TMPDIR containing spaces and glob metacharacters', async () => {
-    const fixture = await remoteBootstrapFixture()
-    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
-    const root = dirname(fixture.dshHome)
-    const specialTmp = join(root, 'tmp two', 'star*dir', 'T')
-    await mkdir(specialTmp, { mode: 0o700, recursive: true })
-
-    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
-      temporaryDirectory: specialTmp,
-    })
-
-    expect(result.status, result.stderr).toBe(0)
-    expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
-    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
-    expect(await readdir(specialTmp)).toEqual([])
-  })
 
   test.each(['upgrade', 'uninstall'] as const)(
     'remote npm %s with lifecycle zero sentinels fails before downloads or source',

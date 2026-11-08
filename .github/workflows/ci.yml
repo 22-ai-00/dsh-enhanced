@@ -24,6 +24,10 @@ env:
   # macOS runners (3 vCPU) override these in their job.
   VITEST_MAX_WORKERS: '2'
   DSH_TEST_CONCURRENCY: '4'
+  # Tiered test matrices (e.g. the Delivery schema 23-31 migration sweep) run
+  # every version only on the nightly schedule; push and PR runs keep the
+  # first/last representatives.
+  DSH_NIGHTLY_FULL_MATRIX: ${{ github.event_name == 'schedule' && '1' || '0' }}
 
 jobs:
   linux-packages:
