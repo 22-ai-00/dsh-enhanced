@@ -65,6 +65,7 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
+| [assistant-dreaming](assistant-dreaming) | `@dsh-enhanced/assistant-dreaming` | 实验性 | 默认关闭的"做梦"插件：确定性随机抽签+空闲门，单工具冻结 Agent 只记录私有 idea（L0），无通知/无自动采用/永不模型自评。 |
 
 <!-- plugin-catalog:end -->
 
