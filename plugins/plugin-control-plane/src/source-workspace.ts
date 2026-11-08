@@ -29,55 +29,13 @@ const COMMAND_TAIL_BYTES = 4_096
 
 /**
  * T3 安全根插件绝不允许经成长执行体的隔离区窄口改写——即使产物只是待批
- * pending plan。命中即拒绝，不进入 worktree 流程。
+ * pending plan。命中即拒绝，不进入 worktree 流程。名单的唯一事实来源是
+ * @dsh-enhanced/assistant-growth-contract（模型提案边界 23 项 / owner 修复边界 12 项）。
  */
-export const PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
-  'assistant-delivery', // authenticated task and feedback evidence
-  'lark-channel', // authenticated external-channel ingress
-  'assistant-automations', // qualification observation and rollback scheduling
-  'assistant-policy', // 策略规则、授权寿命、急停根
-  'credentials-keychain', // 凭据根
-  'assistant-evaluation', // 评测答案根
-  'assistant-verifier', // 验证/私钥评测根
-  'assistant-deepseek-budget', // 预算上限根
-  'assistant-skills', // sealed holdout 私钥与 holdout 数据集
-  'assistant-isolation', // 隔离沙箱机制本身
-  'assistant-web-owner', // owner 安全控制台
-  'plugin-control-plane', // 审批/激活控制面本身（自举提权面）
-  'assistant-growth-driver', // 成长走廊本身：修改者不得准备自改提案
-  'assistant-recovery', // 确定性恢复与监督式自演进 runbook
-  'assistant-evolution', // 审批门控的行为自演进面
-  'owner-console', // owner 控制台入口
-  'assistant-actions', // owner 授权的外部动作代理（GitHub 等）
-  'assistant-work-items', // 后台任务证据账本与准入
-  'assistant-goals', // owner 目标与已验证工作流证据
-  'event-triggers', // 外部事件入口（文件/HTTP/HMAC）
-  'assistant-heartbeat', // 主动时段心跳策略层
-  'assistant-proactive', // 主动机会过滤与效用决策
-  'assistant-memory-learning', // 独立审查的记忆学习采用面
-])
-
-/**
- * Owner 监督式 source-repair 通道（rsi bootstrap manifest、owner-source-repair
- * runbook）是另一条信任边界：它由 owner 显式签名驱动、重装发布包级修复，不是
- * 成长模型的隔离源码提案。这里保留历史 12 个不可变信任根；成长侧新增的治理
- * 组件（growth-driver、recovery、evolution 等）必须仍可由 owner 修复通道恢复，
- * 不能因为扩大了成长边界就从 owner 修复范围消失。
- */
-export const OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
-  'assistant-delivery',
-  'lark-channel',
-  'assistant-automations',
-  'assistant-policy',
-  'credentials-keychain',
-  'assistant-evaluation',
-  'assistant-verifier',
-  'assistant-deepseek-budget',
-  'assistant-skills',
-  'assistant-isolation',
-  'assistant-web-owner',
-  'plugin-control-plane',
-])
+import { MODEL_PROPOSAL_PROTECTED_PLUGINS, OWNER_REPAIR_PROTECTED_PLUGINS } from '@dsh-enhanced/assistant-growth-contract'
+export const PROTECTED_PLUGIN_DENYLIST = MODEL_PROPOSAL_PROTECTED_PLUGINS
+export const OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST = OWNER_REPAIR_PROTECTED_PLUGINS
+export { assertProtectedSetsConsistent as assertProtectedPluginSetsConsistent } from '@dsh-enhanced/assistant-growth-contract'
 
 export interface ScopedPluginFile {
   /** 相对于 plugins/<name>/ 的 POSIX 相对路径，不允许 .. 或绝对路径。 */
