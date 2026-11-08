@@ -47,6 +47,7 @@ flowchart TB
     MEM["personal-memory"]
     ML["assistant-memory-learning"]
     GR["assistant-growth-driver<br/>技能 / 工作流 / 插件候选"]
+    DR["assistant-dreaming<br/>随机空闲 · 私有 idea (L0)"]
     CP["plugin-control-plane<br/>隔离验证 · 采用 · 回滚"]
     ISO["assistant-isolation<br/>Linux/沙箱执行"]
     SK["assistant-skills"]
@@ -92,6 +93,7 @@ flowchart TB
   ET --> WI
   ET --> GO
   HB --> AUTO
+  DR --> AUTO
   HEA --> REC
 ```
 
