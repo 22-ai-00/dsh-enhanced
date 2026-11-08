@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { types as utilTypes } from 'node:util'
-import { growthObjectDigest as acceptanceDigest, validateWorkItemSourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { growthObjectDigest as acceptanceDigest, validateWorkItemSourceGrowthRunBinding,
+  validateWorkItemRevisionSourceGrowthRunBinding,
+  type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import type { AssistantDeliveryService, OwnerWorkItemLearningTask, OwnerWorkItemEngineeringManifest } from '@dsh-enhanced/assistant-delivery'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { OwnerWorkItemFailureReference } from './owner-task-gap-types.js'
@@ -56,4 +58,12 @@ export function assertWorkItemRunReference(run:WorkItemSourceGrowthRunBinding, r
     ||acceptanceDigest(run.source.projection)!==acceptanceDigest(reference.projection)||run.source.sourceDigest!==reference.sourceDigest
     ||run.source.presentationDigest!==reference.presentationDigest||run.source.context.manifestDigest!==reference.context.manifestDigest
     ||run.source.context.objectiveDigest!==reference.context.objectiveDigest||run.source.context.objectiveBytes!==reference.context.objectiveBytes)throw new Error('work item creation run reference changed')
+}
+/** Revision corridor carries the identical work-item source; only the mode differs. */
+export function assertWorkItemRevisionRunReference(run:WorkItemRevisionSourceGrowthRunBinding, reference:OwnerWorkItemFailureReference):void {
+  validateWorkItemRevisionSourceGrowthRunBinding(run)
+  if(run.mode!=='revise-created'||run.source.itemId!==reference.projection.subjectRef||run.source.outcomeId!==reference.outcomeId
+    ||acceptanceDigest(run.source.projection)!==acceptanceDigest(reference.projection)||run.source.sourceDigest!==reference.sourceDigest
+    ||run.source.presentationDigest!==reference.presentationDigest||run.source.context.manifestDigest!==reference.context.manifestDigest
+    ||run.source.context.objectiveDigest!==reference.context.objectiveDigest||run.source.context.objectiveBytes!==reference.context.objectiveBytes)throw new Error('work item revision run reference changed')
 }

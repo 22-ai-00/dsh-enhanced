@@ -3,7 +3,7 @@ import { cleanedLinuxSourceBuildFailure, cleanedLinuxSourcePreflight, consumeCle
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
-import { RevisionCapabilityJournal, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
+import { RevisionCapabilityJournal, revisionCapabilityAuthorityDigest, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
 import { RevisionCapabilityRuntime } from './revision-capability-runtime.js'
 import type { RevisionCapabilityConfig, RevisionCapabilityReadiness } from './revision-capability-types.js'
 import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
@@ -25,13 +25,14 @@ import { isSourceOwnerContinuation, anySourceGrowthRunDigest as sourceGrowthRunD
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest, type PluginRevisionVerificationResult,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
-  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
+  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins,
+  type WorkItemRevisionSourceGrowthRunBinding, type WorkItemRevisionAuthorityPins, validateWorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
 import { rollbackPluginWatch } from './cli.js'
 import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
-import { assertWorkItemRunReference, inertCreationData, WORK_ITEM_ENGINEERING_PROTOCOL, type WorkItemEngineeringSource } from './work-item-creation-contract.js'
+import { assertWorkItemRunReference, assertWorkItemRevisionRunReference, inertCreationData, WORK_ITEM_ENGINEERING_PROTOCOL, type WorkItemEngineeringSource } from './work-item-creation-contract.js'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -383,6 +384,7 @@ export class PluginControlPlaneService extends Service {
   private growthRunProducer: SourceGrowthRunProducer | undefined
   private growthProviderDraining = false
   private workItemCreationFrame:{gapId:string;run:Readonly<WorkItemSourceGrowthRunBinding>;source:WorkItemEngineeringSource}|undefined
+  private workItemRevisionFrame:{gapId:string;run:Readonly<WorkItemRevisionSourceGrowthRunBinding>;source:WorkItemEngineeringSource}|undefined
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
@@ -825,7 +827,7 @@ export class PluginControlPlaneService extends Service {
             },
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
-          withWorkItemGrowthRunFence:(run,gapId,owner,generation,callback)=>this.withWorkItemGrowthFrame(run,gapId,owner,generation,callback),
+          withWorkItemGrowthRunFence:(run,gapId,owner,generation,callback)=>run.protocol==='assistant-growth/source-run/v3'?this.withWorkItemRevisionFrame(run,gapId,owner,generation,callback):this.withWorkItemGrowthFrame(run,gapId,owner,generation,callback),
           assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
           ...(this.config.revisionVerifications ? { inspectRevisionParent: this.inspectRevisionParent,
             verifyPreparedRevision: (job: SourceJobRecord, signal: AbortSignal) => this.verifyPreparedRevision(job, signal,
@@ -1543,10 +1545,100 @@ export class PluginControlPlaneService extends Service {
     if (controlPlaneDigest(readiness.pins) !== controlPlaneDigest(run.authorities)) throw new Error('work item growth authority pins changed')
     const source = this.taskGaps.engineeringSnapshot(gapId,owner)
     return producer.withWorkItemRunFence({runId:run.runId,intentDigest:run.intentDigest,expectedGrowthRunDigest:sourceGrowthRunDigest(run)},actual=>{
-      if(this.growthRunProducer!==producer||sourceGrowthRunDigest(actual)!==sourceGrowthRunDigest(run)||this.workItemCreationFrame)throw new Error('work item producer changed its true binding')
+      if(this.growthRunProducer!==producer||sourceGrowthRunDigest(actual)!==sourceGrowthRunDigest(run)||actual.protocol!=='assistant-growth/source-run/v2'||this.workItemCreationFrame)throw new Error('work item producer changed its true binding')
       this.workItemCreationFrame={gapId,run:actual,source}
       try{return this.store.withOwnerTaskFailureGapAdmission(gapId,()=>{this.assertWorkItemRunLocal(actual,gapId,owner,generation);return callback()})}
       finally{this.workItemCreationFrame=undefined}
+    })
+  }
+
+  inspectWorkItemPreparedRevisionProtocol=(): 'dsh-prepared-revision/v2'|undefined=>{
+    return !this.abort.signal.aborted&&this.config.sourceJobs?.revision?.workItemFailures===true&&this.sourceRuntime?.available()?'dsh-prepared-revision/v2':undefined
+  }
+
+  inspectWorkItemRevisionReadiness=(input:{owner:SourceJobOwnerReceipt})=>{
+    try{
+      this.abort.signal.throwIfAborted()
+      const owner=inertCreationData(input).owner,config=this.config,source=this.sourceRuntime?.inspectWorkItemRevisionReadiness(owner)
+      if(!source||!config.sourceJobs||!config.sourceBuild||config.sourceJobs.revision?.workItemFailures!==true||!config.revisionVerifications)return undefined
+      const delivery=this.ctx.get('assistantDelivery' as never,false) as AssistantDeliveryService|undefined
+      const verifier=this.ctx.get('assistantVerifier' as never,false) as unknown as {inspectWorkItemRevisionReviewReadiness?:()=>{protocol:string;sourceProtocol:string;runProtocol:string;workItemFailures:true;authority:RevisionAcceptanceAuthorityRef;publicKey:string;remainingVerifications:number;available:boolean}}|undefined
+      if(typeof delivery?.withOwnerWorkItemEngineeringContextFence!=='function'||typeof verifier?.inspectWorkItemRevisionReviewReadiness!=='function')return undefined
+      const actual=delivery.validateOwnerRoute({authorityId:owner.authorityId,principalId:owner.principalId,workspace:owner.workspace,agentPreset:owner.agentPreset})
+      if(!isSourceOwnerContinuation(actual,owner))return undefined
+      const review=verifier.inspectWorkItemRevisionReviewReadiness()
+      if(!review||review.protocol!=='assistant-growth/work-item-revision-review-readiness/v1'
+        ||review.sourceProtocol!==WORK_ITEM_ENGINEERING_PROTOCOL||review.runProtocol!=='assistant-growth/source-run/v3'
+        ||review.workItemFailures!==true||controlPlaneDigest(review.authority)!==controlPlaneDigest(config.revisionVerifications.authority)
+        ||!createPublicKey(review.publicKey).export({type:'spki',format:'der'}).equals(createPublicKey(config.revisionVerifications.publicKey).export({type:'spki',format:'der'})))return undefined
+      const adoption=this.revisionCapabilityRuntime?.inspectReadiness()
+      const adoptionPins=config.revisionCapabilities&&adoption?{
+        authorityId:adoption.authority.authorityId,
+        authorityDigest:revisionCapabilityAuthorityDigest({path:join(config.statePath,'revision-adoptions.sqlite'),config:config.revisionCapabilities}),
+        expiresAt:adoption.authority.expiresAt}:undefined
+      if(adoption!==undefined&&!adoptionPins)return undefined
+      const pins:WorkItemRevisionAuthorityPins={protocol:'assistant-growth/work-item-revision-authorities/v1',
+        sourceJobs:{authorityId:source.authority.id,authorityDigest:source.authority.digest,expiresAt:source.authority.expiresAt},
+        revisionGrant:{id:source.revision.id,digest:controlPlaneDigest(source.revision),expiresAt:source.revision.expiresAt,workItemFailures:true},
+        revisionAcceptance:structuredClone(review.authority),
+        ...(adoptionPins?{revisionAdoption:adoptionPins}:{})}
+      validateWorkItemRevisionAuthorityPins(pins)
+      if(source.authority.digest!==controlPlaneDigest({config:config.sourceJobs,build:config.sourceBuild}))return undefined
+      const expiries=[pins.sourceJobs.expiresAt,pins.revisionGrant.expiresAt,pins.revisionAcceptance.expiresAt,...(pins.revisionAdoption?[pins.revisionAdoption.expiresAt]:[])]
+      if(expiries.some(expiry=>Date.now()>=expiry))return undefined
+      const remaining={...source.remaining,verifications:review.remainingVerifications,...(adoption?{adoptions:adoption.remainingAdoptions}:{})}
+      if(Object.values(remaining).some(count=>!Number.isSafeInteger(count)||count<0))return undefined
+      return {protocol:'assistant-growth/work-item-revision-readiness/v1' as const,sourceProtocol:WORK_ITEM_ENGINEERING_PROTOCOL,runProtocol:'assistant-growth/source-run/v3' as const,workItemFailures:true as const,pins,remaining,available:Object.values(remaining).every(count=>count>0)&&review.available&&(adoption?adoption.available:true)}
+    }catch{return undefined}
+  }
+
+  private assertWorkItemRevisionPinsLocal(run:WorkItemRevisionSourceGrowthRunBinding):void{
+    const jobs=this.config.sourceJobs,verification=this.config.revisionVerifications
+    if(!jobs||!this.config.sourceBuild||jobs.revision?.workItemFailures!==true||!verification
+      ||run.authorities.sourceJobs.authorityId!==jobs.authorityId||run.authorities.sourceJobs.authorityDigest!==controlPlaneDigest({config:jobs,build:this.config.sourceBuild})||run.authorities.sourceJobs.expiresAt!==jobs.expiresAt
+      ||run.authorities.revisionGrant.id!==jobs.revision.id||run.authorities.revisionGrant.digest!==controlPlaneDigest(jobs.revision)||run.authorities.revisionGrant.expiresAt!==jobs.revision.expiresAt
+      ||run.authorities.revisionGrant.workItemFailures!==true
+      ||controlPlaneDigest(run.revisionAcceptance)!==controlPlaneDigest(verification.authority)||controlPlaneDigest(run.authorities.revisionAcceptance)!==controlPlaneDigest(verification.authority)
+      ||(run.authorities.revisionAdoption!==undefined)!==(this.config.revisionCapabilities!==undefined))throw new Error('work item revision authority pins changed')
+    if(run.authorities.revisionAdoption!==undefined&&this.config.revisionCapabilities!==undefined){
+      const adoption=this.config.revisionCapabilities
+      if(run.authorities.revisionAdoption.authorityId!==adoption.authorityId
+        ||run.authorities.revisionAdoption.authorityDigest!==revisionCapabilityAuthorityDigest({path:join(this.config.statePath,'revision-adoptions.sqlite'),config:adoption})
+        ||run.authorities.revisionAdoption.expiresAt!==adoption.expiresAt)throw new Error('work item revision authority pins changed')
+    }
+    if(run.authorities.revisionRegressionAcceptance!==undefined){
+      const regression=this.config.revisionRegressions
+      if(!regression||controlPlaneDigest(run.authorities.revisionRegressionAcceptance)!==controlPlaneDigest(regression.authority))throw new Error('work item revision authority pins changed')
+    }
+    const expiries=[run.authorities.sourceJobs.expiresAt,run.authorities.revisionGrant.expiresAt,run.authorities.revisionAcceptance.expiresAt,...(run.authorities.revisionAdoption?[run.authorities.revisionAdoption.expiresAt]:[])]
+    if(expiries.some(expiry=>Date.now()>=expiry))throw new Error('work item revision authority pins changed or expired')
+  }
+
+  private assertWorkItemRevisionRunLocal(run:WorkItemRevisionSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean):void{
+    const reference=this.store.getOwnerTaskFailureReference(gapId)
+    if(!reference||reference.schemaVersion!==2||run.ownerDigest!==controlPlaneDigest(reference.owner)||!isSourceOwnerContinuation(owner,reference.owner))throw new Error('work item revision owner reference changed')
+    assertWorkItemRevisionRunReference(run,reference);this.assertWorkItemRevisionPinsLocal(run)
+    if(Date.now()>=run.expiresAt||generation&&Date.now()>=run.generationDeadlineAt)throw new Error('work item revision source run expired')
+    if(run.modelOrigin==='inherited-owner-task'&&this.workItemRevisionFrame&&controlPlaneDigest(this.workItemRevisionFrame.source.task.proofIdentity.supplier)!==controlPlaneDigest(run.model))throw new Error('work item revision source supplier changed')
+  }
+
+  private withWorkItemRevisionFrame<T>(run:WorkItemRevisionSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T):T{
+    this.abort.signal.throwIfAborted()
+    if(this.workItemRevisionFrame){
+      if(this.workItemRevisionFrame.gapId!==gapId||sourceGrowthRunDigest(this.workItemRevisionFrame.run)!==sourceGrowthRunDigest(run))throw new Error('work item revision frame reentry')
+      this.assertWorkItemRevisionRunLocal(run,gapId,owner,generation);return callback()
+    }
+    const producer = this.growthRunProducer
+    if (!producer || producer.protocol !== 'assistant-growth-source-run-producer/v2') throw new SourceGrowthRunUnavailableError('work item revision growth producer unavailable')
+    const readiness = this.inspectWorkItemRevisionReadiness({owner})
+    if (!readiness) throw new SourceGrowthRunUnavailableError('work item revision growth peers unavailable')
+    if (controlPlaneDigest(readiness.pins) !== controlPlaneDigest(run.authorities)) throw new Error('work item revision authority pins changed')
+    const source = this.taskGaps.engineeringSnapshot(gapId,owner)
+    return producer.withWorkItemRunFence({runId:run.runId,intentDigest:run.intentDigest,expectedGrowthRunDigest:sourceGrowthRunDigest(run)},actual=>{
+      if(this.growthRunProducer!==producer||sourceGrowthRunDigest(actual)!==sourceGrowthRunDigest(run)||actual.protocol!=='assistant-growth/source-run/v3'||this.workItemRevisionFrame)throw new Error('work item revision producer changed its true binding')
+      this.workItemRevisionFrame={gapId,run:actual,source}
+      try{return this.store.withOwnerTaskFailureGapAdmission(gapId,()=>{this.assertWorkItemRevisionRunLocal(actual,gapId,owner,generation);return callback()})}
+      finally{this.workItemRevisionFrame=undefined}
     })
   }
 
@@ -1555,6 +1647,10 @@ export class PluginControlPlaneService extends Service {
     if(expected.protocol==='assistant-growth/source-run/v2'){
       if(this.workItemCreationFrame){this.assertWorkItemRunLocal(expected,gapId,owner,generation);return}
       return this.withWorkItemGrowthFrame(expected,gapId,owner,generation,()=>{})
+    }
+    if(expected.protocol==='assistant-growth/source-run/v3'){
+      if(this.workItemRevisionFrame){this.assertWorkItemRevisionRunLocal(expected,gapId,owner,generation);return}
+      return this.withWorkItemRevisionFrame(expected,gapId,owner,generation,()=>{})
     }
     const producer = this.growthRunProducer
     if (!producer) throw new SourceGrowthRunUnavailableError('source growth run producer unavailable')
@@ -1840,6 +1936,10 @@ export class PluginControlPlaneService extends Service {
       || Date.now() >= plan.expiresAt || !plan.sourceRevision || Date.now() >= plan.sourceRevision.grant.expiresAt) {
       throw new Error('prepared revision package is unavailable for independent verification')
     }
+    if(reference.schemaVersion===2){
+      const run=plan.sourceRevision.growthRun;if(run?.protocol!=='assistant-growth/source-run/v3')throw new Error('work item prepared revision run unavailable')
+      return this.withWorkItemRevisionFrame(run,plan.gapId,reference.owner,false,()=>({protocol:'dsh-prepared-revision/v2' as const,plan:structuredClone(this.store.getSourcePlan(plan.id)),job:structuredClone(this.store.getPreparedRevisionJob(plan.id)),reference:structuredClone(reference),source:structuredClone(this.workItemRevisionFrame!.source),artifact:this.store.readPreparedSourceArtifact(plan.id)}))
+    }
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       this.abort.signal.throwIfAborted()
       const job = this.store.getPreparedRevisionJob(plan.id)
@@ -1953,6 +2053,14 @@ export class PluginControlPlaneService extends Service {
     const plan = this.store.getSourcePlan(input.planId)
     const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
     if (!reference) throw new Error('revision verification source unavailable')
+    if(reference.schemaVersion===2){
+      const run=plan.sourceRevision?.growthRun;if(run?.protocol!=='assistant-growth/source-run/v3')throw new Error('work item revision verification run unavailable')
+      return this.withWorkItemRevisionFrame(run,plan.gapId,reference.owner,false,()=>{
+        const current=this.store.getSourcePlan(input.planId),job=this.store.getPreparedRevisionJob(input.planId)
+        if(current.digest!==input.planDigest||current.preparedEvidence?.pack.sha256!==input.artifactSha256||controlPlaneDigest(reference)!==input.referenceDigest||sourceGrowthRunDigest(run)!==input.growthRunDigest||!job.intent.revision?.growthRun||sourceGrowthRunDigest(job.intent.revision.growthRun)!==input.growthRunDigest||controlPlaneDigest(current.sourceRevision!.parent)!==input.parentDigest||createHash('sha256').update(this.store.readPreparedSourceArtifact(input.planId)).digest('hex')!==input.artifactSha256)throw new Error('work item prepared revision exact binding changed')
+        return callback()
+      })
+    }
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       this.abort.signal.throwIfAborted()
       const current = this.store.getSourcePlan(input.planId)
@@ -2540,6 +2648,10 @@ export class PluginControlPlaneService extends Service {
         if (creation?.growthRun?.protocol === 'assistant-growth/source-run/v2') {
           if (!gapOwner || !('receiptVersion' in gapOwner)) throw new Error('work item creation owner unavailable')
           return this.withWorkItemGrowthFrame(creation.growthRun, input.gapId, gapOwner, false, callback)
+        }
+        if (revision?.growthRun?.protocol === 'assistant-growth/source-run/v3') {
+          if (!gapOwner || !('receiptVersion' in gapOwner)) throw new Error('work item revision owner unavailable')
+          return this.withWorkItemRevisionFrame(revision.growthRun, input.gapId, gapOwner, false, callback)
         }
         return this.taskGaps.withCurrent(input.gapId, gapOwner, callback)
       }

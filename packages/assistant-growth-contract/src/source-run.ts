@@ -244,7 +244,7 @@ export interface SourceGrowthRunProducerV2 {
    * must not inspect/re-enter an upstream producer while this frame is held.
    */
   withWorkItemRunFence<T>(input: SourceGrowthRunRequest & { expectedGrowthRunDigest: string },
-    callback: (binding: Readonly<WorkItemSourceGrowthRunBinding>) => T): T
+    callback: (binding: Readonly<WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding>) => T): T
 }
 export type AnySourceGrowthRunProducer = SourceGrowthRunProducer | SourceGrowthRunProducerV2
 

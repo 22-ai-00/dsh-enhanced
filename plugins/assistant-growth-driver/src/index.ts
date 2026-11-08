@@ -7,7 +7,8 @@ import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh
 import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
-import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
+import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer,
+  type SourceGrowthRunRequest, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
@@ -178,7 +179,8 @@ export class AssistantGrowthDriverService extends Service {
             if (!this.#usage) throw new SourceGrowthRunUnavailableError('usage runtime is temporarily unavailable')
             return this.#usage.inspectAnySourceGrowthRun(request)
           },
-          withWorkItemRunFence: (request, callback) => {
+          withWorkItemRunFence: <T>(request: SourceGrowthRunRequest & { expectedGrowthRunDigest: string },
+            callback: (binding: Readonly<WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding>) => T): T => {
             if (!this.#usage) throw new SourceGrowthRunUnavailableError('usage runtime is temporarily unavailable')
             return this.#usage.withWorkItemRunFence(request, callback)
           },

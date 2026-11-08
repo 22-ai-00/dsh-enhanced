@@ -5,7 +5,8 @@ import type { AssistantDeliveryService, OwnerForegroundLearningTask, OwnerWorkIt
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
   type CreationAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type RevisionRegressionAcceptanceAuthorityRef,
-  type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
+  type AnySourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding,
+  validateAnySourceGrowthRunBinding, anySourceGrowthRunDigest, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, isWorkItemUsageIntent, type WorkItemUsageIntent, type ForegroundUsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 
@@ -371,7 +372,7 @@ export class UsageLearningRuntime {
       return undefined
     }
   }
-  withWorkItemRunFence = <T>(input: SourceGrowthRunRequest & { expectedGrowthRunDigest: string }, callback: (binding: Readonly<WorkItemSourceGrowthRunBinding>) => T): T => {
+  withWorkItemRunFence = <T>(input: SourceGrowthRunRequest & { expectedGrowthRunDigest: string }, callback: (binding: Readonly<WorkItemSourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding>) => T): T => {
     if (!this.active) throw new SourceGrowthRunUnavailableError('usage runtime temporarily unavailable')
     input = ownData(input)
     if (Object.keys(input).sort().join(',') !== 'expectedGrowthRunDigest,intentDigest,runId' || typeof callback !== 'function'

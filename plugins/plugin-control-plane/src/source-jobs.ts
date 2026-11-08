@@ -112,7 +112,7 @@ export class SourceJobRuntime {
   private readonly diagnostics = new Map<string, SourceBuildDiagnostics>()
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
-    withWorkItemGrowthRunFence?: <T>(run:WorkItemSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T)=>T
+    withWorkItemGrowthRunFence?: <T>(run:WorkItemSourceGrowthRunBinding|import('@dsh-enhanced/assistant-growth-contract').WorkItemRevisionSourceGrowthRunBinding,gapId:string,owner:SourceJobOwnerReceipt,generation:boolean,callback:()=>T)=>T
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
     assertGrowthRun?: (growthRun: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean) => void
     trust: () => Promise<Trust>
@@ -326,6 +326,15 @@ export class SourceJobRuntime {
     return {authority,creation:structuredClone(config.creation!),remaining:this.options.store.inspectSourceJobQuota({authority:{...authority,maxSubmissions:config.maxSubmissions},creation:config.creation!})}
   }
 
+  inspectWorkItemRevisionReadiness(owner:SourceJobOwnerReceipt):{authority:{id:string;digest:string;expiresAt:number};revision:NonNullable<SourceJobsConfig['revision']>;remaining:{sourceSubmissions:number;revisions:number}}|undefined{
+    if(!this.available()||!this.modeAllowed('revise-created')||('expiresAt' in this.options.build && Date.now() >= this.options.build.expiresAt)||this.options.config.revision?.workItemFailures!==true||Date.now()>=this.options.config.revision.expiresAt)return undefined
+    const current=this.receipt()
+    if(!isSourceOwnerContinuation(current,owner))return undefined
+    const config=this.options.config
+    const authority={id:config.authorityId,digest:this.authorityDigest,expiresAt:config.expiresAt}
+    return {authority,revision:structuredClone(config.revision!),remaining:this.options.store.inspectSourceJobRevisionQuota({authority:{...authority,maxSubmissions:config.maxSubmissions},revision:config.revision!})}
+  }
+
   available(): boolean { return this.active && !this.abort.signal.aborted && Date.now() < this.options.config.expiresAt }
 
   close(): Promise<void> {
@@ -371,7 +380,7 @@ export class SourceJobRuntime {
   private withGapSource<T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T,growthRun?:SourceGrowthRunBinding): T {
     const reference=this.options.store.getOwnerTaskFailureReference(gapId)
     if(reference?.schemaVersion===2){
-      if(growthRun?.protocol!=='assistant-growth/source-run/v2'||!this.options.withWorkItemGrowthRunFence)throw new SourceGrowthRunUnavailableError('work item growth source fence unavailable')
+      if((growthRun?.protocol!=='assistant-growth/source-run/v2'&&growthRun?.protocol!=='assistant-growth/source-run/v3')||!this.options.withWorkItemGrowthRunFence)throw new SourceGrowthRunUnavailableError('work item growth source fence unavailable')
       return this.options.withWorkItemGrowthRunFence(growthRun,gapId,owner,false,callback)
     }
     if (reference === undefined) return callback()

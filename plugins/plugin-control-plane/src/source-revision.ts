@@ -1,8 +1,9 @@
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { validatePluginCreationVerificationCertificate, validatePluginRevisionParentBinding,
-  validateSourceGrowthRunBinding, type PluginCreationVerificationCertificate, type PluginRevisionParentBinding,
-  type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+  validateSourceGrowthRunBinding,
+  type PluginCreationVerificationCertificate, type PluginRevisionParentBinding,
+  type SourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { ControlPlaneCliError } from './errors.js'
 import { inspectCreationHostScaffold, prepareCreationHostScaffold, validateSourceCreationFiles,
@@ -28,11 +29,14 @@ export interface SourceRevisionGrant {
   namePrefix: string
 }
 
+/** Revision never uses the create-only v2 run; v1 is foreground, v3 is work-item. */
+export type SourceRevisionGrowthRun = SourceGrowthRunBinding | WorkItemRevisionSourceGrowthRunBinding
+
 export interface SourceRevisionBinding {
   grant: SourceRevisionGrant
   generatorDigest: string
   parent: PluginRevisionParentBinding
-  growthRun: SourceGrowthRunBinding
+  growthRun: SourceRevisionGrowthRun
 }
 
 function fail(reason: string): never { throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source revision ${reason}`) }

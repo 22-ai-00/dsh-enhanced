@@ -2444,6 +2444,15 @@ export class ControlPlaneStore {
     return {sourceSubmissions:Math.max(0,a.maxSubmissions-(row?.submissions??0)),creates:Math.max(0,c.maxCreates-(grant?.creates??0))}
   }
 
+  /** Read-only revision quota companion of inspectSourceJobQuota; mirrors the enqueue-side invariants. */
+  inspectSourceJobRevisionQuota(input:{authority:{id:string;digest:string;expiresAt:number;maxSubmissions:number};revision:import('./source-revision.js').SourceRevisionGrant}):{sourceSubmissions:number;revisions:number}{
+    const a=input.authority,g=input.revision
+    const row=this.#database.prepare('SELECT * FROM source_job_authorities WHERE authority_id=?').get(a.id) as {authority_digest:string;expires_at:number;max_submissions:number;submissions:number}|undefined
+    const grant=this.#database.prepare('SELECT * FROM source_revision_grants WHERE grant_id=?').get(g.id) as {grant_digest:string;expires_at:number;max_revisions:number;revisions:number}|undefined
+    if(row&&(row.authority_digest!==a.digest||row.expires_at!==a.expiresAt||row.max_submissions!==a.maxSubmissions)||grant&&(grant.grant_digest!==controlPlaneDigest(g)||grant.expires_at!==g.expiresAt||grant.max_revisions!==g.maxRevisions))throw new ControlPlaneStoreError('conflict','source job revision quota authority changed')
+    return {sourceSubmissions:Math.max(0,a.maxSubmissions-(row?.submissions??0)),revisions:Math.max(0,g.maxRevisions-(grant?.revisions??0))}
+  }
+
   enqueueSourceJob(input: { id: string; automationId: string; idempotencyKey: string; intent: SourceJobIntent }): SourceJobRecord {
     if (!/^source-job-[a-f0-9]{64}$/u.test(input.id) || input.automationId !== input.id) {
       throw new ControlPlaneStoreError('invalid-input', 'source job identity is invalid')
