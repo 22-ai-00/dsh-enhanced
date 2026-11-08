@@ -135,7 +135,19 @@ jobs:
         run: pnpm run build && pnpm run typecheck:built
 
       - name: Verify package tests
-        run: pnpm run test:packages
+        shell: bash
+        run: |
+          set -o pipefail
+          # Job logs need repo-admin rights to download; on failure surface the
+          # failing test lines as check-run annotations instead so a red lane is
+          # diagnosable from the public API.
+          if ! pnpm run test:packages > "${RUNNER_TEMP}/package-tests.log" 2>&1; then
+            grep -aE '(^| )(FAIL|×) |Error: |ERR_PNPM' "${RUNNER_TEMP}/package-tests.log" \
+              | grep -av 'ExperimentalWarning' | head -40 \
+              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            tail -30 "${RUNNER_TEMP}/package-tests.log" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            exit 1
+          fi
 
       - name: Verify package packs
         run: pnpm run pack:check
@@ -251,7 +263,16 @@ jobs:
         run: pnpm run build
 
       - name: Verify root tests (shard)
-        run: pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2 > "${RUNNER_TEMP}/root-tests.log" 2>&1; then
+            grep -aE '(^| )(FAIL|×) |AssertionError|Error: ' "${RUNNER_TEMP}/root-tests.log" \
+              | grep -av 'ExperimentalWarning' | head -40 \
+              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            tail -30 "${RUNNER_TEMP}/root-tests.log" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            exit 1
+          fi
 
   verify:
     needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]
