@@ -28,7 +28,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 1. **触发→自动准入闭环**：在 fresh install 显式开关下生成 `accept` ceiling + `intakeLedger.evaluation.admit` + auto 有界预算，使普通消息→模型判断→自动 WorkItem→执行→独立验收形成全自动闭环（确定性 gate 与预算仍 fail-closed）。
 2. **P1-3 收尾（可选 v3 分支）**：growth-driver 修订走廊已落地；剩余可选的 revision regression 与 revision adoption 的 v3 work-item 分支（两者均为可选 pin，默认不触发）。
-3. **P1-4 收益门（进行中）**：非劣合同与纯函数评估器（`65d353e8`，修正后 `80935f21`）、采用门缝隙/`source_revision_benefit_outcomes` 账本（`0e009d26`）、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)` + 完整合同配置 `sourceJobs.revisionBenefit`（`22370991`）已落地；配置 benefit 后在成本/延迟可测数据源接通前保持 fail-closed（只判 insufficient）。剩余：采用后负向越界自动回滚（复用 revisionCapabilityRuntime 精确 CAS rollback）。
+3. **P1-4 收益门（决策层完成）**：非劣合同与纯函数评估器（`65d353e8`/`80935f21`）、采用门与 `source_revision_benefit_outcomes` 账本（`0e009d26`）、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)`（`22370991`）、负向观察自动回滚 `autoRollbackRevisionIfInferior`（`c023e296`，复用 CAS rollback grant）已落地。配置 benefit 后在成本/延迟可测数据源接通前保持 fail-closed（只判 insufficient）。剩余：把回滚检查挂到 Host 既有 wake（无新 loop）、以及连续真实任务的长期非劣验收。
 4. 终态释放 follow-up 重新进入判断的生产消费方；话题 lane 后台通知仍按顶层发送（无 `replyToEventId`）。
 5. **CI 提速（已建夜间门禁，待分批落地）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）；已删除复现旧 AND 链 bug 的重复测试（`6d1afd2d`）。后续按风险从低到高：合并三个安装成功事务、delivery schema 23–31 矩阵分层（日常只跑首尾版、夜间全矩阵）、release-adapter 无缓存全链转夜间；最大收益项是把 12k 行/353 用例的 `tests/installers.spec.ts` 按安装/升级/回滚/原生拆文件并重分片（注意共享清理状态，不能简单并发），以及 registry-fetch 证书复用与重复构建去重（需先实测）。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
 
