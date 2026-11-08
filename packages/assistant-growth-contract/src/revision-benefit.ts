@@ -73,7 +73,7 @@ export interface RevisionBenefitWindowStats {
 }
 
 export type RevisionBenefitVerdict =
-  | { status: 'insufficient'; reason: 'below-minimum-samples' | 'contract-expired' }
+  | { status: 'insufficient'; reason: 'below-minimum-samples' | 'contract-expired' | 'cost-or-latency-unmeasured' }
   | { status: 'inferior'; reason: string }
   | { status: 'non-inferior'; reason: 'all-metrics-within-thresholds' }
 
@@ -188,6 +188,12 @@ export function evaluateRevisionBenefit(
   if (parentSummary.included < contract.minimumTaskRevisions
     || candidateSummary.included < contract.minimumTaskRevisions) {
     return evaluation
+  }
+  // Cost and latency must be measurable on both windows before any quality
+  // claim: an unmeasured axis never passes non-inferiority by default.
+  if (parentSummary.meanTokens <= 0 || candidateSummary.meanTokens <= 0
+    || parentSummary.meanLatencyMs <= 0 || candidateSummary.meanLatencyMs <= 0) {
+    return { ...evaluation, verdict: { status: 'insufficient', reason: 'cost-or-latency-unmeasured' } }
   }
   const thresholds = contract.thresholds
   if (candidateSummary.failureRate > parentSummary.failureRate + thresholds.maxFailureRateDelta + RATE_EPSILON) {

@@ -43,6 +43,13 @@ describe('revision benefit evaluation', () => {
       .toEqual({ status: 'insufficient', reason: 'below-minimum-samples' })
   })
 
+  test('unmeasured cost or latency on either window stays insufficient', () => {
+    expect(evaluateRevisionBenefit(CONTRACT, window({ tokensTotal: 0 }), window(), 1_500).verdict)
+      .toEqual({ status: 'insufficient', reason: 'cost-or-latency-unmeasured' })
+    expect(evaluateRevisionBenefit(CONTRACT, window(), window({ latencyMsTotal: 0 }), 1_500).verdict)
+      .toEqual({ status: 'insufficient', reason: 'cost-or-latency-unmeasured' })
+  })
+
   test('each threshold violation names its metric', () => {
     expect(evaluateRevisionBenefit(CONTRACT, window(), window({ failed: 3 }), 1_500).verdict)
       .toEqual({ status: 'inferior', reason: 'failure-rate' })
