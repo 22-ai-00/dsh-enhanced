@@ -9,7 +9,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 ## 发布状态
 
 - `0.1.66` 已发布（tag `v0.1.66`，`main`=`48fa40fa`，CI 全自动）。双端精确根检查 PASS：Mac 11,179/1,933、Linux 12,796/311。
-- `0.1.67` 待发 tag（包版本已 bump，双路验证已过）：peer bot 入站与话题回复、P1-1 四个 wake 切片、P1-2 owner 问题回复闭环、P0-3 全新安装自足装配、非 LLM 路由 fail-closed、独立复核修复、CI 去重分片与根测试 PATH 规范化。精确提交 `09cffe2b` Linux 根检查与 CI 四 lane 全绿后合入 `main` 发 tag。
+- `0.1.67` 已发布（tag `v0.1.67`，`main`=`3a459679`，record `5f960f16`，CI 全自动，38 包同版）：peer bot 入站与话题回复、P1-1 四个 wake 切片、P1-2 owner 问题回复闭环、P0-3 全新安装自足装配、非 LLM 路由 fail-closed、独立复核修复、CI 去重分片与根测试 PATH 规范化。精确提交 `09cffe2b` Linux 根检查与 CI 四 lane 全绿；本地柳七月 profile 18 个依赖已从 file: 切到 registry 0.1.67。
 - Host 兼容基线 `>=0.2.1-rc.2 <0.3.0`，固定候选 0.2.2-rc.1；pnpm 11.7.0、store v11、Node 22.23.2（隔离运行时）/ 24（开发）。
 
 ## 已交付能力与边界
@@ -33,7 +33,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 ## 延后验收
 
 - 飞书机器人真实长期使用（用户按次授权测试）；活 Home Docker→native 原地切换与活系统升级。
-- 全局 CLI 在 `~/.npm-global`；本地柳七月（`assistant` profile）用 0.1.67 本地包持续体验，保留飞书 bot 与模型配置。
+- 全局 CLI 在 `~/.npm-global`；本地柳七月（`assistant` profile）用 registry 0.1.67 持续体验，保留飞书 bot 与模型配置，旧 file: 装配配置已备份。
 
 ## 最新完整检查
 
