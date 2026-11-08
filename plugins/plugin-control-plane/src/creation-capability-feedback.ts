@@ -34,6 +34,8 @@ interface AssociationRow {
   model: CreationCapabilityOrdinaryUseModel
   callLatencyMs: number[]
   taskLatencyMs?: number
+  /** Owner revision action on the CURRENT canonical row ('initial' when absent). */
+  ownerRevisionAction: 'initial' | 'correct' | 'withdraw'
 }
 
 const same = (a: unknown, b: unknown): boolean => controlPlaneDigest(a) === controlPlaneDigest(b)
@@ -183,6 +185,7 @@ function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty:
           sourceDigest: controlPlaneDigest({ protocol: source.protocol, source: source.source,
             judgement: source.judgement, ownerRevision: source.ownerRevision }) } },
       model: taskModel(source.source), callLatencyMs: valid.map(call => call.settledAt! - call.claimedAt!),
+      ownerRevisionAction: source.ownerRevision?.action ?? 'initial',
       ...(latencyMs === undefined ? {} : { taskLatencyMs: latencyMs }) })
     }
     return { original, rows, evidence, watermark }
@@ -656,4 +659,53 @@ CreationCapabilityOrdinaryUseTrend | undefined {
     cohorts: { treatedSessions: treatedSessions.size, controlSessions: controlSessions.size },
     concurrentAdoptions: { status: concurrent === 0 ? 'none' : 'flagged', count: concurrent },
     strata, flags, assumptions: [...TREND_ASSUMPTIONS], regressions: { status: 'unmeasured' }, cost: { status: 'unmeasured' } })
+}
+
+/**
+ * P1-4 window statistics for one adopted artifact over its CURRENT certified
+ * associations. Revisions the owner corrected are excluded and reported;
+ * withdrawn revisions are absent from the current set by construction, so the
+ * denominator is the visible current head set. Cost and latency stay zero
+ * (unmeasured) when no trusted metrics exist — the benefit evaluator treats
+ * that as insufficient rather than passing.
+ */
+export function inspectCreationCapabilityBenefitWindow(
+  input: CreationCapabilityFeedbackInput & { minimumWindowRevisions?: number },
+): import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats | undefined {
+  const read = readAssociationRows(input, true)
+  const receipt = input.record.receipt
+  if (!read || !receipt) return undefined
+  const rows = [...read.rows].sort((a, b) => a.association.inboxId < b.association.inboxId ? -1
+    : a.association.inboxId > b.association.inboxId ? 1 : 0)
+  const now = read.now
+  const windowEnd = now
+  const windowStart = now - Math.max(1, Math.min(86_400_000, Math.max(1, receipt.expiresAt - receipt.adoptedAt)))
+  let correctedOrWithdrawn = 0, failed = 0, reworked = 0
+  let latencyMsTotal = 0, tokensTotal = 0, inputTokensTotal = 0, outputTokensTotal = 0
+  for (const row of rows) {
+    if (row.ownerRevisionAction !== 'initial') { correctedOrWithdrawn += 1; continue }
+    if (row.association.task.status === 'not-achieved') failed += 1
+    if (row.association.callKeys.length > 1) reworked += 1
+    latencyMsTotal += row.taskLatencyMs ?? 0
+  }
+  const stats: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats = {
+    protocol: 'assistant-growth/revision-benefit-window/v1', artifactSha256: receipt.artifactSha256,
+    windowStart, windowEnd, taskRevisions: rows.length, correctedOrWithdrawn, failed, reworked,
+    latencyMsTotal, tokensTotal, inputTokensTotal, outputTokensTotal,
+  }
+  try { validateWindowStatsShallow(stats) } catch { return undefined }
+  return stats
+}
+
+function validateWindowStatsShallow(value: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats): void {
+  // Local guard so the feedback module does not import the evaluator: shape
+  // and cross-field bounds only.
+  const included = Math.max(0, value.taskRevisions - value.correctedOrWithdrawn)
+  if (value.failed + value.reworked > included) throw new Error('benefit window counters exceed the included set')
+  for (const field of ['windowStart', 'windowEnd', 'taskRevisions', 'correctedOrWithdrawn', 'failed', 'reworked',
+    'latencyMsTotal', 'tokensTotal', 'inputTokensTotal', 'outputTokensTotal'] as const) {
+    const item = value[field]
+    if (!Number.isSafeInteger(item) || item < 0) throw new Error('benefit window counter invalid')
+  }
+  if (value.windowEnd <= value.windowStart) throw new Error('benefit window must be nonempty')
 }

@@ -6,9 +6,9 @@ import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { RevisionCapabilityJournal, revisionCapabilityAuthorityDigest, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
 import { RevisionCapabilityRuntime } from './revision-capability-runtime.js'
 import type { RevisionCapabilityConfig, RevisionCapabilityReadiness } from './revision-capability-types.js'
-import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityOrdinaryUseReport,
-  inspectCreationCapabilityOrdinaryUseTrend, inspectCreationCapabilityTaskAssociations,
-  type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
+import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityBenefitWindow,
+  inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityOrdinaryUseTrend,
+  inspectCreationCapabilityTaskAssociations, type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
@@ -26,7 +26,8 @@ import { isSourceOwnerContinuation, anySourceGrowthRunDigest as sourceGrowthRunD
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
   type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins,
-  type WorkItemRevisionSourceGrowthRunBinding, type WorkItemRevisionAuthorityPins, validateWorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
+  type WorkItemRevisionSourceGrowthRunBinding, type WorkItemRevisionAuthorityPins, validateWorkItemRevisionAuthorityPins,
+  evaluateRevisionBenefit, revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
@@ -1336,6 +1337,40 @@ export class PluginControlPlaneService extends Service {
         ...(options.windowMs === undefined ? {} : { windowMs: options.windowMs }),
         ...(options.preWindows === undefined ? {} : { preWindows: options.preWindows }),
         ...(options.maxPostWindows === undefined ? {} : { maxPostWindows: options.maxPostWindows }) })
+    } catch { return undefined }
+  }
+
+  /**
+   * Host-only, owner-invoked P1-4 benefit evaluation of one prepared revision:
+   * aggregates the parent and candidate benefit windows from their current
+   * certified associations, evaluates them against the owner-configured
+   * non-inferiority contract, and — only for a revision job whose grant pins
+   * this exact contract digest — records the outcome in the benefit ledger.
+   * Never adoption evidence by itself and never model-callable.
+   */
+  evaluateRevisionBenefit = (planId: string) => {
+    const contract = this.config.sourceJobs?.revisionBenefit
+    const plan = this.store.getSourcePlan(planId)
+    if (!contract || plan.mode !== 'prepared-revise' || !plan.sourceRevision?.parent) return undefined
+    const job = this.store.getPreparedRevisionJob(planId)
+    const pinned = job.intent.revision?.grant.benefit
+    if (!pinned || !job.intent.revision?.growthRun.revisionAcceptance) return undefined
+    const now = Date.now()
+    const input = this.createdCapabilityFeedbackInput(planId)
+    if (!input) return undefined
+    try {
+      const candidate = inspectCreationCapabilityBenefitWindow(input())
+      const parentInput = this.createdCapabilityFeedbackInput(plan.sourceRevision.parent.planId)
+      if (!candidate || !parentInput) return undefined
+      const parent = inspectCreationCapabilityBenefitWindow(parentInput())
+      if (!parent) return undefined
+      const evaluation = evaluateRevisionBenefit(contract, parent, candidate, now)
+      const contractDigest = revisionBenefitContractDigest(contract)
+      if (contractDigest === pinned.contractDigest) {
+        this.store.recordRevisionBenefit(planId, { contractDigest, status: evaluation.verdict.status,
+          reason: evaluation.verdict.reason, evaluation })
+      }
+      return { planId, contractDigest, pinned: contractDigest === pinned.contractDigest, evaluation }
     } catch { return undefined }
   }
 

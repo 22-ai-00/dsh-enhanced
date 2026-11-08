@@ -2,7 +2,9 @@ import { normalizeSourceCreationGrant } from './source-creation.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
-import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding,
+  revisionBenefitContractDigest, validateRevisionBenefitContract,
+  type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationDefinition, type HostAutomationExecutor, type HostAutomationExecutorInput, type HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import { controlPlaneDigest, expectedSourceRelease, type ControlPlaneStore } from './store.js'
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
@@ -47,7 +49,7 @@ export { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-
 class SourceGrowthNativeMismatchError extends Error {}
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
-  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'allowedModes', 'repository', 'baseline', 'creation', 'revision', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
+  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'allowedModes', 'repository', 'baseline', 'creation', 'revision', 'revisionBenefit', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
   if (value === null || typeof value !== 'object' || Array.isArray(value) || build === undefined
     || Object.keys(value).some(key => !allowed.has(key))
     || ![value.authorityId, value.ownerRouteId, value.principalId, value.repository, value.workspace, value.preset].every(text => typeof text === 'string' && text !== '' && text.normalize('NFC').trim() === text && text.length <= 4096 && !/[\p{Cc}]/u.test(text))
@@ -68,6 +70,10 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
   }
   if (value.creation !== undefined) validateSourceCreationGrant(value.creation)
   if (value.revision !== undefined) validateSourceRevisionGrant(value.revision)
+  if (value.revisionBenefit !== undefined) validateRevisionBenefitContract(value.revisionBenefit)
+  if (value.revisionBenefit !== undefined && value.revision?.benefit?.contractDigest !== revisionBenefitContractDigest(value.revisionBenefit)) {
+    throw new Error('plugin-control-plane: revisionBenefit contract does not match the revision grant benefit pin')
+  }
   if ('backend' in build && build.backend === 'macos-seatbelt'
     && (!value.allowedModes || value.allowedModes.some(mode => mode === 'modify')
       || value.creation === undefined && value.revision === undefined)) {

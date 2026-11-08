@@ -18,6 +18,12 @@ export interface SourceJobsConfig {
   creation?: SourceCreationGrant
   /** Preparation only; does not grant adoption or execution of a revision. */
   revision?: SourceRevisionGrant
+  /**
+   * P1-4 owner-configured non-inferiority contract (full form). When present,
+   * revision grants that pin a benefit digest gate auto-adoption on a recorded
+   * non-inferior outcome evaluated under this exact contract.
+   */
+  revisionBenefit?: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitContract
   ownerRouteId: string
   principalId: string
   workspace: string
