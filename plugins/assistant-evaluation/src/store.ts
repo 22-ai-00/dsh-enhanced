@@ -1319,6 +1319,36 @@ export class EvaluationStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
+  /**
+   * Host-only read of one trusted outcome's resource metrics. Deliberately a
+   * separate projection rather than a receipt field: adding it to the receipt
+   * would change every historical learning-projection digest.
+   */
+  inspectTrustedOutcomeMetrics(scopeInput: EvaluationScope, outcomeIdInput: string):
+    Readonly<{ inputTokens?: number; outputTokens?: number; costUsdMicros?: number; latencyMs?: number }> | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)
+    const row = this.#database.prepare(`SELECT metrics_json FROM evaluation_outcomes
+      WHERE id = ? AND scope_key = ? AND trust = 'trusted'`).get(outcomeId, scopeKey) as { metrics_json: string } | undefined
+    if (row === undefined) return undefined
+    let parsed: unknown
+    try { parsed = JSON.parse(row.metrics_json) } catch { return undefined }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const read = (key: string): number | undefined => {
+      const value = (parsed as Record<string, unknown>)[key]
+      return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+    }
+    const inputTokens = read('inputTokens'), outputTokens = read('outputTokens')
+    const costUsdMicros = read('costUsdMicros'), latencyMs = read('latencyMs')
+    const metrics = {
+      ...(inputTokens === undefined ? {} : { inputTokens }),
+      ...(outputTokens === undefined ? {} : { outputTokens }),
+      ...(costUsdMicros === undefined ? {} : { costUsdMicros }),
+      ...(latencyMs === undefined ? {} : { latencyMs }),
+    }
+    return Object.freeze(metrics)
+  }
+
   inspectTaskOwnerRevision(scopeInput: EvaluationScope, outcomeIdInput: string, principalRecordIdInput: string, principalVersionInput: number): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string; operationId?: string }> | undefined {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)

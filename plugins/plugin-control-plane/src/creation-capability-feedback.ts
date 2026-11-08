@@ -11,7 +11,7 @@ import type { CreationCapabilityAttributionArm, CreationCapabilityAttributionDel
   CreationCapabilityTrendWindow } from './creation-capability-types.js'
 
 type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'getTrustedForegroundLearningProjection'
-  | 'withTrustedCanonicalTaskWriterFence'>
+  | 'withTrustedCanonicalTaskWriterFence'> & Partial<Pick<AssistantEvaluationService, 'inspectTrustedOutcomeMetrics'>>
 type Delivery = Pick<AssistantDeliveryService, 'inspectOwnerForegroundLearningTask' | 'inspectOwnerForegroundTaskSource'>
 
 export interface CreationCapabilityFeedbackInput {
@@ -36,6 +36,8 @@ interface AssociationRow {
   taskLatencyMs?: number
   /** Owner revision action on the CURRENT canonical row ('initial' when absent). */
   ownerRevisionAction: 'initial' | 'correct' | 'withdraw'
+  /** Billed token usage from the trusted outcome metrics, when measured. */
+  tokenUsage?: { input: number; output: number }
 }
 
 const same = (a: unknown, b: unknown): boolean => controlPlaneDigest(a) === controlPlaneDigest(b)
@@ -172,6 +174,13 @@ function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty:
       watermark = Math.max(watermark, source.canonical.scopeWatermark)
       const projection = source.canonical.projection
       const latencyMs = taskLatencyMs(originalSource.execution as typeof originalSource.execution | undefined)
+      const outcomeMetrics = evaluation.inspectTrustedOutcomeMetrics?.({
+        scope: evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset }),
+        outcomeId: source.canonical.triggerOutcomeId,
+      })
+      const tokenUsage = outcomeMetrics === undefined
+        || typeof outcomeMetrics.inputTokens !== 'number' || typeof outcomeMetrics.outputTokens !== 'number'
+        ? undefined : { input: outcomeMetrics.inputTokens, output: outcomeMetrics.outputTokens }
       rows.push({ association: { protocol: 'dsh-created-capability-task-association/v1', planId: record.planId,
         inboxId, sessionId: group.sessionId, callKeys: valid.map(call => call.key).sort(),
         receiptDigest, artifactSha256: receipt.artifactSha256, schemaDigest: receipt.schemaDigest,
@@ -186,7 +195,8 @@ function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty:
             judgement: source.judgement, ownerRevision: source.ownerRevision }) } },
       model: taskModel(source.source), callLatencyMs: valid.map(call => call.settledAt! - call.claimedAt!),
       ownerRevisionAction: source.ownerRevision?.action ?? 'initial',
-      ...(latencyMs === undefined ? {} : { taskLatencyMs: latencyMs }) })
+      ...(latencyMs === undefined ? {} : { taskLatencyMs: latencyMs }),
+      ...(tokenUsage === undefined ? {} : { tokenUsage }) })
     }
     return { original, rows, evidence, watermark }
   }
@@ -687,6 +697,11 @@ export function inspectCreationCapabilityBenefitWindow(
     if (row.association.task.status === 'not-achieved') failed += 1
     if (row.association.callKeys.length > 1) reworked += 1
     latencyMsTotal += row.taskLatencyMs ?? 0
+    if (row.tokenUsage !== undefined) {
+      tokensTotal += row.tokenUsage.input + row.tokenUsage.output
+      inputTokensTotal += row.tokenUsage.input
+      outputTokensTotal += row.tokenUsage.output
+    }
   }
   const stats: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats = {
     protocol: 'assistant-growth/revision-benefit-window/v1', artifactSha256: receipt.artifactSha256,

@@ -1015,6 +1015,17 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       hostIdentifier(input.inboxId, 'inboxId', 1_000))
   }
 
+  /**
+   * Host-only resource metrics of one trusted outcome. Kept out of the
+   * learning-projection receipt so historical digests stay unchanged.
+   */
+  inspectTrustedOutcomeMetrics(input: { scope: EvaluationHostScope; outcomeId: string }):
+    Readonly<{ inputTokens?: number; outputTokens?: number; costUsdMicros?: number; latencyMs?: number }> | undefined {
+    this.assertActive()
+    return this.store.inspectTrustedOutcomeMetrics(exactEvaluationHostScope(input.scope),
+      hostIdentifier(input.outcomeId, 'outcomeId', 200))
+  }
+
   /** Host-only exact current owner result for one durable work item. */
   getTrustedWorkItemLearningProjection(input: {
     scope: EvaluationHostScope; itemId: string
