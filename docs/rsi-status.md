@@ -30,7 +30,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 2. **P1-3 收尾（可选 v3 分支）**：growth-driver 修订走廊已落地；剩余可选的 revision regression 与 revision adoption 的 v3 work-item 分支（两者均为可选 pin，默认不触发）。
 3. **P1-4 收益门（决策层完成）**：非劣合同与纯函数评估器（`65d353e8`/`80935f21`）、采用门与 `source_revision_benefit_outcomes` 账本（`0e009d26`）、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)`（`22370991`）、负向观察自动回滚 `autoRollbackRevisionIfInferior`（`c023e296`，复用 CAS rollback grant）已落地。配置 benefit 后在成本/延迟可测数据源接通前保持 fail-closed（只判 insufficient）。剩余：把回滚检查挂到 Host 既有 wake（无新 loop）、以及连续真实任务的长期非劣验收。
 4. 终态释放 follow-up 重新进入判断的生产消费方；话题 lane 后台通知仍按顶层发送（无 `replyToEventId`）。
-5. **CI 提速（已建夜间门禁，分批落地中）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）；已删除复现旧 AND 链 bug 的重复测试（`6d1afd2d`）；三个 TMPDIR 安装成功用例已合并为参数化用例、Delivery schema 23–31 矩阵已按 `DSH_NIGHTLY_FULL_MATRIX` 分层（日常首尾版、夜间全量，`70111690`）。后续：release-adapter 无缓存全链转夜间；最大收益项是把 12k 行/504 用例的 `tests/installers.spec.ts` 按安装/升级/回滚/原生拆文件并重分片（注意共享清理状态，不能简单并发），以及 registry-fetch 证书复用与重复构建去重（需先实测）。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
+5. **CI 提速（已建夜间门禁，分批落地中）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）；已删除复现旧 AND 链 bug 的重复测试（`6d1afd2d`）；三个 TMPDIR 安装成功用例已合并为参数化用例、Delivery schema 23–31 矩阵已按 `DSH_NIGHTLY_FULL_MATRIX` 分层（日常首尾版、夜间全量，`70111690`）。`installers.spec.ts` 文件拆分经两次自动提取尝试后确认不可自动化（内嵌脚本 fixture 与模块作用域耦合，教训已记录），接受长 CI 并以夜间门禁与矩阵分层缓解。后续可实测：registry-fetch 证书复用与重复构建去重。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
 
 ## 延后验收
 
