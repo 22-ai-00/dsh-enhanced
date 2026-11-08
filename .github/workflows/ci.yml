@@ -246,7 +246,7 @@ jobs:
         run: pnpm run build
 
       - name: Verify root tests (shard)
-        run: pnpm exec vitest run --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2
+        run: pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2
 
   verify:
     needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]

@@ -1161,7 +1161,7 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/event-triggers run build',
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
-    expect(manifest.scripts['test:root']).toBe('vitest run --testTimeout=15000 --dir tests')
+    expect(manifest.scripts['test:root']).toBe('vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests')
     expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm run test:packages')
     expect(manifest.scripts['test:packages']).toBe('pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000')
     expect(manifest.scripts['check:quick']).toBe('pnpm run validate && pnpm run lint && pnpm --filter "{origin/dev}..." --if-present run build && pnpm --filter "{origin/dev}..." --if-present run typecheck && pnpm --filter "{origin/dev}" --if-present run test --testTimeout=15000')
@@ -1195,7 +1195,7 @@ describe('release version workflow', () => {
     expect(linuxPackages).toContain('run: pnpm run test:packages')
     expect(linuxPackages).toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toContain('run: pnpm run test:root')
-    expect(linuxRoot).toContain('--dir tests --shard=${{ matrix.shard }}/2')
+    expect(linuxRoot).toContain('--config ./tests/vitest.config.ts --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2')
     expect(linuxRoot).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
     expect(linuxRoot).not.toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toMatch(/^\s+needs:/mu)
