@@ -893,6 +893,9 @@ importers:
       '@deepseek-ai/dsh-agent-loop':
         specifier: 'catalog:'
         version: 0.2.1-rc.2(8cf89676465c33384f243a4325f23416)
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: 'catalog:'
+        version: 0.2.1-rc.2(c3e1dc87a351e0d26ffdc90ff2c79f99)
       '@deepseek-ai/dsh-llm':
         specifier: 'catalog:'
         version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)
