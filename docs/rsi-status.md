@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-07。验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)；实现历史查 Git，原始证据在忽略的 `docs/evidence/`。
+更新：2026-11-08。验收见[合同](rsi-acceptance.md)，发行见[发布协议](releasing.md)；实现历史查 Git，原始证据在忽略的 `docs/evidence/`。
 
 ## 目标与纪律
 
@@ -9,7 +9,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 ## 发布状态
 
 - `0.1.66` 已发布（tag `v0.1.66`，`main`=`48fa40fa`，CI 全自动）。双端精确根检查 PASS：Mac 11,179/1,933、Linux 12,796/311。
-- `0.1.67` 待发布（包版本已 bump）：peer bot 入站与话题回复、P1-1 四个 wake 切片、P1-2 owner 问题回复闭环、P0-3 全新安装自足装配、非 LLM 路由 fail-closed、独立复核修复。待精确提交双端根检查通过后合入 `main` 发 tag。
+- `0.1.67` 待发 tag（包版本已 bump，双路验证已过）：peer bot 入站与话题回复、P1-1 四个 wake 切片、P1-2 owner 问题回复闭环、P0-3 全新安装自足装配、非 LLM 路由 fail-closed、独立复核修复、CI 去重分片与根测试 PATH 规范化。精确提交 `09cffe2b` Linux 根检查与 CI 四 lane 全绿后合入 `main` 发 tag。
 - Host 兼容基线 `>=0.2.1-rc.2 <0.3.0`，固定候选 0.2.2-rc.1；pnpm 11.7.0、store v11、Node 22.23.2（隔离运行时）/ 24（开发）。
 
 ## 已交付能力与边界
@@ -39,6 +39,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped |
 | --- | --- | --- | --- | --- |
+| `09cffe2b`（0.1.67 发布提交） | Linux / Node 24.7.0，隔离 Node 22.23.2 | EXIT 0，PASS，2286 秒 | 12,954 / 314 | 823 / 32 |
 | `48fa40fa`（0.1.66 发布提交） | Mac / Node 26.11.1 | EXIT 0，PASS，1148 秒 | 11,179 / 1,933 | 765 / 85 |
 
-更早切片结果保留在 `docs/evidence/verification-<sha8>/`（gitignored）；0.1.67 发布提交的双端结果在发布后补入。
+更早切片结果保留在 `docs/evidence/verification-<sha8>/`（gitignored）。`09cffe2b` 同时由 CI 四 lane（linux-packages、linux-root-tests 双分片、macos-verify、windows-acp-smoke）全绿背书；macOS 平台行为由 macos-verify lane 持续覆盖。
