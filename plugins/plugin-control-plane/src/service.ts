@@ -1221,6 +1221,43 @@ export class PluginControlPlaneService extends Service {
   }
 
   /**
+   * Host-only P1-4 negative-observation rollback of one active revision: after
+   * the observation window, a recorded `inferior` benefit outcome rolls the
+   * stable entry back to its exact parent under the separate rollback grant,
+   * and stops this lineage from preparing further spontaneous revisions until
+   * the owner re-authorizes. Anything else leaves the adoption untouched.
+   */
+  autoRollbackRevisionIfInferior = async (planId: string, options: { observeWindowMs: number; signal?: AbortSignal }) => {
+    this.abort.signal.throwIfAborted()
+    const runtime = this.revisionCapabilityRuntime
+    const contract = this.config.sourceJobs?.revisionBenefit
+    if (!runtime || !contract) return { rolledBack: false as const, reason: 'benefit-not-configured' as const }
+    const entryId = this.revisionEntryId(planId)
+    if (entryId === undefined) return { rolledBack: false as const, reason: 'entry-not-found' as const }
+    const entry = runtime.inspectEntry(entryId)
+    if (!entry || entry.currentPlanId !== planId) return { rolledBack: false as const, reason: 'not-current' as const }
+    const job = this.store.getPreparedRevisionJob(planId)
+    const pinned = job.intent.revision?.grant.benefit
+    if (!pinned || pinned.contractDigest !== revisionBenefitContractDigest(contract)) {
+      return { rolledBack: false as const, reason: 'benefit-not-pinned' as const }
+    }
+    const outcome = this.store.inspectRevisionBenefitOutcome(planId)
+    const plan = this.store.getSourcePlan(planId)
+    const windowEnd = plan.sourceRevision?.growthRun.createdAt === undefined ? undefined
+      : plan.sourceRevision.growthRun.createdAt + Math.max(1, options.observeWindowMs)
+    if (windowEnd === undefined || Date.now() < windowEnd) {
+      return { rolledBack: false as const, reason: 'observation-open' as const }
+    }
+    if (outcome === undefined || outcome.contractDigest !== pinned.contractDigest) {
+      return { rolledBack: false as const, reason: 'outcome-missing' as const }
+    }
+    if (outcome.status !== 'inferior') return { rolledBack: false as const, reason: `outcome:${outcome.status}` as const }
+    const record = await runtime.rollback({ entryId, expectedCurrentPlanId: planId,
+      ...(options.signal === undefined ? {} : { signal: options.signal }) })
+    return { rolledBack: true as const, reason: outcome.reason, record }
+  }
+
+  /**
    * Host-only authenticated-owner exact parent rollback under its own finite grant. The parent
    * adoption receipt must still be current and the entry must be on the exact expected revision.
    */
@@ -1392,6 +1429,11 @@ export class PluginControlPlaneService extends Service {
       this.abort.signal.throwIfAborted()
       return this.store.listCreatedCapabilityTrendSnapshots(query)
     } catch { return undefined }
+  }
+
+  /** The stable revision entry currently pointing at this plan, if any. */
+  private revisionEntryId(planId: string): string | undefined {
+    return this.revisionCapabilityRuntime?.listEntries().find(entry => entry.currentPlanId === planId)?.entryId
   }
 
   /** The historical read is deferred so callers keep it inside their own failure boundary. */

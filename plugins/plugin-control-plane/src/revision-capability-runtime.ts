@@ -93,6 +93,16 @@ export class RevisionCapabilityRuntime {
     } catch { return undefined }
   }
 
+  /** Host-only content-free projection of every stable entry identity. */
+  listEntries(): readonly { entryId: string; name: string; currentPlanId: string; parentPlanId: string; revision: number }[] {
+    try {
+      return this.journal.listEntries().map(entry => Object.freeze({
+        entryId: entry.entryId, name: entry.name, currentPlanId: entry.currentPlanId,
+        parentPlanId: entry.parentPlanId, revision: entry.revision,
+      }))
+    } catch { return [] }
+  }
+
   inspectCallEvidence(entryId: string): readonly RevisionCapabilityCallEvidence[] {
     try { return this.journal.listCallEvidence(entryId) } catch { return [] }
   }
