@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { types as utilTypes } from 'node:util'
 import { isAbsolute, resolve } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { validateWorkItemGrowthAuthorityPins, type WorkItemGrowthAuthorityPins, type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { validateWorkItemGrowthAuthorityPins, validateWorkItemRevisionAuthorityPins,
+  type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins,
+  type WorkItemSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import type { OwnerForegroundLearningTask, OwnerWorkItemEngineeringContextSource } from '@dsh-enhanced/assistant-delivery'
 
 export type UsageStableOwner = Pick<OwnerForegroundLearningTask['owner'], 'authorityId' | 'authorityHash' | 'principalId' | 'principalRecordId' | 'principalVersion' | 'workspace' | 'agentPreset'>
@@ -50,6 +52,10 @@ export const workItemTextDigest = (text: string): string => createHash('sha256')
 export function workItemAuthorityDeadline(pins: WorkItemGrowthAuthorityPins): number {
   return Math.min(pins.sourceJobs.expiresAt, pins.creationGrant.expiresAt, pins.creationAcceptance.expiresAt, pins.adoption.expiresAt)
 }
+export function workItemRevisionAuthorityDeadline(pins: WorkItemRevisionAuthorityPins): number {
+  return Math.min(pins.sourceJobs.expiresAt, pins.revisionGrant.expiresAt, pins.revisionAcceptance.expiresAt,
+    ...(pins.revisionAdoption ? [pins.revisionAdoption.expiresAt] : []))
+}
 export function isWorkItemCreationReady(value: unknown, pins: WorkItemGrowthAuthorityPins, now = Date.now(), admission = true): value is WorkItemCreationReadiness {
   try {
     const result = ownData(value) as WorkItemCreationReadiness
@@ -60,6 +66,29 @@ export function isWorkItemCreationReady(value: unknown, pins: WorkItemGrowthAuth
     validateWorkItemGrowthAuthorityPins(result.pins)
     return acceptanceDigest(result.pins) === acceptanceDigest(pins) && workItemAuthorityDeadline(pins) > now
       && Object.keys(result.remaining).sort().join(',') === 'adoptions,creates,sourceSubmissions,verifications'
+      && Object.values(result.remaining).every(count => Number.isSafeInteger(count) && count >= (admission ? 1 : 0))
+  } catch { return false }
+}
+export interface WorkItemRevisionReadiness {
+  protocol: 'assistant-growth/work-item-revision-readiness/v1'
+  sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1'
+  runProtocol: 'assistant-growth/source-run/v3'
+  workItemFailures: true
+  pins: WorkItemRevisionAuthorityPins
+  remaining: Record<string, number>
+  available: boolean
+}
+/** Fail-closed structural/authority validator mirroring isWorkItemCreationReady for the v3 revise corridor. */
+export function isWorkItemRevisionReady(value: unknown, pins: WorkItemRevisionAuthorityPins, now = Date.now(), admission = true): value is WorkItemRevisionReadiness {
+  try {
+    const result = ownData(value) as WorkItemRevisionReadiness
+    if (Object.keys(result).sort().join(',') !== 'available,pins,protocol,remaining,runProtocol,sourceProtocol,workItemFailures'
+      || result.protocol !== 'assistant-growth/work-item-revision-readiness/v1'
+      || result.sourceProtocol !== 'assistant-delivery/work-item-engineering-context/v1'
+      || result.runProtocol !== 'assistant-growth/source-run/v3' || result.workItemFailures !== true
+      || typeof result.available !== 'boolean' || admission && result.available !== true) return false
+    validateWorkItemRevisionAuthorityPins(result.pins)
+    return acceptanceDigest(result.pins) === acceptanceDigest(pins) && workItemRevisionAuthorityDeadline(pins) > now
       && Object.values(result.remaining).every(count => Number.isSafeInteger(count) && count >= (admission ? 1 : 0))
   } catch { return false }
 }

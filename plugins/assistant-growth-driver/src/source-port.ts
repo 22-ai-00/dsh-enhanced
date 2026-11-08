@@ -126,6 +126,7 @@ export interface GrowthSourceRevisionTarget {
 
 export interface GrowthSourcePlanePort {
   inspectWorkItemCreationReadiness?(input: { owner: OwnerForegroundLearningTask['owner'] }): WorkItemCreationReadiness | undefined
+  inspectWorkItemRevisionReadiness?(input: { owner: OwnerForegroundLearningTask['owner'] }): import('./work-item-source.js').WorkItemRevisionReadiness | undefined
 
   /** Optional read-only repository inventory; the Host owns the repository and baseline. */
   inspectSourceTargets?(input: {

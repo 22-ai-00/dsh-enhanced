@@ -65,6 +65,7 @@ export class UsageLearningRuntime {
     inspectWorkItemToolPreauthorization?(): boolean
     reviewWorkItem?(input: WorkItemUsageReviewInput): Promise<UsageReviewResult>
     inspectWorkItemCreationReadiness?(input: { owner: WorkItemUsageSource['task']['owner'] }): WorkItemCreationReadiness | undefined
+    inspectWorkItemRevisionReadiness?(input: { owner: WorkItemUsageSource['task']['owner'] }): import('./work-item-source.js').WorkItemRevisionReadiness | undefined
     review(input: UsageReviewInput): Promise<UsageReviewResult>
     inspectCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
     inspectRevisionAcceptanceAuthority?(): RevisionAcceptanceAuthorityRef | undefined

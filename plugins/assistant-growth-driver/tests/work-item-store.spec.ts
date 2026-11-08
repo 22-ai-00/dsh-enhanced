@@ -3,11 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { WorkItemGrowthAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
+import type { WorkItemGrowthAuthorityPins, WorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, expect, test } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
 import { UsageStore } from '../src/usage-store.ts'
-import { isWorkItemCreationReady, type WorkItemUsageLocator } from '../src/work-item-source.ts'
+import { isWorkItemCreationReady, isWorkItemRevisionReady, type WorkItemUsageLocator } from '../src/work-item-source.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }) })
@@ -77,4 +77,25 @@ test('readiness requires exact live protocol, new authority pins and positive ad
   const exhausted = { ...ready, remaining: { ...ready.remaining, creates: 0 }, available: false }
   expect(isWorkItemCreationReady(exhausted, pins, 1)).toBe(false); expect(isWorkItemCreationReady(exhausted, pins, 1, false)).toBe(true)
   expect(isWorkItemCreationReady(ready, pins, 100_000, false)).toBe(false)
+})
+
+test('revision readiness requires the v3 protocol, revision pins and live admission; creation pins never satisfy it', () => {
+  const revisionPins: WorkItemRevisionAuthorityPins = { protocol: 'assistant-growth/work-item-revision-authorities/v1',
+    sourceJobs: { authorityId: 'source', authorityDigest: 'a'.repeat(64), expiresAt: 100_000 },
+    revisionGrant: { id: 'revise', digest: 'b'.repeat(64), expiresAt: 100_000, workItemFailures: true },
+    revisionAcceptance: { protocol: 'assistant-growth/revision-acceptance-authority/v1', authorityId: 'review',
+      authorityDigest: 'c'.repeat(64), keyId: 'key', namePrefix: 'created-', expiresAt: 100_000 } }
+  const ready = { protocol: 'assistant-growth/work-item-revision-readiness/v1',
+    sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v3',
+    workItemFailures: true, pins: revisionPins, remaining: { sourceSubmissions: 1, revisions: 1, verifications: 1 }, available: true }
+  expect(isWorkItemRevisionReady(ready, revisionPins, 1)).toBe(true)
+  for (const wrong of [undefined, { available: true }, { ...ready, runProtocol: 'assistant-growth/source-run/v2' },
+    { ...ready, workItemFailures: undefined }, { ...ready, pins: { ...revisionPins, revisionGrant: { ...revisionPins.revisionGrant, digest: 'f'.repeat(64) } } }]) {
+    expect(isWorkItemRevisionReady(wrong, revisionPins, 1)).toBe(false)
+  }
+  const exhausted = { ...ready, remaining: { ...ready.remaining, revisions: 0 }, available: false }
+  expect(isWorkItemRevisionReady(exhausted, revisionPins, 1)).toBe(false)
+  expect(isWorkItemRevisionReady(exhausted, revisionPins, 1, false)).toBe(true)
+  expect(isWorkItemRevisionReady(ready, revisionPins, 100_000, false)).toBe(false)
+  expect(isWorkItemRevisionReady(ready, pins as unknown as WorkItemRevisionAuthorityPins, 1)).toBe(false)
 })

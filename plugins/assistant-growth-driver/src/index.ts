@@ -89,7 +89,8 @@ export class AssistantGrowthDriverService extends Service {
   #active = true
   readonly #abort = new AbortController()
   #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean;
-    taskCreationReady: () => boolean; workItemCreationReady: () => boolean; taskRevisionReady: () => boolean; nudge: () => void;
+    taskCreationReady: () => boolean; workItemCreationReady: () => boolean; workItemRevisionReady?: () => boolean;
+    taskRevisionReady: () => boolean; nudge: () => void;
     recordTaskFailure: (source: OwnerForegroundLearningTask) => GrowthSourceGap;
     recordWorkItemFailure: (source: Pick<import('./work-item-source.js').WorkItemUsageSource, 'task' | 'manifest' | 'objective'>) => GrowthSourceGap } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
@@ -125,6 +126,10 @@ export class AssistantGrowthDriverService extends Service {
             const binding = this.#sourceBinding
             return binding?.available() && binding.workItemCreationReady() ? binding.port.inspectWorkItemCreationReadiness?.({ owner }) : undefined
           },
+          inspectWorkItemRevisionReadiness: ({ owner }) => {
+            const binding = this.#sourceBinding
+            return binding?.available() && binding.workItemRevisionReady?.() ? binding.port.inspectWorkItemRevisionReadiness?.({ owner }) : undefined
+          },
           inspectCreationAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceCreationAcceptanceAuthority?.(),
           inspectRevisionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionAcceptanceAuthority?.(),
           inspectRevisionRegressionAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceRevisionRegressionAcceptanceAuthority?.(),
@@ -144,7 +149,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'inspectWorkItemCreationReadiness' | 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'getSourceRevisionNamespace' | 'inspectSourceRevisionAcceptanceAuthority' | 'inspectSourceRevisionRegressionAcceptanceAuthority' | 'inspectCreatedCapabilityRevisionTargets' | 'inspectRevisionSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'inspectWorkItemCreationReadiness' | 'inspectWorkItemRevisionReadiness' | 'prepareModifySourcePlan' | 'inspectSourceTargets' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'getSourceRevisionNamespace' | 'inspectSourceRevisionAcceptanceAuthority' | 'inspectSourceRevisionRegressionAcceptanceAuthority' | 'inspectCreatedCapabilityRevisionTargets' | 'inspectRevisionSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           recordOwnerWorkItemFailureGap?: (source: Pick<import('./work-item-source.js').WorkItemUsageSource, 'task' | 'manifest' | 'objective'>) => GrowthSourceGap
@@ -218,11 +223,19 @@ export class AssistantGrowthDriverService extends Service {
                 && typeof live.getSourceCreationNamespace === 'function' && typeof live.inspectSourceCreationAcceptanceAuthority === 'function'
             } catch { return false }
           },
+          workItemRevisionReady: () => {
+            try {
+              const live = current()
+              return producerAvailable && this.#usage !== undefined && typeof live.inspectWorkItemRevisionReadiness === 'function'
+                && typeof live.getSourceRevisionNamespace === 'function' && typeof live.inspectSourceRevisionAcceptanceAuthority === 'function'
+            } catch { return false }
+          },
           taskRevisionReady: () => revisionSeamsPresent && this.#usage !== undefined,
           nudge: () => { if (producerAvailable) current().reconcileSourceGrowthRuns?.() },
           port: {
             listOpenGaps: () => current().gaps(50),
             inspectWorkItemCreationReadiness: input => current().inspectWorkItemCreationReadiness?.(input),
+            inspectWorkItemRevisionReadiness: input => current().inspectWorkItemRevisionReadiness?.(input),
             ...(typeof provider.inspectSourceTargets === 'function'
               ? { inspectSourceTargets: async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectSourceTargets']>>[0]) => {
                   const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
