@@ -65,10 +65,10 @@ dsh --profile web --dump-config
    `resource: {kind: tool, id: run_code}`）。RSI 生成 profile 目前只给 `growth_*` / `plugin_source_*`
    建规则，**本切片不生成该规则、也不改 assistant-policy**；缺失时 `run_code` 按 default-deny 失败
    关闭（计入 `health().run.usage.ptc.failedRunCodeCalls`），wake 不会伪造成功。
-4. WorkItem author lane（`usageLearning.workItemFailures`）暂不支持 PTC：其冻结预授权只有 4 个
-   `plugin_source_*` 工具，保留传输不在其中。driver 在创建 Agent 前直接拒绝
-   （`PTC presentation is not supported for the WorkItem author lane yet`）；启用该 lane 时需要
-   Host 侧预授权或规则后才可开启，本切片不生成。
+4. WorkItem author lane（`usageLearning.workItemFailures`）暂不支持 PTC：其冻结预授权只含
+   `plugin_source_*` 工具（创建走廊 4 个，修订走廊 6 个），保留传输不在其中。driver 在创建 Agent
+   前直接拒绝（`PTC presentation is not supported for the WorkItem author lane yet`）；启用该
+   lane 时需要 Host 侧预授权或规则后才可开启，本切片不生成。
 
 **未覆盖**：真实 `@deepseek-ai/dsh-ptc-runtime-node` 的沙箱执行与真实模型长跑未验收（本切片不新增
 devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime` 驱动 Host 原生 `run_code` 桥、
@@ -110,6 +110,7 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 | `usageLearning.enabled` | `false` | 真实任务触发开关；要求主开关、owner scope、预算及 Evaluation/Automations 服务。 |
 | `usageLearning.workItemFailures` | `false` | 严格可选布尔值；缺失/false 在授权摘要中省略，true 要求 usageLearning、durable source、allowCreation 与显式 workItemAuthorities。只允许后台新工具创建；前台 modify/revise 开关不改变。 |
 | `usageLearning.workItemAuthorities` | 无 | 后台开关开启时必填的准确四份 pins：sourceJobs（authorityId/authorityDigest/expiresAt）、creationGrant（id/digest/expiresAt）、creationAcceptance（完整独立验收引用）、adoption（authorityId/authorityDigest/expiresAt），外层 protocol 为 `assistant-growth/work-item-authorities/v1`。从已授权当前 CP 免费 readiness 获取并由 owner 显式冻结，不自动补签或扩大旧 grant。 |
+| `usageLearning.workItemRevisionAuthorities` | 无 | 可选修订 pins（protocol `assistant-growth/work-item-revision-authorities/v1`）：sourceJobs、带 `workItemFailures: true` 的 revisionGrant、revisionAcceptance，及可选 revisionRegressionAcceptance/revisionAdoption。要求 durable `allowRevision`；配置后只在修订 peer 在线且目标唯一命中时把作业冻结为 v3 修订走廊，缺失任何一环均回退创建走廊。 |
 | `usageLearning.databasePath` | 无 | 开启时必填的私有 SQLite 绝对路径，保存游标、冻结来源与作业状态。 |
 | `usageLearning.maxPending` | `16` | 同时 queued/running 上限（1–100）；满时保留未消费游标，释放容量后继续。 |
 | `usageLearning.lookbackMs` | `86400000` | 来源结果最大年龄与排队 TTL（1 分钟–7 天）。 |
@@ -265,9 +266,11 @@ usageLearning:
 
 工程 objective 是 Delivery 逐段核对的根→当前 child 原样主人输入及有版本 JSON framing，总 UTF-8 不超过16KiB；不得改用 worker brief、根目标摘要或 owner 反馈。背景报告与反馈分栏作为不可信材料，封存 manifest 绑定精确父链及报告版本。完整来源、原 supplier（或显式固定覆盖）、有限预算与 pins 在 Delivery → Evaluation → WorkItems → UsageStore writer frame 内冻结后才进入原生作业；缺失 reasoning effort 保持缺失。同 owner 新 Session 不改写冻结 owner/source-run 摘要。
 
-CP 免费 readiness 必须明确返回工程来源协议、source-run v2、后台能力及完全相同且未过期的 pins。schedule/activate、claim 和首次 LLM 前要求正余额与 available；缺方法、旧协议或摘要不符时不启动付费作者。既有 run 不因自己的末次额度消耗而失效；后续授权仍核对当前活 peer、原 pins、来源及各独立账本。后台作者只看到 gaps/read/job-status/create 工具，不进入技能写、modify/revise 或通用成功轨。候选仍需独立真实构建、held-out 验收及采用，不把主人 testimony 或工具成功当证书。
+CP 免费 readiness 必须明确返回工程来源协议、source-run v2（或 v3）、后台能力及完全相同且未过期的 pins。schedule/activate、claim 和首次 LLM 前要求正余额与 available；缺方法、旧协议或摘要不符时不启动付费作者。既有 run 不因自己的末次额度消耗而失效；后续授权仍核对当前活 peer、原 pins、来源及各独立账本。后台作者按冻结走廊只看到创建面（gaps/read/job-status/create）或修订面（gaps/read/job-status/revision-targets/revision-inspect/revise）工具，不进入技能写、modify 或通用成功轨。候选仍需独立真实构建、held-out 验收及采用，不把主人 testimony 或工具成功当证书。
 
-后台四个 source 工具还要求当前 Policy 的 WorkItem Growth 预授权能力。仅实际发布的 `dsh-enhanced-assistant-growth-driver` plugin Fiber 可注册本 Agent realm 的准确工具定义；注册初始不可用，真实持久化 v2 source-run 返回并匹配 session、occurrence、来源、工具摘要及预算后才启用。每次执行重核当前 owner/source、Policy、期限和工具次数，关闭或取消立即撤销；此许可仅跳过这四个工具的逐次审批，不绕过 Policy 的 execute 规则、预算或急停。前台 v1 仍保留既有审批流程，后续普通任务调用新工具也沿用其真实前台权限/审批通道。
+**走廊冻结（创建 vs 修订）**：WorkItem 离开 pending 队列时由确定性规则冻结本作业的走廊——仅当 `usageLearning.workItemRevisionAuthorities` 已配置、修订 peer 全部在线、且确定性匹配器在 objective 文本中恰好命中一个同 owner 已采用能力名（零命中、多命中、歧义或离线一律 fail-closed）时走 `revise-created`（source-run v3，binding 固化 revision pins 与目标），否则保持既有 `create` 走廊（source-run v2）。走廊冻结后单 wake 单走廊：创建 wake 的 config 维持 `allowRevision: false`，修订 wake 移除创建缝（`plugin_source_create` 不可见）并放行修订面；`allowModification` 在两种后台走廊中恒为 false。
+
+后台 source 工具还要求当前 Policy 的 WorkItem Growth 预授权能力。仅实际发布的 `dsh-enhanced-assistant-growth-driver` plugin Fiber 可注册本 Agent realm 的准确工具定义（创建走廊 4 个、修订走廊 6 个，`assistant-policy` 按 Fiber 白名单双重限制）；注册初始不可用，真实持久化 v2/v3 source-run 返回并匹配 session、occurrence、来源、工具摘要及预算后才启用。每次执行重核当前 owner/source、Policy、期限和工具次数，关闭或取消立即撤销；此许可仅跳过这些工具的逐次审批，不绕过 Policy 的 execute 规则、预算或急停。前台 v1 仍保留既有审批流程，后续普通任务调用新工具也沿用其真实前台权限/审批通道。
 
 source-run v2 producer 将持久 binding 深冻结后，在真实 UsageStore writer frame 内交给同步 CP consumer；禁止 thenable、同实例写方法重入及上游回读。running/reviewed 才可提供通用 producer 授权；unknown 保留原作业且不重派、不重扣，不能借其创建新作业或签新采用授权。旧 v1 协议与校验保留。本轮包内 fixture 不证明真实跨包工程创建/采用/后续工具调用链，完整组合与长期真实收益仍需独立验收。
 
