@@ -29,6 +29,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 2. **P1-3 后台失败任务的工具修订（进行中）**：wire（v3 协议+revision grant）、准入守卫、控制面 readiness/frame/handoff、verifier 修订验证已提交且 fail-closed；剩余 growth-driver 走廊（7 工具集、identity、usage-runtime v3 构造）与可选的 regression/adoption v3 分支。完成后后台作者可修订既有插件。
 3. **P1-4 后续收益**：同供应商、同预算的前后版本质量/返工/成本/延迟比较与回退，用连续 3–5 类真实任务完成“新版本更好”的普通使用验收。
 4. 终态释放 follow-up 重新进入判断的生产消费方；话题 lane 后台通知仍按顶层发送（无 `replyToEventId`）。
+5. **CI 提速（已建夜间门禁，待分批落地）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）。后续按风险从低到高：合并三个安装成功事务、delivery schema 23–31 矩阵分层（日常只跑首尾版、夜间全矩阵）、release-adapter 无缓存全链转夜间、删除复现旧 AND 链 bug 的重复测试；最大收益项是把 12k 行/353 用例的 `tests/installers.spec.ts` 按安装/升级/回滚/原生拆文件并重分片（注意共享清理状态，不能简单并发），以及 registry-fetch 证书复用与重复构建去重（需先实测）。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
 
 ## 延后验收
 

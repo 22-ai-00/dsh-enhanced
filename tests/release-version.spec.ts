@@ -1176,6 +1176,9 @@ describe('release version workflow', () => {
     expect(releaseWorkflow).toContain('--unshare-all')
     const ciWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
     expect(ciWorkflow).toContain("DSH_TEST_CONCURRENCY: '4'")
+    // Nightly gate is the prerequisite for any future test tiering; keep it wired.
+    expect(ciWorkflow).toMatch(/^\s*schedule:\s*$/mu)
+    expect(ciWorkflow).toMatch(/^\s*- cron: '\d+ \d+ \* \* \*'\s*$/mu)
     const linuxPackages = ciWorkflow.split('  linux-packages:\n')[1]?.split('  linux-root-tests:\n')[0]
     const linuxRoot = ciWorkflow.split('  linux-root-tests:\n')[1]?.split('  verify:\n')[0]
     const linuxGate = ciWorkflow.split('  verify:\n')[1]?.split('  macos-verify:\n')[0]

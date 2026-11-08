@@ -4,6 +4,11 @@ on:
   push:
     branches: [dev, main]
   pull_request:
+  # Nightly full gate (03:41 UTC ≈ 11:41 Beijing). Existing lanes are already
+  # the full matrix, so nightly equals a push run; a dedicated lane for
+  # heavier matrices lands with the test-tiering work. Off-minute on purpose.
+  schedule:
+    - cron: '41 3 * * *'
 
 permissions:
   contents: read
