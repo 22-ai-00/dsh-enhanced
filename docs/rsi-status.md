@@ -28,7 +28,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 1. **触发→自动准入闭环**：在 fresh install 显式开关下生成 `accept` ceiling + `intakeLedger.evaluation.admit` + auto 有界预算，使普通消息→模型判断→自动 WorkItem→执行→独立验收形成全自动闭环（确定性 gate 与预算仍 fail-closed）。
 2. **P1-3 收尾（可选 v3 分支）**：growth-driver 修订走廊已落地；剩余可选的 revision regression 与 revision adoption 的 v3 work-item 分支（两者均为可选 pin，默认不触发）。
-3. **P1-4 收益门（数据链路完成）**：非劣合同与纯函数评估器、schema 36 benefit 账本与采用门、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)`、负向观察自动回滚已落地；成本数据源已接通——`inspectTrustedOutcomeMetrics(scope, outcomeId)` 以独立投影暴露 trusted outcome 行的 metrics（不改变历史投影 digest），窗口聚合从 objective 组件行读取 token 用量。剩余：把 `evaluateRevisionBenefit` 与 `autoRollbackRevisionIfInferior` 挂到 Host 既有 wake 的调度（无新 loop），以及连续真实任务的长期非劣验收。
+3. **P1-4 收益门（数据链路完成）**：非劣合同与纯函数评估器、schema 36 benefit 账本与采用门、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)`、负向观察自动回滚已落地；成本数据源已接通——`inspectTrustedOutcomeMetrics(scope, outcomeId)` 以独立投影暴露 trusted outcome 行的 metrics（不改变历史投影 digest），窗口聚合从 objective 组件行读取 token 用量。评估与回滚已挂到 SourceJobs continuation cron tick（`bfc8eeb9`，无新 loop）。剩余：连续 3–5 类真实任务的长期非劣验收。
 4. 终态释放 follow-up 重新进入判断的生产消费方；话题 lane 后台通知仍按顶层发送（无 `replyToEventId`）。
 5. **CI 提速（已建夜间门禁，分批落地中）**：CI 已加 `schedule` 夜间全量门禁（`ci.yml`，前提项）；已删除复现旧 AND 链 bug 的重复测试（`6d1afd2d`）；三个 TMPDIR 安装成功用例已合并为参数化用例、Delivery schema 23–31 矩阵已按 `DSH_NIGHTLY_FULL_MATRIX` 分层（日常首尾版、夜间全量，`70111690`）。`installers.spec.ts` 文件拆分经两次自动提取尝试后确认不可自动化（内嵌脚本 fixture 与模块作用域耦合，教训已记录），接受长 CI 并以夜间门禁与矩阵分层缓解。后续可实测：registry-fetch 证书复用与重复构建去重。规则：任何分流到夜间的用例，其关键风险在日常门禁仍保留代表场景。
 
