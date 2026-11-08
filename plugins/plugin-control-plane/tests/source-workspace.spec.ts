@@ -21,6 +21,7 @@ import {
   createIsolatedWorktree,
   gcPreparedModifyWorktrees,
   linkedWorktrees,
+  OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST,
   preparedWorktreeIsGarbage,
   PROTECTED_PLUGIN_DENYLIST,
   writeScopedPluginFiles,
@@ -320,6 +321,22 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 afterAll(async () => { if (cachedInterpreterRoot !== undefined) await rm(cachedInterpreterRoot, { recursive: true, force: true }) })
+
+describe('protected plugin boundaries', () => {
+  it('the owner-repair denylist stays a strict subset of the growth-proposal denylist', () => {
+    for (const name of OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST) {
+      expect(PROTECTED_PLUGIN_DENYLIST.has(name), name).toBe(true)
+    }
+    expect(PROTECTED_PLUGIN_DENYLIST.size).toBeGreaterThan(OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.size)
+  })
+
+  it('keeps growth machinery out of model-authored proposals but available to owner repair', () => {
+    expect(PROTECTED_PLUGIN_DENYLIST.has('assistant-growth-driver')).toBe(true)
+    expect(PROTECTED_PLUGIN_DENYLIST.has('assistant-recovery')).toBe(true)
+    expect(OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has('assistant-growth-driver')).toBe(false)
+    expect(OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has('assistant-recovery')).toBe(false)
+  })
+})
 
 describe.sequential('prepared modify source workspaces (engineering-layer, not vendor evidence)', () => {
   it('late-binds durable source jobs through the default Cordis service and drains an old peer executor', async () => {

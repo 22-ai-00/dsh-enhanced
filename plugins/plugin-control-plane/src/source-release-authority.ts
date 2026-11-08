@@ -10,7 +10,7 @@ import {
 } from './source-approval-authority.js'
 import { controlPlaneDigest, readOwnerPreparedSourcePlan } from './store.js'
 import { verifyManagedPatchVersion } from './source-versioning.js'
-import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { SourceReleaseAuthorization, SourceReleasePolicy } from './types.js'
 
@@ -84,7 +84,7 @@ export function validateSourceReleaseAuthorityConfig(value: unknown): asserts va
   text(grant.id); integer(grant.expiresAt, 1); integer(grant.maxReleases, 1, 10_000); path(grant.repository); path(grant.worktreeRoot)
   integer(grant.maxChangedFiles, 1, 256); integer(grant.maxChangedBytes, 1, 16 * 1024 * 1024); integer(grant.receiptTtlMs, 1_000, 86_400_000)
   if (grant.versioning !== 'patch' || !Array.isArray(grant.plugins) || grant.plugins.length === 0 || grant.plugins.length > 32) fail()
-  const plugins = grant.plugins.map(value => text(value, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u, 64)); if (new Set(plugins).size !== plugins.length || plugins.some(value => PROTECTED_PLUGIN_DENYLIST.has(value))) fail()
+  const plugins = grant.plugins.map(value => text(value, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u, 64)); if (new Set(plugins).size !== plugins.length || plugins.some(value => OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(value))) fail()
   const owner = object(grant.owner); keys(owner, ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'])
   text(owner.authorityId); text(owner.authorityHash, DIGEST, 64); text(owner.principalId, /^[\s\S]+$/u, 512); text(owner.principalRecordId, /^[\s\S]+$/u, 512); integer(owner.principalVersion, 1); path(owner.workspace); text(owner.agentPreset)
   if (!Array.isArray(grant.policies) || grant.policies.length !== plugins.length) fail()

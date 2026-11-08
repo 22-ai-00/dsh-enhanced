@@ -57,6 +57,28 @@ export const PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
   'assistant-memory-learning', // 独立审查的记忆学习采用面
 ])
 
+/**
+ * Owner 监督式 source-repair 通道（rsi bootstrap manifest、owner-source-repair
+ * runbook）是另一条信任边界：它由 owner 显式签名驱动、重装发布包级修复，不是
+ * 成长模型的隔离源码提案。这里保留历史 12 个不可变信任根；成长侧新增的治理
+ * 组件（growth-driver、recovery、evolution 等）必须仍可由 owner 修复通道恢复，
+ * 不能因为扩大了成长边界就从 owner 修复范围消失。
+ */
+export const OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
+  'assistant-delivery',
+  'lark-channel',
+  'assistant-automations',
+  'assistant-policy',
+  'credentials-keychain',
+  'assistant-evaluation',
+  'assistant-verifier',
+  'assistant-deepseek-budget',
+  'assistant-skills',
+  'assistant-isolation',
+  'assistant-web-owner',
+  'plugin-control-plane',
+])
+
 export interface ScopedPluginFile {
   /** 相对于 plugins/<name>/ 的 POSIX 相对路径，不允许 .. 或绝对路径。 */
   path: string

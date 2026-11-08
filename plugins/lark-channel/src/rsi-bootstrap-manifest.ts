@@ -2,7 +2,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
-import { PROTECTED_PLUGIN_DENYLIST, controlPlaneDigest, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, controlPlaneDigest, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
@@ -171,7 +171,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     || !digestPattern.test(input.git.sha256)) fail('prepared resources do not belong to target installation')
   if (!Array.isArray(input.plugins) || input.plugins.length < 1 || input.plugins.length > 32
     || new Set(input.plugins).size !== input.plugins.length
-    || input.plugins.some(name => !pluginPattern.test(name) || PROTECTED_PLUGIN_DENYLIST.has(name))) fail('source repair plugin scope is invalid or protected')
+    || input.plugins.some(name => !pluginPattern.test(name) || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(name))) fail('source repair plugin scope is invalid or protected')
   validateHostDeploymentInputs(input.hostDeploymentInputs)
   const hostInputs = [...input.hostDeploymentInputs]
   for (const required of ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']) {
@@ -210,7 +210,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     }
     const plugin = name.slice('@dsh-enhanced/'.length)
     if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed plugin row ${id} has inconsistent package identity`)
-    return PROTECTED_PLUGIN_DENYLIST.has(plugin) ? [] : [plugin]
+    return OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plugin) ? [] : [plugin]
   })
   if (installedRepairable.length !== input.plugins.length
     || new Set(installedRepairable).size !== installedRepairable.length

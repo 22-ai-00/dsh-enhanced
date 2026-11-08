@@ -8,7 +8,7 @@ import { approvalSigningPayload, parseApprovalReceipt } from './approval.js'
 import { loadCatalogWithMetadata, parseCatalog, type CatalogEntry, type CatalogPackage } from './catalog.js'
 import { sourceAuthorityCanonicalSafePath, sourceAuthorityReadSafeFile } from './source-approval-authority.js'
 import { controlPlaneDigest, readOwnerSourceAdoptionPlan, validateHostDeploymentInputs } from './store.js'
-import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { ApprovalReceipt } from './types.js'
 
@@ -74,7 +74,7 @@ function policy(value: unknown): AdoptionPolicy {
   const item = object(value); keys(item, ['candidateId', 'packageName', 'dshBaseline', 'capabilities', 'authorities', 'requires', 'registryId', 'registryLocator'])
   const candidateId = text(item.candidateId, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u, 64)
   const packageName = text(item.packageName, /^@dsh-enhanced\/[a-z][a-z0-9-]*$/u, 128)
-  if (packageName !== `@dsh-enhanced/${candidateId}` || PROTECTED_PLUGIN_DENYLIST.has(candidateId)) fail()
+  if (packageName !== `@dsh-enhanced/${candidateId}` || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(candidateId)) fail()
   const dshBaseline = text(item.dshBaseline, /^[0-9A-Za-z.+-]+$/u, 128)
   const registryId = text(item.registryId); const registryLocator = text(item.registryLocator, /^[\s\S]+$/u)
   if (!Array.isArray(item.capabilities) || !Array.isArray(item.authorities) || !Array.isArray(item.requires)) fail()

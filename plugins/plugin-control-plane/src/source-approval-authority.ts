@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { approvalSigningPayload, parseApprovalReceipt } from './approval.js'
 import { PREPARED_SOURCE_BUILD_SCRIPT } from './source-build.js'
 import { controlPlaneDigest, readOwnerPreparedSourcePlan } from './store.js'
-import { PROTECTED_PLUGIN_DENYLIST, changedSourcePaths, checkedSourceSnapshot, runLocalCommand } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, changedSourcePaths, checkedSourceSnapshot, runLocalCommand } from './source-workspace.js'
 import { verifyManagedPatchVersion } from './source-versioning.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { ApprovalReceipt, PluginSourcePlan } from './types.js'
@@ -164,7 +164,7 @@ export function validateSourceApprovalAuthorityConfig(value: unknown): asserts v
   text(owner.principalRecordId, /^[\s\S]+$/u, 512); integer(owner.principalVersion, 1); pathText(owner.workspace); text(owner.agentPreset)
   if (!Array.isArray(grant.plugins) || grant.plugins.length === 0 || grant.plugins.length > 32) fail()
   const plugins = grant.plugins.map(plugin => text(plugin, /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u, 64))
-  if (new Set(plugins).size !== plugins.length || plugins.some(plugin => PROTECTED_PLUGIN_DENYLIST.has(plugin))) fail()
+  if (new Set(plugins).size !== plugins.length || plugins.some(plugin => OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plugin))) fail()
   integer(grant.maxChangedFiles, 1, 256); integer(grant.maxChangedBytes, 1, 16 * 1024 * 1024); integer(grant.receiptTtlMs, 1_000, 86_400_000)
 }
 
@@ -206,7 +206,7 @@ export interface SourceAuthorityWorktreeGrant {
 }
 
 export async function sourceAuthorityValidateWorktree(plan: PluginSourcePlan, grant: SourceAuthorityWorktreeGrant): Promise<void> {
-  if (!COMMIT.test(plan.baseCommit) || PROTECTED_PLUGIN_DENYLIST.has(plan.name) || !grant.plugins.includes(plan.name)) fail()
+  if (!COMMIT.test(plan.baseCommit) || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plan.name) || !grant.plugins.includes(plan.name)) fail()
   const repository = sourceAuthorityCanonicalRepository(grant.repository); const worktreeRoot = sourceAuthorityCanonicalSafePath(grant.worktreeRoot, 'directory')
   const worktree = sourceAuthorityCanonicalSafePath(plan.worktree, 'directory')
   const worktreeRelative = relative(worktreeRoot, worktree)

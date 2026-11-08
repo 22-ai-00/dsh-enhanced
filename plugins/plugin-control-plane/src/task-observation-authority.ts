@@ -13,7 +13,7 @@ import {
 } from './source-approval-authority.js'
 import { controlPlaneDigest } from './store.js'
 import { readTaskObservationContext, taskObservationDigest } from './task-observation-store.js'
-import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import type { TaskObservationBatch, TaskObservationOwner, TaskObservationPolicy, TaskObservationRequest } from './task-observation-types.js'
 import type { PostActivationObservationReceipt } from './types.js'
 
@@ -216,7 +216,7 @@ function validateContext(config: TaskObservationAuthorityConfig, request: TaskOb
       || plan.digest !== batch.planDigest
       || plan.status !== 'activated'
       || !plan.activation
-      || PROTECTED_PLUGIN_DENYLIST.has(plan.candidate.id)
+      || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plan.candidate.id)
       || !config.grant.packages.includes(plan.candidate.package)
       || source.owner.authorityId !== batch.owner.authorityId
       || source.owner.authorityHash !== batch.owner.authorityHash

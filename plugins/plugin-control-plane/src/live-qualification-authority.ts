@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { sourceAuthorityCanonicalSafePath, sourceAuthorityReadSafeFile } from './source-approval-authority.js'
 import { controlPlaneDigest, readLiveQualificationContext } from './store.js'
-import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertLiveQualificationBatch, liveQualificationReceiptId, liveQualificationSigningPayload,
   parseLiveQualificationReceipt, validateLiveQualificationTerms,
@@ -158,7 +158,7 @@ function validateContext(config: LiveQualificationAuthorityConfig, request: Live
       || batch.installationId !== config.grant.installationId || !equal(plan.ledger, config.grant.ledger)
       || batch.profilePath !== config.grant.profilePath || plan.id !== batch.planId || plan.digest !== batch.planDigest
       || plan.status !== 'awaiting-live-tasks' || !plan.activation || plan.activation.id !== batch.activationId
-      || plan.activation.fence !== batch.fence || PROTECTED_PLUGIN_DENYLIST.has(plan.candidate.id)
+      || plan.activation.fence !== batch.fence || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plan.candidate.id)
       || !config.grant.packages.includes(plan.candidate.package)
       || !equal((plan.dossier as { liveQualification?: LiveQualificationTerms }).liveQualification, batch.terms)
       || source.owner.authorityId !== batch.owner.authorityId || source.owner.authorityHash !== batch.owner.authorityHash

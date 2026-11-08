@@ -3,7 +3,7 @@ import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { PROTECTED_PLUGIN_DENYLIST, resolveLocalExecutable, runtimeConfigDigest,
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, resolveLocalExecutable, runtimeConfigDigest,
   validateHostDeploymentInputs, type PluginControlTrustConfig, type RuntimeObserverTarget,
   type SourceReleaseAuthorityConfig } from '@dsh-enhanced/plugin-control-plane'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
@@ -186,7 +186,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const plugin = name.slice('@dsh-enhanced/'.length)
     if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed ${id} has inconsistent package identity`)
     activeBundles.push(plugin)
-    if (!PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
+    if (!OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
   }
   const permission = rows.get('permission')
   if (permission?.get('name') === '@deepseek-ai/dsh-permission-presets' && permission.get('disabled') !== true) {

@@ -7,7 +7,7 @@ import { validateLiveQualificationTerms, type LiveQualificationTerms } from './l
 import { sourceAuthorityCanonicalSafePath, sourceAuthorityReadSafeFile } from './source-approval-authority.js'
 import { parseRuntimeEpochRequest, type RuntimeEpochRequest } from './runtime-epoch.js'
 import { controlPlaneDigest, readOwnerHostAttestationContext, readOwnerRuntimeEpochContext, validateHostDeploymentInputs } from './store.js'
-import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
+import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import { loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { HostAttestationRequest } from './types.js'
@@ -106,7 +106,7 @@ export function validateSystemdHostAuthorityConfig(value: unknown): asserts valu
   text(grant.coordinatorId)
   if (!Array.isArray(grant.packages) || grant.packages.length < 1 || grant.packages.length > 32) fail()
   const packages = grant.packages.map(item => text(item, PACKAGE, 128))
-  if (new Set(packages).size !== packages.length || packages.some(item => PROTECTED_PLUGIN_DENYLIST.has(item.slice('@dsh-enhanced/'.length)))) fail()
+  if (new Set(packages).size !== packages.length || packages.some(item => OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(item.slice('@dsh-enhanced/'.length)))) fail()
   validateHostDeploymentInputs(grant.hostDeploymentInputs)
   validateLiveQualificationTerms(grant.liveQualification)
   const template = object(item.template)
@@ -169,7 +169,7 @@ async function derive(config: SystemdHostAuthorityConfig, request: HostAttestati
     || plan.installationId !== request.installationId || !same(plan.ledger, request.ledger)
     || plan.profile !== request.profile.name || plan.target.profilePath !== request.profile.path
     || !sameOwner(source.owner, config.grant.owner) || !same(released, plan.candidate)
-    || !config.grant.packages.includes(released.package) || PROTECTED_PLUGIN_DENYLIST.has(released.id)
+    || !config.grant.packages.includes(released.package) || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(released.id)
     || plan.dossier.catalogProvenance !== 'owner-provided-integrity-pinned'
     || !same(plan.dossier.hostDeploymentInputs, config.grant.hostDeploymentInputs)
     || !same(plan.dossier.liveQualification, config.grant.liveQualification)
@@ -256,7 +256,7 @@ async function deriveRuntimeEpoch(config: SystemdHostAuthorityConfig, request: R
     || plan.profile !== request.profile.name || plan.target.profilePath !== request.profile.path
     || config.grant.profile.name !== plan.profile || config.grant.profile.path !== plan.target.profilePath
     || !sameOwner(source.owner, config.grant.owner) || !same(released, plan.candidate)
-    || !config.grant.packages.includes(released.package) || PROTECTED_PLUGIN_DENYLIST.has(released.id)
+    || !config.grant.packages.includes(released.package) || OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST.has(released.id)
     || plan.dossier.catalogProvenance !== 'owner-provided-integrity-pinned'
     || !same(plan.dossier.hostDeploymentInputs, config.grant.hostDeploymentInputs)
     || !same(plan.dossier.liveQualification, config.grant.liveQualification)
