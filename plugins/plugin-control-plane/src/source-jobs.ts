@@ -279,7 +279,8 @@ export class SourceJobRuntime {
     if (initial.mode === 'prepared-create') {
       const initialRun = initial.creation?.growthRun
       if (job.intent.mode !== 'create'
-        || job.intent.creation?.growthRun?.protocol !== 'assistant-growth/source-run/v2'
+        || !job.intent.creation?.growthRun
+        || job.intent.creation.growthRun.protocol === 'assistant-growth/source-run/v3'
         || !job.intent.creation.growthRun.creationAcceptance
         || !initialRun || initialRun.protocol === 'assistant-growth/source-run/v3'
         || !initialRun.creationAcceptance) return
@@ -704,7 +705,8 @@ export class SourceJobRuntime {
     if (plan.mode === 'prepared-create') {
       const planRun = plan.creation?.growthRun
       if (job.intent.mode !== 'create' || plan.status !== 'pending-approval'
-        || job.intent.creation?.growthRun?.protocol !== 'assistant-growth/source-run/v2'
+        || !job.intent.creation?.growthRun
+        || job.intent.creation.growthRun.protocol === 'assistant-growth/source-run/v3'
         || !job.intent.creation.growthRun.creationAcceptance
         || !planRun || planRun.protocol === 'assistant-growth/source-run/v3'
         || !planRun.creationAcceptance) return false
