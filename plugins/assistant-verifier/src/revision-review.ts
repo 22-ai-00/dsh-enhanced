@@ -2,16 +2,19 @@ import { createHash, sign, type KeyObject } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSigningPayload,
-  sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validatePluginRevisionParentBinding,
+  anySourceGrowthRunDigest, sourceGrowthEvidenceDigest, validatePluginRevisionParentBinding,
   validateRevisionAcceptanceAuthorityRef, validateSourceGrowthRunBinding,
+  validateWorkItemRevisionSourceGrowthRunBinding,
+  type SourceOwnerReceipt,
   verifyPluginRevisionVerificationCertificate, type PluginCreationVerificationLinuxExecution,
   type PluginRevisionParentBinding,
   type PluginRevisionVerificationCertificate, type PluginRevisionVerificationRequest,
-  type PluginRevisionVerificationResult, type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
+  type PluginRevisionVerificationResult, type RevisionAcceptanceAuthorityRef,
+  type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore } from './creation-review-store.js'
 import { CASE_RULES, COMPARISON_RULES, REVIEW_RULES, RULES_VERSION, SCHEMA_RULES,
   compareCase, compileCreationReviewConfig, linuxPreparedBuildEvidenceDigest, parseCases, parseReview,
-  projectCreationSchemas, type CreationReviewConfig } from './creation-review.js'
+  projectCreationSchemas, type CreationReviewConfig, type WorkItemPreparedCreationSource } from './creation-review.js'
 import { LINUX_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 
@@ -89,7 +92,24 @@ export interface PreparedRevisionPort {
       source: { objective: string; truncated: boolean; quiescent: boolean };
       feedback?: { text: string; truncated: boolean } }
     artifact: Buffer
+  } | {
+    protocol: 'dsh-prepared-revision/v2'
+    plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
+      preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
+        pack: { sha256: string; sizeBytes: number } };
+      sourceRevision?: { grant: { namePrefix: string; expiresAt: number; id?: string; maxRevisions?: number; workItemFailures?: boolean };
+        growthRun: unknown; parent: PluginRevisionParentBinding } }
+    job: { intent: { revision?: unknown } }
+    reference: { owner: SourceOwnerReceipt; schemaVersion: 2;
+      sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1';
+      projection: WorkItemRevisionSourceGrowthRunBinding['source']['projection']; presentationDigest: string;
+      sourceDigest: string; outcomeId: string;
+      context: { manifestDigest: string; objectiveDigest: string; objectiveBytes: number } }
+    source: WorkItemPreparedCreationSource
+    artifact: Buffer
   }
+  inspectWorkItemPreparedRevisionProtocol?(): 'dsh-prepared-revision/v2' | undefined
   withPreparedRevisionFence<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     growthRunDigest: string; referenceDigest: string; parentDigest: string }, callback: () => T): T
   inspectPreparedRevisionLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
@@ -98,8 +118,9 @@ export interface PreparedRevisionPort {
   inspectPreparedRevisionReviewContext(planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }>
 }
 
-function requestValid(value: unknown): value is PluginRevisionVerificationRequest {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
+type PreparedRevisionSnapshot = ReturnType<PreparedRevisionPort['inspectPreparedRevision']>
+
+function requestValid(value: unknown): value is PluginRevisionVerificationRequest {  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
     || Reflect.ownKeys(value).some(key => typeof key !== 'string')
     || Object.getOwnPropertyNames(value).sort().join(',') !== 'planId,protocol'
     || Object.values(Object.getOwnPropertyDescriptors(value)).some(field => !field.enumerable || !('value' in field))) return false
@@ -135,12 +156,77 @@ export class RevisionReviewRuntime {
     })
   }
 
+  /**
+   * The work-item revision uses the identical engineering task evidence as a
+   * work-item creation, only with a v3 revise-created run and a revision grant.
+   */
+  #workItemRevisionTask(snapshot: Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v2' }>,
+    run: WorkItemRevisionSourceGrowthRunBinding): { objective: string; feedback: string | null; judgement: string; name: string } {
+    const { config, authority } = this.#compiled
+    if (config.workItemFailures !== true) throw new Error('work-item revision review is not authorized')
+    const { source, reference, plan } = snapshot, { task, objective } = source
+    const grant = plan.sourceRevision?.grant
+    if (!grant || grant.workItemFailures !== true || grant.namePrefix !== config.namePrefix) throw new Error('work-item revision grant invalid')
+    const pins = run.authorities
+    if (task.protocol !== 'assistant-delivery/owner-work-item-learning/v1' || task.judgement !== 'owner-feedback'
+      || task.canonical.objective?.status !== 'not-achieved'
+      || task.canonical.projection.subjectKind !== 'work-item'
+      || task.canonical.projection.subjectRef !== run.source.itemId
+      || task.canonical.projection.disposition !== 'upsert'
+      || task.proofIdentity.itemId !== run.source.itemId
+      || task.sourceDigest !== run.source.sourceDigest || task.presentationDigest !== run.source.presentationDigest
+      || reference.sourceDigest !== run.source.sourceDigest || reference.presentationDigest !== run.source.presentationDigest
+      || reference.outcomeId !== run.source.outcomeId
+      || canonicalGrowthJson(reference.projection) !== canonicalGrowthJson(run.source.projection)
+      || reference.context.manifestDigest !== run.source.context.manifestDigest
+      || reference.context.objectiveDigest !== run.source.context.objectiveDigest
+      || reference.context.objectiveBytes !== run.source.context.objectiveBytes) throw new Error('work-item revision engineering context changed')
+    for (const key of ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'] as const) {
+      if ((reference.owner as unknown as Record<string, unknown>)[key] !== config.owner[key]
+        || (task.owner as unknown as Record<string, unknown>)[key] !== config.owner[key]) throw new Error('revision work-item owner changed')
+    }
+    if (pins.revisionGrant.id !== grant.id || sourceGrowthEvidenceDigest(grant) !== pins.revisionGrant.digest
+      || grant.expiresAt !== pins.revisionGrant.expiresAt || pins.revisionGrant.workItemFailures !== true
+      || canonicalGrowthJson(pins.revisionAcceptance) !== canonicalGrowthJson(authority)
+      || canonicalGrowthJson(run.revisionAcceptance) !== canonicalGrowthJson(pins.revisionAcceptance)) throw new Error('work-item revision frozen grant changed')
+    if (run.modelOrigin === 'inherited-owner-task' && canonicalGrowthJson(run.model) !== canonicalGrowthJson(task.proofIdentity.supplier)) {
+      throw new Error('work-item revision inherited supplier changed')
+    }
+    if (typeof objective !== 'string' || !objective.isWellFormed() || !objective.trim()
+      || Buffer.byteLength(objective) > 16_384) throw new Error('work-item revision objective invalid')
+    return { objective, feedback: task.presentation.feedback.text, judgement: task.judgement, name: plan.name }
+  }
+
   inspect(input: { owner: RevisionReviewConfig['owner'] }): RevisionReviewAuthorityInspection | undefined {
     const { config, authority, publicKey } = this.#compiled
     if (this.#abort.signal.aborted || Date.now() >= config.expiresAt
       || canonicalGrowthJson(input.owner) !== canonicalGrowthJson(config.owner)) return undefined
     const remainingVerifications = this.#store.remaining(config.authorityId, authority.authorityDigest, config.maxVerifications)
     return Object.freeze({ authority, publicKey, remainingVerifications, available: remainingVerifications > 0 })
+  }
+
+  /** Fail-closed work-item revision readiness; undefined until every peer seam exists. */
+  inspectWorkItemRevisionReviewReadiness(): WorkItemRevisionReviewReadiness | undefined {
+    const { config, authority, publicKey } = this.#compiled
+    if (this.#abort.signal.aborted || config.workItemFailures !== true) return undefined
+    try {
+      for (const name of ['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy']) {
+        if (!this.ctx.get(name as never, false)) return undefined
+      }
+      const port = this.ctx.get('pluginControlPlane' as never, false) as PreparedRevisionPort & {
+        inspectWorkItemPreparedRevisionProtocol?: () => 'dsh-prepared-revision/v2' | undefined
+      } | undefined
+      if (typeof port?.inspectWorkItemPreparedRevisionProtocol !== 'function'
+        || port.inspectWorkItemPreparedRevisionProtocol() !== 'dsh-prepared-revision/v2'
+        || typeof port.inspectPreparedRevision !== 'function' || typeof port.withPreparedRevisionFence !== 'function'
+        || typeof port.inspectPreparedRevisionReviewContext !== 'function') return undefined
+      const remainingVerifications = this.#store.remaining(config.authorityId, authority.authorityDigest, config.maxVerifications)
+      if (this.#abort.signal.aborted) return undefined
+      return Object.freeze({ protocol: 'assistant-growth/work-item-revision-review-readiness/v1',
+        sourceProtocol: 'assistant-delivery/work-item-engineering-context/v1', runProtocol: 'assistant-growth/source-run/v3',
+        workItemFailures: true, authority, publicKey, remainingVerifications,
+        available: remainingVerifications > 0 && Date.now() < Math.min(config.expiresAt, config.runner.expiresAt) })
+    } catch { return undefined }
   }
 
   run(request: PluginRevisionVerificationRequest, external?: AbortSignal): Promise<PluginRevisionVerificationResult> {
@@ -164,39 +250,49 @@ export class RevisionReviewRuntime {
       if (!port || typeof port.inspectPreparedRevision !== 'function' || typeof port.withPreparedRevisionFence !== 'function'
         || typeof port.inspectPreparedRevisionReviewContext !== 'function') throw new Error('revision source port unavailable')
       const snapshot = port.inspectPreparedRevision(request.planId)
-      if (snapshot.protocol !== 'dsh-prepared-revision/v1') throw new Error('revision source protocol changed')
-      const { plan, source, reference, artifact } = snapshot
+      const workItem = snapshot.protocol === 'dsh-prepared-revision/v2'
+      if (!workItem && snapshot.protocol !== 'dsh-prepared-revision/v1') throw new Error('revision source protocol changed')
+      const { plan, artifact } = snapshot
       const revision = plan.sourceRevision
       const intentRevision = snapshot.job.intent.revision as { growthRun?: unknown; parent?: unknown } | undefined
       const run = revision?.growthRun
-      validateSourceGrowthRunBinding(run)
+      if (workItem) validateWorkItemRevisionSourceGrowthRunBinding(run); else validateSourceGrowthRunBinding(run)
       const frozen = run
-      validateRevisionAcceptanceAuthorityRef(frozen.revisionAcceptance)
+      validateRevisionAcceptanceAuthorityRef((frozen as { revisionAcceptance?: unknown }).revisionAcceptance)
       const parent = revision?.parent
       validatePluginRevisionParentBinding(parent)
       validatePluginRevisionParentBinding(intentRevision?.parent)
-      validateSourceGrowthRunBinding(intentRevision?.growthRun)
-      if (canonicalGrowthJson(frozen.revisionAcceptance) !== canonicalGrowthJson(authority)
+      if (workItem) validateWorkItemRevisionSourceGrowthRunBinding(intentRevision?.growthRun); else validateSourceGrowthRunBinding(intentRevision?.growthRun)
+      const workItemTask = workItem
+        ? this.#workItemRevisionTask(snapshot as Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v2' }>,
+          frozen as WorkItemRevisionSourceGrowthRunBinding)
+        : undefined
+      const ownerReceipt = workItem
+        ? (snapshot as Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v2' }>).source.task.owner
+        : (snapshot as Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v1' }>).source.owner
+      if (canonicalGrowthJson((frozen as { revisionAcceptance?: unknown }).revisionAcceptance) !== canonicalGrowthJson(authority)
         || canonicalGrowthJson(frozen) !== canonicalGrowthJson(intentRevision.growthRun)
         || canonicalGrowthJson(parent) !== canonicalGrowthJson(intentRevision.parent)
         || plan.mode !== 'prepared-revise' || plan.status !== 'pending-approval'
         || !plan.name.startsWith(config.namePrefix) || revision?.grant.namePrefix !== config.namePrefix
         || Date.now() >= Math.min(config.expiresAt, plan.expiresAt, revision.grant.expiresAt, frozen.expiresAt)
-        || source.source.truncated || !source.source.quiescent || source.feedback?.truncated
-        || source.judgement === 'unresolved' || !source.source.objective.trim()
-        || Buffer.byteLength(source.source.objective) > 16_384 || !Buffer.isBuffer(artifact)
+        || !Buffer.isBuffer(artifact)
         || artifact.length !== plan.preparedEvidence?.pack.sizeBytes || artifact.length > 512 * 1024
         || createHash('sha256').update(artifact).digest('hex') !== plan.preparedEvidence?.pack.sha256
         || !plan.sourceCheck || !SHA.test(plan.sourceCheck.treeDigest) || !SHA.test(plan.sourceCheck.patchDigest)
-        || sourceGrowthEvidenceDigest(reference.owner) !== frozen.ownerDigest) {
+        || sourceGrowthEvidenceDigest(snapshot.reference.owner) !== frozen.ownerDigest) {
         throw new Error('prepared revision authority or task evidence invalid')
       }
-      for (const key of ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset']) {
-        if (reference.owner[key] !== config.owner[key as keyof typeof config.owner]
-          || source.owner[key] !== config.owner[key as keyof typeof config.owner]) throw new Error('revision owner changed')
+      const v1Source = workItem ? undefined : (snapshot as Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v1' }>).source
+      if (!workItem && (v1Source!.source.truncated || !v1Source!.source.quiescent || v1Source!.feedback?.truncated
+        || v1Source!.judgement === 'unresolved' || !v1Source!.source.objective.trim()
+        || Buffer.byteLength(v1Source!.source.objective) > 16_384)) throw new Error('prepared revision task evidence invalid')
+      for (const key of ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'] as const) {
+        if ((snapshot.reference.owner as Record<string, unknown>)[key] !== config.owner[key]
+          || (ownerReceipt as Record<string, unknown>)[key] !== config.owner[key]) throw new Error('revision owner changed')
       }
-      const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(reference), ownerDigest: sourceGrowthEvidenceDigest(reference.owner),
-        growthRunDigest: sourceGrowthRunDigest(frozen) }
+      const sourceBinding = { referenceDigest: sourceGrowthEvidenceDigest(snapshot.reference), ownerDigest: sourceGrowthEvidenceDigest(snapshot.reference.owner),
+        growthRunDigest: anySourceGrowthRunDigest(frozen) }
       const parentDigest = sourceGrowthEvidenceDigest(parent)
       let linuxExecution: PluginCreationVerificationLinuxExecution | undefined
       if ('backend' in config.runner && config.runner.backend === 'linux-native') {
@@ -221,7 +317,15 @@ export class RevisionReviewRuntime {
       }
       const fenceInput = { planId: plan.id, planDigest: plan.digest, artifactSha256: plan.preparedEvidence.pack.sha256,
         growthRunDigest: sourceBinding.growthRunDigest, referenceDigest: sourceBinding.referenceDigest, parentDigest }
-      const fence = <T>(callback: () => T): T => port.withPreparedRevisionFence(fenceInput, callback)
+      const fence = <T>(callback: () => T): T => {
+        if (workItem) {
+          if (config.workItemFailures !== true || Date.now() >= Math.min(config.expiresAt, config.runner.expiresAt,
+            (frozen as WorkItemRevisionSourceGrowthRunBinding).authorities.sourceJobs.expiresAt,
+            (frozen as WorkItemRevisionSourceGrowthRunBinding).authorities.revisionGrant.expiresAt,
+            (frozen as WorkItemRevisionSourceGrowthRunBinding).authorities.revisionAcceptance.expiresAt)) throw new Error('work-item revision review authority expired')
+        }
+        return port.withPreparedRevisionFence(fenceInput, callback)
+      }
       fence(() => {})
       const model: CreationModel = frozen.model
       const binding = growthObjectDigest({ purpose: REVISION_PURPOSE, request, authority, parent, parentDigest,
@@ -251,8 +355,8 @@ export class RevisionReviewRuntime {
       const projectedSchemas = projectCreationSchemas(discovery.schemas)
       fence(() => this.#store.discovered(plan.id, binding, { jobId: discovery.jobId!, schemaDigest: discovery.schemaDigest!,
         schemas: projectedSchemas, environment: discovery.environment! }))
-      const task = { objective: source.source.objective, feedback: source.feedback?.text ?? null,
-        judgement: source.judgement, name: plan.name }
+      const task = workItem ? workItemTask! : { objective: v1Source!.source.objective, feedback: v1Source!.feedback?.text ?? null,
+        judgement: v1Source!.judgement, name: plan.name }
       const contract = await runNativeCreationTurn(this.ctx, { sessionId: `revision-contract-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens - 1,
         prompt: [...CASE_RULES, `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
