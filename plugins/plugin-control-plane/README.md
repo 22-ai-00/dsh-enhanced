@@ -408,6 +408,12 @@ Host-only `inspectPreparedRevisionRegression` 提供精确父/候选不可变制
 
 主账本在入库和历史回读时独立核对 Linux 修订证书的构建运行时及完整准备证据摘要；回归证书须绑定精确候选证书和同族父证书，并匹配双方共享观察器的边界、运行时与准备回执。历史回读只核对保留的不可变元数据，不重建产物、不要求旧授权仍有效，也不授予新的执行权限。
 
+### 修订非劣收益门（P1-4，opt-in）
+
+`sourceJobs.revision.benefit` 可选携带一个 `assistant-growth/revision-benefit-contract/v1` 合同的 64 位 digest；合同冻结同供应商、同预算与最小任务修订数，并为失败率、返工率、纠正率、延迟与成本五条指标各设非劣阈值。未配置该字段时，修订采用维持上述 review-only 历史行为，配置后已验证修订还必须在主账本 `source_revision_benefit_outcomes`（schema 36，外键锁定 `source_revision_verifications`，只按记录时间单调更新）存在一条针对**同一合同 digest** 的 `non-inferior` 结果，否则 `revisionAdoptionReady` 永远为 false，候选保持 `pending-approval`。
+
+非劣评估（`@dsh-enhanced/assistant-growth-contract` 的 `evaluateRevisionBenefit`）只接受 Host 派生的窗口统计：按 canonical 任务修订去重，corrections/withdrawals 排除并单列；任一样本窗口低于最小修订数、合同过期，或任一窗口的成本/延迟不可测，结果只能是 `insufficient`，不产生收益结论；越过任一阈值返回带指标名的 `inferior`。部署关联与工具成功都不是收益证据，评估不能由成长模型自评。采用后负向越界自动回滚的运行时切片尚未实现。
+
 ### 修订采用的稳定入口替换与精确父版本回退
 
 已动态采用的稳定工具入口可以被独立验收的修订版本替换，同时保留精确父版本回退。该路径默认关闭：未配置 `revisionCapabilities` 时，修订验收与回归门之后的计划仍停在 `pending-approval`，旧计划、旧配置和 `control.sqlite` 行为完全不变。启用须同时具备既有 `creationCapabilities`、`revisionVerifications` 和 `sourceJobs.revision`，且采用后端与创建采用 runner 一致：
