@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 35
+export const controlPlaneSchemaVersion = 36
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -50,6 +50,18 @@ CREATE TRIGGER IF NOT EXISTS created_capability_trend_snapshots_no_update BEFORE
 BEGIN SELECT RAISE(ABORT, 'created capability trend snapshots are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS created_capability_trend_snapshots_no_delete BEFORE DELETE ON created_capability_trend_snapshots
 BEGIN SELECT RAISE(ABORT, 'created capability trend snapshots are append-only'); END;`
+
+/** P1-4 non-inferiority benefit outcomes, one row per evaluated plan window (schema 36). */
+const revisionBenefitOutcomeTableSchema = `CREATE TABLE IF NOT EXISTS source_revision_benefit_outcomes (
+  plan_id TEXT PRIMARY KEY REFERENCES source_revision_verifications(plan_id) ON DELETE RESTRICT,
+  contract_digest TEXT NOT NULL CHECK(length(contract_digest) = 64 AND contract_digest NOT GLOB '*[^a-f0-9]*'),
+  status TEXT NOT NULL CHECK(status IN ('insufficient','inferior','non-inferior')),
+  reason TEXT NOT NULL CHECK(length(reason) > 0 AND length(reason) <= 128),
+  evaluation_json TEXT NOT NULL CHECK(json_valid(evaluation_json) AND json_type(evaluation_json)='object' AND length(evaluation_json)<=1048576),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at > 0)
+) STRICT, WITHOUT ROWID;`
+
+const revisionBenefitOutcomeSchema = revisionBenefitOutcomeTableSchema
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1487,6 +1499,12 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
         database.exec(`${createdCapabilityTrendSnapshotSchema} PRAGMA user_version = 35; COMMIT;`)
       } catch (error) { database.exec('ROLLBACK'); throw error }
     } else database.exec(createdCapabilityTrendSnapshotSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 36) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        database.exec(`${revisionBenefitOutcomeSchema} PRAGMA user_version = 36; COMMIT;`)
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else database.exec(revisionBenefitOutcomeSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

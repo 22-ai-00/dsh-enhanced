@@ -225,12 +225,22 @@ export class SourceJobRuntime {
     return Promise.allSettled(this.growthFlights).then(() => undefined)
   }
 
-  /** A revision is adoptable only when its independent review, and any configured regression, verified. */
+  /** A revision is adoptable only when its independent review, any configured regression, and any configured benefit outcome verified. */
   private revisionAdoptionReady(job: SourceJobRecord, planId: string): boolean {
     if (this.options.store.getRevisionVerificationStatus(planId) !== 'verified') return false
-    if (job.intent.revision?.growthRun.revisionRegressionAcceptance === undefined) return true
-    return this.options.verifyPreparedRevisionRegression !== undefined
-      && this.options.store.getRevisionRegressionStatus(planId) === 'verified'
+    if (job.intent.revision?.growthRun.revisionRegressionAcceptance !== undefined
+      && (!(this.options.verifyPreparedRevisionRegression !== undefined)
+        || this.options.store.getRevisionRegressionStatus(planId) !== 'verified')) {
+      return false
+    }
+    const benefit = job.intent.revision?.grant.benefit
+    if (benefit !== undefined) {
+      const outcome = this.options.store.inspectRevisionBenefitOutcome(planId)
+      if (outcome === undefined || outcome.status !== 'non-inferior' || outcome.contractDigest !== benefit.contractDigest) {
+        return false
+      }
+    }
+    return true
   }
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {

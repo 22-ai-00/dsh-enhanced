@@ -27,6 +27,12 @@ export interface SourceRevisionGrant {
   expiresAt: number
   maxRevisions: number
   namePrefix: string
+  /**
+   * P1-4 opt-in: when configured, a verified revision becomes adoptable only
+   * after its non-inferiority benefit outcome is recorded for this exact
+   * contract digest. Absent keeps the historical review-only adoption gate.
+   */
+  benefit?: { contractDigest: string }
 }
 
 /** Revision never uses the create-only v2 run; v1 is foreground, v3 is work-item. */
@@ -54,10 +60,15 @@ function exact(value: unknown, keys: readonly string[], label: string): Record<s
 
 /** Shape remains valid for historical grants after their expiry. */
 export function validateSourceRevisionGrant(value: unknown): asserts value is SourceRevisionGrant {
+  const optional = value !== null && typeof value === 'object' && !Array.isArray(value)
   const grant = exact(value, ['id', 'expiresAt', 'maxRevisions', 'namePrefix',
-    ...(value !== null && typeof value === 'object' && !Array.isArray(value)
-      && Object.hasOwn(value as object, 'workItemFailures') ? ['workItemFailures'] : [])], 'grant')
+    ...(optional && Object.hasOwn(value as object, 'workItemFailures') ? ['workItemFailures'] : []),
+    ...(optional && Object.hasOwn(value as object, 'benefit') ? ['benefit'] : [])], 'grant')
   if (Object.hasOwn(grant as object, 'workItemFailures') && typeof (grant as Record<string, unknown>)['workItemFailures'] !== 'boolean') fail('grant fields')
+  if (Object.hasOwn(grant as object, 'benefit')) {
+    const benefit = exact((grant as Record<string, unknown>)['benefit'], ['contractDigest'], 'grant benefit')
+    if (typeof benefit['contractDigest'] !== 'string' || !DIGEST.test(benefit['contractDigest'] as string)) fail('grant benefit digest')
+  }
   if (typeof grant.id !== 'string' || !GRANT_ID.test(grant.id) || grant.id.normalize('NFC') !== grant.id
     || !Number.isSafeInteger(grant.expiresAt) || Number(grant.expiresAt) < 1
     || !Number.isSafeInteger(grant.maxRevisions) || Number(grant.maxRevisions) < 1 || Number(grant.maxRevisions) > 1_000

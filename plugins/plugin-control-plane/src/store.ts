@@ -3305,6 +3305,54 @@ export class ControlPlaneStore {
     if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'revision regression claim is not current')
   }
 
+  /**
+   * P1-4 non-inferiority outcome for one evaluated plan window. Rows exist
+   * only under a verified revision verification (FK enforces it); the
+   * contract digest pins which owner contract produced the verdict.
+   */
+  recordRevisionBenefit(planId: string, input: { contractDigest: string; status: 'insufficient' | 'inferior' | 'non-inferior';
+    reason: string; evaluation: unknown }): void {
+    if (!/^[a-f0-9]{64}$/u.test(input.contractDigest)
+      || !['insufficient', 'inferior', 'non-inferior'].includes(input.status)
+      || typeof input.reason !== 'string' || !/^[a-z][a-z0-9-]{0,127}$/u.test(input.reason)) {
+      throw new ControlPlaneStoreError('invalid-input', 'revision benefit outcome fields are invalid')
+    }
+    const evaluationJson = JSON.stringify(input.evaluation)
+    if (Buffer.byteLength(evaluationJson) > 1_048_576) {
+      throw new ControlPlaneStoreError('invalid-input', 'revision benefit evaluation exceeds its bound')
+    }
+    this.#beginMutation()
+    try {
+      this.#database.prepare(`INSERT INTO source_revision_benefit_outcomes
+        (plan_id, contract_digest, status, reason, evaluation_json, recorded_at) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(plan_id) DO UPDATE SET contract_digest=excluded.contract_digest, status=excluded.status,
+        reason=excluded.reason, evaluation_json=excluded.evaluation_json, recorded_at=excluded.recorded_at
+        WHERE source_revision_benefit_outcomes.recorded_at <= excluded.recorded_at`)
+        .run(planId, input.contractDigest, input.status, input.reason, evaluationJson, this.#now())
+      this.#commitMutation()
+    } catch (error) { this.#rollbackMutation(); throw error }
+  }
+
+  getRevisionBenefitStatus(planId: string): 'insufficient' | 'inferior' | 'non-inferior' | undefined {
+    const row = this.#database.prepare('SELECT status FROM source_revision_benefit_outcomes WHERE plan_id=?')
+      .get(planId) as { status: 'insufficient' | 'inferior' | 'non-inferior' } | undefined
+    return row?.status
+  }
+
+  inspectRevisionBenefitOutcome(planId: string): { contractDigest: string; status: 'insufficient' | 'inferior' | 'non-inferior';
+    reason: string; recordedAt: number } | undefined {
+    const row = this.#database.prepare(`SELECT contract_digest,status,reason,recorded_at
+      FROM source_revision_benefit_outcomes WHERE plan_id=?`).get(planId) as
+      { contract_digest: string; status: 'insufficient' | 'inferior' | 'non-inferior'; reason: string; recorded_at: number } | undefined
+    if (row === undefined) return undefined
+    if (!/^[a-f0-9]{64}$/u.test(row.contract_digest)
+      || !['insufficient', 'inferior', 'non-inferior'].includes(row.status)
+      || !/^[a-z][a-z0-9-]{0,127}$/u.test(row.reason) || !Number.isSafeInteger(row.recorded_at) || row.recorded_at < 1) {
+      throw new ControlPlaneStoreError('invalid-state', 'revision benefit outcome record is corrupt')
+    }
+    return { contractDigest: row.contract_digest, status: row.status, reason: row.reason, recordedAt: row.recorded_at }
+  }
+
   readRevisionSource(planId: string): CreationCapabilitySourceSnapshot | undefined {
     const certificate = this.getRevisionVerification(planId)
     if (!certificate) return undefined
