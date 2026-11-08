@@ -137,6 +137,8 @@ export class SourceJobRuntime {
     releaseTimeoutMs?: number
     adoptReleased?: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<void>
     adoptionTimeoutMs?: number
+    /** Host-owned P1-4 benefit reconciliation, driven by this runtime's existing cron tick. */
+    reconcileRevisionBenefits?: () => void
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
     inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
     /** Linux service-owned, single-use proof of no admission and completed/no Host cleanup. */
@@ -808,6 +810,9 @@ export class SourceJobRuntime {
         }
       }
       this.reconcileContinuations()
+      // P1-4 benefit evaluation rides the same cron occurrence; a failure here
+      // never changes the continuation verdict.
+      try { this.options.reconcileRevisionBenefits?.() } catch { /* owner-visible via benefit ledger absence */ }
       if (unsettled) return { outcome: 'unknown', failureClass: 'infrastructure', failurePhase: 'host-execution', failureCode: 'source-continuation-unsettled', sideEffectState: 'unknown', retryability: 'unsafe' }
       return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
     } catch { return failure(this.abort.signal.aborted || input.signal.aborted) }

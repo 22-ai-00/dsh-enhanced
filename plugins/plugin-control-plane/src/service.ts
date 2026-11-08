@@ -866,6 +866,9 @@ export class PluginControlPlaneService extends Service {
               if (!job.planId) throw new Error('source job has no released plan')
               await this.adoptOwnerSourceRelease({ sourcePlanId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest, assertCurrent })
             } } : {}),
+          ...(this.config.sourceJobs?.revisionBenefit === undefined ? {} : {
+            reconcileRevisionBenefits: () => this.reconcileRevisionBenefits(),
+          }),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent,
             nativeRunner?.backend === 'linux-native' ? { runner: nativeRunner.runner, generation: preparationGeneration } : undefined),
           ...(nativeRunner?.backend === 'linux-native' ? { isPreparationNotStarted: (error: unknown, job: SourceJobRecord) =>
@@ -1409,6 +1412,30 @@ export class PluginControlPlaneService extends Service {
       }
       return { planId, contractDigest, pinned: contractDigest === pinned.contractDigest, evaluation }
     } catch { return undefined }
+  }
+
+  /**
+   * Host-only P1-4 reconciliation over every prepared revision plan: after its
+   * observation window, evaluate the benefit outcome and roll back an active
+   * inferior revision. Driven by the SourceJobs continuation cron occurrence;
+   * never a new loop and never model-callable.
+   */
+  reconcileRevisionBenefits = (): void => {
+    const contract = this.config.sourceJobs?.revisionBenefit
+    if (!contract || !this.revisionCapabilityRuntime) return
+    for (const plan of this.store.listPreparedSourcePlans()) {
+      if (plan.mode !== 'prepared-revise') continue
+      try {
+        const job = this.store.getPreparedRevisionJob(plan.id)
+        if (!job.intent.revision?.grant.benefit) continue
+        const evaluation = this.evaluateRevisionBenefit(plan.id)
+        if (evaluation === undefined || !evaluation.pinned) continue
+        if (evaluation.evaluation.verdict.status === 'inferior') {
+          void this.autoRollbackRevisionIfInferior(plan.id, { observeWindowMs: 0 })
+            .catch(() => { /* rollback failures stay visible through the benefit ledger */ })
+        }
+      } catch { /* a plan without a current job or admission is skipped this tick */ }
+    }
   }
 
   /**
