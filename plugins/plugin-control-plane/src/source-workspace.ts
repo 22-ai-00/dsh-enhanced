@@ -44,6 +44,17 @@ export const PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
   'assistant-isolation', // 隔离沙箱机制本身
   'assistant-web-owner', // owner 安全控制台
   'plugin-control-plane', // 审批/激活控制面本身（自举提权面）
+  'assistant-growth-driver', // 成长走廊本身：修改者不得准备自改提案
+  'assistant-recovery', // 确定性恢复与监督式自演进 runbook
+  'assistant-evolution', // 审批门控的行为自演进面
+  'owner-console', // owner 控制台入口
+  'assistant-actions', // owner 授权的外部动作代理（GitHub 等）
+  'assistant-work-items', // 后台任务证据账本与准入
+  'assistant-goals', // owner 目标与已验证工作流证据
+  'event-triggers', // 外部事件入口（文件/HTTP/HMAC）
+  'assistant-heartbeat', // 主动时段心跳策略层
+  'assistant-proactive', // 主动机会过滤与效用决策
+  'assistant-memory-learning', // 独立审查的记忆学习采用面
 ])
 
 export interface ScopedPluginFile {
