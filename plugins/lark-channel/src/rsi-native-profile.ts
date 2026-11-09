@@ -7,8 +7,6 @@ import { defaultHostAttestationPolicy, normalizeControlPlaneConfig, runtimeConfi
   type Config as ControlPlaneConfig, type PluginControlTrustConfig, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
-import type { RsiBuildEnvironment } from './rsi-build.js'
-import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import type { NativeRsiBuildEnvironment, NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
 import { createRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
@@ -30,8 +28,8 @@ const prefix = 'rsi-native-'
 export interface NativeRsiProfileInput {
   dshHome: string; targetProfile: string; targetEffective: string; targetPatch: string
   owner: ActiveLarkOwnerBinding; resources: RsiAuthorityResources; source: RsiSourceWorkspace
-  sourceBuild: RsiBuildEnvironment['sourceBuild'] | NativeRsiBuildEnvironment['sourceBuild']
-  creationBuild: RsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment
+  sourceBuild: NativeRsiBuildEnvironment['sourceBuild']
+  creationBuild: NativeRsiCreationBuildEnvironment
   executor: PluginControlTrustConfig['executor']; now: number; expiresAt: number
   observer: { socketPath: string; keyPath: string }
   /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
@@ -175,15 +173,9 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     input.observer?.keyPath, input.executor?.path]) absolute(path, 'prepared path')
   if (input.source.schemaVersion !== 1 || input.sourceBuild.versioning !== 'patch'
     || input.creationBuild.sourceCommit !== input.source.sourceCommit) fail('creation build differs from prepared source')
-  if ('backend' in input.sourceBuild && input.sourceBuild.backend === 'macos-seatbelt') {
-    if (input.creationBuild.schemaVersion !== 2 || input.creationBuild.backend !== 'macos-seatbelt'
-      || !isDeepStrictEqual(input.creationBuild.runtime, input.sourceBuild.runtime)) fail('native creation runtime differs')
-  } else {
-    if ('backend' in input.sourceBuild || input.creationBuild.schemaVersion !== 1
-      || input.creationBuild.sourceImage !== input.sourceBuild.image
-      || input.creationBuild.dockerPath !== input.sourceBuild.dockerPath
-      || input.creationBuild.socketPath !== input.sourceBuild.socketPath) fail('creation build differs from prepared source')
-  }
+  if (input.sourceBuild.backend !== 'macos-seatbelt'
+    || input.creationBuild.schemaVersion !== 2 || input.creationBuild.backend !== 'macos-seatbelt'
+    || !isDeepStrictEqual(input.creationBuild.runtime, input.sourceBuild.runtime)) fail('native creation runtime differs')
   if (!/^[a-f0-9]{64}$/u.test(input.executor.sha256) || !input.executor.id || !input.executor.version
     || !Array.isArray(input.executor.environmentAllowlist)) fail('executor pin is invalid')
   if (input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
@@ -226,12 +218,11 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     pluginSourceProposals: { enabled: true, allowModification: false, allowCreation: true, allowRevision: false,
       preparationMode: 'durable', repository: input.source.repository, maxPlansPerWake: 1, offline: true, planTtlMs: day } }
   normalizeConfig(growth)
-  const sourceBuildForControl: NonNullable<ControlPlaneConfig['sourceBuild']> = 'backend' in input.sourceBuild
-    ? { ...input.sourceBuild, stateRoot: join(resources.stateRoot, 'native-source-build'),
+  const sourceBuildForControl: NonNullable<ControlPlaneConfig['sourceBuild']> =
+    { ...input.sourceBuild, stateRoot: join(resources.stateRoot, 'native-source-build'),
       authorityDigest: createHash('sha256').update(JSON.stringify({ installation, owner, sourceCommit: input.source.sourceCommit,
         runtime: input.sourceBuild.runtime, expiresAt: input.expiresAt })).digest('hex'),
       expiresAt: input.expiresAt, maxRuns: 1000, maxTotalDurationMs: day }
-    : input.sourceBuild
   const control: ControlPlaneConfig = { catalogPath: resources.catalog.path, statePath: join(resources.stateRoot, 'control-plane'),
     trustPath: join(resources.configRoot, 'native-trust.json'), sourceBuild: sourceBuildForControl,
     sourceJobs: { authorityId: `source-jobs-${installation}`, expiresAt: input.expiresAt, maxSubmissions: 1000,

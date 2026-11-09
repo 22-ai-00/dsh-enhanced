@@ -8,13 +8,12 @@ import { isDeepStrictEqual } from 'node:util'
 import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { verifyRsiBuildEnvironmentReady, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
+import { rsiBuildResources as io } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment, readRsiReleaseBuildEnvironment,
   RsiReleaseBuildUnavailableError, type PreparedReleaseBuildEnvironment } from './rsi-release-build.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { createRsiBootstrapManifest, type RsiBootstrapSourceBuild } from './rsi-bootstrap-manifest.js'
-import { verifyRsiCreationBuildEnvironmentReady, type RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { validateRsiPluginCreationSetup } from './rsi-plugin-creation.js'
 import { validateRsiPluginRevisionSetup } from './rsi-plugin-revision.js'
 import { prepareLinuxRsiRuntime, readLinuxRsiRuntime, LinuxRsiRuntimeUnavailableError } from './rsi-linux-runtime-bootstrap.js'
@@ -66,42 +65,34 @@ async function prepareResources(input: RsiInstallInput, signal: AbortSignal) {
   if (previous?.pluginCreation !== undefined) validateRsiPluginCreationSetup(previous.pluginCreation, previous.sourceReviews.owner)
   if (previous?.pluginRevision !== undefined) validateRsiPluginRevisionSetup(previous.pluginRevision, previous.sourceReviews.owner)
   const priorBuild = previous?.controlPlane.sourceBuild
+  // Historical Docker-era manifests are readable but can never be continued by
+  // the linux-native installer. Migration requires its own signed handoff.
   if (previous && (!priorBuild || 'backend' in priorBuild && priorBuild.backend !== 'linux-native')) {
     fail('existing Linux installation has an unsupported build backend')
   }
-  // New Linux installations use the complete native boundary. An ordinary
-  // retry preserves the exact old backend; migration needs its own signed handoff.
-  const native = !previous || priorBuild !== undefined && 'backend' in priorBuild
   const enableCreation = !previous || previous.pluginCreation !== undefined
   let build: { sourceBuild: RsiBootstrapSourceBuild }
   let release: PreparedReleaseBuildEnvironment
-  let creationBuild: RsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment | undefined
+  let creationBuild: LinuxRsiCreationBuildEnvironment | undefined
   let runnerStates: RsiLinuxRunnerStates | undefined
   const directories: string[] = []
-  if (native) {
-    const resourceInput = { ...input, source, signal }
-    const base = await (previous ? readLinuxRsiRuntime : prepareLinuxRsiRuntime)(resourceInput)
-    release = await (previous ? readRsiReleaseBuildEnvironment : prepareRsiReleaseBuildEnvironment)({ ...resourceInput, build: base })
-    const repository = await (previous ? readLinuxRsiRepositoryRuntime : prepareLinuxRsiRepositoryRuntime)(resourceInput)
-    const cgroupRoots = await discoverLinuxCgroupRoots({ signal })
-    build = { sourceBuild: { backend: 'linux-native', repository, cgroupRoots } }
-    directories.push('linux-source-build-runner')
-    if (enableCreation) {
-      creationBuild = await (previous ? readLinuxRsiCreationBuildEnvironment : prepareLinuxRsiCreationBuildEnvironment)({
-        ...resourceInput, stateRoot: resources.stateRoot,
-      })
-      if (!isDeepStrictEqual(creationBuild.cgroupRoots, cgroupRoots)) fail('creation cgroup roots changed during preparation')
-      if (!previous || previous.pluginRevision) directories.push('revision-review-runner', 'revision-regression-runner')
-    }
-    runnerStates = await prepareRsiLinuxRunnerStates(resources, {
-      creation: enableCreation, revision: enableCreation && (!previous || previous.pluginRevision !== undefined),
-    }, previous)
-  } else {
-    const legacy = await verifyRsiBuildEnvironmentReady({ ...input, source, signal })
-    build = legacy
-    release = await readRsiReleaseBuildEnvironment({ ...input, build: legacy, signal })
-    if (enableCreation) creationBuild = await verifyRsiCreationBuildEnvironmentReady({ ...input, source, build: legacy, signal })
+  const resourceInput = { ...input, source, signal }
+  const base = await (previous ? readLinuxRsiRuntime : prepareLinuxRsiRuntime)(resourceInput)
+  release = await (previous ? readRsiReleaseBuildEnvironment : prepareRsiReleaseBuildEnvironment)({ ...resourceInput, build: base })
+  const repository = await (previous ? readLinuxRsiRepositoryRuntime : prepareLinuxRsiRepositoryRuntime)(resourceInput)
+  const cgroupRoots = await discoverLinuxCgroupRoots({ signal })
+  build = { sourceBuild: { backend: 'linux-native', repository, cgroupRoots } }
+  directories.push('linux-source-build-runner')
+  if (enableCreation) {
+    creationBuild = await (previous ? readLinuxRsiCreationBuildEnvironment : prepareLinuxRsiCreationBuildEnvironment)({
+      ...resourceInput, stateRoot: resources.stateRoot,
+    })
+    if (!isDeepStrictEqual(creationBuild.cgroupRoots, cgroupRoots)) fail('creation cgroup roots changed during preparation')
+    if (!previous || previous.pluginRevision) directories.push('revision-review-runner', 'revision-regression-runner')
   }
+  runnerStates = await prepareRsiLinuxRunnerStates(resources, {
+    creation: enableCreation, revision: enableCreation && (!previous || previous.pluginRevision !== undefined),
+  }, previous)
   if (creationBuild) directories.push('creation-review-runner', 'creation-adoption-runner')
   for (const name of directories) {
     const path = join(resources.stateRoot, name)
@@ -275,7 +266,7 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     try { prepared = await ports.prepare(input, signal) }
     catch (error) {
       signal.throwIfAborted()
-      if (error instanceof RsiBuildUnavailableError || error instanceof RsiReleaseBuildUnavailableError
+      if (error instanceof RsiReleaseBuildUnavailableError
         || error instanceof LinuxRsiRuntimeUnavailableError || error instanceof RsiLinuxCgroupUnavailableError
         || error instanceof RsiLinuxCreationBuildUnavailableError) return { mode: 'not-ready', reason: error.message }
       throw error

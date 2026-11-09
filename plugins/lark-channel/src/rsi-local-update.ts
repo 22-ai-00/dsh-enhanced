@@ -16,10 +16,7 @@ const hash = (value: string | Buffer): string => createHash('sha256').update(val
 const fail = (message: string): never => { throw new Error(`rsi local update: ${message}`) }
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 export interface RsiLocalUpdateInput { dshHome: string; profile: string; sourceRepository: string;
-  rootExtension?: 'memory-learning'; signal?: AbortSignal
-  /** Explicit absolute Docker executable keeps the legacy image backend during
-   * coexistence; on Linux an omitted value selects the native runtime. */
-  dockerPath?: string }
+  rootExtension?: 'memory-learning'; signal?: AbortSignal }
 export interface RsiLocalUpdatePreparation {
   schemaVersion: 1 | 2
   mode: 'prepared'
@@ -166,8 +163,7 @@ export async function prepareRsiLocalUpdate(input: RsiLocalUpdateInput,
       version: source.version, sourceRepository: source.repository, signal })
     if (workspace.sourceCommit !== source.sourceCommit) fail('candidate checkout differs from merged source')
     const builder = ports ? undefined : await localUpdateBuild.prepareRsiLocalUpdateBuild({ dshHome: candidateHome,
-      profile: input.profile, source: workspace, signal,
-      ...(input.dockerPath ? { dockerPath: input.dockerPath } : {}) })
+      profile: input.profile, source: workspace, signal })
     const cohort = await prepareRsiLocalCohort({ dshHome: candidateHome, profile: input.profile,
       source: workspace, bundles, signal }, ports ?? builder!.ports)
     const verifyOriginal = async () => {

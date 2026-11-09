@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { linuxRuntimeDigest, validateLinuxRuntime, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import { rsiBuildResources as io, type RsiBuildEnvironment } from './rsi-build.js'
+import { rsiBuildResources as io, type LegacyDockerSourceBuildEnvironment } from './rsi-build.js'
 import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
 
 interface Pin { path: string; sha256: string }
@@ -13,6 +13,9 @@ export interface RsiReleaseBuildConfig {
   sandboxExecutable: Pin; tarExecutable: Pin; nodeExecutable: Pin; pnpmExecutable: Pin
   pnpmRoot: Pin; storeRoot: Pin; cacheRoot: Pin;
 }
+/** Historical schema 1 Docker-era receipt. It is decoded read-only when a
+ * Docker installation is migrated to the native backend and can never be
+ * prepared or continued. */
 export interface RsiReleaseBuildEnvironment {
   schemaVersion: 1; sourceCommit: string; image: string; releaseBuild: RsiReleaseBuildConfig
 }
@@ -24,7 +27,7 @@ export interface NativeRsiReleaseBuildEnvironment {
   runtimeDigest: string; releaseBuild: RsiReleaseBuildConfig
 }
 export type PreparedReleaseBuildEnvironment = RsiReleaseBuildEnvironment | NativeRsiReleaseBuildEnvironment
-export type ReleaseBuildInput = RsiBuildEnvironment | LinuxRsiBuildEnvironment
+export type ReleaseBuildInput = LegacyDockerSourceBuildEnvironment | LinuxRsiBuildEnvironment
 type Receipt = (RsiReleaseBuildEnvironment | NativeRsiReleaseBuildEnvironment) & {
   dshHome: string; profile: string; receiptDigest: string
 }
@@ -127,21 +130,18 @@ async function exportNativeAssets(assets: string, runtime: LinuxRuntime, signal:
   await mkdir(join(assets, 'store', 'v11', 'projects'), { recursive: true, mode: 0o700 })
 }
 
-/** Caller holds the home lifecycle lock. A Docker build exports fixed assets
- * from the already prepared immutable image (the container is never started);
- * a schema 3 native build copies the same three trees from the verified Linux
- * runtime. Neither path needs a Docker CLI, daemon, socket or image. */
+/** Caller holds the home lifecycle lock. The schema 3 native build copies the
+ * release toolchain/store/cache trees from the verified Linux runtime. A
+ * historical Docker receipt is never exported or continued here. */
 export async function prepareRsiReleaseBuildEnvironment(input: {
   dshHome: string; profile: string; build: ReleaseBuildInput; signal?: AbortSignal
 }): Promise<PreparedReleaseBuildEnvironment> {
-  const dockerBuild = input.build.schemaVersion === 1 ? input.build : undefined
   const runtime = nativeRuntime(input.build)
-  if ((dockerBuild === undefined) === (runtime === undefined)) fail('unsupported release build backend')
+  if (runtime === undefined) throw new RsiReleaseBuildUnavailableError('Docker release build is no longer supported; migrate to linux-native')
   if (!isAbsolute(input.dshHome) || resolve(input.dshHome) !== input.dshHome
     || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile)
     || !/^[a-f0-9]{40}$/u.test(input.build.sourceCommit)) fail('invalid resource binding')
-  if (dockerBuild && !/^sha256:[a-f0-9]{64}$/u.test(dockerBuild.sourceBuild.image)) fail('invalid resource binding')
-  if (runtime) validateLinuxRuntime(runtime)
+  validateLinuxRuntime(runtime)
   if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
     throw new RsiReleaseBuildUnavailableError('Linux x64/arm64 is required')
   }
@@ -168,46 +168,11 @@ export async function prepareRsiReleaseBuildEnvironment(input: {
   }
   const stage = await mkdtemp(join(parent, `.${input.profile}-stage-`))
   await chmod(stage, 0o700)
-  const assets = join(stage, 'assets'), token = randomUUID(), container = `dsh-release-assets-${token}`
-  const docker = dockerBuild?.sourceBuild.dockerPath
-  let containerMayExist = false, claimed: { dev: number; ino: number } | undefined
-  const run = (args: string[], cleanup = false) => io.command(docker!, args, io.isolatedEnvironment(stage),
-    cleanup ? new AbortController().signal : signal, cleanup ? 30_000 : 180_000)
-  const cleanupContainer = async (): Promise<void> => {
-    if (!containerMayExist || !docker) return
-    // Generated name and unguessable label bind cleanup even if create's reply
-    // was lost. Do not delete a replacement container with another label.
-    const ids = await run(['ps', '-a', '--filter', `name=^/${container}$`, '--format', '{{.ID}}'], true)
-    if (!ids) { containerMayExist = false; return }
-    const label = await run(['inspect', '--format', '{{index .Config.Labels "org.dsh.release-assets"}}', container], true)
-    if (label !== token) fail('export container ownership changed')
-    await run(['rm', '-f', container], true)
-    containerMayExist = false
-  }
+  const assets = join(stage, 'assets')
+  let claimed: { dev: number; ino: number } | undefined
   try {
-    await mkdir(join(stage, 'docker-config'), { mode: 0o700 })
     await mkdir(assets, { mode: 0o700 })
-    if (dockerBuild) {
-      const image = dockerBuild.sourceBuild.image
-      for (const name of ['toolchain', 'store', 'cache']) await mkdir(join(assets, name), { mode: 0o700 })
-      await mkdir(join(assets, 'store', 'v11', 'files'), { recursive: true, mode: 0o700 })
-      containerMayExist = true
-      await run(['create', '--name', container, '--label', `org.dsh.release-assets=${token}`,
-        '--network', 'none', '--read-only', '--entrypoint', '/bin/false', image])
-      for (const [source, target] of [
-        ['/opt/pnpm-native/node_modules/@pnpm/exe/.', join(assets, 'toolchain')],
-        ['/usr/local/bin/node', join(assets, 'toolchain', 'node')],
-        // The image's projects registry points at its deleted /seed checkout.
-        // Each release uses a fresh writable registry, never those stale links.
-        ['/opt/pnpm-store/v11/files/.', join(assets, 'store', 'v11', 'files')],
-        ['/opt/pnpm-store/v11/index.db', join(assets, 'store', 'v11', 'index.db')],
-        ['/opt/pnpm-cache/.', join(assets, 'cache')],
-      ] as const) await run(['cp', `${container}:${source}`, target])
-      await cleanupContainer()
-      await mkdir(join(assets, 'store', 'v11', 'projects'), { recursive: true, mode: 0o700 })
-    } else {
-      await exportNativeAssets(assets, runtime!, signal)
-    }
+    await exportNativeAssets(assets, runtime, signal)
     await harden(assets, signal)
     const toolchain = join(assets, 'toolchain')
     const environment = { PATH: `${toolchain}:/usr/bin:/bin`, HOME: stage, LANG: 'C', LC_ALL: 'C' }
@@ -219,11 +184,8 @@ export async function prepareRsiReleaseBuildEnvironment(input: {
     await mkdir(final, { mode: 0o700 })
     const identity = await lstat(final); claimed = { dev: identity.dev, ino: identity.ino }
     for (const name of ['toolchain', 'store', 'cache']) await rename(join(assets, name), join(final, name))
-    const result: PreparedReleaseBuildEnvironment = dockerBuild
-      ? { schemaVersion: 1, sourceCommit: input.build.sourceCommit,
-        image: dockerBuild.sourceBuild.image, releaseBuild: await inspect(final) }
-      : { schemaVersion: 2, backend: 'linux-native', sourceCommit: input.build.sourceCommit,
-        runtimeDigest: linuxRuntimeDigest(runtime!), releaseBuild: await inspect(final) }
+    const result: PreparedReleaseBuildEnvironment = { schemaVersion: 2, backend: 'linux-native',
+      sourceCommit: input.build.sourceCommit, runtimeDigest: linuxRuntimeDigest(runtime), releaseBuild: await inspect(final) }
     const content = { ...result, dshHome: input.dshHome, profile: input.profile }
     await io.writeExclusive(join(final, 'bootstrap.json'), JSON.stringify({ ...content, receiptDigest: digest(JSON.stringify(content)) }))
     await io.syncDirectory(final); await io.syncDirectory(parent)
@@ -235,7 +197,6 @@ export async function prepareRsiReleaseBuildEnvironment(input: {
     }
     throw error
   } finally {
-    // A cleanup failure is surfaced and leaves the labelled container visible.
-    try { await cleanupContainer() } finally { await rm(stage, { recursive: true, force: true }); await io.syncDirectory(parent) }
+    await rm(stage, { recursive: true, force: true }); await io.syncDirectory(parent)
   }
 }

@@ -14,6 +14,7 @@ import { prepareRsiAuthorityRuntime } from '../../src/rsi-authority-runtime.js'
 import { createRsiBootstrapManifest } from '../../src/rsi-bootstrap-manifest.js'
 import type { RsiAuthorityConfigInput } from '../../src/rsi-authority-config.js'
 import { prepareRsiSourceWorkspace } from '../../src/rsi-source.js'
+import { nativePreparedFixture } from './rsi-linux-install.js'
 
 const hash = (value: Buffer): string => createHash('sha256').update(value).digest('hex')
 function git(args: string[]): string {
@@ -52,6 +53,7 @@ export async function rsiBootstrapFixture(): Promise<{
     git(['-C', local, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@dsh.invalid', 'commit', '--quiet', '-m', 'fixture source'])
     const source = await prepareRsiSourceWorkspace({ dshHome: home, profile, version, sourceRepository: local })
     const resources = await prepareRsiAuthorityResources({ dshHome: home, profile })
+    const native = await nativePreparedFixture(resources, source)
     const runtime = await prepareRsiAuthorityRuntime({ dshHome: home, profile })
     const require = createRequire(import.meta.url)
     const cpRoot = dirname(require.resolve('@dsh-enhanced/plugin-control-plane/package.json'))
@@ -115,8 +117,9 @@ export async function rsiBootstrapFixture(): Promise<{
     const now = Date.now(), expiresAt = now + 3_600_000
     const manifest = createRsiBootstrapManifest({ dshHome: home, targetProfile: profile, coordinatorProfile: coordinator,
       targetEffective, owner: binding, resources, runtime, source,
-      sourceBuild: { dockerPath: systemctlPath, image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-        memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
+      sourceBuild: native.sourceBuild,
+      runnerStates: { sourceBuild: native.runnerStates.sourceBuild },
+      enableRevision: false,
       git: gitPin, now, expiresAt, plugins, hostDeploymentInputs,
       observerTargets: [{ entryId: 'dsh-enhanced-assistant-delivery', module: '@dsh-enhanced/assistant-delivery',
         configDigest: runtimeConfigDigest(deliveryConfig), services: ['assistantDelivery'] }] })

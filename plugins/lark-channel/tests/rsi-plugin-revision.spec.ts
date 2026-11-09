@@ -146,8 +146,8 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('finite Li
     expect(() => validateRsiPluginRevisionSetup(cgroups, f.owner, f.now)).toThrow('Linux native family')
     const mixed = structuredClone(setup), { stateRoot, expiresAt, maxRuns, maxTotalDurationMs, maxDurationMs, maxOutputBytes } = mixed.regressions.runner
     mixed.regressions.runner = { stateRoot, expiresAt, maxRuns, maxTotalDurationMs, maxDurationMs, maxOutputBytes,
-      image: 'sha256:' + 'f'.repeat(64), dockerPath: await realpath(process.execPath) }
-    expect(() => validateRsiPluginRevisionSetup(mixed, f.owner, f.now)).toThrow('Linux native family')
+      image: 'sha256:' + 'f'.repeat(64), dockerPath: await realpath(process.execPath) } as unknown as typeof mixed.regressions.runner
+    expect(() => validateRsiPluginRevisionSetup(mixed, f.owner, f.now)).toThrow(/Linux native family|invalid plugin behavior runner backend/u)
   })
 
   test('rejects wrong ledger roots and shared creation or review ledgers', async () => {

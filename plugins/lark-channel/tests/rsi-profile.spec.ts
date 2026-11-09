@@ -13,9 +13,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { controlPlaneDigest } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import { createRsiPluginCreationSetup } from '../src/rsi-plugin-creation.js'
 import { compileRsiPersonalAssistantOptions, compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
+import type { RsiSourceWorkspace } from '../src/rsi-source.js'
+import { nativeDescriptors } from './fixtures/rsi-linux-install.js'
 
 const rows = (extra: string) => `
 - id: dsh-enhanced-personal-assistant
@@ -88,10 +91,19 @@ describe('RSI profile compiler', () => {
       await mkdir(profilePath, { recursive: true }); await mkdir(privateRoot, { recursive: true }); await chmod(privateRoot, 0o700)
       const key = join(privateRoot, 'observer.key'); await writeFile(key, Buffer.alloc(32, 1), { mode: 0o600 }); await chmod(key, 0o600)
       const decision = join(root, 'decisions'); await mkdir(decision); await chmod(decision, 0o700)
+      const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'target' })
+      const native = nativeDescriptors(resources, { sourceCommit: 'a'.repeat(40) } as RsiSourceWorkspace)
+      const sourceBuild = { backend: 'linux-native' as const, runtime: native.repository.runtime,
+        userNamespace: native.repository.userNamespace, systemSnapshot: native.repository.systemSnapshot,
+        cgroupRoots: native.cgroupRoots, stateRoot: join(resources.stateRoot, 'linux-source-build-runner'),
+        authorityDigest: 'a'.repeat(64), expiresAt: Date.now() + 60_000, maxRuns: 48,
+        maxTotalDurationMs: 86_400_000, timeoutMs: 1_800_000, outputBytes: 65_536, versioning: 'patch' as const,
+        memoryMiB: 16_384, cpus: 8, pidsLimit: 1_024, workspaceMiB: 8_192, temporaryMiB: 4_096,
+        workspaceInodes: 1_000_000, temporaryInodes: 1_000_000 }
       const adapter = { executable: { path: join(root, 'adapter'), sha256: 'b'.repeat(64) }, configPath: join(root, 'adapter.json'), timeoutMs: 1000 }
       const value = manifest(); const scope = { ownerRouteId: 'owner-route', principalId: 'lark/account/tenant/owner', workspace: '/tmp/rsi-workspace', preset: 'primary' }
       value.controlPlane = { catalogPath: join(root, 'catalog.json'), statePath: join(root, 'state'), trustPath: join(root, 'trust.json'),
-        sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
+        sourceBuild,
         sourceJobs: { ...value.controlPlane.sourceJobs!, repository: root }, sourceApprovals: adapter, sourceReleases: adapter,
         sourceReleaseExecution: { reviewDecisionRoot: decision, timeoutMs: 1000, independentReview: true }, sourceAdoptions: { profile: 'target', planTtlMs: 60_000, timeoutMs: 1000, authority: adapter, handoff: { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 1000, commit: 'target-host' } },
         runtimeObserver: { socketPath: join(privateRoot, 'observer.sock'), keyPath: key, profilePath, targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }, foregroundDeployments: { attestorJournalPath: join(root, 'attestor.json') },
@@ -105,6 +117,7 @@ describe('RSI profile compiler', () => {
       value.sourceReviews = { ...value.sourceReviews, repository: join(root, 'review-remote'), git: { path: join(root, 'git'), sha256: 'a'.repeat(64) }, decisionRoot: decision }
       value.growthDriver = { ...value.growthDriver, pluginSourceProposals: { ...value.growthDriver.pluginSourceProposals!, repository: root } }
       const targetEffective = rows('').replace('/tmp/rsi-workspace', join(root, 'workspace')).replaceAll('/tmp/rsi-workspace', join(root, 'workspace'))
+      value.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild) }
       const adjustedOwner = { ...owner, workspace: join(root, 'workspace'), conversation: owner.conversation, principal: owner.principal }
       ;(value.controlPlane.sourceJobs as any).workspace = adjustedOwner.workspace
       ;(value.growthDriver.scope as any).workspace = adjustedOwner.workspace
@@ -175,13 +188,11 @@ describe('RSI profile compiler', () => {
       await mkdir(adjustedOwner.workspace)
       const createdRequest = (alias: string) => ({ subject: createdSubject, action: 'execute',
         resource: { kind: 'tool' as const, id: alias }, context: { initiator: 'external' as const } })
-      const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'target' })
       await mkdir(join(resources.stateRoot, 'creation-review-runner'), { mode: 0o700 })
       await mkdir(join(resources.stateRoot, 'creation-adoption-runner'), { mode: 0o700 })
       const creation = createRsiPluginCreationSetup({ resources, owner: value.sourceReviews.owner,
         expiresAt: value.controlPlane.sourceJobs!.expiresAt, now: Date.now(),
-        build: { schemaVersion: 1, sourceCommit: 'a'.repeat(40), sourceImage: `sha256:${'b'.repeat(64)}`,
-          image: `sha256:${'c'.repeat(64)}`, dockerPath: await realpath(process.execPath) } })
+        build: native.creationBuild })
       const alias = `evolved_${creation.creation.namePrefix.replaceAll('-', '_')}calculator_${'a'.repeat(8)}_0`
       expect(policy.evaluate(createdRequest(alias))).toMatchObject({ effect: 'deny', reasonCode: 'default-deny' })
       expect(policyConfig.rules.some((rule: { id: string }) => rule.id === 'rsi-setup-created-tools')).toBe(false)
@@ -192,6 +203,8 @@ describe('RSI profile compiler', () => {
       expect((noCreationPersonal.assistantPolicy as { rules: Array<{ id: string }> }).rules.some(rule => rule.id === 'rsi-setup-created-tools')).toBe(false)
       const creationManifest = structuredClone(value)
       creationManifest.pluginCreation = creation
+      creationManifest.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild),
+        behaviorRuntimeDigest: controlPlaneDigest(native.creationBuild.behavior) }
       creationManifest.controlPlane.sourceJobs!.creation = creation.creation
       creationManifest.controlPlane.creationVerifications = creation.verifications
       creationManifest.controlPlane.creationCapabilities = creation.capabilities

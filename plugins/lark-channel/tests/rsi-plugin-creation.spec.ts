@@ -6,6 +6,7 @@ import type { LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import type { LinuxRsiCreationBuildEnvironment } from '../src/rsi-linux-creation-build.js'
+import type { NativeRsiCreationBuildEnvironment } from '../src/rsi-native-runtime-bootstrap.js'
 import { createRsiPluginCreationSetup, validateRsiPluginCreationSetup } from '../src/rsi-plugin-creation.js'
 
 const roots: string[] = []
@@ -21,8 +22,13 @@ async function fixture() {
     principalId: 'lark/account/tenant/owner', principalRecordId: 'principal-record', principalVersion: 3,
     workspace: root, agentPreset: 'primary' }
   const now = 100_000, expiresAt = 400_000
-  const build = { schemaVersion: 1 as const, sourceCommit: 'a'.repeat(40), sourceImage: 'sha256:' + 'b'.repeat(64),
-    image: 'sha256:' + 'c'.repeat(64), dockerPath: await realpath(process.execPath) }
+  const runtimeRoot = join(root, 'rsi-native-runtimes', 'primary', 'runtime')
+  const runtime = { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+    nodePath: join(runtimeRoot, 'bin', 'node'), nodeSha256: 'a'.repeat(64),
+    roots: [{ path: runtimeRoot, dev: 1, ino: 2, sha256: 'b'.repeat(64) }], modulesPath: join(runtimeRoot, 'node_modules'),
+    versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '3.0.0', tools: '1.0.0', systemPrompt: '1.0.0' } }
+  const build: NativeRsiCreationBuildEnvironment = { schemaVersion: 2, backend: 'macos-seatbelt',
+    sourceCommit: 'a'.repeat(40), runtime }
   return { root, resources, owner, now, expiresAt, build }
 }
 
@@ -159,7 +165,7 @@ describe('finite owner-bound plugin creation setup', () => {
     const mixed = structuredClone(setup)
     expect(() => validateRsiPluginCreationSetup({ ...mixed,
       capabilities: { ...mixed.capabilities, runner: { stateRoot: join(f.resources.stateRoot, 'creation-adoption-runner'),
-        image: f.build.image, dockerPath: f.build.dockerPath, expiresAt: f.expiresAt,
+        image: 'sha256:' + 'd'.repeat(64), dockerPath: '/usr/bin/docker', expiresAt: f.expiresAt,
         maxRuns: 1_024, maxTotalDurationMs: 86_400_000, maxDurationMs: 30_000, maxOutputBytes: 65_536 } } },
     f.owner, f.now)).toThrow('creation runner limits')
   })

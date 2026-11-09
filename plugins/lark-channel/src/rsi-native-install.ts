@@ -7,8 +7,7 @@ import { withDshHomeLifecycleLock } from './setup.js'
 import { withLaunchAgentTargetLock } from './launchd-target-lock.js'
 import { createLaunchAgent, launchAgentPaths } from './launchd.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { prepareRsiBuildEnvironment, RsiBuildUnavailableError, rsiBuildResources as io } from './rsi-build.js'
-import { prepareRsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import { rsiBuildResources as io } from './rsi-build.js'
 import { nativeRsiCreationBuild, prepareNativeRsiRuntime } from './rsi-native-runtime-bootstrap.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { compileNativeRsiProfile, type NativeRsiCompiledProfile, type NativeRsiSetupManifest } from './rsi-native-profile.js'
@@ -49,11 +48,8 @@ async function privateDirectory(path: string): Promise<void> {
 async function prepare(input: RsiInstallInput, signal: AbortSignal) {
   const source = await prepareRsiSourceWorkspace({ ...input, version, signal })
   const resources = await prepareRsiAuthorityResources({ ...input, signal })
-  const build = process.platform === 'darwin'
-    ? await prepareNativeRsiRuntime({ dshHome: input.dshHome, profile: input.profile, source, signal })
-    : await prepareRsiBuildEnvironment({ ...input, source, signal })
-  const creationBuild = build.schemaVersion === 2 ? nativeRsiCreationBuild(build)
-    : await prepareRsiCreationBuildEnvironment({ ...input, source, build, signal })
+  const build = await prepareNativeRsiRuntime({ dshHome: input.dshHome, profile: input.profile, source, signal })
+  const creationBuild = nativeRsiCreationBuild(build)
   for (const name of ['creation-review-runner', 'creation-adoption-runner']) await privateDirectory(join(resources.stateRoot, name))
   const dsh = await resolveInstalledRsiDsh()
   return { source, resources, build, creationBuild,
@@ -104,7 +100,7 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
   return withDshHomeLifecycleLock(input.dshHome, () => withLaunchAgentTargetLock(input, async () => {
     let prepared: Awaited<ReturnType<typeof prepare>>
     try { prepared = await ports.prepare(input, signal) }
-    catch (error) { signal.throwIfAborted(); if (error instanceof RsiBuildUnavailableError) return { mode: 'not-ready', reason: error.message }; throw error }
+    catch (error) { signal.throwIfAborted(); throw error }
     const { resources, source, build, creationBuild, executor } = prepared
     const serviceInput = { ...input, ...(ports.home ? { home: ports.home } : {}), nodePath: await realpath(process.execPath),
       dshPath: executor.path, dshSha256: executor.sha256 }, paths = launchAgentPaths(serviceInput)

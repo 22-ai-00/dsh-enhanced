@@ -14,11 +14,9 @@ import * as nativeRepository from '../src/rsi-linux-repository-bootstrap.js'
 import * as nativeCreation from '../src/rsi-linux-creation-build.js'
 import * as cgroups from '../src/rsi-linux-cgroup-roots.js'
 import * as releases from '../src/rsi-release-build.js'
-import * as dockerBuild from '../src/rsi-build.js'
-import * as dockerCreation from '../src/rsi-creation-build.js'
 import * as runnerState from '../src/rsi-linux-runner-states.js'
 import { createRsiBootstrapManifest } from '../src/rsi-bootstrap-manifest.js'
-import { installRsiOwnerDeployment, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
+import { installRsiOwnerDeployment, rsiInstallPorts } from '../src/rsi-install.js'
 import type { RsiSetupManifest } from '../src/rsi-profile.js'
 import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
@@ -87,14 +85,6 @@ async function fixture() {
     sourceCommit: source.sourceCommit, lockSha256: runtime.lockSha256, runtime }
   const nativeRelease: releases.NativeRsiReleaseBuildEnvironment = { schemaVersion: 2, backend: 'linux-native',
     sourceCommit: source.sourceCommit, runtimeDigest: linuxRuntimeDigest(runtime), releaseBuild: base.input.releaseBuild }
-  const legacyConfig = base.input.manifest.controlPlane.sourceBuild!
-  if ('backend' in legacyConfig) throw new Error('expected Docker baseline fixture')
-  const legacy: dockerBuild.RsiBuildEnvironment = { schemaVersion: 1, sourceCommit: source.sourceCommit,
-    sourceBuild: { ...legacyConfig, versioning: 'patch' } }
-  const legacyCreation: dockerCreation.RsiCreationBuildEnvironment = { schemaVersion: 1, sourceCommit: source.sourceCommit,
-    sourceImage: legacy.sourceBuild.image, image: 'sha256:' + 'f'.repeat(64), dockerPath: legacy.sourceBuild.dockerPath }
-  const legacyRelease: releases.RsiReleaseBuildEnvironment = { schemaVersion: 1, sourceCommit: source.sourceCommit,
-    image: legacy.sourceBuild.image, releaseBuild: base.input.releaseBuild }
   const spies = {
     source: vi.spyOn(sources, 'prepareRsiSourceWorkspace').mockResolvedValue(source),
     authorityRuntime: vi.spyOn(authorityRuntime, 'prepareRsiAuthorityRuntime').mockResolvedValue(base.input.runtime),
@@ -108,8 +98,6 @@ async function fixture() {
     cgroups: vi.spyOn(cgroups, 'discoverLinuxCgroupRoots').mockResolvedValue(native.cgroupRoots),
     prepareRelease: vi.spyOn(releases, 'prepareRsiReleaseBuildEnvironment').mockResolvedValue(nativeRelease),
     readRelease: vi.spyOn(releases, 'readRsiReleaseBuildEnvironment').mockResolvedValue(nativeRelease),
-    docker: vi.spyOn(dockerBuild, 'verifyRsiBuildEnvironmentReady').mockResolvedValue(legacy),
-    dockerCreation: vi.spyOn(dockerCreation, 'verifyRsiCreationBuildEnvironmentReady').mockResolvedValue(legacyCreation),
     // The default spy records the call and runs the real SQLite/seal helper.
     states: vi.spyOn(runnerState, 'prepareRsiLinuxRunnerStates'),
   }
@@ -131,18 +119,12 @@ async function fixture() {
     return bytes
   }
   const prepare = () => rsiInstallPorts.prepare(input, new AbortController().signal)
-  return { base, native, resources, source, input, linuxBase, nativeRelease, legacy, legacyCreation, legacyRelease,
+  return { base, native, resources, source, input, linuxBase, nativeRelease,
     spies, manifestInput, save, prepare }
 }
 function noNativePreparation(f: Awaited<ReturnType<typeof fixture>>): void {
   expect(f.spies.prepareBase).not.toHaveBeenCalled(); expect(f.spies.prepareRepository).not.toHaveBeenCalled()
   expect(f.spies.prepareCreation).not.toHaveBeenCalled(); expect(f.spies.prepareRelease).not.toHaveBeenCalled()
-}
-function noNative(f: Awaited<ReturnType<typeof fixture>>): void {
-  noNativePreparation(f)
-  expect(f.spies.readBase).not.toHaveBeenCalled(); expect(f.spies.readRepository).not.toHaveBeenCalled()
-  expect(f.spies.readCreation).not.toHaveBeenCalled(); expect(f.spies.cgroups).not.toHaveBeenCalled()
-  expect(f.spies.states).not.toHaveBeenCalled()
 }
 async function removeRole(f: Awaited<ReturnType<typeof fixture>>, role: keyof typeof roles): Promise<void> {
   const ref = f.native.runnerStates[role]!
@@ -164,7 +146,6 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0).sequential
     expect(f.spies.prepareCreation).toHaveBeenCalledOnce(); expect(f.spies.prepareRelease).toHaveBeenCalledOnce()
     expect(f.spies.readBase).not.toHaveBeenCalled(); expect(f.spies.readRepository).not.toHaveBeenCalled()
     expect(f.spies.readCreation).not.toHaveBeenCalled(); expect(f.spies.readRelease).not.toHaveBeenCalled()
-    expect(f.spies.docker).not.toHaveBeenCalled(); expect(f.spies.dockerCreation).not.toHaveBeenCalled()
     expect(f.spies.prepareRelease.mock.calls[0]![0].build).toEqual(f.linuxBase)
     expect(result.release).toEqual(f.nativeRelease)
     expect(result.build.sourceBuild).toEqual(f.native.sourceBuild)
@@ -184,7 +165,6 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0).sequential
     noNativePreparation(f)
     expect(f.spies.readBase).toHaveBeenCalledOnce(); expect(f.spies.readRepository).toHaveBeenCalledOnce()
     expect(f.spies.readCreation).toHaveBeenCalledOnce(); expect(f.spies.readRelease.mock.calls[0]![0].build).toEqual(f.linuxBase)
-    expect(f.spies.docker).not.toHaveBeenCalled(); expect(f.spies.dockerCreation).not.toHaveBeenCalled()
     expect(result.runnerStates).toEqual(f.native.runnerStates)
     expect(f.spies.states).toHaveBeenCalledWith(f.resources, { creation: true, revision: true }, manifest)
     expect(await treeIdentity(f.resources.stateRoot)).toEqual(before)
@@ -247,39 +227,6 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0).sequential
     expect(manifest.pluginRevision).toBeUndefined()
   })
 
-  test('existing Docker uses actual readiness entrypoints without any native branch', async () => {
-    const f = await fixture()
-    const { runnerStates: _states, ...legacyInput } = f.manifestInput
-    const manifest = createRsiBootstrapManifest({ ...legacyInput, sourceBuild: f.legacy.sourceBuild,
-      creationBuild: f.legacyCreation, enableRevision: false })
-    await f.save(manifest); f.spies.readRelease.mockResolvedValue(f.legacyRelease)
-    const result = await f.prepare()
-    noNative(f)
-    expect(f.spies.docker).toHaveBeenCalledOnce(); expect(f.spies.dockerCreation).toHaveBeenCalledOnce()
-    expect(f.spies.dockerCreation.mock.calls[0]![0].build).toEqual(f.legacy)
-    expect(f.spies.readRelease.mock.calls[0]![0].build).toEqual(f.legacy)
-    expect(result.build).toEqual(f.legacy); expect(result.creationBuild).toEqual(f.legacyCreation)
-    expect(result.release).toEqual(f.legacyRelease); expect(result.runnerStates).toBeUndefined()
-  })
-
-  test.each(['source', 'creation'] as const)('missing recorded Docker %s image is not-ready before services stop', async kind => {
-    const f = await fixture()
-    const { runnerStates: _states, ...legacyInput } = f.manifestInput
-    const manifest = createRsiBootstrapManifest({ ...legacyInput, sourceBuild: f.legacy.sourceBuild,
-      creationBuild: f.legacyCreation, enableRevision: false })
-    await f.save(manifest); f.spies.readRelease.mockResolvedValue(f.legacyRelease)
-    const error = new dockerBuild.RsiBuildUnavailableError(`${kind} image missing`)
-    if (kind === 'source') f.spies.docker.mockRejectedValueOnce(error)
-    else f.spies.dockerCreation.mockRejectedValueOnce(error)
-    const stop = vi.fn(async () => false), collect = vi.fn(async () => { throw new Error('unexpected installed input collection') })
-    const coordinator = vi.fn(async () => {})
-    const ports: RsiInstallPorts = { ...rsiInstallPorts, stop, collect, coordinator }
-    const profile = join(f.input.dshHome, 'profiles', f.input.profile, 'cordis.patch.yml'), before = await readFile(profile)
-    expect(await installRsiOwnerDeployment(f.input, ports)).toEqual({ mode: 'not-ready', reason: error.message })
-    expect(stop).not.toHaveBeenCalled(); expect(collect).not.toHaveBeenCalled(); expect(coordinator).not.toHaveBeenCalled()
-    expect(await readFile(profile)).toEqual(before); noNative(f)
-  })
-
   test('missing existing native repository fails without falling back to prepare', async () => {
     const f = await fixture(); await f.save(createRsiBootstrapManifest(f.manifestInput))
     const before = await treeIdentity(f.resources.stateRoot)
@@ -312,6 +259,6 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0).sequential
     await f.save(manifest)
     await expect(f.prepare()).rejects.toThrow('namespace')
     noNativePreparation(f)
-    expect(f.spies.readBase).not.toHaveBeenCalled(); expect(f.spies.docker).not.toHaveBeenCalled()
+    expect(f.spies.readBase).not.toHaveBeenCalled()
   })
 })

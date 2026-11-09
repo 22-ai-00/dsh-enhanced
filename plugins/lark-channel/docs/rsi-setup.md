@@ -10,7 +10,7 @@ Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完�
 
 macOS x64 / Apple Silicon 的 `supervised` 使用一个原生 Node Host，由当前登录用户的 launchd 管理。普通任务与认证反馈驱动持久记忆学习，以及 owner 命名空间内的新工具创建、独立行为验证和 Cordis 动态采用。候选构建和行为执行使用私有本机 Node 与 Seatbelt，独立 runner 保留有限额度及 unknown 结果；Host、聊天、模型与学习调度也运行在 macOS。此路径没有既有插件源码替换、发布和双 Host 交接授权；已有 Linux 源码修复轨保持原合同。
 
-使用已安装的独立 npm DSH CLI，并确保它是 `PATH` 中选中的 `dsh`。先确认 `/usr/bin/git --version` 可运行（Apple Command Line Tools）。安装器只复制冻结来源提交中的根清单、工作区包清单与锁文件，以固定摘要验证官方 Node 24.22.0 和 pnpm 11.7.0，使用私有无凭据环境执行 `--frozen-lockfile --ignore-scripts` 安装。此准备阶段可联网下载锁定依赖；候选构建和行为执行离线运行。私有运行时的节点、依赖树、来源提交与锁文件由回执固定，复跑核对全部内容，缺失或漂移时停止而不重建已授权的资产。macOS `--docker-path` 明确拒绝；无需 Docker Desktop 或 Docker socket。
+使用已安装的独立 npm DSH CLI，并确保它是 `PATH` 中选中的 `dsh`。先确认 `/usr/bin/git --version` 可运行（Apple Command Line Tools）。安装器只复制冻结来源提交中的根清单、工作区包清单与锁文件，以固定摘要验证官方 Node 24.22.0 和 pnpm 11.7.0，使用私有无凭据环境执行 `--frozen-lockfile --ignore-scripts` 安装。此准备阶段可联网下载锁定依赖；候选构建和行为执行离线运行。私有运行时的节点、依赖树、来源提交与锁文件由回执固定，复跑核对全部内容，缺失或漂移时停止而不重建已授权的资产。安装器已移除 `--docker-path`；无需 Docker Desktop 或 Docker socket。
 
 本地安装器的默认 `auto` 场景也会选择 supervised；已安装相同源码版本及所需包后，可重试：
 
@@ -60,7 +60,7 @@ Linux 全新 `--install-owner` 默认走原生完整能力：从基础 schema 3 
 
 首次授权前在 `state` 中初始化五个空 runner SQLite 账本，把目录/数据库的 dev、inode、固定 schema 与 seal 摘要绑定到各自配置。seal 文件在 `state/native-runner-states` 中，与 runner 目录分离。已有 manifest 的重试只读取原始引用；账本或目录缺失/替换、seal 缺失或内容漂移均拒绝，不清零额度、不重派 unknown。未使用的修订 runner 也必须保留其预初始化账本。主配置缺失时，首次安装模式还要求所有子账本无任何授权、controller、任务或审计历史，也无未结算 WAL；已使用的封存账本不能被当作新安装重新授权。该约束只保护显式带 `stateSeal` 的新配置；无 seal 的历史 generic runner 不能因此宣称已迁移。
 
-Linux 新安装默认准备原生离线构建运行时（sourceBuild schema 3，`backend: linux-native`），不调用 Docker CLI、daemon、socket，也不拉取镜像：按固定摘要从 nodejs.org 与 npm registry 下载官方 Node v22.23.2 和 pnpm 11.7.0，经私有 user/mount/PID/network 命名空间（bubblewrap）与无凭据环境先 `pnpm fetch --frozen-lockfile --ignore-scripts` 预取，再以 `--offline` 完成安装，随后的候选与发布构建全部离线运行。前置为 Linux x64/arm64、`/usr/bin/{git,curl,tar,bwrap,unshare,mount,bash,python3}` 可用，以及 bwrap 全命名空间隔离和有界 tmpfs 挂载探测通过；不满足这些环境前置时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。清单不完整、回执或内容漂移、网络失败等完整性错误始终致命，不由 `--optional-build` 掩盖；macOS 原生准备失败同样停止安装，已有资源不一致也会停止安装。迁移并存期间，显式传入绝对路径 `--docker-path` 仍走旧的不可变镜像准备路径，该路径沿用已验证的 Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；同一 profile 的原生回执与镜像回执互不续跑。
+Linux 新安装默认准备原生离线构建运行时（sourceBuild schema 3，`backend: linux-native`），不调用 Docker CLI、daemon、socket，也不拉取镜像：按固定摘要从 nodejs.org 与 npm registry 下载官方 Node v22.23.2 和 pnpm 11.7.0，经私有 user/mount/PID/network 命名空间（bubblewrap）与无凭据环境先 `pnpm fetch --frozen-lockfile --ignore-scripts` 预取，再以 `--offline` 完成安装，随后的候选与发布构建全部离线运行。前置为 Linux x64/arm64、`/usr/bin/{git,curl,tar,bwrap,unshare,mount,bash,python3}` 可用，以及 bwrap 全命名空间隔离和有界 tmpfs 挂载探测通过；不满足这些环境前置时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。清单不完整、回执或内容漂移、网络失败等完整性错误始终致命，不由 `--optional-build` 掩盖；macOS 原生准备失败同样停止安装，已有资源不一致也会停止安装。旧 Docker 镜像构建路径已下线；历史 Docker 回执仅只读解码用于迁移，不能与原生回执互续。
 
 支持的环境可单独运行严格构建准备：
 
@@ -71,7 +71,7 @@ Linux 新安装默认准备原生离线构建运行时（sourceBuild schema 3，
 
 `--prepare-build` 输出的是基础 schema 3 原生准备回执，不是 owner 执行授权。正式 `--install-owner` 另取 repository schema 4，并在 owner/原期限固定后编译 Control Plane 的 Linux sourceBuild，绑定完整运行时、双 UID、系统快照、资源限额与账本 seal。基础运行时仍用于导出 schema 2 `releaseBuild`：固定工具链、离线 store/cache 与 `runtimeDigest`，供既有发布 adapter 使用。创建、修订、回归及采用共享同族行为观察器与 cgroup，但使用独立账本和用途分离的签名授权。
 
-Linux 原生自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、8 GiB 工作区及 4 GiB 临时目录上限；两类目录各限 100 万 inode。宿主必须具备相应的委派和资源。原生边界见[运行时说明](../../../docs/dockerless-runtime.md)；旧 Docker 授权保留原 4 GiB 工作区、2 GiB 临时目录与[嵌套 sandbox 配置](../../../scripts/isolation/README.md#nested-sandbox-profile)。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
+Linux 原生自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、8 GiB 工作区及 4 GiB 临时目录上限；两类目录各限 100 万 inode。宿主必须具备相应的委派和资源。原生边界见[运行时说明](../../../docs/dockerless-runtime.md)；历史 Docker 授权保留原 4 GiB 工作区、2 GiB 临时目录与[嵌套 sandbox 配置](../../../scripts/isolation/README.md#nested-sandbox-profile)；该后端已不可新建或续跑，仅供迁移时只读解码。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier、Memory Learning 与 Control Plane。Memory 由 Personal Assistant 内嵌提供，不再添加独立 Memory bundle。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
@@ -151,15 +151,13 @@ macOS 本地 cohort 安装沿用冻结制品与安装文件校验，持同一个
 
 ```sh
 dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
-# 迁移并存期需要旧镜像收据时，可显式指定绝对路径：
-#   --docker-path /usr/bin/docker
 ```
 
 尚未安装 RSI owner 权限的旧冻结 profile 若缺少 Memory Learning，可在已审核并构建的 checkout 中显式追加 `--add-memory-learning`。它只允许这一根包扩展，生成独立 schema 2 候选；准备前后检查真实 pre-owner 权限与签名历史。后续 checkout 维护事务核验精确新增的默认 disabled、无 config 行及全部原配置，仍不启用 scheduler 或学习。原 schema 1 更新保持原 roots；已有 owner/coordinator 不支持这条扩展。具体命令与恢复边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 
 它从既有冻结收据读取源码路径，固定上游已提交 HEAD 和当前修复分支；两条修复 ref 必须已对齐。可直接快进时复用提交，分叉时在私有新仓库合并；冲突会停止准备并保留原始分支。上游的精确包版本可以不同于已安装版本，未提交修改不进入候选。源码、tarball 及准备收据保存在 Home 同级的私有 `.dsh-rsi-local-updates-<home-hash>/` 内；相同原始制品、上游和修复提交会复用已核验的准备结果，变化则使用另一目录。准备期间上游、原始收据或已安装包变化时不返回成功。
 
-Linux 更新构建默认准备摘要固定的原生运行时（schema 3，backend `linux-native`）：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，在受控无凭据环境中先 `pnpm fetch --frozen-lockfile --ignore-scripts` 再离线安装（依赖准备不执行仓库代码；候选执行另受 bubblewrap 隔离），并把运行时全树摘要写入候选 `rsi-linux-runtimes/<profile>/bootstrap.json`；随后导出同摘要工具链/store/cache 三树到 `rsi-release-builds`，输出 schema 2 release 收据（`runtimeDigest` 而非 image ID）。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。全程不调用 Docker CLI、daemon、socket 或镜像；前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时准备失败，运行时完整性错误始终致命。显式绝对路径 `--docker-path` 改用旧 manifest-only 镜像构建器（schema 1）；两类后端收据目录（`rsi-linux-runtimes` 与 `rsi-builds`）互斥、互不续跑，同一候选同时存在两类收据判为不可重放漂移。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装。尚无 owner/coordinator 的安装可显式使用[本地 checkout 维护事务](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)；已配置 owner 的冻结安装尚不支持完整升级。上述 pre-owner checkout 事务支持 Docker→native 和 native→native 的基础 runtime/release/cohort 迁移，保留原身份和 `host:null` 源码历史；混合后端、原生降级回 Docker 及 owner 专用资源会拒绝。已有 owner 的迁移使用独立授权与验收路径。激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。
+Linux 更新构建默认准备摘要固定的原生运行时（schema 3，backend `linux-native`）：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，在受控无凭据环境中先 `pnpm fetch --frozen-lockfile --ignore-scripts` 再离线安装（依赖准备不执行仓库代码；候选执行另受 bubblewrap 隔离），并把运行时全树摘要写入候选 `rsi-linux-runtimes/<profile>/bootstrap.json`；随后导出同摘要工具链/store/cache 三树到 `rsi-release-builds`，输出 schema 2 release 收据（`runtimeDigest` 而非 image ID）。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。全程不调用 Docker CLI、daemon、socket 或镜像；前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时准备失败，运行时完整性错误始终致命。旧 Docker 镜像构建器已下线；两类后端收据目录（`rsi-linux-runtimes` 与 `rsi-builds`）互斥，历史 Docker 收据只读解码用于迁移且不能续跑，同一候选同时存在两类收据判为不可重放漂移。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装。尚无 owner/coordinator 的安装可显式使用[本地 checkout 维护事务](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)；已配置 owner 的冻结安装尚不支持完整升级。上述 pre-owner checkout 事务支持 Docker→native 和 native→native 的基础 runtime/release/cohort 迁移，保留原身份和 `host:null` 源码历史；混合后端、原生降级回 Docker 及 owner 专用资源会拒绝。已有 owner 的迁移使用独立授权与验收路径。激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。
 
 安装事务可通过只读候选检查重新验证源提交、原安装、tarball、固定构建运行时和导出的工具链；它不会执行 Docker 或候选脚本，也不会补建丢失的资源。这里的构建资源检查证明本地记录和文件仍匹配，不证明旧 Docker 镜像当前可运行，也不重新下载或修复原生运行时。源码维护 helper 在独立 Home 副本中导入新提交、更新受管 refs，并保留最初 bootstrap、Git 对象及 `baseline.initialCommit`；既有 Host 密钥签名的 `maintenance.json` 使后续源码读取和候选准备解析到新版本。Control Plane schema 28 将该维护记录与旧 release 收据一起校验，拒绝未结源码任务、断链、旧 tip 或不匹配的 Host 身份。它是完整升级事务的内部接口，尚未开放为直接替换运行中 Agent 的命令；协议边界见[兼容性说明](../../../docs/compatibility.md#本地源码维护历史control-plane-schema-28)。
 

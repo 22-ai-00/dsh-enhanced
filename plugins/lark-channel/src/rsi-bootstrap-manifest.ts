@@ -7,14 +7,12 @@ import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap
 
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { Pin, RsiAuthorityRuntime } from './rsi-authority-runtime.js'
-import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { createRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
 import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
-import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import { compileRsiLinuxSourceBuild, type RsiLinuxSourceBuildPreparation } from './rsi-linux-source-build.js'
@@ -29,9 +27,9 @@ const mutableRows = new Set(['dsh-enhanced-personal-assistant', 'dsh-enhanced-as
   'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-plugin-control-plane'])
 const day = 86_400_000
 
-export type RsiBootstrapSourceBuild = RsiBuildEnvironment['sourceBuild'] | RsiLinuxSourceBuildPreparation
+export type RsiBootstrapSourceBuild = RsiLinuxSourceBuildPreparation
 
-export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild = RsiBuildEnvironment['sourceBuild']> {
+export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild = RsiLinuxSourceBuildPreparation> {
   dshHome: string
   targetProfile: string
   coordinatorProfile: string
@@ -43,7 +41,7 @@ export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild
   source: RsiSourceWorkspace
   sourceBuild: Build
   /** Prepared immutable behavior environment; absent for legacy manifests. */
-  creationBuild?: RsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
+  creationBuild?: LinuxRsiCreationBuildEnvironment
   /** A retry explicitly preserves the original revision opt-in. */
   enableRevision?: boolean
   /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
@@ -156,7 +154,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   canonical(input.owner.workspace, 'owner workspace')
   if (!input.resources || input.resources.schemaVersion !== 1 || !input.runtime || input.runtime.schemaVersion !== 1
     || !input.source || input.source.schemaVersion !== 1 || !input.sourceBuild
-    || !('backend' in input.sourceBuild) && input.sourceBuild.versioning !== 'patch'
+    || input.sourceBuild.backend !== 'linux-native'
     || input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean'
     || input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
     || input.intakeProvider !== undefined && typeof input.intakeProvider !== 'string'
@@ -267,21 +265,18 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   } else if (input.intakeProvider !== undefined || input.intakeModel !== undefined) {
     fail('an explicit intake route requires enableOrdinaryUseLearning')
   }
-  const nativeBuild = 'backend' in input.sourceBuild ? input.sourceBuild : undefined
-  const enableRevision = input.enableRevision ?? (nativeBuild !== undefined && input.creationBuild !== undefined)
-  if (nativeBuild && !input.runnerStates) fail('native installation requires frozen runner states')
-  if (!nativeBuild && input.runnerStates) fail('runner states require the native backend')
-  const runnerStates = nativeBuild ? validateRsiLinuxRunnerStates(input.resources, {
-    sourceBuild: input.runnerStates!.sourceBuild,
-    ...(input.creationBuild ? { creationReview: input.runnerStates!.creationReview!, creationAdoption: input.runnerStates!.creationAdoption! } : {}),
-    ...(enableRevision ? { revisionReview: input.runnerStates!.revisionReview!, revisionRegression: input.runnerStates!.revisionRegression! } : {}),
+  const enableRevision = input.enableRevision ?? (input.creationBuild !== undefined)
+  if (!input.runnerStates) fail('native installation requires frozen runner states')
+  const runnerStates = validateRsiLinuxRunnerStates(input.resources, {
+    sourceBuild: input.runnerStates.sourceBuild,
+    ...(input.creationBuild ? { creationReview: input.runnerStates.creationReview!, creationAdoption: input.runnerStates.creationAdoption! } : {}),
+    ...(enableRevision ? { revisionReview: input.runnerStates.revisionReview!, revisionRegression: input.runnerStates.revisionRegression! } : {}),
   }, {
     creation: input.creationBuild !== undefined, revision: enableRevision,
-  }) : undefined
-  const sourceBuild = nativeBuild ? compileRsiLinuxSourceBuild({ prepared: nativeBuild,
+  })
+  const sourceBuild = compileRsiLinuxSourceBuild({ prepared: input.sourceBuild,
     resources: input.resources, source: input.source, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
-    stateSeal: runnerStates!.sourceBuild })
-    : input.sourceBuild as RsiBuildEnvironment['sourceBuild']
+    stateSeal: runnerStates.sourceBuild })
 
   const personal = rows.get('dsh-enhanced-personal-assistant')
   if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant') fail('effective personal assistant is missing')
@@ -356,7 +351,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       catalogPath: input.resources.catalog.path, statePath: join(state, 'control-plane'), trustPath: join(config, 'trust.json'),
       sourceBuild: { ...sourceBuild },
       sourceJobs: { authorityId: `source-jobs-${installation}`, expiresAt: input.expiresAt,
-        maxSubmissions: nativeBuild ? 48 : 1000,
+        maxSubmissions: 48,
         repository: input.source.repository, baseline: { ...input.source.baseline }, ...scope,
         budgetId: `rsi-source-${installation}`, budgetAmount: 1 },
       sourceApprovals: client('approval'), sourceReleases: client('release'), sourceReleaseExecution: releaseConfig,
@@ -396,17 +391,14 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   }
   if (input.creationBuild) {
     if (input.creationBuild.sourceCommit !== input.source.sourceCommit) fail('creation environment differs from approved source build')
-    if (input.creationBuild.schemaVersion === 3) {
-      if (!nativeBuild || input.creationBuild.backend !== 'linux-native'
-        || input.creationBuild.buildRuntimeDigest !== linuxRuntimeDigest(nativeBuild.repository.runtime)
-        || input.creationBuild.behavior.runtime.sourceCommit !== input.source.sourceCommit
-        || input.creationBuild.behavior.runtime.lockSha256 !== nativeBuild.repository.lockSha256
-        || input.creationBuild.behavior.runtime.root.path !== join(state, 'linux-creation-behavior', 'runtime')
-        || !isDeepStrictEqual(input.creationBuild.cgroupRoots, nativeBuild.cgroupRoots)) {
-        fail('creation runtime differs from approved repository build')
-      }
-    } else if ('backend' in sourceBuild || input.creationBuild.sourceImage !== sourceBuild.image
-      || input.creationBuild.dockerPath !== sourceBuild.dockerPath) fail('creation image differs from approved source build')
+    if (input.creationBuild.backend !== 'linux-native'
+      || input.creationBuild.buildRuntimeDigest !== linuxRuntimeDigest(input.sourceBuild.repository.runtime)
+      || input.creationBuild.behavior.runtime.sourceCommit !== input.source.sourceCommit
+      || input.creationBuild.behavior.runtime.lockSha256 !== input.sourceBuild.repository.lockSha256
+      || input.creationBuild.behavior.runtime.root.path !== join(state, 'linux-creation-behavior', 'runtime')
+      || !isDeepStrictEqual(input.creationBuild.cgroupRoots, input.sourceBuild.cgroupRoots)) {
+      fail('creation runtime differs from approved repository build')
+    }
     const creation = createRsiPluginCreationSetup({ resources: input.resources, build: input.creationBuild,
       owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
       ...(runnerStates ? { stateSeals: { review: runnerStates.creationReview!, adoption: runnerStates.creationAdoption! } } : {}) })
@@ -417,7 +409,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     manifest.growthDriver.pluginSourceProposals!.allowCreation = true
   }
   if (enableRevision) {
-    if (!nativeBuild || input.creationBuild?.schemaVersion !== 3 || !manifest.pluginCreation) {
+    if (!input.creationBuild || !manifest.pluginCreation) {
       fail('revision requires the complete native creation and adoption setup')
     }
     const revision = createRsiPluginRevisionSetup({ resources: input.resources, build: input.creationBuild,
@@ -429,7 +421,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     manifest.controlPlane.revisionRegressions = revision.regressionVerifications
     manifest.growthDriver.pluginSourceProposals!.allowRevision = true
   }
-  if (nativeBuild) manifest.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild),
+  manifest.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild),
     ...(input.creationBuild?.schemaVersion === 3 ? { behaviorRuntimeDigest: controlPlaneDigest(input.creationBuild.behavior) } : {}) }
   // Delivery, Growth and Verifier final options are determined by compileRsiProfiles.
   // Observe their final raw Loader options, not the pre-install dump. Neither

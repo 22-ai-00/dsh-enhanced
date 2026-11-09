@@ -8,8 +8,9 @@ import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { assertRsiMemoryScanActivation, installRsiOwnerDeployment, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
-import { RsiBuildUnavailableError, type RsiBuildEnvironment } from '../src/rsi-build.js'
 import { RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
+import { LinuxRsiRuntimeUnavailableError } from '../src/rsi-linux-runtime-bootstrap.js'
+import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 import { nativePreparedFixture } from './fixtures/rsi-linux-install.js'
 
@@ -49,11 +50,14 @@ async function fixture() {
   // Refresh only at DSH composition boundaries, as the real CLI would do.
   const actualCompile = setup.compile
   setup.compile = async value => { const result = await actualCompile(value); return result }
+  const native = await nativePreparedFixture(f.input.resources, f.input.source)
+  const release = { schemaVersion: 2 as const, backend: 'linux-native' as const,
+    sourceCommit: f.input.source.sourceCommit, runtimeDigest: linuxRuntimeDigest(native.repository.runtime),
+    releaseBuild: f.input.releaseBuild }
   const ports: RsiInstallPorts = { ...rsiInstallPorts, setup,
     prepare: vi.fn(async () => ({ source:f.input.source, runtime:f.input.runtime,resources:f.input.resources,
-      build:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,
-        sourceBuild:f.input.manifest.controlPlane.sourceBuild! as RsiBuildEnvironment['sourceBuild']},
-      release:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,image:'sha256:'+'a'.repeat(64),releaseBuild:f.input.releaseBuild} })),
+      build:{ sourceBuild: native.sourceBuild }, creationBuild: native.creationBuild,
+      runnerStates: native.runnerStates, release })),
     collect: vi.fn(async value => ({ dsh:{root:'/fixture/dsh',path:f.input.executor.path,version:f.input.executor.version,pin:f.input.executor},
       executor:f.input.executor,git:f.input.manifest.sourceReviews.git,systemctl:f.input.systemctl,
       plugins:[...f.input.manifest.sourceReviews.plugins],policies:f.input.policies,
@@ -118,19 +122,10 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
 
   test('rejects persisted creation, receipt and grant file drift before either Host is stopped', async () => {
     const f = await fixture()
-    for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
-      await mkdir(join(f.f.input.resources.stateRoot, name), { mode: 0o700 })
-    }
-    const prepared = await f.ports.prepare(f.input, new AbortController().signal)
-    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
-    vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, creationBuild: {
-      schemaVersion: 1, sourceCommit: prepared.source.sourceCommit,
-      sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
-      dockerPath: prepared.build.sourceBuild.dockerPath } })
     expect((await installRsiOwnerDeployment(f.input, f.ports)).mode).toBe('ready')
     const config = f.f.input.resources.configRoot
     const cases = [
-      { name: 'manifest.json', change: (value: any) => { value.pluginCreation.reviews.runner.image = `sha256:${'c'.repeat(64)}` } },
+      { name: 'manifest.json', change: (value: any) => { value.pluginCreation.reviews.runner.runtime.sourceCommit = 'c'.repeat(40) } },
       { name: 'bootstrap.json', change: (value: any) => { value.planDigest = '0'.repeat(64) } },
       { name: 'adoption.json', change: (value: any) => { value.unrecognized = true } },
     ]
@@ -146,21 +141,12 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
   }, 120_000)
   test('installs a complete created-tool grant once and reuses its exact terms on restart', async () => {
     const f = await fixture()
-    for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
-      await mkdir(join(f.f.input.resources.stateRoot, name), { mode: 0o700 })
-    }
-    const prepared = await f.ports.prepare(f.input, new AbortController().signal)
-    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
-    const creationBuild = { schemaVersion: 1 as const, sourceCommit: prepared.source.sourceCommit,
-      sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
-      dockerPath: prepared.build.sourceBuild.dockerPath }
-    vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, creationBuild })
     const first = await installRsiOwnerDeployment(f.input, f.ports)
     expect(first.mode).toBe('ready')
     const path = join(f.f.input.resources.configRoot, 'manifest.json')
     const bytes = await readFile(path, 'utf8')
     const manifest = JSON.parse(bytes)
-    expect(manifest.pluginCreation.reviews.runner.image).toBe(creationBuild.image)
+    expect(manifest.pluginCreation.reviews.runner).toMatchObject({ backend: 'linux-native' })
     expect(manifest.growthDriver.pluginSourceProposals.allowCreation).toBe(true)
     const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{ id: string; config: Record<string, any> }>
     expect(rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.creationReviews).toEqual(manifest.pluginCreation.reviews)
@@ -200,7 +186,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     expect(first.mode).toBe('ready')
     expect(f.starts).toEqual([f.coordinator,f.profile])
     const manifest = await readFile(join(f.f.input.resources.configRoot,'manifest.json'),'utf8')
-    expect(JSON.parse(manifest).pluginCreation).toBeUndefined()
+    expect(JSON.parse(manifest).pluginCreation).toBeDefined()
     const appliedRows = parse(await readFile(join(f.home,'profiles',f.profile,'cordis.patch.yml'),'utf8')) as Array<{id:string;config:Record<string,any>}>
     const appliedDelivery = appliedRows.find(row => row.id === delivery.id)!.config
     expect(appliedDelivery.ownerRoutes).toHaveLength(1)
@@ -217,14 +203,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     journal.stage = 'prepared'
     await writeFile(journalPath,JSON.stringify(journal),{mode:0o600})
     await writeFile(join(f.home,'profiles',f.coordinator,'cordis.patch.yml'),journal.entries[1]!.before,{mode:0o600})
-    // Even if new build resources are available, replay must preserve a legacy
-    // installation's authorization scope rather than enable created plugins.
-    const prepared = await f.ports.prepare(f.input, new AbortController().signal)
-    if ('backend' in prepared.build.sourceBuild) throw new Error('expected legacy Docker fixture')
-    vi.mocked(f.ports.prepare).mockResolvedValue({ ...prepared, creationBuild: {
-      schemaVersion: 1, sourceCommit: prepared.source.sourceCommit,
-      sourceImage: prepared.build.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
-      dockerPath: prepared.build.sourceBuild.dockerPath } })
+    // Replay must preserve the frozen native authorization scope and terms.
     const second = await installRsiOwnerDeployment(f.input,f.ports)
     expect(second).toEqual(first)
     expect(await readFile(join(f.f.input.resources.configRoot,'manifest.json'),'utf8')).toBe(manifest)
@@ -279,8 +258,8 @@ process.exit(first ? 9 : 0);
   })
   test('missing build prerequisites leave ordinary installation running and do not issue grants', async () => {
     const f = await fixture()
-    f.ports.prepare = vi.fn(async () => { throw new RsiBuildUnavailableError('Docker unavailable') })
-    expect(await installRsiOwnerDeployment(f.input,f.ports)).toEqual({mode:'not-ready',reason:'rsi build unavailable: Docker unavailable'})
+    f.ports.prepare = vi.fn(async () => { throw new LinuxRsiRuntimeUnavailableError('runtime unavailable') })
+    expect(await installRsiOwnerDeployment(f.input,f.ports)).toEqual({mode:'not-ready',reason:'rsi Linux runtime unavailable: runtime unavailable'})
     expect(f.stops).toEqual([])
     expect(f.ports.coordinator).not.toHaveBeenCalled()
   },120_000)

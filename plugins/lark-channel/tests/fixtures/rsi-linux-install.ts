@@ -9,24 +9,16 @@ import type { RsiLinuxSourceBuildPreparation } from '../../src/rsi-linux-source-
 import type { RsiSourceWorkspace } from '../../src/rsi-source.js'
 import { prepareRsiLinuxRunnerStates, type RsiLinuxRunnerStates } from '../../src/rsi-linux-runner-states.js'
 
-/** Shape-valid descriptors and private runner directories only. These are not
- * real toolchain bytes, kernel allocations or evidence of native readiness. */
-export async function nativePreparedFixture(resources: RsiAuthorityResources, source: RsiSourceWorkspace): Promise<{
+/** Shape-valid descriptors only. They are not real toolchain bytes, kernel
+ * allocations or evidence of native readiness, and do not touch the host. */
+export function nativeDescriptors(resources: RsiAuthorityResources, source: RsiSourceWorkspace): {
   repository: LinuxRsiRepositoryBuildEnvironment
   cgroupRoots: LinuxV1CgroupRoots
   sourceBuild: RsiLinuxSourceBuildPreparation
   creationBuild: LinuxRsiCreationBuildEnvironment
-  runnerStates: RsiLinuxRunnerStates
-}> {
+} {
   const ownerUid = process.getuid?.(), ownerGid = process.getgid?.()
-  if (process.platform !== 'linux' || ownerUid === undefined || ownerGid === undefined || ownerUid === 0) {
-    throw new Error('native descriptor fixture requires non-root Linux')
-  }
-  for (const name of ['linux-source-build-runner', 'creation-review-runner', 'creation-adoption-runner',
-    'revision-review-runner', 'revision-regression-runner']) {
-    const path = join(resources.stateRoot, name)
-    await mkdir(path, { recursive: true, mode: 0o700 }); await chmod(path, 0o700)
-  }
+  if (ownerUid === undefined || ownerGid === undefined) throw new Error('native descriptor fixture requires POSIX uid/gid')
   const family = join(dirname(dirname(resources.root)), 'rsi-linux-repository-runtimes', basename(resources.root))
   const runtimeAt = (root: string, ino: number): LinuxRuntime => ({ schemaVersion: 1, backend: 'linux-native',
     platform: `linux-${process.arch}` as LinuxRuntime['platform'], sourceCommit: source.sourceCommit, lockSha256: 'b'.repeat(64),
@@ -50,6 +42,28 @@ export async function nativePreparedFixture(resources: RsiAuthorityResources, so
       observer: { schemaVersion: 1, sourceSha256: '1'.repeat(64), workerSha256: '2'.repeat(64), candidateSha256: '3'.repeat(64),
         launcherSha256: '4'.repeat(64), parentProtectSha256: '5'.repeat(64), childProtectSha256: '6'.repeat(64) } },
     cgroupRoots: structuredClone(cgroupRoots) }
+  return { repository, cgroupRoots, creationBuild, sourceBuild: { backend: 'linux-native', repository, cgroupRoots } }
+}
+
+/** Shape-valid descriptors and private runner directories only. These are not
+ * real toolchain bytes, kernel allocations or evidence of native readiness. */
+export async function nativePreparedFixture(resources: RsiAuthorityResources, source: RsiSourceWorkspace): Promise<{
+  repository: LinuxRsiRepositoryBuildEnvironment
+  cgroupRoots: LinuxV1CgroupRoots
+  sourceBuild: RsiLinuxSourceBuildPreparation
+  creationBuild: LinuxRsiCreationBuildEnvironment
+  runnerStates: RsiLinuxRunnerStates
+}> {
+  const ownerUid = process.getuid?.(), ownerGid = process.getgid?.()
+  if (process.platform !== 'linux' || ownerUid === undefined || ownerGid === undefined || ownerUid === 0) {
+    throw new Error('native descriptor fixture requires non-root Linux')
+  }
+  for (const name of ['linux-source-build-runner', 'creation-review-runner', 'creation-adoption-runner',
+    'revision-review-runner', 'revision-regression-runner']) {
+    const path = join(resources.stateRoot, name)
+    await mkdir(path, { recursive: true, mode: 0o700 }); await chmod(path, 0o700)
+  }
+  const descriptors = nativeDescriptors(resources, source)
   const runnerStates = await prepareRsiLinuxRunnerStates(resources, { creation: true, revision: true })
-  return { repository, cgroupRoots, creationBuild, sourceBuild: { backend: 'linux-native', repository, cgroupRoots }, runnerStates }
+  return { ...descriptors, runnerStates }
 }

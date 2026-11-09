@@ -2,8 +2,7 @@ import { lstat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { prepareRsiBuildEnvironment, rsiBuildResources as io,
-  readRsiBuildEnvironment, type RsiBuildEnvironment } from './rsi-build.js'
+import { rsiBuildResources as io, readRsiBuildEnvironment, type LegacyDockerSourceBuildEnvironment } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment,
   type PreparedReleaseBuildEnvironment } from './rsi-release-build.js'
 import { prepareLinuxRsiRuntime, readLinuxRsiRuntime,
@@ -11,7 +10,7 @@ import { prepareLinuxRsiRuntime, readLinuxRsiRuntime,
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import type { RsiLocalCohortPorts } from './rsi-local-cohort.js'
 
-export type LocalUpdateSourceBuild = RsiBuildEnvironment | LinuxRsiBuildEnvironment
+export type LocalUpdateSourceBuild = LegacyDockerSourceBuildEnvironment | LinuxRsiBuildEnvironment
 export interface RsiLocalUpdateBuildEvidence {
   sourceBuild: LocalUpdateSourceBuild
   releaseBuild: PreparedReleaseBuildEnvironment
@@ -30,17 +29,14 @@ async function loadAdapter(): Promise<{ adapterPath: string }> {
 /** Only the digest-pinned manifest/runtime preparation runs on the host. Updated
  * repository build/pack scripts run with the release adapter's existing offline
  * bwrap mounts, without the live Home, source Git directories or credentials.
- * Linux prepares the schema 3 native runtime by default; an explicit absolute
- * --docker-path keeps the legacy image builder available during coexistence. */
+ * Linux always prepares the schema 3 native runtime; the Docker image backend
+ * is no longer available. */
 export async function prepareRsiLocalUpdateBuild(input: {
   dshHome: string; profile: string; source: RsiSourceWorkspace; signal: AbortSignal
-  dockerPath?: string
 }): Promise<{ ports: RsiLocalCohortPorts; evidence: RsiLocalUpdateBuildEvidence }> {
   const { adapterPath } = await loadAdapter()
-  const build: LocalUpdateSourceBuild = process.platform === 'linux' && !input.dockerPath
-    ? await prepareLinuxRsiRuntime({ dshHome: input.dshHome, profile: input.profile,
-      source: input.source, signal: input.signal })
-    : await prepareRsiBuildEnvironment(input)
+  const build: LocalUpdateSourceBuild = await prepareLinuxRsiRuntime({ dshHome: input.dshHome,
+    profile: input.profile, source: input.source, signal: input.signal })
   const release = await prepareRsiReleaseBuildEnvironment({ dshHome: input.dshHome,
     profile: input.profile, build, signal: input.signal })
   const ports: RsiLocalCohortPorts = { build: async (workspace, output, packagePaths, signal) => {
@@ -66,8 +62,9 @@ async function present(path: string): Promise<boolean> {
 /** Read the signed source build of a prepared candidate Home without creating
  * resources. Exactly one backend tree may exist: the native schema 3 runtime
  * under rsi-linux-runtimes or the legacy Docker schema 1 receipt under
- * rsi-builds. A candidate that somehow contains both is unreplayable drift, and
- * a Docker plan can never be continued by a native receipt or the reverse. */
+ * rsi-builds. The Docker tree is decoded read-only for a historical
+ * Linux-native migration; it can never be resumed or executed. A candidate
+ * that contains both is unreplayable drift. */
 export async function readRsiLocalUpdateSourceBuild(input: {
   dshHome: string; profile: string; source: RsiSourceWorkspace; signal?: AbortSignal
 }): Promise<LocalUpdateSourceBuild> {

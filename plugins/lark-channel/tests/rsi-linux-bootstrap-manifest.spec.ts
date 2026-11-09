@@ -156,13 +156,15 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('complete 
     }
   })
 
-  test('bootstrap rejects mixed Docker and native families or revision without creation', () => {
-    const docker = ctx.base.input.manifest.controlPlane.sourceBuild!
-    if ('backend' in docker) throw new Error('expected legacy Docker fixture')
-    expect(() => createRsiBootstrapManifest({ ...ctx.input, sourceBuild: { ...docker, versioning: 'patch' } })).toThrow('runner states require')
+  test('bootstrap rejects a historical Docker build family without an explicit native migration', () => {
+    const dockerSourceBuild = { dockerPath: '/usr/bin/docker', image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+      memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' as const }
+    expect(() => createRsiBootstrapManifest({ ...ctx.input,
+      sourceBuild: dockerSourceBuild as unknown as RsiLinuxSourceBuildPreparation })).toThrow('prepared RSI inputs are incomplete')
     expect(() => createRsiBootstrapManifest({ ...ctx.input, creationBuild: { schemaVersion: 1,
-      sourceCommit: ctx.input.source.sourceCommit, sourceImage: docker.image, image: 'sha256:' + 'a'.repeat(64),
-      dockerPath: docker.dockerPath } })).toThrow('creation image')
+      sourceCommit: ctx.input.source.sourceCommit, sourceImage: dockerSourceBuild.image,
+      image: 'sha256:' + 'a'.repeat(64), dockerPath: dockerSourceBuild.dockerPath,
+    } as unknown as LinuxRsiCreationBuildEnvironment })).toThrow('creation runtime differs')
     const incomplete = { ...ctx.input, enableRevision: true }; delete incomplete.creationBuild
     expect(() => createRsiBootstrapManifest(incomplete)).toThrow(/revision.*creation/u)
   })

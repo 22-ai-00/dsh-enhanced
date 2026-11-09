@@ -173,17 +173,9 @@ test('CLI preparation derives the existing source and cannot be combined with ac
   for (const flags of [[], ['--install-owner'], ['--install-local-cohort'], ['--apply']]) {
     expect(() => parseRsiSetupArgs([...flags, '--add-memory-learning'])).toThrow('requires --prepare-local-update')
   }
-  // Linux defaults to the native runtime; an explicit absolute --docker-path is
-  // the only way to keep preparing a legacy image receipt.
-  if (process.platform === 'darwin') {
-    expect(() => parseRsiSetupArgs([...base, '--docker-path', '/usr/bin/docker']))
-      .toThrow('--docker-path is not supported by macOS')
-  } else {
-    expect(parseRsiSetupArgs([...base, '--docker-path', '/usr/bin/docker']))
-      .toMatchObject({ dockerPath: '/usr/bin/docker' })
-  }
-  expect(() => parseRsiSetupArgs([...base, '--docker-path', 'relative']))
-    .toThrow(process.platform === 'darwin' ? '--docker-path is not supported by macOS' : '--docker-path must be absolute')
+  // The removed Docker image backend is not a CLI option anymore.
+  expect(() => parseRsiSetupArgs([...base, '--docker-path', '/usr/bin/docker']))
+    .toThrow('unknown option --docker-path')
 })
 
 test('local update source build reader dispatches on mutually exclusive receipt trees', async () => {
@@ -205,22 +197,13 @@ test('local update source build reader dispatches on mutually exclusive receipt 
   expect(docker).toHaveBeenCalledTimes(1)
 })
 
-test.skipIf(process.platform !== 'linux')('Linux local update builder uses the native runtime unless an explicit docker path is given', async () => {
+test('local update builder always selects the native runtime', async () => {
   const home = await mkdtemp(join(tmpdir(), 'rsi-lub-build-')); roots.push(home)
   const native = vi.spyOn(linuxBootstrap, 'prepareLinuxRsiRuntime')
     .mockRejectedValue(new Error('native backend selected'))
-  const docker = vi.spyOn(sourceBuild, 'prepareRsiBuildEnvironment')
-    .mockRejectedValue(new Error('docker backend selected'))
   const input = { dshHome: home, profile: 'web', source: { sourceCommit: 'x' } as never, signal: AbortSignal.timeout(5_000) }
   await expect(prepareRsiLocalUpdateBuild(input)).rejects.toThrow('native backend selected')
   expect(native).toHaveBeenCalledTimes(1)
-  expect(docker).not.toHaveBeenCalled()
-  vi.clearAllMocks()
-  await expect(prepareRsiLocalUpdateBuild({ ...input, dockerPath: '/usr/bin/docker' }))
-    .rejects.toThrow('docker backend selected')
-  expect(docker).toHaveBeenCalledTimes(1)
-  expect(docker.mock.calls[0]![0]).toMatchObject({ dockerPath: '/usr/bin/docker' })
-  expect(native).not.toHaveBeenCalled()
 })
 
 linuxTest('explicit pre-owner extension freezes exactly one disabled bundle without changing the installed Home', async () => {

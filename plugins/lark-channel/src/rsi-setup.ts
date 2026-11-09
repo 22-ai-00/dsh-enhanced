@@ -14,7 +14,6 @@ import { assertRsiSchedulerActivation, captureRsiAutomationInventories, rsiAutom
   rsiDatabasePaths, type RsiAutomationInventories, type RsiAutomationInventory } from './rsi-owner-profile.js'
 import { installDshResidentService } from './resident.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
 import { prepareLinuxRsiRuntime, LinuxRsiRuntimeUnavailableError } from './rsi-linux-runtime-bootstrap.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
@@ -66,7 +65,7 @@ export function assertRsiEffectivePatch(patch: string, effective: string): void 
 export interface RsiSetupArgs {
   manifestPath: string; dshHome: string; apply: boolean; rollback: boolean; start: boolean; confirmStopped: boolean; help: boolean
   prepareSource?: boolean; profile?: string; sourceRepository?: string
-  prepareBuild?: boolean; optionalBuild?: boolean; dockerPath?: string
+  prepareBuild?: boolean; optionalBuild?: boolean
   prepareAuthorities?: boolean
   installOwner?: boolean
   /** Read-only onboarding wait: poll until the owner's first Lark DM binding exists. */
@@ -116,14 +115,13 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
       ;(result.bundles ??= []).push(value)
     }
     else if (key === '--optional-build') result.optionalBuild = true
-    else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository' || key === '--docker-path'
+    else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository'
       || key === '--intake-provider' || key === '--intake-model') {
       const value = argv[++i]
       if (!value || value.startsWith('--')) fail(`${key} needs a value`)
       if (key === '--manifest') result.manifestPath = resolve(value!)
       else if (key === '--profile') result.profile = value
       else if (key === '--source-repository') result.sourceRepository = value
-      else if (key === '--docker-path') result.dockerPath = value
       else if (key === '--intake-provider') result.intakeProvider = value
       else if (key === '--intake-model') result.intakeModel = value
       else result.dshHome = value!
@@ -138,7 +136,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   if (result.timeoutSeconds !== undefined && !result.waitOwnerDm) fail('--timeout-seconds requires --wait-owner-dm')
   if (result.waitOwnerDm) {
     if (result.manifestPath || result.apply || result.rollback || result.start || result.confirmStopped || result.installOwner
-      || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.optionalBuild || result.dockerPath
+      || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.optionalBuild
       || result.sourceRepository || result.ackExistingAutomations || result.installLocalCohort || result.bundles
       || result.prepareLocalUpdate || result.addMemoryLearning || result.enableOrdinaryUseLearning
       || result.intakeProvider || result.intakeModel) {
@@ -156,25 +154,21 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
       || result.confirmStopped || result.optionalBuild || result.bundles) fail('local update preparation cannot be combined with other operations')
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('local update preparation requires --profile and absolute DSH_HOME')
     if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
-    // Linux defaults to the native runtime; an explicit absolute --docker-path
-    // keeps a legacy image receipt replayable during coexistence.
-    if (result.dockerPath && process.platform === 'darwin') fail('--docker-path is not supported by macOS native build preparation')
-    if (result.dockerPath && !isAbsolute(result.dockerPath)) fail('--docker-path must be absolute')
     return result
   }
   if (result.bundles && !result.installLocalCohort) fail('--bundle requires --install-local-cohort')
   if (result.installLocalCohort) {
     if (result.installOwner || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath
-      || result.apply || result.rollback || result.start || result.confirmStopped || result.optionalBuild || result.dockerPath) fail('local cohort installation cannot be combined with other operations')
+      || result.apply || result.rollback || result.start || result.confirmStopped || result.optionalBuild) fail('local cohort installation cannot be combined with other operations')
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)
       || !result.sourceRepository || !isAbsolute(result.sourceRepository) || !result.bundles?.length
       || new Set(result.bundles).size !== result.bundles.length) fail('local cohort installation requires a profile, absolute source repository and unique bundles')
     return result
   }
-  if ((result.optionalBuild || result.dockerPath) && !result.prepareBuild) fail('--optional-build and --docker-path require --prepare-build')
+  if (result.optionalBuild && !result.prepareBuild) fail('--optional-build requires --prepare-build')
   if (result.installOwner) {
     if (result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath || result.apply
-      || result.rollback || result.start || result.confirmStopped || result.optionalBuild || result.dockerPath) fail('owner installation cannot be combined with other operations')
+      || result.rollback || result.start || result.confirmStopped || result.optionalBuild) fail('owner installation cannot be combined with other operations')
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('owner installation requires --profile and absolute DSH_HOME')
     if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
     return result
@@ -185,8 +179,6 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('resource preparation requires --profile and absolute DSH_HOME')
     if (result.prepareAuthorities && result.sourceRepository) fail('--source-repository requires --prepare-source or --prepare-build')
     if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
-    if (result.dockerPath && process.platform === 'darwin') fail('--docker-path is not supported by macOS native build preparation')
-    if (result.dockerPath && !isAbsolute(result.dockerPath)) fail('--docker-path must be absolute')
     return result
   }
   if (result.profile || result.sourceRepository) fail('--profile and --source-repository require --prepare-source, --prepare-build or --prepare-authorities')
@@ -469,7 +461,7 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
 
 /** Internal installer entry: caller already owns the DSH_HOME lifecycle lock. */
 export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetupPorts = rsiSetupPorts): Promise<{ mode: string; profiles: readonly string[] }> {
-  if (args.prepareLocalUpdate || args.installLocalCohort || args.bundles || args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
+  if (args.prepareLocalUpdate || args.installLocalCohort || args.bundles || args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
@@ -598,9 +590,9 @@ sleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) => new
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations] [--enable-ordinary-use-learning [--intake-provider <id> --intake-model <id>]]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\n--enable-ordinary-use-learning is accepted only with --install-owner and only on a fresh profile: it emits the observe-only intake evaluator (rules plus the Delivery or explicit provider/model) and the flagged memory grants. A retry preserves the stored opt-in and never expands an existing installation; no admission, revision key or Growth failure pin is added.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime by default and exports its release toolchain/store/cache (--docker-path instead prepares the legacy offline image); --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
-    process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --docker-path is rejected and --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
-    process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning] [--docker-path <absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. Linux builds with the native runtime by default; --docker-path keeps the legacy image builder. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations] [--enable-ordinary-use-learning [--intake-provider <id> --intake-model <id>]]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\n--enable-ordinary-use-learning is accepted only with --install-owner and only on a fresh profile: it emits the observe-only intake evaluator (rules plus the Delivery or explicit provider/model) and the flagged memory grants. A retry preserves the stored opt-in and never expands an existing installation; no admission, revision key or Growth failure pin is added.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime and exports its release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
+    process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. Linux builds with the native runtime. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
   }
   if (args.waitOwnerDm) {
@@ -625,7 +617,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
       const sourceRepository = args.sourceRepository ?? (await readRsiLocalCohort({ dshHome: args.dshHome, profile: args.profile! })).sourceRepository
       const prepared = await prepareRsiLocalUpdate({ dshHome: args.dshHome, profile: args.profile!, sourceRepository,
         ...(args.addMemoryLearning ? { rootExtension: 'memory-learning' as const } : {}),
-        ...(args.dockerPath ? { dockerPath: args.dockerPath } : {}), signal: controller.signal })
+        signal: controller.signal })
       process.stdout.write(`${JSON.stringify({ mode: prepared.mode, root: prepared.root, profile: prepared.profile,
         sourceCommit: prepared.source.sourceCommit, version: prepared.cohort.version,
         packages: prepared.cohort.packages.length, receiptDigest: prepared.receiptDigest,
@@ -691,46 +683,29 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
           : { authorityResourcesUnavailable: 'private authority runtime currently requires Linux' }) }
         try {
           if (process.platform === 'darwin') {
-            if (args.dockerPath) fail('--docker-path is not supported by macOS native build preparation')
             const { nativeRsiCreationBuild, prepareNativeRsiRuntime } = await import('./rsi-native-runtime-bootstrap.js')
             const build = await prepareNativeRsiRuntime({ dshHome: args.dshHome, profile: args.profile!, source,
               signal: controller.signal })
             return { ...provisioned, sourceBuild: build.sourceBuild, creationBuild: nativeRsiCreationBuild(build),
               capabilities: ['native-memory-learning', 'verified-plugin-creation', 'dynamic-tool-adoption'] }
           }
-          // Linux prepares the schema 3 native runtime by default: no Docker
-          // CLI, daemon, socket or image is involved. An explicit --docker-path
-          // keeps the legacy image path available during migration coexistence.
-          if (process.platform === 'linux' && !args.dockerPath) {
-            const build = await prepareLinuxRsiRuntime({ dshHome: args.dshHome, profile: args.profile!, source,
-              signal: controller.signal })
-            try {
-              const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
-                build, signal: controller.signal })
-              return { ...provisioned, sourceBuild: build, releaseBuild: release }
-            } catch (error) {
-              controller.signal.throwIfAborted()
-              if (!args.optionalBuild || !(error instanceof RsiReleaseBuildUnavailableError)) throw error
-              process.stderr.write(`自迭代发布构建环境未就绪：${error.message}。已保留源码、验证运行时与原生工具链。\n`)
-              return { ...provisioned, sourceBuild: build, releaseBuildUnavailable: error.message }
-            }
-          }
-          const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
-            dockerPath: args.dockerPath, signal: controller.signal })
+          // Linux prepares the schema 3 native runtime: no Docker CLI, daemon,
+          // socket or image is involved.
+          const build = await prepareLinuxRsiRuntime({ dshHome: args.dshHome, profile: args.profile!, source,
+            signal: controller.signal })
           try {
             const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
               build, signal: controller.signal })
-            return { ...provisioned, sourceBuild: build.sourceBuild, releaseBuild: release.releaseBuild }
+            return { ...provisioned, sourceBuild: build, releaseBuild: release }
           } catch (error) {
             controller.signal.throwIfAborted()
             if (!args.optionalBuild || !(error instanceof RsiReleaseBuildUnavailableError)) throw error
-            process.stderr.write(`自迭代发布构建环境未就绪：${error.message}。已保留源码与验证镜像。\n`)
-            return { ...provisioned, sourceBuild: build.sourceBuild, releaseBuildUnavailable: error.message }
+            process.stderr.write(`自迭代发布构建环境未就绪：${error.message}。已保留源码、验证运行时与原生工具链。\n`)
+            return { ...provisioned, sourceBuild: build, releaseBuildUnavailable: error.message }
           }
         } catch (error) {
           controller.signal.throwIfAborted()
-          if (!args.optionalBuild
-            || !(error instanceof RsiBuildUnavailableError || error instanceof LinuxRsiRuntimeUnavailableError)) throw error
+          if (!args.optionalBuild || !(error instanceof LinuxRsiRuntimeUnavailableError)) throw error
           process.stderr.write(`自迭代构建环境未就绪：${error.message}。已保留源码准备结果。\n`)
           return { ...provisioned, buildUnavailable: error.message }
         }

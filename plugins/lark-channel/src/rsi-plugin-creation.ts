@@ -8,7 +8,6 @@ import type { CreationReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
 import type { Config as ControlPlaneConfig, CreationCapabilityConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
-import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
 
@@ -70,9 +69,9 @@ function publicKeyAt(path: string): string {
   return createPublicKey(createPrivateKey(readFileSync(path))).export({ format: 'pem', type: 'spki' }).toString()
 }
 
-/** The review and adoption runners must be the same backend. Linux native
- * runners additionally pin the delegated cgroup roots; Docker runners pin the
- * image and client. Mixed backends can never share a finite creation grant. */
+/** The review and adoption runners must be the same native backend. Linux
+ * native runners additionally pin the delegated cgroup roots; macOS runners
+ * pin the runtime. Docker-era runners are historical-only and never match. */
 function pairedRunnerMatches(
   reviews: CreationReviewConfig['runner'], capabilities: CreationCapabilityConfig['runner']): boolean {
   const reviewBackend = 'backend' in reviews ? reviews.backend : undefined
@@ -87,24 +86,16 @@ function pairedRunnerMatches(
     && reviews.backend === 'macos-seatbelt' && capabilities.backend === 'macos-seatbelt') {
     return isDeepStrictEqual(reviews.runtime, capabilities.runtime)
   }
-  if (!('backend' in reviews) && !('backend' in capabilities)) {
-    return reviews.image === capabilities.image && reviews.dockerPath === capabilities.dockerPath
-      && reviews.socketPath === capabilities.socketPath
-  }
   return false
 }
 
-type CreationBuild = RsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
+type CreationBuild = NativeRsiCreationBuildEnvironment | LinuxRsiCreationBuildEnvironment
 
 /** Project the prepared immutable build receipt onto the backend-specific
  * runner binding shared by review and adoption. */
 function creationRunnerBackend(build: CreationBuild) {
   if (build.schemaVersion === 2) return { backend: 'macos-seatbelt' as const, runtime: build.runtime }
-  if (build.schemaVersion === 3) {
-    return { backend: 'linux-native' as const, runtime: build.behavior, cgroupRoots: build.cgroupRoots }
-  }
-  return { image: build.image, dockerPath: build.dockerPath,
-    ...(build.socketPath ? { socketPath: build.socketPath } : {}) }
+  return { backend: 'linux-native' as const, runtime: build.behavior, cgroupRoots: build.cgroupRoots }
 }
 
 /** Admission of a complete finite chain; no resource is created or reset here. */

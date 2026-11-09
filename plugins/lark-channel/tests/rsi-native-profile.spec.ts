@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
@@ -16,7 +16,6 @@ import { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations
 import { MemoryLearningRuntime, type LearningPorts } from '../../assistant-memory-learning/lib/runtime.js'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
 import { compileNativeRsiProfile, type NativeRsiProfileInput } from '../src/rsi-native-profile.ts'
-import type { RsiCreationBuildEnvironment } from '../src/rsi-creation-build.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -28,8 +27,6 @@ async function fixture(): Promise<NativeRsiProfileInput> {
   for (const name of ['creation-review-runner', 'creation-adoption-runner']) await mkdir(join(resources.stateRoot, name), { mode: 0o700 })
   const observer = { socketPath: join(resources.stateRoot, 'observer.sock'), keyPath: join(resources.configRoot, 'observer.key') }
   await writeFile(observer.keyPath, Buffer.alloc(32, 9), { mode: 0o600 })
-  const seccompPath = join(resources.configRoot, 'source-builder-seccomp.json')
-  await writeFile(seccompPath, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)), { mode: 0o600 })
   const principal = { channel: 'lark' as const, account: 'account', tenant: 'tenant', user: 'owner' }
   const conversation = { channel: 'lark' as const, account: 'account', tenant: 'tenant', kind: 'dm' as const, chat: 'chat' }
   const owner = { id: 'binding', conversation, principal, workspace, agentPreset: 'primary', sessionId: 'session',
@@ -47,7 +44,12 @@ async function fixture(): Promise<NativeRsiProfileInput> {
     { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
     row('plugin-control-plane', {}), row('lark-channel', { enabled: true }),
   ])
-  const now = Date.now(), image = `sha256:${'a'.repeat(64)}`, dockerPath = await realpath(process.execPath)
+  const now = Date.now()
+  const runtimeRoot = join(home, 'rsi-native-runtimes', 'web', 'runtime')
+  const runtime = { schemaVersion: 1 as const, platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+    nodePath: join(runtimeRoot, 'bin', 'node'), nodeSha256: 'a'.repeat(64),
+    roots: [{ path: runtimeRoot, dev: 1, ino: 2, sha256: 'b'.repeat(64) }], modulesPath: join(runtimeRoot, 'node_modules'),
+    versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '3.0.0', tools: '1.0.0', systemPrompt: '1.0.0' } }
   const executorPath = join(root, 'executor'), executorBytes = '#!/bin/sh\nexit 0\n'
   await writeFile(executorPath, executorBytes, { mode: 0o500 })
   return { dshHome: home, targetProfile: 'web', targetEffective,
@@ -55,12 +57,10 @@ async function fixture(): Promise<NativeRsiProfileInput> {
     owner, resources, source: { schemaVersion: 1, version: '0.1.49', origin: { kind: 'local-head', locator: root, ref: 'HEAD' },
       sourceCommit: 'b'.repeat(40), repository: sourceRoot,
       baseline: { ref: 'refs/dsh-source/repairs', remote: release, targetBranch: 'repairs', initialCommit: 'b'.repeat(40) } },
-    sourceBuild: { dockerPath, socketPath: join(root, 'docker.sock'), daemonId: 'daemon-test-12345', profile: 'portable-repository',
-      repositorySandbox: { seccompPath },
-      image, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16,
-      workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
-    creationBuild: { schemaVersion: 1, sourceCommit: 'b'.repeat(40), sourceImage: image,
-      image: `sha256:${'c'.repeat(64)}`, dockerPath, socketPath: join(root, 'docker.sock') },
+    sourceBuild: { backend: 'macos-seatbelt', runtime, timeoutMs: 60_000 as const,
+      outputBytes: 1_048_576 as const, versioning: 'patch' as const },
+    creationBuild: { schemaVersion: 2, backend: 'macos-seatbelt',
+      sourceCommit: 'b'.repeat(40), runtime },
     executor: { id: 'native-executor', version: '1', path: executorPath,
       sha256: createHash('sha256').update(executorBytes).digest('hex'), environmentAllowlist: [] },
     now, expiresAt: now + 30 * 86_400_000, observer }
@@ -201,9 +201,9 @@ describe('native owner learning profile', () => {
     rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config = { authorityId: 'foreign' }
     rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled = false
     expect(() => compileNativeRsiProfile({ ...input, targetEffective: stringify(rows) })).toThrow('existing memory learner grant differs')
-    const dockerBuild = input.creationBuild as RsiCreationBuildEnvironment
-    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...dockerBuild, sourceImage: `sha256:${'0'.repeat(64)}` } })).toThrow('creation build differs')
-    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...dockerBuild, socketPath: '/tmp/other.sock' } })).toThrow('creation build differs')
+    const nativeCreation = input.creationBuild
+    expect(() => compileNativeRsiProfile({ ...input, creationBuild: { ...nativeCreation,
+      runtime: { ...nativeCreation.runtime, nodeSha256: '0'.repeat(64) } } })).toThrow('native creation runtime differs')
   })
 
   test('registers a native memory scan against the generated Policy and Automations config', async () => {

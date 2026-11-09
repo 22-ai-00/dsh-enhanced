@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parse, parseDocument, stringify, type Node } from 'yaml'
-import { normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { controlPlaneDigest, normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
 import { validateSourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
@@ -11,6 +11,9 @@ import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
 import { createRsiBootstrapManifest, rawLoaderConfig, type RsiBootstrapManifestInput } from '../src/rsi-bootstrap-manifest.ts'
 import { compileRsiProfiles } from '../src/rsi-profile.ts'
 import type { RsiAuthorityRuntime } from '../src/rsi-authority-runtime.ts'
+import { prepareRsiLinuxRunnerStates } from '../src/rsi-linux-runner-states.ts'
+import type { RsiSourceWorkspace } from '../src/rsi-source.ts'
+import { nativeDescriptors } from './fixtures/rsi-linux-install.ts'
 
 const now = Date.now()
 const owner = {
@@ -77,13 +80,15 @@ async function fixture() {
     { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
     row('dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane', {}),
   ])
+  const source = { schemaVersion: 1 as const, version: '0.1.48', origin: { kind: 'local-head' as const, locator: root, ref: 'HEAD' },
+    sourceCommit: 'a'.repeat(40), repository: join(root, 'source'),
+    baseline: { ref: 'refs/dsh-source/repairs', remote: join(root, 'release.git'), targetBranch: 'repairs', initialCommit: 'a'.repeat(40) } } as unknown as RsiSourceWorkspace
+  const native = nativeDescriptors(resources, source)
+  const runnerStates = await prepareRsiLinuxRunnerStates(resources, { creation: true, revision: false })
   const input: RsiBootstrapManifestInput = { dshHome: home, targetProfile: 'target', coordinatorProfile: 'coordinator',
     targetEffective, owner: active, resources, runtime: runtime(home),
-    source: { schemaVersion: 1, version: '0.1.48', origin: { kind: 'local-head', locator: root, ref: 'HEAD' },
-      sourceCommit: 'a'.repeat(40), repository: join(root, 'source'),
-      baseline: { ref: 'refs/dsh-source/repairs', remote: join(root, 'release.git'), targetBranch: 'repairs', initialCommit: 'a'.repeat(40) } },
-    sourceBuild: { dockerPath: await realpath(process.execPath), image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-      memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
+    source,
+    sourceBuild: native.sourceBuild, runnerStates: { sourceBuild: runnerStates.sourceBuild }, enableRevision: false,
     git: { path: '/usr/bin/git', sha256: 'a'.repeat(64) }, now, expiresAt: now + 30 * 86_400_000,
     plugins: ['personal-assistant', 'assistant-goals', 'assistant-health', 'assistant-growth-driver', 'assistant-memory-learning'],
     observerTargets: [{ entryId: 'dsh-enhanced-lark-channel', module: '@dsh-enhanced/lark-channel',
@@ -94,7 +99,7 @@ async function fixture() {
         `node_modules/@dsh-enhanced/${name}/cordis.patch.yml`,
         `node_modules/@dsh-enhanced/${name}/lib/index.js`,
       ])] }
-  return { root, input }
+  return { root, input, native, runnerStates }
 }
 
 /** Add the two ordinary-use rows and the deployment model route to the base fixture. */
@@ -118,16 +123,11 @@ function addOrdinaryUseLearning(input: RsiBootstrapManifestInput): void {
 
 describe('ordinary-use RSI manifest factory', () => {
   test('compiles the complete finite created-tool chain and fences mismatched setup fields', async () => {
-    const { root, input } = await fixture()
+    const { root, input, native, runnerStates } = await fixture()
     try {
       await mkdir(input.owner.workspace, { mode: 0o700 })
-      for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
-        await mkdir(join(input.resources.stateRoot, name), { mode: 0o700 })
-      }
-      input.sourceBuild.image = `sha256:${'a'.repeat(64)}`
-      input.creationBuild = { schemaVersion: 1, sourceCommit: input.source.sourceCommit,
-        sourceImage: input.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
-        dockerPath: input.sourceBuild.dockerPath }
+      input.creationBuild = native.creationBuild
+      input.runnerStates = runnerStates
       const manifest = createRsiBootstrapManifest(input)
       const creation = manifest.pluginCreation!
       expect(creation.reviews.owner).toEqual(manifest.sourceReviews.owner)
@@ -158,6 +158,7 @@ describe('ordinary-use RSI manifest factory', () => {
         .creationCapabilities.retention).toBeUndefined()
       const partial = structuredClone(manifest)
       delete partial.pluginCreation
+      partial.linuxBuild = { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(manifest.controlPlane.sourceBuild!) }
       await expect(compile(partial)).rejects.toThrow('complete independently verified adoption setup')
       const drift = structuredClone(manifest)
       drift.controlPlane.sourceJobs!.creation = { ...drift.controlPlane.sourceJobs!.creation!, namePrefix: 'foreign-' }

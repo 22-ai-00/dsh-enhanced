@@ -11,10 +11,12 @@ import { externalPrincipalId, ownerRouteAuthorityHash } from '@dsh-enhanced/assi
 import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
 import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
 import { Config as AutomationsConfig } from '@dsh-enhanced/assistant-automations'
+import { controlPlaneDigest } from '@dsh-enhanced/plugin-control-plane'
 import { compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
 import { configureSupervisedGrowthProfilePatch } from '../src/supervised-growth-profile.ts'
 import { createRsiMemoryLearningSetup } from '../src/rsi-memory-learning.ts'
 import { deriveScannerRetirementConfiguration, ScannerRetirementConfigurationError } from '../src/rsi-scanner-retirement-config.ts'
+import { nativeDescriptors } from './fixtures/rsi-linux-install.js'
 
 const roots: string[] = []
 const require = createRequire(import.meta.url)
@@ -154,11 +156,20 @@ describe('frozen target configuration scanner retirement derivation', () => {
     const supervisedRows = merge(f.rows, overlay)
     const adapter = { executable: { path: join(root, 'adapter'), sha256: 'b'.repeat(64) }, configPath: join(root, 'adapter.json'), timeoutMs: 1000 }
     const expiresAt = Date.now() + 60_000
+    const resourceRoot = join(f.home, 'rsi-authorities', f.profile)
+    const native = nativeDescriptors({ root: resourceRoot, stateRoot: join(resourceRoot, 'state') } as never,
+      { sourceCommit: 'a'.repeat(40) } as never)
+    const sourceBuild = { backend: 'linux-native' as const, runtime: native.repository.runtime,
+      userNamespace: native.repository.userNamespace, systemSnapshot: native.repository.systemSnapshot,
+      cgroupRoots: native.cgroupRoots, stateRoot: join(resourceRoot, 'state', 'linux-source-build-runner'),
+      authorityDigest: 'a'.repeat(64), expiresAt, maxRuns: 48, maxTotalDurationMs: 86_400_000,
+      timeoutMs: 1_800_000, outputBytes: 65_536, versioning: 'patch' as const, memoryMiB: 16_384, cpus: 8,
+      pidsLimit: 1_024, workspaceMiB: 8_192, temporaryMiB: 4_096, workspaceInodes: 1_000_000, temporaryInodes: 1_000_000 }
     const manifest: RsiSetupManifest = {
       schemaVersion: 1, targetProfile: f.profile, coordinatorProfile: 'coordinator',
+      linuxBuild: { schemaVersion: 1, sourceBuildDigest: controlPlaneDigest(sourceBuild) },
       controlPlane: { catalogPath: join(root, 'catalog.json'), statePath: join(root, 'state'), trustPath: join(root, 'trust.json'),
-        sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-          memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096, versioning: 'patch' },
+        sourceBuild,
         sourceJobs: { authorityId: 'jobs', expiresAt, maxSubmissions: 1, repository: root, ...f.growth.scope, budgetId: 'source', budgetAmount: 1 },
         sourceApprovals: adapter, sourceReleases: adapter,
         sourceReleaseExecution: { reviewDecisionRoot: decisionRoot, timeoutMs: 1000, independentReview: true },
