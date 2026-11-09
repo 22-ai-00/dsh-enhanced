@@ -358,18 +358,9 @@ and later successful runs must not be presented as one unqualified command pass.
 
 DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5-rc.1`，可设置 `DSH_E2E_HOST_VERSION=0.1.2-rc.1` 或同一 0.1 次版本的精确 RC 来验证另一 Host。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行 format 3 审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。
 
-## Source proposal Docker boundary smoke
+## Source proposal native boundary smoke
 
-After building `plugin-control-plane`, run:
-
-```sh
-DSH_SOURCE_BUILD_IMAGE='your-local-builder@sha256:<immutable-digest>' \
-  node scripts/e2e/source-prepare-docker-smoke.mjs
-```
-
-The image must already exist locally and expose executable Node, pnpm, tar, sha256sum and standard POSIX utilities to UID 65534. Corepack shims whose pnpm cache exists only under `/root` are insufficient. The smoke uses a dependency-free synthetic repository; a production image additionally needs an offline dependency store for the target repository's pinned pnpm version. No image pull, package download, Host bind mount, model call, publication or production profile mutation is part of this command.
-
-This probe runs the actual source builder in Docker and asserts a nonroot user, read-only root, absent Host paths/Git metadata/Docker socket/forwarded sentinel, exact patched source consumption, successful offline install/check/pack, and container removal. `DSH_SOURCE_BUILD_EVIDENCE=/absolute/path.json` optionally saves its result. It does not establish full repository build success, model patch quality, remote release, or production activation. Its generated worktree is removed on exit.
+The Docker source-builder smoke (`source-prepare-docker-smoke.mjs`) was removed with the Docker backend. Source preparation now runs only through the linux-native or macOS seatbelt backends behind the durable `sourceJobs` lane; its contracts and evidence are covered by the `plugin-control-plane` package tests and the [native runtime guide](../../docs/dockerless-runtime.md). No standalone Docker boundary smoke remains.
 
 
 ## Real day1 source proposal
