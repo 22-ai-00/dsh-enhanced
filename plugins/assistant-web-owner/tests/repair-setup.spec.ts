@@ -54,7 +54,17 @@ async function configured() {
   rows.push({ id: 'dsh-enhanced-assistant-verifier', config: { profiles: [{ id: 'repair-outcome' }] } }, { id: 'dsh-enhanced-assistant-deepseek-budget', config: { id: 'repair-budget' } })
   const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const scope = { principalId: 'web/web/local/operator', principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, preset: input.preset }
-  const holdout = { id: 'holdout', version: 1, scope, execution: { image: `sha256:${'d'.repeat(64)}`, dockerPath: process.execPath, stateRoot: join(home, 'holdout-state'), command: 'true', artifactPath: 'result', expiresAt: Date.now() + 60_000, repeats: 2, maxToolCalls: 1, maxBytes: 1024, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }, authority: { executable: process.execPath, args: [], publicKey, generatorDigest: 'e'.repeat(64) }, canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'a'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'f'.repeat(64) } } }, maxComparisons: 1 }
+  const runtimeRoot = join(home, 'rsi-linux-runtimes', 'web', 'runtime')
+  const nativeRuntime = { schemaVersion: 1, backend: 'linux-native' as const, platform: process.arch === 'arm64' ? 'linux-arm64' as const : 'linux-x64' as const,
+    sourceCommit: 'a'.repeat(40), lockSha256: 'b'.repeat(64), root: { path: runtimeRoot, dev: 1, ino: 2, sha256: 'c'.repeat(64) },
+    nodePath: join(runtimeRoot, 'bin/node'), nodeSha256: 'd'.repeat(64), pnpmPath: join(runtimeRoot, 'pnpm/bin/pnpm.mjs'),
+    nativePnpmRoot: join(runtimeRoot, 'pnpm-native'), nativePnpmPath: join(runtimeRoot, 'pnpm-native/pnpm'),
+    modulesPath: join(runtimeRoot, 'node_modules'), storePath: join(runtimeRoot, 'store'), cachePath: join(runtimeRoot, 'cache'),
+    versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '5.9.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } }
+  const cgroupRoots = { mode: 'v1' as const, cpu: `/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-${process.getuid!()}`,
+    memory: `/sys/fs/cgroup/memory/dsh-native/uid-${process.getuid!()}`, pids: `/sys/fs/cgroup/pids/dsh-native/uid-${process.getuid!()}`,
+    freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${process.getuid!()}` }
+  const holdout = { id: 'holdout', version: 1, scope, execution: { backend: 'linux-native' as const, runtime: nativeRuntime, cgroupRoots, stateRoot: join(home, 'holdout-state'), command: 'true', artifactPath: 'result', expiresAt: Date.now() + 60_000, repeats: 2, maxToolCalls: 1, maxBytes: 1024, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }, authority: { executable: process.execPath, args: [], publicKey, generatorDigest: 'e'.repeat(64) }, canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'a'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'f'.repeat(64) } } }, maxComparisons: 1 }
   const profile = (id: string, followupProfileIds: string[] = []) => ({ id, scope, skillName: 'saved-write', taskFamilyId: 'family', description: 'repair', externalHoldoutProfileId: 'holdout', provider: 'fixture', model: 'fixture', allowedTools: ['write'], maxGoalRounds: 1, maxModelCalls: 1, maxToolCalls: 1, maxOutputTokens: 32, maxDurationMs: 30_000, canaryRuns: 1, maxCanaryRuns: 1, maxIterations: followupProfileIds.length + 1, ...(followupProfileIds.length ? { followupProfileIds } : {}) })
   return { input, effective, source: JSON.stringify(rows), holdout, profile }
 }
