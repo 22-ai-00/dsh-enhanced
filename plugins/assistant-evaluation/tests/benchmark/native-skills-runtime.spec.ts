@@ -4,8 +4,19 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { createNativeSkillGoalRuntime, type NativeSkillGoalOptions } from '../../src/benchmark/native-skills-runtime.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
+
+// Non-live cases cancel or inspect setup before any isolated process starts.
+// Mount the plugin shape without a real runtime-tree verification; gated live
+// cases keep the real module.
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
+  const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
+  return syntheticIsolationModule(actual)
+})
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -26,13 +37,7 @@ async function options(cellId: string): Promise<Omit<NativeSkillGoalOptions, 'fa
   await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
   return { cellId, workspace, stateRoot, task, model, persona: 'Solve the requested task through the native Goal and allowed tools.',
     budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 12, costUsdMicros: null }, execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 2 },
-    image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`,
-    // Without a real image these cases exercise admission/cancellation paths
-    // and never spawn the runner, but createVerifierAuthorities still resolves
-    // the executable at construction time. macOS runners ship no Docker, so
-    // point at the running Node binary (a guaranteed canonical executable),
-    // mirroring strategy-executor.spec.ts; only the image-gated runs use docker.
-    dockerPath: process.env.DSH_ISOLATION_TEST_IMAGE ? '/usr/bin/docker' : process.execPath, stepMaxDurationMs: 25000, signal: new AbortController().signal }
+    ...nativeExecution(root), stepMaxDurationMs: 25000, signal: new AbortController().signal }
 }
 interface RoundTiming {
   maxDurationMs: number
@@ -91,7 +96,7 @@ class Adapter extends LlmAdapter {
 const factory = (reuse: boolean, sourcePlanning = false): NativeSkillGoalOptions['factory'] => (_model, { ctx }) => ({ adapter: new Adapter(ctx, reuse, sourcePlanning), inputTokenUpperBound: () => 10, dispose() {} })
 const rawService = <T>(value: T): T => (value as T & { [key: symbol]: T })[Symbol.for('cordis.original')] ?? value
 
-test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently achieved native source and reuses its exact skill in a fresh Goal', async () => {
+test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)('captures an independently achieved native source and reuses its exact skill in a fresh Goal', async () => {
   let sourceAdapter!: Adapter
   const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: (_model, { ctx }) => ({
     adapter: sourceAdapter = new Adapter(ctx, false, true), inputTokenUpperBound: () => 10, dispose() {},
@@ -163,7 +168,7 @@ test('preserves a capture admission failure without treating it as a cleanup fai
   expect(source.snapshot().meter?.modelCalls).toBe(0)
 })
 
-test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE).each(['rejected', 'creation-failed', 'disposer-failed', 'late'] as const)('settles actual capture resources independently of the %s operation', async mode => {
+test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME).each(['rejected', 'creation-failed', 'disposer-failed', 'late'] as const)('settles actual capture resources independently of the %s operation', async mode => {
   let context!: Context
   const source = await createNativeSkillGoalRuntime({ ...await options(`capture-${mode}`), stopTimeoutMs: 1000,
     factory: (selected, environment) => { context = environment.ctx; return factory(false)(selected, environment) },

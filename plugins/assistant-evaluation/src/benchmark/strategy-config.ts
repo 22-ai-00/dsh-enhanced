@@ -1,4 +1,5 @@
 /** Strict, side-effect-free operator configuration for the native Goal strategy benchmarks. */
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeModelConfig } from './native.js'
 import { isAbsolute, relative } from 'node:path'
 import { isStrategySuite, strategyCasesForSuite, strategyTaskForSuite, type StrategySuite } from './strategy-corpus-v2.js'
@@ -15,8 +16,9 @@ export interface StrategyBenchmarkConfig {
   execution: { modelCalls: number; maxOutputTokensPerCall: number; maxGoalRounds: number }
   repeats: number
   seed: number
-  image: string
-  dockerPath: string
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
   stepMaxDurationMs: number
   stopTimeoutMs?: number
   workspaceDirectory: string
@@ -29,6 +31,12 @@ const identifier = (value: unknown, field: string): void => benchmarkAssert(type
 const digest = (value: unknown, field: string): void => benchmarkAssert(typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value), `invalid ${field}`)
 const rate = (value: unknown): void => benchmarkInteger(value, 0, MAX_RATE)
 const absolute = (value: unknown, field: string): void => benchmarkAssert(typeof value === 'string' && isAbsolute(value) && value.length <= 4096 && !value.includes('\u0000'), `invalid ${field}`)
+// The native runner re-validates the runtime descriptor and cgroup roots
+// authoritatively when it is constructed. This parser only rejects shapes that
+// could never be a descriptor, keeping the optional peer from being imported
+// as a value here.
+const plain = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const contains = (ancestor: string, descendant: string): boolean => {
   const path = relative(ancestor, descendant)
   return path === '' || (path !== '..' && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(path))
@@ -36,7 +44,7 @@ const contains = (ancestor: string, descendant: string): boolean => {
 
 export function parseStrategyBenchmarkConfig(value: unknown): Readonly<StrategyBenchmarkConfig> {
   const copy = benchmarkSnapshot(value)
-  const raw = benchmarkObject(copy, ['suite', 'id', 'cases', 'persona', 'model', 'budget', 'execution', 'repeats', 'seed', 'image', 'dockerPath', 'stepMaxDurationMs', 'workspaceDirectory', 'stateDirectory',
+  const raw = benchmarkObject(copy, ['suite', 'id', 'cases', 'persona', 'model', 'budget', 'execution', 'repeats', 'seed', 'backend', 'runtime', 'cgroupRoots', 'stepMaxDurationMs', 'workspaceDirectory', 'stateDirectory',
     ...((copy !== null && typeof copy === 'object' && Object.hasOwn(copy, 'stopTimeoutMs')) ? ['stopTimeoutMs'] : [])])
   benchmarkAssert(isStrategySuite(raw.suite), 'unsupported strategy suite')
   identifier(raw.id, 'strategy benchmark id')
@@ -81,8 +89,9 @@ export function parseStrategyBenchmarkConfig(value: unknown): Readonly<StrategyB
   benchmarkInteger(execution.modelCalls, 1, 10_000); benchmarkInteger(execution.maxOutputTokensPerCall, 1, budget.outputTokens); benchmarkInteger(execution.maxGoalRounds, 1, 32)
   benchmarkAssert(model.maxOutputTokens === execution.maxOutputTokensPerCall, 'model output limit must equal strategy execution limit')
   benchmarkInteger(raw.repeats, 2, 20); benchmarkInteger(raw.seed, 0, 0xffffffff)
-  benchmarkAssert(typeof raw.image === 'string' && /^sha256:[a-f0-9]{64}$/u.test(raw.image), 'invalid immutable image')
-  absolute(raw.dockerPath, 'docker path'); absolute(raw.workspaceDirectory, 'workspace directory'); absolute(raw.stateDirectory, 'state directory')
+  benchmarkAssert(raw.backend === 'linux-native', 'invalid isolation backend')
+  benchmarkAssert(plain(raw.runtime) && plain(raw.cgroupRoots), 'strategy runtime and cgroup roots required')
+  absolute(raw.workspaceDirectory, 'workspace directory'); absolute(raw.stateDirectory, 'state directory')
   benchmarkAssert(!contains(raw.workspaceDirectory as string, raw.stateDirectory as string) && !contains(raw.stateDirectory as string, raw.workspaceDirectory as string), 'strategy state and workspaces must be separate')
   benchmarkInteger(raw.stepMaxDurationMs, 1_000, 300_000)
   benchmarkAssert((raw.stepMaxDurationMs as number) * 3 < budget.durationMs, 'strategy step duration does not fit benchmark duration')

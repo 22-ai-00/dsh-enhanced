@@ -101,7 +101,7 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 
 - **文件系统：** 创建数据库父目录并写入本地 SQLite；新数据库目录使用 `0700`、数据库使用 `0600`。现有数据库若为符号链接、硬链接、非当前用户所有或对 group/other 开放，会拒绝启动。数据库启用 WAL、`synchronous=FULL`、迁移版本检查和 5 秒 busy timeout。
 - **网络：** 默认 Evaluation 插件无网络访问；显式调用 experimental benchmark SDK 时，模型 delegate 或独立 holdout authority 是否联网由可信 Host/operator 的部署决定，SDK 本身只使用进程内调用或 stdio transport。
-- **子进程：** 默认 Evaluation 插件不创建子进程；显式调用 `./benchmark/holdout` 的 `openHoldoutProvider()` 会启动 operator 指定的 authority executable；`./benchmark/skills` 还会通过 Isolation 启动 Docker 验收作业。
+- **子进程：** 默认 Evaluation 插件不创建子进程；显式调用 `./benchmark/holdout` 的 `openHoldoutProvider()` 会启动 operator 指定的 authority executable；`./benchmark/skills` 还会通过 Isolation 在已准备的 linux-native runtime 中启停隔离验收作业。
 - **凭据：** 默认 Evaluation 插件不读取凭据；`./benchmark/holdout` provider 只收到 operator 显式给出的精确 environment，不继承 Host 环境。`./benchmark/skills` 使用的 Skills authority transport 继承 Host 环境；模型 delegate 所需凭据由可信 Host 自行装配和撤销。
 - **浏览器：** 无。
 - **install script：** 无；仅有标准 TypeScript build/prepack 和仓库发布保护脚本。
@@ -221,7 +221,7 @@ dsh-benchmark run --config ./docs/examples/strategy-benchmark.config.json --adap
 dsh-benchmark report --database ./private/strategy.sqlite --plan strategy-public-development --config ./docs/examples/strategy-benchmark.config.json --output ./private/strategy-report-copy.json
 ```
 
-`doctor --suite strategy-v1 --config` 会在不安装依赖、不拉取镜像的前提下检查 Host packages，并执行有界的离线 Docker/image probe；ready 不证明模型凭据或 provider 可用。`plan` 不调用模型。`run` 只装载操作者指定的 trusted adapter，费用和 token 限额来自配置；adapter 入口的 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。策略 suite 固定 `inputLimitMode: "upper-bound"` 和 `outputLimitMode: "provider"`；现有 Codex 订阅 adapter 的 estimate/observed 模式不兼容策略运行。`report` 重新打开已保存的 cell 观察和摘要，并从 `--config` 重建当前 plan 进行比对；它不重新激活已关闭 runtime 或重放模型调用。
+`doctor --suite strategy-v1 --config` 会在不安装依赖、不准备 runtime 的前提下检查 Host packages，并执行有界的离线 native runtime/cgroup probe；ready 不证明模型凭据或 provider 可用。策略配置使用 `backend: "linux-native"`、已准备的 `runtime` 描述符与当前用户的 cgroup v1 `cgroupRoots`，不再接受 image/dockerPath。`plan` 不调用模型。`run` 只装载操作者指定的 trusted adapter，费用和 token 限额来自配置；adapter 入口的 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。策略 suite 固定 `inputLimitMode: "upper-bound"` 和 `outputLimitMode: "provider"`；现有 Codex 订阅 adapter 的 estimate/observed 模式不兼容策略运行。`report` 重新打开已保存的 cell 观察和摘要，并从 `--config` 重建当前 plan 进行比对；它不重新激活已关闭 runtime 或重放模型调用。
 
 配置示例、计量协议和限制见 [评测实施文档](../../docs/benchmark-implementation.md)。预算为每 cell 上限；金额单位为美元的百万分之一，计价为每百万 tokens 对应的该单位。`costUsdMicros: null` 明确选择仅 token 预算，模型输入/输出价格也可同时为 null；报告中的未知费用不会填成零。声明金额上限时必须提供非缓存输入、cache read、cache write、输出四类费率，且必须使用输入上界和提供商输出上限；输入预留采用三类输入的最高费率。DSH 的非缓存 input 与两类 cache 相加为实际输入，reasoning 已包含在 output 中，不重复计费。实际使用了缺价的 cache 时，费用保持 null。可信适配器须关闭隐藏自动重试。
 
@@ -266,7 +266,7 @@ Legacy schema 7 owner rows are adopted lazily through the exact Host delivery ca
 
 策略 Host 接口新增 `createStrategyGoalRuntime`、`strategyGoalTaskDigests` 和 `StrategyEvidenceStore`。单 cell 真实装配原生 Goal/driver/subagents、Goals、Delivery、Isolation 与 Verifier；模型通过真实工具创建目标并导出隔离产物，独立验证向后续轮次提供反馈。运行结束后读取当前 owner 路由授权的持久目标快照，等待资源清理成功，再保存内容寻址的私有证据；证据包含每轮 step/outcome 的独立回执、真实 triggerRunId、策略子会话和外层计量，读取时重验 plan/cell/digest。清理超时保留 unknown，不能据此重放或启动下一 cell。
 
-此接口运行本机 Docker 和离线任意候选 shell：输入复制入容器，验证向量只供独立 runner，Host 持久状态保存在候选工作区之外。调用方必须提供受信任 adapter factory、已有私有目录、固定本机镜像及明确限额；不查找或修改用户 profile，不发送真实渠道消息。`execute`/`close` 清理有等待上限，但不合作资源可能仍未停止。adapter factory 与初始装配仍由调用方的整体期限控制，不能把本接口计量窗口视为完整比较墙钟期限。目录权限不隔离同 UID 的可信 Host 代码。
+此接口在已准备的 linux-native runtime 与当前用户 cgroup v1 roots 中运行离线任意候选 shell：输入复制入独立 scratch workspace，验证向量只供独立 runner，Host 持久状态保存在候选工作区之外。调用方必须提供受信任 adapter factory、已有私有目录、固定 runtime/cgroupRoots 及明确限额；不查找或修改用户 profile，不发送真实渠道消息。`execute`/`close` 清理有等待上限，但不合作资源可能仍未停止。adapter factory 与初始装配仍由调用方的整体期限控制，不能把本接口计量窗口视为完整比较墙钟期限。目录权限不隔离同 UID 的可信 Host 代码。
 
 策略 executor 会核对实际挂载工具、完整 persona、完整 Policy 配置、运行时来源和 adapter；这些观察连同全流程故障证据写入 journal 外的私有证据目录。普通 Evaluation bundle 不自动激活上述可选 Host peers，且尚无真实模型收益结论。
 

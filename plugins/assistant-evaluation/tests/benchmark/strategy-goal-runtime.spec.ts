@@ -4,13 +4,24 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { createStrategyGoalRuntime, strategyGoalTaskDigests, type StrategyGoalTask } from '../../src/benchmark/strategy-goal-runtime.js'
 import { strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, type StrategyBenchmarkPlan } from '../../src/benchmark/strategy-plan.js'
 import { StrategyEvidenceStore } from '../../src/benchmark/strategy-evidence.js'
 import { benchmarkSchedule } from '../../src/benchmark/schema.js'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
+
+// Cancellation cases stop before any isolated process starts. Mount the plugin
+// shape without a real runtime-tree verification; the gated live cases keep
+// the real module.
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
+  const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
+  return syntheticIsolationModule(actual)
+})
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -27,7 +38,7 @@ function plan(): StrategyBenchmarkPlan {
       versions: { model: acceptanceDigest(model), skills: '0'.repeat(64), ...strategyBenchmarkCapabilityVersions(capabilities, enabled) }, features: { memory: false, planning: false, review: false, growth: false } })) } }
 }
 
-for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)(`real isolated Goal comparison arm strategy=${strategy}`, async () => {
+for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)(`real isolated Goal comparison arm strategy=${strategy}`, async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'strategy-goal-runtime-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const workspace = join(root, 'workspace'); const stateRoot = join(root, 'state')
@@ -70,7 +81,7 @@ for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TES
   const runtime = await createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: new AbortController().signal }, task,
     workspace, stateRoot, persona: 'Solve the public task using the admitted Goal and isolation tools. Keep test vectors private.', model,
     factory: (_model, { ctx }) => ({ adapter: new Adapter(ctx), inputTokenUpperBound: () => 10, dispose() {} }),
-    image: process.env.DSH_ISOLATION_TEST_IMAGE!, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000 })
+    ...nativeExecution(root), stepMaxDurationMs: 25000 })
   cleanups.push(runtime.close)
   const result = await runtime.execute()
   const snapshot = result.snapshot as unknown as ReturnType<AssistantGoalsService['inspectOwnerGoalExecution']>
@@ -121,7 +132,7 @@ async function cancellableRuntime(hangDispose = false) {
   }
   const runtime = await createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: controller.signal }, task,
     workspace, stateRoot, persona: '', model, factory: () => ({ adapter: new BlockedAdapter(), inputTokenUpperBound: () => 10, dispose: () => hangDispose ? disposing : undefined }),
-    image: `sha256:${'0'.repeat(64)}`, dockerPath: process.execPath, stepMaxDurationMs: 25000, stopTimeoutMs: 1000 })
+    ...nativeExecution(root), stepMaxDurationMs: 25000, stopTimeoutMs: 1000 })
   return { runtime, ready, controller, releaseDispose, wasAborted: () => aborted }
 }
 

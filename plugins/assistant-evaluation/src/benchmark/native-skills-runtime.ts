@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { isAbsolute, join } from 'node:path'
 import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeAdapterBinding, NativeAdapterFactory, NativeModelConfig } from './native.js'
 import type { BenchmarkBudget } from './types.js'
 import { benchmarkAssert, benchmarkInteger, benchmarkSnapshot } from './schema.js'
@@ -37,7 +38,7 @@ export interface NativeCapturedSkill {
 export interface NativeSkillGoalOptions {
   cellId: string; workspace: string; stateRoot: string; persona: string; model: NativeModelConfig; budget: BenchmarkBudget
   execution: { modelCalls: number; maxOutputTokensPerCall: number; maxGoalRounds: number }
-  task: NativeGoalTask; image: string; dockerPath: string; stepMaxDurationMs: number; factory: NativeAdapterFactory; signal: AbortSignal
+  task: NativeGoalTask; backend: 'linux-native'; runtime: LinuxRuntime; cgroupRoots: LinuxCgroupRoots; stepMaxDurationMs: number; factory: NativeAdapterFactory; signal: AbortSignal
   stopTimeoutMs?: number
   /** Configured before the source Goal is created; never renew an accepted receipt. */
   source?: { name: string; description: string; validityMs: number }
@@ -89,7 +90,8 @@ function validateNativeSkillGoalOptions(input: NativeSkillGoalOptions): void {
   benchmarkInteger(input.execution.modelCalls, 1, 10000); benchmarkInteger(input.execution.maxGoalRounds, 1, 32)
   benchmarkInteger(input.execution.maxOutputTokensPerCall, 1, input.budget.outputTokens)
   benchmarkInteger(input.stepMaxDurationMs, 1000, 300000)
-  benchmarkAssert(/^sha256:[a-f0-9]{64}$/u.test(input.image) && typeof input.dockerPath === 'string' && isAbsolute(input.dockerPath), 'immutable image and absolute Docker path required')
+  benchmarkAssert(input.backend === 'linux-native' && input.runtime !== null && typeof input.runtime === 'object' && !Array.isArray(input.runtime)
+    && input.cgroupRoots !== null && typeof input.cgroupRoots === 'object' && !Array.isArray(input.cgroupRoots), 'native skill linux-native runtime and cgroup roots required')
   benchmarkAssert(input.stepMaxDurationMs * 3 < input.budget.durationMs && input.task.verification.maxDurationMs * input.task.verification.cases.length < input.stepMaxDurationMs, 'native skill verification exceeds budget')
 }
 
@@ -102,7 +104,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
   if (input.source) benchmarkInteger(input.source.validityMs, 1000, 86400000)
   const captured = input.arm?.captured
   const frozen = benchmarkSnapshot({ cellId: input.cellId, persona: input.persona, model: input.model, budget: input.budget, execution: input.execution,
-    task: input.task, image: input.image, dockerPath: input.dockerPath, stepMaxDurationMs: input.stepMaxDurationMs,
+    task: input.task, backend: input.backend, runtime: input.runtime, cgroupRoots: input.cgroupRoots, stepMaxDurationMs: input.stepMaxDurationMs,
     source: input.source ?? null, arm: input.arm ? { planDigest: input.arm.planDigest, variantId: input.arm.variantId, selection: captured!.selection, snapshot: captured!.snapshot } : null })
   if (captured) benchmarkAssert(acceptanceDigest({ model: captured.origin.model, budget: captured.origin.budget, execution: captured.origin.execution, task: captured.origin.task, persona: captured.origin.persona })
     === acceptanceDigest({ model: frozen.model, budget: frozen.budget, execution: frozen.execution, task: frozen.task, persona: frozen.persona }), 'delegated native skill must reuse the source supplier and execution contract')
@@ -169,7 +171,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
     if (stopped || signal.aborted) await owner.shutdown()
     live()
     const services = await installNativeGoalServices({ ctx, owner, model: frozen.model, budget: frozen.budget, limits: { ...frozen.execution, observationMode: 'enforced-upper-bound-provider-output' },
-      task: frozen.task, image: frozen.image, dockerPath: frozen.dockerPath, stepMaxDurationMs: frozen.stepMaxDurationMs, enabledStrategy: false, assertLive: live,
+      task: frozen.task, backend: frozen.backend, runtime: frozen.runtime, cgroupRoots: frozen.cgroupRoots, stepMaxDurationMs: frozen.stepMaxDurationMs, enabledStrategy: false, assertLive: live,
       ...(frozen.source ? { acceptanceValidityMs: frozen.source.validityMs } : {}) })
     goals = services.goals
     if (captured || frozen.source) {

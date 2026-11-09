@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { CellObservation, HoldoutReceipt, ProspectiveBenchmarkManifest, QualificationBinding, SignedCell } from '@dsh-enhanced/task-acceptance-contract/holdout-authority'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeAdapterFactory } from './native.js'
 import { createNativeSkillGoalRuntime, type NativeCapturedSkill, type NativeSkillGoalControl, type NativeSkillGoalOptions, type NativeSkillGoalResult } from './native-skills-runtime.js'
 import { BenchmarkStore } from './store.js'
@@ -29,8 +30,9 @@ export interface NativeSkillBenchmarkConfig {
   execution: NativeSkillGoalOptions['execution']
   /** Public program specification and separate, provisional native Goal smoke checks. */
   task: NativeSkillGoalOptions['task']
-  image: string
-  dockerPath: string
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
   stepMaxDurationMs: number
   stopTimeoutMs?: number
   repeats: number
@@ -123,7 +125,7 @@ export function nativeSkillJournalPlan(config: NativeSkillBenchmarkConfig, bindi
   const versions = (candidate: boolean): BenchmarkVersions => ({ model: acceptanceDigest(config.model), prompt: acceptanceDigest({ persona: config.persona, task: config.task }),
     skills: candidate ? binding.candidateDigest : binding.baselineDigest,
     tools: acceptanceDigest({ protocol: nativeSkillBenchmarkProtocol, candidate, tools: ['goal_create', 'goal_context', 'goal_checkpoint', 'isolation_run', ...(candidate ? ['skill_run', 'skill_status'] : [])] }),
-    policy: acceptanceDigest({ protocol: nativeSkillBenchmarkProtocol, candidate, runtimeDigest }), runtime: acceptanceDigest({ runtimeDigest, binding, execution: config.execution, image: config.image, dockerPath: config.dockerPath }) })
+    policy: acceptanceDigest({ protocol: nativeSkillBenchmarkProtocol, candidate, runtimeDigest }), runtime: acceptanceDigest({ runtimeDigest, binding, execution: config.execution, backend: config.backend, runtimeContentDigest: acceptanceDigest(config.runtime), cgroupRootsDigest: acceptanceDigest(config.cgroupRoots) }) })
   const plan = parseBenchmarkPlan({ schemaVersion: 1, id: config.id, comparison: 'capability', dataset: { id: `prospective-${manifest.begin.datasetDigest.slice(0, 24)}`, version: '1', digest: manifest.begin.datasetDigest, split: 'holdout' },
     cases: manifest.cases.map(value => ({ id: value.id, domain: 'code', inputDigest: value.inputDigest, acceptanceDigest: value.acceptanceDigest })),
     variants: [false, true].map(candidate => ({ id: candidate ? 'candidate' : 'baseline', role: candidate ? 'candidate' : 'baseline', versions: versions(candidate), features: { memory: false, planning: false, review: false, growth: candidate } })),
@@ -182,6 +184,8 @@ export async function runNativeSkillBenchmark(input: NativeSkillBenchmarkConfig,
   benchmarkInteger(config.verification.maxDurationMs, 1, 300000); benchmarkInteger(config.verification.maxOutputBytes, 1, 262144)
   benchmarkAssert(typeof config.verification.command === 'string' && config.verification.command.length > 0 && config.verification.command.length <= 16384, 'native skill verifier command invalid')
   benchmarkAssert(config.model.observationMode !== 'observed-call-count', 'native skill comparison requires measured tokens')
+  benchmarkAssert(config.backend === 'linux-native' && config.runtime !== null && typeof config.runtime === 'object' && !Array.isArray(config.runtime)
+    && config.cgroupRoots !== null && typeof config.cgroupRoots === 'object' && !Array.isArray(config.cgroupRoots), 'native skill linux-native runtime and cgroup roots required')
   benchmarkAssert(config.budget.toolCalls <= 32 && config.verification.maxDurationMs < config.budget.durationMs, 'native skill holdout bounds exceed cell budget')
   privateRoot(config.stateRoot); privateRoot(config.workspaceRoot); privateRoot(join(config.stateRoot, 'runtimes'))
   separate(config.stateRoot, config.workspaceRoot); separate(config.stateRoot, captured.selection.scope.workspace)
@@ -211,7 +215,7 @@ export async function runNativeSkillBenchmark(input: NativeSkillBenchmarkConfig,
     save(config.stateRoot, 'manifest', { binding, manifest, plan, runtimeDigest })
     store = new BenchmarkStore(join(config.stateRoot, 'benchmark.sqlite')); store.create(plan)
     benchmarkAssert(store.status(plan.id).runningCell === null && store.results(plan.id).length === 0, 'native skill benchmark cannot re-dispatch an existing run')
-    verifier = new IsolatedVerifierRunner({ stateRoot: join(config.stateRoot, 'verification'), image: config.image, dockerPath: config.dockerPath, authorityDigest: acceptanceDigest(binding),
+    verifier = new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(config.stateRoot, 'verification'), runtime: config.runtime, cgroupRoots: config.cgroupRoots, authorityDigest: acceptanceDigest(binding),
       command: config.verification.command, expiresAt: config.expiresAt, maxRuns: schedule.length, maxTotalDurationMs: schedule.length * config.verification.maxDurationMs,
       maxDurationMs: config.verification.maxDurationMs, maxOutputBytes: config.verification.maxOutputBytes })
     const executor: BenchmarkExecutor = { execute(request) {
@@ -223,7 +227,7 @@ export async function runNativeSkillBenchmark(input: NativeSkillBenchmarkConfig,
           && signed.cellId === expected.cellId && signed.armDigest === expected.armDigest && typeof signed.stdin === 'string' && bytesDigest(signed.stdin) === request.task.inputDigest, 'native skill signed input drift')
         const workspace = join(config.workspaceRoot, request.cell.id); privateRoot(workspace)
         const runtime = await createNativeSkillGoalRuntime({ cellId: request.cell.id, workspace, stateRoot: join(config.stateRoot, 'runtimes'), persona: config.persona, model: config.model,
-          budget: config.budget, execution: config.execution, task: config.task, image: config.image, dockerPath: config.dockerPath, stepMaxDurationMs: config.stepMaxDurationMs,
+          budget: config.budget, execution: config.execution, task: config.task, backend: config.backend, runtime: config.runtime, cgroupRoots: config.cgroupRoots, stepMaxDurationMs: config.stepMaxDurationMs,
           ...(config.stopTimeoutMs === undefined ? {} : { stopTimeoutMs: config.stopTimeoutMs }), factory, signal: request.signal, lifecycle(value) { control = value },
           ...(request.cell.variantId === 'candidate' ? { arm: { captured, planDigest, variantId: 'candidate' } } : {}) })
         let value: NativeSkillGoalResult, artifact: { content: string; sha256: string }

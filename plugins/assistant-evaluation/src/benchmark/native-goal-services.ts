@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeModelConfig } from './native.js'
 import type { BenchmarkBudget } from './types.js'
 import type { BenchmarkStrategyOwnerRuntime } from './strategy-owner.js'
@@ -22,9 +23,9 @@ const plugin = (ctx: Context, value: unknown, config: unknown = {}) => ctx.plugi
 export async function installNativeGoalServices(input: {
   ctx: Context; owner: BenchmarkStrategyOwnerRuntime; model: NativeModelConfig; budget: BenchmarkBudget
   limits: { modelCalls: number; maxOutputTokensPerCall: number; maxGoalRounds: number; observationMode: NativeModelConfig['observationMode'] }
-  task: NativeGoalTask; image: string; dockerPath: string; stepMaxDurationMs: number; enabledStrategy: boolean; assertLive: () => void; acceptanceValidityMs?: number
+  task: NativeGoalTask; backend: 'linux-native'; runtime: LinuxRuntime; cgroupRoots: LinuxCgroupRoots; stepMaxDurationMs: number; enabledStrategy: boolean; assertLive: () => void; acceptanceValidityMs?: number
 }): Promise<{ goals: NativeGoalsHost; ownerRouteId: string; principalId: string; lineage: ReturnType<BenchmarkStrategyOwnerRuntime['pairOwner']> }> {
-  const { ctx, owner, model, budget, limits, task, image, dockerPath, stepMaxDurationMs, enabledStrategy, assertLive } = input
+  const { ctx, owner, model, budget, limits, task, backend, runtime, cgroupRoots, stepMaxDurationMs, enabledStrategy, assertLive } = input
   const validityMs = input.acceptanceValidityMs ?? budget.durationMs
   if (!Number.isSafeInteger(validityMs) || validityMs < 1 || validityMs > 86400000) throw new Error('invalid native acceptance validity')
   const callCounting = limits.observationMode === 'observed-call-count'
@@ -43,10 +44,10 @@ export async function installNativeGoalServices(input: {
   const goals = ctx.get('assistantGoals' as never) as unknown as NativeGoalsHost
   if (typeof goals?.inspectOwnerGoalExecution !== 'function') throw new Error('upgrade Goals: owner execution snapshot API required')
   const lineage = owner.pairOwner(), principalId = owner.principalId, ownerRouteId = owner.ownerRouteId, expiresAt = Date.now() + budget.durationMs
-  await plugin(ctx, isolationModule.default, { stateRoot: `${owner.runtimeRoot}/isolation`, image, dockerPath, limits: { maxDurationMs: Math.min(stepMaxDurationMs, 300000) }, grants: [{ id: 'benchmark-work', revision: 1,
+  await plugin(ctx, isolationModule.default, { backend: 'linux-native', linux: { runtime, cgroupRoots }, stateRoot: `${owner.runtimeRoot}/isolation`, limits: { maxDurationMs: Math.min(stepMaxDurationMs, 300000) }, grants: [{ id: 'benchmark-work', revision: 1,
     principalDigest: isolationModule.isolationPrincipalDigest(principalId), ...lineage, workspace: owner.workspace, agentPreset: 'benchmark', expiresAt, maxRuns: Math.max(1, budget.toolCalls), maxTotalDurationMs: budget.durationMs }] })
   assertLive()
-  const authority = { kind: 'isolated-runner', id: 'benchmark-verification', stateRoot: `${owner.runtimeRoot}/verification-jobs`, image, dockerPath, command: task.verification.command, expiresAt,
+  const authority = { kind: 'isolated-runner', id: 'benchmark-verification', stateRoot: `${owner.runtimeRoot}/verification-jobs`, backend, runtime, cgroupRoots, command: task.verification.command, expiresAt,
     maxRuns: Math.min(10000, (limits.maxGoalRounds * 2 + 2) * task.verification.cases.length), maxTotalDurationMs: budget.durationMs, maxDurationMs: task.verification.maxDurationMs, maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
   const compiled = verifierModule.createVerifierAuthorities({ authorities: [authority] })[0]
   await plugin(ctx, verifierModule.AssistantVerifierService, { databasePath: `${owner.runtimeRoot}/verifier.sqlite`, tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: ['goal-step', 'goal-outcome'].map(taskKind => ({ id: `benchmark-${taskKind}`, version: 1, taskKind,

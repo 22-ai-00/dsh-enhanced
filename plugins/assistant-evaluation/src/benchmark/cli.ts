@@ -170,20 +170,19 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
       })
       if (configPath === undefined) {
-        result = { ready: false, packages, isolation: { ready: false }, next: 'Provide --config to probe the immutable local image and Docker runtime. Dependencies alone do not establish strategy readiness.' }
+        result = { ready: false, packages, isolation: { ready: false }, next: 'Provide --config to probe the configured linux-native runtime and cgroup roots. Dependencies alone do not establish strategy readiness.' }
         exitCode = 2
       } else if (!packages.every(entry => entry.available)) {
-        result = { ready: false, packages, isolation: { ready: false }, next: 'Install the unavailable strategy runtime packages before probing Docker or the configured image.' }
+        result = { ready: false, packages, isolation: { ready: false }, next: 'Install the unavailable strategy runtime packages before probing the configured linux-native runtime.' }
         exitCode = 2
       } else {
         const input = await strategyConfig(configured)
         let isolationReady = false
         try {
-          const isolationPackage = '@dsh-enhanced/assistant-isolation'
-          const isolation = await import(isolationPackage) as { probeIsolationRuntime(image: string, dockerPath: string): Promise<void> }
-          await isolation.probeIsolationRuntime(input.image, input.dockerPath)
+          const resources = await import('@dsh-enhanced/assistant-isolation/native-resources')
+          await resources.probeLinuxIsolationRuntime({ runtime: input.runtime, cgroupRoots: input.cgroupRoots })
           isolationReady = true
-        } catch { /* Keep diagnostics non-sensitive and do not attempt installation or image pulls. */ }
+        } catch { /* Keep diagnostics non-sensitive and do not attempt installation or runtime preparation. */ }
         result = { ready: packages.every(entry => entry.available) && isolationReady, packages, isolation: { ready: isolationReady },
           next: 'A ready runtime does not prove model access. Configure a trusted adapter, token counter and frozen strategy limits.' }
         exitCode = (result as { ready: boolean }).ready ? 0 : 2
@@ -235,7 +234,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
           const factory = await adapter(fields.get('--adapter')!, input)
           const tasks = Object.fromEntries(input.cases.map(caseId => [caseId, corpusV2.strategyTaskForSuite(input.suite, caseId)]))
           const strategyExecutor = executor.createStrategyBenchmarkExecutor({ plan, tasks, persona: input.persona, model: input.model, factory,
-            workspaceDirectory: input.workspaceDirectory, stateDirectory: input.stateDirectory, image: input.image, dockerPath: input.dockerPath,
+            workspaceDirectory: input.workspaceDirectory, stateDirectory: input.stateDirectory, backend: input.backend, runtime: input.runtime, cgroupRoots: input.cgroupRoots,
             stepMaxDurationMs: input.stepMaxDurationMs, ...(input.stopTimeoutMs === undefined ? {} : { stopTimeoutMs: input.stopTimeoutMs }) })
           const results = await runBenchmark(store, journal, strategyExecutor, signal)
           executor.verifyStrategyBenchmarkResults(plan, results, input.stateDirectory, input.workspaceDirectory)

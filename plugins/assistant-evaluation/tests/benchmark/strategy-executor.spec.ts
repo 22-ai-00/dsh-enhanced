@@ -3,7 +3,7 @@ import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '
 import { mkdtempSync, realpathSync, rmSync, readFileSync, writeFileSync, cpSync, mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { createStrategyBenchmarkExecutor, createStrategyBenchmarkPlan, verifyStrategyBenchmarkResults } from '../../src/benchmark/strategy-executor.js'
 import { strategyBenchmarkJournalPlan } from '../../src/benchmark/strategy-plan.js'
 import { strategyDevelopmentTask } from '../../src/benchmark/strategy-corpus.js'
@@ -12,6 +12,17 @@ import type { NativeAdapterFactory } from '../../src/benchmark/native.js'
 import { StrategyEvidenceStore } from '../../src/benchmark/strategy-evidence.js'
 import { BenchmarkStore } from '../../src/benchmark/store.js'
 import { runBenchmark } from '../../src/benchmark/runner.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
+
+// Setup and cancellation cases never start an isolated process. Mount the
+// plugin shape without a real runtime-tree verification; the gated live case
+// keeps the real module.
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
+  const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
+  return syntheticIsolationModule(actual)
+})
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -20,13 +31,13 @@ function config(): StrategyBenchmarkConfig {
   return { suite: 'strategy-v1', id: 'strategy-executor', cases: ['integer-sum'], persona: 'Solve the public task with the admitted Goal and isolated tools.',
     model: { provider: 'strategy-fixture', model: 'fixed', temperature: null, maxOutputTokens: 128, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
     execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 3 }, budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 8, costUsdMicros: null },
-    repeats: 2, seed: 1, image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`, dockerPath: process.env.DSH_ISOLATION_TEST_IMAGE ? '/usr/bin/docker' : process.execPath, stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
+    repeats: 2, seed: 1, ...nativeExecution(root), stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
     workspaceDirectory: join(root, 'workspaces'), stateDirectory: join(root, 'state') }
 }
 const task = strategyDevelopmentTask('integer-sum')
 const tasks = { 'integer-sum': task }
 
-test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('runs all paired native cells, reopens detailed evidence, and never replays completed cells', async () => {
+test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)('runs all paired native cells, reopens detailed evidence, and never replays completed cells', async () => {
   const input = config(); const plan = createStrategyBenchmarkPlan(input); const journal = strategyBenchmarkJournalPlan(plan)
   const database = new BenchmarkStore(join(roots.at(-1)!, 'journal.sqlite'))
   const workspaces = new Set<string>(); let factories = 0; let childCalls = 0; let privateLeak = false

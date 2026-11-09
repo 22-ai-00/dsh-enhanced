@@ -8,17 +8,18 @@ import { createStrategyBenchmarkPlan } from '../../src/benchmark/strategy-execut
 import { strategyBenchmarkJournalPlan } from '../../src/benchmark/strategy-plan.js'
 import { strategyDevelopmentCases } from '../../src/benchmark/strategy-corpus.js'
 import type { StrategyBenchmarkConfig } from '../../src/benchmark/strategy-config.js'
+import { syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-runtime.ts'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 async function workspace(): Promise<string> { const path = await mkdtemp(join(tmpdir(), 'strategy-cli-')); directories.push(path); return path }
 const hash = (character: string) => character.repeat(64)
-const configuration = (root: string, image = `sha256:${hash('c')}`): StrategyBenchmarkConfig => ({
+const configuration = (root: string, runtimeTag = 'a'): StrategyBenchmarkConfig => ({
   suite: 'strategy-v1', id: 'strategy-cli-development', cases: [strategyDevelopmentCases()[0]!.id], persona: 'Build the requested artifact.',
   model: { provider: 'fixture/provider', model: 'fixture-model', temperature: null, inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maxOutputTokens: 64,
     inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: hash('a'), tokenCounterDigest: hash('b') },
   budget: { durationMs: 90_000, inputTokens: 2_000, outputTokens: 500, costUsdMicros: null, toolCalls: 20 }, execution: { modelCalls: 4, maxOutputTokensPerCall: 64, maxGoalRounds: 3 },
-  repeats: 2, seed: 7, image, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 20_000, stopTimeoutMs: 1_000,
+  repeats: 2, seed: 7, backend: 'linux-native', runtime: syntheticLinuxRuntime(join(root, `runtime-${runtimeTag}`)), cgroupRoots: syntheticCgroupRoots(), stepMaxDurationMs: 20_000, stopTimeoutMs: 1_000,
   workspaceDirectory: join(root, 'workspaces'), stateDirectory: join(root, 'state'),
 })
 const capture = () => { const chunks: string[] = []; return { chunks, io: { stdout(text: string) { chunks.push(text) } } } }
@@ -34,9 +35,9 @@ describe('strategy-v1 benchmark CLI', () => {
     expect(output.chunks.join('')).not.toContain('expectedStdout')
   })
 
-  it('freezes a strategy plan without loading an adapter and commits changed image configuration', async () => {
+  it('freezes a strategy plan without loading an adapter and commits changed native runtime configuration', async () => {
     const root = await workspace(); const first = join(root, 'first.json'); const second = join(root, 'second.json')
-    await writeFile(first, JSON.stringify(configuration(root))); await writeFile(second, JSON.stringify(configuration(root, `sha256:${hash('d')}`)))
+    await writeFile(first, JSON.stringify(configuration(root))); await writeFile(second, JSON.stringify(configuration(root, 'b')))
     const one = capture(); const two = capture()
     expect(await benchmarkCli(['plan', '--config', first], one.io)).toBe(0)
     expect(await benchmarkCli(['plan', '--config', second], two.io)).toBe(0)

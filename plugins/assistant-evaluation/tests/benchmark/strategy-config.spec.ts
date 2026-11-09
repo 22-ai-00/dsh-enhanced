@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { parseStrategyBenchmarkConfig, type StrategyBenchmarkConfig } from '../../src/benchmark/strategy-config.ts'
 import { strategyDevelopmentCases, strategyDevelopmentCorpus, strategyDevelopmentDataset, strategyDevelopmentTask } from '../../src/benchmark/strategy-corpus.ts'
 import { strategyGoalTaskDigests } from '../../src/benchmark/strategy-goal-runtime.ts'
+import { syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-runtime.ts'
 
 const hash = (character: string) => character.repeat(64)
 const fixture = (): StrategyBenchmarkConfig => ({
@@ -10,7 +11,7 @@ const fixture = (): StrategyBenchmarkConfig => ({
   model: { provider: 'fixture/provider', model: 'fixture-model', temperature: 0, inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maxOutputTokens: 64,
     inputUsdMicrosPerMillionTokens: 1, outputUsdMicrosPerMillionTokens: 1, cacheReadUsdMicrosPerMillionTokens: 1, cacheWriteUsdMicrosPerMillionTokens: 1, adapterDigest: hash('a'), tokenCounterDigest: hash('b') },
   budget: { durationMs: 90_000, inputTokens: 2_000, outputTokens: 500, costUsdMicros: 100, toolCalls: 20 }, execution: { modelCalls: 4, maxOutputTokensPerCall: 64, maxGoalRounds: 3 },
-  repeats: 2, seed: 7, image: `sha256:${hash('c')}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 20_000, stopTimeoutMs: 1_000, workspaceDirectory: '/var/tmp/strategy-work', stateDirectory: '/var/tmp/strategy-state',
+  repeats: 2, seed: 7, backend: 'linux-native', runtime: syntheticLinuxRuntime('/var/tmp/strategy-config'), cgroupRoots: syntheticCgroupRoots(), stepMaxDurationMs: 20_000, stopTimeoutMs: 1_000, workspaceDirectory: '/var/tmp/strategy-work', stateDirectory: '/var/tmp/strategy-state',
 })
 
 describe('strategy-v1 configuration', () => {
@@ -27,7 +28,9 @@ describe('strategy-v1 configuration', () => {
     (input: any) => { input.model.maxOutputTokens = 65 },
     (input: any) => { input.budget.costUsdMicros = 1; input.model.cacheReadUsdMicrosPerMillionTokens = null },
     (input: any) => { input.workspaceDirectory = 'relative' },
-    (input: any) => { input.image = 'latest' },
+    (input: any) => { input.backend = 'docker' },
+    (input: any) => { delete input.runtime },
+    (input: any) => { input.cgroupRoots = null },
   ])('rejects a config that cannot be enforced before execution', mutate => {
     const input = fixture(); mutate(input); expect(() => parseStrategyBenchmarkConfig(input)).toThrow()
   })

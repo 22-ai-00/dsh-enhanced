@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, lstatSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeAdapterFactory, NativeModelConfig } from './native.js'
 import { emptyBenchmarkMetrics, type BenchmarkExecutionRequest, type BenchmarkExecutor } from './runner.js'
 import { benchmarkAssert, benchmarkSnapshot } from './schema.js'
@@ -23,8 +24,9 @@ export interface StrategyBenchmarkExecutorOptions {
   /** Both directories must be private, canonical and outside one another. Retained for audit. */
   workspaceDirectory: string
   stateDirectory: string
-  image: string
-  dockerPath: string
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
   stepMaxDurationMs: number
   stopTimeoutMs?: number
 }
@@ -41,9 +43,9 @@ const contains = (a: string, b: string): boolean => { const path = relative(a, b
 const same = (a: unknown, b: unknown): boolean => acceptanceCanonicalJson(a) === acceptanceCanonicalJson(b)
 const resolverDirectory = fileURLToPath(new URL('.', import.meta.url))
 const noSkills = acceptanceDigest('strategy-no-skills-v1')
-function actualCapabilities(input: Pick<StrategyBenchmarkExecutorOptions, 'persona' | 'model' | 'image' | 'dockerPath' | 'stepMaxDurationMs' | 'stopTimeoutMs'>) {
+function actualCapabilities(input: Pick<StrategyBenchmarkExecutorOptions, 'persona' | 'model' | 'runtime' | 'cgroupRoots' | 'stepMaxDurationMs' | 'stopTimeoutMs'>) {
   const expectation = createFixedStrategyCapabilityExpectation({ resolverDirectory, persona: input.persona, modelProvider: input.model.provider })
-  const runtimeCommitment = { source: expectation.capabilities.common.runtime, sourceIdentityDigest: acceptanceDigest(expectation.sourceIdentity), image: input.image, dockerPath: input.dockerPath,
+  const runtimeCommitment = { source: expectation.capabilities.common.runtime, sourceIdentityDigest: acceptanceDigest(expectation.sourceIdentity), runtimeDigest: acceptanceDigest(input.runtime), cgroupRootsDigest: acceptanceDigest(input.cgroupRoots),
     stepMaxDurationMs: input.stepMaxDurationMs, stopTimeoutMs: input.stopTimeoutMs ?? 10000 }
   return { expectation, runtimeCommitment, capabilities: { ...expectation.capabilities, common: { ...expectation.capabilities.common, runtime: acceptanceDigest(runtimeCommitment) } } }
 }
@@ -67,7 +69,7 @@ export function createStrategyBenchmarkExecutor(input: StrategyBenchmarkExecutor
   const plan = parseStrategyBenchmarkPlan(input.plan)
   const tasks = benchmarkSnapshot(input.tasks)
   const model = benchmarkSnapshot(input.model)
-  const { persona, factory, image, dockerPath, stepMaxDurationMs, stopTimeoutMs } = input
+  const { persona, factory, backend, runtime: runtimeDescriptor, cgroupRoots, stepMaxDurationMs, stopTimeoutMs } = input
   benchmarkAssert(typeof persona === 'string' && typeof factory === 'function', 'invalid strategy executor configuration')
   const { expectation, capabilities, runtimeCommitment } = actualCapabilities(input)
   benchmarkAssert(same(plan.capabilities, capabilities), 'strategy installed capabilities differ from plan')
@@ -123,7 +125,7 @@ export function createStrategyBenchmarkExecutor(input: StrategyBenchmarkExecutor
         } catch (error) { await binding.dispose(); throw error }
       }
       const runtime = await createStrategyGoalRuntime({ plan, request, task: tasks[request.cell.caseId]!, persona, model, factory: guardedFactory,
-        workspace, stateRoot, image, dockerPath, stepMaxDurationMs, ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs }),
+        workspace, stateRoot, backend, runtime: runtimeDescriptor, cgroupRoots, stepMaxDurationMs, ...(stopTimeoutMs === undefined ? {} : { stopTimeoutMs }),
         lifecycle: control => { attempt.control = control },
       })
       const result = await runtime.execute()

@@ -54,7 +54,7 @@ export interface StrategyCellWrite {
   nativeEvidenceDigest: string
   capabilities: {
     sourceIdentity: unknown
-    runtimeCommitment: { source: string; sourceIdentityDigest: string; image: string; dockerPath: string; stepMaxDurationMs: number; stopTimeoutMs: number }
+    runtimeCommitment: { source: string; sourceIdentityDigest: string; runtimeDigest: string; cgroupRootsDigest: string; stepMaxDurationMs: number; stopTimeoutMs: number }
     requests: readonly { sessionId: string; kind: 'parent' | 'child'; observation: unknown | null }[]
   }
 }
@@ -321,7 +321,7 @@ export class StrategyEvidenceStore {
     const native = this.read(plan, cell, raw.nativeEvidenceDigest)
     if (native.outcome.status !== 'completed' || native.outcome.verdict === 'unknown' || !native.outcome.quiescent) fail('cell outcome remains unknown')
     const capability = keys(raw.capabilities, ['sourceIdentity', 'runtimeCommitment', 'requests'])
-    const commitment = keys(capability.runtimeCommitment, ['source', 'sourceIdentityDigest', 'image', 'dockerPath', 'stepMaxDurationMs', 'stopTimeoutMs'])
+    const commitment = keys(capability.runtimeCommitment, ['source', 'sourceIdentityDigest', 'runtimeDigest', 'cgroupRootsDigest', 'stepMaxDurationMs', 'stopTimeoutMs'])
     const sourceDigest = evidenceDigest(capability.sourceIdentity)
     if (commitment.sourceIdentityDigest !== sourceDigest || evidenceDigest(commitment) !== plan.capabilities.common.runtime) fail('runtime source commitment drift')
     if (!Array.isArray(capability.requests) || capability.requests.length !== native.meter.traces.length || capability.requests.length === 0) fail('incomplete capability observations')

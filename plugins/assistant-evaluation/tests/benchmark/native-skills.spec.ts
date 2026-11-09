@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { createNativeSkillGoalRuntime, runNativeSkillBenchmark, nativeSkillBenchmarkReport, type NativeSkillBenchmarkConfig, type NativeSkillBenchmarkEvidence } from '../../src/benchmark/native-skills.js'
 import type { NativeAdapterFactory } from '../../src/benchmark/native.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -42,7 +43,7 @@ class Adapter extends LlmAdapter {
   }
 }
 
-test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('runs native baseline/candidate Goals against after-freeze signed tasks and rechecks final evidence', async () => {
+test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)('runs native baseline/candidate Goals against after-freeze signed tasks and rechecks final evidence', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'native-skill-benchmark-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const sourceWorkspace = join(root, 'source-workspace'); await mkdir(sourceWorkspace, { mode: 0o700 }); await mkdir(join(root, 'source-state'), { mode: 0o700 })
@@ -54,7 +55,7 @@ test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('runs native baseline/candida
   const { stdout } = await promisify(execFile)(process.execPath, [cli, '--inspect-config', authorityConfig])
   const pins = JSON.parse(stdout) as { generatorDigest: string }
   const common = { task, model, persona: 'Solve the public program specification using a native Goal and the allowed tools.', budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 12, costUsdMicros: null },
-    execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 2 }, image: process.env.DSH_ISOLATION_TEST_IMAGE!, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000 }
+    execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 2 }, ...nativeExecution(root), stepMaxDurationMs: 25000 }
   const messages: string[] = [], factory: NativeAdapterFactory = (_model, { ctx }) => ({ adapter: new Adapter(ctx, messages), inputTokenUpperBound: () => 10, dispose() {} })
   const signal = new AbortController().signal
   const source = await createNativeSkillGoalRuntime({ ...common, cellId: 'source', workspace: sourceWorkspace, stateRoot: join(root, 'source-state'), factory, signal, source: { name: 'render-template', description: 'Render literal template placeholders.', validityMs: 600000 } })

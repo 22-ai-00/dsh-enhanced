@@ -14,6 +14,7 @@ import { benchmarkCli } from '../../src/benchmark/cli.js'
 import { BenchmarkStore } from '../../src/benchmark/store.js'
 import { createStrategyBenchmarkPlan } from '../../src/benchmark/strategy-executor.js'
 import { strategyBenchmarkJournalPlan } from '../../src/benchmark/strategy-plan.js'
+import { syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-runtime.ts'
 
 const hash = (character: string) => character.repeat(64)
 
@@ -26,7 +27,7 @@ const v2Fixture = (): StrategyBenchmarkConfig => ({
   model: { provider: 'fixture/provider', model: 'fixture-model', temperature: 0, inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maxOutputTokens: 64,
     inputUsdMicrosPerMillionTokens: 1, outputUsdMicrosPerMillionTokens: 1, cacheReadUsdMicrosPerMillionTokens: 1, cacheWriteUsdMicrosPerMillionTokens: 1, adapterDigest: hash('a'), tokenCounterDigest: hash('b') },
   budget: { durationMs: 150_000, inputTokens: 2_000, outputTokens: 500, costUsdMicros: 100, toolCalls: 20 }, execution: { modelCalls: 4, maxOutputTokensPerCall: 64, maxGoalRounds: 3 },
-  repeats: 2, seed: 7, image: `sha256:${hash('c')}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 45_000, stopTimeoutMs: 1_000, workspaceDirectory: '/var/tmp/strategy-v2-work', stateDirectory: '/var/tmp/strategy-v2-state',
+  repeats: 2, seed: 7, backend: 'linux-native', runtime: syntheticLinuxRuntime('/var/tmp/strategy-v2-config'), cgroupRoots: syntheticCgroupRoots(), stepMaxDurationMs: 45_000, stopTimeoutMs: 1_000, workspaceDirectory: '/var/tmp/strategy-v2-work', stateDirectory: '/var/tmp/strategy-v2-state',
 })
 
 describe('strategy-v2 corpus', () => {

@@ -12,6 +12,7 @@ import { BenchmarkStore } from '../../src/benchmark/store.js'
 import { runBenchmark } from '../../src/benchmark/runner.js'
 import type { StrategyBenchmarkConfig } from '../../src/benchmark/strategy-config.js'
 import type { NativeAdapterFactory } from '../../src/benchmark/native.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
 
 const roots: string[] = []
 afterEach(() => {
@@ -30,7 +31,7 @@ function config(): StrategyBenchmarkConfig {
       inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
     execution: { modelCalls: 16, maxOutputTokensPerCall: 1024, maxGoalRounds: 3 },
     budget: { durationMs: 100000, inputTokens: 4_194_304, outputTokens: 8192, toolCalls: 16, costUsdMicros: null },
-    repeats: 2, seed: 1, image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
+    repeats: 2, seed: 1, ...nativeExecution(root), stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
     workspaceDirectory: join(root, 'workspaces'), stateDirectory: join(root, 'state'),
   }
 }
@@ -38,7 +39,7 @@ function config(): StrategyBenchmarkConfig {
 type WireObservation = { endpoint: string; redirect: RequestInit['redirect']; model: unknown; maxTokens: unknown; thinking: unknown; reasoningEffort: unknown; cacheSafe: boolean; privateLeak: boolean; feedbackObserved: boolean; correctArtifact: boolean; childNoTools: boolean }
 const task = strategyDevelopmentTask('integer-sum')
 
-test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('runs the real DeepSeek Goal route through paired cells without leaking verifier inputs', async () => {
+test.skipIf(!process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME)('runs the real DeepSeek Goal route through paired cells without leaking verifier inputs', async () => {
   const wallClockNow = Date.now
   const startedAt = wallClockNow()
   vi.spyOn(Date, 'now').mockImplementation(() => Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.checkedAt) + 1000 + wallClockNow() - startedAt)

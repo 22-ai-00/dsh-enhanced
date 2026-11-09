@@ -1,13 +1,23 @@
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createStrategyGoalRuntime, strategyGoalTaskDigests, type StrategyGoalRuntimeControl, type StrategyGoalTask } from '../../src/benchmark/strategy-goal-runtime.js'
 import { strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, type StrategyBenchmarkPlan } from '../../src/benchmark/strategy-plan.js'
 import { benchmarkSchedule } from '../../src/benchmark/schema.js'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'
+import { nativeExecution } from './helpers/native-runtime.ts'
+
+// Lifecycle cases cancel before any isolated process starts. Mount the plugin
+// shape without a real runtime-tree verification; live runs keep the real module.
+vi.mock('@dsh-enhanced/assistant-isolation', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-isolation')>()
+  if (process.env.DSH_ISOLATION_TEST_NATIVE_RUNTIME !== undefined) return actual
+  const { syntheticIsolationModule } = await import('./helpers/synthetic-isolation.ts')
+  return syntheticIsolationModule(actual)
+})
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -25,7 +35,7 @@ test('registers lifecycle before setup and disposes a factory binding that arriv
   const abort = new AbortController(); let control: StrategyGoalRuntimeControl | undefined; let started!: () => void; const factoryStarted = new Promise<void>(resolve => { started = resolve }); let release!: () => void; const late = new Promise<void>(resolve => { release = resolve }); let disposed = 0; let streams = 0
   class LateAdapter extends LlmAdapter { override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> { streams++; yield { type: 'finish', reason: { kind: 'stop' } } } }
   const setup = createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: abort.signal }, task, workspace, stateRoot, persona: '', model,
-    factory: async () => { started(); await late; return { adapter: new LateAdapter(), inputTokenUpperBound: () => 1, dispose: () => { disposed++ } } }, image: `sha256:${'0'.repeat(64)}`, dockerPath: process.execPath, stepMaxDurationMs: 4000, stopTimeoutMs: 1000,
+    factory: async () => { started(); await late; return { adapter: new LateAdapter(), inputTokenUpperBound: () => 1, dispose: () => { disposed++ } } }, ...nativeExecution(root), stepMaxDurationMs: 4000, stopTimeoutMs: 1000,
     lifecycle: value => { control = value }, })
   expect(control?.snapshot()).toMatchObject({ stage: 'setup', runtimeRoot: null, meter: null, goalSnapshot: null, cleanup: 'pending' })
   await factoryStarted; abort.abort(); const stopping = control!.close()
@@ -41,6 +51,6 @@ test('registers lifecycle before setup and disposes a factory binding that arriv
 test('observer failure closes setup without replacing the observer exception', async () => {
   const source = plan(); const bound = strategyBenchmarkJournalPlan(source); const variant = bound.variants[0]!; const cell = benchmarkSchedule(bound).find(value => value.variantId === variant.id)!
   let control: StrategyGoalRuntimeControl | undefined
-  await expect(createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: new AbortController().signal }, task, workspace: '/tmp/unused', stateRoot: '/tmp/unused-state', persona: '', model, factory: async () => { throw new Error('factory must not run') }, image: `sha256:${'0'.repeat(64)}`, dockerPath: process.execPath, stepMaxDurationMs: 4000, lifecycle: value => { control = value; throw new Error('observer failed') } })).rejects.toThrow('observer failed')
+  await expect(createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: new AbortController().signal }, task, workspace: '/tmp/unused', stateRoot: '/tmp/unused-state', persona: '', model, factory: async () => { throw new Error('factory must not run') }, ...nativeExecution('/tmp/unused'), stepMaxDurationMs: 4000, lifecycle: value => { control = value; throw new Error('observer failed') } })).rejects.toThrow('observer failed')
   expect(control?.snapshot()).toMatchObject({ stage: 'closed', cleanup: 'succeeded', runtimeRoot: null, meter: null, goalSnapshot: null })
 })

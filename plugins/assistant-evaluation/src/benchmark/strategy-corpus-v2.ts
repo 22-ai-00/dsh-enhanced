@@ -9,7 +9,7 @@
  *
  * The v1 authored corpus is intentionally untouched so its dataset digest stays byte-identical.
  * Every private expected byte below was produced by a POSIX-sh reference implementation and
- * byte-compared inside the frozen verifier image (dash + busybox awk); it is not hand-computed.
+ * byte-compared inside the frozen linux-native verifier runtime (dash + busybox awk); it is not hand-computed.
  */
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { BenchmarkCase, BenchmarkPlan } from './types.js'

@@ -1,6 +1,7 @@
 /** Native Goal + isolated artifact assembly. This does not attest a complete comparison. */
 import { Context } from '@deepseek-ai/cordis'
 import { acceptanceDigest, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { NativeAdapterFactory, NativeAdapterBinding, NativeModelConfig } from './native.js'
 import type { BenchmarkExecutionRequest } from './runner.js'
 import { benchmarkAssert, benchmarkInteger, benchmarkObject, benchmarkSnapshot } from './schema.js'
@@ -47,8 +48,9 @@ export interface StrategyGoalRuntimeOptions {
   persona: string
   model: NativeModelConfig
   factory: NativeAdapterFactory
-  image: string
-  dockerPath: string
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
   stepMaxDurationMs: number
   /** Failure to stop within this window remains unknown; never retry the cell. */
   stopTimeoutMs?: number
@@ -117,7 +119,7 @@ function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
  * capabilities and persist/validate complete cell evidence before reporting.
  */
 export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOptions) {
-  const { workspace, stateRoot, persona, image, dockerPath, factory } = input
+  const { workspace, stateRoot, persona, backend, runtime: runtimeDescriptor, cgroupRoots, factory } = input
   const signal = input.request.signal
   const cellId = input.request.cell.id
   const limits = strategyBenchmarkRequestLimits(input.plan, input.request)
@@ -127,7 +129,8 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
   const model = benchmarkSnapshot(input.model)
   const callCounting = model.observationMode === 'observed-call-count'
   benchmarkAssert(acceptanceDigest(model) === input.request.variant.versions.model, 'strategy model differs from frozen route')
-  benchmarkAssert(/^sha256:[a-f0-9]{64}$/u.test(image) && dockerPath.startsWith('/'), 'immutable local image and absolute Docker path required')
+  benchmarkAssert(backend === 'linux-native' && runtimeDescriptor !== null && typeof runtimeDescriptor === 'object' && !Array.isArray(runtimeDescriptor)
+    && cgroupRoots !== null && typeof cgroupRoots === 'object' && !Array.isArray(cgroupRoots), 'linux-native runtime and cgroup roots required')
   const stopTimeoutMs = input.stopTimeoutMs ?? 10000
   benchmarkInteger(stopTimeoutMs, 1000, 30000)
   const stepDuration = input.stepMaxDurationMs
@@ -224,7 +227,7 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
     assertLive()
     const installed = await installNativeGoalServices({ ctx, owner, model, budget,
       limits: { modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall, maxGoalRounds: limits.maxGoalRounds, observationMode: model.observationMode },
-      task, image, dockerPath, stepMaxDurationMs: stepDuration, enabledStrategy: enabled, assertLive })
+      task, backend, runtime: runtimeDescriptor, cgroupRoots, stepMaxDurationMs: stepDuration, enabledStrategy: enabled, assertLive })
     const goals = installed.goals
     goalsHost = goals
     const principalId = installed.principalId, ownerRouteId = installed.ownerRouteId
