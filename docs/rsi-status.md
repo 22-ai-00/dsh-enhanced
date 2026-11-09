@@ -26,7 +26,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 下一批（按目标优先级）
 
-0. **P2 声明式保护分级（起步）**：`assistant-growth-contract` 已成为受保护插件名单的单一事实来源（`plugin-protection` 模块：模型提案 23 项 / owner 修复 12 项，加载即断言严格子集；放此包是因其已在 RSI bootstrap 密封闭包内），plugin-control-plane 与 growth-driver 的手抄镜像已删除；后续：manifest `dsh.protection` 声明与 owner 显式修订通道。
+0. **P2 声明式保护分级（起步）**：`assistant-growth-contract` 已成为受保护插件名单的单一事实来源（`plugin-protection` 模块：模型提案 23 项 / owner 修复 12 项，加载即断言严格子集；放此包是因其已在 RSI bootstrap 密封闭包内），plugin-control-plane 与 growth-driver 的手抄镜像已删除；`dsh.protection.floor` 声明已落地（12 个 immutable 根在 manifest 声明，validate-workspace 对照单一来源校验只升不降，`8e104fc1`）。后续：owner 显式修订通道（新触发类型 `owner-instruction`，需与 revise-created 的 owner-task-failure 准入要求一起设计，工作量与 P1-3 相当）。
 1. **触发→自动准入闭环**：在 fresh install 显式开关下生成 `accept` ceiling + `intakeLedger.evaluation.admit` + auto 有界预算，使普通消息→模型判断→自动 WorkItem→执行→独立验收形成全自动闭环（确定性 gate 与预算仍 fail-closed）。
 2. **P1-3 收尾（可选 v3 分支）**：growth-driver 修订走廊已落地；剩余可选的 revision regression 与 revision adoption 的 v3 work-item 分支（两者均为可选 pin，默认不触发）。
 3. **P1-4 收益门（数据链路完成）**：非劣合同与纯函数评估器、schema 36 benefit 账本与采用门、窗口聚合与 Host-only `evaluateRevisionBenefit(planId)`、负向观察自动回滚已落地；成本数据源已接通——`inspectTrustedOutcomeMetrics(scope, outcomeId)` 以独立投影暴露 trusted outcome 行的 metrics（不改变历史投影 digest），窗口聚合从 objective 组件行读取 token 用量。评估与回滚已挂到 SourceJobs continuation cron tick（`bfc8eeb9`，无新 loop）。剩余：连续 3–5 类真实任务的长期非劣验收。
