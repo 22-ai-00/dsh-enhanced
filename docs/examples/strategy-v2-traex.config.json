@@ -33,8 +33,21 @@
   },
   "repeats": 2,
   "seed": 7,
-  "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "dockerPath": "/usr/bin/docker",
+  "backend": "linux-native",
+  "runtime": {
+    "schemaVersion": 1, "backend": "linux-native", "platform": "linux-x64",
+    "sourceCommit": "0000000000000000000000000000000000000000", "lockSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "root": { "path": "/absolute/private/linux-runtime", "dev": 1, "ino": 2, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+    "nodePath": "/absolute/private/linux-runtime/bin/node", "nodeSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "pnpmPath": "/absolute/private/linux-runtime/pnpm/bin/pnpm.mjs",
+    "nativePnpmRoot": "/absolute/private/linux-runtime/pnpm-native", "nativePnpmPath": "/absolute/private/linux-runtime/pnpm-native/pnpm",
+    "modulesPath": "/absolute/private/linux-runtime/node_modules", "storePath": "/absolute/private/linux-runtime/store", "cachePath": "/absolute/private/linux-runtime/cache",
+    "versions": { "node": "v22.23.2", "pnpm": "11.7.0", "typescript": "6.0.3", "cordis": "4.0.5", "tools": "0.2.1-rc.2", "systemPrompt": "0.2.1-rc.2" }
+  },
+  "cgroupRoots": {
+    "mode": "v1", "cpu": "/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-1000", "memory": "/sys/fs/cgroup/memory/dsh-native/uid-1000",
+    "pids": "/sys/fs/cgroup/pids/dsh-native/uid-1000", "freezer": "/sys/fs/cgroup/freezer/dsh-native/uid-1000"
+  },
   "stepMaxDurationMs": 60000,
   "stopTimeoutMs": 5000,
   "workspaceDirectory": "/absolute/private/strategy-v2-workspaces",

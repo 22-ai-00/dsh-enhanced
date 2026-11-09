@@ -37,8 +37,8 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 从 `@dsh-enhanced/assistant-evaluation/benchmark/skills` 导入：
 
 - `createNativeSkillGoalRuntime(options)`：创建一个真实 DSH Goal 单元。`execute()` 返回独立 Goal 观察、Host usage、工具调用和技能执行记录。来源单元配置 `source: { name, description, validityMs }`；达成后调用 `captureVerifiedSkill()`，通过真实 SessionQuery/Goals 重新验证，沉淀 pending 候选。来源服务必须持续存活。
-- `runNativeSkillBenchmark(config, captured, factory, signal)`：使用同一个可信模型工厂运行 baseline/candidate。`config` 固定 persona、model、budget、execution、公开 task、不可变 image、Docker 路径、步骤时限、repeats（2–4）、seed、expiresAt、独立 authority 和 verification。供应、预算、任务与 persona 必须匹配 captured.origin；训练用量单独返回，不混入复用单元。
-- `nativeSkillBenchmarkReport(evidence, pinnedPublicKey, generatorDigest)`：离线重验 `completion.json`，重算报告；不启动模型、authority 或 Docker。
+- `runNativeSkillBenchmark(config, captured, factory, signal)`：使用同一个可信模型工厂运行 baseline/candidate。`config` 固定 persona、model、budget、execution、公开 task、固定 linux-native runtime 与 cgroup roots、步骤时限、repeats（2–4）、seed、expiresAt、独立 authority 和 verification。供应、预算、任务与 persona 必须匹配 captured.origin；训练用量单独返回，不混入复用单元。
+- `nativeSkillBenchmarkReport(evidence, pinnedPublicKey, generatorDigest)`：离线重验 `completion.json`，重算报告；不启动模型、authority 或原生隔离执行。
 
 `stateRoot`、`workspaceRoot` 必须是独立的私有绝对目录，state 也不能位于来源 workspace 内。来源 runtime 的 workspace/stateRoot 由调用者预先创建为 `0700`。模型工厂负责装配凭据服务和适配器；模型仅见公开程序规格和允许的原生工具，不接收独立验收输入、答案、私钥或 authority 路径。
 
@@ -56,9 +56,9 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 
 ## 真实 Day1 探针
 
-先运行 `pnpm build`，准备已存在、包含 `/bin/sh` 与 `node` 的不可变本地 Docker 镜像。真实 Day1 探针须由可信 Host 提供一个固定 adapter 模块（导出一个满足 native adapter 契约的工厂），在全新私有目录运行；探针拒绝覆盖或恢复已有实验，不拉取镜像、不安装插件、不修改日常 profile。
+先运行 `pnpm build`，准备已存在、包含 `bin/node`、`pnpm` 与 `node_modules` 的固定只读 Linux 运行时（`LinuxRuntime`），并确认当前 UID 已获得 cgroup v1 委派。真实 Day1 探针须由可信 Host 提供一个固定 adapter 模块（导出一个满足 native adapter 契约的工厂），在全新私有目录运行；探针拒绝覆盖或恢复已有实验，不准备运行时、不安装插件、不修改日常 profile。
 
-凭据由 Host 的 adapter 或本地凭据服务按引用解析，不接受明文 key；`DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）须同时设置。文件内容不会写入证据。可用 `DSH_NATIVE_SKILL_DOCKER` 指定绝对 Docker 路径，默认 `/usr/bin/docker`。
+凭据由 Host 的 adapter 或本地凭据服务按引用解析，不接受明文 key；`DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）须同时设置。文件内容不会写入证据。真实执行测试用 `DSH_ISOLATION_TEST_NATIVE_RUNTIME` 指向已准备的 runtime 描述符。
 
 探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 Goal 回合（`stepMaxDurationMs`）240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。回合期限覆盖该轮所有模型和工具调用；它不会随每次调用重置。期限中断了已派发请求且 usage 未结算时，该实验保持 unknown，即使本地最后一个产物作业成功也不能据此捕获候选。
 
@@ -68,7 +68,7 @@ Goals 经原生 SystemPrompt 与 `goal_context` 提供 `roundTiming`：首次上
 
 ## 当前验收范围
 
-真实 Docker 工程测试覆盖：来源 native Goal→独立验收→SessionQuery 捕获→12 个新 Goal 的双臂比较，候选 6 次实际技能复用；两臂各 6 次达成、质量平局。另覆盖 usage/输出/预算/训练证据篡改、unknown 报告、重跑拒绝与取消清理。这些使用确定性适配器，不证明真实模型收益。
+真实原生隔离工程测试覆盖：来源 native Goal→独立验收→SessionQuery 捕获→12 个新 Goal 的双臂比较，候选 6 次实际技能复用；两臂各 6 次达成、质量平局。另覆盖 usage/输出/预算/训练证据篡改、unknown 报告、重跑拒绝与取消清理。这些使用确定性适配器，不证明真实模型收益。
 
 ```sh
 DSH_ISOLATION_TEST_IMAGE=sha256:LOCAL_IMMUTABLE_IMAGE \
