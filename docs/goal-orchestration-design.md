@@ -27,4 +27,4 @@ Delivery 等待准确 Agent 的步骤及全目标验收后再释放租约；idle
 | 调度、租约与恢复 | [Automations](../plugins/assistant-automations/README.md)、[Delivery](../plugins/assistant-delivery/README.md) |
 | 独立验收 | [Verifier](../plugins/assistant-verifier/README.md)、[Isolation](../plugins/assistant-isolation/README.md) |
 
-`pnpm test:autonomy:wake` 检查临时 profile 的安装、进程重启、撤权和中断后不重放；需要已固定的本机 Docker 镜像及浏览器，参数见 Goals README。真实仓库路径见[仓库 E2E](live-repository-e2e.md)。这些入口及已有组件不等于跨日生产目标、完整授权维度或同预算收益已经验收。
+`pnpm test:autonomy:wake` 检查临时 profile 的安装、进程重启、撤权和中断后不重放；其 harness 目前仍构造 Docker 时代配置、已被 linux-native 校验 fail-closed 且不在 CI 内，迁移到 prepared LinuxRuntime/cgroup（`DSH_ISOLATION_TEST_NATIVE_RUNTIME`）属下一批，另需本机浏览器，参数见 Goals README。真实仓库路径见[仓库 E2E](live-repository-e2e.md)。这些入口及已有组件不等于跨日生产目标、完整授权维度或同预算收益已经验收。

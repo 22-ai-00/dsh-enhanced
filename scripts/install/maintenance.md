@@ -199,7 +199,7 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
   workspace-write /absolute/private-auxiliary-root
 ```
 
-事务在屏蔽并停止双服务后重新复制 Home，追加真实 owner-ledger 源码维护记录，物化候选包和独立构建的 creation image，并用原身份、原始期限与预算重新编译配置。原 bootstrap 不覆盖；旧配置、journal、creation receipt 保留在私有审计中，新配置由单独的 Host 签名 repair overlay 绑定，不虚构 activation。unit 与 service environment 保持不变，其他 profile 不得改变行为。
+事务在屏蔽并停止双服务后重新复制 Home，追加真实 owner-ledger 源码维护记录，物化候选包并准备 linux-native 运行时资源（runtime 树、cgroup roots 与离线依赖），并用原身份、原始期限与预算重新编译配置。原 bootstrap 不覆盖；旧配置、journal、creation receipt 保留在私有审计中，新配置由单独的 Host 签名 repair overlay 绑定，不虚构 activation。unit 与 service environment 保持不变，其他 profile 不得改变行为。
 
 停服前仅允许原签名配置绑定的 observer socket，按精确路径、所有者及文件身份核验；准备副本不保留该运行时端点。原 Home 的 socket 不由安装器删除，必须由服务正常关闭清理，停服后再执行不允许特殊文件的严格快照检查。未知 socket、FIFO、符号链接替换或身份漂移继续拒绝。
 
@@ -418,9 +418,9 @@ Linux 新安装默认使用 native；源码安装可显式固定当前仓库的�
 
 省略 source repository 时只取已安装包版本的官方 tag，缺失不会换用其他版本。native 要求非 root Linux、bubblewrap、namespace/tmpfs 支持及已委派的 cgroup v1；资源准备只读取固定 Git manifests/lockfile，下载校验官方工具链并准备离线依赖，不创建 RSI owner、协调器或服务。setup 在创建 Web owner/grant 前使用真实原生执行器探测非 root、只读根目录及 artifact 导出，之后重新核对 runtime 收据。缺少 cgroup 委派时拒绝，不自动提权。
 
-显式 Docker 路径继续支持现有安装：传 `--isolation-backend docker --isolation-image sha256:<已存在的本机镜像ID>`，不要同时指定 native source repository。macOS 的实验性 autonomy 保留这一 Docker 路径。安装器不拉取镜像、不安装或重启 Docker；使用最终配置的 Docker 路径和生产 supervisor 完成相同范围的固定任务探测。两种 backend 清理状态未知时均保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
+Docker 后端已从产品移除：新安装与新配置只接受 linux-native（Linux）或 macOS seatbelt，安装器不再接受 `--isolation-backend docker` / `--isolation-image`，传入即 fail-closed，也不再拉取镜像、安装或重启 Docker。仍保留 Docker 的原安装只能在满足严格前提（创建/修订审查、修订回归与采用业务记录为空）时执行一次性 docker→native 迁移，详见 [dockerless 运行时](../../docs/dockerless-runtime.md)；Docker 时代的配置与收据仅作只读迁移证据，不会再拉起容器。清理状态未知时保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
 
-普通 Goal admission 的独立 `isolated-runner` 验收支持已配置的 Docker 或 Linux native 后端。native 复用持久 runtime 与 cgroup v1 描述符，不另行准备或续权；cgroup v2 明确拒绝。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
+普通 Goal admission 的独立 `isolated-runner` 验收现在只支持 linux-native（Linux）/ seatbelt（macOS）后端；Docker 时代的 isolated-runner 配置仅保留只读解码，不能再执行。native 复用持久 runtime 与 cgroup v1 描述符，不另行准备或续权；cgroup v2 明确拒绝。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
 
 首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、backend、镜像、native runtime 描述符或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
 

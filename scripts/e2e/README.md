@@ -2,9 +2,11 @@
 
 These opt-in probes have separate prerequisites and evidence boundaries; they are not all run by `pnpm check`. Current project progress is maintained in [RSI status](../../docs/rsi-status.md). Raw results stay in ignored local directories or CI artifacts.
 
+> **Migration note (Docker removal):** the product's Docker backend is gone; new builds/verification accept only linux-native or macOS seatbelt. Several opt-in harnesses below (the autonomy family `DSH_ISOLATION_TEST_IMAGE=sha256:…`, canary/repair `DSH_HOLDOUT_TEST_IMAGE`, repo-autonomy, and the personal-memory acceptance script) still construct Docker-era `image`/`dockerPath` configs. They are now rejected by linux-native validation (fail-closed), are not run by CI or `pnpm check`, and are tracked for migration to `DSH_ISOLATION_TEST_NATIVE_RUNTIME` in the next batch. Until migrated, treat their Docker prerequisites as obsolete.
+
 ## Real Day1 native skill comparison
 
-The approved Day1 native-skill comparison is run by a trusted Host-provided adapter module that satisfies the native adapter contract; it drives a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, an immutable local Docker image containing `sh` and `node`, and a resolvable credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
+The approved Day1 native-skill comparison is run by a trusted Host-provided adapter module that satisfies the native adapter contract; it drives a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, a prepared linux-native `LinuxRuntime` + cgroup v1 roots supplied via `DSH_ISOLATION_TEST_NATIVE_RUNTIME` (no Docker image), and a resolvable credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
 
 ## Linux native boundary (real kernel)
 
@@ -358,9 +360,13 @@ and later successful runs must not be presented as one unqualified command pass.
 
 DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5-rc.1`，可设置 `DSH_E2E_HOST_VERSION=0.1.2-rc.1` 或同一 0.1 次版本的精确 RC 来验证另一 Host。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行 format 3 审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。
 
-## Source proposal native boundary smoke
+## Source proposal native boundary
 
-The Docker source-builder smoke (`source-prepare-docker-smoke.mjs`) was removed with the Docker backend. Source preparation now runs only through the linux-native or macOS seatbelt backends behind the durable `sourceJobs` lane; its contracts and evidence are covered by the `plugin-control-plane` package tests and the [native runtime guide](../../docs/dockerless-runtime.md). The Docker-image reality smokes (`source-repository-smoke.mjs`, `source-repository-sandbox-smoke.mjs`, `source-model-smoke.mjs`, `source-model-durable-smoke.mjs` and their `source-model-control-fixture.mjs`) were removed with the same backend; no standalone Docker boundary smoke or Docker-image source-proposal probe remains.
+Source preparation runs only through the linux-native or macOS seatbelt backends
+behind the durable `sourceJobs` lane; its contracts and evidence are covered by
+the `plugin-control-plane` package tests and the
+[native runtime guide](../../docs/dockerless-runtime.md). Its boundary probe is
+`linux-native-boundary.mjs` above.
 
 
 ## Authenticated replay on a real DSH Host

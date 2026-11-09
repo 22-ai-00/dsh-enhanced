@@ -253,8 +253,8 @@ export class PluginBehaviorRunner {
 }
 
 /* DSH_PLUGIN_VERIFIER_WORKER_START
-// Copied verbatim into the manifest-only image by build-plugin-verifier-image.mjs.
-// This code executes inside the isolation worker, never in the Host process.
+// Inlined into the native behavior worker; this code executes inside the isolation
+// worker, never in the Host process.
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'

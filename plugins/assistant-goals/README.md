@@ -151,7 +151,7 @@ executionBudget:
 
 可选 `preauthorizedSchedule: true` 允许有限隔离作用域中的精确 `goal_schedule` 免逐条审批；默认关闭，不改变工具默认注册或省略 `wake_at` 的检查行为。开启要求持久 `backgroundWake`、累计预算、步骤与全目标独立验收，并在每次调用核对当前 owner 人类回合、原 Session/Goal/revision、剩余预算、精确模型 meter、owner route 和两个隔离验收 profile。免审批参数必须恰为 `goal_id`、`expected_revision`、`wake_at`；验收条件必须覆盖唤醒的有效期限。该只读预检查不创建预算或验收任务，实际执行仍经过 Policy 授权和原有 CAS；它不开放 `goal_control` 或其他目标操作。
 
-维护者可用 `DSH_ISOLATION_TEST_IMAGE=sha256:<本机已有镜像摘要> pnpm test:autonomy:wake` 验证实际安装、进程重启、撤权拒绝及中断后不重放；本机 Chromium 可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定。该测试显式添加固定验收条件、精确 owner route、后台 Policy 和确定性模型计量器，不证明默认安装已具备生产模型计量或完整自治能力。
+维护者的实际安装/进程重启/撤权拒绝/中断不重放端到端用例是 `pnpm test:autonomy:wake`；该 Playwright harness 仍构造 Docker 时代的 `--isolation-image` 配置，Docker 后端移除后已被 linux-native 校验 fail-closed、不在 CI/`pnpm check` 内，迁移到 prepared LinuxRuntime（`DSH_ISOLATION_TEST_NATIVE_RUNTIME`）属下一批，迁移前此命令不可直接运行。本机 Chromium 可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定。该测试显式添加固定验收条件、精确 owner route、后台 Policy 和确定性模型计量器，不证明默认安装已具备生产模型计量或完整自治能力。
 
 后台恢复要求 Delivery 提供版本 1 的终态验收等待能力；旧版缺少该能力时在调度与执行边界拒绝。原生 idle 或达到轮次上限不是验收结束：Delivery 保留原 Agent 和会话租约，等待这个 Agent 的步骤及全目标验收，随后重新核对授权、期限和状态。最后一轮可先达到轮次上限，再凭对应 owner/定义/实际执行的独立全目标回执转为 complete；不能仅凭较大的 revision 推断完成。
 

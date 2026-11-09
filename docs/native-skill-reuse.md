@@ -71,7 +71,7 @@ Goals 经原生 SystemPrompt 与 `goal_context` 提供 `roundTiming`：首次上
 真实原生隔离工程测试覆盖：来源 native Goal→独立验收→SessionQuery 捕获→12 个新 Goal 的双臂比较，候选 6 次实际技能复用；两臂各 6 次达成、质量平局。另覆盖 usage/输出/预算/训练证据篡改、unknown 报告、重跑拒绝与取消清理。这些使用确定性适配器，不证明真实模型收益。
 
 ```sh
-DSH_ISOLATION_TEST_IMAGE=sha256:LOCAL_IMMUTABLE_IMAGE \
+DSH_ISOLATION_TEST_NATIVE_RUNTIME=/absolute/path/to/prepared-runtime.json \
 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run \
   tests/benchmark/native-skills-runtime.spec.ts tests/benchmark/native-skills.spec.ts
 ```

@@ -63,25 +63,16 @@ files, queue state, the Context replacement and native execution outcome. It
 did not give the model the approval, release or acceptance tools. Local owner
 routing, empty history and tool approval were engineering fixtures.
 
-For an explicit non-production protocol experiment, set
-`DSH_SOURCE_MODEL_REASONING_PROBE=low`. The private Pi Context declares the
-selected model's `low` mapping and sets the native provider configuration to
-that level. The regular route remains the default when the variable is absent.
-Evidence marks this as an unverified configuration experiment: the recorded
-successful run lacks per-request `reasoningEffort` observations, so it does not
-establish effective selection, wire dispatch or gateway enforcement of `low`.
-Stream evidence records event-type counts, reasoning/text/argument character
-counts, finish reason and settled usage; it does not retain reasoning text.
-Changing this setting makes the run unsuitable for a same-contract comparison
-against earlier default-route attempts.
+The historical `DSH_SOURCE_MODEL_REASONING_PROBE` and `DSH_SOURCE_MODEL_PREFLIGHT`
+switches belonged to the Docker-era source-model smoke harnesses, which were
+removed with the Docker backend; no code references them now. Durable `sourceJobs`
+run only on linux-native or macOS seatbelt, covered by the `plugin-control-plane`
+package tests and the [native runtime boundary](dockerless-runtime.md).
 
-Add `DSH_SOURCE_MODEL_PREFLIGHT=1` to exercise trust loading and a dummy queue
-admission, then replace the Context and confirm the queued record without a
-model call or native sandbox execution. This emits a distinct preflight evidence kind.
 Every run uses private local state; the evidence records its path. Successful
 pending plans retain their registered worktrees for review, and failures retain
 their state for reconciliation. Do not remove those directories manually while
-their worktree/container ownership remains unresolved.
+their worktree ownership remains unresolved.
 
 The scheduler is explicitly disabled during the model wake. After queue
 acceptance the first Context is disposed; a fresh Context opens the same state
@@ -91,6 +82,14 @@ recovery of a running job. Claimed jobs interrupted during execution remain
 `unknown` and require resource reconciliation, never automatic replay.
 
 ## Independent acceptance and evidence boundary
+
+> **Migration pending:** `personal-memory-source-acceptance.mjs` still
+> constructs a Docker-era `IsolatedVerifierRunner({ image, dockerPath })`;
+> after the Docker removal the runner constructor requires a linux-native
+> `LinuxRuntime` + cgroup roots, so this harness currently throws at
+> construction and is fail-closed until migrated to
+> `LinuxVerifierRunner` (tracked as the opt-in e2e migration). The command
+> shapes below record the intended contract, not a currently runnable command.
 
 For the personal-memory task, use the separate owner-owned
 `personal-memory-source-acceptance.mjs` harness to compare baseline and candidate

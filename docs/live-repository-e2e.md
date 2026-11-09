@@ -79,7 +79,7 @@ existing test branch. After delivery it waits for the real event
 snapshot, a successful wake, the existing repository-readback outcome receipt,
 source retirement, and a final restart that produces no new source event.
 
-This scenario repairs only `summarize.mjs`, matching the production admission contract and its independent verification artifact. Prepare a fresh descriptor immediately before running: at goal setup, its fixed deadline must still be more than six minutes away. Installation and container prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
+This scenario repairs only `summarize.mjs`, matching the production admission contract and its independent verification artifact. Prepare a fresh descriptor immediately before running: at goal setup, its fixed deadline must still be more than six minutes away. Installation and linux-native runtime prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The repo-autonomy harness itself still constructs Docker-era runner config and is fail-closed pending the native migration tracked in [RSI status](rsi-status.md). The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
 
 Observation starts during preflight, so its poll budget must cover setup, model execution, and CI latency as well as event waiting. The example permits 180 polls at two-second intervals; it does not reserve all polls until the commit exists.
 
