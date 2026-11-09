@@ -9,6 +9,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantIsolationService } from '@dsh-enhanced/assistant-isolation'
+import { nativeIsolationConfig, cleanupNativeIsolation } from './helpers/native-isolation.ts'
 import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest, type Server } from 'node:http'
@@ -17,7 +18,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, test, vi } from 'vitest'
+import { afterAll, describe, expect, test, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
 import { commitOnGitHub, createCompensatingCommitOnGitHub, readGitHubPreimage } from '../src/github.ts'
 import type { ActionGrant } from '../src/types.ts'
@@ -26,6 +27,7 @@ const secret = 'fixture-broker-token-not-a-user-secret'
 const initialHead = 'a'.repeat(40)
 const ownerSid = 'action-session'
 const otherSid = 'other-session'
+afterAll(cleanupNativeIsolation)
 
 function makeAgent(ctx: Context, workspace: string, sid: string): Agent {
   const id = SessionId(sid)
@@ -173,7 +175,7 @@ async function makeHarness(options: HarnessOptions = {}) {
     const value = principalOverride ?? { principalId: 'owner', principalRecordId: 'record', principalVersion: 1 }
     return { principalId: value.principalId, principalLineage: { principalRecordId: value.principalRecordId, principalVersion: value.principalVersion }, scope: { workspace: root, preset: 'primary' } }
   } } as never)
-  await ctx.plugin(AssistantIsolationService, { stateRoot: join(root, 'isolation'), image: 'sha256:' + 'a'.repeat(64), grants: [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }] })
+  await ctx.plugin(AssistantIsolationService, await nativeIsolationConfig(join(root, 'isolation'), [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }]))
   let asks = 0
   ctx.on('approval/request', async () => { asks++; return 'allowed-once' })
   const load = async () => await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) {

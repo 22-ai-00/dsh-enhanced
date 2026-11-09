@@ -9,6 +9,7 @@ import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantIsolationService } from '@dsh-enhanced/assistant-isolation'
+import { nativeIsolationConfig, cleanupNativeIsolation } from './helpers/native-isolation.ts'
 import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
@@ -17,7 +18,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, test, vi } from 'vitest'
+import { afterAll, expect, test, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
 import { commitOnGitHub } from '../src/github.ts'
 import { execFile } from 'node:child_process'
@@ -26,6 +27,7 @@ import { fileURLToPath } from 'node:url'
 import type { ActionGrant } from '../src/types.ts'
 
 const secret = 'fixture-broker-token-not-a-user-secret'
+afterAll(cleanupNativeIsolation)
 function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('action-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
@@ -80,7 +82,7 @@ test.runIf(process.platform === 'linux')('real ToolRuntime, Keychain and HTTP ex
     ctx.provide('agents' as never, { get: (id: string) => id === owner.id ? owner : undefined } as never)
     ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
     // Exercise the actual Isolation routing exception; no isolation job is submitted.
-    await ctx.plugin(AssistantIsolationService, { stateRoot: join(root, 'isolation'), image: 'sha256:' + 'a'.repeat(64), grants: [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }] })
+    await ctx.plugin(AssistantIsolationService, await nativeIsolationConfig(join(root, 'isolation'), [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }]))
     let asks = 0; let allowHostCanary = true; ctx.on('approval/request', async () => { asks++; return allowHostCanary ? 'allowed-once' : 'rejected' })
     const load = async () => await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) {
       new AssistantActionsService(runtime, { stateRoot, grants: [grant] }, input => commitOnGitHub(input, transport))
