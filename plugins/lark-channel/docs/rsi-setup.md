@@ -71,7 +71,7 @@ Linux 新安装默认准备原生离线构建运行时（sourceBuild schema 3，
 
 `--prepare-build` 输出的是基础 schema 3 原生准备回执，不是 owner 执行授权。正式 `--install-owner` 另取 repository schema 4，并在 owner/原期限固定后编译 Control Plane 的 Linux sourceBuild，绑定完整运行时、双 UID、系统快照、资源限额与账本 seal。基础运行时仍用于导出 schema 2 `releaseBuild`：固定工具链、离线 store/cache 与 `runtimeDigest`，供既有发布 adapter 使用。创建、修订、回归及采用共享同族行为观察器与 cgroup，但使用独立账本和用途分离的签名授权。
 
-Linux 原生自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、8 GiB 工作区及 4 GiB 临时目录上限；两类目录各限 100 万 inode。宿主必须具备相应的委派和资源。原生边界见[运行时说明](../../../docs/dockerless-runtime.md)；历史 Docker 授权保留原 4 GiB 工作区、2 GiB 临时目录与[嵌套 sandbox 配置](../../../scripts/isolation/README.md#nested-sandbox-profile)；该后端已不可新建或续跑，仅供迁移时只读解码。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
+Linux 原生自动配置使用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、8 GiB 工作区及 4 GiB 临时目录上限；两类目录各限 100 万 inode。宿主必须具备相应的委派和资源。原生边界见[运行时说明](../../../docs/dockerless-runtime.md)；历史 Docker 授权保留原 4 GiB 工作区、2 GiB 临时目录与其嵌套 sandbox 配置（该配置及 Docker 构建入口已随 Docker 后端移除）；该后端已不可新建或续跑，仅供迁移时只读解码。macOS 原生构建按固定 60 秒单次、1 MiB 输出、1000 次及 24 小时累计运行限额授予，独立行为 runner 保留各自原有额度。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier、Memory Learning 与 Control Plane。Memory 由 Personal Assistant 内嵌提供，不再添加独立 Memory bundle。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 

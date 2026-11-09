@@ -174,3 +174,47 @@ export async function readRsiBuildEnvironment(input: { dshHome: string; profile:
   return { schemaVersion: 1, sourceCommit: saved.sourceCommit as string,
     sourceBuild: saved.sourceBuild }
 }
+
+const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/u
+const SOURCE_COMMIT = /^[a-f0-9]{40}$/u
+
+/** Persisted Docker-era creation-build receipt, minus the fields only a live build can prove. */
+export interface LegacyRsiCreationBuildEnvironment {
+  schemaVersion: 1
+  sourceCommit: string
+  sourceImage: string
+  image: string
+  dockerPath: string
+  socketPath?: string
+}
+
+/** Read the historical creation-build receipt for comparison during a Docker -> native handoff.
+ * It performs no Docker call and never proves the image is present or prepares/resumes a build. */
+export async function readLegacyRsiCreationBuildReceipt(input: {
+  dshHome: string; profile: string; source: RsiSourceWorkspace; signal?: AbortSignal
+}): Promise<LegacyRsiCreationBuildEnvironment> {
+  if (!exactPath(input.dshHome) || !PROFILE.test(input.profile)
+    || input.source.schemaVersion !== 1 || !SOURCE_COMMIT.test(input.source.sourceCommit)) fail('invalid DSH_HOME, profile or source')
+  input.signal?.throwIfAborted()
+  await directory(input.dshHome, false)
+  const parent = join(input.dshHome, 'rsi-creation-builds'), final = join(parent, input.profile)
+  await directory(parent); await directory(final)
+  if ((await realpath(final)) !== final) fail('creation build home is not canonical')
+  const saved = JSON.parse((await readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Record<string, unknown>
+  const { receiptDigest: recordedDigest, ...content } = saved
+  if (saved.schemaVersion !== 1 || typeof recordedDigest !== 'string' || digest(JSON.stringify(content)) !== recordedDigest
+    || saved.sourceCommit !== input.source.sourceCommit
+    || typeof saved.sourceImage !== 'string' || !IMAGE_DIGEST.test(saved.sourceImage)
+    || typeof saved.image !== 'string' || !IMAGE_DIGEST.test(saved.image)
+    || typeof saved.dockerPath !== 'string' || !exactPath(saved.dockerPath)
+    || (saved.socketPath !== undefined && (typeof saved.socketPath !== 'string' || !isAbsolute(saved.socketPath)))) {
+    fail('recorded Docker creation build receipt is invalid or does not match the source')
+  }
+  input.signal?.throwIfAborted()
+  return { schemaVersion: 1, sourceCommit: saved.sourceCommit as string,
+    sourceImage: saved.sourceImage as string, image: saved.image as string, dockerPath: saved.dockerPath as string,
+    ...(saved.socketPath === undefined ? {} : { socketPath: saved.socketPath as string }) }
+}
+
+/** Installer-facing name retained for the Docker -> native handoff; purely read-only. */
+export const readRsiCreationBuildEnvironment = readLegacyRsiCreationBuildReceipt
