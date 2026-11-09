@@ -5,12 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from '../src/external-holdout.ts'
+import { syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-holdout-fixture.ts'
 
 const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
 const ready = `process.stdout.write(JSON.stringify({event:'ready',protocol:'assistant-skills/holdout-ipc/v1'})+'\\n');`
 const authority = (code: string) => ({ executable: process.execPath, args: ['-e', code], publicKey, datasetDigest: 'a'.repeat(64) })
 const profile = (): ExternalHoldoutProfile => ({ id: 'operator', version: 1, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/tmp/workspace', preset: 'primary' },
-  execution: { image: `sha256:${'b'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: '/tmp/operator-state', command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 }, authority: authority(''), maxComparisons: 1 })
+  execution: { backend: 'linux-native', runtime: syntheticLinuxRuntime('/tmp/operator-state'), cgroupRoots: syntheticCgroupRoots(), stateRoot: '/tmp/operator-state', command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 }, authority: authority(''), maxComparisons: 1 })
 
 describe('external authority configuration', () => {
   test('freezes exact scoped public configuration and permits expired profiles for status readback', () => {
@@ -24,6 +25,17 @@ describe('external authority configuration', () => {
     expect(() => validateExternalHoldoutProfiles([profile(), { ...profile(), id: 'other' }])).toThrow(/invalid external/)
     expect(() => validateExternalHoldoutProfiles([{ ...profile(), execution: { ...profile().execution, stateRoot: '/tmp/workspace/private' } }])).toThrow(/invalid external/)
     expect(() => validateExternalHoldoutProfiles([{ ...profile(), expectedStdout: 'answer' } as ExternalHoldoutProfile])).toThrow(/invalid external/)
+    // The Docker artifact backend was removed: only a structurally valid
+    // linux-native runtime and cgroup descriptor may reach the verifier.
+    const native = (execution: object) => ({ ...profile(), id: 'invalid', authority: authority('native-check'), execution }) as ExternalHoldoutProfile
+    expect(() => validateExternalHoldoutProfiles([native({ ...profile().execution, backend: undefined })]))
+      .toThrow(/invalid execution config/)
+    expect(() => validateExternalHoldoutProfiles([native({ ...profile().execution, backend: 'docker' })]))
+      .toThrow(/invalid execution config/)
+    expect(() => validateExternalHoldoutProfiles([native({ ...profile().execution, runtime: undefined })]))
+      .toThrow(/invalid execution config/)
+    expect(() => validateExternalHoldoutProfiles([native({ ...profile().execution, cgroupRoots: undefined })]))
+      .toThrow(/invalid execution config/)
   })
 
   test('requires exactly one public holdout identity digest', () => {

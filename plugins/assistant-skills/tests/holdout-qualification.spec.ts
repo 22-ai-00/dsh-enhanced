@@ -8,6 +8,7 @@ import { createDefinition } from '../src/definition.ts'
 import { HoldoutAuthority, type HoldoutDataset } from '../src/holdout-authority.ts'
 import { createProspectiveCertificate, generateProspectiveDataset, prospectiveGeneratorDigest } from '../src/prospective-holdout.ts'
 import { inspectProspectiveQualification, qualifyHoldout, verifyHoldoutReceipt, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
+import { nativeExecution } from './helpers/native-holdout-fixture.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -28,7 +29,7 @@ async function fixture() {
   const workspace = await stateRoot(), root = await stateRoot(), keys = generateKeyPairSync('ed25519')
   const authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 } })
   const input: Omit<HoldoutQualificationInput, 'transport'> = { baseline: skill(workspace, 'printf bad'), candidate: skill(workspace, 'cat'),
-    scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, execution: { image: `sha256:${digest('d')}`, dockerPath: '/usr/bin/docker', stateRoot: root,
+    scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, execution: { ...nativeExecution(root),
       command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 2000, verificationDurationMs: 1000 },
     expectedDatasetDigest: acceptanceDigest(dataset), pinnedPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), signal: new AbortController().signal, authorize() {} }
   return { authority, input }
@@ -107,8 +108,8 @@ test.each(['order-summary/v1', 'order-summary/v2', 'template-render/v1', 'depend
   const baseline = skill(workspace, 'printf bad'), candidate = skill(workspace, 'cat')
   const canaryAdmission = { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: candidate.name, parentDefinitionDigest: acceptanceDigest(baseline), candidateDefinitionDigest: acceptanceDigest(candidate),
     taskFamily: { goalDefinitionDigest: candidate.source.goal.definition.digest, outcomeProfile: { id: 'exact-outcome', version: 1, digest: digest('9') } } }
-  const execution = { image: `sha256:${digest('d')}`, dockerPath: '/usr/bin/docker', stateRoot: root, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 2000, verificationDurationMs: 1000 }
-  const binding = { scopeDigest: acceptanceDigest(scope), baselineDigest: acceptanceDigest(baseline), candidateDigest: acceptanceDigest(candidate), budgetDigest: acceptanceDigest({ inputsDigest: acceptanceDigest({}), filesDigest: acceptanceDigest([]), image: execution.image, dockerPath: execution.dockerPath, command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt, repeats: execution.repeats, maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, maxOutputBytes: execution.maxOutputBytes, cellDurationMs: execution.cellDurationMs, verificationDurationMs: execution.verificationDurationMs }), admissionDigest: acceptanceDigest(canaryAdmission), expiresAt: execution.expiresAt, repeats: execution.repeats }
+  const execution = { ...nativeExecution(root), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 2000, verificationDurationMs: 1000 }
+  const binding = { scopeDigest: acceptanceDigest(scope), baselineDigest: acceptanceDigest(baseline), candidateDigest: acceptanceDigest(candidate), budgetDigest: acceptanceDigest({ inputsDigest: acceptanceDigest({}), filesDigest: acceptanceDigest([]), backend: execution.backend, runtimeDigest: acceptanceDigest(execution.runtime), cgroupRootsDigest: acceptanceDigest(execution.cgroupRoots), command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt, repeats: execution.repeats, maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, maxOutputBytes: execution.maxOutputBytes, cellDurationMs: execution.cellDurationMs, verificationDurationMs: execution.verificationDurationMs }), admissionDigest: acceptanceDigest(canaryAdmission), expiresAt: execution.expiresAt, repeats: execution.repeats }
   const prospective = createProspectiveCertificate(binding, dataset, keys.privateKey, '123e4567-e89b-42d3-a456-826614174000')
   const authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective })
   authority.begin(binding)

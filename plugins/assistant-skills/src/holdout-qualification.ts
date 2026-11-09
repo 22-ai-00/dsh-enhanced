@@ -3,15 +3,18 @@ import { lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalScope } from '@dsh-enhanced/assistant-goals'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
 import { replaySkill, validateReplayTrace, type ReplayResult } from './replay.js'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from './holdout-authority.js'
 import { verifyProspectiveCertificate } from './prospective-holdout.js'
 
+/** Artifact execution always uses the fixed native Linux verifier; Docker was removed. */
 export interface HoldoutExecutionConfig {
-  readonly image: string
-  readonly dockerPath: string
+  readonly backend: 'linux-native'
+  readonly runtime: LinuxRuntime
+  readonly cgroupRoots: LinuxCgroupRoots
   readonly stateRoot: string
   readonly command: string
   readonly artifactPath: string
@@ -122,8 +125,11 @@ async function request<T>(transport: HoldoutQualificationInput['transport'], ope
   try { return await Promise.race([transport.request(operation, value, bounded) as Promise<T>, aborted]) } finally { local.abort() }
 }
 export function validateHoldoutExecution(value: HoldoutExecutionConfig): void {
-  if (!plain(value) || typeof value.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.image) || typeof value.dockerPath !== 'string' || !isAbsolute(value.dockerPath)
-    || typeof value.stateRoot !== 'string' || !isAbsolute(value.stateRoot) || typeof value.command !== 'string' || value.command.length === 0 || value.command.length > 16384
+  // Lightweight shape only: the native verifier runner re-validates the runtime,
+  // cgroup roots and execution contract authoritatively on construction. Keeping
+  // this peer-optional lets profiles load without the isolation bundle mounted.
+  if (!plain(value) || value.backend !== 'linux-native' || !plain(value.runtime) || !plain(value.cgroupRoots)) fail('invalid execution config')
+  if (typeof value.stateRoot !== 'string' || !isAbsolute(value.stateRoot) || typeof value.command !== 'string' || value.command.length === 0 || value.command.length > 16384
     || typeof value.artifactPath !== 'string' || !/^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/u.test(value.artifactPath) || value.artifactPath.split('/').some(part => part === '.' || part === '..')
     || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 || !Number.isSafeInteger(value.repeats) || value.repeats < 2 || value.repeats > 4
     || !Number.isSafeInteger(value.maxToolCalls) || value.maxToolCalls < 1 || value.maxToolCalls > 32 || !Number.isSafeInteger(value.maxBytes) || value.maxBytes < 1 || value.maxBytes > 262144
@@ -149,7 +155,8 @@ export function canaryAdmissionMatches(value: unknown, baseline: SkillDefinition
 function binding(scope: GoalScope, baseline: SkillDefinition, candidate: SkillDefinition, execution: HoldoutExecutionConfig, inputs: Readonly<Record<string, unknown>>, files: readonly { path: string; content: string }[], canaryAdmission?: CanaryAdmission) {
   const limits = { maxToolCalls: execution.maxToolCalls, maxOutputBytes: execution.maxOutputBytes }
   return { scopeDigest: digest(scope), baselineDigest: digest(baseline), candidateDigest: digest(candidate),
-    budgetDigest: digest({ inputsDigest: digest(inputs), filesDigest: digest(files), image: execution.image, dockerPath: execution.dockerPath, command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt,
+    budgetDigest: digest({ inputsDigest: digest(inputs), filesDigest: digest(files), backend: execution.backend, runtimeDigest: digest(execution.runtime),
+      cgroupRootsDigest: digest(execution.cgroupRoots), command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt,
       repeats: execution.repeats, maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, maxOutputBytes: execution.maxOutputBytes, cellDurationMs: execution.cellDurationMs, verificationDurationMs: execution.verificationDurationMs }),
     expiresAt: execution.expiresAt, repeats: execution.repeats, ...(canaryAdmission === undefined ? {} : { admissionDigest: digest(canaryAdmission) }), limits }
 }
@@ -276,7 +283,8 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
   if (expectedGeneratorDigest !== undefined && !prospectiveBinding(begin, frozen, pinnedPublicKey, expectedGeneratorDigest)) fail('prospective certificate does not match the frozen plan')
   revalidate()
   const { IsolatedVerifierRunner } = await import('@dsh-enhanced/assistant-isolation')
-  const runner = new IsolatedVerifierRunner({ stateRoot: join(execution.stateRoot, 'verification'), image: execution.image, dockerPath: execution.dockerPath,
+  const runner = new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(execution.stateRoot, 'verification'),
+    runtime: execution.runtime, cgroupRoots: execution.cgroupRoots,
     authorityDigest: digest({ protocol: 'assistant-skills/holdout-qualification/v1', binding: frozen }), command: execution.command, expiresAt: execution.expiresAt,
     maxRuns: begin.cellCount, maxTotalDurationMs: begin.cellCount * execution.verificationDurationMs, maxDurationMs: execution.verificationDurationMs, maxOutputBytes: execution.maxOutputBytes })
   const seen = new Map<string, string>()

@@ -1,8 +1,8 @@
 import { spawn, execFile } from 'node:child_process'
-import { generateKeyPairSync, createHash, randomUUID } from 'node:crypto'
+import { generateKeyPairSync, createHash } from 'node:crypto'
 import { mkdtemp, realpath, writeFile, rm, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -14,6 +14,7 @@ import { qualifyHoldout } from '../src/holdout-qualification.ts'
 import { openHoldoutProcess } from '../src/external-holdout.ts'
 import { verifyHoldoutSignature, verifyProspectiveBenchmarkManifest, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
 import { generatorDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate, type ProspectiveGeneratorName } from '../src/prospective-holdout.ts'
+import { liveNativeRuntime, nativeExecution } from './helpers/native-holdout-fixture.ts'
 
 const exec = promisify(execFile), roots: string[] = [], closes: (() => Promise<void>)[] = []
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -273,11 +274,10 @@ test.each(['next', 'record'] as const)('recovers a durable %s whose acknowledgem
   }
 }, 30000)
 
-const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
-const authorityImage = process.env.DSH_HOLDOUT_TEST_IMAGE ?? ''
-test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.test(value)))('separate authority and candidate containers judge real outputs without mounting answers or keys into the candidate', async () => {
-  const config = await setup(true, false, 'order-summary/v1', 5), docker = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', name = `dsh-holdout-test-${randomUUID()}`
-  const client = await openHoldoutProcess({ executable: docker, publicKey: config.publicKey, datasetDigest: acceptanceDigest(dataset), args: ['run', '--rm', '-i', '--name', name, '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid!()}:${process.getgid!()}`, '--pids-limit', '32', '--memory', '128m', '--cpus', '1', '--mount', `type=bind,source=${resolve(cli, '..')},target=/runtime,readonly`, '--mount', `type=bind,source=${config.root},target=/authority`, '--entrypoint', '/usr/local/bin/node', authorityImage, '/runtime/holdout-cli.js', '--config', '/authority/config.json'] }, new AbortController().signal)
+const nativeRuntime = liveNativeRuntime()
+test.skipIf(!nativeRuntime)('a native authority and candidate judge real outputs without returning private answers or keys', async () => {
+  const config = await setup(false, false, 'order-summary/v1', 5)
+  const client = await openHoldoutProcess({ executable: process.execPath, publicKey: config.publicKey, datasetDigest: acceptanceDigest(dataset), args: [cli, '--config', join(config.root, 'config.json')] }, new AbortController().signal)
   const stateRoot = await realpath(await mkdtemp(join(tmpdir(), 'holdout-candidates-'))); roots.push(stateRoot)
   const scope = { principalId: 'operator', principalRecordId: 'owner', principalVersion: 1, workspace: '/author-workspace', preset: 'primary' }
   const skill = (content: string) => createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'fixture-source', definition: { version: 1, digest: sha('fixture-definition'), objective: 'Echo stdin.' }, sessionId: 'fixture-session', nativeGoalId: 'fixture-native' }, runId: 'fixture-run', turn: 1,
@@ -289,8 +289,8 @@ test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.tes
     ] }, { name: 'fixture-echo', description: 'Synthetic program comparison; source acceptance is a fixture.' }, ['glob', 'write', 'read', 'get_goal'])
   const operations: string[] = []
   try {
-    const result = await qualifyHoldout({ baseline: skill('printf wrong'), candidate: skill('[ ! -e /authority/dataset.json ] && [ ! -e /authority/key.pem ] && [ ! -S /var/run/docker.sock ] && cat'), scope,
-      execution: { image, dockerPath: docker, stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'artifact.sh', expiresAt: Date.now() + 180000, repeats: 2, maxToolCalls: 5, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 20000, verificationDurationMs: 10000 },
+    const result = await qualifyHoldout({ baseline: skill('printf wrong'), candidate: skill('cat'), scope,
+      execution: { ...nativeExecution(stateRoot), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'artifact.sh', expiresAt: Date.now() + 180000, repeats: 2, maxToolCalls: 5, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 20000, verificationDurationMs: 10000 },
       expectedDatasetDigest: acceptanceDigest(dataset), pinnedPublicKey: config.publicKey, signal: new AbortController().signal, authorize() {}, transport: { async request(operation, value, signal) { operations.push(operation); return client.transport.request(operation, value, signal) } } })
     expect(result.receipt.complete).toBe(true)
     expect(verifyHoldoutSignature(result.receipt as unknown as Record<string, unknown>, config.publicKey)).toBe(true)
@@ -298,6 +298,6 @@ test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.tes
     expect(result).toMatchObject({ modelCalls: 0, promotionAuthorized: false })
     expect(operations.filter(value => value === 'record')).toHaveLength(12)
     expect(JSON.stringify(result)).not.toMatch(/expectedStdout|stdin|"stdout"/u)
-    if (process.env.DSH_HOLDOUT_TEST_EVIDENCE) await writeFile(process.env.DSH_HOLDOUT_TEST_EVIDENCE, JSON.stringify({ protocol: 'holdout-runtime-test/v1', source: 'explicit synthetic program and source-acceptance fixtures', authorityImage, candidateImage: image, separateContainerMounts: true, candidateProbes: ['authority dataset absent', 'authority key absent', 'Docker socket absent'], operations, result }, null, 2), { mode: 0o600 })
-  } finally { await client.close(); await exec(docker, ['rm', '-f', name]).catch(() => {}) }
+    if (process.env.DSH_HOLDOUT_TEST_EVIDENCE) await writeFile(process.env.DSH_HOLDOUT_TEST_EVIDENCE, JSON.stringify({ protocol: 'holdout-runtime-test/v1', source: 'explicit synthetic program and source-acceptance fixtures', nativeRuntime, operations, result }, null, 2), { mode: 0o600 })
+  } finally { await client.close() }
 }, 180000)

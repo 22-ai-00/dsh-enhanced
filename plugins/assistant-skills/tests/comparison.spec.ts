@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { createDefinition } from '../src/definition.ts'
 import { SkillComparator, validateComparisonProfiles, type SkillComparisonProfile } from '../src/comparison.ts'
+import { liveNativeRuntime, syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-holdout-fixture.ts'
 
-const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function root() { const value = await mkdtemp(join(tmpdir(), 'skills-comparison-')); roots.push(value); return value }
@@ -13,10 +13,10 @@ function skill(workspace: string, script: string, observations = false) { const 
   ? [{ id: 'glob', toolName: 'glob', arguments: { path: workspace, pattern: '**/*.sh' } }, { id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: script } }, { id: 'read', toolName: 'read', arguments: { file_path: 'result.sh' } }, { id: 'goal', toolName: 'get_goal', arguments: {} }]
   : [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: script } }]
   return createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'source', definition: { version: 1, digest: 'a'.repeat(64), objective: 'script' }, sessionId: 'session', nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 }, steps }, { name: 'script-result', description: 'Write result script.', bindings: [{ name: 'path', stepId: 'write', path: '/file_path' }] }, observations ? ['glob', 'write', 'read', 'get_goal'] : ['write']) }
-function profile(workspace: string, stateRoot: string): SkillComparisonProfile { const cases = [['replay', 'one'], ['evaluation', 'two'], ['regression', 'three']] as const; return { id: 'synthetic', version: 1, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, stateRoot, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 2, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: cases.map(([kind, stdin]) => ({ id: kind, kind, inputs: { path: 'result.sh' }, files: [], stdin: `${stdin}\n`, expectedStdout: `${stdin}\n`, expectedExitCode: 0 })) } }
+function profile(workspace: string, stateRoot: string): SkillComparisonProfile { const cases = [['replay', 'one'], ['evaluation', 'two'], ['regression', 'three']] as const; return { id: 'synthetic', version: 1, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, stateRoot, backend: 'linux-native' as const, runtime: syntheticLinuxRuntime(stateRoot), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 2, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: cases.map(([kind, stdin]) => ({ id: kind, kind, inputs: { path: 'result.sh' }, files: [], stdin: `${stdin}\n`, expectedStdout: `${stdin}\n`, expectedExitCode: 0 })) } }
 
-const dockerTests = /^sha256:[0-9a-f]{64}$/u.test(image) ? describe.sequential : describe.skip
-dockerTests('synthetic native skill comparison', () => {
+const nativeTests = liveNativeRuntime() ? describe.sequential : describe.skip
+nativeTests('synthetic native skill comparison', () => {
   test('runs paired replay/evaluation/regression cells and never promotes automatically', async () => {
     const workspace = await root(), stateRoot = await root(); await chmod(stateRoot, 0o700)
     const comparator = new SkillComparator(profile(workspace, stateRoot))
@@ -55,4 +55,10 @@ test('rejects unsafe or incomplete synthetic comparison profiles', async () => {
   expect(() => validateComparisonProfiles([{ ...valid, id: 'bad', stateRoot: workspace }])).toThrow()
   expect(() => validateComparisonProfiles([{ ...valid, cases: valid.cases.map((entry, index) => index ? entry : { ...entry, id: 'evaluation' }) }])).toThrow()
   expect(() => validateComparisonProfiles([{ ...valid, maxComparisons: Infinity }])).toThrow()
+  // The execution backend is fixed: a missing/foreign backend or a missing
+  // native runtime/cgroup descriptor must be rejected.
+  expect(() => validateComparisonProfiles([{ ...valid, id: 'no-backend', backend: undefined as never }])).toThrow()
+  expect(() => validateComparisonProfiles([{ ...valid, id: 'foreign-backend', backend: 'docker' as never }])).toThrow()
+  expect(() => validateComparisonProfiles([{ ...valid, id: 'no-runtime', runtime: undefined as never }])).toThrow()
+  expect(() => validateComparisonProfiles([{ ...valid, id: 'no-cgroups', cgroupRoots: undefined as never }])).toThrow()
 })

@@ -21,10 +21,10 @@ import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type Ver
 import * as HoldoutQualification from '../src/holdout-qualification.ts'
 import { AssistantSkillsService, type StageSuccessCandidateInput } from '../src/service.ts'
 import { SkillStore, type SkillDelegatedArmBinding } from '../src/store.ts'
+import { liveNativeRuntime, nativeExecution, syntheticCgroupRoots, syntheticLinuxRuntime } from './helpers/native-holdout-fixture.ts'
 
 const cleanups: (() => Promise<void>)[] = []
-const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
-const dockerAvailable = /^sha256:[0-9a-f]{64}$/u.test(image)
+const nativeRuntime = liveNativeRuntime()
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function runRows(root: string): number { const database = new DatabaseSync(join(root, 'skills.sqlite')); try { return (database.prepare('SELECT count(*) AS count FROM skill_runs').get() as { count: number }).count } finally { database.close() } }
 function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id): Agent {
@@ -36,7 +36,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1, repairHoldoutTtlMs = 60000, sourceTool: 'write' | 'isolation_run' = 'write') {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], repair = false, repairIterations = 1, repairHoldoutTtlMs = 60000, sourceTool: 'write' | 'isolation_run' = 'write') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-service-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-'))) : undefined
@@ -127,13 +127,13 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   const dispatches: string[] = []; const lineage: { name: string; root: string; nested: boolean }[] = []
   ctx.on('tools/execute', async (exec, next) => { dispatches.push(exec.name); lineage.push({ name: exec.name, root: exec.rootCallId, nested: exec.parent !== undefined }); return next() })
   ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'write' && deniedTool ? { kind: 'deny', reason: 'fixture current permission revoked' } : next())
-  const comparisons: SkillComparisonProfile[] | undefined = comparison ? [{ id: 'service-comparison', version: 1, scope, stateRoot: comparisonRoot!, image: comparisonImage, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+  const comparisons: SkillComparisonProfile[] | undefined = comparison ? [{ id: 'service-comparison', version: 1, scope, stateRoot: comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 },
     { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] : undefined
   const repairHoldout: ExternalHoldoutProfile = { id: 'repair-holdout', version: 1, scope,
-    execution: { image: `sha256:${'b'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: `${root}-holdout`, command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + repairHoldoutTtlMs, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 },
+    execution: { ...nativeExecution(`${root}-holdout`), command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + repairHoldoutTtlMs, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 },
     authority: { executable: process.execPath, args: [], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: 'c'.repeat(64) }, maxComparisons: 1,
     canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'd'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'e'.repeat(64) } } } }
   if (repair) { ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never) }
@@ -264,15 +264,16 @@ function installSuccessHost(f: Awaited<ReturnType<typeof fixture>>, options?: {
   return { locators, sourceFor: (locator: { sessionId: string; goalId: string }) => sources.get(`${locator.sessionId}${locator.goalId}`)!,
     successReadCount: () => reads, successInputs }
 }
-function sealedProfile(f: Awaited<ReturnType<typeof fixture>>) {
-  return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+function sealedProfile(f: Awaited<ReturnType<typeof fixture>>): SkillComparisonProfile {
+  return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay' as const, inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation' as const, inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression' as const, inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }
 }
 function canaryProfile({ root, scope }: { root: string; scope: object }) {
   const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
-  return [{ id: 'canary', version: 1, scope, execution: { image: `sha256:${'a'.repeat(64)}`, dockerPath: process.execPath,
-    stateRoot: join(tmpdir(), `assistant-skills-canary-${root.split('/').pop()}`), command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60000,
+  const stateRoot = join(tmpdir(), `assistant-skills-canary-${root.split('/').pop()}`)
+  return [{ id: 'canary', version: 1, scope, execution: { ...nativeExecution(stateRoot),
+    command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60000,
     repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 },
   authority: { executable: process.execPath, args: [], publicKey, generatorDigest: '1'.repeat(64) }, maxComparisons: 1 }]
 }
@@ -592,7 +593,7 @@ test('skill_comparison_status redacts private external receipt cells and returns
 })
 
 test('skill_compare projects both the first result and idempotent replay through public comparison status', async () => {
-  const f = await fixture(false, true, 'owner-session', 'owner-session', undefined, `sha256:${'a'.repeat(64)}`)
+  const f = await fixture(false, true)
   result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write the result script.', bindings_json: '[]', expected_version: 0 }))
   f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
   const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Projected comparison.', bindings_json: '[]', parent_version: 1, reason: 'Audit projection.', trigger: 'owner review' }))
@@ -612,7 +613,7 @@ test('skill_compare projects both the first result and idempotent replay through
 test('skill_qualify projects both the first result and idempotent replay through public comparison status', async () => {
   const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const authority = `process.stdout.write(JSON.stringify({event:'ready',protocol:'assistant-skills/holdout-ipc/v1'})+'\\n');let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);process.stdout.write(JSON.stringify({id:m.id,ok:false})+'\\n')}})`
-  const f = await fixture(false, false, 'owner-session', 'owner-session', ({ root, scope }) => [{ id: 'project-external', version: 1, scope, execution: { image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: join(tmpdir(), `assistant-skills-projected-${root.split('/').pop()}`), command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60_000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }, authority: { executable: process.execPath, args: ['-e', authority], publicKey, datasetDigest: '4'.repeat(64) }, maxComparisons: 1 }])
+  const f = await fixture(false, false, 'owner-session', 'owner-session', ({ root, scope }) => [{ id: 'project-external', version: 1, scope, execution: { ...nativeExecution(join(tmpdir(), `assistant-skills-projected-${root.split('/').pop()}`)), command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60_000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }, authority: { executable: process.execPath, args: ['-e', authority], publicKey, datasetDigest: '4'.repeat(64) }, maxComparisons: 1 }])
   result(await f.save()); f.source.steps[0]!.arguments = { file: 'output.txt', data: 'candidate' }
   const candidate = result(await f.candidate(1))
   const raw = { receipt: { complete: true, sessionId: 'private-authority-session', planDigest: '5'.repeat(64), datasetDigest: '4'.repeat(64), publicKey: 'private-key', cellVerdicts: [{ caseId: 'private-case', verdict: 'achieved' }] },
@@ -903,10 +904,10 @@ test('activation rejects business, repeated, foreign, and getter metadata proof 
   }
 })
 
-const dockerTest = dockerAvailable ? test : test.skip
-dockerTest('compares a pending native-file candidate through isolated verification without changing the active skill', async () => {
+const nativeTest = nativeRuntime ? test : test.skip
+nativeTest('compares a pending native-file candidate through isolated verification without changing the active skill', async () => {
   // Source and fresh-Goal admission below are Host seams. This test exercises the real
-  // ToolRuntime -> SkillComparator -> native replay -> Docker verifier path.
+  // ToolRuntime -> SkillComparator -> native replay -> linux-native verifier path.
   const f = await fixture(false, true)
   const saved = result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write the result script.', bindings_json: '[]', expected_version: 0 }))
   expect(saved).toMatchObject({ name: 'saved-write', version: 1 })
@@ -935,13 +936,13 @@ dockerTest('compares a pending native-file candidate through isolated verificati
   expect(exhausted.isError).toBe(true)
 }, 120000)
 
-dockerTest('consumes a Host-attested plan through native replay while independence remains unproven', async () => {
+nativeTest('consumes a Host-attested plan through native replay while independence remains unproven', async () => {
   const f = await fixture(false, true)
   result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
   f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
   const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed host qualification', trigger: 'owner review' }))
   const service = f.ctx.assistantSkills
-  const configured = [{ id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+  const configured = [{ id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native' as const, runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] as const
   service.registerSealedHoldoutProvider({ generation: 'host', read: ({ planId }) => planId === 'sealed' ? { profile: configured[0] as never, attestationDigest: '8'.repeat(64) } : undefined })
@@ -954,7 +955,7 @@ dockerTest('consumes a Host-attested plan through native replay while independen
   expect(await service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never, candidate.id, 'sealed', 'sealed-once')).toEqual(receipt)
 }, 120000)
 
-dockerTest('sealed qualification rejects provider revocation or profile drift before replay and preserves the active version', async () => {
+nativeTest('sealed qualification rejects provider revocation or profile drift before replay and preserves the active version', async () => {
   for (const mode of ['revoked', 'drifted'] as const) {
     const f = await fixture(false, true)
     result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
@@ -968,7 +969,7 @@ dockerTest('sealed qualification rejects provider revocation or profile drift be
   }
 }, 120000)
 
-dockerTest('sealed qualification turns unknown when the candidate parent changes during the comparison', async () => {
+nativeTest('sealed qualification turns unknown when the candidate parent changes during the comparison', async () => {
   const f = await fixture(false, true)
   result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
   f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
@@ -993,7 +994,7 @@ async function watchedFixture(failureThreshold = 1, maxRuns = 2) {
 }
 
 async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2, successor = false) {
-  const f = successor ? await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true, 2) : await fixture(), parent = result(await f.save())
+  const f = successor ? await fixture(false, false, 'owner-session', 'owner-session', undefined, true, 2) : await fixture(), parent = result(await f.save())
   const expiresAt = Date.now() + 30_000
   if (successor) await expect.poll(() => f.ctx.tools.get('skill_repair_arm')).toBeDefined()
   const repair = successor ? f.ctx.assistantSkills.armRepair(f.owner, { goalId: 'source-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: `successor-${Math.random()}`, expiresAt }) : undefined
@@ -1005,7 +1006,7 @@ async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2, successor 
   const taskFamily = { goalDefinitionDigest: candidate.definition.source.goalDefinitionDigest, outcomeProfile: { id: 'profile', version: 1, digest: 'a'.repeat(64) } }
   const admission = { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'saved-write', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest, taskFamily }
   const profile: ExternalHoldoutProfile = { id: 'revision-canary', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' },
-    execution: { image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact', artifactPath: 'artifact', expiresAt: Date.now() + 120_000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 },
+    execution: { ...nativeExecution(stateRoot), command: '/bin/sh /workspace/artifact', artifactPath: 'artifact', expiresAt: Date.now() + 120_000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 },
     authority: { executable: process.execPath, args: ['-e', "process.stdout.write(JSON.stringify({event:'ready',protocol:'assistant-skills/holdout-ipc/v1'})+'\\n');process.stdin.resume();setInterval(()=>{},1000)"], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: '9'.repeat(64) },
     canaryAdmission: admission, maxComparisons: 1 }
   const store = new SkillStore(join(f.root, 'skills.sqlite'))
@@ -1415,7 +1416,7 @@ test('captures an exact successful skill reuse as fixed bound steps while retain
 })
 
 test('finite repair arming requires a live human request and exact immutable replay, and survives restart without dispatch', async () => {
-  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true)
+  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, true)
   await f.save()
   const input = { goalId: 'failed-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: 'repair-once', expiresAt: Date.now() + 30000 }
   f.human(false)
@@ -1436,7 +1437,7 @@ test('finite repair arming requires a live human request and exact immutable rep
 })
 
 test('repair rejects expired authorization, exposes only scoped configuration, and denies fabricated execution capability', async () => {
-  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true)
+  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, true)
   await f.save()
   const input = { goalId: 'failed-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: 'repair-once', expiresAt: Date.now() - 1 }
   expect(() => f.ctx.assistantSkills.armRepair(f.owner, input)).toThrow(/finite/)
@@ -1613,7 +1614,7 @@ test('skill_repair_arm fails closed on a model-supplied expiry outside the finit
     ['an expiry beyond the seven day ceiling', Date.now() + 7 * 86400000 + 60_000, 30 * 86400000],
   ]
   for (const [label, expiresAt, holdoutTtlMs] of cases) {
-    const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true, 1, holdoutTtlMs)
+    const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, true, 1, holdoutTtlMs)
     await expect.poll(() => f.ctx.tools.get('skill_repair_arm')).toBeDefined()
     const response = await f.execute('skill_repair_arm', { ...base, expires_at: expiresAt })
     expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
@@ -1948,8 +1949,8 @@ test('preauthorizes only an exact live isolation-only benchmark delegation', asy
   expect(ordinaryGrant!.authorize(execution(ordinaryRecipient.owner, { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"ordinary"}', invocation_id: 'ordinary' }))).toBe(false)
   ordinaryMounted.dispose()
 
-  const source = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, false, 1, 60000, 'isolation_run')
-  const recipient = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, false, 1, 60000, 'isolation_run')
+  const source = await fixture(false, false, 'owner-session', 'owner-session', undefined, false, 1, 60000, 'isolation_run')
+  const recipient = await fixture(false, false, 'owner-session', 'owner-session', undefined, false, 1, 60000, 'isolation_run')
   result(await source.save())
   const arm = await delegatedArm(source, recipient)
   const grant = recipient.preauthorizations.find(entry => entry.definition.name === 'skill_run')

@@ -1,6 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,12 +8,13 @@ import { afterEach, expect, test } from 'vitest'
 import { createDefinition } from '../src/definition.ts'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from '../src/external-holdout.ts'
 import { inspectProspectiveQualification, qualifyHoldout } from '../src/holdout-qualification.ts'
+import { liveNativeRuntime, nativeExecution } from './helpers/native-holdout-fixture.ts'
 
 const execFile = promisify(execFileCallback)
 const roots: string[] = []
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
-// This pinned Node image is the ordinary verifier transport, never a fixture transport.
-const image = process.env.DSH_HOLDOUT_TEST_IMAGE ?? ''
+// A prepared linux-native runtime is the ordinary verifier transport, never a fixture transport.
+const nativeRuntime = liveNativeRuntime()
 const digest = (letter: string) => letter.repeat(64)
 
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -25,7 +25,7 @@ function definition(scope: { principalId: string; principalRecordId: string; pri
   { name: 'result', description: 'Write result.' }, ['write'])
 }
 
-test.skipIf(!existsSync('/usr/bin/docker') || !/^sha256:[a-f0-9]{64}$/u.test(image))('prospective CLI freezes before generation, qualifies both arms in Docker, and reinspects the signed receipt after restart', async () => {
+test.skipIf(!nativeRuntime)('prospective CLI freezes before generation, qualifies both arms in the native runtime, and reinspects the signed receipt after restart', async () => {
   const root = await mkdtemp(join(tmpdir(), 'prospective-holdout-cli-'))
   const stateRoot = await mkdtemp(join(tmpdir(), 'prospective-holdout-state-'))
   roots.push(root, stateRoot); await chmod(root, 0o700); await chmod(stateRoot, 0o700)
@@ -42,7 +42,7 @@ test.skipIf(!existsSync('/usr/bin/docker') || !/^sha256:[a-f0-9]{64}$/u.test(ima
   const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }
   const baseline = definition(scope, "printf '{}\\n'")
   const candidate = definition(scope, "node -e 'let s=\"\";process.stdin.on(\"data\",c=>s+=c).on(\"end\",()=>{const t={};for(const o of JSON.parse(s))if(o.status!==\"cancelled\")t[o.currency]=(t[o.currency]||0)+o.cents;const r={};for(const k of Object.keys(t).sort())r[k]=t[k];process.stdout.write(JSON.stringify(r)+\"\\n\")})'")
-  const execution = { image, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 8192, maxOutputBytes: 4096, cellDurationMs: 15000, verificationDurationMs: 10000 }
+  const execution = { ...nativeExecution(stateRoot), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 8192, maxOutputBytes: 4096, cellDurationMs: 15000, verificationDurationMs: 10000 }
   const [profile] = validateExternalHoldoutProfiles([{ id: 'prospective', version: 1, scope, execution, authority: { executable: process.execPath, args: [cli, '--config', configPath], publicKey: inspectedConfig.publicKey, generatorDigest: inspectedConfig.generatorDigest }, maxComparisons: 1 } satisfies ExternalHoldoutProfile])
   const controller = new AbortController(), client = await openHoldoutProcess(profile!.authority, controller.signal)
   let result: Awaited<ReturnType<typeof qualifyHoldout>>

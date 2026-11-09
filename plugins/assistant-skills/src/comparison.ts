@@ -3,7 +3,7 @@ import { isAbsolute, join, relative } from 'node:path'
 import { createRequire } from 'node:module'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
+import type { IsolatedVerifierRunner, LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { BenchmarkObservation, BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
@@ -14,8 +14,9 @@ export interface SkillComparisonProfile {
   version: number
   scope: GoalScope
   stateRoot: string
-  image: string
-  dockerPath: string
+  backend: 'linux-native'
+  runtime: LinuxRuntime
+  cgroupRoots: LinuxCgroupRoots
   command: string
   artifactPath: string
   expiresAt: number
@@ -51,7 +52,7 @@ export function validateComparisonProfiles(value: unknown): readonly SkillCompar
       || !['principalId', 'principalRecordId', 'workspace', 'preset'].every(key => typeof (p.scope as unknown as Record<string, unknown>)[key] === 'string' && String((p.scope as unknown as Record<string, unknown>)[key]).length > 0)
       || !integer(p.scope.principalVersion, 1, 1000000000) || !isAbsolute(p.scope.workspace)
       || typeof p.stateRoot !== 'string' || !isAbsolute(p.stateRoot) || inside(p.scope.workspace, p.stateRoot) || inside(p.stateRoot, p.scope.workspace)
-      || typeof p.image !== 'string' || !/^sha256:[0-9a-f]{64}$/u.test(p.image) || typeof p.dockerPath !== 'string' || !isAbsolute(p.dockerPath)
+      || p.backend !== 'linux-native' || !plain(p.runtime) || !plain(p.cgroupRoots)
       || typeof p.command !== 'string' || !p.command || p.command.length > 16384
       || typeof p.artifactPath !== 'string' || !/^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/u.test(p.artifactPath) || p.artifactPath.split('/').some(part => part === '.' || part === '..')
       || !integer(p.expiresAt, 1, Number.MAX_SAFE_INTEGER) || !integer(p.maxComparisons, 1, 100) || !integer(p.repeats, 2, 4)
@@ -97,7 +98,8 @@ export class SkillComparator {
     privateRoot(this.#profile.stateRoot)
     this.#runtime = runtimeDigest()
     const p = this.#profile, count = p.maxComparisons * p.cases.length * p.repeats * 2
-    this.#runner = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => new IsolatedVerifierRunner({ stateRoot: join(p.stateRoot, 'verification'), image: p.image, dockerPath: p.dockerPath,
+    this.#runner = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(p.stateRoot, 'verification'),
+      runtime: p.runtime, cgroupRoots: p.cgroupRoots,
       authorityDigest: acceptanceDigest(p), command: p.command, expiresAt: p.expiresAt, maxRuns: count,
       maxTotalDurationMs: count * p.verificationDurationMs, maxDurationMs: p.verificationDurationMs, maxOutputBytes: p.maxOutputBytes }))
     void this.#runner.catch(() => {})
