@@ -9,7 +9,7 @@ import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk }
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { sourceGrowthEvidenceDigest, sourceGrowthRunDigest, verifyPluginRevisionVerificationCertificate,
   type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { CreationReviewRuntime, compileCreationReviewConfig } from '../src/creation-review.ts'
 import { RevisionReviewRuntime, compileRevisionReviewConfig, type RevisionReviewConfig } from '../src/revision-review.ts'
 import { AssistantVerifierService } from '../src/service.ts'
@@ -280,4 +280,80 @@ test('service fails closed until peers arrive and drains the revision reviewer w
   expect(await service.verifyPluginRevision(f.request)).toEqual({ status: 'unknown', reason: 'stale-source' })
   await provider.dispose(); await new Promise(resolve => setImmediate(resolve))
   expect(service.inspectRevisionAcceptanceAuthority({ owner: f.owner })).toBeUndefined()
+})
+
+describe('owner-instruction revision corridor (v3)', () => {
+  function portToInstructionCorridor(f: Awaited<ReturnType<typeof fixture>>,
+    instruction: { instructionId: string; digest: string },
+    reviewModel = { provider: 'supplier', model: 'review-model', reasoningEffort: 'high' }) {
+    const { growthRun: _growthRun, ...sourceRevision } = structuredClone(f.plan.sourceRevision)
+    const v3Snapshot = { protocol: 'dsh-prepared-revision/v3' as const,
+      plan: { ...f.plan, sourceRevision },
+      job: { intent: { revision: { parent: structuredClone(f.parent) }, ownerInstruction: structuredClone(instruction) } },
+      source: { instruction, owner: structuredClone(f.source.owner), reviewModel },
+      artifact: f.artifact }
+    f.cp.inspectPreparedRevision.mockReturnValue(v3Snapshot as never)
+    let current = true
+    const mutablePort = f.cp as unknown as { withPreparedInstructionRevisionFence: (input: { planId: string;
+      planDigest: string; artifactSha256: string; instructionDigest: string; parentDigest: string },
+      callback: () => unknown) => unknown }
+    mutablePort.withPreparedInstructionRevisionFence = (input, callback) => {
+      if (!current || input.planId !== f.plan.id || input.planDigest !== f.plan.digest
+        || input.artifactSha256 !== createHash('sha256').update(f.artifact).digest('hex')
+        || input.instructionDigest !== instruction.digest
+        || input.parentDigest !== sourceGrowthEvidenceDigest(f.parent)) throw new Error('current instruction source changed')
+      return callback()
+    }
+    return { withdraw: () => { current = false } }
+  }
+
+  test('verifies through the instruction source with no task evidence, growth run or execution claim', async () => {
+    const f = await fixture()
+    const instruction = { instructionId: 'instruction-1', digest: 'e'.repeat(64) }
+    portToInstructionCorridor(f, instruction)
+    const result = await f.runtime.run(f.request)
+    expect(result.status).toBe('verified')
+    if (result.status !== 'verified') return
+    expect(result.certificate.protocol).toBe('assistant-growth/revision-verification/v3')
+    expect(result.certificate.source).toEqual({ instructionDigest: instruction.digest,
+      ownerDigest: sourceGrowthEvidenceDigest(f.source.owner) })
+    expect(result.certificate.execution).toBeUndefined()
+    expect(verifyPluginRevisionVerificationCertificate(result.certificate, f.compiled.authority, f.compiled.publicKey)).toBe(true)
+    expect(result.certificate.observations).toHaveLength(2)
+    expect(observer.run).toHaveBeenCalledTimes(3)
+    // The review supplier comes from the snapshot's owner route, never a growth run.
+    expect(f.adapter.requests.every(item => item.model === 'review-model')).toBe(true)
+    // Cached certificate replays without new model or observer work.
+    const replay = await f.runtime.run(f.request)
+    expect(replay.status).toBe('verified')
+    expect(observer.run).toHaveBeenCalledTimes(3)
+  })
+
+  test('a drifted instruction digest fails closed before any model or observer work', async () => {
+    const f = await fixture()
+    portToInstructionCorridor(f, { instructionId: 'instruction-1', digest: 'e'.repeat(64) })
+    const base = f.cp.inspectPreparedRevision.getMockImplementation()!
+    f.cp.inspectPreparedRevision.mockImplementation(() => {
+      const snapshot = base() as unknown as { job: { intent: { ownerInstruction?: { instructionId: string; digest: string } } } }
+      snapshot.job.intent.ownerInstruction = { instructionId: 'instruction-1', digest: '0'.repeat(64) }
+      return snapshot as never
+    })
+    expect(await f.runtime.run(f.request)).toEqual({ status: 'unknown', reason: 'stale-source' })
+    expect(f.adapter.requests).toHaveLength(0)
+    expect(observer.run).not.toHaveBeenCalled()
+  })
+
+  test('a source change during review suppresses signing and is durable unknown', async () => {
+    const f = await fixture()
+    portToInstructionCorridor(f, { instructionId: 'instruction-1', digest: 'e'.repeat(64) })
+    const mutablePort = f.cp as unknown as { withPreparedInstructionRevisionFence: () => never }
+    f.adapter.afterCall = index => { if (index === 2) mutablePort.withPreparedInstructionRevisionFence = () => { throw new Error('withdrawn') } }
+    expect((await f.runtime.run(f.request)).status).toBe('unknown')
+    expect((await f.runtime.run(f.request)).status).toBe('unknown')
+    expect(f.adapter.requests).toHaveLength(2)
+    // A fresh, still-current corridor verifies a new candidate for the same plan identity.
+    const other = await fixture()
+    portToInstructionCorridor(other, { instructionId: 'instruction-2', digest: 'e'.repeat(64) })
+    expect((await other.runtime.run(other.request)).status).toBe('verified')
+  })
 })

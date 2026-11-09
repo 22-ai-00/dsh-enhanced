@@ -108,10 +108,25 @@ export interface PreparedRevisionPort {
       context: { manifestDigest: string; objectiveDigest: string; objectiveBytes: number } }
     source: WorkItemPreparedCreationSource
     artifact: Buffer
+  } | {
+    /** Owner-instruction revision: no task failure and no growth run on either side. */
+    protocol: 'dsh-prepared-revision/v3'
+    plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
+      preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
+        pack: { sha256: string; sizeBytes: number } };
+      sourceRevision?: { grant: { namePrefix: string; expiresAt: number }; parent: PluginRevisionParentBinding } }
+    job: { intent: { revision?: unknown; ownerInstruction?: { instructionId: string; digest: string } } }
+    source: { instruction: { instructionId: string; digest: string }; owner: SourceOwnerReceipt;
+      reviewModel: { provider: string; model: string; reasoningEffort?: string } }
+    artifact: Buffer
   }
   inspectWorkItemPreparedRevisionProtocol?(): 'dsh-prepared-revision/v2' | undefined
   withPreparedRevisionFence<T>(input: { planId: string; planDigest: string; artifactSha256: string;
     growthRunDigest: string; referenceDigest: string; parentDigest: string }, callback: () => T): T
+  /** Exact-source fence for owner-instruction revisions; never carries a growth run or task reference. */
+  withPreparedInstructionRevisionFence?<T>(input: { planId: string; planDigest: string; artifactSha256: string;
+    instructionDigest: string; parentDigest: string }, callback: () => T): T
   inspectPreparedRevisionLinuxBuild?(planId: string, signal: AbortSignal): Promise<{
     runtime: import('@dsh-enhanced/assistant-isolation').LinuxRuntime; evidenceDigest: string
   }>
@@ -251,6 +266,7 @@ export class RevisionReviewRuntime {
         || typeof port.inspectPreparedRevisionReviewContext !== 'function') throw new Error('revision source port unavailable')
       const snapshot = port.inspectPreparedRevision(request.planId)
       const workItem = snapshot.protocol === 'dsh-prepared-revision/v2'
+      if (snapshot.protocol === 'dsh-prepared-revision/v3') return this.#runInstruction(snapshot, port, signal, request)
       if (!workItem && snapshot.protocol !== 'dsh-prepared-revision/v1') throw new Error('revision source protocol changed')
       const { plan, artifact } = snapshot
       const revision = plan.sourceRevision
@@ -431,6 +447,162 @@ export class RevisionReviewRuntime {
           maxCases: config.maxCases }, sessions: { contract: contract.sessionId, sourceReview: review.sessionId },
         observations, reviewDigest: review.outputDigest, verifiedAt, expiresAt,
         ...(linuxExecution ? { execution: linuxExecution } : {}),
+      }
+      const signature = sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), privateKey).toString('base64url')
+      const certificate = { ...body, signature }
+      fence(() => this.#store.certificate(plan.id, binding, certificate))
+      admitted = undefined
+      return { status: 'verified', certificate }
+    } catch {
+      const reason = signal.aborted ? 'interrupted' : admitted ? 'verification-unknown' : 'stale-source'
+      if (admitted) {
+        try { this.#store.unknown(admitted.planId, admitted.binding, reason) } catch { /* completed or closed ledger remains authoritative */ }
+      }
+      return { status: 'unknown', reason }
+    }
+  }
+
+  /**
+   * Owner-instruction revision review: the same independent contract and
+   * behavior checks as a task-failure revision, but sourced from the frozen
+   * Host instruction instead of a failed task and growth run. No execution
+   * boundary evidence is claimed because no growth-run execution pin exists.
+   */
+  async #runInstruction(
+    snapshot: Extract<PreparedRevisionSnapshot, { protocol: 'dsh-prepared-revision/v3' }>,
+    port: PreparedRevisionPort, signal: AbortSignal, request: PluginRevisionVerificationRequest,
+  ): Promise<PluginRevisionVerificationResult> {
+    const { config, authority, privateKey, publicKey } = this.#compiled
+    let admitted: { planId: string; binding: string } | undefined
+    try {
+      const { plan, artifact } = snapshot
+      const instruction = snapshot.job.intent.ownerInstruction
+      const revision = plan.sourceRevision
+      const parent = revision?.parent
+      validatePluginRevisionParentBinding(parent)
+      if (!instruction || instruction.digest !== snapshot.source.instruction.digest
+        || instruction.instructionId !== snapshot.source.instruction.instructionId
+        || Object.hasOwn(revision ?? {}, 'growthRun')
+        || plan.mode !== 'prepared-revise' || plan.status !== 'pending-approval'
+        || !plan.name.startsWith(config.namePrefix) || revision?.grant.namePrefix !== config.namePrefix
+        || !Number.isSafeInteger(revision?.grant.expiresAt)
+        || Date.now() >= Math.min(config.expiresAt, plan.expiresAt, revision.grant.expiresAt)
+        || !Buffer.isBuffer(artifact) || !plan.preparedEvidence
+        || artifact.length !== plan.preparedEvidence.pack.sizeBytes || artifact.length > 512 * 1024
+        || createHash('sha256').update(artifact).digest('hex') !== plan.preparedEvidence.pack.sha256
+        || !plan.sourceCheck || !SHA.test(plan.sourceCheck.treeDigest) || !SHA.test(plan.sourceCheck.patchDigest)) {
+        throw new Error('prepared instruction revision evidence invalid')
+      }
+      for (const key of ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion',
+        'workspace', 'agentPreset'] as const) {
+        if ((snapshot.source.owner as unknown as Record<string, unknown>)[key] !== config.owner[key]) throw new Error('revision owner changed')
+      }
+      if (typeof port.withPreparedInstructionRevisionFence !== 'function') {
+        throw new Error('instruction revision fence unavailable')
+      }
+      const sourceBinding = { instructionDigest: instruction.digest,
+        ownerDigest: sourceGrowthEvidenceDigest(snapshot.source.owner) }
+      const parentDigest = sourceGrowthEvidenceDigest(parent)
+      const fenceInput = { planId: plan.id, planDigest: plan.digest,
+        artifactSha256: plan.preparedEvidence.pack.sha256, instructionDigest: instruction.digest, parentDigest }
+      const fence = <T>(callback: () => T): T => port.withPreparedInstructionRevisionFence!(fenceInput, callback)
+      fence(() => {})
+      const model: CreationModel = snapshot.source.reviewModel
+      const binding = growthObjectDigest({ purpose: REVISION_PURPOSE, request, authority, parent, parentDigest,
+        plan: { id: plan.id, digest: plan.digest, tree: plan.sourceCheck.treeDigest, patch: plan.sourceCheck.patchDigest,
+          artifact: plan.preparedEvidence.pack }, source: sourceBinding, model,
+        budget: { maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs, maxCases: config.maxCases } })
+      const claim = fence(() => this.#store.claim(plan.id, binding, config.authorityId, authority.authorityDigest, config.maxVerifications))
+      if (claim.state === 'certificate') return claim.certificate && claim.certificate.expiresAt > Date.now()
+        && canonicalGrowthJson(claim.certificate.parent) === canonicalGrowthJson(parent)
+        && verifyPluginRevisionVerificationCertificate(claim.certificate, authority, publicKey)
+        ? { status: 'verified', certificate: claim.certificate } : { status: 'unknown', reason: 'stale-source' }
+      if (claim.state === 'rejected') return { status: 'rejected', reason: claim.reason! }
+      if (claim.state !== 'new') return { status: 'unknown', reason: claim.reason ?? 'previous-unknown' }
+      admitted = { planId: plan.id, binding }
+
+      const observer = await this.#loadRunner()
+      signal.throwIfAborted(); fence(() => {})
+      const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' }, signal })
+      if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
+        || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256) {
+        this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
+        return { status: 'unknown', reason: 'schema-observation-unknown' }
+      }
+      const projectedSchemas = projectCreationSchemas(discovery.schemas)
+      fence(() => this.#store.discovered(plan.id, binding, { jobId: discovery.jobId!, schemaDigest: discovery.schemaDigest!,
+        schemas: projectedSchemas, environment: discovery.environment! }))
+      const task = { objective: `Owner-requested revision of ${plan.name} under instruction ${instruction.instructionId}`,
+        feedback: null, judgement: 'owner-instruction', name: plan.name }
+      const contract = await runNativeCreationTurn(this.ctx, { sessionId: `revision-contract-${binding.slice(0, 40)}`,
+        owner: config.owner, model, maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens - 1,
+        prompt: [...CASE_RULES, `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        data: { task, schemas: projectedSchemas }, signal, assertCurrent: () => fence(() => {}) })
+      const cases = parseCases(contract.value, config.maxCases, projectedSchemas)
+      if (cases.status === 'insufficient') {
+        fence(() => this.#store.unknown(plan.id, binding, 'contract-insufficient'))
+        return { status: 'unknown', reason: 'contract-insufficient' }
+      }
+      fence(() => this.#store.contract(plan.id, binding, { cases: cases.cases, outputDigest: contract.outputDigest,
+        sessionId: contract.sessionId }))
+      const observations: { caseId: string; jobId: string; operationDigest: string; observationDigest: string }[] = []
+      const jobs = new Set([discovery.jobId])
+      for (const item of cases.cases) {
+        signal.throwIfAborted(); fence(() => {})
+        const operation = { kind: 'invoke' as const, schemaDigest: discovery.schemaDigest,
+          calls: [{ id: item.id, toolName: item.toolName, arguments: item.arguments }] }
+        const operationDigest = growthObjectDigest(operation)
+        fence(() => this.#store.claimCase(plan.id, binding, item.id, operationDigest))
+        const observed = await observer.run({ key: growthObjectDigest([binding, 'invoke', operationDigest]), artifact, operation, signal })
+        if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
+          || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
+          || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
+          || observed.calls?.length !== 1 || observed.calls[0]?.id !== item.id || jobs.has(observed.jobId)) {
+          this.#store.unknown(plan.id, binding, 'case-observation-unknown')
+          return { status: 'unknown', reason: 'case-observation-unknown' }
+        }
+        const raw = observed.calls[0]!.result
+        jobs.add(observed.jobId)
+        const observationDigest = growthObjectDigest(raw)
+        fence(() => this.#store.observation(plan.id, binding, item.id, { jobId: observed.jobId!, operationDigest, observationDigest }))
+        observations.push({ caseId: item.id, jobId: observed.jobId, operationDigest, observationDigest })
+        if (!compareCase(item.expected, raw)) {
+          fence(() => this.#store.reject(plan.id, binding, 'case-mismatch'))
+          return { status: 'rejected', reason: 'case-mismatch' }
+        }
+      }
+      const context = await port.inspectPreparedRevisionReviewContext(plan.id, signal)
+      fence(() => {})
+      if (Buffer.byteLength(context.patch) > config.maxInputBytes / 2 || context.changedPaths.length < 1
+        || context.changedPaths.length > 32) throw new Error('revision source review context exceeds bound')
+      fence(() => this.#store.claimReview(plan.id, binding))
+      const review = await runNativeCreationTurn(this.ctx, { sessionId: `revision-source-${binding.slice(0, 40)}`,
+        owner: config.owner, model, maxInputBytes: config.maxInputBytes,
+        maxOutputTokens: config.maxOutputTokens - contract.outputTokens,
+        prompt: [...REVIEW_RULES, ...REVISION_RULES, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        data: { task, parent, cases: cases.cases, changedPaths: context.changedPaths, patch: context.patch },
+        signal, assertCurrent: () => fence(() => {}) })
+      const verdict = parseReview(review.value)
+      if (contract.outputTokens + review.outputTokens > config.maxOutputTokens) throw new Error('revision model budget exceeded')
+      if (verdict.decision !== 'approved') {
+        fence(() => this.#store.reject(plan.id, binding, 'source-review-rejected'))
+        return { status: 'rejected', reason: 'source-review-rejected' }
+      }
+      const verifiedAt = Date.now()
+      const expiresAt = Math.min(verifiedAt + config.receiptTtlMs, config.expiresAt, plan.expiresAt, revision.grant.expiresAt)
+      if (expiresAt <= verifiedAt) throw new Error('revision verification windows closed')
+      const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
+        protocol: 'assistant-growth/revision-verification/v3',
+        verificationId: `revision-${binding.slice(0, 40)}`,
+        authority, plan: { id: plan.id, digest: plan.digest, name: plan.name,
+          sourceTreeDigest: plan.sourceCheck.treeDigest, sourcePatchDigest: plan.sourceCheck.patchDigest,
+          artifactSha256: plan.preparedEvidence.pack.sha256, artifactBytes: artifact.length,
+          generatorDigest: plan.generatorDigest }, parent, source: sourceBinding,
+        contractDigest: growthObjectDigest(cases.cases), schemaDigest: discovery.schemaDigest,
+        environment: discovery.environment, model,
+        budget: { modelCalls: 2, maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
+          maxCases: config.maxCases }, sessions: { contract: contract.sessionId, sourceReview: review.sessionId },
+        observations, reviewDigest: review.outputDigest, verifiedAt, expiresAt,
       }
       const signature = sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), privateKey).toString('base64url')
       const certificate = { ...body, signature }

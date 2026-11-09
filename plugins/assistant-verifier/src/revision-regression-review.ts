@@ -188,6 +188,10 @@ export class RevisionRegressionReviewRuntime {
       const frozen = plan.sourceRevision.growthRun
       validateRevisionRegressionAcceptanceAuthorityRef(frozen.revisionRegressionAcceptance)
       validatePluginRevisionVerificationCertificate(candidate.certificate)
+      // Regressions only exist for task-failure revisions; an instruction
+      // certificate has no reference or growth run to regress against.
+      if (candidate.certificate.protocol === 'assistant-growth/revision-verification/v3'
+        || !('referenceDigest' in candidate.certificate.source)) throw new Error('instruction revisions carry no regression acceptance')
       validatePluginCreationVerificationCertificate(parent.certificate)
       validatePluginRevisionParentBinding(parent.binding)
       const linux = 'backend' in config.runner && config.runner.backend === 'linux-native'
