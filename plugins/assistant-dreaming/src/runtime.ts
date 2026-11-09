@@ -15,8 +15,6 @@ import { buildDreamMaterial, type DreamMaterial } from './projection.js'
 import { runDreamAgent, type DreamAgentModel } from './dream-agent.js'
 import { enqueueDreamNotification } from './notify.js'
 
-/** Default circular window for a ticket match (roughly 1% of the modulus). */
-const DREAM_TICKET_WINDOW = 5_000
 /** Bounds how many recorded ideas may hold recall tickets per wake. */
 const DREAM_RECORDED_TICKET_LIMIT = 100
 
@@ -135,7 +133,7 @@ export class AssistantDreamingService extends Service {
       subject: { kind: row.subjectKind as LotterySubject['kind'], key: row.subjectKey },
       value: row.value, digest: row.digest,
     }))
-    const hits = matchTickets({ draw, tickets, window: DREAM_TICKET_WINDOW })
+    const hits = matchTickets({ draw, tickets, window: this.#config.lotteryWindow })
     return { draw, hits }
   }
 

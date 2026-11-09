@@ -47,6 +47,7 @@ schema 不允许任何评分/置信度/自收益字段，沉默不算正向。
 | `baseIntervalMs` | `3600000` | 抽签节拍（15 分钟–24 小时），复用原生 Automations `every`。 |
 | `runProbabilityPpm` | `250000` | 每节拍抽中率（0–1,000,000）。 |
 | `idleMinMs` | `1800000` | 距最近可信活动至少 30 分钟才触发；缺活动标记 fail-closed。 |
+| `lotteryWindow` | `5000` | 召回开奖号环形窗口半宽（0–500,000；0 = 仅精确票号命中），按命中率调节召回频率。 |
 | `activeHours` | 无 | 同日窗口 `timezone/startMinute/endMinute`，不跨午夜。 |
 | `randomSeed` | 无 | 可选 HMAC seed；只持久化其 digest。 |
 | `maxDreamsPerDay` | `3` | 每日做梦次数硬顶（1–24）。 |

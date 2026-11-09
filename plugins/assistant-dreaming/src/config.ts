@@ -35,6 +35,8 @@ export interface DreamingConfig {
   activeHours?: DreamingActiveHours
   /** Optional owner-supplied HMAC seed; randomness stays deterministic. */
   randomSeed?: string
+  /** Half-width of the recall lottery's circular window around the draw. */
+  lotteryWindow?: number
 
   // Per-wake / per-day bounds
   maxDreamsPerDay?: number
@@ -69,6 +71,7 @@ export interface NormalizedDreamingConfig {
   readonly baseIntervalMs: number
   readonly runProbabilityPpm: number
   readonly idleMinMs: number
+  readonly lotteryWindow: number
   readonly activeHours: DreamingActiveHours | null
   readonly seedDigest: string | null
   readonly maxDreamsPerDay: number
@@ -92,7 +95,7 @@ export interface NormalizedDreamingConfig {
 }
 
 const fields = new Set([
-  'enabled', 'scope', 'databasePath', 'baseIntervalMs', 'runProbabilityPpm', 'idleMinMs',
+  'enabled', 'scope', 'databasePath', 'baseIntervalMs', 'runProbabilityPpm', 'idleMinMs', 'lotteryWindow',
   'activeHours', 'randomSeed', 'maxDreamsPerDay', 'maxIdeasPerWake', 'maxModelCalls', 'maxToolCalls',
   'maxOutputTokens', 'maxDurationMs', 'maxInputBytes', 'maxEvidenceRefs', 'notifyOwner',
   'maxNotificationsPerDay', 'notifyMinIntervalMs', 'budgetId', 'budgetAmount', 'provider', 'model',
@@ -123,6 +126,7 @@ const schema = Schema.object({
   baseIntervalMs: Schema.natural().min(900_000).max(86_400_000).default(3_600_000),
   runProbabilityPpm: Schema.natural().min(0).max(1_000_000).default(250_000),
   idleMinMs: Schema.natural().min(300_000).max(86_400_000).default(1_800_000),
+  lotteryWindow: Schema.natural().min(0).max(500_000).default(5_000),
   activeHours: activeHoursSchema,
   randomSeed: Schema.string().min(16).max(256),
 
@@ -173,6 +177,7 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
     baseIntervalMs: config.baseIntervalMs ?? 3_600_000,
     runProbabilityPpm: config.runProbabilityPpm ?? 250_000,
     idleMinMs: config.idleMinMs ?? 1_800_000,
+    lotteryWindow: config.lotteryWindow ?? 5_000,
     activeHours: config.activeHours ? Object.freeze({ ...config.activeHours }) : null,
     seedDigest: config.randomSeed === undefined
       ? null : createHash('sha256').update(config.randomSeed).digest('hex'),

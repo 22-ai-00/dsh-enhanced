@@ -19,6 +19,15 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     expect(config.maxDreamsPerDay).toBe(3)
   })
 
+  test('lottery window defaults to 5000 and is bounded and owner-configurable', () => {
+    expect(normalizeConfig().lotteryWindow).toBe(5_000)
+    expect(normalizeConfig({ lotteryWindow: 0 }).lotteryWindow).toBe(0)
+    expect(normalizeConfig({ lotteryWindow: 123_456 }).lotteryWindow).toBe(123_456)
+    expect(() => normalizeConfig({ lotteryWindow: 500_001 })).toThrow()
+    expect(() => normalizeConfig({ lotteryWindow: -1 })).toThrow()
+    expect(() => normalizeConfig({ lotteryWindow: 1.5 })).toThrow()
+  })
+
   test('fail-closed validation rejects an enabled config without scope and store', () => {
     expect(() => normalizeConfig({
       enabled: true, provider: 'p', model: 'm', budgetId: 'b', budgetAmount: 1,
