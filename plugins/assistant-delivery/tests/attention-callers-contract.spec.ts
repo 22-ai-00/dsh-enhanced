@@ -21,6 +21,9 @@ const forwarders = new Set([
   'plugins/assistant-automations/src/service.ts:enqueueBackground:input',
   'plugins/assistant-automations/src/service.ts:enqueueBackgroundRoute:input',
   'plugins/assistant-delivery/src/service.ts:auditAttention:audit',
+  // The dream notification's origin is enqueueDreamNotification (notify.ts), which declares
+  // attention; this port adapter only forwards the helper-built input unchanged.
+  'plugins/assistant-dreaming/src/runtime.ts:enqueueOwnerNotification:input',
 ])
 
 interface CallSite { file: string; line: number; method: string; declared: boolean; argument: string }
