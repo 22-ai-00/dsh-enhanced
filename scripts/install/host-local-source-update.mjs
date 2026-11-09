@@ -197,17 +197,18 @@ function candidateBackend(preparation) {
  * carries the source build, and the native one fetches both from the relocated
  * family so a caller never mixes a staged Home with candidate-side builds. */
 async function stageCandidateResources(api, { backend, owner, ...seam }) {
-  if (backend !== 'linux-native') {
-    return api.stageRsiLocalUpdateResources(seam)
-  }
+  // The Docker staging seam was removed. Only a linux-native candidate can be
+  // staged; a Docker-era proof fails closed rather than running the native seam
+  // over a different backend.
+  if (backend !== 'linux-native') fail('a Docker candidate can no longer be staged; migrate it to the linux-native backend')
   // A linux-native candidate carries the owner families a pre-owner Home does not
   // have; staging it without the owner-led transaction would relocate into a Home
   // that never owned them.
   if (!owner) fail('a linux-native candidate needs the owner-led source update transaction')
   if (typeof api.stageLinuxRsiNativeResources !== 'function') {
     // An installer packaged before the native resource seam can still read a
-    // native preparation; it must refuse the transaction instead of running the
-    // Docker staging path over it.
+    // native preparation; it must refuse the transaction instead of running a
+    // removed Docker staging path over it.
     fail('a linux-native candidate build needs the reviewed rsi-linux-native-resources staging seam, '
       + 'which this installer does not expose')
   }
@@ -467,14 +468,10 @@ export async function verifyHostLocalSourceUpdate({ proof, homePath, physicalHom
     || proof.resources.preparationDigest !== proof.preparationDigest) fail('candidate source proof is incomplete')
   if (proof.record.after.cohortDigest !== proof.stagedCohortDigest
     || proof.record.before.cohortDigest !== proof.original.cohortDigest) fail('staged cohort record differs')
-  // The staged resource proof owns the backend: a linux-native Home is verified
-  // against its relocated families (the cutover rename keeps their sealed
-  // physical identity), a Docker-era one against the staged build image proof.
-  if (proof.resources.backend === 'linux-native') {
-    await api.verifyLinuxRsiNativeResources({ proof: proof.resources, physicalHome })
-  } else {
-    await api.verifyRsiLocalUpdateResources({ physicalHome, proof: proof.resources })
-  }
+  // The staged resource proof owns the backend: only a linux-native Home is
+  // accepted. The Docker-era staging verifier was removed with the Docker seam.
+  if (proof.resources.backend !== 'linux-native') fail('a Docker-era staged Home can no longer be verified')
+  await api.verifyLinuxRsiNativeResources({ proof: proof.resources, physicalHome })
   const cohortPath = join(physicalHome, 'rsi-local-cohorts', proof.profile, 'receipt.json')
   await privateFileDigest(cohortPath)
   const cohort = JSON.parse((await readFile(cohortPath)).toString('utf8'))

@@ -360,28 +360,8 @@ DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5
 
 ## Source proposal native boundary smoke
 
-The Docker source-builder smoke (`source-prepare-docker-smoke.mjs`) was removed with the Docker backend. Source preparation now runs only through the linux-native or macOS seatbelt backends behind the durable `sourceJobs` lane; its contracts and evidence are covered by the `plugin-control-plane` package tests and the [native runtime guide](../../docs/dockerless-runtime.md). No standalone Docker boundary smoke remains.
+The Docker source-builder smoke (`source-prepare-docker-smoke.mjs`) was removed with the Docker backend. Source preparation now runs only through the linux-native or macOS seatbelt backends behind the durable `sourceJobs` lane; its contracts and evidence are covered by the `plugin-control-plane` package tests and the [native runtime guide](../../docs/dockerless-runtime.md). The Docker-image reality smokes (`source-repository-smoke.mjs`, `source-repository-sandbox-smoke.mjs`, `source-model-smoke.mjs`, `source-model-durable-smoke.mjs` and their `source-model-control-fixture.mjs`) were removed with the same backend; no standalone Docker boundary smoke or Docker-image source-proposal probe remains.
 
-
-## Real day1 source proposal
-
-```sh
-DSH_SOURCE_MODEL_LIVE=1 \
-DSH_WEB_REAL_SOURCE_HOME="$HOME/.dsh" \
-DSH_WEB_REAL_PROVIDER=custom-gateway \
-DSH_WEB_REAL_MODEL=<configured-model-id> \
-DSH_SOURCE_BUILD_IMAGE='your-local-builder@sha256:<64-hex-digest>' \
-DSH_SOURCE_MODEL_EVIDENCE=/tmp/day1-source-proof.json \
-  node scripts/e2e/source-model-smoke.mjs
-```
-
-Build the workspace first (`pnpm build`). The script uses the existing route selected by `DSH_WEB_REAL_PROVIDER` / `DSH_WEB_REAL_MODEL` and its credential reference through `prepareRealRoute`; it never changes that source profile or writes its key into evidence. It resolves the native pi adapter from the installed DSH package; set `DSH_SOURCE_MODEL_DSH_PACKAGE` to that installation's absolute `package.json` path when it differs from the local default. The tested installation uses pi adapter/runtime `0.1.2-rc.1` and Cordis `4.0.2`, matching the workspace runtime.
-
-One wake permits at most 12 model calls, 20 tool calls, 4,096 output tokens per request, and 240 seconds. It provides a broken synthetic clamp plugin in a temporary Git repository, a fixture owner route and empty history, and a one-wake Policy budget. The actual Growth Driver's seven-tool surface lets the real model inspect the committed source and propose one patch; the production Control Plane runs offline Docker checks and persists a pending plan. Assertions compare read/plan base commits, model patch, successful check/pack evidence, SQLite pending state, and unchanged original source. The temporary Context and repository are disposed on exit.
-
-This proves a real-model source-proposal path on one synthetic task. Owner authentication/history and the tool-approval channel are fixtures; it does not prove general repository repair, owner approval, registry publication, production activation, or sustained RSI benefit. Successful local evidence: 2026-09-19 day1 run.
-
-For the durable source-job probe against a frozen real repository, including the Day1 personal-memory candidate and separate Host check, use [Real model → durable source check](../../docs/live-durable-source-proposal.md).
 
 ## Authenticated replay on a real DSH Host
 

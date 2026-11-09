@@ -20,13 +20,13 @@ const inside = (root, path) => path === root || path.startsWith(root + sep)
 const exactPath = path => typeof path === 'string' && isAbsolute(path) && resolve(path) === path && !path.includes('\0')
 const fail = message => { throw new Error(`Local source maintenance: ${message}`) }
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
-const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-local-resources', 'rsi-source-maintenance',
+const modules = ['rsi-local-update', 'rsi-local-update-build', 'rsi-source-maintenance',
   'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-install', 'rsi-local-cohort', 'rsi-authority-runtime',
   'rsi-linux-native-resources', 'rsi-plugin-revision', 'supervised-growth-profile']
 /** Modules whose absence only fails closed on the path that needs them. The
  * backend-agnostic candidate-build reader and the linux-native resource staging
- * may postdate an older installer's packaged lib tree; the Docker path never
- * reads either, so only their own absence is tolerated. */
+ * may postdate an older installer's packaged lib tree; only their own absence is
+ * tolerated, and a removed Docker proof fails closed before reading either. */
 const optionalModules = new Set(['rsi-local-update-build', 'rsi-linux-native-resources',
   'rsi-plugin-revision'])
 const ownerModules = ['rsi-source', 'rsi-build', 'rsi-authority-resources', 'rsi-setup', 'rsi-profile']
@@ -599,8 +599,12 @@ export async function prepareLocalSourceStage(input) {
   const live = await api.readRsiSourceMaintenance({ logicalHome: input.homePath, physicalHome: input.homePath, profile: input.profile })
   const originalCohort = await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile })
   const native = input.proof.protocol === nativeProtocol
-  const stage = native ? api.stageLinuxRsiPreOwnerNativeResources : api.stageRsiLocalUpdateResources
-  if (typeof stage !== 'function') fail('reviewed installer cannot stage the selected pre-owner backend')
+  // The Docker resource staging seam was removed; only the reviewed pre-owner
+  // native protocol may stage. A Docker-era proof fails closed instead of
+  // silently running the native seam over a different backend.
+  if (!native) fail('pre-owner source staging requires the linux-native protocol')
+  const stage = api.stageLinuxRsiPreOwnerNativeResources
+  if (typeof stage !== 'function') fail('reviewed installer cannot stage the pre-owner native resources')
   const resource = await stage({ logicalHome: input.homePath, stagePhysicalHome: input.stageHome,
     profile: input.profile, preparationRoot: input.proof.preparationRoot })
   if (native && resource.proof.originalBackend !== input.proof.original.backend) fail('original native transition backend changed')

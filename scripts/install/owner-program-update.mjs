@@ -28,9 +28,10 @@ const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const fail = message => { throw new Error(`Owner program update: ${message}`) }
 /**
  * A candidate build receipt is either the Docker schema 1 `RsiBuildEnvironment`
- * or the linux-native schema 3 `LinuxRsiBuildEnvironment`. Docker candidates and
- * the Docker original keep their historical receipts and comparisons; native
- * candidates have their own creation, staging and verification seams. The
+ * or the linux-native schema 3 `LinuxRsiBuildEnvironment`. The Docker original
+ * keeps its historical receipts and comparisons, but a Docker candidate now
+ * fails closed because the image build was removed; only a linux-native
+ * candidate has the creation, staging and verification seams below. The
  * native stage is completed in three ordered steps, each fail-closed:
  *
  * - `assertNativeStageRelocation` refuses the native materializer dispatch
@@ -120,7 +121,7 @@ async function apiFor(installer) {
   await assertLocalSourceInstaller(installer)
   const root = join(installer.root, 'plugins', 'lark-channel', 'lib')
   const names = ['rsi-authority-resources', 'rsi-authority-runtime', 'rsi-source-maintenance',
-    'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
+    'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
     'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
     'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
     'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
@@ -882,9 +883,10 @@ export async function inspectOwnerProgramEmptyCreationStage({ ownerUpdate, physi
 
 /** Prepare the creation Home for an owner program update. `sourceBuild` is the
  * candidate build receipt returned by the backend-agnostic reader: either the
- * Docker schema 1 `RsiBuildEnvironment` or the linux-native schema 3
+ * legacy Docker schema 1 `RsiBuildEnvironment` or the linux-native schema 3
  * `LinuxRsiBuildEnvironment`. Native candidates require the authenticated empty
- * Docker-origin handoff; Docker receipts retain their historical equality checks.
+ * Docker-origin handoff; a Docker candidate fails closed because its image
+ * build was removed.
  * @param {{ownerUpdate: any, candidateHome: string, source: any,
  *   sourceBuild: any, installer?: any, signal?: AbortSignal}} input */
 export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source, sourceBuild,
@@ -938,12 +940,11 @@ export async function prepareOwnerProgramCreation({ ownerUpdate, candidateHome, 
       candidateBuild: actualBuild, creationBuild, receiptSha256, ...historyRecord,
       ...(backendTransition ? { backendTransition } : {}) }
   }
-  const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
-    profile, source: actualSource, build: actualBuild, ...(signal ? { signal } : {}) })
-  const receiptSha256 = hash(await bytes(join(candidateHome, 'rsi-creation-builds', profile,
-    'bootstrap.json'), 65_536))
-  return { schemaVersion: 1, candidateHome, candidateSource: actualSource,
-    candidateBuild: actualBuild, creationBuild, receiptSha256 }
+  // The Docker candidate build was removed. Only the linux-native creation
+  // build can prepare a candidate; a Docker-era candidate fails closed here
+  // instead of calling a deleted image build. Its historical receipts remain
+  // readable through readRsiCreationBuildEnvironment for handoff comparison.
+  fail('a Docker-era candidate can no longer be prepared; migrate the source build to the linux-native backend')
 }
 
 export async function appendOwnerProgramSourceMaintenance({ ownerUpdate, homePath, stageHome, record,
@@ -1591,15 +1592,10 @@ export async function stageOwnerProgramUpdate({ ownerUpdate, homePath, stageHome
       || !same(oldVerifier.revisionRegressions, previousRevision.regressions)))) {
     fail('existing verifier review contract differs')
   }
-  const creation = native
-    ? await api.materializeLinuxRsiNativeInStage({
-      candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
-      logicalHome: homePath, profile,
-      ...(ownerUpdate.nativeRelocation ? { relocation: ownerUpdate.nativeRelocation } : {}) })
-    : await api.materializeRsiCreationBuildInStage({
-      candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
-      logicalHome: homePath, profile, candidateSource: candidateCreation.candidateSource,
-      candidateBuild: candidateCreation.candidateBuild, stagedSource: source, stagedBuild: build })
+  const creation = await api.materializeLinuxRsiNativeInStage({
+    candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
+    logicalHome: homePath, profile,
+    ...(ownerUpdate.nativeRelocation ? { relocation: ownerUpdate.nativeRelocation } : {}) })
   if (creation.candidateReceiptSha256 !== candidateCreation.receiptSha256) {
     fail('materialized creation build differs')
   }

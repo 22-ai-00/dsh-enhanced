@@ -276,17 +276,7 @@ node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
 
 #### 未启用 owner 的旧行为镜像
 
-源码维护不会静默改写既有 `rsi-creation-builds` 收据。若首次 owner 安装发现行为镜像仍绑定旧源码，先完成经过认证的源码及构建资源更新，确认当前行为镜像配方与依赖锁一致。再显式迁移这个尚未被 owner 使用的辅助资源：
-
-```sh
-node /reviewed/checkout/scripts/install/creation-build-migration.mjs \
-  assistant /absolute/dsh-home \
-  /absolute/.dsh-rsi-creation-build-migration-reviewed-20261013 /reviewed/checkout
-```
-
-归档须是 Home 同级、同文件系统下尚不存在的 `.dsh-rsi-creation-build-migration-` 前缀目录。入口持有 Home 生命周期锁，核对签名源码历史、未初始化的 owner / registry / 账本及旧收据，只把严格识别的旧资源原样归档到 Home 外；新收据必须由当前源码和构建环境的原生镜像准备器生成。日志和旧收据保留，重复调用沿同一日志恢复，不覆盖未知目录或用旧镜像冒充新环境。已有 owner、未知资源、漂移或不完整归档均拒绝；不能用删除旧目录替代迁移。镜像准备可能访问 Debian 包源，但候选行为验收仍禁网运行。这个操作不启用 scheduler，也不代表普通使用学习已验收。
-
-若在首次日志落盘前崩溃，空归档不会被自动认领；原资源尚未移动，经人工核对后可另指定新归档重试。日志原子替换前崩溃留下的临时文件也会被拒绝，需检查原日志、临时内容和两侧资源后处理；不要直接删除归档重跑。已完成迁移的新资源丢失时同样拒绝重建，不把未知丢失当成首次安装。
+Docker 行为镜像后端已移除；旧 `rsi-creation-builds` 收据只用于 `docker→linux-native` 迁移的只读对比，安装器不再准备、重建或应用该镜像。原生 pre-owner 资源由 `rsi-linux-native-resources` 的 pre-owner 迁移负责，不再需要独立的镜像迁移入口。
 
 DSH `0.2` 的 standalone setup 需要 Host 原生模块解析器；不要用旧 PATH 中的 DSH 或手工补 `NODE_PATH`。在已审核 checkout 中，指定 Home 绑定的私有 Host 后调用安装器入口：
 

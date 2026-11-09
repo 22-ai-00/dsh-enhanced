@@ -292,7 +292,9 @@ test.skipIf(process.platform !== 'linux').each(['repair', 'program update'] as c
   const patches = { target: hash(await readFile(targetPatchPath)), coordinator: hash(await readFile(coordinatorPatchPath)) }
   const runtimeReceiptDigest = hash(await readFile(join(fixture.home, 'rsi-authority-runtimes', 'target', 'receipt.json')))
   const journalPath = join(fixture.home, '.rsi-setup-journal.json')
-  const creationPath = join(fixture.home, 'rsi-creation-builds', 'target', 'bootstrap.json')
+  // The installed fixture binds the linux-native source build, so the signed
+  // overlay digests the native creation receipt tree.
+  const creationPath = join(fixture.home, 'rsi-linux-creation-builds', 'target', 'bootstrap.json')
   const beforeJournalSource = json({ stage: 'before-repair' }), beforeCreationSource = json({ stage: 'before-repair' })
   const journalSource = json({ stage: 'after-repair' }), creationSource = json({ stage: 'after-repair' })
   await file(journalPath, beforeJournalSource)
@@ -352,7 +354,7 @@ test.skipIf(process.platform !== 'linux').each(['repair', 'program update'] as c
   expect(proof.installations).toHaveLength(1)
   await verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome, hostPlan: fixture.hostPlan, proof })
   const stagedJournalPath = join(stageHome, '.rsi-setup-journal.json')
-  const stagedCreationPath = join(stageHome, 'rsi-creation-builds', 'target', 'bootstrap.json')
+  const stagedCreationPath = join(stageHome, 'rsi-linux-creation-builds', 'target', 'bootstrap.json')
   await writeFile(stagedJournalPath, json({ stage: 'journal-drift-after-host' }))
   await expect(verifyRsiHostUpdate({ homePath: fixture.home, physicalHome: stageHome,
     hostPlan: fixture.hostPlan, proof })).rejects.toThrow(`owner ${kind} journal or creation receipt changed`)

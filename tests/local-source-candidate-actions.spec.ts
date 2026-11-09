@@ -23,7 +23,7 @@ async function fixture() {
   await writeFile(join(installerRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n', { mode: 0o600 })
   const require = createRequire(import.meta.url)
   await cp(dirname(require.resolve('yaml/package.json')), join(installerRoot, 'node_modules/yaml'), { recursive: true })
-  for (const name of ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintenance', 'rsi-local-activation',
+  for (const name of ['rsi-local-update', 'rsi-source-maintenance', 'rsi-local-activation',
     'rsi-authority-runtime', 'supervised-growth-profile']) await writeFile(join(lib, `${name}.js`), 'export {}\n', { mode: 0o600 })
   await writeFile(join(lib, 'rsi-local-update.js'), `import {readFile,writeFile} from 'node:fs/promises';import {join} from 'node:path';
 export async function readRsiLocalUpdateLocked({dshHome,profile,root}) {

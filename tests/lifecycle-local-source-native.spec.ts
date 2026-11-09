@@ -125,7 +125,7 @@ async function boundInspectorFixture() {
   await writeFile(join(root,'scripts/install/local-source-maintenance.mjs'),'export {}\n',{mode:0o600})
   const require = createRequire(import.meta.url)
   await cp(dirname(require.resolve('yaml/package.json')),join(root,'node_modules/yaml'),{recursive:true})
-  const names = ['rsi-local-update','rsi-local-update-build','rsi-local-resources','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-install','rsi-local-cohort','rsi-authority-runtime','rsi-linux-native-resources','rsi-plugin-revision','supervised-growth-profile']
+  const names = ['rsi-local-update','rsi-local-update-build','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-install','rsi-local-cohort','rsi-authority-runtime','rsi-linux-native-resources','rsi-plugin-revision','supervised-growth-profile']
   for (const name of names) await writeFile(join(root,'plugins/lark-channel/lib',name+'.js'),'export {}\n',{mode:0o600})
   const actualPath = fileURLToPath(new URL('../plugins/lark-channel/lib/rsi-linux-native-resources.js',import.meta.url))
   // The source reader is a fixture port. Identity validation delegates to the

@@ -68,10 +68,11 @@ async function load(installer) {
   await assertLocalSourceInstaller(installer)
   const root = join(installer.root, 'plugins', 'lark-channel', 'lib')
   const names = ['rsi-authority-resources', 'rsi-authority-runtime', 'rsi-source-maintenance',
-    'rsi-bootstrap-manifest', 'rsi-authority-config', 'rsi-profile', 'rsi-creation-build',
+    'rsi-bootstrap-manifest', 'rsi-authority-config', 'rsi-profile',
     'rsi-host-update', 'rsi-build', 'rsi-release-build', 'rsi-setup', 'rsi-service-environment',
     'systemd', 'rsi-owner-profile', 'rsi-source', 'rsi-install', 'rsi-local-cohort',
-    'rsi-install-inputs']
+    'rsi-install-inputs', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
+    'rsi-linux-native-resources']
   const api = Object.assign({}, ...await Promise.all(names.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
   const require = createRequire(join(installer.root, 'package.json'))
   const larkRequire = createRequire(join(installer.root, 'plugins', 'lark-channel', 'package.json'))
@@ -638,17 +639,21 @@ export async function stageOwnerSourceRepair({ ownerRepair, homePath, stageHome,
     physicalHome: stageHome, profile: ownerRepair.profile })
   if (!same(sourceState.workspace, source) || !same(sourceState.records,
     [...original.source.records, record])) fail('new staged source differs')
-  const build = sourceBuild.sourceBuild ? sourceBuild : { schemaVersion: 1,
-    sourceCommit: source.sourceCommit, sourceBuild }
+  // The native materializer owns the staged creation family; wrap the raw
+  // source-build preparation the same way the owner program update does.
+  const build = sourceBuild.sourceBuild ? sourceBuild
+    : { schemaVersion: 3, backend: 'linux-native', sourceCommit: source.sourceCommit, sourceBuild }
   const release = releaseBuild.releaseBuild ? releaseBuild.releaseBuild : releaseBuild
-  const creation = await api.materializeRsiCreationBuildInStage({ candidateHome: candidateCreation.candidateHome,
-    stagePhysicalHome: stageHome, logicalHome: homePath, profile: ownerRepair.profile,
-    candidateSource: candidateCreation.candidateSource, candidateBuild: candidateCreation.candidateBuild,
-    stagedSource: source, stagedBuild: build })
+  const creation = await api.materializeLinuxRsiNativeInStage({
+    candidateHome: candidateCreation.candidateHome, stagePhysicalHome: stageHome,
+    logicalHome: homePath, profile: ownerRepair.profile })
+  const creationBuild = creation.family.creationBuild
   if (creation.candidateReceiptSha256 !== candidateCreation.receiptSha256
-    || !same(creation.creationBuild, candidateCreation.creationBuild)) fail('new creation receipt differs from candidate')
+    || candidateCreation.creationBuild !== undefined && !same(creationBuild, candidateCreation.creationBuild)) {
+    fail('new creation receipt differs from candidate')
+  }
   const manifest = api.createRsiBootstrapManifest(manifestInputs(original, selected.targetEffective,
-    creation.creationBuild, source, runtime, build.sourceBuild))
+    creationBuild, source, runtime, build.sourceBuild))
   if (manifest.sourceReviews.expiresAt !== original.manifest.sourceReviews.expiresAt
     || !same(manifest.serviceEnvironment, original.manifest.serviceEnvironment)
     || !same(manifest.sourceReviews.owner, original.manifest.sourceReviews.owner)
@@ -963,16 +968,12 @@ export async function prepareOwnerRepairCreation({ ownerRepair, candidateHome, s
     || actualSource.sourceCommit === ownerRepair.original.source.workspace.sourceCommit) {
     fail('candidate source or build differs from the prepared maintenance')
   }
-  const creationBuild = await api.prepareRsiCreationBuildEnvironment({ dshHome: candidateHome,
-    profile, source: actualSource, build: actualBuild, ...(signal ? { signal } : {}) })
-  const path = join(candidateHome, 'rsi-creation-builds', profile, 'bootstrap.json')
-  const receiptSha256 = hash(await stable(path, 65_536))
-  if (!same(await api.readRsiCreationBuildEnvironment({ dshHome: candidateHome, profile,
-    source: actualSource, build: actualBuild, ...(signal ? { signal } : {}) }), creationBuild)) {
-    fail('candidate creation build did not replay')
-  }
-  return { schemaVersion: 1, candidateHome, candidateSource: actualSource,
-    candidateBuild: actualBuild, creationBuild, receiptSha256 }
+  // Owner source repair is the Docker-era repair path. The Docker image build
+  // was removed, so a candidate can no longer be prepared here; it must migrate
+  // through the owner program update onto the linux-native backend. Historical
+  // Docker creation receipts remain readable through
+  // readRsiCreationBuildEnvironment for the handoff comparison.
+  fail('a Docker-era owner repair candidate can no longer be prepared; migrate the source build to the linux-native backend through the owner program update')
 }
 
 export async function appendOwnerSourceRepairMaintenance({ ownerRepair, homePath, stageHome, record,

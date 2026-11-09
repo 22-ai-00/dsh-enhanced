@@ -767,7 +767,7 @@ test('staged Host authority CAS migrates digests and retains used grant count', 
 })
 
 const ownerInstallerModules = ['rsi-authority-resources', 'rsi-authority-runtime', 'rsi-source-maintenance',
-  'rsi-creation-build', 'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
+  'rsi-source', 'rsi-build', 'rsi-local-update-build', 'rsi-release-build',
   'rsi-profile', 'rsi-host-update', 'rsi-plugin-creation', 'rsi-install', 'rsi-service-environment',
   'systemd', 'rsi-authority-config', 'rsi-bootstrap-manifest', 'rsi-setup', 'rsi-install-inputs',
   'rsi-local-cohort', 'rsi-linux-creation-build', 'rsi-linux-native-materialize',
@@ -813,7 +813,6 @@ async function ownerCreationInstaller(fixture: Record<string, unknown>) {
   const bodies: Record<string, string> = {
     'rsi-source': 'export async function readRsiSourceWorkspace() { return (await fixture()).source }',
     'rsi-local-update-build': 'export async function readRsiLocalUpdateSourceBuild() { return (await fixture()).build }',
-    'rsi-creation-build': seam('rsi-creation-builds', 'prepareRsiCreationBuildEnvironment'),
     'rsi-linux-creation-build': seam('rsi-linux-creation-builds',
       'prepareLinuxRsiCreationBuildEnvironment'),
   }
@@ -907,7 +906,7 @@ test('prepareOwnerProgramCreation refuses a native installation moving back to a
   } finally { await rm(installer.root, { recursive: true, force: true }) }
 })
 
-test('prepareOwnerProgramCreation keeps the Docker creation seam and omits a backend transition', async () => {
+test('prepareOwnerProgramCreation refuses a Docker-era candidate after the image build was removed', async () => {
   const source = candidateSource('b'.repeat(40))
   const build = candidateBuild('docker', source.sourceCommit)
   const creation = creationBuild('docker', source.sourceCommit)
@@ -916,16 +915,10 @@ test('prepareOwnerProgramCreation keeps the Docker creation seam and omits a bac
     const candidateHome = join(installer.root, 'candidate')
     await mkdir(candidateHome, { mode: 0o700 })
     const ownerUpdate = ownerProgramUpdate(installer, candidateBuild('docker', 'a'.repeat(40)))
-    const result = await prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
-      sourceBuild: build })
-    expect(result).not.toHaveProperty('backendTransition')
-    expect(result).not.toHaveProperty('backend')
-    expect(result).toMatchObject({ schemaVersion: 1, candidateHome, candidateSource: source,
-      candidateBuild: build, creationBuild: creation })
-    const seams = await recordedSeams(installer.root)
-    expect(seams.map(call => call.seam)).toEqual(['rsi-creation-builds'])
-    expect(result.receiptSha256).toBe(createHash('sha256').update(await readFile(
-      join(candidateHome, 'rsi-creation-builds', 'assistant', 'bootstrap.json'))).digest('hex'))
+    await expect(prepareOwnerProgramCreation({ ownerUpdate, candidateHome, source,
+      sourceBuild: build })).rejects.toThrow(/Docker-era candidate can no longer be prepared/u)
+    await expect(readFile(join(installer.root, 'calls.jsonl')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   } finally { await rm(installer.root, { recursive: true, force: true }) }
 })
 

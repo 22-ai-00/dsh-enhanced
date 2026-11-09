@@ -151,11 +151,11 @@ async function fixture() {
     api, preparation, record, stagedCohort, candidatePackage, stagedSources }
 }
 
-test('binds reviewed pre-owner source and rebases authenticated artifacts for disposable preparation', async () => {
+test('binds a reviewed native owner program and rebases authenticated artifacts for disposable preparation', async () => {
   const setup = await fixture()
   await mkdir(join(setup.homePath, 'profiles', 'node_modules'), { mode: 0o755 })
-  const proof = await prepareHostLocalSourceUpdate(setup)
-  expect(proof.original.preOwner.preparedCoordinator).toBeTruthy()
+  const proof = await nativeProgramProof(setup)
+  expect(proof.protocol).toBe('dsh-enhanced/host-owner-program-update/v1')
   expect(Object.keys(proof.candidateArtifacts)).toEqual([setup.candidatePackage.name])
   const result = await stageResourcesForPreparation({ proof: JSON.parse(JSON.stringify(proof)),
     homePath: setup.homePath, disposableHome: setup.disposableHome })
@@ -172,6 +172,7 @@ test('binds reviewed pre-owner source and rebases authenticated artifacts for di
 
 test('owner repair appends the real owner-ledger record and binds finalization to native inputs', async () => {
   const setup = await fixture()
+  setup.preparation.build = { sourceBuild: nativeCandidate, releaseBuild: nativeReleaseCandidate }
   const ownerRepair = { homePath: setup.homePath, profile: setup.profile, permissionPreset: 'workspace-write' }
   const candidateCreation = { receiptSha256: 'a'.repeat(64) }
   const ownerRepairNext = { overlayDigest: 'b'.repeat(64) }
@@ -204,7 +205,7 @@ test('owner repair appends the real owner-ledger record and binds finalization t
   expect(mocks.stageOwner).toHaveBeenCalledWith(expect.objectContaining({
     ownerRepair, candidateCreation, stageNativeEffective: native, coordinatorBase: 'native-base',
     unitProperties: { ExecStart: 'exact-host' }, transactionId: 'repair-transaction',
-    sourceBuild: 'candidate-build', releaseBuild: 'candidate-release', record: setup.record,
+    sourceBuild: nativeRuntimeCandidate, releaseBuild: nativeReleaseCandidate, record: setup.record,
   }))
   await verifyHostLocalSourceUpdate({ proof: finalized, homePath: setup.homePath,
     physicalHome: setup.stageHome, selection: 'candidate', checkLedger: true })
@@ -301,16 +302,16 @@ test('failed owner eligibility never falls back to pre-owner or creates candidat
 
 test('signs host-null source maintenance before package changes and verifies candidate chain', async () => {
   const setup = await fixture()
-  const proof = await prepareHostLocalSourceUpdate(setup)
+  const proof = await nativeProgramProof(setup)
   const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
   expect(signed.record.host).toBeNull()
   expect(signed.stagedCohortDigest).toBe(setup.stagedCohort.receiptDigest)
   expect(setup.api.produceRsiLocalSourceMaintenance).toHaveBeenCalledWith(expect.objectContaining({
-    maintenanceMode: 'pre-owner', preparedCoordinator: true,
+    maintenanceMode: 'owner-ledger',
   }))
   await verifyHostLocalSourceUpdate({ proof: signed, homePath: setup.homePath,
     physicalHome: setup.stageHome, selection: 'candidate' })
-  expect(setup.api.verifyRsiLocalUpdateResources).toHaveBeenCalled()
+  expect(setup.api.verifyLinuxRsiNativeResources).toHaveBeenCalled()
   const finalized = await finalizeHostLocalSourceUpdate({ proof: signed, homePath: setup.homePath,
     stageHome: setup.stageHome })
   expect(finalized.candidateRuntime.receiptDigest).toBe('6'.repeat(64))
@@ -320,16 +321,16 @@ test('signs host-null source maintenance before package changes and verifies can
   }))
 })
 
-test('rejects unexpected authority owners and candidate authority mutation', async () => {
+test('rejects unexpected authority owners and the removed Docker staging candidate', async () => {
   const setup = await fixture()
   await mkdir(join(setup.homePath, 'rsi-authorities', 'other'), { mode: 0o700 })
   await expect(prepareHostLocalSourceUpdate(setup)).rejects.toThrow(/other rsi-authorities/u)
   await rm(join(setup.homePath, 'rsi-authorities', 'other'), { recursive: true })
   const proof = await prepareHostLocalSourceUpdate(setup)
-  const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
-  await writeFile(join(setup.stageHome, 'rsi-authorities', 'assistant', 'config', 'grant'), 'changed', { mode: 0o600 })
-  await expect(verifyHostLocalSourceUpdate({ proof: signed, homePath: setup.homePath,
-    physicalHome: setup.stageHome, selection: 'candidate' })).rejects.toThrow(/candidate authority/u)
+  await expect(stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome }))
+    .rejects.toThrow(/Docker candidate can no longer be staged/u)
+  expect(setup.api.stageRsiLocalUpdateResources).not.toHaveBeenCalled()
+  expect(setup.api.stageLinuxRsiNativeResources).not.toHaveBeenCalled()
 })
 
 test('requires an explicit auxiliary preparation for enhanced roots absent from the candidate cohort', async () => {
@@ -343,7 +344,7 @@ test('requires an explicit auxiliary preparation for enhanced roots absent from 
 
 test('rejects a candidate cohort receipt whose digest no longer matches signed maintenance', async () => {
   const setup = await fixture()
-  const proof = await prepareHostLocalSourceUpdate(setup)
+  const proof = await nativeProgramProof(setup)
   const signed = await stageHostLocalSourceUpdate({ proof, homePath: setup.homePath, stageHome: setup.stageHome })
   await writeFile(join(setup.stageHome, 'rsi-local-cohorts', setup.profile, 'receipt.json'),
     JSON.stringify({ ...setup.stagedCohort, receiptDigest: '0'.repeat(64) }), { mode: 0o600 })
@@ -353,7 +354,7 @@ test('rejects a candidate cohort receipt whose digest no longer matches signed m
 
 test('retains the primary locator for byte-identical auxiliary closure packages', async () => {
   const setup = await fixture()
-  const prepared = await prepareHostLocalSourceUpdate(setup)
+  const prepared = await nativeProgramProof(setup)
   const proof = { ...prepared, auxiliary: { protocol: 'verified-auxiliary' } }
   const name = setup.candidatePackage.name
   const duplicate = { ...prepared.candidateArtifacts[name], name: undefined,
@@ -382,7 +383,7 @@ test.each([
   ['runtime dependencies', { runtimeDependencies: ['@dsh-enhanced/other'] }],
 ])('rejects overlapping auxiliary packages with different %s', async (_label, changed) => {
   const setup = await fixture()
-  const prepared = await prepareHostLocalSourceUpdate(setup)
+  const prepared = await nativeProgramProof(setup)
   const proof = { ...prepared, auxiliary: { protocol: 'verified-auxiliary' } }
   const name = setup.candidatePackage.name
   mocks.auxMaterialize.mockResolvedValue({ artifacts: { [name]: {

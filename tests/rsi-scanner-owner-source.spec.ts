@@ -94,7 +94,9 @@ async function overlay(f: Fixture, kind: 'repair' | 'program', changeOwner = fal
   const patches = { target: hash(await readFile(join(f.home, 'profiles/target/cordis.patch.yml'))),
     coordinator: hash(await readFile(join(f.home, 'profiles/coordinator/cordis.patch.yml'))) }
   const runtimeReceiptDigest = hash(await readFile(join(f.home, 'rsi-authority-runtimes/target/receipt.json')))
-  const journalPath = join(f.home, '.rsi-setup-journal.json'), creationPath = join(f.home, 'rsi-creation-builds/target/bootstrap.json')
+  // The installed fixture binds the linux-native source build, so the signed
+  // overlay digests the native creation receipt tree.
+  const journalPath = join(f.home, '.rsi-setup-journal.json'), creationPath = join(f.home, 'rsi-linux-creation-builds/target/bootstrap.json')
   const beforeJournal = json({ state: 'before' }), beforeCreation = json({ state: 'before' })
   const afterJournal = json({ state: 'after' }), afterCreation = json({ state: 'after' })
   await file(journalPath, afterJournal); await file(creationPath, afterCreation)
