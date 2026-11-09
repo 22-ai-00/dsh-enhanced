@@ -65,6 +65,29 @@ export interface SourceOwnerInstruction {
   idempotencyKey: string
 }
 
+/**
+ * A structured owner-instruction revision request written by the control-plane
+ * CLI before any Delivery/owner-route validation exists in that process. The
+ * running service's SourceJobs continuation tick claims pending rows, re-validates
+ * the owner route inside its trust boundary and only then enqueues the job. The
+ * CLI never writes source_jobs directly and the model tool surface never reaches
+ * this table. `files` are the exact candidate bytes; `filesDigest` binds them.
+ */
+export interface SourceOwnerInstructionRequest {
+  requestId: string
+  planId: string
+  pluginName: string
+  expectedBaseCommit: string
+  files: readonly ScopedPluginFile[]
+  filesDigest: string
+  ttlMs: number
+  idempotencyKey: string
+  createdAt: number
+  expiresAt: number
+  status: 'pending' | 'claimed' | 'accepted' | 'rejected'
+  failureCode: string | null
+}
+
 export interface SourceJobAuthority {
   id: string
   digest: string

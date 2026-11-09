@@ -14,7 +14,7 @@ import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openCont
   openControlPlaneDatabaseReadOnly } from './sqlite.js'
 import { isLegacyDockerSourceBuildConfig, validateLegacyDockerSourceBuildConfig, validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
-import { validateScopedPluginFiles } from './source-workspace.js'
+import { validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
@@ -22,7 +22,7 @@ import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, 
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,
-  SourceOwnerInstruction } from './source-job-types.js'
+  SourceOwnerInstruction, SourceOwnerInstructionRequest } from './source-job-types.js'
 import type { AnyOwnerTaskFailureReference as OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
@@ -445,6 +445,12 @@ interface OwnerInstructionRow {
   instruction_id: string; owner_receipt_json: string; owner_digest: string; owner_route_id: string
   plan_id: string; plugin_name: string; files_digest: string; created_at: number; expires_at: number
   idempotency_key: string
+}
+
+interface OwnerInstructionRequestRow {
+  request_id: string; plan_id: string; plugin_name: string; expected_base_commit: string
+  files_json: string; files_digest: string; ttl_ms: number; idempotency_key: string
+  created_at: number; expires_at: number; status: 'pending' | 'claimed' | 'accepted' | 'rejected'; failure_code: string | null
 }
 
 interface ActivationRow {
@@ -2266,6 +2272,128 @@ export class ControlPlaneStore {
     const row = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE instruction_id = ?')
       .get(instructionId) as OwnerInstructionRow | undefined
     return row === undefined ? undefined : this.ownerInstructionFromRow(row)
+  }
+
+  /**
+   * Records a structured owner-instruction request written by the control-plane
+   * CLI. This table is CLI-writable and drained by the running service's SourceJobs
+   * continuation tick, which re-validates the owner route inside its trust boundary
+   * before enqueueing; the CLI never writes source_jobs and the model tool surface
+   * never reaches this table. The request freezes the exact candidate files (bound
+   * by filesDigest) and expires.
+   */
+  recordOwnerInstructionRequest(input: {
+    planId: string
+    pluginName: string
+    expectedBaseCommit: string
+    files: readonly ScopedPluginFile[]
+    ttlMs: number
+    idempotencyKey: string
+    createdAt: number
+  }): SourceOwnerInstructionRequest {
+    const planId = bounded(input.planId, 'planId', 160)
+    const pluginName = bounded(input.pluginName, 'pluginName', 160)
+    const idempotencyKey = bounded(input.idempotencyKey, 'idempotencyKey', 160)
+    if (!KEY.test(planId) || !KEY.test(idempotencyKey) || pluginName.normalize('NFC') !== pluginName
+      || pluginName.length === 0 || pluginName.length > 160) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request identity is invalid')
+    }
+    if (typeof input.expectedBaseCommit !== 'string' || !COMMIT.test(input.expectedBaseCommit)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request base commit is invalid')
+    }
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 900_000 || input.ttlMs > 86_400_000) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request ttl is invalid')
+    }
+    if (!Number.isSafeInteger(input.createdAt) || input.createdAt < 1) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request timing is invalid')
+    }
+    const files = structuredClone(input.files) as ScopedPluginFile[]
+    validateSourceCreationFiles(files)
+    const filesDigest = controlPlaneDigest(files)
+    const filesJson = JSON.stringify(files)
+    if (filesJson.length > 1_048_576) throw new ControlPlaneStoreError('invalid-input', 'owner instruction request files are too large')
+    const expiresAt = input.createdAt + input.ttlMs
+    const requestId = `oir-${controlPlaneDigest({ planId, expectedBaseCommit: input.expectedBaseCommit, idempotencyKey }).slice(0, 32)}`
+    const prior = this.#database.prepare('SELECT * FROM source_owner_instruction_requests WHERE idempotency_key = ? OR request_id = ?')
+      .get(idempotencyKey, requestId) as unknown as OwnerInstructionRequestRow | undefined
+    if (prior !== undefined) {
+      const stored = this.ownerInstructionRequestFromRow(prior)
+      // Retries are idempotent; a reused key/id with a different payload is a conflict.
+      if (stored.idempotencyKey !== idempotencyKey || stored.requestId !== requestId
+        || stored.planId !== planId || stored.pluginName !== pluginName
+        || stored.expectedBaseCommit !== input.expectedBaseCommit || stored.filesDigest !== filesDigest
+        || stored.ttlMs !== input.ttlMs) {
+        throw new ControlPlaneStoreError('conflict', 'owner instruction request identity or idempotency key was reused with different input')
+      }
+      return stored
+    }
+    this.#database.prepare(`INSERT INTO source_owner_instruction_requests
+      (request_id, plan_id, plugin_name, expected_base_commit, files_json, files_digest, ttl_ms,
+        idempotency_key, created_at, expires_at, status, failure_code)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)`).run(requestId, planId, pluginName,
+      input.expectedBaseCommit, filesJson, filesDigest, input.ttlMs, idempotencyKey, input.createdAt, expiresAt)
+    const row = this.#database.prepare('SELECT * FROM source_owner_instruction_requests WHERE request_id = ?')
+      .get(requestId) as unknown as OwnerInstructionRequestRow
+    return this.ownerInstructionRequestFromRow(row)
+  }
+
+  getOwnerInstructionRequest(requestId: string): SourceOwnerInstructionRequest | undefined {
+    if (typeof requestId !== 'string' || !KEY.test(requestId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request id is invalid')
+    }
+    const row = this.#database.prepare('SELECT * FROM source_owner_instruction_requests WHERE request_id = ?')
+      .get(requestId) as OwnerInstructionRequestRow | undefined
+    return row === undefined ? undefined : this.ownerInstructionRequestFromRow(row)
+  }
+
+  /** Pending, unexpired requests, oldest first; the continuation tick drains these. */
+  listPendingOwnerInstructionRequests(now: number): SourceOwnerInstructionRequest[] {
+    if (!Number.isSafeInteger(now) || now < 1) throw new ControlPlaneStoreError('invalid-input', 'query time is invalid')
+    return (this.#database.prepare(`SELECT * FROM source_owner_instruction_requests
+      WHERE status = 'pending' AND expires_at > ? ORDER BY created_at, request_id`).all(now) as unknown as OwnerInstructionRequestRow[])
+      .map(row => this.ownerInstructionRequestFromRow(row))
+  }
+
+  /** CAS pending->claimed so two ticks cannot drain one request; false when it was not pending or already expired. */
+  claimOwnerInstructionRequest(requestId: string, now: number): boolean {
+    if (typeof requestId !== 'string' || !KEY.test(requestId) || !Number.isSafeInteger(now) || now < 1) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request claim is invalid')
+    }
+    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+      SET status = 'claimed' WHERE request_id = ? AND status = 'pending' AND expires_at > ?`).run(requestId, now)
+    return Number(result.changes) === 1
+  }
+
+  /** Marks a claimed/pending request rejected with a bounded failure code; unknown or already-settled rows are ignored. */
+  rejectOwnerInstructionRequest(requestId: string, failureCode: string, now: number): void {
+    if (typeof requestId !== 'string' || !KEY.test(requestId) || typeof failureCode !== 'string'
+      || failureCode.length === 0 || failureCode.length > 120 || !Number.isSafeInteger(now) || now < 1) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request rejection is invalid')
+    }
+    this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'rejected', failure_code = ?
+      WHERE request_id = ? AND status IN ('pending', 'claimed')`).run(failureCode, requestId)
+  }
+
+  /** Marks a claimed request accepted once the job was enqueued; only a live claim transitions. */
+  acceptOwnerInstructionRequest(requestId: string): void {
+    if (typeof requestId !== 'string' || !KEY.test(requestId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request id is invalid')
+    }
+    this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'accepted'
+      WHERE request_id = ? AND status = 'claimed'`).run(requestId)
+  }
+
+  private ownerInstructionRequestFromRow(row: OwnerInstructionRequestRow): SourceOwnerInstructionRequest {
+    let files: ScopedPluginFile[]
+    try { files = JSON.parse(row.files_json) as ScopedPluginFile[] }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction request files are corrupt') }
+    if (!Array.isArray(files) || controlPlaneDigest(files) !== row.files_digest) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction request digest is corrupt')
+    }
+    return { requestId: row.request_id, planId: row.plan_id, pluginName: row.plugin_name,
+      expectedBaseCommit: row.expected_base_commit, files, filesDigest: row.files_digest, ttlMs: row.ttl_ms,
+      idempotencyKey: row.idempotency_key, createdAt: row.created_at, expiresAt: row.expires_at,
+      status: row.status, failureCode: row.failure_code }
   }
 
   #ownerInstructionPayload(input: SourceOwnerInstruction): SourceOwnerInstruction {

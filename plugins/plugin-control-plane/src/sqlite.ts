@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 37
+export const controlPlaneSchemaVersion = 38
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -78,6 +78,24 @@ const sourceOwnerInstructionTableSchema = `CREATE TABLE IF NOT EXISTS source_own
 ) STRICT, WITHOUT ROWID;`
 
 const sourceOwnerInstructionSchema = sourceOwnerInstructionTableSchema
+
+/** Structured owner-instruction requests written by the CLI and drained by the running service (schema 38). */
+const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
+  request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
+  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
+  plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
+  expected_base_commit TEXT NOT NULL CHECK(length(expected_base_commit) = 40 AND expected_base_commit NOT GLOB '*[^a-f0-9]*'),
+  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json) = 'array' AND length(files_json) <= 1048576),
+  files_digest TEXT NOT NULL CHECK(length(files_digest) = 64 AND files_digest NOT GLOB '*[^a-f0-9]*'),
+  ttl_ms INTEGER NOT NULL CHECK(ttl_ms >= 900000 AND ttl_ms <= 86400000),
+  idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) > 0 AND length(idempotency_key) <= 160),
+  created_at INTEGER NOT NULL CHECK(created_at > 0),
+  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'accepted', 'rejected')),
+  failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120))
+) STRICT, WITHOUT ROWID;`
+
+const sourceOwnerInstructionRequestSchema = sourceOwnerInstructionRequestTableSchema
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1536,6 +1554,21 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
         database.exec(`${sourceOwnerInstructionSchema} PRAGMA user_version = 37; COMMIT;`)
       } catch (error) { database.exec('ROLLBACK'); throw error }
     } else database.exec(sourceOwnerInstructionSchema)
+    const ownerInstructionRequestSchema = database.prepare("SELECT type,sql FROM sqlite_schema WHERE name='source_owner_instruction_requests'")
+      .get() as { type: string; sql: string | null } | undefined
+    if (ownerInstructionRequestSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 38) {
+      throw new Error('missing source owner instruction request schema')
+    }
+    if (ownerInstructionRequestSchema !== undefined && (ownerInstructionRequestSchema.type !== 'table'
+      || ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema))) {
+      throw new Error('unknown source owner instruction request schema')
+    }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 38) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        database.exec(`${sourceOwnerInstructionRequestSchema} PRAGMA user_version = 38; COMMIT;`)
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else database.exec(sourceOwnerInstructionRequestSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {
