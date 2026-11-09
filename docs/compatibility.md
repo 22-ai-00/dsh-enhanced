@@ -105,7 +105,7 @@ Growth Usage schema 2 增加可空的 `source_run_json`；旧 intent 字节和�
 
 schema 29 在原源码计划中增加 `prepared-create` 与冻结创建授权，并独立持久计量创建用量。升级保持 schema 28 的旧 `create` / `modify` 行、计划摘要、收据和引用不变，不回填创建权限。旧二进制不能打开新账本；停下旧写者，并同步升级共享账本的 Host、CLI 与签名器。只读维护入口要求当前 schema，不能用旧程序打开已升级副本。
 
-创建构建须使用保留已验证基线 lock 的新版 source builder 镜像；Host 精确复核新 importer 后，还须匹配镜像内基线锁 SHA。旧镜像缺少基线文件、基线变动或输入回执不匹配时拒绝创建，须通过现有候选构建流程准备新镜像；不自动重置旧 bootstrap 回执。普通修改保持原 pnpm 策略。安装器的 Dockerfile 白名单与镜像构建脚本须同批升级，实际构建权限和限制见[构建器说明](../scripts/isolation/README.md)。
+创建构建在 linux-native 仓库运行时中使用保留已验证基线 lock 的固定 pnpm 工具链；Host 精确复核新 importer 后，还须匹配只读运行时内的基线锁 SHA。运行时缺少基线文件、基线变动或输入回执不匹配时拒绝创建，须通过原生资源准备入口准备新运行时；不自动重置旧 bootstrap 回执。普通修改保持原 pnpm 策略。运行时的工具链白名单与资源准备脚本须同批升级，实际构建权限和限制见[原生运行时指南](dockerless-runtime.md)。
 
 Growth 的 `pluginSourceProposals.allowCreation` 默认关闭且只适用于 durable 模式；启用时需同批 Control Plane 的创建读取与公开命名规则接口，以及 owner 的 `sourceJobs.creation`。缺少接口或有效授权时保留旧修改路径。创建用量不因重启或 sourceJobs 配置换代而复位；同一创建 grant id 的定义不能变更。候选目前只到 pending，旧修改审批、发布和采用合同不适用于它；详细边界见[创建候选](../plugins/plugin-control-plane/README.md#自动创建新插件候选)。
 
@@ -115,7 +115,7 @@ Control Plane 可选 `creationCapabilities` 使用独立私有 `creation-adoptio
 
 采用账本当前为 schema v3：v2 在原 calls 行增加可空前台归因列，v3 新增独立懒读取的签名源码表；v1/v2 逐级迁移保持原 authorityDigest、配置、密钥、采用凭证、调用结果、unknown 和累计额度，旧行不补任务或源码。升级前停止旧 controller，旧版本不能打开新库。内建创建采用路径依赖同批精确源码采集模块，Host 历史读取还要求 Delivery `validateOwnerRoute`；源码数据不扩大创建/采用授权，不额外改变主 Control Plane 账本（当前 schema 35）或 DSH/Cordis ABI。
 
-Host 动态挂载可信工具入口，精确候选每次在独立 Docker child 内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
+Host 动态挂载可信工具入口，精确候选每次在独立 linux-native 受限进程内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
 
 Owner 安装 manifest 的可选 `pluginCreation` 只在完整创建、独立验收与采用字段一致时启用；需同批 Verifier 创建配置编译器和 Control Plane 有限采用校验器。新安装从固定源码构建资源准备行为镜像，使用原 14 身份中的独立 `review`/`adoption` 密钥及独立协议，不更改资源 v1 回执。旧 manifest 的重试保留原授权和期限，不自动增加创建能力；缺失已登记镜像或漂移输入时拒绝重建。
 
@@ -162,7 +162,7 @@ Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1
 初始 owner 配置新增可选 `memoryLearning` 组，schema1 的旧手动 manifest 不变；新自动安装要求同批 `assistant-memory-learning` 与 Personal Assistant 内嵌 Memory，并核验真实依赖解析及声明文件 pins。Lark CLI 的两个新 bundle peers 使用 `>=0.1.48 <0.2.0`，共享 growth contract 随包作为依赖。两个新可选 peer 的公开验证器只在学习组启用时同步加载，旧 CLI/手动 manifest 无该组不解析它们。无需 Memory/Delivery/Evaluation schema 升级；已有 owner manifest 不会自动迁移或续期。学习提取预算按 workspace 聚合，扫描按 subject，重复启动复用准确持久扫描定义与本次进程 observer。
 
 
-`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。`normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。Linux 的两个 Host 和授权器须成套安装当前构建。源码替换与发布的 CLI 要求 Linux/systemd user services；手动 manifest 入口默认仅校验，显式应用具有私有恢复 journal。macOS 的 `--install-owner` 使用单个原生 launchd Host，只授权持久记忆学习与新工具验证、动态采用；候选构建/验证经固定的本地 Docker socket 执行，支持 x64/arm64，既有源码发布授权不会被移植或放宽。Linux `supervised` 新安装通过 `--install-owner` 自动补齐独立协调器、生成当前 owner 的有限配置并成对部署；构建资源未就绪或旧本地目录链接使包实体位于 profile 外时返回退出码 3。本地 supervised 新安装从冻结 HEAD 构建 tarball，使用 pnpm 11.7 的 isolated 布局、冻结源码安装脚本清单及精确父包运行依赖覆盖安装到 profile 内；目标及协调器核对同批内部依赖的实际文件，普通共享库不会作为 bundle 启用。安装器核对已安装包的同批版本、声明入口和 patch，按原始 Loader 配置生成 observer 摘要，最终 systemd 属性取自停机状态下的实际 `systemctl show`。这没有升级 DSH/Cordis ABI，也不构成完整传递性模块字节证明；详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。
+`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。`normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。Linux 的两个 Host 和授权器须成套安装当前构建。源码替换与发布的 CLI 要求 Linux/systemd user services；手动 manifest 入口默认仅校验，显式应用具有私有恢复 journal。macOS 的 `--install-owner` 使用单个原生 launchd Host，只授权持久记忆学习与新工具验证、动态采用；候选构建/验证经固定的 Seatbelt 受限单进程执行，支持 x64/arm64，既有源码发布授权不会被移植或放宽。Linux `supervised` 新安装通过 `--install-owner` 自动补齐独立协调器、生成当前 owner 的有限配置并成对部署；构建资源未就绪或旧本地目录链接使包实体位于 profile 外时返回退出码 3。本地 supervised 新安装从冻结 HEAD 构建 tarball，使用 pnpm 11.7 的 isolated 布局、冻结源码安装脚本清单及精确父包运行依赖覆盖安装到 profile 内；目标及协调器核对同批内部依赖的实际文件，普通共享库不会作为 bundle 启用。安装器核对已安装包的同批版本、声明入口和 patch，按原始 Loader 配置生成 observer 摘要，最终 systemd 属性取自停机状态下的实际 `systemctl show`。这没有升级 DSH/Cordis ABI，也不构成完整传递性模块字节证明；详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。
 
 owner 配置生成器依赖同批本地发布 adapter 的 `inspectLocalReleaseAdapterConfiguration` 只读入口，用真实阶段配置解析器核对私有身份、Git、构建和 registry/catalog 资源，不执行发布阶段。准备器复制并固定这批程序后才生成授权；不能混用缺少此入口的旧副本。自动安装接线使用这些固定资源并保留有限授权的原期限和额度；旧 `web` profile 若运行越界的 DSH `0.1.7-rc.2`，其 peer 不兼容导致增强包被跳过，只能作为负向证据，不能证明正向部署。没有修改 DSH/Cordis ABI 或账本 schema，真实普通任务闭环与受管 Host 跟随 latest 更新仍待验收。
 
@@ -304,9 +304,9 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.2 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
 
 
-`assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.2 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host 与固定本地 Docker Unix socket；测试环境 Docker 29.4.1、cgroup v1/cgroupfs 和预装的不可变本地 bash fixture image，未把镜像 tag 或未验证的远端镜像作为运行时默认。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。
+`assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.2 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host、user namespace 与当前 UID 已委派的 cgroup v1 资源根；Docker 后端已删除，Docker 时代的 ledger 行只读保留。测试环境使用 cgroup v1/cgroupfs 与固定本地运行时 fixture。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。
 
-Isolation 工作区要求 Linux Docker local volume driver 支持 tmpfs `size`/`nr_inodes`/UID/GID 选项。不可变镜像须包含可信 `/bin/busybox` 的 sleep/stat/cat 与 `/bin/sh`，拒绝声明 VOLUME 的镜像；仍不自动拉取镜像。SQLite v1→v2 增加持久资源预留，降级前需保留数据库并停止旧运行体，不能由旧版本打开 v2 绕过预算。
+Isolation 工作区使用内核 `size`/`nr_inodes` 上限的 tmpfs 与 cgroup 限额，由原生运行时在执行前创建并核对；固定运行时须包含获准的 Node、pnpm 与工具链，拒绝运行未经验证的远端产物，仍不自动下载。SQLite v1→v2 增加持久资源预留，降级前需保留数据库并停止旧运行体，不能由旧版本打开 v2 绕过预算。
 
 Isolation 审计归档 wire v1 只读取 ledger schema 6 的固定高水位快照，输出 canonical、连续且 hash-linked 的 NDJSON batch，并保留源 SQLite audit 行；重复归档须字节幂等。旧 reader 必须拒绝未知 archive wire/record 版本，不能跳过后继续验证；ledger schema 或 archive wire 升级必须排空旧 writer、保留原库与归档，并重跑 schema 迁移、打包后 `archive-audit`/`verify-audit`、中断恢复、重复执行、篡改/缺失/乱序/截断拒绝和发布包公开导出测试。archive v1 的本地 hash 仅提供相对可信 digest 的完整性与链接，不提供真实性或不可否认性；检测同 UID Host/root 的整链重算及尾部/全量回滚需要外部受保护的单调 anchor `{archiveInstanceId, highestSequence, headDigest}`。
 
@@ -323,7 +323,7 @@ Actions embedded ledger schema v3 为新 commit 行保存精确 path binding，�
 
 有限自治安装使用[当前 Host 基线](#host-基线)，不另行固定旧版 DSH 或 Cordis。Loader 会先解包 ESM 的 default；Isolation/Actions 的 default 必须保留 `{ name, Config, apply }`（Actions 还包含 `inject`），不能用无相同插件名的 Service class 取代，否则 exact preauthorization 注册失败并回滚工具注册。命名 Service 导出继续供程序调用。Isolation 的公开预授权方法采用实例绑定以兼容 Cordis trace proxy。
 
-Web owner 在显式 autonomy setup 时按后端动态加载同仓匹配的可选 Isolation peer，普通 Web 无此运行时依赖。Linux native 分支准备或核验持久 runtime、发现已委派的 cgroup 资源，再执行原生 probe；重复配置保留既有描述符和授权。Docker 分支才调用 `probeIsolationRuntime`，使用已验证的 literal Docker path 和本机固定镜像。doctor 只核验并探测已保存的后端，不准备资源或续权。升级需跑实际安装/default-export/原生工具链路；`pnpm test:autonomy` 的 Docker 场景仍需其镜像与非 root Linux 环境，仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。native 的 cgroup v1 等前提见[运行时指南](dockerless-runtime.md)。
+Web owner 在显式 autonomy setup 时按后端动态加载同仓匹配的可选 Isolation peer，普通 Web 无此运行时依赖。Linux 固定使用 native：准备或核验持久 runtime、发现已委派的 cgroup 资源，再执行原生 probe；重复配置保留既有描述符和授权，旧 Docker profile fail-closed 要求显式迁移。doctor 只核验并探测已保存的后端，不准备资源或续权。升级需跑实际安装/default-export/原生工具链路；`pnpm test:autonomy` 的原生场景需要非 root Linux 与 cgroup v1 委派环境，仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。native 的 cgroup v1 等前提见[运行时指南](dockerless-runtime.md)。
 
 `assistant-deepseek-budget` 对齐 `dsh-llm`、可选 `dsh-credentials@0.1.2-rc.1` 和当前 Goals Host meter API。通过自己的 `LlmAdapter` 注册固定路由，使用 `credentials.resolve(credentialRef(...))` 取得当前服务提供的凭据；不复用上游 `deepseek-official` 的可变 endpoint 配置。现有原生预算在 adapter dispatch 前预留，重试若形成新的原生请求必须重新经过预算。DeepSeek 协议契约具有固定到期时间，升级时须重新核对官方上下文/输出/usage 语义、禁重定向、工具回放、失效取消与实际安装验收。
 
@@ -343,7 +343,7 @@ Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./extern
 
 GitHub 仓库来源新增 `github-repository` kind，沿用现有来源/envelope v1 并保持 HTTPS 观测信任语义；旧 reader 不能消费该新 kind。正式 observer 依赖同批 Automations 的 `inspectSystemOwnedActivation` 与幂等 `reconcileSystem` 原始规范化回执，以及 Delivery owner-route receipt。其定义摘要使用 Automations 当前规范化 JSON 的 SHA-256，升级时须保留定义改写与重启回放回归。Delivery 是 EventTriggers 的可选 Host peer，仅配置 observer 时注入；原有来源无需该依赖。Web Owner 配置入口通过 EventTriggers 公开 normalizer 校验新事件配置，需安装同批包。Goals 对可选 `inspectOwnerSources` 采用结构化能力探测，不静态导入 EventTriggers，不把来源元数据当成授权。
 
-- Skills comparison uses `dsh-tool-fs`, `dsh-fs-local` and native ToolRuntime at `0.1.2-rc.1` in a private Context, with explicit path containment and no inherited model tools. LocalFileSystem `cwd` alone is not containment. Evaluation `/benchmark` and Isolation `IsolatedVerifierRunner` are optional Host peer APIs loaded for configured comparisons; the native filesystem libraries travel as dependencies for the private replay runtime. Upgrade checks cover actual native edit/write behavior, artifact execution in Docker, unknown no-replay, profile budgets and cancellation.
+- Skills comparison uses `dsh-tool-fs`, `dsh-fs-local` and native ToolRuntime at `0.1.2-rc.1` in a private Context, with explicit path containment and no inherited model tools. LocalFileSystem `cwd` alone is not containment. Evaluation `/benchmark` and Isolation `IsolatedVerifierRunner` are optional Host peer APIs loaded for configured comparisons; the native filesystem libraries travel as dependencies for the private replay runtime. Upgrade checks cover actual native edit/write behavior, artifact execution in the linux-native sandbox, unknown no-replay, profile budgets and cancellation.
 
 
 中间步骤交付需同批 Goals 的 `inspectOwnerAcceptedStepArtifacts`、Verifier 的持久回执通知和 Actions 的显式 `verifiedDelivery.acceptance` 支持。Actions 将 Verifier 声明为可选 Host peer，仅验收后交付运行时等待该服务；普通直接动作不因此自动启用 Verifier。旧 grant 省略模式仍为整体验收，已保存 intent 也按旧模式解释；同 revision 不允许更改授权模式。该变更不改变 DSH/Cordis 基线或创建新的调度器，升级应成套安装。
