@@ -13,6 +13,7 @@ import { DreamStore, type DreamIdea } from './store.js'
 import { decideTrigger, localDayKey } from './trigger.js'
 import { buildDreamMaterial } from './projection.js'
 import { runDreamAgent, type DreamAgentModel } from './dream-agent.js'
+import { enqueueDreamNotification } from './notify.js'
 
 const EXECUTOR = 'assistant-dreaming-v1'
 const OWNER = 'assistant-dreaming'
@@ -30,7 +31,8 @@ export interface DreamingHealth {
 interface DreamPorts {
   automations: AssistantAutomationsService
   policy: Pick<AssistantPolicyService, 'reserve' | 'finalize' | 'release'>
-  delivery: Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerModelSelection'>
+  delivery: Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerModelSelection'
+    | 'resolveOwnerRoute' | 'enqueueOwnerNotification'>
   evaluation: Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections'>
   goals: Pick<AssistantGoalsService, 'inspectOwnerGoals'>
   skills: Pick<AssistantSkillsService, 'inspectOwnerActiveSkills' | 'inspectOwnerSkillCandidates'>
@@ -246,6 +248,7 @@ export class AssistantDreamingService extends Service {
       this.#lastRunOutcome = result.outcome
       if (result.outcome === 'succeeded') {
         store.completeDream(runId, Date.now(), result.ideaCount)
+        this.#notifyOwner(store, runId, decision.dayKey, result.ideaCount, now)
         ports.policy.finalize(reserved, config.budgetAmount!)
         reserved = undefined
         return settled('succeeded', 'none', 'none', 'dreamed', 'possible')
@@ -284,6 +287,38 @@ export class AssistantDreamingService extends Service {
     if (!selected.provider || !selected.model) throw new Error('assistant-dreaming: owner model selection is unavailable')
     return { provider: selected.provider, model: selected.model,
       ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
+  }
+
+  /**
+   * L1 owner summary notification. Fails closed at every gate: the
+   * notification flag, daily count and minimum interval must all allow it,
+   * and the live route is re-validated by the enqueue helper. A failed
+   * notification never changes the dream outcome.
+   */
+  #notifyOwner(store: DreamStore, runId: string, dayKey: string, ideaCount: number, now: number): void {
+    const config = this.#config
+    if (!config.notifyOwner || config.maxNotificationsPerDay === 0 || ideaCount === 0) return
+    if (store.countNotifications(dayKey) >= config.maxNotificationsPerDay) return
+    const lastAt = store.lastNotificationAt()
+    if (lastAt !== null && now - lastAt < config.notifyMinIntervalMs) return
+    const scope = config.scope!
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (delivery === undefined) return
+    const sent = enqueueDreamNotification(
+      {
+        validateOwnerRoute: input => delivery.validateOwnerRoute({ authorityId: scope.ownerRouteId, principalId: input.principalId,
+          workspace: input.workspace, agentPreset: input.preset }),
+        resolveOwnerRoute: ownerRouteId => delivery.resolveOwnerRoute(ownerRouteId),
+        enqueueOwnerNotification: input => delivery.enqueueOwnerNotification(input),
+      },
+      {
+        owner: { ownerRouteId: scope.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset },
+        runId,
+        summaries: store.listIdeas(ideaCount).map(idea => ({ summary: idea.summary, detail: idea.detail })),
+        dayKey, now, expiresAt: now + config.maxDurationMs,
+      },
+    )
+    if (sent) store.incrementNotifications(dayKey, now)
   }
 
   health(): DreamingHealth {

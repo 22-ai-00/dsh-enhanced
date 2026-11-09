@@ -6,7 +6,7 @@
 插件私有的 SQLite 账本。
 
 它**不是**成长复盘：输入是跨任务的模式与空白，输出是未验证假设。默认级别 L0
-（仅私有 idea），不通知、不开 Goal/WorkItem、不形成候选、不自动采用；模型输出
+（仅私有 idea），默认不通知、不开 Goal/WorkItem、不形成候选、不自动采用；模型输出
 schema 不允许任何评分/置信度/自收益字段，沉默不算正向。
 
 ## 信任边界与权限
@@ -39,7 +39,7 @@ schema 不允许任何评分/置信度/自收益字段，沉默不算正向。
 | `maxIdeasPerWake` | `3` | 每次 wake 最多 idea 数（1–5）。 |
 | `maxModelCalls` / `maxToolCalls` / `maxOutputTokens` / `maxDurationMs` | `2/1/2048/90000` | 单轮冻结上限。 |
 | `maxInputBytes` / `maxEvidenceRefs` | `16384/8` | 输入材料上限。 |
-| `notifyOwner` | `false` | S0/S1 始终为 false；L1 通知在后续切片实现。 |
+| `notifyOwner` | `false` | L1：开启后在每日/间隔门内发一条有界 owner 摘要（仅计数与前 3 条 summary，经 Delivery 认证通知通道；撤回/拒收不推断），默认关闭。 |
 | `budgetId` / `budgetAmount` | 无 | 必须成对；启用时必填。 |
 | `provider` / `model` | 无 | 供应商中立通用字段，必须成对；`reasoningEffort` 可选。 |
 | `apiKeyEnv` | 无 | 只允许环境变量引用名，不存密钥。 |
@@ -58,7 +58,7 @@ budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、activeHours 同日窗
 
 ## 不做的事
 
-- 不发通知（L1 后续切片）、不读 Memory（S4）、不读 web、不调用任何写工具或
+- 除可选 L1 摘要通知外不发消息；不读 Memory（S4）、不读 web、不调用任何写工具或
   Goal/WorkItem 候选 API。
 - 不评分、不排序、不把工具成功或 owner 沉默当作收益证据；任何"采用"只认后续真实
   owner 动作或独立验收轨道。
@@ -70,4 +70,4 @@ budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、activeHours 同日窗
 
 `pnpm --filter @dsh-enhanced/assistant-dreaming test`：config fail-closed、
 确定性抽签/active-hours/idle/日上限门、SQLite 账本/状态机/保留期/ownData 防护。
-完整真实模型长跑与真实通知留待后续切片独立验收。
+完整真实模型长跑与真实通知发送留待运行验收。

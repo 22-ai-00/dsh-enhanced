@@ -206,6 +206,29 @@ export class DreamStore {
     return row?.dreams ?? 0
   }
 
+  /** L1 notification accounting over the existing per-day counters row. */
+  countNotifications(dayKey: string): number {
+    const row = this.db.prepare('SELECT notifications FROM dream_counters WHERE lane=? AND day_key=?')
+      .get(this.lane, dayKey) as { notifications: number } | undefined
+    return row?.notifications ?? 0
+  }
+
+  incrementNotifications(dayKey: string, at: number): number {
+    assertMutable(this.closed)
+    this.db.prepare(`INSERT INTO dream_counters (lane, day_key, dreams, notifications, last_notification_at)
+      VALUES (?, ?, 0, 1, ?)
+      ON CONFLICT(lane, day_key) DO UPDATE SET notifications = notifications + 1, last_notification_at = ?`)
+      .run(this.lane, dayKey, at, at)
+    return this.countNotifications(dayKey)
+  }
+
+  /** Timestamp of the most recent notification, or null when none was sent. */
+  lastNotificationAt(): number | null {
+    const row = this.db.prepare('SELECT MAX(last_notification_at) AS at FROM dream_counters WHERE lane=?')
+      .get(this.lane) as { at: number | null } | undefined
+    return row?.at ?? null
+  }
+
   recordIdea(idea: Omit<DreamIdea, 'lane' | 'state'>): DreamIdea {
     assertMutable(this.closed)
     const refs = ownData(idea.evidenceRefs)
