@@ -14,7 +14,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 ## 已交付能力与边界
 
-- **原生隔离与能力工厂**：Linux 原生 namespace/cgroup v1 执行、源码 prepare/build、离线工具创建（38 包），独立行为验收、审查证书、有限动态采用、修订采用（精确父版本 CAS + 回滚）。Docker 后端已从 isolation、control-plane、web-owner、skills、evaluation、lark-channel 全部删除，新构建/验证/采用只接受 linux-native 或 macOS seatbelt；Docker 时代的配置、receiver 与账本行仅保留只读解码与 fail-closed 迁移提示。x64 实测；cgroup v2 拒绝，arm64 未验收。Docker→native 非空迁移：封存归档+新 plan 重新验证，真实模型重采用已在 Linux 内部基准网关实测通过；活 Home 原地切换按用户要求延后。
+- **原生隔离与能力工厂**：Linux 原生 namespace/cgroup v1 执行、源码 prepare/build、离线工具创建（38 包），独立行为验收、审查证书、有限动态采用、修订采用（精确父版本 CAS + 回滚）。Docker 后端已从 isolation、control-plane、web-owner、skills、evaluation、lark-channel 全部删除，新构建/验证/采用只接受 linux-native 或 macOS seatbelt；Docker 时代的配置、receiver 与账本行仅保留只读解码与 fail-closed 迁移提示。x64 实测；cgroup v2 拒绝，arm64 未验收。Docker→native 非空迁移：封存归档+新 plan 重新验证，真实模型重采用已在 Linux 内部基准网关实测通过；活 Home 原地切换按用户要求延后。产品代码与根安装器已无 Docker 执行路径；`scripts/e2e/` 下仍需真实模型/浏览器的 opt-in harness（autonomy 系列、repo、personal-memory 验收、canary/repair、skill comparison）仍构造旧 `image/dockerPath` 配置，现已被 native 校验 fail-closed 判死、不在 CI 与 `pnpm check` 内，迁移到 linux-native 属下一批（详见调研结论，不阻塞实验发行）。
 - **原生 Goal**：真实 Cordis/Loader/NativeWeb/AgentLoop 贯通，产物绑定独立 Linux 验收；正确产物 achieved、错误产物被拒；冷账本与资源清理核验。供应商为本地脚本，不证明任意任务能力。
 - **持久工作项（默认关、observe）**：准入、认领、报告、有界 resume、显式诊断、owner 召回/续办/结果反馈；事件跟随（Event Triggers、订阅）、Policy 变更通知、跟进归属与终态释放、结果窗口结算均搭既有 native scheduler wake，无新 Loop/timer。独立验收绑定（句柄晚绑定）、裁决门、held 报告均为 opt-in 切片，合同见 WP21。
 - **普通使用学习**：认证主人事实/经验→三份显式授权（学习/审查/采用）→独立审查→有限召回；后台 WorkItem 结果可进入经验（`workItemExperiences`），更正/撤回/unknown 有界。2026-11-07 起全新 supervised/native 安装可 `--enable-ordinary-use-learning` 自动生成只观察 intake evaluator（ceiling `digest`，从 Delivery 模型路由或显式 `--intake-provider/--intake-model`）、WorkItems 评估开关与三份带经验标记的记忆授权；非 LLM provider（如 `traex-agent`）会 fail-closed。`revisionCapabilities` 与 growth `workItemFailures` 签名 pin 仍未自动生成。
@@ -43,6 +43,7 @@ Linux 去除 Docker 依赖且保留能力；通过持久任务、原生 Agent、
 
 | 精确提交 | 环境 | 结果 | 测试 passed / skipped | 文件 passed / skipped |
 | --- | --- | --- | --- | --- |
+| `8011666f`（Docker 移除收尾） | Linux / Node 24.7.0，隔离 Node 22.23.2，`VITEST_MAX_WORKERS=4` | EXIT 0，PASS，约 2310 秒 | 12,814 / 273 | 823 / 19 |
 | `09cffe2b`（0.1.67 发布提交） | Linux / Node 24.7.0，隔离 Node 22.23.2 | EXIT 0，PASS，2286 秒 | 12,954 / 314 | 823 / 32 |
 | `48fa40fa`（0.1.66 发布提交） | Mac / Node 26.11.1 | EXIT 0，PASS，1148 秒 | 11,179 / 1,933 | 765 / 85 |
 
