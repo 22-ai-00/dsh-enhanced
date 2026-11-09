@@ -8,7 +8,8 @@ import { canonicalGrowthJson, type PluginCreationVerificationCertificate } from 
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { CreationCapabilityJournal } from '../../plugins/plugin-control-plane/src/creation-capability-journal.js'
 import { CreationReviewStore } from '../../plugins/assistant-verifier/src/creation-review-store.js'
-import { compileCreationReviewConfig, type CreationReviewConfig } from '../../plugins/assistant-verifier/src/creation-review.js'
+import { compileCreationReviewConfig, compileLegacyCreationReviewIdentity,
+  type CreationReviewConfig, type LegacyCreationReviewConfig } from '../../plugins/assistant-verifier/src/creation-review.js'
 import type { CreationCapabilityConfig } from '../../plugins/plugin-control-plane/src/creation-capability-types.js'
 import * as control from '../../plugins/plugin-control-plane/src/index.js'
 import { inspectOwnerCreationHistory, inspectOwnerEmptyCreationHistory } from '../../scripts/install/owner-empty-creation-history.mjs'
@@ -90,9 +91,9 @@ function linuxFixture(maxAdoptions = 2, maxCalls = 3) {
 export const api = { control, yaml }
 /** Optional Docker-era business written through the real journal before inspection. */
 export type OwnerHistorySeed = (f: ReturnType<typeof linuxFixture>) => void
-/** Opt-in full creation-review configs (Docker-era old, linux-native next) and review-lane seeding. */
+/** Opt-in full creation-review configs (Docker-era old read-only, linux-native next) and review-lane seeding. */
 export interface OwnerFixtureOptions {
-  reviews?: (f: ReturnType<typeof linuxFixture>) => { old: CreationReviewConfig; next: CreationReviewConfig }
+  reviews?: (f: ReturnType<typeof linuxFixture>) => { old: LegacyCreationReviewConfig; next: CreationReviewConfig }
   reviewSeed?: (path: string, f: ReturnType<typeof linuxFixture>) => void
   /** Journal authority config when it predates the manifest (e.g. a runner.image re-pin). */
   journalConfig?: (f: ReturnType<typeof linuxFixture>) => ReturnType<typeof linuxFixture>['oldConfig']
@@ -111,7 +112,7 @@ export async function ownerFixture(seed?: OwnerHistorySeed, options: OwnerFixtur
   const manifest = { pluginCreation: { capabilities: f.oldConfig, reviews: reviewConfigs?.old ?? { runner: f.oldConfig.runner } },
     sourceReviews: { authorityId: 'source' }, controlPlane: { statePath: join(f.root, 'control-plane'), creationCapabilities: f.oldConfig,
       sourceBuild: { schemaVersion: 1, sourceCommit: 'a'.repeat(40) },
-      ...(reviewConfigs ? { creationVerifications: { authority: compileCreationReviewConfig(reviewConfigs.old).authority } } : {}) } }
+      ...(reviewConfigs ? { creationVerifications: { authority: compileLegacyCreationReviewIdentity(reviewConfigs.old).authority } } : {}) } }
   const ownerUpdate = { protocol: 'dsh-enhanced/host-owner-program-update/v1', homePath: f.root, profile: 'assistant',
     hostPlanDigest: d('e'), original: { build: { schemaVersion: 1 }, resources, receiptSource: 'owner-bootstrap',
       ...(reviewConfigs ? { source: { workspace: { sourceCommit: 'a'.repeat(40) } } } : {}),

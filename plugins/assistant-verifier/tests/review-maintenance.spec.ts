@@ -6,7 +6,8 @@ import { afterEach, expect, test } from 'vitest'
 import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
 import { CreationReviewStore, lineageHash, reviewPublicIdentity } from '../src/review-maintenance.ts'
 import { stableIdentity, validateIdentity, validateLane } from '../src/review-authority-lineage.ts'
-import type { CreationReviewConfig } from '../src/creation-review.ts'
+import { compileCreationReviewConfig, compileLegacyCreationReviewIdentity,
+  type CreationReviewConfig, type LegacyCreationReviewConfig } from '../src/creation-review.ts'
 import type { RevisionRegressionReviewConfig } from '../src/revision-regression-review.ts'
 
 const roots: string[] = []
@@ -77,4 +78,28 @@ test('invalid lanes and configs fail closed; the maintenance surface re-exports 
   expect(() => reviewPublicIdentity('creation-reviews', { ...f.config, keyPath: join(f.stateRoot, 'missing.pem') })).toThrow()
   expect(typeof CreationReviewStore.openExistingForMaintenance).toBe('function')
   expect(lineageHash({ a: 1 })).toMatch(/^[a-f0-9]{64}$/u)
+})
+
+test('a Docker-era review lane projects a read-only legacy identity but cannot use the live compiler', () => {
+  const f = fixture()
+  const legacy = {
+    authorityId: f.config.authorityId, owner: f.config.owner, namePrefix: f.config.namePrefix, keyId: f.config.keyId,
+    keyPath: f.config.keyPath, expiresAt: f.config.expiresAt, maxVerifications: f.config.maxVerifications,
+    runner: { image: `sha256:${'a'.repeat(64)}`, dockerPath: realpathSync(process.execPath), stateRoot: f.stateRoot,
+      expiresAt: f.config.runner.expiresAt, maxRuns: 16, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
+    policy: f.config.policy, maxInputBytes: f.config.maxInputBytes, maxOutputTokens: f.config.maxOutputTokens,
+    maxDurationMs: f.config.maxDurationMs, maxCases: f.config.maxCases, receiptTtlMs: f.config.receiptTtlMs,
+  } as LegacyCreationReviewConfig
+  // The live compiler refuses the removed Docker runner.
+  expect(() => compileCreationReviewConfig(legacy as unknown as CreationReviewConfig)).toThrow('invalid plugin behavior runner backend')
+  // The legacy compiler recomputes the historical digest read-only.
+  const compiled = compileLegacyCreationReviewIdentity(legacy)
+  expect(compiled.authority.authorityDigest).toMatch(/^[a-f0-9]{64}$/u)
+  // The maintenance identity surface selects the legacy path automatically and still hides the key.
+  const identity = reviewPublicIdentity('creation-reviews', legacy as unknown as CreationReviewConfig)
+  expect(() => validateIdentity(identity)).not.toThrow()
+  expect(identity.authority.authorityDigest).toBe(compiled.authority.authorityDigest)
+  expect(JSON.stringify(identity)).not.toContain(f.config.keyPath)
+  expect(identity.runner).toEqual({ logicalStateRoot: f.stateRoot, maxRuns: 16, maxTotalDurationMs: 80_000,
+    maxDurationMs: 10_000, maxOutputBytes: 65_536, expiresAt: f.config.runner.expiresAt })
 })

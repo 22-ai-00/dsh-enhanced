@@ -15,7 +15,8 @@ import { CreationReviewStore } from './creation-review-store.js'
 import { projectReviewPublicIdentity } from './review-authority-lineage.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 import { behaviorNativeRuntimeDigest, LINUX_BEHAVIOR_BOUNDARY, NATIVE_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig,
-  type CreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
+  isLegacyDockerBehaviorDeploymentConfig, validateLegacyDockerBehaviorDeploymentConfig,
+  type CreationBehaviorDeploymentConfig, type LegacyDockerBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 
@@ -105,8 +106,8 @@ function privatePath(value: unknown, label: string): string {
   return value
 }
 
-/** Synchronous deployment validation, before any runner or SQLite resource is acquired. */
-export function validateCreationReviewConfig(input: CreationReviewConfig): CreationReviewConfig {
+/** Shared field/key/owner validation for live and historical review configs; validates the runner separately. */
+function validateCreationReviewFields(input: CreationReviewConfig, runner: { stateRoot: string; expiresAt: number; maxRuns: number; maxTotalDurationMs: number; maxDurationMs: number; maxOutputBytes: number }): CreationReviewConfig {
   const item = exact(input, ['authorityId', 'owner', 'namePrefix', 'keyId', 'keyPath', 'expiresAt', 'maxVerifications',
     'runner', 'policy', 'maxInputBytes', 'maxOutputTokens', 'maxDurationMs', 'maxCases', 'receiptTtlMs'], 'config', ['workItemFailures', 'history'])
   if (Object.hasOwn(item, 'workItemFailures') && typeof item.workItemFailures !== 'boolean') throw new Error('creation review invalid workItemFailures')
@@ -133,8 +134,6 @@ export function validateCreationReviewConfig(input: CreationReviewConfig): Creat
   integer(item.receiptTtlMs, 1000, 86_400_000, 'receipt ttl')
   if (typeof item.policy !== 'string' || !item.policy.trim() || item.policy.includes('\0')
     || !item.policy.isWellFormed() || Buffer.byteLength(item.policy) > 8192) throw new Error('creation review invalid policy')
-  const runner = item.runner as CreationBehaviorDeploymentConfig
-  validateCreationBehaviorDeploymentConfig(runner)
   privatePath(runner.stateRoot, 'runner root')
   integer(runner.expiresAt, 1, 8_640_000_000_000_000, 'runner expiry')
   integer(runner.maxRuns, 1, 10_000, 'runner quota')
@@ -156,6 +155,33 @@ export function validateCreationReviewConfig(input: CreationReviewConfig): Creat
   return config
 }
 
+/** Synchronous deployment validation, before any runner or SQLite resource is acquired. */
+export function validateCreationReviewConfig(input: CreationReviewConfig): CreationReviewConfig {
+  const runner = input.runner as CreationBehaviorDeploymentConfig
+  validateCreationBehaviorDeploymentConfig(runner)
+  return validateCreationReviewFields(input, runner)
+}
+
+/** Historical Docker-era review config; decoded read-only during an authority handoff. It can never run. */
+export interface LegacyCreationReviewConfig extends Omit<CreationReviewConfig, 'runner'> {
+  runner: LegacyDockerBehaviorDeploymentConfig
+}
+
+/** Read-only validation for a Docker-era review config; no behavior runner is constructed. */
+export function validateLegacyCreationReviewConfig(input: unknown): LegacyCreationReviewConfig {
+  if (!input || typeof input !== 'object') throw new Error('creation review invalid config')
+  const item = input as LegacyCreationReviewConfig
+  const runner = validateLegacyDockerBehaviorDeploymentConfig(item.runner)
+  return validateCreationReviewFields(item as unknown as CreationReviewConfig, runner) as unknown as LegacyCreationReviewConfig
+}
+
+/** A review config carries the removed Docker-era runner rather than a native backend. */
+export function isLegacyDockerReviewConfig(value: unknown): value is LegacyCreationReviewConfig {
+  if (!value || typeof value !== 'object') return false
+  const runner = (value as { runner?: unknown }).runner
+  return isLegacyDockerBehaviorDeploymentConfig(runner)
+}
+
 export function compileCreationReviewConfig(input: CreationReviewConfig): {
   config: CreationReviewConfig; authority: CreationAcceptanceAuthorityRef; publicKey: string; privateKey: KeyObject
 } {
@@ -174,6 +200,30 @@ export function compileCreationReviewConfig(input: CreationReviewConfig): {
     authorityId: config.authorityId, keyId: config.keyId, authorityDigest, namePrefix: config.namePrefix, expiresAt: config.expiresAt }
   validateCreationAcceptanceAuthorityRef(authority)
   return { config, authority: Object.freeze(authority), publicKey, privateKey }
+}
+
+/** Recompute the historical authority identity of a Docker-era review lane during an authority
+ * handoff. Returns only the public identity (no private key): it exists to match the persisted old
+ * digest, not to sign or run anything. */
+export function compileLegacyCreationReviewIdentity(input: LegacyCreationReviewConfig): {
+  config: LegacyCreationReviewConfig; authority: CreationAcceptanceAuthorityRef; publicKey: string
+} {
+  const config = validateLegacyCreationReviewConfig(input)
+  const publicKey = createPublicKey(createPrivateKey(readFileSync(config.keyPath)))
+    .export({ format: 'pem', type: 'spki' }).toString()
+  const fingerprint = createHash('sha256')
+    .update(createPublicKey(createPrivateKey(readFileSync(config.keyPath))).export({ format: 'der', type: 'spki' })).digest('hex')
+  const authorityDigest = growthObjectDigest({ protocol: RULES_VERSION, caseRules: CASE_RULES, reviewRules: REVIEW_RULES,
+    comparisonRules: COMPARISON_RULES, schemaRules: SCHEMA_RULES, authorityId: config.authorityId, owner: config.owner,
+    namePrefix: config.namePrefix, keyId: config.keyId, keyFingerprint: fingerprint, expiresAt: config.expiresAt,
+    maxVerifications: config.maxVerifications, runner: config.runner, policy: config.policy,
+    maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
+    maxCases: config.maxCases, receiptTtlMs: config.receiptTtlMs,
+    ...(config.workItemFailures === true ? { workItemFailures: true, workItemRules: WORK_ITEM_RULES } : {}) })
+  const authority: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+    authorityId: config.authorityId, keyId: config.keyId, authorityDigest, namePrefix: config.namePrefix, expiresAt: config.expiresAt }
+  validateCreationAcceptanceAuthorityRef(authority)
+  return { config, authority: Object.freeze(authority), publicKey }
 }
 
 export interface WorkItemCreationReviewReadiness {

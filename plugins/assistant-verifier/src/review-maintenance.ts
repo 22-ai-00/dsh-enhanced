@@ -1,7 +1,8 @@
 /** Offline review-lane maintenance surface for installers (package subpath `./review-maintenance`).
  * Kept apart from the plugin entry so creation-review → store → lineage imports stay acyclic and the
  * service entry does not export store internals. */
-import { compileCreationReviewConfig, type CreationReviewConfig } from './creation-review.js'
+import { compileCreationReviewConfig, compileLegacyCreationReviewIdentity,
+  isLegacyDockerReviewConfig, type CreationReviewConfig } from './creation-review.js'
 import { compileRevisionReviewConfig, type RevisionReviewConfig } from './revision-review.js'
 import { compileRevisionRegressionReviewConfig, type RevisionRegressionReviewConfig } from './revision-regression-review.js'
 import { projectReviewPublicIdentity, type LineageScope, type ReviewPublicIdentity } from './review-authority-lineage.js'
@@ -21,6 +22,11 @@ export function reviewPublicIdentity(lane: 'revision-reviews', config: RevisionR
 export function reviewPublicIdentity(lane: 'revision-regressions', config: RevisionRegressionReviewConfig): ReviewPublicIdentity
 export function reviewPublicIdentity(lane: LineageScope['lane'], config: ReviewLaneConfig): ReviewPublicIdentity
 export function reviewPublicIdentity(lane: LineageScope['lane'], config: ReviewLaneConfig): ReviewPublicIdentity {
+  if (lane === 'creation-reviews' && isLegacyDockerReviewConfig(config)) {
+    // Docker-era lane: project the historical identity read-only; never construct a runner.
+    const compiled = compileLegacyCreationReviewIdentity(config)
+    return projectReviewPublicIdentity(lane, compiled)
+  }
   const compiled = lane === 'creation-reviews' ? compileCreationReviewConfig(config as CreationReviewConfig)
     : lane === 'revision-reviews' ? compileRevisionReviewConfig(config as RevisionReviewConfig)
       : lane === 'revision-regressions' ? compileRevisionRegressionReviewConfig(config as RevisionRegressionReviewConfig)

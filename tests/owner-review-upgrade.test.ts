@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import { CreationReviewStore } from '../plugins/assistant-verifier/src/creation-review-store.js'
-import { compileCreationReviewConfig, type CreationReviewConfig } from '../plugins/assistant-verifier/src/creation-review.js'
+import { compileLegacyCreationReviewIdentity,
+  type CreationReviewConfig, type LegacyCreationReviewConfig } from '../plugins/assistant-verifier/src/creation-review.js'
 import * as verifier from '../plugins/assistant-verifier/src/review-maintenance.js'
 import { stageOwnerEmptyAdoptionHandoff } from '../scripts/install/owner-empty-adoption-handoff.mjs'
 import { stageOwnerReviewGrantHandoffs, preflightOwnerReviewGrantHandoffs } from '../scripts/install/owner-review-grant-handoff.mjs'
@@ -32,13 +33,13 @@ function reviews(f: F, nextRunner: Partial<CreationReviewConfig['runner']> = {})
   const value = {
     old: { ...common, runner: { ...bounds, image: 'sha256:' + 'a'.repeat(64), dockerPath: realpathSync(process.execPath) } },
     next: { ...common, runner: { ...bounds, backend, runtime, cgroupRoots, ...nextRunner } },
-  } as { old: CreationReviewConfig; next: CreationReviewConfig }
+  } as { old: LegacyCreationReviewConfig; next: CreationReviewConfig }
   cache.set(f, value)
   return value
 }
 /** Real review history under the old Docker authority: one unknown and one crash-left review-claimed row. */
 function seedHistory(path: string, f: F) {
-  const { old } = reviews(f), digest = compileCreationReviewConfig(old).authority.authorityDigest
+  const { old } = reviews(f), digest = compileLegacyCreationReviewIdentity(old).authority.authorityDigest
   const store = new CreationReviewStore<unknown>(path)
   try {
     store.claim('unknown', binding, old.authorityId, digest, old.maxVerifications); store.unknown('unknown', binding, 'uncertain')

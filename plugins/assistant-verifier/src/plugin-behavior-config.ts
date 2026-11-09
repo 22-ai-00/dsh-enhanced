@@ -144,3 +144,42 @@ export function validatePluginBehaviorDeploymentConfig(value: unknown): PluginBe
     throw new Error('invalid plugin behavior deployment config')
   return validateCreationBehaviorDeploymentConfig(value) as PluginBehaviorDeploymentConfig
 }
+
+/** Docker-era review runner, readable only to recompute a historical authority digest.
+ * It can never construct a behavior runner or execute; the live deployment validator rejects it. */
+export interface LegacyDockerBehaviorDeploymentConfig {
+  image: string
+  dockerPath: string
+  socketPath?: string
+  stateRoot: string
+  expiresAt: number
+  maxRuns: number
+  maxTotalDurationMs: number
+  maxDurationMs: number
+  maxOutputBytes: number
+}
+
+export function isLegacyDockerBehaviorDeploymentConfig(value: unknown): value is LegacyDockerBehaviorDeploymentConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false
+  const item = value as Record<string, unknown>
+  return !Object.hasOwn(item, 'backend') && Object.hasOwn(item, 'image') && Object.hasOwn(item, 'dockerPath')
+    && Object.keys(item).every(key => ['image', 'dockerPath', 'socketPath', 'stateRoot', 'expiresAt', 'maxRuns',
+      'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes'].includes(key))
+}
+
+/** Shape validation for a historical Docker-era review runner; never enables execution. */
+export function validateLegacyDockerBehaviorDeploymentConfig(value: unknown): LegacyDockerBehaviorDeploymentConfig {
+  if (!isLegacyDockerBehaviorDeploymentConfig(value)
+    || typeof value.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.image)
+    || !absolute(value.dockerPath)
+    || Object.hasOwn(value, 'socketPath')
+      && (typeof value.socketPath !== 'string' || !absolute(value.socketPath) || /[\p{Cc},]/u.test(value.socketPath) || value.socketPath.includes('://'))
+    || !absolute(value.stateRoot) || value.stateRoot === '/' || /[\p{Cc}\\]/u.test(value.stateRoot)
+    || !positive(value.expiresAt, 8_640_000_000_000_000) || !positive(value.maxRuns, 10_000)
+    || !positive(value.maxTotalDurationMs, 86_400_000) || !positive(value.maxDurationMs, 300_000)
+    || Number(value.maxDurationMs) > Number(value.maxTotalDurationMs)
+    || !positive(value.maxOutputBytes, 262_144) || Number(value.maxOutputBytes) < 65_536) {
+    throw new Error('invalid legacy plugin behavior Docker config')
+  }
+  return structuredClone(value)
+}

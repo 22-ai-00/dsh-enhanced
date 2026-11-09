@@ -16,7 +16,7 @@ import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-chan
 import { classifyLifecycleScenario } from '../scripts/install/lifecycle-config.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { nativeInstallerHost, nativeInstallerSetupPackage } from './native-installer-host-fixture.ts'
-import { stageRsiLocalUpdateResources } from '../plugins/lark-channel/src/rsi-local-resources.ts'
+import { stageLinuxRsiPreOwnerNativeResources as stageRsiLocalUpdateResources } from '../plugins/lark-channel/src/rsi-linux-native-resources.ts'
 import { rsiMemoryLearningInitialRow } from '../plugins/lark-channel/src/rsi-local-roots-extension.ts'
 import {
   assertEffectiveSupervisedGrowthConfig,
