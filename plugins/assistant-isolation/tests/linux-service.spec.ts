@@ -8,7 +8,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createTaskAcceptanceContract, type GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -51,12 +51,9 @@ async function setup(maxRuns = 12) {
     { id: 'grant', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation:offline' } },
   ] })
   const config: Config = { backend: 'linux-native', linux, stateRoot,
-    // Any attempted Docker execution would fail and leave a detectable marker.
-    dockerPath: join(root, 'forbidden-docker'), socketPath: join(root, 'missing.sock'),
     limits: { maxDurationMs: 5000, maxOutputBytes: 4096, memoryMiB: 128, pidsLimit: 32, cpus: 0.5, workspaceMiB: 4, workspaceInodes: 256 },
     grants: [{ id: 'offline', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1,
       workspace: project, agentPreset: 'primary', expiresAt: Date.now() + 120_000, maxRuns, maxTotalDurationMs: 60_000 }] }
-  await writeFile(config.dockerPath!, `#!/bin/sh\nprintf contacted > '${join(root, 'docker-contacted')}'\nexit 1\n`, { mode: 0o700 })
   let plugin = await ctx.plugin(IsolationPlugin, config)
   const handle = await ctx.agents.create({ sessionId: SessionId('public-linux'), meta: { cwd: project, agentPreset: 'primary' } })
   const agent = handle.agent
@@ -112,8 +109,6 @@ describe.skipIf(!real).sequential('public isolation_run with real Linux cgroups 
     await expect(f.ctx.assistantIsolation.run(f.agent, request('still-exhausted'), f.signal)).rejects.toThrow('budget')
     expect(f.db.prepare('SELECT COUNT(*) AS n,SUM(reserved_duration_ms) AS duration FROM isolation_jobs').get()).toMatchObject({ n: 1, duration: 5000 })
     expect(f.db.prepare("SELECT COUNT(*) AS n FROM isolation_audit WHERE action='supervisor-spawn-intent'").get()?.n).toBe(1)
-    await expect(stat(join(f.root, 'docker-contacted'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(stat(join(f.stateRoot, 'docker-socket-path'))).rejects.toMatchObject({ code: 'ENOENT' })
   }, 20_000)
 
   test.each(['cancel', 'revoke', 'owner', 'fence', 'goal', 'dispose'] as const)('stops both actual resource groups after %s', async mode => {
@@ -163,7 +158,6 @@ describe.skipIf(!real).sequential('public isolation_run with real Linux cgroups 
     await groupsAbsent(f.db, 'interrupted')
     expect(await f.call(request('subsequent'))).toMatchObject({ status: 'succeeded', quiescent: true })
     expect(f.db.prepare('SELECT COUNT(*) AS n,SUM(reserved_duration_ms) AS duration FROM isolation_jobs').get()).toMatchObject({ n: 2, duration: 10000 })
-    await expect(stat(join(f.root, 'docker-contacted'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('verifies the complete runtime before every new admission, while exact replay survives drift', async () => {
@@ -176,29 +170,30 @@ describe.skipIf(!real).sequential('public isolation_run with real Linux cgroups 
     expect(f.db.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(1)
   })
 
-  test.each(['budget', 'capacity'] as const)('keeps old Docker uncertainty, socket identity and %s; same-key migration is an explicit conflict', async mode => {
+  test.each(['budget', 'capacity'] as const)('keeps old Docker uncertainty and %s capacity blocks; same-key migration is an explicit conflict', async mode => {
     const f = await setup(mode === 'budget' ? 1 : 12)
     await f.close()
     const peer = new IsolationLedger(join(f.stateRoot, 'ledger.sqlite'))
     const authority = peer.claimController('historical', 30_000)
     try {
       const grant = f.config.grants![0]!
-      const { principalDigest, principalRecordId, principalVersion, workspace, agentPreset } = grant
-      const job = peer.prepare({ identity: { principalDigest, principalRecordId, principalVersion, workspace, agentPreset }, sessionId: String(f.agent.session.id), grantId: grant.id,
-        idempotencyKey: 'legacy', requestDigest: 'legacy-unverifiable-digest', durationMs: 5000, authority, backend: 'docker' }).job
-      const dispatched = peer.markDispatched(job.id, job.version, authority)
-      peer.settle(job.id, dispatched.version, { jobId: job.id, status: 'unknown', quiescent: false,
-        stdout: 'original Docker evidence', stderr: '', artifacts: [], reason: 'docker-creation-unconfirmed' }, authority)
+      const { principalDigest, principalRecordId, workspace } = grant
+      // A Docker-era row can only be opened from history: write its exact shape directly.
+      const database = new DatabaseSync(join(f.stateRoot, 'ledger.sqlite'))
+      try {
+        database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted) VALUES (?,?,1,?,?,1,?,'primary',?,?,?,'dsh-isolation-legacy','docker',?,5000,0,0,0,'unknown',1,10000,10000,?,1)")
+          .run('00000000-0000-4000-8000-000000000002', grant.id, principalDigest, principalRecordId, workspace,
+            String(f.agent.session.id), 'legacy', 'legacy-unverifiable-digest', Date.now() + 100_000,
+            JSON.stringify({ jobId: '00000000-0000-4000-8000-000000000002', status: 'unknown', quiescent: false,
+              stdout: 'original Docker evidence', stderr: '', artifacts: [], reason: 'docker-creation-unconfirmed' }))
+      } finally { database.close() }
     } finally { peer.releaseController(authority); peer.close() }
-    await writeFile(join(f.stateRoot, 'docker-socket-path'), '/var/run/docker.sock\n', { mode: 0o600 })
     await f.reopen()
     await expect(f.ctx.assistantIsolation.run(f.agent, request('legacy'), f.signal)).rejects.toThrow('different request or backend')
     await expect(f.ctx.assistantIsolation.run(f.agent, request('fresh'), f.signal)).rejects.toThrow(mode === 'budget' ? 'budget' : 'active legacy job')
     expect(JSON.parse(f.db.prepare('SELECT result_json FROM isolation_jobs').get()?.result_json as string))
       .toMatchObject({ status: 'unknown', quiescent: false, stdout: 'original Docker evidence' })
     expect(await readdir(join(f.stateRoot, 'linux-executions'))).toEqual([])
-    expect(await readFile(join(f.stateRoot, 'docker-socket-path'), 'utf8')).toBe('/var/run/docker.sock\n')
-    await expect(stat(join(f.root, 'docker-contacted'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('binds a successful exported artifact to the exact goal contract for private readback', async () => {

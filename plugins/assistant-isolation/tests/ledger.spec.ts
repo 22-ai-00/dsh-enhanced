@@ -11,8 +11,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const clock = () => 10_000
 const identity: IsolationIdentity = { principalDigest: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'default' }
 const grant = (revision = 1): IsolationGrant => ({ ...identity, id: 'grant', revision, expiresAt: 100_000, maxRuns: 2, maxTotalDurationMs: 2_000 })
-const input = (key = 'key') => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 })
-const reservation = (memoryMiB = 64, workspaceInodes = 100) => ({ memoryMiB, workspaceInodes, maxMemoryMiB: 100, maxWorkspaceInodes: 200 })
+const input = (key = 'key') => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500, backend: 'macos-seatbelt' as const })
 const unknown = (jobId: string, quiescent = false): IsolationResult => ({ jobId, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [] })
 const binding = (paths: readonly string[]) => ({ admission: { protocol: 'goal-artifact-admission/v1' as const, contractId: 'contract-1', contractDigest: 'a'.repeat(64), runId: 'run-1', turn: 1 }, paths })
 function path(): string { const root = mkdtempSync(join(tmpdir(), 'isolation-ledger-')); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }
@@ -94,28 +93,13 @@ describe('IsolationLedger', () => {
     ledger.close()
   })
 
-  it('atomically reserves global memory and inode pools without double-charging idempotency', () => {
-    const file = path(); const first = new IsolationLedger(file, { now: clock }); const second = new IsolationLedger(file, { now: clock })
-    first.syncGrants([{ ...grant(), maxRuns: 10, maxTotalDurationMs: 10_000 }])
-    const prepared = first.prepare({ ...input('pool-a'), resourceReservation: reservation(60, 80) })
-    expect(prepared.job).toMatchObject({ reservedMemoryMiB: 60, reservedWorkspaceInodes: 80 })
-    expect(second.prepare({ ...input('pool-a'), resourceReservation: reservation(60, 80) })).toMatchObject({ created: false, job: { id: prepared.job.id } })
-    expect(error(() => second.prepare({ ...input('pool-memory'), resourceReservation: reservation(41, 10) })).code).toBe('unauthorized')
-    expect(error(() => second.prepare({ ...input('pool-inodes'), resourceReservation: reservation(40, 121) })).code).toBe('unauthorized')
-    const auditDatabase = new DatabaseSync(file)
-    const audit = auditDatabase.prepare("SELECT detail FROM isolation_audit WHERE action='job-prepared' ORDER BY sequence DESC LIMIT 1").get() as { detail: string }
-    expect(audit.detail).toContain('reservation:memoryMiB:60,workspaceInodes:80')
-    auditDatabase.close()
-    first.close(); second.close()
-  })
-
-  it('holds reservations for every non-quiescent result and releases only after cleanup', () => {
+  it('holds non-quiescent results against the active job limit and releases only after cleanup', () => {
     const ledger = new IsolationLedger(':memory:', { now: clock }); ledger.syncGrants([{ ...grant(), maxRuns: 10, maxTotalDurationMs: 10_000 }])
-    const stranded = ledger.prepare({ ...input('stranded'), resourceReservation: reservation(60, 100) }).job
+    const stranded = ledger.prepare({ ...input('stranded'), maxActiveJobs: 1 }).job
     const settled = ledger.settle(stranded.id, stranded.version, unknown(stranded.id))
-    expect(error(() => ledger.prepare({ ...input('blocked'), resourceReservation: reservation(41, 100) })).code).toBe('unauthorized')
+    expect(error(() => ledger.prepare({ ...input('blocked'), maxActiveJobs: 1 })).code).toBe('unauthorized')
     const cleaned = ledger.settle(settled.id, settled.version, unknown(settled.id, true))
-    expect(ledger.prepare({ ...input('released'), resourceReservation: reservation(41, 100) }).created).toBe(true)
+    expect(ledger.prepare({ ...input('released'), maxActiveJobs: 1 }).created).toBe(true)
     expect(error(() => ledger.settle(cleaned.id, cleaned.version, { ...unknown(cleaned.id), status: 'succeeded', quiescent: false })).code).toBe('invalid-input')
     ledger.close()
   })
@@ -135,13 +119,13 @@ describe('IsolationLedger', () => {
     database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,status,version,created_at,updated_at) VALUES ('legacy','grant',1,?,?,?,?,?,?,?,?,?,100000,500,'prepared',1,10000,10000)").run(identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset, 'session', 'legacy-key', 'legacy-digest', 'dsh-isolation-legacy')
     database.close()
     const ledger = new IsolationLedger(file, { now: clock })
-    expect(ledger.get('legacy')).toMatchObject({ reservedMemoryMiB: 0, reservedWorkspaceInodes: 0, reservedStorageBytes: 0, status: 'prepared' })
-    expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
+    expect(ledger.get('legacy')).toMatchObject({ reservedMemoryMiB: 0, reservedWorkspaceInodes: 0, reservedStorageBytes: 0, status: 'prepared', backend: 'docker' })
+    expect(error(() => ledger.prepare({ ...input('new'), maxActiveJobs: 1 })).code).toBe('unauthorized')
     const legacy = ledger.get('legacy')!
     expect(legacy.dispatchAttempted).toBe(true)
     expect(error(() => ledger.settle(legacy.id, legacy.version, unknown(legacy.id, true))).code).toBe('invalid-state')
     ledger.settle(legacy.id, legacy.version, unknown(legacy.id))
-    expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
+    expect(error(() => ledger.prepare({ ...input('new'), maxActiveJobs: 1 })).code).toBe('unauthorized')
     ledger.close()
     const reopened = new DatabaseSync(file)
     expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(9)
@@ -155,7 +139,7 @@ describe('IsolationLedger', () => {
     const ledger = new IsolationLedger(file, { now: clock })
     const authority = ledger.claimController('host', 100)
     ledger.syncGrants([grant()], authority)
-    const prepared = ledger.prepare({ ...input(), resourceReservation: reservation(), authority }).job
+    const prepared = ledger.prepare({ ...input(), authority }).job
     expect(prepared.dispatchAttempted).toBe(false)
     expect(error(() => ledger.markDispatched(prepared.id, prepared.version, { ...authority, fence: authority.fence + 1 })).code).toBe('unauthorized')
     const dispatched = ledger.markDispatched(prepared.id, prepared.version, authority)
@@ -168,53 +152,32 @@ describe('IsolationLedger', () => {
       expect(reopened.get(prepared.id)?.dispatchAttempted).toBe(true)
       const failed = reopened.settle(dispatched.id, dispatched.version, { ...unknown(dispatched.id), reason: 'supervisor-exited:1' }, authority)
       expect(error(() => reopened.settle(failed.id, failed.version, { ...failed.result!, quiescent: true }, authority)).code).toBe('invalid-state')
-      expect(error(() => reopened.prepare({ ...input('blocked'), resourceReservation: reservation() })).code).toBe('unauthorized')
+      expect(error(() => reopened.prepare({ ...input('blocked'), maxActiveJobs: 1 })).code).toBe('unauthorized')
       const db = new DatabaseSync(file)
       try { expect(db.prepare("SELECT action FROM isolation_audit WHERE job_id=? ORDER BY sequence").all(prepared.id).map(row => row.action)).toEqual(['job-prepared', 'supervisor-spawn-intent', 'job-settled']) }
       finally { db.close() }
     } finally { reopened.close() }
   })
 
-  it('migrates v2 jobs conservatively and preserves private evidence outside the public result', () => {
+  it('migrates a v6 Docker-era job without changing its backend identity or budget', () => {
     const file = path()
-    let ledger = new IsolationLedger(file, { now: clock })
-    ledger.syncGrants([grant()])
-    const legacy = ledger.prepare({ ...input('v2'), resourceReservation: reservation() }).job
-    ledger.close()
-    const db = new DatabaseSync(file)
-    db.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
-      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,status,version,created_at,updated_at,result_json FROM isolation_jobs_v7;
-      DROP TABLE isolation_jobs_v7; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';`)
-    db.close()
-    ledger = new IsolationLedger(file, { now: clock })
-    try {
-      expect(ledger.get(legacy.id)).toMatchObject({ dispatchAttempted: true, reservedMemoryMiB: 64, reservedWorkspaceInodes: 100, reservedStorageBytes: 0 })
-      const process = { bootId: '00000000-0000-0000-0000-000000000000', pid: 1, startTicks: '1' }
-      const witness = { daemon: { process, engineId: 'engine', dockerPath: '/usr/bin/docker', socketPath: '/run/docker.sock', pidFile: '/run/docker.pid' }, supervisor: { ...process, pid: 2 } }
-      const settled = ledger.settle(legacy.id, legacy.version, unknown(legacy.id), undefined, witness)
-      expect(settled.creationWitness).toEqual(witness)
-      expect(settled.result).not.toHaveProperty('creationWitness')
-      expect(error(() => ledger.settle(settled.id, settled.version, unknown(settled.id, true))).code).toBe('invalid-state')
-      ledger.close()
-      ledger = new IsolationLedger(file, { now: clock })
-      expect(ledger.get(legacy.id)?.creationWitness).toEqual(witness)
-    } finally { ledger.close() }
-  })
-
-  it('migrates a v6 Linux job without changing its Docker identity or budget', () => {
-    const file = path(); let ledger = new IsolationLedger(file, { now: clock }); ledger.syncGrants([grant()])
-    const original = ledger.prepare({ ...input('v6'), resourceReservation: reservation() }).job
-    ledger.close()
     const database = new DatabaseSync(file)
-    database.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
-      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json FROM isolation_jobs_v7;
-      DROP TABLE isolation_jobs_v7; PRAGMA user_version=6; UPDATE schema_meta SET value='6' WHERE key='schema-version';`)
+    database.exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
+      CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
+      PRAGMA user_version = 6;`)
+    database.prepare('INSERT INTO isolation_grants(id,digest,revision,expires_at,max_runs,max_total_duration_ms,revoked,principal_digest,principal_record_id,principal_version,workspace,agent_preset) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)').run('grant', JSON.stringify(grant()), 1, 100_000, 10, 10_000, identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset)
+    database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,status,version,created_at,updated_at) VALUES ('legacy','grant',1,?,?,?,?,?,?,?,?,?,100000,500,'prepared',1,10000,10000)").run(identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset, 'session', 'legacy-key', 'legacy-digest', 'dsh-isolation-legacy')
     database.close()
-    ledger = new IsolationLedger(file, { now: clock })
+    const ledger = new IsolationLedger(file, { now: clock })
     try {
-      expect(ledger.get(original.id)).toMatchObject({ backend: 'docker', containerName: original.containerName,
-        reservedMemoryMiB: original.reservedMemoryMiB, reservedWorkspaceInodes: original.reservedWorkspaceInodes,
-        requestDigest: original.requestDigest, status: 'prepared' })
+      expect(ledger.get('legacy')).toMatchObject({ backend: 'docker',
+        reservedDurationMs: 500, requestDigest: 'legacy-digest', status: 'prepared' })
       const db = new DatabaseSync(file)
       try { expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(9) }
       finally { db.close() }
@@ -222,18 +185,25 @@ describe('IsolationLedger', () => {
   })
 
   it('migrates v5 binding storage as null and never lets a same-key replay attach a binding', () => {
-    const file = path(); let ledger = new IsolationLedger(file, { now: clock }); ledger.syncGrants([grant()])
-    const legacy = ledger.prepare(input('legacy-v5')).job; ledger.close()
+    const file = path()
     const database = new DatabaseSync(file)
-    database.exec(`ALTER TABLE isolation_jobs RENAME TO isolation_jobs_v7;
-      CREATE TABLE isolation_jobs AS SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json FROM isolation_jobs_v7;
-      DROP TABLE isolation_jobs_v7; PRAGMA user_version=5; UPDATE schema_meta SET value='5' WHERE key='schema-version';`)
+    database.exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
+      CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
+      PRAGMA user_version = 5;`)
+    database.prepare('INSERT INTO isolation_grants(id,digest,revision,expires_at,max_runs,max_total_duration_ms,revoked,principal_digest,principal_record_id,principal_version,workspace,agent_preset) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)').run('grant', JSON.stringify(grant()), 1, 100_000, 10, 10_000, identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset)
+    database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,status,version,created_at,updated_at) VALUES ('legacy','grant',1,?,?,?,?,?,?,?,?,?,100000,500,'prepared',1,10000,10000)").run(identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset, 'session', 'legacy-v5', 'digest-legacy-v5', 'dsh-isolation-legacy')
     database.close()
-    ledger = new IsolationLedger(file, { now: clock })
+    const ledger = new IsolationLedger(file, { now: clock })
     try {
-      expect(ledger.get(legacy.id)?.artifactBinding).toBeUndefined()
+      expect(ledger.get('legacy')?.artifactBinding).toBeUndefined()
       const replay = ledger.prepare({ ...input('legacy-v5'), artifactBinding: binding(['report.txt']) })
-      expect(replay).toMatchObject({ created: false, job: { id: legacy.id } })
+      expect(replay).toMatchObject({ created: false, job: { id: 'legacy' } })
       expect(replay.job.artifactBinding).toBeUndefined()
     } finally { ledger.close() }
   })

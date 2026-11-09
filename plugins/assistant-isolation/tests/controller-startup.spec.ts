@@ -3,29 +3,28 @@ import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, expect, test, vi } from 'vitest'
 import type {} from '@deepseek-ai/dsh-tools'
 import IsolationPlugin from '../src/index.ts'
 import { IsolationLedger } from '../src/ledger.ts'
 import { AssistantIsolationService } from '../src/service.ts'
-import { configuredDockerSocketPath } from '../src/docker-socket.ts'
-import { bindIsolationStateSocket } from '../src/state-socket-binding.ts'
+import { cleanupNativeFixtures, nativeConfigWithRuntime } from './helpers/native-config.js'
 
 const roots: string[] = []
 const sleep = async (milliseconds: number): Promise<void> => await new Promise(resolve => setTimeout(resolve, milliseconds))
-const image = `sha256:${'a'.repeat(64)}`
 const principalDigest = 'a'.repeat(64)
 
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterAll(async () => { await cleanupNativeFixtures() })
 
 async function fixture(leaseMs: number) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-isolation-controller-startup-')))
   roots.push(root)
   await chmod(root, 0o700)
-  bindIsolationStateSocket(root, configuredDockerSocketPath(undefined))
+  const config = await nativeConfigWithRuntime(root)
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
   const authority = ledger.claimController('previous-host', leaseMs)
-  return { root, ledger, authority }
+  return { root, ledger, authority, config }
 }
 
 function controller(root: string) {
@@ -34,15 +33,16 @@ function controller(root: string) {
   finally { database.close() }
 }
 
+const linuxTest = test.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)
 const rawExecution = (name: string, cwd: string) => ({ name, agent: { session: { header: { cwd, agentPreset: 'default' } } } }) as never
 
-test('scope guard blocks raw Host tools while controller startup is pending and after readiness, then unloads', async () => {
-  const { root, ledger, authority } = await fixture(30_000)
+linuxTest('scope guard blocks raw Host tools while controller startup is pending and after readiness, then unloads', async () => {
+  const { ledger, authority, config } = await fixture(30_000)
   const grant = { id: 'scoped-grant', revision: 1, principalDigest, principalRecordId: 'record', principalVersion: 1,
     workspace: '/scoped', agentPreset: 'default', expiresAt: Date.now() + 60_000, maxRuns: 1, maxTotalDurationMs: 1_000 }
   ledger.syncGrants([grant], authority)
   const context = new Context()
-  const mounted = context.plugin(IsolationPlugin, { stateRoot: root, image, grants: [grant] })
+  const mounted = context.plugin(IsolationPlugin, { ...config, grants: [grant] })
   const ownerContext = (mounted as unknown as { ctx: Context }).ctx
   let mountSettled = false, startupError: unknown
   void mounted.then(() => { mountSettled = true }, error => { mountSettled = true; startupError = error })
@@ -67,7 +67,7 @@ test('scope guard blocks raw Host tools while controller startup is pending and 
   } finally { await context.fiber.dispose(); ledger.close() }
 })
 
-test('default mount and dependent injection stay pending until a release or expiry during startup', async () => {
+linuxTest('default mount and dependent injection stay pending until a release or expiry during startup', async () => {
   const claimAfterPending = async (mode: 'release' | 'expiry') => {
     // Keep the lease clock stationary until pending-service assertions finish.
     // Real filesystem/SQLite and Cordis scheduling remain active: a busy CI
@@ -76,7 +76,7 @@ test('default mount and dependent injection stay pending until a release or expi
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     const previous = await fixture(mode === 'release' ? 30_000 : 40)
     const context = new Context()
-    const mounted = context.plugin(IsolationPlugin, { stateRoot: previous.root })
+    const mounted = context.plugin(IsolationPlugin, previous.config)
     let mountSettled = false, startupError: unknown, activations = 0
     void mounted.then(() => { mountSettled = true }, error => { mountSettled = true; startupError = error })
     const dependent = context.inject(['assistantIsolation'], () => { activations++ })
@@ -102,20 +102,20 @@ test('default mount and dependent injection stay pending until a release or expi
   await claimAfterPending('expiry')
 })
 
-test('claims the next fence after a released lease', async () => {
+linuxTest('claims the next fence after a released lease', async () => {
   const released = await fixture(30_000)
   const context = new Context()
   try {
     released.ledger.releaseController(released.authority)
-    await context.plugin(IsolationPlugin, { stateRoot: released.root })
+    await context.plugin(IsolationPlugin, released.config)
     expect(controller(released.root)).toMatchObject({ fence: released.authority.fence + 1 })
   } finally { await context.fiber.dispose(); released.ledger.close() }
 })
 
-test('does not steal a renewing live controller lease', async () => {
-  const { root, ledger, authority } = await fixture(500)
+linuxTest('does not steal a renewing live controller lease', async () => {
+  const { root, ledger, authority, config } = await fixture(500)
   const context = new Context()
-  const pending = context.plugin(AssistantIsolationService, { stateRoot: root })
+  const pending = context.plugin(AssistantIsolationService, config)
   let settled = false
   void pending.then(() => { settled = true }, () => { settled = true })
   const renewal = setInterval(() => { ledger.renewController(authority, 500) }, 100)
@@ -130,11 +130,11 @@ test('does not steal a renewing live controller lease', async () => {
   }
 })
 
-test('rejects startup at its bounded deadline while a live owner keeps renewing', async () => {
+linuxTest('rejects startup at its bounded deadline while a live owner keeps renewing', async () => {
   vi.useFakeTimers()
-  const { root, ledger, authority } = await fixture(500)
+  const { root, ledger, authority, config } = await fixture(500)
   const context = new Context()
-  const pending = context.plugin(IsolationPlugin, { stateRoot: root })
+  const pending = context.plugin(IsolationPlugin, config)
   const renewal = setInterval(() => { ledger.renewController(authority, 500) }, 100)
   const database = new DatabaseSync(join(root, 'ledger.sqlite'), { readOnly: true })
   const baseline = database.prepare('SELECT (SELECT COUNT(*) FROM isolation_grants) AS grants, (SELECT COUNT(*) FROM isolation_jobs) AS jobs').get()
@@ -154,8 +154,8 @@ test('rejects startup at its bounded deadline while a live owner keeps renewing'
   }
 })
 
-test('cancellation while waiting cannot claim later or mutate grants and usage', async () => {
-  const { root, ledger, authority } = await fixture(30_000)
+linuxTest('cancellation while waiting cannot claim later or mutate grants and usage', async () => {
+  const { root, ledger, authority, config } = await fixture(30_000)
   const grant = { id: 'existing-grant', revision: 1, principalDigest, principalRecordId: 'record', principalVersion: 1,
     workspace: '/workspace', agentPreset: 'default', expiresAt: Date.now() + 60_000, maxRuns: 1, maxTotalDurationMs: 1_000 }
   ledger.syncGrants([grant], authority)
@@ -163,7 +163,7 @@ test('cancellation while waiting cannot claim later or mutate grants and usage',
   const baseline = database.prepare('SELECT (SELECT COUNT(*) FROM isolation_grants) AS grants, (SELECT COUNT(*) FROM isolation_jobs) AS jobs, (SELECT COUNT(*) FROM isolation_audit) AS audits').get()
   database.close()
   const context = new Context()
-  const pending = context.plugin(IsolationPlugin, { stateRoot: root, image, grants: [grant] })
+  const pending = context.plugin(IsolationPlugin, { ...config, grants: [grant] })
   let startupError: unknown, settled = false
   void pending.then(() => { settled = true }, error => { settled = true; startupError = error })
   try {

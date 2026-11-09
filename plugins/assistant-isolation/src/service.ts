@@ -7,20 +7,15 @@ import type {} from '@dsh-enhanced/assistant-delivery'
 import type {} from '@dsh-enhanced/assistant-policy'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { CreationWitness } from './runtime-witness.js'
 import { Config, validateConfig } from './config.js'
 import { IsolationLedger, IsolationLedgerError, type IsolationControllerAuthority } from './ledger.js'
-import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
-import { reconcileUnknownJob } from './reconcile.js'
-import { normalizeRequest, stageWorkspace } from './workspace.js'
+import { normalizeRequest } from './workspace.js'
 import { registerIsolationTools } from './tools.js'
 import { plannedStorageBytes } from './storage-policy.js'
 import { maintainIsolationStorage, observeStorage } from './storage.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import { inspectIsolationGrant } from './diagnostics.js'
-import { bindIsolationStateSocket } from './state-socket-binding.js'
 import { linuxExecutionContractDigest, linuxJobResourceReservation, validateLinuxExecutionContract, type LinuxExecutionContract } from './linux-execution-contract.js'
 import { linuxRuntimeDigest, verifyLinuxRuntime } from './linux-runtime.js'
 import { linuxExecutionReceiptBinding, prepareLinuxExecutionIntent, readLinuxExecutionPartialCleanupProof, readLinuxExecutionReceipt, runLinuxExecution } from './linux-execution.js'
@@ -71,7 +66,7 @@ export class AssistantIsolationService extends Service {
   #active = true
   #timer: NodeJS.Timeout | undefined
 
-  constructor(ctx: Context, input: Config = {}) {
+  constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantIsolation')
     this.#config = validateConfig(input)
     const root = this.#config.stateRoot
@@ -79,8 +74,8 @@ export class AssistantIsolationService extends Service {
     if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('assistant-isolation: private owned state root required')
     chmodSync(root, 0o700)
     this.#executionRoot = join(root, 'linux-executions')
-    if (this.#config.backend === 'linux-native') {
-      const linux = this.#config.linux!
+    {
+      const linux = this.#config.linux
       this.#linuxContract = validateLinuxExecutionContract({ schemaVersion: 1, backend: 'linux-native',
         runtimeDigest: linuxRuntimeDigest(linux.runtime), profile: 'ordinary', limits: this.#config.limits,
         keeperLimits: { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 }, cgroupRoots: linux.cgroupRoots })
@@ -88,7 +83,7 @@ export class AssistantIsolationService extends Service {
       const native = lstatSync(this.#executionRoot)
       if (realpathSync(this.#executionRoot) !== this.#executionRoot || !native.isDirectory() || native.isSymbolicLink()
         || native.uid !== process.getuid?.() || native.mode & 0o077) throw new Error('assistant-isolation: private owned Linux execution root required')
-    } else bindIsolationStateSocket(root, this.#config.socketPath)
+    }
     this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
     ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) this.#abortStartup() })
     ctx.on('tools/execute', async (execution, next) => {
@@ -140,7 +135,7 @@ export class AssistantIsolationService extends Service {
     }, 5000)
     this.#timer.unref()
     await this.#recover()
-    if (this.#config.backend === 'linux-native') await verifyLinuxRuntime(this.#config.linux!.runtime)
+    await verifyLinuxRuntime(this.#config.linux.runtime)
     this.#recoveryAbort.signal.throwIfAborted()
     this.#registerRuntime()
   }
@@ -168,14 +163,7 @@ export class AssistantIsolationService extends Service {
         if (!this.#active) break
         if (this.#jobs.has(job.id)) continue
         const signal = AbortSignal.any([this.#recoveryAbort.signal, AbortSignal.timeout(30_000)])
-        if (job.backend === 'linux-native') {
-          await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, signal)
-          continue
-        }
-        if (job.backend === 'docker' && this.#config.backend === 'docker'
-          && await reconcileUnknownJob(this.#ledger, this.#controller(), job, this.#config.dockerPath, signal, this.#config.socketPath)) {
-          await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
-        }
+        await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, signal)
       }
       if (this.#active && Date.now() - this.#lastMaintenance >= 60_000) {
         this.#lastMaintenance = Date.now()
@@ -240,27 +228,9 @@ export class AssistantIsolationService extends Service {
       cursor = page.at(-1)!.id
       for (const job of page) {
         if (!this.#active) return
-        if (job.backend === 'linux-native') {
-          await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, this.#recoveryAbort.signal)
-          continue
-        }
-        // A different backend cannot authenticate historical external resources.
-        if (job.backend !== 'docker' || this.#config.backend !== 'docker') {
-          if (job.status === 'prepared' || job.status === 'running') this.#ledger.settle(job.id, job.version, {
-            jobId: job.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'controller-recovery-backend-unavailable',
-          }, this.#controller())
-          continue
-        }
-        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath, signal: this.#recoveryAbort.signal })
-        if (!this.#active) return
-        // An absent object does not prove a timed-out daemon create request
-        // completed. Restart must not erase that uncertainty or free its pool.
-        const quiescent = removed && !job.dispatchAttempted && job.result?.reason !== 'docker-creation-unconfirmed'
-        const result: IsolationResult = job.result ? { ...job.result, quiescent } : {
-          jobId: job.id, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [], reason: job.dispatchAttempted ? 'controller-recovery-dispatch-unconfirmed' : 'controller-recovery-no-replay',
-        }
-        this.#ledger.settle(job.id, job.version, result, this.#controller())
-        if (quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
+        // Only the linux-native backend is supported; historical rows from
+        // removed backends cannot be reconciled and stay as historical evidence.
+        await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, this.#recoveryAbort.signal)
       }
     }
   }
@@ -321,9 +291,7 @@ export class AssistantIsolationService extends Service {
     const identity = this.#identity(agent, request.grantId)
     const producer = this.ctx.get('assistantGoals' as never, false) as { currentArtifactAdmission?(agent: Agent): GoalArtifactAdmission | undefined } | undefined
     const admission = producer?.currentArtifactAdmission?.(agent!)
-    const requestDigest = this.#linuxContract
-      ? digest({ request, backend: 'linux-native', contract: linuxExecutionContractDigest(this.#linuxContract) })
-      : digest({ request, image: this.#config.image, limits: this.#config.limits })
+    const requestDigest = digest({ request, backend: 'linux-native', contract: linuxExecutionContractDigest(this.#linuxContract!) })
     const existing = this.#ledger.findJobByKey(identity, String(agent!.session.id), request.grantId, request.idempotencyKey)
     if (existing) {
       if (existing.backend !== this.#config.backend || existing.requestDigest !== requestDigest
@@ -433,38 +401,6 @@ export class AssistantIsolationService extends Service {
     }
     const timer = setInterval(() => { if (!authorized()) abort.abort() }, 250)
     timer.unref()
-    let mayHaveCreated = false
-    let creationWitness: CreationWitness | undefined
-    let result: IsolationResult = { jobId: job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'preparation-failed' }
-    try {
-      if (job.backend === 'linux-native') return await this.#executeLinux(job, request, AbortSignal.any([signal, abort.signal]), authorized, next => { job = next })
-      const workspacePath = await stageWorkspace(this.#config.stateRoot, job.id, request)
-      if (!authorized()) throw new Error('authorization-denied-before-create')
-      job = this.#ledger.markDispatched(job.id, job.version, this.#controller())
-      mayHaveCreated = true
-      const processResult = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
-        dockerPath: this.#config.dockerPath, socketPath: this.#config.socketPath, workspacePath, artifacts: request.artifacts ?? [], command: request.command, deadline: job.deadline,
-        limits: this.#config.limits, signal: AbortSignal.any([signal, abort.signal]),
-        authorizeStart: () => {
-          if (!authorized()) return false
-          job = this.#ledger.start(job.id, job.version, this.#authority)
-          return true
-        },
-      })
-      const { creationWitness: witness, ...publicResult } = processResult
-      creationWitness = witness
-      result = { ...publicResult, jobId: job.id, artifacts: processResult.artifacts ?? [],
-        quiescent: publicResult.status === 'unknown' ? false : publicResult.quiescent }
-    } catch {
-      if (mayHaveCreated) {
-        await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { socketPath: this.#config.socketPath })
-        result = { ...result, status: 'unknown', quiescent: false, reason: 'runner-exception-no-replay' }
-      }
-    }
-    finally { clearInterval(timer) }
-    // A lost controller cannot write success into a successor's ledger.
-    try { this.#ledger.settle(job.id, job.version, result, this.#authority, creationWitness) }
-    finally { if (result.quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true }) }
-    return result
+    return await this.#executeLinux(job, request, AbortSignal.any([signal, abort.signal]), authorized, next => { job = next })
   }
 }

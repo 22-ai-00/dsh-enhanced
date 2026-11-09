@@ -11,12 +11,15 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterAll, afterEach, expect, test } from 'vitest'
 import IsolationPlugin from '../src/index.ts'
 import { isolationPrincipalDigest } from '../src/service.ts'
+import { cleanupNativeFixtures, nativeConfigWithRuntime } from './helpers/native-config.js'
 
+const linuxTest = test.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
+afterAll(async () => { await cleanupNativeFixtures() })
 
 function nativeTool(name: string) {
   return defineTool({ name, description: `${name} fixture tool`, parameters: {},
@@ -41,10 +44,11 @@ async function fixture() {
   } } as never)
   new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'deny' })
   const now = Date.now()
-  const plugin = await ctx.plugin(IsolationPlugin, { stateRoot, image: `sha256:${'a'.repeat(64)}`, grants: [{
+  const config = await nativeConfigWithRuntime(stateRoot, { grants: [{
     id: 'offline', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1,
     workspace, agentPreset: 'primary', expiresAt: now + 60_000, maxRuns: 2, maxTotalDurationMs: 60_000,
-  }] }) as unknown as { dispose(): Promise<void> }
+  }] })
+  const plugin = await ctx.plugin(IsolationPlugin, config) as unknown as { dispose(): Promise<void> }
   const target = await ctx.agents.create({ sessionId: SessionId('isolated-owner'), meta: { cwd: workspace, agentPreset: 'primary' } })
   const ordinary = await ctx.agents.create({ sessionId: SessionId('ordinary'), meta: { cwd: ordinaryWorkspace, agentPreset: 'primary' } })
   owners.set(target.agent, 'owner')
@@ -54,7 +58,7 @@ async function fixture() {
 const names = (assembly: Awaited<ReturnType<SystemPrompt['assemble']>>) => assembly.tools.map(tool => tool.name)
 const assemble = (ctx: Context, agent: Agent) => ctx.systemPrompt.assemble({ agent, scope: agent })
 
-test('presents only the execution-guard surface and fresh-scratch facts to the exact configured owner scope', async () => {
+linuxTest('presents only the execution-guard surface and fresh-scratch facts to the exact configured owner scope', async () => {
   const f = await fixture()
   try {
     const restricted = await assemble(f.ctx, f.target.agent)
@@ -72,9 +76,9 @@ test('presents only the execution-guard surface and fresh-scratch facts to the e
     expect(names(ordinary)).toEqual(expect.arrayContaining(['glob', 'bash', 'read', 'goal_control']))
     expect(ordinary.sections.some(section => section.name === 'assistant-isolation:restricted-scope')).toBe(false)
   } finally { await f.target.dispose(); await f.ordinary.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
-})
+}, 15_000)
 
-test('keeps the configured owner scope hidden after grant revocation and restores the normal surface on unload', async () => {
+linuxTest('keeps the configured owner scope hidden after grant revocation and restores the normal surface on unload', async () => {
   const f = await fixture()
   try {
     const database = new DatabaseSync(join(f.stateRoot, 'ledger.sqlite'))
@@ -86,4 +90,4 @@ test('keeps the configured owner scope hidden after grant revocation and restore
     expect(restored.sections.some(section => section.name === 'assistant-isolation:restricted-scope')).toBe(false)
     expect(restored.sections.some(section => section.name === 'tools:glob')).toBe(true)
   } finally { await f.target.dispose(); await f.ordinary.dispose(); await f.ctx.fiber.dispose() }
-})
+}, 15_000)

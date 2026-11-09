@@ -12,12 +12,15 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterAll, afterEach, expect, test } from 'vitest'
 import IsolationPlugin from '../src/index.ts'
+import { cleanupNativeFixtures, nativeConfigWithRuntime } from './helpers/native-config.js'
 import { AssistantIsolationService, isolationPrincipalDigest } from '../src/service.ts'
 
+const linuxTest = test.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
+afterAll(async () => { await cleanupNativeFixtures() })
 
 async function fixture(discoveryAllowed = true, legacyPolicy = false, directClassMount = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-'))); roots.push(root)
@@ -47,7 +50,7 @@ async function fixture(discoveryAllowed = true, legacyPolicy = false, directClas
     { id: 'other-owner', revision: 1, principalDigest: isolationPrincipalDigest('other'), principalRecordId: 'record-other', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now + 60_000, maxRuns: 3, maxTotalDurationMs: 90_000 },
     { id: 'expired', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now - 1, maxRuns: 3, maxTotalDurationMs: 90_000 },
   ]
-  const config = { stateRoot, image: `sha256:${'a'.repeat(64)}`, grants }
+  const config = await nativeConfigWithRuntime(stateRoot, { grants })
   const mountedPlugin = directClassMount ? AssistantIsolationService : IsolationPlugin
   const plugin = await ctx.plugin(mountedPlugin, config) as unknown as { dispose(): Promise<void> }
   const handle = await ctx.agents.create({ sessionId: SessionId('grant-discovery'), meta: { cwd: workspace, agentPreset: 'primary' } })
@@ -61,7 +64,7 @@ function discoveryExecution(agent: Agent, arguments_: unknown = {}): ToolExecuti
   return { callId, rootCallId: callId, token: Symbol('grant-discovery') as never, name: 'isolation_grants', arguments: arguments_, signal: new AbortController().signal, agent }
 }
 
-test('lists only current owner scope grants with remaining boundaries and no authority mutation', async () => {
+linuxTest('lists only current owner scope grants with remaining boundaries and no authority mutation', async () => {
   const f = await fixture()
   try {
     expect(f.ctx.tools.get('isolation_grants', f.handle.agent)?.description).toContain('read-only')
@@ -75,9 +78,9 @@ test('lists only current owner scope grants with remaining boundaries and no aut
     } finally { database.close() }
     await expect(f.ctx.assistantIsolation.discover(f.handle.agent)).resolves.toEqual([])
   } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
-})
+}, 15_000)
 
-test('fails closed for missing owner, foreign scope, and denied discovery Policy', async () => {
+linuxTest('fails closed for missing owner, foreign scope, and denied discovery Policy', async () => {
   const f = await fixture()
   try {
     f.owners.set(f.handle.agent, undefined)
@@ -93,9 +96,9 @@ test('fails closed for missing owner, foreign scope, and denied discovery Policy
   const denied = await fixture(false)
   try { await expect(denied.ctx.assistantIsolation.discover(denied.handle.agent)).rejects.toThrow(/policy denied/) }
   finally { await denied.handle.dispose(); await denied.plugin.dispose(); await denied.ctx.fiber.dispose() }
-})
+}, 15_000)
 
-test('keeps grant discovery available with a Policy predating context preauthorization', async () => {
+linuxTest('keeps grant discovery available with a Policy predating context preauthorization', async () => {
   const f = await fixture(true, true)
   try {
     expect(f.ctx.tools.get('isolation_grants', f.handle.agent)).toBeDefined()
@@ -103,9 +106,9 @@ test('keeps grant discovery available with a Policy predating context preauthori
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
     await expect(f.ctx.assistantIsolation.discover(f.handle.agent)).resolves.toHaveLength(1)
   } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
-})
+}, 15_000)
 
-test.each([false, true])('preauthorizes only a current exact-owner grant discovery and unregisters on unload (direct class mount: %s)', async (directClassMount) => {
+linuxTest.each([false, true])('preauthorizes only a current exact-owner grant discovery and unregisters on unload (direct class mount: %s)', async (directClassMount) => {
   const f = await fixture(true, false, directClassMount)
   try {
     await f.ctx.plugin(ApprovalService, { policy: 'ask' })
@@ -142,4 +145,4 @@ test.each([false, true])('preauthorizes only a current exact-owner grant discove
   const denied = await fixture(false)
   try { expect(denied.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(denied.handle.agent))).toBe(false) }
   finally { await denied.handle.dispose(); await denied.plugin.dispose(); await denied.ctx.fiber.dispose() }
-})
+}, 30_000)

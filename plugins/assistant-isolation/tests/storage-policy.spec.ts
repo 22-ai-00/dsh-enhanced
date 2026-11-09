@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'vitest'
 import { createHash } from 'node:crypto'
 import { validateConfig } from '../src/config.ts'
+import { nativeConfig } from './helpers/native-config.js'
 import { defaultStoragePolicy, pruneResult, validateRetention, validateStoragePolicy } from '../src/storage-policy.ts'
 import type { IsolationResult } from '../src/types.ts'
 
 const result: IsolationResult = { jobId: 'job', status: 'succeeded', quiescent: true, stdout: '中文'.repeat(2000), stderr: 'err', artifacts: [{ path: 'a', content: '内容'.repeat(1000) }] }
 
-describe('storage policy', () => {
+const linuxDescribe = describe.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)
+
+linuxDescribe('storage policy', () => {
   test('defaults to preserving result bodies', () => { expect(defaultStoragePolicy.resultRetentionMs).toBe(0) })
   test('prunes terminal quiescent output with UTF-8 byte digests', () => {
     const pruned = pruneResult(result, 100)
@@ -29,6 +32,6 @@ describe('storage policy', () => {
     expect(validateRetention({ kind: 'pruned', version: 1, prunedAt: 1, original: { sha256: '0'.repeat(64), bytes: 0 }, stdout: { sha256: '0'.repeat(64), bytes: 0 }, stderr: { sha256: '0'.repeat(64), bytes: 0 }, artifacts: [{ sha256: '0'.repeat(64), bytes: 0, path: 'x' }, { sha256: '0'.repeat(64), bytes: 0, path: 'x' }] })).toBeUndefined()
     expect(() => validateStoragePolicy({ ...defaultStoragePolicy, maxStateBytes: 1 })).toThrow()
     expect(validateStoragePolicy(defaultStoragePolicy)).toEqual(defaultStoragePolicy)
-    expect(validateConfig({ storage: { maxStateBytes: 16 * 1024 * 1024, maxJobRecords: 1, resultRetentionMs: 0 }, limits: { maxOutputBytes: 262_144, maxArtifactBytes: 1_048_576, maxInputBytes: 1_048_576 } }).storage.maxStateBytes).toBe(16 * 1024 * 1024)
+    expect(validateConfig({ ...nativeConfig(), storage: { maxStateBytes: 256 * 1024 * 1024, maxJobRecords: 1, resultRetentionMs: 0 }, limits: { maxOutputBytes: 262_144, maxArtifactBytes: 1_048_576, maxInputBytes: 1_048_576 } }).storage.maxStateBytes).toBe(256 * 1024 * 1024)
   })
 })

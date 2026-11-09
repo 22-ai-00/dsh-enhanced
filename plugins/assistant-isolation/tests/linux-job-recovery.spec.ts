@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
 import { defaultLimits } from '../src/config.js'
 import { LinuxCgroupLease } from '../src/linux-cgroups.js'
 import { IsolationLedger } from '../src/ledger.js'
@@ -86,11 +87,18 @@ test('requires the existing live controller and honors an already aborted signal
 })
 
 test('does not settle historical Docker rows', async () => {
-  const { ledger, authority, input } = fixture()
-  // Use the existing native job's identity with a separate finite Docker grant.
-  ledger.syncGrants([{ ...input.identity, id: 'docker', revision: 1, expiresAt: Date.now() + 60_000, maxRuns: 1, maxTotalDurationMs: 5000 }], authority)
-  const { linuxContract: _contract, resourceReservation: _reservation, storageBudget: _storage, ...dockerInput } = input
-  const job = ledger.prepare({ ...dockerInput, backend: 'docker', grantId: 'docker' }).job
+  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-linux-recovery-docker-')); roots.push(stateRoot)
+  const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite')); ledgers.push(ledger)
+  const authority = ledger.claimController('recovery-owner', 30_000)
+  const identity = { principalDigest: 'a'.repeat(64), principalRecordId: 'owner', principalVersion: 1, workspace: '/workspace', agentPreset: 'default' }
+  ledger.syncGrants([{ ...identity, id: 'docker', revision: 1, expiresAt: Date.now() + 60_000, maxRuns: 1, maxTotalDurationMs: 5000 }], authority)
+  // Docker rows can only be opened from history: write its exact shape directly.
+  const database = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+  try {
+    database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,dispatch_attempted) VALUES (?,?,1,?,?,1,?,'default','session','once','c','dsh-isolation-legacy','docker',?,5000,0,0,0,'prepared',1,10000,10000,0)")
+      .run('00000000-0000-4000-8000-000000000003', 'docker', identity.principalDigest, identity.principalRecordId, identity.workspace, Date.now() + 60_000)
+  } finally { database.close() }
+  const job = ledger.recoverable()[0]!
   expect(await reconcileLinuxJob(ledger, authority, job, '/unavailable')).toBe(false)
   expect(ledger.get(job.id)).toEqual(job)
 })

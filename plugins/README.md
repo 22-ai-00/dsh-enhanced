@@ -56,7 +56,7 @@
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 | [assistant-recovery](assistant-recovery) | `@dsh-enhanced/assistant-recovery` | 实验性 | 无模型、固定 catalog、带幂等步骤账本的 `supervised-growth/v2` Host 恢复控制面。 |
-| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux 原生/Docker 执行、持久恢复、私有审计与外部撤销；Linux 原生新装及 pre-owner 维护已接通，cgroup v1 与已有 owner 迁移限制见[运行时指南](../docs/dockerless-runtime.md)。 |
+| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux 原生执行、持久恢复、私有审计与外部撤销；无 Docker 依赖，Linux 原生新装及 pre-owner 维护已接通，cgroup v1 与已有 owner 迁移限制见[运行时指南](../docs/dockerless-runtime.md)。 |
 | [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；外部 v1 broker 支持 expected-head commit、仓库/分支/文件/PR/check/review/指定提交检查读取，以及独立授权的已验收产物 PR 交付。直接模型建 PR 仅限内嵌模式。外部凭据与权威账本由独立 broker 持有，UID、service unit、key 与基础设施由部署方配置。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；按配置后端准备并检查源码候选。新工具创建支持独立行为验收和有限动态采用，修改、修订与源码发布各有独立授权和验收门；平台与迁移限制见本包说明。 |
 

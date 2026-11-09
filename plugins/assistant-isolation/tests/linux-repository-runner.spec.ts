@@ -323,10 +323,16 @@ await runner.run('interrupted',request,async()=>{await appendFile(input.stateRoo
       principalVersion: 1, workspace: input.stateRoot, agentPreset: 'repository' }
     const grantId = mode === 'grant' ? 'historical-docker' : 'repository'
     ledger.syncGrants([{ ...identity, id: grantId, revision: 1, expiresAt: input.expiresAt, maxRuns: 1, maxTotalDurationMs: 5000 }], authority)
-    let job = ledger.prepare({ identity, sessionId: `authority:${input.authorityDigest}`, grantId, idempotencyKey: 'historical',
-      requestDigest: 'b'.repeat(64), durationMs: 5000, authority }).job
-    job = ledger.markDispatched(job.id, job.version, authority)
-    ledger.settle(job.id, job.version, { jobId: job.id, status: 'unknown', quiescent: false, stdout: 'historical Docker evidence', stderr: '', artifacts: [] }, authority)
+    // Only a Docker-era ledger can carry this row: write its exact historical
+    // shape directly, since this package no longer creates Docker jobs.
+    const historicalId = '00000000-0000-4000-8000-0000000000aa'
+    const historical = new DatabaseSync(join(input.stateRoot, 'ledger.sqlite'))
+    try {
+      historical.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted) VALUES (?,?,1,?,?,1,?,'repository',?,?,?,'dsh-isolation-historical','docker',?,5000,0,0,0,'unknown',2,10000,10000,?,1)")
+        .run(historicalId, grantId, identity.principalDigest, identity.principalRecordId, input.stateRoot,
+          `authority:${input.authorityDigest}`, 'historical', 'b'.repeat(64), input.expiresAt,
+          JSON.stringify({ jobId: historicalId, status: 'unknown', quiescent: false, stdout: 'historical Docker evidence', stderr: '', artifacts: [] }))
+    } finally { historical.close() }
     ledger.releaseController(authority)
     const path = join(input.stateRoot, 'ledger.sqlite'), before = await readFile(path), wal = await readFile(path + '-wal')
     const db = new DatabaseSync(path, { readOnly: true })

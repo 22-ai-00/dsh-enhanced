@@ -12,16 +12,14 @@ lease interval plus ordinary boot time before treating readiness as a failure.
 
 `@dsh-enhanced/assistant-isolation` adds `isolation_run` to the native DSH ToolRuntime. An operator grants a finite number of offline shell jobs to one authenticated owner, workspace and agent preset. Each job receives only explicitly supplied text files in a fresh scratch directory. Results and artifacts are untrusted process output; exit code zero does not establish that a user goal was achieved.
 
-This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, local operator, configured runtime and kernel remain trusted; the Docker backend also trusts its daemon and image. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against runtime/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.
+This is an actual isolation component of the autonomy work. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, local operator, configured runtime and kernel remain trusted. The package contains no Docker dependency: Linux isolation is the native user-namespace/cgroup/seccomp backend, and macOS verification uses the seatbelt primitive. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against runtime/kernel overhead or unrelated workloads. Do not treat this component as a complete hostile-code production platform.
 
 ## Native Linux building blocks
 
 The Host-only `runLinuxNamespace`, `LinuxCgroupLease`, and `LinuxRuntime`
-exports provide Docker-free execution on non-root Linux. The public tool accepts
-explicit `backend: 'linux-native'` configuration; the private verifier also
-accepts `LinuxVerifierRunnerConfig` below. Omitting `backend` retains Docker
-configuration semantics. Production setup still selects its existing backend
-until installation and owner migration are integrated.
+exports provide execution on non-root Linux. Both the public tool and the private
+verifier require explicit `backend: 'linux-native'` configuration; there is
+only the native backend and no implicit default.
 
 `runLinuxNamespace` uses fixed `unshare`, mount, bubblewrap and Python/libseccomp
 programs, with a shipped digest-checked syscall policy. It exposes system runtime
@@ -55,8 +53,8 @@ runtime broker or a sudo rule for a writable checkout.
 `LinuxRuntime` verification binds Node, native pnpm, frozen dependencies and
 retained store/cache to device/inode and deterministic tree hashes. It rejects
 outside links, writable contents and drift. None of these exports activates a
-service, reads provider credentials, accesses a browser, downloads images or
-runs an install lifecycle script. See the [delivery boundary](../../docs/dockerless-runtime.md)
+service, reads provider credentials, accesses a browser or runs an install
+lifecycle script. See the [delivery boundary](../../docs/dockerless-runtime.md)
 for remaining integration and acceptance.
 
 ### Public native execution
@@ -67,7 +65,7 @@ is the digest-pinned `LinuxRuntime` prepared by the native toolchain bootstrap;
 `cgroupRoots` identifies the current user's verified v1 controller delegation.
 The synchronous Cordis Config rejects invalid bindings and insufficient pools;
 service readiness and every newly admitted request recheck the runtime tree.
-This branch does not require an image or resolve a Docker socket.
+This branch does not require an image, a Docker socket or a container daemon.
 
 `isolation_run` keeps its existing request, owner/Policy checks, goal artifact
 binding and cancellation contract. Inline files enter a fresh bounded workspace;
@@ -78,15 +76,15 @@ under an existing idempotency key is a conflict and never creates a new job.
 
 Startup and background recovery use each job's persisted backend. Native cleanup
 uses the original contract and private receipts; a native-configured service
-leaves historical Docker unknown resources occupied for their original cleanup
-path. Switching configuration does not extend grants or reset budgets.
+keeps historical unknown resources occupied for their original cleanup
+path. Configuration changes do not extend grants or reset budgets.
 
 `dsh-isolation probe-native /absolute/runtime-config.json` accepts an owned JSON
 file containing exactly `{ runtime, cgroupRoots }`. It tests pinned Node,
-non-root execution, a canary artifact and actual cleanup without Docker or a
-production grant. Unproven cleanup retains its private evidence directory.
-`reconcile /absolute/private/state-root` dispatches cleanup by persisted backend;
-Docker arguments are unused for a native-only ledger. `revoke` first persists
+non-root execution, a canary artifact and actual cleanup without a production
+grant. Unproven cleanup retains its private evidence directory.
+`reconcile /absolute/private/state-root` reconciles native cleanup.
+`revoke` first persists
 revocation and lets a live controller stop its work. For pending native jobs it
 also reports `nativeResourcesQuiescent` and `nativeRetained`; exit 2 indicates
 that cleanup is not yet confirmed. It never takes over a live controller.
@@ -117,7 +115,7 @@ incomplete initialization needs explicit reconciliation. The helper never
 renews grants, clears history or replays unknown jobs. Configurations without a
 seal retain their original behavior and have not acquired this protection.
 
-An authorized Docker-to-linux-native backend handover runs offline on a staged
+An authorized legacy-to-linux-native backend handover runs offline on a staged
 copy of the home. `prepareLinuxVerifierHandoverState({ name, stageStateRoot,
 stageSealPath, liveStateRoot, liveSealPath })` upgrades the staging ledger to
 schema 9 and publishes the seal before the new authority digest is compiled;
@@ -125,9 +123,8 @@ schema 9 and publishes the seal before the new authority digest is compiled;
 seal still binds the copy and performs the audited grant/job rewrite without
 resealing, so a digest compiled in between stays valid across the cutover.
 
-`IsolatedVerifierRunner` accepts either the existing Docker configuration or an
-explicit `backend: 'linux-native'` configuration with a verified `LinuxRuntime`
-and delegated `cgroupRoots`. `LinuxVerifierRunner` is also exported directly.
+`IsolatedVerifierRunner` requires a `backend: 'linux-native'` configuration with
+a verified `LinuxRuntime` and delegated `cgroupRoots`; any other backend is rejected. `LinuxVerifierRunner` is also exported directly.
 The API remains `run(key, artifact, stdin, signal)` and `close()`; the fixed
 operator command receives `artifact` and `input` files in the private workspace.
 Its PATH uses the pinned runtime's Node/pnpm. Ordinary agent tools do not receive
@@ -147,8 +144,7 @@ original identities and proves actual group/workspace absence. A missing or
 partial creation record never grants permission to run the command again or to
 signal an unidentified process. Proven cleanup releases active capacity while
 preserving an existing unknown result and its consumed run/duration budget.
-Historical Docker/macOS rows retain their own backend identity; switching this
-API does not reconcile those external resources or reset their grants.
+Historical rows opened from a pre-native ledger retain their original backend identity; the API cannot create them and does not reset their grants.
 
 These APIs still require non-root Linux with verified v1 delegation and the
 fixed namespace dependencies. Installer migration, behavior certificates and
@@ -247,7 +243,7 @@ native integration; repository execution alone does not authorize adoption.
 ## Native macOS execution primitive
 
 The Host-only `runNativeMacProcess` export runs one digest-pinned Node process
-under `/usr/bin/sandbox-exec`, without Docker. Its deny-default policy permits
+under `/usr/bin/sandbox-exec`, without a container daemon. Its deny-default policy permits
 only system runtime reads, explicitly approved canonical runtime roots and a
 private workspace. The workspace is read-only unless the trusted caller explicitly
 sets `workspaceWritable: true`. Network and child processes are denied; file
@@ -271,10 +267,10 @@ do not authenticate its contents. The caller must provision trusted runtime
 contents and exclude aliases to unrelated Host files. Workspace staging rejects
 symbolic links, hard links and special files before dispatch.
 Writable workspaces have no hard disk quota; this primitive also has no hard
-memory or CPU quota. Do not infer Docker resource limits or a complete native
+memory or CPU quota. Do not infer native resource limits or a complete native
 RSI installation from a successful invocation. Native tests run on macOS and
 use only temporary canaries, an ephemeral loopback listener and disposable
-processes; they require no Docker installation.
+processes; they require no container runtime installation.
 
 The Host-only `NativeMacVerifierRunner` adds a durable finite grant to this
 single-process primitive. Its `backend: 'macos-seatbelt'` configuration pins an
@@ -287,7 +283,7 @@ and nonce. The detached supervisor kills its candidate when the Host IPC
 disconnects; an absent or invalid receipt leaves the job `unknown`, occupies
 active capacity and cannot be replayed. A new Host must wait for the old
 controller lease to expire before recovering it. The private native state
-root is bound separately from Docker state and is never a runtime read root.
+root is its own private state and is never a runtime read root.
 Runtime tree hashing rejects special files, hard links, external symbolic
 links and group/world-writable contents; internal pnpm links are allowed only
 when their resolved targets remain inside the same root. Admission bounds runs,
@@ -301,17 +297,18 @@ trusted verifier API, not the public `isolation_run` tool.
 dsh plugin --profile <profile> add @dsh-enhanced/assistant-isolation
 ```
 
-Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. No Docker image is downloaded by the plugin.
+Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. The plugin downloads no image and contacts no container daemon.
 
-The Docker backend supports a non-root Linux or macOS Host process with access to a local Docker daemon. Linux defaults to `/var/run/docker.sock`; macOS defaults to the current user's Docker Desktop socket at `~/.docker/run/docker.sock`. The socket must exist at runtime and remain the same local Unix socket through creation, execution and cleanup. macOS requires an owner-owned socket and private Docker run directory; a remote `DOCKER_HOST`, Docker context or socket path outside that user directory is never used. Configure an already-present, operator-reviewed image **ID** (`sha256:` plus 64 hexadecimal digits), containing `/bin/sh`, a trusted `/bin/busybox` with `sleep`, `stat` and `cat`, and the commands needed for the task. Image-declared `VOLUME` entries are rejected to prevent extra writable Docker volumes. A tag or remote repository digest is not accepted as a substitute for the local immutable image ID. Failed Docker operations do not fall back to a Host shell.
+Linux isolation requires a non-root Linux Host with verified v1 cgroup delegation and the fixed namespace dependencies (unshare, bubblewrap, Python/libseccomp). macOS exposes only the `macos-seatbelt` verifier primitive; `isolation_run` is Linux-only.
 
 ## Configuration
 
 ```yaml
+backend: linux-native
 stateRoot: /absolute/private/assistant-isolation
-image: sha256:<64-hex-local-image-id>
-dockerPath: /usr/bin/docker
-# Optional: socketPath: /Users/<owner>/.docker/run/docker.sock on macOS.
+linux:
+  runtime: <digest-pinned LinuxRuntime from the native toolchain bootstrap>
+  cgroupRoots: <current-user v1 controller delegation>
 maxConcurrentJobs: 2
 maxReservedMemoryMiB: 2048
 maxReservedWorkspaceInodes: 32768
@@ -347,33 +344,9 @@ Within a configured workspace/preset, the model sees only the same named surface
 
 ## Authorization, stop and recovery
 
-The private SQLite WAL ledger binds each job to exact owner lineage, grant revision, request/image/limits digest, owning Session, idempotency key and absolute deadline. A private state-root marker binds recovery to the configured Docker socket path; changing that path requires a separate state root. Legacy Linux ledgers without the marker can only continue on their original `/var/run/docker.sock`. Run count and reserved duration are consumed before creation and are not refunded on failures. Grant IDs retain cumulative usage across revisions. Same-key exact requests return the original outcome; changed requests are rejected. An unknown outcome is never automatically re-executed or promoted to success. Reusing a revoked grant revision cannot reactivate it.
+The private SQLite WAL ledger binds each job to exact owner lineage, grant revision, request/limits digest, owning Session, idempotency key and absolute deadline. Run count and reserved duration are consumed before creation and are not refunded on failures. Grant IDs retain cumulative usage across revisions. Same-key exact requests return the original outcome; changed requests are rejected. An unknown outcome is never automatically re-executed or promoted to success. Reusing a revoked grant revision cannot reactivate it. Legacy pre-native ledgers keep their historical rows readable for accounting and migration only; this package cannot create them.
 
-Schema v6 migrates existing v1/v2/v3/v4/v5 job records without erasing them. It retains the v5 rule that, before any supervisor can receive create authority, the Host durably commits a fenced `supervisor-spawn-intent`; a crash between fork and the later running-state CAS therefore cannot look like an unstarted job. Legacy records lack this proof and are conservatively treated as already dispatched. Each new job reserves `memoryMiB + workspaceMiB + 32` MiB (worker limit, workspace capacity, and keeper limit) and `workspaceInodes` in the same transaction as grant usage. Prepared/running jobs and all unconfirmed cleanup retain their reservations; an active legacy job with unknown resource use prevents new reservations. Unknown dispatched jobs retain occupancy after ordinary exact-name removal. A separate reconciliation path can release resource reservations only with the complete request receipt and stop evidence described below. Jobs durably known never to have been dispatched can still use ordinary recovery. Changing pool settings cannot retroactively release reservations. The pool applies to this state root, so separate state roots need an operator-managed aggregate budget.
-
-The native tool cancellation signal (including Agent cancellation), current owner/Policy changes, grant revocation and service disposal stop running jobs. The controller polls authorization every 250 ms while active. A detached supervisor watches the job deadline and Host IPC independently; losing the Host IPC initiates container termination, state inspection and removal, including `setsid` descendants. Stop is asynchronous, with bounded Docker control calls. The plugin reports `quiescent: false` and `unknown` when it cannot confirm cleanup. It cannot undo instructions already executed before a stop was observed. A timed-out creation acknowledgment remains `docker-creation-unconfirmed` and holds its reservation even across Host restart: current object absence alone does not prove a pending daemon request completed. The same protection covers other unknown outcomes after dispatch, including supervisor exit, IPC loss and runner exceptions. Private diagnostic witnesses capture the Linux boot ID, process PID/start ticks and Docker Engine ID around a final supervisor receipt when available. They are stored separately from model-visible results. A restart candidate is not a release authorization: trusted socket-to-daemon binding and an independently proven stop barrier remain operational requirements; do not delete the ledger to force capacity release.
-
-A final supervisor receipt now records whether every create/start/copy/exec command returned normally and every CLI closed. On Linux, when that private `requestsSettled` flag is true, the original supervisor has exited, and the exact Docker daemon generation is unchanged, the Host can remove and independently inspect all three UUID-named resources. A fresh opaque cleanup receipt, the original witness, current controller fence and job version are required in the same ledger transaction to release reservations. macOS does not fabricate Linux process witnesses; an unknown dispatched job retains its reservation pending a separately proven stop barrier. The original `unknown` outcome, output, run count and consumed duration remain unchanged; commands are never replayed. The audit stores the exact resources and their removal/absence observations.
-
-The live Host checks a bounded page of pending records every five seconds without overlapping sweeps. With the Host stopped, an operator can invoke the same path:
-
-```sh
-dsh-isolation reconcile /absolute/private/assistant-isolation
-# Optional Docker executable:
-dsh-isolation reconcile /absolute/private/assistant-isolation /absolute/docker
-```
-
-The command reports checked, released and retained counts and refuses to take over a live controller. Legacy receipts, interrupted mutating calls (including timeout or output overflow of `start --attach` or artifact `exec`), missing final IPC, and changed daemon generations retain occupancy. Systemd socket/service invocation metadata is diagnostic only: daemon restart does not prove containerd/shim execution stopped. Automatic release of these ambiguous cases is still unsupported.
-
-An operator can revoke from a separate terminal, without calling the model:
-
-```sh
-dsh-isolation revoke /absolute/private/assistant-isolation offline-maintenance 1
-# Optional absolute Docker executable for deployments using another path:
-dsh-isolation revoke /absolute/private/assistant-isolation offline-maintenance 1 /absolute/docker
-```
-
-This persists revocation first and attempts to remove this grant's exact UUID-named execution containers, keeper containers and workspace volumes. `containersRemoved` reports those removal attempts, not an atomic barrier against an already in-flight Docker request. A running controller also rejects any subsequent start and polls revocation. Return code 2 means cleanup was not confirmed; retain the ledger and investigate Docker availability. Credentials and external action leases are outside this offline entry point.
+Schema migration retains every historical job record. Before any supervisor can receive create authority, the Host durably commits a fenced `supervisor-spawn-intent`; a crash between fork and the running-state CAS therefore cannot look like an unstarted job. Legacy records without that proof are conservatively treated as already dispatched. Each new job reserves `memoryMiB + workspaceMiB + 32` MiB (worker limit, workspace capacity, and keeper limit) and `workspaceInodes` in the same transaction as grant usage. Prepared/running jobs and all unconfirmed cleanup retain their reservations; capacity releases only with the complete request receipt and stop evidence below. Changing pool settings never retroactively releases reservations. The pool applies to this state root, so separate state roots need an operator-managed aggregate budget.
 
 A durable 30-second controller lease with fencing prevents two live controllers from recovering or spending the same ledger. Heartbeats run every 5 seconds; losing the fence stops jobs and forbids stale outcome writes. A replacement can claim an expired controller lease, walk all recovery pages and remove old execution/keeper containers and workspace volumes without replaying their commands. Recovery retains unknown execution outcomes even when later removal succeeds. The controller ledger must not be deleted to clear an unknown job or exhausted budget.
 
@@ -423,28 +396,26 @@ The local hash chain proves integrity and linkage relative to a trusted digest; 
 
 | Surface | Authority |
 | --- | --- |
-| Filesystem | Host owns a `0700` state directory, `0600` ledger and per-job staging. A separate operator-owned `0700` audit archive may contain canonical hash-linked NDJSON batches; neither state nor archive root is mounted or bind-mounted into a worker. The worker sees its byte/inode-limited tmpfs workspace plus its configured image or approved native runtime roots. Console/artifact results and diagnostic witnesses persist in the private ledger. The Host reads Linux `/proc`, the protected `/run/docker.pid`, and socket metadata for best-effort diagnostics; missing metadata never grants release. No writable Host bind is exposed. Observed storage admission and opt-in result retention are described below; they are not a hard filesystem quota. |
-| Network | Docker uses its fixed local Unix socket; native Linux does not contact Docker. Workers have no network, Host socket/config mount or external action endpoint. |
-| Subprocess | Native Linux uses the fixed packaged keeper, unshare, mount, bubblewrap and Python/libseccomp programs described above. Docker starts the fixed configured Docker executable and packaged detached Node supervisor, and may read fixed docker.service/docker.socket properties through /usr/bin/systemctl for diagnostics. Workers run `/bin/sh` with non-root UID/GID, read-only image filesystem, dropped capabilities, `no-new-privileges`, memory/CPU/PID limits, bounded `/tmp` and `/dev/shm`, and disabled Docker log storage. A fixed BusyBox keeper retains the job volume across execution-container removal and does not execute job code. |
-| Credentials | Worker receives no Host environment or credential files. The Docker daemon access itself is a privileged trusted Host capability. Images and approved runtime roots must contain no embedded secrets. |
+| Filesystem | Host owns a `0700` state directory, `0600` ledger and per-job staging. A separate operator-owned `0700` audit archive may contain canonical hash-linked NDJSON batches; neither state nor archive root is mounted or bind-mounted into a worker. The worker sees its byte/inode-limited tmpfs workspace plus approved native runtime roots. Result and receipt data persist in the private ledger. The Host reads Linux `/proc` for best-effort diagnostics; missing metadata never grants release. No writable Host bind is exposed. Observed storage admission and opt-in result retention are described below; they are not a hard filesystem quota. |
+| Network | None. Workers have no network namespace connectivity, no Host socket/config mount and no external action endpoint. |
+| Subprocess | Native Linux uses the fixed packaged keeper, `unshare`, mount, bubblewrap and Python/libseccomp programs described above, with a shipped digest-checked seccomp policy. Workers run `/bin/sh` as non-root UID/GID with dropped capabilities, `no-new-privileges`, memory/CPU/PID limits, bounded `/tmp` and `/dev/shm`. The keeper only coordinates cleanup; it never executes job code. |
+| Credentials | The worker receives no Host environment or credential files. Approved runtime roots must contain no embedded secrets. |
 | Browser | None. |
 | Install scripts | No runtime provisioning, image pull or privileged install hook. Standard package build/prepack only. |
 
-Whole-machine failure, Docker daemon failure, disk exhaustion and untrusted Host plugins are not solved by IPC cleanup. Unknown jobs remain visible in the ledger and consume active capacity when quiescence is unconfirmed. The same Host user can inspect or modify this database; it is protected from the container worker, not from the trusted operator. Partial scratch cleanup failures are not proof of execution failure and may require operator cleanup once the container is confirmed stopped.
+Whole-machine failure, disk exhaustion and untrusted Host plugins are not solved by IPC cleanup. Unknown jobs remain visible in the ledger and consume active capacity when quiescence is unconfirmed. The same Host user can inspect or modify this database; it is protected from the worker, not from the trusted operator. Partial scratch cleanup failures are not proof of execution failure and may require operator cleanup once resource absence is confirmed.
 
 ## Verification
 
 ```sh
-CI=true DSH_ISOLATION_TEST_IMAGE=sha256:<local-image-id> pnpm check
+DSH_NATIVE_CGROUP_REAL=1 pnpm check
 ```
 
-Without the environment variable, Docker tests are explicitly skipped. With it, tests use actual containers and the native AgentLoop/ToolRuntime; the model and Delivery identity are controlled seams; the finite-grant fixture uses the actual default-deny Policy, ApprovalService and native ToolRuntime. Separate tests exercise Host file/socket/environment separation, a Host HTTP canary, configured cgroup restrictions, workspace exhaustion, output/IPC separation, cancellation, and Host process-group death. Filesystem quota and storage lifecycle probes use actual Docker resources; no image is pulled. These are not evidence of a real cloud model, external account, full user profile or all autonomy work packages being complete.
-
-The optional identity probe `python3 scripts/isolation/daemon-witness-probe.py` runs from the repository root after a build. It requires Python 3, rootlesskit/dockerd and unprivileged Linux namespaces, starts only private rootless daemons, and leaves inspectable logs under `/tmp`. It verifies a real restart, stable Engine ID, changed PID/start ticks, live-process rejection and a surviving volume. Its limited UID/GID map and absent cgroup delegation do not establish worker isolation or production release authority.
+Without `DSH_NATIVE_CGROUP_REAL=1`, real-cgroup integration tests are explicitly skipped; schema, contract, migration and simulated-runtime tests always run. Real tests use actual user namespaces, cgroup leases, seccomp and the native AgentLoop/ToolRuntime; the model and Delivery identity are controlled seams and the finite-grant fixture uses the actual default-deny Policy, ApprovalService and native ToolRuntime. Separate tests exercise cgroup restrictions, workspace exhaustion, output bounds, cancellation, receipts and process-group death. These are not evidence of a real cloud model, external account, full user profile or a complete autonomy acceptance.
 
 ## Operator readiness and native preauthorization
 
-`dsh-isolation probe sha256:<local-image-id> [/absolute/docker [/absolute/docker.sock]]` exercises the production supervisor, non-root/read-only-root execution, work volume, artifact export and cleanup with a fixed nonce task. On macOS the default Docker executable is `/usr/local/bin/docker`; pass its absolute path if installed elsewhere. It creates private temporary staging and never pulls an image. Successful or confirmed-quiescent probes remove staging; unknown cleanup retains `probe.json` with exact job/container/image/socket metadata for operator investigation. This diagnostic does not create a production grant or reset a ledger, and does not replace task-specific resource validation.
+`dsh-isolation probe-native /absolute/runtime-config.json` exercises the pinned native runtime, non-root execution, a canary artifact and actual cleanup with a fixed nonce task, using exactly `{ runtime, cgroupRoots }` from an owned bounded JSON file. It creates private temporary staging and never touches production grants. Successful or confirmed-quiescent probes remove staging; unknown cleanup retains its private evidence for operator investigation. This diagnostic does not create a production grant or reset a ledger, and does not replace task-specific resource validation.
 
 With matching Policy and Isolation builds, the exact registered `isolation_run` definition can skip a redundant risk prompt only while its owner/scope grant and live Policy evaluation permit the normalized request. Same-name scoped tools cannot borrow this registration. Native tool authorization remains independent: configure `execute` on `tool:isolation_run` as well as `tool:isolation:<grant-id>`; explicit denials still win. A default-deny Policy is supported without allowing unrelated tools.
 
@@ -456,7 +427,7 @@ The default export is the Cordis plugin object with stable name, Config and appl
 
 schema v6 新增可空的 artifact admission 绑定，v1–v5 行迁移后保留且不会被追认为目标产物。Host 在真实 Goals native round 内，于隔离任务派发前固定 step acceptance ID/digest、run、turn 与声明输出路径；相同幂等键不会重新绑定。运行中若原 admission 改变则取消。私有 `readAcceptedArtifact` 只读取同一 v4 step scope/owner/Session 的成功、已静止、有效期内且正文未清理的产物；较新的同路径失败尝试禁止回退旧结果。
 
-Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，固定 authority/镜像/命令、次数、累计预留时长及期限，可选 `socketPath` 与普通隔离任务遵循相同的本地 Docker socket 约束，并复用相同 Docker supervisor 和资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。
+Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，要求显式 `backend: 'linux-native'` 配置（已验证 `LinuxRuntime` 与受委派 v1 cgroupRoots），固定 authority/命令、次数、累计预留时长及期限，复用原生执行资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。
 
 The read-only `isolation_grants` tool exposes usable grant IDs and remaining limits only for the current authenticated owner and workspace/preset. It applies live Policy, principal lineage, expiry and revocation checks; it cannot create or extend grants and returns no credentials or Host paths. When Policy allows discovery and at least one grant remains usable for that exact owner, the Host registers its exact tool definition for finite preauthorization so this read-only query skips the redundant native risk prompt. Revocation, expiry, owner/scope mismatch, Policy denial, tool replacement, or bundle unload removes that preauthorization. Use a returned ID with `isolation_run`.
 

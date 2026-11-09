@@ -45,7 +45,7 @@ function usedLedger(path: string): { jobId: string } {
   try {
     ledger.syncGrants([{ ...identity, id: 'finite', revision: 1, expiresAt: 100_000, maxRuns: 1, maxTotalDurationMs: 500 }])
     const job = ledger.prepare({ identity, sessionId: 'session', grantId: 'finite', idempotencyKey: 'unknown-key',
-      requestDigest: 'original-request', durationMs: 500 }).job
+      requestDigest: 'original-request', durationMs: 500, backend: 'macos-seatbelt' as const }).job
     ledger.settle(job.id, job.version, { jobId: job.id, status: 'unknown', quiescent: false,
       stdout: '', stderr: '', artifacts: [] })
     return { jobId: job.id }
@@ -146,9 +146,9 @@ describe.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('f
       expect(ledger.get(jobId)).toMatchObject({ id: jobId, status: 'unknown', reservedDurationMs: 500,
         result: { status: 'unknown', quiescent: false } })
       expect(ledger.prepare({ identity, sessionId: 'session', grantId: 'finite', idempotencyKey: 'unknown-key',
-        requestDigest: 'original-request', durationMs: 500 })).toMatchObject({ created: false, job: { id: jobId } })
+        requestDigest: 'original-request', durationMs: 500, backend: 'macos-seatbelt' })).toMatchObject({ created: false, job: { id: jobId } })
       expect(() => ledger.prepare({ identity, sessionId: 'session', grantId: 'finite', idempotencyKey: 'new-key',
-        requestDigest: 'new-request', durationMs: 500 })).toThrow()
+        requestDigest: 'new-request', durationMs: 500, backend: 'macos-seatbelt' })).toThrow()
       expect(ledger.recoverable()).toHaveLength(1)
     } finally { ledger.close() }
   })

@@ -12,7 +12,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const clock = () => now
 const identity: IsolationIdentity = { principalDigest: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'default' }
 const grant: IsolationGrant = { ...identity, id: 'grant', revision: 1, expiresAt: 100_000, maxRuns: 20, maxTotalDurationMs: 20_000 }
-const input = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 })
+const input = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500, backend: 'macos-seatbelt' as const })
 const budget = (reservedBytes = 128, maxJobRecords = 20, maxStateBytes = 1_000_000): IsolationStorageBudget => ({ maxStateBytes, maxJobRecords, reservedBytes, observation: { bytes: 0, observedAt: now } })
 const completed = (jobId: string, body = 'retained-body'.repeat(256)): IsolationResult => ({ jobId, status: 'succeeded', quiescent: true, stdout: body, stderr: body, artifacts: [{ path: 'out.txt', content: body }] })
 function path(): string { const root = mkdtempSync(join(tmpdir(), 'isolation-storage-')); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }

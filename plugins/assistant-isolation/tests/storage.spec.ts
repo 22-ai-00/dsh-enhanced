@@ -5,22 +5,21 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, expect, test } from 'vitest'
+import { afterAll, afterEach, expect, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantIsolationService } from '../src/service.ts'
+import { cleanupNativeFixtures, nativeConfigWithRuntime } from './helpers/native-config.js'
 import { IsolationLedger } from '../src/ledger.ts'
 import { defaultStoragePolicy } from '../src/storage-policy.ts'
 import { maintainIsolationStorage, observeStorage } from '../src/storage.ts'
-import { configuredDockerSocketPath } from '../src/docker-socket.ts'
-import { bindIsolationStateSocket } from '../src/state-socket-binding.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterAll(async () => { await cleanupNativeFixtures() })
 const identity = { principalDigest: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/project', agentPreset: 'default' }
-const request = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: key, durationMs: 1000 })
+const request = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: key, durationMs: 1000, backend: 'macos-seatbelt' as const })
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-storage-'))); roots.push(root)
-  bindIsolationStateSocket(root, configuredDockerSocketPath(undefined))
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
   const authority = ledger.claimController('host', 30_000)
   ledger.syncGrants([{ ...identity, id: 'grant', revision: 1, expiresAt: Date.now() + 60_000, maxRuns: 10, maxTotalDurationMs: 10_000 }], authority)
@@ -93,12 +92,12 @@ test('operator CLI refuses a live Host and uses the same bounded opt-in maintena
   } finally { ledger.close() }
 })
 
-test('the live Host performs explicitly enabled maintenance through its real periodic sweep', async () => {
+test.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)('the live Host performs explicitly enabled maintenance through its real periodic sweep', async () => {
   const { root, ledger, authority, job } = await fixture()
   ledger.releaseController(authority); ledger.close()
   const ctx = new Context()
   try {
-    await ctx.plugin(AssistantIsolationService, { stateRoot: root, storage: { resultRetentionMs: 1 } })
+    await ctx.plugin(AssistantIsolationService, await nativeConfigWithRuntime(root, { storage: { resultRetentionMs: 1 } }))
     const reader = new IsolationLedger(join(root, 'ledger.sqlite'))
     try {
       expect(reader.get(job.id)?.result?.retention).toBeUndefined()

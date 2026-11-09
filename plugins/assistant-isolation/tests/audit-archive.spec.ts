@@ -20,7 +20,7 @@ const grant: IsolationGrant = { ...identity, id: 'grant', revision: 1, expiresAt
 function privateRoot(label: string): string { const root = realpathSync(mkdtempSync(join(tmpdir(), `${label}-`))); chmodSync(root, 0o700); roots.push(root); return root }
 function prepare(stateRoot: string, count = 1): IsolationLedger {
   const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite'), { now: () => 10_000 }); ledger.syncGrants([grant])
-  for (let index = 0; index < count; index += 1) ledger.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: `key-${index}`, requestDigest: `digest-${index}`, durationMs: 500 })
+  for (let index = 0; index < count; index += 1) ledger.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: `key-${index}`, requestDigest: `digest-${index}`, durationMs: 500, backend: 'macos-seatbelt' })
   return ledger
 }
 function archiveFiles(directory: string): string[] { return readdirSync(directory).filter(name => /^isolation-audit-v1-[a-f0-9]{64}\.ndjson$/u.test(name)).sort() }
@@ -95,7 +95,7 @@ describe('isolation audit archive', () => {
     const stateRoot = privateRoot('wal-state'); const archiveDirectory = privateRoot('wal-archive'); const writer = prepare(stateRoot, 2)
     const result = archiveIsolationAudit({ stateRoot, archiveDirectory, batchSize: 1 })
     expect(result.verification).toMatchObject({ highestSequence: 3, snapshotThroughSequence: 3 })
-    writer.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: 'later', requestDigest: 'later', durationMs: 500 })
+    writer.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: 'later', requestDigest: 'later', durationMs: 500, backend: 'macos-seatbelt' })
     expect(verifyIsolationAuditArchive(archiveDirectory)).toMatchObject({ highestSequence: 3 })
     expect(archiveIsolationAudit({ stateRoot, archiveDirectory, batchSize: 1 }).verification).toMatchObject({ highestSequence: 4 })
     writer.close()
@@ -122,7 +122,7 @@ describe('isolation audit archive', () => {
     const options = { encoding: 'utf8' as const, timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, NODE_NO_WARNINGS: '1' } }
     const waiting = Array.from({ length: 4 }, async () => await execFileAsync(process.execPath, arguments_, options))
     await new Promise(resolve => setTimeout(resolve, 100))
-    for (let index = 0; index < 3; index += 1) writer.prepare({ identity, sessionId: 'stagger', grantId: 'grant', idempotencyKey: `stagger-${index}`, requestDigest: `stagger-${index}`, durationMs: 500 })
+    for (let index = 0; index < 3; index += 1) writer.prepare({ identity, sessionId: 'stagger', grantId: 'grant', idempotencyKey: `stagger-${index}`, requestDigest: `stagger-${index}`, durationMs: 500, backend: 'macos-seatbelt' })
     control.exec('COMMIT'); control.close(); writer.close()
     const completed = await Promise.all(waiting)
     expect(completed.map(result => (JSON.parse(result.stdout) as { createdRecords: number }).createdRecords).sort((left, right) => left - right)).toEqual([0, 0, 0, 3])

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { normalizeRequest, stageWorkspace } from '../src/workspace.ts'
 import { validateConfig } from '../src/config.ts'
+import { nativeConfig } from './helpers/native-config.js'
 import type { IsolationLimits, IsolationRequest } from '../src/types.ts'
 
 const roots: string[] = []
@@ -14,12 +15,14 @@ const request = (files: IsolationRequest['files'] = [{ path: 'input.txt', conten
 const jobId = '00000000-0000-4000-8000-000000000000'
 function root(): string { const value = mkdtempSync(join(tmpdir(), 'isolation-workspace-')); roots.push(value); return value }
 
-describe('isolation workspace boundaries', () => {
+const linuxDescribe = describe.skipIf(process.platform !== 'linux' || (process.getuid?.() ?? 0) === 0)
+
+linuxDescribe('isolation workspace boundaries', () => {
   it('rejects invalid workspace/pool bounds and counts staged parent directories before creation', () => {
-    expect(validateConfig({}).limits).toMatchObject({ workspaceMiB: 64, workspaceInodes: 4096 })
-    for (const value of [0, -1, 1.5, NaN, Infinity, 1025]) expect(() => validateConfig({ limits: { workspaceMiB: value } })).toThrow(/limits/)
-    expect(() => validateConfig({ maxReservedMemoryMiB: 351 })).toThrow(/pool/)
-    expect(() => validateConfig({ maxReservedWorkspaceInodes: 4095 })).toThrow(/pool/)
+    expect(validateConfig(nativeConfig()).limits).toMatchObject({ workspaceMiB: 64, workspaceInodes: 4096 })
+    for (const value of [0, -1, 1.5, NaN, Infinity, 1025]) expect(() => validateConfig({ ...nativeConfig(), limits: { workspaceMiB: value } })).toThrow(/limits/)
+    expect(() => validateConfig({ ...nativeConfig(), maxReservedMemoryMiB: 351 })).toThrow(/pool/)
+    expect(() => validateConfig({ ...nativeConfig(), maxReservedWorkspaceInodes: 4095 })).toThrow(/pool/)
     const nested = request([{ path: 'a/b/c', content: '' }])
     expect(() => normalizeRequest(nested, { ...limits, workspaceInodes: 3 })).toThrow(/inode/)
     expect(normalizeRequest(nested, { ...limits, workspaceInodes: 4 }).files).toEqual(nested.files)

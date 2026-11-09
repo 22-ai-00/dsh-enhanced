@@ -1,6 +1,5 @@
 import type { GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import type { LinuxExecutionContract, LinuxExecutionIntent, LinuxExecutionResources } from './linux-execution-contract.js'
-import type { CreationWitness } from './runtime-witness.js'
 
 /** Owner identity is attested by the Host, never supplied in a model tool call. */
 export interface IsolationIdentity {
@@ -91,12 +90,14 @@ export interface IsolationJob {
   sessionId: string
   idempotencyKey: string
   requestDigest: string
-  /** Explicit backend identity; legacy v6 rows migrate to docker. */
+  /**
+   * Backend that executed the job. 'docker' only identifies legacy historical
+   * rows opened from a pre-native ledger; this package can no longer create them.
+   */
   backend: 'docker' | 'macos-seatbelt' | 'linux-native'
   linuxContract?: LinuxExecutionContract
   linuxIntent?: LinuxExecutionIntent
   linuxResources?: LinuxExecutionResources
-  containerName: string
   nativeResourceId?: string
   nativeNonce?: string
   deadline: number
@@ -108,8 +109,6 @@ export interface IsolationJob {
   reservedStorageBytes: number
   /** Persisted before handing any create authority to a supervisor. */
   dispatchAttempted: boolean
-  /** Host-only diagnostic evidence; never an authorization to release resources. */
-  creationWitness?: CreationWitness
   status: IsolationStatus
   version: number
   createdAt: number
@@ -117,30 +116,3 @@ export interface IsolationJob {
   result?: IsolationResult
 }
 
-export interface IsolationRunInput {
-  jobId: string
-  containerName: string
-  image: string
-  dockerPath: string
-  socketPath?: string
-  workspacePath: string
-  artifacts?: string[]
-  command: string
-  deadline: number
-  limits: IsolationLimits
-  signal: AbortSignal
-  /** Last Host authorization/CAS, after create and immediately before start. */
-  authorizeStart(): boolean | Promise<boolean>
-}
-
-export interface IsolationProcessResult {
-  /** Private Host evidence, excluded from model-facing results. */
-  creationWitness?: CreationWitness
-  artifacts?: IsolationFile[]
-  status: IsolationResult['status']
-  quiescent: boolean
-  exitCode?: number
-  stdout: string
-  stderr: string
-  reason?: string
-}

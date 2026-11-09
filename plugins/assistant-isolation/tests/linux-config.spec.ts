@@ -1,15 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { Config, defaultLimits, validateConfig } from '../src/config.js'
-import { configuredDockerSocketPath } from '../src/docker-socket.js'
 import { linuxJobResourceReservation, type LinuxExecutionContract } from '../src/linux-execution-contract.js'
 import type { LinuxRuntime } from '../src/linux-runtime.js'
 import { plannedStorageBytes } from '../src/storage-policy.js'
+import { nativeConfig } from './helpers/native-config.js'
 
-vi.mock('../src/docker-socket.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/docker-socket.js')>()
-  return { ...actual, configuredDockerSocketPath: vi.fn(actual.configuredDockerSocketPath) }
-})
-beforeEach(() => vi.clearAllMocks())
 const uid = process.getuid?.() ?? 1
 function runtime(): LinuxRuntime {
   const path = '/opt/dsh-native-runtime'
@@ -31,33 +26,34 @@ function synchronous(value: unknown) {
   return result
 }
 
-test.skipIf(process.platform === 'win32')('omitted backend retains Docker defaults and immutable-image grant admission', () => {
-  expect(validateConfig({})).toMatchObject({ backend: 'docker', image: '' })
-  expect(configuredDockerSocketPath).toHaveBeenCalledOnce()
-  expect(synchronous({ image: 'mutable:latest' }).issues).toBeDefined()
+test('rejects a legacy or missing backend synchronously without any Docker lookup', () => {
+  expect(synchronous({}).issues).toBeDefined()
+  expect(synchronous({ backend: 'docker', image: 'sha256:' + 'a'.repeat(64) }).issues).toBeDefined()
   expect(synchronous({ backend: 'arbitrary' }).issues).toBeDefined()
 })
 
 describe.skipIf(process.platform !== 'linux' || uid === 0)('public Linux configuration admission', () => {
-  test('validates synchronously without resolving a Docker socket or requiring an image', () => {
-    const input = { ...native(), socketPath: 'tcp://unreachable:2375', dockerPath: 'unavailable', grants: [{ id: 'finite', revision: 1,
-      principalDigest: 'a'.repeat(64), principalRecordId: 'owner', principalVersion: 1, workspace: '/workspace', agentPreset: 'default',
-      expiresAt: Date.now() + 1000, maxRuns: 1, maxTotalDurationMs: 1000 }] }
-    expect(validateConfig(input)).toMatchObject({ backend: 'linux-native', image: '', socketPath: input.socketPath, grants: input.grants })
+  test('validates synchronously and never requires a Docker socket or image', () => {
+    const grants = [{ id: 'finite', revision: 1, principalDigest: 'a'.repeat(64), principalRecordId: 'owner', principalVersion: 1,
+      workspace: '/workspace', agentPreset: 'default', expiresAt: Date.now() + 1000, maxRuns: 1, maxTotalDurationMs: 1000 }]
+    const input = nativeConfig('/var/tmp/dsh-native-config', { grants })
+    expect(validateConfig(input)).toMatchObject({ backend: 'linux-native', grants })
     expect(synchronous(input).issues).toBeUndefined()
-    expect(configuredDockerSocketPath).not.toHaveBeenCalled()
   })
 
   test.each(['missing', 'runtime-drift', 'v2', 'other-uid', 'overlap'] as const)('Loader rejects %s synchronously', mode => {
     const input = native()
-    if (mode === 'missing') delete input.linux
-    if (mode === 'runtime-drift') input.linux!.runtime.nodePath = '/usr/bin/node'
-    if (mode === 'v2') input.linux!.cgroupRoots = { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
-    if (mode === 'other-uid') input.linux!.cgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-99999',
+    if (mode === 'missing') {
+      const { linux: _linux, ...withoutLinux } = input
+      expect(synchronous(withoutLinux).issues).toBeDefined()
+      return
+    }
+    if (mode === 'runtime-drift') input.linux.runtime.nodePath = '/usr/bin/node'
+    if (mode === 'v2') input.linux.cgroupRoots = { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
+    if (mode === 'other-uid') input.linux.cgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-99999',
       memory: '/sys/fs/cgroup/memory/dsh-native/uid-99999', pids: '/sys/fs/cgroup/pids/dsh-native/uid-99999', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-99999' }
-    if (mode === 'overlap') input.stateRoot = input.linux!.runtime.root.path + '/state'
+    if (mode === 'overlap') input.stateRoot = input.linux.runtime.root.path + '/state'
     expect(synchronous(input).issues).toBeDefined()
-    expect(configuredDockerSocketPath).not.toHaveBeenCalled()
   })
 
   test('admits exact memory/inode/storage reservations and rejects one unit less', () => {

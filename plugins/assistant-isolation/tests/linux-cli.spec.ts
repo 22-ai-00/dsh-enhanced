@@ -44,24 +44,24 @@ async function prepared() {
 
 test.skipIf(process.platform !== 'linux')('native reconcile ignores unavailable Docker configuration and never resets the consumed budget', async () => {
   const ctx = await prepared(); ctx.ledger.releaseController(ctx.authority)
-  expect(await reconcileIsolation(ctx.stateRoot, 'no-docker', new AbortController().signal, 'not-a-socket')).toEqual({ checked: 1, released: 1, retained: 0 })
+  expect(await reconcileIsolation(ctx.stateRoot, new AbortController().signal)).toEqual({ checked: 1, released: 1, retained: 0 })
   expect(ctx.ledger.get(ctx.job.id)?.result).toMatchObject({ status: 'unknown', quiescent: true })
   const authority = ctx.ledger.claimController('inspect', 30_000)
   expect(() => ctx.ledger.prepare({ ...ctx.input, authority, idempotencyKey: 'second' })).toThrow('budget exhausted')
   ctx.ledger.releaseController(authority)
 })
 
-test.skipIf(process.platform !== 'linux')('external native revoke is durable without taking a live controller or interpreting an empty Docker container name', async () => {
+test.skipIf(process.platform !== 'linux')('external native revoke is durable without taking a live controller', async () => {
   const ctx = await prepared()
-  expect(await revokeIsolationGrant(ctx.stateRoot, 'grant', 1, 'no-docker', 'not-a-socket')).toEqual({
-    revoked: true, containersRemoved: true, nativeResourcesQuiescent: false, nativeRetained: 1 })
+  expect(await revokeIsolationGrant(ctx.stateRoot, 'grant', 1)).toEqual({
+    revoked: true, nativeResourcesQuiescent: false, nativeRetained: 1 })
   expect(ctx.ledger.hasController(ctx.authority)).toBe(true)
   expect(ctx.ledger.usable(ctx.job.id)).toBe(false)
   expect(ctx.ledger.get(ctx.job.id)).toEqual(ctx.job)
-  await expect(reconcileIsolation(ctx.stateRoot, 'no-docker')).rejects.toThrow('another host')
+  await expect(reconcileIsolation(ctx.stateRoot)).rejects.toThrow('another host')
   ctx.ledger.releaseController(ctx.authority)
-  expect(await revokeIsolationGrant(ctx.stateRoot, 'grant', 1, 'no-docker', 'not-a-socket')).toEqual({
-    revoked: true, containersRemoved: true, nativeResourcesQuiescent: true, nativeRetained: 0 })
+  expect(await revokeIsolationGrant(ctx.stateRoot, 'grant', 1)).toEqual({
+    revoked: true, nativeResourcesQuiescent: true, nativeRetained: 0 })
 })
 
 describe.skipIf(!real)('native operator interfaces with real Linux execution', () => {
@@ -78,7 +78,7 @@ describe.skipIf(!real)('native operator interfaces with real Linux execution', (
     expect(result.receipt?.result.stdout).toBe('once')
     const unknown = { jobId: job.id, status: 'unknown' as const, quiescent: false, stdout: 'keep original', stderr: '', artifacts: [], reason: 'lost settlement' }
     ctx.ledger.settle(job.id, job.version, unknown, ctx.authority); ctx.ledger.releaseController(ctx.authority)
-    expect(await reconcileIsolation(ctx.stateRoot, 'no-docker', new AbortController().signal, 'not-a-socket')).toEqual({ checked: 1, released: 1, retained: 0 })
+    expect(await reconcileIsolation(ctx.stateRoot, new AbortController().signal)).toEqual({ checked: 1, released: 1, retained: 0 })
     expect(ctx.ledger.get(job.id)?.result).toEqual({ ...unknown, quiescent: true })
     expect(ctx.ledger.get(job.id)?.reservedDurationMs).toBe(5000)
   })
@@ -95,7 +95,7 @@ describe.skipIf(!real)('native operator interfaces with real Linux execution', (
       try {
         await expect.poll(() => database.prepare('SELECT status FROM isolation_jobs').get()?.status, { timeout: 8000 }).toBe('running')
         const controller = database.prepare('SELECT owner_id, fence FROM isolation_controller').get()
-        const revoked = await revokeIsolationGrant(stateRoot, 'verification', 1, 'no-docker', 'not-a-socket')
+        const revoked = await revokeIsolationGrant(stateRoot, 'verification', 1)
         expect(revoked.revoked).toBe(true)
         expect(database.prepare('SELECT owner_id, fence FROM isolation_controller').get()).toEqual(controller)
         const result = await pending

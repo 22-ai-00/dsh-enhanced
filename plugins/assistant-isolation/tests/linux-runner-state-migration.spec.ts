@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -14,7 +14,6 @@ import { inspectLinuxRunnerState, resealLinuxRunnerState, type LinuxRunnerStateS
 import { LinuxRepositoryRunner } from '../src/linux-repository-runner.js'
 import type { LinuxRuntime } from '../src/linux-runtime.js'
 import { LinuxVerifierRunner } from '../src/linux-verifier-runner.js'
-import type { CreationWitness } from '../src/runtime-witness.js'
 import type { IsolationGrant } from '../src/types.js'
 
 const roots: string[] = []
@@ -26,7 +25,9 @@ const oldDigest = 'a'.repeat(64), newDigest = 'b'.repeat(64)
 const expiresAt = 4_000_000_000_000
 const requestFor = (key: string): string => createHash('sha256').update(key).digest('hex')
 const boot = '11111111-1111-1111-1111-111111111111'
-const witness: CreationWitness = {
+// Historical private evidence a Docker-era ledger could carry; the handover only
+// hashes and retires it, so its shape stays opaque to this fixture.
+const witness = {
   daemon: { process: { bootId: boot, pid: 4242, startTicks: '100' }, engineId: 'engine:1',
     dockerPath: '/usr/bin/docker', socketPath: '/run/docker.sock', pidFile: '/run/docker.pid' },
   supervisor: { bootId: boot, pid: 4343, startTicks: '200' },
@@ -124,35 +125,42 @@ function dockerLedger(path: string, workspace: string): { ids: JobIds } {
   try {
     ledger.syncGrants([{ ...identity, id: 'verification', revision: 1, expiresAt: 100_000, maxRuns: 8, maxTotalDurationMs: 10_000 }])
     const authority = ledger.claimController('old-host-process', 1_000)
-    const prepare = (key: string, durationMs: number, backend: 'docker' | 'macos-seatbelt' = 'docker') =>
-      ledger.prepare({ identity, sessionId: `authority:${oldDigest}`, grantId: 'verification', idempotencyKey: key,
-        requestDigest: requestFor(key), durationMs, backend }).job
-    ids.prepared = prepare('prepared-key', 500).id
-    const dispatched = prepare('dispatched-key', 600)
-    ledger.markDispatched(dispatched.id, dispatched.version, authority)
-    ledger.settle(dispatched.id, dispatched.version + 1,
-      { jobId: dispatched.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] }, authority, witness)
-    ids.dispatched = dispatched.id
-    const running = prepare('running-key', 700)
-    ledger.start(running.id, running.version)
-    ids.running = running.id
-    const succeeded = prepare('succeeded-key', 800)
-    ledger.start(succeeded.id, succeeded.version)
-    ledger.settle(succeeded.id, succeeded.version + 1,
-      { jobId: succeeded.id, status: 'succeeded', quiescent: true, exitCode: 0, stdout: '', stderr: '', artifacts: [] })
-    ids.succeeded = succeeded.id
-    const failed = prepare('failed-key', 400)
-    ledger.start(failed.id, failed.version)
-    ledger.settle(failed.id, failed.version + 1,
-      { jobId: failed.id, status: 'failed', quiescent: true, exitCode: 1, stdout: '', stderr: '', artifacts: [] })
-    ids.failed = failed.id
-    const unknown = prepare('unknown-key', 500)
-    ledger.settle(unknown.id, unknown.version,
-      { jobId: unknown.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'docker-creation-unconfirmed' })
-    ids.unknown = unknown.id
-    const macos = prepare('macos-key', 500, 'macos-seatbelt')
-    ledger.settle(macos.id, macos.version,
-      { jobId: macos.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] })
+    // Docker rows can only be replayed from history: this package no longer
+    // creates one, so the fixture writes the exact legacy row shape directly.
+    const insert = (key: string, durationMs: number): string => {
+      const id = randomUUID()
+      const database = new DatabaseSync(path)
+      try {
+        database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,dispatch_attempted) VALUES (?,?,1,?,?,1,?,'verification',?,?,?,?,'docker',?,?,0,0,0,'prepared',1,10000,10000,0)")
+          .run(id, 'verification', identity.principalDigest, identity.principalRecordId, workspace, `authority:${oldDigest}`,
+            key, requestFor(key), `dsh-isolation-${id}`, 10_000 + durationMs, durationMs)
+      } finally { database.close() }
+      return id
+    }
+    ids.prepared = insert('prepared-key', 500)
+    const dispatchedId = insert('dispatched-key', 600)
+    const dispatched = ledger.markDispatched(dispatchedId, 1, authority)
+    ledger.settle(dispatchedId, dispatched.version, { jobId: dispatchedId, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] }, authority)
+    const witnessDb = new DatabaseSync(path)
+    try { witnessDb.prepare('UPDATE isolation_jobs SET creation_witness_json=? WHERE id=?').run(JSON.stringify(witness), dispatchedId) } finally { witnessDb.close() }
+    ids.dispatched = dispatchedId
+    const runningId = insert('running-key', 700)
+    ledger.start(runningId, 1)
+    ids.running = runningId
+    const succeededId = insert('succeeded-key', 800)
+    const succeeded = ledger.start(succeededId, 1)
+    ledger.settle(succeededId, succeeded.version, { jobId: succeededId, status: 'succeeded', quiescent: true, exitCode: 0, stdout: '', stderr: '', artifacts: [] })
+    ids.succeeded = succeededId
+    const failedId = insert('failed-key', 400)
+    const failed = ledger.start(failedId, 1)
+    ledger.settle(failedId, failed.version, { jobId: failedId, status: 'failed', quiescent: true, exitCode: 1, stdout: '', stderr: '', artifacts: [] })
+    ids.failed = failedId
+    const unknownId = insert('unknown-key', 500)
+    ledger.settle(unknownId, 1, { jobId: unknownId, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'docker-creation-unconfirmed' })
+    ids.unknown = unknownId
+    const macos = ledger.prepare({ identity, sessionId: `authority:${oldDigest}`, grantId: 'verification', idempotencyKey: 'macos-key',
+      requestDigest: requestFor('macos-key'), durationMs: 500, backend: 'macos-seatbelt' }).job
+    ledger.settle(macos.id, macos.version, { jobId: macos.id, status: 'unknown', quiescent: false, stdout: '', stderr: '', artifacts: [] })
     ids.macos = macos.id
     return { ids: ids as JobIds }
   } finally { ledger.close() }
@@ -319,14 +327,14 @@ describe.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)('a
       const oldIdentity = { principalDigest: oldDigest, principalRecordId: `verification:${oldDigest}`,
         principalVersion: 1, workspace: t.liveRunner, agentPreset: 'verification' as const }
       const first = ledger.prepare({ identity: newIdentity, sessionId: `authority:${newDigest}`, grantId: 'verification',
-        idempotencyKey: 'prepared-key', requestDigest: requestFor('native-request-1'), durationMs: 500 })
+        idempotencyKey: 'prepared-key', requestDigest: requestFor('native-request-1'), durationMs: 500, backend: 'macos-seatbelt' })
       expect(first.created).toBe(true)
       expect(ledger.prepare({ identity: newIdentity, sessionId: `authority:${newDigest}`, grantId: 'verification',
-        idempotencyKey: 'prepared-key', requestDigest: requestFor('native-request-1'), durationMs: 500 }).created).toBe(false)
+        idempotencyKey: 'prepared-key', requestDigest: requestFor('native-request-1'), durationMs: 500, backend: 'macos-seatbelt' }).created).toBe(false)
       // Same eight-tuple + request as the stranded docker row: read back, no
       // grant lookup, no replay, no error even though the old grant is rewritten.
       const replayed = ledger.prepare({ identity: oldIdentity, sessionId: `authority:${oldDigest}`, grantId: 'verification',
-        idempotencyKey: 'prepared-key', requestDigest: requestFor('prepared-key'), durationMs: 500 })
+        idempotencyKey: 'prepared-key', requestDigest: requestFor('prepared-key'), durationMs: 500, backend: 'macos-seatbelt' })
       expect(replayed.created).toBe(false)
       expect(replayed.job).toMatchObject({ id: ids.prepared, status: 'unknown', backend: 'docker' })
     } finally { ledger.close() }

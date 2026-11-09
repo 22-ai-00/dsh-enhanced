@@ -39,12 +39,12 @@ export { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutio
   type LinuxExecutionResources, type LinuxReceiptBinding,
   type LinuxExecutionPartialCleanupProof } from './linux-execution-contract.js'
 export { inspectIsolationGrant, type IsolationGrantDiagnostic, type IsolationGrantDiagnosticReason } from './diagnostics.js'
-export { probeIsolationRuntime, probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './probe.js'
+export { probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './probe.js'
 export * from './audit-archive.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'
 
-export async function apply(ctx: Context, config: Config = {}): Promise<void> { await new AssistantIsolationService(ctx, config).ready }
+export async function apply(ctx: Context, config: Config): Promise<void> { await new AssistantIsolationService(ctx, config).ready }
 // Loader unwraps the default export; preserve the trusted plugin identity there.
 export default { name, Config, apply }
 

@@ -2,10 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { defaultLimits, validateConfig } from './config.js'
-import { configuredDockerSocketPath } from './docker-socket.js'
-import { runIsolatedProcess } from './runner.js'
-import { stageWorkspace } from './workspace.js'
+import { validateConfig } from './config.js'
 import type { LinuxCgroupRoots } from './linux-cgroups.js'
 import { linuxRuntimeDigest, verifyLinuxRuntime, type LinuxRuntime } from './linux-runtime.js'
 import { validateLinuxExecutionContract } from './linux-execution-contract.js'
@@ -54,31 +51,3 @@ export async function probeLinuxIsolationRuntime(input: LinuxIsolationProbeConfi
 }
 
 /** Operator-only readiness probe using the same supervisor and work-volume path as jobs. */
-export async function probeIsolationRuntime(image: string, dockerPath = process.platform === 'darwin' ? '/usr/local/bin/docker' : '/usr/bin/docker', socketPath?: string): Promise<{ ready: true }> {
-  if (!/^sha256:[0-9a-f]{64}$/.test(image) || !dockerPath.startsWith('/')) throw new Error('isolation readiness requires an immutable local image and absolute Docker path')
-  if (!['linux', 'darwin'].includes(process.platform) || process.getuid?.() === undefined || process.getuid() === 0) throw new Error('isolation readiness requires a non-root Unix Host and Docker access')
-  socketPath = configuredDockerSocketPath(socketPath)
-  const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-isolation-probe-'))
-  const jobId = randomUUID(); const containerName = `dsh-isolation-${jobId}`
-  let safeToRemove = true
-  try {
-    const marker = randomUUID()
-    const command = `test "$(id -u)" != 0 && test ! -w /etc && printf '%s' '${marker}' > readiness.txt && printf '%s' '${marker}'`
-    const workspacePath = await stageWorkspace(stateRoot, jobId, { grantId: 'readiness', idempotencyKey: jobId, command })
-    await writeFile(join(stateRoot, 'probe.json'), JSON.stringify({ jobId, containerName, image, dockerPath, socketPath }), { mode: 0o600, flag: 'wx' })
-    safeToRemove = false
-    const result = await runIsolatedProcess({ jobId, containerName, image, dockerPath, socketPath, workspacePath,
-      command, artifacts: ['readiness.txt'], deadline: Date.now() + 20_000,
-      limits: { ...defaultLimits, maxDurationMs: 20_000, memoryMiB: 64, workspaceMiB: 4, workspaceInodes: 64 },
-      signal: AbortSignal.timeout(20_000), authorizeStart: () => true })
-    safeToRemove = result.quiescent
-    if (result.status !== 'succeeded' || !result.quiescent || result.stdout !== marker
-      || result.artifacts?.length !== 1 || result.artifacts[0]?.content !== marker) {
-      throw new Error(`isolation readiness failed (${result.reason ?? result.status}); check Docker permissions, local image and resource limits${safeToRemove ? '' : `; unresolved probe evidence retained at ${stateRoot}`}`)
-    }
-    return { ready: true }
-  } catch (error) {
-    if (!safeToRemove) throw new Error(`isolation readiness did not establish quiescence; unresolved probe evidence retained at ${stateRoot}`, { cause: error })
-    throw error
-  } finally { if (safeToRemove) await rm(stateRoot, { recursive: true, force: true }) }
-}

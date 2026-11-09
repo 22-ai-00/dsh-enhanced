@@ -126,7 +126,6 @@ describe('Linux IsolationLedger', () => {
     const second = ledger.prepare({ ...request('second'), authority }).job
     expect(first).toMatchObject({ backend: 'linux-native', nativeResourceId: `linux-${first.id}`, reservedMemoryMiB: 112, reservedWorkspaceInodes: 128, reservedStorageBytes: 4096, linuxContract: contract })
     expect(first.nativeNonce).toMatch(/^[0-9a-f]{32}$/u); expect(first.nativeNonce).not.toBe(second.nativeNonce)
-    expect(first.containerName).toBe('')
     expect(ledger.findJobByKey(identity, 'session', 'grant', 'key')).toEqual(first)
     for (const mutation of [{ principalDigest: 'other' }, { principalRecordId: 'other' }, { principalVersion: 2 }, { workspace: '/other' }, { agentPreset: 'other' }]) expect(ledger.findJobByKey({ ...identity, ...mutation }, 'session', 'grant', 'key')).toBeUndefined()
     expect(ledger.findJobByKey(identity, 'other', 'grant', 'key')).toBeUndefined()
@@ -276,11 +275,23 @@ describe('real schema 7 migration', () => {
     const stateRoot = root(); const file = join(stateRoot, 'ledger.sqlite')
     const { ledger, authority } = setup(file)
     const limited = { ...grant, maxRuns: 2, maxTotalDurationMs: 1000, revision: 2 }; ledger.syncGrants([limited], authority)
-    let docker = ledger.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: 'old-docker', requestDigest: 'legacy-docker', durationMs: 500, resourceReservation: request().resourceReservation, authority }).job
-    docker = ledger.markDispatched(docker.id, docker.version, authority); docker = ledger.settle(docker.id, docker.version, outcome(docker, 'unknown', false), authority)
-    let mac = ledger.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: 'old-mac', requestDigest: 'legacy-mac', durationMs: 500, backend: 'macos-seatbelt', authority }).job
-    mac = ledger.markDispatched(mac.id, mac.version, authority); mac = ledger.settle(mac.id, mac.version, outcome(mac, 'unknown', false), authority)
+    // A Docker-era row can only be opened from history: this package no longer creates one.
+    ledger.prepare({ ...request('old-docker-seed'), authority, idempotencyKey: 'old-docker-seed' })
+    const seed = ledger.findJobByKey(identity, 'session', 'grant', 'old-docker-seed')!
     ledger.close(); ledgers.splice(ledgers.indexOf(ledger), 1)
+    const seedDb = new DatabaseSync(file)
+    seedDb.prepare("DELETE FROM isolation_jobs WHERE id=?").run(seed.id)
+    seedDb.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,dispatch_attempted) VALUES ('00000000-0000-4000-8000-000000000001','grant',2,?,?,1,?,'default','session','old-docker','legacy-docker','dsh-isolation-legacy','docker',10500,500,112,128,4096,'prepared',1,10000,10000,0)")
+      .run(identity.principalDigest, identity.principalRecordId, identity.workspace)
+    seedDb.close()
+    const seeding = new IsolationLedger(file, { now: () => 10_000 }); ledgers.push(seeding)
+    let docker = seeding.get('00000000-0000-4000-8000-000000000001')!
+    docker = seeding.markDispatched(docker.id, docker.version, authority); docker = seeding.settle(docker.id, docker.version, outcome(docker, 'unknown', false), authority)
+    seeding.close(); ledgers.splice(ledgers.indexOf(seeding), 1)
+    const rest = new IsolationLedger(file, { now: () => 10_000 }); ledgers.push(rest)
+    let mac = rest.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: 'old-mac', requestDigest: 'legacy-mac', durationMs: 500, backend: 'macos-seatbelt', authority }).job
+    mac = rest.markDispatched(mac.id, mac.version, authority); mac = rest.settle(mac.id, mac.version, outcome(mac, 'unknown', false), authority)
+    rest.close(); ledgers.splice(ledgers.indexOf(rest), 1)
     const database = new DatabaseSync(file)
     const columns = (database.prepare('PRAGMA table_info(isolation_jobs)').all() as Array<{ name: string }>).map(row => row.name).filter(name => !name.startsWith('linux_') && name !== 'migrated').join(',')
     database.exec(`DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs RENAME TO saved_v8;

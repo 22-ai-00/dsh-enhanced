@@ -14,7 +14,7 @@ const identity: IsolationIdentity = { principalDigest: 'a'.repeat(64), principal
 const grant = (changes: Partial<IsolationGrant> = {}): IsolationGrant => ({ ...identity, id: 'grant-1', revision: 1, expiresAt: 100_000, maxRuns: 2, maxTotalDurationMs: 1_000, ...changes })
 function root(): string { const value = realpathSync(mkdtempSync(join(tmpdir(), 'isolation-diagnostics-'))); roots.push(value); return value }
 function prepare(ledger: IsolationLedger, key = 'key') {
-  return ledger.prepare({ identity, sessionId: 'session-1', grantId: 'grant-1', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 }).job
+  return ledger.prepare({ identity, sessionId: 'session-1', grantId: 'grant-1', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500, backend: 'macos-seatbelt' }).job
 }
 
 describe('read-only isolation grant diagnostics', () => {
