@@ -6,7 +6,7 @@ This is a runnable judging and recovery boundary, not a declaration that a datas
 
 ## Deployment boundary
 
-Run the authority in a separate evaluation service, VM or container. Mount its private configuration, dataset, key and state only there. Candidate workers must not receive these mounts, the authority stdin, Docker socket, Host filesystem or network access. The trusted controller bridges the authority's pipe and the existing `IsolatedVerifierRunner`; the latter receives only an artifact and the current input. The authority itself does not execute candidate code or require a Docker socket.
+Run the authority in a separate evaluation service, VM or container. Mount its private configuration, dataset, key and state only there. Candidate workers must not receive these mounts, the authority stdin, the Host filesystem or network access. The trusted controller bridges the authority's pipe and the existing `IsolatedVerifierRunner`; the latter runs in the fixed linux-native namespace/cgroup/seccomp boundary and receives only an artifact and the current input. The authority itself does not execute candidate code and needs no container runtime socket.
 
 The CLI enforces private canonical directories and owned regular single-link files, rejects symlink configuration/key/data, and creates SQLite state with private permissions. These checks do not sandbox a malicious administrator or another trusted Host process. Merely starting the CLI beside an unrestricted candidate shell is insufficient. The container integration test checks the concrete separate-mount boundary; it does not claim whole-Host isolation.
 
@@ -37,9 +37,9 @@ One state database belongs to one frozen qualification. A new candidate needs a 
 
 ## Installed Skills entrypoint
 
-`assistant-skills` accepts an optional `externalHoldouts` array, disabled by default. Each public Host profile contains `id`, `version`, exact owner `scope`, `maxComparisons: 1`, `execution`, and `authority`. `execution` uses the exported `HoldoutExecutionConfig`: immutable candidate image, absolute Docker path, private state root outside the workspace, fixed command and artifact path, finite expiry, repeats and tool/byte/output/time ceilings. Optional typed `inputs` and initial `files` are identical for both arms and their digests are part of the signed budget binding. They must contain only candidate-visible setup, never held-out answers.
+`assistant-skills` accepts an optional `externalHoldouts` array, disabled by default. Each public Host profile contains `id`, `version`, exact owner `scope`, `maxComparisons: 1`, `execution`, and `authority`. `execution` uses the exported `HoldoutExecutionConfig`: a fixed `linux-native` runtime descriptor with current-UID cgroup roots, a private state root outside the workspace, a fixed command and artifact path, finite expiry, repeats and tool/byte/output/time ceilings. Optional typed `inputs` and initial `files` are identical for both arms and their digests are part of the signed budget binding. They must contain only candidate-visible setup, never held-out answers.
 
-`authority` contains an absolute `executable`, fixed `args`, pinned Ed25519 `publicKey`, and exactly one of `datasetDigest` (fixed data) or `generatorDigest` (prospective data). This is trusted operator configuration, never a model-selected command. For a separate container, the executable may be the Host's Docker client with an explicitly configured, restricted authority container command. Do not mount operator data/key directories or Docker sockets into the candidate. A generic process command does not itself establish isolation; deploy the boundary described above.
+`authority` contains an absolute `executable`, fixed `args`, pinned Ed25519 `publicKey`, and exactly one of `datasetDigest` (fixed data) or `generatorDigest` (prospective data). This is trusted operator configuration, never a model-selected command. For a separately deployed service, the executable may be the host process of a restricted authority container or VM. Do not mount operator data/key directories into the candidate sandbox. A generic process command does not itself establish isolation; deploy the boundary described above.
 
 Obtain the public pins inside the operator environment before configuring the Host:
 
@@ -76,7 +76,7 @@ For the dependency-ordering family, use `"prospective": { "generator": "dependen
 
 All three families are narrow deterministic fixtures. Other task domains need their own independently governed judge and are not covered by these generators.
 
-Run the installed `dsh-skill-holdout --inspect-config /operator/private/config.json` and use its `publicKey` and `generatorDigest` in `externalHoldouts[].authority`; omit `datasetDigest`. The existing execution configuration still fixes the artifact, command, locally available immutable image and identical budgets. The candidate image must contain the task runtime, such as Node for a JavaScript order summary. Installing this package does not create signing keys, authorize evaluation resources or pull images automatically.
+Run the installed `dsh-skill-holdout --inspect-config /operator/private/config.json` and use its `publicKey` and `generatorDigest` in `externalHoldouts[].authority`; omit `datasetDigest`. The execution configuration still fixes the artifact, command, the prepared native runtime and identical budgets. The pinned runtime must contain the task runtime, such as Node for a JavaScript order summary. Installing this package does not create signing keys, authorize evaluation resources or prepare runtimes automatically.
 
 On `begin`, the operator first durably freezes the exact scope, baseline, candidate, budget and optional canary-admission binding with a unique freeze ID. Only then does it generate private cases and sign the certificate binding the exact profile, dataset digest and generation sequence to that frozen request. A failure after the freeze makes that plan unavailable; restart cannot draw a replacement dataset, and a lost acknowledgement resumes the already persisted bytes. Completed receipts can be reread without rerunning cells. Profile, dataset, certificate, receipt or admission drift fails closed. The certificate proves the configured authority's generation sequence; it does not prove training-data history or general intelligence improvement.
 
@@ -110,16 +110,15 @@ The authority library and signature helper are available from `@dsh-enhanced/ass
 
 ## Validation and remaining gates
 
-Package tests cover signature/binding tampering, limits, single-cell admission, private file permissions, controller exclusion, real process crashes immediately after commit but before acknowledgement, and recovery. The container test uses the production Host pipe, a separately mounted authority and actual `IsolatedVerifierRunner` jobs; a candidate that attempts to access the authority data/key or Docker socket must not gain access.
+Package tests cover signature/binding tampering, limits, single-cell admission, private file permissions, controller exclusion, real process crashes immediately after commit but before acknowledgement, and recovery. The live test uses the production Host pipe, a separately mounted authority and actual `IsolatedVerifierRunner` jobs in the native sandbox; a candidate that attempts to access the authority data/key or the Host filesystem must not gain access.
 
-Run these tests with two explicit locally installed immutable images:
+Run these tests with an explicit prepared native runtime:
 
 ```sh
-DSH_ISOLATION_TEST_IMAGE=sha256:CANDIDATE_IMAGE_DIGEST \
-DSH_HOLDOUT_TEST_IMAGE=sha256:AUTHORITY_NODE_IMAGE_DIGEST \
+DSH_ISOLATION_TEST_NATIVE_RUNTIME=/absolute/prepared/linux-runtime \
 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/holdout-cli.spec.ts
 ```
 
-The candidate image needs the existing Isolation `/bin/sh` and `/bin/busybox` contract. The authority test image additionally needs `/usr/local/bin/node`; no image is automatically pulled. Test data and programs are explicit synthetic fixtures, not evidence of model improvement or production historical independence.
+The native runtime needs the Isolation toolchain contract (`bin/node`, `pnpm`/`pnpm-native`, `node_modules`, store and cache trees); the authority test process uses the Host Node executable. Nothing is downloaded automatically. Test data and programs are explicit synthetic fixtures, not evidence of model improvement or production historical independence.
 
-The existing in-process `SealedSkillHoldoutProvider` remains a compatibility binding and does not acquire stronger trust from this CLI. Prospective canary requires the independently configured authority, fair measured comparison, critical regressions, explicit finite deployment authority, and a bound rollback watch. The package integration for the topology profile runs the genuine authority CLI, immutable Docker execution, Skills store/deployment/watch recovery and exact rollback path. Its Goals summary is a faithful Host-capability fixture; Goals' aggregation from actual snapshots is verified independently in the Goals package. Engineering fixture gains do not establish improvement on real user tasks, and none of these profiles proves historical holdout independence. No calendar observation period is required, but those functional gates remain mandatory.
+The existing in-process `SealedSkillHoldoutProvider` remains a compatibility binding and does not acquire stronger trust from this CLI. Prospective canary requires the independently configured authority, fair measured comparison, critical regressions, explicit finite deployment authority, and a bound rollback watch. The package integration for the topology profile runs the genuine authority CLI, native isolated execution, Skills store/deployment/watch recovery and exact rollback path. Its Goals summary is a faithful Host-capability fixture; Goals' aggregation from actual snapshots is verified independently in the Goals package. Engineering fixture gains do not establish improvement on real user tasks, and none of these profiles proves historical holdout independence. No calendar observation period is required, but those functional gates remain mandatory.
