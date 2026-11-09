@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { deliverySchemaVersion, ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
@@ -23,23 +24,31 @@ function fixture() {
   const owner = ensurePrincipalLocally({ databasePath, principal })
   const grant = { id: 'autonomy-web', revision: 1, principalDigest: createHash('sha256').update('web/web/local/operator').digest('hex'),
     principalRecordId: owner.id, principalVersion: owner.version, workspace, agentPreset: 'standard', expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 120_000 }
+  const runtimeRoot = join(home, 'rsi-linux-runtimes', 'web', 'runtime')
+  const runtime: LinuxRuntime = { schemaVersion: 1, backend: 'linux-native', platform: process.arch === 'arm64' ? 'linux-arm64' : 'linux-x64',
+    sourceCommit: 'a'.repeat(40), lockSha256: 'b'.repeat(64), root: { path: runtimeRoot, dev: 1, ino: 2, sha256: 'c'.repeat(64) },
+    nodePath: join(runtimeRoot, 'bin/node'), nodeSha256: 'd'.repeat(64), pnpmPath: join(runtimeRoot, 'pnpm/bin/pnpm.mjs'),
+    nativePnpmRoot: join(runtimeRoot, 'pnpm-native'), nativePnpmPath: join(runtimeRoot, 'pnpm-native/pnpm'), modulesPath: join(runtimeRoot, 'node_modules'),
+    storePath: join(runtimeRoot, 'store'), cachePath: join(runtimeRoot, 'cache'),
+    versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '5.9.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } }
+  const cgroupRoots: LinuxCgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/uid-1000', memory: '/sys/fs/cgroup/memory/uid-1000', pids: '/sys/fs/cgroup/pids/uid-1000', freezer: '/sys/fs/cgroup/freezer/uid-1000' }
   const source = stringify([
-    { id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation', config: { stateRoot: join(home, 'isolation'), image: `sha256:${'a'.repeat(64)}`, grants: [grant] } },
+    { id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation', config: { stateRoot: join(home, 'isolation'), backend: 'linux-native', linux: { runtime, cgroupRoots }, grants: [grant] } },
     { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner', config: { workspace, preset: 'standard', principal: { account: 'web', tenant: 'local', user: 'operator' } } },
     { id: 'dsh-enhanced-assistant-delivery', name: '@dsh-enhanced/assistant-delivery', config: { databasePath } },
   ])
-  return { home, source, databasePath, grant }
+  return { home, source, databasePath, grant, runtime, cgroupRoots }
 }
 
 describe('autonomy doctor profile and persisted owner checks', () => {
   it('reads a real Delivery schema 31 owner without changing identity, database or configured grant', () => {
-    const { home, source, databasePath, grant } = fixture()
+    const { home, source, databasePath, grant, runtime, cgroupRoots } = fixture()
     const schema = new DatabaseSync(databasePath, { readOnly: true })
     try { expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(31) } finally { schema.close() }
     const before = databaseFingerprint(databasePath)
     const profile = inspectAutonomyProfile(source, 'web', home)
     expect(profile.grant).toEqual(grant)
-    expect(profile.dockerPath).toBe('/usr/bin/docker')
+    expect(profile).toMatchObject({ backend: 'linux-native', linux: { runtime, cgroupRoots } })
     expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
     expect(profile.grant).toEqual(grant)
     expect(databaseFingerprint(databasePath)).toEqual(before)
@@ -135,19 +144,26 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(inspectAutonomyOwner({ ...profile, grant: { ...profile.grant, workspace: workspaceLink } })).toEqual({ status: 'unavailable' })
   })
 
-  it('rejects disabled/shadowed components, broadened grants, owner changes and unsafe image/path values', () => {
+  it('rejects disabled/shadowed components, broadened grants, owner changes and Docker-era or unsafe values', () => {
     const { home, source } = fixture()
     const invalid = [
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'disabled'], true),
       (doc: ReturnType<typeof parseDocument>) => doc.add({ id: 'shadow', name: '@dsh-enhanced/assistant-isolation' }),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'image'], 'latest'),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'dockerPath'], '/usr/../bin/docker'),
+      (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'backend'], 'docker'),
+      (doc: ReturnType<typeof parseDocument>) => doc.deleteIn([0, 'config', 'linux']),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'grants', 0, 'workspace'], '/other'),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'grants', 0, 'maxRuns'], 0),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([0, 'config', 'grants', 0, 'extraAuthority'], true),
       (doc: ReturnType<typeof parseDocument>) => doc.setIn([1, 'config', 'principal', 'user'], 'other'),
     ]
     for (const mutate of invalid) { const doc = parseDocument(source); mutate(doc); expect(() => inspectAutonomyProfile(String(doc), 'web', home)).toThrow() }
+    for (const [key, value] of [['image', `sha256:${'a'.repeat(64)}`], ['backend', 'docker'], ['dockerPath', '/usr/bin/docker']] as const) {
+      const doc = parseDocument(source)
+      doc.setIn([0, 'config', key], value)
+      expect(() => inspectAutonomyProfile(String(doc), 'web', home)).toThrow(/Docker isolation was removed; migrate this profile explicitly/)
+    }
   })
 
   it('recognizes only the published Delivery path helper and never evaluates YAML code', () => {

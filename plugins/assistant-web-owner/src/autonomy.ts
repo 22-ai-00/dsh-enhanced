@@ -7,14 +7,17 @@ import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep 
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
 export interface FiniteAutonomyTerms { maxRuns: number; leaseMs: number; maxTotalDurationMs: number }
-export type AutonomySetupOptions = FiniteAutonomyTerms & (
-  { backend?: 'docker'; image: string; source?: never } |
-  { backend: 'linux-native'; image?: never; source?: { kind: 'official-tag' } | { kind: 'local-head'; repository: string } }
-)
+export type AutonomyLinuxSource = { kind: 'official-tag' } | { kind: 'local-head'; repository: string }
+/** Only the linux-native backend remains; Docker-era options are rejected explicitly. */
+export type AutonomySetupOptions = FiniteAutonomyTerms & {
+  backend?: 'linux-native'
+  source?: AutonomyLinuxSource
+}
 export type AutonomyLinuxConfig = { runtime: LinuxRuntime; cgroupRoots: LinuxCgroupRoots }
-export type AutonomyResolvedOptions = FiniteAutonomyTerms & (
-  { backend?: 'docker'; image: string } | { backend: 'linux-native'; linux: AutonomyLinuxConfig }
-)
+export type AutonomyResolvedOptions = FiniteAutonomyTerms & {
+  backend?: 'linux-native'
+  linux: AutonomyLinuxConfig
+}
 export interface AutonomyProfileInput { dshHome: string; profile: string; workspace: string; preset: string; isolation: AutonomyResolvedOptions }
 export type AutonomyPreflightInput = Omit<AutonomyProfileInput, 'isolation'> & { isolation: AutonomySetupOptions }
 
@@ -25,7 +28,7 @@ const bundles = [...requiredBundles, ...stateBundles] as const
 type Bundle = typeof bundles[number]
 const profileKey = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const presetKey = /^[a-z0-9][a-z0-9-]*$/u
-const imagePattern = /^sha256:[0-9a-f]{64}$/u
+const dockerRemoved = 'Docker isolation was removed; use the linux-native backend'
 function fail(message: string): never { throw new Error(`assistant-web-owner autonomy: ${message}`) }
 function map(value: unknown, label: string): YAMLMap { if (!isMap(value)) fail(`${label} must be a mapping`); return value }
 function parse(source: string, label: string): { document: Document; rows: YAMLSeq } {
@@ -120,18 +123,18 @@ function validateFiniteTerms(value: FiniteAutonomyTerms): void {
 }
 export function validateAutonomyOptions(value: AutonomySetupOptions): void {
   if (value === null || typeof value !== 'object') fail('invalid autonomy options')
-  const allowed = value.backend === 'linux-native' ? ['backend', 'source', 'maxRuns', 'leaseMs', 'maxTotalDurationMs'] : ['backend', 'image', 'maxRuns', 'leaseMs', 'maxTotalDurationMs']
-  if (Object.keys(value).some(key => !allowed.includes(key))) fail('mixed or invalid autonomy options')
+  // Only linux-native keys are accepted. Docker-era options (`image`, `backend:
+  // 'docker'`, or any other unknown key) fail explicitly instead of being ignored.
+  if (Object.keys(value).some(key => !['backend', 'source', 'maxRuns', 'leaseMs', 'maxTotalDurationMs'].includes(key))) fail(dockerRemoved)
   validateFiniteTerms(value)
-  if (value.backend === 'linux-native') {
-    if (value.source !== undefined) {
-      const source = value.source
-      if (!source || typeof source !== 'object' || (source.kind !== 'official-tag' && source.kind !== 'local-head')
-        || Object.keys(source).sort().join(',') !== (source.kind === 'local-head' ? 'kind,repository' : 'kind')) fail('invalid Linux source')
-      if (source.kind === 'local-head' && (typeof source.repository !== 'string' || !isAbsolute(source.repository)
-        || normalize(source.repository) !== source.repository || /[\p{Cc}*]/u.test(source.repository))) fail('Linux source repository must be a canonical absolute path')
-    }
-  } else if (value.backend !== undefined && value.backend !== 'docker' || !imagePattern.test(value.image ?? '')) fail('image must be an immutable sha256 digest')
+  if (value.backend !== undefined && value.backend !== 'linux-native') fail(dockerRemoved)
+  if (value.source !== undefined) {
+    const source = value.source
+    if (!source || typeof source !== 'object' || (source.kind !== 'official-tag' && source.kind !== 'local-head')
+      || Object.keys(source).sort().join(',') !== (source.kind === 'local-head' ? 'kind,repository' : 'kind')) fail('invalid Linux source')
+    if (source.kind === 'local-head' && (typeof source.repository !== 'string' || !isAbsolute(source.repository)
+      || normalize(source.repository) !== source.repository || /[\p{Cc}*]/u.test(source.repository))) fail('Linux source repository must be a canonical absolute path')
+  }
 }
 /** Reject tagged/aliased native descriptors rather than evaluating arbitrary YAML. */
 export function literalAutonomyLinux(value: unknown): AutonomyLinuxConfig {
@@ -156,13 +159,6 @@ export function validateAutonomyLinuxPaths(linux: AutonomyLinuxConfig, stateRoot
   if (root === stateRoot || root.startsWith(stateRoot + sep) || stateRoot.startsWith(root + sep)) fail('Isolation state overlaps Linux runtime')
 }
 
-/** Read the exact literal Docker executable from a materialized autonomy profile. */
-export function autonomyDockerPath(source: string): string {
-  const { rows } = parse(source, 'autonomy profile')
-  const config = map(row(rows, 'assistant-isolation', true)!.get('config', true), 'Isolation config')
-  return config.has('dockerPath') ? path(config.get('dockerPath', true), 'Isolation dockerPath') : '/usr/bin/docker'
-}
-
 /** Pure YAML materialization; it neither creates credentials nor grants external repository authority. */
 export function preflightAutonomyProfile(input: AutonomyPreflightInput, source: string, effectiveSource: string): string {
   validateAutonomyOptions(input.isolation)
@@ -174,9 +170,9 @@ export function prepareAutonomyProfile(input: AutonomyProfileInput, source: stri
 function materializeAutonomyProfile(input: AutonomyProfileInput, source: string, effectiveSource: string, owner: { id: string; version: number } | undefined, now: number, preflight: boolean): string {
   options(input)
   if (!preflight) {
-    const allowed = input.isolation.backend === 'linux-native' ? ['backend','linux','maxRuns','leaseMs','maxTotalDurationMs'] : ['backend','image','maxRuns','leaseMs','maxTotalDurationMs']
-    if (Object.keys(input.isolation).some(key => !allowed.includes(key)) || input.isolation.backend !== undefined && !['docker','linux-native'].includes(input.isolation.backend)) fail('invalid resolved autonomy options')
-    if (input.isolation.backend === 'linux-native' && (!input.isolation.linux || Object.keys(input.isolation.linux).sort().join() !== 'cgroupRoots,runtime')) fail('invalid resolved Linux descriptor')
+    if (Object.keys(input.isolation).some(key => !['backend','linux','maxRuns','leaseMs','maxTotalDurationMs'].includes(key))
+      || input.isolation.backend !== undefined && input.isolation.backend !== 'linux-native') fail(dockerRemoved)
+    if (!input.isolation.linux || Object.keys(input.isolation.linux).sort().join() !== 'cgroupRoots,runtime') fail('invalid resolved Linux descriptor')
   }
   if (owner !== undefined && (typeof owner.id !== 'string' || owner.id.length === 0 || !Number.isSafeInteger(owner.version) || owner.version < 1)) fail('invalid owner')
   if (!Number.isSafeInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER - input.isolation.leaseMs) fail('invalid clock')
@@ -226,42 +222,33 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
   }
   const skills = configs.get('assistant-skills')
   if (skills) canonicalizeNestedStateRoots(target.document, skills, canonicalHome, 'Skills')
-  const requestedBackend = input.isolation.backend ?? 'docker'
   const configuredBackend = isolation.has('backend') ? scalar(isolation.get('backend', true), 'Isolation backend') : isolation.has('linux') ? 'linux-native' : undefined
   const oldImage = isolation.has('image') ? scalar(isolation.get('image', true), 'Isolation image') : undefined
-  if (configuredBackend !== undefined && configuredBackend !== requestedBackend
-    || requestedBackend === 'linux-native' && (oldImage !== undefined && oldImage !== '' || isolation.has('dockerPath') || isolation.has('socketPath'))) fail('existing isolation backend differs; explicit migration is required')
-  if (requestedBackend === 'docker') {
-    if (isolation.has('linux')) fail('existing Linux isolation requires explicit migration')
-    if (isolation.has('dockerPath')) path(isolation.get('dockerPath', true), 'Isolation dockerPath')
-    const image = (input.isolation as Extract<AutonomyResolvedOptions, { image: string }>).image
-    if (!imagePattern.test(image)) fail('image must be an immutable sha256 digest')
-    if (oldImage !== undefined && oldImage !== image) fail('existing isolation image differs; explicit migration is required')
-    isolation.set('image', target.document.createNode(image))
-    if (input.isolation.backend !== undefined) isolation.set('backend', target.document.createNode('docker'))
-  } else {
-    const existing = isolation.has('linux') ? literalAutonomyLinux(isolation.get('linux', true)) : undefined
-    if (preflight) {
-      const plannedRoot = join(canonicalHome, 'rsi-linux-runtimes', input.profile, 'runtime')
-      const state = scalar(isolation.get('stateRoot', true), 'Isolation stateRoot')
-      if (plannedRoot === state || plannedRoot.startsWith(state + sep) || state.startsWith(plannedRoot + sep)) fail('Isolation state overlaps Linux runtime')
-    }
-    if (existing) validateAutonomyLinuxPaths(existing, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
-    const resolved = input.isolation.backend === 'linux-native' && 'linux' in input.isolation ? input.isolation.linux : undefined
-    if (!preflight && !resolved) fail('resolved Linux runtime and cgroup roots are required')
-    if (resolved) {
-      validateAutonomyLinuxPaths(resolved, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
-      if (existing && !isDeepStrictEqual(existing, resolved)) fail('existing Linux descriptor differs; explicit migration is required')
-      isolation.set('linux', target.document.createNode(resolved))
-    }
-    isolation.set('backend', target.document.createNode('linux-native'))
-    isolation.delete('image'); isolation.delete('dockerPath'); isolation.delete('socketPath')
+  // Existing Docker profiles are never rewritten in place: the owner must run an
+  // explicit migration so the backend and authority change stays auditable.
+  if (configuredBackend === 'docker' || oldImage !== undefined || isolation.has('dockerPath') || isolation.has('socketPath')) fail('existing Docker isolation requires explicit migration')
+  if (configuredBackend !== undefined && configuredBackend !== 'linux-native') fail('existing isolation backend differs; explicit migration is required')
+  const existing = isolation.has('linux') ? literalAutonomyLinux(isolation.get('linux', true)) : undefined
+  if (preflight) {
+    const plannedRoot = join(canonicalHome, 'rsi-linux-runtimes', input.profile, 'runtime')
+    const state = scalar(isolation.get('stateRoot', true), 'Isolation stateRoot')
+    if (plannedRoot === state || plannedRoot.startsWith(state + sep) || state.startsWith(plannedRoot + sep)) fail('Isolation state overlaps Linux runtime')
   }
+  if (existing) validateAutonomyLinuxPaths(existing, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
+  const resolved = 'linux' in input.isolation ? input.isolation.linux : undefined
+  if (!preflight && !resolved) fail('resolved Linux runtime and cgroup roots are required')
+  if (resolved) {
+    validateAutonomyLinuxPaths(resolved, scalar(isolation.get('stateRoot', true), 'Isolation stateRoot'), canonicalHome)
+    if (existing && !isDeepStrictEqual(existing, resolved)) fail('existing Linux descriptor differs; explicit migration is required')
+    isolation.set('linux', target.document.createNode(resolved))
+  }
+  isolation.set('backend', target.document.createNode('linux-native'))
+  isolation.delete('image'); isolation.delete('dockerPath'); isolation.delete('socketPath')
   if (!actions.has('grants')) actions.set('grants', target.document.createNode([]))
   else sequence(actions.get('grants', true), 'Actions grants')
   let grants: YAMLSeq
   if (!isolation.has('grants')) { grants = target.document.createNode([]) as YAMLSeq; isolation.set('grants', grants) } else grants = sequence(isolation.get('grants', true), 'Isolation grants')
-  if (requestedBackend === 'linux-native' && !isolation.has('linux') && grants.items.length > 0) fail('existing isolation grants without a native descriptor require explicit migration')
+  if (!isolation.has('linux') && grants.items.length > 0) fail('existing isolation grants without a native descriptor require explicit migration')
   const id = `autonomy-${input.profile}`; const principalDigest = createHash('sha256').update(`web/${input.profile}/local/operator`).digest('hex')
   const baseGrant = { id, revision: 1, principalDigest, workspace: input.workspace, agentPreset: input.preset, maxRuns: input.isolation.maxRuns, maxTotalDurationMs: input.isolation.maxTotalDurationMs }
   const validateManaged = (current: YAMLMap, checkOwner: boolean): void => {

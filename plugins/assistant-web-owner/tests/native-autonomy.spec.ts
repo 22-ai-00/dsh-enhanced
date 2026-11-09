@@ -18,7 +18,7 @@ import { inspectAutonomyProfile, probeAutonomyProfileRuntime } from '../src/doct
 const resource = vi.hoisted(() => ({ freeze: vi.fn(), prepare: vi.fn(), read: vi.fn(), discover: vi.fn(), probe: vi.fn(), docker: vi.fn(), verify: vi.fn() }))
 vi.mock('@dsh-enhanced/assistant-isolation/native-resources', () => ({ freezeLinuxRuntimeSource: resource.freeze,
   prepareLinuxRuntime: resource.prepare, readLinuxRuntime: resource.read, discoverLinuxCgroupRoots: resource.discover, probeLinuxIsolationRuntime: resource.probe }))
-vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(), probeIsolationRuntime: resource.docker, verifyLinuxRuntime: resource.verify }))
+vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(), verifyLinuxRuntime: resource.verify }))
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 beforeEach(() => { for (const stub of Object.values(resource)) stub.mockReset() })
@@ -70,10 +70,19 @@ test('native first setup pairs once; replay reads the existing receipt without p
   expect(resource.freeze).toHaveBeenCalledWith({ kind:'official-tag',version: JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8')).version })
   expect(resource.prepare).toHaveBeenCalledTimes(1)
   const ledgerPath = join(parsed.stateRoot,'ledger.sqlite'), ledger = new IsolationLedger(ledgerPath)
-  ledger.syncGrants([parsed.grant])
+  const authority = ledger.claimController('replay-owner', 60_000)
+  ledger.syncGrants([parsed.grant], authority)
   const grant = parsed.grant
+  const contract = { schemaVersion: 1 as const, backend: 'linux-native' as const, runtimeDigest: 'b'.repeat(64), profile: 'ordinary' as const,
+    limits: { maxDurationMs: 1000, maxInputBytes: 1024, maxOutputBytes: 1024, maxArtifactBytes: 1024, maxFiles: 8, memoryMiB: 64, workspaceMiB: 16, workspaceInodes: 128, pidsLimit: 16, cpus: 1 },
+    keeperLimits: { memoryMiB: 32, pidsLimit: 8, cpus: 0.1 },
+    cgroupRoots: { mode: 'v1' as const, cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000', memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000',
+      pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' } }
   ledger.prepare({ identity:{principalDigest:grant.principalDigest,principalRecordId:grant.principalRecordId,principalVersion:grant.principalVersion,workspace:grant.workspace,agentPreset:grant.agentPreset},
-    sessionId:'existing-session',grantId:grant.id,idempotencyKey:'existing-budget-use',requestDigest:'existing-budget-use',durationMs:1000 })
+    sessionId:'existing-session',grantId:grant.id,idempotencyKey:'existing-budget-use',requestDigest:'c'.repeat(64),durationMs:1000,
+    authority, backend:'linux-native', linuxContract:contract,
+    resourceReservation:{memoryMiB:112,workspaceInodes:128,maxMemoryMiB:224,maxWorkspaceInodes:256},
+    storageBudget:{maxStateBytes:1_000_000,maxJobRecords:100,reservedBytes:4096,observation:{bytes:0,observedAt:Date.now()}} })
   ledger.close()
   const grantsBefore = rows(ledgerPath,'SELECT * FROM isolation_grants'), jobsBefore = rows(ledgerPath,'SELECT * FROM isolation_jobs')
   await configureWebOwner(f.input,first)
@@ -87,10 +96,15 @@ test('native first setup pairs once; replay reads the existing receipt without p
 
 test('native source, backend, grant and runtime/state drift fail before pairing or patch mutation', async () => {
   const f = await fixture()
-  const docker = { ...f.input, isolation: { image: `sha256:${'e'.repeat(64)}`, maxRuns:3,leaseMs:3600000,maxTotalDurationMs:120000 } }
-  const preexisting = prepareAutonomyProfile(docker,prepareWebOwnerProfile(f.input,'[]',f.effective).patch,f.effective,{id:'old-owner',version:1})
-  await writeFile(f.patchPath,preexisting)
-  await expect(configureWebOwner(f.input,preexisting)).rejects.toThrow(/backend differs/u)
+  const document = parseDocument(prepareWebOwnerProfile(f.input, '[]', f.effective).patch)
+  if (!isSeq(document.contents)) throw new Error('fixture expected rows')
+  // A legacy Docker profile is present on disk but is never rewritten in place.
+  const legacyRow = parseDocument(`- id: dsh-enhanced-assistant-isolation\n  name: '@dsh-enhanced/assistant-isolation'\n  config: { image: 'sha256:${'e'.repeat(64)}' }\n`)
+  if (!isSeq(legacyRow.contents)) throw new Error('fixture expected legacy row')
+  document.contents.add(legacyRow.contents.items[0]!)
+  const preexisting = document.toString()
+  await writeFile(f.patchPath, preexisting)
+  await expect(configureWebOwner(f.input, f.effective)).rejects.toThrow(/existing Docker isolation requires explicit migration/u)
   expect(resource.freeze).not.toHaveBeenCalled(); expect(existsSync(f.databasePath)).toBe(false)
   await writeFile(f.patchPath,'[]')
   await configureWebOwner(f.input,f.effective)

@@ -14,7 +14,7 @@ interface AutonomyDoctorBase {
   grant: IsolationGrant
   principal: { channel: 'web'; account: string; tenant: string; user: string }
 }
-export type AutonomyDoctorProfile = AutonomyDoctorBase & ({ backend?: 'docker'; image: string; dockerPath: string; linux?: never } | { backend: 'linux-native'; linux: AutonomyLinuxConfig; image?: never; dockerPath?: never })
+export type AutonomyDoctorProfile = AutonomyDoctorBase & { backend: 'linux-native'; linux: AutonomyLinuxConfig }
 function fail(message: string): never { throw new Error(`autonomy doctor: ${message}`) }
 function literal(node: unknown, label: string): unknown {
   if (isScalar(node) && (node.tag === undefined || node.tag === 'tag:yaml.org,2002:str')) return node.value
@@ -75,19 +75,15 @@ export function inspectAutonomyProfile(source: string, profile: string, dshHome:
   const common: AutonomyDoctorBase = { stateRoot,
     databasePath: path(delivery.get('databasePath', true), 'Delivery databasePath', dshHome),
     grant: { ...grant } as unknown as IsolationGrant, principal: { channel: 'web', account: profile, tenant: 'local', user: 'operator' } }
-  const backend = isolation.has('backend') ? literal(isolation.get('backend', true), 'Isolation backend') : 'docker'
-  if (backend === 'linux-native') {
-    if (isolation.has('image') || isolation.has('dockerPath') || isolation.has('socketPath')) fail('mixed native and Docker configuration')
-    const linux = literalAutonomyLinux(isolation.get('linux', true))
-    validateAutonomyLinuxPaths(linux, stateRoot, dshHome)
-    return { ...common, backend, linux }
-  }
-  if (backend !== 'docker' || isolation.has('linux')) fail('invalid isolation backend')
-  const image = literal(isolation.get('image', true), 'Isolation image')
-  if (typeof image !== 'string' || !/^sha256:[0-9a-f]{64}$/u.test(image)) fail('immutable local isolation image required')
-  return { ...common, image, dockerPath: isolation.has('dockerPath') ? path(isolation.get('dockerPath', true), 'Docker path') : '/usr/bin/docker',
-    ...(isolation.has('backend') ? { backend: 'docker' as const } : {}) }
-
+  const declaredBackend = isolation.has('backend') ? literal(isolation.get('backend', true), 'Isolation backend') : undefined
+  // Docker profiles are never interpreted or rewritten here. Fail closed with a
+  // migration hint so an old profile cannot be reported as healthy.
+  if (declaredBackend === 'docker' || isolation.has('image') || isolation.has('dockerPath') || isolation.has('socketPath')) fail('Docker isolation was removed; migrate this profile explicitly to the linux-native backend')
+  if (declaredBackend !== undefined && declaredBackend !== 'linux-native') fail('invalid isolation backend; migrate this profile explicitly to the linux-native backend')
+  if (!isolation.has('linux')) fail('missing linux-native isolation descriptor; migrate this profile explicitly')
+  const linux = literalAutonomyLinux(isolation.get('linux', true))
+  validateAutonomyLinuxPaths(linux, stateRoot, dshHome)
+  return { ...common, backend: 'linux-native', linux }
 }
 
 /** A read-only snapshot, never pairing, migration, or an authorization for future execution. */
@@ -114,15 +110,10 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
 
 /** Verify only the persisted backend descriptor; never fetch, prepare or renew. */
 export async function probeAutonomyProfileRuntime(profile: AutonomyDoctorProfile): Promise<void> {
-  if (profile.backend === 'linux-native') {
-    const { verifyLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation')
-    const { probeLinuxIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
-    await verifyLinuxRuntime(profile.linux.runtime)
-    await probeLinuxIsolationRuntime(profile.linux)
-  } else {
-    const { probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
-    await probeIsolationRuntime(profile.image, profile.dockerPath)
-  }
+  const { verifyLinuxRuntime } = await import('@dsh-enhanced/assistant-isolation')
+  const { probeLinuxIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation/native-resources')
+  await verifyLinuxRuntime(profile.linux.runtime)
+  await probeLinuxIsolationRuntime(profile.linux)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +476,8 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
   // readiness snapshot is an explicit `--readiness` opt-in so an autonomy
   // profile's diagnostic run is unchanged.
   const parsed = inspectAutonomyProfile(source, profile, dshHome)
-  const { inspectIsolationGrant, probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
-  if (typeof inspectIsolationGrant !== 'function' || typeof probeIsolationRuntime !== 'function') fail('install the matching assistant-isolation version with grant diagnostics; no state was changed')
+  const { inspectIsolationGrant } = await import('@dsh-enhanced/assistant-isolation')
+  if (typeof inspectIsolationGrant !== 'function') fail('install the matching assistant-isolation version with grant diagnostics; no state was changed')
   const owner = inspectAutonomyOwner(parsed)
   const grant = inspectIsolationGrant({ stateRoot: parsed.stateRoot, grant: parsed.grant })
   // Report persisted state before dispatching a disposable, separately bounded probe.

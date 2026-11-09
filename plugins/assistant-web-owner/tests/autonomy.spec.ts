@@ -3,20 +3,34 @@ import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { describe, expect, it } from 'vitest'
 import { parseDocument } from 'yaml'
-import { autonomyDockerPath, prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyProfileInput, type FiniteAutonomyTerms } from '../src/autonomy.ts'
+import { prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyLinuxConfig, type AutonomyProfileInput, type FiniteAutonomyTerms } from '../src/autonomy.ts'
 
 // /var is an OS symlink on macOS; use a virtual home beneath canonical /.
-const input: AutonomyProfileInput & { isolation: FiniteAutonomyTerms & { image: string; backend?: 'docker' } } = {
-  dshHome: '/dsh-autonomy-fixture/home', profile: 'web', workspace: '/srv/workspace', preset: 'standard',
-  isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 },
+const fixtureHome = '/dsh-autonomy-fixture/home'
+const cgroupRoots: LinuxCgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/uid-1000', memory: '/sys/fs/cgroup/memory/uid-1000', pids: '/sys/fs/cgroup/pids/uid-1000', freezer: '/sys/fs/cgroup/freezer/uid-1000' }
+function linuxFor(home: string): AutonomyLinuxConfig {
+  const root = join(home, 'rsi-linux-runtimes', 'web', 'runtime')
+  const runtime: LinuxRuntime = { schemaVersion: 1, backend: 'linux-native', platform: process.arch === 'arm64' ? 'linux-arm64' : 'linux-x64',
+    sourceCommit: 'a'.repeat(40), lockSha256: 'b'.repeat(64), root: { path: root, dev: 1, ino: 2, sha256: 'c'.repeat(64) },
+    nodePath: join(root, 'bin/node'), nodeSha256: 'd'.repeat(64), pnpmPath: join(root, 'pnpm/bin/pnpm.mjs'),
+    nativePnpmRoot: join(root, 'pnpm-native'), nativePnpmPath: join(root, 'pnpm-native/pnpm'), modulesPath: join(root, 'node_modules'),
+    storePath: join(root, 'store'), cachePath: join(root, 'cache'),
+    versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '5.9.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } }
+  return { runtime, cgroupRoots }
 }
+const input: AutonomyProfileInput = {
+  dshHome: fixtureHome, profile: 'web', workspace: '/srv/workspace', preset: 'standard',
+  isolation: { backend: 'linux-native', linux: linuxFor(fixtureHome), maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 },
+}
+const finite: FiniteAutonomyTerms = { maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 }
 const publishedUserHome = join(realpathSync(tmpdir()), `web-owner-published-defaults-${process.pid}`)
 const rows = (home = join(publishedUserHome, '.dsh')) => `
 - id: dsh-enhanced-assistant-isolation
   name: '@dsh-enhanced/assistant-isolation'
-  config: { dockerPath: /usr/bin/docker }
+  config: {}
 - id: dsh-enhanced-assistant-actions
   name: '@dsh-enhanced/assistant-actions'
   config: {}
@@ -36,6 +50,9 @@ const rows = (home = join(publishedUserHome, '.dsh')) => `
     databasePath: ${join(home, 'assistant-proactive.sqlite')}
     profiles: []
 `
+function localInputAt(home: string, workspace: string): AutonomyProfileInput {
+  return { ...input, dshHome: home, workspace, isolation: { ...input.isolation, linux: linuxFor(home) } }
+}
 const owner = { id: 'owner-record', version: 7 }
 function prepareWithHome(home: string, ...args: Parameters<typeof prepareProfile>): string {
   const previous = process.env.HOME; process.env.HOME = home
@@ -63,15 +80,23 @@ describe('prepareAutonomyProfile', () => {
     }])
   })
 
-  it('rejects disabled, duplicate, custom image, and custom grant conflicts', () => {
+  it('rejects disabled, duplicate, drifted Linux descriptor, and custom grant conflicts', () => {
     const effective = rows()
     expect(() => prepareAutonomyProfile(input, '[]', effective.replace('id: dsh-enhanced-assistant-actions', 'id: dsh-enhanced-assistant-actions\n  disabled: true'), owner)).toThrow(/disabled/)
     expect(() => prepareAutonomyProfile(input, '[]', `${effective}- id: dsh-enhanced-assistant-isolation\n`, owner)).toThrow(/duplicate/)
     const configured = prepareAutonomyProfile(input, '[]', effective, owner, 1_000)
-    const image = configured.replace(input.isolation.image, `sha256:${'b'.repeat(64)}`)
-    expect(() => prepareAutonomyProfile(input, image, image, owner, 2_000)).toThrow(/image differs/)
+    const drifted = configured.replace('c'.repeat(64), 'e'.repeat(64))
+    expect(() => prepareAutonomyProfile(input, drifted, drifted, owner, 2_000)).toThrow(/descriptor differs/)
     const grants = configured.replace('maxRuns: 3', 'maxRuns: 4')
     expect(() => prepareAutonomyProfile(input, grants, grants, owner, 2_000)).toThrow(/managed isolation grant differs/)
+  })
+
+  it('refuses to rewrite an existing Docker profile', () => {
+    const effective = rows()
+    for (const config of [`{ image: 'sha256:${'a'.repeat(64)}' }`, '{ backend: docker }', '{ dockerPath: /usr/bin/docker }', '{ socketPath: /var/run/docker.sock }']) {
+      const docker = effective.replace("name: '@dsh-enhanced/assistant-isolation'\n  config: {}", `name: '@dsh-enhanced/assistant-isolation'\n  config: ${config}`)
+      expect(() => prepareAutonomyProfile(input, '[]', docker, owner)).toThrow(/existing Docker isolation requires explicit migration/)
+    }
   })
 
   it('does not renew an existing managed grant and requires an unchanged owner scope', () => {
@@ -137,7 +162,7 @@ describe('prepareAutonomyProfile', () => {
     try {
       const dshHome = join(root, 'home'); const outside = join(root, 'outside')
       await mkdir(dshHome); await mkdir(outside); await symlink(outside, join(dshHome, 'link'))
-      const localInput = { ...input, dshHome, workspace: join(root, 'workspace') }
+      const localInput = localInputAt(dshHome, join(root, 'workspace'))
       const cases = [
         ['assistant-isolation', 'stateRoot', 'Isolation stateRoot'],
         ['assistant-actions', 'stateRoot', 'Actions stateRoot'],
@@ -170,7 +195,7 @@ describe('prepareAutonomyProfile', () => {
     try {
       const physical = join(root, 'physical'); const alias = join(root, 'alias')
       await mkdir(physical); await symlink(physical, alias)
-      const aliasedInput = { ...input, dshHome: alias, workspace: join(root, 'workspace') }
+      const aliasedInput = { ...input, dshHome: alias, workspace: join(root, 'workspace'), isolation: { ...input.isolation, linux: linuxFor(physical) } }
       const patch = prepareAutonomyProfile(aliasedInput, '[]', rows(), owner, 1_000)
       const canonical = await realpath(physical)
       expect(config(patch, 'dsh-enhanced-assistant-isolation').stateRoot).toBe(join(canonical, 'assistant-isolation', 'web'))
@@ -189,7 +214,7 @@ describe('prepareAutonomyProfile', () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-autonomy-existing-')))
     try {
       const home = join(root, 'home'); const dshHome = join(home, '.dsh'); await mkdir(home); await mkdir(dshHome)
-      const effective = rows(dshHome); const localInput = { ...input, dshHome, workspace: join(root, 'workspace') }
+      const effective = rows(dshHome); const localInput = localInputAt(dshHome, join(root, 'workspace'))
       const explicit = `
 - id: dsh-enhanced-assistant-skills
   config: { databasePath: ${join(home, '.dsh', 'assistant-skills.sqlite')} }
@@ -213,7 +238,7 @@ describe('prepareAutonomyProfile', () => {
     try {
       const physical = join(root, 'physical'); const alias = join(root, 'alias'); const outside = join(root, 'outside')
       await mkdir(physical); await mkdir(outside); await symlink(physical, alias); await symlink(outside, join(physical, 'escape'))
-      const localInput = { ...input, dshHome: alias, workspace: join(root, 'workspace') }
+      const localInput = { ...input, dshHome: alias, workspace: join(root, 'workspace'), isolation: { ...input.isolation, linux: linuxFor(physical) } }
       const safe = `
 - id: dsh-enhanced-assistant-skills
   config:
@@ -229,19 +254,21 @@ describe('prepareAutonomyProfile', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  it('probes the same literal Docker path that the runtime will use', () => {
+  it('rejects Docker-era options and profile settings with an explicit migration error', () => {
+    for (const value of [
+      { ...finite, image: `sha256:${'a'.repeat(64)}` },
+      { ...finite, backend: 'docker' },
+    ]) expect(() => validateAutonomyOptions(value as never)).toThrow(/Docker isolation was removed; use the linux-native backend/)
     const effective = rows()
-    const custom = prepareAutonomyProfile(input, '[]', effective.replace('/usr/bin/docker', '/opt/docker'), owner, 1_000)
-    expect(autonomyDockerPath(custom)).toBe('/opt/docker')
-    expect(autonomyDockerPath(prepareAutonomyProfile(input, '[]', effective, owner, 1_000))).toBe('/usr/bin/docker')
-    for (const value of ['docker', '/opt/../docker', '!!js getDocker()']) {
-      expect(() => prepareAutonomyProfile(input, '[]', effective.replace('/usr/bin/docker', value), owner)).toThrow(/path/)
+    for (const config of [`{ image: 'sha256:${'a'.repeat(64)}' }`, '{ backend: docker }']) {
+      const docker = effective.replace("name: '@dsh-enhanced/assistant-isolation'\n  config: {}", `name: '@dsh-enhanced/assistant-isolation'\n  config: ${config}`)
+      expect(() => prepareAutonomyProfile(input, '[]', docker, owner)).toThrow(/existing Docker isolation requires explicit migration/)
     }
   })
 
-  it('validates bounded immutable options', () => {
-    expect(() => validateAutonomyOptions({ ...input.isolation, image: 'latest' })).toThrow(/immutable/)
-    expect(() => validateAutonomyOptions({ ...input.isolation, maxRuns: 10_001 })).toThrow(/maxRuns/)
-    expect(() => validateAutonomyOptions({ ...input.isolation, maxTotalDurationMs: 1 })).toThrow(/maxTotalDurationMs/)
+  it('validates bounded linux-native options', () => {
+    expect(() => validateAutonomyOptions({ ...finite, maxRuns: 10_001 })).toThrow(/maxRuns/)
+    expect(() => validateAutonomyOptions({ ...finite, maxTotalDurationMs: 1 })).toThrow(/maxTotalDurationMs/)
+    expect(() => validateAutonomyOptions({ ...finite, backend: 'linux-native', source: { kind: 'local-head', repository: 'relative' } })).toThrow(/canonical absolute path/)
   })
 })

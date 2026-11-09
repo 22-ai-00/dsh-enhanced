@@ -24,7 +24,7 @@ import { prepareWebOwnerProfile, runWebOwnerSetup, type WebOwnerSetupInput } fro
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(now = Date.now(), native = false) {
+async function fixture(now = Date.now()) {
   const dshHome = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-goal-admission-'))); roots.push(dshHome)
   const input: WebOwnerSetupInput = { dshHome, profile: 'web', workspace: join(dshHome, 'workspace'), preset: 'standard' }
   const slugs = ['event-triggers', 'personal-assistant', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-verifier', 'assistant-deepseek-budget']
@@ -36,12 +36,6 @@ async function fixture(now = Date.now(), native = false) {
     if (!isSeq(inserts)) throw new Error('fixture expected published inserts')
     for (const row of inserts.items) effectiveDocument.add(row)
   }
-  // Metadata-only fixture: verifier preparation validates an executable path but never runs Docker here; Linux E2E covers Docker execution.
-  if (!isSeq(effectiveDocument.contents)) throw new Error('fixture expected effective rows')
-  const isolationRow = effectiveDocument.contents.items.find(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')
-  if (!isMap(isolationRow)) throw new Error('fixture expected isolation row')
-  const metadataExecutable = await realpath(process.execPath)
-  if (!native) isolationRow.setIn(['config', 'dockerPath'], metadataExecutable)
   const effective = effectiveDocument.toString()
   const initial = prepareWebOwnerProfile(input, '[]', effective)
   await mkdir(input.workspace)
@@ -57,10 +51,9 @@ async function fixture(now = Date.now(), native = false) {
   const uid = process.getuid?.() || 1000
   const cgroupRoots = {mode:'v1' as const,cpu:`/sys/fs/cgroup/cpu/dsh-native/uid-${uid}`,memory:`/sys/fs/cgroup/memory/dsh-native/uid-${uid}`,pids:`/sys/fs/cgroup/pids/dsh-native/uid-${uid}`,freezer:`/sys/fs/cgroup/freezer/dsh-native/uid-${uid}`}
   const finite = {maxRuns:20,leaseMs:3600000,maxTotalDurationMs:600000}
-  const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: native ? {...finite,backend:'linux-native',linux:{runtime,cgroupRoots}} : { ...finite,image: `sha256:${'a'.repeat(64)}` } }, initial.patch, effective, realOwner, now) }
+  const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: {...finite,backend:'linux-native',linux:{runtime,cgroupRoots}} }, initial.patch, effective, realOwner, now) }
   const profile = inspectAutonomyProfile(prepared.patch, input.profile, input.dshHome)
-  if (!native) expect(profile.dockerPath).toBe(metadataExecutable)
-  else expect(profile).toMatchObject({backend:'linux-native',linux:{runtime,cgroupRoots}})
+  expect(profile).toMatchObject({backend:'linux-native',linux:{runtime,cgroupRoots}})
   const snapshot = { binding: realBinding, owner: realOwner }
   await mkdir(profile.stateRoot, { recursive: true, mode: 0o700 })
   const isolation = new IsolationLedger(join(profile.stateRoot, 'ledger.sqlite'))
@@ -164,7 +157,7 @@ describe('goal admission planning', () => {
   // Native fixtures freeze metadata only. No namespace/cgroup/runtime probe or
   // held-out process is executed here; main owns real Linux consumer evidence.
   test('native Goal authority copies the persistent descriptor and exact finite terms without Docker fields', async () => {
-    const f = await fixture(Date.now(), true)
+    const f = await fixture(Date.now())
     const plan = prepareGoalAdmission(f.input,f.prepared.patch,f.effective,task(),f.snapshot,Date.now())
     const verifier = config(plan.patch,'dsh-enhanced-assistant-verifier')
     expect(verifier.authorities).toHaveLength(1)
@@ -183,12 +176,20 @@ describe('goal admission planning', () => {
   })
 
   test('native formal admission replay preserves owner, grant expiry and actual consumed isolation budget', async () => {
-    const f = await fixture(Date.now(),true), privateTask = join(f.input.dshHome,'native-goal-task.json')
+    const f = await fixture(Date.now()), privateTask = join(f.input.dshHome,'native-goal-task.json')
     await writeFile(privateTask,task(),{mode:0o600})
     const ledgerPath = join(f.profile.stateRoot,'ledger.sqlite'), ledger = new IsolationLedger(ledgerPath)
+    const authority = ledger.claimController('replay-owner', 60_000)
     const grant = f.profile.grant
+    ledger.syncGrants([grant], authority)
+    const contract = {schemaVersion:1 as const,backend:'linux-native' as const,runtimeDigest:'b'.repeat(64),profile:'ordinary' as const,
+      limits:{maxDurationMs:1000,maxInputBytes:1024,maxOutputBytes:1024,maxArtifactBytes:1024,maxFiles:8,memoryMiB:64,workspaceMiB:16,workspaceInodes:128,pidsLimit:16,cpus:1},
+      keeperLimits:{memoryMiB:32,pidsLimit:8,cpus:0.1},cgroupRoots:f.cgroupRoots}
     ledger.prepare({identity:{principalDigest:grant.principalDigest,principalRecordId:grant.principalRecordId,principalVersion:grant.principalVersion,workspace:grant.workspace,agentPreset:grant.agentPreset},
-      sessionId:f.snapshot.binding.sessionId,grantId:grant.id,idempotencyKey:'already-reserved',requestDigest:'already-reserved',durationMs:1000})
+      sessionId:f.snapshot.binding.sessionId,grantId:grant.id,idempotencyKey:'already-reserved',requestDigest:'c'.repeat(64),durationMs:1000,
+      authority,backend:'linux-native',linuxContract:contract,
+      resourceReservation:{memoryMiB:112,workspaceInodes:128,maxMemoryMiB:224,maxWorkspaceInodes:256},
+      storageBudget:{maxStateBytes:1_000_000,maxJobRecords:100,reservedBytes:4096,observation:{bytes:0,observedAt:Date.now()}}})
     ledger.close()
     const read = (path: string, table: string) => {const db = new DatabaseSync(path,{readOnly:true});try {return db.prepare(`SELECT * FROM ${table}`).all()} finally {db.close()}}
     const grants = read(ledgerPath,'isolation_grants'), jobs = read(ledgerPath,'isolation_jobs'), owners = read(f.prepared.databasePath,'delivery_principals')
@@ -203,7 +204,7 @@ describe('goal admission planning', () => {
   })
 
   test('native managed authority refuses runtime/cgroup/budget/owner drift, expiry and mixed profiles', async () => {
-    const f = await fixture(Date.now(),true)
+    const f = await fixture(Date.now())
     const first = prepareGoalAdmission(f.input,f.prepared.patch,f.effective,task(),f.snapshot,Date.now())
     const change = (callback: (document: ReturnType<typeof parseDocument>) => void) => { const document = parseDocument(first.patch); callback(document); return document.toString() }
     const isolateIndex = (document: ReturnType<typeof parseDocument>) => {if (!isSeq(document.contents)) throw new Error('rows');return document.contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')}
