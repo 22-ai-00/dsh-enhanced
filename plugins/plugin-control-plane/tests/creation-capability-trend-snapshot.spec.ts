@@ -173,7 +173,9 @@ describe('schema 35 migration', () => {
     legacy.close()
     const migrated = openControlPlaneDatabase(path)
     expect(version(migrated)).toBe(controlPlaneSchemaVersion)
-    expect(controlPlaneSchemaVersion).toBe(35)
+    // Schema 35 introduced this table; later versions retain it and migrate
+    // further, so assert the table migration rather than a frozen version.
+    expect(version(migrated)).toBeGreaterThanOrEqual(35)
     expect(migrated.prepare("SELECT name FROM sqlite_schema WHERE tbl_name='created_capability_trend_snapshots' ORDER BY name")
       .all().map(row => (row as { name: string }).name)).toEqual(['created_capability_trend_snapshots',
       'created_capability_trend_snapshots_no_delete', 'created_capability_trend_snapshots_no_update',
