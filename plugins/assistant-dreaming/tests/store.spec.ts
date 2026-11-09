@@ -129,6 +129,28 @@ describe('lottery tickets and recalls (schema 2)', () => {
     store.close()
   })
 
+  test('drops tickets of resolved or pruned recorded ideas but keeps active ones', async () => {
+    const { store } = await makeStore()
+    store.beginDream('run-1', 1, '2026-11-08', 1, 'f'.repeat(64))
+    const makeIdea = (id: string) => store.recordIdea({
+      id, runId: 'run-1', createdAt: 10, dayKey: '2026-11-08',
+      summary: `s-${id}`, detail: 'd', evidenceRefs: [REF],
+    })
+    makeIdea('idea-open')
+    makeIdea('idea-done')
+    store.transitionIdea('idea-done', 'validated', 'owner', 20)
+    store.upsertTicket({ subjectKind: 'recorded-idea', subjectKey: 'idea-open', value: 1, digest: DIGEST(1), now: 1 })
+    store.upsertTicket({ subjectKind: 'recorded-idea', subjectKey: 'idea-done', value: 2, digest: DIGEST(2), now: 1 })
+    store.upsertTicket({ subjectKind: 'recorded-idea', subjectKey: 'idea-ghost', value: 3, digest: DIGEST(3), now: 1 })
+    store.upsertTicket({ subjectKind: 'goal', subjectKey: 'goal-1', value: 4, digest: DIGEST(4), now: 1 })
+    expect(store.pruneResolvedIdeaTickets()).toBe(2)
+    const remaining = store.listTickets().map(row => row.subjectKey)
+    expect(remaining).toEqual(['goal-1', 'idea-open'])
+    // Idempotent: nothing left to prune on the next wake.
+    expect(store.pruneResolvedIdeaTickets()).toBe(0)
+    store.close()
+  })
+
   test('migrates a schema 1 ledger to 2 without losing dream data', async () => {
     const { store, path } = await makeStore()
     store.beginDream('run-1', 1, '2026-11-08', 1, 'f'.repeat(64))

@@ -17,6 +17,8 @@ import { enqueueDreamNotification } from './notify.js'
 
 /** Default circular window for a ticket match (roughly 1% of the modulus). */
 const DREAM_TICKET_WINDOW = 5_000
+/** Bounds how many recorded ideas may hold recall tickets per wake. */
+const DREAM_RECORDED_TICKET_LIMIT = 100
 
 const EXECUTOR = 'assistant-dreaming-v1'
 const OWNER = 'assistant-dreaming'
@@ -98,12 +100,24 @@ export class AssistantDreamingService extends Service {
 
   /**
    * Register a stable ticket for every recallable subject derived from the
-   * current projected material. Pure registration: no randomness here, the
-   * ticket value comes from the HMAC seed in assignTicket.
+   * current projected material and for this lane's unresolved recorded ideas.
+   * Pure registration: no randomness here, the ticket value comes from the
+   * HMAC seed in assignTicket.
    */
   #registerTickets(store: DreamStore, material: DreamMaterial, now: number, seedDigest: string): void {
     for (const item of material.items) {
       const subject: LotterySubject = { kind: item.kind, key: item.evidenceRef }
+      const ticket = assignTicket({ seedDigest, lane: this.#lane, subject })
+      store.upsertTicket({ subjectKind: subject.kind, subjectKey: subject.key,
+        value: ticket.value, digest: ticket.digest, now })
+    }
+    // Recorded-but-unresolved ideas are recall subjects too, so a past dream
+    // can be revisited; resolved ones (validated/rejected/withdrawn) stop
+    // holding a ticket by never being re-registered.
+    store.pruneResolvedIdeaTickets()
+    for (const idea of store.listIdeas(DREAM_RECORDED_TICKET_LIMIT)) {
+      if (idea.state !== 'recorded') continue
+      const subject: LotterySubject = { kind: 'recorded-idea', key: idea.id }
       const ticket = assignTicket({ seedDigest, lane: this.#lane, subject })
       store.upsertTicket({ subjectKind: subject.kind, subjectKey: subject.key,
         value: ticket.value, digest: ticket.digest, now })
@@ -277,8 +291,17 @@ export class AssistantDreamingService extends Service {
         model,
         scope: scopeConfig,
         material: seedMaterial,
-        recallHits: hits.map(hit => ({ kind: hit.subject.kind, key: hit.subject.key,
-          ticketValue: hit.ticketValue, distance: hit.distance })),
+        recallHits: hits.map(hit => {
+          const focus = { kind: hit.subject.kind, key: hit.subject.key,
+            ticketValue: hit.ticketValue, distance: hit.distance }
+          // Recorded ideas live outside the projection material; carry their
+          // own summary so the recalled subject is not just an opaque id.
+          if (hit.subject.kind === 'recorded-idea') {
+            const idea = store.idea(hit.subject.key)
+            if (idea !== undefined) return { ...focus, summary: idea.summary }
+          }
+          return focus
+        }),
         deadlineAt: Math.min(now + config.maxDurationMs, Date.now() + config.maxDurationMs),
         signal: input.signal,
         onSubmit: ideas => {

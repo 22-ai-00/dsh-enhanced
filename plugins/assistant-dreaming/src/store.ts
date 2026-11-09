@@ -294,6 +294,18 @@ export class DreamStore {
     return Number(result.changes) === 1
   }
 
+  /**
+   * Drop tickets held by recorded ideas that left the `recorded` state
+   * (validated/rejected/withdrawn): a resolved idea must stop being recalled.
+   */
+  pruneResolvedIdeaTickets(): number {
+    assertMutable(this.closed)
+    return Number(this.db.prepare(`DELETE FROM dream_tickets
+      WHERE subject_kind='recorded-idea' AND NOT EXISTS (
+        SELECT 1 FROM dream_ideas WHERE dream_ideas.lane=? AND dream_ideas.state='recorded'
+          AND dream_ideas.id=dream_tickets.subject_key)`).run(this.lane).changes)
+  }
+
   lastRecall(): { occurrence: number; subjectKind: string; subjectKey: string; at: number } | undefined {
     const row = this.db.prepare(`SELECT occurrence, subject_kind, subject_key, at FROM dream_recalls
       WHERE lane=? ORDER BY seq DESC LIMIT 1`).get(this.lane) as

@@ -30,6 +30,8 @@ export interface DreamRecallFocus {
   key: string
   ticketValue: number
   distance: number
+  /** For subjects not inside the projection material (e.g. recorded ideas), the recalled text itself. */
+  summary?: string
 }
 
 export interface DreamAgentInput {
