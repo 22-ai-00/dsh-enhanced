@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
-import { lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { ControlPlaneCliError } from './errors.js'
 import type { ControlPlaneStore } from './store.js'
 import type { PluginSourcePlan } from './types.js'
@@ -399,6 +399,44 @@ export function validateScopedPluginFiles(files: readonly ScopedPluginFile[]): v
     totalBytes += bytes
     if (totalBytes > MAX_PREPARED_TOTAL_BYTES) throw new ControlPlaneCliError('INVALID_ARGUMENT', `prepared files exceed the ${MAX_PREPARED_TOTAL_BYTES}-byte total bound`)
   }
+}
+
+/**
+ * Reads an owner-supplied plugin directory into scoped files. Symmetric with
+ * writeScopedPluginFiles: only regular files are read (no symlink, socket,
+ * fifo or device), every entry stays inside the root with a POSIX relative
+ * path, and the same count/size/path bounds are enforced before return. This is
+ * the structured-CLI side of the owner-instruction entry; it never resolves a
+ * path outside the given root and rejects anything that could change during read.
+ */
+export async function readScopedPluginFiles(root: string): Promise<ScopedPluginFile[]> {
+  const canonicalRoot = await realpath(root)
+  const collected: ScopedPluginFile[] = []
+  const walk = async (directory: string): Promise<void> => {
+    const entries = await lstat(directory)
+    if (entries.isSymbolicLink() || !entries.isDirectory()) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin source root must be a real directory')
+    }
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (entry.name === '.git') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin source must not contain a .git directory')
+      const absolute = join(directory, entry.name)
+      const stat = await lstat(absolute)
+      if (stat.isSymbolicLink()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `symlink is not allowed in plugin source: ${entry.name}`)
+      if (stat.isDirectory()) { await walk(absolute); continue }
+      if (!stat.isFile()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `only regular files are allowed in plugin source: ${entry.name}`)
+      const relativePath = relative(canonicalRoot, absolute).split(sep).join('/')
+      if (relativePath === '' || isAbsolute(relativePath) || relativePath.startsWith('..')
+        || relativePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `plugin source path escapes its root: ${relativePath}`)
+      }
+      collected.push({ path: relativePath.normalize('NFC'), content: await readFile(absolute, 'utf8') })
+    }
+  }
+  await walk(canonicalRoot)
+  // Enforce the identical durable-job bounds before the caller adds the creation
+  // path boundary; an empty directory or an oversized set fails here.
+  validateScopedPluginFiles(collected)
+  return collected
 }
 
 async function writeValidatedPluginFiles(worktree: string, name: string, files: readonly ScopedPluginFile[],

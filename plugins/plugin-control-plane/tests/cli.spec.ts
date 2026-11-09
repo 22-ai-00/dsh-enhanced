@@ -1579,4 +1579,30 @@ describe.sequential('trusted staged CLI', () => {
       hostAttestor: { ...value.trust.hostAttestor, sha256: '0'.repeat(64) } }), { mode: 0o600 })
     await expect(loadTrustConfig(value.trustPath)).rejects.toThrow('digest changed')
   })
+
+  test('source revision-enqueue records a schema-38 owner-instruction request from a files directory', async () => {
+    const value = await fixture()
+    const filesDir = join(value.root, 'request-files')
+    await mkdir(join(filesDir, 'src'), { recursive: true }); await writeFile(join(filesDir, 'README.md'), '# demo\n')
+    await writeFile(join(filesDir, 'src', 'index.ts'), 'export const a = 1\n')
+    const commit = 'a'.repeat(40)
+    // The base commit need not exist for the request layer; the service re-checks
+    // the adopted parent before enqueueing, so the CLI only freezes the intent.
+    const output = await withEnvironment({ DSH_HOME: value.dshHome }, async () => {
+      const chunks: string[] = []; const original = process.stdout.write.bind(process.stdout)
+      process.stdout.write = ((chunk: string | Uint8Array) => { chunks.push(String(chunk)); return true }) as typeof process.stdout.write
+      try { await runPluginControl(['source', 'revision-enqueue', '--plan-id', 'plan-1', '--plugin-name', 'demo-plugin',
+        '--files-dir', filesDir, '--expected-base-commit', commit, '--idempotency-key', 'req-1', '--ttl-ms', '900000']) }
+      finally { process.stdout.write = original }
+      return JSON.parse(chunks.join('')) as { requestId: string; status: string }
+    })
+    expect(output.status).toBe('pending')
+    expect(output.requestId).toMatch(/^oir-[a-f0-9]{32}$/u)
+    const store = new ControlPlaneStore({ path: value.state })
+    const recorded = store.getOwnerInstructionRequest(output.requestId)
+    store.close()
+    expect(recorded).toMatchObject({ planId: 'plan-1', pluginName: 'demo-plugin', expectedBaseCommit: commit,
+      status: 'pending', ttlMs: 900_000, idempotencyKey: 'req-1' })
+    expect(recorded!.files.map(file => file.path).sort()).toEqual(['README.md', 'src/index.ts'])
+  }, 30_000)
 })

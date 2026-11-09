@@ -18,8 +18,9 @@ import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthor
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
 import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
 import { ControlPlaneCliError } from './errors.js'
+import { validateSourceCreationFiles } from './source-creation.js'
 import { ControlledProcessError, executeControlledProcess } from './adapter-process.js'
-import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, runLocalCommand, sourcePathAllowed, verifyPreparedSourceWorktree } from './source-workspace.js'
+import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, readScopedPluginFiles, runLocalCommand, sourcePathAllowed, verifyPreparedSourceWorktree } from './source-workspace.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
 import type { ActivationRetractionAuthority, ActivationRetractionReceipt, ApprovalReceipt, HostAttestationReceipt,
@@ -1231,6 +1232,33 @@ async function sourceGc(argv: readonly string[]): Promise<void> {
   } finally { store.close() }
 }
 
+/**
+ * Records one structured owner-instruction revision request. This CLI process
+ * has no Delivery access, so it only freezes the owner-supplied candidate files
+ * and target into the schema-38 request table; the running service re-validates
+ * the owner route inside its trust boundary before enqueueing. Files come from
+ * a real directory (no symlinks/escapes) and are bounded by the same prepared
+ * file limits as a durable source job.
+ */
+async function sourceRevisionEnqueue(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const planId = option(argv, '--plan-id')
+    const pluginName = option(argv, '--plugin-name')
+    const filesDir = option(argv, '--files-dir')
+    const expectedBaseCommit = option(argv, '--expected-base-commit')
+    const idempotencyKey = option(argv, '--idempotency-key')
+    const ttlMs = integerOption(argv, '--ttl-ms')
+    const files = await readScopedPluginFiles(filesDir)
+    validateSourceCreationFiles(files)
+    const request = store.recordOwnerInstructionRequest({ planId, pluginName, expectedBaseCommit, files,
+      ttlMs, idempotencyKey, createdAt: Date.now() })
+    process.stdout.write(`${JSON.stringify({ requestId: request.requestId, status: request.status,
+      planId: request.planId, pluginName: request.pluginName, expiresAt: request.expiresAt })}\n`)
+  } finally { store.close() }
+}
+
 function assertReleaseCommand(argv: readonly string[]): void {
   if (argv.includes('--phase')) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'release phase is derived from durable plan status')
 }
@@ -1447,7 +1475,8 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'source') {
     if (argv[1] === 'verify-prepared') return sourceVerifyPrepared(argv)
     if (argv[1] === 'gc') return sourceGc(argv)
-    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control source <verify-prepared|gc>')
+    if (argv[1] === 'revision-enqueue') return sourceRevisionEnqueue(argv)
+    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control source <verify-prepared|gc|revision-enqueue>')
   }
   if (command === 'release-start') return releaseStart(argv)
   if (command === 'release-request') return releaseRequest(argv)
@@ -1455,5 +1484,5 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'release-attest') return releaseAttest(argv)
   if (command === 'release-reconcile') return releaseReconcile(argv)
   if (command === 'activation-plan') return activationPlan(argv)
-  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|source verify-prepared|source gc|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
+  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|source verify-prepared|source gc|source revision-enqueue|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
 }
