@@ -18,7 +18,8 @@ import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding
 import { inspectSourceCreationContext, validateSourceCreationFiles, validateSourceCreationGrant } from './source-creation.js'
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
-import type { SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+import type { SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord,
+  SourceJobsConfig, SourceOwnerInstruction } from './source-job-types.js'
 import { SOURCE_BUILD_CHECK_FAILED, type SourceBuildDiagnostics } from './source-build-diagnostics.js'
 
 export const SOURCE_JOB_OWNER = 'plugin-control-plane-source'
@@ -37,6 +38,8 @@ export interface EnqueueSourceJobInput {
   parentPlanId?: string
   /** Host expectation only; authoritative bytes are reread through the registered producer. */
   growthRun?: SourceGrowthRunBinding
+  /** Authenticated alternative trigger for revise-created without a task failure. */
+  ownerInstruction?: { instructionId: string; digest: string }
   expectedBaseCommit: string; ttlMs: number; owner: SourceJobCaller; signal: AbortSignal; assertCurrent: () => void | Promise<void>
 }
 export interface SourceJobPorts {
@@ -236,7 +239,7 @@ export class SourceJobRuntime {
   /** A revision is adoptable only when its independent review, any configured regression, and any configured benefit outcome verified. */
   private revisionAdoptionReady(job: SourceJobRecord, planId: string): boolean {
     if (this.options.store.getRevisionVerificationStatus(planId) !== 'verified') return false
-    if (job.intent.revision?.growthRun.revisionRegressionAcceptance !== undefined
+    if (job.intent.revision?.growthRun?.revisionRegressionAcceptance !== undefined
       && (!(this.options.verifyPreparedRevisionRegression !== undefined)
         || this.options.store.getRevisionRegressionStatus(planId) !== 'verified')) {
       return false
@@ -276,12 +279,18 @@ export class SourceJobRuntime {
       signal.throwIfAborted(); this.assertOwner(job)
     }
     if (initial.mode === 'prepared-revise') {
-      if (job.intent.mode !== 'revise-created' || !job.intent.revision?.growthRun.revisionAcceptance || !initial.sourceRevision?.growthRun.revisionAcceptance) return
+      // Task-failure revisions continue only while their frozen acceptance pins
+      // are fresh; owner-instruction revisions carry no growth run and are
+      // re-authorized by assertOwner (instruction, parent and owner checks).
+      const revisionPins = job.intent.revision?.growthRun?.revisionAcceptance !== undefined
+        && initial.sourceRevision?.growthRun?.revisionAcceptance !== undefined
+      if (job.intent.mode !== 'revise-created'
+        || (job.intent.ownerInstruction === undefined && !revisionPins)) return
       await assertCurrent()
       if (this.options.store.getRevisionVerificationStatus(planId) === undefined && this.options.verifyPreparedRevision) await this.options.verifyPreparedRevision(job, signal)
       if (this.options.store.getRevisionVerificationStatus(planId) === 'verified'
         && this.options.store.getRevisionRegressionStatus(planId) === undefined
-        && job.intent.revision.growthRun.revisionRegressionAcceptance && this.options.verifyPreparedRevisionRegression) {
+        && job.intent.revision?.growthRun?.revisionRegressionAcceptance && this.options.verifyPreparedRevisionRegression) {
         await assertCurrent()
         await this.options.verifyPreparedRevisionRegression(job, signal)
       }
@@ -415,6 +424,28 @@ export class SourceJobRuntime {
     if (!this.modeAllowed(mode)) throw new Error('source job mode is not authorized')
   }
 
+  /**
+   * Fail-closed re-validation of a Host-recorded owner instruction at enqueue
+   * and at every continuation. The instruction, not the caller, freezes the
+   * target, files and owner; the gap must be the synthetic instruction gap.
+   */
+  #assertOwnerInstruction(binding: EnqueueSourceJobInput['ownerInstruction'],
+    input: EnqueueSourceJobInput): SourceOwnerInstruction {
+    if (!binding) throw new Error('revision requires an authenticated owner task failure or owner instruction')
+    const stored = this.options.store.getOwnerInstruction(binding.instructionId)
+    if (!stored || controlPlaneDigest(stored) !== binding.digest) throw new Error('owner instruction changed')
+    if (stored.expiresAt <= Date.now()) throw new Error('owner instruction expired')
+    if (stored.planId !== input.parentPlanId || stored.pluginName !== input.name) throw new Error('owner instruction target changed')
+    if (stored.filesDigest !== controlPlaneDigest(input.files)) throw new Error('owner instruction files changed')
+    let gapKey: string
+    try { gapKey = this.options.store.getGap(input.gapId).idempotencyKey }
+    catch { throw new Error('owner instruction gap changed') }
+    if (gapKey !== `owner-instruction:${stored.instructionId}`) {
+      throw new Error('owner instruction gap changed')
+    }
+    return stored
+  }
+
   private assertOwner(job: SourceJobRecord): void {
     this.assertMode(job.intent.mode)
     const current = this.receipt()
@@ -427,7 +458,16 @@ export class SourceJobRuntime {
       || job.intent.authority.id !== this.options.config.authorityId
       || controlPlaneDigest(job.intent.owner) !== job.intent.ownerDigest
       || (taskBacked ? !isSourceOwnerContinuation(current, job.intent.owner)
-        : controlPlaneDigest(current) !== job.intent.ownerDigest)) throw new Error('source job authority changed or expired')
+        : (job.intent.ownerInstruction !== undefined
+          ? !isSourceOwnerContinuation(current, job.intent.owner)
+          : controlPlaneDigest(current) !== job.intent.ownerDigest))) throw new Error('source job authority changed or expired')
+    // Re-validate the frozen instruction on every continuation exactly like
+    // enqueue; a revoked, changed or expired instruction cannot proceed.
+    if (job.intent.ownerInstruction !== undefined) {
+      const stored = this.options.store.getOwnerInstruction(job.intent.ownerInstruction.instructionId)
+      if (stored === undefined || controlPlaneDigest(stored) !== job.intent.ownerInstruction.digest
+        || stored.expiresAt <= Date.now()) throw new Error('owner instruction changed or expired')
+    }
     if (job.intent.revision) {
       const parent = this.options.inspectRevisionParent?.(job.intent.revision.parent.planId)
       if (!parent || parent.name !== job.intent.name || controlPlaneDigest(parent.parent) !== controlPlaneDigest(job.intent.revision.parent)) throw new Error('source revision parent changed')
@@ -456,6 +496,8 @@ export class SourceJobRuntime {
     if(input.growthRun?.protocol==='assistant-growth/source-run/v2'&&input.mode!=='create')throw new Error('work item growth only permits create')
     if(input.growthRun?.protocol==='assistant-growth/source-run/v3'&&input.mode!=='revise-created')throw new Error('work item revision growth only permits revise-created')
     if (input.mode !== 'create' && input.mode !== 'revise-created' && input.growthRun !== undefined) throw new Error('modify source job cannot carry a growth run')
+    if (input.ownerInstruction !== undefined && input.mode !== 'revise-created') throw new Error('owner instructions only authorize revise-created jobs')
+    if (input.growthRun !== undefined && input.ownerInstruction !== undefined) throw new Error('an owner instruction is not a growth run')
     if (input.mode === 'create' || input.mode === 'revise-created') validateSourceCreationFiles(input.files)
     else {
       if (input.mode !== undefined) throw new Error('invalid source job mode')
@@ -463,7 +505,8 @@ export class SourceJobRuntime {
       if (this.options.build.versioning === 'patch') assertManagedVersionPaths(input.files)
     }
     if ((input.mode === 'revise-created') !== (typeof input.parentPlanId === 'string' && input.parentPlanId.length > 0)) throw new Error('source revision parent is missing or outside revision mode')
-    return this.track(this.enqueueOwned({ ...input, files: structuredClone(input.files), owner: structuredClone(input.owner) }))
+    return this.track(this.enqueueOwned({ ...input, files: structuredClone(input.files), owner: structuredClone(input.owner),
+      ...(input.ownerInstruction === undefined ? {} : { ownerInstruction: structuredClone(input.ownerInstruction) }) }))
   }
 
   private async enqueueOwned(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
@@ -485,9 +528,18 @@ export class SourceJobRuntime {
     if (input.repository !== config.repository || await realpath(input.repository) !== config.repository) throw new Error('source job repository mismatch')
     const currentOwner = this.assertCaller(input.owner)
     const reference = this.options.store.getOwnerTaskFailureReference(input.gapId)
-    if (input.mode === 'revise-created' && !reference) throw new Error('revision requires an authenticated owner task failure')
-    const owner = reference?.owner ?? currentOwner
+    if (input.mode === 'revise-created' && reference !== undefined && input.ownerInstruction !== undefined) {
+      throw new Error('owner instruction cannot replace an authenticated owner task failure')
+    }
+    // A revise-created job without a task failure is legal only through a
+    // Host-recorded owner instruction; every frozen field must match it.
+    const instruction = input.mode === 'revise-created' && !reference
+      ? this.#assertOwnerInstruction(input.ownerInstruction, input) : undefined
+    const owner = instruction?.ownerReceipt ?? reference?.owner ?? currentOwner
     if (reference && !isSourceOwnerContinuation(currentOwner, owner)) throw new Error('source job task owner changed')
+    if (instruction !== undefined && !isSourceOwnerContinuation(currentOwner, instruction.ownerReceipt)) {
+      throw new Error('owner instruction owner changed')
+    }
     this.withGapSource(input.gapId, currentOwner, () => this.assertGrowthRun(input.growthRun, input.mode, input.gapId, owner, true),input.growthRun)
     const parent = input.mode === 'revise-created' ? this.options.inspectRevisionParent?.(input.parentPlanId!) : undefined
     if (input.mode === 'revise-created' && (!parent || parent.name !== input.name)) throw new Error('adopted revision parent unavailable or mismatched')
@@ -504,7 +556,9 @@ export class SourceJobRuntime {
           || (input.growthRun !== undefined && controlPlaneDigest(frozen.creation?.growthRun) !== controlPlaneDigest(input.growthRun))))
         || (input.mode === 'revise-created' && (controlPlaneDigest(frozen.revision?.grant) !== controlPlaneDigest(config.revision)
           || controlPlaneDigest(frozen.revision?.parent) !== controlPlaneDigest(parent!.parent)
-          || controlPlaneDigest(frozen.revision?.growthRun) !== controlPlaneDigest(input.growthRun)))
+          || (frozen.revision?.growthRun === undefined) !== (input.growthRun === undefined)
+          || (input.growthRun !== undefined && controlPlaneDigest(frozen.revision?.growthRun) !== controlPlaneDigest(input.growthRun))
+          || (frozen.ownerInstruction?.digest ?? null) !== (instruction === undefined ? null : controlPlaneDigest(instruction))))
         || frozen.repository !== input.repository || frozen.name !== input.name || frozen.gapId !== input.gapId || frozen.baseCommit !== input.expectedBaseCommit
         || frozen.ttlMs !== input.ttlMs || controlPlaneDigest(frozen.files) !== controlPlaneDigest(input.files)) throw new Error('source job idempotency conflict')
       await assertCurrent()
@@ -532,10 +586,15 @@ export class SourceJobRuntime {
       ...(input.mode === 'create' ? { mode: 'create' as const, creation: { grant: structuredClone(config.creation!), generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceCreationContext>>).generatorDigest,
         ...(input.growthRun === undefined ? {} : { growthRun: structuredClone(input.growthRun) }) } } : {}),
       ...(input.mode === 'revise-created' ? { mode: 'revise-created' as const, revision: { grant: structuredClone(config.revision!),
-        generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceRevisionContext>>).generatorDigest, parent: structuredClone(parent!.parent), growthRun: structuredClone(input.growthRun! as import('@dsh-enhanced/assistant-growth-contract').SourceGrowthRunBinding) } } : {}),
+        generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceRevisionContext>>).generatorDigest, parent: structuredClone(parent!.parent),
+        // Task-failure revisions pin a growth run; owner-instruction revisions have none.
+        ...(input.growthRun === undefined ? {}
+          : { growthRun: structuredClone(input.growthRun! as import('@dsh-enhanced/assistant-growth-contract').SourceGrowthRunBinding) }) } } : {}),
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),
+      ...(instruction === undefined ? {} : {
+        ownerInstruction: { instructionId: instruction.instructionId, digest: controlPlaneDigest(instruction) } }),
       ...('backend' in this.options.build
         ? { nativeResource: { backend: this.options.build.backend, key: id } }
         : { containerName: `dsh-source-job-${token}` }),
@@ -709,10 +768,13 @@ export class SourceJobRuntime {
     let plan: PluginSourcePlan
     try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
     if (plan.mode === 'prepared-revise') {
-      if (job.intent.mode !== 'revise-created' || plan.status !== 'pending-approval' || !plan.sourceRevision?.growthRun.revisionAcceptance) return false
+      // Task-failure revisions require fresh acceptance pins; owner-instruction
+      // revisions are re-authorized through their frozen instruction row.
+      if (job.intent.mode !== 'revise-created' || plan.status !== 'pending-approval') return false
+      if (job.intent.ownerInstruction === undefined && !plan.sourceRevision?.growthRun?.revisionAcceptance) return false
       const status = this.options.store.getRevisionVerificationStatus(plan.id)
       const verify = status === undefined && this.options.verifyPreparedRevision !== undefined
-      const regression = status === 'verified' && plan.sourceRevision.growthRun.revisionRegressionAcceptance !== undefined
+      const regression = status === 'verified' && plan.sourceRevision?.growthRun?.revisionRegressionAcceptance !== undefined
         && this.options.store.getRevisionRegressionStatus(plan.id) === undefined && this.options.verifyPreparedRevisionRegression !== undefined
       const adoption = this.options.revisionAdoptionEligible !== undefined && this.options.adoptVerifiedRevision !== undefined
         && this.revisionAdoptionReady(job, plan.id) && this.options.revisionAdoptionEligible(plan.id) === true

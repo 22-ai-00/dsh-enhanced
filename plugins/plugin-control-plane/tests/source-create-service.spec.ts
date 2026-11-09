@@ -1326,6 +1326,8 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
 function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
   alter?: (body: Omit<PluginRevisionVerificationCertificate, 'signature'>) => void): PluginRevisionVerificationCertificate {
   const { plan, reference } = f.service.inspectPreparedRevision(planId)
+  const growthRun = plan.sourceRevision!.growthRun
+  if (!growthRun) throw new Error('task-failure revision fixture must pin a growth run')
   const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
     protocol: 'assistant-growth/revision-verification/v1', verificationId: 'fixture-revision', authority: f.revisionAuthority,
     parent: plan.sourceRevision!.parent,
@@ -1333,9 +1335,9 @@ function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planI
       sourcePatchDigest: plan.sourceCheck!.patchDigest, artifactSha256: plan.preparedEvidence!.pack.sha256,
       artifactBytes: plan.preparedEvidence!.pack.sizeBytes, generatorDigest: plan.generatorDigest },
     source: { referenceDigest: controlPlaneDigest(reference), ownerDigest: controlPlaneDigest(reference.owner),
-      growthRunDigest: sourceGrowthRunDigest(plan.sourceRevision!.growthRun) },
+      growthRunDigest: sourceGrowthRunDigest(growthRun) },
     contractDigest: 'a'.repeat(64), schemaDigest: candidateSchemaDigest, environment: candidateEnvironment,
-    model: plan.sourceRevision!.growthRun.model,
+    model: growthRun.model,
     budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 2 },
     sessions: { contract: 'revision-contract', sourceReview: 'revision-source' },
     observations: [{ caseId: 'case-one', jobId: 'revision-job-one', operationDigest: 'c'.repeat(64), observationDigest: 'd'.repeat(64) },

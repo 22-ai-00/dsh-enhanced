@@ -46,6 +46,25 @@ export interface SourceJobOwnerReceipt {
   generation: number
 }
 
+/**
+ * Host-recorded owner revision instruction: the authenticated alternative to
+ * a failed owner task for triggering one `revise-created` job. It is written
+ * only by the Host request path, freezes the owner receipt and the exact
+ * submitted files, and expires; the model cannot create or alter it.
+ */
+export interface SourceOwnerInstruction {
+  instructionId: string
+  ownerReceipt: SourceJobOwnerReceipt
+  ownerDigest: string
+  ownerRouteId: string
+  planId: string
+  pluginName: string
+  filesDigest: string
+  createdAt: number
+  expiresAt: number
+  idempotencyKey: string
+}
+
 export interface SourceJobAuthority {
   id: string
   digest: string
@@ -78,6 +97,12 @@ export interface SourceJobIntent {
   containerName?: string
   /** Durable native ledger key, never interpreted as a Docker container. */
   nativeResource?: { backend: 'macos-seatbelt' | 'linux-native'; key: string }
+  /**
+   * Present only on `revise-created` jobs authenticated by a Host-recorded
+   * owner instruction instead of an owner task failure. The digest pins the
+   * exact stored instruction row, so any drift fails the frozen intent.
+   */
+  ownerInstruction?: { instructionId: string; digest: string }
 }
 
 export type SourceJobStatus = 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'

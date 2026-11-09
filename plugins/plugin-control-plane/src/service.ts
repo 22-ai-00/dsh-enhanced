@@ -1246,7 +1246,7 @@ export class PluginControlPlaneService extends Service {
     }
     const outcome = this.store.inspectRevisionBenefitOutcome(planId)
     const plan = this.store.getSourcePlan(planId)
-    const windowEnd = plan.sourceRevision?.growthRun.createdAt === undefined ? undefined
+    const windowEnd = plan.sourceRevision?.growthRun?.createdAt === undefined ? undefined
       : plan.sourceRevision.growthRun.createdAt + Math.max(1, options.observeWindowMs)
     if (windowEnd === undefined || Date.now() < windowEnd) {
       return { rolledBack: false as const, reason: 'observation-open' as const }
@@ -1394,7 +1394,7 @@ export class PluginControlPlaneService extends Service {
     if (!contract || plan.mode !== 'prepared-revise' || !plan.sourceRevision?.parent) return undefined
     const job = this.store.getPreparedRevisionJob(planId)
     const pinned = job.intent.revision?.grant.benefit
-    if (!pinned || !job.intent.revision?.growthRun.revisionAcceptance) return undefined
+    if (!pinned || !job.intent.revision?.growthRun?.revisionAcceptance) return undefined
     const now = Date.now()
     const input = this.createdCapabilityFeedbackInput(planId)
     if (!input) return undefined
@@ -2086,7 +2086,7 @@ export class PluginControlPlaneService extends Service {
     const policy = this.inspectSourceRevisionRegressionAcceptanceAuthority()
     const run = prepared.plan.sourceRevision!.growthRun
     const source = this.store.readRevisionSource(planId)
-    if (!certificate || !source || !policy || !run.revisionRegressionAcceptance
+    if (!certificate || !source || !policy || !run || !run.revisionRegressionAcceptance
       || controlPlaneDigest(run.revisionRegressionAcceptance) !== controlPlaneDigest(policy)) {
       throw new Error('regression requires fresh independently verified candidate and pre-author policy')
     }
@@ -2123,6 +2123,7 @@ export class PluginControlPlaneService extends Service {
         || controlPlaneDigest(snapshot.candidate.certificate) !== input.candidateVerificationDigest
         || source.digest !== input.sourceDigest || snapshot.candidate.sourceDigest !== input.sourceDigest
         || controlPlaneDigest(policy) !== input.regressionAuthorityDigest
+        || snapshot.plan.sourceRevision!.growthRun?.revisionRegressionAcceptance === undefined
         || controlPlaneDigest(snapshot.plan.sourceRevision!.growthRun.revisionRegressionAcceptance) !== input.regressionAuthorityDigest
         || controlPlaneDigest(snapshot.parent.binding) !== input.parentDigest) {
         throw new Error('regression parent, candidate or policy changed')
@@ -2269,6 +2270,7 @@ export class PluginControlPlaneService extends Service {
       const { plan, reference, job } = this.store.getRetainedPreparedRevision(planId)
       const certificate = this.store.getRevisionVerification(planId)
       if (!certificate || !plan.sourceRevision || !isSourceOwnerContinuation(before, reference.owner)
+        || plan.sourceRevision.growthRun === undefined
         || !verifyPluginRevisionVerificationCertificate(certificate, policy.authority, policy.publicKey, certificate.verifiedAt)
         || certificate.plan.digest !== plan.digest || certificate.source.referenceDigest !== controlPlaneDigest(reference)
         || certificate.source.ownerDigest !== job.intent.ownerDigest
@@ -2301,6 +2303,70 @@ export class PluginControlPlaneService extends Service {
   inspectSourceJob = (input: { id: string; owner: SourceJobCaller }): SourceJobProjection => {
     if (this.sourceRuntime === undefined) throw new Error('plugin-control-plane: durable source jobs unavailable')
     return this.sourceRuntime.inspect(input)
+  }
+
+  /**
+   * Host-only owner instruction entry. Freezes one authenticated owner
+   * receipt, the adopted revision parent and the exact submitted files into an
+   * expiring instruction row, then enqueues one `revise-created` source job
+   * against the synthetic instruction gap. The model tool surface never
+   * reaches this method; without a valid instruction the admission still
+   * requires an owner task failure.
+   */
+  requestOwnerInstructionRevision = (input: {
+    planId: string
+    pluginName: string
+    files: readonly ScopedPluginFile[]
+    ttlMs: number
+    idempotencyKey: string
+    expectedBaseCommit: string
+    signal?: AbortSignal
+  }): Promise<{ instructionId: string; jobId: string }> => {
+    this.abort.signal.throwIfAborted()
+    const config = this.config.sourceJobs
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as
+      { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt } | undefined
+    if (config === undefined || config.revision === undefined || delivery === undefined) {
+      throw new Error('plugin-control-plane: owner instruction revisions require source jobs, a revision grant and a live owner route')
+    }
+    if (config.revision.expiresAt <= Date.now()) throw new Error('plugin-control-plane: the source revision grant is expired')
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 900_000 || input.ttlMs > 86_400_000) {
+      throw new Error('plugin-control-plane: owner instruction ttl is invalid')
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(input.idempotencyKey)) {
+      throw new Error('plugin-control-plane: owner instruction idempotency key is invalid')
+    }
+    validateSourceCreationFiles(input.files)
+    const receipt = delivery.validateOwnerRoute({ authorityId: config.ownerRouteId,
+      principalId: config.principalId, workspace: config.workspace, agentPreset: config.preset })
+    const parent = this.inspectRevisionParent(input.planId)
+    if (parent.name !== input.pluginName) throw new Error('plugin-control-plane: owner instruction target does not match the adopted parent')
+    const instructionId = `instruction-${createHash('sha256').update(config.authorityId).update('\0')
+      .update(input.idempotencyKey).digest('hex').slice(0, 32)}`
+    const now = Date.now()
+    const gap = this.store.recordGap({
+      idempotencyKey: `owner-instruction:${instructionId}`, capability: `plugin-revision:${input.pluginName}`,
+      context: 'Owner instruction revision request', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0,
+    })
+    if (gap.status !== 'open') throw new Error('plugin-control-plane: owner instruction gap is not open')
+    const instruction = this.store.recordOwnerInstruction({
+      instructionId, ownerReceipt: receipt, ownerRouteId: config.ownerRouteId, planId: input.planId,
+      pluginName: input.pluginName, filesDigest: controlPlaneDigest(input.files),
+      createdAt: now, expiresAt: now + input.ttlMs, idempotencyKey: input.idempotencyKey,
+    })
+    const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
+    return this.enqueueSourceJob({
+      gapId: gap.id, mode: 'revise-created', name: input.pluginName, files: input.files,
+      repository: config.repository, parentPlanId: input.planId,
+      ownerInstruction: { instructionId: instruction.instructionId,
+        digest: controlPlaneDigest(instruction) },
+      expectedBaseCommit: input.expectedBaseCommit, ttlMs: input.ttlMs,
+      idempotencyKey: input.idempotencyKey,
+      owner: { ownerRouteId: receipt.authorityId, principalId: receipt.principalId,
+        principalRecordId: receipt.principalRecordId, principalVersion: receipt.principalVersion,
+        workspace: receipt.workspace, preset: receipt.agentPreset },
+      signal, assertCurrent: () => this.abort.signal.throwIfAborted(),
+    }).then(job => ({ instructionId: instruction.instructionId, jobId: job.id }))
   }
 
   reconcileSourceJob = (input: { id: string; owner: SourceJobCaller }): Promise<SourceJobProjection> => {
@@ -2425,11 +2491,13 @@ export class PluginControlPlaneService extends Service {
     const prepared = this.inspectPreparedRevisionRegression(job.planId)
     if (prepared.job.id !== job.id) throw new Error('regression job is not exact prepared revision')
     const certificate = prepared.candidate.certificate
+    const acceptance = prepared.plan.sourceRevision?.growthRun?.revisionRegressionAcceptance
+    if (acceptance === undefined) throw new Error('owner-instruction revisions carry no regression acceptance')
     const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest, artifactSha256: certificate.plan.artifactSha256,
       growthRunDigest: certificate.source.growthRunDigest, referenceDigest: certificate.source.referenceDigest,
       parentDigest: controlPlaneDigest(certificate.parent), candidateVerificationDigest: controlPlaneDigest(certificate),
       sourceDigest: prepared.candidate.sourceDigest,
-      regressionAuthorityDigest: controlPlaneDigest(prepared.plan.sourceRevision!.growthRun.revisionRegressionAcceptance) }
+      regressionAuthorityDigest: controlPlaneDigest(acceptance) }
     this.withPreparedRevisionRegressionFence(binding, () => this.store.claimRevisionRegression(job.planId!))
     try {
       const current = verifier()

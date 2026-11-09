@@ -741,6 +741,10 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 该 Host API 使用同批 `assistant-delivery` 与可选 `assistant-evaluation >=0.1.33` 的精确接口；不要求手工 gap 部署安装 Evaluation。它只授权来源绑定的候选准备，pending plan 的后续授权采用、发布与观测仍走独立控制链。
 
+### Owner 显式指令修订来源
+
+Host-only `requestOwnerInstructionRevision(input)`（schema 37 `source_owner_instructions`）是与任务失败并列的第二条 `revise-created` 触发来源，让 owner 不依赖失败任务也能发起一次对已采用插件的修订。它在同一同步帧内：经 Delivery 重验当前 owner route，核对 parent 计划仍是已采用的同名插件，校验提交文件并冻结其规范 digest，写入带 TTL 的指令行（模型工具面不可达此接口），再用合成的 `owner-instruction:<id>` gap 入队一个修订作业。入队、重启恢复和每个 continuation 都重放同一组 fail-closed 校验：指令 digest、过期时间、plan/plugin 名、files digest、gap 归属与 owner continuation；指令与任务失败证据互斥，不允许混用。该类作业不携带 growth run，`validateSourceRevisionBinding` 仅在显式 `allowWithoutGrowthRun` 下接受，独立 revision 审查仍强制；回归 pin 与 P1-4 收益门不适用于无 growth run 的指令作业。指令对应的合成 gap 不出现在全局 `gaps()` 中。
+
 ## 权限
 
 - 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceJobs.creation` 时执行冻结基线的公共生成器并写临时模板目录、私有 worktree、目录行和新锁文件 importer；启用 Docker `sourceBuild` 时调用 owner 配置的离线容器构建，启用原生 macOS `sourceBuild` 时执行固定编译器及 Host 打包，读取冻结依赖树并写 owner-private 持久账本、工作目录和回执。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。

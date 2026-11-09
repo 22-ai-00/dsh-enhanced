@@ -152,7 +152,7 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
+async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; instruction?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -218,6 +218,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: sourceRepository,
     ...(options.allowedModes ? { allowedModes: options.allowedModes } : {}),
     ...(options.creation ? { creation: { id: 'source-runtime-create', expiresAt: Date.now() + 30_000, maxCreates: 1, namePrefix: 'agent-', ...(options.workItemFailures ? { workItemFailures: true } : {}) } } : {}),
+    ...(options.instruction ? { revision: { id: 'source-runtime-revise', expiresAt: Date.now() + 30_000, maxRevisions: 1, namePrefix: 'health-' } } : {}),
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
   const approvePrepared = vi.fn(async (job: SourceJobRecord, _signal: AbortSignal) => {
@@ -240,6 +241,10 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
     ...(options.preflightGeneration ? { isPreparationNotStarted: (error: unknown, owned: SourceJobRecord) => consumeCleanedLinuxSourcePreflight(error, owned, options.preflightGeneration!) } : {}),
     ...(options.inspectNativeQuiescence === undefined ? {} : { inspectNativeQuiescence: options.inspectNativeQuiescence }),
     assertGrowthRun: expected => { if (controlPlaneDigest(expected) !== controlPlaneDigest(growthRun)) throw new Error('growth run changed') },
+    ...(options.instruction ? { inspectRevisionParent: () => ({ name: 'health-helper',
+      parent: { planId: 'parent-plan', certificateDigest: hex('certificate'), artifactSha256: hex('artifact'),
+        sourceArchiveDigest: hex('archive'), sourceDigest: hex('parent-source') },
+      source: {} as never, certificate: {} as never }) } : {}),
     ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}), ...(options.adoption ? { adoptReleased, adoptionTimeoutMs: 60_000 } : {}) })
   const runtime = createRuntime()
   runtime.start()
@@ -500,6 +505,87 @@ describe('durable source-job runtime', () => {
       expect(() => f.enqueue()).toThrow('mode is not authorized')
       expect(f.store.listSourceJobs(100)).toEqual([])
     } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  describe('owner-instruction revise-created admission', () => {
+    const revisionFiles = [{ path: 'src/index.ts', content: 'export const changed = true\n' }]
+    const revisionEnqueue = (f: Awaited<ReturnType<typeof fixture>>, extra: Record<string, unknown> = {},
+      gapId = f.gap.id) =>
+      f.runtime.enqueue({ gapId, name: 'health-helper', repository: f.sourceRepository,
+        files: revisionFiles, mode: 'revise-created', parentPlanId: 'parent-plan',
+        idempotencyKey: 'instruction:job-one', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
+        owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined, ...extra })
+
+    it('still refuses a revise-created job with neither a task failure nor an instruction', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        await expect(revisionEnqueue(f)).rejects.toThrow(/owner task failure or owner instruction/u)
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('rejects an unknown instruction or a frozen digest that no longer matches', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        const instructionId = 'instruction-fake'
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: 'a'.repeat(64) } }))
+          .rejects.toThrow('owner instruction changed')
+        const stored = f.store.recordOwnerInstruction({ instructionId: 'instruction-real', ownerReceipt: receipt(),
+          ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+          filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+          idempotencyKey: 'instruction-real-key' })
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId: 'instruction-real', digest: 'b'.repeat(64) } }))
+          .rejects.toThrow('owner instruction changed')
+        expect(stored.instructionId).toBe('instruction-real')
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('rejects an instruction whose frozen files or target drifted', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        const make = (instructionId: string, overrides: Record<string, unknown>) => {
+          const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
+            ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+            filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+            idempotencyKey: `${instructionId}-key`, ...overrides })
+          const gap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`,
+            capability: 'plugin-revision:health-helper', context: 'instruction',
+            expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+          return { binding: { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, gapId: gap.id }
+        }
+        const files = make('instruction-files', { filesDigest: hex('different-files') })
+        await expect(revisionEnqueue(f, files.binding, files.gapId))
+          .rejects.toThrow('owner instruction files changed')
+        const plan = make('instruction-plan', { planId: 'other-plan' })
+        await expect(revisionEnqueue(f, plan.binding, plan.gapId))
+          .rejects.toThrow('owner instruction target changed')
+        // A valid instruction cannot ride an unrelated gap.
+        const gapMismatch = make('instruction-gap', {})
+        await expect(revisionEnqueue(f, gapMismatch.binding))
+          .rejects.toThrow('owner instruction gap changed')
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('passes every admission gate with a matching instruction and only then reaches source inspection', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        const instructionId = 'instruction-ok'
+        const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
+          ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+          filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+          idempotencyKey: 'instruction-ok-key' })
+        const instructionGap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`, capability: 'plugin-revision:health-helper',
+          context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+        // The lightweight fixture has no real parent archive or Host scaffold:
+        // a scaffold failure proves admission succeeded and control reached
+        // the real source inspection rather than an instruction gate.
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, instructionGap.id))
+          .rejects.toThrow(/template or Host inputs are missing/u)
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
   })
 
   it('settles a queued modification before recovery when the new Host grant is create-only', async () => {

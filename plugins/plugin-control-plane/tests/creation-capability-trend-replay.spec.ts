@@ -226,7 +226,8 @@ describe('created capability ordinary-use trend: synthetic replay against plante
     for (const [index, effect] of effects.entries()) {
       expect(Math.abs(sum[index]! / seeds - effect)).toBeLessThan(3 * (se[index]! / seeds) / Math.sqrt(seeds))
     }
-  })
+    // The 30-draw seed sweep runs ~7s even idle; the 5s default times out under host load.
+  }, 30_000)
 
   it('covers zero when no effect is planted', () => {
     const result = replay({ ...base, seed: 7, strata: twoStrata([0, 0]) }).trend()

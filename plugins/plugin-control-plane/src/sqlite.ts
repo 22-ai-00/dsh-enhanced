@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 36
+export const controlPlaneSchemaVersion = 37
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -62,6 +62,22 @@ const revisionBenefitOutcomeTableSchema = `CREATE TABLE IF NOT EXISTS source_rev
 ) STRICT, WITHOUT ROWID;`
 
 const revisionBenefitOutcomeSchema = revisionBenefitOutcomeTableSchema
+
+/** Host-recorded owner revision instructions, the second authenticated revise trigger (schema 37). */
+const sourceOwnerInstructionTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instructions (
+  instruction_id TEXT PRIMARY KEY CHECK(length(instruction_id) > 0 AND length(instruction_id) <= 160),
+  owner_receipt_json TEXT NOT NULL CHECK(json_valid(owner_receipt_json) AND json_type(owner_receipt_json)='object' AND length(owner_receipt_json)<=4096),
+  owner_digest TEXT NOT NULL CHECK(length(owner_digest) = 64 AND owner_digest NOT GLOB '*[^a-f0-9]*'),
+  owner_route_id TEXT NOT NULL CHECK(length(owner_route_id) > 0 AND length(owner_route_id) <= 200),
+  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
+  plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
+  files_digest TEXT NOT NULL CHECK(length(files_digest) = 64 AND files_digest NOT GLOB '*[^a-f0-9]*'),
+  created_at INTEGER NOT NULL CHECK(created_at > 0),
+  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+  idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) > 0 AND length(idempotency_key) <= 160)
+) STRICT, WITHOUT ROWID;`
+
+const sourceOwnerInstructionSchema = sourceOwnerInstructionTableSchema
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1505,6 +1521,21 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
         database.exec(`${revisionBenefitOutcomeSchema} PRAGMA user_version = 36; COMMIT;`)
       } catch (error) { database.exec('ROLLBACK'); throw error }
     } else database.exec(revisionBenefitOutcomeSchema)
+    const ownerInstructionSchema = database.prepare("SELECT type,sql FROM sqlite_schema WHERE name='source_owner_instructions'")
+      .get() as { type: string; sql: string | null } | undefined
+    if (ownerInstructionSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 37) {
+      throw new Error('missing source owner instruction schema')
+    }
+    if (ownerInstructionSchema !== undefined && (ownerInstructionSchema.type !== 'table'
+      || ownerInstructionSchema.sql !== storedTableSchema(sourceOwnerInstructionTableSchema))) {
+      throw new Error('unknown source owner instruction schema')
+    }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 37) {
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        database.exec(`${sourceOwnerInstructionSchema} PRAGMA user_version = 37; COMMIT;`)
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else database.exec(sourceOwnerInstructionSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

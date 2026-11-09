@@ -21,7 +21,8 @@ import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSour
 import { anySourceGrowthRunDigest as sourceGrowthRunDigest, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate,
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
-import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
+import type { SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,
+  SourceOwnerInstruction } from './source-job-types.js'
 import type { AnyOwnerTaskFailureReference as OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
@@ -299,8 +300,8 @@ function creationBindingFromStored(value: unknown): SourceCreationBinding {
     ...(growthRun === undefined ? {} : { growthRun: Object.freeze(growthRun) }) })
 }
 
-function revisionBindingFromStored(value: unknown): SourceRevisionBinding {
-  try { validateSourceRevisionBinding(value) }
+function revisionBindingFromStored(value: unknown, options?: { allowWithoutGrowthRun?: boolean }): SourceRevisionBinding {
+  try { validateSourceRevisionBinding(value, options) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source revision binding is invalid') }
   return Object.freeze(structuredClone(value))
 }
@@ -438,6 +439,12 @@ interface GapRow extends Record<string, unknown> {
 interface OwnerTaskFailureGapRow {
   reference_json: string
   reference_digest: string
+}
+
+interface OwnerInstructionRow {
+  instruction_id: string; owner_receipt_json: string; owner_digest: string; owner_route_id: string
+  plan_id: string; plugin_name: string; files_digest: string; created_at: number; expires_at: number
+  idempotency_key: string
 }
 
 interface ActivationRow {
@@ -1400,7 +1407,8 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   const native = backend === 'macos-seatbelt' || backend === 'linux-native'
   exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
     'baseCommit', 'files', 'ttlMs', 'build', 'worktree', native ? 'nativeResource' : 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : []),
-    ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : []), ...(Object.hasOwn(intent, 'revision') ? ['revision'] : [])], 'source job intent')
+    ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : []), ...(Object.hasOwn(intent, 'revision') ? ['revision'] : []),
+    ...(Object.hasOwn(intent, 'ownerInstruction') ? ['ownerInstruction'] : [])], 'source job intent')
   const authority = objectRecord(intent['authority'], 'source job authority')
   exactKeys(authority, ['id', 'digest', 'expiresAt', 'maxSubmissions'], 'source job authority')
   const owner = objectRecord(intent['owner'], 'source job owner')
@@ -1426,7 +1434,11 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     || (backend === 'macos-seatbelt' && (intent['mode'] !== 'create' && intent['mode'] !== 'revise-created'))
     || (intent['mode'] !== undefined && intent['mode'] !== 'create' && intent['mode'] !== 'revise-created')
     || (intent['mode'] === 'create') !== Object.hasOwn(intent, 'creation')
-    || (intent['mode'] === 'revise-created') !== Object.hasOwn(intent, 'revision')) {
+    || (intent['mode'] === 'revise-created') !== Object.hasOwn(intent, 'revision')
+    || (Object.hasOwn(intent, 'ownerInstruction') && intent['mode'] !== 'revise-created')
+    || (Object.hasOwn(intent, 'ownerInstruction')
+      && intent['revision'] !== null && typeof intent['revision'] === 'object'
+      && Object.hasOwn(intent['revision'] as object, 'growthRun'))) {
     throw new ControlPlaneStoreError('invalid-input', 'source job intent is invalid')
   }
   if (native) {
@@ -1455,7 +1467,18 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   try { if (intent['mode'] === 'create' || intent['mode'] === 'revise-created') validateSourceCreationFiles(files); else validateScopedPluginFiles(files) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source job files are invalid') }
   const creation = intent['mode'] === 'create' ? creationBindingFromStored(intent['creation']) : undefined
-  const revision = intent['mode'] === 'revise-created' ? revisionBindingFromStored(intent['revision']) : undefined
+  const revision = intent['mode'] === 'revise-created'
+    ? revisionBindingFromStored(intent['revision'], { allowWithoutGrowthRun: Object.hasOwn(intent, 'ownerInstruction') }) : undefined
+  let ownerInstruction: SourceJobIntent['ownerInstruction']
+  if (Object.hasOwn(intent, 'ownerInstruction')) {
+    const item = objectRecord(intent['ownerInstruction'], 'source job owner instruction')
+    exactKeys(item, ['instructionId', 'digest'], 'source job owner instruction')
+    if (typeof item['instructionId'] !== 'string' || !KEY.test(item['instructionId'])
+      || typeof item['digest'] !== 'string' || !DIGEST.test(item['digest'])) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job owner instruction is invalid')
+    }
+    ownerInstruction = Object.freeze({ instructionId: item['instructionId'], digest: item['digest'] })
+  }
   if (revision !== undefined && !(intent['name'] as string).startsWith(revision.grant.namePrefix)) throw new ControlPlaneStoreError('invalid-input', 'source job plugin name is outside its revision grant')
   if (creation !== undefined && !(intent['name'] as string).startsWith(creation.grant.namePrefix)) {
     throw new ControlPlaneStoreError('invalid-input', 'source job plugin name is outside its creation grant')
@@ -1479,7 +1502,8 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
       : { containerName: intent['containerName'] as string }),
     ...(creation === undefined ? {} : { mode: 'create' as const, creation }),
     ...(revision === undefined ? {} : { mode: 'revise-created' as const, revision }),
-    ...(Object.hasOwn(intent, 'baseline') ? { baseline: Object.freeze(intent['baseline']) as NonNullable<SourceJobIntent['baseline']> } : {}) })
+    ...(Object.hasOwn(intent, 'baseline') ? { baseline: Object.freeze(intent['baseline']) as NonNullable<SourceJobIntent['baseline']> } : {}),
+    ...(ownerInstruction === undefined ? {} : { ownerInstruction }) })
 }
 
 function exactInputRecord(value: unknown, label: string): Record<string, unknown> {
@@ -2074,6 +2098,7 @@ export class ControlPlaneStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ControlPlaneStoreError('invalid-input', 'gap limit must be 1..100')
     return (this.#database.prepare(`SELECT gap.* FROM capability_gaps gap
       WHERE gap.status = 'open' AND gap.idempotency_key NOT LIKE 'owner-task-failure:%'
+        AND gap.idempotency_key NOT LIKE 'owner-instruction:%'
         AND NOT EXISTS (SELECT 1 FROM owner_task_failure_gaps sidecar WHERE sidecar.gap_id = gap.id)
       ORDER BY gap.roi DESC, gap.created_at, gap.id LIMIT ?`).all(limit) as unknown as GapRow[]).map(gapFromRow)
   }
@@ -2173,6 +2198,93 @@ export class ControlPlaneStore {
 
   getOwnerTaskFailureReference(gapId: string): OwnerTaskFailureReference | undefined {
     return readOwnerTaskFailureReference(this.#database, gapId)
+  }
+
+  /**
+   * Record one Host-authenticated owner revision instruction. Idempotent on
+   * idempotencyKey: reusing a key with a different payload fails closed, and
+   * reusing the same full payload returns the stored instruction. The owner
+   * receipt and files digest are frozen at write time.
+   */
+  recordOwnerInstruction(input: {
+    instructionId: string
+    ownerReceipt: SourceJobOwnerReceipt
+    ownerRouteId: string
+    planId: string
+    pluginName: string
+    filesDigest: string
+    createdAt: number
+    expiresAt: number
+    idempotencyKey: string
+  }): SourceOwnerInstruction {
+    const instructionId = bounded(input.instructionId, 'instructionId', 160)
+    const ownerRouteId = bounded(input.ownerRouteId, 'ownerRouteId', 200)
+    const planId = bounded(input.planId, 'planId', 160)
+    const pluginName = bounded(input.pluginName, 'pluginName', 160)
+    const idempotencyKey = bounded(input.idempotencyKey, 'idempotencyKey', 160)
+    if (!KEY.test(instructionId) || !KEY.test(planId) || !KEY.test(idempotencyKey) || !KEY.test(ownerRouteId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction identity is invalid')
+    }
+    if (!DIGEST.test(input.filesDigest)) throw new ControlPlaneStoreError('invalid-input', 'owner instruction files digest is invalid')
+    if (!Number.isSafeInteger(input.createdAt) || input.createdAt < 1
+      || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= input.createdAt) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction timing is invalid')
+    }
+    const ownerDigest = controlPlaneDigest(input.ownerReceipt)
+    if (!DIGEST.test(ownerDigest)) throw new ControlPlaneStoreError('invalid-input', 'owner receipt is invalid')
+    const receiptJson = JSON.stringify(input.ownerReceipt)
+    const prior = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE idempotency_key = ? OR instruction_id = ?')
+      .get(idempotencyKey, instructionId) as unknown as OwnerInstructionRow | undefined
+    if (prior !== undefined) {
+      const stored = this.ownerInstructionFromRow(prior)
+      // Retries may recompute createdAt; every frozen field must match. A
+      // reused id or key with a different payload is a conflict either way.
+      const expected = this.#ownerInstructionPayload({ ...input, ownerDigest, createdAt: stored.createdAt })
+      if (stored.idempotencyKey !== idempotencyKey || stored.instructionId !== instructionId
+        || controlPlaneDigest(stored) !== controlPlaneDigest(expected)) {
+        throw new ControlPlaneStoreError('conflict', 'owner instruction identity or idempotency key was reused with different input')
+      }
+      return stored
+    }
+    this.#database.prepare(`INSERT INTO source_owner_instructions
+      (instruction_id, owner_receipt_json, owner_digest, owner_route_id, plan_id, plugin_name,
+        files_digest, created_at, expires_at, idempotency_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(instructionId, receiptJson, ownerDigest, ownerRouteId,
+      planId, pluginName, input.filesDigest, input.createdAt, input.expiresAt, idempotencyKey)
+    const row = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE instruction_id = ?')
+      .get(instructionId) as unknown as OwnerInstructionRow
+    return this.ownerInstructionFromRow(row)
+  }
+
+  getOwnerInstruction(instructionId: string): SourceOwnerInstruction | undefined {
+    if (typeof instructionId !== 'string' || !KEY.test(instructionId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'instruction id is invalid')
+    }
+    const row = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE instruction_id = ?')
+      .get(instructionId) as OwnerInstructionRow | undefined
+    return row === undefined ? undefined : this.ownerInstructionFromRow(row)
+  }
+
+  #ownerInstructionPayload(input: SourceOwnerInstruction): SourceOwnerInstruction {
+    return { instructionId: input.instructionId, ownerReceipt: input.ownerReceipt, ownerDigest: input.ownerDigest,
+      ownerRouteId: input.ownerRouteId, planId: input.planId, pluginName: input.pluginName,
+      filesDigest: input.filesDigest, createdAt: input.createdAt, expiresAt: input.expiresAt,
+      idempotencyKey: input.idempotencyKey }
+  }
+
+  private ownerInstructionFromRow(row: OwnerInstructionRow): SourceOwnerInstruction {
+    let ownerReceipt: SourceJobOwnerReceipt
+    try { ownerReceipt = JSON.parse(row.owner_receipt_json) as SourceJobOwnerReceipt }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction receipt is corrupt') }
+    if (controlPlaneDigest(ownerReceipt) !== row.owner_digest) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction digest is corrupt')
+    }
+    return {
+      instructionId: row.instruction_id, ownerReceipt, ownerDigest: row.owner_digest,
+      ownerRouteId: row.owner_route_id, planId: row.plan_id, pluginName: row.plugin_name,
+      filesDigest: row.files_digest, createdAt: row.created_at, expiresAt: row.expires_at,
+      idempotencyKey: row.idempotency_key,
+    }
   }
 
   withOwnerTaskFailureGapAdmission<T>(gapId: string, callback: () => T): T {
@@ -2471,7 +2583,19 @@ export class ControlPlaneStore {
     }
     if (now >= intent.authority.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
     if (intent.creation !== undefined && now >= intent.creation.grant.expiresAt) throw new ControlPlaneStoreError('expired', 'source creation grant is expired')
-    if (intent.revision !== undefined && (this.getOwnerTaskFailureReference(intent.gapId) === undefined || now >= intent.revision.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'revision grant or owner task is unavailable')
+    if (intent.revision !== undefined && (now >= intent.revision.grant.expiresAt
+      || (this.getOwnerTaskFailureReference(intent.gapId) === undefined && intent.ownerInstruction === undefined))) {
+      throw new ControlPlaneStoreError('expired', 'revision grant or owner task is unavailable')
+    }
+    // Re-validate the frozen instruction at the writer boundary: a revoked or
+    // changed instruction must never produce a source job, even after restart.
+    if (intent.ownerInstruction !== undefined) {
+      const instruction = this.getOwnerInstruction(intent.ownerInstruction.instructionId)
+      if (instruction === undefined || controlPlaneDigest(instruction) !== intent.ownerInstruction.digest
+        || instruction.expiresAt <= now) {
+        throw new ControlPlaneStoreError('expired', 'owner instruction is unavailable or changed')
+      }
+    }
     const growthRun = intent.creation?.growthRun ?? intent.revision?.growthRun
     if (growthRun !== undefined && (now >= growthRun.generationDeadlineAt || now >= growthRun.expiresAt)) throw new ControlPlaneStoreError('expired', 'source growth generation window is expired')
     this.#beginMutation()
@@ -2791,7 +2915,8 @@ export class ControlPlaneStore {
           throw new ControlPlaneStoreError('expired', 'task-backed creation growth run is absent or expired')
         }
       }
-      if (revision !== undefined && (this.getOwnerTaskFailureReference(input.gapId) === undefined || now >= revision.growthRun.expiresAt)) {
+      if (revision !== undefined && revision.growthRun !== undefined
+        && (this.getOwnerTaskFailureReference(input.gapId) === undefined || now >= revision.growthRun.expiresAt)) {
         throw new ControlPlaneStoreError('expired', 'revision requires a current owner task and frozen growth run')
       }
       if (preparedArtifact !== undefined) {
@@ -3200,7 +3325,7 @@ export class ControlPlaneStore {
     if (certificate.verifiedAt > this.#now() || certificate.expiresAt <= this.#now()
       || !candidate || !parent || !source || !reference || !run?.revisionRegressionAcceptance
       || !revisionRegressionMatchesCandidate(certificate, candidate, parent)
-      || !job.intent.revision?.growthRun.revisionRegressionAcceptance
+      || !job.intent.revision?.growthRun?.revisionRegressionAcceptance
       || controlPlaneDigest(certificate.plan) !== controlPlaneDigest(candidate.plan)
       || controlPlaneDigest(certificate.source) !== controlPlaneDigest(candidate.source)
       || controlPlaneDigest(certificate.parent) !== controlPlaneDigest(candidate.parent)

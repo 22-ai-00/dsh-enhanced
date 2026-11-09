@@ -42,7 +42,12 @@ export interface SourceRevisionBinding {
   grant: SourceRevisionGrant
   generatorDigest: string
   parent: PluginRevisionParentBinding
-  growthRun: SourceRevisionGrowthRun
+  /**
+   * Present on task-failure revisions, which pin an independent acceptance
+   * grant; absent on Host-recorded owner-instruction revisions, whose
+   * authorization is the instruction row itself.
+   */
+  growthRun?: SourceRevisionGrowthRun
 }
 
 function fail(reason: string): never { throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source revision ${reason}`) }
@@ -84,14 +89,27 @@ export function normalizeSourceRevisionGrant(value: SourceRevisionGrant): Source
   return result
 }
 
-export function validateSourceRevisionBinding(value: unknown): asserts value is SourceRevisionBinding {
-  const binding = exact(value, ['grant', 'generatorDigest', 'parent', 'growthRun'], 'binding')
+/**
+ * Validates a frozen revision binding. A task-failure revision pins a source
+ * growth run; a Host-recorded owner-instruction revision has none, and callers
+ * that handle that trigger pass `allowWithoutGrowthRun` after proving the
+ * instruction themselves. The two trigger kinds never mix in one binding.
+ */
+export function validateSourceRevisionBinding(value: unknown,
+  options?: { allowWithoutGrowthRun?: boolean }): asserts value is SourceRevisionBinding {
+  const binding = exact(value, ['grant', 'generatorDigest', 'parent',
+    ...(options?.allowWithoutGrowthRun === true && (value as Record<string, unknown>) !== null
+      && typeof value === 'object' && !Object.hasOwn(value as object, 'growthRun') ? [] : ['growthRun'])], 'binding')
   validateSourceRevisionGrant(binding.grant)
   validatePluginRevisionParentBinding(binding.parent)
-  validateSourceGrowthRunBinding(binding.growthRun)
-  if (typeof binding.generatorDigest !== 'string' || !DIGEST.test(binding.generatorDigest)
-    || !(binding.growthRun as SourceGrowthRunBinding).revisionAcceptance
-    || (binding.growthRun as SourceGrowthRunBinding).revisionAcceptance!.namePrefix !== (binding.grant as SourceRevisionGrant).namePrefix) {
+  if (Object.hasOwn(binding as object, 'growthRun')) {
+    validateSourceGrowthRunBinding(binding.growthRun)
+    if (!(binding.growthRun as SourceGrowthRunBinding).revisionAcceptance
+      || (binding.growthRun as SourceGrowthRunBinding).revisionAcceptance!.namePrefix !== (binding.grant as SourceRevisionGrant).namePrefix) {
+      fail('binding fields')
+    }
+  }
+  if (typeof binding.generatorDigest !== 'string' || !DIGEST.test(binding.generatorDigest)) {
     fail('binding fields')
   }
 }
@@ -183,9 +201,11 @@ type RevisionWorkspaceInput = {
 }
 
 function checkBinding(input: RevisionWorkspaceInput): void {
-  validateSourceRevisionBinding(input.revision)
+  validateSourceRevisionBinding(input.revision, { allowWithoutGrowthRun: true })
   currentGrant(input.revision.grant, input.name)
-  if (input.revision.growthRun.revisionAcceptance!.expiresAt <= Date.now()) fail('acceptance authority expired')
+  if (input.revision.growthRun !== undefined && input.revision.growthRun.revisionAcceptance!.expiresAt <= Date.now()) {
+    fail('acceptance authority expired')
+  }
 }
 
 export async function prepareRevisedPluginWorkspace(input: RevisionWorkspaceInput): Promise<{ scope: readonly string[]; generatorDigest: string }> {
