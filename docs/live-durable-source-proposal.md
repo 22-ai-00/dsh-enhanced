@@ -26,13 +26,14 @@ approve, publish, install or activate that plan.
   credential reference for
   [the real-route helper](../scripts/e2e/web-owner-real-route.mjs), selected
   with `DSH_WEB_REAL_PROVIDER` / `DSH_WEB_REAL_MODEL`.
-- Build the owner-controlled offline image using
-  `node scripts/isolation/build-source-image.mjs`. Retain its immutable image ID,
-  manifest inventory and lock digest; rebuild when the lock changes.
-- Use the documented [repository sandbox profile](../scripts/isolation/README.md).
-  The approved nested sandbox requires Docker `29.4.1/linux/amd64` and the pinned
-  seccomp file. It keeps network disabled, non-root execution, no capabilities,
-  and no Host mounts. Its `/proc` exposure differs from Docker's default masks.
+- Prepare the fixed linux-native repository runtime with the owner resource
+  preparation entry (`prepareLinuxRsiRepositoryRuntime`). Retain its runtime
+  descriptor, manifest inventory and lock digest; re-prepare when the lock changes.
+- Use the documented [native runtime boundary](dockerless-runtime.md).
+  The nested repository sandbox runs inside the linux-native user namespace,
+  cgroup v1 delegation and the pinned seccomp profile. It keeps network disabled,
+  non-root execution, no capabilities, and no Host mounts. Its `/proc` exposure is
+  limited by the namespace and seccomp policy rather than a container default.
 - Keep the target plugin clean at HEAD. The source reader exposes committed
   plugin files only; uncommitted harness changes are not candidate input.
 
@@ -79,7 +80,7 @@ against earlier default-route attempts.
 
 Add `DSH_SOURCE_MODEL_PREFLIGHT=1` to exercise trust loading and a dummy queue
 admission, then replace the Context and confirm the queued record without a
-model call or Docker execution. This emits a distinct preflight evidence kind.
+model call or native sandbox execution. This emits a distinct preflight evidence kind.
 Every run uses private local state; the evidence records its path. Successful
 pending plans retain their registered worktrees for review, and failures retain
 their state for reconciliation. Do not remove those directories manually while
