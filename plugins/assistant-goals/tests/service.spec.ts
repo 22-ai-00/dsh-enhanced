@@ -11,7 +11,6 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -235,8 +234,17 @@ describe('owner-scoped native goal context', () => {
       executionBudget: { mode: 'calls', modelCalls: 4, toolCalls: 4, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [route] } })
     const agent = await f.create(`preauth-${kind}`, 'owner'); f.human.add(agent)
     const objective = 'Verify repository outcome'
-    const isolated = { kind: 'isolated-runner' as const, id: 'isolated', stateRoot: join(f.root, 'verification'), image: `sha256:${'a'.repeat(64)}`,
-      dockerPath: realpathSync(process.execPath), command: 'cat /workspace/artifact', expiresAt: Date.now() + 300_000,
+    const runtimeRoot = '/private/native-verifier-runtime'
+    const isolated = { kind: 'isolated-runner' as const, id: 'isolated', stateRoot: join(f.root, 'verification'), backend: 'linux-native' as const,
+      runtime: { schemaVersion: 1 as const, backend: 'linux-native' as const, platform: `linux-${process.arch}` as 'linux-arm64' | 'linux-x64',
+        sourceCommit: '1'.repeat(40), lockSha256: '2'.repeat(64), root: { path: runtimeRoot, dev: 1, ino: 2, sha256: '3'.repeat(64) },
+        nodePath: `${runtimeRoot}/bin/node`, nodeSha256: '4'.repeat(64), pnpmPath: `${runtimeRoot}/pnpm/bin/pnpm.mjs`,
+        nativePnpmRoot: `${runtimeRoot}/pnpm-native`, nativePnpmPath: `${runtimeRoot}/pnpm-native/pnpm`,
+        modulesPath: `${runtimeRoot}/node_modules`, storePath: `${runtimeRoot}/store`, cachePath: `${runtimeRoot}/cache`,
+        versions: { node: 'v22.23.2' as const, pnpm: '11.7.0' as const, typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+      cgroupRoots: { mode: 'v1' as const, cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000', memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000',
+        pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' },
+      command: 'cat /workspace/artifact', expiresAt: Date.now() + 300_000,
       maxRuns: 4, maxTotalDurationMs: 10_000, maxDurationMs: 1_000, maxOutputBytes: 1024, testSets: [{ id: 'cases', cases: [{ stdin: '', expectedStdout: 'ok', expectedExitCode: 0 }] }] }
     const remote = kind === 'repository-readback'
       ? { kind, id: 'remote', grantId: 'repository', grantRevision: 1, repository: 'octo/example', branch: 'automation/fix', baseBranch: 'main',
