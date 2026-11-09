@@ -191,4 +191,65 @@ describe('independent adopted-tool revision verification', () => {
       expect(verifyPluginRevisionVerificationCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
     })
   })
+
+  describe('owner-instruction v3', () => {
+    function instructionCertificate(): PluginRevisionVerificationCertificate {
+      const v1 = certificate()
+      const { signature: _signature, ...body } = v1
+      const v3Body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {
+        ...body, protocol: 'assistant-growth/revision-verification/v3' as const,
+        source: { instructionDigest: 'c'.repeat(64), ownerDigest: hash },
+      }
+      return { ...v3Body,
+        signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(v3Body)), privateKey).toString('base64url') }
+    }
+
+    test('accepts a signed v3 instruction certificate and rejects the task-derived source shape', () => {
+      const signed = instructionCertificate()
+      expect(signed.protocol).toBe('assistant-growth/revision-verification/v3')
+      expect(() => validatePluginRevisionVerificationCertificate(signed)).not.toThrow()
+      expect(verifyPluginRevisionVerificationCertificate(signed, signed.authority, pem, 20_000)).toBe(true)
+      // No growth-run triple, no execution, and no task reference may ride the v3 protocol.
+      const { signature: _signature, ...body } = signed
+      for (const tampered of [
+        { ...body, source: { instructionDigest: hash, ownerDigest: hash, growthRunDigest: hash } },
+        { ...body, source: { referenceDigest: hash, ownerDigest: hash, growthRunDigest: hash } },
+        { ...body, source: { instructionDigest: hash } },
+        { ...body, execution: { boundary: 'linux-native-process-seccomp-v1', runtimeDigest: hash,
+          buildRuntimeDigest: hash, buildEvidenceDigest: hash, observerPreparationDigest: hash } },
+        { ...body, source: { instructionDigest: 'short', ownerDigest: hash } },
+      ]) expect(() => validatePluginRevisionVerificationCertificate(tampered)).toThrow()
+    })
+
+    test('uses a signing domain distinct from v1 and v2', () => {
+      const signed = instructionCertificate()
+      const { signature: _signature, ...body } = signed
+      const v1DomainSignature = sign(null,
+        Buffer.from('assistant-growth/revision-verification/v1\0' + canonicalGrowthJson(body)),
+        privateKey).toString('base64url')
+      const v2DomainSignature = sign(null,
+        Buffer.from('assistant-growth/revision-verification/v2\0' + canonicalGrowthJson(body)),
+        privateKey).toString('base64url')
+      expect(verifyPluginRevisionVerificationCertificate({ ...signed, signature: v1DomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+      expect(verifyPluginRevisionVerificationCertificate({ ...signed, signature: v2DomainSignature },
+        signed.authority, pem, 20_000)).toBe(false)
+    })
+
+    test('binds the instruction digest to the signature', () => {
+      const signed = instructionCertificate()
+      const changed: PluginRevisionVerificationCertificate = { ...signed,
+        source: { instructionDigest: otherHash, ownerDigest: hash } }
+      expect(verifyPluginRevisionVerificationCertificate(changed, signed.authority, pem, 20_000)).toBe(false)
+      // A changed digest is a different signed body, never a valid re-sign of the same one.
+      expect(pluginRevisionVerificationSigningPayload(
+        { ...bodyOf(signed), source: { instructionDigest: otherHash, ownerDigest: hash } }))
+        .not.toBe(pluginRevisionVerificationSigningPayload(bodyOf(signed)))
+    })
+
+    function bodyOf(value: PluginRevisionVerificationCertificate): Omit<PluginRevisionVerificationCertificate, 'signature'> {
+      const { signature: _signature, ...body } = value
+      return body
+    }
+  })
 })

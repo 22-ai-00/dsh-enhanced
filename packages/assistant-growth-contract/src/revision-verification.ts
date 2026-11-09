@@ -22,12 +22,33 @@ export interface PluginRevisionParentBinding {
   sourceDigest: string
 }
 
+/**
+ * Task-failure revisions bind the frozen growth run that authorized them.
+ * Owner-instruction revisions have no growth run: their signed source instead
+ * binds the exact instruction row that authenticated the revision, while the
+ * parent binding already names the adopted plan.
+ */
+export type PluginRevisionVerificationTaskSource = { referenceDigest: string; ownerDigest: string; growthRunDigest: string }
+export type PluginRevisionVerificationInstructionSource = { instructionDigest: string; ownerDigest: string }
+export type PluginRevisionVerificationSource =
+  | PluginRevisionVerificationTaskSource
+  | PluginRevisionVerificationInstructionSource
+
+export function isPluginRevisionTaskSource(value: PluginRevisionVerificationSource): value is PluginRevisionVerificationTaskSource {
+  return Object.hasOwn(value, 'growthRunDigest')
+}
+export function isPluginRevisionInstructionSource(value: PluginRevisionVerificationSource): value is PluginRevisionVerificationInstructionSource {
+  return Object.hasOwn(value, 'instructionDigest')
+}
+
 export type PluginRevisionVerificationCertificate =
-  Omit<PluginCreationVerificationCertificate, 'protocol' | 'authority' | 'execution'> & {
+  Omit<PluginCreationVerificationCertificate, 'protocol' | 'authority' | 'execution' | 'source'> & {
     protocol: 'assistant-growth/revision-verification/v1' | 'assistant-growth/revision-verification/v2'
+      | 'assistant-growth/revision-verification/v3'
     authority: RevisionAcceptanceAuthorityRef
     parent: PluginRevisionParentBinding
-    /** Required exactly for v2 with the Linux native boundary; rejected for v1. */
+    source: PluginRevisionVerificationSource
+    /** Required exactly for v2 with the Linux native boundary; rejected for v1 and v3. */
     execution?: PluginCreationVerificationLinuxExecution
   }
 
@@ -35,6 +56,10 @@ export type PluginRevisionVerificationCertificateV1 = PluginRevisionVerification
   { protocol: 'assistant-growth/revision-verification/v1'; execution?: never }
 export type PluginRevisionVerificationCertificateV2 = PluginRevisionVerificationCertificate &
   { protocol: 'assistant-growth/revision-verification/v2'; execution: PluginCreationVerificationLinuxExecution }
+/** Owner-instruction revision: no task reference and no growth run anywhere in the signed body. */
+export type PluginRevisionVerificationCertificateV3 = PluginRevisionVerificationCertificate &
+  { protocol: 'assistant-growth/revision-verification/v3'; execution?: never;
+    source: { instructionDigest: string; ownerDigest: string } }
 
 /** Host-only request; the producer must reread the current parent and candidate. */
 export interface PluginRevisionVerificationRequest {
@@ -48,6 +73,7 @@ export type PluginRevisionVerificationResult =
 
 const domainV1 = 'assistant-growth/revision-verification/v1\0'
 const domainV2 = 'assistant-growth/revision-verification/v2\0'
+const domainV3 = 'assistant-growth/revision-verification/v3\0'
 const digest = /^[a-f0-9]{64}$/u
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const certificateKeys = ['protocol', 'verificationId', 'authority', 'plan', 'parent', 'source', 'contractDigest',
@@ -92,23 +118,41 @@ export function validatePluginRevisionParentBinding(value: unknown): asserts val
 export function validatePluginRevisionVerificationCertificate(value: unknown): asserts value is PluginRevisionVerificationCertificate {
   const protocol: unknown = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'protocol')?.value : undefined
   const linux = protocol === 'assistant-growth/revision-verification/v2'
+  const instruction = protocol === 'assistant-growth/revision-verification/v3'
   const item = record(value, [...certificateKeysFor(value), 'signature'], 'certificate')
-  if (!linux && item.protocol !== 'assistant-growth/revision-verification/v1') fail('protocol')
+  if (!linux && item.protocol !== 'assistant-growth/revision-verification/v1'
+    && item.protocol !== 'assistant-growth/revision-verification/v3') fail('protocol')
   const authority = item.authority
   validateRevisionAcceptanceAuthorityRef(authority)
   validatePluginRevisionParentBinding(item.parent)
+  // The instruction source is validated in full here; the delegated creation
+  // shape check only re-verifies the shared fields, so it receives a mapped
+  // pseudo-source with the exact triple shape it always required.
+  if (instruction) {
+    const source = record(item.source, ['instructionDigest', 'ownerDigest'], 'source')
+    for (const key of ['instructionDigest', 'ownerDigest']) {
+      if (typeof source[key] !== 'string' || !digest.test(source[key])) fail(`source ${key}`)
+    }
+  }
   const { parent: _parent, ...creationShape } = item
   validatePluginCreationVerificationCertificate({ ...creationShape,
     protocol: linux ? 'assistant-growth/creation-verification/v3' : 'assistant-growth/creation-verification/v1',
     authority: { ...authority, protocol: 'assistant-growth/creation-acceptance-authority/v1' },
-  })
+    ...(instruction ? { source: instructionSourceForShapeCheck(item.source) } : {}) })
   if (Buffer.byteLength(canonicalGrowthJson(item)) > 65_536) fail('certificate bytes')
+}
+
+/** Maps a validated v3 instruction source onto the shared creation shape for field checks only. */
+function instructionSourceForShapeCheck(source: unknown): { referenceDigest: string; ownerDigest: string; growthRunDigest: string } {
+  const item = source as { instructionDigest: string; ownerDigest: string }
+  return { referenceDigest: item.instructionDigest, ownerDigest: item.ownerDigest, growthRunDigest: item.instructionDigest }
 }
 
 export function pluginRevisionVerificationSigningPayload(value: Omit<PluginRevisionVerificationCertificate, 'signature'>): string {
   const body = record(value, certificateKeysFor(value), 'signing body')
   validatePluginRevisionVerificationCertificate({ ...body, signature: 'A'.repeat(86) })
-  return (body.protocol === 'assistant-growth/revision-verification/v2' ? domainV2 : domainV1) + canonicalGrowthJson(body)
+  return (body.protocol === 'assistant-growth/revision-verification/v2' ? domainV2
+    : body.protocol === 'assistant-growth/revision-verification/v3' ? domainV3 : domainV1) + canonicalGrowthJson(body)
 }
 
 /** Signature and authority equality only; consumers must also recheck provenance and parent currency. */
