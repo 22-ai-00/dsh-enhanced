@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as release from '../src/release.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { advanceSourceRelease } from '../src/source-release-runner.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
@@ -97,9 +98,8 @@ function managedIntent(repository: string, id: string, baseline = true): SourceJ
     owner, ownerDigest: controlPlaneDigest(owner), trustDigest: hex('trust'), repository, name: 'health-helper',
     gapId: 'gap-placeholder', gapRevision: 1, gapDigest: hex('gap'), baseCommit: 'a'.repeat(40),
     files: [{ path: 'src/index.ts', content: 'export {}\n' }], ttlMs: 60_000,
-    build: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'b'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128,
-      cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
-    worktree: join(repository, `worktree-job-${id.repeat(64)}`), containerName: `dsh-source-job-${id.repeat(64)}`,
+    build: { ...linuxSourceConfig(), stateRoot: '/approved/state', expiresAt: 1_900_000_000_000 },
+    worktree: join(repository, `worktree-job-${id.repeat(64)}`), nativeResource: { backend: 'linux-native', key: `source-job-${id.repeat(64)}` },
     ...(baseline ? { baseline: { ref: 'refs/dsh-source/health-helper', remote: join(repository, 'remote.git'),
       targetBranch: 'repairs', initialCommit: 'a'.repeat(40) } } : {}) }
 }
@@ -137,10 +137,15 @@ describe('managed source job serialization', () => {
         name: intent.name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify',
         ttlMs: intent.ttlMs, idempotencyKey: 'prepared-plan', sourceJob: { jobId: id, jobRevision: running.revision, occurrenceId: 'occurrence-1' },
         prepared: { treeDigest: hex('tree'), patchDigest: hex('patch'), checkedAt: Date.now(),
-          evidence: { schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
-            environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'test', pnpmVersion: 'test' },
-            commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: hex('check') }],
-            pack: { name: 'health-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: 1, sha256: hex('pack') }, preparedAt: Date.now() } } }).result
+          evidence: { schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
+            runtimeDigest: hex('runtime'), executionContractDigest: hex('contract'), buildScriptSha256: hex('script'),
+            archive: { sizeBytes: 1, sha256: hex('archive') },
+            receipt: { requestDigest: hex('request'), nativeNonce: 'a'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+              intentDigest: hex('intent'), resourcesDigest: hex('resources'), receiptDigest: hex('receipt') },
+            environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+            checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+            pack: { name: 'health-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: 1, sha256: hex('pack') },
+            logDigest: hex('check'), durationMs: 1, preparedAt: Date.now() } } }).result
       expect(store.getSourceJob(id)).toMatchObject({ status: 'prepared', planId: plan.id })
       const nextId = `source-job-${'b'.repeat(64)}`
       expect(() => store.enqueueSourceJob({ id: nextId, automationId: nextId, idempotencyKey: 'prepared-two',

@@ -9,6 +9,7 @@ import type { OwnerTaskFailureReference } from '../src/owner-task-gap-types.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import { gcPreparedModifyWorktrees } from '../src/source-workspace.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import type { CreateSourcePlanInput } from '../src/store.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
@@ -45,9 +46,8 @@ function sourceIntent(gap: ReturnType<ControlPlaneStore['recordOwnerTaskFailureG
     expiresAt: NOW + 180_000, maxSubmissions: 10 }, owner, ownerDigest: controlPlaneDigest(owner), trustDigest: sha('trust'),
   repository: git?.repository ?? '/repository', name: 'new-helper', gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap),
   baseCommit: git?.baseCommit ?? 'a'.repeat(40), files: [{ path: 'src/index.ts', content: 'export {}\n' }], ttlMs: 60_000,
-  build: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'b'.repeat(64)}`, timeoutMs: 60_000,
-    memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
-  worktree: git?.worktree ?? `/worktree/worktree-job-${suffix.repeat(64)}`, containerName: `dsh-${id}` }
+  build: { ...linuxSourceConfig(), stateRoot: '/approved/state', expiresAt: NOW + 180_000 },
+  worktree: git?.worktree ?? `/worktree/worktree-job-${suffix.repeat(64)}`, nativeResource: { backend: 'linux-native', key: id } }
 }
 
 function preparedInput(source: SourceJobIntent, jobId: string, revision: number, bytes: Buffer): CreateSourcePlanInput {
@@ -56,10 +56,15 @@ function preparedInput(source: SourceJobIntent, jobId: string, revision: number,
     scope: ['plugins/README.md', 'plugins/new-helper', 'pnpm-lock.yaml'], ttlMs: source.ttlMs, idempotencyKey: 'artifact-plan',
     sourceJob: { jobId, jobRevision: revision, occurrenceId: 'occurrence-1' }, preparedArtifact: bytes,
     prepared: { treeDigest: sha('tree'), patchDigest: sha('patch'), checkedAt: NOW + 1,
-      evidence: { schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
-        environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22', pnpmVersion: '11.7.0' },
-        commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: sha('log') }],
-        pack: { name: 'new-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: bytes.length, sha256: sha(bytes) }, preparedAt: NOW + 1 } } }
+      evidence: { schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
+        runtimeDigest: sha('runtime'), executionContractDigest: sha('contract'), buildScriptSha256: sha('script'),
+        archive: { sizeBytes: bytes.length, sha256: sha('archive') },
+        receipt: { requestDigest: sha('request'), nativeNonce: 'a'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+          intentDigest: sha('intent'), resourcesDigest: sha('resources'), receiptDigest: sha('receipt') },
+        environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+        checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+        pack: { name: 'new-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: bytes.length, sha256: sha(bytes) },
+        logDigest: sha('log'), durationMs: 1, preparedAt: NOW + 1 } } }
 }
 
 function queueRunning(store: ControlPlaneStore, suffix = 'd', git?: { repository: string; worktree: string; baseCommit: string },

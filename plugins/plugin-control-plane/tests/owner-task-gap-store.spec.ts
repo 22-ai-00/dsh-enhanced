@@ -8,6 +8,7 @@ import { exampleIntegrityPinnedCatalog } from '../src/catalog.ts'
 import type { OwnerTaskFailureReference } from '../src/owner-task-gap-types.ts'
 import { controlPlaneSchemaVersion, openControlPlaneDatabase } from '../src/sqlite.ts'
 import { ControlPlaneStore, ControlPlaneStoreError, controlPlaneDigest } from '../src/store.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
 
 const roots: string[] = []
@@ -36,9 +37,8 @@ function sourceIntent(gapId: string, gapRevision: number, gapDigest: string): So
   return { authority: { id: 'source-authority', digest: digest('source-authority'), expiresAt: 1_800_000_060_000, maxSubmissions: 1 },
     owner, ownerDigest: controlPlaneDigest(owner), trustDigest: digest('trust'), repository: '/repository', name: 'owner-repair',
     gapId, gapRevision, gapDigest, baseCommit: 'a'.repeat(40), files: [{ path: 'src/index.ts', content: 'export {}\n' }], ttlMs: 60_000,
-    build: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'b'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128,
-      cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
-    worktree: `/worktree/worktree-job-${'d'.repeat(64)}`, containerName: `dsh-source-job-${'d'.repeat(64)}` }
+    build: { ...linuxSourceConfig(), stateRoot: '/approved/state', expiresAt: 1_800_000_060_000 },
+    worktree: `/worktree/worktree-job-${'d'.repeat(64)}`, nativeResource: { backend: 'linux-native', key: `source-job-${'d'.repeat(64)}` } }
 }
 
 function sourcePlanInput(gapId: string) {

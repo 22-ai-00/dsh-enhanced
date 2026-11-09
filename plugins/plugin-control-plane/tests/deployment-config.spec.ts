@@ -208,7 +208,7 @@ test.skipIf(process.platform !== 'linux')('rejects seal accessors and hidden or 
   expect(() => validateSourceBuildConfig(inherited as never)).toThrow('state seal is invalid')
 })
 
-test('rejects state seals on Docker and macOS source configs', () => {
+test('rejects state seals on non-Linux source configs', () => {
   const docker = { dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64), timeoutMs: 60_000,
     memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }
   const native = { backend: 'macos-seatbelt' as const, stateRoot: '/approved/mac-state', authorityDigest: 'a'.repeat(64),
@@ -217,11 +217,10 @@ test('rejects state seals on Docker and macOS source configs', () => {
       nodePath: '/approved/mac-runtime/bin/node', nodeSha256: 'a'.repeat(64), modulesPath: '/approved/mac-runtime/node_modules',
       roots: [{ path: '/approved/mac-runtime', dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
       versions: { node: 'v22.23.2', typescript: '6', cordis: '4', tools: '1', systemPrompt: '1' } } }
-  for (const config of [docker, native]) {
-    expect(() => validateSourceBuildConfig(config)).not.toThrow()
-    expect(() => validateSourceBuildConfig({ ...config, stateSeal: { path: '/approved/seal.json', sha256: 'c'.repeat(64) } } as never))
-      .toThrow('state seal is invalid')
-  }
+  expect(() => validateSourceBuildConfig(docker as never)).toThrow('requires a native backend')
+  expect(() => validateSourceBuildConfig(native)).not.toThrow()
+  expect(() => validateSourceBuildConfig({ ...native, stateSeal: { path: '/approved/seal.json', sha256: 'c'.repeat(64) } } as never))
+    .toThrow('state seal is invalid')
 })
 
 test.skipIf(process.platform !== 'linux').each([false, true])('passes the optional state seal unchanged to the service-owned Linux runner (%s)', async sealed => {

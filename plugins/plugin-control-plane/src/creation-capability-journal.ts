@@ -171,6 +171,8 @@ export function validateCreationCapabilityConfig(value: unknown): asserts value 
   if (linux) validateLinuxCreationCapabilityRunner(runner)
   else if (native) validateNativeMacRuntime(runner.runtime)
   else {
+    // A Docker-era runner is readable history only: the runtime refuses to
+    // construct a behavior runner for it, and the sealed handover retires it.
     str(runner.image, /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u, 512)
     const dockerPath = path(runner.dockerPath)
     if (dockerPath === keyPath) fail()

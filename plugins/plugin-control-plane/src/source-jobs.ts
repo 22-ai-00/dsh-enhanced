@@ -11,7 +11,7 @@ import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
 import { assertManagedVersionPaths } from './source-versioning.js'
 import { resolveSourceBaseline, validateSourceBaselineConfig } from './source-baseline.js'
-import { removeSourceJobContainer, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
+import { validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { inspectSourceRevisionContext, normalizeSourceRevisionGrant, validateSourceRevisionGrant } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-enhanced/assistant-growth-contract'
@@ -598,9 +598,7 @@ export class SourceJobRuntime {
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),
       ...(instruction === undefined ? {} : {
         ownerInstruction: { instructionId: instruction.instructionId, digest: controlPlaneDigest(instruction) } }),
-      ...('backend' in this.options.build
-        ? { nativeResource: { backend: this.options.build.backend, key: id } }
-        : { containerName: `dsh-source-job-${token}` }),
+      nativeResource: { backend: this.options.build.backend, key: id },
     }
     await assertCurrent()
     // Synchronous acceptance and registration: no Agent signal is persisted.
@@ -1013,14 +1011,11 @@ export class SourceJobRuntime {
       if (job.status !== 'unknown') throw new Error('only unknown source jobs need resource reconciliation')
       const trust = await this.options.trust()
       if (controlPlaneDigest(trust) !== job.intent.trustDigest) throw new Error('source job trust changed')
-      if ('backend' in job.intent.build) {
-        if (job.intent.nativeResource?.backend !== job.intent.build.backend || job.intent.nativeResource.key !== job.id
-          || controlPlaneDigest(this.options.build) !== controlPlaneDigest(job.intent.build)
-          || await this.options.inspectNativeQuiescence?.(job.id) !== 'quiescent') {
-          throw new Error('native source job has no valid durable quiescence receipt')
-        }
-      } else {
-        await removeSourceJobContainer(job.intent.build, { id: job.id, containerName: job.intent.containerName! })
+      if (job.intent.nativeResource === undefined || !('backend' in job.intent.build)
+        || job.intent.nativeResource.backend !== job.intent.build.backend || job.intent.nativeResource.key !== job.id
+        || controlPlaneDigest(this.options.build) !== controlPlaneDigest(job.intent.build)
+        || await this.options.inspectNativeQuiescence?.(job.id) !== 'quiescent') {
+        throw new Error('native source job has no valid durable quiescence receipt')
       }
       await removeSourceJobWorktree({ stateRoot: join(this.options.statePath, 'source-worktrees'), repository: job.intent.repository, worktree: job.intent.worktree, baseCommit: job.intent.baseCommit, environment: inheritedEnvironment(trust) })
       this.inspect(input)

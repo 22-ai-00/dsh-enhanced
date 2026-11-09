@@ -1,42 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
-import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { ControlPlaneCliError } from './errors.js'
 import { verifyRevisedPluginWorkspace, type SourceRevisionBinding } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { verifyCreatedPluginWorkspace, type SourceCreationBinding } from './source-creation.js'
-import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
-import type { DockerSourcePreparedEvidence, SourcePreparedEvidence } from './types.js'
+import { runLocalCommand } from './source-workspace.js'
+import type { SourcePreparedEvidence } from './types.js'
 import type { LinuxRuntime, LinuxCgroupRoots, LinuxRunnerStateSeal, LinuxSystemSnapshot, LinuxUserNamespaceMapping, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
-
-export interface DockerSourceBuildConfig {
-  /** Canonical owner-controlled docker client. */
-  dockerPath: string
-  /** Canonical, owner-held local Docker Desktop socket for portable repository builds. */
-  socketPath?: string
-  /** Engine identity frozen by the owner bootstrap receipt. */
-  daemonId?: string
-  /** Image pinned by manifest reference or a local immutable image content ID. */
-  image: string
-  timeoutMs: number
-  memoryMiB: number
-  cpus: number
-  pidsLimit: number
-  workspaceMiB: number
-  outputBytes: number
-  /** Host-owned package/runtime version bump before the checked tree is frozen. */
-  versioning?: 'patch'
-  /** Owner-only opt-in for the larger, full-repository check budget. */
-  profile?: 'standard' | 'repository' | 'portable-repository'
-  /** Writable /tmp tmpfs size. Defaults to 32 MiB for standard, 2048 MiB for repository. */
-  temporaryMiB?: number
-  /** Explicit owner opt-in for nested unprivileged sandboxes. Relaxes Docker's
-   * system-path masks, hides /sys, and requires the pinned seccomp/runtime. */
-  repositorySandbox?: { seccompPath: string }
-}
 
 export interface NativeSourceBuildConfig {
   backend: 'macos-seatbelt'
@@ -69,7 +41,7 @@ export interface LinuxSourceBuildConfig extends Omit<NativeSourceBuildConfig, 'b
   stateSeal?: LinuxRunnerStateSeal
 }
 
-export type SourceBuildConfig = DockerSourceBuildConfig | NativeSourceBuildConfig | LinuxSourceBuildConfig
+export type SourceBuildConfig = NativeSourceBuildConfig | LinuxSourceBuildConfig
 
 /** Keep Config synchronous and independent of the Mac executor package: Linux
  * authority runtimes copy this module without assistant-isolation. The native
@@ -182,13 +154,6 @@ export interface SourceBuildResult<E extends SourcePreparedEvidence = SourcePrep
   /** Host-only bytes from the same verified in-container pack read. Never persisted in source evidence. */
   packArtifact?: Buffer
 }
-
-const imageDigest = /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u
-const marker = /^DSH_PREPARED_PACK\t([^\t\n]+)\t([0-9]+)\t([a-f0-9]{64})\t([^\t\n]+)\t([^\t\n]+)$/mu
-const packFrame = 'DSH_PREPARED_PACK_BYTES_V1\t'
-const maximumPackBytes = 32 * 1024 * 1024
-const maximumPackBase64Bytes = Math.ceil(maximumPackBytes / 3) * 4
-const repositorySeccompSha256 = 'b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342'
 
 /** Exact in-container command recorded in prepared source evidence. */
 export const PREPARED_SOURCE_BUILD_SCRIPT = String.raw`set -eu
@@ -615,16 +580,6 @@ if (process.env.DSH_SOURCE_CAPTURE_PACK === 'true') process.stdout.write('DSH_PR
 DSH_SOURCE_PACK_VERIFY
 `
 
-interface SourceBuildLimits {
-  profile: 'standard' | 'repository' | 'portable-repository'
-  temporaryMiB: number
-}
-
-function sourceBuildLimits(config: DockerSourceBuildConfig): SourceBuildLimits {
-  const profile = config.profile ?? 'standard'
-  return { profile, temporaryMiB: config.temporaryMiB ?? (profile === 'standard' ? 32 : 2_048) }
-}
-
 export function validateSourceBuildConfig(config: SourceBuildConfig): void {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
@@ -682,98 +637,7 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
     catch { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source runtime configuration is invalid') }
     return
   }
-  const allowedDockerKeys = new Set(['dockerPath', 'socketPath', 'daemonId', 'image', 'timeoutMs', 'memoryMiB', 'cpus',
-    'pidsLimit', 'workspaceMiB', 'outputBytes', 'versioning', 'profile', 'temporaryMiB', 'repositorySandbox'])
-  if (config === null || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).some(key => !allowedDockerKeys.has(key)) || (config.profile !== undefined && config.profile !== 'standard' && config.profile !== 'repository' && config.profile !== 'portable-repository')
-    || (config.versioning !== undefined && config.versioning !== 'patch')
-    || (config.temporaryMiB !== undefined && !Number.isSafeInteger(config.temporaryMiB))
-    || (config.profile === 'portable-repository' && config.repositorySandbox === undefined)
-    || (config.repositorySandbox !== undefined && (config.profile !== 'repository' && config.profile !== 'portable-repository' || typeof config.repositorySandbox !== 'object' || config.repositorySandbox === null
-      || Array.isArray(config.repositorySandbox) || Object.getPrototypeOf(config.repositorySandbox) !== Object.prototype
-      || Object.keys(config.repositorySandbox).length !== 1 || Object.keys(config.repositorySandbox)[0] !== 'seccompPath'
-      || typeof config.repositorySandbox.seccompPath !== 'string' || !config.repositorySandbox.seccompPath.startsWith('/') || config.repositorySandbox.seccompPath.includes('\0')))
-    || (config.profile === 'portable-repository' ? typeof config.socketPath !== 'string' : config.socketPath !== undefined)
-    || (config.profile === 'portable-repository' ? typeof config.daemonId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9:._-]{7,127}$/u.test(config.daemonId) || !/^sha256:[a-f0-9]{64}$/u.test(config.image) : config.daemonId !== undefined)
-    || (config.socketPath !== undefined && (typeof config.socketPath !== 'string' || !config.socketPath.startsWith('/')
-      || resolve(config.socketPath) !== config.socketPath || /[\p{Cc},]/u.test(config.socketPath) || config.socketPath.includes('://')))
-    || typeof config.image !== 'string' || config.image.length > 256 || !imageDigest.test(config.image) || typeof config.dockerPath !== 'string' || !config.dockerPath.startsWith('/') || config.dockerPath.includes('\0')
-    || !Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 60_000
-    || !Number.isSafeInteger(config.memoryMiB) || config.memoryMiB < 128
-    || !Number.isSafeInteger(config.pidsLimit) || config.pidsLimit < 16
-    || !Number.isFinite(config.cpus) || config.cpus < 0.25
-    || !Number.isSafeInteger(config.workspaceMiB) || config.workspaceMiB < 64
-    || !Number.isSafeInteger(config.outputBytes) || config.outputBytes < 4096 || config.outputBytes > 1_048_576) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
-  }
-  const limits = sourceBuildLimits(config)
-  const repository = limits.profile !== 'standard'
-  if (config.timeoutMs > (repository ? 1_800_000 : 240_000)
-    || config.memoryMiB > (repository ? 16_384 : 4_096)
-    || config.pidsLimit > (repository ? 1_024 : 512)
-    || config.cpus > (repository ? 16 : 4)
-    || config.workspaceMiB > (repository ? 8_192 : 2_048)
-    || limits.temporaryMiB < 32 || limits.temporaryMiB > (repository ? 4_096 : 32)) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
-  }
-}
-
-async function snapshotRepositorySeccomp(config: DockerSourceBuildConfig, temporary: string): Promise<{ path: string; digest: string } | undefined> {
-  const sandbox = config.repositorySandbox
-  if (sandbox === undefined) return undefined
-  if (!(process.platform === 'linux' && process.arch === 'x64')
-    && !(config.profile === 'portable-repository' && process.platform === 'darwin' && ['x64', 'arm64'].includes(process.arch))) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp requires an approved native Host')
-  }
-  const canonical = await realpath(sandbox.seccompPath)
-  if (canonical !== resolve(sandbox.seccompPath)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp profile must be canonical')
-  const before = await lstat(canonical); const parent = await lstat(dirname(canonical)); const uid = process.getuid?.()
-  if (!before.isFile() || before.isSymbolicLink() || before.size > 65_536 || (before.mode & 0o022) !== 0
-    || !parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o022) !== 0
-    || (uid !== undefined && before.uid !== 0 && before.uid !== uid)) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp profile is not an owner-safe bounded regular file')
-  }
-  const bytes = await readFile(canonical)
-  const after = await lstat(canonical)
-  if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp profile changed while being read')
-  }
-  const digest = createHash('sha256').update(bytes).digest('hex')
-  if (digest !== repositorySeccompSha256) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp profile digest is not approved')
-  const path = join(temporary, 'repository-seccomp.json')
-  await writeFile(path, bytes, { mode: 0o600 }); await chmod(path, 0o600)
-  return { path, digest }
-}
-
-async function verifiedDockerPath(path: string): Promise<string> {
-  const canonical = await realpath(path)
-  const executable = await lstat(canonical); const parent = await lstat(dirname(canonical)); const uid = process.getuid?.()
-  if (resolve(path) !== canonical || !executable.isFile() || executable.isSymbolicLink() || (executable.mode & 0o111) === 0
-    || (executable.mode & 0o022) !== 0 || !parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o002) !== 0
-    || (uid !== undefined && executable.uid !== 0 && executable.uid !== uid)) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build docker client is not a canonical owner-safe executable')
-  }
-  return canonical
-}
-
-async function verifiedPortableSocket(config: DockerSourceBuildConfig): Promise<string | undefined> {
-  if (config.profile !== 'portable-repository') return undefined
-  if (process.platform !== 'darwin' || !['x64', 'arm64'].includes(process.arch)) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable repository requires native macOS')
-  }
-  const expected = join(homedir(), '.docker', 'run', 'docker.sock')
-  if (config.socketPath !== expected || await realpath(expected) !== expected) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable Docker socket must be the owner local socket')
-  }
-  const socket = await lstat(expected), parent = await lstat(dirname(expected))
-  if (!socket.isSocket() || socket.uid !== process.getuid?.() || !parent.isDirectory()
-    || parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0) {
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable Docker socket is not owner-safe')
-  }
-  return expected
-}
-
-function portableArgs(socket: string | undefined, configDirectory: string | undefined, args: string[]): string[] {
-  return socket === undefined ? args : ['--config', configDirectory!, '-H', `unix://${socket}`, ...args]
+  throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration requires a native backend')
 }
 
 export async function sourceTree(worktree: string, baseCommit: string, scope: readonly string[], environment: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<{ tree: string; temporary: string; cleanup: () => Promise<void> }> {
@@ -788,8 +652,13 @@ export async function sourceTree(worktree: string, baseCommit: string, scope: re
   } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error }
 }
 
-export async function verifySourcePreparation(input: Pick<Parameters<typeof runDockerPreparedChecks>[0],
-  'worktree' | 'baseCommit' | 'name' | 'scope' | 'environment' | 'signal' | 'assertCurrent' | 'creation' | 'revision'>): Promise<void> {
+export async function verifySourcePreparation(input: {
+  worktree: string; baseCommit: string; name: string; scope: readonly string[]; environment: NodeJS.ProcessEnv
+  signal: AbortSignal; assertCurrent: () => Promise<void>
+  creation?: SourceCreationBinding | undefined
+  revision?: { binding: SourceRevisionBinding; parentSource: CreationCapabilitySourceSnapshot
+    parentCertificate: PluginCreationVerificationCertificate; files: readonly import('./source-workspace.js').ScopedPluginFile[] } | undefined
+}): Promise<void> {
   if (input.creation === undefined && input.revision === undefined) return
   if (input.creation !== undefined && input.revision !== undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build has conflicting preparation authorities')
   if ((input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
@@ -812,253 +681,46 @@ export async function verifySourcePreparation(input: Pick<Parameters<typeof runD
  * container. No repository, state directory, socket, credential, environment
  * value, or Host path crosses the boundary: the sole input is tar on stdin.
  */
-export async function runDockerPreparedChecks(input: {
-  config: DockerSourceBuildConfig
-  worktree: string
-  baseCommit: string
-  name: string
-  scope: readonly string[]
-  environment: NodeJS.ProcessEnv
-  signal: AbortSignal
-  assertCurrent: () => Promise<void>
-  preparedAt: number
-  /** Frozen before resource acquisition by the durable Host job. */
-  sourceJob?: { id: string; containerName: string }
-  /** Frozen owner grant and generator proof for Host-scaffolded creation only. */
-  creation?: SourceCreationBinding
-  revision?: { binding: SourceRevisionBinding; parentSource: CreationCapabilitySourceSnapshot; parentCertificate: PluginCreationVerificationCertificate; files: readonly import('./source-workspace.js').ScopedPluginFile[] }
-  /** Host-only request to return the exact already-verified pack bytes for independent verification. */
-  capturePack?: true
-}): Promise<SourceBuildResult<DockerSourcePreparedEvidence>> {
-  if (input.capturePack !== undefined && input.capturePack !== true) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source pack capture request is invalid')
-  if (input.sourceJob !== undefined && (!/^source-job-[a-f0-9]{64}$/u.test(input.sourceJob.id)
-    || input.sourceJob.containerName !== `dsh-${input.sourceJob.id}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
-  validateSourceBuildConfig(input.config); const limits = sourceBuildLimits(input.config); const dockerPath = await verifiedDockerPath(input.config.dockerPath)
-  const socket = await verifiedPortableSocket(input.config)
-  await input.assertCurrent()
-  if (input.config.profile === 'repository' && input.config.repositorySandbox !== undefined) {
-    const version = await dockerControl(dockerPath, ['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'], input.signal)
-    if (version.code !== 0 || version.stdout.trim() !== '29.4.1/linux/amd64') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository seccomp requires approved Docker runtime 29.4.1/linux/amd64')
-    await input.assertCurrent()
-  }
-  if (socket !== undefined) {
-    const version = await dockerControl(dockerPath, ['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'], input.signal, socket)
-    const architecture = process.arch === 'arm64' ? 'arm64' : 'amd64'
-    if (version.code !== 0 || version.stdout.trim() !== `29.4.1/linux/${architecture}`) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable repository requires approved matching Linux Docker runtime')
-    }
-    const daemon = await dockerControl(dockerPath, ['info', '--format', '{{.ID}}'], input.signal, socket)
-    if (daemon.code !== 0 || daemon.stdout.trim() !== input.config.daemonId) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable repository Docker daemon identity differs')
-    }
-    const image = await dockerControl(dockerPath, ['image', 'inspect', '--format', '{{.Id}}/{{.Os}}/{{.Architecture}}', input.config.image], input.signal, socket)
-    if (image.code !== 0 || image.stdout.trim() !== `${input.config.image}/linux/${architecture}`) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'portable repository image ID or platform differs')
-    }
-    await input.assertCurrent()
-  }
-  let creationSnapshot: Awaited<ReturnType<typeof checkedSourceSnapshot>> | undefined
-  let baseLockDigest: string | undefined
-  const verifyCreation = (): Promise<void> => verifySourcePreparation(input)
-  if (input.creation !== undefined || input.revision !== undefined) {
-    await verifyCreation()
-    creationSnapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment, undefined, input.signal)
-    const baseLock = await runLocalBuffer('git', ['show', `${input.baseCommit}:pnpm-lock.yaml`], input.worktree,
-      input.environment, { maximumOutput: 8_388_608, signal: input.signal })
-    baseLockDigest = createHash('sha256').update(baseLock).digest('hex')
-  }
-  const snapshot = await sourceTree(input.worktree, input.baseCommit, input.scope, input.environment)
-  let before: Awaited<ReturnType<typeof checkedSourceSnapshot>>
-  let packageVersion: string
-  let seccomp: { path: string; digest: string } | undefined
-  try {
-    seccomp = await snapshotRepositorySeccomp(input.config, snapshot.temporary)
-    before = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment, snapshot.tree)
-    if (creationSnapshot !== undefined) {
-      if (before.checkedTreeDigest !== creationSnapshot.checkedTreeDigest || before.checkedPatchDigest !== creationSnapshot.checkedPatchDigest) {
-        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation staged tree differs from verified workspace')
-      }
-      await verifyCreation()
-      const current = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment, undefined, input.signal)
-      if (current.checkedTreeDigest !== creationSnapshot.checkedTreeDigest || current.checkedPatchDigest !== creationSnapshot.checkedPatchDigest) {
-        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation changed after verification')
-      }
-    }
-    const packageJson = await runLocalCommand('git', ['show', `${snapshot.tree}:plugins/${input.name}/package.json`],
-      input.worktree, input.environment, { capture: true, maximumOutput: 65_536 })
-    const value: unknown = (JSON.parse(packageJson) as { version?: unknown })?.version
-    if (typeof value !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(value)) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source package version is invalid')
-    }
-    packageVersion = value
-    await input.assertCurrent()
-    input.signal.throwIfAborted()
-  } catch (error) { await snapshot.cleanup(); throw error }
-  const container = input.sourceJob?.containerName ?? `dsh-source-prepare-${randomUUID()}`
-  if (input.sourceJob !== undefined) {
-    try {
-      const existing = await dockerControl(dockerPath, ['container', 'ls', '--all', '--quiet', '--filter', `name=^/${container}$`], input.signal, socket)
-      if (existing.code !== 0 || existing.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable source container already exists or cannot be inspected')
-    } catch (error) { await snapshot.cleanup(); throw error }
-  }
-  if ((input.creation !== undefined || input.revision !== undefined) && (input.creation?.grant ?? input.revision!.binding.grant).expiresAt <= Date.now()) {
-    await snapshot.cleanup()
-    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation grant expired before build')
-  }
-  const script = PREPARED_SOURCE_BUILD_SCRIPT
-  const args = ['run', '-i', '--pull', 'never', '--name', container, '--label', `dsh.source.tree=${snapshot.tree}`, ...(input.sourceJob === undefined ? [] : ['--label', `dsh.source.job=${input.sourceJob.id}`]), ...(seccomp === undefined ? [] : ['--label', `dsh.source.seccomp.sha256=${seccomp.digest}`]), '--network', 'none', '--read-only', '--cap-drop', 'ALL',
-    '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--pids-limit', String(input.config.pidsLimit),
-    '--memory', `${input.config.memoryMiB}m`, '--memory-swap', `${input.config.memoryMiB}m`, '--cpus', String(input.config.cpus),
-    '--tmpfs', `/workspace:rw,nosuid,nodev,mode=1777,size=${input.config.workspaceMiB}m${limits.profile !== 'standard' ? ',exec' : ''}`, '--tmpfs', `/tmp:rw,nosuid,nodev,mode=1777,size=${limits.temporaryMiB}m${limits.profile !== 'standard' ? ',exec' : ''}`,
-    '--workdir', '/workspace', '--env', `PLUGIN_ROOT=plugins/${input.name}`, '--env', 'HOME=/tmp', '--env', 'PATH=/usr/local/bin:/usr/bin:/bin',
-    ...(input.capturePack ? ['--env', 'DSH_SOURCE_CAPTURE_PACK=true'] : []),
-    ...(baseLockDigest === undefined ? [] : ['--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${baseLockDigest}`]),
-    ...(limits.profile !== 'standard' ? ['--env', 'CI=true', '--env', `VITEST_MAX_WORKERS=${Math.max(1, Math.min(4, Math.floor(input.config.cpus)))}`] : []),
-    // Docker's masked proc submounts prevent procfs mounts in a child user
-    // namespace. This opt-in removes those system-path masks; an empty /sys
-    // compensates for sysfs exposure, but does not restore the /proc masks.
-    ...(seccomp === undefined ? [] : ['--security-opt', `seccomp=${seccomp.path}`,
-      '--security-opt', 'systempaths=unconfined', '--tmpfs', '/sys:ro,nosuid,nodev,noexec,size=1m']),
-    '--entrypoint', '/bin/sh', input.config.image, '-ceu', script]
-  const dockerConfig = socket === undefined ? undefined : await mkdtemp(join(tmpdir(), 'dsh-source-docker-config-'))
-  const git = spawn('/usr/bin/git', ['archive', '--format=tar', snapshot.tree], { cwd: input.worktree, env: input.environment, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
-  const docker = spawn(dockerPath, portableArgs(socket, dockerConfig, args), { stdio: ['pipe', 'pipe', 'pipe'], shell: false,
-    env: socket === undefined ? { PATH: '/usr/bin:/bin' } : { PATH: '/usr/bin:/bin', HOME: dockerConfig, DOCKER_CONFIG: dockerConfig } })
-  git.stderr.resume()
-  docker.stdin!.on('error', () => { /* EPIPE is settled by the Docker exit result. */ })
-  git.stdout.pipe(docker.stdin!)
-  const dockerDone = new Promise<number | null>((resolvePromise, reject) => { docker.once('error', reject); docker.once('close', resolvePromise) })
-  const gitDone = new Promise<void>((resolvePromise, reject) => { git.once('error', reject); git.once('close', code => code === 0 ? resolvePromise() : reject(new ControlPlaneCliError('EXECUTOR_FAILED', `source archive exited ${code}`))) })
-  const stdoutLimit = input.config.outputBytes + (input.capturePack ? packFrame.length + maximumPackBase64Bytes + 1 : 0)
-  let stdout = ''; let stdoutBytes = 0; let stderr = ''; let overflow = false; let timedOut = false
-  const add = (target: 'out' | 'err', chunk: Buffer): void => {
-    if (target === 'err') { stderr = (stderr + chunk.toString('utf8')).slice(-4096); return }
-    const remaining = stdoutLimit - stdoutBytes
-    if (remaining > 0) stdout += chunk.subarray(0, remaining).toString('utf8')
-    stdoutBytes += chunk.length
-    if (stdoutBytes > stdoutLimit) { overflow = true; stop() }
-  }
-  docker.stdout!.on('data', (chunk: Buffer) => add('out', chunk)); docker.stderr!.on('data', (chunk: Buffer) => add('err', chunk))
-  const stop = (): void => { git.kill('SIGKILL'); docker.kill('SIGKILL') }
-  const abort = (): void => { timedOut = true; stop() }
-  input.signal.addEventListener('abort', abort, { once: true })
-  const timer = setTimeout(abort, input.config.timeoutMs)
-  if (input.signal.aborted) abort()
-  const started = Date.now()
-  try {
-    const [code] = await Promise.all([dockerDone, gitDone])
-    await input.assertCurrent()
-    if (timedOut || input.signal.aborted) throw new ControlPlaneCliError('EXECUTOR_TIMEOUT', 'isolated source build was cancelled or exceeded its deadline')
-    if (overflow) throw new ControlPlaneCliError('EXECUTOR_OUTPUT_LIMIT', 'isolated source build exceeded its output bound')
-    if (code !== 0) throw new ControlPlaneCliError('EXECUTOR_FAILED', `isolated source build failed (${code}): ${stderr.trimEnd()}`)
-    const match = marker.exec(stdout)
-    if (match === null) throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build did not emit its pack evidence marker')
-    let packArtifact: Buffer | undefined
-    if (input.capturePack) {
-      const prefix = `${match[0]}\n${packFrame}`
-      if (!stdout.startsWith(prefix) || !stdout.endsWith('\n')) throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted an invalid pack capture frame')
-      const encoded = stdout.slice(prefix.length, -1)
-      const expectedSize = Number(match[2])
-      if (!Number.isSafeInteger(expectedSize) || expectedSize < 1 || expectedSize > maximumPackBytes
-        || encoded.length !== Math.ceil(expectedSize / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) {
-        throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted an invalid pack capture frame')
-      }
-      packArtifact = Buffer.from(encoded, 'base64')
-      if (packArtifact.length !== expectedSize || packArtifact.toString('base64') !== encoded
-        || createHash('sha256').update(packArtifact).digest('hex') !== match[3]) {
-        throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build pack capture differs from verified evidence')
-      }
-    } else if (stdout.trim() !== match[0]) {
-      throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted unexpected evidence output')
-    }
-    const checked = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment)
-    if (checked.checkedTreeDigest !== before.checkedTreeDigest || checked.checkedPatchDigest !== before.checkedPatchDigest) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source changed while its isolated build was running')
-    }
-    const logDigest = createHash('sha256').update(stdout).update('\0').update(stderr).digest('hex')
-    const checkedAt = Date.now()
-    return { treeDigest: checked.checkedTreeDigest, patchDigest: checked.checkedPatchDigest, checkedAt,
-      ...(packArtifact === undefined ? {} : { packArtifact }),
-      evidence: Object.freeze({ schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
-        environment: Object.freeze({ npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: match[4]!, pnpmVersion: match[5]! }),
-        commands: Object.freeze([{ command: 'docker', args: Object.freeze(portableArgs(socket, dockerConfig, args)), exitCode: 0 as const, durationMs: Date.now() - started, logDigest }]),
-        pack: Object.freeze({ name: match[1]!, sizeBytes: Number(match[2]), sha256: match[3]!, version: packageVersion }), preparedAt: input.preparedAt }) }
-  } finally {
-    clearTimeout(timer); input.signal.removeEventListener('abort', abort); stop()
-    await Promise.allSettled([dockerDone, gitDone])
-    try {
-      // Failed inspect is ambiguous (daemon loss also exits nonzero). Require
-      // a successful exact-name listing from the daemon to prove absence.
-      if (input.sourceJob === undefined) await ensureContainerRemoved(dockerPath, container, socket, input.config.daemonId)
-      else await removeSourceJobContainer(input.config, input.sourceJob)
-    } finally { await snapshot.cleanup(); if (dockerConfig !== undefined) await rm(dockerConfig, { recursive: true, force: true }) }
-  }
-}
+// docker-era prepared checks were removed; Linux and macOS native checks are the only backends.
 
-/** Reconcile only a labeled, image-bound durable container, then prove absence. */
-export async function removeSourceJobContainer(config: DockerSourceBuildConfig, job: { id: string; containerName: string }): Promise<void> {
-  if (!/^source-job-[a-f0-9]{64}$/u.test(job.id) || job.containerName !== `dsh-${job.id}`) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
-  validateSourceBuildConfig(config)
-  const path = await verifiedDockerPath(config.dockerPath)
-  const socket = await verifiedPortableSocket(config)
-  if (socket !== undefined) {
-    const daemon = await dockerControl(path, ['info', '--format', '{{.ID}}'], undefined, socket)
-    if (daemon.code !== 0 || daemon.stdout.trim() !== config.daemonId) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container Docker daemon identity differs')
-    }
-  }
-  const list = (): Promise<{ code: number | null; stdout: string }> => dockerControl(path, ['container', 'ls', '--all', '--quiet', '--filter', `name=^/${job.containerName}$`], undefined, socket)
-  const before = await list()
-  if (before.code !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container absence is unproven')
-  if (before.stdout.trim() !== '') {
-    const inspected = await dockerControl(path, ['inspect', '--format', '[{{json .Id}},{{json .Name}},{{json .Config.Image}},{{json (index .Config.Labels "dsh.source.job")}}]', job.containerName], undefined, socket)
-    if (inspected.code !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container identity is unproven')
-    const value: unknown = JSON.parse(inspected.stdout)
-    if (!Array.isArray(value) || value.length !== 4 || typeof value[0] !== 'string' || !/^[a-f0-9]{64}$/u.test(value[0])
-      || value[1] !== `/${job.containerName}` || value[2] !== config.image || value[3] !== job.id) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container ownership mismatch')
-    await dockerControl(path, ['rm', '-f', value[0]], undefined, socket)
-  }
-  const after = await list()
-  if (after.code !== 0 || after.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container cleanup is unproven')
+/** Docker-era build configuration readable only from historical stored intents.
+ * This shape can never be produced by the current build dispatch. */
+export interface LegacyDockerSourceBuildConfig {
+  dockerPath: string
+  socketPath?: string
+  daemonId?: string
+  image: string
+  timeoutMs: number
+  memoryMiB: number
+  cpus: number
+  pidsLimit: number
+  workspaceMiB: number
+  outputBytes: number
+  versioning?: 'patch'
+  profile?: 'standard' | 'repository' | 'portable-repository'
+  temporaryMiB?: number
+  repositorySandbox?: { seccompPath: string }
 }
-
-async function dockerControl(path: string, args: string[], signal?: AbortSignal, socket?: string): Promise<{ code: number | null; stdout: string }> {
-  signal?.throwIfAborted()
-  const configDirectory = socket === undefined ? undefined : await mkdtemp(join(tmpdir(), 'dsh-source-docker-config-'))
-  try { return await new Promise((resolvePromise, reject) => {
-    const child = spawn(path, portableArgs(socket, configDirectory, args), { stdio: ['ignore', 'pipe', 'ignore'], shell: false,
-      env: socket === undefined ? { PATH: '/usr/bin:/bin' } : { PATH: '/usr/bin:/bin', HOME: configDirectory, DOCKER_CONFIG: configDirectory } })
-    let stdout = ''; let bytes = 0; let failed = false
-    const abort = (): void => { child.kill('SIGKILL') }
-    signal?.addEventListener('abort', abort, { once: true })
-    if (signal?.aborted) abort()
-    const timer = setTimeout(() => { failed = true; child.kill('SIGKILL') }, 5_000)
-    const cleanup = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
-    child.stdout!.on('data', (chunk: Buffer) => {
-      bytes += chunk.length
-      if (bytes > 4_096) { failed = true; child.kill('SIGKILL') }
-      else stdout += chunk.toString('utf8')
-    })
-    child.once('error', () => { cleanup(); reject(new ControlPlaneCliError('EXECUTOR_FAILED', 'source build control client could not start')) })
-    child.once('close', code => {
-      cleanup()
-      if (signal?.aborted) reject(new ControlPlaneCliError('EXECUTOR_TIMEOUT', 'source build control query was cancelled'))
-      else if (failed) reject(new ControlPlaneCliError('EXECUTOR_FAILED', 'source build control query exceeded its resource bound'))
-      else resolvePromise({ code, stdout })
-    })
-  }) } finally { if (configDirectory !== undefined) await rm(configDirectory, { recursive: true, force: true }) }
+const legacyDockerConfigKeys = new Set(['dockerPath', 'socketPath', 'daemonId', 'image', 'timeoutMs', 'memoryMiB',
+  'cpus', 'pidsLimit', 'workspaceMiB', 'outputBytes', 'versioning', 'profile', 'temporaryMiB', 'repositorySandbox'])
+export function isLegacyDockerSourceBuildConfig(value: unknown): value is LegacyDockerSourceBuildConfig {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const config = value as Record<string, unknown>
+  return !Object.hasOwn(config, 'backend') && Object.keys(config).some(key => key === 'dockerPath' || key === 'image')
+    && Object.keys(config).every(key => legacyDockerConfigKeys.has(key))
 }
-
-async function ensureContainerRemoved(path: string, container: string, socket?: string, daemonId?: string): Promise<void> {
-  if (socket !== undefined) {
-    const daemon = await dockerControl(path, ['info', '--format', '{{.ID}}'], undefined, socket)
-    if (daemon.code !== 0 || daemon.stdout.trim() !== daemonId) {
-      throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build daemon changed before cleanup')
-    }
+/** Shape validation for historical Docker-era intents only; never enables a build. */
+export function validateLegacyDockerSourceBuildConfig(config: unknown): LegacyDockerSourceBuildConfig {
+  if (!isLegacyDockerSourceBuildConfig(config)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'legacy source build configuration is invalid')
+  if (typeof config.dockerPath !== 'string' || !config.dockerPath.startsWith('/')
+    || typeof config.image !== 'string' || config.image.length > 256
+    || !Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 60_000
+    || !Number.isSafeInteger(config.memoryMiB) || config.memoryMiB < 128
+    || !Number.isSafeInteger(config.pidsLimit) || config.pidsLimit < 16
+    || !Number.isFinite(config.cpus) || config.cpus < 0.25
+    || !Number.isSafeInteger(config.workspaceMiB) || config.workspaceMiB < 64
+    || !Number.isSafeInteger(config.outputBytes) || config.outputBytes < 4096) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'legacy source build configuration is invalid')
   }
-  await dockerControl(path, ['rm', '-f', container], undefined, socket)
-  const remaining = await dockerControl(path, ['container', 'ls', '--all', '--quiet', '--filter', `name=^/${container}$`], undefined, socket)
-  if (remaining.code !== 0 || remaining.stdout.trim() !== '') {
-    throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build container cleanup could not prove quiescence')
-  }
+  return config
 }

@@ -26,6 +26,7 @@ export interface CreationCapabilityConfig {
   /** Opt-in lifetime for an already adopted capability; never extends either use grant. */
   retention?: { maximumLifetimeMs: number }
   runner: {
+    /** @deprecated Docker-era shape; readable from stored history and sealed-handoff inputs only. The runtime cannot construct a behavior runner from it. */
     stateRoot: string
     image: string
     dockerPath: string

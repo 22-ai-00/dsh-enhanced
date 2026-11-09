@@ -58,7 +58,7 @@ import { advanceSourceRelease, sourceReleaseAuthorities, validateSourceReleaseEx
 import { adoptSourceRelease, validateSourceAdoptionConfig, type SourceAdoptionConfig } from './source-adoption-runner.js'
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
-import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
+import { validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { runNativePreparedChecks } from './native-source-build.js'
 import { LINUX_PREPARED_SOURCE_BUILD_SCRIPT, LINUX_SOURCE_PACK_PATH, runLinuxPreparedChecks } from './linux-source-build.js'
 import { LinuxRepositoryRunner, NativeMacVerifierRunner, linuxRuntimeDigest, verifyLinuxRuntime, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
@@ -306,9 +306,15 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
     const verification = config.creationVerifications
     const jobs = config.sourceJobs
     const build = config.sourceBuild
-    const buildBackend = build && 'backend' in build ? build.backend : 'docker'
-    const adoptionBackend = 'backend' in capability.runner ? capability.runner.backend : 'docker'
-    if (!build || buildBackend !== adoptionBackend) {
+    if (!build || !('backend' in build)) {
+      throw new Error('plugin-control-plane: creation build requires a native execution backend')
+    }
+    const buildBackend = build.backend
+    if (!('backend' in capability.runner)) {
+      throw new Error('plugin-control-plane: creation adoption runner requires a native execution backend')
+    }
+    const adoptionBackend = capability.runner.backend
+    if (buildBackend !== adoptionBackend) {
       throw new Error('plugin-control-plane: creation build, verification and adoption require matching execution backends')
     }
     if (!verification || !jobs?.creation || capability.namePrefix !== jobs.creation.namePrefix
@@ -783,7 +789,8 @@ export class PluginControlPlaneService extends Service {
         const sourceBuild = this.config.sourceBuild!
         let nativeRunner: typeof this.nativeSourceRunner
         try {
-          nativeRunner = !('backend' in sourceBuild) ? undefined : sourceBuild.backend === 'macos-seatbelt'
+          nativeRunner = !('backend' in sourceBuild) ? undefined
+            : sourceBuild.backend === 'macos-seatbelt'
             ? { backend: 'macos-seatbelt', runner: new NativeMacVerifierRunner({ backend: 'macos-seatbelt',
             stateRoot: sourceBuild.stateRoot, authorityDigest: sourceBuild.authorityDigest,
             runtime: sourceBuild.runtime, source: NATIVE_SOURCE_COMPILER, expiresAt: sourceBuild.expiresAt,
@@ -2860,8 +2867,7 @@ export class PluginControlPlaneService extends Service {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', 'ttlMs must be an integer within 900000..86400000')
     }
     const buildConfig = this.config.sourceBuild
-    const repositoryBuild = buildConfig !== undefined && ('backend' in buildConfig
-      ? buildConfig.backend === 'linux-native' : ['repository', 'portable-repository'].includes(buildConfig.profile ?? ''))
+    const repositoryBuild = buildConfig !== undefined && 'backend' in buildConfig && buildConfig.backend === 'linux-native'
     const maximumTimeoutMs = repositoryBuild ? 1_800_000 : 240_000
     const timeoutMs = input.timeoutMs ?? 180_000
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > maximumTimeoutMs) {
@@ -2907,26 +2913,19 @@ export class PluginControlPlaneService extends Service {
         environment, signal, assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
         ...(revision === undefined ? {} : { revision: { binding: revision, parentSource: parent!.source,
           parentCertificate: parent!.certificate, files: input.files } }), ...(capturePack ? { capturePack: true as const } : {}) }
-      const checked = 'backend' in configured
-        ? await (async () => {
-          const native = this.nativeSourceRunner
-          if (sourceJob === undefined || native === undefined || native.backend !== configured.backend
-            || sourceJob.intent.nativeResource?.backend !== configured.backend || sourceJob.intent.nativeResource.key !== sourceJob.id) {
-            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation requires its bound durable source job')
-          }
-          if (configured.backend === 'linux-native' && native.backend === 'linux-native') {
-            linuxBuildInvoked = true
-            return runLinuxPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
-              runner: native.runner, sourceJob: { id: sourceJob.id } })
-          }
-          if (configured.backend !== 'macos-seatbelt' || native.backend !== 'macos-seatbelt' || !creating && !revising) {
-            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'macOS source preparation requires a Host-scaffolded creation job')
-          }
-          return runNativePreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
+      if (!('backend' in configured)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build requires a native backend')
+      const native = this.nativeSourceRunner
+      if (sourceJob === undefined || native === undefined || native.backend !== configured.backend
+        || sourceJob.intent.nativeResource?.backend !== configured.backend || sourceJob.intent.nativeResource.key !== sourceJob.id) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation requires its bound durable source job')
+      }
+      const checked = configured.backend === 'linux-native' && native.backend === 'linux-native'
+        ? await (linuxBuildInvoked = true, runLinuxPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
+          runner: native.runner, sourceJob: { id: sourceJob.id } }))
+        : configured.backend === 'macos-seatbelt' && native.backend === 'macos-seatbelt' && (creating || revising)
+          ? await runNativePreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
             runner: native.runner, sourceJob: { id: sourceJob.id } })
-        })()
-        : await runDockerPreparedChecks({ ...common, config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
-          ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName! } }) })
+          : (() => { throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'native source preparation backend is unavailable') })()
       await assertCurrent()
       if (capturePack && checked.packArtifact === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation artifact was not captured')
       if (revision !== undefined) {

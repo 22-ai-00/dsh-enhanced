@@ -12,7 +12,7 @@ import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliati
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
 import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase,
   openControlPlaneDatabaseReadOnly } from './sqlite.js'
-import { validateSourceBuildConfig } from './source-build.js'
+import { isLegacyDockerSourceBuildConfig, validateLegacyDockerSourceBuildConfig, validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
@@ -1483,8 +1483,11 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   if (creation !== undefined && !(intent['name'] as string).startsWith(creation.grant.namePrefix)) {
     throw new ControlPlaneStoreError('invalid-input', 'source job plugin name is outside its creation grant')
   }
-  try { validateSourceBuildConfig(intent['build'] as SourceJobIntent['build']) }
-  catch { throw new ControlPlaneStoreError('invalid-input', 'source job build configuration is invalid') }
+  if (isLegacyDockerSourceBuildConfig(intent['build'])) validateLegacyDockerSourceBuildConfig(intent['build'])
+  else {
+    try { validateSourceBuildConfig(intent['build'] as Exclude<SourceJobIntent['build'], import('./source-build.js').LegacyDockerSourceBuildConfig>) }
+    catch { throw new ControlPlaneStoreError('invalid-input', 'source job build configuration is invalid') }
+  }
   if (Object.hasOwn(intent, 'baseline')) {
     try { validateSourceBaselineConfig(intent['baseline']) }
     catch { throw new ControlPlaneStoreError('invalid-input', 'source job baseline configuration is invalid') }

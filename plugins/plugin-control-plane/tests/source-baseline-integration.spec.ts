@@ -10,6 +10,7 @@ import * as release from '../src/release.ts'
 import { resolveSourceBaseline } from '../src/source-baseline.ts'
 import { inspectSourceContext } from '../src/source-context.ts'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { ControlPlaneStore } from '../src/store.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import { sourceBaselineRelease } from './helpers/source-baseline.ts'
@@ -86,8 +87,8 @@ it('continues through two signed durable releases and queues from the recovered 
     runtime = new SourceJobRuntime({ config: { authorityId: 'baseline-jobs', expiresAt: Date.now() + 600_000,
       maxSubmissions: 3, repository, baseline: config, ownerRouteId: 'route', principalId: 'owner', workspace: root,
       preset: 'primary', budgetId: 'source', budgetAmount: 1 },
-      build: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-        memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
+      build: { ...linuxSourceConfig(), stateRoot: join(root, 'native-state'), expiresAt: Date.now() + 600_000,
+        maxTotalDurationMs: 120_000, timeoutMs: 60_000 },
       statePath: first.root, store: reopened, ports: { automations: automations as never, delivery: { validateOwnerRoute: () => receipt } },
       trust: async () => trust, prepare: async () => { throw new Error('admission test must not execute a build') } })
     runtime.start()

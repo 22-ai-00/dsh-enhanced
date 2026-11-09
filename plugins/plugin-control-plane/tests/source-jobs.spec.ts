@@ -25,8 +25,16 @@ const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
 const receipt = () => ({ receiptVersion: 2 as const, authorityId: OWNER.ownerRouteId, authorityHash: hex('route-1'), principalId: OWNER.principalId,
   principalRecordId: OWNER.principalRecordId, principalVersion: OWNER.principalVersion, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 })
-const build = { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } as const
-const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-evidence' as const, environment: { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true, nodeVersion: 'test', pnpmVersion: 'test' }, commands: [{ command: 'pnpm', args: ['check'], exitCode: 0 as const, durationMs: 1, logDigest: 'e'.repeat(64) }], pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() })
+const build = { ...linuxSourceConfig() }
+const evidence = () => ({ schemaVersion: 3 as const, kind: 'dsh-source-prepared-evidence' as const, boundary: 'linux-native-repository-v1' as const,
+  runtimeDigest: 'a'.repeat(64), executionContractDigest: 'b'.repeat(64), buildScriptSha256: 'c'.repeat(64),
+  archive: { sizeBytes: 1, sha256: 'f'.repeat(64) },
+  receipt: { requestDigest: 'a'.repeat(64), nativeNonce: 'a'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+    intentDigest: 'b'.repeat(64), resourcesDigest: 'c'.repeat(64), receiptDigest: 'd'.repeat(64) },
+  environment: { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+  checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'] as const,
+  pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) },
+  logDigest: 'e'.repeat(64), durationMs: 1, preparedAt: Date.now() })
 
 /** Orchestration boundary only: durable source/reviewer ports are simulated.
  * The real revision enqueue, certificates and native definition are exercised
@@ -212,7 +220,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
       mode: job.intent.mode === 'create' ? 'prepared-create' : 'modify',
       ...(job.intent.mode === 'create' ? { creation: job.intent.creation! } : {}), ttlMs: job.intent.ttlMs,
       idempotencyKey: `source-job-plan:${job.id}`, sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! },
-      prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: options.preparedEvidence ?? evidence() } }).result
+      prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: (options.preparedEvidence ?? evidence()) as SourcePreparedEvidence } }).result
     return options.typed === true ? withGapSourceFence!(job.intent.gapId, job.intent.owner, create) : create()
   })
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: sourceRepository,
@@ -403,8 +411,8 @@ describe('durable source-job runtime', () => {
     } finally { await f.runtime.close() }
   })
 
-  it.each([['Docker', false], ['macOS', false], ['Docker', true], ['macOS', true]] as const)('retains the legacy %s occurrence definition (create=%s) when Linux review hooks are present', async (backend, create) => {
-    const settings: sourceBuild.SourceBuildConfig = backend === 'Docker' ? build : {
+  it.each([['macOS', false], ['macOS', true]] as const)('retains the %s occurrence definition (create=%s) when Linux review hooks are present', async (_backend, create) => {
+    const settings: sourceBuild.SourceBuildConfig = {
       backend: 'macos-seatbelt', stateRoot: '/approved/state', authorityDigest: hex('mac-authority'),
       expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 120_000, timeoutMs: 60_000, outputBytes: 4096,
       runtime: { schemaVersion: 1, platform: `darwin-${process.arch}` as 'darwin-x64' | 'darwin-arm64',
@@ -469,13 +477,11 @@ describe('durable source-job runtime', () => {
       restarted = f.createRuntime(); restarted.start()
       const unknown = f.store.getSourceJob(queued.id)!
       expect(unknown.status).toBe('unknown')
-      const cleanup = vi.spyOn(sourceBuild, 'removeSourceJobContainer')
       const reconcile = restarted.reconcileUnknown({ id: queued.id, owner: OWNER })
       if (proof === 'quiescent') await expect(reconcile).resolves.toMatchObject({ status: 'failed', failureCode: 'source-job-resources-reconciled' })
       else { await expect(reconcile).rejects.toThrow(); expect(f.store.getSourceJob(queued.id)).toEqual(unknown) }
       if (proof !== 'absent') expect(inspect).toHaveBeenCalledWith(queued.id)
       expect(f.prepare).not.toHaveBeenCalled()
-      expect(cleanup).not.toHaveBeenCalled()
       const raw = new DatabaseSync(join(f.root, 'control.sqlite'))
       try { expect(raw.prepare('SELECT submissions FROM source_job_authorities').get()).toEqual({ submissions: 1 }) }
       finally { raw.close() }
@@ -1023,7 +1029,7 @@ describe('durable source-job runtime', () => {
     } finally { await f.runtime.close(); f.store.close() }
   })
   it('lets the same owner in a new binding inspect and reconcile unknown work without replay', async () => {
-    const f = await fixture()
+    const f = await fixture({ inspectNativeQuiescence: async () => 'quiescent' })
     try {
       const queued = await f.enqueue()
       const current = f.store.getSourceJob(queued.id)!
@@ -1033,10 +1039,8 @@ describe('durable source-job runtime', () => {
       expect(f.runtime.inspect({ id: queued.id, owner: OWNER }).status).toBe('unknown')
       expect(() => f.runtime.inspect({ id: queued.id, owner: { ...OWNER, principalRecordId: 'another' } })).toThrow(/scope mismatch/)
       // OS ownership is separately exercised in source-build/resources tests.
-      const cleanup = vi.spyOn(sourceBuild, 'removeSourceJobContainer').mockResolvedValue()
       const result = await f.runtime.reconcileUnknown({ id: queued.id, owner: OWNER })
       expect(result.status).toBe('failed')
-      expect(cleanup).toHaveBeenCalledWith(build, { id: queued.id, containerName: `dsh-${queued.id}` })
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
   })

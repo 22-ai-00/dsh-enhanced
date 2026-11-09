@@ -1,4 +1,4 @@
-import type { SourceBuildConfig } from './source-build.js'
+import type { LegacyDockerSourceBuildConfig, SourceBuildConfig } from './source-build.js'
 import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
 import type { SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
@@ -91,11 +91,12 @@ export interface SourceJobIntent {
   baseCommit: string
   files: readonly ScopedPluginFile[]
   ttlMs: number
-  build: SourceBuildConfig
+  /** A docker-era value can only be decoded from stored history; new intents require a native backend. */
+  build: SourceBuildConfig | LegacyDockerSourceBuildConfig
   worktree: string
-  /** Historical Docker row identity; absent for native jobs. */
+  /** Historical Docker row identity; present only on legacy docker-era intents. */
   containerName?: string
-  /** Durable native ledger key, never interpreted as a Docker container. */
+  /** Durable native ledger key; present on all native jobs. */
   nativeResource?: { backend: 'macos-seatbelt' | 'linux-native'; key: string }
   /**
    * Present only on `revise-created` jobs authenticated by a Host-recorded

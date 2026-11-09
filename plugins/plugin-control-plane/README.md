@@ -211,26 +211,37 @@ schema 17 在成功启用前保存 `package.json`、`pnpm-lock.yaml`、`cordis.p
 
 ## 源码能力 lane 和边界
 
-公开 `validateSourceBuildConfig` 只验证构建配置组件；完整部署仍须通过 `normalizeControlPlaneConfig`，Linux repository 后端必须同时配置持久 `sourceJobs`。Linux 的可选 `stateSeal: { path, sha256 }` 固定已初始化 runner 账本的外部 seal，并由运行时在写入前核验；它不会在配置校验期间初始化数据库。Docker/macOS 配置不接受此字段。
+公开 `validateSourceBuildConfig` 只验证原生构建配置组件；Docker 后端已删除，传入无 `backend` 的 Docker 时代形状会同步拒绝。完整部署仍须通过 `normalizeControlPlaneConfig`，Linux repository 后端必须同时配置持久 `sourceJobs`。Linux 的可选 `stateSeal: { path, sha256 }` 固定已初始化 runner 账本的外部 seal，并由运行时在写入前核验；它不会在配置校验期间初始化数据库。macOS seatbelt 配置不接受此字段。
 
 `source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`。local checks 使用临时 Git index 对 exact scope 计算 staged tree/patch digest，不污染工作树的真实 index。owner 必须在 checks 之后为 exact source digests、scope 和 release policy 签发独立 authorization，随后才能执行 `release-start`。
 
-`prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree。默认 Docker 后端以 `git archive` stdin 传入 owner 配置的镜像；显式 Linux 原生后端见下文。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或构建失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
+`prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree。源码检查只派发给绑定的持久原生后端（linux-native 或 macOS seatbelt）：无 Host bind mount、网络、特权或调用者环境，使用只读根、非 root 执行身份、固定 CPU/内存/PID/临时目录限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或构建失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
 
 `inspectSource` 只从当前 `HEAD` 的 Git objects 读取非保护插件的已跟踪普通文本文件；它不读取工作树。调用者可先请求空 `paths` 获得有界 manifest，再将返回的 `baseCommit` 用作读取和 `prepareModifySourcePlan.expectedBaseCommit` 的精确绑定。HEAD 已移动、二进制/生成/隐藏路径、symlink、submodule 或越界路径都会被拒绝。清单最多 1024 条，内容最多 64 个文件、单文件 64 KiB、合计 256 KiB；返回真实 blob 大小并支持普通可执行文本文件。整个读取请求从服务入口起受 15 秒截止时间控制；取消会终止正在运行的 Git 子进程，异步权限检查的迟到结果不再生效，Fiber 卸载等待请求收尾。
 
-Host patch config 在启用修改准备前必须提供 `sourceBuild`，例如：
+Host patch config 在启用修改准备前必须提供原生 `sourceBuild`，例如：
 
 ```yaml
 sourceBuild:
-  dockerPath: /usr/bin/docker
-  image: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  backend: linux-native
+  stateRoot: /private/owner/source-build
+  authorityDigest: sha256:<64-hex>
+  runtime: # 已验证的固定 Linux 工具链（Node/pnpm/系统工具）
+    schemaVersion: 1
+    # ...runtime roots、versions 等，由 Host 原生资源准备入口产出
+  cgroupRoots: # 当前 UID 委派的 cgroup v1 roots
+  expiresAt: 1800000000000
+  maxRuns: 63
+  maxTotalDurationMs: 600000
   timeoutMs: 180000
+  outputBytes: 65536
   memoryMiB: 512
   cpus: 1
   pidsLimit: 64
   workspaceMiB: 512
-  outputBytes: 65536
+  temporaryMiB: 32
+  workspaceInodes: 32768
+  temporaryInodes: 32768
 ```
 
 可选 `sourceBuild.versioning: patch` 让 Host 在冻结检查树前，从基准 Git 提交生成当前插件的下一补丁版本，同时更新 `package.json` 与 `src/version.ts`。只支持稳定 `x.y.z`；模型不得提交这两个保留文件。生成的版本变化与源码一起接受离线检查、打包和摘要绑定，检查后再次核对文件及制品版本。持久作业冻结此配置，重启不会改用新的版本策略。
@@ -239,13 +250,7 @@ sourceBuild:
 
 同一基准的多个候选会得到相同下一版本，不提供覆盖已发布版本的权限。后续采用流程须串行推进获准源码基准；现有 registry/catalog 冲突检查继续拒绝版本复用。此选项只准备可区分版本的候选，自动发布和采用需显式启用下述有限授权与执行配置，不会为每次修复发布公共 npm 包。
 
-`sourceBuild.profile` defaults to `standard`, whose existing maximum build timeout is 4 minutes and whose `/tmp` tmpfs is fixed at 32 MiB. An owner may explicitly set `profile: repository` for a full repository `pnpm check`; only that profile permits a timeout up to 30 minutes, memory up to 16 GiB, 16 CPUs, 1024 PIDs, an 8 GiB workspace tmpfs and a 4 GiB `/tmp` tmpfs (default 2 GiB). The repository profile explicitly permits execution from both bounded tmpfs mounts, needed by native build tools and temporary executable test fixtures; the standard profile retains Docker’s default no-exec mounts. The repository profile fixes `CI=true` and sets `VITEST_MAX_WORKERS` from the frozen configured CPUs (floor, clamped to 1–4) inside the container. The caller cannot select a profile or increase these limits: its timeout is capped by the owner configuration. Cancellation, deadline expiry, output overflow, or Fiber disposal kills the preparation client, waits for archive/build processes, and proves named-container absence before any pending plan is stored. Interrupted builds are never automatically replayed; the optional durable Host lane below records their status and resource identity.
-
-`repositorySandbox: { seccompPath: /absolute/owner/path/source-builder-seccomp.json }` is a separate repository-only opt-in for the existing nested Bubblewrap integration tests. It requires the approved profile digest and Docker Server `29.4.1/linux/amd64`; other bytes or runtimes fail before candidate execution. It permits additional namespace/mount syscalls, removes Docker's masked/read-only system-path lists, and hides `/sys` behind an empty read-only tmpfs. This expands the outer container's `/proc` visibility and kernel surface; it is not equivalent to Docker's default policy. UID 65534, zero capabilities, no-new-privileges, offline execution, read-only root, and no Host bind mounts remain mandatory. See the [profile provenance and limits](../../scripts/isolation/README.md#nested-sandbox-profile). Omitting this option retains Docker's default system-path restrictions, including in repository mode.
-
-`dockerPath` 必须是 canonical、owner/root-owned 且不可被 group/world 写的可执行文件。镜像要包含 UID 65534 可执行的 Node、pnpm 和可用的离线 store；pnpm 的 cache 必须定位到可写 tmpfs；离线 store 由镜像中的只读种子复制到 workspace tmpfs，供 pnpm 11 写入其 SQLite 索引；未配置时 `canPrepareSource()` 返回 false，修改准备请求 fail closed。
-
-完整仓库镜像的 owner 构建脚本见 [source builder](../../scripts/isolation/README.md)。它只传入依赖清单和 lockfile，在联网构建阶段预取依赖；候选源码进入容器时仍禁网、无 Host 挂载。`repository` profile 仅扩大 owner 配置的检查预算，不延长 Growth Driver 的 5 分钟授权。长检查可通过下述持久 Host 任务提交；入队不代表检查通过或源码已改进。
+Linux 原生构建的超时上限为 30 分钟（仓库级 `pnpm check`），内存、CPU、PID、workspace 与临时目录配额均由上面的固定字段声明并在执行合同中冻结；调用方不能选择配置外的 profile 或提高限制，每次请求取调用方与配置 timeout 的较小值。取消、截止到期、输出溢出或 Fiber 卸载都会终止准备客户端并等待构建进程退出；中断的构建不会自动重放，持久 Host 任务（见下文）记录其状态与资源身份。
 
 Host-only `inspectSourceTargets({ repository, baseCommit? })` 返回当前受信源码基线与最多 128 个已提交、可修改插件的名称及可选简短描述，供当前来源的 Growth 选择读取目标。目录仅从 canonical Git 仓库的正规 `plugins/<name>/package.json` blob 形成；保护根、符号链接、submodule、脏工作树和未跟踪目录不进入结果，manifest 非法或超过限制会拒绝整次查询。每个 manifest 最多 16 KiB，合计最多 512 KiB，描述最多 512 UTF-8 字节；`baseCommit` 不匹配当前受信基线时拒绝。目录不授予源码修改、创建、审批或采用权限，后续源码读取与准备仍核对原有来源及基线。
 
@@ -275,7 +280,7 @@ Linux 创建准备可接通独立 `creationVerifications`，必须同时配置�
 
 Linux 创建证书可接下述有限动态采用，构建和采用后端必须一致。linux-native 边界现已接通对已有插件的修改链：修订 v2 与配对回归 v2，以及修改计划的源码审批、发布与源码发布采用均消费同一份 schema 3 仓库准备 evidence，不再要求任何 Docker 命令证据；schema 2 macOS 单进程证据永远不能支撑全仓修改。无 Docker 全新安装默认链路及 pre-owner 基础资源迁移已接通；完整活 Home 的 Docker→native 升级仍未验收，不能由 pre-owner 迁移证据替代，进程内代码热加载也不在此链路内；配置后端不支持的组合（如 macOS 全仓修改、linux-native 缺持久 sourceJobs 或双 UID、跨采用链缺上游环节）仍会明确拒绝启动。动态工具采用不改变源码计划的 `pending-approval`，不能据此替换需要完整自迭代链的生产部署。
 
-### 持久源码检查任务（Docker 可选，Linux 原生必需）
+### 持久源码检查任务（原生后端必需）
 
 Growth Driver 设置 `pluginSourceProposals.preparationMode: durable` 后，`plugin_source_prepare` 只提交任务，`plugin_source_job_status` 回读当前 owner 的状态。控制面还必须配置独立于模型回合的有限 Host 授权：
 
@@ -349,9 +354,9 @@ Growth Driver 同时启用 `pluginSourceProposals.allowCreation: true` 与 `prep
 
 Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 manifest、patch、许可证、版本和构建配置，登记目录行，并只为新包追加锁文件 importer。依赖只能复用基线 catalog 的唯一既有解析，不进行网络解析、不改变已有 importers/packages/snapshots。生成器以固定 Node 执行路径、清理后的环境及有限运行时限运行；这属于可信基线的 Host 子进程，临时目录本身不构成操作系统沙箱。Host 在构建前后重建生成器输出，复验保留文件、catalog、lock 与精确 Git 源码快照。
 
-`sourceBuild.backend: macos-seatbelt` 选择纯 macOS 创建构建：Host 校验冻结的 Node/TypeScript/Cordis 依赖树，按原创建或修订授权复核 worktree，把候选 TypeScript 当作数据交给固定编译器，在无网络、无子进程的系统沙箱内作语义类型检查并生成 JS/声明文件。编译器不执行候选脚本、测试、tsconfig 插件或已生成 JS。Host 将受限输出与固定 manifest、README、LICENSE、patch 打成确定性的不超过 512 KiB 的 tar.gz，留存 v2 证据中的运行时摘要、固定编译器摘要和实际三项检查。v2 不声明 `pnpm check` 或 CPU、内存、磁盘硬配额；v1 Docker 证据及 Linux 修改/发布路径保持原样。原生作业使用单独的持久资源身份；unknown 只有经原生执行器的精确关闭回执核对后才释放，不调用 Docker 清理，也不自动重派。
+`sourceBuild.backend: macos-seatbelt` 选择纯 macOS 创建构建：Host 校验冻结的 Node/TypeScript/Cordis 依赖树，按原创建或修订授权复核 worktree，把候选 TypeScript 当作数据交给固定编译器，在无网络、无子进程的系统沙箱内作语义类型检查并生成 JS/声明文件。编译器不执行候选脚本、测试、tsconfig 插件或已生成 JS。Host 将受限输出与固定 manifest、README、LICENSE、patch 打成确定性的不超过 512 KiB 的 tar.gz，留存 v2 证据中的运行时摘要、固定编译器摘要和实际三项检查。v2 不声明 `pnpm check` 或 CPU、内存、磁盘硬配额；历史 v1 Docker 证据仅可从存储只读，不能支撑新的修改/发布路径。原生作业使用单独的持久资源身份；unknown 只有经原生执行器的精确关闭回执核对后才释放，不自动重派。
 
-Linux Docker 创建检查需要包含已验证基线锁文件的新构建镜像（运行 `node scripts/isolation/build-source-image.mjs`）。Host 复核实际归档的创建范围，容器核对原 Git 基线锁摘要与只读镜像 `/opt/dsh-source-baseline/pnpm-lock.yaml` 一致，才在 pnpm 11.7.0 的首次离线 frozen install 使用 `--trust-lockfile`。该选项跳过锁文件解析与供应链策略复核；已有解析已在镜像构建时通过策略验证，新 importer 不引入新解析。普通修改不使用此选项，旧镜像或不同基线均拒绝此创建检查。构建证据保留实际 Docker 参数及基线锁摘要。
+Linux 创建检查由下文的 linux-native 完整源码准备承担：隔离仓库在首次离线 frozen install 前核对 Git 基线锁摘要与运行时只读锁文件一致才使用 `--trust-lockfile`。该选项跳过锁文件解析与供应链策略复核；已有解析已在固定运行时准备阶段通过策略验证，新 importer 不引入新解析。基线不匹配直接拒绝；构建证据（schema 3）保留执行合同、运行时与基线锁摘要。
 
 `creation.id` 对应的授权定义不可变，累计用量独立持久保存；更换 `sourceJobs.authorityId`、重启或修改构建配置不会重置同一创建授权。接受的失败/unknown 尝试仍消费创建额度，同一幂等请求不重复扣取。实际创建同时受 `maxSubmissions`、Policy 预算及全账本单 outstanding job 上限约束。
 
@@ -481,9 +486,12 @@ creationCapabilities:
   retention:
     maximumLifetimeMs: 2592000000 # optional: 30 days after adoption
   runner:
+    backend: linux-native
     stateRoot: /private/owner/capability-runner
-    image: sha256:<64-hex-plugin-verifier-image-id>
-    dockerPath: /usr/bin/docker
+    runtime: # 完整 LinuxPluginBehaviorRuntime（含隔离运行时与观察器 sha256）
+      schemaVersion: 1
+      # ...由 Host 原生资源准备入口产出并冻结
+    cgroupRoots: # 当前 UID 委派的 cgroup v1 roots
     expiresAt: 1800000000000
     maxRuns: 63
     maxTotalDurationMs: 600000
@@ -495,7 +503,7 @@ creationCapabilities:
 
 Linux 采用使用显式 `runner.backend: linux-native`、签名时的完整 `LinuxPluginBehaviorRuntime`、当前 UID 的 `cgroupRoots` 及相同的有限 runner 字段，不配置镜像。仅接受 v3 创建证书；其四项执行绑定随完整证书摘要写入原采用回执，无需新建账本或更换回执协议。首次采用复核原成功构建收据；挂载、恢复及每次调用复核私有 `behavior.json`、签名基底/准备摘要和实际保留观察器。采用后的 v2 保留期不要求旧构建授权、原工具链或编译器继续存在，仍要求精确观察器可用以及当前 owner/任务来源有效。取消与关闭会等待这些检查结束；验收失败不挂载工具，未知调用不重派。Linux 可选校验模块仅在显式配置时加载，基础 Control Plane 不要求安装 Verifier。已有 Docker 账本不能改写为 Linux 账本；保权安装迁移仍是独立交付。
 
-Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 中创建自己的 Cordis Context 并挂载：Docker 使用离线容器，Linux 使用原生父/候选隔离进程，macOS 使用 Seatbelt 受限单进程；Host 不导入候选代码。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。Host 的包读取、临时制品、所选后端进程与隔离资源、私有 ledger 和密钥读取属于本授权；Linux 另读取固定只读运行时和准备回执。候选无法读取 Host 凭据、签名私钥或私有验收数据，无网络，不执行包安装脚本。各后端限制详见 [行为执行器](../assistant-verifier/README.md#新插件包的隔离行为观察)。
+Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 中创建自己的 Cordis Context 并挂载：Linux 使用原生父/候选隔离进程，macOS 使用 Seatbelt 受限单进程；Host 不导入候选代码。Docker 后端已删除，历史 Docker runner 形状只能从存储或 sealed-handoff 只读，无法构造行为执行器。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。Host 的包读取、临时制品、所选后端进程与隔离资源、私有 ledger 和密钥读取属于本授权；Linux 另读取固定只读运行时和准备回执。候选无法读取 Host 凭据、签名私钥或私有验收数据，无网络，不执行包安装脚本。各后端限制详见 [行为执行器](../assistant-verifier/README.md#新插件包的隔离行为观察)。
 
 调用经过原生 ToolRuntime/Policy，须由 Delivery 证明当前注册的真实 Agent、Session 和 owner lineage；Policy 还须允许该 owner scope 下的准确工具别名或有限别名模式。输入、结果和累计调用均有界；同一 Agent Session/call id/参数的已完成调用回读缓存，unknown 不再派发。候选注释不进入 Host 描述，输出作为不可信数据。每次异步检查后、派发前和落账前重验真实调用者与 canonical 来源，撤权或纠正期间的迟到结果不能变成成功。
 
@@ -747,7 +755,7 @@ Host-only `requestOwnerInstructionRevision(input)`（schema 37 `source_owner_ins
 
 ## 权限
 
-- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceJobs.creation` 时执行冻结基线的公共生成器并写临时模板目录、私有 worktree、目录行和新锁文件 importer；启用 Docker `sourceBuild` 时调用 owner 配置的离线容器构建，启用原生 macOS `sourceBuild` 时执行固定编译器及 Host 打包，读取冻结依赖树并写 owner-private 持久账本、工作目录和回执。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
+- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceJobs.creation` 时执行冻结基线的公共生成器并写临时模板目录、私有 worktree、目录行和新锁文件 importer；启用 linux-native `sourceBuild` 时在 user namespace/cgroup/seccomp 边界内执行固定工具链的离线仓库构建，启用 macOS seatbelt `sourceBuild` 时执行固定编译器及 Host 打包，读取冻结依赖树并写 owner-private 持久账本、工作目录和回执。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。

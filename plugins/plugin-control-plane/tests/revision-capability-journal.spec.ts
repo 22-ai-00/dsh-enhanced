@@ -10,6 +10,7 @@ import { normalizeControlPlaneConfig, type Config } from '../src/index.js'
 import { RevisionCapabilityJournal, revisionCapabilityPublicKey, validateRevisionCapabilityConfig,
   verifyRevisionCapabilityAdoptionReceipt } from '../src/revision-capability-journal.js'
 import type { RevisionCapabilityConfig } from '../src/revision-capability-types.js'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 
 const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -187,8 +188,14 @@ describe('revision adoption configuration', () => {
     const owner = { ...ownerOf(f.dir), authorityId: 'route', principalId: 'owner', principalRecordId: 'record',
       principalVersion: 1, workspace: f.dir, agentPreset: 'primary' }
     return { catalogPath: join(f.dir, 'catalog.json'), trustPath: join(f.dir, 'trust.json'), statePath: join(f.dir, 'state'),
-      sourceBuild: { dockerPath: '/usr/bin/docker', image: 'fixture@sha256:' + d('a'), timeoutMs: 60_000, memoryMiB: 128,
-        cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
+      sourceBuild: { ...linuxSourceConfig(), stateRoot: join(f.dir, 'native-state'),
+        expiresAt: f.base + 600_000, maxTotalDurationMs: 120_000, timeoutMs: 60_000,
+        userNamespace: { schemaVersion: 1, ownerUid: process.getuid!(), ownerGid: process.getgid!(),
+          candidateUid: process.getuid!() + 65536, candidateGid: process.getgid!() + 65536,
+          hostNamespace: { dev: 1, ino: 7 }, helpers: { uid: { path: '/usr/bin/newuidmap', sha256: d('1') },
+            gid: { path: '/usr/bin/newgidmap', sha256: d('2') } } },
+        systemSnapshot: { schemaVersion: 1, root: { path: join(f.dir, 'system'), dev: 1, ino: 3, sha256: d('3') },
+          manifestSha256: d('4'), bytes: 4096, entries: 16 } },
       sourceJobs: { authorityId: 'source-grant', expiresAt: f.base + 600_000, maxSubmissions: 2, repository: f.repository,
         ownerRouteId: owner.authorityId, principalId: 'owner', workspace: f.dir, preset: 'primary',
         budgetId: 'source-budget', budgetAmount: 1, allowedModes: ['create', 'revise-created'],
@@ -199,8 +206,23 @@ describe('revision adoption configuration', () => {
         expiresAt: f.base + 400_000 }, publicKey: f.publicKey },
       creationCapabilities: { authorityId: 'owner-creation', keyId: 'creation-key', keyPath: f.creationKey.path,
         owner, namePrefix, expiresAt: f.base + 300_000, maxAdoptions: 2, maxTools: 2, maxCallsPerAdoption: 4,
-        maxCallRecords: 8, maxInputBytes: 1024, runner: { stateRoot: f.dir, image: 'runner@sha256:' + d('b'),
-          dockerPath: '/usr/bin/docker', expiresAt: f.base + 300_000, maxRuns: 4, maxTotalDurationMs: 60_000,
+        maxCallRecords: 8, maxInputBytes: 1024, runner: { backend: 'linux-native' as const,
+          runtime: { schemaVersion: 1 as const, runtime: { schemaVersion: 1 as const, backend: 'linux-native' as const,
+            platform: `linux-${process.arch}` as 'linux-x64' | 'linux-arm64',
+            sourceCommit: '1'.repeat(40), lockSha256: d('e'), root: { path: join(f.dir, 'observer-runtime'), dev: 1, ino: 2, sha256: d('f') },
+            nodePath: join(f.dir, 'observer-runtime/bin/node'), nodeSha256: 'a'.repeat(64),
+            pnpmPath: join(f.dir, 'observer-runtime/pnpm/bin/pnpm.mjs'),
+            nativePnpmPath: join(f.dir, 'observer-runtime/pnpm-native/pnpm'),
+            nativePnpmRoot: join(f.dir, 'observer-runtime/pnpm-native'),
+            modulesPath: join(f.dir, 'observer-runtime/node_modules'),
+            storePath: join(f.dir, 'observer-runtime/store'), cachePath: join(f.dir, 'observer-runtime/cache'),
+            versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+          observer: { schemaVersion: 1 as const, sourceSha256: 'b'.repeat(64), workerSha256: 'c'.repeat(64), candidateSha256: 'd'.repeat(64),
+            launcherSha256: 'e'.repeat(64), parentProtectSha256: 'f'.repeat(64), childProtectSha256: '0'.repeat(64) } },
+          cgroupRoots: { mode: 'v1' as const, cpu: `/sys/fs/cgroup/cpu/dsh-native/uid-${process.getuid!()}`,
+            memory: `/sys/fs/cgroup/memory/dsh-native/uid-${process.getuid!()}`, pids: `/sys/fs/cgroup/pids/dsh-native/uid-${process.getuid!()}`,
+            freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${process.getuid!()}` },
+          stateRoot: f.dir, expiresAt: f.base + 300_000, maxRuns: 4, maxTotalDurationMs: 60_000,
           maxDurationMs: 30_000, maxOutputBytes: 65_536 } },
       revisionVerifications: { authority: { protocol: 'assistant-growth/revision-acceptance-authority/v1',
         authorityId: 'revision-review', keyId: 'revision-review-key', authorityDigest: d('c'), namePrefix,

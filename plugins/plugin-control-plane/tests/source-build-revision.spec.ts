@@ -1,15 +1,13 @@
 // Engineering fixture: a local fake Docker executable records dispatch only.
 // Git staging and the fixed public generator are real; OS isolation is not tested.
-import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { PluginCreationVerificationCertificate, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
-import { runDockerPreparedChecks, verifySourcePreparation, type SourceBuildConfig } from '../src/source-build.js'
+import { verifySourcePreparation } from '../src/source-build.js'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
 import { prepareRevisedPluginWorkspace, type SourceRevisionBinding, type SourceRevisionGrant } from '../src/source-revision.js'
 import { controlPlaneDigest } from '../src/store.js'
@@ -43,7 +41,6 @@ afterEach(async () => {
 const h = (letter: string): string => letter.repeat(64)
 const name = 'rsi-build-revision'
 const scope = [`plugins/${name}`, 'plugins/README.md', 'pnpm-lock.yaml']
-const marker = `printf 'DSH_PREPARED_PACK\\thelper-0.1.0.tgz\\t13\\t${h('d')}\\tv24.0.0\\t11.7.0\\n'`
 
 function certificate(generatorDigest: string, treeDigest: string, patchDigest: string): PluginCreationVerificationCertificate {
   const now = Date.now()
@@ -120,71 +117,12 @@ async function fixture() {
   const files = [{ path: 'src/index.ts', content: 'export const version = 2\n' }]
   await prepareRevisedPluginWorkspace({ worktree: current, baseCommit, name, files,
     environment, signal, assertCurrent: () => undefined, revision: binding, parentSource, parentCertificate })
-  const dockerPath = join(root, 'docker')
-  await writeFile(dockerPath, `#!/bin/sh\nif [ "$1" = run ]; then\nprintf '%s\\n' "$@" > "$0.args"\ncat >/dev/null\n${marker}\nfi\n`)
-  await chmod(dockerPath, 0o700)
-  const config: SourceBuildConfig = { dockerPath, image: `sha256:${h('a')}`, timeoutMs: 60_000,
-    memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4_096 }
+  const config = linuxSourceConfig()
   const revision = { binding, parentSource, parentCertificate, files }
   const input = { config, worktree: current, baseCommit, name, scope, environment, signal,
     assertCurrent: async () => {}, preparedAt: Date.now(), revision }
-  return { root, repository, worktree: current, dockerPath, baseCommit, creation, binding, revision, input }
+  return { root, repository, worktree: current, baseCommit, creation, binding, revision, input }
 }
-
-async function noDockerRun(path: string): Promise<void> {
-  await expect(lstat(`${path}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
-}
-
-test('revision proof reaches Docker dispatch with the exact staged tree and trusted baseline lock', async () => {
-  const f = await fixture()
-  const result = await runDockerPreparedChecks(f.input)
-  const baseLock = execFileSync('/usr/bin/git', ['show', `${f.baseCommit}:pnpm-lock.yaml`], { cwd: f.repository })
-  const lockDigest = createHash('sha256').update(baseLock).digest('hex')
-  expect(result.evidence.pack.version).toBe('0.1.0')
-  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining([
-    '--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${lockDigest}`]))
-  expect(result.treeDigest).toMatch(/^[a-f0-9]{64}$/u)
-  expect(await readFile(`${f.dockerPath}.args`, 'utf8')).toContain('PLUGIN_ROOT=plugins/rsi-build-revision')
-}, 30_000)
-
-test('parent binding, archived bytes, scope and mutually exclusive authorities fail before Docker run', async () => {
-  const f = await fixture()
-  await expect(runDockerPreparedChecks({ ...f.input, revision: { ...f.revision,
-    binding: { ...f.binding, parent: { ...f.binding.parent, sourceDigest: h('0') } } } })).rejects.toThrow(/parent binding/)
-  await noDockerRun(f.dockerPath)
-  const forged = JSON.parse(JSON.stringify(f.revision.parentSource)) as typeof f.revision.parentSource
-  ;(forged.files[0] as { content: string }).content = 'forged parent'
-  await expect(runDockerPreparedChecks({ ...f.input, revision: { ...f.revision, parentSource: forged } })).rejects.toThrow()
-  await noDockerRun(f.dockerPath)
-  await expect(runDockerPreparedChecks({ ...f.input, scope: [`plugins/${name}`] })).rejects.toThrow(/scope differs/)
-  await noDockerRun(f.dockerPath)
-  await expect(runDockerPreparedChecks({ ...f.input, creation: f.creation })).rejects.toThrow(/conflicting preparation authorities/)
-  await noDockerRun(f.dockerPath)
-}, 30_000)
-
-test('current scaffold, lock, unsubmitted candidate change and expired grant fail before Docker run', async () => {
-  const f = await fixture()
-  const lockPath = join(f.worktree, 'pnpm-lock.yaml')
-  const originalLock = await readFile(lockPath)
-  await writeFile(lockPath, 'tampered lock\n')
-  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/lock importer changed/)
-  await noDockerRun(f.dockerPath)
-  await writeFile(lockPath, originalLock)
-  const patchPath = join(f.worktree, 'plugins', name, 'cordis.patch.yml')
-  const originalPatch = await readFile(patchPath)
-  await writeFile(patchPath, 'tampered patch\n')
-  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/Host-owned generated file changed/)
-  await noDockerRun(f.dockerPath)
-  await writeFile(patchPath, originalPatch)
-  const readmePath = join(f.worktree, 'plugins', name, 'README.md')
-  await writeFile(readmePath, '# unsubmitted change\n')
-  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/actual source changed/)
-  await noDockerRun(f.dockerPath)
-  await writeFile(readmePath, '# Parent source\n')
-  await expect(runDockerPreparedChecks({ ...f.input, revision: { ...f.revision,
-    binding: { ...f.binding, grant: { ...f.binding.grant, expiresAt: Date.now() - 1 } } } })).rejects.toThrow(/grant expired/)
-  await noDockerRun(f.dockerPath)
-}, 30_000)
 
 test('preserves real revision proof and rejects parent drift before Linux dispatch', async () => {
   const f = await fixture(), config = linuxSourceConfig()
@@ -200,7 +138,6 @@ test('preserves real revision proof and rejects parent drift before Linux dispat
   if (process.platform !== 'linux') {
     await expect(runLinuxPreparedChecks(input)).rejects.toThrow('Linux source build durable authority is invalid')
     expect(run).not.toHaveBeenCalled()
-    await noDockerRun(f.dockerPath)
     return
   }
   const result = await runLinuxPreparedChecks(input)
@@ -210,5 +147,4 @@ test('preserves real revision proof and rejects parent drift before Linux dispat
   await expect(runLinuxPreparedChecks({ ...input, revision: { ...f.revision,
     binding: { ...f.binding, parent: { ...f.binding.parent, sourceDigest: h('0') } } } })).rejects.toThrow(/parent binding/u)
   expect(run).toHaveBeenCalledOnce()
-  await noDockerRun(f.dockerPath)
 }, 30000)

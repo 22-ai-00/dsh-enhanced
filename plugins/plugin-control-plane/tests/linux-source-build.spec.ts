@@ -70,10 +70,7 @@ test('validates Linux, Mac and Docker configurations independently without a run
     expect(() => validateSourceBuildConfig({ ...valid, ...patch } as LinuxSourceBuildConfig)).toThrow()
   }
   expect(() => validateSourceBuildConfig({ dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64),
-    timeoutMs: 60000, memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4096 })).not.toThrow()
-  expect(() => validateSourceBuildConfig({ dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64),
-    timeoutMs: 60000, memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4096,
-    unexpected: true } as unknown as LinuxSourceBuildConfig)).toThrow()
+    timeoutMs: 60000, memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4096 } as unknown as Parameters<typeof validateSourceBuildConfig>[0])).toThrow()
   const source = await readFile(new URL('../src/source-build.ts', import.meta.url), 'utf8')
   for (const line of source.split('\n').filter(line => line.includes("from '@dsh-enhanced/assistant-isolation'"))) expect(line).toMatch(/^import type /u)
 })

@@ -1,23 +1,19 @@
 // 工程层、非真实供应商证据：本文件用 PATH 注入的假 pnpm 壳与临时 git 仓库
 // fixture 验证隔离 worktree 编排、frozen 构建闸、modify source plan 服务入口、
 // owner CLI 复验与 GC。所有构建证据都来自工程层假壳，不代表任何真实 pnpm/供应商构建。
-import { generateKeyPairSync, sign } from 'node:crypto'
+import { generateKeyPairSync } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { chmod, copyFile, cp, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { lstat } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { delimiter, join } from 'node:path'
 import { lstatSync } from 'node:fs'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationExecutor } from '@dsh-enhanced/assistant-automations'
 import { afterAll, afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from 'vitest'
-import { approvalSigningPayload } from '../src/approval.ts'
-import { runPluginControl } from '../src/cli.ts'
 import { ControlPlaneCliError } from '../src/errors.ts'
 import {
-  checkedSourceSnapshot,
   createIsolatedWorktree,
   gcPreparedModifyWorktrees,
   linkedWorktrees,
@@ -27,14 +23,14 @@ import {
   writeScopedPluginFiles,
 } from '../src/source-workspace.ts'
 import { PluginControlPlaneService } from '../src/service.ts'
-import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
+import { ControlPlaneStore } from '../src/store.ts'
 import type { SourceBuildConfig } from '../src/source-build.ts'
 import type { SourceJobsConfig } from '../src/source-job-types.ts'
-import type { ApprovalReceipt, PluginSourcePlan } from '../src/types.ts'
+import type { PluginSourcePlan } from '../src/types.ts'
 
 const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
 const ledgerId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01'
-const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url))
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -207,30 +203,6 @@ async function modifyRepositoryFixture(root: string): Promise<{ repository: stri
 
 // The create-plan CLI cross-check needs the generator/template assets and a
 // pre-created linked worktree, exactly like tests/cli.spec.ts.
-async function createRepositoryFixture(root: string): Promise<{ repository: string; worktree: string }> {
-  const repository = join(root, 'create-repository')
-  const worktree = join(root, 'create-worktree')
-  await mkdir(join(repository, 'scripts'), { recursive: true })
-  await mkdir(join(repository, 'plugins'), { recursive: true })
-  await cp(join(repositoryRoot, 'scripts', 'create-plugin.mjs'), join(repository, 'scripts', 'create-plugin.mjs'))
-  await cp(join(repositoryRoot, 'templates', 'plugin'), join(repository, 'templates', 'plugin'), { recursive: true })
-  await cp(join(repositoryRoot, 'LICENSE'), join(repository, 'LICENSE'))
-  await writeFile(join(repository, 'plugins', 'README.md'), '# Plugin catalog\n\n<!-- plugin-catalog:end -->\n')
-  await writeFile(join(repository, '.gitignore'), 'node_modules/\npnpm-lock.yaml\n')
-  await writeFile(join(repository, 'package.json'), `${JSON.stringify({ name: 'create-scaffold-fixture', private: true, type: 'module',
-    scripts: { 'create:plugin': 'node ./scripts/create-plugin.mjs', check: 'node ./scripts/check-fixture.mjs' } }, null, 2)}\n`)
-  await writeFile(join(repository, 'scripts', 'check-fixture.mjs'), `import { readdir } from 'node:fs/promises'
-const entries = (await readdir('plugins', { withFileTypes: true })).filter(entry => entry.isDirectory())
-if (entries.length !== 1) throw new Error('expected exactly one generated plugin')
-`)
-  execFileSync('/usr/bin/git', ['init', repository])
-  execFileSync('/usr/bin/git', ['-C', repository, 'config', 'user.name', 'Test'])
-  execFileSync('/usr/bin/git', ['-C', repository, 'config', 'user.email', 'test@example.invalid'])
-  execFileSync('/usr/bin/git', ['-C', repository, 'add', '.'])
-  execFileSync('/usr/bin/git', ['-C', repository, 'commit', '-m', 'fixture'])
-  execFileSync('/usr/bin/git', ['-C', repository, 'worktree', 'add', '-b', 'scaffold', worktree])
-  return { repository: await realpath(repository), worktree: await realpath(worktree) }
-}
 
 class ToolsStub extends Service {
   constructor(ctx: Context) { super(ctx, 'tools') }
@@ -244,9 +216,11 @@ function makeService(value: TrustFixture, sourceBuild: Partial<SourceBuildConfig
     catalogPath: join(value.control, 'catalog.json'),
     statePath: value.statePath,
     trustPath: value.trustPath,
-    ...(sourceJobs === undefined ? {} : { sourceJobs }),
-    sourceBuild: { dockerPath: join(value.root, 'bin', 'docker'), image: 'fixture/source-build@sha256:' + 'a'.repeat(64),
-      timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536, ...sourceBuild },
+    sourceBuild: { ...linuxSourceConfig(), stateRoot: join(value.root, 'native-state'), expiresAt: Date.now() + 600_000,
+      maxTotalDurationMs: 1_800_000, timeoutMs: 180_000, outputBytes: 65_536, ...sourceBuild } as SourceBuildConfig,
+    sourceJobs: sourceJobs ?? { authorityId: 'source-jobs-fixture', expiresAt: Date.now() + 600_000, maxSubmissions: 2,
+      repository: value.root, ownerRouteId: 'route-1', principalId: 'owner-1', workspace: value.root,
+      preset: 'primary', budgetId: 'source-runs', budgetAmount: 1 } as SourceJobsConfig,
   })
 }
 
@@ -279,37 +253,7 @@ async function recordGap(service: PluginControlPlaneService, suffix: string) {
     context: `engineering-layer gap ${suffix}`, expectedValue: 100, frequency: 10, estimatedCost: 50, risk: 0.2 })
 }
 
-async function prepareOkModifyPlan(value: TrustFixture, service: PluginControlPlaneService,
-  repository: string, shell: { binDir: string; logPath: string }, suffix: string, ttlMs = 900_000): Promise<PluginSourcePlan> {
-  const gap = await recordGap(service, suffix)
-  return withEnvironment({
-    DSH_HOME: value.dshHome,
-    PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}`,
-    DSH_TEST_PNPM_LOG: shell.logPath,
-    NPM_CONFIG_FOO: 'bar',
-  }, () => service.prepareModifySourcePlan({
-    gapId: gap.id, name: 'health-helper', repository,
-    files: [{ path: 'src/index.ts', content: '// engineering-layer patched\n' }],
-    idempotencyKey: `source:modify:${suffix}`, ttlMs,
-  }))
-}
 
-async function approvePlanViaCli(value: TrustFixture, shell: { binDir: string }, plan: PluginSourcePlan): Promise<void> {
-  const now = Date.now()
-  const unsigned: Omit<ApprovalReceipt, 'signature'> = { schemaVersion: 1,
-    approvalId: `workspace-approval-${plan.id.slice(-8)}`, authority: 'owner-policy', keyId: 'owner-key-1',
-    planId: plan.id, planDigest: plan.digest, decision: 'approved', principal: 'owner@test',
-    decidedAt: now, expiresAt: now + 30_000 }
-  const receipt: ApprovalReceipt = { ...unsigned,
-    signature: sign(null, Buffer.from(approvalSigningPayload(unsigned)), value.privateKey).toString('base64') }
-  const receiptPath = join(value.control, `workspace-approval-${plan.id.slice(-8)}.json`)
-  await writeFile(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
-  await withEnvironment({
-    DSH_HOME: value.dshHome,
-    PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}`,
-  }, () => runPluginControl(['approve', '--kind', 'source', '--plan-id', plan.id,
-    '--expected-revision', String(plan.revision), '--approval-receipt', receiptPath]))
-}
 
 const rootOwnsSystemDirs = process.platform === 'linux' && lstatSync('/usr/bin', { bigint: true }).uid === 0n
 const describe = rootOwnsSystemDirs ? baseDescribe : baseDescribe.skip
@@ -347,7 +291,8 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
     new ToolsStub(ctx)
     const config = {
       catalogPath: join(value.control, 'catalog.json'), statePath: value.statePath, trustPath: value.trustPath,
-      sourceBuild: { dockerPath: join(shell.binDir, 'docker'), image: 'fixture/source-build@sha256:' + 'a'.repeat(64), timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536 },
+      sourceBuild: { ...linuxSourceConfig(), stateRoot: join(value.root, 'late-binding-state'), expiresAt: Date.now() + 600_000,
+        maxTotalDurationMs: 1_800_000, timeoutMs: 180_000, outputBytes: 65_536 },
       sourceJobs: { authorityId: 'source-jobs-fixture', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: source.repository,
         ownerRouteId: 'route-1', principalId: 'owner-1', workspace: value.root, preset: 'primary', budgetId: 'source-runs', budgetAmount: 1 },
     }
@@ -447,98 +392,16 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
     } finally { await isolated.remove() }
   }, 30_000)
 
-  it('prepares a pending modify plan with Docker-contained build evidence and independently matching digests', async () => {
+  it('fails closed on standalone native preparation without a durable source job', async () => {
     const value = await trustFixture()
     const service = makeService(value)
     const shell = await installFakePnpm(value.root)
     const source = await modifyRepositoryFixture(value.root)
-    const plan = await prepareOkModifyPlan(value, service, source.repository, shell, 'ok')
-
-    expect(plan).toMatchObject({
-      mode: 'modify', status: 'pending-approval', revision: 1,
-      name: 'health-helper', scope: ['plugins/health-helper'], generatorDigest: MODIFY_GENERATOR_DIGEST,
-      baseCommit: source.head,
-    })
-    expect(plan.sourceCheck?.treeDigest).toMatch(/^[a-f0-9]{64}$/u)
-    expect(plan.sourceCheck?.patchDigest).toMatch(/^[a-f0-9]{64}$/u)
-    expect(plan.approval).toBeUndefined()
-    expect(plan.releaseAuthorization).toBeUndefined()
-    expect(plan.release).toBeUndefined()
-    const evidence = plan.preparedEvidence!
-    if (evidence.schemaVersion !== 1) throw new Error('expected legacy build evidence')
-    expect(evidence.commands.map(command => command.command)).toEqual(['docker'])
-    expect(evidence.commands.every(command => command.exitCode === 0)).toBe(true)
-    expect(evidence.environment).toMatchObject({ npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true })
-    expect(evidence.pack).toMatchObject({ name: 'health-helper-0.1.0.tgz', version: '0.1.0',
-      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) })
-
-    // The prepared worktree survives success and recomputes to identical digests.
-    const metadata = await lstat(plan.worktree)
-    expect(metadata.isDirectory()).toBe(true)
-    const recomputed = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, process.env)
-    expect(recomputed).toEqual({ checkedTreeDigest: plan.sourceCheck!.treeDigest, checkedPatchDigest: plan.sourceCheck!.patchDigest })
-
-    const database = openDatabase(value.state)
-    try {
-      expect(database.prepare('SELECT COUNT(*) AS count FROM source_plans').get() as { count: number }).toMatchObject({ count: 1 })
-      const gap = database.prepare('SELECT status, candidate_id FROM capability_gaps WHERE id = ?').get(plan.gapId) as
-        { status: string; candidate_id: string | null }
-      // Gap reservation for source plans is recorded through gap_plan_claims;
-      // the activation-only candidate_id column stays NULL for source plans.
-      expect(gap).toEqual({ status: 'matched', candidate_id: null })
-      const claim = database.prepare('SELECT plan_id, plan_kind FROM gap_plan_claims WHERE gap_id = ?').get(plan.gapId) as
-        { plan_id: string; plan_kind: string }
-      expect(claim).toEqual({ plan_id: plan.id, plan_kind: 'source' })
-    } finally { database.close() }
-
-    // The fake Docker fixture receives only the archive stream; no host pnpm
-    // executable is invoked by the control plane.
-    await expect(readFile(shell.logPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  }, 30_000)
-
-  it.each(['install', 'check', 'pack'] as const)('destroys the worktree and writes no plan when frozen %s fails', async phase => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const gap = await recordGap(service, `fail-${phase}`)
-    // Replace the owner-configured Docker executable itself. The runner passes
-    // no proposal/process environment into the container client.
-    await executable(join(shell.binDir, 'docker'), '#!/usr/bin/bash\nif [[ "${1:-}" == "container" ]]; then exit 1; fi\ncat >/dev/null\nexit 29\n')
-    await expect(withEnvironment({
-      DSH_HOME: value.dshHome,
-      PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}`,
-      DSH_TEST_PNPM_LOG: shell.logPath,
-      DSH_TEST_PNPM_FAIL: phase,
-    }, () => service.prepareModifySourcePlan({
-      gapId: gap.id, name: 'health-helper', repository: source.repository,
-      files: [{ path: 'src/index.ts', content: '// boom\n' }],
-      idempotencyKey: `source:modify:fail-${phase}`,
-    }))).rejects.toMatchObject({ code: 'EXECUTOR_FAILED' } as Partial<ControlPlaneCliError>)
-
-    // The isolated worktree (and its transient pack dir) is fully removed.
-    const remaining = await readdir(join(value.statePath, 'source-worktrees')).catch(() => [])
-    expect(remaining.some(name => name.startsWith('worktree-') || name.startsWith('pack-'))).toBe(false)
-    const database = openDatabase(value.state)
-    try {
-      expect(database.prepare('SELECT COUNT(*) AS count FROM source_plans').get() as { count: number }).toMatchObject({ count: 0 })
-      const row = database.prepare('SELECT status, candidate_id FROM capability_gaps WHERE id = ?').get(gap.id) as
-        { status: string; candidate_id: string | null }
-      expect(row).toEqual({ status: 'open', candidate_id: null })
-    } finally { database.close() }
-  }, 30_000)
-
-  it('fails closed when Docker cannot prove the named container is absent', async () => {
-    const value = await trustFixture(); const service = makeService(value); const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root); const gap = await recordGap(service, 'cleanup-daemon')
-    await executable(join(shell.binDir, 'docker'), `#!/usr/bin/bash
-if [[ "\${1:-}" == 'container' && "\${2:-}" == 'ls' ]]; then exit 1; fi
-if [[ "\${1:-}" == 'run' ]]; then cat >/dev/null; printf 'DSH_PREPARED_PACK\\thealth-helper-0.1.0.tgz\\t13\\t%s\\tv22.0.0\\t11.0.0\\n' "$(printf 'd%.0s' {1..64})"; fi
-exit 0
-`)
-    await expect(service.prepareModifySourcePlan({ gapId: gap.id, name: 'health-helper', repository: source.repository,
-      files: [{ path: 'src/index.ts', content: '// cleanup\n' }], idempotencyKey: 'source:modify:cleanup-daemon' }))
-      .rejects.toMatchObject({ code: 'EXECUTOR_FAILED' } as Partial<ControlPlaneCliError>)
+    const gap = await recordGap(service, 'standalone-native')
+    await expect(withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
+      () => service.prepareModifySourcePlan({ gapId: gap.id, name: 'health-helper', repository: source.repository,
+        files: [{ path: 'src/index.ts', content: '// standalone\n' }], idempotencyKey: 'source:modify:standalone' })))
+      .rejects.toThrow(/bound durable source job/)
     expect(openDatabase(value.state).prepare('SELECT count(*) AS n FROM source_plans').get()).toEqual({ n: 0 })
   }, 30_000)
 
@@ -570,7 +433,7 @@ exit 0
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' } as Partial<ControlPlaneCliError>)
     await expect(service.prepareModifySourcePlan({ ...base, timeoutMs: 59_999 }))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' } as Partial<ControlPlaneCliError>)
-    await expect(service.prepareModifySourcePlan({ ...base, timeoutMs: 240_001 }))
+    await expect(service.prepareModifySourcePlan({ ...base, timeoutMs: 1_800_001 }))
       .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' } as Partial<ControlPlaneCliError>)
 
     // A closed gap cannot receive a proposal. The store only closes gaps
@@ -583,210 +446,6 @@ exit 0
     await expect(service.prepareModifySourcePlan({ gapId: closedGap.id, name: 'health-helper',
       repository: source.repository, files: [{ path: 'src/index.ts', content: 'x' }],
       idempotencyKey: 'source:modify:closed' })).rejects.toMatchObject({ code: 'SOURCE_BOUNDARY' } as Partial<ControlPlaneCliError>)
-  }, 60_000)
-
-  it('persists full Docker evidence for an owner-selected repository build and enforces its caller ceiling', async () => {
-    const value = await trustFixture()
-    const service = makeService(value, { profile: 'repository', timeoutMs: 1_800_000 })
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const gap = await recordGap(service, 'repository-budget')
-    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
-      files: [{ path: 'src/index.ts', content: '// owner repository build\n' }], idempotencyKey: 'source:repository-budget' }
-    await expect(service.prepareModifySourcePlan({ ...input, timeoutMs: 1_800_001 }))
-      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
-    const plan = await withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => service.prepareModifySourcePlan({ ...input, timeoutMs: 1_800_000 }))
-    expect(plan.status).toBe('pending-approval')
-    if (plan.preparedEvidence?.schemaVersion !== 1) throw new Error('expected legacy build evidence')
-    const args = plan.preparedEvidence.commands[0]!.args
-    expect(args.length).toBeGreaterThan(32)
-    expect(args).toContain('CI=true')
-    expect(args.some(arg => arg.startsWith('dsh.source.tree='))).toBe(true)
-    expect(args.at(-1)).toContain("checked check /bin/sh -ceu 'umask 022; exec pnpm check'")
-    expect(args.at(-1)!.length).toBeGreaterThan(4096)
-    const store = new ControlPlaneStore({ path: value.state })
-    const database = openDatabase(value.state)
-    try {
-      expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence)
-      const command = plan.preparedEvidence.commands[0]!
-      const updateArgs = (changed: readonly string[]): void => {
-        database.prepare('UPDATE source_plans SET prepared_evidence_json = ? WHERE id = ?').run(JSON.stringify({
-          ...plan.preparedEvidence, commands: [{ ...command, args: changed }],
-        }), plan.id)
-      }
-      updateArgs(['x'.repeat(4097), ...args.slice(1)])
-      expect(() => store.getSourcePlan(plan.id)).toThrow('stored source prepared evidence is corrupt')
-      updateArgs([...args.slice(0, -1), 'x'.repeat(32_769)])
-      expect(() => store.getSourcePlan(plan.id)).toThrow('stored source prepared evidence is corrupt')
-      database.prepare('UPDATE source_plans SET prepared_evidence_json = ? WHERE id = ?')
-        .run(JSON.stringify(plan.preparedEvidence), plan.id)
-      expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence)
-    } finally { database.close(); store.close() }
-  }, 30_000)
-
-  it('advances a clean matching approved modify plan to ready via owner CLI verify-prepared', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const plan = await prepareOkModifyPlan(value, service, source.repository, shell, 'cli-verify-ok')
-    await approvePlanViaCli(value, shell, plan)
-
-    const output = await withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => runPluginControl(['source', 'verify-prepared', '--plan-id', plan.id, '--expected-revision', '2']))
-    expect(output).toBeUndefined()
-    // The approve call also wrote a receipt to the mocked stdout above; the
-    // last operation line in this test is the verify-prepared receipt.
-    const receiptLine = (vi.mocked(process.stdout.write).mock.calls.map(call => String(call[0]))
-      .filter(line => line.includes('"operation"')).at(-1) ?? '').trim()
-    const receipt = JSON.parse(receiptLine) as { operation: string; result: PluginSourcePlan }
-    expect(receipt.operation).toBe('source-verify-prepared')
-    expect(receipt.result).toMatchObject({ status: 'ready-for-human-review', revision: 3 })
-    const database = openDatabase(value.state)
-    try {
-      const row = database.prepare('SELECT status, revision FROM source_plans WHERE id = ?').get(plan.id) as
-        { status: string; revision: number }
-      expect(row).toEqual({ status: 'ready-for-human-review', revision: 3 })
-    } finally { database.close() }
-  }, 30_000)
-
-  it.each([
-    ['HEAD drift', async (worktree: string) => {
-      execFileSync('/usr/bin/git', ['-C', worktree, 'commit', '--allow-empty', '-m', 'drift'])
-    }],
-    ['a file outside the plugin scope', async (worktree: string) => {
-      await writeFile(join(worktree, 'plugins', 'EVIL.md'), 'outside\n')
-    }],
-    ['changed patch content', async (worktree: string) => {
-      await writeFile(join(worktree, 'plugins', 'health-helper', 'src', 'index.ts'), '// drifted content\n')
-    }],
-    ['a removed worktree', async (worktree: string) => {
-      await rm(worktree, { recursive: true, force: true })
-    }],
-  ] as const)('rejects verify-prepared on %s without changing the approved revision', async (_label, damage) => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const plan = await prepareOkModifyPlan(value, service, source.repository, shell, `cli-drift-${_label.replaceAll(' ', '-')}`)
-    const worktree = plan.worktree
-    await approvePlanViaCli(value, shell, plan)
-    await damage(worktree)
-    await expect(withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => runPluginControl(['source', 'verify-prepared', '--plan-id', plan.id, '--expected-revision', '2']))).rejects.toThrow()
-    if (_label !== 'a removed worktree') {
-      const database = openDatabase(value.state)
-      try {
-        const row = database.prepare('SELECT status, revision FROM source_plans WHERE id = ?').get(plan.id) as
-          { status: string; revision: number }
-        expect(row).toEqual({ status: 'approved', revision: 2 })
-      } finally { database.close() }
-    }
-  }, 30_000)
-
-  it('cross-rejects scaffold for modify and verify-prepared for create plans', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const modifySource = await modifyRepositoryFixture(value.root)
-    const modifyPlan = await prepareOkModifyPlan(value, service, modifySource.repository, shell, 'cross-modify')
-    await approvePlanViaCli(value, shell, modifyPlan)
-    await expect(withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => runPluginControl(['scaffold', '--plan-id', modifyPlan.id, '--expected-revision', '2'])))
-      .rejects.toThrow('modify plans are verified')
-
-    // A create plan approved through the owner CLI must be locally scaffolded,
-    // never verify-prepared.
-    const createSource = await createRepositoryFixture(value.root)
-    const createGap = await recordGap(service, 'cross-create')
-    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['source-plan', '--gap-id', createGap.id,
-      '--repository', createSource.repository, '--worktree', createSource.worktree,
-      '--name', 'health-helper', '--idempotency-key', 'scaffold-plan:cross-create']))
-    const database = openDatabase(value.state)
-    let createId: string
-    try {
-      createId = (database.prepare('SELECT id FROM source_plans WHERE gap_id = ?').get(createGap.id) as { id: string }).id
-    } finally { database.close() }
-    const inspect = new ControlPlaneStore({ path: value.state })
-    const createPlan = inspect.getSourcePlan(createId); inspect.close()
-    await approvePlanViaCli(value, shell, createPlan)
-    await expect(withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => runPluginControl(['source', 'verify-prepared', '--plan-id', createId, '--expected-revision', '2'])))
-      .rejects.toThrow('only serves modify source plans')
-  }, 30_000)
-
-  it('garbage-collects only expired linked worktrees inside the state root, retaining ready plans', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const stateWorktreeRoot = join(value.statePath, 'source-worktrees')
-
-    // Unexpired pending plan: retained even under a far-future GC sweep.
-    const fresh = await prepareOkModifyPlan(value, service, source.repository, shell, 'gc-fresh', 86_400_000)
-    expect((await service.gcPreparedSourceWorktrees(Date.now())).removed).toEqual([])
-    expect((await lstat(fresh.worktree)).isDirectory()).toBe(true)
-
-    // Expired pending plan: removed and unregistered.
-    const expired = await prepareOkModifyPlan(value, service, source.repository, shell, 'gc-expired', 900_000)
-    let removed = await service.gcPreparedSourceWorktrees(expired.expiresAt + 1)
-    expect(removed.removed).toContain(resolve(expired.worktree))
-    expect(service.gaps(50).find(gap => gap.id === expired.gapId)?.status).toBe('open')
-    const expiredStore = new ControlPlaneStore({ path: value.state })
-    try { expect(expiredStore.getSourcePlan(expired.id)).toMatchObject({ status: 'expired', revision: 2 }) }
-    finally { expiredStore.close() }
-    await expect(lstat(expired.worktree)).rejects.toMatchObject({ code: 'ENOENT' })
-    expect((await linkedWorktrees(source.repository, process.env)).includes(resolve(expired.worktree))).toBe(false)
-    // Idempotent.
-    removed = await service.gcPreparedSourceWorktrees(expired.expiresAt + 1)
-    expect(removed.removed).toEqual([])
-
-    // Expired approved plan: also collected.
-    const approvedExpired = await prepareOkModifyPlan(value, service, source.repository, shell, 'gc-approved', 900_000)
-    await approvePlanViaCli(value, shell, approvedExpired)
-    expect((await service.gcPreparedSourceWorktrees(approvedExpired.expiresAt + 1)).removed)
-      .toContain(resolve(approvedExpired.worktree))
-
-    // Ready plan, however far past its TTL: retained for the owner release flow.
-    const ready = await prepareOkModifyPlan(value, service, source.repository, shell, 'gc-ready', 900_000)
-    await approvePlanViaCli(value, shell, ready)
-    await withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
-      () => runPluginControl(['source', 'verify-prepared', '--plan-id', ready.id, '--expected-revision', '2']))
-    expect((await service.gcPreparedSourceWorktrees(ready.expiresAt + 10_000_000)).removed).toEqual([])
-    expect((await lstat(ready.worktree)).isDirectory()).toBe(true)
-
-    // A plan row whose worktree points outside the state root is never touched.
-    const rogueStore = new ControlPlaneStore({ path: value.state })
-    const rogueGap = rogueStore.recordGap({ idempotencyKey: 'gap:workspace:gc-rogue', capability: 'health',
-      context: 'rogue', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-    rogueStore.createSourcePlan({ gapId: rogueGap.id, repository: source.repository,
-      worktree: join(value.root, 'outside-state', 'worktree-rogue'), baseCommit: source.head,
-      name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'],
-      mode: 'modify', ttlMs: 900_000, idempotencyKey: 'source:modify:gc-rogue',
-      prepared: { treeDigest: 'a'.repeat(64), patchDigest: 'b'.repeat(64), checkedAt: Date.now(),
-        evidence: minimalPreparedEvidence('c'.repeat(64), Date.now()) } })
-    rogueStore.close()
-    expect((await service.gcPreparedSourceWorktrees(Date.now() + 10_000_000)).removed).toEqual([])
-
-    // A path inside the state root that is not a linked worktree is retained too.
-    const ghost = join(stateWorktreeRoot, 'worktree-ghost')
-    await mkdir(ghost, { recursive: true, mode: 0o700 })
-    const ghostStore = new ControlPlaneStore({ path: value.state })
-    const ghostGap = ghostStore.recordGap({ idempotencyKey: 'gap:workspace:gc-ghost', capability: 'health',
-      context: 'ghost', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-    ghostStore.createSourcePlan({ gapId: ghostGap.id, repository: source.repository, worktree: ghost,
-      baseCommit: source.head, name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST,
-      scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 900_000, idempotencyKey: 'source:modify:gc-ghost',
-      prepared: { treeDigest: 'd'.repeat(64), patchDigest: 'e'.repeat(64), checkedAt: Date.now(),
-        evidence: minimalPreparedEvidence('f'.repeat(64), Date.now()) } })
-    ghostStore.close()
-    expect((await service.gcPreparedSourceWorktrees(Date.now() + 10_000_000)).removed).toEqual([])
-    expect((await lstat(ghost)).isDirectory()).toBe(true)
-
-    // The fresh plan from above is still present and linked throughout.
-    expect((await service.gcPreparedSourceWorktrees(Date.now() + 10_000_000)).removed).toEqual([])
-    expect((await lstat(fresh.worktree)).isDirectory()).toBe(true)
   }, 60_000)
 
   it('collects only registered, expired prepared-create worktrees with exact frozen scope', async () => {
@@ -843,26 +502,6 @@ exit 0
     expect(preparedWorktreeIsGarbage(withoutCheck, now)).toBe(false)
   }, 30_000)
 
-  it('binds source inspection to preparation and rejects stale HEAD before creating a worktree', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const inspection = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
-    const gap = await recordGap(service, 'inspected')
-    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
-      expectedBaseCommit: inspection.baseCommit, files: [{ path: 'src/index.ts', content: '// replacement\n' }], idempotencyKey: 'source:inspected' }
-    execFileSync('/usr/bin/git', ['-C', source.repository, 'commit', '--allow-empty', '-m', 'new head'])
-    await expect(service.prepareModifySourcePlan(input)).rejects.toThrow('stale')
-    expect(await linkedWorktrees(source.repository, process.env)).toEqual([source.repository])
-    expect(service.gaps(50).find(row => row.id === gap.id)?.candidateId).toBeUndefined()
-    const fresh = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
-    const plan = await service.prepareModifySourcePlan({ ...input, expectedBaseCommit: fresh.baseCommit })
-    expect(plan.baseCommit).toBe(fresh.baseCommit)
-    expect(plan.status).toBe('pending-approval')
-    expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(fresh.baseCommit)
-  })
-
   it('owns target inspection through cancellation and Fiber teardown', async () => {
     const value = await trustFixture()
     const service = makeService(value)
@@ -883,38 +522,6 @@ exit 0
     release()
     expect(await inspecting).toBeInstanceOf(Error)
     await expect(service.inspectSourceTargets(input)).rejects.toThrow()
-  })
-
-  it('inspects and prepares the managed baseline while preserving a dirty older checkout', async () => {
-    const value = await trustFixture()
-    await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', source.repository, ...args], { encoding: 'utf8' }).trim()
-    await writeFile(join(source.repository, 'plugins/health-helper/src/index.ts'), 'export const installed = true\n')
-    git('add', '.'); git('commit', '-m', 'installed baseline')
-    const installed = git('rev-parse', 'HEAD'), remote = join(value.root, 'source-release.git')
-    execFileSync('/usr/bin/git', ['clone', '--bare', source.repository, remote], { stdio: 'pipe' })
-    await chmod(remote, 0o700)
-    execFileSync('/usr/bin/git', ['-C', remote, 'update-ref', 'refs/heads/main', installed])
-    git('checkout', '--detach', source.head)
-    const dirtyPath = join(source.repository, 'plugins/health-helper/src/index.ts')
-    await writeFile(dirtyPath, '// user work in progress\n')
-    const service = makeService(value, {}, { authorityId: 'managed-source-test', expiresAt: Date.now() + 600_000,
-      maxSubmissions: 3, repository: source.repository, ownerRouteId: 'owner-route', principalId: 'owner',
-      workspace: value.root, preset: 'primary', budgetId: 'source-runs', budgetAmount: 1,
-      baseline: { ref: 'refs/dsh-source/main', remote, targetBranch: 'main', initialCommit: installed } })
-    const inspection = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
-    expect(inspection.baseCommit).toBe(installed)
-    const gap = await recordGap(service, 'managed-inspected')
-    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
-      files: [{ path: 'src/index.ts', content: 'export const repaired = true\n' }], idempotencyKey: 'source:managed-inspected' }
-    await expect(service.prepareModifySourcePlan({ ...input, expectedBaseCommit: source.head })).rejects.toThrow('stale')
-    const plan = await service.prepareModifySourcePlan({ ...input, expectedBaseCommit: inspection.baseCommit })
-    expect(plan.baseCommit).toBe(installed)
-    expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(installed)
-    expect(git('rev-parse', 'HEAD')).toBe(source.head)
-    expect(git('rev-parse', 'refs/dsh-source/main')).toBe(installed)
-    expect(await readFile(dirtyPath, 'utf8')).toBe('// user work in progress\n')
   })
 
   it('starts the inspection deadline before awaiting a stalled authority fence', async () => {
@@ -953,53 +560,5 @@ exit 0
     await expect(service.inspectSource(input)).rejects.toThrow()
   })
 
-  it('rejects concurrent preparations and drains worktree cleanup before Fiber disposal completes', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const ctx = contexts.pop()!
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const gap = await recordGap(service, 'dispose')
-    await executable(join(shell.binDir, 'docker'), `#!/bin/sh
-if [ "$1" = run ]; then
-  cat >/dev/null
-  : > "$0.started"
-  exec /bin/sleep 60
-fi
-exit 0
-`)
-    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
-      files: [{ path: 'src/index.ts', content: '// pending\n' }], idempotencyKey: 'source:modify:dispose' }
-    const preparation = service.prepareModifySourcePlan(input)
-    const settled = preparation.then(() => undefined, error => error)
-    try {
-      await vi.waitFor(async () => { expect((await lstat(join(shell.binDir, 'docker.started'))).isFile()).toBe(true) })
-      await expect(service.prepareModifySourcePlan({ ...input, idempotencyKey: 'source:modify:overlap' })).rejects.toThrow(/still draining/)
-    } finally { await ctx.fiber.dispose() }
-    expect(await settled).toBeInstanceOf(Error)
-    expect(await readdir(join(value.statePath, 'source-worktrees'))).toEqual([])
-    expect(await linkedWorktrees(source.repository, process.env)).toEqual([source.repository])
-    const db = openDatabase(value.state)
-    try { expect(db.prepare('SELECT COUNT(*) AS count FROM source_plans').get()).toMatchObject({ count: 0 }) }
-    finally { db.close() }
-  })
 
-  it('exposes owner CLI source gc as thin JSON wrapper', async () => {
-    const value = await trustFixture()
-    const service = makeService(value)
-    const shell = await installFakePnpm(value.root)
-    const source = await modifyRepositoryFixture(value.root)
-    const plan = await prepareOkModifyPlan(value, service, source.repository, shell, 'cli-gc', 900_000)
-    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['source', 'gc']))
-    const before = (vi.mocked(process.stdout.write).mock.calls.map(call => String(call[0]))
-      .find(line => line.includes('"removed"')) ?? '').trim()
-    expect(JSON.parse(before)).toEqual({ removed: [] })
-
-    const output = await withEnvironment({ DSH_HOME: value.dshHome },
-      () => runPluginControl(['source', 'gc']))
-    expect(output).toBeUndefined()
-    // After expiry the same owner command reaps the worktree.
-    const gc = await service.gcPreparedSourceWorktrees(plan.expiresAt + 1)
-    expect(gc.removed).toContain(resolve(plan.worktree))
-  }, 30_000)
 })

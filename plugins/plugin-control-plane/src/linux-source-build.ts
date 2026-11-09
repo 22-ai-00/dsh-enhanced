@@ -6,7 +6,7 @@ import type { LinuxRepositoryRunner } from '@dsh-enhanced/assistant-isolation'
 import { ControlPlaneCliError } from './errors.js'
 import { checkedSourceSnapshot, runLocalBuffer, runLocalCommand } from './source-workspace.js'
 import { PREPARED_SOURCE_BUILD_SCRIPT, sourceTree, validateSourceBuildConfig, verifySourcePreparation,
-  type LinuxSourceBuildConfig, type SourceBuildResult, type runDockerPreparedChecks } from './source-build.js'
+  type LinuxSourceBuildConfig, type SourceBuildResult } from './source-build.js'
 import type { LinuxSourcePreparedEvidence } from './types.js'
 import { consumeLinuxSourceBuildFailed, isLinuxSourceBuildFailed, linuxSourceBuildFailed, linuxSourceNotStarted } from './linux-source-preflight.js'
 import { sourceBuildDiagnostics } from './source-build-diagnostics.js'
@@ -29,7 +29,12 @@ chmod -R u+w /workspace/.dsh-pnpm-store /workspace/.dsh-pnpm-cache
   + '\nmkdir -p /workspace/.dsh-native-artifact\ncp -- "$pack" /workspace/.dsh-native-artifact/package.tgz\n'
 const buildScriptSha256 = sha(LINUX_PREPARED_SOURCE_BUILD_SCRIPT)
 
-export interface LinuxSourceBuildInput extends Omit<Parameters<typeof runDockerPreparedChecks>[0], 'config' | 'sourceJob'> {
+export interface LinuxSourceBuildInput {
+  worktree: string; baseCommit: string; name: string; scope: readonly string[]; environment: NodeJS.ProcessEnv
+  signal: AbortSignal; assertCurrent: () => Promise<void>; preparedAt: number
+  creation?: Parameters<typeof verifySourcePreparation>[0]['creation']
+  revision?: Parameters<typeof verifySourcePreparation>[0]['revision']
+  capturePack?: boolean
   config: LinuxSourceBuildConfig
   runner: LinuxRepositoryRunner
   sourceJob: { id: string }

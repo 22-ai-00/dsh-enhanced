@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
-import type { SourceBuildConfig } from '../src/source-build.ts'
+import type { LegacyDockerSourceBuildConfig, SourceBuildConfig } from '../src/source-build.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
 import type { LinuxSourcePreparedEvidence, PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
@@ -25,7 +25,7 @@ const signing = generateKeyPairSync('ed25519')
 const creationAcceptance: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
   authorityId: 'creation-verifier', keyId: 'creation-key', authorityDigest: hex('verifier'), namePrefix: 'agent-', expiresAt: now + 60_000 }
 
-function build(backend: Backend): SourceBuildConfig {
+function build(backend: Backend): SourceBuildConfig | LegacyDockerSourceBuildConfig {
   if (backend === 'linux-native') return { ...linuxSourceConfig(), expiresAt: now + 600_000 }
   if (backend === 'docker') return { dockerPath: '/usr/bin/docker', image: `example@sha256:${hex('image')}`,
     timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }

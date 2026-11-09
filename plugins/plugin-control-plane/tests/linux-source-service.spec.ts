@@ -39,7 +39,6 @@ vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await origi
   },
   NativeMacVerifierRunner: class { constructor() { transport.macConstruct(); throw new Error('Mac runner must not be constructed') } },
 }))
-vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof builds>(), runDockerPreparedChecks: vi.fn() }))
 vi.mock('../src/native-source-build.ts', async original => ({ ...await original<typeof macBuild>(), runNativePreparedChecks: vi.fn() }))
 vi.mock('../src/linux-source-build.ts', async original => ({ ...await original<typeof linuxBuild>(), runLinuxPreparedChecks: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn() }))
@@ -138,7 +137,6 @@ it('dispatches a durable modify job exclusively through its owned Linux runner a
   expect(f.store.getSourcePlan(prepared.planId!).preparedEvidence?.schemaVersion).toBe(3)
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ runner, sourceJob: { id: job.id },
     config: expect.objectContaining({ backend: 'linux-native', timeoutMs: 60_000 }), name: 'health-helper' }))
-  expect(builds.runDockerPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
   expect(transport.macConstruct).not.toHaveBeenCalled()
   expect(runner.config).not.toHaveProperty('userNamespace')
@@ -158,8 +156,8 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('passes paired im
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ runner,
     sourceJob: { id: job.id }, config: expect.objectContaining({ userNamespace: f.sourceBuild.userNamespace,
       systemSnapshot: f.sourceBuild.systemSnapshot, timeoutMs: 60_000 }) }))
-  expect(builds.runDockerPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
+  expect(transport.macConstruct).not.toHaveBeenCalled()
 })
 
 // Fault injection changes only the returned Host handoff, leaving the real
@@ -187,7 +185,6 @@ it.each(['backend', 'key'] as const)('rejects a corrupted Host %s binding before
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
-  expect(builds.runDockerPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
 })
 
@@ -195,7 +192,6 @@ it('rejects standalone Linux preparation without a durable source job before rea
   const f = await fixture()
   await expect(f.service.prepareModifySourcePlan({ ...f.request, timeoutMs: 60_000 })).rejects.toThrow(/bound durable source job/)
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
-  expect(builds.runDockerPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
   expect(f.store.getGap(f.request.gapId).status).toBe('open')
 })

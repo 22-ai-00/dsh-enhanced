@@ -128,6 +128,7 @@ export class CreationCapabilityRuntime {
     this.ctx = input.ctx; this.config = input.config; this.journal = input.journal; this.ports = input.ports
     this.createRunner = input.createRunner ?? (async () => {
       const { PluginBehaviorRunner } = await import('@dsh-enhanced/assistant-verifier/plugin-behavior-runner')
+      if (!('backend' in this.config.runner)) throw new Error('creation capability runner requires a native backend')
       return new PluginBehaviorRunner({ ...this.config.runner, authorityDigest: this.journal.authorityDigest })
     })
   }

@@ -2,9 +2,9 @@ import { describe, expect, test } from 'vitest'
 import { revisionBenefitContractDigest, type RevisionBenefitContract } from '@dsh-enhanced/assistant-growth-contract'
 import { validateSourceJobsConfig } from '../src/source-jobs.js'
 import type { SourceJobsConfig } from '../src/source-job-types.js'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.js'
 
-const build = { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-  memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } as const
+const build = linuxSourceConfig()
 
 const base: SourceJobsConfig = {
   authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2,

@@ -7,6 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SourceBuildConfig } from '../src/source-build.js'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
@@ -17,8 +18,7 @@ import type { PluginControlTrustConfig } from '../src/trust.ts'
 const roots: string[] = []
 const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
-const build = { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } as const
-
+const build = { ...linuxSourceConfig() }
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 function trust(root: string): PluginControlTrustConfig {
@@ -29,8 +29,15 @@ function trust(root: string): PluginControlTrustConfig {
 }
 
 function evidence(): SourcePreparedEvidence {
-  return { schemaVersion: 1, kind: 'dsh-source-prepared-evidence', environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'test', pnpmVersion: 'test' },
-    commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'e'.repeat(64) }], pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
+  return { schemaVersion: 3, kind: 'dsh-source-prepared-evidence', boundary: 'linux-native-repository-v1',
+    runtimeDigest: 'a'.repeat(64), executionContractDigest: 'b'.repeat(64), buildScriptSha256: 'c'.repeat(64),
+    archive: { sizeBytes: 1, sha256: 'f'.repeat(64) },
+    receipt: { requestDigest: 'a'.repeat(64), nativeNonce: 'a'.repeat(32), nativeResourceId: 'linux-11111111-1111-4111-8111-111111111111',
+      intentDigest: 'b'.repeat(64), resourcesDigest: 'c'.repeat(64), receiptDigest: 'd'.repeat(64) },
+    environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'v22.23.2', pnpmVersion: '11.7.0' },
+    checks: ['source-archive-integrity', 'frozen-offline-install', 'repository-pnpm-check', 'source-input-recheck', 'package-integrity'],
+    pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) },
+    logDigest: 'e'.repeat(64), durationMs: 1, preparedAt: Date.now() }
 }
 
 async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean } = {}) {
@@ -60,7 +67,7 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
     return options.continuations ? withGapSourceFence(job.intent.gapId, job.intent.owner, create) : create()
   })
   const approvePrepared = vi.fn(async () => { throw new Error('authority temporarily unavailable') })
-  const runtimeBuild = options.linux ? linuxSourceConfig() : build
+  const runtimeBuild: SourceBuildConfig = options.linux ? linuxSourceConfig() : build
   const createRuntime = () => new SourceJobRuntime({ config, build: runtimeBuild, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
     ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
   })
