@@ -148,7 +148,7 @@ dsh-rsi web-url --profile web
 | 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
 | 重启服务 | `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。只升级命令本身用 `dsh-rsi update`。对于 Linux 冻结 owner/cohort，`dsh-rsi update --all --yes` 仅接纳原安装为 Docker 后端且满足严格前提的 Home；切到 native 时，创建/修订审查、修订回归与采用业务记录必须为空。原生 owner 的原地程序升级和非空创建历史迁移尚不支持；尚未建立 owner 的 Home 有独立维护入口。旧 CLI 须先单独运行一次 `dsh-rsi update`。普通安装的升级路径、恢复和 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+浏览器关闭后，默认安装的服务仍会在后台运行。只升级命令本身用 `dsh-rsi update`。Linux 新安装固定使用 linux-native 后端；`dsh-rsi update --all --yes` 对保留的 Docker 原安装只在满足严格前提（创建/修订审查、修订回归与采用业务记录为空）时执行一次性 docker→native 迁移，Docker 时代的构建与执行路径已移除，旧收据仅作只读迁移证据。原生 owner 的原地程序升级和非空创建历史迁移尚不支持；尚未建立 owner 的 Home 有独立维护入口。旧 CLI 须先单独运行一次 `dsh-rsi update`。普通安装的升级路径、恢复和 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
 
 ## 按需阅读
 
