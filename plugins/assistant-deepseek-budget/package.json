@@ -46,6 +46,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "protection": {
+      "floor": "immutable"
     }
   },
   "dependencies": {

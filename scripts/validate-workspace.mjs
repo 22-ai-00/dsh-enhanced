@@ -236,6 +236,54 @@ for (const required of templateRequired) {
   if (!await exists(path)) report(path, 'missing template file')
 }
 
+// Protection floors: the runtime single source of truth lives in the inert
+// plugin-protection module of @dsh-enhanced/assistant-growth-contract (inside
+// the sealed RSI bootstrap closure). This build-time check parses that source
+// and pins the declarative `dsh.protection.floor` manifest field to it, so a
+// floor can only rise and a protected plugin cannot silently drop its marker.
+const protectionSourcePath = join(packagesRoot, 'assistant-growth-contract', 'src', 'plugin-protection.ts')
+const protectionSource = await exists(protectionSourcePath) ? await readFile(protectionSourcePath, 'utf8') : undefined
+if (protectionSource === undefined) {
+  report(protectionSourcePath, 'missing plugin protection source')
+} else {
+  const extractSet = (name) => {
+    const start = protectionSource.indexOf(`export const ${name}`)
+    if (start < 0) { report(protectionSourcePath, `missing ${name}`); return [] }
+    const open = protectionSource.indexOf('new Set([', start)
+    const close = protectionSource.indexOf('])', open)
+    if (open < 0 || close < 0) { report(protectionSourcePath, `${name} must be a Set literal`); return [] }
+    return [...protectionSource.slice(open, close).matchAll(/'([a-z][a-z0-9-]*)'/g)]
+      .map(match => match[1])
+  }
+  const modelProposal = new Set(extractSet('MODEL_PROPOSAL_PROTECTED_PLUGINS'))
+  const ownerRepair = new Set(extractSet('OWNER_REPAIR_PROTECTED_PLUGINS'))
+  for (const name of ownerRepair) {
+    if (!modelProposal.has(name)) report(protectionSourcePath, `owner-repair protection ${name} must also be model-proposal protected`)
+    if (!entries.some(entry => entry.name === name)) report(protectionSourcePath, `protected plugin ${name} has no plugin directory`)
+  }
+  const declared = new Map()
+  for (const entry of entries) {
+    const manifestPath = join(pluginsRoot, entry.name, 'package.json')
+    let manifest
+    try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')) } catch { continue }
+    const floor = manifest.dsh?.protection?.floor
+    if (floor === undefined) continue
+    if (floor !== 'model-proposal' && floor !== 'immutable') {
+      report(manifestPath, `dsh.protection.floor must be "model-proposal" or "immutable"`)
+      continue
+    }
+    const declaresModelProposal = modelProposal.has(entry.name)
+    const declaresImmutable = ownerRepair.has(entry.name)
+    if (!declaresModelProposal) report(manifestPath, `dsh.protection.floor is declared but ${entry.name} is not a protected plugin`)
+    else if (floor === 'immutable' && !declaresImmutable) report(manifestPath, `only owner-repair safety roots may declare the immutable floor`)
+    else if (floor === 'model-proposal' && declaresImmutable) report(manifestPath, `immutable safety roots must declare the immutable floor, never a lower one`)
+    declared.set(entry.name, floor)
+  }
+  for (const name of ownerRepair) {
+    if (!declared.has(name)) report(join(pluginsRoot, name, 'package.json'), 'immutable safety roots must declare dsh.protection.floor "immutable"')
+  }
+}
+
 if (errors.length > 0) {
   console.error(`Workspace validation failed with ${errors.length} error(s):`)
   for (const error of errors) console.error(`- ${error}`)
