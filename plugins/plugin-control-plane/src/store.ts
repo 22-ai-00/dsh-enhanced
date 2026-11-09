@@ -18,7 +18,7 @@ import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
-import { anySourceGrowthRunDigest as sourceGrowthRunDigest, isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate,
+import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, isSourceOwnerContinuation, isPluginRevisionTaskSource, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate,
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,
@@ -3198,22 +3198,42 @@ export class ControlPlaneStore {
     const job = this.getPreparedRevisionJob(plan.id)
     const reference = this.getOwnerTaskFailureReference(plan.gapId)
     validateCreationCapabilitySource(source, certificate)
-    if (!reference || controlPlaneDigest(plan.sourceRevision?.parent) !== controlPlaneDigest(certificate.parent) || !plan.sourceCheck || !plan.preparedEvidence || !plan.sourceRevision?.growthRun
-      || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
-      || !job.intent.revision?.growthRun || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
-      || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
-      || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
-      || plan.preparedEvidence.pack.sha256 !== certificate.plan.artifactSha256
-      || plan.preparedEvidence.pack.sizeBytes !== certificate.plan.artifactBytes
-      || plan.generatorDigest !== certificate.plan.generatorDigest
-      || controlPlaneDigest(reference) !== certificate.source.referenceDigest
-      || controlPlaneDigest(reference.owner) !== certificate.source.ownerDigest
-      || sourceGrowthRunDigest(plan.sourceRevision.growthRun) !== certificate.source.growthRunDigest
-      || sourceGrowthRunDigest(job.intent.revision.growthRun) !== certificate.source.growthRunDigest
-      || controlPlaneDigest(plan.sourceRevision.growthRun.model) !== controlPlaneDigest(certificate.model)
-      || certificate.expiresAt > Math.min(plan.expiresAt, plan.sourceRevision.grant.expiresAt,
-        plan.sourceRevision.growthRun.expiresAt, certificate.authority.expiresAt)) {
-      throw new ControlPlaneStoreError('invalid-input', 'revision verification certificate does not match exact prepared source')
+    if (isPluginRevisionTaskSource(certificate.source)) {
+      if (!reference || controlPlaneDigest(plan.sourceRevision?.parent) !== controlPlaneDigest(certificate.parent) || !plan.sourceCheck || !plan.preparedEvidence || !plan.sourceRevision?.growthRun
+        || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
+        || !job.intent.revision?.growthRun || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
+        || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
+        || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
+        || plan.preparedEvidence.pack.sha256 !== certificate.plan.artifactSha256
+        || plan.preparedEvidence.pack.sizeBytes !== certificate.plan.artifactBytes
+        || plan.generatorDigest !== certificate.plan.generatorDigest
+        || controlPlaneDigest(reference) !== certificate.source.referenceDigest
+        || controlPlaneDigest(reference.owner) !== certificate.source.ownerDigest
+        || sourceGrowthRunDigest(plan.sourceRevision.growthRun) !== certificate.source.growthRunDigest
+        || sourceGrowthRunDigest(job.intent.revision.growthRun) !== certificate.source.growthRunDigest
+        || controlPlaneDigest(plan.sourceRevision.growthRun.model) !== controlPlaneDigest(certificate.model)
+        || certificate.expiresAt > Math.min(plan.expiresAt, plan.sourceRevision.grant.expiresAt,
+          plan.sourceRevision.growthRun.expiresAt, certificate.authority.expiresAt)) {
+        throw new ControlPlaneStoreError('invalid-input', 'revision verification certificate does not match exact prepared source')
+      }
+    } else {
+      // Owner-instruction revisions: the signed instruction source replaces
+      // the task reference and growth run, which must be absent on both sides.
+      const instruction = job.intent.ownerInstruction
+      if (!instruction || plan.sourceRevision?.growthRun !== undefined || job.intent.revision?.growthRun !== undefined
+        || !plan.sourceCheck || !plan.preparedEvidence || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
+        || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
+        || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
+        || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
+        || plan.preparedEvidence.pack.sha256 !== certificate.plan.artifactSha256
+        || plan.preparedEvidence.pack.sizeBytes !== certificate.plan.artifactBytes
+        || plan.generatorDigest !== certificate.plan.generatorDigest
+        || controlPlaneDigest(plan.sourceRevision?.parent) !== controlPlaneDigest(certificate.parent)
+        || certificate.source.instructionDigest !== instruction.digest
+        || growthObjectDigest(job.intent.owner) !== certificate.source.ownerDigest
+        || certificate.expiresAt > Math.min(plan.expiresAt, plan.sourceRevision!.grant.expiresAt, certificate.authority.expiresAt)) {
+        throw new ControlPlaneStoreError('invalid-input', 'instruction revision certificate does not match exact prepared source')
+      }
     }
     this.readPreparedSourceArtifact(plan.id)
     if (source.baseCommit !== plan.baseCommit || controlPlaneDigest(source.scope) !== controlPlaneDigest(plan.scope)) throw new ControlPlaneStoreError('invalid-input', 'revision source archive base or scope changed')
@@ -3321,6 +3341,12 @@ export class ControlPlaneStore {
     const source = this.readRevisionSource(plan.id)
     const reference = this.getOwnerTaskFailureReference(plan.gapId)
     const run = plan.sourceRevision?.growthRun
+    // Regressions exist only for task-failure revisions with frozen acceptance pins.
+    if (!candidate || !isPluginRevisionTaskSource(candidate.source)
+      || candidate.protocol === 'assistant-growth/revision-verification/v3') {
+      throw new ControlPlaneStoreError('invalid-input', 'owner-instruction revisions carry no regression acceptance')
+    }
+    const candidateSource = candidate.source
     const previousJobs = new Set([...(parent?.observations ?? []), ...(candidate?.observations ?? [])].map(item => item.jobId))
     if (certificate.verifiedAt > this.#now() || certificate.expiresAt <= this.#now()
       || !candidate || !parent || !source || !reference || !run?.revisionRegressionAcceptance
@@ -3338,10 +3364,9 @@ export class ControlPlaneStore {
       || controlPlaneDigest(certificate.model) !== controlPlaneDigest(run.model)
       || controlPlaneDigest(certificate.authority) !== controlPlaneDigest(run.revisionRegressionAcceptance)
       || controlPlaneDigest(certificate.authority) !== controlPlaneDigest(job.intent.revision.growthRun.revisionRegressionAcceptance)
-      || certificate.source.referenceDigest !== controlPlaneDigest(reference)
-      || certificate.source.ownerDigest !== controlPlaneDigest(reference.owner)
-      || certificate.source.growthRunDigest !== sourceGrowthRunDigest(run)
-      || sourceGrowthRunDigest(run) !== sourceGrowthRunDigest(job.intent.revision.growthRun)
+      || candidateSource.referenceDigest !== controlPlaneDigest(reference)
+      || candidateSource.ownerDigest !== controlPlaneDigest(reference.owner)
+      || candidateSource.growthRunDigest !== sourceGrowthRunDigest(run)
       || certificate.observations.length !== parent.observations.length
       || certificate.observations.some((item, index) => item.caseId !== parent.observations[index]?.caseId
         || previousJobs.has(item.parent.jobId) || previousJobs.has(item.candidate.jobId))

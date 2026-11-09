@@ -1325,7 +1325,11 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
 
 function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
   alter?: (body: Omit<PluginRevisionVerificationCertificate, 'signature'>) => void): PluginRevisionVerificationCertificate {
-  const { plan, reference } = f.service.inspectPreparedRevision(planId)
+  const prepared = f.service.inspectPreparedRevision(planId)
+  if (prepared.protocol !== 'dsh-prepared-revision/v1' && prepared.protocol !== 'dsh-prepared-revision/v2') {
+    throw new Error('signed revision certificate fixture only covers task-failure revisions')
+  }
+  const { plan, reference } = prepared
   const growthRun = plan.sourceRevision!.growthRun
   if (!growthRun) throw new Error('task-failure revision fixture must pin a growth run')
   const body: Omit<PluginRevisionVerificationCertificate, 'signature'> = {

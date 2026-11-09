@@ -40,11 +40,14 @@ export interface RevisionCapabilityModel {
 }
 
 /** Content-addressed candidate run reference bound by an adoption receipt. */
-export interface RevisionCapabilitySourceRef {
-  referenceDigest: string
-  ownerDigest: string
-  growthRunDigest: string
-}
+/**
+ * The adoption receipt repeats the verification certificate's signed source:
+ * a task-failure revision pins its growth run, an owner-instruction revision
+ * pins the instruction row that authenticated it.
+ */
+export type RevisionCapabilitySourceRef =
+  | { referenceDigest: string; ownerDigest: string; growthRunDigest: string }
+  | { instructionDigest: string; ownerDigest: string }
 
 /** A signed adoption receipt binds the exact parent adoption receipt, candidate artifact, new task and model. */
 export interface RevisionCapabilityAdoptionReceipt {

@@ -255,7 +255,10 @@ export class SourceJobRuntime {
   }
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
-    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    // Owner-instruction revisions continue on their frozen instruction; task
+    // revisions on their durable task-failure source. Both re-authorize below.
+    if (!job.planId || (job.intent.ownerInstruction === undefined
+      && !this.options.store.getOwnerTaskFailureReference(job.intent.gapId))) return
     if (this.continuing.has(job.id)) return
     this.continuing.add(job.id)
     try { await this.continuePreparedLocked(job, signal) } finally { this.continuing.delete(job.id) }

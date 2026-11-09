@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { canonicalGrowthJson } from '@dsh-enhanced/assistant-growth-contract'
+import { canonicalGrowthJson, isPluginRevisionTaskSource } from '@dsh-enhanced/assistant-growth-contract'
 import type { CreationCapabilityObservation, CreationCapabilityTool } from './creation-capability-types.js'
 import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityCallEvidence,
   RevisionCapabilityConfig, RevisionCapabilityInspection, RevisionCapabilityJournalPort,
@@ -233,8 +233,10 @@ export class RevisionCapabilityRuntime {
             parentReceiptDigest: parent.receiptDigest, parentArtifactSha256: certificate.parent.artifactSha256,
             entryId, aliasesDigest: digest([...aliases]), artifactSha256: sha(inspection.artifact),
             artifactBytes: inspection.artifact.length, schemaDigest: certificate.schemaDigest,
-            source: { referenceDigest: certificate.source.referenceDigest, ownerDigest: certificate.source.ownerDigest,
-              growthRunDigest: certificate.source.growthRunDigest },
+            source: isPluginRevisionTaskSource(certificate.source)
+              ? { referenceDigest: certificate.source.referenceDigest, ownerDigest: certificate.source.ownerDigest,
+                growthRunDigest: certificate.source.growthRunDigest }
+              : { instructionDigest: certificate.source.instructionDigest, ownerDigest: certificate.source.ownerDigest },
             model: certificate.model,
             ...(inspection.regression === undefined ? {} : { regressionDigest: digest(inspection.regression) }),
             inFlightParentCalls, expiresAt, adoptedAt }

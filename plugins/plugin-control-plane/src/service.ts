@@ -18,7 +18,7 @@ import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { isSourceOwnerContinuation, anySourceGrowthRunDigest as sourceGrowthRunDigest, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
+import { isSourceOwnerContinuation, isPluginRevisionTaskSource, anySourceGrowthRunDigest as sourceGrowthRunDigest, validateAnySourceGrowthRunBinding as validateSourceGrowthRunBinding, validateWorkItemGrowthAuthorityPins, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
   validateRevisionAcceptanceAuthorityRef, verifyPluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef,
   validateRevisionRegressionAcceptanceAuthorityRef, verifyPluginRevisionRegressionCertificate,
   type RevisionRegressionAcceptanceAuthorityRef, type PluginRevisionRegressionCertificate, type PluginRevisionRegressionRequest, type PluginRevisionRegressionResult,
@@ -1950,6 +1950,9 @@ export class PluginControlPlaneService extends Service {
     const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
     combined.throwIfAborted()
     const prepared = this.inspectPreparedRevision(planId), build = this.config.sourceBuild
+    if (prepared.protocol === 'dsh-prepared-revision/v3') {
+      throw new Error('owner-instruction revisions do not use the task-failure Linux build binding')
+    }
     const native = this.nativeSourceRunner, evidence = prepared.plan.preparedEvidence
     if (!build || !('backend' in build) || build.backend !== 'linux-native' || !build.userNamespace || !build.systemSnapshot
       || native?.backend !== 'linux-native'
@@ -2036,9 +2039,25 @@ export class PluginControlPlaneService extends Service {
     this.abort.signal.throwIfAborted()
     const plan = this.store.getSourcePlan(planId)
     const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
-    if (!reference || plan.mode !== 'prepared-revise' || plan.status !== 'pending-approval'
+    if (plan.mode !== 'prepared-revise' || plan.status !== 'pending-approval'
       || Date.now() >= plan.expiresAt || !plan.sourceRevision || Date.now() >= plan.sourceRevision.grant.expiresAt) {
       throw new Error('prepared revision package is unavailable for independent verification')
+    }
+    if (!reference) {
+      // Owner-instruction revisions have no task reference; the frozen
+      // instruction is their whole provenance.
+      const job = this.store.getPreparedRevisionJob(plan.id)
+      const binding = job.intent.ownerInstruction
+      const stored = binding === undefined ? undefined : this.store.getOwnerInstruction(binding.instructionId)
+      if (!binding || stored === undefined || controlPlaneDigest(stored) !== binding.digest
+        || stored.expiresAt <= Date.now() || plan.sourceRevision.growthRun !== undefined
+        || stored.planId !== plan.id || stored.pluginName !== plan.name
+        || job.intent.revision?.growthRun !== undefined) {
+        throw new Error('prepared instruction revision is unavailable or changed')
+      }
+      return { protocol: 'dsh-prepared-revision/v3' as const, plan: structuredClone(plan), job: structuredClone(job),
+        source: { instruction: binding, owner: job.intent.owner, reviewModel: this.resolveInstructionReviewModel(stored) },
+        artifact: this.store.readPreparedSourceArtifact(plan.id) }
     }
     if(reference.schemaVersion===2){
       const run=plan.sourceRevision.growthRun;if(run?.protocol!=='assistant-growth/source-run/v3')throw new Error('work item prepared revision run unavailable')
@@ -2060,6 +2079,22 @@ export class PluginControlPlaneService extends Service {
   }
 
   /** Host-only pre-author policy reference; never grants candidate or model authority. */
+  /** Resolves the review supplier for an owner-instruction revision from the live owner route. */
+  private resolveInstructionReviewModel(stored: { ownerReceipt: { authorityId: string; principalId: string;
+    workspace: string; agentPreset: string } }): { provider: string; model: string; reasoningEffort?: string } {
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as
+      { inspectOwnerModelSelection?(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }):
+        { provider?: string; model?: string; reasoningEffort?: string } } | undefined
+    const selection = delivery?.inspectOwnerModelSelection?.({ authorityId: stored.ownerReceipt.authorityId,
+      principalId: stored.ownerReceipt.principalId, workspace: stored.ownerReceipt.workspace,
+      agentPreset: stored.ownerReceipt.agentPreset })
+    if (selection?.provider === undefined || selection.model === undefined) {
+      throw new Error('owner-instruction revision requires a live owner model selection')
+    }
+    return { provider: selection.provider, model: selection.model,
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) }
+  }
+
   inspectSourceRevisionAcceptanceAuthority = (): RevisionAcceptanceAuthorityRef | undefined => {
     const policy = this.config.revisionVerifications?.authority
     if (this.abort.signal.aborted || !policy || Date.now() >= policy.expiresAt
@@ -2100,6 +2135,9 @@ export class PluginControlPlaneService extends Service {
       throw new Error('regression parent immutable artifact unavailable or changed')
     }
     this.inspectRevisionParent(parent.parent.planId)
+    if (prepared.protocol === 'dsh-prepared-revision/v3') {
+      throw new Error('owner-instruction revisions carry no regression acceptance')
+    }
     return { protocol: 'dsh-prepared-revision-regression/v1' as const,
       plan: prepared.plan, job: prepared.job, reference: prepared.reference,
       candidate: { certificate, artifact: Buffer.from(prepared.artifact), sourceDigest: source.digest },
@@ -2135,6 +2173,8 @@ export class PluginControlPlaneService extends Service {
   inspectVerifiedRevisionRegression = (planId: string): PluginRevisionRegressionCertificate | undefined => {
     const certificate = this.store.getRevisionRegression(planId), policy = this.config.revisionRegressions
     if (!certificate || !policy || !verifyPluginRevisionRegressionCertificate(certificate, policy.authority, policy.publicKey)) return undefined
+    // Instruction revisions carry no regression acceptance and never enter this corridor.
+    if (!isPluginRevisionTaskSource(certificate.source)) return undefined
     const prepared = this.inspectPreparedRevisionRegression(planId)
     this.withPreparedRevisionRegressionFence({ planId, planDigest: certificate.plan.digest, artifactSha256: certificate.plan.artifactSha256,
       growthRunDigest: certificate.source.growthRunDigest, referenceDigest: certificate.source.referenceDigest,
@@ -2192,15 +2232,56 @@ export class PluginControlPlaneService extends Service {
     })
   }
 
+  /**
+   * Exact-source fence for owner-instruction revisions: the frozen instruction
+   * row replaces the task reference and growth run, and every comparison is
+   * replayed against durable state inside the Evaluation writer transaction.
+   */
+  withPreparedInstructionRevisionFence = <T>(input: { planId: string; planDigest: string; artifactSha256: string;
+    instructionDigest: string; parentDigest: string }, callback: () => T): T => {
+    this.abort.signal.throwIfAborted()
+    const policy = this.inspectSourceRevisionAcceptanceAuthority()
+    if (!policy) throw new Error('revision verification authority unavailable')
+    const plan = this.store.getSourcePlan(input.planId)
+    if (this.store.getOwnerTaskFailureReference(plan.gapId) !== undefined) {
+      throw new Error('instruction revision fence cannot ride a task failure')
+    }
+    const job = this.store.getPreparedRevisionJob(input.planId)
+    const instruction = job.intent.ownerInstruction
+    const current = this.store.getSourcePlan(input.planId)
+    const stored = instruction === undefined ? undefined : this.store.getOwnerInstruction(instruction.instructionId)
+    if (!instruction || stored === undefined || controlPlaneDigest(stored) !== instruction.digest
+      || instruction.digest !== input.instructionDigest
+      || current.digest !== input.planDigest || current.mode !== 'prepared-revise' || !current.sourceCheck || !current.preparedEvidence
+      || current.preparedEvidence.pack.sha256 !== input.artifactSha256
+      || current.sourceRevision?.growthRun !== undefined || job.intent.revision?.growthRun !== undefined
+      || controlPlaneDigest(current.sourceRevision?.parent) !== input.parentDigest
+      || controlPlaneDigest(current.sourceRevision?.grant) !== controlPlaneDigest(this.config.sourceJobs?.revision)) {
+      throw new Error('instruction revision exact source binding changed')
+    }
+    if (stored.expiresAt <= Date.now()) throw new Error('owner instruction expired')
+    const artifact = this.store.readPreparedSourceArtifact(input.planId)
+    if (createHash('sha256').update(artifact).digest('hex') !== input.artifactSha256) {
+      throw new Error('instruction revision artifact changed')
+    }
+    return callback()
+  }
+
   /** Independent reviewer reads the actual checked tree through a disposable Git index. */
   inspectPreparedRevisionReviewContext = async (planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }> => {
     const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
     combined.throwIfAborted()
     const prepared = this.inspectPreparedRevision(planId)
-    const current = () => this.withPreparedRevisionFence({ planId, planDigest: prepared.plan.digest,
-      artifactSha256: prepared.plan.preparedEvidence!.pack.sha256,
-      growthRunDigest: sourceGrowthRunDigest(prepared.plan.sourceRevision!.growthRun!),
-      referenceDigest: controlPlaneDigest(prepared.reference), parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent) }, () => undefined)
+    const assertCurrent = prepared.protocol === 'dsh-prepared-revision/v3'
+      ? () => this.withPreparedInstructionRevisionFence({ planId, planDigest: prepared.plan.digest,
+        artifactSha256: prepared.plan.preparedEvidence!.pack.sha256,
+        instructionDigest: prepared.source.instruction.digest,
+        parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent) }, () => undefined)
+      : () => this.withPreparedRevisionFence({ planId, planDigest: prepared.plan.digest,
+        artifactSha256: prepared.plan.preparedEvidence!.pack.sha256,
+        growthRunDigest: sourceGrowthRunDigest(prepared.plan.sourceRevision!.growthRun!),
+        referenceDigest: controlPlaneDigest(prepared.reference), parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent) }, () => undefined)
+    const current = assertCurrent
     current()
     const trust = await this.boundTrust()
     const environment = inheritedEnvironment(trust)
@@ -2220,6 +2301,21 @@ export class PluginControlPlaneService extends Service {
     if (!certificate) return undefined
     const config = this.config.revisionVerifications
     if (!config || !verifyPluginRevisionVerificationCertificate(certificate, config.authority, config.publicKey)) return undefined
+    if (!isPluginRevisionTaskSource(certificate.source)) {
+      this.withPreparedInstructionRevisionFence({ planId, planDigest: certificate.plan.digest,
+        artifactSha256: certificate.plan.artifactSha256,
+        instructionDigest: certificate.source.instructionDigest, parentDigest: controlPlaneDigest(certificate.parent) }, () => {
+        const plan = this.store.getSourcePlan(planId)
+        if (!plan.sourceCheck || !plan.preparedEvidence || certificate.plan.name !== plan.name
+          || certificate.plan.generatorDigest !== plan.generatorDigest
+          || certificate.plan.sourceTreeDigest !== plan.sourceCheck.treeDigest
+          || certificate.plan.sourcePatchDigest !== plan.sourceCheck.patchDigest
+          || certificate.plan.artifactBytes !== plan.preparedEvidence.pack.sizeBytes) {
+          throw new Error('revision verification exact plan evidence changed')
+        }
+      })
+      return structuredClone(certificate)
+    }
     this.withPreparedRevisionFence({ planId, planDigest: certificate.plan.digest,
       artifactSha256: certificate.plan.artifactSha256, growthRunDigest: certificate.source.growthRunDigest,
       referenceDigest: certificate.source.referenceDigest, parentDigest: controlPlaneDigest(certificate.parent) }, () => {
@@ -2270,6 +2366,7 @@ export class PluginControlPlaneService extends Service {
       const { plan, reference, job } = this.store.getRetainedPreparedRevision(planId)
       const certificate = this.store.getRevisionVerification(planId)
       if (!certificate || !plan.sourceRevision || !isSourceOwnerContinuation(before, reference.owner)
+        || !isPluginRevisionTaskSource(certificate.source)
         || plan.sourceRevision.growthRun === undefined
         || !verifyPluginRevisionVerificationCertificate(certificate, policy.authority, policy.publicKey, certificate.verifiedAt)
         || certificate.plan.digest !== plan.digest || certificate.source.referenceDigest !== controlPlaneDigest(reference)
@@ -2442,29 +2539,57 @@ export class PluginControlPlaneService extends Service {
     signal.throwIfAborted()
     if (!job.planId || !this.config.revisionVerifications || this.store.getRevisionVerificationStatus(job.planId) !== undefined) return
     const prepared = this.inspectPreparedRevision(job.planId)
-    if (prepared.job.id !== job.id || !prepared.plan.sourceRevision?.growthRun || !prepared.plan.preparedEvidence) {
+    if (prepared.job.id !== job.id || !prepared.plan.preparedEvidence) {
       throw new Error('revision verification job is not the exact prepared source')
     }
+    if (prepared.protocol === 'dsh-prepared-revision/v3') {
+      // Owner-instruction revisions claim through their instruction binding.
+      const instruction = prepared.source.instruction
+      this.withPreparedInstructionRevisionFence({ planId: prepared.plan.id, planDigest: prepared.plan.digest,
+        artifactSha256: prepared.plan.preparedEvidence.pack.sha256,
+        instructionDigest: instruction.digest, parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent) },
+        () => this.store.claimRevisionVerification(job.planId!))
+      return this.runPreparedRevisionVerifier(job, prepared, signal, verifier,
+        { planId: prepared.plan.id, planDigest: prepared.plan.digest,
+          artifactSha256: prepared.plan.preparedEvidence.pack.sha256,
+          instructionDigest: instruction.digest, parentDigest: controlPlaneDigest(prepared.plan.sourceRevision!.parent),
+          ownerDigest: controlPlaneDigest(prepared.source.owner) })
+    }
+    if (!prepared.plan.sourceRevision?.growthRun) throw new Error('prepared revision lacks a frozen source growth run')
     const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest,
       artifactSha256: prepared.plan.preparedEvidence.pack.sha256,
       growthRunDigest: sourceGrowthRunDigest(prepared.plan.sourceRevision.growthRun),
       referenceDigest: controlPlaneDigest(prepared.reference), parentDigest: controlPlaneDigest(prepared.plan.sourceRevision.parent) }
     this.withPreparedRevisionFence(binding, () => this.store.claimRevisionVerification(job.planId!))
+    return this.runPreparedRevisionVerifier(job, prepared, signal, verifier, binding)
+  }
+
+  /** Runs the independent reviewer and settles the claimed row inside the caller's exact-source fence. */
+  private async runPreparedRevisionVerifier(job: SourceJobRecord,
+    prepared: { plan: PluginSourcePlan },
+    signal: AbortSignal, verifier: () => RevisionVerifierPort,
+    fenceInput: { planId: string; planDigest: string; artifactSha256: string; parentDigest: string }
+      & ({ growthRunDigest: string; referenceDigest: string } | { instructionDigest: string; ownerDigest: string })): Promise<void> {
+    const inFence = (callback: () => void) => 'growthRunDigest' in fenceInput
+      ? this.withPreparedRevisionFence(fenceInput, callback)
+      : this.withPreparedInstructionRevisionFence(fenceInput, callback)
+    const planId = job.planId
+    if (!planId) throw new Error('revision verification job has no plan')
     try {
       const current = verifier()
       if (typeof current?.verifyPluginRevision !== 'function') throw new Error('independent revision verifier unavailable')
-      const result = await current.verifyPluginRevision({ protocol: 'assistant-growth/revision-verification-request/v1', planId: job.planId }, signal)
+      const result = await current.verifyPluginRevision({ protocol: 'assistant-growth/revision-verification-request/v1', planId }, signal)
       signal.throwIfAborted()
       if (result.status === 'verified' && !verifyPluginRevisionVerificationCertificate(result.certificate,
-        this.config.revisionVerifications.authority, this.config.revisionVerifications.publicKey)) {
+        this.config.revisionVerifications!.authority, this.config.revisionVerifications!.publicKey)) {
         throw new Error('revision verification certificate signature or policy invalid')
       }
       if (controlPlaneDigest(await this.boundTrust()) !== job.intent.trustDigest) throw new Error('revision verification trust changed')
-      await this.inspectPreparedRevisionReviewContext(job.planId, signal)
+      await this.inspectPreparedRevisionReviewContext(job.planId!, signal)
       const source = result.status === 'verified' ? await captureCreationCapabilitySource({ worktree: prepared.plan.worktree,
         baseCommit: prepared.plan.baseCommit, scope: [...prepared.plan.scope].sort(), certificate: result.certificate,
         environment: inheritedEnvironment(await this.boundTrust()), signal }) : undefined
-      this.withPreparedRevisionFence(binding, () => {
+      inFence(() => {
         if (result.status === 'verified') {
           if (!source) throw new Error('verified revision source archive unavailable')
           this.store.recordRevisionVerification(result.certificate, source)
@@ -2475,7 +2600,7 @@ export class PluginControlPlaneService extends Service {
     } catch (error) {
       // The claimed row is a durable no-replay fence even if the process dies
       // before settlement. A later native tick cannot dispatch another review.
-      try { this.withPreparedRevisionFence(binding, () => {
+      try { inFence(() => {
         if (this.store.getRevisionVerificationStatus(job.planId!) === 'claimed') {
           this.store.settleRevisionVerification(job.planId!, 'unknown', 'independent-verification-unsettled')
         }
@@ -2493,6 +2618,9 @@ export class PluginControlPlaneService extends Service {
     const certificate = prepared.candidate.certificate
     const acceptance = prepared.plan.sourceRevision?.growthRun?.revisionRegressionAcceptance
     if (acceptance === undefined) throw new Error('owner-instruction revisions carry no regression acceptance')
+    if (!isPluginRevisionTaskSource(certificate.source)) {
+      throw new Error('owner-instruction revisions carry no regression acceptance')
+    }
     const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest, artifactSha256: certificate.plan.artifactSha256,
       growthRunDigest: certificate.source.growthRunDigest, referenceDigest: certificate.source.referenceDigest,
       parentDigest: controlPlaneDigest(certificate.parent), candidateVerificationDigest: controlPlaneDigest(certificate),

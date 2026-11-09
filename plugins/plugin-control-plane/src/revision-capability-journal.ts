@@ -99,8 +99,11 @@ function model(value: unknown): RevisionCapabilityModel {
   return value as RevisionCapabilityModel
 }
 function sourceRef(value: unknown): RevisionCapabilitySourceRef {
-  const item = obj(value, ['referenceDigest', 'ownerDigest', 'growthRunDigest'])
-  for (const name of ['referenceDigest', 'ownerDigest', 'growthRunDigest']) str(item[name], SHA, 64)
+  const instruction = value !== null && typeof value === 'object' && Object.hasOwn(value as object, 'instructionDigest')
+  const item = instruction ? obj(value, ['instructionDigest', 'ownerDigest']) : obj(value, ['referenceDigest', 'ownerDigest', 'growthRunDigest'])
+  for (const name of instruction ? ['instructionDigest', 'ownerDigest'] : ['referenceDigest', 'ownerDigest', 'growthRunDigest']) {
+    str(item[name], SHA, 64)
+  }
   return value as RevisionCapabilitySourceRef
 }
 function aliases(value: unknown): readonly string[] {
