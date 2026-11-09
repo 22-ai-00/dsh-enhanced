@@ -62,8 +62,6 @@ async function fixture() {
   const now = Date.now()
   const owner = { authorityId: 'route', authorityHash: h('a'), principalId: 'owner', principalRecordId: 'record',
     principalVersion: 1, workspace: root, agentPreset: 'main' }
-  const dockerRunner = { stateRoot, image: 'sha256:' + h('a'), dockerPath: await realpath(process.execPath),
-    expiresAt: now + 120_000, maxRuns: 16, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 }
   const baseRoot = join(root, 'base')
   const base: LinuxRuntime = { schemaVersion: 1, backend: 'linux-native', platform: `linux-${process.arch}` as LinuxRuntime['platform'],
     sourceCommit: '1'.repeat(40), lockSha256: '2'.repeat(64), root: { path: baseRoot, dev: 1, ino: 1, sha256: '3'.repeat(64) },
@@ -87,11 +85,9 @@ async function fixture() {
   deployment.read.mockResolvedValue(preparedDeployment)
   const common = { owner, namePrefix: 'owner-', keyId: 'owner-key', keyPath, expiresAt: now + 120_000,
     maxVerifications: 2, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
-  const dockerBase = { ...common, authorityId: 'regression-review', runner: dockerRunner }
   const linuxBase = { ...common, authorityId: 'regression-review', runner: linuxRunner }
   const creationConfig: CreationReviewConfig = { ...linuxBase, authorityId: 'creation-review',
     policy: 'The original owner task requires exact signed addition.', maxInputBytes: 65_536, maxOutputTokens: 1024 }
-  const dockerConfig: RevisionRegressionReviewConfig = dockerBase
   const linuxConfig: RevisionRegressionReviewConfig = linuxBase
   const creation = compileCreationReviewConfig(creationConfig)
   const regression = compileRevisionRegressionReviewConfig(linuxConfig)
@@ -177,10 +173,6 @@ async function fixture() {
     const runtime = new RevisionRegressionReviewRuntime(ctx, linuxConfig, databasePath,
       certificate => creationRuntime.readRetainedCases(certificate)); runtimes.push(runtime); return runtime
   }
-  const makeDockerRuntime = () => {
-    const runtime = new RevisionRegressionReviewRuntime(ctx, dockerConfig, databasePath,
-      certificate => creationRuntime.readRetainedCases(certificate)); runtimes.push(runtime); return runtime
-  }
   let job = 0
   observer.run.mockImplementation(async ({ artifact, operation }: {
     artifact: Buffer; operation: { kind: string; calls?: { id: string; arguments: { a: number; b: number } }[] } }) => {
@@ -193,9 +185,9 @@ async function fixture() {
         result: { isError: false, value: { sum: operation.calls![0]!.arguments.a + operation.calls![0]!.arguments.b } } }] }
   })
   const request = { protocol: 'assistant-growth/revision-regression-request/v1' as const, planId: plan.id }
-  return { root, ctx, creationRuntime, linuxConfig, dockerConfig, regression, cp, request, snapshot, plan,
+  return { root, ctx, creationRuntime, linuxConfig, regression, cp, request, snapshot, plan,
     parentCertificate, candidateCertificate, execution, preparedDeployment, descriptor,
-    makeLinuxRuntime, makeDockerRuntime }
+    makeLinuxRuntime }
 }
 
 test('paired Linux regression signs v2 anchoring one retained observer across the v3 parent and v2 candidate', async () => {
@@ -233,13 +225,6 @@ test.each(['parent-v1', 'candidate-v1', 'runtime-digest', 'build-runtime-digest'
     expect(runtime.inspect({ owner: f.linuxConfig.owner })?.remainingVerifications).toBe(2)
   })
 
-test('a non-Linux runtime refuses v3/v2 Linux certificates without dispatching', async () => {
-  const f = await fixture()
-  const runtime = f.makeDockerRuntime()
-  expect(await runtime.run(f.request)).toEqual({ status: 'unknown', reason: 'stale-source' })
-  expect(observer.run).not.toHaveBeenCalled()
-  expect(deployment.read).not.toHaveBeenCalled()
-})
 
 test.each(['deployment-descriptor', 'deployment-base', 'deployment-preparation'])(
   'Linux %s drifting from the signed candidate is stale-source before admission', async mode => {

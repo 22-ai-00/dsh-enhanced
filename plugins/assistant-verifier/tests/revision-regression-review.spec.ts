@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSigningPayload,
@@ -17,10 +18,12 @@ import { RevisionRegressionReviewRuntime, compileRevisionRegressionReviewConfig,
 import { AssistantVerifierService } from '../src/service.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
-vi.mock('@dsh-enhanced/assistant-isolation', () => ({ IsolatedVerifierRunner: class {
+vi.mock('@dsh-enhanced/assistant-isolation', () => ({ NativeMacVerifierRunner: class {
   run(...args: unknown[]) { return observer.run(...args) }
   close() { return observer.close() }
-} }))
+},
+validateNativeMacRuntime: (value: unknown) => value,
+nativeMacRuntimeDigest: () => 'f'.repeat(64) }))
 
 const roots: string[] = [], contexts: Context[] = [], runtimes: Array<CreationReviewRuntime | RevisionRegressionReviewRuntime> = []
 afterEach(async () => {
@@ -32,12 +35,27 @@ afterEach(async () => {
 
 const h = (letter: string) => letter.repeat(64)
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+/** A minimal native tgz pack accepted by the seatbelt artifact staging. */
+function nativePack(source = 'export default {}'): Buffer {
+  const files = { 'package/package.json': JSON.stringify({ name: 'owner-sum', version: '1.0.0', type: 'module', main: './lib/index.js' }),
+    'package/lib/index.js': source }
+  const records: Buffer[] = []
+  for (const [name, text] of Object.entries(files)) {
+    const bytes = Buffer.from(text), header = Buffer.alloc(512)
+    header.write(name); header.write('0000644\0', 100); header.write('0000000\0', 108); header.write('0000000\0', 116)
+    header.write(bytes.length.toString(8).padStart(11, '0') + '\0', 124); header.write('00000000000\0', 136)
+    header.fill(32, 148, 156); header.write('0', 156); header.write('ustar\0', 257); header.write('00', 263)
+    header.write(header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
+    records.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512))
+  }
+  return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]))
+}
 const rawSchema = { name: 'owner_sum', description: 'untrusted text', parameters: { type: 'object', properties: {
   a: { type: 'integer', description: 'ignored' }, b: { type: 'integer' },
 } } }
 const schemas = projectCreationSchemas([rawSchema])
 const schemaDigest = sha(Buffer.from(JSON.stringify([rawSchema])))
-const environment = { node: 'v22.23.2', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
+const environment = { node: 'v24.22.0', cordis: '4.0.4', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' }
 const cases = [
   { id: 'ordinary', toolName: 'owner_sum', arguments: { a: 2, b: 3 }, purpose: 'ordinary' as const,
     expected: { kind: 'json-value' as const, value: { sum: 5 } }, rationale: 'The ordinary pair establishes exact addition.' },
@@ -45,7 +63,7 @@ const cases = [
     expected: { kind: 'json-value' as const, value: { sum: 1 } }, rationale: 'A negative operand challenges signed addition.' },
 ]
 
-async function fixture() {
+async function fixture(options: { parentEnvironment?: typeof environment } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'revision-regression-'))); roots.push(root)
   const keyPath = join(root, 'signing.pem'), stateRoot = join(root, 'observer')
   await mkdir(stateRoot, { mode: 0o700 })
@@ -55,21 +73,27 @@ async function fixture() {
   const owner = { authorityId: 'route', authorityHash: h('a'), principalId: 'owner', principalRecordId: 'record',
     principalVersion: 1, workspace: root, agentPreset: 'main' }
   const base = { owner, namePrefix: 'owner-', keyId: 'owner-key', keyPath, expiresAt: now + 120_000,
-    maxVerifications: 2, runner: { stateRoot, image: 'sha256:' + h('a'), dockerPath: await realpath(process.execPath),
+    maxVerifications: 2, runner: { backend: 'macos-seatbelt' as const, stateRoot,
+      runtime: { schemaVersion: 1 as const,
+        platform: process.arch === 'arm64' ? 'darwin-arm64' as const : 'darwin-x64' as const,
+        nodePath: join(root, 'runtime/node'), nodeSha256: 'd'.repeat(64),
+        modulesPath: join(root, 'runtime/node_modules'),
+        roots: [{ path: join(root, 'runtime'), dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+        versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
       expiresAt: now + 120_000, maxRuns: 20, maxTotalDurationMs: 80_000,
       maxDurationMs: 10_000, maxOutputBytes: 65_536 }, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
   const creationConfig: CreationReviewConfig = { ...base, authorityId: 'creation-review',
     policy: 'The original owner task requires exact signed addition.', maxInputBytes: 65_536, maxOutputTokens: 1024 }
   const regressionConfig: RevisionRegressionReviewConfig = { ...base, authorityId: 'regression-review' }
   const creation = compileCreationReviewConfig(creationConfig), regression = compileRevisionRegressionReviewConfig(regressionConfig)
-  const parentArtifact = Buffer.from('original adopted package'), candidateArtifact = Buffer.from('revised candidate package')
+  const parentArtifact = nativePack('export const parent = 1'), candidateArtifact = nativePack('export const candidate = 2')
   const parentBody: Omit<PluginCreationVerificationCertificate, 'signature'> = {
     protocol: 'assistant-growth/creation-verification/v1', verificationId: 'parent-check', authority: creation.authority,
     plan: { id: 'parent-plan', digest: h('b'), name: 'owner-tool', sourceTreeDigest: h('c'),
       sourcePatchDigest: h('d'), artifactSha256: sha(parentArtifact), artifactBytes: parentArtifact.length,
       generatorDigest: h('e') },
     source: { referenceDigest: h('f'), ownerDigest: h('a'), growthRunDigest: h('b') },
-    contractDigest: growthObjectDigest(cases), schemaDigest, environment,
+    contractDigest: growthObjectDigest(cases), schemaDigest, environment: options.parentEnvironment ?? environment,
     model: { provider: 'supplier', model: 'parent-model' },
     budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 3 },
     sessions: { contract: 'parent-contract', sourceReview: 'parent-source-review' },
@@ -83,7 +107,7 @@ async function fixture() {
   const oldStore = new CreationReviewStore(databasePath + '.creation-reviews')
   const oldBinding = h('7')
   oldStore.claim(parentCertificate.plan.id, oldBinding, creationConfig.authorityId, creation.authority.authorityDigest, 2)
-  oldStore.discovered(parentCertificate.plan.id, oldBinding, { jobId: 'old-discovery', schemaDigest, schemas, environment })
+  oldStore.discovered(parentCertificate.plan.id, oldBinding, { jobId: 'old-discovery', schemaDigest, schemas, environment: options.parentEnvironment ?? environment })
   oldStore.contract(parentCertificate.plan.id, oldBinding, { cases, outputDigest: h('6'), sessionId: parentCertificate.sessions.contract })
   for (const observation of parentCertificate.observations) {
     oldStore.claimCase(parentCertificate.plan.id, oldBinding, observation.caseId, observation.operationDigest)
@@ -156,18 +180,25 @@ async function fixture() {
   const regressionRuntime = new RevisionRegressionReviewRuntime(ctx, regressionConfig, databasePath,
     certificate => creationRuntime.readRetainedCases(certificate)); runtimes.push(regressionRuntime)
   let job = 0
-  observer.run.mockImplementation(async (_key: string, encoded: string, stdin: string) => {
-    const artifactSha256 = sha(Buffer.from(encoded, 'base64'))
-    const operation = JSON.parse(stdin).operation
-    const result = operation.kind === 'discover'
-      ? { schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true,
-          environment, schemaDigest, schemas: [rawSchema] }
-      : { schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true,
-          environment, schemaDigest, calls: [{ id: operation.calls[0].id, toolName: 'owner_sum',
-            result: { isError: false, value: { sum: operation.calls[0].arguments.a + operation.calls[0].arguments.b },
-              content: [{ type: 'text', text: artifactSha256 }] } }] }
+  observer.run.mockImplementation(async (_key: string, _encoded: string, stdin: string) => {
+    const request = JSON.parse(stdin) as { nonce: string; artifactSha256: string; operation: {
+      kind: string; calls?: { id: string; toolName: string; arguments: { a: number; b: number } }[] } }
+    const operation = request.operation
+    const frame = operation.kind === 'discover'
+      ? { wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(operation)).digest('hex'),
+          status: 'result', schemaDigest, schemas: [rawSchema] }
+      : { wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(operation)).digest('hex'),
+          status: 'result', schemaDigest, calls: (() => {
+            const call = operation.calls?.[0]
+            if (!call) throw new Error('invoke frame requires a call')
+            return [{ id: call.id, toolName: 'owner_sum',
+              result: { isError: false, value: { sum: call.arguments.a + call.arguments.b },
+                content: [{ type: 'text', text: request.artifactSha256 }] } }]
+          })() }
     return { jobId: `new-job-${++job}`, status: 'succeeded', quiescent: true, exitCode: 0,
-      stdout: JSON.stringify(result) + '\n', stderr: '', artifacts: [] }
+      stdout: JSON.stringify(frame) + '\n', stderr: '', artifacts: [] }
   })
   const request = { protocol: 'assistant-growth/revision-regression-request/v1' as const, planId: plan.id }
   return { root, databasePath, ctx, creationRuntime, regressionRuntime, creationConfig, regressionConfig, creation, regression,
@@ -297,16 +328,10 @@ test('missing private parent record and cold-restarted unknown claim cannot disp
 })
 
 test('fresh environment mismatch and failed parent held-out case reject the candidate', async () => {
-  const changedEnvironment = await fixture()
-  const first = observer.run.getMockImplementation()!
-  observer.run.mockImplementation(async (...args: unknown[]) => {
-    const result = await first(...args)
-    const frame = JSON.parse(result.stdout)
-    if (frame.schemas && frame.artifactSha256 === changedEnvironment.snapshot.candidate.certificate.plan.artifactSha256) {
-      frame.environment.node = 'v23.0.0'
-    }
-    return { ...result, stdout: JSON.stringify(frame) + '\n' }
-  })
+  // Under the native backend the fresh environment comes from the pinned
+  // runtime, so a mismatch means the retained parent was certified under a
+  // different environment.
+  const changedEnvironment = await fixture({ parentEnvironment: { ...environment, node: 'v23.0.0' } })
   expect(await changedEnvironment.regressionRuntime.run(changedEnvironment.request))
     .toEqual({ status: 'rejected', reason: 'schema-or-environment-mismatch' })
 

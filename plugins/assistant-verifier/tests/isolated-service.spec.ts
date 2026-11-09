@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
-import { realpathSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantVerifierService } from '../src/service.ts'
-import { createVerifierAuthorities, type DockerIsolatedRunnerAuthorityInput, type NativeIsolatedRunnerAuthorityInput } from '../src/drivers.ts'
+import { createVerifierAuthorities, type NativeIsolatedRunnerAuthorityInput } from '../src/drivers.ts'
 import type { AcceptanceHandle, AcceptanceTask, AcceptedExecution, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '../src/host.ts'
 
 // Records service dispatch only. This seam is not Linux execution evidence.
@@ -60,7 +59,7 @@ function step(ref = 'run-1', owner = 'owner-1', definitionDigest = sha): GoalSte
     task: { kind: 'goal-step', ref, goal: { id: 'goal-1', definitionVersion: 1, definitionDigest, stepId: 'step-1', runId: ref, sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } },
     objective: 'verify isolated behavior' }
 }
-async function harness(withIsolation = true, native = false, acceptedArtifact = false) {
+async function harness(withIsolation = true, acceptedArtifact = false) {
   const root = await mkdtemp(join(tmpdir(), 'verifier-isolated-service-')); roots.push(root)
   const ctx = new Context(); contexts.push(ctx); const producer = new GoalsProducer(); ctx.provide('assistantGoals' as never, producer as never)
   let artifactReads = 0
@@ -74,8 +73,7 @@ async function harness(withIsolation = true, native = false, acceptedArtifact = 
     },
   } as never)
   const runtimeRoot = '/private/service-native-runtime'
-  const backend: Pick<NativeIsolatedRunnerAuthorityInput, 'backend' | 'runtime' | 'cgroupRoots'>
-    | Pick<DockerIsolatedRunnerAuthorityInput, 'image' | 'dockerPath'> = native ? { backend: 'linux-native' as const,
+  const backend: Pick<NativeIsolatedRunnerAuthorityInput, 'backend' | 'runtime' | 'cgroupRoots'> = { backend: 'linux-native' as const,
     runtime: { schemaVersion: 1, backend: 'linux-native', platform: `linux-${process.arch}` as 'linux-x64' | 'linux-arm64', sourceCommit: '1'.repeat(40), lockSha256: sha,
       root: { path: runtimeRoot, dev: 1, ino: 2, sha256: sha }, nodePath: `${runtimeRoot}/bin/node`, nodeSha256: sha,
       pnpmPath: `${runtimeRoot}/pnpm/bin/pnpm.mjs`, nativePnpmRoot: `${runtimeRoot}/pnpm-native`, nativePnpmPath: `${runtimeRoot}/pnpm-native/pnpm`,
@@ -83,7 +81,6 @@ async function harness(withIsolation = true, native = false, acceptedArtifact = 
       versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
     cgroupRoots: { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000', memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000',
       pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' } }
-    : { image: `sha256:${sha}`, dockerPath: realpathSync(process.execPath) }
   const authority = { kind: 'isolated-runner' as const, id: 'isolation-runner', stateRoot: root, ...backend, command: '/bin/sh /workspace/artifact < /workspace/input', expiresAt: Date.now() + 60_000,
     maxRuns: 2, maxTotalDurationMs: 60_000, maxDurationMs: 1_000, maxOutputBytes: 4_096,
     testSets: [{ id: 'private-set', cases: [{ stdin: 'private-input', expectedStdout: 'private-output', expectedExitCode: 0 }] }] }
@@ -152,28 +149,23 @@ describe('v4 isolated service provenance', () => {
 })
 
 describe('compiled isolated authority backend dispatch (recording runner seam)', () => {
-  it.each([false, true])('dispatches native=%s with exact finite terms and reuses the authority runner', async native => {
-    const h = await harness(true, native, true), handle = h.prepare(h.main)
+  it('dispatches the native runner with exact finite terms and reuses the authority runner', async () => {
+    const h = await harness(true, true), handle = h.prepare(h.main)
     h.producer.source = handle
     expect(await h.finish(handle, h.main)).toMatchObject({ receipt: { objectiveStatus: 'achieved' } })
     expect(runnerCalls.created).toHaveLength(1); expect(runnerCalls.runs).toBe(1)
     const config = runnerCalls.created[0]!
     expect(config).toMatchObject({ expiresAt: expect.any(Number), maxRuns: 2, maxTotalDurationMs: 60_000,
-      maxDurationMs: 1_000, maxOutputBytes: 4_096, authorityDigest: expect.any(String) })
-    if (native) {
-      expect(config).toMatchObject({ backend: 'linux-native', runtime: { schemaVersion: 1 }, cgroupRoots: { mode: 'v1' } })
-      expect(config).not.toHaveProperty('image'); expect(config).not.toHaveProperty('dockerPath')
-    } else {
-      expect(config).toMatchObject({ image: `sha256:${sha}`, dockerPath: realpathSync(process.execPath) })
-      expect(config).not.toHaveProperty('backend'); expect(config).not.toHaveProperty('runtime')
-    }
+      maxDurationMs: 1_000, maxOutputBytes: 4_096, authorityDigest: expect.any(String),
+      backend: 'linux-native', runtime: { schemaVersion: 1 }, cgroupRoots: { mode: 'v1' } })
+    expect(config).not.toHaveProperty('image'); expect(config).not.toHaveProperty('dockerPath')
     await h.finish(handle, h.main)
     expect(runnerCalls.created).toHaveLength(1); expect(runnerCalls.runs).toBe(1)
   })
 
   it('native cannot bypass owner/source or producer generation fences to create a runner', async () => {
     for (const change of ['owner', 'generation'] as const) {
-      const h = await harness(true, true, true), handle = h.prepare(h.main)
+      const h = await harness(true, true), handle = h.prepare(h.main)
       if (change === 'owner') h.producer.source = h.prepare(h.foreignOwner)
       else { h.producer.source = handle; h.producer.changeGenerationDuringSource = true }
       expect(await h.finish(handle, h.main)).toMatchObject({ receipt: { objectiveStatus: 'unknown' } })
@@ -183,7 +175,7 @@ describe('compiled isolated authority backend dispatch (recording runner seam)',
 })
 
 it('native dispatch still rejects a producer generation changed during independent case execution', async () => {
-  const h = await harness(true, true, true), handle = h.prepare(h.main)
+  const h = await harness(true, true), handle = h.prepare(h.main)
   h.producer.source = handle
   runnerCalls.onRun = () => { h.producer.changeGenerationDuringSource = true }
   expect(await h.finish(handle, h.main)).toMatchObject({ receipt: { objectiveStatus: 'unknown' } })

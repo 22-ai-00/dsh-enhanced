@@ -4,7 +4,7 @@ import { AssistantIsolationService, Config } from './service.js'
 
 export const name = 'dsh-enhanced-assistant-isolation'
 export { version, AssistantIsolationService, Config }
-export { IsolatedVerifierRunner, type IsolatedVerifierRunnerConfig } from './verifier-runner.js'
+export { IsolatedVerifierRunner, type LinuxVerifierRunnerConfig as IsolatedVerifierRunnerConfig } from './verifier-runner.js'
 export { runNativeMacProcess, type NativeMacProcessInput, type NativeMacProcessResult, type NativeMacReadRoot } from './native-macos.js'
 export { validateNativeMacRuntime, verifyNativeMacRuntime, hashNativeMacRuntimeTree, nativeMacRuntimeDigest, type NativeMacRuntime } from './native-runtime.js'
 export { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from './native-verifier-runner.js'

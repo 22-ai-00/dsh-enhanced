@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
 import { chmod, lstat, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
@@ -24,7 +24,6 @@ const MAX_ISOLATED_TEST_SETS = 64
 const MAX_ISOLATED_CASES = 256
 const MAX_ISOLATED_TEST_CASES = 1_024
 const MAX_ISOLATED_TEST_BYTES = 65_536
-const IMAGE = /^sha256:[a-f0-9]{64}$/u
 const STABLE_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
 
 export interface RunnerAuthorityInput {
@@ -103,17 +102,12 @@ export interface IsolatedRunnerAuthorityTerms {
   readonly testSets: readonly IsolatedRunnerTestSetInput[]
 }
 
-export interface DockerIsolatedRunnerAuthorityInput extends IsolatedRunnerAuthorityTerms {
-  readonly backend?: 'docker'
-  readonly image: string
-  readonly dockerPath: string
-}
 export interface NativeIsolatedRunnerAuthorityInput extends IsolatedRunnerAuthorityTerms {
   readonly backend: 'linux-native'
   readonly runtime: LinuxRuntime
   readonly cgroupRoots: Extract<LinuxCgroupRoots, { mode: 'v1' }>
 }
-export type IsolatedRunnerAuthorityInput = DockerIsolatedRunnerAuthorityInput | NativeIsolatedRunnerAuthorityInput
+export type IsolatedRunnerAuthorityInput = NativeIsolatedRunnerAuthorityInput
 
 export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput | IsolatedRunnerAuthorityInput | RepositoryReadbackAuthorityInput | RepositoryCommitReadbackAuthorityInput
 export interface VerifierAuthoritiesConfig { readonly authorities: readonly VerifierAuthorityInput[] }
@@ -132,8 +126,7 @@ export interface ReadbackAuthority extends Omit<ReadbackAuthorityInput, 'allowHt
   readonly allowHttpLoopback: boolean
   readonly digest: string
 }
-export type IsolatedRunnerAuthority = (Omit<DockerIsolatedRunnerAuthorityInput, 'backend'> & { readonly backend?: never; readonly digest: string })
-  | (NativeIsolatedRunnerAuthorityInput & { readonly digest: string })
+export type IsolatedRunnerAuthority = NativeIsolatedRunnerAuthorityInput & { readonly digest: string }
 export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority | IsolatedRunnerAuthority | RepositoryOutcomeAuthority
 
 export interface IsolatedVerificationContext {
@@ -239,21 +232,6 @@ function canonicalDirectory(value: unknown, label: string): string {
   const path = string(value, label)
   if (!isAbsolute(path) || normalize(path) !== path || resolve(path) !== path || path === sep) fail(`${label} must be a canonical non-root absolute path`)
   return path
-}
-function canonicalExecutable(value: unknown, label: string): string {
-  const configured = string(value, label)
-  if (!isAbsolute(configured) || normalize(configured) !== configured || resolve(configured) !== configured) fail(`${label} must be a canonical absolute path`)
-  let resolved: string
-  try { resolved = realpathSync(configured) } catch { fail(`${label} is unavailable`) }
-  if (resolved !== configured) fail(`${label} must not traverse a symlink`)
-  try {
-    const stat = statSync(resolved)
-    if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`${label} must be an executable regular file`)
-  } catch (error) {
-    if (error instanceof VerifierAuthorityError) throw error
-    fail(`${label} is unavailable`)
-  }
-  return resolved
 }
 function strictArray(value: unknown, label: string, minimum: number, maximum: number): unknown[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length < minimum || value.length > maximum || Object.getOwnPropertySymbols(value).length > 0) fail(`${label} must be bounded`)
@@ -366,16 +344,15 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
       return freeze({ ...bare, digest: digest(bare) })
     }
     if (kind === 'isolated-runner') {
-      const native = item.backend === 'linux-native'
-      if (item.backend !== undefined && item.backend !== 'docker' && !native) fail('unknown isolated runner backend')
+      if (item.backend !== 'linux-native') fail('isolated runner authority requires the linux-native backend')
       allowedKeys(item, ['kind', 'id', 'stateRoot', 'command', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes', 'testSets',
-        ...(native ? ['backend', 'runtime', 'cgroupRoots'] : ['image', 'dockerPath'])], native ? [] : ['backend'], `isolated runner authority ${id}`)
+        'backend', 'runtime', 'cgroupRoots'], [], `isolated runner authority ${id}`)
       const expiresAt = item.expiresAt
       if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt < 1) fail('isolated runner expiresAt must be an absolute timestamp')
       const maxTotalDurationMs = whole(item.maxTotalDurationMs, 'isolated runner maxTotalDurationMs', 86_400_000)
       const maxDurationMs = whole(item.maxDurationMs, 'isolated runner maxDurationMs', 300_000)
       if (maxDurationMs > maxTotalDurationMs) fail('isolated runner maxDurationMs must not exceed maxTotalDurationMs')
-      if (native) {
+      {
         // Reject accessors/non-JSON data before shared validators read fields.
         const runtimeInput = object(item.runtime, 'native runtime')
         const rootInput = object(runtimeInput.root, 'native runtime root')
@@ -405,13 +382,6 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
           maxOutputBytes: whole(item.maxOutputBytes, 'isolated runner maxOutputBytes', 262_144), testSets: isolatedTestSets(item.testSets) }
         return freeze({ ...bare, digest: digest(bare) })
       }
-      const image = string(item.image, 'isolated runner image')
-      if (!IMAGE.test(image)) fail('isolated runner image must be SHA-256 pinned')
-      const bare = { kind: 'isolated-runner' as const, id, stateRoot: canonicalDirectory(item.stateRoot, 'isolated runner stateRoot'), image,
-        dockerPath: canonicalExecutable(item.dockerPath, 'isolated runner dockerPath'), command: string(item.command, 'isolated runner command'), expiresAt,
-        maxRuns: whole(item.maxRuns, 'isolated runner maxRuns', 10_000), maxTotalDurationMs, maxDurationMs,
-        maxOutputBytes: whole(item.maxOutputBytes, 'isolated runner maxOutputBytes', 262_144), testSets: isolatedTestSets(item.testSets) }
-      return freeze({ ...bare, digest: digest(bare) })
     }
     return fail(`unknown authority kind ${kind}`)
   })

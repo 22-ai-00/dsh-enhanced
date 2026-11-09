@@ -593,10 +593,11 @@ export class AssistantVerifierService extends Service<Config> {
         if (pending === undefined) {
           pending = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => {
             this.#assertActive()
+            if (authority.backend !== 'linux-native') {
+              throw new Error('assistant-verifier: only the linux-native isolation backend is supported')
+            }
             return new IsolatedVerifierRunner({ stateRoot: authority.stateRoot,
-              ...(authority.backend === 'linux-native' ? { backend: 'linux-native' as const,
-                runtime: authority.runtime, cgroupRoots: authority.cgroupRoots }
-                : { image: authority.image, dockerPath: authority.dockerPath }),
+              backend: 'linux-native' as const, runtime: authority.runtime, cgroupRoots: authority.cgroupRoots,
               authorityDigest: authority.digest, command: authority.command,
               expiresAt: authority.expiresAt, maxRuns: authority.maxRuns, maxTotalDurationMs: authority.maxTotalDurationMs,
               maxDurationMs: authority.maxDurationMs, maxOutputBytes: authority.maxOutputBytes })

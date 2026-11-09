@@ -80,20 +80,22 @@ test('rejects hidden fields, symbols and inherited seal authority', () => {
   expect(() => validatePluginBehaviorRunnerConfig({ ...linux(), stateSeal })).toThrow('Linux state seal')
 })
 
-test('keeps Docker and macOS behavior configurations closed to Linux state seals', () => {
+test('keeps macOS behavior configurations closed to Linux state seals', () => {
   const common = { stateRoot: '/approved/runner', authorityDigest: 'a'.repeat(64), expiresAt: Date.now() + 60_000,
     maxRuns: 2, maxTotalDurationMs: 60_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 }
-  const docker = { ...common, dockerPath: '/usr/bin/docker', image: 'sha256:' + 'a'.repeat(64) }
   const native = { ...common, backend: 'macos-seatbelt' as const, runtime: { schemaVersion: 1 as const,
     platform: `darwin-${process.arch}` as 'darwin-x64' | 'darwin-arm64', nodePath: '/approved/mac-runtime/bin/node',
     nodeSha256: 'a'.repeat(64), modulesPath: '/approved/mac-runtime/node_modules',
     roots: [{ path: '/approved/mac-runtime', dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
     versions: { node: 'v22.23.2', typescript: '6', cordis: '4', tools: '1', systemPrompt: '1' } } }
-  for (const original of [docker, native]) {
+  for (const original of [native]) {
     expect(validatePluginBehaviorRunnerConfig(original)).toEqual(original)
     expect(() => validatePluginBehaviorRunnerConfig({ ...original, stateSeal: seal() })).toThrow('runner config')
     const { authorityDigest: _authorityDigest, ...deployment } = original
     expect(validateCreationBehaviorDeploymentConfig(deployment)).toEqual(deployment)
     expect(() => validateCreationBehaviorDeploymentConfig({ ...deployment, stateSeal: seal() })).toThrow('runner config')
   }
+  // The removed Docker backend no longer validates at all.
+  expect(() => validatePluginBehaviorRunnerConfig({ ...common, dockerPath: '/usr/bin/docker',
+    image: 'sha256:' + 'a'.repeat(64) })).toThrow('backend')
 })

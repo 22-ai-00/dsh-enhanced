@@ -35,7 +35,14 @@ test('late binds the private Control Plane and native peers, then drains each ve
   const expiresAt = Date.now() + 60_000
   const creationReviews: CreationReviewConfig = { authorityId: 'grant', owner, namePrefix: 'owner-', keyId: 'key-1', keyPath,
     expiresAt, maxVerifications: 1,
-    runner: { stateRoot, image: 'sha256:' + 'b'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt,
+    runner: { backend: 'macos-seatbelt' as const, stateRoot,
+      runtime: { schemaVersion: 1 as const,
+        platform: process.arch === 'arm64' ? 'darwin-arm64' as const : 'darwin-x64' as const,
+        nodePath: join(root, 'runtime/node'), nodeSha256: 'd'.repeat(64),
+        modulesPath: join(root, 'runtime/node_modules'),
+        roots: [{ path: join(root, 'runtime'), dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+        versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+      expiresAt: expiresAt,
       maxRuns: 3, maxTotalDurationMs: 30_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Review the owner task.', maxInputBytes: 8192, maxOutputTokens: 512, maxDurationMs: 20_000,
     maxCases: 2, receiptTtlMs: 10_000, workItemFailures: true }

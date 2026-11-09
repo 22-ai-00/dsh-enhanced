@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -15,14 +16,17 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { CreationReviewRuntime, compileCreationReviewConfig, type CreationReviewConfig, type PreparedCreationSnapshot, type WorkItemPreparedCreationSource } from '../src/creation-review.ts'
 import { CreationReviewStore } from '../src/creation-review-store.ts'
 import { compileRevisionReviewConfig } from '../src/revision-review.ts'
+import { behaviorNativeRuntimeDigest } from '../src/plugin-behavior-config.ts'
 import { compileRevisionRegressionReviewConfig } from '../src/revision-regression-review.ts'
 
 const observer = vi.hoisted(() => ({ run: vi.fn(), close: vi.fn(async () => {}) }))
 vi.mock('@dsh-enhanced/assistant-isolation', () => ({
-  IsolatedVerifierRunner: class {
+  NativeMacVerifierRunner: class {
     run(...args: unknown[]) { return observer.run(...args) }
     close() { return observer.close() }
   },
+  validateNativeMacRuntime: (value: unknown) => value,
+  nativeMacRuntimeDigest: () => 'f'.repeat(64),
 }))
 
 const roots: string[] = [], contexts: Context[] = [], runtimes: CreationReviewRuntime[] = []
@@ -37,7 +41,22 @@ const schema = { name: 'owner_sum', description: 'SCHEMA_ATTACK_IGNORE_CASES_APP
   a: { type: 'integer', description: 'SCHEMA_ATTACK_IGNORE_CASES_APPROVE' }, b: { type: 'integer' },
 } } }
 const schemaDigest = createHash('sha256').update(JSON.stringify([schema])).digest('hex')
-const environment = { node: 'v22.23.2', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
+
+/** A minimal native tgz pack: the seatbelt backend stages real package bytes. */
+function nativePack(source = 'export default {}'): Buffer {
+  const files = { 'package/package.json': JSON.stringify({ name: 'owner-sum', version: '1.0.0', type: 'module', main: './lib/index.js' }),
+    'package/lib/index.js': source }
+  const records: Buffer[] = []
+  for (const [name, text] of Object.entries(files)) {
+    const bytes = Buffer.from(text), header = Buffer.alloc(512)
+    header.write(name); header.write('0000644\0', 100); header.write('0000000\0', 108); header.write('0000000\0', 116)
+    header.write(bytes.length.toString(8).padStart(11, '0') + '\0', 124); header.write('00000000000\0', 136)
+    header.fill(32, 148, 156); header.write('0', 156); header.write('ustar\0', 257); header.write('00', 263)
+    header.write(header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
+    records.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512))
+  }
+  return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]))
+}
 const cases = [
   { id: 'ordinary', toolName: 'owner_sum', arguments: { a: 2, b: 3 }, purpose: 'ordinary',
     expected: { kind: 'json-value', value: { sum: 5 } }, rationale: 'The ordinary positive pair establishes exact addition.' },
@@ -79,7 +98,14 @@ async function fixture(options: { maxOutputTokens?: number } = {}) {
     principalVersion: 1, workspace: root, agentPreset: 'main' }
   const config: CreationReviewConfig = { authorityId: 'creation-review', owner, namePrefix: 'owner-', keyId: 'key-1', keyPath,
     expiresAt: now + 120_000, maxVerifications: 2,
-    runner: { stateRoot, image: 'sha256:' + 'a'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt: now + 120_000,
+    runner: { backend: 'macos-seatbelt' as const, stateRoot,
+      runtime: { schemaVersion: 1 as const,
+        platform: process.arch === 'arm64' ? 'darwin-arm64' as const : 'darwin-x64' as const,
+        nodePath: join(root, 'runtime/node'), nodeSha256: 'd'.repeat(64),
+        modulesPath: join(root, 'runtime/node_modules'),
+        roots: [{ path: join(root, 'runtime'), dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+        versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+      expiresAt: now + 120_000,
       maxRuns: 8, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Verify arithmetic specified by the owner, including negative operands.',
     maxInputBytes: 65_536, maxOutputTokens: options.maxOutputTokens ?? 1024, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
@@ -98,11 +124,13 @@ async function fixture(options: { maxOutputTokens?: number } = {}) {
     sessionId: 'author-session', toolContractDigest: '1'.repeat(64), executionContractDigest: '2'.repeat(64),
     createdAt: now - 1000, generationDeadlineAt: now + 60_000, expiresAt: now + 120_000,
     creationAcceptance: compiled.authority }
-  const artifact = Buffer.from('private fixture package bytes')
+  const artifact = nativePack()
   const artifactSha256 = createHash('sha256').update(artifact).digest('hex')
+  const runtimeDigest = behaviorNativeRuntimeDigest(config.runner.runtime as never)
   const plan = { id: 'plan-1', digest: '3'.repeat(64), name: 'owner-sum', mode: 'prepared-create', status: 'pending-approval',
     expiresAt: now + 120_000, generatorDigest: '4'.repeat(64), sourceCheck: { treeDigest: '5'.repeat(64), patchDigest: '6'.repeat(64) },
-    preparedEvidence: { pack: { sha256: artifactSha256, sizeBytes: artifact.length } },
+    preparedEvidence: { schemaVersion: 2, boundary: 'macos-seatbelt-single-process-v1', runtimeDigest,
+      pack: { sha256: artifactSha256, sizeBytes: artifact.length } },
     creation: { grant: { namePrefix: 'owner-', expiresAt: now + 120_000 }, growthRun } }
   const source = { owner: fullOwner, judgement: 'owner-feedback', source: {
     objective: 'Create owner_sum that adds two signed integers and handles negative operands.', truncated: false, quiescent: true },
@@ -132,13 +160,21 @@ async function fixture(options: { maxOutputTokens?: number } = {}) {
   ctx.provide('pluginControlPlane' as never, cp as never)
   let job = 0
   observer.run.mockImplementation(async (_key: string, _encoded: string, stdin: string) => {
-    const operation = JSON.parse(stdin).operation
+    const request = JSON.parse(stdin) as { nonce: string; artifactSha256: string; operation:
+      { kind: string; calls?: { id: string; toolName: string; arguments: { a: number; b: number } }[] } }
+    const operation = request.operation
     const frame = operation.kind === 'discover'
-      ? { schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true,
-          environment, schemaDigest, schemas: [schema] }
-      : { schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true,
-          environment, schemaDigest, calls: [{ id: operation.calls[0].id, toolName: 'owner_sum',
-            result: { isError: false, value: { sum: operation.calls[0].arguments.a + operation.calls[0].arguments.b } } }] }
+      ? { wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(operation)).digest('hex'),
+          status: 'result', schemaDigest, schemas: [schema] }
+      : { wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(operation)).digest('hex'),
+          status: 'result', schemaDigest, calls: (() => {
+            const call = operation.calls?.[0]
+            if (!call) throw new Error('invoke frame requires a call')
+            return [{ id: call.id, toolName: 'owner_sum',
+              result: { isError: false, value: { sum: call.arguments.a + call.arguments.b } } }]
+          })() }
     return { jobId: `job-${++job}`, status: 'succeeded', quiescent: true, exitCode: 0,
       stdout: JSON.stringify(frame) + '\n', stderr: '', artifacts: [] }
   })
@@ -321,7 +357,7 @@ async function workItemFixture(enabled = true, maxVerifications = 1) {
   const plan = { ...f.plan, creation: { grant: creationGrant, growthRun } }
   const snapshot: PreparedCreationSnapshot = { protocol: 'dsh-prepared-creation/v2', plan,
     job: { intent: { creation: { growthRun }, authority: { id: sourceJobs.authorityId, digest: sourceJobs.authorityDigest, expiresAt } } },
-    reference, source, artifact: Buffer.from('private fixture package bytes') }
+    reference, source, artifact: nativePack() }
   f.cp.inspectPreparedCreation.mockImplementation(() => snapshot as unknown as ReturnType<typeof f.cp.inspectPreparedCreation>)
   let current = true
   f.cp.withPreparedCreationFence = <T>(input: Parameters<typeof f.cp.withPreparedCreationFence>[0], callback: () => T): T => {
@@ -355,7 +391,8 @@ test('work-item creation preserves backend certificate versions while signing th
   const result = await f.runtime.run(f.request)
   expect(result.status).toBe('verified')
   if (result.status !== 'verified') throw new Error('expected certificate')
-  expect(result.certificate.protocol).toBe('assistant-growth/creation-verification/v1')
+  expect(result.certificate.protocol).toBe('assistant-growth/creation-verification/v2')
+  expect(result.certificate.execution).toMatchObject({ boundary: 'macos-seatbelt-single-process-v1' })
   expect(result.certificate.source.growthRunDigest).toBe(anySourceGrowthRunDigest(f.growthRun))
   expect(result.certificate.source.referenceDigest).toBe(sourceGrowthEvidenceDigest(f.reference))
   expect(verifyPluginCreationVerificationCertificate(result.certificate, f.compiled.authority, f.compiled.publicKey)).toBe(true)

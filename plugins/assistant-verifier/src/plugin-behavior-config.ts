@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, resolve, sep } from 'node:path'
-import type { IsolatedVerifierRunnerConfig, NativeMacRuntime,
-  NativeMacVerifierRunnerConfig, LinuxVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import type { NativeMacRuntime, NativeMacVerifierRunnerConfig, LinuxVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from './linux-behavior-runtime.js'
 
 export const NATIVE_BEHAVIOR_BOUNDARY = 'macos-seatbelt-single-process-v1'
@@ -9,12 +8,9 @@ export const LINUX_BEHAVIOR_BOUNDARY = 'linux-native-process-seccomp-v1'
 export interface LinuxPluginBehaviorRunnerConfig extends Omit<LinuxVerifierRunnerConfig, 'command' | 'runtime' | 'limits'> {
   runtime: LinuxPluginBehaviorRuntime
 }
-export type PluginBehaviorRunnerConfig = Omit<IsolatedVerifierRunnerConfig, 'command'>
-  | Omit<NativeMacVerifierRunnerConfig, 'source'>
-  | LinuxPluginBehaviorRunnerConfig
+export type PluginBehaviorRunnerConfig = Omit<NativeMacVerifierRunnerConfig, 'source'> | LinuxPluginBehaviorRunnerConfig
 export type CreationBehaviorDeploymentConfig = PluginBehaviorDeploymentConfig | Omit<LinuxPluginBehaviorRunnerConfig, 'authorityDigest'>
-export type PluginBehaviorDeploymentConfig = Omit<IsolatedVerifierRunnerConfig, 'command' | 'authorityDigest'>
-  | Omit<NativeMacVerifierRunnerConfig, 'source' | 'authorityDigest'>
+export type PluginBehaviorDeploymentConfig = Omit<NativeMacVerifierRunnerConfig, 'source' | 'authorityDigest'>
 
 function exactKeys(value: unknown, required: string[], optional: string[] = []): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -109,8 +105,9 @@ export function validatePluginBehaviorRunnerConfig(value: unknown): PluginBehavi
   const common = ['stateRoot', 'authorityDigest', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes']
   const backend = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'backend')?.value : undefined
   const native = backend === 'macos-seatbelt', linux = backend === 'linux-native'
-  const fields = linux ? ['backend', 'runtime', 'cgroupRoots'] : native ? ['backend', 'runtime'] : ['image', 'dockerPath']
-  if (!exactKeys(value, [...common, ...fields], linux ? ['stateSeal'] : native ? [] : ['socketPath'])
+  if (!native && !linux) throw new Error('invalid plugin behavior runner backend')
+  const fields = linux ? ['backend', 'runtime', 'cgroupRoots'] : ['backend', 'runtime']
+  if (!exactKeys(value, [...common, ...fields], linux ? ['stateSeal'] : [])
     || !absolute(value.stateRoot) || typeof value.authorityDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.authorityDigest)
     || !positive(value.expiresAt, 8_640_000_000_000_000) || !positive(value.maxRuns, 10_000)
     || !positive(value.maxTotalDurationMs, 86_400_000) || !positive(value.maxDurationMs, 300_000)
@@ -124,12 +121,7 @@ export function validatePluginBehaviorRunnerConfig(value: unknown): PluginBehavi
     linuxRuntime(value.runtime)
     linuxCgroups(value.cgroupRoots)
     if (Object.hasOwn(value, 'stateSeal')) linuxStateSeal(value.stateSeal, value.stateRoot)
-  } else if (native) nativeRuntime(value.runtime)
-  else if (typeof value.image !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(value.image)
-    || !absolute(value.dockerPath) || Object.hasOwn(value, 'socketPath')
-      && (!absolute(value.socketPath) || /[\p{Cc},]/u.test(value.socketPath) || value.socketPath.includes('://'))) {
-    throw new Error('invalid plugin behavior Docker config')
-  }
+  } else nativeRuntime(value.runtime)
   return structuredClone(value) as PluginBehaviorRunnerConfig
 }
 

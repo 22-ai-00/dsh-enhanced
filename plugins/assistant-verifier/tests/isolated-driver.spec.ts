@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { realpathSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,16 +11,29 @@ const cleanup: string[] = []
 afterEach(async () => { await Promise.all(cleanup.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 async function stateRoot(): Promise<string> { const root = await mkdtemp(join(tmpdir(), 'isolated-verifier-')); cleanup.push(root); return root }
-async function authority(testSetId = 'private-set'): Promise<IsolatedRunnerAuthority> {
-  const root = await stateRoot()
+function nativeInput(stateRootValue: string): IsolatedRunnerAuthority {
+  const root = '/private/native-verifier-runtime'
   const [compiled] = createVerifierAuthorities({ authorities: [{
-    kind: 'isolated-runner', id: 'isolation-runner', stateRoot: root, image: `sha256:${'a'.repeat(64)}`,
-    dockerPath: realpathSync(process.execPath), command: '/bin/sh /workspace/artifact < /workspace/input',
-    expiresAt: Date.now() + 60_000, maxRuns: 10, maxTotalDurationMs: 10_000, maxDurationMs: 1_000,
-    maxOutputBytes: 1_024, testSets: [{ id: testSetId, cases: [{ stdin: 'private-stdin', expectedStdout: 'private-output', expectedExitCode: 0 }] }],
+    kind: 'isolated-runner', id: 'isolation-runner', backend: 'linux-native' as const, stateRoot: stateRootValue,
+    runtime: { schemaVersion: 1 as const, backend: 'linux-native' as const,
+      platform: `linux-${process.arch}` as 'linux-arm64' | 'linux-x64', sourceCommit: '1'.repeat(40), lockSha256: '2'.repeat(64),
+      root: { path: root, dev: 1, ino: 2, sha256: '3'.repeat(64) }, nodePath: `${root}/bin/node`, nodeSha256: '4'.repeat(64),
+      pnpmPath: `${root}/pnpm/bin/pnpm.mjs`, nativePnpmRoot: `${root}/pnpm-native`, nativePnpmPath: `${root}/pnpm-native/pnpm`,
+      modulesPath: `${root}/node_modules`, storePath: `${root}/store`, cachePath: `${root}/cache`,
+      versions: { node: 'v22.23.2' as const, pnpm: '11.7.0' as const, typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+    cgroupRoots: { mode: 'v1' as const, cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000',
+      memory: '/sys/fs/cgroup/memory/dsh-native/uid-1000', pids: '/sys/fs/cgroup/pids/dsh-native/uid-1000', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-1000' },
+    command: '/bin/sh /workspace/artifact < /workspace/input', expiresAt: Date.now() + 60_000,
+    maxRuns: 10, maxTotalDurationMs: 10_000, maxDurationMs: 1_000, maxOutputBytes: 1_024,
+    testSets: [{ id: 'private-set', cases: [{ stdin: 'private-stdin', expectedStdout: 'private-output', expectedExitCode: 0 }] }],
   }] })
-  if (compiled?.kind !== 'isolated-runner') throw new Error('missing isolated authority')
+  if (compiled?.kind !== 'isolated-runner' || compiled.backend !== 'linux-native') throw new Error('missing native isolated authority')
   return compiled
+}
+async function authority(testSetId = 'private-set'): Promise<IsolatedRunnerAuthority> {
+  const compiled = nativeInput(await stateRoot())
+  return testSetId === 'private-set' ? compiled
+    : { ...compiled, testSets: [{ ...compiled.testSets[0]!, id: testSetId }] }
 }
 function contract(authority: IsolatedRunnerAuthority, testSetId = 'private-set'): TaskAcceptanceContract {
   const issuedAt = Date.now()
@@ -74,11 +86,14 @@ describe('isolated acceptance driver', () => {
 
   it('rejects unsafe isolated authority configuration before a runner callback exists', async () => {
     const root = await stateRoot()
-    expect(() => createVerifierAuthorities({ authorities: [{ kind: 'isolated-runner', id: 'bad', stateRoot: root, image: 'latest', dockerPath: realpathSync(process.execPath), command: 'any', expiresAt: 1, maxRuns: 1, maxTotalDurationMs: 1_000, maxDurationMs: 2_000, maxOutputBytes: 1, testSets: [] }] })).toThrow(/pinned|duration|testSets/i)
+    const base = { kind: 'isolated-runner' as const, id: 'bad', stateRoot: root,
+      backend: 'linux-native' as const, runtime: { schemaVersion: 1 as const } as never, cgroupRoots: { mode: 'v1' as const } as never,
+      command: 'any', expiresAt: 1, maxRuns: 1, maxTotalDurationMs: 1_000, maxDurationMs: 2_000, maxOutputBytes: 1, testSets: [] }
+    expect(() => createVerifierAuthorities({ authorities: [base] })).toThrow(/duration|testSets|runtime|cgroup/i)
   })
 })
 
-function nativeInput() {
+function nativeInputFixture() {
   const root = '/private/native-verifier-runtime'
   return { kind: 'isolated-runner' as const, id: 'native-runner', backend: 'linux-native' as const,
     stateRoot: '/private/native-verifier-state',
@@ -94,26 +109,14 @@ function nativeInput() {
     maxRuns: 2, maxTotalDurationMs: 60_000, maxDurationMs: 1_000, maxOutputBytes: 4_096,
     testSets: [{ id: 'private-set', cases: [{ stdin: 'private-input', expectedStdout: 'private-output', expectedExitCode: 0 }] }] }
 }
-function compileNative(input: unknown = nativeInput()) {
+function compileNative(input: unknown = nativeInputFixture()) {
   const [compiled] = createVerifierAuthorities({ authorities: [input] })
   if (compiled?.kind !== 'isolated-runner' || compiled.backend !== 'linux-native') throw new Error('missing native authority')
   return compiled
 }
 
-it('preserves the pre-native Docker normalized bytes/digest with omitted or explicit docker backend', () => {
-  const input = { kind: 'isolated-runner', id: 'legacy-fixed', stateRoot: '/private/verifier-state',
-    image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/true', command: '/bin/sh /workspace/artifact < /workspace/input',
-    expiresAt: 2_000_000, maxRuns: 2, maxTotalDurationMs: 60_000, maxDurationMs: 1_000, maxOutputBytes: 4_096,
-    testSets: [{ id: 'private-set', cases: [{ stdin: 'private-input', expectedStdout: 'private-output', expectedExitCode: 0 }] }] }
-  const [legacy] = createVerifierAuthorities({ authorities: [input] })
-  expect(legacy?.digest).toBe('acf5cfc56128d69d73a7cf718381a2a66fd0d7c814db3ac43a396422dcbe6735')
-  expect(JSON.stringify(legacy)).toBe(JSON.stringify({ ...input, digest: 'acf5cfc56128d69d73a7cf718381a2a66fd0d7c814db3ac43a396422dcbe6735' }))
-  const [explicit] = createVerifierAuthorities({ authorities: [{ ...input, backend: 'docker' }] })
-  expect(JSON.stringify(explicit)).toBe(JSON.stringify(legacy))
-})
-
 it('compiles native authority synchronously without runtime files and deep freezes detached identity and held-out cases', () => {
-  const input = nativeInput(), compiled = compileNative(input), before = JSON.stringify(compiled)
+  const input = nativeInputFixture(), compiled = compileNative(input), before = JSON.stringify(compiled)
   for (const object of [compiled, compiled.runtime, compiled.runtime.root, compiled.runtime.versions, compiled.cgroupRoots, compiled.testSets, compiled.testSets[0]!.cases[0]]) expect(Object.isFrozen(object)).toBe(true)
   input.runtime.root.sha256 = '5'.repeat(64); input.cgroupRoots.cpu = '/sys/fs/cgroup/cpu2/dsh-native/uid-1000'
   input.testSets[0]!.cases[0]!.expectedStdout = 'changed'
@@ -125,20 +128,19 @@ it('compiles native authority synchronously without runtime files and deep freez
 it('binds every native runtime identity, cgroup root and finite limit in authority digest', () => {
   const original = compileNative()
   for (const change of [
-    (x: ReturnType<typeof nativeInput>) => { x.runtime.sourceCommit = '5'.repeat(40) },
-    (x: ReturnType<typeof nativeInput>) => { x.runtime.nodeSha256 = '6'.repeat(64) },
-    (x: ReturnType<typeof nativeInput>) => { x.runtime.root.ino++ },
-    (x: ReturnType<typeof nativeInput>) => { x.cgroupRoots.freezer = '/sys/fs/cgroup/freezer2/dsh-native/uid-1000' },
-    (x: ReturnType<typeof nativeInput>) => { x.expiresAt++ },
-    (x: ReturnType<typeof nativeInput>) => { x.maxRuns++ },
-  ]) { const input = nativeInput(); change(input); expect(compileNative(input).digest).not.toBe(original.digest) }
+    (x: ReturnType<typeof nativeInputFixture>) => { x.runtime.sourceCommit = '5'.repeat(40) },
+    (x: ReturnType<typeof nativeInputFixture>) => { x.runtime.nodeSha256 = '6'.repeat(64) },
+    (x: ReturnType<typeof nativeInputFixture>) => { x.runtime.root.ino++ },
+    (x: ReturnType<typeof nativeInputFixture>) => { x.cgroupRoots.freezer = '/sys/fs/cgroup/freezer2/dsh-native/uid-1000' },
+    (x: ReturnType<typeof nativeInputFixture>) => { x.expiresAt++ },
+    (x: ReturnType<typeof nativeInputFixture>) => { x.maxRuns++ },
+  ]) { const input = nativeInputFixture(); change(input); expect(compileNative(input).digest).not.toBe(original.digest) }
 })
 
-it('rejects mixed/unknown backends, cgroup v2, malformed paths/overlap and accessor-shaped runtime', () => {
-  const base = nativeInput()
+it('rejects unknown backends, cgroup v2, malformed paths/overlap and accessor-shaped runtime', () => {
+  const base = nativeInputFixture()
   for (const input of [
-    { ...base, backend: 'future' }, { ...base, image: `sha256:${'a'.repeat(64)}` },
-    { ...base, dockerPath: '/usr/bin/true' }, { ...base, backend: 'docker' },
+    { ...base, backend: 'future' },
     { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' } },
     { ...base, stateRoot: base.runtime.root.path }, { ...base, stateRoot: `${base.runtime.root.path}/state` },
     { ...base, stateRoot: '/private' }, { ...base, stateRoot: base.cgroupRoots.cpu },
@@ -154,7 +156,7 @@ it('rejects mixed/unknown backends, cgroup v2, malformed paths/overlap and acces
 })
 
 it('native compilation keeps the existing private criterion comparison and post-run artifact reread', async () => {
-  const compiled = compileNative({ ...nativeInput(), expiresAt: Date.now() + 60_000 }), accepted = contract(compiled)
+  const compiled = compileNative({ ...nativeInputFixture(), expiresAt: Date.now() + 60_000 }), accepted = contract(compiled)
   expect(await verifyAcceptanceCriteria(accepted, [compiled], new AbortController().signal, context())).toMatchObject([{ status: 'passed' }])
   const wrong = context(); wrong.run = async () => ({ jobId: 'native-case', status: 'succeeded', quiescent: true, exitCode: 1, stdout: 'private-output', stderr: '' })
   expect(await verifyAcceptanceCriteria(accepted, [compiled], new AbortController().signal, wrong)).toMatchObject([{ status: 'failed' }])

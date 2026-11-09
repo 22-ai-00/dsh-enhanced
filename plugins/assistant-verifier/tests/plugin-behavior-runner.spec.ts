@@ -8,11 +8,6 @@ const seam = vi.hoisted(() => ({
   configs: [] as unknown[],
 }))
 vi.mock('@dsh-enhanced/assistant-isolation', () => ({
-  IsolatedVerifierRunner: class {
-    constructor(config: unknown) { seam.configs.push(config) }
-    run(...args: unknown[]) { return seam.run(...args) }
-    close() { return seam.close() }
-  },
   NativeMacVerifierRunner: class {
     constructor(config: unknown) { seam.configs.push(config) }
     run(...args: unknown[]) { return seam.run(...args) }
@@ -25,26 +20,25 @@ vi.mock('@dsh-enhanced/assistant-isolation', () => ({
 import { PluginBehaviorRunner, NATIVE_BEHAVIOR_BOUNDARY } from '../src/plugin-behavior-runner.ts'
 import { behaviorNativeRuntimeDigest } from '../src/plugin-behavior-config.ts'
 
+const nativePlatform: 'darwin-arm64' | 'darwin-x64' = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64'
 const authority = {
-  stateRoot: '/private/state', image: 'sha256:' + 'a'.repeat(64), dockerPath: '/usr/bin/docker',
+  backend: 'macos-seatbelt' as const,
+  stateRoot: '/private/state',
   authorityDigest: 'b'.repeat(64), expiresAt: Date.now() + 60_000, maxRuns: 2,
   maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
+  runtime: { schemaVersion: 1 as const, platform: nativePlatform,
+    nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
+    modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+    versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } },
 }
-const nativePlatform: 'darwin-arm64' | 'darwin-x64' = process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64'
-const artifact = Buffer.from('fixture tgz bytes')
+// The native backend stages a real tgz pack; every case here uses one so the
+// runner reaches the frame-parsing logic under test.
+const artifact = nativePack()
 const artifactSha256 = createHash('sha256').update(artifact).digest('hex')
 const schema = { name: 'probe_echo', description: 'Echo', parameters: { type: 'object', properties: {} } }
 const schemaDigest = createHash('sha256').update(JSON.stringify([schema])).digest('hex')
 const signal = new AbortController().signal
-const result = (value: unknown, status = 'succeeded', quiescent = true) => ({
-  jobId: 'job-1', status, quiescent, exitCode: 0,
-  stdout: JSON.stringify(value) + '\n', stderr: '', artifacts: [],
-})
-const observed = (extra: Record<string, unknown> = {}) => ({
-  schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true, schemaDigest,
-  environment: { node: 'v22.23.2', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' },
-  schemas: [schema], ...extra,
-})
+
 beforeEach(() => { seam.run.mockReset(); seam.close.mockClear(); seam.configs.length = 0 })
 
 function nativePack(): Buffer {
@@ -62,20 +56,30 @@ function nativePack(): Buffer {
   return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]))
 }
 
+/** Parses the runner's request from the supervisor stdin and answers with a matching native wire frame. */
+function nativeResponse(
+  stdin: string,
+  body: Record<string, unknown>,
+  extra: { status?: string; quiescent?: boolean; stdoutPrefix?: string } = {},
+) {
+  const request = JSON.parse(stdin) as { nonce: string; artifactSha256: string; operation: unknown }
+  const frame = { wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
+    operationDigest: createHash('sha256').update(JSON.stringify(request.operation)).digest('hex'),
+    ...body }
+  return {
+    jobId: 'job-1', status: extra.status ?? 'succeeded', quiescent: extra.quiescent ?? true, exitCode: 0,
+    stdout: (extra.stdoutPrefix ?? '') + JSON.stringify(frame) + '\n', stderr: '', artifacts: [],
+  }
+}
+
 it('native mode stages regular files, binds a fixed worker frame, and derives environment from runtime authority', async () => {
   const nativeArtifact = nativePack(), hash = createHash('sha256').update(nativeArtifact).digest('hex')
-  const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
-    expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
-    runtime: { schemaVersion: 1 as const, platform: nativePlatform, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
-      modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
-        node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
+  const config = { ...authority, stateRoot: '/private/native-state',
+    runtime: { ...authority.runtime, nodePath: '/private/runtime/node' } }
   seam.run.mockImplementation((_key: string, files: unknown, stdin: string) => {
     expect(files).toEqual([{ path: 'package/package.json', content: expect.any(String) },
       { path: 'package/lib/index.js', content: 'export default {}' }])
-    const request = JSON.parse(stdin) as { nonce: string; artifactSha256: string; operation: unknown }
-    return result({ wireVersion: 1, nonce: request.nonce, artifactSha256: request.artifactSha256,
-      operationDigest: createHash('sha256').update(JSON.stringify(request.operation)).digest('hex'),
-      status: 'result', schemaDigest, schemas: [schema] })
+    return nativeResponse(stdin, { status: 'result', schemaDigest, schemas: [schema] })
   })
   const runner = new PluginBehaviorRunner(config)
   const observation = await runner.run({ key: 'native-discover', artifact: nativeArtifact, operation: { kind: 'discover' }, signal })
@@ -88,36 +92,29 @@ it('native mode stages regular files, binds a fixed worker frame, and derives en
 
 it('native mode rejects a forged or polluted frame without converting candidate stdout into Host authority', async () => {
   const nativeArtifact = nativePack()
-  const config = { backend: 'macos-seatbelt' as const, stateRoot: '/private/native-state', authorityDigest: 'b'.repeat(64),
-    expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 20_000, maxDurationMs: 10_000, maxOutputBytes: 65_536,
-    runtime: { schemaVersion: 1 as const, platform: nativePlatform, nodePath: '/private/runtime/node', nodeSha256: 'd'.repeat(64),
-      modulesPath: '/private/runtime/node_modules', roots: [{ path: '/private/runtime', dev: 1, ino: 1, sha256: 'e'.repeat(64) }], versions: {
-        node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } } }
   seam.run.mockImplementation((_key: string, _files: unknown, stdin: string) => {
-    const request = JSON.parse(stdin) as { artifactSha256: string; operation: unknown }
-    return { ...result({ wireVersion: 1, nonce: '0'.repeat(64), artifactSha256: request.artifactSha256,
-      operationDigest: createHash('sha256').update(JSON.stringify(request.operation)).digest('hex'),
-      status: 'result', schemaDigest, schemas: [schema] }), stderr: '' }
+    const frame = nativeResponse(stdin, { status: 'result', schemaDigest, schemas: [schema] })
+    return { ...frame, stdout: JSON.stringify({ ...JSON.parse(frame.stdout),
+      nonce: '0'.repeat(64) }) + '\n' }
   })
-  const runner = new PluginBehaviorRunner(config)
+  const runner = new PluginBehaviorRunner(authority)
   expect((await runner.run({ key: 'native-forged', artifact: nativeArtifact,
     operation: { kind: 'discover' }, signal })).status).toBe('unknown')
   await runner.close()
 })
 
-it('stages only canonical base64 artifact and bounded operation, with fixed command and frozen authority', async () => {
-  seam.run.mockResolvedValue(result(observed()))
+it('stages a canonical artifact with a frozen native authority', async () => {
+  seam.run.mockImplementation((...args: unknown[]) => nativeResponse(args[2] as string,
+    { status: 'result', schemaDigest, schemas: [schema] }))
   const runner = new PluginBehaviorRunner(authority)
   const value = await runner.run({ key: 'candidate:discover', artifact, operation: { kind: 'discover' }, signal })
   expect(value).toMatchObject({ status: 'observed', quiescent: true, artifactSha256, schemaDigest, jobId: 'job-1' })
   expect(seam.configs[0]).toMatchObject({ authorityDigest: authority.authorityDigest,
-    maxRuns: authority.maxRuns,
-    command: 'exec /usr/bin/env LD_PRELOAD=/opt/dsh-plugin-verifier/parent-protect.so /usr/local/bin/node --disable-sigusr1 /opt/dsh-plugin-verifier/worker.mjs' })
-  const [key, encoded, input] = seam.run.mock.calls[0]!
+    maxRuns: authority.maxRuns, source: expect.any(String) })
+  const [key, files, input] = seam.run.mock.calls[0]!
   expect(key).toBe('candidate:discover')
-  expect(encoded).toBe(artifact.toString('base64'))
-  expect(JSON.parse(input)).toEqual({ schemaVersion: 1, sha256: artifactSha256,
-    sizeBytes: artifact.length, operation: { kind: 'discover' } })
+  expect(files as { path: string }[]).toContainEqual({ path: 'package/package.json', content: expect.any(String) })
+  expect(JSON.parse(input as string)).toMatchObject({ schemaVersion: 1, artifactSha256 })
   await runner.close()
   expect(seam.close).toHaveBeenCalledOnce()
 })
@@ -127,25 +124,22 @@ it('retains raw native execution outcomes only when the discovered schema digest
     { id: 'call-1', toolName: 'probe_echo', arguments: { value: ['repeat', 'repeat'] } },
   ] }
   const native = { content: [{ type: 'text', text: 'echo' }], value: { echo: 'ok' } }
-  seam.run.mockResolvedValue(result(observed({ schemas: undefined, calls: [
-    { id: 'call-1', toolName: 'probe_echo', result: native },
-  ] })))
+  seam.run.mockImplementation((...args: unknown[]) => nativeResponse(args[2] as string,
+    { status: 'result', schemaDigest, calls: [{ id: 'call-1', toolName: 'probe_echo', result: native }] }))
   const runner = new PluginBehaviorRunner(authority)
   const value = await runner.run({ key: 'candidate:invoke', artifact, operation, signal })
   expect(value).toMatchObject({ status: 'observed', calls: [{ result: native }] })
   expect(seam.run).toHaveBeenCalledOnce()
-  expect(JSON.parse(seam.run.mock.calls[0]![2]).operation).toEqual(operation)
+  expect(JSON.parse(seam.run.mock.calls[0]![2] as string).operation).toEqual(operation)
   await runner.close()
 })
 
 it('accepts repeated JSON object references without treating them as cycles', async () => {
-  const shared = { value: 1 }
-  seam.run.mockResolvedValue(result(observed({ schemas: undefined, calls: [
-    { id: 'call-1', toolName: 'probe_echo', result: { value: 1 } },
-  ] })))
+  seam.run.mockImplementation((...args: unknown[]) => nativeResponse(args[2] as string,
+    { status: 'result', schemaDigest, calls: [{ id: 'call-1', toolName: 'probe_echo', result: { value: 1 } }] }))
   const runner = new PluginBehaviorRunner(authority)
   const value = await runner.run({ key: 'repeated', artifact, operation: { kind: 'invoke', schemaDigest,
-    calls: [{ id: 'call-1', toolName: 'probe_echo', arguments: { pair: [shared, shared] } }] }, signal })
+    calls: [{ id: 'call-1', toolName: 'probe_echo', arguments: { pair: [{ value: 1 }, { value: 1 }] } }] }, signal })
   expect(value.status).toBe('observed')
   await runner.close()
 })
@@ -177,15 +171,19 @@ it('returns unknown for a package above the isolation input budget without dispa
 })
 
 it.each([
-  ['wrong schema digest', result(observed({ schemaDigest: '0'.repeat(64) }))],
-  ['wrong artifact digest', result(observed({ artifactSha256: '0'.repeat(64) }))],
-  ['legacy same-process worker', result(observed({ schemaVersion: 1, boundary: undefined }))],
-  ['missing process boundary', result(observed({ boundary: undefined }))],
-  ['stdout pollution', { ...result(observed()), stdout: 'candidate log\n' + JSON.stringify(observed()) + '\n' }],
-  ['missing schema', result(observed({ schemas: [] }))],
-  ['unknown process result', result(observed(), 'unknown', false)],
-])('returns unknown for %s without replay', async (_label, isolated) => {
-  seam.run.mockResolvedValue(isolated)
+  ['wrong schema digest', (stdin: string) => nativeResponse(stdin, { status: 'result', schemaDigest: '0'.repeat(64), schemas: [schema] })],
+  ['wrong artifact digest', (stdin: string) => {
+    const frame = nativeResponse(stdin, { status: 'result', schemaDigest, schemas: [schema] })
+    return { ...frame, stdout: JSON.stringify({ ...JSON.parse(frame.stdout), artifactSha256: '0'.repeat(64) }) + '\n' }
+  }],
+  ['stdout pollution', (stdin: string) => {
+    const frame = nativeResponse(stdin, { status: 'result', schemaDigest, schemas: [schema] })
+    return { ...frame, stdout: `candidate log\n${frame.stdout}` }
+  }],
+  ['missing schema', (stdin: string) => nativeResponse(stdin, { status: 'result', schemaDigest, schemas: [] })],
+  ['unknown native result', (stdin: string) => nativeResponse(stdin, { status: 'unknown', reason: 'worker-lost' })],
+])('returns unknown for %s without replay', async (_label, responder) => {
+  seam.run.mockImplementation((...args: unknown[]) => responder(args[2] as string))
   const runner = new PluginBehaviorRunner(authority)
   const value = await runner.run({ key: 'one', artifact, operation: { kind: 'discover' }, signal })
   expect(value.status).toBe('unknown')
@@ -194,7 +192,8 @@ it.each([
 })
 
 it('preserves a bounded worker unknown reason after proven isolation cleanup', async () => {
-  seam.run.mockResolvedValue(result({ schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'unknown', reason: 'plugin-fiber-not-active' }))
+  seam.run.mockImplementation((...args: unknown[]) => nativeResponse(args[2] as string,
+    { status: 'unknown', reason: 'plugin-fiber-not-active' }))
   const runner = new PluginBehaviorRunner(authority)
   expect(await runner.run({ key: 'pending', artifact, operation: { kind: 'discover' }, signal }))
     .toMatchObject({ status: 'unknown', quiescent: true, reason: 'plugin-fiber-not-active' })

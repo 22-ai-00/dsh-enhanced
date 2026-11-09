@@ -81,7 +81,15 @@ async function fixture() {
     principalVersion: 1, workspace: root, agentPreset: 'main' }
   const config: CreationReviewConfig = { authorityId: 'creation-review', owner, namePrefix: 'owner-', keyId: 'key-1', keyPath,
     expiresAt: now + 120_000, maxVerifications: 2,
-    runner: { stateRoot, image: 'sha256:' + 'a'.repeat(64), dockerPath: await realpath(process.execPath), expiresAt: now + 120_000,
+    // Replaced by the Linux native runner below; the initial value only satisfies the config shape.
+    runner: { backend: 'macos-seatbelt' as const, stateRoot,
+      runtime: { schemaVersion: 1 as const,
+        platform: process.arch === 'arm64' ? 'darwin-arm64' as const : 'darwin-x64' as const,
+        nodePath: join(root, 'runtime/node'), nodeSha256: 'd'.repeat(64),
+        modulesPath: join(root, 'runtime/node_modules'),
+        roots: [{ path: join(root, 'runtime'), dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+        versions: { node: 'v24.22.0', typescript: '6.0.3', cordis: '4.0.4', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } },
+      expiresAt: now + 120_000,
       maxRuns: 8, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Verify arithmetic specified by the owner, including negative operands.',
     maxInputBytes: 65_536, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }

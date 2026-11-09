@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
-import { IsolatedVerifierRunner, NativeMacVerifierRunner, type IsolatedVerifierRunnerConfig,
-  type NativeMacVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
+import { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from '@dsh-enhanced/assistant-isolation'
 import { behaviorNativeRuntimeDigest, NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig,
   type PluginBehaviorRunnerConfig } from './plugin-behavior-config.js'
 export { NATIVE_BEHAVIOR_BOUNDARY, LINUX_BEHAVIOR_BOUNDARY, validatePluginBehaviorRunnerConfig, validatePluginBehaviorDeploymentConfig } from './plugin-behavior-config.js'
@@ -19,7 +18,6 @@ const MAX_WORKER_OUTPUT_BYTES = 64 * 1024
 const SHA256 = /^[a-f0-9]{64}$/u
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/u
 const SAFE_TOOL = /^[a-z][a-z0-9_-]{0,95}$/u
-const COMMAND = 'exec /usr/bin/env LD_PRELOAD=/opt/dsh-plugin-verifier/parent-protect.so /usr/local/bin/node --disable-sigusr1 /opt/dsh-plugin-verifier/worker.mjs'
 const BOUNDARY = 'process-seccomp-v1'
 export type PluginBehaviorOperation =
   | { readonly kind: 'discover' }
@@ -131,7 +129,7 @@ function validLinuxFrame(value: PluginBehaviorObservation, operation: PluginBeha
 
 /** Host-only behavior observation. The candidate and worker receive no oracle or promotion authority. */
 export class PluginBehaviorRunner {
-  readonly #runner: IsolatedVerifierRunner | NativeMacVerifierRunner | LinuxBehaviorRunner
+  readonly #runner: NativeMacVerifierRunner | LinuxBehaviorRunner
   readonly #native: boolean
   readonly #linux: boolean
   readonly #runtimeDigest?: string
@@ -155,7 +153,7 @@ export class PluginBehaviorRunner {
         tools: native.runtime.versions.tools, systemPrompt: native.runtime.versions.systemPrompt }
       this.#modulesPath = native.runtime.modulesPath
       this.#runner = new NativeMacVerifierRunner({ ...native, source: NATIVE_BEHAVIOR_SOURCE })
-    } else this.#runner = new IsolatedVerifierRunner({ ...config as Omit<IsolatedVerifierRunnerConfig, 'command'>, command: COMMAND })
+    } else throw new Error('plugin behavior runner requires a native backend')
   }
   async run(input: PluginBehaviorRunnerInput): Promise<PluginBehaviorObservation> {
     const artifactSha256 = Buffer.isBuffer(input.artifact)
@@ -190,7 +188,7 @@ export class PluginBehaviorRunner {
     try {
       isolated = this.#native
         ? await (this.#runner as NativeMacVerifierRunner).run(input.key, staged!.files, stdin, input.signal)
-        : await (this.#runner as IsolatedVerifierRunner).run(input.key, input.artifact.toString('base64'), stdin, input.signal)
+        : await (this.#runner as LinuxBehaviorRunner).run(input.key, input.artifact.toString('base64'), stdin, input.signal)
     }
     catch { return unknown('plugin-runner-unavailable') }
     if (isolated.status !== 'succeeded' || isolated.quiescent !== true || isolated.exitCode !== 0)

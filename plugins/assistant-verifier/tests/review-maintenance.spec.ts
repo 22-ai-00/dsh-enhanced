@@ -22,7 +22,14 @@ function fixture() {
     owner: { authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record',
       principalVersion: 1, workspace: root, agentPreset: 'main' },
     namePrefix: 'owner-', keyId: 'key-1', keyPath, expiresAt: now + 120_000, maxVerifications: 2,
-    runner: { stateRoot, image: 'sha256:' + 'a'.repeat(64), dockerPath: process.execPath, expiresAt: now + 120_000,
+    runner: { backend: 'macos-seatbelt' as const, stateRoot,
+      runtime: { schemaVersion: 1 as const,
+        platform: process.arch === 'arm64' ? 'darwin-arm64' as const : 'darwin-x64' as const,
+        nodePath: join(root, 'runtime/node'), nodeSha256: 'd'.repeat(64),
+        modulesPath: join(root, 'runtime/node_modules'),
+        roots: [{ path: join(root, 'runtime'), dev: 1, ino: 1, sha256: 'e'.repeat(64) }],
+        versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '4.0.4', tools: '0.2.0-rc.2', systemPrompt: '0.2.0-rc.2' } },
+      expiresAt: now + 120_000,
       maxRuns: 16, maxTotalDurationMs: 80_000, maxDurationMs: 10_000, maxOutputBytes: 65_536 },
     policy: 'Verify arithmetic specified by the owner.', maxInputBytes: 65_536, maxOutputTokens: 1024,
     maxDurationMs: 60_000, maxCases: 3, receiptTtlMs: 30_000 }
@@ -49,14 +56,17 @@ test('each lane projects a validated public identity bound to its authority prot
   }
 })
 
-test('a backend-only runner change moves only the authority digest', () => {
+test('a runner change moves only the authority digest', () => {
   const f = fixture()
   const before = reviewPublicIdentity('creation-reviews', f.config)
+  // The pinned runtime is part of the authority digest but not the stable
+  // public identity, exactly like the removed Docker image was.
   const after = reviewPublicIdentity('creation-reviews', { ...f.config,
-    runner: { ...f.config.runner, image: 'sha256:' + 'b'.repeat(64) } as CreationReviewConfig['runner'] })
+    runner: { ...f.config.runner, runtime: { ...f.config.runner.runtime, nodeSha256: '0'.repeat(64) } } } as CreationReviewConfig)
   expect(after.authority.authorityDigest).not.toBe(before.authority.authorityDigest)
   expect(canonicalGrowthJson(stableIdentity(after))).toBe(canonicalGrowthJson(stableIdentity(before)))
-  const bounded = reviewPublicIdentity('creation-reviews', { ...f.config, runner: { ...f.config.runner, maxRuns: 17 } })
+  const bounded = reviewPublicIdentity('creation-reviews', { ...f.config,
+    runner: { ...f.config.runner, maxRuns: 17 } })
   expect(canonicalGrowthJson(stableIdentity(bounded))).not.toBe(canonicalGrowthJson(stableIdentity(before)))
 })
 

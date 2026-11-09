@@ -347,33 +347,6 @@ describe.skipIf(!real)('finite Linux private verifier API with real kernel bound
     }
   }, 25_000)
 
-  test.each(['prepared', 'unknown'] as const)('switching the same state root back to Docker retains Linux %s without passing it to Docker cleanup', async status => {
-    const input = await fixture(), seeded = await seed(input, 'backend-switch')
-    if (status === 'unknown') seeded.ledger.settle(seeded.job.id, seeded.job.version,
-      { jobId: seeded.job.id, status: 'unknown', quiescent: false, stdout: 'original Linux evidence', stderr: '', artifacts: [],
-        reason: 'retained uncertainty' }, seeded.controller)
-    seeded.ledger.releaseController(seeded.controller); seeded.ledger.close()
-    const executableRoot = await root('dsh-rejecting-docker-fixture-')
-    const called = join(executableRoot, 'called'), dockerPath = join(executableRoot, 'docker')
-    // This rejecting fixture checks routing only; it is not a real Docker test.
-    await writeFile(dockerPath, `#!/bin/sh\nprintf called > "${called}"\nexit 17\n`, { mode: 0o500 })
-    const runner = new IsolatedVerifierRunner({ stateRoot: input.stateRoot, authorityDigest: input.authorityDigest,
-      command: input.command, expiresAt: input.expiresAt, maxRuns: input.maxRuns,
-      maxTotalDurationMs: input.maxTotalDurationMs, maxDurationMs: input.maxDurationMs, maxOutputBytes: input.maxOutputBytes,
-      image: `sha256:${'1'.repeat(64)}`, dockerPath, socketPath: '/var/run/docker.sock' })
-    try {
-      await expect(runner.run('backend-switch', seeded.artifact, seeded.stdin, new AbortController().signal)).rejects.toThrow('different request or backend')
-      await expect(stat(called)).rejects.toMatchObject({ code: 'ENOENT' })
-      const db = database(input)
-      try {
-        const row = db.prepare('SELECT backend_kind,status,result_json FROM isolation_jobs').get()
-        expect(row).toMatchObject({ backend_kind: 'linux-native', status: 'unknown' })
-        expect(JSON.parse(row?.result_json as string)).toMatchObject({ quiescent: false,
-          stdout: status === 'unknown' ? 'original Linux evidence' : '' })
-        expect(db.prepare('SELECT COUNT(*) AS n FROM isolation_jobs').get()?.n).toBe(1)
-      } finally { db.close() }
-    } finally { await runner.close() }
-  })
 
   test('refuses runtime and state overlap before creating a ledger', async () => {
     const input = await fixture()
