@@ -65,17 +65,17 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 `isolated-process-behavior` 只用于 `goal-step` / `goal-outcome`，使用 `task-acceptance/v4` 与 `task-verification/v4`。条件包含 `id`、`authority: { id, digest }`、`artifactPath`、`testSetId`；不允许与旧 criterion 混用。v1/v2/v3 的原有格式和摘要保持兼容。
 
-对应 Host authority 保持 `isolated-runner`，按严格后端分支配置：省略 `backend` 或显式 `backend: 'docker'` 时，提供已存在的 `sha256:…` 镜像和绝对 `dockerPath`；Docker 规范化对象不写入 `backend`，原摘要逐字节兼容。显式 `backend: 'linux-native'` 时只提供已准备的 `runtime: LinuxRuntime` 和已委派的 `cgroupRoots`（仅 v1），不能混入镜像或 Docker 字段。两支均保留固定 `stateRoot`、`command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]`。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在隔离环境运行复制产物。
+对应 Host authority 保持 `isolated-runner`，固定要求 `backend: 'linux-native'`：只提供已准备的 `runtime: LinuxRuntime` 和当前 UID 已委派的 `cgroupRoots`（仅 v1），不能混入镜像或 Docker 字段；缺失 `backend` 或提供 `backend: 'docker'` 一律拒绝。固定 `stateRoot`、`command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]` 保持不变。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在原生隔离环境运行复制产物。
 
 原生配置编译从非激活的 `@dsh-enhanced/assistant-isolation/native-resources` 复用纯运行时和 cgroup 路径校验，深冻结副本；此时不创建目录、进程、cgroup 或授权，也不准备运行时。拒绝未知后端、v2 cgroup、路径别名形状及 state/runtime/cgroup 路径重叠。实际目录、文件内容、委派身份与当前隔离能力由既有 `IsolatedVerifierRunner` → `LinuxVerifierRunner` 在执行时再次核验；静态编译成功不证明 Linux 环境就绪。
 
 authority 摘要覆盖整个运行时描述、cgroup 根、全部有限条款与私有测试向量；验收 profile 必须引用编译后的精确摘要。服务保留按摘要缓存和 Cordis disposer，复用现有 runner/账本，不重置额度、期限或未知历史。Goals 的可信 producer、owner/Session/定义、接受的产物、静止状态、执行 fence 与派发后产物重读保持原边界。不能把模型生成的测试向量或原始工具退出码当作独立验收条件。单元里的录制 runner 仅证明分派合同，不代替 Linux 实机证据。
 
-预期结果只保存在 Host authority 中。容器每次只收到 `artifact` 和当前 `input`；模型反馈、契约、回执不包含测试输入或预期输出。反馈会披露有限的通过/失败信息，这不是密码学意义的测试集保密。
+预期结果只保存在 Host authority 中。原生隔离执行每次只收到 `artifact` 和当前 `input`；模型反馈、契约、回执不包含测试输入或预期输出。反馈会披露有限的通过/失败信息，这不是密码学意义的测试集保密。
 
 此能力需要同一 Host 中已启用的 `assistant-isolation` 服务；Verifier 的正式包依赖仅安装其 runner 代码，普通验收不会自动激活 Isolation 服务。Verifier 通过当前 Goals producer 找回真实 step acceptance，再核对 owner、workspace、preset、Session、原生目标、定义与 run。产物只能来自该次 admitted native round 派发前绑定的 Isolation job；新的失败/unknown 产物尝试会遮蔽旧成功，已清理正文或缺少 provenance 时返回 unknown。whole-goal 使用其持久 `triggerRunId`，不能换成上下文 focus 的目标。
 
-独立验收使用另一私有 stateRoot 和 Isolation 持久控制器、资源池与预算，不使用模型 Agent 身份，也不在 Host 上执行产物。每测试用例的幂等键绑定契约、criterion、源 job、内容摘要、authority、testSet 和序号。相同 key 重读已知结果；派发不明的任务保留 unknown 和占用，重启不重放。更改配置不会自动扩额或续期；需要 operator 明确处置私有账本和未确认的运行资源。Docker 文件系统、网络、子进程和凭据边界与 Isolation 一致；Host 插件和同 UID 管理者仍属于可信控制面。
+独立验收使用另一私有 stateRoot 和 Isolation 持久控制器、资源池与预算，不使用模型 Agent 身份，也不在 Host 上执行产物。每测试用例的幂等键绑定契约、criterion、源 job、内容摘要、authority、testSet 和序号。相同 key 重读已知结果；派发不明的任务保留 unknown 和占用，重启不重放。更改配置不会自动扩额或续期；需要 operator 明确处置私有账本和未确认的运行资源。原生 namespace/cgroup/seccomp 的文件系统、网络、子进程和凭据边界与 Isolation 一致；Host 插件和同 UID 管理者仍属于可信控制面。
 
 ## 仓库整体验收
 
@@ -87,25 +87,25 @@ authority 摘要覆盖整个运行时描述、cgroup 根、全部有限条款与
 
 ## 新插件包的隔离行为观察
 
-从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。旧 Docker 构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。Docker 路径必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。Verifier 将 Isolation 代码作为正式运行依赖打包安装，但只在使用这个子入口时构造 runner；包依赖不会挂载 Isolation 的 Cordis 服务。观察器只接受原生构造参数（Linux 为完整 `LinuxPluginBehaviorRuntime`，macOS 为固定 `NativeMacRuntime`），无 `command` 字段，命令由实现固定；Docker 时代的 image/dockerPath 形状只能从历史存储读取，运行时拒绝构造。调用方提供私有 `stateRoot`、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
 
-macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；旧 v1 凭证及 Docker 路径保留。
+macOS 使用显式 `backend: 'macos-seatbelt'`、私有固定 `runtime` 与相同的持久次数、时长和输出预算；部署配置省略 `authorityDigest`，认证 Host 在构造时注入。`validatePluginBehaviorDeploymentConfig` 与 `validatePluginBehaviorRunnerConfig` 是同步严格校验。固定源码在只读 Seatbelt 单进程中加载 Cordis、SystemPrompt、Tools 和候选，只将操作输入传入候选；预期答案、签名私钥和持久账本留在 Host。Host 安全解析 npm tarball 为普通文件，拒绝链接及越界路径；从已核验的 runtime 填入环境与 `macos-seatbelt-single-process-v1` 边界。候选仍与观察代码同进程，其输出和结果均视为不可信，必须由独立私有 held-out 答案裁决；该边界不声称具备 Linux 双进程隔离的等价防篡改性。v2 创建证书签名绑定运行时摘要和固定构建证据摘要，采用及后续调用再次比对运行时；历史 v1 凭证仅可只读、不能据此构造新观察器。
 
-Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用。创建验收及有限采用使用专门的 `validateCreationBehaviorDeploymentConfig`，纯校验另从 `./plugin-behavior-config` 导出；通用 `validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，旧消费方不能据此取得 Linux 创建授权。修订与配对回归已接通同一 Linux 观察器（见下文）；无 Docker 安装默认值尚未接线。
+Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginBehaviorRuntime`、当前用户已委派的 `cgroupRoots` 和相同的有限 authority 字段；调用者不能提供命令、源码、镜像或资源策略。先从 `@dsh-enhanced/assistant-verifier/linux-behavior-runtime` 导入 `prepareLinuxPluginBehaviorRuntime({ runtime: baseLinuxRuntime, root: privateDestination, signal })`，取得独立目录内的固定运行时描述。该目录保存 `behavior.json` 和 `runtime/`，后者只读映射到 `/runtime/0`。原基底、源码身份、安装回执、主人与额度均不被改写。此入口仅供可信 Host 使用。创建验收及有限采用使用专门的 `validateCreationBehaviorDeploymentConfig`，纯校验另从 `./plugin-behavior-config` 导出；通用 `validatePluginBehaviorDeploymentConfig` 仍拒绝 Linux，旧消费方不能据此取得 Linux 创建授权。修订与配对回归已接通同一 Linux 观察器（见下文）；全新安装默认使用原生链路。
 
-原生准备在私有目录中限量复制基底，使用固定 `/usr/bin/cc` 及其已核验的 root-owned 工具链编译已发布 C 资产，不下载依赖、不运行候选或安装脚本。C 字节及父/候选 JavaScript 与 Docker 观察器同源，仅变更固定运行时路径；编译器、依赖、源码和产物摘要绑定到新回执，重用时漂移即拒绝。准备会读基底/系统编译器与头文件、写新私有目录并启动受限编译子进程；运行只接收包和输入，不接触 Host 凭据、浏览器、Docker socket 或验收答案。独占锁协调本 API；崩溃留下的锁拒绝继续，不自动夺锁。该权限边界不隔离同 UID 的恶意 Host 插件。
+原生准备在私有目录中限量复制基底，使用固定 `/usr/bin/cc` 及其已核验的 root-owned 工具链编译已发布 C 资产，不下载依赖、不运行候选或安装脚本。C 字节及父/候选 JavaScript 与原生观察器同源，仅变更固定运行时路径；编译器、依赖、源码和产物摘要绑定到新回执，重用时漂移即拒绝。准备会读基底/系统编译器与头文件、写新私有目录并启动受限编译子进程；运行只接收包和输入，不接触 Host 凭据、浏览器、Host 文件系统或验收答案。独占锁协调本 API；崩溃留下的锁拒绝继续，不自动夺锁。该权限边界不隔离同 UID 的恶意 Host 插件。
 
 原生执行保留父/候选分进程、固定 seccomp、Node 权限及父进程保护，外层使用 Linux `ordinary` 隔离策略。Host 逐次核验固定资产和环境，等待私有收据与真实资源结束后才返回 `linux-native-process-seccomp-v1` 观察及运行时摘要。取消和 `close()` 也覆盖执行前的工具链校验；未知历史不重派，准备校验失败不冒称历史资源已经静止。该观察仍需独立验收，不能当作签名证书或发布授权。
 
 `run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
 
-新版镜像的父观察器不导入候选；候选在另一个受限进程中用固定 Cordis、SystemPrompt 和原生 Tools 加载，不提供模拟 Agent、owner 或缺失注入。父进程核对包字节、调用身份和结果大小，自行计算 schema 摘要与环境版本，等候子进程真实退出；候选 stdout/stderr 不作为父观察协议。worker 协议 v2 拒绝旧同进程镜像的 v1 结果，需要重新构建专用镜像。候选没有工具、注入不满足、包非法、超时、结果帧非法或无法确认资源结束时返回 `unknown`。
+新版原生观察器的父进程不导入候选；候选在另一个受限进程中用固定 Cordis、SystemPrompt 和原生 Tools 加载，不提供模拟 Agent、owner 或缺失注入。父进程核对包字节、调用身份和结果大小，自行计算 schema 摘要与环境版本，等候子进程真实退出；候选 stdout/stderr 不作为父观察协议。worker 协议 v2 拒绝旧同进程形态的 v1 结果，需要重新准备原生观察器。候选没有工具、注入不满足、包非法、超时、结果帧非法或无法确认资源结束时返回 `unknown`。
 
-该镜像目前要求 Linux x64。固定原生启动器在加载候选前设置 `no_new_privs` 与 seccomp，限制文件写入、非线程进程创建、网络和跨进程操作；父进程禁用信号启动调试器并设置 [non-dumpable](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)，避免同 UID 子进程重开其受保护的 `/proc` 内存或描述符。设置失败即拒绝运行；容器仍沿用 Isolation 的无网络、只读根文件系统、无 capability 和资源限额，不新增 Host 权限。Node 的路径权限只是额外限制，[官方权限模型](https://nodejs.org/download/release/latest-v22.x/docs/api/permissions.html)并不保证抵抗恶意代码；[seccomp](https://docs.kernel.org/userspace-api/seccomp_filter.html) 不检查路径内容，不能单独当完整沙箱。
+该观察器目前要求 Linux x64。固定原生启动器在加载候选前设置 `no_new_privs` 与 seccomp，限制文件写入、非线程进程创建、网络和跨进程操作；父进程禁用信号启动调试器并设置 [non-dumpable](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)，避免同 UID 子进程重开其受保护的 `/proc` 内存或描述符。设置失败即拒绝运行；原生沙箱沿用 Isolation 的无网络、只读根文件系统、无 capability 和 cgroup 资源限额，不新增 Host 权限。Node 的路径权限只是额外限制，[官方权限模型](https://nodejs.org/download/release/latest-v22.x/docs/api/permissions.html)并不保证抵抗恶意代码；[seccomp](https://docs.kernel.org/userspace-api/seccomp_filter.html) 不检查路径内容，不能单独当完整沙箱。
 
-容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。schema 和工具结果仍是候选的黑箱输出；`observed` 与 `quiescent` 只说明本次输出、子进程退出与外层容器回收，不能证明候选按原语义执行了工具或 Cordis disposer，也不能单独证明目标达成或发布安全。可选创建验收见下文；真实加载后的外部观察与自动采用仍需接通。
+候选进程只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。schema 和工具结果仍是候选的黑箱输出；`observed` 与 `quiescent` 只说明本次输出、子进程退出与外层资源回收，不能证明候选按原语义执行了工具或 Cordis disposer，也不能单独证明目标达成或发布安全。可选创建验收见下文；真实加载后的外部观察与自动采用仍需接通。
 
-新增权限为通过固定 Docker executable 写入私有隔离账本、暂存包和输入，在无网络、只读根文件系统且有资源上限的容器内执行候选。运行时不执行安装脚本、不挂载 Host 仓库或凭据。专用镜像准备会联网下载公开系统依赖，随后按完整锁文件离线安装且禁用依赖脚本；详见镜像指南。
+新增权限为在固定 linux-native 命名空间/cgroup/seccomp 边界写入私有隔离账本、暂存包和输入，在无网络、只读根文件系统且有资源上限的原生沙箱内执行候选。运行时不执行安装脚本、不挂载 Host 仓库或凭据。固定运行时由原生资源准备入口离线产出并冻结其工具链摘要；详见[原生运行时指南](../../docs/dockerless-runtime.md)。
 
 ## 普通任务产生的新插件验收
 
@@ -119,12 +119,12 @@ Linux 原生私有 API 使用 `backend: 'linux-native'`、`runtime: LinuxPluginB
 | `owner` | `authorityId`, `authorityHash`, `principalId`, `principalRecordId`, `principalVersion`, `workspace`, `agentPreset`。workspace 为已存在的 canonical 绝对路径。 |
 | `keyPath` | owner 私有、单链接、非符号链接的 Ed25519 PKCS8 文件；不会交给模型或容器。 |
 | `maxVerifications` | 1–1000；失败与未知派发也消费持久额度，不随重启返还。 |
-| `runner` | Docker 使用 `stateRoot`, `image`, `dockerPath` 及有限期限、次数、时长和输出预算；macOS/Linux 使用上文的显式原生配置。最坏每次消耗 `1 + maxCases` 个独立观察调用。 |
+| `runner` | 固定使用显式原生配置：Linux 为 `backend: linux-native` + `LinuxPluginBehaviorRuntime` + cgroup roots，macOS 为 `backend: macos-seatbelt` + `NativeMacRuntime`，均含 `stateRoot` 及有限期限、次数、时长和输出预算；Docker 形状只可从历史只读。最坏每次消耗 `1 + maxCases` 个独立观察调用。 |
 | `policy` | owner 固定的验收政策，最多 8192 字节。 |
 | `maxInputBytes`, `maxOutputTokens` | 输入 4096–262144 字节，每个模型回合 1–32768 输出 token。 |
 | `maxDurationMs`, `maxCases`, `receiptTtlMs` | 整次验收 1 秒至 30 分钟；2–8 个不同输入；回执 1 秒至 24 小时，受所有原授权窗口收窄。 |
 
-部署前用导出的 `compileCreationReviewConfig(config)` 取得 `{ authority, publicKey }`，只将这两个公开字段写入 Control Plane 的 `creationVerifications`。验收政策、固定规则、密钥指纹、镜像及预算纳入 authority digest。Growth 在首次作者模型请求前持久冻结这个引用；历史无引用的候选不会取得新签名资格。
+部署前用导出的 `compileCreationReviewConfig(config)` 取得 `{ authority, publicKey }`，只将这两个公开字段写入 Control Plane 的 `creationVerifications`。验收政策、固定规则、密钥指纹、原生运行时描述及预算纳入 authority digest。Growth 在首次作者模型请求前持久冻结这个引用；历史无引用的候选不会取得新签名资格。
 
 封存精确 tgz 后，第一轮全新、无工具的原生 Agent 从当前认证任务/纠正正文与候选参数结构生成私有用例；不读取候选代码、测试或调用结果。schema 的说明文字不进入此轮。Host 在调用前持久保存用例，分别在独立子进程执行并精确比较文本或 JSON 值。第二轮全新 Agent 检查实际已核对的源码补丁、任务语义与固定用例；两轮均使用来源 Growth run 的准确模型，不增加默认供应商或隐式恢复切换。
 
