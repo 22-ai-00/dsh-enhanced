@@ -1,8 +1,12 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DreamStore, ownData } from '../src/store.ts'
+import { TICKET_MODULUS } from '../src/trigger.ts'
+
+const TICKET_MAX = TICKET_MODULUS
 
 const roots: string[] = []
 afterEach(async () => {
@@ -87,5 +91,62 @@ describe('ownData guard', () => {
     expect(() => ownData(withGetter)).toThrow()
     expect(() => ownData('x'.repeat(70_000))).toThrow()
     expect(ownData({ nested: { list: [1, true, 'ok'] } })).toEqual({ nested: { list: [1, true, 'ok'] } })
+  })
+})
+
+describe('lottery tickets and recalls (schema 2)', () => {
+  const DIGEST = (n: number) => n.toString(16).padStart(64, '0')
+
+  test('registers tickets idempotently, lists them and rejects invalid rows', async () => {
+    const { store } = await makeStore()
+    store.upsertTicket({ subjectKind: 'task-projection', subjectKey: 'task-1', value: 123, digest: DIGEST(1), now: 1 })
+    store.upsertTicket({ subjectKind: 'task-projection', subjectKey: 'task-1', value: 999, digest: DIGEST(2), now: 2 })
+    store.upsertTicket({ subjectKind: 'goal', subjectKey: 'goal-1', value: TICKET_MAX - 1, digest: DIGEST(3), now: 3 })
+    expect(store.listTickets()).toEqual([
+      { subjectKind: 'task-projection', subjectKey: 'task-1', value: 123, digest: DIGEST(1) },
+      { subjectKind: 'goal', subjectKey: 'goal-1', value: TICKET_MAX - 1, digest: DIGEST(3) },
+    ])
+    expect(() => store.upsertTicket({ subjectKind: 'alien', subjectKey: 'x', value: 1, digest: DIGEST(1), now: 1 })).toThrow()
+    expect(() => store.upsertTicket({ subjectKind: 'goal', subjectKey: '', value: 1, digest: DIGEST(1), now: 1 })).toThrow()
+    expect(() => store.upsertTicket({ subjectKind: 'goal', subjectKey: 'x', value: TICKET_MAX, digest: DIGEST(1), now: 1 })).toThrow()
+    expect(() => store.upsertTicket({ subjectKind: 'goal', subjectKey: 'x', value: 1, digest: 'zz', now: 1 })).toThrow()
+    store.close()
+  })
+
+  test('records recalls once per slot and reads the latest one', async () => {
+    const { store } = await makeStore()
+    const recall = { occurrence: 7, drawDigest: DIGEST(9), drawValue: 100, subjectKind: 'goal',
+      subjectKey: 'goal-1', ticketValue: 110, distance: 10, at: 1_000 }
+    expect(store.recordRecall(recall)).toBe(true)
+    expect(store.recordRecall(recall)).toBe(false)
+    expect(store.lastRecall()).toEqual({ occurrence: 7, subjectKind: 'goal', subjectKey: 'goal-1', at: 1_000 })
+    expect(store.recordRecall({ ...recall, occurrence: 8, at: 2_000 })).toBe(true)
+    expect(store.lastRecall()!.occurrence).toBe(8)
+    // INSERT OR IGNORE downgrades the CHECK failure to a refusal: the bad row
+    // is never stored and the latest recall stays untouched.
+    expect(store.recordRecall({ ...recall, occurrence: 9, distance: -1 })).toBe(false)
+    expect(store.lastRecall()!.occurrence).toBe(8)
+    store.close()
+  })
+
+  test('migrates a schema 1 ledger to 2 without losing dream data', async () => {
+    const { store, path } = await makeStore()
+    store.beginDream('run-1', 1, '2026-11-08', 1, 'f'.repeat(64))
+    store.recordIdea({
+      id: 'idea-1', runId: 'run-1', createdAt: 10, dayKey: '2026-11-08',
+      summary: 's', detail: 'd', evidenceRefs: [REF],
+    })
+    store.close()
+    // Downgrade the physical file to schema 1 and reopen: the additive
+    // migration must keep the dream ledger intact and add the lottery tables.
+    const legacy = new DatabaseSync(path)
+    legacy.exec('DROP TABLE dream_recalls; DROP TABLE dream_tickets; PRAGMA user_version = 1;')
+    legacy.close()
+    const migrated = new DreamStore(path, 'test-lane')
+    expect(migrated.run('run-1')).toMatchObject({ outcome: 'running', ideaCount: 1 })
+    expect(migrated.idea('idea-1')).toMatchObject({ summary: 's', state: 'recorded' })
+    migrated.upsertTicket({ subjectKind: 'skill', subjectKey: 'sk', value: 5, digest: DIGEST(1), now: 2 })
+    expect(migrated.listTickets()).toHaveLength(1)
+    migrated.close()
   })
 })

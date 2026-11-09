@@ -9,6 +9,18 @@
 （仅私有 idea），默认不通知、不开 Goal/WorkItem、不形成候选、不自动采用；模型输出
 schema 不允许任何评分/置信度/自收益字段，沉默不算正向。
 
+## 召回抽奖（"无事找事"）
+
+在触发门（活跃时段/空闲/日上限/概率抽签）全部通过后，wake 不会直接调用模型，
+而是先跑一段纯代码的 per-subject 抽奖：每个可回顾对象（任务投影、目标、技能，
+后续可扩展到已记录 idea）由 `HMAC(seed, lane+kind+key)` 派生出一个
+`[0, 1_000_000)` 内的稳定**票号**并登记入账；每个 wake 槽位再由
+`HMAC(seed, lane+occurrence)` 滚出一个**开奖号**，票号落在开奖号环形窗口
+（默认 ±5,000，约 1%）内的对象被"召回"。没有任何票命中是正常的无思考槽位，
+该槽位以 `skip:lottery-no-hit` 结束、完全不调用模型；命中时才启动 Agent，并把
+被召回对象作为聚焦提示注入，模型围绕它展开思考。全程确定性、可审计、可重放，
+随机性只来自 owner seed 的 HMAC，代码里没有 `Math.random`。
+
 ## 信任边界与权限
 
 - 注入：`assistantAutomations`、`assistantPolicy`、`assistantDelivery`、
@@ -53,8 +65,10 @@ budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、activeHours 同日窗
 
 `dream_runs`（每次抽签/运行与 drawDigest）、`dream_ideas`（含状态机
 `recorded → owner-acknowledged → validated/rejected` 或 `withdrawn`，同 lane 同日
-同摘要去重）、`dream_idea_events`、`dream_counters`（每日做梦/通知计数）。
-`PRAGMA user_version=1`，schema 变新即拒绝启动。
+同摘要去重）、`dream_idea_events`、`dream_counters`（每日做梦/通知计数）、
+`dream_tickets`（每个 subject 的稳定票号，重复登记不覆盖原票）、`dream_recalls`
+（每次开奖命中的审计行，槽位重放幂等）。
+`PRAGMA user_version=2`（schema 2 仅对 1 做加法迁移），schema 变新即拒绝启动。
 
 ## 不做的事
 
@@ -69,5 +83,6 @@ budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、activeHours 同日窗
 ## 测试
 
 `pnpm --filter @dsh-enhanced/assistant-dreaming test`：config fail-closed、
-确定性抽签/active-hours/idle/日上限门、SQLite 账本/状态机/保留期/ownData 防护。
+确定性抽签/active-hours/idle/日上限门、确定性票号/环形窗口匹配、SQLite
+账本/状态机/保留期/schema 1→2 迁移/ownData 防护、L1 通知路由验证与 fail-closed。
 完整真实模型长跑与真实通知发送留待运行验收。

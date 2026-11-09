@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
  * module adopts, notifies or promotes anything.
  */
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 export type IdeaState = 'recorded' | 'withdrawn' | 'owner-acknowledged' | 'validated' | 'rejected'
 
@@ -155,6 +155,33 @@ export class DreamStore {
           PRIMARY KEY (lane, day_key)
         );
       `)
+      this.db.exec(`PRAGMA user_version = 1`)
+    }
+    // Schema 2: per-subject lottery tickets plus an audit of every recall hit.
+    if (version < 2) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS dream_tickets (
+          subject_kind TEXT NOT NULL CHECK(subject_kind IN ('task-projection','goal','skill','recorded-idea')),
+          subject_key TEXT NOT NULL CHECK(length(subject_key) > 0 AND length(subject_key) <= 500),
+          ticket_value INTEGER NOT NULL CHECK(ticket_value >= 0 AND ticket_value < 1000000),
+          ticket_digest TEXT NOT NULL CHECK(length(ticket_digest) = 64 AND ticket_digest NOT GLOB '*[^a-f0-9]*'),
+          created_at INTEGER NOT NULL CHECK(created_at > 0),
+          PRIMARY KEY (subject_kind, subject_key)
+        ) STRICT, WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS dream_recalls (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          lane TEXT NOT NULL,
+          occurrence INTEGER NOT NULL,
+          draw_digest TEXT NOT NULL CHECK(length(draw_digest) = 64 AND draw_digest NOT GLOB '*[^a-f0-9]*'),
+          draw_value INTEGER NOT NULL CHECK(draw_value >= 0 AND draw_value < 1000000),
+          subject_kind TEXT NOT NULL,
+          subject_key TEXT NOT NULL,
+          ticket_value INTEGER NOT NULL,
+          distance INTEGER NOT NULL CHECK(distance >= 0),
+          at INTEGER NOT NULL CHECK(at > 0),
+          UNIQUE (lane, occurrence, subject_kind, subject_key)
+        ) STRICT;
+      `)
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     }
   }
@@ -227,6 +254,52 @@ export class DreamStore {
     const row = this.db.prepare('SELECT MAX(last_notification_at) AS at FROM dream_counters WHERE lane=?')
       .get(this.lane) as { at: number | null } | undefined
     return row?.at ?? null
+  }
+
+  /**
+   * Register one subject's lottery ticket. The value is derived by the caller
+   * from the plugin seed, so the store never invents randomness; re-registering
+   * the same subject keeps its original ticket.
+   */
+  upsertTicket(ticket: { subjectKind: string; subjectKey: string; value: number; digest: string; now: number }): void {
+    assertMutable(this.closed)
+    if (!['task-projection', 'goal', 'skill', 'recorded-idea'].includes(ticket.subjectKind)
+      || typeof ticket.subjectKey !== 'string' || !ticket.subjectKey || ticket.subjectKey.length > 500
+      || !Number.isSafeInteger(ticket.value) || ticket.value < 0 || ticket.value >= 1_000_000
+      || !/^[a-f0-9]{64}$/u.test(ticket.digest) || !Number.isSafeInteger(ticket.now) || ticket.now < 1) {
+      throw new Error('dream store: invalid lottery ticket')
+    }
+    this.db.prepare(`INSERT INTO dream_tickets (subject_kind, subject_key, ticket_value, ticket_digest, created_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(subject_kind, subject_key) DO NOTHING`)
+      .run(ticket.subjectKind, ticket.subjectKey, ticket.value, ticket.digest, ticket.now)
+  }
+
+  /** All unsolved lottery tickets for this lane, oldest first. */
+  listTickets(): readonly { subjectKind: string; subjectKey: string; value: number; digest: string }[] {
+    return (this.db.prepare(`SELECT subject_kind, subject_key, ticket_value, ticket_digest FROM dream_tickets
+      WHERE subject_kind IN ('task-projection','goal','skill','recorded-idea') ORDER BY created_at, subject_key`)
+      .all() as Array<{ subject_kind: string; subject_key: string; ticket_value: number; ticket_digest: string }>)
+      .map(row => ({ subjectKind: row.subject_kind, subjectKey: row.subject_key, value: row.ticket_value, digest: row.ticket_digest }))
+  }
+
+  /** Record one recall hit; the unique key makes a replayed slot a no-op. */
+  recordRecall(input: { occurrence: number; drawDigest: string; drawValue: number; subjectKind: string;
+    subjectKey: string; ticketValue: number; distance: number; at: number }): boolean {
+    assertMutable(this.closed)
+    const result = this.db.prepare(`INSERT OR IGNORE INTO dream_recalls
+      (lane, occurrence, draw_digest, draw_value, subject_kind, subject_key, ticket_value, distance, at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(this.lane, input.occurrence, input.drawDigest, input.drawValue, input.subjectKind,
+        input.subjectKey, input.ticketValue, input.distance, input.at)
+    return Number(result.changes) === 1
+  }
+
+  lastRecall(): { occurrence: number; subjectKind: string; subjectKey: string; at: number } | undefined {
+    const row = this.db.prepare(`SELECT occurrence, subject_kind, subject_key, at FROM dream_recalls
+      WHERE lane=? ORDER BY seq DESC LIMIT 1`).get(this.lane) as
+      { occurrence: number; subject_kind: string; subject_key: string; at: number } | undefined
+    return row === undefined ? undefined
+      : { occurrence: row.occurrence, subjectKind: row.subject_kind, subjectKey: row.subject_key, at: row.at }
   }
 
   recordIdea(idea: Omit<DreamIdea, 'lane' | 'state'>): DreamIdea {

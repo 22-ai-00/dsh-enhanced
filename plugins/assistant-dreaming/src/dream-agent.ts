@@ -25,6 +25,13 @@ export interface SubmittedIdea {
   evidenceRefs: string[]
 }
 
+export interface DreamRecallFocus {
+  kind: string
+  key: string
+  ticketValue: number
+  distance: number
+}
+
 export interface DreamAgentInput {
   ctx: Context
   wakeId: string
@@ -32,6 +39,11 @@ export interface DreamAgentInput {
   model: DreamAgentModel
   scope: DreamingScopeConfig
   material: DreamMaterial
+  /**
+   * Subjects recalled by the code-driven lottery for this wake. When present,
+   * the wake must focus its thought on them; they remain untrusted task data.
+   */
+  recallHits?: readonly DreamRecallFocus[]
   deadlineAt: number
   signal: AbortSignal
   /** Records the accepted ideas and returns the persisted count. */
@@ -180,8 +192,10 @@ export async function runDreamAgent(input: DreamAgentInput): Promise<DreamAgentR
       },
     })
     const agent = handle.agent
+    const recall = input.recallHits === undefined || input.recallHits.length === 0 ? ''
+      : `\n\nA code-driven recall lottery selected these subjects for this wake. Focus the thought on them first; anything else in the material is context only:\n${JSON.stringify(input.recallHits)}`
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: `${DREAM_PROMPT}\n\n${JSON.stringify(material)}` }],
+      content: [{ type: 'text', text: `${DREAM_PROMPT}${recall}\n\n${JSON.stringify(material)}` }],
       source: { kind: 'assistant-dreaming', form: 'notice', summary: 'Bounded dreaming wake' },
     }))
     await agent.whenIdle()

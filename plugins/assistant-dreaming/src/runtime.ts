@@ -10,10 +10,13 @@ import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, normalizeConfig, type DreamingConfig, type NormalizedDreamingConfig } from './config.js'
 import { DreamStore, type DreamIdea } from './store.js'
-import { decideTrigger, localDayKey } from './trigger.js'
-import { buildDreamMaterial } from './projection.js'
+import { decideTrigger, localDayKey, assignTicket, rollLottery, matchTickets, type LotterySubject } from './trigger.js'
+import { buildDreamMaterial, type DreamMaterial } from './projection.js'
 import { runDreamAgent, type DreamAgentModel } from './dream-agent.js'
 import { enqueueDreamNotification } from './notify.js'
+
+/** Default circular window for a ticket match (roughly 1% of the modulus). */
+const DREAM_TICKET_WINDOW = 5_000
 
 const EXECUTOR = 'assistant-dreaming-v1'
 const OWNER = 'assistant-dreaming'
@@ -91,6 +94,35 @@ export class AssistantDreamingService extends Service {
       this.#store?.close()
       return closing
     }, 'assistant-dreaming.runtime')
+  }
+
+  /**
+   * Register a stable ticket for every recallable subject derived from the
+   * current projected material. Pure registration: no randomness here, the
+   * ticket value comes from the HMAC seed in assignTicket.
+   */
+  #registerTickets(store: DreamStore, material: DreamMaterial, now: number, seedDigest: string): void {
+    for (const item of material.items) {
+      const subject: LotterySubject = { kind: item.kind, key: item.evidenceRef }
+      const ticket = assignTicket({ seedDigest, lane: this.#lane, subject })
+      store.upsertTicket({ subjectKind: subject.kind, subjectKey: subject.key,
+        value: ticket.value, digest: ticket.digest, now })
+    }
+  }
+
+  /**
+   * The "无事找事" lottery: roll one code-generated number and return the
+   * tickets within the circular window. Runs without a model call; an empty
+   * result means no subject is recalled this slot.
+   */
+  #drawRecallHits(store: DreamStore, occurrence: number, seedDigest: string) {
+    const draw = rollLottery({ seedDigest, lane: this.#lane, occurrence })
+    const tickets = store.listTickets().map(row => ({
+      subject: { kind: row.subjectKind as LotterySubject['kind'], key: row.subjectKey },
+      value: row.value, digest: row.digest,
+    }))
+    const hits = matchTickets({ draw, tickets, window: DREAM_TICKET_WINDOW })
+    return { draw, hits }
   }
 
   #ports(ctx: Context): DreamPorts {
@@ -183,11 +215,12 @@ export class AssistantDreamingService extends Service {
     } catch { latestActivityAt = null }
     const occurrence = Number.parseInt(createHash('sha256')
       .update(`${input.definitionHash}\0${input.occurrenceId}`).digest('hex').slice(0, 12), 16)
+    const seedDigest = config.seedDigest ?? createHash('sha256').update(`assistant-dreaming\0${this.#lane}`).digest('hex')
     const decision = decideTrigger({
       now,
       occurrence,
       lane: this.#lane,
-      seedDigest: config.seedDigest ?? createHash('sha256').update(`assistant-dreaming\0${this.#lane}`).digest('hex'),
+      seedDigest,
       probabilityPpm: config.runProbabilityPpm,
       activeHours: config.activeHours,
       latestActivityAt,
@@ -198,6 +231,24 @@ export class AssistantDreamingService extends Service {
     if (!decision.fire) {
       this.#lastSkipReason = decision.reason
       return settled('succeeded', 'none', 'none', `skip:${decision.reason}`)
+    }
+    // Per-subject lottery ("无事找事"): build material and tickets, then roll
+    // one code-generated number. A miss is a normal no-thought slot and skips
+    // the model entirely; a hit focuses the wake on the recalled subject.
+    const seedMaterial = buildDreamMaterial({
+      evaluation: ports.evaluation, delivery: ports.delivery, goals: ports.goals, skills: ports.skills,
+      scope: scopeConfig, maxInputBytes: config.maxInputBytes,
+    })
+    this.#registerTickets(store, seedMaterial, now, seedDigest)
+    const { draw, hits } = this.#drawRecallHits(store, occurrence, seedDigest)
+    if (hits.length === 0) {
+      this.#lastSkipReason = 'lottery-no-hit'
+      return settled('succeeded', 'none', 'none', 'skip:lottery-no-hit')
+    }
+    for (const hit of hits) {
+      store.recordRecall({ occurrence, drawDigest: draw.drawDigest, drawValue: draw.value,
+        subjectKind: hit.subject.kind, subjectKey: hit.subject.key, ticketValue: hit.ticketValue,
+        distance: hit.distance, at: now })
     }
     this.#lastSkipReason = null
     const runId = `dream-${input.occurrenceId}`
@@ -217,10 +268,6 @@ export class AssistantDreamingService extends Service {
       }
       reserved = reservation.reservationId
       store.beginDream(runId, occurrence, decision.dayKey, now, decision.drawDigest)
-      const material = buildDreamMaterial({
-        evaluation: ports.evaluation, delivery: ports.delivery, goals: ports.goals, skills: ports.skills,
-        scope: scopeConfig, maxInputBytes: config.maxInputBytes,
-      })
       submitted = true
       this.#lastRunAt = now
       const result = await runDreamAgent({
@@ -229,7 +276,9 @@ export class AssistantDreamingService extends Service {
         config,
         model,
         scope: scopeConfig,
-        material,
+        material: seedMaterial,
+        recallHits: hits.map(hit => ({ kind: hit.subject.kind, key: hit.subject.key,
+          ticketValue: hit.ticketValue, distance: hit.distance })),
         deadlineAt: Math.min(now + config.maxDurationMs, Date.now() + config.maxDurationMs),
         signal: input.signal,
         onSubmit: ideas => {

@@ -143,4 +143,102 @@ export function slotOccurrence(now: number, baseIntervalMs: number): number {
   return Math.floor(now / baseIntervalMs)
 }
 
+/**
+ * Per-subject lottery tickets ("无事找事"): every recallable thing — a task,
+ * a goal, a skill, or a previously recorded idea — holds one ticket with a
+ * stable ticket value. Each wake slot rolls one bounded random number from the
+ * HMAC seed; a subject whose ticket value lands inside the rolling window is
+ * recalled for focused thought. This is code-driven (the draw and match run
+ * without any model call) — the model is invoked only after a hit.
+ *
+ * Values live in a widened range rather than [0,1) so a configurable window
+ * can be made wider without touching the deterministic draw.
+ */
+
+export const TICKET_MODULUS = 1_000_000
+/** Default rolling window around the draw value in each direction. */
+export const DEFAULT_TICKET_WINDOW = 5_000
+
+export type LotterySubjectKind = 'task-projection' | 'goal' | 'skill' | 'recorded-idea'
+
+export interface LotterySubject {
+  kind: LotterySubjectKind
+  /** Stable subject key (inbox id, goal id, skill name, or idea id). */
+  key: string
+}
+
+export interface Ticket {
+  subject: LotterySubject
+  /** Stable value in [0, TICKET_MODULUS) derived from the ticket seed. */
+  value: number
+  digest: string
+}
+
+/** One subject's stable ticket. The seed is only used as HMAC material. */
+export function assignTicket(input: { seedDigest: string; lane: string; subject: LotterySubject }): Ticket {
+  const digest = createHmac('sha256', input.seedDigest)
+    .update(`assistant-dreaming/ticket/v1\0${input.lane}\0${input.subject.kind}\0${input.subject.key}`)
+    .digest('hex')
+  const value = Number.parseInt(digest.slice(0, 8), 16) % TICKET_MODULUS
+  return { subject: input.subject, value, digest }
+}
+
+export interface LotteryDrawInput {
+  seedDigest: string
+  lane: string
+  occurrence: number
+}
+
+export interface LotteryDraw {
+  drawDigest: string
+  /** Rolled value in [0, TICKET_MODULUS). */
+  value: number
+}
+
+/** The wake's single rolling number, derived deterministically from the seed. */
+export function rollLottery(input: LotteryDrawInput): LotteryDraw {
+  if (!Number.isSafeInteger(input.occurrence) || input.occurrence < 0) {
+    throw new Error('dream trigger: lottery occurrence must be a non-negative safe integer')
+  }
+  const drawDigest = createHmac('sha256', input.seedDigest)
+    .update(`assistant-dreaming/lottery/v1\0${input.lane}\0${input.occurrence}`)
+    .digest('hex')
+  const value = Number.parseInt(drawDigest.slice(0, 8), 16) % TICKET_MODULUS
+  return { drawDigest, value }
+}
+
+export interface LotteryMatchInput {
+  draw: LotteryDraw
+  tickets: readonly Ticket[]
+  /** Half-width of the circular window; default keeps roughly 1% of tickets. */
+  window?: number
+}
+
+export interface LotteryHit {
+  subject: LotterySubject
+  ticketDigest: string
+  ticketValue: number
+  distance: number
+}
+
+/**
+ * Returns the tickets whose value is within `window` of the draw on the
+ * circular modulus. Deterministic and side-effect free; an empty result means
+ * nothing is recalled this slot, which is the normal "no thought" outcome.
+ */
+export function matchTickets(input: LotteryMatchInput): readonly LotteryHit[] {
+  const window = input.window ?? DEFAULT_TICKET_WINDOW
+  if (!Number.isSafeInteger(window) || window < 0) throw new Error('dream trigger: ticket window must be a non-negative integer')
+  const hits: LotteryHit[] = []
+  for (const ticket of input.tickets) {
+    const direct = Math.abs(ticket.value - input.draw.value)
+    const circular = TICKET_MODULUS - direct
+    const distance = Math.min(direct, circular)
+    if (distance <= window) {
+      hits.push({ subject: ticket.subject, ticketDigest: ticket.digest, ticketValue: ticket.value, distance })
+    }
+  }
+  return hits.sort((a, b) => a.distance - b.distance || a.subject.key.localeCompare(b.subject.key))
+}
+
 export { MINUTES_PER_DAY }
