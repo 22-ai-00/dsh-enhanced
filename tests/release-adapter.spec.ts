@@ -629,6 +629,7 @@ function runAdapter(
   waitForReady = false,
 ): Promise<SourceReleaseReceipt> {
   const role = target.roles[request.phase]
+  const startedAt = performance.now()
   return new Promise((resolvePromise, reject) => {
     const artifact = 'artifact' in request.input ? request.input.artifact : undefined
     const descriptors = artifact === undefined ? [] : [artifact.tarballPath, artifact.sbomPath, artifact.provenancePath]
@@ -660,13 +661,15 @@ function runAdapter(
     })
     let timedOut = false
     if (!waitForReady) armTimeout()
-    child.once('close', code => {
+    child.once('close', (code, signal) => {
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer)
       for (const descriptor of descriptors) closeSync(descriptor)
       const error = Buffer.concat(stderr).toString('utf8')
-      if (timedOut) reject(new Error('adapter timeout'))
-      else if (waitForReady && !ready) reject(new Error(error || 'adapter exited before publish ready marker'))
-      else if (code !== 0) reject(new Error(error || 'adapter exited ' + String(code)))
+      const diagnostic = `phase=${request.phase}, operationId=${request.operationId}, elapsedMs=${Math.round(performance.now() - startedAt)}, `
+        + `timeoutMs=${timeout}, exitCode=${code}, signal=${signal}, waitForReady=${waitForReady}, ready=${ready}`
+      if (timedOut) reject(new Error(`adapter timeout (${diagnostic})`))
+      else if (waitForReady && !ready) reject(new Error(`${error || 'adapter exited before publish ready marker'} (${diagnostic})`))
+      else if (code !== 0) reject(new Error(`${error || 'adapter exited ' + String(code)} (${diagnostic})`))
       else {
         try {
           resolvePromise(parseSourceReleaseReceipt(JSON.parse(Buffer.concat(stdout).toString('utf8'))))
@@ -1027,7 +1030,8 @@ describe('owner-controlled local release adapter', () => {
     await copyFile(timeoutFixtureSource, timeoutPath)
     await rewriteNodeShebang(timeoutPath, target.nodePath)
     await chmod(timeoutPath, 0o755)
-    await expect(runAdapter(target, publishRequest, 50, timeoutPath, true)).rejects.toThrow('adapter timeout')
+    await expect(runAdapter(target, publishRequest, 50, timeoutPath, true))
+      .rejects.toThrow(/adapter timeout \(phase=publish, operationId=release-operation-publish,/u)
     expect((await stat(new URL(target.policy.registryReference))).size).toBe(build.tarballBytes)
     const recoveredPublishReceipt = await runAdapter(target, publishRequest, 2_000, timeoutPath)
     verifyReceipt(publishRequest, recoveredPublishReceipt, target.roles.publish)
