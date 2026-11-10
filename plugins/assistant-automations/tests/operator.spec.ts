@@ -222,13 +222,13 @@ describe('active Automations readiness read', () => {
     const database = new DatabaseSync(f.path)
     database.exec('PRAGMA journal_mode=DELETE')
     database.close()
-    for (const version of [15, 16, 14]) {
+    for (const version of [15, 16, 17, 14]) {
       const set = new DatabaseSync(f.path); set.exec(`PRAGMA user_version = ${version}`); set.close()
       if (version !== 14) expect(listActiveAutomationsForReadiness(f.path).map(record => record.id)).toEqual(['bad'])
     }
     expectCode(() => listActiveAutomationsForReadiness(f.path), 'schema-unsupported')
     const repair = new DatabaseSync(f.path)
-    repair.exec('PRAGMA user_version = 17')
+    repair.exec('PRAGMA user_version = 18')
     repair.prepare("UPDATE automation_definitions SET definition_json = '{}' WHERE id = 'bad'").run()
     repair.close()
     expectCode(() => listActiveAutomationsForReadiness(f.path), 'database-corrupt')
@@ -395,7 +395,7 @@ describe('read-only Automations operator snapshot', () => {
     const versionAfter = versionDatabase.prepare('PRAGMA user_version').get(); versionDatabase.close()
     const after = await Promise.all(paths.map(fingerprint))
 
-    expect(snapshot).toMatchObject({ protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 17,
+    expect(snapshot).toMatchObject({ protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 18,
       inFlightCount: 0, records: [
         { id: 'a-paused', owner: 'owner-a', status: 'paused', runningTaskCount: 0 },
         { id: 'm-deleted', status: 'deleted', runningTaskCount: 0 },
@@ -495,7 +495,7 @@ describe('read-only Automations operator snapshot', () => {
     }
   })
 
-  test.runIf(process.platform === 'linux').each([15, 16, 18])('rejects schema v%s without migrating it', async version => {
+  test.runIf(process.platform === 'linux').each([15, 16, 17, 18, 19])('rejects schema v%s without migrating it', async version => {
     const root = await realpath(await mkdtemp(join(tmpdir(), `automations-operator-v${version}-`))); roots.push(root)
     await chmod(root, 0o700); const path = join(root, 'automations.sqlite')
     const database = new DatabaseSync(path); database.exec(`PRAGMA user_version=${version}`); database.close(); await chmod(path, 0o600)

@@ -30,7 +30,7 @@ function definition(name: string) {
   }
 }
 
-async function fixture(version: 15 | 16 | 17 = 17, retired = false) {
+async function fixture(version: 15 | 16 | 17 | 18 = 18, retired = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-retirement-proof-')))
   roots.push(root)
   const path = join(root, 'state', 'automations.sqlite')
@@ -48,6 +48,7 @@ async function fixture(version: 15 | 16 | 17 = 17, retired = false) {
   store.close()
   mutate(path, database => {
     database.exec('PRAGMA journal_mode=DELETE')
+    if (version < 18) database.exec('ALTER TABLE automation_task_acceptance DROP COLUMN host_proof_json; PRAGMA user_version=17')
     if (version < 17) {
       database.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
     }
@@ -95,6 +96,19 @@ describe('privileged Automations retirement snapshot', () => {
     const f = await fixture(16)
     mutate(f.path, database => database.exec('PRAGMA user_version=17'))
     expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
+    expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'schema-unsupported')
+  })
+
+  test.each([
+    'PRAGMA user_version=18',
+    'ALTER TABLE automation_task_acceptance ADD COLUMN host_proof_json TEXT; PRAGMA user_version=18',
+  ])('rejects an incomplete v18 without changing the ledger: %s', async sql => {
+    const f = await fixture(17)
+    mutate(f.path, database => database.exec(sql))
+    const before = fingerprint(f.path)
+    expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
+    expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'schema-unsupported')
+    expect(fingerprint(f.path)).toEqual(before)
   })
 
   test.each([
@@ -110,7 +124,7 @@ describe('privileged Automations retirement snapshot', () => {
     expectCode(() => inspectAutomationRetirementSnapshot(f.path), 'schema-unsupported')
   })
 
-  test.each([15, 16, 17] as const)('reads real schema v%i without changing bytes, inode, mode or sidecars', async version => {
+  test.each([15, 16, 17, 18] as const)('reads real schema v%i without changing bytes, inode, mode or sidecars', async version => {
     const f = await fixture(version)
     const before = fingerprint(f.path)
     const proof = inspectAutomationRetirementSnapshot(f.path)
@@ -123,9 +137,12 @@ describe('privileged Automations retirement snapshot', () => {
     expect(proof.retirements).toEqual([])
     expect(proof.historyTables).toHaveLength(15)
     for (const table of proof.historyTables) {
-      if (version === 17 && table.name === 'automation_runs') {
+      if (version >= 17 && table.name === 'automation_runs') {
         expect(table.legacyDigest).toMatch(/^[a-f0-9]{64}$/u)
         expect(table.nonNullQuiescentCount).toBe(0)
+      } else if (version === 18 && table.name === 'automation_task_acceptance') {
+        expect(table.legacyDigest).toMatch(/^[a-f0-9]{64}$/u)
+        expect(table.nonNullHostProofCount).toBe(0)
       } else {
         expect(table).not.toHaveProperty('legacyDigest')
         expect(table).not.toHaveProperty('nonNullQuiescentCount')
@@ -142,8 +159,10 @@ describe('privileged Automations retirement snapshot', () => {
     if (version < 17) expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'schema-unsupported')
     else {
       const ordinary = inspectAutomationsOperatorSnapshot(f.path)
+      expect(ordinary.schemaVersion).toBe(version)
       expect(ordinary.records[0]).not.toHaveProperty('definition')
       expect(ordinary).not.toHaveProperty('retirements')
+      expect(fingerprint(f.path)).toEqual(before)
     }
   })
 
@@ -177,6 +196,24 @@ describe('privileged Automations retirement snapshot', () => {
       digests.add(observed.digest)
     }
     expect(digests.size).toBe(3)
+  })
+
+  test('migrates a real v17 acceptance row with null Host proof and keeps its legacy projection', async () => {
+    const f = await fixture(17)
+    mutate(f.path, database => {
+      database.prepare(`INSERT INTO automation_task_acceptance(task_id,contract_id,contract_digest,workspace,preset,
+        principal_record_id,principal_version,binding_id,binding_version,binding_generation,dispatched_at)
+        VALUES ('task','legacy-contract',?,'/work','default','principal',1,'binding',1,1,?)`).run('a'.repeat(64), now)
+    })
+    const old = history(f.path, 'automation_task_acceptance')
+    new AutomationStore({ path: f.path }).close()
+    const migrated = history(f.path, 'automation_task_acceptance')
+    expect(migrated).toMatchObject({ rowCount: 1, legacyDigest: old.digest, nonNullHostProofCount: 0 })
+    mutate(f.path, database => {
+      expect(database.prepare('SELECT contract_id, host_proof_json FROM automation_task_acceptance').get())
+        .toEqual({ contract_id: 'legacy-contract', host_proof_json: null })
+      expect(() => database.exec("UPDATE automation_task_acceptance SET host_proof_json='invalid JSON'")).toThrow(/CHECK constraint/u)
+    })
   })
 
   test('returns every exact bound retirement receipt and preserves immutable definition digests', async () => {
@@ -394,7 +431,7 @@ describe('privileged Automations retirement snapshot', () => {
   })
 
   test.each([
-    'PRAGMA user_version=18',
+    'PRAGMA user_version=19',
     'CREATE TABLE unexpected_history(id TEXT) STRICT',
     'CREATE VIEW unexpected_view AS SELECT id FROM automation_tasks',
     'CREATE INDEX unexpected_index ON automation_tasks(status)',
@@ -416,36 +453,46 @@ describe('privileged Automations retirement snapshot', () => {
     expectCode(() => inspectAutomationRetirementSnapshot(corrupt.path), 'database-corrupt')
   })
 
-  test.runIf(process.platform === 'linux')('reads complete WAL data from pinned copies and preserves every source byte and inode', async () => {
-    const f = await fixture()
-    const keeper = spawn(process.execPath, ['--input-type=module', '-e', `
+  test.runIf(process.platform === 'linux').each([17, 18] as const)(
+    'reads schema %i WAL data from pinned copies without migrating or modifying the source', async version => {
+      const f = await fixture(version)
+      const keeper = spawn(process.execPath, ['--input-type=module', '-e', `
       import { DatabaseSync } from 'node:sqlite'
       const database = new DatabaseSync(process.argv[1])
       database.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0')
       database.prepare("UPDATE automation_tasks SET claimed_by='WAL_PRIVATE_BODY',status='running'").run()
       process.stdout.write('ready\\n')
       process.stdin.on('data', () => { database.close(); process.exit(0) })
-    `, f.path], { stdio: ['pipe', 'pipe', 'pipe'] })
-    try {
-      await new Promise<void>((resolve, reject) => {
-        keeper.once('error', reject)
-        keeper.stdout.once('data', () => resolve())
-        keeper.once('exit', code => reject(new Error(`keeper exited ${code} before ready`)))
-      })
-      for (const suffix of ['-wal', '-shm']) chmodSync(f.path + suffix, 0o600)
-      const before = fingerprint(f.path)
-      const proof = inspectAutomationRetirementSnapshot(f.path)
-      expect(proof.inFlightCount).toBe(1)
-      expect(proof.sidecars.wal).not.toBeNull()
-      expect(JSON.stringify(proof)).not.toContain('WAL_PRIVATE_BODY')
-      expect(fingerprint(f.path)).toEqual(before)
-    } finally {
-      if (keeper.exitCode === null && keeper.signalCode === null) {
-        keeper.kill('SIGTERM')
-        await new Promise<void>(resolve => keeper.once('exit', () => resolve()))
+      `, f.path], { stdio: ['pipe', 'pipe', 'pipe'] })
+      try {
+        await new Promise<void>((resolve, reject) => {
+          keeper.once('error', reject)
+          keeper.stdout.once('data', () => resolve())
+          keeper.once('exit', code => reject(new Error(`keeper exited ${code} before ready`)))
+        })
+        for (const suffix of ['-wal', '-shm']) chmodSync(f.path + suffix, 0o600)
+        const before = fingerprint(f.path)
+        const proof = inspectAutomationRetirementSnapshot(f.path)
+        expect(proof.inFlightCount).toBe(1)
+        expect(proof.sidecars.wal).not.toBeNull()
+        expect(JSON.stringify(proof)).not.toContain('WAL_PRIVATE_BODY')
+        const snapshot = inspectAutomationsOperatorSnapshot(f.path)
+        const { protocol, storageDigest, inFlightCount, records } = snapshot
+        expect(snapshot.schemaVersion).toBe(version)
+        expect(inFlightCount).toBe(1)
+        expect(snapshot.sidecars.wal).toEqual(proof.sidecars.wal)
+        expect(snapshot.inventoryDigest).toBe(createHash('sha256').update(JSON.stringify({
+          protocol, schemaVersion: version, storageDigest, inFlightCount, records,
+        })).digest('hex'))
+        expect(fingerprint(f.path)).toEqual(before)
+      } finally {
+        if (keeper.exitCode === null && keeper.signalCode === null) {
+          keeper.kill('SIGTERM')
+          await new Promise<void>(resolve => keeper.once('exit', () => resolve()))
+        }
       }
-    }
-  })
+      mutate(f.path, database => expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: version }))
+    })
 
   test('fails closed for unsafe files, incomplete WAL and rollback journals', async () => {
     const f = await fixture()

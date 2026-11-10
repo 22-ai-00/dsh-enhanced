@@ -44,6 +44,12 @@ WorkItems schema 9 新增不可变 continuation 记录，保存真实输入字�
 
 可选 continuation 须同批部署新的 WorkItems、Automations 精确 occurrence 读取、Delivery 当前人类输入读取和 Policy 精确工具注册。缺少能力时拒绝激活；Delivery schema 28 和 DSH/Cordis 依赖不变。实际消费原生 Agent 的 Host 执行新增仅减权的目标判定，新的 Evaluation outbox 保持 objective unknown，包括超时竞争；原确定性 Host 与旧 outbox 不重解释。工具最终授权使用已锁定 Host 的 `ToolRuntime.guard`，从调用方 Cordis fiber 注册；原 diagnosis 工具 schema 不扩权。实际连接、长期使用及跨信道路由验收见[当前状态](rsi-status.md)。
 
+## 主人续办的独立验收（Automations 18）
+
+Automations schema 18 为任务验收表增加可空 `host_proof_json`，绑定严格 Host 原生执行的 occurrence、attempt、定义、来源及执行契约；旧行保持 NULL，不补造历史证明。普通只读 Operator 接受合法 17/18，升级预览可在 writer 迁移前读取 v17；退休证明和安装消费者接受 15–18，跨版本比较旧列摘要及新增证明全为 NULL，同版本比较完整历史。旧 writer 不得写入 v18。
+
+WorkItems 无新 schema：启用 `acceptance.holdReport` 时，新续办计划冻结必需验收和认证目标原文，旧 v1/v2 计划保留原要求。必需合同在模型与工具调用前须仍有效，待发报告重新核对当前独立回执；关闭验收配置不会放行完成通知。需同批部署新 Automations 与 WorkItems，并配置匹配原目标的已批准 Verifier profile。此能力验收批准路径的当前状态，不证明产物由本次执行产生；首次通用委托和动态准则尚未覆盖。
+
 
 ## 前台终止观察与原任务读取（Delivery schema 28）
 

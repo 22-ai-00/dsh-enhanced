@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService, type Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
-import { inspectAutomationRetirementSnapshot, type HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
+import { inspectAutomationRetirementSnapshot, type AutomationRetirementSnapshot, type HostAutomationDefinition } from '@dsh-enhanced/assistant-automations'
 import { externalPrincipalId, ownerRouteAuthorityHash, inspectRevokedOwnerRouteLocally } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, describe, expect, test } from 'vitest'
 import { stringify } from 'yaml'
@@ -44,7 +44,7 @@ function sql<T>(path: string, action: (db: DatabaseSync) => T): T {
 // owner-source signature chain, package installer and systemd are separately
 // verified; here the real journal/operator, namespace, Policy, Automations and
 // SQLite transition run together, including a real physical Home rename.
-async function maintenanceFixture(version: 15 | 16 | 17) {
+async function maintenanceFixture(version: 15 | 16 | 17 | 18) {
   const f = await paths(), home = f.home
   const principal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' }
   const authority = { id: 'rsi-owner', conversation: { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm' as const, chat: 'oc_owner' },
@@ -94,6 +94,7 @@ async function maintenanceFixture(version: 15 | 16 | 17) {
     const now = Date.now()
     db.prepare("INSERT INTO automation_occurrences(id,automation_id,trigger_kind,trigger_key,scheduled_at,status,dry_run,created_at,updated_at) VALUES ('occ','ordinary','manual','manual',?,'unknown',0,?,?)").run(now, now, now)
     db.prepare("INSERT INTO automation_tasks(id,occurrence_id,automation_id,status,cancel_requested,attempt_count,created_at,updated_at) VALUES ('unknown','occ','ordinary','unknown',0,0,?,?)").run(now, now)
+    if (version < 18) db.exec('ALTER TABLE automation_task_acceptance DROP COLUMN host_proof_json; PRAGMA user_version=17')
     if (version < 17) db.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
     if (version === 15) {
       for (const name of ['automation_retirements_no_update', 'automation_retirements_no_delete', 'automation_retired_no_activate_insert', 'automation_retired_no_activate_update']) db.exec(`DROP TRIGGER ${name}`)
@@ -111,6 +112,7 @@ async function maintenanceFixture(version: 15 | 16 | 17) {
   await writeFile(join(home, 'dsh'), `#!${process.execPath}\nimport {readFileSync} from 'node:fs'; process.stdout.write(readFileSync(process.env.DSH_HOME+'/effective.yml'))\n`, { mode: 0o700 })
   await writeFile(join(home, 'package.json'), '{"type":"module"}')
   const before = inspectAutomationRetirementSnapshot(join(home, 'automations.sqlite'))
+  expect(before.schemaVersion).toBe(version)
   const revoked = inspectRevokedOwnerRouteLocally(derived.ownerQuery)
   await cp(home, f.staged, { recursive: true, preserveTimestamps: true })
   const source = { effectiveConfigDigest: hash(effectiveConfig), databasePaths: { delivery: 'delivery.sqlite', automations: 'automations.sqlite', recovery: 'recovery.sqlite' },
@@ -129,17 +131,28 @@ async function maintenanceFixture(version: 15 | 16 | 17) {
   return { ...f, before, manifest, sandbox }
 }
 
+function expectPreservedHistory(before: AutomationRetirementSnapshot, after: AutomationRetirementSnapshot) {
+  expect(after.schemaVersion).toBe(18)
+  expect(after.historyTables).toEqual(before.historyTables.map(table => {
+    const legacy = { name: table.name, rowCount: table.rowCount, legacyDigest: table.digest }
+    if (before.schemaVersion < 17 && table.name === 'automation_runs') {
+      return expect.objectContaining({ ...legacy, nonNullQuiescentCount: 0 })
+    }
+    if (before.schemaVersion < 18 && table.name === 'automation_task_acceptance') {
+      return expect.objectContaining({ ...legacy, nonNullHostProofCount: 0 })
+    }
+    return table
+  }))
+}
+
 describe.skipIf(!available)('real scanner maintenance namespace', () => {
-  test.each([15, 16, 17] as const)('keeps the original Home intact and verifies the same retired database after swapping v%s', async version => {
+  test.each([15, 16, 17, 18] as const)('keeps the original Home intact and verifies the same retired database after swapping v%s', async version => {
     const f = await maintenanceFixture(version)
     const result = await api.prepareScannerRetirement({ manifest: f.manifest, physicalTransactionRoot: f.transaction, sandbox: f.sandbox })
     expect(result.supervisedLifecycle.scannerRetirement.phase).toBe('completed')
     const after = inspectAutomationRetirementSnapshot(join(f.staged, 'automations.sqlite'))
     expect(after.retirements).toHaveLength(4)
-    const oldRuns = f.before.historyTables.find(table => table.name === 'automation_runs')!
-    expect(after.historyTables.find(table => table.name === 'automation_runs')).toMatchObject({
-      legacyDigest: oldRuns.legacyDigest ?? oldRuns.digest, rowCount: oldRuns.rowCount, nonNullQuiescentCount: 0 })
-    expect(after.historyTables.filter(table => table.name !== 'automation_runs')).toEqual(f.before.historyTables.filter(table => table.name !== 'automation_runs'))
+    expectPreservedHistory(f.before, after)
     expect(inspectAutomationRetirementSnapshot(join(f.home, 'automations.sqlite'))).toEqual(f.before)
     expect(sql(join(f.home, 'policy.sqlite'), db => db.prepare('SELECT count(*) AS n FROM budget_reservations').get()?.n)).toBe(0)
     expect(sql(join(f.staged, 'policy.sqlite'), db => db.prepare('SELECT count(*) AS n FROM budget_reservations').get()?.n)).toBe(4)
@@ -174,9 +187,7 @@ export * from ${JSON.stringify(larkUrl)};\n`
     expect(evidence.captured.capture.plan.operations).toHaveLength(4)
     const partial = inspectAutomationRetirementSnapshot(join(f.staged, 'automations.sqlite'))
     expect(partial.retirements).toHaveLength(count)
-    expect(partial.historyTables.find(table => table.name === 'automation_runs')).toMatchObject({
-      legacyDigest: f.before.historyTables.find(table => table.name === 'automation_runs')!.digest, nonNullQuiescentCount: 0 })
-    expect(partial.historyTables.filter(table => table.name !== 'automation_runs')).toEqual(f.before.historyTables.filter(table => table.name !== 'automation_runs'))
+    expectPreservedHistory(f.before, partial)
     expect(inspectAutomationRetirementSnapshot(join(f.home, 'automations.sqlite'))).toEqual(f.before)
     expect(sql(join(f.home, 'policy.sqlite'), db => db.prepare('SELECT count(*) AS n FROM budget_reservations').get()?.n)).toBe(0)
     expect(sql(join(f.staged, 'policy.sqlite'), db => db.prepare('SELECT count(*) AS n FROM budget_reservations').get()?.n)).toBe(count)

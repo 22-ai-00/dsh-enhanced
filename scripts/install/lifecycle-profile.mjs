@@ -1345,7 +1345,7 @@ function validCompactOperatorProof(proof) {
     'assistant-recovery/operator-snapshot/v1': [5],
     // v16 adds durable scanner retirement; compact identity/digest fields remain
     // unchanged. Keep v15 proofs for recovery of existing lifecycle journals.
-    'assistant-automations-operator-snapshot/v1': [15, 16, 17],
+    'assistant-automations-operator-snapshot/v1': [15, 16, 17, 18],
   }
   const additional = proof?.protocol === 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
     ? ['storageDigest'] : proof?.protocol === 'assistant-automations-operator-snapshot/v1' ? ['inventoryDigest', 'storageDigest']

@@ -21,12 +21,6 @@ export type HeldReportRelease =
   | Readonly<{ kind: 'achieved' }>
   | Readonly<{ kind: 'unverified'; timeoutMs: number }>
   | Readonly<{ kind: 'blocked'; reason: string }>
-  /**
-   * The row was never actually held (it has no acceptance binding any more),
-   * so it is recovered as an ordinary report: no timeout note, normal delivery
-   * identity, the self-reported status unchanged.
-   */
-  | Readonly<{ kind: 'plain' }>
 
 export interface DispatchDependencies {
   readonly config: NormalizedConfig
@@ -201,9 +195,9 @@ export class WorkItemDispatch {
   }
 
   /** Build the owner-facing notification for one terminal report. */
-  notification(item: WorkItemRecord, report: WorkItemReportRecord, note?: string): WorkItemNotification {
+  notification(item: WorkItemRecord, report: WorkItemReportRecord, unverified?: Readonly<{ timeoutMs: number }>): WorkItemNotification {
     const lines = [
-      `**Work item ${report.status}: ${item.title}**`,
+      `**Work item ${unverified === undefined ? report.status : 'result unverified'}: ${item.title}**`,
       '',
       report.summary,
       '',
@@ -217,7 +211,10 @@ export class WorkItemDispatch {
       for (const path of report.artifactPaths) lines.push(`- \`${path}\``)
     }
     if (report.truncated) lines.push('', '_The report was truncated at the configured byte limit._')
-    if (note !== undefined) lines.push('', note)
+    if (unverified !== undefined) {
+      const minutes = String(Math.round(unverified.timeoutMs / 60_000))
+      lines.push('', `_Unverified: no current verifier verdict arrived within the ${minutes}-minute hold window. The result is the worker's self-report._`)
+    }
     return Object.freeze({
       item,
       report,
@@ -245,30 +242,24 @@ export class WorkItemDispatch {
 
   /**
    * WP21 slice 8 (`acceptance.holdReport`): send the report held while the
-   * verifier settles the binding. `achieved` sends the ordinary report,
-   * `unverified` sends it with an explicit timeout note, `blocked` sends a
-   * `blocked` report instead of the self-reported `ready` one, and `plain`
-   * recovers a row that lost its binding (or was never really held) by sending
-   * it exactly like an ordinary report. The delivery coordinates stay on the
-   * held report revision, so a crash or a later wake can never enqueue the same
-   * held report twice.
+   * verifier settles. Achievement sends the ready report, timeout identifies
+   * the result as unverified, and a rejection sends a blocked notification.
+   * Each outcome records delivery against the original report revision.
    */
   async notifyHeld(item: WorkItemRecord, report: WorkItemReportRecord, release: HeldReportRelease): Promise<boolean> {
     if (!isActive(this.#deps.config)) return false
     const target = release.kind === 'blocked'
-      ? Object.freeze({ ...report, status: 'blocked' as const,
-        summary: `The independent verifier did not accept this work (${release.reason}). The worker reported: ${report.summary}` })
+      ? Object.freeze({ ...report, status: 'blocked' as const })
       : report
     if (!this.shouldNotify(target)) return false
-    const note = release.kind === 'unverified'
-      ? `_Unverified: no verifier verdict arrived within the ${String(Math.round(release.timeoutMs / 60_000))}-minute hold window, so this self-reported result was released on timeout._`
-      : undefined
     return this.#deliver(item, report, complete => {
       const reported = release.kind === 'blocked'
         ? Object.freeze({ ...complete, status: 'blocked' as const,
-          summary: `The independent verifier did not accept this work (${release.reason}). The worker reported: ${complete.summary}` })
+          summary: release.reason === 'acceptance-disabled'
+            ? `The required independent acceptance is disabled (acceptance-disabled). The worker reported: ${complete.summary}`
+            : `The independent verifier did not accept this work (${release.reason}). The worker reported: ${complete.summary}` })
         : complete
-      const built = this.notification(item, reported, note)
+      const built = this.notification(item, reported, release.kind === 'unverified' ? release : undefined)
       // The blocked variant is a different message; give it its own delivery
       // identity while still recording the outcome against the held revision.
       return release.kind === 'blocked' ? Object.freeze({ ...built, idempotencyKey: `${report.deliveryKey}:blocked` }) : built

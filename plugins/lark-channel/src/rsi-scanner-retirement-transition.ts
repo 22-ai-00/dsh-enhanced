@@ -129,7 +129,7 @@ function stableDefinition(record: AutomationRetirementDefinitionRecord) {
 }
 
 /** Reproduce SQLite ADD COLUMN's insertion before the table constraints. */
-function addRunQuiescenceColumnSql(sql: string | null): string | undefined {
+function addColumnSql(sql: string | null, column: string): string | undefined {
   if (sql === null) return undefined
   let depth = 0
   // Skip quoted strings/identifiers and comments when finding structural commas.
@@ -138,11 +138,11 @@ function addRunQuiescenceColumnSql(sql: string | null): string | undefined {
     if (token[0] === '(') depth++
     if (token[0] === ')') {
       depth--
-      if (depth === 0) return `${sql.slice(0, token.index)}, quiescent INTEGER CHECK(quiescent IN (0, 1))${sql.slice(token.index)}`
+      if (depth === 0) return `${sql.slice(0, token.index)}, ${column}${sql.slice(token.index)}`
     }
     if (token[0] === ',' && depth === 1
       && /^\s*(?:CHECK|CONSTRAINT|FOREIGN\s+KEY|PRIMARY\s+KEY|UNIQUE)\b/iu.test(sql.slice(token.index + 1))) {
-      return `${sql.slice(0, token.index)}, quiescent INTEGER CHECK(quiescent IN (0, 1))${sql.slice(token.index)}`
+      return `${sql.slice(0, token.index)}, ${column}${sql.slice(token.index)}`
     }
   }
   return undefined
@@ -151,12 +151,17 @@ function addRunQuiescenceColumnSql(sql: string | null): string | undefined {
 function verifySchema(before: AutomationRetirementSnapshot, after: AutomationRetirementSnapshot): void {
   const original = uniqueMap(before.schemaEntries, schemaKey, 'schema-changed')
   const current = uniqueMap(after.schemaEntries, schemaKey, 'schema-changed')
-  const upgradesQuiescence = before.schemaVersion < 17 && after.schemaVersion === 17
+  const upgradesQuiescence = before.schemaVersion < 17 && after.schemaVersion >= 17
+  const upgradesHostProof = before.schemaVersion < 18 && after.schemaVersion === 18
   for (const [key, entry] of original) {
     const updated = current.get(key)
-    if (upgradesQuiescence && entry.type === 'table' && entry.name === 'automation_runs') {
+    const column = entry.type !== 'table' ? undefined
+      : upgradesQuiescence && entry.name === 'automation_runs' ? 'quiescent INTEGER CHECK(quiescent IN (0, 1))'
+      : upgradesHostProof && entry.name === 'automation_task_acceptance'
+        ? 'host_proof_json TEXT CHECK(host_proof_json IS NULL OR json_valid(host_proof_json))' : undefined
+    if (column !== undefined) {
       // Preserve every byte of the pre-existing SQL, including table constraints.
-      const expectedSql = addRunQuiescenceColumnSql(entry.sql)
+      const expectedSql = addColumnSql(entry.sql, column)
       if (typeof expectedSql !== 'string' || expectedSql === entry.sql
         || !same({ ...entry, sql: expectedSql }, updated)) reject('schema-changed')
     } else if (!same(entry, updated)) reject('schema-changed')
@@ -168,7 +173,8 @@ function verifySchema(before: AutomationRetirementSnapshot, after: AutomationRet
   }
   // Formal readers verify the exact retirement table/trigger SQL. Preserve the
   // historical seven-identity v15->v16 allowance; upgrading to v17 additionally
-  // permits only the exact run quiescence column and immutable trigger.
+  // permits the exact run quiescence column and immutable trigger. Schema 18
+  // permits only the nullable Host proof column in the existing acceptance table.
   const additions: AutomationRetirementSchemaEntry[] = before.schemaVersion === 15 ? [
     { type: 'table', name: 'automation_system_retirements', table: 'automation_system_retirements', sql: '' },
     { type: 'index', name: 'sqlite_autoindex_automation_system_retirements_1', table: 'automation_system_retirements', sql: null },
@@ -205,7 +211,7 @@ export function prepareScannerRetirementOperations(
   try {
     const { before, ownerProof } = input
     if (before.protocol !== 'assistant-automations/retirement-snapshot/v1'
-      || ![15, 16, 17].includes(before.schemaVersion) || before.inFlightCount !== 0
+      || ![15, 16, 17, 18].includes(before.schemaVersion) || before.inFlightCount !== 0
       || !digestPattern.test(before.snapshotDigest)) reject('invalid-proof')
     const evidenceForOwner = ownerEvidence(ownerProof)
     if (!Array.isArray(input.targets) || input.targets.length > 4) reject('invalid-targets')
@@ -250,7 +256,7 @@ export function verifyScannerRetirementTransition(input: ScannerRetirementTransi
   try {
     const { before, after, ownerProof } = input
     if (before.protocol !== 'assistant-automations/retirement-snapshot/v1' || after.protocol !== before.protocol
-      || ![15, 16, 17].includes(before.schemaVersion) || ![16, 17].includes(after.schemaVersion)
+      || ![15, 16, 17, 18].includes(before.schemaVersion) || ![16, 17, 18].includes(after.schemaVersion)
       || after.schemaVersion < before.schemaVersion
       || before.inFlightCount !== 0 || after.inFlightCount !== 0
       || !digestPattern.test(before.snapshotDigest) || !digestPattern.test(after.snapshotDigest)) reject('invalid-proof')
@@ -298,13 +304,17 @@ export function verifyScannerRetirementTransition(input: ScannerRetirementTransi
     for (const [index, table] of before.historyTables.entries()) {
       const updated = updatedHistory.get(table.name)
       if (after.historyTables[index]?.name !== table.name) reject('history-changed')
-      if (before.schemaVersion < 17 && after.schemaVersion === 17 && table.name === 'automation_runs') {
+      const newObservationCount = before.schemaVersion < 17 && after.schemaVersion >= 17 && table.name === 'automation_runs'
+        ? 'nonNullQuiescentCount'
+        : before.schemaVersion < 18 && after.schemaVersion === 18 && table.name === 'automation_task_acceptance'
+          ? 'nonNullHostProofCount' : undefined
+      if (newObservationCount !== undefined) {
         // Only the trusted reader can compute this old-column projection. The
         // new nullable column must carry no retrospectively signed observations.
         if (!updated || updated.rowCount !== table.rowCount || updated.legacyDigest !== table.digest
-          || updated.nonNullQuiescentCount !== 0
+          || updated[newObservationCount] !== 0
           || Object.keys(table).sort().join(',') !== 'digest,name,rowCount'
-          || Object.keys(updated).sort().join(',') !== 'digest,legacyDigest,name,nonNullQuiescentCount,rowCount') reject('history-changed')
+          || Object.keys(updated).sort().join(',') !== `digest,legacyDigest,name,${newObservationCount},rowCount`) reject('history-changed')
       } else if (!same(table, updated)) reject('history-changed')
     }
     verifySchema(before, after)

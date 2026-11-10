@@ -14,6 +14,7 @@ import {
   validateTaskAcceptanceContract,
   validateTaskVerificationReceipt,
   type TaskAcceptanceContract,
+  type TaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
 import type { PeerOwnerRouteReceipt, PeerVerifierService } from './peers.ts'
 import type {
@@ -185,6 +186,27 @@ export interface AcceptanceVerdictSink {
   recordAcceptanceVerdict(verdict: Omit<WorkItemAcceptanceVerdict, 'recordedAt'>, gate?: WorkItemAcceptanceGateExpectation): Readonly<{ verdict: WorkItemAcceptanceVerdict; created: boolean; blockedReason?: WorkItemAcceptanceBlockReason }>
 }
 
+function receiptIsFresh(receipt: TaskVerificationReceipt): boolean {
+  const now = Date.now()
+  return receipt.completedAt <= now && now < receipt.validUntil
+}
+
+/** Recheck the independent peer before releasing a durable verdict as a result. */
+export function hasFreshAcceptanceReceipt(verifier: PeerVerifierService | undefined, verdict: WorkItemAcceptanceVerdict): boolean {
+  const read = inspect(verifier, verdict.contractId)
+  if (read.kind !== 'read' || read.value?.state !== 'done') return false
+  const contract = validContract(read.value.contract)
+  if (contract === undefined || contract.id !== verdict.contractId || contract.digest !== verdict.contractDigest) return false
+  try {
+    const receipt = validateTaskVerificationReceipt(contract, read.value.receipt)
+    return receipt.id === verdict.receiptId && receipt.digest === verdict.receiptDigest
+      && receipt.completedAt === verdict.completedAt && receipt.objectiveStatus === verdict.objectiveStatus
+      && receiptIsFresh(receipt)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Read one bound item's verdict back from the independent verifier.
  *
@@ -204,6 +226,7 @@ export function settleAcceptance(
    * The caller handles `needs-attention` (no verdict is written for it).
    */
   gate?: WorkItemAcceptanceGateExpectation,
+  requireFresh = false,
 ): WorkItemAcceptanceSettleResult {
   const recorded = sink.acceptanceVerdict(item.id)
   if (recorded !== undefined) {
@@ -242,6 +265,9 @@ export function settleAcceptance(
   // Evidence gathered before this item existed cannot complete it.
   if (receipt.startedAt < item.createdAt) {
     return Object.freeze({ outcome: 'drift', detail: 'verifier receipt predates the work item' })
+  }
+  if (requireFresh && !receiptIsFresh(receipt)) {
+    return Object.freeze({ outcome: 'drift', detail: 'verifier receipt is not currently valid' })
   }
   let result
   try {

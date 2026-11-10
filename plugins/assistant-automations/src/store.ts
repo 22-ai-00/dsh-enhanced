@@ -183,6 +183,19 @@ interface AcceptanceRow {
   dispatched_at: number
   submitted: number
   quiescent: number
+  host_proof_json: string | null
+}
+
+interface HostAcceptanceProof {
+  readonly protocol: 'assistant-automations/host-acceptance/v1'
+  readonly occurrenceId: string
+  readonly attemptId: string
+  readonly definitionHash: string
+  readonly activationNonce: string
+  readonly catalogDigest: string
+  readonly ownerRouteId: string
+  readonly executionContractDigest: string
+  readonly sourceDigest: string
 }
 
 interface CircuitRow {
@@ -2715,6 +2728,7 @@ export class AutomationStore {
     bindingVersion: number
     bindingGeneration: number
     dispatchedAt: number
+    host?: Pick<HostAcceptanceProof, 'executionContractDigest' | 'sourceDigest'>
   }): void {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u.test(input.contractId)
       || !/^[a-f0-9]{64}$/u.test(input.contractDigest)
@@ -2735,9 +2749,26 @@ export class AutomationStore {
       }
       const snapshot = this.getTaskExecutionSnapshot(input.taskId)
       const occurrenceRow = this.database.prepare('SELECT * FROM automation_occurrences WHERE id = ?').get(taskRow.occurrence_id) as OccurrenceRow | undefined
-      if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition) || occurrenceRow?.dry_run !== 0
+      if (snapshot === undefined || occurrenceRow?.dry_run !== 0
         || snapshot.definition.workspace !== input.scope.workspace || snapshot.definition.agentPreset !== input.scope.preset) {
         throw new AutomationStoreError('invalid-state', 'acceptance does not match immutable production task')
+      }
+      const hostDefinition = isHostAutomationDefinition(snapshot.definition) ? snapshot.definition : undefined
+      let hostProof: HostAcceptanceProof | undefined
+      if (input.host !== undefined && hostDefinition !== undefined) {
+        const attempt = this.database.prepare('SELECT * FROM automation_attempts WHERE task_id = ? AND attempt_number = 1')
+          .get(input.taskId) as AttemptRow | undefined
+        if (taskRow.status !== 'running' || taskRow.attempt_count !== 1 || attempt?.status !== 'running'
+          || hostDefinition.retrySafety !== 'never' || hostDefinition.maxRetries !== 0 || hostDefinition.budgetId === undefined
+          || ![input.host.executionContractDigest, input.host.sourceDigest].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value))) {
+          throw new AutomationStoreError('invalid-state', 'acceptance does not match the reserved Host attempt')
+        }
+        hostProof = { protocol: 'assistant-automations/host-acceptance/v1', occurrenceId: taskRow.occurrence_id,
+          attemptId: attempt.id, definitionHash: hash(hostDefinition), activationNonce: hostDefinition.execution.activationNonce,
+          catalogDigest: hostDefinition.execution.catalogDigest, ownerRouteId: hostDefinition.execution.ownerRouteId, executionContractDigest: input.host.executionContractDigest,
+          sourceDigest: input.host.sourceDigest }
+      } else if (input.host !== undefined || hostDefinition !== undefined) {
+        throw new AutomationStoreError('invalid-state', 'acceptance requires exact Host proof')
       }
       const existing = this.database.prepare('SELECT * FROM automation_task_acceptance WHERE task_id = ?').get(input.taskId) as AcceptanceRow | undefined
       if (existing !== undefined) {
@@ -2747,16 +2778,52 @@ export class AutomationStore {
       }
       this.database.prepare(`INSERT INTO automation_task_acceptance(
         task_id, contract_id, contract_digest, workspace, preset, principal_record_id,
-        principal_version, binding_id, binding_version, binding_generation, dispatched_at, submitted
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+        principal_version, binding_id, binding_version, binding_generation, dispatched_at, submitted, host_proof_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(
         input.taskId, input.contractId, input.contractDigest, input.scope.workspace, input.scope.preset,
         input.owner.principalRecordId, input.owner.principalVersion, input.bindingId, input.bindingVersion, input.bindingGeneration,
-        input.dispatchedAt,
+        input.dispatchedAt, hostProof === undefined ? null : JSON.stringify(hostProof),
       )
     })
   }
 
-  inspectAcceptedExecution(contract: AcceptanceContract): AcceptedExecution | null {
+  private inspectHostAcceptanceProof(row: Pick<AcceptanceRow, 'host_proof_json' | 'task_id'>,
+    snapshot: AutomationRecord): HostAcceptanceProof | undefined {
+    if (!isHostAutomationDefinition(snapshot.definition) || typeof row.host_proof_json !== 'string'
+      || Buffer.byteLength(row.host_proof_json) > 4_096) return undefined
+    try {
+      const proof = JSON.parse(row.host_proof_json) as HostAcceptanceProof
+      const task = this.database.prepare('SELECT * FROM automation_tasks WHERE id = ?').get(row.task_id) as TaskRow | undefined
+      const attempt = this.database.prepare('SELECT * FROM automation_attempts WHERE task_id = ? AND attempt_number = 1')
+        .get(row.task_id) as AttemptRow | undefined
+      const definition = snapshot.definition
+      if (task?.attempt_count !== 1 || attempt === undefined || task.automation_id !== snapshot.id
+        || definition.retrySafety !== 'never' || definition.maxRetries !== 0 || definition.budgetId === undefined
+        || typeof proof.executionContractDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(proof.executionContractDigest)
+        || typeof proof.sourceDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(proof.sourceDigest)) return undefined
+      const expected: HostAcceptanceProof = { protocol: 'assistant-automations/host-acceptance/v1',
+        occurrenceId: task.occurrence_id, attemptId: attempt.id, definitionHash: hash(definition),
+        activationNonce: definition.execution.activationNonce, catalogDigest: definition.execution.catalogDigest,
+        ownerRouteId: definition.execution.ownerRouteId, executionContractDigest: proof.executionContractDigest, sourceDigest: proof.sourceDigest }
+      return JSON.stringify(expected) === row.host_proof_json ? expected : undefined
+    } catch { return undefined }
+  }
+
+  private inspectCompletedHostAcceptance(proof: HostAcceptanceProof, row: RunRow, scope: { workspace: string; preset: string }): boolean {
+    const terminal = this.inspectProductionOccurrence({ automationId: row.automation_id, occurrenceId: proof.occurrenceId,
+      workspace: scope.workspace, agentPreset: scope.preset })
+    if (!terminal || terminal.runId !== row.id || terminal.taskId !== row.task_id || terminal.attemptId !== proof.attemptId
+      || terminal.immutableContext.definitionHash !== proof.definitionHash || terminal.budgetSettlementState !== 'finalized') return false
+    try {
+      const usage = JSON.parse(row.usage_json) as Record<string, unknown>
+      return usage.hostAcceptanceExecutionContractDigest === proof.executionContractDigest
+        && usage.hostAcceptanceNativeOutcome === terminal.status
+        && usage.hostAcceptanceSourceDigest === proof.sourceDigest
+    } catch { return false }
+  }
+
+  inspectAcceptedExecution(contract: AcceptanceContract, hostOwnerCurrent?: (snapshot: AutomationRecord,
+    binding: Readonly<{ id: string; version: number; generation: number }>) => boolean): AcceptedExecution | null {
     const row = this.database.prepare(`SELECT acceptance.*, run.*, acceptance.quiescent AS accepted_quiescent FROM automation_task_acceptance acceptance
       LEFT JOIN automation_runs run ON run.task_id = acceptance.task_id
       WHERE acceptance.contract_id = ?`).get(contract.id) as (AcceptanceRow & Partial<RunRow> & { accepted_quiescent: number }) | undefined
@@ -2766,11 +2833,18 @@ export class AutomationStore {
       || contract.task.ref !== `run-${row.task_id}`) return null
     if (row.id === undefined || row.status === undefined || row.created_at === undefined || row.diagnostic_json === undefined) return null
     const snapshot = this.getRunExecutionSnapshot(row.id)
-    if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition)
+    if (snapshot === undefined
       || snapshot.definition.workspace !== row.workspace || snapshot.definition.agentPreset !== row.preset
       || this.getRunExecutionMode(row.id) !== 'production') return null
+    let quiescent = row.accepted_quiescent === 1
+    if (isHostAutomationDefinition(snapshot.definition)) {
+      const proof = this.inspectHostAcceptanceProof(row, snapshot)
+      if (!proof || row.status === 'cancelled' || !this.inspectCompletedHostAcceptance(proof, row as RunRow, contract.scope)
+        || hostOwnerCurrent?.(snapshot, { id: row.binding_id, version: row.binding_version, generation: row.binding_generation }) !== true) return null
+      // The immutable run may be committed before the acceptance row is updated.
+      quiescent = true
+    } else if (row.host_proof_json !== null) return null
     const status = row.status === 'timed_out' ? 'timed-out' : row.status
-    const quiescent = row.accepted_quiescent === 1
     return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
       dispatchedAt: row.dispatched_at, status, quiescent, completedAt: row.created_at, executionRef: row.id })
   }
@@ -2780,8 +2854,8 @@ export class AutomationStore {
    * froze, if any, with the Delivery binding it was frozen under. Keyed by the
    * exact (automation, occurrence, scope) tuple. Like `inspectAcceptedExecution`
    * the task must be production: a non-dry-run occurrence whose immutable task
-   * snapshot is a non-host definition of this scope and, once a terminal run
-   * exists, whose run execution mode is `production`. Ids only, no contract body.
+   * snapshot has this scope. A Host task also needs a reserved native proof.
+   * A terminal run needs a production proof for the same attempt. Ids only.
    */
   inspectOccurrenceAcceptance(input: {
     automationId: string; occurrenceId: string; workspace: string; agentPreset: string
@@ -2789,7 +2863,7 @@ export class AutomationStore {
     const values = [input.automationId, input.occurrenceId, input.workspace, input.agentPreset]
     if (values.some(value => typeof value !== 'string' || value === '' || value.length > 4_096)) return undefined
     const row = this.database.prepare(`SELECT acceptance.task_id, acceptance.contract_id, acceptance.contract_digest,
-        acceptance.binding_id, acceptance.binding_version, acceptance.binding_generation, run.id AS run_id
+        acceptance.binding_id, acceptance.binding_version, acceptance.binding_generation, acceptance.host_proof_json, run.id AS run_id
       FROM automation_task_acceptance acceptance
       JOIN automation_tasks task ON task.id = acceptance.task_id
       JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id AND occurrence.automation_id = task.automation_id
@@ -2797,15 +2871,23 @@ export class AutomationStore {
       WHERE task.automation_id = ? AND task.occurrence_id = ? AND occurrence.dry_run = 0
         AND acceptance.workspace = ? AND acceptance.preset = ?`)
       .get(input.automationId, input.occurrenceId, input.workspace, input.agentPreset) as
-        (Pick<AcceptanceRow, 'task_id' | 'contract_id' | 'contract_digest' | 'binding_id' | 'binding_version' | 'binding_generation'> & { run_id: string | null }) | undefined
+        (Pick<AcceptanceRow, 'task_id' | 'contract_id' | 'contract_digest' | 'binding_id' | 'binding_version' | 'binding_generation' | 'host_proof_json'> & { run_id: string | null }) | undefined
     if (row === undefined || typeof row.contract_id !== 'string' || !/^[a-f0-9]{64}$/u.test(row.contract_digest)
       || typeof row.binding_id !== 'string' || row.binding_id === ''
       || !Number.isSafeInteger(row.binding_version) || row.binding_version < 1
       || !Number.isSafeInteger(row.binding_generation) || row.binding_generation < 1) return undefined
     const snapshot = this.getTaskExecutionSnapshot(row.task_id)
-    if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition)
+    if (snapshot === undefined
       || snapshot.definition.workspace !== input.workspace || snapshot.definition.agentPreset !== input.agentPreset) return undefined
     if (row.run_id !== null && this.getRunExecutionMode(row.run_id) !== 'production') return undefined
+    if (isHostAutomationDefinition(snapshot.definition)) {
+      const proof = this.inspectHostAcceptanceProof(row, snapshot)
+      if (!proof || proof.occurrenceId !== input.occurrenceId) return undefined
+      if (row.run_id !== null) {
+        const run = this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(row.run_id) as RunRow | undefined
+        if (run === undefined || !this.inspectCompletedHostAcceptance(proof, run, { workspace: input.workspace, preset: input.agentPreset })) return undefined
+      }
+    } else if (row.host_proof_json !== null) return undefined
     return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
       bindingId: row.binding_id, bindingVersion: row.binding_version, bindingGeneration: row.binding_generation })
   }

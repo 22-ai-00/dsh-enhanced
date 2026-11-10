@@ -2,7 +2,19 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 17
+export const automationSchemaVersion = 18
+
+const hostProofColumnV18 = 'host_proof_json TEXT CHECK(host_proof_json IS NULL OR json_valid(host_proof_json))'
+
+export function hasAutomationHostProofColumn(database: DatabaseSync): boolean {
+  const column = database.prepare('PRAGMA table_xinfo(automation_task_acceptance)').all()
+    .find(candidate => candidate.name === 'host_proof_json')
+  const sql = database.prepare(`SELECT sql FROM sqlite_schema
+    WHERE type = 'table' AND name = 'automation_task_acceptance'`).get()?.sql
+  return column?.type === 'TEXT' && column.notnull === 0 && column.dflt_value === null
+    && column.pk === 0 && column.hidden === 0 && typeof sql === 'string'
+    && /,\s*host_proof_json TEXT CHECK\(host_proof_json IS NULL OR json_valid\(host_proof_json\)\)\s*\) STRICT$/u.test(sql)
+}
 
 const quiescenceTriggerV17 = `
   CREATE TRIGGER IF NOT EXISTS automation_run_quiescence_immutable
@@ -432,12 +444,13 @@ function migrate(database: DatabaseSync): void {
       workspace TEXT NOT NULL, preset TEXT NOT NULL,
       principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
       binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL CHECK(binding_version >= 1), binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
-      dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1)), quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1))
+      dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1)), quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1)),
+      ${hostProofColumnV18}
     ) STRICT;
     ${retirementTablesV16}
     ${retirementActivationTriggersV16}
     ${quiescenceTriggerV17}
-    PRAGMA user_version = 17;
+    PRAGMA user_version = 18;
     COMMIT;
     `)
     return
@@ -830,6 +843,12 @@ function migrate(database: DatabaseSync): void {
     database.exec(`BEGIN IMMEDIATE;
       ${hasRuns ? 'ALTER TABLE automation_runs ADD COLUMN quiescent INTEGER CHECK(quiescent IN (0, 1));' + quiescenceTriggerV17 : ''}
       PRAGMA user_version = 17; COMMIT;`)
+    version = 17
+  }
+  if (version === 17) {
+    database.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE automation_task_acceptance ADD COLUMN ${hostProofColumnV18};
+      PRAGMA user_version = 18; COMMIT;`)
   }
 }
 
@@ -848,6 +867,9 @@ export function openAutomationDatabase(path: string): DatabaseSync {
     database.exec('PRAGMA busy_timeout = 5000')
     database.exec('PRAGMA synchronous = FULL')
     migrate(database)
+    if (!hasAutomationHostProofColumn(database)) {
+      throw new Error('automation database has an invalid schema 18 Host proof column')
+    }
     if (path !== ':memory:') {
       database.exec('PRAGMA journal_mode = WAL')
       chmodSync(path, 0o600)

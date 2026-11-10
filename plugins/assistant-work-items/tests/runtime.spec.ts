@@ -16,6 +16,8 @@ import type { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { WorkItemAuthority } from '../src/authority.ts'
 import { type Config, normalizeConfig, type NormalizedConfig } from '../src/config.ts'
+import { continuationCanonical, continuationOwnerLineage, type ContinuationParent } from '../src/continuation-contract.ts'
+import { continuationDigest, continuationSourceKey } from '../src/continuation-record.ts'
 import { WorkItemDispatch } from '../src/dispatch.ts'
 import type { WorkItemEvaluationRegistration } from '../src/evaluation.ts'
 import { WorkItemLedger } from '../src/ledger.ts'
@@ -29,7 +31,9 @@ import type {
   PeerPolicyRequest,
   PeerPolicyService,
   PeerVerifierService,
+  WorkItemReplySource,
 } from '../src/peers.ts'
+import { createReplyContinuationPlan } from '../src/reply-contract.ts'
 import { OUTCOME_EVIDENCE_SOURCE } from '../src/outcome.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
 import { WorkItemStore } from '../src/store.ts'
@@ -224,11 +228,13 @@ class FakeAutomationsPeer extends Service {
   /** Host-only worker-run acceptance handles, keyed by occurrence. */
   readonly acceptance = new Map<string, { contractId: string; contractDigest: string; bindingId: string; bindingVersion: number; bindingGeneration: number }>()
   readonly acceptanceReads: string[] = []
+  continuationAcceptanceWorker: string | undefined
   acceptanceFailure: Error | null = null
   inspectOccurrenceAcceptance(input: { automationId: string; occurrenceId: string; workspace: string; agentPreset: string }) {
     this.acceptanceReads.push(input.occurrenceId)
     if (this.acceptanceFailure !== null) throw this.acceptanceFailure
-    if (input.automationId !== WORKER || input.workspace !== WORKSPACE || input.agentPreset !== PRESET) return undefined
+    if ((input.automationId !== WORKER && input.automationId !== this.continuationAcceptanceWorker)
+      || input.workspace !== WORKSPACE || input.agentPreset !== PRESET) return undefined
     return this.acceptance.get(input.occurrenceId)
   }
 }
@@ -270,13 +276,13 @@ function serviceContract(id = 'svc-acceptance-1', options: { ref?: string; owner
 }
 
 /** A passing receipt whose verification starts now, after the item exists. */
-function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now(), status: 'passed' | 'unknown' | 'failed' = 'passed') {
+function serviceReceipt(contract: TaskAcceptanceContract, startedAt = Date.now(), status: 'passed' | 'unknown' | 'failed' = 'passed', validUntil = startedAt + 1_800_000) {
   const now = startedAt
   return createTaskVerificationReceipt(contract, {
     protocol: 'task-verification/v1', id: 'svc-receipt-1', contractId: contract.id, contractDigest: contract.digest,
     scope: contract.scope, owner: contract.owner, task: contract.task,
     results: [{ criterionId: 'program', status, reason: status === 'passed' ? 'output-matched' : status === 'failed' ? 'output-differed' : 'probe-timeout', evidence: status !== 'unknown' ? [{ kind: 'process-output', ref: 'capture-1', digest: 'a'.repeat(64) }] : [] }],
-    startedAt: now, completedAt: now + 1, validUntil: now + 1_800_000,
+    startedAt: now, completedAt: now + 1, validUntil,
   })
 }
 
@@ -2264,6 +2270,60 @@ describe('work-item admission authority revalidation', () => {
     expect(boundEvents(fixture, itemId)).toBe(0)
   })
 
+  test('acceptance.bindWorkerRun scans both configured workers but requires a sealed continuation before binding', async () => {
+    const worker = 'continuation-worker'
+    const fixture = await serviceHarness({ extra: { ...bindWorkerRun(), ownerRecall: { enabled: true },
+      admission: { allowedKinds: ['review', 'owner-continuation'], maxOpenItems: 10, maxAdmitsPerHour: 10, cooldownMs: 0 },
+      ownerContinuation: { enabled: true, automationId: worker, allowedTools: ['work_item_claim', 'work_item_report', 'work_item_read_context'],
+        budgetId: 'continuation-budget', budgetAmount: 1, maxModelCalls: 3, maxToolCalls: 6, maxOutputTokens: 512, timeoutMs: 10000, expiresAt: Date.now() + 600_000 },
+    } })
+    fixture.automations!.continuationAcceptanceWorker = worker
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const continuation = admitPlain(fixture, 'bind-configured-continuation')
+    const legacyMain = admitPlain(fixture, 'bind-legacy-main')
+    const legacyContinuation = admitPlain(fixture, 'bind-legacy-continuation')
+    const foreign = admitPlain(fixture, 'bind-foreign-worker')
+    const stale = admitPlain(fixture, 'bind-continuation-stale-occ')
+    const absent = admitPlain(fixture, 'bind-continuation-absent-occ')
+    for (const item of [continuation, legacyMain, legacyContinuation, foreign, stale, absent]) {
+      publishWorkerContract(fixture, peer, item.occurrenceId)
+    }
+
+    // Seed current and invalid dispatch evidence without running any workers.
+    const raw = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'))
+    try {
+      const setWorker = raw.prepare('UPDATE work_item SET worker_automation_id = ? WHERE id = ?')
+      const setDispatch = raw.prepare('UPDATE work_item_dispatch SET automation_id = ? WHERE item_id = ?')
+      for (const item of [continuation, legacyContinuation, stale, absent]) {
+        setWorker.run(worker, item.itemId)
+        setDispatch.run(worker, item.itemId)
+      }
+      setDispatch.run('', legacyMain.itemId)
+      setDispatch.run('', legacyContinuation.itemId)
+      setDispatch.run('foreign-worker', foreign.itemId)
+      raw.prepare('UPDATE work_item_dispatch SET occurrence_id = ? WHERE item_id = ?').run('obsolete-occurrence', stale.itemId)
+      raw.prepare('UPDATE work_item_dispatch SET occurrence_id = NULL WHERE item_id = ?').run(absent.itemId)
+    } finally { raw.close() }
+
+    const store = readStore(fixture)
+    const candidates = store.listLateAcceptanceCandidates(WORKER, null, 10, worker)
+    expect(candidates.map(candidate => [candidate.item.id, candidate.automationId])).toEqual(expect.arrayContaining([
+      [continuation.itemId, worker], [legacyMain.itemId, WORKER],
+    ]))
+    expect(candidates).toHaveLength(2)
+    const first = store.listLateAcceptanceCandidates(WORKER, null, 1, worker)[0]!
+    const second = store.listLateAcceptanceCandidates(WORKER, { id: first.item.id, createdAt: first.item.createdAt }, 1, worker)[0]!
+    expect([first.item.id, second.item.id]).toEqual(candidates.map(candidate => candidate.item.id))
+
+    fixture.automations!.acceptanceReads.splice(0)
+    fixture.automations?.wake()
+    expect(fixture.automations?.acceptanceReads.toSorted()).toEqual([continuation.occurrenceId, legacyMain.occurrenceId].toSorted())
+    // A dispatch identity alone cannot stand in for a sealed continuation
+    // plan. The real native continuation integration covers a valid plan.
+    expect(store.lateAcceptanceBinding(continuation.itemId)).toBeUndefined()
+    expect(store.lateAcceptanceBinding(legacyMain.itemId)?.occurrenceId).toBe(legacyMain.occurrenceId)
+  })
+
   describe('through a real assistant-delivery owner route', () => {
     const ownerScope = { authorityId: ROUTE, principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: WORKSPACE, agentPreset: PRESET }
     /** Every non-bound `bindWorkerRun` outcome logged for `itemId`, in order. */
@@ -2587,22 +2647,34 @@ describe('work-item admission authority revalidation', () => {
     expect(fixture.delivery.enqueues[0]?.idempotencyKey).toBe(first)
   })
 
-  test('acceptance.holdReport holds a report on the worker run contract bound earlier by the same wake', async () => {
-    const fixture = await serviceHarness({ extra: holdReport() })
-    const peer = new FakeVerifierPeer(fixture.ctx)
-    const { itemId, occurrenceId } = admitPlain(fixture, 'hold-late-bound-1')
-    const contract = publishWorkerContract(fixture, peer, occurrenceId)
-    fixture.service.claim(workerAgent(occurrenceId))
-    // The wake binds the in-flight run before the worker reports.
-    fixture.automations?.wake()
-    expect(readStore(fixture).lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId, binding: { contractId: contract.id } })
-    await fixture.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-hold-late' })
-    expect(fixture.delivery.enqueues).toHaveLength(0)
+  test('acceptance.holdReport waits for a late contract across restart and sends one verified result', async () => {
+    const first = await serviceHarness({ extra: holdReport() })
+    const { itemId, occurrenceId } = admitPlain(first, 'hold-late-bound-1')
+    first.service.claim(workerAgent(occurrenceId))
+    const report = await first.service.report(workerAgent(occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-hold-late' })
+    expect(report).toMatchObject({ notified: false, delivery: 'pending' })
+    expect(first.delivery.enqueues).toHaveLength(0)
+    expect(heldReportDelivery(first, itemId)).toBeNull()
+
+    const second = await serviceHarness({ root: first.root, extra: holdReport() })
+    const peer = new FakeVerifierPeer(second.ctx)
+    second.automations?.wake()
+    expect(second.delivery.enqueues).toHaveLength(0)
+    expect(readStore(second).lateAcceptanceBinding(itemId)).toBeUndefined()
+    const contract = publishWorkerContract(second, peer, occurrenceId)
+    second.automations?.wake()
+    expect(readStore(second).lateAcceptanceBinding(itemId)).toMatchObject({ occurrenceId, binding: { contractId: contract.id } })
+    expect(second.delivery.enqueues).toHaveLength(0)
+
     peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
-    fixture.automations?.wake()
-    await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
-    expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
-    expect(fixture.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: contract.id, objectiveStatus: 'achieved' })
+    second.automations?.wake()
+    await vi.waitFor(() => expect(heldReportDelivery(second, itemId)).toBe('sent'))
+    expect(second.delivery.enqueues).toHaveLength(1)
+    expect(second.delivery.enqueues[0]?.text).toContain('**Work item ready:')
+    expect(second.service.acceptanceVerdict(itemId)).toMatchObject({ contractId: contract.id, objectiveStatus: 'achieved' })
+    second.automations?.wake()
+    await Promise.resolve()
+    expect(second.delivery.enqueues).toHaveLength(1)
   })
 
   test('acceptance.holdReport replaces a held report with the blocked report on any other verdict', async () => {
@@ -2662,8 +2734,8 @@ describe('work-item admission authority revalidation', () => {
       vi.setSystemTime(realNow + 60_000)
       fixture.automations?.wake()
       await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
-      expect(fixture.delivery.enqueues[0]?.text).toContain('_Unverified: no verifier verdict arrived within the 1-minute hold window')
-      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
+      expect(fixture.delivery.enqueues[0]?.text).toContain('_Unverified: no current verifier verdict arrived within the 1-minute hold window')
+      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item result unverified:')
       expect(heldReportDelivery(fixture, itemId)).toBe('sent')
       fixture.automations?.wake()
       await Promise.resolve()
@@ -2700,6 +2772,137 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
+  async function persistedReplyReport(required: boolean) {
+    const worker = 'continuation-worker'
+    const continuationSettings: Partial<Config> = {
+      ownerRecall: { enabled: true },
+      ownerReplyContinuation: true,
+      admission: { allowedKinds: ['review', 'owner-continuation'], maxOpenItems: 4, maxAdmitsPerHour: 10, cooldownMs: 0 },
+      ownerContinuation: { enabled: true, automationId: worker, allowedTools: ['work_item_claim', 'work_item_report', 'work_item_read_context'],
+        budgetId: 'continuation-budget', budgetAmount: 1, maxModelCalls: 3, maxToolCalls: 6, maxOutputTokens: 512, timeoutMs: 10000, expiresAt: Date.now() + 600_000 },
+    }
+    const first = await serviceHarness({ extra: { ...continuationSettings, ...holdReport(60_000) } })
+    first.automations!.continuationAcceptanceWorker = worker
+    const parent = admitPlain(first, 'persisted-required-parent')
+    const child = admitPlain(first, 'persisted-required-child')
+    first.service.claim(workerAgent(child.occurrenceId))
+    await first.service.report(workerAgent(child.occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'persisted-required-ready' })
+    expect(first.delivery.enqueues).toHaveLength(0)
+
+    const store = readStore(first)
+    const item = { ...store.findItemById(child.itemId)!, workerAutomationId: worker, kind: 'owner-continuation', maxAttempts: 1 }
+    const inputText = 'Check this result.'
+    const source: WorkItemReplySource = { protocol: 'assistant-delivery/work-item-reply/v1', id: 'persisted-reply',
+      sourceDigest: 'a'.repeat(64), inputText, inputSha256: continuationDigest(inputText), inputBytes: Buffer.byteLength(inputText),
+      admissionCursor: { epoch: 'fixture', sequence: 1 }, scope: item.scope, principalId: item.scope.principalId,
+      owner: { principalRecordId: item.owner.principalRecordId, principalVersion: item.owner.principalVersion },
+      binding: { id: item.originBindingId, version: item.owner.bindingVersion, generation: item.owner.generation },
+      target: { outboxId: 'parent-outbox', providerMessageId: 'parent-message', itemId: parent.itemId,
+        reportRevision: 1, reportDigest: 'a'.repeat(64), streamId: 'parent-stream' },
+      executionParentItemId: parent.itemId, state: 'pending' }
+    const lineage = continuationOwnerLineage(first.delivery.validateOwnerRoute({ authorityId: ROUTE, principalId: PRINCIPAL, workspace: WORKSPACE, agentPreset: PRESET }))
+    const prior: ContinuationParent = { itemId: parent.itemId, rootItemId: parent.itemId, reportRevision: null, outcomeRevision: null,
+      production: { protocol: 'assistant-automations/production-occurrence/v1', automationId: WORKER, occurrenceId: parent.occurrenceId,
+        taskId: 'parent-task', attemptId: 'parent-attempt', runId: 'parent-run', executionMode: 'production', status: 'succeeded',
+        completedAt: Date.now(), quiescent: true, budgetSettlementState: 'finalized',
+        immutableContext: { state: 'verified', definitionHash: 'a'.repeat(64), definitionVersion: 1, scope: { workspace: WORKSPACE, agentPreset: PRESET } } } }
+    const plan = createReplyContinuationPlan(item, source, prior, {
+      modelSelection: { provider: 'fixture', model: 'fixture' },
+      evidence: { kind: 'continuation-plan', itemId: parent.itemId, planDigest: 'b'.repeat(64), production: prior.production },
+    }, first.config, { protocol: 'assistant-work-items/continuation-activation/v1', stage: 'established', configurationDigest: 'a'.repeat(64),
+      activationNonce: 'a'.repeat(64), reconciliationKey: 'fixture', definitionHash: 'a'.repeat(64), definitionVersion: 1,
+      catalogDigest: 'a'.repeat(64), ownerLineage: lineage }, first.config.ownerContinuation!.allowedTools.map(name => ({ name })), required)
+    expect(plan.protocol).toBe('assistant-work-items/owner-continuation-plan/v2')
+    if (required) expect(plan.contract.acceptance).toMatchObject({ required: true, objective: source.inputText })
+    else expect(plan.contract.acceptance).toBeUndefined()
+    const planJson = continuationCanonical(plan)
+    const raw = new DatabaseSync(join(first.root, 'state', 'state.sqlite'))
+    try {
+      raw.prepare("UPDATE work_item SET kind = 'owner-continuation', worker_automation_id = ?, max_attempts = 1 WHERE id = ?").run(worker, child.itemId)
+      raw.prepare("UPDATE work_item_dispatch SET automation_id = ? WHERE item_id = ?").run(worker, child.itemId)
+      raw.prepare('INSERT INTO work_item_continuation VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)')
+        .run(child.itemId, parent.itemId, parent.itemId, continuationSourceKey(parent.itemId, source.sourceDigest), source.sourceDigest,
+          Buffer.from(source.inputText), continuationDigest(source.inputText), Buffer.from(planJson), continuationDigest(planJson), item.createdAt)
+    } finally { raw.close() }
+    return { first, child, continuationSettings }
+  }
+
+  test.each([true, false])('acceptance.holdReport disabled after restart preserves a persisted reply plan requirement (%s)', async required => {
+    const { first, child, continuationSettings } = await persistedReplyReport(required)
+    first.service.close()
+
+    const second = await serviceHarness({ root: first.root, extra: continuationSettings })
+    expect(second.config.acceptanceHoldReport).toBeUndefined()
+    second.automations?.wake()
+    if (!required) {
+      await Promise.resolve()
+      expect(heldReportDelivery(second, child.itemId)).toBeNull()
+      expect(second.delivery.enqueues).toHaveLength(0)
+      return
+    }
+    await vi.waitFor(() => expect(heldReportDelivery(second, child.itemId)).toBe('sent'))
+    expect(second.delivery.enqueues).toHaveLength(1)
+    expect(second.delivery.enqueues[0]?.text).toContain('**Work item blocked:')
+    expect(second.delivery.enqueues[0]?.text).toContain('acceptance-disabled')
+    second.automations?.wake()
+    expect(second.delivery.enqueues).toHaveLength(1)
+  })
+
+  test.each([['fresh', 'passed'], ['expired', 'passed'], ['fresh', 'failed'], ['expired', 'failed']] as const)(
+    'acceptance.holdReport rechecks a %s %s required receipt after restart', async (freshness, result) => {
+    const now = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(now)
+    try {
+      const { first, child, continuationSettings } = await persistedReplyReport(true)
+      const verifier = new FakeVerifierPeer(first.ctx)
+      const contract = publishWorkerContract(first, verifier, child.occurrenceId)
+      first.automations?.wake()
+      expect(readStore(first).lateAcceptanceBinding(child.itemId)?.occurrenceId).toBe(child.occurrenceId)
+      const receipt = serviceReceipt(contract, now, result, now + 1_000)
+      vi.setSystemTime(now + 1)
+      verifier.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt })
+      expect(first.service.settleAcceptance(child.itemId)).toMatchObject({ outcome: 'verified' })
+      expect(first.delivery.enqueues).toHaveLength(0)
+      first.service.close()
+
+      if (freshness === 'expired') vi.setSystemTime(now + 1_000)
+      const second = await serviceHarness({ root: first.root, extra: { ...continuationSettings, ...holdReport(60_000) } })
+      new FakeVerifierPeer(second.ctx).tasks.set(contract.id, { contract, state: 'done', reason: null, receipt })
+      second.automations?.wake()
+      if (freshness === 'expired') {
+        expect(second.delivery.enqueues).toHaveLength(0)
+        expect(second.service.acceptanceVerdict(child.itemId)?.receiptDigest).toBe(receipt.digest)
+        vi.setSystemTime(now + 60_000)
+        second.automations?.wake()
+      }
+      await vi.waitFor(() => expect(heldReportDelivery(second, child.itemId)).toBe('sent'))
+      expect(second.delivery.enqueues).toHaveLength(1)
+      expect(second.delivery.enqueues[0]?.text).toContain(freshness === 'expired'
+        ? '**Work item result unverified:' : result === 'passed' ? '**Work item ready:' : '**Work item blocked:')
+      second.automations?.wake()
+      expect(second.delivery.enqueues).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
+
+  test.each(['future', 'expired'])('acceptance.holdReport refuses a %s required receipt on first settlement', async freshness => {
+    const now = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(now)
+    try {
+      const { first, child } = await persistedReplyReport(true)
+      const verifier = new FakeVerifierPeer(first.ctx)
+      const contract = publishWorkerContract(first, verifier, child.occurrenceId)
+      first.automations?.wake()
+      const receipt = serviceReceipt(contract, now, 'passed', now + 1_000)
+      if (freshness === 'expired') vi.setSystemTime(now + 1_000)
+      verifier.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt })
+      expect(first.service.settleAcceptance(child.itemId)).toMatchObject({ outcome: 'drift' })
+      expect(first.service.acceptanceVerdict(child.itemId)).toBeNull()
+      expect(first.delivery.enqueues).toHaveLength(0)
+    } finally { vi.useRealTimers() }
+  })
+
   test('acceptance.holdReport keeps holding while the verifier is unavailable and still times out', async () => {
     const realNow = Date.now()
     vi.useFakeTimers({ toFake: ['Date'] })
@@ -2723,17 +2926,7 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
-  test('acceptance.holdReport reports an unbound item normally and leaves a withdrawn owner unsent', async () => {
-    // Unbound at report time: no acceptance contract was ever bound, so the
-    // report takes the ordinary dispatch path with no hold.
-    const unbound = await serviceHarness({ extra: holdReport() })
-    const plain = admitPlain(unbound, 'hold-unbound-1')
-    unbound.service.claim(workerAgent(plain.occurrenceId))
-    await unbound.service.report(workerAgent(plain.occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-unbound' })
-    expect(unbound.delivery.enqueues).toHaveLength(1)
-
-    // Held, then the owner route is withdrawn before release: Delivery refuses
-    // and the failed delivery is recorded, never retried behind the owner's back.
+  test('acceptance.holdReport leaves a withdrawn owner unsent', async () => {
     const realNow = Date.now()
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(realNow)
@@ -2807,54 +3000,49 @@ describe('work-item admission authority revalidation', () => {
     }
   })
 
-  test('acceptance.holdReport recovers a report whose acceptance binding disappeared as an ordinary send', async () => {
-    const fixture = await serviceHarness({ extra: holdReport() })
-    const peer = new FakeVerifierPeer(fixture.ctx)
-    const { itemId } = await executedBound(fixture, peer, 'hold-orphan-1', 'occ-1')
-    expect(fixture.delivery.enqueues).toHaveLength(0)
-    expect(heldReportDelivery(fixture, itemId)).toBeNull()
-    // The ready report committed while bound; the binding then disappears (a
-    // re-armed generation supersedes it, or the mandate lost it). This row can
-    // never settle, so the scan must recover it instead of stranding it.
-    rewriteBasis(fixture, itemId, basis => {
-      const mandate = basis?.['mandate'] as Record<string, unknown> | undefined
-      if (mandate === undefined) throw new Error('item has no mandate')
-      const rest = { ...mandate }
-      delete rest['acceptance']
-      return { ...basis, mandate: rest }
-    })
-    expect(readStore(fixture).findItemById(itemId)?.authority?.mandate?.acceptance).toBeUndefined()
-    const report = readStore(fixture).reports(itemId).at(-1)!
-    fixture.automations?.wake()
-    await vi.waitFor(() => expect(fixture.delivery.enqueues).toHaveLength(1))
-    expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
-    expect(fixture.delivery.enqueues[0]?.text).toContain(`item: \`${itemId}\``)
-    expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
-    // The recovered send is the ordinary report: normal delivery identity, no note.
-    expect(fixture.delivery.enqueues[0]?.idempotencyKey).toBe(report.deliveryKey)
-    expect(heldReportDelivery(fixture, itemId)).toBe('sent')
-    fixture.automations?.wake()
-    await Promise.resolve()
-    expect(fixture.delivery.enqueues).toHaveLength(1)
+  test('acceptance.holdReport keeps holding if a binding disappeared, then reports timeout as unverified', async () => {
+    const realNow = Date.now()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(realNow)
+    try {
+      const fixture = await serviceHarness({ extra: holdReport(60_000) })
+      const peer = new FakeVerifierPeer(fixture.ctx)
+      const { contract, itemId } = await executedBound(fixture, peer, 'hold-orphan-1', 'occ-1')
+      peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
+      expect(fixture.service.settleAcceptance(itemId)).toMatchObject({ outcome: 'verified' })
+      rewriteBasis(fixture, itemId, basis => {
+        const mandate = basis?.['mandate'] as Record<string, unknown> | undefined
+        if (mandate === undefined) throw new Error('item has no mandate')
+        const rest = { ...mandate }
+        delete rest['acceptance']
+        return { ...basis, mandate: rest }
+      })
+      fixture.automations?.wake()
+      expect(fixture.delivery.enqueues).toHaveLength(0)
+      expect(heldReportDelivery(fixture, itemId)).toBeNull()
+      vi.setSystemTime(realNow + 60_000)
+      fixture.automations?.wake()
+      await vi.waitFor(() => expect(heldReportDelivery(fixture, itemId)).toBe('sent'))
+      expect(fixture.delivery.enqueues).toHaveLength(1)
+      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item result unverified:')
+      expect(fixture.delivery.enqueues[0]?.text).not.toContain('**Work item ready:')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  test('acceptance.holdReport records a terminal no-send for a never-held report when ready is not notifiable', async () => {
+  test('acceptance.holdReport preserves the blocked notification when ready is not notifiable', async () => {
     const fixture = await serviceHarness({ extra: { ...holdReport(), delivery: { notifyOn: ['blocked'] } } })
-    const plain = admitPlain(fixture, 'hold-orphan-silent-1')
-    fixture.service.claim(workerAgent(plain.occurrenceId))
-    await fixture.service.report(workerAgent(plain.occurrenceId), { status: 'ready', summary: 'done', idempotencyKey: 'r-orphan-silent' })
-    // Report-time `notifyOn` excluded `ready`: the report was never held, never
-    // sent and has no delivery state, but the scan still sees the row.
-    expect(fixture.delivery.enqueues).toHaveLength(0)
-    expect(heldReportDelivery(fixture, plain.itemId)).toBeNull()
+    const peer = new FakeVerifierPeer(fixture.ctx)
+    const { contract, itemId } = await executedBound(fixture, peer, 'hold-ready-silent-1', 'occ-1')
     fixture.automations?.wake()
-    await vi.waitFor(() => expect(heldReportDelivery(fixture, plain.itemId)).toBe('failed'))
+    expect(heldReportDelivery(fixture, itemId)).toBeNull()
     expect(fixture.delivery.enqueues).toHaveLength(0)
-    // Terminal: the recovered row is not rescanned into a send.
+    peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract, Date.now(), 'failed') })
     fixture.automations?.wake()
-    await Promise.resolve()
-    expect(fixture.delivery.enqueues).toHaveLength(0)
-    expect(heldReportDelivery(fixture, plain.itemId)).toBe('failed')
+    await vi.waitFor(() => expect(heldReportDelivery(fixture, itemId)).toBe('sent'))
+    expect(fixture.delivery.enqueues).toHaveLength(1)
+    expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item blocked:')
   })
 
   test('acceptance.holdReport skips a malformed verdict row and still releases the rest of the page', async () => {
@@ -2888,7 +3076,7 @@ describe('work-item admission authority revalidation', () => {
     expect(heldReportDelivery(fixture, poison.itemId)).toBeNull()
   })
 
-  test('acceptance.holdReport does not hold a report when only an earlier generation has a verdict', async () => {
+  test.each([true, false])('acceptance.holdReport does not accept an earlier generation receipt (already recorded: %s)', async recorded => {
     const realNow = Date.now()
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(realNow)
@@ -2901,10 +3089,13 @@ describe('work-item admission authority revalidation', () => {
       if (admitted.outcome === 'refused') throw new Error(admitted.reasonCode)
       const itemId = admitted.item.id
       fixture.service.claim(workerAgent('occ-1'))
-      // Attempt 1 already has the item's one verdict (the store keeps one per item).
-      readStore(fixture).recordAcceptanceVerdict({ itemId, verifier: 'assistant-verifier', contractId: contract.id,
-        contractDigest: contract.digest, receiptId: 'svc-receipt-1', receiptDigest: 'b'.repeat(64),
-        objectiveStatus: 'achieved', completedAt: realNow, attempt: 1, occurrenceId: 'occ-1' })
+      const receipt = serviceReceipt(contract, realNow)
+      peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt })
+      if (recorded) {
+        readStore(fixture).recordAcceptanceVerdict({ itemId, verifier: 'assistant-verifier', contractId: contract.id,
+          contractDigest: contract.digest, receiptId: receipt.id, receiptDigest: receipt.digest,
+          objectiveStatus: 'achieved', completedAt: receipt.completedAt, attempt: 1, occurrenceId: 'occ-1' })
+      }
       await fixture.service.report(workerAgent('occ-1'), { status: 'progress', summary: 'still working', idempotencyKey: 'r-stale-progress' })
       // Lease expiry re-arms a second generation through the ordinary claim sweep.
       vi.setSystemTime(realNow + fixture.config.limits.leaseMs + 1)
@@ -2912,17 +3103,17 @@ describe('work-item admission authority revalidation', () => {
       expect(fixture.automations?.calls).toHaveLength(2)
       expect(fixture.service.claim(workerAgent('occ-2'))).toMatchObject({ attempt: 2, replayed: false })
       await fixture.service.report(workerAgent('occ-2'), { status: 'ready', summary: 'done', idempotencyKey: 'r-stale-ready' })
-      // The stale attempt-1 verdict can never settle attempt 2: holding would
-      // always wait out holdTimeoutMs, so the report goes out immediately.
-      expect(fixture.delivery.enqueues).toHaveLength(1)
-      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item ready:')
-      expect(fixture.delivery.enqueues[0]?.text).not.toContain('Unverified')
-      expect(heldReportDelivery(fixture, itemId)).toBe('sent')
-      expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'ready', attempt: 2 })
-      // Nothing was held, so a later wake has nothing to release or duplicate.
+      // The attempt-1 verdict is not proof of this attempt's outcome.
       fixture.automations?.wake()
-      await Promise.resolve()
+      expect(fixture.service.acceptanceVerdict(itemId)?.attempt ?? null).toBe(recorded ? 1 : null)
+      expect(fixture.delivery.enqueues).toHaveLength(0)
+      expect(heldReportDelivery(fixture, itemId)).toBeNull()
+      expect(readStore(fixture).findItemById(itemId)).toMatchObject({ state: 'ready', attempt: 2 })
+      vi.setSystemTime(Date.now() + fixture.config.acceptanceHoldReport!.holdTimeoutMs)
+      fixture.automations?.wake()
+      await vi.waitFor(() => expect(heldReportDelivery(fixture, itemId)).toBe('sent'))
       expect(fixture.delivery.enqueues).toHaveLength(1)
+      expect(fixture.delivery.enqueues[0]?.text).toContain('**Work item result unverified:')
     } finally {
       vi.useRealTimers()
     }

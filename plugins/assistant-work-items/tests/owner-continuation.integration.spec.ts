@@ -9,8 +9,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,7 +52,9 @@ class LocalSupplier extends LlmAdapter {
   readonly plans = new Map<string, Array<Command | undefined>>()
   readonly counts = new Map<string, number>()
   readonly pages = new Map<string, ContextPage[]>()
-  readonly stages = new Map<string, { kind: number; offset: number; last?: Command | undefined; reported?: boolean; attacked?: boolean }>()
+  readonly stages = new Map<string, { kind: number; offset: number; last?: Command | undefined; reported?: boolean; attacked?: boolean; artifactWritten?: boolean }>()
+  writeAcceptanceArtifact = false
+  beforeContinuationPrompt?: () => void
   groupedResponse = false
   markerAttack = false
   summaryGate: Promise<void> | undefined
@@ -68,14 +71,15 @@ class LocalSupplier extends LlmAdapter {
     if(foreground) { yield* chunks(foreground.shift()); return }
     const count=(this.counts.get(id)??0)+1;this.counts.set(id,count)
     if(!request.tools?.some(tool=>tool.name==='work_item_read_context')) {
+      const readsSource = request.tools?.some(tool=>tool.name==='work_item_read_source')
       if(count===1) yield* chunks({name:'work_item_claim',args:{}})
-      else if(count===2) yield* chunks({name:'work_item_read_source',args:{offset:0,max_bytes:512}})
-      else if(count===3) yield* chunks({name:'work_item_report',args:{status:'ready',summary:reportText}})
+      else if(count===2 && readsSource) yield* chunks({name:'work_item_read_source',args:{offset:0,max_bytes:512}})
+      else if(count===(readsSource ? 3 : 2)) yield* chunks({name:'work_item_report',args:{status:'ready',summary:reportText}})
       else { await this.summaryGate; yield* chunks() }
       return
     }
     const stage=this.stages.get(id)??{kind:0,offset:0};this.stages.set(id,stage)
-    if(count===1) {yield* chunks({name:'work_item_claim',args:{}});return}
+    if(count===1) {this.beforeContinuationPrompt?.();yield* chunks({name:'work_item_claim',args:{}});return}
     if(stage.last?.name==='work_item_read_context') {
       const result=request.messages.filter(message=>message.role==='tool').at(-1)
       if(!result) throw new Error('actual context result missing')
@@ -87,6 +91,7 @@ class LocalSupplier extends LlmAdapter {
     const kinds=['input','parent-brief','parent-report']
     let command: Command | undefined
     if(stage.kind<kinds.length) command={name:'work_item_read_context',args:{kind:kinds[stage.kind],offset:stage.offset,max_bytes:512}}
+    else if(this.writeAcceptanceArtifact && !stage.artifactWritten) {command={name:'continuation_write_fixture',args:{}};stage.artifactWritten=true}
     else if(!stage.reported) {command={name:'work_item_report',args:{status:'ready',summary:'Continued from current owner input and bounded historical pages.'}};stage.reported=true}
     if(stage.reported && !command && this.markerAttack && !stage.attacked) {command={name:'continuation_marker',args:{}};stage.attacked=true}
     stage.last=command
@@ -111,7 +116,7 @@ function decoded<T>(content: readonly { type: string; text?: string }[]): T {
   const text = content.map(c => c.text ?? '').join('\n').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')
   return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as T
 }
-async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean } = {}) {
+async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean; genericParent?: boolean; acceptanceArtifact?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'owner-continuation-native-'))
   const ctx = new Context(), agents: Agent[] = [], supplier = new LocalSupplier(); supplier.markerAttack=options.markerAttack===true;supplier.groupedResponse=options.groupedResponse===true
   let releaseSummary: (() => void) | undefined
@@ -132,18 +137,26 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
   const principal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }, principalId = 'web/browser/local/owner'
   const conversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'ordinary-source' }
   const scope = { authorityId: 'recall-owner', principalId, workspace: root, agentPreset: 'primary' }
+  const workerId = options.genericParent ? 'ordinary-worker' : 'diagnosis-worker'
+  const workerOwner = options.genericParent ? 'ordinary-parent-fixture' : 'assistant-work-items-diagnosis'
+  const workerBudget = options.genericParent ? 'ordinary-runs' : 'diagnosis-runs'
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), proposalMaintenanceIntervalMs: 0,
-    budgets: ['diagnosis-runs','continuation-runs'].map(id=>({id, metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' as const})), rules: [
+    budgets: [workerBudget,'continuation-runs'].map(id=>({id, metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' as const})), rules: [
       { id: 'local-pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
       { id: 'owner-ingest', effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
-      { id: 'intake', effect: 'allow', subject: { kind: 'background', id: 'work-items/v1', workspace: root, principal: principalId }, actions: ['admit'], resource: { kind: 'automation', id: 'diagnosis-worker' } },
-      { id: 'event', effect: 'allow', subject: { kind: 'external', id: 'work-items/v1', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: 'diagnosis-worker' } },
-      { id: 'install', effect: 'allow', subject: { kind: 'background', id: 'assistant-work-items-diagnosis', workspace: root, principal: principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: 'diagnosis-worker' }, context: { initiators: ['background'] } },
-      { id: 'worker', effect: 'allow', subject: { kind: 'background', id: 'diagnosis-worker', workspace: root, principal: principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'diagnosis-worker' }, context: { initiators: ['background'] } },
+      { id: 'intake', effect: 'allow', subject: { kind: 'background', id: 'work-items/v1', workspace: root, principal: principalId }, actions: ['admit'], resource: { kind: 'automation', id: workerId } },
+      { id: 'event', effect: 'allow', subject: { kind: 'external', id: 'work-items/v1', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: workerId } },
+      { id: 'install', effect: 'allow', subject: { kind: 'background', id: workerOwner, workspace: root, principal: principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: workerId }, context: { initiators: ['background'] } },
+      { id: 'worker', effect: 'allow', subject: { kind: 'background', id: workerId, workspace: root, principal: principalId }, actions: ['execute'], resource: { kind: 'automation', id: workerId }, context: { initiators: ['background'] } },
       { id: 'tools', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'work_item_*' }, context: { initiators: ['external', 'background'] } },
+      ...(options.genericParent ? ['work_item_claim', 'work_item_report'].map(tool => ({
+        id: `ordinary-parent-${tool}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root },
+        actions: ['execute'], resource: { kind: 'tool' as const, id: tool }, context: { initiators: ['background' as const] },
+      })) : []),
       { id: 'marker', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'continuation_marker' }, context: { initiators: ['background'] } },
+      ...(options.acceptanceArtifact === undefined ? [] : [{ id: 'acceptance-fixture-tool', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: 'continuation_write_fixture' }, context: { initiators: ['background' as const] } }]),
       { id: 'owner-reply', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
-      { id: 'recall', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['inspect-work-items'], resource: { kind: 'automation', id: 'diagnosis-worker' }, context: { initiators: ['external'] } },
+      { id: 'recall', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['inspect-work-items'], resource: { kind: 'automation', id: workerId }, context: { initiators: ['external'] } },
       { id: 'continue-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: principalId }, actions: ['continue-work-items'], resource: { kind: 'automation', id: 'continuation-worker' }, context: { initiators: ['external'] } },
       { id: 'continue-admit', effect: 'allow', subject: { kind: 'background', id: 'work-items/v1', workspace: root, principal: principalId }, actions: ['admit'], resource: { kind: 'automation', id: 'continuation-worker' }, context: { initiators: ['background'] } },
       { id: 'continue-event', effect: 'allow', subject: { kind: 'external', id: 'work-items/v1', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: 'continuation-worker' } },
@@ -154,7 +167,21 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
   const Approval = await import(pathToFileURL(dep.resolve('@deepseek-ai/dsh-user-approval')).href)
   await ctx.plugin(Approval.default as never, { policy: 'ask' } as never).await()
   let recallApprovalAsks = 0
-  ctx.on('approval/request', (request, next) => { if (['work_item_list', 'work_item_recall', 'work_item_continue'].includes(request.toolName)) recallApprovalAsks++; return next() }, { prepend: true })
+  ctx.on('approval/request', (request, next) => {
+    if (['work_item_list', 'work_item_recall', 'work_item_continue'].includes(request.toolName)) recallApprovalAsks++
+    if (options.acceptanceArtifact !== undefined && request.toolName === 'continuation_write_fixture' && request.callId !== undefined) {
+      const agent = request.agent
+      const execution = agent.ctx.get('assistantAutomationExecution')
+      const call = agent.session.snapshotEvents().find(event => event.type === 'tool/call'
+        && String(event.data.callId) === String(request.callId) && event.data.name === request.toolName)
+      if (execution?.mode === 'production' && execution.automationId === 'continuation-worker'
+        && call?.type === 'tool/call' && call.data.arguments === '{}'
+        && ctx.assistantPolicy.evaluateAgent(agent, 'execute', { kind: 'tool', id: request.toolName }).ruleId === 'acceptance-fixture-tool'
+        && query(join(root, 'items.sqlite'), "SELECT occurrence_id FROM work_item WHERE kind='owner-continuation'")
+          .some(row => row.occurrence_id === execution.occurrenceId)) return Promise.resolve('allowed-once' as const)
+    }
+    return next()
+  }, { prepend: true })
   ctx.llm.registerAdapter(['local','replacement'], supplier)
   ctx.on('agent/created', ({ agent }) => { agents.push(agent) })
   await ctx.plugin(AgentLoop, { agents: [] }).await()
@@ -178,16 +205,37 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
   // Every delegated expiry must be bounded by the same owner authorization.
   // Separate clock reads could put a child expiry one millisecond past scope.
   const expiresAt = Date.now() + 3600000
-  const workConfig: Config & { ownerRecall: { enabled: true } } = { enabled: true, mode: 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: 'diagnosis-worker',
+  let workConfig: Config & { ownerRecall: { enabled: true } } = { enabled: true, mode: 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: workerId,
     scope: { workspace: root, preset: 'primary', principalId, ownerRouteId: scope.authorityId, expiresAt }, ownerRecall: { enabled: true },
-    admission: { allowedKinds: ['diagnosis','owner-continuation'], maxOpenItems: 10, maxAdmitsPerHour: 10, cooldownMs: 0 }, limits: { maxReportBytes: 8192 },
-    sources: { foregroundFailures: { enabled: true, kind: 'diagnosis', includeTimedOut: true, sweepIntervalMs: 60000, maxCandidatesPerSweep: 10, maxAdmitsPerSweep: 1 } },
+    admission: { allowedKinds: [options.genericParent ? 'review' : 'diagnosis','owner-continuation'], maxOpenItems: 10, maxAdmitsPerHour: 10, cooldownMs: 0 }, limits: { maxReportBytes: 8192 },
     ownerContinuation: {enabled:true,automationId:'continuation-worker',allowedTools:continuationTools,budgetId:'continuation-runs',budgetAmount:1,maxModelCalls:24,maxToolCalls:22,maxOutputTokens:2048,timeoutMs:20000,expiresAt},
-    diagnosis: { enabled: true, budgetId: 'diagnosis-runs', budgetAmount: 1, maxModelCalls: 5, maxToolCalls: 4, maxOutputTokens: 512, timeoutMs: 15000, expiresAt } }
+    ...(options.genericParent ? {} : {
+      sources: { foregroundFailures: { enabled: true, kind: 'diagnosis', includeTimedOut: true, sweepIntervalMs: 60000, maxCandidatesPerSweep: 10, maxAdmitsPerSweep: 1 } },
+      diagnosis: { enabled: true, budgetId: workerBudget, budgetAmount: 1, maxModelCalls: 5, maxToolCalls: 4, maxOutputTokens: 512, timeoutMs: 15000, expiresAt },
+    }) }
+  if (options.genericParent) {
+    ctx.assistantAutomations.reconcileSystem({
+      owner: workerOwner, automationId: workerId, idempotencyKey: 'ordinary-parent/v1', desiredStatus: 'active',
+      definition: {
+        name: 'Ordinary review worker', schedule: { kind: 'at', at: new Date(expiresAt).toISOString() }, prompt: 'Claim the review and report the result.',
+        workspace: root, agentPreset: 'primary', principal: principalId, provider: 'local', model: 'scripted',
+        allowedTools: ['work_item_claim', 'work_item_report'], maxToolCalls: 2, maxOutputTokens: 512, timeoutMs: 15000,
+        misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, budgetId: workerBudget, budgetAmount: 1,
+      },
+    })
+  }
   const marker=vi.fn(async()=>({written:true}));let lateAllows=0;const markerPreparedStates: unknown[]=[]
   if(options.markerAttack) {
     workConfig.ownerContinuation!.allowedTools=[...continuationTools,'continuation_marker']
     ctx.tools.register(defineTool({name:'continuation_marker',description:'Finite fixture marker, no external IO',parameters:{},output:{schema:{type:'object',additionalProperties:false,properties:{written:{type:'boolean',required:true}}},render:()=>[]},execute:marker}))
+  }
+  if(options.acceptanceArtifact !== undefined) {
+    supplier.writeAcceptanceArtifact=true
+    workConfig.ownerContinuation!.allowedTools=[...continuationTools,'continuation_write_fixture']
+    ctx.tools.register(defineTool({name:'continuation_write_fixture',description:'Write one fixed artifact for the independent fixture check',parameters:{},output:{schema:{type:'object',additionalProperties:false,properties:{written:{type:'boolean',required:true}}},render:()=>[]},execute:async()=>{
+      await writeFile(join(root,'verified-result.txt'),options.acceptanceArtifact!,{flag:'wx'})
+      return {written:true}
+    }}))
   }
   let workFork=ctx.plugin(AssistantWorkItemsService,workConfig);await workFork.await()
   expect(ctx.tools.schemas().map(t => t.name)).toEqual(expect.arrayContaining(['work_item_list', 'work_item_recall', 'work_item_continue']))
@@ -199,13 +247,26 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
       const delivery = ctx.assistantDelivery
       authObservations.push({ deliveryGetIdentityStable: ctx.get('assistantDelivery') === ctx.get('assistantDelivery'), policyGetIdentityStable: ctx.get('assistantPolicy') === ctx.get('assistantPolicy'), signalAborted: execution.signal.aborted, name: execution.name, callIdType: typeof execution.callId, route: delivery.validateOwnerAgentForRoute(agent, scope.authorityId),
         turn: delivery.currentPreferenceTurn(agent), proof: delivery.inspectOwnerForegroundToolCall({ agent, authorityId: scope.authorityId, callId: String(execution.callId), toolName: execution.name, argumentsJson: JSON.stringify(execution.arguments) }),
-        input:execution.name==='work_item_continue'?delivery.readOwnerForegroundToolInput({agent,authorityId:scope.authorityId,callId:String(execution.callId),toolName:execution.name,argumentsJson:JSON.stringify(execution.arguments),offset:0,maxBytes:8192}):undefined,health:ctx.assistantWorkItems.health(),policy: ctx.assistantPolicy.evaluateAgent(agent, execution.name==='work_item_continue'?'continue-work-items':'inspect-work-items', { kind: 'automation', id: execution.name==='work_item_continue'?'continuation-worker':'diagnosis-worker' }) })
+        input:execution.name==='work_item_continue'?delivery.readOwnerForegroundToolInput({agent,authorityId:scope.authorityId,callId:String(execution.callId),toolName:execution.name,argumentsJson:JSON.stringify(execution.arguments),offset:0,maxBytes:8192}):undefined,health:ctx.assistantWorkItems.health(),policy: ctx.assistantPolicy.evaluateAgent(agent, execution.name==='work_item_continue'?'continue-work-items':'inspect-work-items', { kind: 'automation', id: execution.name==='work_item_continue'?'continuation-worker':workerId }) })
     }
     return next()
   }, { prepend: true })
   const snapshot = () => ({ workItems: ledger(join(root, 'items.sqlite')), runs: query(join(root, 'automations.sqlite'), 'SELECT * FROM automation_runs ORDER BY id'), budget: query(join(root, 'policy.sqlite'), 'SELECT * FROM budget_reservations ORDER BY id') })
   const produce = async () => {
-    await access!.prompt({ sessionId: 'ordinary-source', requestId: 'source-failure', text: 'Inspect the owner task 🧭.', content: [{ type: 'text', text: 'Inspect the owner task 🧭.' }] }, async () => { source.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect the owner task 🧭.' }], source: { kind: 'user', rpcId: 'source-failure' as never } })) }, new AbortController().signal)
+    if (options.genericParent) {
+      const binding = operator!.getActiveBinding(conversation)!
+      const admitted = ctx.assistantWorkItems.admitDecision({
+        protocol: 'work-items/execute-decision/v1', decisionId: 'ordinary-review', verdict: 'execute',
+        origin: 'explicit', mode: 'auto', budgetRemaining: 1,
+        mandate: {
+          kind: 'review', title: 'Review the owner task', brief: 'Inspect the owner task 🧭.',
+          originBindingId: binding.id, acceptanceRef: 'acceptance:ordinary-review/v1',
+        },
+      })
+      expect(admitted).toMatchObject({ outcome: 'admitted', dispatch: { state: 'dispatched' } })
+    } else {
+      await access!.prompt({ sessionId: 'ordinary-source', requestId: 'source-failure', text: 'Inspect the owner task 🧭.', content: [{ type: 'text', text: 'Inspect the owner task 🧭.' }] }, async () => { source.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Inspect the owner task 🧭.' }], source: { kind: 'user', rpcId: 'source-failure' as never } })) }, new AbortController().signal)
+    }
     await vi.waitFor(() => expect(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item')).toHaveLength(1), { timeout: 75000 })
     const itemId = String(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item')[0]!['id'])
     await vi.waitFor(() => expect(query(join(root, 'automations.sqlite'), 'SELECT status FROM automation_runs')).toHaveLength(1), { timeout: 20000 })
@@ -235,9 +296,23 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
     } finally { await handle.dispose() }
   }
   const restart=async()=>{await workFork.dispose();workFork=ctx.plugin(AssistantWorkItemsService,workConfig);await workFork.await()}
+  const enableAcceptance=async(objective:string,withProfile:boolean)=>{
+    const owner=ctx.assistantDelivery.validateOwnerRoute(scope)
+    const authority={kind:'runner' as const,id:'continuation-read-result',executable:process.execPath,
+      fixedArgs:['-e',"process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))"],timeoutMs:5_000,maxOutputBytes:1024}
+    const compiled=createVerifierAuthorities({authorities:[authority]})
+    await ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,authorities:[authority],profiles:withProfile?[{
+      id:'continuation-result',version:1,scope:{workspace:root,preset:'primary'},owner:{principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion},
+      taskKind:'automation-run',objective,validityMs:60_000,bounds:{maxDurationMs:5_000,maxEvidenceBytes:4096},
+      criteria:[{id:'result',kind:'process-behavior',authority:{id:authority.id,digest:compiled[0]!.digest},artifactPath:'verified-result.txt',stdin:'',expectedStdout:'verified',expectedExitCode:0}],
+    }]:[]}).await()
+    expect(options.genericParent).toBe(true)
+    workConfig={...workConfig,acceptance:{bindWorkerRun:{enabled:true},autoSettle:{enabled:true},holdReport:{enabled:true,holdTimeoutMs:60_000}}}
+    await restart()
+  }
   const waitRuns=async(count:number)=>{await vi.waitFor(()=>expect(query(join(root,'automations.sqlite'),'SELECT * FROM automation_runs')).toHaveLength(count),{timeout:30000});await ctx.assistantAutomations.whenIdle();return query(join(root,'automations.sqlite'),'SELECT * FROM automation_runs ORDER BY created_at')}
   const waitParentReport=async()=>{await vi.waitFor(()=>expect(query(join(root,'items.sqlite'),'SELECT * FROM work_item_report')).toHaveLength(1),{timeout:75000});return String(query(join(root,'items.sqlite'),'SELECT id FROM work_item')[0]!.id)}
-  return { markerPreparedStates,warnings,marker,lateAllows:()=>lateAllows,ctx,supplier,agents,operator,principal,scope,produce,newSession,ask,snapshot,root,authObservations,restart,waitRuns,waitParentReport,releaseSummary:()=>releaseSummary?.(),releaseDispose:()=>releaseDispose?.(),recallApprovalAsks:()=>recallApprovalAsks }
+  return { markerPreparedStates,warnings,marker,lateAllows:()=>lateAllows,ctx,supplier,agents,operator,principal,scope,produce,newSession,ask,snapshot,root,authObservations,restart,enableAcceptance,waitRuns,waitParentReport,releaseSummary:()=>releaseSummary?.(),releaseDispose:()=>releaseDispose?.(),recallApprovalAsks:()=>recallApprovalAsks }
 }
 
 // Native Agent/Cordis/SQLite/Policy/Host are real. Only the LLM supplier is
@@ -268,6 +343,90 @@ function expectPages(f: Awaited<ReturnType<typeof fixture>>, child: string, pare
   expect(pages.some(p=>p.kind==='parent-brief')).toBe(true)
 }
 describe('authenticated owner continuation through real native Host execution',()=>{
+  test.each([['verified','achieved'],['wrong bytes','not-achieved']] as const)('verifies the exact continuation result (%s) before notifying the owner',async(artifact,verdict)=>{
+    const f=await fixture({genericParent:true,acceptanceArtifact:artifact}),parent=await f.produce(),session=await f.newSession()
+    const objective='  请续办：写入预期的结果🧭。\n'
+    await f.enableAcceptance(objective,true)
+    const verifierPath=join(f.root,'verifier.sqlite'),automationPath=join(f.root,'automations.sqlite')
+    const contracts=()=>query(verifierPath,'SELECT id,payload FROM acceptance_contracts')
+    f.supplier.beforeContinuationPrompt=()=>{
+      expect(contracts().map(row=>JSON.parse(String(row.payload)))).toEqual([expect.objectContaining({objective})])
+      expect(query(automationPath,'SELECT contract_id FROM automation_task_acceptance')).toEqual([{contract_id:contracts()[0]!.id}])
+    }
+    const result=await f.ask(session,{name:'work_item_continue',args:{item_id:parent}},objective)
+    expect(result.isError,JSON.stringify(result.content)).toBe(false)
+    const runs=await f.waitRuns(2)
+    expect(runs[1],String(runs[1]?.diagnostic_json)).toMatchObject({automation_id:'continuation-worker',status:'succeeded',quiescent:1})
+    expect(JSON.parse(String(contracts()[0]!.payload))).toMatchObject({objective,task:{kind:'automation-run',ref:`run-${String(runs[1]!.task_id)}`}})
+    const reports=()=>query(join(f.root,'items.sqlite'),"SELECT report.* FROM work_item_report report JOIN work_item item ON item.id=report.item_id WHERE item.kind='owner-continuation'")
+    expect(reports()).toEqual([expect.objectContaining({status:'ready',delivery_id:null})])
+    const reportKey=String(reports()[0]!.delivery_key)
+    const outbox=()=>query(join(f.root,'delivery.sqlite'),'SELECT id,idempotency_key FROM outbox_messages')
+      .filter(row=>row.idempotency_key===reportKey || row.idempotency_key===`${reportKey}:blocked`)
+    expect(outbox()).toEqual([])
+    const worker=f.agents.find(agent=>String(agent.session.id)===String(runs[1]!.session_id))
+    const events=worker?.session.snapshotEvents()??[]
+    const writeCall=events.find(event=>event.type==='tool/call'&&event.data.name==='continuation_write_fixture')
+    const writeResult=events.find(event=>event.type==='tool/result'&&writeCall?.type==='tool/call'
+      &&String(event.data.message.source.callId)===String(writeCall.data.callId))
+    const written=await readFile(join(f.root,'verified-result.txt'),'utf8').catch((error:unknown)=>String(error))
+    const verifier=f.ctx.assistantVerifier
+    expect(verifier).toBeInstanceOf(AssistantVerifierService)
+    await verifier.tick()
+    const receipt=verifier.inspectAcceptedTask(String(contracts()[0]!.id))?.receipt
+    const detail=JSON.stringify({diagnostic:runs[1]!.diagnostic_json,writeResult,receipt,written,warnings:f.warnings})
+    expect(writeResult,detail).toMatchObject({type:'tool/result',data:{message:{isError:false}}})
+    expect(written,detail).toBe(artifact)
+    expect(receipt,JSON.stringify(receipt)).toMatchObject({objectiveStatus:verdict})
+    await vi.waitFor(async()=>{
+      await f.ctx.assistantAutomations.tick()
+      expect(reports()).toEqual([expect.objectContaining({delivery_id:expect.any(String)})])
+    },{timeout:5_000})
+    const outcomes=query(join(f.root,'items.sqlite'),"SELECT outcome.objective_status FROM work_item_outcome outcome JOIN work_item item ON item.id=outcome.item_id WHERE item.kind='owner-continuation'")
+    // The worker's outcome remains self-reported. Only the independent
+    // acceptance verdict can establish the checked objective status.
+    expect(outcomes.length).toBeGreaterThan(0)
+    for(const outcome of outcomes) expect(outcome.objective_status).toBe('unknown')
+    expect(f.ctx.assistantWorkItems.acceptanceVerdict(String(reports()[0]!.item_id)))
+      .toMatchObject({objectiveStatus:verdict,receiptId:receipt!.id,receiptDigest:receipt!.digest})
+    await f.ctx.assistantAutomations.tick()
+    expect(outbox()).toEqual([{
+      id:reports()[0]!.delivery_id,
+      idempotency_key:verdict==='not-achieved' ? `${reportKey}:blocked` : reportKey,
+    }])
+  },100000)
+
+  test('a missing exact acceptance profile prevents the required continuation from reaching its first model prompt',async()=>{
+    const f=await fixture({genericParent:true}),parent=await f.produce(),session=await f.newSession()
+    const objective='请续办这条未经配置的目标。'
+    await f.enableAcceptance(objective,false)
+    const nativeRun=vi.spyOn(f.ctx.assistantAutomations,'runAgentForHostExecution')
+    f.supplier.beforeContinuationPrompt=()=>{throw new Error('required continuation reached the model without an acceptance profile')}
+    const result=await f.ask(session,{name:'work_item_continue',args:{item_id:parent}},objective)
+    expect(result.isError,JSON.stringify(result.content)).toBe(false)
+    const runs=await f.waitRuns(2)
+    const diagnostic=String(runs[1]?.diagnostic_json)
+    const workerSession=String(runs[1]!.session_id)
+    expect(workerSession,diagnostic).toMatch(/^automation-/u)
+    expect(f.agents.some(agent=>String(agent.session.id)===workerSession),diagnostic).toBe(true)
+    expect(f.supplier.requests.filter(request=>String(request.sessionId)===workerSession),diagnostic).toHaveLength(0)
+    expect(query(join(f.root,'verifier.sqlite'),'SELECT id FROM acceptance_contracts'),diagnostic).toHaveLength(0)
+    expect(nativeRun,diagnostic).toHaveBeenCalledTimes(1)
+    await expect(nativeRun.mock.results[0]!.value,diagnostic).rejects.toMatchObject({
+      message:'required task acceptance profile is unavailable',
+      diagnostic:{failureCode:'runtime-conflict',promptSubmissionState:'not-submitted'},
+    })
+    expect(query(join(f.root,'items.sqlite'),"SELECT attempt FROM work_item WHERE kind='owner-continuation'"),diagnostic)
+      .toEqual([{attempt:0}])
+    expect(query(join(f.root,'items.sqlite'),"SELECT report.item_id FROM work_item_report report JOIN work_item item ON item.id=report.item_id WHERE item.kind='owner-continuation'"),diagnostic)
+      .toEqual([])
+    expect(runs[1],diagnostic).toMatchObject({automation_id:'continuation-worker',status:'unknown'})
+    expect(JSON.parse(diagnostic),diagnostic).toMatchObject({
+      failureClass:'infrastructure',failurePhase:'host-execution',failureCode:'host-executor-failed',
+      sideEffectState:'unknown',retryability:'unsafe',budgetSettlementState:'finalized',
+    })
+  },100000)
+
   test('uses the current owner input and paged historical report in one new production run and finite budget',async()=>{
     const f=await fixture(), parent=await f.produce(), session=await f.newSession()
     expect(f.snapshot().runs).toEqual([expect.objectContaining({status:'succeeded',execution_mode:'production',quiescent:1})])

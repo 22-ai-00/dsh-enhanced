@@ -113,19 +113,60 @@ linuxTest('claims the next fence after a released lease', async () => {
 })
 
 linuxTest('does not steal a renewing live controller lease', async () => {
+  // The startup deadline, the retry sleep and the competing renewal must share one
+  // controllable clock. With real timers a loaded worker can let the 500ms lease
+  // expire before the first renewal, so the case would fail for scheduling rather
+  // than for a lease-stealing defect. Real SQLite transactions and the original
+  // 500ms lease / 100ms renewal / 750ms observation window are preserved.
+  vi.useFakeTimers()
+  const originalClaim = IsolationLedger.prototype.claimController
+  const attempts: Array<{ at: number; ok: boolean }> = []
+  const claim = vi.spyOn(IsolationLedger.prototype, 'claimController').mockImplementation(
+    function (this: IsolationLedger, ownerId: string, ttlMs: number) {
+      const at = Date.now()
+      try { const value = originalClaim.call(this, ownerId, ttlMs); attempts.push({ at, ok: true }); return value }
+      catch (error) { attempts.push({ at, ok: false }); throw error }
+    })
   const { root, ledger, authority, config } = await fixture(500)
+  const claimedAt = Date.now()
   const context = new Context()
   const pending = context.plugin(AssistantIsolationService, config)
   let settled = false
   void pending.then(() => { settled = true }, () => { settled = true })
-  const renewal = setInterval(() => { ledger.renewController(authority, 500) }, 100)
+  const renewals: boolean[] = []
+  const renewal = setInterval(() => { renewals.push(ledger.renewController(authority, 500)) }, 100)
+  let disposed = false
+  const dispose = async () => { if (disposed) return; disposed = true; await context.fiber.dispose() }
   try {
-    await sleep(750)
-    expect(settled).toBe(false)
+    // Step through the original 750ms window; each of the seven real renewals must
+    // succeed and the pending mount must stay pending.
+    for (let step = 1; step <= 7; step++) {
+      await vi.advanceTimersByTimeAsync(100)
+      expect(settled).toBe(false)
+      expect(renewals.length).toBe(step)
+    }
+    expect(renewals).toEqual([true, true, true, true, true, true, true])
+    // Competitor claims really ran past the initial 500ms expiry point and were refused.
+    expect(attempts.some(attempt => !attempt.ok && attempt.at >= claimedAt + 500)).toBe(true)
     expect(controller(root)).toEqual({ owner_id: 'previous-host', fence: authority.fence })
+    // Releasing the live owner is the only thing that lets startup take over.
+    ledger.releaseController(authority)
+    await vi.advanceTimersByTimeAsync(500)
+    await pending
+    expect(renewals).toContain(false)
+    const taken = controller(root)
+    expect(taken.fence).toBe(authority.fence + 1)
+    expect(taken.owner_id).not.toBe('previous-host')
+    // Dispose while the controlled clock is still installed: the takeover lease is
+    // released at the same logical time the probe claims it.
+    await dispose()
+    const probe = new IsolationLedger(join(root, 'ledger.sqlite'))
+    try { expect(probe.claimController('after-dispose', 500).fence).toBe(authority.fence + 2) } finally { probe.close() }
   } finally {
     clearInterval(renewal)
-    await context.fiber.dispose()
+    claim.mockRestore()
+    await dispose()
+    vi.useRealTimers()
     ledger.close()
   }
 })

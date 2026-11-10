@@ -200,16 +200,16 @@ describe('supervised lifecycle v3 invariants', () => {
     })).toBe(false)
   })
 
-  test('accepts only reviewed Automations schema 15, 16 and 17 compact proofs across all lifecycle phases', () => {
+  test('accepts only reviewed Automations schema 15 through 18 compact proofs across all lifecycle phases', () => {
     const locations = ['source', 'previewAcceptance', 'postSwapAcceptance'] as const
-    for (const schemaVersion of [15, 16, 17]) {
+    for (const schemaVersion of [15, 16, 17, 18]) {
       const accepted = structuredClone(supervisedManifestFixture('post-swap-accepted'))
       for (const location of locations) accepted[location].automationsProof = {
         ...accepted[location].automationsProof, schemaVersion,
       }
       expect(lifecycleProfileTest.validSupervisedLifecycle(accepted), `reviewed schema ${schemaVersion}`).toBe(true)
     }
-    for (const schemaVersion of [14, 18, 0, -1, 16.5, '16', null]) for (const location of locations) {
+    for (const schemaVersion of [14, 19, 0, -1, 16.5, '16', null]) for (const location of locations) {
       const rejected = structuredClone(supervisedManifestFixture('post-swap-accepted'))
       rejected[location].automationsProof = { ...rejected[location].automationsProof, schemaVersion } as never
       expect(lifecycleProfileTest.validSupervisedLifecycle(rejected), `${location} schema ${schemaVersion}`).toBe(false)

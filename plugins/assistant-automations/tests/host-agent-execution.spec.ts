@@ -7,12 +7,14 @@ import { createUserMessage, LlmAdapter, ReasoningEffortId, ToolCallId,
 import { pluginRecordOf, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { createTaskAcceptanceContract, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import type { AcceptanceTaskInput, TaskAcceptanceRegistration } from '../src/acceptance.ts'
 import { hostAgentToolSchemaDigest } from '../src/host-agent-execution.ts'
 import { HostAutomationExecutorRegistry } from '../src/host-executors.ts'
 import { AutomationRunnerFailureError } from '../src/coordinator.ts'
@@ -691,6 +693,184 @@ describe('authorized Host invocation to one bounded native Agent', () => {
   })
 })
 
+
+describe('required Host Agent acceptance', () => {
+  const acceptance = Object.freeze({ required: true as const, objective: 'Summarize the owner-provided records.', sourceDigest: 'c'.repeat(64) })
+
+  function enable(f: Awaited<ReturnType<typeof harness>>, options: { owner?: boolean; profile?: boolean; expired?: boolean } = {}) {
+    let generation = 3
+    let live = true
+    let contract: TaskAcceptanceContract | undefined
+    const prepare = vi.fn((input: AcceptanceTaskInput) => {
+      if (options.profile === false) return null
+      const now = Date.now()
+      contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v1', id: 'host-acceptance', ...input,
+        profile: { id: 'host-profile', version: 1, digest: 'd'.repeat(64) },
+        issuedAt: now - 2_000, expiresAt: options.expired ? now - 1_000 : now + 60_000,
+        criteria: [{ id: 'result', kind: 'process-behavior', authority: { id: 'checker', digest: 'e'.repeat(64) },
+          artifactPath: 'result.txt', stdin: '', expectedStdout: 'verified', expectedExitCode: 0 }],
+        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
+      })
+      return { contractId: contract.id, contractDigest: contract.digest }
+    })
+    const registration: TaskAcceptanceRegistration = {
+      protocol: 'assistant-verifier/host-producer/v1', generation: f.service.trustedAcceptanceProducerGeneration(),
+      owner: { ownsTaskAcceptanceRegistration: candidate => live && candidate === registration },
+      requiresAcceptance: false, prepare, completed: async () => {},
+    }
+    f.ctx.provide('assistantVerifier' as never, {
+      ...registration.owner,
+      inspectAcceptedTask: (id: string) => contract?.id === id ? { contract, state: 'awaiting-execution' } : null,
+    } as never)
+    f.service.registerTaskAcceptanceSink(registration)
+    if (options.owner !== false) {
+      f.ctx.provide('assistantDelivery' as never, {
+        inspectOwnerRouteBinding: (input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) => ({
+          protocol: 'assistant-delivery/owner-route-binding/v1', bindingId: 'live-host-binding',
+          receipt: { ...input, receiptVersion: 2, bindingVersion: 2, generation,
+            principalRecordId: 'host-owner-record', principalVersion: 4 },
+        }),
+      } as never)
+    }
+    return { prepare, acceptedContract: () => contract!, unloadVerifier: () => { live = false },
+      advanceOwnerGeneration: () => { generation += 1 } }
+  }
+
+  const invokeRequired = (f: Awaited<ReturnType<typeof harness>>,
+    requirement: NonNullable<HostAgentExecutionContract['acceptance']> = acceptance) => {
+    const controller = new AbortController()
+    f.execute(async invocation => hostResult(await f.invoke(invocation, f.contract({ acceptance: requirement }),
+      { signal: controller.signal, assertCurrent: () => {} })))
+  }
+
+  test.each([
+    { invalid: 'oversized UTF-8', objective: '界'.repeat(2_731) },
+    { invalid: 'blank', objective: ' \t\n' },
+    { invalid: 'NUL', objective: 'valid prefix\0invalid suffix' },
+  ])('rejects an $invalid acceptance objective at the Host boundary', async ({ objective }) => {
+    const f = await harness()
+    invokeRequired(f, { ...acceptance, objective })
+    await f.run()
+    expect(f.apiErrors[0]).toMatchObject({ message: 'assistant-automations: invalid Host Agent acceptance requirement' })
+    expect(f.adapter.requests).toHaveLength(0)
+  })
+
+  test('durably binds the real Host attempt and delegated objective before its first model request', async () => {
+    const f = await harness(), { prepare, acceptedContract, advanceOwnerGeneration } = enable(f)
+    const path = join(f.root, 'automations.sqlite')
+    const duringPrompt: Array<Record<string, unknown>> = []
+    f.adapter.script = () => {
+      duringPrompt.push(...rows(path, 'SELECT * FROM automation_task_acceptance'))
+      return text()
+    }
+    invokeRequired(f)
+    const occurrence = await f.run()
+    const terminal = f.service.inspectProductionOccurrence({ automationId: f.automationId, occurrenceId: occurrence.id,
+      workspace: f.root, agentPreset: 'primary' })
+    expect(terminal).toMatchObject({ status: 'succeeded', quiescent: true, budgetSettlementState: 'finalized' })
+    expect(f.adapter.requests).toHaveLength(1)
+    expect(f.adapter.requests[0]).toMatchObject({ provider: 'mock', model: 'script-model', reasoningEffort: 'low' })
+    expect(prepare).toHaveBeenCalledExactlyOnceWith({
+      scope: { workspace: f.root, preset: 'primary' }, owner: { principalRecordId: 'host-owner-record', principalVersion: 4 },
+      task: { kind: 'automation-run', ref: `run-${terminal!.taskId}` }, objective: acceptance.objective,
+    })
+    expect(duringPrompt).toHaveLength(1)
+    expect(duringPrompt[0]).toMatchObject({ task_id: terminal!.taskId, submitted: 1, binding_generation: 3 })
+    const proof = JSON.parse(duringPrompt[0]!.host_proof_json as string)
+    expect(proof).toMatchObject({ occurrenceId: occurrence.id, attemptId: terminal!.attemptId,
+      definitionHash: terminal!.immutableContext.definitionHash, activationNonce: f.activation.activationNonce,
+      executionContractDigest: f.nativeResults[0]!.contractDigest, sourceDigest: acceptance.sourceDigest })
+    const accepted = { ...prepare.mock.calls[0]![0], id: acceptedContract().id, digest: acceptedContract().digest }
+    expect(await f.service.inspectAcceptedExecution(accepted)).toMatchObject({
+      executionRef: terminal!.runId, status: 'succeeded', quiescent: true,
+    })
+    const lookup = { automationId: f.automationId, occurrenceId: occurrence.id, workspace: f.root, agentPreset: 'primary' }
+    expect(f.service.inspectOccurrenceAcceptance(lookup)).toMatchObject({ contractId: 'host-acceptance', bindingGeneration: 3 })
+    const db = new DatabaseSync(path)
+    try {
+      // Simulate a crash after the run commit and before the acceptance update.
+      db.prepare('UPDATE automation_task_acceptance SET quiescent = 0 WHERE task_id = ?').run(terminal!.taskId)
+      expect(await f.service.inspectAcceptedExecution(accepted)).toMatchObject({
+        executionRef: terminal!.runId, status: 'succeeded', quiescent: true,
+      })
+      const update = db.prepare('UPDATE automation_task_acceptance SET host_proof_json = ? WHERE task_id = ?')
+      update.run(null, terminal!.taskId)
+      expect(await f.service.inspectAcceptedExecution(accepted)).toBeNull()
+      update.run(JSON.stringify({ ...proof, attemptId: 'stale-attempt' }), terminal!.taskId)
+      expect(await f.service.inspectAcceptedExecution(accepted)).toBeNull()
+      expect(f.service.inspectOccurrenceAcceptance(lookup)).toBeUndefined()
+      update.run(JSON.stringify(proof), terminal!.taskId)
+
+      // Bypass the immutable-run trigger in this disposable database to test a run without quiescence.
+      db.exec('DROP TRIGGER automation_run_quiescence_immutable')
+      const updateRun = db.prepare('UPDATE automation_runs SET quiescent = ? WHERE id = ?')
+      updateRun.run(0, terminal!.runId)
+      expect(await f.service.inspectAcceptedExecution(accepted)).toBeNull()
+      expect(f.service.inspectOccurrenceAcceptance(lookup)).toBeUndefined()
+      updateRun.run(1, terminal!.runId)
+    } finally { db.close() }
+    expect(await f.service.inspectAcceptedExecution(accepted)).toMatchObject({ executionRef: terminal!.runId, quiescent: true })
+    advanceOwnerGeneration()
+    expect(await f.service.inspectAcceptedExecution(accepted)).toBeNull()
+  })
+
+  test.each(['sink', 'owner', 'profile'] as const)('does not submit a model request without required %s', async missing => {
+    const f = await harness()
+    if (missing !== 'sink') enable(f, { owner: missing !== 'owner', profile: missing !== 'profile' })
+    invokeRequired(f)
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(0)
+    expect(rows(join(f.root, 'automations.sqlite'), 'SELECT task_id FROM automation_task_acceptance')).toEqual([])
+  })
+
+  test('does not bind or submit when the owner changes during acceptance preparation', async () => {
+    const f = await harness(), { prepare, advanceOwnerGeneration } = enable(f)
+    prepare.mockImplementation(() => {
+      advanceOwnerGeneration()
+      return { contractId: 'host-acceptance', contractDigest: 'd'.repeat(64) }
+    })
+    invokeRequired(f)
+    await f.run()
+    expect(prepare).toHaveBeenCalledTimes(1)
+    expect(f.adapter.requests).toHaveLength(0)
+    expect(rows(join(f.root, 'automations.sqlite'), 'SELECT task_id FROM automation_task_acceptance')).toEqual([])
+  })
+
+  test('does not prove a completed Agent whose outer Host budget could not settle', async () => {
+    const f = await harness(), { prepare, acceptedContract } = enable(f)
+    f.finalize.mockImplementation(() => { throw new Error('budget settlement unavailable') })
+    f.adapter.script = () => text()
+    invokeRequired(f)
+    const occurrence = await f.run()
+    expect(f.adapter.requests).toHaveLength(1)
+    expect(f.nativeResults[0]).toMatchObject({ outcome: 'succeeded', quiescent: true })
+    const accepted = { ...prepare.mock.calls[0]![0], id: acceptedContract().id, digest: acceptedContract().digest }
+    expect(await f.service.inspectAcceptedExecution(accepted)).toBeNull()
+    expect(f.service.inspectOccurrenceAcceptance({ automationId: f.automationId, occurrenceId: occurrence.id,
+      workspace: f.root, agentPreset: 'primary' })).toBeUndefined()
+  })
+
+  test('rejects an expired contract before its first model request', async () => {
+    const f = await harness()
+    enable(f, { expired: true })
+    invokeRequired(f)
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(0)
+    expect(rows(join(f.root, 'automations.sqlite'), 'SELECT task_id FROM automation_task_acceptance')).toEqual([])
+  })
+
+  test('blocks the generated tool call if the verifier unloads during generation', async () => {
+    const f = await harness(), { unloadVerifier } = enable(f)
+    f.adapter.script = () => {
+      unloadVerifier()
+      return toolCalls(['probe'])
+    }
+    invokeRequired(f)
+    await f.run()
+    expect(f.adapter.requests).toHaveLength(1)
+    expect(f.probe).not.toHaveBeenCalled()
+  })
+})
 
 describe('Host Agent synchronous authorization fence', () => {
   test('advertises version 1 and checks a synchronous owner before model/tool boundaries', async () => {

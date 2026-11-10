@@ -131,7 +131,11 @@ test('v10 saved proofs migrate without granting legacy success activation author
   h.db.exec(`
     DROP TRIGGER automation_run_quiescence_immutable;
     ALTER TABLE automation_runs DROP COLUMN quiescent;
+    DROP TRIGGER automation_retired_no_activate_insert;
+    DROP TRIGGER automation_retired_no_activate_update;
+    DROP TABLE automation_system_retirements;
     ALTER TABLE automation_growth_artifacts DROP COLUMN canary_evaluation_proof_json;
+    DROP TABLE automation_task_acceptance;
     ALTER TABLE automation_occurrences DROP COLUMN external_event_digest;
     ALTER TABLE automation_occurrences DROP COLUMN external_event_json;
     PRAGMA user_version = 10;
@@ -139,7 +143,7 @@ test('v10 saved proofs migrate without granting legacy success activation author
   const reopened = new GrowthAutomationStore(h.path)
   cleanup.push(() => reopened.close())
   Object.assign(h.service, { growthStore: reopened })
-  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 })
+  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 18 })
   expect(() => h.service.inspectWorkflowCanary(inspect)).toThrow(/evidence/)
   expect(() => h.service.promoteWorkflowAutomation(request)).toThrow(/evidence/)
   expect(h.activate).not.toHaveBeenCalled()

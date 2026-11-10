@@ -1370,17 +1370,20 @@ export class WorkItemStore {
 
   /**
    * WP21 slice 6 candidates: items whose worker dispatch is `dispatched` to
-   * `workerAutomationId` under their current occurrence, whose mandate binds
+   * their configured main or continuation worker under the current occurrence, whose mandate binds
    * no contract, that have no verdict yet and no `acceptance-bound` row for
    * that occurrence. Never-run, withdrawn, failed and dropped items are out.
    * (created_at, id) order strictly after `after`; bounded scan, no schema change.
    */
-  listLateAcceptanceCandidates(workerAutomationId: string, after: Readonly<{ createdAt: number; id: string }> | null, limit: number): readonly WorkItemLateAcceptanceCandidate[] {
+  listLateAcceptanceCandidates(workerAutomationId: string, after: Readonly<{ createdAt: number; id: string }> | null, limit: number,
+    continuationAutomationId?: string): readonly WorkItemLateAcceptanceCandidate[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('invalid-input', 'acceptance bind limit must be between 1 and 10')
     const rows = this.#statement(`
       SELECT ${ITEM_ALIASES} FROM work_item i
       WHERE EXISTS (SELECT 1 FROM work_item_dispatch d WHERE d.item_id = i.id AND d.state = 'dispatched'
-          AND d.occurrence_id IS NOT NULL AND d.occurrence_id = i.occurrence_id AND (d.automation_id = ? OR d.automation_id = ''))
+          AND d.occurrence_id IS NOT NULL AND d.occurrence_id = i.occurrence_id
+          AND ((d.automation_id = i.worker_automation_id AND d.automation_id IN (?, ?))
+            OR (d.automation_id = '' AND i.worker_automation_id = ?)))
         AND i.state NOT IN ('failed', 'dropped')
         AND CASE WHEN json_valid(i.authority_basis) THEN json_extract(i.authority_basis, '$.mandate.acceptance') END IS NULL
         AND NOT EXISTS (SELECT 1 FROM work_item_event e WHERE e.item_id = i.id AND e.kind = '${ACCEPTANCE_VERIFIED_EVENT}')
@@ -1388,13 +1391,16 @@ export class WorkItemStore {
           AND CASE WHEN json_valid(e.detail) THEN json_extract(e.detail, '$.occurrenceId') END = i.occurrence_id)
         AND (i.created_at, i.id) > (?, ?)
       ORDER BY i.created_at ASC, i.id ASC LIMIT ?
-    `).all(workerAutomationId, after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]
+    `).all(workerAutomationId, continuationAutomationId ?? null, workerAutomationId, after?.createdAt ?? -1, after?.id ?? '', limit) as Row[]
     const candidates: WorkItemLateAcceptanceCandidate[] = []
     for (const row of rows) {
       const item = itemFromRow(row)
       const dispatch = this.getDispatch(item.id)
       if (dispatch?.state !== 'dispatched' || dispatch.occurrenceId === null || dispatch.occurrenceId !== item.occurrenceId) continue
-      candidates.push(Object.freeze({ item, automationId: dispatch.automationId === '' ? workerAutomationId : dispatch.automationId, occurrenceId: dispatch.occurrenceId,
+      // Empty dispatch IDs predate explicit worker IDs and belong only to the main worker.
+      const automationId = dispatch.automationId === '' ? workerAutomationId : dispatch.automationId
+      if (automationId !== item.workerAutomationId || (automationId !== workerAutomationId && automationId !== continuationAutomationId)) continue
+      candidates.push(Object.freeze({ item, automationId, occurrenceId: dispatch.occurrenceId,
         // This generation was armed at `occurredAt` (a re-arm sets it to the
         // re-arm or resume-due time) and is woken no earlier, so its run
         // cannot have started before it or before the item existed.
@@ -1482,7 +1488,8 @@ export class WorkItemStore {
    * position instead of rescanning rows that are still waiting. Read-only and
    * bounded; no schema change.
    */
-  listHeldAcceptanceReports(limit: number, after?: Readonly<{ recordedAt: number; itemId: string }>): readonly Readonly<{ item: WorkItemRecord; report: WorkItemReportRecord }>[] {
+  listHeldAcceptanceReports(limit: number, after?: Readonly<{ recordedAt: number; itemId: string }>,
+    continuationOnly = false): readonly Readonly<{ item: WorkItemRecord; report: WorkItemReportRecord }>[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) fail('invalid-input', 'held report limit must be between 1 and 100')
     const keyset = after === undefined ? '' : ' AND (r.recorded_at > ? OR (r.recorded_at = ? AND i.id > ?))'
     const rows = this.#statement(`
@@ -1494,6 +1501,7 @@ export class WorkItemStore {
         AND r.status = 'ready' AND r.delivery_state IS NULL
         AND i.observed = 0 AND i.attempt >= 1
         AND (i.state = 'ready' OR (i.state = 'blocked' AND i.state_reason LIKE 'acceptance-%'))
+        ${continuationOnly ? "AND i.kind = 'owner-continuation'" : ''}
         ${keyset}
       ORDER BY r.recorded_at ASC, i.id ASC LIMIT ?
     `).all(...(after === undefined ? [] : [after.recordedAt, after.recordedAt, after.itemId]), limit) as Row[]

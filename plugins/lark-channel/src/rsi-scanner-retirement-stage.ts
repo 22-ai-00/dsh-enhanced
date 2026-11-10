@@ -161,11 +161,9 @@ export function verifyScannerRetirementPersistence(input: { plan: ScannerRetirem
     || digest(unsigned) !== completionDigest || !same(completion(plan, receipt.after), receipt)) fail('invalid-plan')
   const current = inspectAutomationRetirementSnapshot(plan.automationsDatabasePath)
   sameStage(plan.before, current)
-  // A validated historical completion may remain on v16 without opening a
-  // writer. A v17 completion can never use that allowance to accept a downgrade.
-  const historicalV16 = current.schemaVersion === 16 && receipt.after.schemaVersion === 16
-    && (plan.before.schemaVersion === 15 || plan.before.schemaVersion === 16)
-  if (current.schemaVersion !== 17 && !historicalV16) fail('persistence-drift')
+  // An already completed retirement can stay on its original schema or
+  // advance through a reviewed migration. Never accept a downgrade.
+  if (current.schemaVersion < receipt.after.schemaVersion) fail('persistence-drift')
   for (const target of plan.targets) {
     const record = receipt.after.records.find(row => row.id === target.automationId)
     const marker = receipt.after.retirements.find(row => row.owner === target.owner && row.automationId === target.automationId)

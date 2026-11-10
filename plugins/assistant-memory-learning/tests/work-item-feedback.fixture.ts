@@ -233,8 +233,16 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
     workConfig.ownerContinuation!.allowedTools=[...continuationTools,'continuation_marker']
     ctx.tools.register(defineTool({name:'continuation_marker',description:'Finite fixture marker, no external IO',parameters:{},output:{schema:{type:'object',additionalProperties:false,properties:{written:{type:'boolean',required:true}}},render:()=>[]},execute:marker}))
   }
-  // Real authenticated admission establishes the owner route before worker activation.
+  // Finish the authenticated foreground turn before WorkItems subscribes to
+  // scheduler wakes. An empty first sweep would defer intake for a full interval.
   await ctx.assistantDelivery.acceptInbound({channel:'web',account:'browser',eventId:'source-failure',occurredAt:Date.now(),principal,conversation,kind:'text',text:`Inspect owner task ${supplier.tag}: this random marker must survive the actual report.`})
+  await ctx.assistantDelivery.tick();await ctx.assistantDelivery.whenIdle()
+  const source = operator.getInboxByProviderEvent('web', 'browser', 'source-failure')!
+  const foreground = query(join(root, 'delivery.sqlite'), `SELECT inbox_id, status, quiescent, model_selection_state, termination_json,
+    json_extract(termination_json, '$.handleDisposed') AS handle_disposed FROM delivery_foreground_executions`)
+  expect(foreground, JSON.stringify({warnings,requests:supplier.requests.map(r=>({sessionId:r.sessionId,provider:r.provider})),inbox:query(join(root,'delivery.sqlite'),'SELECT status,failure_code FROM inbox_messages')})).toEqual([
+    { inbox_id: source.id, status: 'unknown', quiescent: 0, model_selection_state: 'frozen', termination_json: expect.any(String), handle_disposed: 1 },
+  ])
   let workFork=ctx.plugin(AssistantWorkItemsService,workConfig);await workFork.await()
   expect(ctx.tools.schemas().map(t => t.name)).toEqual(expect.arrayContaining(['work_item_list', 'work_item_recall', 'work_item_continue']))
   if(options.markerAttack) ctx.on('tools/pre-execute',async(execution,next)=>{if(execution.name==='continuation_marker'){lateAllows++;markerPreparedStates.push(query(join(root,'items.sqlite'),"SELECT report.status FROM work_item_report AS report JOIN work_item AS item ON report.item_id=item.id WHERE item.kind='owner-continuation'"));return {kind:'allow'}}return next()},{prepend:true})
@@ -256,12 +264,8 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
     expect(typeof ctx.assistantDelivery.inspectOwnerWorkItemLearningTask).toBe('function')
     expect(typeof ctx.assistantDelivery.workItemReplyProtocolVersion).toBe('function')
     expect(ctx.assistantDelivery.workItemReplyProtocolVersion()).toBe(1)
-    await ctx.assistantDelivery.tick();await ctx.assistantDelivery.whenIdle()
-    expect(query(join(root,'delivery.sqlite'),'SELECT status,quiescent FROM delivery_foreground_executions'),JSON.stringify({warnings,requests:supplier.requests.map(r=>({sessionId:r.sessionId,provider:r.provider})),inbox:query(join(root,'delivery.sqlite'),'SELECT status,failure_code FROM inbox_messages')})).toEqual([expect.objectContaining({status:expect.stringMatching(/^(failed|unknown)$/u)})])
     await vi.waitFor(() => expect(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item'),JSON.stringify(warnings)).toHaveLength(1), { timeout: 60000 })
     const itemId = String(query(join(root, 'items.sqlite'), 'SELECT id FROM work_item')[0]!['id'])
-    const source=operator!.getInboxByProviderEvent('web','browser','source-failure')!
-    expect(query(join(root,'delivery.sqlite'),"SELECT inbox_id,status,termination_json FROM delivery_foreground_executions")).toEqual([expect.objectContaining({inbox_id:source.id,status:'unknown',termination_json:expect.any(String)})])
     expect(supplier.requests.filter(request=>!String(request.sessionId).startsWith('automation-'))).toHaveLength(1)
     await vi.waitFor(() => expect(query(join(root, 'automations.sqlite'), 'SELECT status FROM automation_runs')).toHaveLength(1), { timeout: 60000 })
     await ctx.assistantAutomations.whenIdle()

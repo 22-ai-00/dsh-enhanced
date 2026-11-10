@@ -3,6 +3,7 @@ import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgent
 import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { validateTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
 import type {
@@ -436,7 +437,7 @@ export class AssistantAutomationsService extends Service implements
     if (policy === undefined) throw new Error('assistant-automations: assistantPolicy service is required')
     this.config = config
     this.policy = policy
-    this.#hostAgents = new HostAgentExecutions(ctx, policy)
+    this.#hostAgents = new HostAgentExecutions(ctx, policy, input => this.prepareTaskAcceptance(input))
     this.hostExecutors = new HostAutomationExecutorRegistry(this.#hostAgents)
     this.preparationRunner = new AutomationPreparationRunner(ctx, policy)
     const initialDelivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
@@ -610,7 +611,30 @@ export class AssistantAutomationsService extends Service implements
 
   async inspectAcceptedExecution(contract: AcceptanceContract): Promise<AcceptedExecution | null> {
     this.assertActive()
-    return this.store.inspectAcceptedExecution(contract)
+    return this.store.inspectAcceptedExecution(contract, (snapshot, binding) => {
+      const current = this.inspectHostAcceptanceOwner(snapshot)
+      return current !== undefined && current.owner.principalRecordId === contract.owner.principalRecordId
+        && current.owner.principalVersion === contract.owner.principalVersion && current.binding.id === binding.id
+        && current.binding.version === binding.version && current.binding.generation === binding.generation
+    })
+  }
+
+  private inspectHostAcceptanceOwner(snapshot: AutomationRecord) {
+    const { definition } = snapshot
+    if (!isHostAutomationDefinition(definition)) return undefined
+    try {
+      const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+      const route = delivery?.inspectOwnerRouteBinding({ authorityId: definition.execution.ownerRouteId,
+        principalId: definition.principal, workspace: definition.workspace, agentPreset: definition.agentPreset })
+      const receipt = route?.receipt
+      if (route?.protocol !== 'assistant-delivery/owner-route-binding/v1' || receipt?.receiptVersion !== 2
+        || receipt.authorityId !== definition.execution.ownerRouteId || receipt.principalId !== definition.principal
+        || receipt.workspace !== definition.workspace || receipt.agentPreset !== definition.agentPreset
+        || !route.bindingId || !receipt.principalRecordId
+        || ![receipt.bindingVersion, receipt.generation, receipt.principalVersion].every(value => Number.isSafeInteger(value) && value > 0)) return undefined
+      return Object.freeze({ owner: Object.freeze({ principalRecordId: receipt.principalRecordId, principalVersion: receipt.principalVersion }),
+        binding: Object.freeze({ id: route.bindingId, version: receipt.bindingVersion, generation: receipt.generation }) })
+    } catch { return undefined }
   }
 
   private prepareTaskAcceptance(input: {
@@ -618,36 +642,69 @@ export class AssistantAutomationsService extends Service implements
     automationId: string
     scope: { workspace: string; preset: string }
     objective: string
+    host?: { executionContractDigest: string; sourceDigest: string }
     owner?: { principalRecordId: string; principalVersion: number }
     binding?: { id: string; version: number; generation: number }
-  }): void {
+  }): void | (() => void) {
+    const required = this.acceptanceRequired || input.host !== undefined
     const sink = this.acceptanceSink
     if (sink === undefined) {
-      if (this.acceptanceRequired) {
+      if (required) {
         throw new AssistantAutomationsError('runtime-conflict', 'required task acceptance verifier is unavailable')
       }
       return
     }
-    if (input.owner === undefined || input.binding === undefined) {
-      if (this.acceptanceRequired) {
+    const snapshot = input.host === undefined ? undefined : this.store.getTaskExecutionSnapshot(input.taskId)
+    const hostOwner = snapshot?.id === input.automationId ? this.inspectHostAcceptanceOwner(snapshot) : undefined
+    const owner = input.host === undefined ? input.owner : hostOwner?.owner
+    const binding = input.host === undefined ? input.binding : hostOwner?.binding
+    if (owner === undefined || binding === undefined) {
+      if (required) {
         throw new AssistantAutomationsError('missing-approval-route', 'required task acceptance lacks an authenticated Delivery owner')
       }
       return
     }
-    const handle = sink.registration.prepare(Object.freeze({ scope: Object.freeze(input.scope), owner: input.owner,
+    const task = Object.freeze({ scope: Object.freeze(input.scope), owner,
       task: Object.freeze({ kind: 'automation-run' as const, ref: `run-${input.taskId}` }), objective: input.objective,
-    }))
+    })
+    const handle = sink.registration.prepare(task)
     if (handle === null) {
-      if (this.acceptanceRequired) {
+      if (required) {
         throw new AssistantAutomationsError('runtime-conflict', 'required task acceptance profile is unavailable')
       }
       return
     }
+    const assertHostAcceptance = snapshot === undefined ? undefined : () => {
+      const current = this.inspectHostAcceptanceOwner(snapshot)
+      if (this.acceptanceSink !== sink || current === undefined || JSON.stringify(current) !== JSON.stringify(hostOwner)) {
+        throw new AssistantAutomationsError('runtime-conflict', 'required Host task acceptance changed before dispatch')
+      }
+      const verifier = this.ctx.get('assistantVerifier' as never, false) as unknown as {
+        ownsTaskAcceptanceRegistration?(value: TaskAcceptanceRegistration): boolean
+        inspectAcceptedTask?(id: string): Readonly<{ contract: unknown; state: string }> | null
+      } | undefined
+      const accepted = verifier?.ownsTaskAcceptanceRegistration?.(sink.registration) === true
+        ? verifier.inspectAcceptedTask?.(handle.contractId)
+        : undefined
+      if (accepted?.state !== 'awaiting-execution') {
+        throw new AssistantAutomationsError('runtime-conflict', 'required Host task acceptance is unavailable')
+      }
+      const contract = validateTaskAcceptanceContract(accepted.contract)
+      if (contract.id !== handle.contractId || contract.digest !== handle.contractDigest || contract.expiresAt <= Date.now()
+        || contract.scope.workspace !== task.scope.workspace || contract.scope.preset !== task.scope.preset
+        || contract.owner.principalRecordId !== task.owner.principalRecordId || contract.owner.principalVersion !== task.owner.principalVersion
+        || contract.task.kind !== task.task.kind || contract.task.ref !== task.task.ref || contract.objective !== task.objective) {
+        throw new AssistantAutomationsError('runtime-conflict', 'required Host task acceptance changed or expired')
+      }
+    }
+    assertHostAcceptance?.()
     this.store.bindTaskAcceptance({ taskId: input.taskId, contractId: handle.contractId, contractDigest: handle.contractDigest,
-      scope: input.scope, owner: input.owner, bindingId: input.binding.id, bindingVersion: input.binding.version,
-      bindingGeneration: input.binding.generation,
+      scope: input.scope, owner, bindingId: binding.id, bindingVersion: binding.version,
+      bindingGeneration: binding.generation,
+      ...(input.host === undefined ? {} : { host: input.host }),
       dispatchedAt: Date.now(),
     })
+    return assertHostAcceptance
   }
 
   /**

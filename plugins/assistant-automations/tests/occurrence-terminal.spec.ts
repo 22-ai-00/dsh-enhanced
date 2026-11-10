@@ -98,10 +98,10 @@ test('completion idempotency binds the observation and SQL cannot retroactively 
 })
 test('real schema16 migration leaves historical runs NULL and prevents later promotion', async () => {
   const f = await fixture(runnerFor({ quiescent: undefined })), o = await f.start(); await f.coordinator.whenIdle(); await f.dispose()
-  const raw = new DatabaseSync(f.path); raw.exec('DROP TRIGGER automation_run_quiescence_immutable;ALTER TABLE automation_runs DROP COLUMN quiescent;PRAGMA user_version=16;'); raw.close()
+  const raw = new DatabaseSync(f.path); raw.exec('ALTER TABLE automation_task_acceptance DROP COLUMN host_proof_json;DROP TRIGGER automation_run_quiescence_immutable;ALTER TABLE automation_runs DROP COLUMN quiescent;PRAGMA user_version=16;'); raw.close()
   const migrated = new AutomationStore({ path: f.path }); cleanups.push(async () => migrated.close())
   expect(migrated.inspectProductionOccurrence({ automationId: 'automation', occurrenceId: o.id, ...scope })).toBeUndefined()
   const db = new DatabaseSync(f.path); cleanups.push(async () => db.close())
-  expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 }); expect(db.prepare('SELECT quiescent FROM automation_runs').get()).toEqual({ quiescent: null })
+  expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 18 }); expect(db.prepare('SELECT quiescent FROM automation_runs').get()).toEqual({ quiescent: null })
   expect(() => db.exec('UPDATE automation_runs SET quiescent=1')).toThrow('immutable')
 })

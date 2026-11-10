@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { AutomationRunnerInput, AutomationRunnerResult } from './coordinator.js'
-import { runHostNativeAgent } from './native-agent-execution.js'
+import { runHostNativeAgent, type DshAutomationRunnerOptions } from './native-agent-execution.js'
 import type { HostAgentAuthorizationFence, HostAgentExecutionContract, HostAgentExecutionResult, HostAutomationExecutorInput } from './types.js'
 
 /** Codepoint order, independent of host locale. Includes the complete schema objects. */
@@ -14,7 +14,7 @@ export function hostAgentToolSchemaDigest(schemas: readonly { name: string }[]):
 }
 function contractSnapshot(value: HostAgentExecutionContract): Readonly<HostAgentExecutionContract> {
   const contract = structuredClone(value)
-  const keys = ['provider','model','reasoningEffort','prompt','allowedTools','toolSchemaDigest','maxModelCalls','maxToolCalls','maxOutputTokens','timeoutMs']
+  const keys = ['provider','model','reasoningEffort','prompt','allowedTools','toolSchemaDigest','maxModelCalls','maxToolCalls','maxOutputTokens','timeoutMs','acceptance']
   if (Object.keys(contract).some(key => !keys.includes(key)) || typeof contract.provider !== 'string' || !contract.provider.trim()
     || typeof contract.model !== 'string' || !contract.model.trim() || typeof contract.prompt !== 'string' || !contract.prompt.trim()
     || Buffer.byteLength(contract.prompt) > 65536 || contract.reasoningEffort !== undefined && (typeof contract.reasoningEffort !== 'string' || !contract.reasoningEffort.trim())
@@ -24,8 +24,17 @@ function contractSnapshot(value: HostAgentExecutionContract): Readonly<HostAgent
     || !Number.isSafeInteger(contract.maxToolCalls) || contract.maxToolCalls < 0 || contract.maxToolCalls > 1000
     || !Number.isSafeInteger(contract.maxOutputTokens) || contract.maxOutputTokens < 1 || contract.maxOutputTokens > 131072
     || !Number.isSafeInteger(contract.timeoutMs) || contract.timeoutMs < 1 || contract.timeoutMs > 3600000) throw new Error('assistant-automations: invalid Host Agent contract')
-  const { reasoningEffort, ...required } = contract
-  return Object.freeze({ ...required, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), allowedTools: Object.freeze([...contract.allowedTools].sort()) })
+  const { acceptance, reasoningEffort, ...required } = contract
+  if (acceptance !== undefined && (acceptance === null || typeof acceptance !== 'object'
+    || Object.keys(acceptance).length !== 3 || !['required', 'objective', 'sourceDigest'].every(key => Object.hasOwn(acceptance, key))
+    || acceptance.required !== true || typeof acceptance.objective !== 'string' || !acceptance.objective.trim()
+    || Buffer.byteLength(acceptance.objective, 'utf8') > 8_192 || acceptance.objective.includes('\0')
+    || typeof acceptance.sourceDigest !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(acceptance.sourceDigest))) {
+    throw new Error('assistant-automations: invalid Host Agent acceptance requirement')
+  }
+  return Object.freeze({ ...required, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), allowedTools: Object.freeze([...contract.allowedTools].sort()),
+    ...(acceptance === undefined ? {} : { acceptance: Object.freeze(acceptance) }) })
 }
 function authorizationSnapshot(value: HostAgentAuthorizationFence): Readonly<HostAgentAuthorizationFence> {
   if (value === null || typeof value !== 'object' || types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('assistant-automations: invalid authorization fence')
@@ -57,7 +66,8 @@ export class HostAgentExecutions {
   readonly #live = new Set<Invocation>()
   #active = true
   #accepting = true
-  constructor(private readonly ctx: Context, private readonly policy: AssistantPolicyService) {}
+  constructor(private readonly ctx: Context, private readonly policy: AssistantPolicyService,
+    private readonly prepareAcceptance: NonNullable<DshAutomationRunnerOptions['prepareAcceptance']>) {}
   runnerKey(): object { return this.#key }
   open(key: object, invocation: Readonly<HostAutomationExecutorInput>, input: AutomationRunnerInput, freshReservation: boolean, publish: (result: AutomationRunnerResult) => void): (() => Promise<AutomationRunnerResult | undefined>) | undefined {
     if (key !== this.#key || !this.#active || !this.#accepting || !freshReservation || input.occurrence.dryRun || input.task.attemptCount !== 1
@@ -95,6 +105,7 @@ export class HostAgentExecutions {
     if (!this.#active || !this.#accepting || !state?.active || state.consumed || state.signal.aborted) throw new Error('assistant-automations: exact live reserved Host invocation is required')
     const fence = authorization === undefined ? undefined : authorizationSnapshot(authorization)
     const contract = contractSnapshot(value)
+    if (contract.acceptance !== undefined && fence === undefined) throw new Error('assistant-automations: required Host Agent acceptance needs an authorization fence')
     if (contract.timeoutMs > state.input.automation.definition.timeoutMs) throw new Error('assistant-automations: Host Agent deadline exceeds occurrence contract')
     const contractDigest = acceptanceDigest(contract)
     const now = Date.now(), startedAt = state.input.task.updatedAt
@@ -138,7 +149,7 @@ export class HostAgentExecutions {
       timer = setTimeout(() => deadline.abort('host-agent-deadline'), Math.max(0, deadlineAt - Date.now()))
       timer.unref?.()
       const pending = runHostNativeAgent(this.ctx, this.policy, state.input, contract, contractDigest, signal, Object.freeze({ deadlineAt, check, ...(authorize === undefined ? {} : { authorize }),
-        observe: (read: () => AutomationRunnerResult) => { if (state.active && !signal.aborted) state.readObservation = read } }))
+        observe: (read: () => AutomationRunnerResult) => { if (state.active && !signal.aborted) state.readObservation = read } }), this.prepareAcceptance)
       state.pending = pending
       // Observe rejection even when a faulty executor drops its returned promise.
       void pending.catch(() => {})
@@ -152,7 +163,9 @@ export class HostAgentExecutions {
       check()
       const snapshot = snapshotResult(result)
       check()
-      state.result = snapshot
+      state.result = contract.acceptance === undefined ? snapshot : Object.freeze({ ...snapshot,
+        usage: Object.freeze({ ...snapshot.usage, hostAcceptanceExecutionContractDigest: contractDigest,
+          hostAcceptanceNativeOutcome: snapshot.outcome, hostAcceptanceSourceDigest: contract.acceptance.sourceDigest }) })
       state.finished = true
       return Object.freeze({ ...snapshot, contractDigest })
     } finally { removeAbort?.(); clearTimeout(timer); if (signal.aborted) await drainInvocation(state) }

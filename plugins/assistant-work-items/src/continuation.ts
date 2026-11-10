@@ -293,13 +293,15 @@ export class WorkItemContinuation {
       || Date.now()>=plan.authorization.expiresAt) continuationFail('frozen record association changed')
     const parent=this.store.findItemById(record.parentItemId)
     if(!parent || acceptanceCanonicalJson(this.proof(parent,plan.parent.production.occurrenceId))!==acceptanceCanonicalJson(plan.parent.production)) continuationFail('parent proof changed')
+    const requireAcceptance=plan.contract.acceptance!==undefined
+    if(requireAcceptance && this.config.acceptanceHoldReport===undefined) continuationFail('required acceptance is disabled')
     const expected=isReplyContinuationPlan(plan)?(()=>{
       const source=this.replySource(plan.source.origin.reply.id,record.sourceDigest)
       if(source.state!=='routed' || source.child?.itemId!==item.id || source.child.planDigest!==record.planDigest
         || source.executionParentItemId!==record.parentItemId
         || acceptanceCanonicalJson(immutableReply(source))!==acceptanceCanonicalJson(plan.source.origin.reply)) continuationFail('reply child is not durably acknowledged')
-      return createReplyContinuationPlan(item,source,plan.parent,this.parentSupplier(plan.parent),this.config,activation,this.schemas())
-    })():createContinuationPlan(item,{sourceDigest:record.sourceDigest,inputText:record.inputText,modelSelection:plan.source.modelSelection},plan.parent,this.config,activation,this.schemas())
+      return createReplyContinuationPlan(item,source,plan.parent,this.parentSupplier(plan.parent),this.config,activation,this.schemas(),requireAcceptance)
+    })():createContinuationPlan(item,{sourceDigest:record.sourceDigest,inputText:record.inputText,modelSelection:plan.source.modelSelection},plan.parent,this.config,activation,this.schemas(),requireAcceptance)
     if(record.planJson!==continuationCanonical(expected)) continuationFail('frozen execution contract changed')
     return plan
   }
@@ -333,6 +335,7 @@ export class WorkItemContinuation {
     const record=this.store.getContinuation(item.id)
     if(!record) return false
     const plan=parseStoredContinuationPlan(record.planJson)
+    if(plan.contract.acceptance!==undefined && this.config.acceptanceHoldReport===undefined) return false
     if(isReplyContinuationPlan(plan) && this.hooks.isReplyConsumerCurrent?.()!==true) return false
     return !this.#closed && !this.#controller.signal.aborted && !this.store.closed
   }

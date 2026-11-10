@@ -41,9 +41,10 @@ function database<T>(path: string, action: (db: DatabaseSync) => T): T {
   try { return action(db) } finally { db.close() }
 }
 const triggers = ['automation_retirements_no_update', 'automation_retirements_no_delete', 'automation_retired_no_activate_insert', 'automation_retired_no_activate_update']
-function downgrade(path: string, version: 15 | 16 = 15) {
+function downgrade(path: string, version: 15 | 16 | 17 = 15) {
   database(path, db => {
-    db.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
+    db.exec('ALTER TABLE automation_task_acceptance DROP COLUMN host_proof_json; PRAGMA user_version=17')
+    if (version < 17) db.exec('DROP TRIGGER automation_run_quiescence_immutable; ALTER TABLE automation_runs DROP COLUMN quiescent; PRAGMA user_version=16')
     if (version === 15) { for (const name of triggers) db.exec(`DROP TRIGGER ${name}`); db.exec('DROP TABLE automation_system_retirements; PRAGMA user_version=15') }
   })
 }
@@ -60,7 +61,7 @@ function policyState(path: string) {
   return database(path, db => ({ reservations: db.prepare('SELECT * FROM budget_reservations ORDER BY id').all(),
     periods: db.prepare('SELECT * FROM budget_periods ORDER BY scope,metric,period_start,period_ms').all() }))
 }
-async function fixture(options: { version?: 15 | 16 | 17; memoryOnly?: boolean; active?: boolean; missing?: boolean; deny?: boolean; minimumGeneration?: number } = {}) {
+async function fixture(options: { version?: 15 | 16 | 17 | 18; memoryOnly?: boolean; active?: boolean; missing?: boolean; deny?: boolean; minimumGeneration?: number } = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'scanner-retirement-stage-'))); roots.push(home)
   const principal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' }
   const authority = { id: 'rsi-owner', conversation: { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm' as const, chat: 'oc_owner' },
@@ -113,7 +114,7 @@ async function fixture(options: { version?: 15 | 16 | 17; memoryOnly?: boolean; 
     writer.reconcileSystemOwned({ owner: 'ordinary', automationId: 'ordinary', idempotencyKey: 'ordinary', definition })
   } finally { writer.close() }
   history(automationsPath)
-  if (options.version === 15 || options.version === 16) downgrade(automationsPath, options.version)
+  if (options.version === 15 || options.version === 16 || options.version === 17) downgrade(automationsPath, options.version)
   const context = new Context(), fiber = context.plugin(AssistantPolicyService, { ...policy, proposalMaintenanceIntervalMs: 0 })
   try { await fiber.await() } finally { await fiber.dispose(); await context.fiber.dispose() }
   const before = inspectAutomationRetirementSnapshot(automationsPath)
@@ -140,12 +141,16 @@ describe('formal stopped-stage scanner retirement composition', () => {
       const intervals = vi.spyOn(globalThis, 'setInterval')
       const completion = await apply(f, plan)
       expect(intervals).not.toHaveBeenCalled()
-      expect(completion.after.schemaVersion).toBe(17)
+      expect(completion.after.schemaVersion).toBe(18)
       expect(completion.after.retirements).toHaveLength(plan.targets.length)
       const oldRuns = plan.before.historyTables.find(table => table.name === 'automation_runs')!
       expect(completion.after.historyTables.find(table => table.name === 'automation_runs')).toMatchObject({
         legacyDigest: oldRuns.legacyDigest ?? oldRuns.digest, rowCount: oldRuns.rowCount, nonNullQuiescentCount: 0 })
-      expect(completion.after.historyTables.filter(table => table.name !== 'automation_runs')).toEqual(plan.before.historyTables.filter(table => table.name !== 'automation_runs'))
+      const oldAcceptance = plan.before.historyTables.find(table => table.name === 'automation_task_acceptance')!
+      expect(completion.after.historyTables.find(table => table.name === 'automation_task_acceptance')).toMatchObject({
+        legacyDigest: oldAcceptance.digest, rowCount: oldAcceptance.rowCount, nonNullHostProofCount: 0 })
+      const unchanged = (table: { name: string }) => table.name !== 'automation_runs' && table.name !== 'automation_task_acceptance'
+      expect(completion.after.historyTables.filter(unchanged)).toEqual(plan.before.historyTables.filter(unchanged))
       expect(completion.after.records.find(record => record.id === 'ordinary')).toEqual(plan.before.records.find(record => record.id === 'ordinary'))
       expect(verifyScannerRetirementPersistence({ plan, completion })).toEqual(completion.after)
       const policyAfter = policyState(f.policyPath), retire = vi.spyOn(AssistantAutomationsService.prototype, 'retireSystemOwned')
@@ -221,7 +226,8 @@ describe('formal stopped-stage scanner retirement composition', () => {
     await expect(apply(f, plan, controller.signal)).rejects.toThrow('bounded partial stop')
     expect(inspectAutomationRetirementSnapshot(f.automationsPath).retirements).toHaveLength(1)
     const completion = await apply(f, plan)
-    expect(completion.after.historyTables.filter(table => table.name !== 'automation_runs')).toEqual(plan.before.historyTables.filter(table => table.name !== 'automation_runs'))
+    const unchanged = (table: { name: string }) => table.name !== 'automation_runs' && table.name !== 'automation_task_acceptance'
+    expect(completion.after.historyTables.filter(unchanged)).toEqual(plan.before.historyTables.filter(unchanged))
     expect(completion.after.retirements.map(marker => marker.operationId).sort()).toEqual(plan.operations.map(operation => operation.operationId).sort())
     expect(policyState(f.policyPath).reservations).toHaveLength(4)
     expect(verifyScannerRetirementPersistence({ plan, completion }).retirements).toHaveLength(4)
@@ -261,19 +267,20 @@ describe('formal stopped-stage scanner retirement composition', () => {
     expect(inspectAutomationRetirementSnapshot(f.automationsPath).retirements).toEqual([])
   })
 
-  test.each([15, 16] as const)('cold-replays historical completed schema16 journal from plan schema%i without writes', async version => {
+  test.each([{ version: 15, archivedVersion: 16 }, { version: 16, archivedVersion: 16 },
+    { version: 17, archivedVersion: 17 }] as const)(
+    'cold-replays completed schema$archivedVersion journal from plan schema$version without writes', async ({ version, archivedVersion }) => {
     const f = await fixture({ version }), plan = prepared(f)
     await apply(f, plan)
-    // Recreate the exact old writer's completed v16 state: the retirement rows
-    // are real formal-writer output, with only the subsequent v17 DDL removed.
-    downgrade(f.automationsPath, 16)
-    const journalPath = join(f.input.dshHome, 'retirement-completed-v16.json')
+    // The retirement rows are formal-writer output, with only the newer DDL removed.
+    downgrade(f.automationsPath, archivedVersion)
+    const journalPath = join(f.input.dshHome, 'retirement-completed-legacy.json')
     await writeFile(journalPath, JSON.stringify({ plan, completion: await apply(f, plan) }))
     const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
       plan: ScannerRetirementPlan; completion: Awaited<ReturnType<typeof apply>>
     }
     const archived = journal.completion
-    expect(archived.after.schemaVersion).toBe(16)
+    expect(archived.after.schemaVersion).toBe(archivedVersion)
     const beforeReplay = inspectAutomationRetirementSnapshot(f.automationsPath)
     const budgetBefore = policyState(f.policyPath)
     const retire = vi.spyOn(AssistantAutomationsService.prototype, 'retireSystemOwned')
@@ -288,15 +295,15 @@ describe('formal stopped-stage scanner retirement composition', () => {
     // completion and its old authorization remain the same historical evidence.
     const archivedJson = JSON.stringify(archived)
     new AutomationStore({ path: f.automationsPath }).close()
-    expect(verifyScannerRetirementPersistence({ plan: journal.plan, completion: archived }).schemaVersion).toBe(17)
+    expect(verifyScannerRetirementPersistence({ plan: journal.plan, completion: archived }).schemaVersion).toBe(18)
     expect(JSON.stringify(archived)).toBe(archivedJson)
     expect(policyState(f.policyPath)).toEqual(budgetBefore)
   })
 
-  test.each([16, 17] as const)('rejects current schema16 for a schema17 completion from plan schema%i', async version => {
+  test.each([16, 17] as const)('rejects current schema%i for a schema18 completion', async version => {
     const f = await fixture({ version }), plan = prepared(f), completion = await apply(f, plan)
-    expect(completion.after.schemaVersion).toBe(17)
-    downgrade(f.automationsPath, 16)
+    expect(completion.after.schemaVersion).toBe(18)
+    downgrade(f.automationsPath, version)
     expect(() => verifyScannerRetirementPersistence({ plan, completion })).toThrow(/persistence-drift/u)
   })
 

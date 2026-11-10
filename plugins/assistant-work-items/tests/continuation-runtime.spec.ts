@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+import type { HostAgentExecutionContract, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { WorkItemContinuation } from '../src/continuation.ts'
@@ -15,11 +15,11 @@ afterEach(()=>vi.restoreAllMocks())
 async function fixture() {
   const f=await harness(),parent=await readyItem(f)
   vi.spyOn(Date,'now').mockImplementation(f.now)
-  const config=normalizeConfig({enabled:true,mode:'active',databasePath:f.config.databasePath,workRoot:f.config.workRoot,
+  const config={...normalizeConfig({enabled:true,mode:'active',databasePath:f.config.databasePath,workRoot:f.config.workRoot,
     intakeSourceId:f.config.intakeSourceId,workerAutomationId:f.config.workerAutomationId!,scope:f.config.scope!,ownerRecall:{enabled:true},
     admission:{...f.config.admission,allowedKinds:[...f.config.admission.allowedKinds,'owner-continuation']},ownerContinuation:{enabled:true,automationId:'continuation-worker',
       allowedTools:['work_item_claim','work_item_report','work_item_read_context','execute'],budgetId:'continuation-budget',budgetAmount:1,
-      maxModelCalls:8,maxToolCalls:20,maxOutputTokens:256,timeoutMs:15000,expiresAt:f.now()+3600000}},f.now())
+      maxModelCalls:8,maxToolCalls:20,maxOutputTokens:256,timeoutMs:15000,expiresAt:f.now()+3600000}},f.now())}
   let owner=receipt({authorityId:config.scope!.ownerRouteId,principalId:config.scope!.principalId,workspace:config.scope!.workspace,agentPreset:config.scope!.preset})
   const schemas=config.ownerContinuation!.allowedTools.map(name=>({name,description:name,parameters:{type:'object',additionalProperties:false}}))
   const state:{definition?:HostAutomationDefinition;status:string;executor?:HostAutomationExecutor;proofs:Map<string,ContinuationProductionProof>;
@@ -30,7 +30,7 @@ async function fixture() {
     immutableContext:{state:'verified',definitionHash:item.workerAutomationId==='continuation-worker'&&state.definition?continuationDefinitionHash(state.definition):'a'.repeat(64),definitionVersion:1,scope:{workspace:item.scope.workspace,agentPreset:item.scope.preset},...(item.workerAutomationId==='continuation-worker'?{owner:CONTINUATION_OWNER}:{})}})
   state.proofs.set(`occ-${parent.id}`,proof(parent,`occ-${parent.id}`))
   const reconcile=vi.fn((input:{definition:HostAutomationDefinition})=>{state.definition=input.definition})
-  const runAgent=vi.fn((input:HostAutomationExecutorInput)=>state.model(input))
+  const runAgent=vi.fn((input:HostAutomationExecutorInput,_contract:HostAgentExecutionContract)=>state.model(input))
   const automations={hostAgentAuthorizationVersion:()=>1,runAgentForHostExecution:runAgent,
     registerHostExecutor:(executor:HostAutomationExecutor)=>{state.executor=executor;return()=>{if(state.executor===executor) delete state.executor}},
     reconcileSystem:reconcile,
@@ -129,6 +129,34 @@ test('freezes current instruction supplier, explicit effort and complete UTF-8 i
     expect(record.inputText).toBe('接着修复前次任务😀\0完整')
     const cold=new WorkItemStore(f.config.databasePath,{now:f.now})
     try {expect(cold.getContinuation(item.id)).toEqual(record)} finally {cold.close()}
+    expect(f.runAgent).not.toHaveBeenCalled()
+  } finally {f.runtime.close()}
+})
+
+test('freezes required acceptance per continuation and rejects invalid objectives without changing old plans',async()=>{
+  const f=await fixture()
+  try {
+    const legacy=f.makeChild('1'.repeat(64))
+    const legacyBytes=f.store.getContinuation(legacy.id)!.planJson
+    expect(parseContinuationPlan(legacyBytes).contract.acceptance).toBeUndefined()
+    Object.assign(f.config,{acceptanceHoldReport:{holdTimeoutMs:60_000}})
+    expect(f.runtime.validateWake(legacy)).toBe(true)
+    expect(f.store.getContinuation(legacy.id)!.planJson).toBe(legacyBytes)
+    const sourceDigest='2'.repeat(64), objective='  '+ '界'.repeat(2729)+' 😀\n'
+    expect(Buffer.byteLength(objective)).toBe(8195)
+    expect(()=>f.makeChild(sourceDigest,objective)).toThrow(/8192 UTF-8 bytes/u)
+    expect(()=>f.makeChild(sourceDigest,' \t\n ')).toThrow(/nonblank/u)
+    expect(()=>f.makeChild(sourceDigest,'owner\0input')).toThrow(/NUL-free/u)
+    const exact='  '+'界'.repeat(2728)+' 😀\n'
+    expect(Buffer.byteLength(exact)).toBe(8192)
+    const required=f.makeChild(sourceDigest,exact)
+    const plan=parseContinuationPlan(f.store.getContinuation(required.id)!.planJson)
+    expect(plan.contract.acceptance).toEqual({required:true,objective:exact,sourceDigest})
+    expect(f.runtime.validateWake(required)).toBe(true)
+    Reflect.deleteProperty(f.config,'acceptanceHoldReport')
+    expect(f.runtime.validateWake(required)).toBe(false)
+    expect(f.runtime.isWakeCurrent(required)).toBe(false)
+    expect(f.runtime.validateWake(legacy)).toBe(true)
     expect(f.runAgent).not.toHaveBeenCalled()
   } finally {f.runtime.close()}
 })

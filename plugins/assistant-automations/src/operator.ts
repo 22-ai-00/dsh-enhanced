@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
-import { automationSchemaVersion } from './sqlite.js'
+import { automationSchemaVersion, hasAutomationHostProofColumn } from './sqlite.js'
 import { assertNoMacProcessConnection, macCleanupPinnedDirectory, macConnectionInodes, macExclusiveWriter } from './operator-macos.js'
 import { normalizeAutomationDefinition } from './store.js'
 import type { AutomationDefinition, AutomationRecord, AutomationStatus } from './types.js'
@@ -56,7 +56,7 @@ export interface AutomationOperatorRecord {
 
 export interface AutomationsOperatorSnapshot {
   readonly protocol: typeof automationsOperatorSnapshotProtocol
-  readonly schemaVersion: 17
+  readonly schemaVersion: 17 | typeof automationSchemaVersion
   readonly database: AutomationOperatorFileIdentity
   readonly sidecars: Readonly<{
     wal: AutomationOperatorFileIdentity | null
@@ -96,9 +96,10 @@ export interface AutomationRetirementHistoryTable {
   readonly name: string
   readonly rowCount: number
   readonly digest: string
-  /** Only schema 17 automation_runs: exact historical column projection. */
+  /** Exact column projection before the nullable column was introduced. */
   readonly legacyDigest?: string
   readonly nonNullQuiescentCount?: number
+  readonly nonNullHostProofCount?: number
 }
 
 export interface AutomationRetirementSchemaEntry {
@@ -111,7 +112,7 @@ export interface AutomationRetirementSchemaEntry {
 
 export interface AutomationRetirementSnapshot {
   readonly protocol: typeof automationRetirementSnapshotProtocol
-  readonly schemaVersion: 15 | 16 | 17
+  readonly schemaVersion: 15 | 16 | 17 | 18
   readonly database: AutomationOperatorFileIdentity
   readonly sidecars: AutomationsOperatorSnapshot['sidecars']
   readonly storageDigest: string
@@ -881,12 +882,12 @@ function normalizedSchemaSql(sql: string): string {
     token => /^\s/u.test(token) ? ' ' : token).trim()
 }
 
-function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16 | 17): readonly AutomationRetirementSchemaEntry[] {
+function inspectRetirementSchema(database: DatabaseSync, version: AutomationRetirementSnapshot['schemaVersion']): readonly AutomationRetirementSchemaEntry[] {
   const raw = database.prepare(`SELECT type, name, tbl_name AS "table", sql
     FROM sqlite_schema ORDER BY type COLLATE BINARY, name COLLATE BINARY`).all()
   const entries: AutomationRetirementSchemaEntry[] = []
   const expectedTables = Object.keys(retirementColumns).filter(name => version >= 16 || name !== 'automation_system_retirements')
-  const additions: Readonly<Record<string, string>> = version === 17
+  const additions: Readonly<Record<string, string>> = version >= 17
     ? { ...retirementAdditions, ...quiescenceAddition } : retirementAdditions
   const seenTables = new Set<string>(); const seenIndexes = new Set<string>(); const seenAdditions = new Set<string>()
   for (const row of raw) {
@@ -901,14 +902,15 @@ function inspectRetirementSchema(database: DatabaseSync, version: 15 | 16 | 17):
         fail('schema-unsupported', 'unreviewed table')
       }
       const columns = database.prepare(`PRAGMA table_xinfo("${entry.name}")`).all()
-      const expectedColumns = version === 17 && entry.name === 'automation_runs'
-        ? `${retirementColumns[entry.name]} quiescent:INTEGER`.split(' ').sort().join(' ')
-        : retirementColumns[entry.name]
+      const addedColumn = version >= 17 && entry.name === 'automation_runs' ? 'quiescent:INTEGER'
+        : version >= 18 && entry.name === 'automation_task_acceptance' ? 'host_proof_json:TEXT' : undefined
+      const expectedColumns = addedColumn === undefined ? retirementColumns[entry.name]
+        : `${retirementColumns[entry.name]} ${addedColumn}`.split(' ').sort().join(' ')
       if (columns.some(column => column.hidden !== 0)
         || columns.map(column => `${column.name}:${column.type}`).sort().join(' ') !== expectedColumns) {
         fail('schema-unsupported', 'unreviewed table columns')
       }
-      if (version === 17 && entry.name === 'automation_runs') {
+      if (version >= 17 && entry.name === 'automation_runs') {
         const quiescent = columns.find(column => column.name === 'quiescent')
         if (quiescent?.notnull !== 0 || quiescent.dflt_value !== null || quiescent.pk !== 0
           || !/\bquiescent INTEGER CHECK\s*\(quiescent IN\s*\(0, 1\)\)/u.test(normalizedSchemaSql(entry.sql))) {
@@ -1073,18 +1075,26 @@ function inspectRetirements(database: DatabaseSync, records: readonly InternalAu
   }))
 }
 
-function retirementContents(database: DatabaseSync, version: 15 | 16 | 17, records: readonly InternalAutomationOperatorRecord[]) {
+function retirementContents(database: DatabaseSync, version: AutomationRetirementSnapshot['schemaVersion'], records: readonly InternalAutomationOperatorRecord[]) {
   const schemaEntries = inspectRetirementSchema(database, version)
   const schemaDigest = sha256(JSON.stringify({ protocol: 'assistant-automations/retirement-schema/v1', schemaEntries }))
   const historyTables = Object.keys(retirementColumns).filter(name => name !== 'automation_definitions'
     && name !== 'automation_system_retirements').sort().map(name => {
       const columns = retirementColumns[name]!.split(' ').map(column => column.split(':')[0]!)
       const legacy = inspectHistoryTable(database, name, columns)
-      if (version !== 17 || name !== 'automation_runs') return legacy
-      const count = database.prepare('SELECT COUNT(*) AS count FROM automation_runs WHERE quiescent IS NOT NULL').get()?.count
-      if (!safeInteger(count)) fail('database-corrupt', 'invalid run quiescence observation count')
-      return freeze({ ...inspectHistoryTable(database, name, [...columns, 'quiescent'].sort()),
-        legacyDigest: legacy.digest, nonNullQuiescentCount: count })
+      if (version >= 17 && name === 'automation_runs') {
+        const count = database.prepare('SELECT COUNT(*) AS count FROM automation_runs WHERE quiescent IS NOT NULL').get()?.count
+        if (!safeInteger(count)) fail('database-corrupt', 'invalid run quiescence observation count')
+        return freeze({ ...inspectHistoryTable(database, name, [...columns, 'quiescent'].sort()),
+          legacyDigest: legacy.digest, nonNullQuiescentCount: count })
+      }
+      if (version >= 18 && name === 'automation_task_acceptance') {
+        const count = database.prepare('SELECT COUNT(*) AS count FROM automation_task_acceptance WHERE host_proof_json IS NOT NULL').get()?.count
+        if (!safeInteger(count)) fail('database-corrupt', 'invalid Host proof count')
+        return freeze({ ...inspectHistoryTable(database, name, [...columns, 'host_proof_json'].sort()),
+          legacyDigest: legacy.digest, nonNullHostProofCount: count })
+      }
+      return legacy
     })
   return freeze({
     records: inspectRetirementDefinitions(database, records),
@@ -1217,8 +1227,15 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     const queryOnly = (database.prepare('PRAGMA query_only').get() as { query_only?: unknown }).query_only
     if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== automationSchemaVersion && !(retirement && (version === 15 || version === 16))) {
-      fail('schema-unsupported', retirement ? 'expected schema 15, 16 or 17' : `expected schema ${automationSchemaVersion}`)
+    if (version !== automationSchemaVersion && version !== 17 && !(retirement && (version === 15 || version === 16))) {
+      fail('schema-unsupported', retirement ? 'expected schema 15, 16, 17 or 18' : `expected schema 17 or ${automationSchemaVersion}`)
+    }
+    // Upgrade preview runs before the new Host writer migrates the ledger.
+    if (version === 17 && !retirement) {
+      inspectRetirementSchema(database, version)
+    }
+    if (version === 18 && !hasAutomationHostProofColumn(database)) {
+      fail('schema-unsupported', 'acceptance Host proof schema is missing or changed')
     }
     const check = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (check.length !== 1 || check[0]?.quick_check !== 'ok') fail('database-corrupt', 'SQLite quick_check failed')
@@ -1246,7 +1263,7 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
     const foreignKeys = database.prepare('PRAGMA foreign_key_check').all()
     if (foreignKeys.length !== 0) fail('database-corrupt', 'foreign-key integrity check failed')
     const records = freeze(internalRecords.map(publicRecord))
-    const proof = retirement ? retirementContents(database, version as 15 | 16 | 17, internalRecords) : undefined
+    const proof = retirement ? retirementContents(database, version as AutomationRetirementSnapshot['schemaVersion'], internalRecords) : undefined
     // History scans can lazily open SQLite resources as well.
     if (inodeBindSupported) assertConnectionBound(bound, selfDescriptors())
     database.exec('ROLLBACK'); transaction = false
@@ -1258,27 +1275,10 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
       database: source.digest,
       wal: wal?.digest ?? null,
     }))
-    const inventoryDigest = sha256(JSON.stringify({
-      protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 17 as const,
-      storageDigest,
-      inFlightCount: inFlight.count,
-      records,
-    }))
-    const snapshot = freeze({
-      protocol: automationsOperatorSnapshotProtocol,
-      schemaVersion: 17 as const,
-      database: identity(source),
-      sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
-      storageDigest,
-      inFlightCount: inFlight.count,
-      inventoryDigest,
-      records,
-    })
     if (proof !== undefined) {
       const semantic = {
         protocol: automationRetirementSnapshotProtocol,
-        schemaVersion: version as 15 | 16 | 17,
+        schemaVersion: version as AutomationRetirementSnapshot['schemaVersion'],
         storageDigest,
         inFlightCount: inFlight.count,
         ...proof,
@@ -1289,7 +1289,27 @@ function readSnapshot(databasePath: string, retirement = false): OperatorReadRes
         sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
         snapshotDigest: sha256(JSON.stringify(semantic)),
       })
-    } else result = { snapshot, internalRecords }
+    } else {
+      if (version !== 17 && version !== automationSchemaVersion) fail('schema-unsupported', 'unexpected inventory schema')
+      const inventory = {
+        protocol: automationsOperatorSnapshotProtocol,
+        schemaVersion: version,
+        storageDigest,
+        inFlightCount: inFlight.count,
+        records,
+      } as const
+      const snapshot = freeze({
+        protocol: inventory.protocol,
+        schemaVersion: inventory.schemaVersion,
+        database: identity(source),
+        sidecars: freeze({ wal: wal === null ? null : identity(wal), shm: shm === null ? null : identity(shm) }),
+        storageDigest,
+        inFlightCount: inventory.inFlightCount,
+        inventoryDigest: sha256(JSON.stringify(inventory)),
+        records,
+      })
+      result = { snapshot, internalRecords }
+    }
   } catch (error) {
     deferred = error
   } finally {
@@ -1448,9 +1468,12 @@ export function listActiveAutomationsForReadiness(databasePath: string): Automat
     if (queryOnly !== 1) fail('database-unavailable', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
     // Readiness also reads the still-running original program's store during an owner update;
-    // automation_definitions is unchanged from schema 15 (16/17 only add tables, triggers and a runs column).
-    if (version !== automationSchemaVersion && version !== 15 && version !== 16) {
-      fail('schema-unsupported', 'expected schema 15, 16 or 17')
+    // The active definition projection is unchanged from schema 15.
+    if (version !== automationSchemaVersion && version !== 15 && version !== 16 && version !== 17) {
+      fail('schema-unsupported', 'expected schema 15, 16, 17 or 18')
+    }
+    if (version === 18 && !hasAutomationHostProofColumn(database)) {
+      fail('schema-unsupported', 'acceptance Host proof schema is missing or changed')
     }
     const rows = database.prepare(`
       SELECT id, system_owner, definition_hash, definition_json, status, next_run_at,

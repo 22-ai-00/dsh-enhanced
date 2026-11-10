@@ -239,9 +239,10 @@ export interface DshAutomationRunnerOptions {
     automationId: string
     scope: { workspace: string; preset: string }
     objective: string
+    host?: { executionContractDigest: string; sourceDigest: string }
     owner?: AcceptanceOwner
     binding?: { id: string; version: number; generation: number }
-  }) => void
+  }) => void | (() => void)
   readonly acceptanceEnabled?: () => boolean
   /** Host-only synchronous fence after setup and before the first model prompt. */
   readonly beforePrompt?: () => void
@@ -320,6 +321,12 @@ class NativeAgentExecution implements AutomationRunner {
     let agentCreationSubmitted = false
     let followupSubmitted = false
     let removeAbort: (() => void) | undefined
+    let hostAcceptanceFence: (() => void) | undefined
+    const assertHostAcceptance = () => {
+      if (this.hostContract?.contract.acceptance === undefined) return
+      if (hostAcceptanceFence === undefined) throw new Error('assistant-automations: required Host Agent acceptance is not bound')
+      hostAcceptanceFence()
+    }
     let toolCalls = 0
     let phase: AutomationFailurePhase = 'preflight'
     let promptSubmissionState: AutomationPromptSubmissionState = 'not-submitted'
@@ -438,6 +445,7 @@ class NativeAgentExecution implements AutomationRunner {
             }
             beforePrompt?.()
             strict?.deadline.authorize?.()
+            assertHostAcceptance()
             modelCalls += 1
             if (!strict) { yield* next(); return }
             let outputBytes = 0
@@ -512,7 +520,12 @@ class NativeAgentExecution implements AutomationRunner {
           )
           agentCtx.tools.guard((execution) => {
             if (strict && execution.agent !== agent) return undefined
-            if (strict) { strict.deadline.authorize?.(); strict.deadline.check(); if (hostAgentToolSchemaDigest(agentCtx.tools.schemas(agent)) !== strict.contract.toolSchemaDigest) return 'assistant-automations: Host tool schemas drifted' }
+            if (strict) {
+              assertHostAcceptance()
+              strict.deadline.authorize?.()
+              strict.deadline.check()
+              if (hostAgentToolSchemaDigest(agentCtx.tools.schemas(agent)) !== strict.contract.toolSchemaDigest) return 'assistant-automations: Host tool schemas drifted'
+            }
             if (!allowed.has(execution.name)) return 'assistant-automations: tool is outside the immutable allowlist'
             if (toolCalls >= definition.maxToolCalls) {
               return 'assistant-automations: immutable tool-call budget exhausted'
@@ -551,13 +564,18 @@ class NativeAgentExecution implements AutomationRunner {
       // Resolve the real Delivery owner only after setup installed the immutable
       // approval binding.  Never derive an acceptance principal from the
       // definition's display principal or any model-controlled value.
-      if (execution.mode === 'production' && this.prepareAcceptance !== undefined && this.acceptanceEnabled?.() === true) {
+      const hostAcceptance = this.hostContract?.contract.acceptance
+      if (hostAcceptance !== undefined && (execution.mode !== 'production' || this.prepareAcceptance === undefined)) {
+        throw new Error('assistant-automations: required Host Agent acceptance is unavailable')
+      }
+      if (execution.mode === 'production' && this.prepareAcceptance !== undefined
+        && (hostAcceptance !== undefined || this.acceptanceEnabled?.() === true)) {
         const delivery = this.ctx.get('assistantDelivery') as
           | Pick<AssistantDeliveryService, 'prepareAgentApproval'>
           | undefined
         let owner: AcceptanceOwner | undefined
         let binding: { id: string; version: number; generation: number } | undefined
-        if (typeof delivery?.prepareAgentApproval === 'function') {
+        if (hostAcceptance === undefined && typeof delivery?.prepareAgentApproval === 'function') {
           try {
             const route = delivery.prepareAgentApproval(agent, {
               sourceId: 'dsh-enhanced-assistant-verifier',
@@ -579,11 +597,15 @@ class NativeAgentExecution implements AutomationRunner {
               || !('code' in error) || error.code !== 'missing-binding') throw error
           }
         }
-        this.prepareAcceptance({ taskId: input.task.id, automationId: input.automation.id,
-          scope: Object.freeze({ workspace: definition.workspace, preset: presetId }), objective: definition.prompt,
+        this.hostContract?.deadline.authorize?.()
+        const acceptanceFence = this.prepareAcceptance({ taskId: input.task.id, automationId: input.automation.id,
+          scope: Object.freeze({ workspace: definition.workspace, preset: presetId }), objective: hostAcceptance?.objective ?? definition.prompt,
+          ...(hostAcceptance === undefined ? {} : { host: { executionContractDigest: this.hostContract!.digest, sourceDigest: hostAcceptance.sourceDigest } }),
           ...(owner === undefined ? {} : { owner }), ...(binding === undefined ? {} : { binding }),
         })
+        if (hostAcceptance !== undefined && typeof acceptanceFence === 'function') hostAcceptanceFence = acceptanceFence
       }
+      assertHostAcceptance()
       const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-automations-signal' })
       input.signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => input.signal.removeEventListener('abort', abort)
@@ -736,12 +758,13 @@ export class DshAutomationRunner extends NativeAgentExecution {
 
 /** Internal Host path: outer HostRunner alone reserves and settles the occurrence. */
 export function runHostNativeAgent(ctx: Context, policy: AssistantPolicyService, input: AutomationRunnerInput,
-  contract: Readonly<HostAgentExecutionContract>, contractDigest: string, signal: AbortSignal, deadline: Readonly<{ deadlineAt: number; check: () => void; authorize?: () => void; observe: (read: () => AutomationRunnerResult) => void }>): Promise<AutomationRunnerResult> {
+  contract: Readonly<HostAgentExecutionContract>, contractDigest: string, signal: AbortSignal, deadline: Readonly<{ deadlineAt: number; check: () => void; authorize?: () => void; observe: (read: () => AutomationRunnerResult) => void }>,
+  prepareAcceptance: NonNullable<DshAutomationRunnerOptions['prepareAcceptance']>): Promise<AutomationRunnerResult> {
   if (!isHostAutomationDefinition(input.automation.definition) || acceptanceDigest(contract) !== contractDigest) throw new Error('assistant-automations: invalid Host native execution')
   const { execution: _execution, budgetId: _budgetId, budgetAmount: _budgetAmount, ...control } = input.automation.definition
   const definition = { ...control, provider: contract.provider, model: contract.model, prompt: contract.prompt,
     allowedTools: contract.allowedTools, maxToolCalls: contract.maxToolCalls, maxOutputTokens: contract.maxOutputTokens }
-  return new NativeAgentExecution(ctx, policy, { allowUnbudgetedExecution: true, maxModelCalls: contract.maxModelCalls }, { contract, digest: contractDigest, deadline })
+  return new NativeAgentExecution(ctx, policy, { allowUnbudgetedExecution: true, maxModelCalls: contract.maxModelCalls, prepareAcceptance }, { contract, digest: contractDigest, deadline })
     .run({ ...input, signal, automation: { ...input.automation, definition } })
 }
 

@@ -672,6 +672,7 @@ export interface HostAgentExecutionContract {
   readonly maxToolCalls: number
   readonly maxOutputTokens: number
   readonly timeoutMs: number
+  readonly acceptance?: Readonly<{ required: true; objective: string; sourceDigest: string }>
 }
 export interface HostAgentExecutionResult {
   readonly outcome: AutomationRunStatus

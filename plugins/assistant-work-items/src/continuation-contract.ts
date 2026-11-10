@@ -105,7 +105,8 @@ export interface WorkItemContinuationPlan {
   readonly digest:string
 }
 export function createContinuationPlan(item:WorkItemRecord, source:ContinuationSource, parent:ContinuationParent,
-  config:NormalizedConfig, activation:ContinuationActivation, schemas:readonly {name:string}[]):Readonly<WorkItemContinuationPlan> {
+  config:NormalizedConfig, activation:ContinuationActivation, schemas:readonly {name:string}[],
+  requireAcceptance=config.acceptanceHoldReport!==undefined):Readonly<WorkItemContinuationPlan> {
   const settings=config.ownerContinuation, model=source.modelSelection
   if (!settings || !/^[a-f0-9]{64}$/u.test(source.sourceDigest) || typeof source.inputText !== 'string'
     || Buffer.from(source.inputText,'utf8').toString('utf8') !== source.inputText || Buffer.byteLength(source.inputText)>MAX_CONTINUATION_INPUT_BYTES
@@ -113,11 +114,13 @@ export function createContinuationPlan(item:WorkItemRecord, source:ContinuationS
     || !model.provider || !model.model || typeof model.provider !== 'string' || typeof model.model !== 'string'
     || Object.hasOwn(model,'reasoningEffort') && (typeof model.reasoningEffort !== 'string' || !model.reasoningEffort)
     || item.workerAutomationId!==settings.automationId || item.maxAttempts!==1 || !item.authority || item.observed) continuationFail('admission basis differs')
+  if(requireAcceptance && (!source.inputText.trim() || source.inputText.includes('\0') || Buffer.byteLength(source.inputText,'utf8')>8192)) continuationFail('acceptance objective must be nonblank, NUL-free, and at most 8192 UTF-8 bytes')
   const toolSchemas=continuationSchemas(schemas,config)
   const contract:HostAgentExecutionContract={provider:model.provider,model:model.model,
     ...(Object.hasOwn(model,'reasoningEffort') ? {reasoningEffort:model.reasoningEffort!}:{}),prompt:CONTINUATION_PROMPT,
     allowedTools:[...settings.allowedTools],toolSchemaDigest:acceptanceDigest(toolSchemas),maxModelCalls:settings.maxModelCalls,
-    maxToolCalls:settings.maxToolCalls,maxOutputTokens:settings.maxOutputTokens,timeoutMs:settings.timeoutMs}
+    maxToolCalls:settings.maxToolCalls,maxOutputTokens:settings.maxOutputTokens,timeoutMs:settings.timeoutMs,
+    ...(requireAcceptance ? {acceptance:{required:true,objective:source.inputText,sourceDigest:source.sourceDigest}} : {})}
   const unsigned={protocol:'assistant-work-items/owner-continuation-plan/v1' as const,item:continuationItemBasis(item),
     source:{digest:source.sourceDigest,inputSha256:continuationDigest(source.inputText),inputBytes:Buffer.byteLength(source.inputText),modelSelection:model},parent,
     authorization:{modelOrigin:'current-owner-input' as const,budgetOrigin:'explicit-continuation-authorization' as const,

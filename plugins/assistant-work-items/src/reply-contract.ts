@@ -35,13 +35,13 @@ export const isReplyContinuationPlan=(plan:StoredContinuationPlan):plan is WorkI
 
 export function createReplyContinuationPlan(item:WorkItemRecord,source:WorkItemReplySource,parent:ContinuationParent,
   supplier:Readonly<{modelSelection:ContinuationSource['modelSelection'];evidence:ReplySupplierEvidence}>,
-  config:NormalizedConfig,activation:ContinuationActivation,schemas:readonly {name:string}[]):Readonly<WorkItemReplyContinuationPlan> {
+  config:NormalizedConfig,activation:ContinuationActivation,schemas:readonly {name:string}[],requireAcceptance?:boolean):Readonly<WorkItemReplyContinuationPlan> {
   if(!config.ownerReplyContinuation || source.state==='cancelled' || source.executionParentItemId!==parent.itemId
     || source.scope.workspace!==item.scope.workspace || source.scope.preset!==item.scope.preset || source.principalId!==item.scope.principalId
     || source.owner.principalRecordId!==item.owner.principalRecordId || source.owner.principalVersion!==item.owner.principalVersion
     || source.binding.id!==item.originBindingId || source.binding.version!==item.owner.bindingVersion || source.binding.generation!==item.owner.generation
     || supplier.evidence.itemId!==parent.itemId || acceptanceCanonicalJson(supplier.evidence.production)!==acceptanceCanonicalJson(parent.production)) continuationFail('reply source admission association differs')
-  const base=createContinuationPlan(item,{sourceDigest:source.sourceDigest,inputText:source.inputText,modelSelection:supplier.modelSelection},parent,config,activation,schemas)
+  const base=createContinuationPlan(item,{sourceDigest:source.sourceDigest,inputText:source.inputText,modelSelection:supplier.modelSelection},parent,config,activation,schemas,requireAcceptance)
   const {digest:_digest,...common}=base
   const unsigned={...common,protocol:'assistant-work-items/owner-continuation-plan/v2' as const,
     source:{...base.source,origin:{kind:'owner-report-reply' as const,reply:immutableReply(source),supplier:supplier.evidence}},

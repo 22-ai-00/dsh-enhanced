@@ -943,7 +943,7 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     }] : [])],
   })
   const schedule = async () => {
-    let scheduled: { id: string; wakeAt: number } | undefined
+    let scheduled: { id: string; wakeAt: number; expiresAt: number } | undefined
     const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
       const created = await fixture.ctx.tools.execute({ callId: ToolCallId('wake-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
@@ -999,8 +999,9 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     try { return database.prepare('SELECT state, intent_json, dispatched_at FROM goal_wakes WHERE id = ?').get(id) as { state: string; intent_json: string; dispatched_at: number | null } }
     finally { database.close() }
   }
-  const runAt = async (at: number) => {
+  const runAt = async (at: number, beforeTick?: () => void) => {
     await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(at), { timeout: 4_000 })
+    beforeTick?.()
     await fixture.ctx.assistantAutomations.tick(); await fixture.ctx.assistantAutomations.whenIdle()
     await fixture.ctx.assistantGoals.whenIdle()
   }
@@ -1756,21 +1757,44 @@ describe('real native Delivery Agent runtime', () => {
       yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
     })
-    const running = fixture.runAt(wake.wakeAt)
-    let deadline: ReturnType<typeof setTimeout> | undefined
+    const setWallTimeout = setTimeout
+    const clearWallTimeout = clearTimeout
+    const withinWallTime = async (operation: () => Promise<void>, failure: string): Promise<void> => {
+      let watchdog: ReturnType<typeof setWallTimeout> | undefined
+      const expired = new Promise<never>((_resolve, reject) => {
+        watchdog = setWallTimeout(() => reject(new Error(failure)), 6_000)
+      })
+      try { await Promise.race([expired, operation()]) }
+      finally { clearWallTimeout(watchdog) }
+    }
+    const restoreFixture = () => {
+      releaseTool()
+      if (vi.isFakeTimers()) vi.useRealTimers()
+    }
+    onTestFinished(restoreFixture)
+    const running = fixture.runAt(wake.wakeAt, () => {
+      // Automation captured its wall clock at mount, so wait until the wake
+      // is due. Starting 1 ms late on the frozen clock gives Delivery's
+      // absolute deadline priority over Automation's relative timeout.
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+      vi.setSystemTime(wake.wakeAt + 1)
+    })
     try {
-      await Promise.race([started, running.then(() => { throw new Error('scheduled goal ended before tool start') })])
-      if (cancellation === 'stop') {
-        const cancel = vi.spyOn(retainedAgent!, 'cancel')
-        await fixture.service.acceptInbound(message('evt-scheduled-goal-stop', '/stop', 'command'))
-        expect(cancel).toHaveBeenCalled()
-      }
-      await expect(Promise.race([
-        running,
-        new Promise<never>((_resolve, reject) => {
-          deadline = setTimeout(() => reject(new Error('scheduled goal deadline did not bound its hung tool')), 6_000)
-        }),
-      ])).resolves.toBeUndefined()
+      await Promise.race([started, running.then(() => {
+        const { state, dispatched_at: dispatchedAt } = fixture.readWake(wake.id)
+        throw new Error(`scheduled goal ended before tool start: ${JSON.stringify({ state, dispatchedAt, requests: fixture.llm.requests.length })}`)
+      })])
+      expect(fixture.readWake(wake.id)).toMatchObject({ state: 'dispatched', dispatched_at: expect.any(Number) })
+      await withinWallTime(async () => {
+        if (cancellation === 'stop') {
+          const cancel = vi.spyOn(retainedAgent!, 'cancel')
+          await fixture.service.acceptInbound(message('evt-scheduled-goal-stop', '/stop', 'command'))
+          expect(cancel).toHaveBeenCalled()
+        } else {
+          await vi.advanceTimersByTimeAsync(wake.expiresAt - Date.now())
+        }
+        await running
+      }, 'scheduled goal cancellation did not bound its hung tool')
       expect(fixture.readWake(wake.id)).toMatchObject({ state: 'unknown', dispatched_at: expect.any(Number) })
       expect(retainedAgent).toBeDefined()
       expect(fixture.ctx.agents.get(retainedAgent!.id)).toBe(retainedAgent)
@@ -1781,10 +1805,13 @@ describe('real native Delivery Agent runtime', () => {
       expect(late.isError).toBe(true)
       expect(fixture.presetExecute).toHaveBeenCalledOnce()
     } finally {
-      if (deadline !== undefined) clearTimeout(deadline)
-      releaseTool()
-      await vi.waitFor(() => expect(retainedAgent === undefined || fixture.ctx.agents.get(retainedAgent.id)).toBeUndefined())
-      await fixture.ctx.fiber.restart()
+      restoreFixture()
+      try {
+        await withinWallTime(() => running.catch(() => {}), 'scheduled goal did not settle after releasing its tool')
+        await vi.waitFor(() => expect(retainedAgent === undefined || fixture.ctx.agents.get(retainedAgent.id)).toBeUndefined())
+      } finally {
+        await fixture.ctx.fiber.restart()
+      }
     }
   }, 15_000)
 
