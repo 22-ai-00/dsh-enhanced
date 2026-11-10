@@ -297,7 +297,7 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 该版本 `SessionStore.detach` 的 `session/disposed` 仅表示内存释放，Persistence 仍保留记录；Web owner 的空闲回收会抑制由此生成的 `api-session/removed`，避免浏览器误清空会话。没有修改原生持久删除 API。升级必须重跑双事件订阅的空闲回收、真实浏览器文本/审批/Goal，以及 Host 重启后恢复；独立 `pnpm test:web-owner` 验证实际 HTTP/WS 和新浏览器认证，不能由进程内 Gateway 测试代替。
 
 
-原生 Memory benchmark 和 supervised 配置的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 先生成共享包、Policy、Delivery/Evaluation、Isolation、Verifier 和 Automations，再按依赖顺序预建 Preference Learning、Health、Evolution、Growth Experiments、Heartbeat、Recovery 和 Goals，随后以 `--workspace-concurrency=1` 递归构建。循环开发依赖下的并发 emit 会让其他包读取正在重写的声明；串行递归阶段避免这类读写重叠，bootstrap 则提供空 `lib` 环境下所需的声明。这里只调整仓库构建顺序，不改变发布包或运行时服务激活。清洁构建验证必须使用不含既有 `lib` 和 `node_modules` 的源码副本。
+原生 Memory benchmark 和 supervised 配置的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 先生成共享包与 Policy，再用 `build:core` 编译 Evaluation 的公开入口 `src/index.ts` 及其依赖。随后完整构建 Delivery、Isolation、Evaluation（含依赖前两者的 benchmark）、Verifier 和 Automations，再按依赖顺序预建 Preference Learning、Health、Evolution、Growth Experiments、Heartbeat、Recovery 和 Goals，随后以 `--workspace-concurrency=1` 递归构建。循环开发依赖下的并发 emit 会让其他包读取正在重写的声明；串行递归阶段避免这类读写重叠，bootstrap 则提供空 `lib` 环境下所需的声明。这里只调整仓库构建顺序，不改变发布包或运行时服务激活。清洁构建验证必须使用不含既有 `lib` 和 `node_modules` 的源码副本。
 
 全部构建和类型检查完成后，根 `test:built` 与 CI 的包测试使用 `--no-sort`，让已有空闲测试槽直接运行下一个包，不再等待整组依赖包测试结束。pnpm 的工作区并发上限、Vitest worker 上限、测试超时和验收范围均保持原值；构建仍按上述顺序串行执行。测试只能读取共享构建产物：Verifier 的真实打包测试在私有临时源码副本中执行 `prepack`，避免重写其他测试正在读取的工作区 `lib`。新增会生成文件的测试也必须隔离输出，不能依赖包测试的先后顺序。
 
@@ -330,7 +330,7 @@ Web owner 在显式 autonomy setup 时按后端动态加载同仓匹配的可选
 Web owner 的 Goal admission CLI 要求同批 Delivery 只读 snapshot API、Isolation 持久 grant diagnostics 与 Goals/Verifier/DeepSeek API，升级时须作为完整 autonomy bundle 集合安装。旧 Delivery 缺少 snapshot API 时通过 feature detection 在写入前明确要求升级，不因 named import 失败而隐藏原因；正式发布仍须按统一版本策略同步首发版本与 peer 下界。Goal admission 的 Web owner 只读快照仅接受同批 Delivery 的当前 schema、私有本地数据库、精确 canonical Web dm binding、当前 owner/version 和已释放或不存在的 Session lease；不迁移旧 schema。这与 operator 通用 snapshot、doctor 各自的兼容范围不同。DSH `0.1.2-rc.1` 会保留 Session/settings 模型选择，CLI 改默认路由后仍须通过原生模型选择器选择目标路由。升级需复核 CLI 二次字节幂等、撤权拒绝及真实浏览器在进程重启后恢复 Session/后台唤醒的行为。
 
 
-策略 benchmark owner 的可选 Host 接口使用 `dsh-session-persistence-jsonl` / `dsh-session-persistence@0.1.2-rc.1` 的 `ensureMaterialized`：普通 flush 不保证空会话头已落盘，Delivery 初次创建后 dispose/resume 前必须显式 materialize。依赖作为 Evaluation optional peers，普通 bundle 不自动激活。Delivery 增加不加载服务的 `./types` 子路径，Evaluation owner 动态载入同仓 Delivery 服务并使用该类型接口，避免 Evaluation → Delivery → Evaluation 服务声明构建环。根 bootstrap 在 Policy 后先生成 Delivery 的无服务类型入口，再构建 Evaluation 和完整 Delivery，支持两包 lib 均为空的构建；升级必须验证实际 JSONL 创建/恢复、临时 owner 和策略父子预算对账。
+策略 benchmark owner 的可选 Host 接口使用 `dsh-session-persistence-jsonl` / `dsh-session-persistence@0.1.2-rc.1` 的 `ensureMaterialized`：普通 flush 不保证空会话头已落盘，Delivery 初次创建后 dispose/resume 前必须显式 materialize。依赖作为 Evaluation optional peers，普通 bundle 不自动激活。Delivery 增加不加载服务的 `./types` 子路径，Evaluation owner 动态载入同仓 Delivery 服务并使用该类型接口，避免 Evaluation → Delivery → Evaluation 服务声明构建环。根 bootstrap 在 Policy 后先构建 Evaluation 公开入口，再完整构建 Delivery 和 Isolation，最后构建含 benchmark 的完整 Evaluation，支持各包 `lib` 均为空的构建；升级必须验证实际 JSONL 创建/恢复、临时 owner 和策略父子预算对账。
 
 策略原生 cell 装配使用 `dsh-goal`、`dsh-tool-goal`、`dsh-goal-round-driver`、`dsh-subagent@0.1.2-rc.1`，以及同批 Goals/Isolation/Verifier 可选 peers。必须以 Isolation 的具名默认插件入口挂载，保留 Policy 对插件身份的预授权核验；直接挂载其 Service class 会使工具注册失败。Goals 新增当前 owner route 校验的结束后快照，区分模型上下文截断视图与完整策略记录；每个 native run 的 step contract 和 whole-goal assessment contract 分开保存，后者通过持久 triggerRunId 关联。动态加载避免服务声明循环，发布前应运行完整 bootstrap 与原生隔离回归。
 

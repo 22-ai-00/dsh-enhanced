@@ -54,6 +54,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:core": "tsc -p tsconfig.core.json",
     "prepack": "pnpm run build",
     "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "test": "vitest run",
