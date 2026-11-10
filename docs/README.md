@@ -27,6 +27,8 @@
 
 ## 开发与维护
 
+- [当前接手方案](handover/README.md)：未验收普通任务补丁、CI 提速、后续实施与 Linux 历史改动归属；可从 dev 完整拉取。
+
 - [新增插件](creating-a-plugin.md)：插件目录、manifest、patch、测试、README 和目录登记的完整清单。
 - [仓库架构](architecture.md)：bundle 与共享库边界、独立发布和 Host/Web 双面设计。
 - [Cordis 运行时契约](cordis-runtime-contracts.md)：修改生命周期、注入、配置、资源归属或重载时必读。
@@ -50,12 +52,12 @@
 - [PTC 执行模式与持续成长](ptc-growth-integration.md)：可预测阶段交给程序、轨迹作为成长输入，以及分阶段落地边界。
 - [固定任务评测](benchmark-implementation.md)、[执行策略评测](goal-strategy-evaluation.md)：固定供应与预算的比较方法及证据限制。
 - [技能比较配置](skill-comparison-profiles.md)、[独立留出验收](skill-holdout-authority.md)：原生重放、冻结后生成任务、签名验收与有限 canary。
-- [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：可复现入口与当前验证边界。
+- [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：当前验证合同；真实仓库 E2E 的 Docker 到 native 迁移仍待完成，旧命令暂不可运行。
 - [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：固定来源与第三方候选审查；旧安装方案和建设清单已移除，当前包列表见[插件目录](../plugins/README.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[阻断回放](effect-blocked-replay.md)：当前发布/启用组件契约与验证限制。
 - [发布 adapter](npm-publish-adapter.md)、[独立发布验签](npm-release-verifier.md)、[catalog 准入](npm-catalog-admission.md)、[registry 读回](npm-registry-readback.md)：发布组件与可复现探针；[adapter 生命周期](control-plane-adapter-lifetime.md)说明进程归属、取消和清理边界。
 
-原始运行 JSON 和日志留本地或 CI artifacts；当前文档只记录可复现命令、验证结论及限制。过期交接快照和实施流水从 Git 历史查询。
+原始运行 JSON 和日志留在本地忽略目录或 CI artifacts；仓库保留维护中的合同、当前可运行命令和必要的验证结论。过期交接快照与重复实施流水从 Git 历史查询。
 
 ## 历史研究（仅按需读取）
 

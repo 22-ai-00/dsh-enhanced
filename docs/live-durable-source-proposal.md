@@ -51,23 +51,11 @@ that cached commit into the unchanged Control Plane full-file contract. This
 avoids repeating large unchanged files without weakening read-before-write,
 path, byte, cancellation or provider-generation checks.
 
-The entry point `scripts/e2e/source-model-durable-smoke.mjs` was removed with
-the Docker source-build backend. The durable `sourceJobs` lane now runs only on
-the linux-native or macOS seatbelt backend; its contracts and boundary evidence
-are covered by the `plugin-control-plane` package tests and the
-[native runtime boundary](dockerless-runtime.md). The option descriptions below
-record the historical harness contract rather than a current runnable command.
-
-The harness recorded model/tool calls, committed source reads, frozen candidate
-files, queue state, the Context replacement and native execution outcome. It
-did not give the model the approval, release or acceptance tools. Local owner
-routing, empty history and tool approval were engineering fixtures.
-
-The historical `DSH_SOURCE_MODEL_REASONING_PROBE` and `DSH_SOURCE_MODEL_PREFLIGHT`
-switches belonged to the Docker-era source-model smoke harnesses, which were
-removed with the Docker backend; no code references them now. Durable `sourceJobs`
-run only on linux-native or macOS seatbelt, covered by the `plugin-control-plane`
-package tests and the [native runtime boundary](dockerless-runtime.md).
+The Docker-era source-model smoke was retired with the Docker source-build
+backend. Current durable `sourceJobs` coverage is in the `plugin-control-plane`
+package tests and the [native runtime boundary](dockerless-runtime.md); the old
+option descriptions below are historical contract notes, not runnable commands.
+The old probe switches are no longer part of the repository interface.
 
 Every run uses private local state; the evidence records its path. Successful
 pending plans retain their registered worktrees for review, and failures retain

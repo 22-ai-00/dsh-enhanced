@@ -1,39 +1,31 @@
 # RSI 当前状态
 
-更新：2026-11-10。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)。原始日志保存在忽略的 `docs/evidence/`，历史实现与检查查 Git。
+更新：2026-11-10。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)。原始日志留 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
-## 目标与开发基线
+## 目标与当前安排
 
-通过认证任务与反馈、原生 Agent、持久学习、独立验证、有界采用和版本回退，减少主人协调与返工。以后续真实任务的质量、成本和人工介入衡量改进；模型自评、安装成功与工具退出码不能替代任务验收。
+通过认证任务与反馈、原生 Agent、持久学习、独立验证、有界采用和回退，减少主人的协调与返工；以后续真实任务的质量、成本和人工介入判断收益。
 
-以 Linux 当前源码及其未提交进展为开发来源，Mac 开发、Linux `/data00` 独立副本验证，运行前后核对源码摘要。只保留 `dev`、`main`；能力验证后提交、推送 `dev`，仅发布时合入 `main`。当前包版本 `0.1.67`；Host 兼容范围 `>=0.2.1-rc.2 <0.3.0`，候选 `0.2.2-rc.1`，工具链见[兼容说明](compatibility.md)。
+**用户已暂停本轮功能开发，转交另一工具。** 可移植入口是[接手方案](handover/README.md)，其中包含未验收源码补丁、具体剩余计划、CI 优化、真实失败结果及原 Linux 改动归属；新 clone 无需本地忽略目录。普通任务补丁尚未应用到提交的运行代码。
 
-## 本轮能力：结构化修订请求到独立证书
+开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。原 Linux 活跃工作树保留，12 个旧未提交文件已有可恢复历史 patch；新交接副本同步 GitHub dev。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
 
-- `source revision-enqueue` 写入的请求由原生 Automations wake 只读发现，在预算约束的 continuation occurrence 中认领；空队列暂停，退出取消并等待在途工作。
-- schema 40 保存递增认领代次和 instruction/job 关联，重试保持原始期限；旧认领不能结算新认领，登记中断不能误报已受理。`revision-show` 只读查询活 WAL，关联损坏显示 unknown；accepted 不代表作业或验证成功。
-- 指令来源的 prepared 产物经过准确的 owner、父版本、文件与期限绑定，接入真实 Verifier 和 v3 签证。**v3 不承诺实际执行，也不授权自动采用。** 结构化补丁请求不等于从聊天文字自动取得修改授权。
-- 冷构建先生成 Evaluation 公开 core，再构建 Delivery、Isolation 和完整 Evaluation。最近 GitHub CI 的共同首错是提前编译 benchmark 而缺少 Isolation 产物，该顺序修复覆盖此原因。远端验收以对应 `dev` 提交的全部 CI job 为准。
+## 已有能力与边界
 
-## 当前边界与阻断
+- Goals、WorkItems、原生执行、恢复、owner 反馈、独立验收与持久记忆已有实现；首次普通委托到动态准则仍未完整接通，现有 Verifier 依赖批准 profile。文件准则证明当前状态，尚不证明本次生成。
+- 已提交 Control Plane 能通过有预算的原生 continuation 消费修订请求，带 generation/receipt 与恢复栅栏；v3 审查证书不授权自动采用。采用前配对收益与入队时供应者冻结仍需完善。
+- fresh supervised 默认 digest ceiling；首装预设/学习授权顺序、skip/decline 语义与普通使用收益仍待验收。学习成功不等于后续任务改善。
+- Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
+- 主动准入、通知反馈、Dream 与 Web 均保留原边界；provider 接受不等于用户已读，Dream 默认关闭，长期收益未证明。
 
-- **普通任务与主动性**：Goals、WorkItems、事件跟随、认领、报告、恢复和 owner 反馈已有实现。inferred 自动准入尚未完整传递原目标与验收合同；`holdReport` 只持有已绑定验收的 ready 报告，不能保证所有完成通知已验收。首次明确委托还需受信来源准入及 Host worker 验收接线。
-- **持久学习**：认证事实/经验、三份有限授权、更正撤回、有限召回已有实现。fresh supervised 默认 `digest` ceiling，不等于自动执行；首装预设与学习授权顺序仍需修复。长期真实召回和决策收益未验收。
-- **工程成长**：原生隔离、源码构建、独立审查、有界动态采用、父版本 CAS 与回退已有实现。可选修订收益投影误走创建账本，采用前候选样本仍缺；不能据部署关联推断收益。修订审查从活 owner 路由解析模型并绑定到验证认领，未在 CLI 请求入队时冻结。
-- **平台与渠道**：Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 原地迁移及旧 opt-in E2E 的迁移尚未验收。Docker 执行后端已移除，旧配置只读解码并拒绝继续执行。provider 接受投递不等于用户已读或任务达成，长期通知收益仍待观察。
-- **做梦与 Web**：做梦默认关闭，只生成私有 idea 与有界摘要，尚无自动晋升；owner-console 已有 GUI 冒烟，长期真实使用仍待观察。
+## 下一交付
 
-## 下一交付与验收
+1. 恢复普通续办 39 路径 patch，补强 Isolation 续租测试的确定性前提，再跑完整 Linux 门与独立复核；严格绑定原目标、供应者/预算、当前 occurrence/attempt，验收前持有报告。
+2. 交付 CI 八路径 patch：安装器拆组与根分片均衡，核对用例集合，测精确提交的根片、包 job 和总 run。四份旧资料已在交接中收敛。
+3. 打通首次自然语言委托与受保护的动态准则，再修首装/学习、工程成长和主动性，按能力逐个提交；完整顺序及验收见[剩余方案](handover/remaining-work.md)。
 
-1. 修复全新 supervised 的预设/学习授权顺序和 skip/decline 语义；实际编译配置，核对后置装配幂等、真实失败传播和必要的服务重启。
-2. 打通一类明确委托：从认证 Inbox 冻结原目标、实际模型与验收要求，在首个 worker 模型调用前生成绑定本次来源的真实合同；按 item/occurrence/attempt 核对事实、产物与回执。错误事实、旧产物、旧回执必须被拒绝，不能仅通过固定格式检查。
-3. 修复修订收益投影，以同输入、供应商和预算的独立配对验证取得采用前样本；缺样本明确阻断，再验证有限试用、退化和精确回退。
-4. 修复 `check:quick` 的 Git 筛选假绿，迁移当前 Host/native 端到端场景；诊断分别显示配置、运行就绪和任务已验证。保留独有回归后再清理旧资料。
+## 最近验证
 
-## 最新验证
-
-- Linux、Node 24.7.0、pnpm 11.7.0，代码快照 `c5192b29`：标准 `pnpm check` **EXIT 0**，耗时 2318 秒。清单、零警告 lint、完整构建、类型检查通过；根测试 **1610 passed / 4 skipped**，39 包测试 **11244 passed / 271 skipped**，39 包 dry-run pack 通过。独立代码与证据复核 PASS；事实文档更新单独核对差量。
-- 空 `lib` 的完整 Linux 构建通过。真实 CP/Automations/AgentLoop/Verifier 组合与签名双账本通过；模型供应和外部构建/runner 为 fixture，不证明线上模型、生产隔离执行或自动采用。
-- 根跳过两项依赖本地发布标签的资产检查和两项 macOS 专项；包测试保留平台/opt-in 条件，额外 Linux runtime 归档未配置。此前一轮 release adapter 超时未稳定复现，已增加阶段诊断；不声称未知根因已修复。
-- 2086 个源码文件在完整检查前后摘要、大小、模式一致。`TMPDIR=/data00/home/jiataorui/t` 避开已复现的 socket 路径限制。Mac 清理的生成物原分配量约 515 MiB，旧修改有备份；六个无独有提交的旧分支已删除。原 Linux 工作树及其活动进程保留。
-- 本轮未升级生产 Home、调用真实模型或进行飞书投递，也未发布 npm 或验收长期普通使用收益。详见 `docs/evidence/code-review-2026-11-10/`；GitHub 检查结果随对应提交记录。
+- 已提交运行基线 `8e608d4a`：[CI #819](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42762151021) 六 job 成功；历史 Linux 全检 EXIT 0 / 2318s，根 1610 pass/4 skip、包 11244 pass/271 skip、39 packs，独立复核 PASS。仅属于已提交能力。
+- 未验收普通快照 `b0628837`：最新 39 包诊断 EXIT 1 / 714s，38 包通过，11279 pass/1 fail/271 skip；唯一失败为 Isolation renewing lease 用例，未 pack、未新 full。此前两次标准 full 分别失败于 Delivery deadline 和 MemoryLearning 初始准入；两个夹具修复已保存在 patch，后续相应包通过，但不能拼成全检 PASS。
+- 用户停止开发后仅做资料与恢复校验，未继续运行完整检查。没有发布 npm、升级生产 Home 或验证真实模型/外部渠道及长期收益。交接包独立复核 PASS，精确命令和限制见[核验与归属](handover/verification.md)。

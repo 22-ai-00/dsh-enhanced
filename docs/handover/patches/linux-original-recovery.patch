@@ -1,0 +1,972 @@
+diff --git a/plugins/plugin-control-plane/README.md b/plugins/plugin-control-plane/README.md
+index 9706b0f04583f775eccbe05248f0024bee8336a8..e6f9a1daffe4eb45a1bbc9fa74398e5ab458e7f2 100644
+--- a/plugins/plugin-control-plane/README.md
++++ b/plugins/plugin-control-plane/README.md
+@@ -753,7 +753,7 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
+ 
+ Host-only `requestOwnerInstructionRevision(input)`（schema 37 `source_owner_instructions`）是与任务失败并列的第二条 `revise-created` 触发来源，让 owner 不依赖失败任务也能发起一次对已采用插件的修订。它在同一同步帧内：经 Delivery 重验当前 owner route，核对 parent 计划仍是已采用的同名插件，校验提交文件并冻结其规范 digest，写入带 TTL 的指令行（模型工具面不可达此接口），再用合成的 `owner-instruction:<id>` gap 入队一个修订作业。入队、重启恢复和每个 continuation 都重放同一组 fail-closed 校验：指令 digest、过期时间、plan/plugin 名、files digest、gap 归属与 owner continuation；指令与任务失败证据互斥，不允许混用。该类作业不携带 growth run，`validateSourceRevisionBinding` 仅在显式 `allowWithoutGrowthRun` 下接受，独立 revision 审查仍强制；回归 pin 与 P1-4 收益门不适用于无 growth run 的指令作业。指令对应的合成 gap 不出现在全局 `gaps()` 中。
+ 
+-结构化 CLI 入口分两层，使无 Delivery 的 CLI 进程不直接触发授权：`dsh-plugin-control source revision-enqueue --plan-id <id> --plugin-name <name> --files-dir <dir> --expected-base-commit <sha40> --idempotency-key <key> --ttl-ms <900000..86400000>` 用 `readScopedPluginFiles` 把目录安全读成候选文件（拒 symlink/越界/`.git`，沿用 64 文件/64 KiB/256 KiB 与 candidate authority 路径边界），再写入 schema 38 `source_owner_instruction_requests` 的 `pending` 请求行并打印 requestId；重复相同幂等键与内容返回同一行，改内容则冲突。请求行只冻结意图，不入队 `source_jobs`。运行中的 service 负责在其信任边界内对 `pending` 行重验 owner route 后调用 `requestOwnerInstructionRevision`，成功置 `accepted`、失败以有界 failure code 置 `rejected`；该拾取调度仍在实现中（当前请求行会停留在 `pending`，不影响其它控制面路径）。
++结构化 CLI 入口分两层，使无 Delivery 的 CLI 进程不直接触发授权：`dsh-plugin-control source revision-enqueue --plan-id <id> --plugin-name <name> --files-dir <dir> --expected-base-commit <sha40> --idempotency-key <key> --ttl-ms <900000..86400000>` 用 `readScopedPluginFiles` 把目录安全读成候选文件（拒 symlink/越界/`.git`，沿用 64 文件/64 KiB/256 KiB 与 candidate authority 路径边界），再写入 schema 38/39 `source_owner_instruction_requests` 的 `pending` 请求行并打印 requestId；重复相同幂等键与内容返回同一行，改内容则冲突。请求行只冻结意图，不入队 `source_jobs`。运行中的 service 通过一个**独立、常驻 active、无 source 预算**的 host automation（`owner-instruction-request-drain`，每 60s）在其信任边界内对 `pending` 行重验 owner route 后调用 `requestOwnerInstructionRevision`，成功置 `accepted`、失败以有界 failure code 置 `rejected`；该 automation 与 continuation 解耦，即使没有任何 prepared source job 也保持 active，因此 idle 期 CLI 写入的请求也会被拾取。空 pass 不做任何 authority/模型工作。schema 39 为请求行增加 `claimed_at`：claim 是 CAS `pending→claimed`，进程若在 settle 前崩溃，drain 会在 claim 超过五分钟（`OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS`）后把该孤儿 claim 退回 `pending` 重新受理，不会永久卡住；未过期的正常 claim 与其他已结算行不受影响。
+ 
+ ## 权限
+ 
+diff --git a/plugins/plugin-control-plane/src/service.ts b/plugins/plugin-control-plane/src/service.ts
+index ac5c107d2757540611253259a5c0717e0927bb3a..4abedb6b4756d006dfa37ed5d394a11a412ba2cb 100644
+--- a/plugins/plugin-control-plane/src/service.ts
++++ b/plugins/plugin-control-plane/src/service.ts
+@@ -71,6 +71,7 @@ import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.
+ import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
+ import { registerPluginControlTools } from './tools.js'
+ import { SourceGrowthRunUnavailableError, SourceJobRuntime, normalizeSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
++import { drainOwnerInstructionRequests as drainPendingOwnerInstructionRequests } from './owner-instruction-drain.js'
+ import type { SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+ import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
+ import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
+@@ -876,6 +877,7 @@ export class PluginControlPlaneService extends Service {
+           ...(this.config.sourceJobs?.revisionBenefit === undefined ? {} : {
+             reconcileRevisionBenefits: () => this.reconcileRevisionBenefits(),
+           }),
++          drainOwnerInstructionRequests: () => this.drainOwnerInstructionRequests(),
+           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent,
+             nativeRunner?.backend === 'linux-native' ? { runner: nativeRunner.runner, generation: preparationGeneration } : undefined),
+           ...(nativeRunner?.backend === 'linux-native' ? { isPreparationNotStarted: (error: unknown, job: SourceJobRecord) =>
+@@ -2409,6 +2411,24 @@ export class PluginControlPlaneService extends Service {
+     return this.sourceRuntime.inspect(input)
+   }
+ 
++  /**
++   * Drains pending CLI-written owner-instruction requests on the always-active
++   * drain automation. Each request is claimed through the store CAS, then the
++   * full requestOwnerInstructionRevision admission (Delivery owner-route
++   * re-validation, adopted-parent check, exact-file freeze and enqueue) runs in
++   * this service's trust boundary. Accept/reject is recorded on the row.
++   */
++  drainOwnerInstructionRequests = async (): Promise<void> => {
++    if (this.abort.signal.aborted || this.sourceRuntime === undefined) return
++    await drainPendingOwnerInstructionRequests({
++      store: this.store,
++      now: Date.now(),
++      admit: request => this.requestOwnerInstructionRevision({ planId: request.planId, pluginName: request.pluginName,
++        files: request.files, ttlMs: request.ttlMs, idempotencyKey: request.idempotencyKey,
++        expectedBaseCommit: request.expectedBaseCommit }),
++    })
++  }
++
+   /**
+    * Host-only owner instruction entry. Freezes one authenticated owner
+    * receipt, the adopted revision parent and the exact submitted files into an
+diff --git a/plugins/plugin-control-plane/src/source-job-types.ts b/plugins/plugin-control-plane/src/source-job-types.ts
+index 6e54dc9a923d210e7beefec052e6de6d2421091b..5487149d7cf42457f101a1300fd021fb933aaff4 100644
+--- a/plugins/plugin-control-plane/src/source-job-types.ts
++++ b/plugins/plugin-control-plane/src/source-job-types.ts
+@@ -86,6 +86,8 @@ export interface SourceOwnerInstructionRequest {
+   expiresAt: number
+   status: 'pending' | 'claimed' | 'accepted' | 'rejected'
+   failureCode: string | null
++  /** Set while claimed; a stale value marks an orphaned claim safe to requeue. */
++  claimedAt: number | null
+ }
+ 
+ export interface SourceJobAuthority {
+diff --git a/plugins/plugin-control-plane/src/source-jobs.ts b/plugins/plugin-control-plane/src/source-jobs.ts
+index 9c88467b6c686a9842629960a6a0a221ae358a1a..c0efd1a5fb99887e70da53bff4cd90736256d0c0 100644
+--- a/plugins/plugin-control-plane/src/source-jobs.ts
++++ b/plugins/plugin-control-plane/src/source-jobs.ts
+@@ -28,6 +28,12 @@ const CATALOG = controlPlaneDigest({ executor: EXECUTOR, version: 1, operation:
+ const CONTINUATION_EXECUTOR = 'plugin-control-plane-source-continuations-v1'
+ const CONTINUATION_CATALOG = controlPlaneDigest({ executor: CONTINUATION_EXECUTOR, version: 1, operation: 'continue-prepared-source-plan' })
+ const CONTINUATION_AUTOMATION = 'source-job-prepared-continuations'
++/**
++ * The owner-instruction drain runs on an internal timer rather than a host
++ * automation: an empty pass does no work and must not reserve a source-budget
++ * slot, while the hardened automation profile rejects unbudgeted host runs.
++ */
++const DRAIN_INTERVAL_MS = 60_000
+ 
+ export interface SourceJobCaller {
+   ownerRouteId: string; principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string
+@@ -109,6 +115,8 @@ export class SourceJobRuntime {
+   private readonly authorityDigest: string
+   private unregister?: () => void
+   private unregisterContinuation?: () => void
++  private drainTimer: ReturnType<typeof setInterval> | undefined
++  private draining = false
+   private closing?: Promise<void>
+   private active = false
+   private readonly generation = randomUUID()
+@@ -142,6 +150,13 @@ export class SourceJobRuntime {
+     adoptionTimeoutMs?: number
+     /** Host-owned P1-4 benefit reconciliation, driven by this runtime's existing cron tick. */
+     reconcileRevisionBenefits?: () => void
++    /**
++     * Host-owned drain of CLI-written owner-instruction requests, driven by a
++     * dedicated always-active automation so cross-process CLI writes are picked
++     * up even when no prepared source job exists. Re-validates the owner route
++     * inside the service before enqueueing.
++     */
++    drainOwnerInstructionRequests?: () => Promise<void>
+     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
+     inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
+     /** Linux service-owned, single-use proof of no admission and completed/no Host cleanup. */
+@@ -185,6 +200,7 @@ export class SourceJobRuntime {
+         execute: input => this.track(this.executeContinuations(input)),
+       })
+       this.active = true
++      if (this.options.drainOwnerInstructionRequests !== undefined) this.startDrainTimer()
+       // Recovery is admitted exclusively through a production cron occurrence.
+       // Reading this local durable query intentionally performs no authority call.
+       this.reconcileContinuations()
+@@ -193,6 +209,8 @@ export class SourceJobRuntime {
+       // Registration is transactional from this runtime's point of view: an
+       // unregistration fault cannot leave the other executor registered or
+       // obscure the original registration failure.
++      if (this.drainTimer !== undefined) clearInterval(this.drainTimer)
++      this.drainTimer = undefined
+       try { this.unregisterContinuation?.() } catch { /* original error wins */ }
+       try { this.unregister?.() } catch { /* original error wins */ }
+       throw error
+@@ -371,6 +389,7 @@ export class SourceJobRuntime {
+   close(): Promise<void> {
+     return this.closing ??= (async () => {
+       this.active = false
++      if (this.drainTimer !== undefined) { clearInterval(this.drainTimer); this.drainTimer = undefined }
+       try {
+         const current = this.options.ports.automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION })
+         if (current?.activationNonce === this.continuationNonce) this.options.ports.automations.reconcileSystem({ owner: SOURCE_JOB_OWNER,
+@@ -839,6 +858,36 @@ export class SourceJobRuntime {
+         ownerRouteId: config.ownerRouteId, activationNonce: this.continuationNonce } }
+   }
+ 
++  /**
++   * Starts the internal drain timer. It runs independently of the continuation
++   * automation state, so a cross-process CLI write is picked up even when no
++   * prepared source job exists and the source automation is paused. An internal
++   * timer (rather than a host automation) keeps an empty pass free of budget
++   * reservations; the hardened automation profile rejects unbudgeted host runs.
++   */
++  private startDrainTimer(): void {
++    if (this.drainTimer !== undefined) return
++    const timer = setInterval(() => { void this.runDrain().catch(() => { /* next tick retries */ }) }, DRAIN_INTERVAL_MS)
++    timer.unref?.()
++    this.drainTimer = timer
++    // Pick up requests already pending at startup without waiting one interval.
++    void this.runDrain().catch(() => { /* next tick retries */ })
++  }
++
++  /**
++   * One drain pass with re-entrancy protection. The injected Host port performs
++   * the trust-boundary admission and records accept/reject per request; a pass
++   * that overlaps a still-running one is skipped rather than queued.
++   */
++  private async runDrain(): Promise<void> {
++    if (!this.active || this.abort.signal.aborted || this.draining) return
++    const drain = this.options.drainOwnerInstructionRequests
++    if (drain === undefined) return
++    this.draining = true
++    try { await drain() }
++    finally { this.draining = false }
++  }
++
+   /** Reconciliation only changes native activation; it never calls an authority. */
+   private reconcileContinuations(force = false): void {
+     if (!this.active || !this.hasContinuations()) return
+diff --git a/plugins/plugin-control-plane/src/sqlite.ts b/plugins/plugin-control-plane/src/sqlite.ts
+index 5e0d458ad0599d93d5bb56fef35371d704f55a93..ad7c59be7647ee8f80b98d07960fe62792a96ed3 100644
+--- a/plugins/plugin-control-plane/src/sqlite.ts
++++ b/plugins/plugin-control-plane/src/sqlite.ts
+@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
+ import { DatabaseSync } from 'node:sqlite'
+ import { pathToFileURL } from 'node:url'
+ 
+-export const controlPlaneSchemaVersion = 38
++export const controlPlaneSchemaVersion = 39
+ 
+ const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
+   grant_id TEXT PRIMARY KEY,
+@@ -79,8 +79,8 @@ const sourceOwnerInstructionTableSchema = `CREATE TABLE IF NOT EXISTS source_own
+ 
+ const sourceOwnerInstructionSchema = sourceOwnerInstructionTableSchema
+ 
+-/** Structured owner-instruction requests written by the CLI and drained by the running service (schema 38). */
+-const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
++/** Structured owner-instruction requests written by the CLI and drained by the running service (schema 38, claim time since 39). */
++const sourceOwnerInstructionRequestTableSchemaV38 = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
+   request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
+   plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
+   plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
+@@ -95,7 +95,35 @@ const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS sou
+   failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120))
+ ) STRICT, WITHOUT ROWID;`
+ 
+-const sourceOwnerInstructionRequestSchema = sourceOwnerInstructionRequestTableSchema
++/**
++ * Schema 39 adds `claimed_at` so a claim orphaned by a crash before
++ * accept/reject is reclaimable instead of pinning the row forever.
++ */
++const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
++  request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
++  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
++  plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
++  expected_base_commit TEXT NOT NULL CHECK(length(expected_base_commit) = 40 AND expected_base_commit NOT GLOB '*[^a-f0-9]*'),
++  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json) = 'array' AND length(files_json) <= 1048576),
++  files_digest TEXT NOT NULL CHECK(length(files_digest) = 64 AND files_digest NOT GLOB '*[^a-f0-9]*'),
++  ttl_ms INTEGER NOT NULL CHECK(ttl_ms >= 900000 AND ttl_ms <= 86400000),
++  idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) > 0 AND length(idempotency_key) <= 160),
++  created_at INTEGER NOT NULL CHECK(created_at > 0),
++  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
++  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'accepted', 'rejected')),
++  failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120)),
++  claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0)
++) STRICT, WITHOUT ROWID;`
++
++/**
++ * SQLite splices an ALTER-added column into the stored CREATE text with its own
++ * formatting (the new column follows a comma on the closing line, before the
++ * table options), so a v38→39 migrated table matches the spliced form rather
++ * than the canonical v39 CREATE.
++ */
++const sourceOwnerInstructionRequestTableSchemaSpliced = storedTableSchema(sourceOwnerInstructionRequestTableSchemaV38)
++  .replace(/\n\) STRICT, WITHOUT ROWID$/u, '\n, claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0)) STRICT, WITHOUT ROWID')
++
+ 
+ const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
+   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
+@@ -1559,16 +1587,46 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
+     if (ownerInstructionRequestSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 38) {
+       throw new Error('missing source owner instruction request schema')
+     }
++    // A v38 ledger carries the pre-claimed_at table text; a migrated v39 ledger
++    // carries SQLite's ALTER-spliced text. Both are valid intermediate forms;
++    // the schema 39 block below enforces the final column set.
+     if (ownerInstructionRequestSchema !== undefined && (ownerInstructionRequestSchema.type !== 'table'
+-      || ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema))) {
++      || (ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchemaV38)
++        && ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema)
++        && ownerInstructionRequestSchema.sql !== sourceOwnerInstructionRequestTableSchemaSpliced))) {
+       throw new Error('unknown source owner instruction request schema')
+     }
+     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 38) {
+       database.exec('BEGIN IMMEDIATE')
+       try {
+-        database.exec(`${sourceOwnerInstructionRequestSchema} PRAGMA user_version = 38; COMMIT;`)
++        database.exec(`${sourceOwnerInstructionRequestTableSchemaV38} PRAGMA user_version = 38; COMMIT;`)
+       } catch (error) { database.exec('ROLLBACK'); throw error }
+-    } else database.exec(sourceOwnerInstructionRequestSchema)
++    } else database.exec(sourceOwnerInstructionRequestTableSchemaV38)
++    const ownerInstructionRequestColumns = (database.prepare("PRAGMA table_info('source_owner_instruction_requests')")
++      .all() as { name: string }[]).map(column => column.name)
++    const ownerInstructionRequestVersion = Number(database.prepare('PRAGMA user_version').get()?.user_version)
++    if (ownerInstructionRequestVersion >= 39) {
++      if (!ownerInstructionRequestColumns.includes('claimed_at')) {
++        throw new Error('missing source owner instruction request claim column')
++      }
++      const current = database.prepare("SELECT sql FROM sqlite_schema WHERE name='source_owner_instruction_requests'")
++        .get() as { sql: string | null } | undefined
++      if (current?.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema)
++        && current?.sql !== sourceOwnerInstructionRequestTableSchemaSpliced) {
++        throw new Error('unknown source owner instruction request schema')
++      }
++    } else {
++      if (ownerInstructionRequestColumns.includes('claimed_at')) {
++        // A migration interrupted after the ALTER but before the version write
++        // reopens here; the column and table text are already the v39 form.
++        database.exec('PRAGMA user_version = 39')
++      } else {
++        database.exec('BEGIN IMMEDIATE')
++        try {
++          database.exec(`ALTER TABLE source_owner_instruction_requests ADD COLUMN claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0); PRAGMA user_version = 39; COMMIT;`)
++        } catch (error) { database.exec('ROLLBACK'); throw error }
++      }
++    }
+     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
+     return database
+   } catch (error) {
+diff --git a/plugins/plugin-control-plane/src/store.ts b/plugins/plugin-control-plane/src/store.ts
+index dbae0a01b4f2fb940d81288011cacc7d1fc50caa..e7120c8666e34fe64d911a8647ce258f188271a0 100644
+--- a/plugins/plugin-control-plane/src/store.ts
++++ b/plugins/plugin-control-plane/src/store.ts
+@@ -451,6 +451,7 @@ interface OwnerInstructionRequestRow {
+   request_id: string; plan_id: string; plugin_name: string; expected_base_commit: string
+   files_json: string; files_digest: string; ttl_ms: number; idempotency_key: string
+   created_at: number; expires_at: number; status: 'pending' | 'claimed' | 'accepted' | 'rejected'; failure_code: string | null
++  claimed_at: number | null
+ }
+ 
+ interface ActivationRow {
+@@ -2354,16 +2355,57 @@ export class ControlPlaneStore {
+       .map(row => this.ownerInstructionRequestFromRow(row))
+   }
+ 
+-  /** CAS pending->claimed so two ticks cannot drain one request; false when it was not pending or already expired. */
++  /**
++   * Quarantines pending rows whose frozen files no longer match their digest
++   * (disk corruption or external tampering). Without this, one unreadable row
++   * makes `listPendingOwnerInstructionRequests` throw and starves every healthy
++   * request behind it. Each bad row is terminally rejected with a bounded code;
++   * returns the quarantined count.
++   */
++  quarantineCorruptOwnerInstructionRequests(now: number): number {
++    if (!Number.isSafeInteger(now) || now < 1) throw new ControlPlaneStoreError('invalid-input', 'query time is invalid')
++    const rows = this.#database.prepare(`SELECT * FROM source_owner_instruction_requests
++      WHERE status = 'pending' AND expires_at > ?`).all(now) as unknown as OwnerInstructionRequestRow[]
++    let quarantined = 0
++    for (const row of rows) {
++      try { this.ownerInstructionRequestFromRow(row) } catch {
++        const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
++          SET status = 'rejected', failure_code = 'request-corrupt' WHERE request_id = ? AND status = 'pending'`).run(row.request_id)
++        quarantined += Number(result.changes)
++      }
++    }
++    return quarantined
++  }
++
++  /**
++   * CAS pending->claimed so two ticks cannot drain one request; false when it
++   * was not pending or already expired. Records the claim time so a crash before
++   * settle leaves a requeueable orphan rather than a permanently pinned row.
++   */
+   claimOwnerInstructionRequest(requestId: string, now: number): boolean {
+     if (typeof requestId !== 'string' || !KEY.test(requestId) || !Number.isSafeInteger(now) || now < 1) {
+       throw new ControlPlaneStoreError('invalid-input', 'owner instruction request claim is invalid')
+     }
+     const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+-      SET status = 'claimed' WHERE request_id = ? AND status = 'pending' AND expires_at > ?`).run(requestId, now)
++      SET status = 'claimed', claimed_at = ? WHERE request_id = ? AND status = 'pending' AND expires_at > ?`).run(now, requestId, now)
+     return Number(result.changes) === 1
+   }
+ 
++  /**
++   * Requeues claims orphaned by a crash before accept/reject. A claim is stale
++   * once older than `claimTimeoutMs`; expired rows keep their claimed state
++   * since the pending queue rejects them anyway. Returns the requeued count.
++   */
++  reclaimOrphanedOwnerInstructionRequests(now: number, claimTimeoutMs: number): number {
++    if (!Number.isSafeInteger(now) || now < 1 || !Number.isSafeInteger(claimTimeoutMs) || claimTimeoutMs < 1) {
++      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request orphan reclamation is invalid')
++    }
++    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
++      SET status = 'pending', claimed_at = NULL
++      WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at <= ? AND expires_at > ?`).run(now - claimTimeoutMs, now)
++    return Number(result.changes)
++  }
++
+   /** Marks a claimed/pending request rejected with a bounded failure code; unknown or already-settled rows are ignored. */
+   rejectOwnerInstructionRequest(requestId: string, failureCode: string, now: number): void {
+     if (typeof requestId !== 'string' || !KEY.test(requestId) || typeof failureCode !== 'string'
+@@ -2383,6 +2425,20 @@ export class ControlPlaneStore {
+       WHERE request_id = ? AND status = 'claimed'`).run(requestId)
+   }
+ 
++  /**
++   * Returns a live claim to pending after a transient admission failure (the
++   * host was busy, shutting down, or timed out). The request stays eligible for
++   * the next pass instead of being permanently rejected; only a claimed row
++   * transitions so a settled row is never reopened.
++   */
++  releaseOwnerInstructionRequestClaim(requestId: string): void {
++    if (typeof requestId !== 'string' || !KEY.test(requestId)) {
++      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request id is invalid')
++    }
++    this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'pending', claimed_at = NULL
++      WHERE request_id = ? AND status = 'claimed'`).run(requestId)
++  }
++
+   private ownerInstructionRequestFromRow(row: OwnerInstructionRequestRow): SourceOwnerInstructionRequest {
+     let files: ScopedPluginFile[]
+     try { files = JSON.parse(row.files_json) as ScopedPluginFile[] }
+@@ -2393,7 +2449,7 @@ export class ControlPlaneStore {
+     return { requestId: row.request_id, planId: row.plan_id, pluginName: row.plugin_name,
+       expectedBaseCommit: row.expected_base_commit, files, filesDigest: row.files_digest, ttlMs: row.ttl_ms,
+       idempotencyKey: row.idempotency_key, createdAt: row.created_at, expiresAt: row.expires_at,
+-      status: row.status, failureCode: row.failure_code }
++      status: row.status, failureCode: row.failure_code, claimedAt: row.claimed_at }
+   }
+ 
+   #ownerInstructionPayload(input: SourceOwnerInstruction): SourceOwnerInstruction {
+diff --git a/plugins/plugin-control-plane/tests/cli.spec.ts b/plugins/plugin-control-plane/tests/cli.spec.ts
+index f42f0c08b24658f5828983a67ca507234fcf1602..6c6e10203d4f1704df6bb28cbab0c1f62536c564 100644
+--- a/plugins/plugin-control-plane/tests/cli.spec.ts
++++ b/plugins/plugin-control-plane/tests/cli.spec.ts
+@@ -1580,7 +1580,7 @@ describe.sequential('trusted staged CLI', () => {
+     await expect(loadTrustConfig(value.trustPath)).rejects.toThrow('digest changed')
+   })
+ 
+-  test('source revision-enqueue records a schema-38 owner-instruction request from a files directory', async () => {
++  test('source revision-enqueue records a pending owner-instruction request from a files directory', async () => {
+     const value = await fixture()
+     const filesDir = join(value.root, 'request-files')
+     await mkdir(join(filesDir, 'src'), { recursive: true }); await writeFile(join(filesDir, 'README.md'), '# demo\n')
+diff --git a/plugins/plugin-control-plane/tests/owner-instruction-request-store.spec.ts b/plugins/plugin-control-plane/tests/owner-instruction-request-store.spec.ts
+index 65249f3b936e2021801918ea088c7cb6b3547321..db2af036fd256c900426ab200bd89ff1317a4ff4 100644
+--- a/plugins/plugin-control-plane/tests/owner-instruction-request-store.spec.ts
++++ b/plugins/plugin-control-plane/tests/owner-instruction-request-store.spec.ts
+@@ -25,7 +25,7 @@ const base = {
+   files, ttlMs: 900_000, idempotencyKey: 'key-1', createdAt: 1_000,
+ }
+ 
+-describe('owner instruction request store (schema 38)', () => {
++describe('owner instruction request store (schema 39)', () => {
+   it('records and reads one pending request with frozen files and digest', () => {
+     const { store, path } = ledger()
+     expect(Number((new DatabaseSync(path).prepare('PRAGMA user_version').get() as { user_version: number }).user_version))
+@@ -33,6 +33,7 @@ describe('owner instruction request store (schema 38)', () => {
+     const recorded = store.recordOwnerInstructionRequest(base)
+     expect(recorded.status).toBe('pending')
+     expect(recorded.failureCode).toBeNull()
++    expect(recorded.claimedAt).toBeNull()
+     expect(recorded.expiresAt).toBe(base.createdAt + base.ttlMs)
+     expect(recorded.filesDigest).toBe(controlPlaneDigest(files))
+     expect(recorded.requestId).toMatch(/^oir-[a-f0-9]{32}$/u)
+@@ -96,7 +97,52 @@ describe('owner instruction request store (schema 38)', () => {
+     const recorded = store.recordOwnerInstructionRequest(base)
+     expect(store.claimOwnerInstructionRequest(recorded.requestId, 5_000)).toBe(true)
+     expect(store.claimOwnerInstructionRequest(recorded.requestId, 5_000)).toBe(false)
+-    expect(store.getOwnerInstructionRequest(recorded.requestId)?.status).toBe('claimed')
++    expect(store.getOwnerInstructionRequest(recorded.requestId)).toMatchObject({ status: 'claimed', claimedAt: 5_000 })
++    store.close()
++  })
++
++  it('requeues an orphaned claim after the timeout but leaves a fresh claim pinned', () => {
++    const { store } = ledger()
++    const orphan = store.recordOwnerInstructionRequest(base)
++    const fresh = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-2', idempotencyKey: 'key-2', createdAt: 2_000 })
++    expect(store.claimOwnerInstructionRequest(orphan.requestId, 5_000)).toBe(true)
++    expect(store.claimOwnerInstructionRequest(fresh.requestId, 290_000)).toBe(true)
++    // At t=305000 the first claim is 300000ms old (stale), the second only 15000ms.
++    expect(store.reclaimOrphanedOwnerInstructionRequests(305_000, 300_000)).toBe(1)
++    const requeued = store.getOwnerInstructionRequest(orphan.requestId)
++    expect(requeued).toMatchObject({ status: 'pending', claimedAt: null })
++    expect(store.getOwnerInstructionRequest(fresh.requestId)).toMatchObject({ status: 'claimed', claimedAt: 290_000 })
++    // The requeued row is listable and claimable again.
++    expect(store.listPendingOwnerInstructionRequests(305_000).map(item => item.requestId)).toEqual([orphan.requestId])
++    expect(store.claimOwnerInstructionRequest(orphan.requestId, 305_000)).toBe(true)
++    // A second reclamation with no stale claims changes nothing.
++    expect(store.reclaimOrphanedOwnerInstructionRequests(305_001, 300_000)).toBe(0)
++    expect(() => store.reclaimOrphanedOwnerInstructionRequests(305_000, 0)).toThrow()
++    store.close()
++  })
++
++  it('releases a live claim back to pending but never reopens an accepted or rejected row', () => {
++    const { store } = ledger()
++    const claimed = store.recordOwnerInstructionRequest(base)
++    expect(store.claimOwnerInstructionRequest(claimed.requestId, 5_000)).toBe(true)
++    store.releaseOwnerInstructionRequestClaim(claimed.requestId)
++    expect(store.getOwnerInstructionRequest(claimed.requestId)).toMatchObject({ status: 'pending', claimedAt: null })
++    expect(store.listPendingOwnerInstructionRequests(5_000).map(item => item.requestId)).toEqual([claimed.requestId])
++    // A settled row is unaffected by a release.
++    const accepted = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-2', idempotencyKey: 'key-accepted' })
++    expect(store.claimOwnerInstructionRequest(accepted.requestId, 5_000)).toBe(true)
++    store.acceptOwnerInstructionRequest(accepted.requestId)
++    store.releaseOwnerInstructionRequestClaim(accepted.requestId)
++    expect(store.getOwnerInstructionRequest(accepted.requestId)?.status).toBe('accepted')
++    const rejected = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-3', idempotencyKey: 'key-rejected' })
++    expect(store.claimOwnerInstructionRequest(rejected.requestId, 5_000)).toBe(true)
++    store.rejectOwnerInstructionRequest(rejected.requestId, 'parent-mismatch', 5_000)
++    store.releaseOwnerInstructionRequestClaim(rejected.requestId)
++    expect(store.getOwnerInstructionRequest(rejected.requestId)?.status).toBe('rejected')
++    // Releasing an unclaimed pending row is a no-op that stays pending.
++    const untouched = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-4', idempotencyKey: 'key-untouched' })
++    store.releaseOwnerInstructionRequestClaim(untouched.requestId)
++    expect(store.getOwnerInstructionRequest(untouched.requestId)?.status).toBe('pending')
+     store.close()
+   })
+ 
+@@ -146,8 +192,23 @@ describe('owner instruction request store (schema 38)', () => {
+   })
+ })
+ 
+-describe('schema 38 migration', () => {
+-  it('adds the owner instruction request table to a schema 37 ledger', () => {
++describe('owner instruction request migrations', () => {
++  const v38TableDdl = `CREATE TABLE source_owner_instruction_requests (
++  request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
++  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
++  plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
++  expected_base_commit TEXT NOT NULL CHECK(length(expected_base_commit) = 40 AND expected_base_commit NOT GLOB '*[^a-f0-9]*'),
++  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json) = 'array' AND length(files_json) <= 1048576),
++  files_digest TEXT NOT NULL CHECK(length(files_digest) = 64 AND files_digest NOT GLOB '*[^a-f0-9]*'),
++  ttl_ms INTEGER NOT NULL CHECK(ttl_ms >= 900000 AND ttl_ms <= 86400000),
++  idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) > 0 AND length(idempotency_key) <= 160),
++  created_at INTEGER NOT NULL CHECK(created_at > 0),
++  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
++  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'accepted', 'rejected')),
++  failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120))
++) STRICT, WITHOUT ROWID`
++
++  it('adds the owner instruction request table to a schema 37 ledger and migrates it to the current schema', () => {
+     const { path } = ledger()
+     openControlPlaneDatabase(path).close()
+     const legacy = new DatabaseSync(path)
+@@ -156,15 +217,37 @@ describe('schema 38 migration', () => {
+     const migrated = openControlPlaneDatabase(path)
+     const version = Number((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+     expect(version).toBe(controlPlaneSchemaVersion)
+-    expect(version).toBeGreaterThanOrEqual(38)
+-    expect(migrated.prepare("SELECT name FROM sqlite_schema WHERE tbl_name='source_owner_instruction_requests' ORDER BY name")
+-      .all().map(row => (row as { name: string }).name)).toEqual([
+-        'source_owner_instruction_requests',
+-        'sqlite_autoindex_source_owner_instruction_requests_2',
+-      ])
++    expect(version).toBeGreaterThanOrEqual(39)
++    expect((migrated.prepare("PRAGMA table_info('source_owner_instruction_requests')").all() as { name: string }[])
++      .map(column => column.name)).toContain('claimed_at')
+     migrated.close()
+   })
+ 
++  it('adds claimed_at to a populated schema 38 ledger without losing rows', () => {
++    const { path, store } = ledger()
++    const recorded = store.recordOwnerInstructionRequest(base)
++    store.close()
++    const legacy = new DatabaseSync(path)
++    legacy.exec(`DROP TABLE source_owner_instruction_requests; ${v38TableDdl}; PRAGMA user_version = 38;`)
++    legacy.prepare(`INSERT INTO source_owner_instruction_requests
++      (request_id, plan_id, plugin_name, expected_base_commit, files_json, files_digest, ttl_ms,
++        idempotency_key, created_at, expires_at, status, failure_code)
++      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)`)
++      .run(recorded.requestId, recorded.planId, recorded.pluginName, recorded.expectedBaseCommit,
++        JSON.stringify(recorded.files), recorded.filesDigest, recorded.ttlMs,
++        recorded.idempotencyKey, recorded.createdAt, recorded.expiresAt)
++    legacy.close()
++    const migrated = openControlPlaneDatabase(path)
++    expect(Number((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)).toBe(39)
++    migrated.close()
++    const reopened = new ControlPlaneStore({ path, now: () => 6_000 })
++    expect(reopened.getOwnerInstructionRequest(recorded.requestId)).toMatchObject({ requestId: recorded.requestId,
++      status: 'pending', claimedAt: null })
++    expect(reopened.claimOwnerInstructionRequest(recorded.requestId, 7_000)).toBe(true)
++    expect(reopened.getOwnerInstructionRequest(recorded.requestId)?.claimedAt).toBe(7_000)
++    reopened.close()
++  })
++
+   it('fails closed on a missing or unknown request table', () => {
+     const { path } = ledger()
+     openControlPlaneDatabase(path).close()
+diff --git a/plugins/plugin-control-plane/tests/source-jobs-native.spec.ts b/plugins/plugin-control-plane/tests/source-jobs-native.spec.ts
+index 15b78fcf7bded35bf443b0528f87db55b7600b55..c81ca4bd65c8db5cdf1b132fb24194a9dc5840b4 100644
+--- a/plugins/plugin-control-plane/tests/source-jobs-native.spec.ts
++++ b/plugins/plugin-control-plane/tests/source-jobs-native.spec.ts
+@@ -40,7 +40,7 @@ function evidence(): SourcePreparedEvidence {
+     logDigest: 'e'.repeat(64), durationMs: 1, preparedAt: Date.now() }
+ }
+ 
+-async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean } = {}) {
++async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean; drain?: () => Promise<void> } = {}) {
+   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-'))); roots.push(root)
+   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true }); await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export {}\n')
+   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
+@@ -70,6 +70,7 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
+   const runtimeBuild: SourceBuildConfig = options.linux ? linuxSourceConfig() : build
+   const createRuntime = () => new SourceJobRuntime({ config, build: runtimeBuild, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
+     ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
++    ...(options.drain === undefined ? {} : { drainOwnerInstructionRequests: options.drain }),
+   })
+   const runtime = createRuntime()
+   runtime.start()
+@@ -167,4 +168,29 @@ describe('native Automations + Policy source jobs', () => {
+       expect(f.store.getSourceJob(queued.id)?.revision).toBe(4)
+     } finally { await restarted?.close(); f.store.close() }
+   })
++
++  it('drains owner-instruction requests through an internal timer only when the drain port is present', async () => {
++    const statusOf = (automations: AssistantAutomationsService, automationId: string): string | undefined => {
++      try { return automations.inspectSystemOwned({ owner: 'plugin-control-plane-source', automationId }).automationStatus }
++      catch { return undefined }
++    }
++    // Without the drain port the runtime never invokes a drain and registers no
++    // owner-instruction automation (the drain is an internal, budget-free timer).
++    const without = await fixture()
++    try {
++      await new Promise(resolve => setTimeout(resolve, 25))
++      expect(statusOf(without.automations, 'owner-instruction-request-drain')).toBeUndefined()
++    } finally { await without.runtime.close(); without.store.close() }
++
++    // With the port the startup pass runs immediately and still no host
++    // automation is created; the continuation automation also stays absent
++    // without a prepared job, proving the drain is independent of it.
++    const drain = vi.fn(async () => undefined)
++    const withDrain = await fixture({ drain })
++    try {
++      await vi.waitFor(() => expect(drain).toHaveBeenCalled())
++      expect(statusOf(withDrain.automations, 'owner-instruction-request-drain')).toBeUndefined()
++      expect(statusOf(withDrain.automations, 'source-job-prepared-continuations')).toBeUndefined()
++    } finally { await withDrain.runtime.close(); withDrain.store.close() }
++  })
+ })
+diff --git a/plugins/plugin-control-plane/tests/source-workspace.spec.ts b/plugins/plugin-control-plane/tests/source-workspace.spec.ts
+index 0c13796badd277d8953d4b431f3e99a17d2ee626..7afa2cea0f62d3c87d96adc1bf58e9c0a0ea0c74 100644
+--- a/plugins/plugin-control-plane/tests/source-workspace.spec.ts
++++ b/plugins/plugin-control-plane/tests/source-workspace.spec.ts
+@@ -301,26 +301,38 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
+     const service = ctx.get('pluginControlPlane') as PluginControlPlaneService
+     expect(service.canEnqueueSource()).toBe(false)
+ 
+-    let executor: HostAutomationExecutor | undefined
+-    let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
+-    let automationStatus: 'active' | 'paused' = 'paused'
+-    let definitionVersion = 0
++    // Keyed by automation/executor id, mirroring AssistantAutomationsService:
++    // the always-active drain automation must not clobber a source job slot.
++    type AutomationState = { definitionHash: string; activationNonce: string; ownerRouteId: string; automationStatus: 'active' | 'paused'; definitionVersion: number }
++    const automationsById = new Map<string, AutomationState>()
++    const executors = new Map<string, HostAutomationExecutor>()
+     const automations = {
+-      registerHostExecutor(value: HostAutomationExecutor): () => void { executor = value; return () => { executor = undefined } },
++      registerHostExecutor(value: HostAutomationExecutor): () => void {
++        executors.set(value.descriptor.executorId, value)
++        return () => { executors.delete(value.descriptor.executorId) }
++      },
+       reconcileSystem(input: Parameters<AssistantAutomationsService['reconcileSystem']>[0]): ReturnType<AssistantAutomationsService['reconcileSystem']> {
+         const definitionHash = automationDefinitionDigest(input.definition)
+         const desiredStatus = input.desiredStatus ?? 'active'
+-        if (activation?.definitionHash !== definitionHash || automationStatus !== desiredStatus) definitionVersion += 1
+-        activation = { definitionHash, activationNonce: input.definition.execution!.activationNonce, ownerRouteId: input.definition.execution!.ownerRouteId }
+-        automationStatus = desiredStatus
++        const prior = automationsById.get(input.automationId)
++        if (prior === undefined || prior.definitionHash !== definitionHash || prior.automationStatus !== desiredStatus) {
++          automationsById.set(input.automationId, { definitionHash, activationNonce: input.definition.execution!.activationNonce,
++            ownerRouteId: input.definition.execution!.ownerRouteId, automationStatus: desiredStatus, definitionVersion: (prior?.definitionVersion ?? 0) + 1 })
++        }
+         return {} as ReturnType<AssistantAutomationsService['reconcileSystem']>
+       },
+       reconcileSystemExact(): never { throw new Error('modify lifecycle fixture must not rearm task-created plugins') },
+       pauseSystemOwned(): never { throw new Error('modify lifecycle fixture must not revoke a Growth producer') },
+-      inspectSystemOwnedActivation(): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> { return activation },
+-      inspectSystemOwned(): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
+-        return { latestTerminalRuns: {}, definitionHash: activation?.definitionHash,
+-          definitionVersion, automationStatus } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
++      inspectSystemOwnedActivation(input: { automationId: string }): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> {
++        const state = automationsById.get(input.automationId)
++        return state === undefined ? undefined
++          : { definitionHash: state.definitionHash, activationNonce: state.activationNonce, ownerRouteId: state.ownerRouteId }
++      },
++      inspectSystemOwned(input: { automationId: string }): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
++        const state = automationsById.get(input.automationId)
++        if (state === undefined) throw new Error(`unknown system automation ${input.automationId}`)
++        return { latestTerminalRuns: {}, definitionHash: state.definitionHash,
++          definitionVersion: state.definitionVersion, automationStatus: state.automationStatus } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
+       },
+     } satisfies Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'reconcileSystemExact' | 'pauseSystemOwned' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+     const delivery = { validateOwnerRoute: () => ({ receiptVersion: 2 as const, authorityId: 'route-1', authorityHash: 'b'.repeat(64), principalId: 'owner-1',
+@@ -337,14 +349,15 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
+       owner: { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: value.root, preset: 'primary' },
+       signal: new AbortController().signal, assertCurrent: () => undefined })
+     expect(job.status).toBe('queued')
+-    expect(executor).toBeDefined()
++    const captured = executors.get('plugin-control-plane-source-check')
++    expect(captured).toBeDefined()
+     expect(await readFile(shell.logPath, 'utf8').catch(() => '')).toBe('')
+-    const captured = executor!
++    const jobAutomation = automationsById.get(job.id)!
+     await peer.dispose()
+     expect(service.canEnqueueSource()).toBe(false)
+-    const result = await captured.execute({ occurrenceId: 'old-peer', automationId: job.id, definitionHash: activation!.definitionHash,
++    const result = await captured!.execute({ occurrenceId: 'old-peer', automationId: job.id, definitionHash: jobAutomation.definitionHash,
+       executionMode: 'production', targetScope: { workspace: value.root, preset: 'primary' }, principal: 'owner-1', ownerRouteId: 'route-1',
+-      activationNonce: activation!.activationNonce, catalogDigest: captured.descriptor.catalogDigest, signal: new AbortController().signal })
++      activationNonce: jobAutomation.activationNonce, catalogDigest: captured!.descriptor.catalogDigest, signal: new AbortController().signal })
+     expect(result.outcome).toBe('failed')
+     await ctx.fiber.dispose()
+   })
+diff --git a/plugins/plugin-control-plane/src/owner-instruction-drain.ts b/plugins/plugin-control-plane/src/owner-instruction-drain.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c339902964c9165d24d5c11e3cbb008fce124147
+--- /dev/null
++++ b/plugins/plugin-control-plane/src/owner-instruction-drain.ts
+@@ -0,0 +1,111 @@
++import type { ControlPlaneStore } from './store.js'
++import type { SourceOwnerInstructionRequest } from './source-job-types.js'
++
++/**
++ * Admission performed inside the running service's trust boundary. It must
++ * re-validate the owner route (e.g. via Delivery) before enqueueing; the drain
++ * never writes source_jobs itself. Throwing rejects or retries the request
++ * depending on whether the error is transient.
++ */
++export type OwnerInstructionAdmit = (
++  request: SourceOwnerInstructionRequest,
++) => Promise<{ instructionId: string; jobId: string }>
++
++/** Maps a terminal admission error to a bounded failure code persisted on the row. */
++function failureCode(error: unknown): string {
++  const message = error instanceof Error ? error.message : String(error)
++  if (message.includes('expired')) return 'revision-grant-expired'
++  if (message.includes('does not match the adopted parent')) return 'parent-mismatch'
++  if (message.includes('require source jobs')) return 'drain-unavailable'
++  if (message.includes('owner route') || message.includes('validateOwnerRoute')) return 'owner-route-unavailable'
++  return 'instruction-admission-rejected'
++}
++
++/**
++ * Fail-closed transient allowlist: only conditions that a later pass can
++ * legitimately outlive return the claim to pending. Anything outside this list
++ * is a terminal rejection, so an unexpected error never loops forever. A retried
++ * row is still bounded by its own `expires_at`, after which the pending query no
++ * longer returns it.
++ */
++export function isTransientAdmissionError(error: unknown): boolean {
++  if (!(error instanceof Error)) return false
++  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true
++  const message = error.message
++  return message.includes('durable source jobs unavailable')
++    || message.includes('another source operation is draining')
++    || message.includes('SQLITE_BUSY')
++    || message.includes('database is locked')
++    || message.includes('source operation is draining')
++}
++
++/**
++ * A claim is considered orphaned once it has outlived five drain intervals.
++ * The single-process service settles every claim in well under a second, so a
++ * claim this old can only belong to a process that died before settling.
++ */
++export const OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS = 300_000
++
++export interface OwnerInstructionDrainResult {
++  /** Requests claimed and accepted this pass. */
++  accepted: SourceOwnerInstructionRequest[]
++  /** Requests terminally rejected this pass, with a bounded failure code. */
++  rejected: { request: SourceOwnerInstructionRequest; failureCode: string }[]
++  /** Claims returned to pending after a transient failure; retried next pass. */
++  retried: SourceOwnerInstructionRequest[]
++  /** Orphaned claims from a crashed process that were returned to pending. */
++  reclaimed: number
++  /** Corrupt pending rows terminally quarantined so they cannot starve the queue. */
++  quarantined: number
++}
++
++/**
++ * Drains pending CLI-written owner-instruction requests. Stale claims left by a
++ * process that crashed between the CAS and the settle are requeued first. Each
++ * request is then claimed with a store CAS so two ticks can never drain the
++ * same row; an admitted request is passed to the trusted `admit` callback and
++ * the row is marked accepted, rejected (terminal) or requeued (transient). This
++ * is pure orchestration over the store and the injected admission — it has no
++ * timers or Cordis access and is unit testable without the full service.
++ */
++export async function drainOwnerInstructionRequests(input: {
++  store: Pick<ControlPlaneStore,
++    'listPendingOwnerInstructionRequests' | 'claimOwnerInstructionRequest'
++    | 'acceptOwnerInstructionRequest' | 'rejectOwnerInstructionRequest'
++    | 'releaseOwnerInstructionRequestClaim' | 'reclaimOrphanedOwnerInstructionRequests'
++    | 'quarantineCorruptOwnerInstructionRequests'>
++  admit: OwnerInstructionAdmit
++  now: number
++  /** Bounds the number of requests handled in one drain pass. */
++  maxPerPass?: number
++}): Promise<OwnerInstructionDrainResult> {
++  const maxPerPass = input.maxPerPass ?? 16
++  const result: OwnerInstructionDrainResult = { accepted: [], rejected: [], retried: [],
++    reclaimed: input.store.reclaimOrphanedOwnerInstructionRequests(input.now, OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS),
++    quarantined: input.store.quarantineCorruptOwnerInstructionRequests(input.now) }
++  const pending = input.store.listPendingOwnerInstructionRequests(input.now).slice(0, maxPerPass)
++  for (const request of pending) {
++    let claimed = false
++    try { claimed = input.store.claimOwnerInstructionRequest(request.requestId, input.now) }
++    catch { continue }
++    if (!claimed) continue
++    try {
++      await input.admit(request)
++      input.store.acceptOwnerInstructionRequest(request.requestId)
++      result.accepted.push(request)
++    } catch (error) {
++      if (isTransientAdmissionError(error)) {
++        // Return the live claim so the next pass retries; never settle it as a
++        // terminal rejection for a condition the Host can recover from.
++        input.store.releaseOwnerInstructionRequestClaim(request.requestId)
++        result.retried.push(request)
++        continue
++      }
++      const code = failureCode(error)
++      try { input.store.rejectOwnerInstructionRequest(request.requestId, code, input.now) }
++      catch { /* a claimed, un-rejected row stays visible for reconciliation */ }
++      result.rejected.push({ request, failureCode: code })
++    }
++  }
++  return result
++}
+diff --git a/plugins/plugin-control-plane/tests/owner-instruction-drain.spec.ts b/plugins/plugin-control-plane/tests/owner-instruction-drain.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b139833a8192b2133eba9be6afb528181351984
+--- /dev/null
++++ b/plugins/plugin-control-plane/tests/owner-instruction-drain.spec.ts
+@@ -0,0 +1,179 @@
++import { mkdtempSync, rmSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { DatabaseSync } from 'node:sqlite'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { ControlPlaneStore } from '../src/store.ts'
++import { drainOwnerInstructionRequests, OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS, type OwnerInstructionAdmit } from '../src/owner-instruction-drain.ts'
++import type { ScopedPluginFile } from '../src/source-workspace.ts'
++
++const roots: string[] = []
++afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
++
++function ledger() {
++  const root = mkdtempSync(join(tmpdir(), 'cp-drain-'))
++  roots.push(root)
++  const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
++  return { root, store }
++}
++
++const files: ScopedPluginFile[] = [{ path: 'README.md', content: '# demo\n' }]
++const base = {
++  planId: 'plan-1', pluginName: 'demo-plugin', expectedBaseCommit: 'a'.repeat(40),
++  files, ttlMs: 900_000, idempotencyKey: 'key-1', createdAt: 1_000,
++}
++
++describe('drainOwnerInstructionRequests', () => {
++  it('claims and accepts each pending request once, never re-draining accepted rows', async () => {
++    const { store } = ledger()
++    const first = store.recordOwnerInstructionRequest(base)
++    const second = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-2', idempotencyKey: 'key-2', createdAt: 2_000 })
++    const admit = vi.fn(async () => ({ instructionId: 'instr', jobId: 'job' }))
++    const result = await drainOwnerInstructionRequests({ store, admit, now: 5_000 })
++    expect(admit).toHaveBeenCalledTimes(2)
++    expect(result.accepted.map(item => item.requestId).sort()).toEqual([first.requestId, second.requestId].sort())
++    expect(result.rejected).toEqual([])
++    expect(store.getOwnerInstructionRequest(first.requestId)?.status).toBe('accepted')
++    expect(store.getOwnerInstructionRequest(second.requestId)?.status).toBe('accepted')
++    // A second pass finds nothing pending.
++    const again = await drainOwnerInstructionRequests({ store, admit, now: 6_000 })
++    expect(again.accepted).toEqual([])
++    expect(admit).toHaveBeenCalledTimes(2)
++    store.close()
++  })
++
++  it('rejects a request whose admission throws and records a bounded failure code', async () => {
++    const { store } = ledger()
++    const request = store.recordOwnerInstructionRequest(base)
++    const failingAdmit: OwnerInstructionAdmit = async () => { throw new Error('plugin-control-plane: owner route missing') }
++    const result = await drainOwnerInstructionRequests({ store, admit: failingAdmit, now: 5_000 })
++    expect(result.accepted).toEqual([])
++    expect(result.rejected).toHaveLength(1)
++    expect(result.rejected[0]!.failureCode).toBe('owner-route-unavailable')
++    expect(store.getOwnerInstructionRequest(request.requestId)).toMatchObject({ status: 'rejected',
++      failureCode: 'owner-route-unavailable' })
++    store.close()
++  })
++
++  it('maps an expired revision grant to a distinct failure code', async () => {
++    const { store } = ledger()
++    store.recordOwnerInstructionRequest(base)
++    const result = await drainOwnerInstructionRequests({ store,
++      admit: async () => { throw new Error('plugin-control-plane: the source revision grant is expired') }, now: 5_000 })
++    expect(result.rejected[0]!.failureCode).toBe('revision-grant-expired')
++    store.close()
++  })
++
++  it('skips an expired request via the store CAS without calling admit', async () => {
++    const { store } = ledger()
++    const request = store.recordOwnerInstructionRequest(base)
++    const admit = vi.fn(async () => ({ instructionId: 'instr', jobId: 'job' }))
++    // After the request's expiry (createdAt 1000 + ttl 900000 = 901000) the claim fails.
++    const result = await drainOwnerInstructionRequests({ store, admit, now: 1_000_000 })
++    expect(admit).not.toHaveBeenCalled()
++    expect(result.accepted).toEqual([])
++    expect(store.getOwnerInstructionRequest(request.requestId)?.status).toBe('pending')
++    store.close()
++  })
++
++  it('caps the number of requests handled in one pass', async () => {
++    const { store } = ledger()
++    for (const index of [0, 1, 2]) {
++      store.recordOwnerInstructionRequest({ ...base, planId: `plan-${index}`, idempotencyKey: `key-${index}`, createdAt: 1_000 + index })
++    }
++    const admit = vi.fn(async () => ({ instructionId: 'instr', jobId: 'job' }))
++    const result = await drainOwnerInstructionRequests({ store, admit, now: 5_000, maxPerPass: 2 })
++    expect(admit).toHaveBeenCalledTimes(2)
++    expect(result.accepted).toHaveLength(2)
++    const remaining = store.listPendingOwnerInstructionRequests(5_000)
++    expect(remaining).toHaveLength(1)
++    store.close()
++  })
++
++  it('reclaims a claim orphaned by a crashed process and drains it on the next pass', async () => {
++    const { store, root } = ledger()
++    const orphan = store.recordOwnerInstructionRequest(base)
++    expect(store.claimOwnerInstructionRequest(orphan.requestId, 10_000)).toBe(true)
++    store.close()
++    // Simulate a process that died between the CAS and the settle: the row is
++    // still claimed with a stale claim time, invisible to the pending listing.
++    const now = 10_000 + OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS + 1
++    const raw = new DatabaseSync(join(root, 'control.sqlite'))
++    expect(raw.prepare("SELECT status FROM source_owner_instruction_requests WHERE request_id = ?").get(orphan.requestId))
++      .toMatchObject({ status: 'claimed' })
++    raw.close()
++    const reopened = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
++    expect(reopened.listPendingOwnerInstructionRequests(now)).toEqual([])
++    const admit = vi.fn(async () => ({ instructionId: 'instr', jobId: 'job' }))
++    const result = await drainOwnerInstructionRequests({ store: reopened, admit, now })
++    expect(result.reclaimed).toBe(1)
++    expect(admit).toHaveBeenCalledTimes(1)
++    expect(result.accepted.map(item => item.requestId)).toEqual([orphan.requestId])
++    expect(reopened.getOwnerInstructionRequest(orphan.requestId)?.status).toBe('accepted')
++    reopened.close()
++  })
++
++  it('requeues a transient admission failure instead of permanently rejecting the request', async () => {
++    const { store } = ledger()
++    const request = store.recordOwnerInstructionRequest(base)
++    const transient = new Error('plugin-control-plane: another source operation is draining')
++    const admit = vi.fn()
++      .mockRejectedValueOnce(transient)
++      .mockResolvedValueOnce({ instructionId: 'instr', jobId: 'job' })
++    const first = await drainOwnerInstructionRequests({ store, admit, now: 5_000 })
++    expect(first.rejected).toEqual([])
++    expect(first.retried.map(item => item.requestId)).toEqual([request.requestId])
++    const requeued = store.getOwnerInstructionRequest(request.requestId)
++    expect(requeued).toMatchObject({ status: 'pending', claimedAt: null })
++    // The next pass lists and drains the requeued request successfully.
++    const second = await drainOwnerInstructionRequests({ store, admit, now: 6_000 })
++    expect(second.accepted.map(item => item.requestId)).toEqual([request.requestId])
++    expect(store.getOwnerInstructionRequest(request.requestId)?.status).toBe('accepted')
++    expect(admit).toHaveBeenCalledTimes(2)
++    store.close()
++  })
++
++  it('requeues an aborted admission while keeping a genuine authorization rejection terminal', async () => {
++    const { store } = ledger()
++    const transient = store.recordOwnerInstructionRequest({ ...base, idempotencyKey: 'key-abort' })
++    const terminal = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-2', idempotencyKey: 'key-denied' })
++    const admit = vi.fn(async request => {
++      if (request.requestId === transient.requestId) {
++        const error = new Error('operation was aborted'); error.name = 'AbortError'; throw error
++      }
++      throw new Error('plugin-control-plane: owner instruction target does not match the adopted parent')
++    })
++    const result = await drainOwnerInstructionRequests({ store, admit, now: 5_000 })
++    expect(result.retried.map(item => item.requestId)).toEqual([transient.requestId])
++    expect(result.rejected.map(item => item.request.requestId)).toEqual([terminal.requestId])
++    expect(store.getOwnerInstructionRequest(transient.requestId)?.status).toBe('pending')
++    expect(store.getOwnerInstructionRequest(terminal.requestId)).toMatchObject({ status: 'rejected', failureCode: 'parent-mismatch' })
++    store.close()
++  })
++
++  it('quarantines a corrupt pending row so healthy requests behind it still drain', async () => {
++    const { store, root } = ledger()
++    const corrupt = store.recordOwnerInstructionRequest(base)
++    const healthy = store.recordOwnerInstructionRequest({ ...base, planId: 'plan-2', idempotencyKey: 'key-2', createdAt: 2_000 })
++    store.close()
++    const raw = new DatabaseSync(join(root, 'control.sqlite'))
++    raw.prepare(`UPDATE source_owner_instruction_requests SET files_json=json_set(files_json,'$[0].content','# tampered') WHERE request_id = ?`)
++      .run(corrupt.requestId)
++    raw.close()
++    const reopened = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
++    expect(() => reopened.listPendingOwnerInstructionRequests(5_000)).toThrow(/corrupt/u)
++    const admit = vi.fn(async () => ({ instructionId: 'instr', jobId: 'job' }))
++    const result = await drainOwnerInstructionRequests({ store: reopened, admit, now: 5_000 })
++    expect(result.quarantined).toBe(1)
++    // The corrupt row is rejected; read it raw because digest validation must
++    // keep failing on its corrupted contents even after quarantine.
++    const quarantineRaw = new DatabaseSync(join(root, 'control.sqlite'))
++    expect(quarantineRaw.prepare('SELECT status, failure_code FROM source_owner_instruction_requests WHERE request_id = ?').get(corrupt.requestId))
++      .toMatchObject({ status: 'rejected', failure_code: 'request-corrupt' })
++    quarantineRaw.close()
++    // The healthy row was not blocked by the corrupt one.
++    expect(admit).toHaveBeenCalledTimes(1)
++    expect(result.accepted.map(item => item.requestId)).toEqual([healthy.requestId])
++    reopened.close()
++  })
++})

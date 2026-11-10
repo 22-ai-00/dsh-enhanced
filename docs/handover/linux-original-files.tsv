@@ -1,0 +1,13 @@
+# SHA-256	bytes	mode	path; historical only; base d2a1e0da682484c88dd41a656b42e2a1174b4375
+a5de644c11c62887257e62ba73548a5783e6f9f9d351fba267988bcfbf26e7a8	129838	0644	plugins/plugin-control-plane/README.md
+1f227349f85e5b5a3ed1201db4842e9424aa77c83e212a21134144e4e1fa26a9	5470	0644	plugins/plugin-control-plane/src/owner-instruction-drain.ts
+e07a6038e76f23adec52f57990a7c43d64569908efd47e8642f094b695f098f0	218796	0644	plugins/plugin-control-plane/src/service.ts
+ce6b49a69e51dbfe7c21e7ab8858ce0d238c98b86aea77d20efa61a9754f4d59	6105	0644	plugins/plugin-control-plane/src/source-job-types.ts
+2ec453b07b949c2b2a1a1718319eeafb6bfa2a8aaa3c49811220f6fcff769f9c	80722	0644	plugins/plugin-control-plane/src/source-jobs.ts
+fe06ce384fedaa7a65303e29ff33cb76cf797c71755e76e1987fb0c5244ef1cc	107745	0644	plugins/plugin-control-plane/src/sqlite.ts
+2f0cc5a843f2008d5e5b2de0e988f76fe4a54b1c1a0bc50fbff66e48e7cb46f6	491241	0644	plugins/plugin-control-plane/src/store.ts
+5ced994f019eee6e0228a668e6413ad9120dfe86c07607a0e30a647ccb2eb82d	131405	0644	plugins/plugin-control-plane/tests/cli.spec.ts
+73568d2c154e94d966126371c5f6e87156f35fc7c2a8d6776073e7ad734f6f5c	10130	0644	plugins/plugin-control-plane/tests/owner-instruction-drain.spec.ts
+00d657ea0b5c5096f98f34867ac4667ca336f27d0ec51c0521ac3094a551c3ce	15738	0644	plugins/plugin-control-plane/tests/owner-instruction-request-store.spec.ts
+bc5e5b6e99c890b6a42bba4321baf45e9e3fb9d9d97488a00f39d6e0ac41af51	15640	0644	plugins/plugin-control-plane/tests/source-jobs-native.spec.ts
+aed57186b4e5613b1da6fb069f4f175f3b8d132759e3a09aaef7ff535fa4105a	33762	0644	plugins/plugin-control-plane/tests/source-workspace.spec.ts

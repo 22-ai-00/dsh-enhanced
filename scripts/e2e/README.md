@@ -116,23 +116,17 @@ The foreground schedules a wake and the test restarts the actual Host again. Ass
 
 ## Real model repository event continuation
 
-```sh
-CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-  DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra \
-  DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture \
-  pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
-```
+> **Migration pending:** this scenario and its external-event companion still
+> construct Docker-era verifier configuration. The native Host migration is
+> incomplete, so the commands formerly listed here are not runnable validation
+> paths. Keep the scenario description below as its test and acceptance contract
+> until the verifier is migrated.
 
 The installed profile receives an ordinary repair-and-delivery request. The model chooses tools and creates its own finite Goal; the test does not supply trigger IDs, invoke Goal tools or select tool order. After an independently accepted intermediate PR and a durable event wait, it restarts the real Host while CI/review remain pending, returns to the original Session, and changes only the remote fixture state. Assertions bind the resumed Goal and source execution to an event after the saved cursor, require fresh repository outcome evidence for the actual committed head and visible feedback, then check that another restart and unchanged observation create no duplicate event or commit/PR.
 
-GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier run as actual components. This is not live GitHub authentication or remote CI/review evidence. The event experiment allows at most 26 model dispatches with a 300-second task budget; installer and cleanup have a separate test timeout. It needs the exact local Docker image configured in the spec. No ordinary profile is modified, and no provider credential is retained in artifacts.
+GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The historical scenario ran the model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier as actual components. Its evidence did not establish live GitHub authentication or remote CI/review behavior. Migration must preserve its limit of 26 model dispatches and 300-second task budget, separate installer and cleanup timeout, ordinary-profile isolation, and credential redaction. The Docker image precondition must be replaced by a verified native runtime before this path can run again.
 
-To exercise the external broker with the same real-model event/restart scenario:
-
-```sh
-CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-  pnpm exec playwright test --config scripts/e2e/playwright-repo-external-events.config.mjs
-```
+The external broker companion keeps the following acceptance contract:
 
 This entry uses `traex-agent` (default `gpt-5.6-terra`), the installed production
 EventTriggers/Actions services and a real signed Unix broker with Linux
@@ -148,15 +142,7 @@ receipt timing and uniqueness, then confirms that another restart preserves
 the result without new model or tool dispatches.
 Artifacts use `.cache/repo-autonomy-external-events-e2e/`.
 
-The 2026-09-13 run
-passed with DSH `0.1.5-rc.1` and TraeX `gpt-5.6-terra`: two successful event
-wakes, three native goal rounds, independent achieved verification and a
-native reply visible after restart. That run exercised the native reply path;
-the textless completion-notice fallback is covered by focused tests. A retired
-source still recorded local health failures after correctly stopping remote
-observations; zero health failures are not claimed.
-
-For a failed integration that needs local diagnosis, set `DSH_REPO_RETAIN_FAILURE=1`. The Host and browser still stop, but `retained-environment.json` points to the private temporary profile and original Session so a restart/UI check can reuse it without repeating model work. The default deletes this environment; remove a retained directory after diagnosis because it includes the private test configuration. Startup diagnostics retain only session/header/workspace identifiers, not credentials or model request headers.
+The historical `DSH_REPO_RETAIN_FAILURE=1` diagnostic mode stopped the Host and browser but retained a private profile and original Session, located through `retained-environment.json`. Migration must preserve its default cleanup, explicit private-state retention, and redaction of credentials and model request headers. Retained directories require cleanup after diagnosis.
 
 ## Automatic workflow capture and reuse
 

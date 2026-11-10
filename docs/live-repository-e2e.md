@@ -1,14 +1,13 @@
 # Live GitHub repository E2E
 
-For installation or initial-session failures, first run the same entry with
-`DSH_REPO_SETUP_ONLY=1` and neither live input variable. This stops after the
-shipped goal setup discovers the idle owner session. Its observer rejects all
-model requests, and its separate output directory contains `setup-proof.json`
-rather than a task-completion proof. Fixture flags are optional. This probe
-does not validate model behavior, remote access, or goal execution; run the
-complete scenario after the concrete setup failure has been fixed.
+> **Migration pending:** the repository-autonomy E2E still creates a
+> Docker-era verifier configuration. The current Host accepts Linux-native
+> verification, so this Playwright scenario (including setup-only mode) is not
+> a runnable validation path yet. The contract below is retained for migration.
+> Migrate the scenario and preserve its repository, task, restart, and
+> readback checks before restoring a runnable command.
 
-The existing repository Playwright scenario can use the production Actions and
+The historical repository Playwright scenario was designed to use the production Actions and
 EventTriggers GitHub transports when `DSH_REPO_LIVE_INPUT` names a private JSON
 descriptor. The v3 commit mode creates a direct commit on an already-existing,
 isolated test branch in the named repository. It does not create a branch. Do
@@ -62,29 +61,22 @@ successful, error-free health row; a missing handle, wrong consumer/purpose,
 unusable credential, or inaccessible repository/branch stops there before any
 remote write.
 
-Run without either fixture flag:
+The JSON example above is retained as the historical v3 input contract. Its
+scenario is not executable while the native migration above is pending.
 
-```sh
-CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra \
-DSH_REPO_LIVE_GITHUB=1 \
-DSH_REPO_LIVE_INPUT=/absolute/private/live-repository.json \
-pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
-```
-
-The test rejects a missing, non-private, expired, broad, malformed, or
-fixture-mixed descriptor before installation or model work. It does not run in
+The intended test rejects a missing, non-private, expired, broad, malformed, or
+fixture-mixed descriptor before installation or model work. It is not part of
 this repository's normal test suite because it commits to the explicitly bounded
-existing test branch. After delivery it waits for the real event
+existing test branch. Its intended post-delivery checks wait for the real event
 snapshot, a successful wake, the existing repository-readback outcome receipt,
 source retirement, and a final restart that produces no new source event.
 
-This scenario repairs only `summarize.mjs`, matching the production admission contract and its independent verification artifact. Prepare a fresh descriptor immediately before running: at goal setup, its fixed deadline must still be more than six minutes away. Installation and linux-native runtime prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The repo-autonomy harness itself still constructs Docker-era runner config and is fail-closed pending the native migration tracked in [RSI status](rsi-status.md). The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
+The migrated scenario must retain the `summarize.mjs`-only repair scope, matching the production admission contract and its independent verification artifact. Its fresh descriptor must preserve the original timing constraint: at goal setup, its fixed deadline must still be more than six minutes away. Installation and linux-native runtime prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The repo-autonomy harness itself still constructs Docker-era runner config and is fail-closed pending the native migration tracked in [RSI status](rsi-status.md). The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
 
 Observation starts during preflight, so its poll budget must cover setup, model execution, and CI latency as well as event waiting. The example permits 180 polls at two-second intervals; it does not reserve all polls until the commit exists.
 
 Version 3 requires `deliveryMode: "commit"` and rejects reviewer fields; no PR or reviewer account is needed. `requiredChecks` must use actual check-run names and app IDs from the controlled repository, not the workflow title. The example is a GitHub Actions check named `verify`. Only the delivered commit is eligible for outcome verification; an advanced branch head cannot satisfy it. The finite test window requires a check that can finish within that window.
 
-Existing v2 descriptors retain their explicit PR/reviewer behavior. For a real model test with a GitHub transport fixture, use `DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture DSH_REPO_DELIVERY_MODE=commit` with the same Playwright config and without either live input variable. This validates the production Goal, Actions, event, verification and feedback services against a controlled remote response; it is not evidence of a real GitHub write.
+The historical v2 contract retains explicit PR/reviewer behavior. Its controlled-transport variant used `DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture DSH_REPO_DELIVERY_MODE=commit` without live input variables. Migration must preserve the production Goal, Actions, event, verification and feedback checks against controlled remote responses; those results do not establish a real GitHub write.
 
-Add `DSH_REPO_REQUIRE_PREAUTHORIZED=1` to verify that the admitted task needs no additional tool approvals. The browser test fails immediately if an approval appears and records it in `approvals.json`; it does not accept the prompt in this mode. Expired or invalid wait authority remains a denied request.
+The historical `DSH_REPO_REQUIRE_PREAUTHORIZED=1` mode required the admitted task to complete without additional tool approvals. Migration must preserve immediate failure when an approval appears, the diagnostic `approvals.json`, and refusal to accept that prompt. Expired or invalid wait authority must remain a denied request.
