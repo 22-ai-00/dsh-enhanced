@@ -48,24 +48,24 @@ git diff --check
 
 Linux 环境按交接入口配置，`TASK_ROOT` 指向自己的独立目录。不要与另一完整测试竞争同一主机资源或终止他人进程。两边使用同一源码、固定工具链和缓存条件。
 
+**vitest 4.1.8 的 `vitest list` 不受 `--shard` 影响**（分片只在 `createPool`/`executeTests` 里调用 sequencer，list 只做 collect），所以不能用 list 证明分片，`list --json` 也不含 skipped 用例。正确做法：
+
 ```sh
+# 1) 应用前/后的全量集合与文件集（名字并集、文件增删）
 pnpm exec vitest list --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --dir tests --testTimeout=15000 --includeTaskLocation --json="$TASK_ROOT/evidence/all-tests.json"
+  --dir tests --testTimeout=15000 --includeTaskLocation --json="$TASK_ROOT/evidence/after/list.json"
 pnpm exec vitest list --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --dir tests --testTimeout=15000 --includeTaskLocation --shard=1/2 --json="$TASK_ROOT/evidence/shard-1-tests.json"
-pnpm exec vitest list --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --dir tests --testTimeout=15000 --includeTaskLocation --shard=2/2 --json="$TASK_ROOT/evidence/shard-2-tests.json"
-pnpm exec vitest run --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --testTimeout=15000 tests/root-test-sequencer.spec.ts
-pnpm exec vitest run --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --testTimeout=15000 tests/installers-linux-lifecycle.spec.ts \
-  -t 'offline upgrade swaps one validated home while preserving custom configuration and durable task state'
-pnpm exec vitest run --no-cache --maxWorkers=4 --config ./tests/vitest.config.ts \
-  --testTimeout=15000 tests/installers-local-source.spec.ts \
-  -t 'takes a SQLite store snapshot including committed WAL and isolates writable cache copies'
+  --dir tests --testTimeout=15000 --filesOnly --json="$TASK_ROOT/evidence/after/files.json"
+# 2) 分片归属：按锁定算法的预测 + 真实 --shard 运行 + CI artifact 三证
+node scripts/shard-partition.mjs "$(pwd -P)" "$TASK_ROOT/evidence/after/files.json" 2
+pnpm exec vitest run --no-cache --config ./tests/vitest.config.ts --dir tests \
+  --testTimeout=15000 --shard=1/2 --reporter=json --outputFile.json="$TASK_ROOT/evidence/shard-1.json"
+python3 scripts/shard-set.py "$(pwd -P)" "$TASK_ROOT/evidence/shard-1.json" "$TASK_ROOT/evidence/shard-2.json" "$TASK_ROOT/evidence/after/files.json"
 ```
 
-保存应用前与应用后的 collection，将两个拆出 spec 映射回原 installers，以完整测试名、mode、timeout 比对。两个分片并集必须等于全量，交集为空，两重组不在同片；CLI list 未包含的元数据用锁定 TypeScript AST 对照，不从数量相等推断测试体等价。
+两个分片并集必须等于全量、交集为空、两重组不在同片；CLI list 未包含的元数据（timeout、修饰链）用锁定 TypeScript AST 对照，不从数量相等推断测试体等价。CI 上以精确 run 的 `root-tests.json` artifact 为权威。
+
+导出的预测/集合脚本在本地 `scripts/`（`shard-partition.mjs`、`shard-set.py`、`ast-compare.mjs`、`compare-list.py`、`compare-run-status.py`），不随仓库提交。
 
 历史纯 CI 候选：基线 99 文件/1614 用例，候选 102 文件/1619 用例，仅新增 sequencer 五项；其中 installers 留存 213 passed/3 skipped，lifecycle 240 passed，local-source 42 passed，合计与原来一致。普通任务补丁增加了根回归，当前联合集合不应照抄这些旧总数，必须现场重采。
 

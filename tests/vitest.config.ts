@@ -1,6 +1,7 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
+import { RootTestSequencer } from './root-test-sequencer.ts'
 
 // Root test suite configuration. It lives inside tests/ so `vitest run` in a
 // workspace package directory cannot discover it by walking upward. The root
@@ -13,5 +14,6 @@ const here = dirname(fileURLToPath(import.meta.url))
 export default defineConfig({
   test: {
     setupFiles: [resolve(here, 'vitest.setup.ts')],
+    sequence: { sequencer: RootTestSequencer },
   },
 })
