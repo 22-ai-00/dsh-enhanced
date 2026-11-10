@@ -16,7 +16,7 @@ import { captureHostInputFiles, materializeHostInputFiles } from './host-inputs.
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority, Ed25519SourceReleaseAuthorizationAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationReceipt,
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
-import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
+import { ControlPlaneStore, ControlPlaneStoreError, controlPlaneDigest, expectedSourceRelease } from './store.js'
 import { ControlPlaneCliError } from './errors.js'
 import { validateSourceCreationFiles } from './source-creation.js'
 import { ControlledProcessError, executeControlledProcess } from './adapter-process.js'
@@ -1259,6 +1259,17 @@ async function sourceRevisionEnqueue(argv: readonly string[]): Promise<void> {
   } finally { store.close() }
 }
 
+async function sourceRevisionShow(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const requestId = option(argv, '--request-id')
+  const store = new ControlPlaneStore({ path: trust.ledger.path, readOnly: 'live' })
+  try {
+    const request = store.inspectOwnerInstructionRequest(requestId)
+    if (request === undefined) throw new ControlPlaneStoreError('not-found', 'owner instruction request not found')
+    process.stdout.write(`${JSON.stringify(request)}\n`)
+  } finally { store.close() }
+}
+
 function assertReleaseCommand(argv: readonly string[]): void {
   if (argv.includes('--phase')) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'release phase is derived from durable plan status')
 }
@@ -1476,7 +1487,8 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
     if (argv[1] === 'verify-prepared') return sourceVerifyPrepared(argv)
     if (argv[1] === 'gc') return sourceGc(argv)
     if (argv[1] === 'revision-enqueue') return sourceRevisionEnqueue(argv)
-    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control source <verify-prepared|gc|revision-enqueue>')
+    if (argv[1] === 'revision-show') return sourceRevisionShow(argv)
+    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control source <verify-prepared|gc|revision-enqueue|revision-show --request-id <id>>')
   }
   if (command === 'release-start') return releaseStart(argv)
   if (command === 'release-request') return releaseRequest(argv)
@@ -1484,5 +1496,5 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'release-attest') return releaseAttest(argv)
   if (command === 'release-reconcile') return releaseReconcile(argv)
   if (command === 'activation-plan') return activationPlan(argv)
-  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|source verify-prepared|source gc|source revision-enqueue|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
+  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|source verify-prepared|source gc|source revision-enqueue|source revision-show|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
 }

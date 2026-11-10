@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 38
+export const controlPlaneSchemaVersion = 40
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -79,8 +79,8 @@ const sourceOwnerInstructionTableSchema = `CREATE TABLE IF NOT EXISTS source_own
 
 const sourceOwnerInstructionSchema = sourceOwnerInstructionTableSchema
 
-/** Structured owner-instruction requests written by the CLI and drained by the running service (schema 38). */
-const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
+/** Structured owner-instruction requests written by the CLI and drained by the running service (schema 38, claim time since 39). */
+const sourceOwnerInstructionRequestTableSchemaV38 = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
   request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
   plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
   plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
@@ -95,7 +95,44 @@ const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS sou
   failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120))
 ) STRICT, WITHOUT ROWID;`
 
-const sourceOwnerInstructionRequestSchema = sourceOwnerInstructionRequestTableSchema
+/**
+ * Schema 39 adds `claimed_at` so a claim orphaned by a crash before
+ * accept/reject is reclaimable instead of pinning the row forever.
+ */
+const sourceOwnerInstructionRequestTableSchema = `CREATE TABLE IF NOT EXISTS source_owner_instruction_requests (
+  request_id TEXT PRIMARY KEY CHECK(length(request_id) > 0 AND length(request_id) <= 160),
+  plan_id TEXT NOT NULL CHECK(length(plan_id) > 0 AND length(plan_id) <= 160),
+  plugin_name TEXT NOT NULL CHECK(length(plugin_name) > 0 AND length(plugin_name) <= 160),
+  expected_base_commit TEXT NOT NULL CHECK(length(expected_base_commit) = 40 AND expected_base_commit NOT GLOB '*[^a-f0-9]*'),
+  files_json TEXT NOT NULL CHECK(json_valid(files_json) AND json_type(files_json) = 'array' AND length(files_json) <= 1048576),
+  files_digest TEXT NOT NULL CHECK(length(files_digest) = 64 AND files_digest NOT GLOB '*[^a-f0-9]*'),
+  ttl_ms INTEGER NOT NULL CHECK(ttl_ms >= 900000 AND ttl_ms <= 86400000),
+  idempotency_key TEXT NOT NULL UNIQUE CHECK(length(idempotency_key) > 0 AND length(idempotency_key) <= 160),
+  created_at INTEGER NOT NULL CHECK(created_at > 0),
+  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'accepted', 'rejected')),
+  failure_code TEXT CHECK(failure_code IS NULL OR (length(failure_code) > 0 AND length(failure_code) <= 120)),
+  claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0)
+) STRICT, WITHOUT ROWID;`
+
+/**
+ * SQLite splices an ALTER-added column into the stored CREATE text with its own
+ * formatting (the new column follows a comma on the closing line, before the
+ * table options), so a v38→39 migrated table matches the spliced form rather
+ * than the canonical v39 CREATE.
+ */
+const sourceOwnerInstructionRequestTableSchemaSpliced = storedTableSchema(sourceOwnerInstructionRequestTableSchemaV38)
+  .replace(/\n\) STRICT, WITHOUT ROWID$/u, '\n, claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0)) STRICT, WITHOUT ROWID')
+
+const ownerInstructionRequestV40Columns = [
+  'claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation >= 0)',
+  'instruction_id TEXT CHECK(instruction_id IS NULL OR (length(instruction_id) > 0 AND length(instruction_id) <= 160))',
+  'job_id TEXT CHECK(job_id IS NULL OR (length(job_id) > 0 AND length(job_id) <= 160))',
+]
+const ownerInstructionRequestV40Schemas = [storedTableSchema(sourceOwnerInstructionRequestTableSchema), sourceOwnerInstructionRequestTableSchemaSpliced]
+  .map(schema => ownerInstructionRequestV40Columns.reduce((sql, column) =>
+    sql.replace(/\) STRICT, WITHOUT ROWID$/u, `, ${column}) STRICT, WITHOUT ROWID`), schema))
+
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -263,10 +300,7 @@ function assertPrivateRegularFile(path: string): void {
   }
 }
 
-function prepare(path: string): void {
-  if (!isAbsolute(path)) throw new ControlPlaneDatabaseError('invalid-path', 'plugin-control-plane database path must be absolute')
-  const directory = dirname(path)
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
+function assertPrivateDatabaseDirectory(directory: string): void {
   const directoryStat = lstatSync(directory)
   const uid = process.getuid?.()
   // The leaf directory itself must be a private, owner-owned real directory.
@@ -277,6 +311,13 @@ function prepare(path: string): void {
     || (directoryStat.mode & 0o077) !== 0 || (uid !== undefined && directoryStat.uid !== uid)) {
     throw new ControlPlaneDatabaseError('unsafe-file', 'plugin-control-plane database directory must be a private, owner-owned real directory')
   }
+}
+
+function prepare(path: string): void {
+  if (!isAbsolute(path)) throw new ControlPlaneDatabaseError('invalid-path', 'plugin-control-plane database path must be absolute')
+  const directory = dirname(path)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  assertPrivateDatabaseDirectory(directory)
   if (!existsSync(path)) closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600))
   assertPrivateRegularFile(path)
   for (const sidecar of [`${path}-wal`, `${path}-shm`]) if (existsSync(sidecar)) assertPrivateRegularFile(sidecar)
@@ -1559,16 +1600,63 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (ownerInstructionRequestSchema === undefined && Number(database.prepare('PRAGMA user_version').get()?.user_version) >= 38) {
       throw new Error('missing source owner instruction request schema')
     }
+    // A v38 ledger carries the pre-claimed_at table text; a migrated v39 ledger
+    // carries SQLite's ALTER-spliced text. Both are valid intermediate forms;
+    // the schema 39 block below enforces the final column set.
     if (ownerInstructionRequestSchema !== undefined && (ownerInstructionRequestSchema.type !== 'table'
-      || ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema))) {
+      || (ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchemaV38)
+        && ownerInstructionRequestSchema.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema)
+        && ownerInstructionRequestSchema.sql !== sourceOwnerInstructionRequestTableSchemaSpliced
+        && !ownerInstructionRequestV40Schemas.includes(ownerInstructionRequestSchema.sql ?? '')))) {
       throw new Error('unknown source owner instruction request schema')
     }
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 38) {
       database.exec('BEGIN IMMEDIATE')
       try {
-        database.exec(`${sourceOwnerInstructionRequestSchema} PRAGMA user_version = 38; COMMIT;`)
+        database.exec(`${sourceOwnerInstructionRequestTableSchemaV38} PRAGMA user_version = 38; COMMIT;`)
       } catch (error) { database.exec('ROLLBACK'); throw error }
-    } else database.exec(sourceOwnerInstructionRequestSchema)
+    } else database.exec(sourceOwnerInstructionRequestTableSchemaV38)
+    const ownerInstructionRequestColumns = (database.prepare("PRAGMA table_info('source_owner_instruction_requests')")
+      .all() as { name: string }[]).map(column => column.name)
+    const ownerInstructionRequestVersion = Number(database.prepare('PRAGMA user_version').get()?.user_version)
+    if (ownerInstructionRequestVersion >= 39) {
+      if (!ownerInstructionRequestColumns.includes('claimed_at')) {
+        throw new Error('missing source owner instruction request claim column')
+      }
+      const current = database.prepare("SELECT sql FROM sqlite_schema WHERE name='source_owner_instruction_requests'")
+        .get() as { sql: string | null } | undefined
+      if (current?.sql !== storedTableSchema(sourceOwnerInstructionRequestTableSchema)
+        && current?.sql !== sourceOwnerInstructionRequestTableSchemaSpliced
+        && !ownerInstructionRequestV40Schemas.includes(current?.sql ?? '')) {
+        throw new Error('unknown source owner instruction request schema')
+      }
+    } else {
+      if (ownerInstructionRequestColumns.includes('claimed_at')) {
+        // A migration interrupted after the ALTER but before the version write
+        // reopens here; the column and table text are already the v39 form.
+        database.exec('PRAGMA user_version = 39')
+      } else {
+        database.exec('BEGIN IMMEDIATE')
+        try {
+          database.exec(`ALTER TABLE source_owner_instruction_requests ADD COLUMN claimed_at INTEGER CHECK(claimed_at IS NULL OR claimed_at > 0); PRAGMA user_version = 39; COMMIT;`)
+        } catch (error) { database.exec('ROLLBACK'); throw error }
+      }
+    }
+    const versionAfterClaims = Number(database.prepare('PRAGMA user_version').get()?.user_version)
+    const requestTable = database.prepare("SELECT sql FROM sqlite_schema WHERE name='source_owner_instruction_requests'")
+      .get() as { sql: string }
+    if (versionAfterClaims === 39) {
+      const columnsPresent = ownerInstructionRequestV40Schemas.includes(requestTable.sql)
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        for (const column of columnsPresent ? [] : ownerInstructionRequestV40Columns) {
+          database.exec(`ALTER TABLE source_owner_instruction_requests ADD COLUMN ${column}`)
+        }
+        database.exec('PRAGMA user_version = 40; COMMIT;')
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else if (!ownerInstructionRequestV40Schemas.includes(requestTable.sql)) {
+      throw new Error('unknown v40 source owner instruction request schema')
+    }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {
@@ -1578,28 +1666,33 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
 }
 
 /**
- * Open a stopped, checkpointed control-plane ledger strictly for preflight reads.
+ * Open an existing current-schema ledger for read-only inspection.
  *
  * Never creates the database, never migrates it, and never changes its journal
- * mode: a missing or older ledger is evidence that the caller is looking at the
- * wrong Home rather than a fresh installation to initialize. Immutable SQLite
- * reads avoid even WAL/SHM creation. They must never run beside a writer: any
- * nonempty WAL or rollback journal is rejected rather than silently ignored.
+ * mode. Checkpoint mode uses immutable reads for a stopped ledger and rejects
+ * nonempty journals. Live mode uses SQLite's ordinary read-only connection so
+ * committed WAL entries remain visible beside a writer.
  */
-export function openControlPlaneDatabaseReadOnly(path: string): DatabaseSync {
+export function openControlPlaneDatabaseReadOnly(path: string, mode: 'checkpoint' | 'live' = 'checkpoint'): DatabaseSync {
   if (!isAbsolute(path)) throw new ControlPlaneDatabaseError('invalid-path', 'plugin-control-plane database path must be absolute')
   if (!existsSync(path)) throw new ControlPlaneDatabaseError('missing', 'plugin-control-plane database does not exist')
+  if (mode === 'live') assertPrivateDatabaseDirectory(dirname(path))
   assertPrivateRegularFile(path)
   for (const sidecar of [`${path}-wal`, `${path}-shm`, `${path}-journal`]) {
-    if (!existsSync(sidecar)) continue
+    const present = mode === 'live' ? lstatSync(sidecar, { throwIfNoEntry: false }) !== undefined : existsSync(sidecar)
+    if (!present) continue
     assertPrivateRegularFile(sidecar)
-    if (!sidecar.endsWith('-shm') && lstatSync(sidecar).size !== 0) {
+    if (mode === 'checkpoint' && !sidecar.endsWith('-shm') && lstatSync(sidecar).size !== 0) {
       throw new ControlPlaneDatabaseError('unsettled-journal', 'read-only preflight requires a stopped, checkpointed control-plane database')
     }
   }
-  const uri = pathToFileURL(path)
-  uri.search = 'immutable=1&mode=ro'
-  const database = new DatabaseSync(uri.href, { readOnly: true })
+  let location = path
+  if (mode === 'checkpoint') {
+    const uri = pathToFileURL(path)
+    uri.search = 'immutable=1&mode=ro'
+    location = uri.href
+  }
+  const database = new DatabaseSync(location, { readOnly: true })
   try {
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;')
     const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)

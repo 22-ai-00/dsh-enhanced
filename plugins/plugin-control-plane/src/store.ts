@@ -209,6 +209,9 @@ function creationVerificationMatchesPreparedEvidence(certificate: PluginCreation
 /** Legacy revision v1 has no execution claim; Linux requires its own signed build provenance. */
 function revisionVerificationMatchesPreparedEvidence(certificate: PluginRevisionVerificationCertificate,
   evidence: SourcePreparedEvidence): boolean {
+  // v3 binds review evidence through the signed plan and instruction. It
+  // carries no native execution provenance and cannot authorize adoption.
+  if (certificate.protocol === 'assistant-growth/revision-verification/v3') return !Object.hasOwn(certificate, 'execution')
   if (certificate.protocol === 'assistant-growth/revision-verification/v1') {
     return evidence.schemaVersion !== 3 && !Object.hasOwn(certificate, 'execution')
   }
@@ -451,7 +454,11 @@ interface OwnerInstructionRequestRow {
   request_id: string; plan_id: string; plugin_name: string; expected_base_commit: string
   files_json: string; files_digest: string; ttl_ms: number; idempotency_key: string
   created_at: number; expires_at: number; status: 'pending' | 'claimed' | 'accepted' | 'rejected'; failure_code: string | null
+  claimed_at: number | null; claim_generation: number; instruction_id: string | null; job_id: string | null
 }
+
+type OwnerInstructionRequestStatusRow = Pick<OwnerInstructionRequestRow, 'request_id' | 'plan_id' | 'plugin_name'
+  | 'expected_base_commit' | 'status' | 'failure_code' | 'created_at' | 'expires_at' | 'instruction_id' | 'job_id'>
 
 interface ActivationRow {
   id: string; plan_digest: string; gap_id: string; gap_snapshot_json: string; profile: string
@@ -955,7 +962,7 @@ function preparedArtifactBytesFromRow(row: SourcePreparedArtifactRow,
   return bytes
 }
 
-function sourceFromRow(row: SourceRow): PluginSourcePlan {
+function sourceFromRow(row: SourceRow, allowWithoutGrowthRun = false): PluginSourcePlan {
   if (row.mode !== 'create' && row.mode !== 'modify' && row.mode !== 'prepared-create' && row.mode !== 'prepared-revise') {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan has an unknown mode')
   }
@@ -981,7 +988,7 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
     try { creation = creationBindingFromStored(JSON.parse(row.creation_json) as unknown) }
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored source creation binding is corrupt') }
   }
-  const revision = row.revision_json === null ? undefined : revisionBindingFromStored(JSON.parse(row.revision_json) as unknown)
+  const revision = row.revision_json === null ? undefined : revisionBindingFromStored(JSON.parse(row.revision_json) as unknown, { allowWithoutGrowthRun })
   const prepared = row.mode === 'modify' || row.mode === 'prepared-create' || row.mode === 'prepared-revise'
   if (prepared !== (preparedEvidence !== undefined) || (row.mode === 'modify' && preparedEvidence?.schemaVersion === 2)
     || (row.mode === 'prepared-create') !== (creation !== undefined) || (row.mode === 'prepared-revise') !== (revision !== undefined)
@@ -1042,7 +1049,7 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
       ...(row.release_failure_code === null ? {} : { failureCode: row.release_failure_code }), updatedAt: row.updated_at } }) }
 }
 
-function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
+function sourceSnapshotFromStored(value: unknown, allowWithoutGrowthRun = false): PluginSourcePlan {
   const item = objectRecord(value, 'stored source plan snapshot')
   // `mode` was introduced in schema v13; receipt rows written by older binaries
   // omit it and are backfilled to 'create'. `preparedEvidence` exists only on
@@ -1079,7 +1086,7 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
     generatorDigest: item['generatorDigest'], scope: item['scope'], createdAt: item['createdAt'], expiresAt: item['expiresAt'] }
   const preparedEvidence = item['preparedEvidence'] === undefined ? undefined : preparedEvidenceFromStored(item['preparedEvidence'])
   const creation = item['creation'] === undefined ? undefined : creationBindingFromStored(item['creation'])
-  const revision = item['sourceRevision'] === undefined ? undefined : revisionBindingFromStored(item['sourceRevision'])
+  const revision = item['sourceRevision'] === undefined ? undefined : revisionBindingFromStored(item['sourceRevision'], { allowWithoutGrowthRun })
   if ((mode === 'prepared-create' || mode === 'prepared-revise') && (creation ?? revision)?.generatorDigest !== item['generatorDigest']) throw new ControlPlaneStoreError('invalid-state', 'stored source creation generator changed')
   const approval = item['approval'] === undefined ? undefined : verifiedApprovalFromStored(item['approval'], item['id'], item['digest'],
     Number(item['createdAt']), Number(item['expiresAt']))
@@ -1152,8 +1159,8 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
 
 export interface ControlPlaneStoreOptions {
   path: string; now?: () => number
-  /** Read a stopped, checkpointed current-schema ledger without sidecar creation; never use beside a writer. */
-  readOnly?: boolean
+  /** true reads a stopped checkpoint without sidecars. 'live' also sees committed WAL entries. */
+  readOnly?: boolean | 'live'
   /** Host-owned synchronous source fence for an activation worker connection. */
   withOwnerActivationFence?: <T>(gapId: string, callback: () => T) => T
   adoptionCoordinatorId?: string
@@ -2058,7 +2065,9 @@ export class ControlPlaneStore {
       throw new ControlPlaneStoreError('invalid-input', 'adoption coordinator id is invalid')
     }
     if (options.adoptionCoordinatorId && options.withOwnerActivationFence) throw new ControlPlaneStoreError('invalid-input', 'adoption coordinator cannot hold owner fence')
-    this.#database = options.readOnly === true ? openControlPlaneDatabaseReadOnly(options.path) : openControlPlaneDatabase(options.path)
+    this.#database = options.readOnly === true || options.readOnly === 'live'
+      ? openControlPlaneDatabaseReadOnly(options.path, options.readOnly === 'live' ? 'live' : 'checkpoint')
+      : openControlPlaneDatabase(options.path)
     this.#now = options.now ?? Date.now
     this.#withLiveQualificationFence = options.withLiveQualificationFence
     this.#withOwnerActivationFence = options.withOwnerActivationFence; this.#adoptionCoordinatorId = options.adoptionCoordinatorId
@@ -2346,41 +2355,168 @@ export class ControlPlaneStore {
     return row === undefined ? undefined : this.ownerInstructionRequestFromRow(row)
   }
 
-  /** Pending, unexpired requests, oldest first; the continuation tick drains these. */
-  listPendingOwnerInstructionRequests(now: number): SourceOwnerInstructionRequest[] {
-    if (!Number.isSafeInteger(now) || now < 1) throw new ControlPlaneStoreError('invalid-input', 'query time is invalid')
-    return (this.#database.prepare(`SELECT * FROM source_owner_instruction_requests
-      WHERE status = 'pending' AND expires_at > ? ORDER BY created_at, request_id`).all(now) as unknown as OwnerInstructionRequestRow[])
-      .map(row => this.ownerInstructionRequestFromRow(row))
+  /** Historical status projection, independent of the candidate payload and current owner authorization. */
+  inspectOwnerInstructionRequest(requestId: string) {
+    if (typeof requestId !== 'string' || !KEY.test(requestId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request id is invalid')
+    }
+    this.#database.exec('BEGIN')
+    try {
+      const row = this.#database.prepare(`SELECT request_id, plan_id, plugin_name, expected_base_commit, status,
+        failure_code, created_at, expires_at, instruction_id, job_id FROM source_owner_instruction_requests WHERE request_id = ?`)
+        .get(requestId) as OwnerInstructionRequestStatusRow | undefined
+      if (row === undefined) return undefined
+      if (!/^oir-[a-f0-9]{32}$/u.test(row.request_id) || !KEY.test(row.plan_id) || !COMMIT.test(row.expected_base_commit)
+        || bounded(row.plugin_name, 'stored owner instruction plugin name', 160) !== row.plugin_name
+        || !['pending', 'claimed', 'accepted', 'rejected'].includes(row.status)
+        || (row.status === 'rejected') !== (row.failure_code !== null)
+        || (row.failure_code !== null && !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/u.test(row.failure_code))
+        || !Number.isSafeInteger(row.created_at) || row.created_at < 1
+        || !Number.isSafeInteger(row.expires_at) || row.expires_at <= row.created_at
+        || (row.status !== 'accepted' && (row.instruction_id !== null || row.job_id !== null))
+        || (row.instruction_id !== null && !KEY.test(row.instruction_id))
+        || (row.job_id !== null && !/^source-job-[a-f0-9]{64}$/u.test(row.job_id))) {
+        throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction request status is corrupt')
+      }
+      const job = row.status === 'accepted' && row.instruction_id !== null && row.job_id !== null
+        ? this.#inspectRecordedOwnerInstructionJob(requestId) : null
+      const jobAssociation = job !== null ? 'matched' : row.status === 'accepted' ? 'unknown' : null
+      return { requestId: row.request_id, planId: row.plan_id, pluginName: row.plugin_name,
+        expectedBaseCommit: row.expected_base_commit, status: row.status, failureCode: row.failure_code,
+        createdAt: row.created_at, expiresAt: row.expires_at, instructionId: row.instruction_id, jobId: row.job_id,
+        jobAssociation, job }
+    } finally { this.#database.exec('ROLLBACK') }
   }
 
-  /** CAS pending->claimed so two ticks cannot drain one request; false when it was not pending or already expired. */
-  claimOwnerInstructionRequest(requestId: string, now: number): boolean {
+  #inspectRecordedOwnerInstructionJob(requestId: string) {
+    try {
+      const request = this.getOwnerInstructionRequest(requestId)
+      if (request === undefined || request.instructionId === null || request.jobId === null) return null
+      const instruction = this.getOwnerInstruction(request.instructionId)
+      const job = this.getSourceJob(request.jobId)
+      if (instruction === undefined || job === undefined) return null
+
+      const intent = job.intent
+      if (instruction.idempotencyKey !== request.idempotencyKey || job.idempotencyKey !== request.idempotencyKey
+        || instruction.planId !== request.planId || intent.revision?.parent.planId !== request.planId
+        || instruction.pluginName !== request.pluginName || intent.name !== request.pluginName
+        || instruction.filesDigest !== request.filesDigest || controlPlaneDigest(intent.files) !== request.filesDigest
+        || instruction.createdAt !== request.createdAt || instruction.expiresAt !== request.expiresAt
+        || intent.baseCommit !== request.expectedBaseCommit || intent.ttlMs !== request.ttlMs
+        || intent.mode !== 'revise-created' || intent.ownerDigest !== instruction.ownerDigest
+        || intent.ownerInstruction?.instructionId !== instruction.instructionId
+        || intent.ownerInstruction.digest !== controlPlaneDigest(instruction)) return null
+
+      return { status: job.status, failureCode: job.failureCode ?? null, candidatePlanId: job.planId ?? null }
+    } catch (error) {
+      if (error instanceof ControlPlaneStoreError) return null
+      throw error
+    }
+  }
+
+  /** Pending, unexpired requests, oldest first. This read never quarantines rows. */
+  listPendingOwnerInstructionRequests(now: number, limit = 16): SourceOwnerInstructionRequest[] {
+    return this.#pendingOwnerInstructionRows(now, limit).map(row => this.ownerInstructionRequestFromRow(row))
+  }
+
+  #pendingOwnerInstructionRows(now: number, limit: number): OwnerInstructionRequestRow[] {
+    if (!Number.isSafeInteger(now) || now < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request query bounds are invalid')
+    }
+    // Sort only request identities before loading the bounded batch of files.
+    return this.#database.prepare(`SELECT r.* FROM (
+      SELECT request_id FROM source_owner_instruction_requests WHERE status = 'pending' AND expires_at > ?
+      ORDER BY created_at, request_id LIMIT ?
+    ) batch JOIN source_owner_instruction_requests r ON r.request_id = batch.request_id
+      ORDER BY r.created_at, r.request_id`).all(now, limit) as unknown as OwnerInstructionRequestRow[]
+  }
+
+  /** Decode and quarantine exactly one batch. Never re-read beyond its limit after quarantine. */
+  readOwnerInstructionDrainBatch(now: number, limit: number): { pending: SourceOwnerInstructionRequest[]; quarantined: number } {
+    const rows = this.#pendingOwnerInstructionRows(now, limit)
+    const pending: SourceOwnerInstructionRequest[] = []
+    let quarantined = 0
+    for (const row of rows) {
+      try { pending.push(this.ownerInstructionRequestFromRow(row)) } catch {
+        const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+          SET status = 'rejected', failure_code = 'request-corrupt'
+          WHERE request_id = ? AND status = 'pending' AND claim_generation = ?`).run(row.request_id, row.claim_generation)
+        quarantined += Number(result.changes)
+      }
+    }
+    return { pending, quarantined }
+  }
+
+  /** Read-only readiness for the existing native scheduler wake. */
+  hasOwnerInstructionRequestWork(now: number, claimTimeoutMs: number): boolean {
+    return this.#database.prepare(`SELECT 1 FROM source_owner_instruction_requests
+      WHERE status = 'pending' OR (status = 'claimed' AND
+        (expires_at <= ? OR claimed_at IS NULL OR claimed_at <= ?)) LIMIT 1`).get(now, now - claimTimeoutMs) !== undefined
+  }
+
+  expireOwnerInstructionRequests(now: number): void {
+    this.#database.prepare(`UPDATE source_owner_instruction_requests
+      SET status = 'rejected', claimed_at = NULL, failure_code = 'request-expired'
+      WHERE status IN ('pending', 'claimed') AND expires_at <= ?`).run(now)
+  }
+
+  /** Pending-to-claimed CAS returns a durable, monotonically increasing claim generation. */
+  claimOwnerInstructionRequest(requestId: string, now: number): number | undefined {
     if (typeof requestId !== 'string' || !KEY.test(requestId) || !Number.isSafeInteger(now) || now < 1) {
       throw new ControlPlaneStoreError('invalid-input', 'owner instruction request claim is invalid')
     }
     const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
-      SET status = 'claimed' WHERE request_id = ? AND status = 'pending' AND expires_at > ?`).run(requestId, now)
+      SET status = 'claimed', claimed_at = ?, claim_generation = claim_generation + 1
+      WHERE request_id = ? AND status = 'pending' AND expires_at > ? RETURNING claim_generation`)
+      .get(now, requestId, now) as { claim_generation: number } | undefined
+    return result?.claim_generation
+  }
+
+  /** Requeue stale claims, including legacy v38 claims without a timestamp. */
+  reclaimOrphanedOwnerInstructionRequests(now: number, claimTimeoutMs: number): number {
+    if (!Number.isSafeInteger(now) || now < 1 || !Number.isSafeInteger(claimTimeoutMs) || claimTimeoutMs < 1) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request orphan reclamation is invalid')
+    }
+    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+      SET status = 'pending', claimed_at = NULL
+      WHERE status = 'claimed' AND (claimed_at IS NULL OR claimed_at <= ?) AND expires_at > ?`).run(now - claimTimeoutMs, now)
+    return Number(result.changes)
+  }
+
+  rejectOwnerInstructionRequest(requestId: string, generation: number, failureCode: string): boolean {
+    this.#assertOwnerInstructionClaim(requestId, generation)
+    if (typeof failureCode !== 'string' || failureCode.length === 0 || failureCode.length > 120) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request rejection is invalid')
+    }
+    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+      SET status = 'rejected', claimed_at = NULL, failure_code = ?
+      WHERE request_id = ? AND status = 'claimed' AND claim_generation = ?`).run(failureCode, requestId, generation)
     return Number(result.changes) === 1
   }
 
-  /** Marks a claimed/pending request rejected with a bounded failure code; unknown or already-settled rows are ignored. */
-  rejectOwnerInstructionRequest(requestId: string, failureCode: string, now: number): void {
-    if (typeof requestId !== 'string' || !KEY.test(requestId) || typeof failureCode !== 'string'
-      || failureCode.length === 0 || failureCode.length > 120 || !Number.isSafeInteger(now) || now < 1) {
-      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request rejection is invalid')
+  acceptOwnerInstructionRequest(requestId: string, generation: number, receipt: { instructionId: string; jobId: string }): boolean {
+    this.#assertOwnerInstructionClaim(requestId, generation)
+    if (!KEY.test(receipt.instructionId) || !/^source-job-[a-f0-9]{64}$/u.test(receipt.jobId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request admission receipt is invalid')
     }
-    this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'rejected', failure_code = ?
-      WHERE request_id = ? AND status IN ('pending', 'claimed')`).run(failureCode, requestId)
+    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests
+      SET status = 'accepted', claimed_at = NULL, instruction_id = ?, job_id = ?
+      WHERE request_id = ? AND status = 'claimed' AND claim_generation = ?`)
+      .run(receipt.instructionId, receipt.jobId, requestId, generation)
+    return Number(result.changes) === 1
   }
 
-  /** Marks a claimed request accepted once the job was enqueued; only a live claim transitions. */
-  acceptOwnerInstructionRequest(requestId: string): void {
-    if (typeof requestId !== 'string' || !KEY.test(requestId)) {
-      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request id is invalid')
+  releaseOwnerInstructionRequestClaim(requestId: string, generation: number): boolean {
+    this.#assertOwnerInstructionClaim(requestId, generation)
+    const result = this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'pending', claimed_at = NULL
+      WHERE request_id = ? AND status = 'claimed' AND claim_generation = ?`).run(requestId, generation)
+    return Number(result.changes) === 1
+  }
+
+  #assertOwnerInstructionClaim(requestId: string, generation: number): void {
+    if (typeof requestId !== 'string' || !KEY.test(requestId) || !Number.isSafeInteger(generation) || generation < 1) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction request claim is invalid')
     }
-    this.#database.prepare(`UPDATE source_owner_instruction_requests SET status = 'accepted'
-      WHERE request_id = ? AND status = 'claimed'`).run(requestId)
   }
 
   private ownerInstructionRequestFromRow(row: OwnerInstructionRequestRow): SourceOwnerInstructionRequest {
@@ -2393,7 +2529,8 @@ export class ControlPlaneStore {
     return { requestId: row.request_id, planId: row.plan_id, pluginName: row.plugin_name,
       expectedBaseCommit: row.expected_base_commit, files, filesDigest: row.files_digest, ttlMs: row.ttl_ms,
       idempotencyKey: row.idempotency_key, createdAt: row.created_at, expiresAt: row.expires_at,
-      status: row.status, failureCode: row.failure_code }
+      status: row.status, failureCode: row.failure_code, claimedAt: row.claimed_at,
+      claimGeneration: row.claim_generation, instructionId: row.instruction_id, jobId: row.job_id }
   }
 
   #ownerInstructionPayload(input: SourceOwnerInstruction): SourceOwnerInstruction {
@@ -2832,10 +2969,12 @@ export class ControlPlaneStore {
   /** Prepared owner continuations have a bounded recovery query, independent of job history. */
   listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false, includeCreationAdoption = false, includeRevision = false, includeRegression = false, includeRevisionAdoption = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
-      JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
+      LEFT JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
       LEFT JOIN source_adoptions a ON a.source_plan_id = p.id
       LEFT JOIN activation_plans ap ON ap.id = a.activation_plan_id
-      WHERE j.status = 'prepared' AND ((p.mode = 'modify' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
+      WHERE j.status = 'prepared'
+        AND (g.gap_id IS NOT NULL OR (p.mode = 'prepared-revise' AND json_type(j.intent_json, '$.ownerInstruction') = 'object'))
+        AND ((p.mode = 'modify' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
         OR (? = 1 AND p.status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
           'awaiting-registry-verify', 'awaiting-catalog-admission'))
         OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))))
@@ -2845,13 +2984,15 @@ export class ControlPlaneStore {
         OR (? = 1 AND p.mode = 'prepared-create' AND p.status = 'pending-approval'
           AND EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id AND v.status = 'verified'))
         OR (? = 1 AND p.mode = 'prepared-revise' AND p.status = 'pending-approval'
-          AND json_type(j.intent_json, '$.revision.growthRun.revisionAcceptance') IS NOT NULL
+          AND (json_type(j.intent_json, '$.revision.growthRun.revisionAcceptance') IS NOT NULL
+            OR (g.gap_id IS NULL AND json_type(j.intent_json, '$.ownerInstruction') = 'object'))
           AND NOT EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id))
         OR (? = 1 AND p.mode = 'prepared-revise' AND p.status = 'pending-approval'
           AND json_type(j.intent_json, '$.revision.growthRun.revisionRegressionAcceptance') IS NOT NULL
           AND EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id AND v.status='verified')
           AND NOT EXISTS (SELECT 1 FROM source_revision_regressions v WHERE v.plan_id=p.id))
         OR (? = 1 AND p.mode = 'prepared-revise' AND p.status = 'pending-approval'
+          AND g.gap_id IS NOT NULL
           AND EXISTS (SELECT 1 FROM source_revision_verifications v WHERE v.plan_id=p.id AND v.status='verified')
           AND (json_type(j.intent_json, '$.revision.growthRun.revisionRegressionAcceptance') IS NULL
             OR EXISTS (SELECT 1 FROM source_revision_regressions r WHERE r.plan_id=p.id AND r.status='verified'))))
@@ -2940,7 +3081,10 @@ export class ControlPlaneStore {
       || (creation !== undefined && (creation.generatorDigest !== input.generatorDigest || !name.startsWith(creation.grant.namePrefix)))) {
       throw new ControlPlaneStoreError('invalid-input', 'prepared source creation binding is invalid')
     }
-    const revision = input.revision === undefined ? undefined : revisionBindingFromStored(input.revision)
+    const instructionJob = mode === 'prepared-revise' && input.sourceJob !== undefined
+      ? this.getSourceJob(input.sourceJob.jobId)?.intent.ownerInstruction : undefined
+    const revision = input.revision === undefined ? undefined
+      : revisionBindingFromStored(input.revision, { allowWithoutGrowthRun: instructionJob !== undefined })
     if ((mode === 'prepared-revise') !== (revision !== undefined)
       || (revision !== undefined && (revision.generatorDigest !== input.generatorDigest || !name.startsWith(revision.grant.namePrefix)))) {
       throw new ControlPlaneStoreError('invalid-input', 'prepared source revision binding is invalid')
@@ -2970,9 +3114,6 @@ export class ControlPlaneStore {
         || input.preparedArtifact.length !== preparedEvidence.pack.sizeBytes
         || createHash('sha256').update(input.preparedArtifact).digest('hex') !== preparedEvidence.pack.sha256) {
         throw new ControlPlaneStoreError('invalid-input', 'prepared source artifact differs from checked package evidence')
-      }
-      if (this.getOwnerTaskFailureReference(input.gapId) === undefined) {
-        throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact requires an owner task failure gap')
       }
       preparedArtifact = Buffer.from(input.preparedArtifact)
     }
@@ -3040,6 +3181,15 @@ export class ControlPlaneStore {
           || (mode === 'prepared-revise' && controlPlaneDigest(sourceJob.intent.revision) !== controlPlaneDigest(revision))) {
           throw new ControlPlaneStoreError('conflict', 'source job completion lost its immutable running binding')
         }
+        const reference = this.getOwnerTaskFailureReference(input.gapId)
+        if (sourceJob.intent.ownerInstruction !== undefined) {
+          if (reference !== undefined || mode !== 'prepared-revise') {
+            throw new ControlPlaneStoreError('invalid-state', 'prepared revision owner sources conflict')
+          }
+          this.#assertRevisionInstruction(sourceJob, now)
+        } else if (preparedArtifact !== undefined && reference === undefined) {
+          throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact requires an owner task failure gap')
+        }
         if (now >= sourceJob.expiresAt || (creation !== undefined && now >= creation.grant.expiresAt) || (revision !== undefined && now >= revision.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
         if (mode === 'prepared-create' && this.getOwnerTaskFailureReference(input.gapId) !== undefined
           && (!creation?.growthRun || now >= creation.growthRun.expiresAt)) {
@@ -3102,7 +3252,20 @@ export class ControlPlaneStore {
   getSourcePlan(id: string): PluginSourcePlan {
     const row = this.#database.prepare('SELECT * FROM source_plans WHERE id = ?').get(id) as unknown as SourceRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('not-found', 'source plan not found')
-    return sourceFromRow(row)
+    return this.#readSourcePlanRow(row)
+  }
+
+  #readSourcePlanRow(row: SourceRow): PluginSourcePlan {
+    const plan = sourceFromRow(row, row.mode === 'prepared-revise')
+    if (plan.sourceRevision !== undefined && plan.sourceRevision.growthRun === undefined) {
+      // Historical reads can parse the v3 form only when the matching durable
+      // job and instruction still bind this plan. Authority use rechecks time.
+      if (this.getOwnerTaskFailureReference(plan.gapId) !== undefined) {
+        throw new ControlPlaneStoreError('invalid-state', 'prepared revision owner sources conflict')
+      }
+      this.#assertRevisionInstruction(this.#retainedPreparedRevisionJob(plan))
+    }
+    return plan
   }
 
   /** Exact durable source job for a currently admitted prepared creation. */
@@ -3159,22 +3322,49 @@ export class ControlPlaneStore {
       || this.#now() >= plan.expiresAt || this.#now() >= plan.sourceRevision.grant.expiresAt) {
       throw new ControlPlaneStoreError('invalid-state', 'prepared revision requires a current pending plan')
     }
+    const job = this.#retainedPreparedRevisionJob(plan)
     const owner = this.getOwnerTaskFailureReference(plan.gapId)
-    if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared revision requires an owner task failure gap')
-    this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
-    return this.getRetainedPreparedRevision(planId).job
+    if (owner === undefined) {
+      this.#assertRevisionInstruction(job, this.#now())
+    } else {
+      this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
+      if (job.intent.ownerInstruction !== undefined || job.intent.ownerDigest !== controlPlaneDigest(owner.owner)) {
+        throw new ControlPlaneStoreError('invalid-state', 'prepared revision owner task binding changed')
+      }
+    }
+    return job
+  }
+
+  #assertRevisionInstruction(job: SourceJobRecord, now?: number): void {
+    const binding = job.intent.ownerInstruction
+    const instruction = binding === undefined ? undefined : this.getOwnerInstruction(binding.instructionId)
+    if (!instruction || controlPlaneDigest(instruction) !== binding!.digest || (now !== undefined && (instruction.expiresAt <= now || job.expiresAt <= now))
+      || instruction.planId !== job.intent.revision?.parent.planId
+      || instruction.pluginName !== job.intent.name || job.intent.revision?.growthRun !== undefined
+      || instruction.ownerDigest !== job.intent.ownerDigest || instruction.filesDigest !== controlPlaneDigest(job.intent.files)
+      || this.getGap(job.intent.gapId).idempotencyKey !== `owner-instruction:${instruction.instructionId}`) {
+      throw new ControlPlaneStoreError('invalid-state', 'prepared revision requires a current exact owner instruction')
+    }
   }
 
   /** Read-only exact historical binding for an already signed adoption. Caller must hold the current owner fence. */
   getRetainedPreparedRevision(planId: string): { plan: PluginSourcePlan; job: SourceJobRecord;
     reference: OwnerTaskFailureReference } {
     const plan = this.getSourcePlan(planId)
+    const owner = this.getOwnerTaskFailureReference(plan.gapId)
+    if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'retained revision requires an owner task failure gap')
+    const job = this.#retainedPreparedRevisionJob(plan)
+    if (job.intent.ownerInstruction !== undefined || job.intent.ownerDigest !== controlPlaneDigest(owner.owner)) {
+      throw new ControlPlaneStoreError('invalid-state', 'retained revision owner task binding changed')
+    }
+    return { plan, job, reference: owner }
+  }
+
+  #retainedPreparedRevisionJob(plan: PluginSourcePlan): SourceJobRecord {
     if (plan.mode !== 'prepared-revise' || !['pending-approval', 'expired'].includes(plan.status)
       || plan.sourceRevision === undefined || plan.preparedEvidence === undefined || plan.sourceCheck === undefined) {
       throw new ControlPlaneStoreError('invalid-state', 'retained revision requires exact prepared evidence')
     }
-    const owner = this.getOwnerTaskFailureReference(plan.gapId)
-    if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'retained revision requires an owner task failure gap')
     const row = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ?')
       .get(plan.id) as unknown as SourceJobRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared revision has no source job')
@@ -3184,7 +3374,6 @@ export class ControlPlaneStore {
       || job.intent.revision === undefined || job.intent.gapId !== plan.gapId
       || job.intent.gapRevision !== plan.gapSnapshot.revision
       || gap.inputDigest !== plan.gapSnapshot.inputDigest
-      || job.intent.ownerDigest !== controlPlaneDigest(owner.owner)
       || controlPlaneDigest(job.intent.owner) !== job.intent.ownerDigest
       || controlPlaneDigest(job.intent.revision) !== controlPlaneDigest(plan.sourceRevision)
       || job.intent.revision.generatorDigest !== plan.generatorDigest
@@ -3194,7 +3383,7 @@ export class ControlPlaneStore {
       || plan.expiresAt !== plan.createdAt + job.intent.ttlMs) {
       throw new ControlPlaneStoreError('invalid-state', 'prepared revision source job binding is corrupt')
     }
-    return { plan, job, reference: owner }
+    return job
   }
 
   /** Host-only package bytes for an owner-admitted, still-pending created plugin. */
@@ -3352,7 +3541,7 @@ export class ControlPlaneStore {
       // the task reference and growth run, which must be absent on both sides.
       const instruction = job.intent.ownerInstruction
       if (!instruction || plan.sourceRevision?.growthRun !== undefined || job.intent.revision?.growthRun !== undefined
-        || !plan.sourceCheck || !plan.preparedEvidence || !revisionVerificationMatchesPreparedEvidence(certificate, plan.preparedEvidence)
+        || !plan.sourceCheck || !plan.preparedEvidence || certificate.protocol !== 'assistant-growth/revision-verification/v3'
         || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
         || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
         || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
@@ -3438,7 +3627,7 @@ export class ControlPlaneStore {
   claimRevisionVerification(planId: string): void {
     const job = this.getPreparedRevisionJob(planId)
     const pinned = job.intent.revision?.growthRun?.revisionAcceptance
-    if (!pinned || this.#now() >= pinned.expiresAt) {
+    if (job.intent.ownerInstruction === undefined && (!pinned || this.#now() >= pinned.expiresAt)) {
       throw new ControlPlaneStoreError('invalid-state', 'revision verification requires a current pre-author policy binding')
     }
     this.#beginMutation()
@@ -3897,7 +4086,7 @@ export class ControlPlaneStore {
       ? (this.#database.prepare(`SELECT * FROM source_plans WHERE mode = 'modify' ORDER BY created_at, id`).all() as unknown as SourceRow[])
       : (this.#database.prepare(`SELECT * FROM source_plans WHERE mode = 'modify' AND expires_at < ? ORDER BY created_at, id`)
         .all(filter.expiredBefore) as unknown as SourceRow[])
-    return rows.map(sourceFromRow)
+    return rows.map(row => sourceFromRow(row))
   }
 
   /** Isolated worktrees owned by the background prepared flows, including owner-granted creation. */
@@ -3907,7 +4096,7 @@ export class ControlPlaneStore {
         .all() as unknown as SourceRow[])
       : (this.#database.prepare(`SELECT * FROM source_plans WHERE mode IN ('modify', 'prepared-create', 'prepared-revise') AND expires_at < ? ORDER BY created_at, id`)
         .all(filter.expiredBefore) as unknown as SourceRow[])
-    return rows.map(sourceFromRow)
+    return rows.map(row => this.#readSourcePlanRow(row))
   }
 
   /** Retire an expired prepared plan before removing its worktree. The CAS
@@ -6232,7 +6421,9 @@ export class ControlPlaneStore {
   #sourcePlanReceipt(idempotencyKey: string, operation: string, inputDigest: string, planId: string): OperationReceipt<PluginSourcePlan> | undefined {
     const receipt = this.#receipt<unknown>(idempotencyKey, operation, inputDigest)
     if (receipt === undefined) return undefined
-    const result = sourceSnapshotFromStored(receipt.result); const authoritative = this.getSourcePlan(planId)
+    const authoritative = this.getSourcePlan(planId)
+    const result = sourceSnapshotFromStored(receipt.result, authoritative.sourceRevision !== undefined
+      && authoritative.sourceRevision.growthRun === undefined)
     if (result.id !== planId || result.digest !== authoritative.digest || result.gapId !== authoritative.gapId
       || result.revision > authoritative.revision
       || (result.approval !== undefined && controlPlaneDigest(result.approval) !== controlPlaneDigest(authoritative.approval))
@@ -6251,7 +6442,9 @@ export class ControlPlaneStore {
   #sourcePlanReceiptByKey(idempotencyKey: string, operation: string, inputDigest: string): OperationReceipt<PluginSourcePlan> | undefined {
     const receipt = this.#receipt<unknown>(idempotencyKey, operation, inputDigest)
     if (receipt === undefined) return undefined
-    const snapshot = sourceSnapshotFromStored(receipt.result)
+    // The authoritative read below must prove the linked owner instruction
+    // for the historical v3 shape before this receipt can be returned.
+    const snapshot = sourceSnapshotFromStored(receipt.result, true)
     const authoritative = this.getSourcePlan(snapshot.id)
     const replayBinding = { operation: 'create-source-plan', gapId: snapshot.gapId, repository: snapshot.repository,
       worktree: snapshot.worktree, baseCommit: snapshot.baseCommit, name: snapshot.name, generatorDigest: snapshot.generatorDigest,

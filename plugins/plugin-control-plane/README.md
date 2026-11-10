@@ -753,7 +753,15 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 Host-only `requestOwnerInstructionRevision(input)`（schema 37 `source_owner_instructions`）是与任务失败并列的第二条 `revise-created` 触发来源，让 owner 不依赖失败任务也能发起一次对已采用插件的修订。它在同一同步帧内：经 Delivery 重验当前 owner route，核对 parent 计划仍是已采用的同名插件，校验提交文件并冻结其规范 digest，写入带 TTL 的指令行（模型工具面不可达此接口），再用合成的 `owner-instruction:<id>` gap 入队一个修订作业。入队、重启恢复和每个 continuation 都重放同一组 fail-closed 校验：指令 digest、过期时间、plan/plugin 名、files digest、gap 归属与 owner continuation；指令与任务失败证据互斥，不允许混用。该类作业不携带 growth run，`validateSourceRevisionBinding` 仅在显式 `allowWithoutGrowthRun` 下接受，独立 revision 审查仍强制；回归 pin 与 P1-4 收益门不适用于无 growth run 的指令作业。指令对应的合成 gap 不出现在全局 `gaps()` 中。
 
-结构化 CLI 入口分两层，使无 Delivery 的 CLI 进程不直接触发授权：`dsh-plugin-control source revision-enqueue --plan-id <id> --plugin-name <name> --files-dir <dir> --expected-base-commit <sha40> --idempotency-key <key> --ttl-ms <900000..86400000>` 用 `readScopedPluginFiles` 把目录安全读成候选文件（拒 symlink/越界/`.git`，沿用 64 文件/64 KiB/256 KiB 与 candidate authority 路径边界），再写入 schema 38 `source_owner_instruction_requests` 的 `pending` 请求行并打印 requestId；重复相同幂等键与内容返回同一行，改内容则冲突。请求行只冻结意图，不入队 `source_jobs`。运行中的 service 负责在其信任边界内对 `pending` 行重验 owner route 后调用 `requestOwnerInstructionRevision`，成功置 `accepted`、失败以有界 failure code 置 `rejected`；该拾取调度仍在实现中（当前请求行会停留在 `pending`，不影响其它控制面路径）。
+结构化 CLI 入口分两层，使无 Delivery 的 CLI 进程不直接触发授权：`dsh-plugin-control source revision-enqueue --plan-id <id> --plugin-name <name> --files-dir <dir> --expected-base-commit <sha40> --idempotency-key <key> --ttl-ms <900000..86400000>` 用 `readScopedPluginFiles` 把目录安全读成候选文件（拒 symlink/越界/`.git`，沿用 64 文件/64 KiB/256 KiB 与 candidate authority 路径边界），再写入 schema 38 起的 `source_owner_instruction_requests` 表，保存为 `pending` 并打印 requestId。相同幂等键和内容返回原请求及原期限，改变内容会报冲突。原生调度器唤醒时只读检查队列，有待处理项时激活已有的 source continuation。实际认领、owner route 重验和入队使用该 continuation 的生产运行与预算。空队列暂停，不消耗运行额度。schema 40 用递增认领代次保护结算，在 `accepted` 行保存指令 ID 和已注册的作业 ID。进程若在结算前退出，五分钟后的孤儿认领可以重试，重用原期限及同一作业。过期或无法入队的请求记录有界失败码。独立验证继续使用同一 continuation，显式指令的自动采用留给后续验收。
+
+使用提交时返回的 `requestId`，从同一 owner-private ledger 查看历史状态：
+
+```sh
+dsh-plugin-control source revision-show --request-id <request-id>
+```
+
+命令以只读连接打开当前 schema 的既有账本，可读取正在运行的服务已提交到 WAL 的状态。缺失或旧版账本会报错，命令无需写入或迁移账本。输出包含请求目标、状态、失败码、创建与过期时间，以及已记录的指令和作业 ID。候选内容损坏时仍可查看请求状态和失败码。只有请求、指令和作业的持久绑定相符时，`jobAssociation` 才为 `matched`，并返回作业状态、失败码和候选 plan ID。旧版 `accepted` 请求缺少收据，或关联行缺失、错配或损坏时，`jobAssociation` 为 `unknown`，`job` 为 `null`。`accepted` 表示请求曾被受理。当前授权、执行成功、独立验证和采用需要各自的证据。候选文件、源码和完整作业 intent 留在账本内。
 
 ## 权限
 

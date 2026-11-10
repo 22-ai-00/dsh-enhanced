@@ -45,6 +45,7 @@ export interface EnqueueSourceJobInput {
 export interface SourceJobPorts {
   automations: Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'reconcileSystemExact'
     | 'pauseSystemOwned' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+    & Partial<Pick<AssistantAutomationsService, 'onSchedulerWake'>>
   delivery: { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt }
 }
 type Trust = Awaited<ReturnType<typeof loadTrustConfig>>
@@ -109,12 +110,14 @@ export class SourceJobRuntime {
   private readonly authorityDigest: string
   private unregister?: () => void
   private unregisterContinuation?: () => void
+  private unsubscribeWake?: () => void
   private closing?: Promise<void>
   private active = false
   private readonly generation = randomUUID()
   private readonly continuationNonce: string
   private readonly continuing = new Set<string>()
   private continuationCursor = 0
+  private preferRequestDrain = true
   private continuationStatus: 'active' | 'paused' | undefined
   private continuationTransition = 0
   /** Process-local, bounded build diagnostics; the failure code itself is durable. */
@@ -142,6 +145,9 @@ export class SourceJobRuntime {
     adoptionTimeoutMs?: number
     /** Host-owned P1-4 benefit reconciliation, driven by this runtime's existing cron tick. */
     reconcileRevisionBenefits?: () => void
+    /** Observe requests on the native scheduler wake and admit them inside its budgeted occurrence. */
+    hasOwnerInstructionRequests?: () => boolean
+    drainOwnerInstructionRequests?: (signal: AbortSignal) => Promise<void>
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
     inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>
     /** Linux service-owned, single-use proof of no admission and completed/no Host cleanup. */
@@ -185,6 +191,11 @@ export class SourceJobRuntime {
         execute: input => this.track(this.executeContinuations(input)),
       })
       this.active = true
+      if (this.options.drainOwnerInstructionRequests !== undefined) {
+        const automations = this.options.ports.automations
+        if (!automations.onSchedulerWake) throw new Error('owner instruction drain requires native scheduler wake')
+        this.unsubscribeWake = automations.onSchedulerWake(() => this.reconcileContinuations())
+      }
       // Recovery is admitted exclusively through a production cron occurrence.
       // Reading this local durable query intentionally performs no authority call.
       this.reconcileContinuations()
@@ -193,6 +204,7 @@ export class SourceJobRuntime {
       // Registration is transactional from this runtime's point of view: an
       // unregistration fault cannot leave the other executor registered or
       // obscure the original registration failure.
+      try { this.unsubscribeWake?.() } catch { /* original error wins */ }
       try { this.unregisterContinuation?.() } catch { /* original error wins */ }
       try { this.unregister?.() } catch { /* original error wins */ }
       throw error
@@ -266,7 +278,8 @@ export class SourceJobRuntime {
 
   private async continuePreparedLocked(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
     this.assertMode(job.intent.mode)
-    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    if (!job.planId || (job.intent.ownerInstruction === undefined
+      && !this.options.store.getOwnerTaskFailureReference(job.intent.gapId))) return
     const planId = job.planId
     const current = this.options.store.getSourceJob(job.id)
     if (current?.status !== 'prepared' || current.planId !== planId) throw new Error('source job continuation changed')
@@ -299,7 +312,7 @@ export class SourceJobRuntime {
       }
       // Verified acceptance and the optional independent parent regression end the review lane.
       // Replacing the stable adopted entry is a separately authorized continuation.
-      if (this.revisionAdoptionReady(job, planId)
+      if (job.intent.ownerInstruction === undefined && this.revisionAdoptionReady(job, planId)
         && this.options.revisionAdoptionEligible?.(planId) && this.options.adoptVerifiedRevision) {
         await assertCurrent()
         await this.options.adoptVerifiedRevision(job, signal)
@@ -372,6 +385,7 @@ export class SourceJobRuntime {
     return this.closing ??= (async () => {
       this.active = false
       try {
+        this.unsubscribeWake?.()
         const current = this.options.ports.automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION })
         if (current?.activationNonce === this.continuationNonce) this.options.ports.automations.reconcileSystem({ owner: SOURCE_JOB_OWNER,
           automationId: CONTINUATION_AUTOMATION, idempotencyKey: `${CONTINUATION_AUTOMATION}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.continuationDefinition() })
@@ -468,8 +482,13 @@ export class SourceJobRuntime {
     // enqueue; a revoked, changed or expired instruction cannot proceed.
     if (job.intent.ownerInstruction !== undefined) {
       const stored = this.options.store.getOwnerInstruction(job.intent.ownerInstruction.instructionId)
-      if (stored === undefined || controlPlaneDigest(stored) !== job.intent.ownerInstruction.digest
-        || stored.expiresAt <= Date.now()) throw new Error('owner instruction changed or expired')
+      if (taskBacked || stored === undefined || controlPlaneDigest(stored) !== job.intent.ownerInstruction.digest
+        || stored.expiresAt <= Date.now() || stored.planId !== job.intent.revision?.parent.planId
+        || stored.pluginName !== job.intent.name || stored.filesDigest !== controlPlaneDigest(job.intent.files)
+        || stored.ownerDigest !== job.intent.ownerDigest
+        || this.options.store.getGap(job.intent.gapId).idempotencyKey !== `owner-instruction:${stored.instructionId}`) {
+        throw new Error('owner instruction changed or expired')
+      }
     }
     if (job.intent.revision) {
       const parent = this.options.inspectRevisionParent?.(job.intent.revision.parent.planId)
@@ -751,7 +770,8 @@ export class SourceJobRuntime {
   private hasContinuations(): boolean {
     return !!(this.options.approvePrepared || this.options.verifyPreparedRevisionRegression || this.options.verifyPreparedRevision
       || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.adoptVerifiedRevision
-      || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+      || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased
+      || this.options.drainOwnerInstructionRequests)
   }
 
   private continuationJobs(): readonly SourceJobRecord[] {
@@ -842,7 +862,9 @@ export class SourceJobRuntime {
   /** Reconciliation only changes native activation; it never calls an authority. */
   private reconcileContinuations(force = false): void {
     if (!this.active || !this.hasContinuations()) return
-    const definition = this.continuationDefinition(), desiredStatus = this.continuationJobs().length ? 'active' as const : 'paused' as const
+    const definition = this.continuationDefinition()
+    const requests = this.available() && this.options.hasOwnerInstructionRequests?.() === true
+    const desiredStatus = requests || this.continuationJobs().length ? 'active' as const : 'paused' as const
     if (!force && desiredStatus === this.continuationStatus) return
     this.options.ports.automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION,
       idempotencyKey: `${CONTINUATION_AUTOMATION}:${this.generation}:${++this.continuationTransition}:${desiredStatus}`, desiredStatus, definition })
@@ -859,7 +881,16 @@ export class SourceJobRuntime {
         || input.targetScope.workspace !== this.options.config.workspace || input.targetScope.preset !== this.options.config.preset) throw new Error('source continuation dispatch changed')
       const jobs = this.continuationJobs()
       let unsettled = false
-      if (jobs.length) {
+      const drain = this.options.drainOwnerInstructionRequests
+      const hasRequests = drain !== undefined && this.available() && this.options.hasOwnerInstructionRequests?.() === true
+      if (hasRequests && (!jobs.length || this.preferRequestDrain)) {
+        const signal = AbortSignal.any([this.abort.signal, input.signal, AbortSignal.timeout(
+          Math.max(1, Math.min(this.continuationTimeoutMs(), this.options.config.expiresAt - Date.now())))])
+        signal.throwIfAborted()
+        try { await drain(signal); signal.throwIfAborted() } catch { unsettled = true }
+        this.preferRequestDrain = false
+      } else if (jobs.length) {
+        this.preferRequestDrain = true
         // One budget-admitted occurrence advances one durable row. The cursor
         // is intentionally in-memory; a restart returning to the first row is
         // safe because every release transition remains independently claimed.

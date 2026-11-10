@@ -71,6 +71,7 @@ import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
 import { SourceGrowthRunUnavailableError, SourceJobRuntime, normalizeSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
+import { drainOwnerInstructionRequests as drainPendingOwnerInstructionRequests, OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS } from './owner-instruction-drain.js'
 import type { SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
@@ -626,6 +627,11 @@ export class PluginControlPlaneService extends Service {
           'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
           if (typeof current('automations')[method] !== 'function') throw new Error(`plugin-control-plane: durable source jobs require assistantAutomations.${method}`)
         }
+        const instructionDrainEnabled = this.config.sourceJobs?.revision !== undefined
+          && this.config.sourceJobs.allowedModes?.includes('revise-created') !== false
+        if (instructionDrainEnabled && typeof current('automations').onSchedulerWake !== 'function') {
+          throw new Error('plugin-control-plane: owner instruction drain requires assistantAutomations.onSchedulerWake')
+        }
         if (typeof current('delivery').validateOwnerRoute !== 'function') throw new Error('plugin-control-plane: durable source jobs require Delivery v2 owner validation')
         let capabilities: CreationCapabilityRuntime | undefined
         let unsubscribeTaskChanges: (() => void) | undefined
@@ -827,6 +833,7 @@ export class PluginControlPlaneService extends Service {
           ports: {
             automations: {
               registerHostExecutor: executor => current('automations').registerHostExecutor(executor),
+              onSchedulerWake: listener => current('automations').onSchedulerWake!(listener),
               reconcileSystem: request => current('automations').reconcileSystem(request),
               reconcileSystemExact: request => current('automations').reconcileSystemExact(request),
               pauseSystemOwned: request => current('automations').pauseSystemOwned(request),
@@ -876,6 +883,10 @@ export class PluginControlPlaneService extends Service {
           ...(this.config.sourceJobs?.revisionBenefit === undefined ? {} : {
             reconcileRevisionBenefits: () => this.reconcileRevisionBenefits(),
           }),
+          ...(instructionDrainEnabled ? {
+            hasOwnerInstructionRequests: () => this.store.hasOwnerInstructionRequestWork(Date.now(), OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS),
+            drainOwnerInstructionRequests: (signal: AbortSignal) => this.drainOwnerInstructionRequests(signal),
+          } : {}),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent,
             nativeRunner?.backend === 'linux-native' ? { runner: nativeRunner.runner, generation: preparationGeneration } : undefined),
           ...(nativeRunner?.backend === 'linux-native' ? { isPreparationNotStarted: (error: unknown, job: SourceJobRecord) =>
@@ -2058,10 +2069,11 @@ export class PluginControlPlaneService extends Service {
       const stored = binding === undefined ? undefined : this.store.getOwnerInstruction(binding.instructionId)
       if (!binding || stored === undefined || controlPlaneDigest(stored) !== binding.digest
         || stored.expiresAt <= Date.now() || plan.sourceRevision.growthRun !== undefined
-        || stored.planId !== plan.id || stored.pluginName !== plan.name
+        || stored.planId !== plan.sourceRevision.parent.planId || stored.pluginName !== plan.name
         || job.intent.revision?.growthRun !== undefined) {
         throw new Error('prepared instruction revision is unavailable or changed')
       }
+      this.assertInstructionRevisionOwner(stored.ownerReceipt, plan)
       return { protocol: 'dsh-prepared-revision/v3' as const, plan: structuredClone(plan), job: structuredClone(job),
         source: { instruction: binding, owner: job.intent.owner, reviewModel: this.resolveInstructionReviewModel(stored) },
         artifact: this.store.readPreparedSourceArtifact(plan.id) }
@@ -2086,6 +2098,23 @@ export class PluginControlPlaneService extends Service {
   }
 
   /** Host-only pre-author policy reference; never grants candidate or model authority. */
+  private assertInstructionRevisionOwner(owner: SourceJobOwnerReceipt, plan: PluginSourcePlan): void {
+    const config = this.config.sourceJobs
+    const revision = plan.sourceRevision
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as
+      { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt } | undefined
+    if (!config?.revision || !revision || !delivery || config.expiresAt <= Date.now()
+      || controlPlaneDigest(config.revision) !== controlPlaneDigest(revision.grant)) {
+      throw new Error('instruction revision owner authority unavailable')
+    }
+    const current = delivery.validateOwnerRoute({ authorityId: config.ownerRouteId, principalId: config.principalId,
+      workspace: config.workspace, agentPreset: config.preset })
+    if (!isSourceOwnerContinuation(current, owner)
+      || controlPlaneDigest(this.inspectRevisionParent(revision.parent.planId).parent) !== controlPlaneDigest(revision.parent)) {
+      throw new Error('instruction revision owner or adopted parent changed')
+    }
+  }
+
   /** Resolves the review supplier for an owner-instruction revision from the live owner route. */
   private resolveInstructionReviewModel(stored: { ownerReceipt: { authorityId: string; principalId: string;
     workspace: string; agentPreset: string } }): { provider: string; model: string; reasoningEffort?: string } {
@@ -2267,6 +2296,7 @@ export class PluginControlPlaneService extends Service {
       throw new Error('instruction revision exact source binding changed')
     }
     if (stored.expiresAt <= Date.now()) throw new Error('owner instruction expired')
+    this.assertInstructionRevisionOwner(stored.ownerReceipt, current)
     const artifact = this.store.readPreparedSourceArtifact(input.planId)
     if (createHash('sha256').update(artifact).digest('hex') !== input.artifactSha256) {
       throw new Error('instruction revision artifact changed')
@@ -2344,7 +2374,15 @@ export class PluginControlPlaneService extends Service {
     this.abort.signal.throwIfAborted()
     const plan = this.store.getSourcePlan(planId)
     const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
-    if (!reference || plan.mode !== 'prepared-revise') throw new Error('revision verification owner source unavailable')
+    if (plan.mode !== 'prepared-revise') throw new Error('revision verification owner source unavailable')
+    if (!reference) {
+      const job = this.store.getPreparedRevisionJob(planId)
+      const instruction = job.intent.ownerInstruction
+      if (!instruction || !plan.preparedEvidence || !plan.sourceRevision) throw new Error('revision verification owner source unavailable')
+      return this.withPreparedInstructionRevisionFence({ planId, planDigest: plan.digest,
+        artifactSha256: plan.preparedEvidence.pack.sha256, instructionDigest: instruction.digest,
+        parentDigest: controlPlaneDigest(plan.sourceRevision.parent) }, () => this.store.inspectRevisionVerificationRecord(planId))
+    }
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       const current = this.store.getSourcePlan(planId)
       if (current.mode !== 'prepared-revise' || current.digest !== plan.digest) {
@@ -2409,6 +2447,20 @@ export class PluginControlPlaneService extends Service {
     return this.sourceRuntime.inspect(input)
   }
 
+  private async drainOwnerInstructionRequests(signal: AbortSignal): Promise<void> {
+    await drainPendingOwnerInstructionRequests({
+      store: this.store,
+      now: Date.now(),
+      readNow: Date.now,
+      signal,
+      maxPerPass: 1,
+      admit: (request, assertCurrent) => this.requestOwnerInstructionRevision({ planId: request.planId, pluginName: request.pluginName,
+        files: request.files, ttlMs: request.ttlMs, idempotencyKey: request.idempotencyKey,
+        expectedBaseCommit: request.expectedBaseCommit, window: { createdAt: request.createdAt, expiresAt: request.expiresAt },
+        signal, assertCurrent }),
+    })
+  }
+
   /**
    * Host-only owner instruction entry. Freezes one authenticated owner
    * receipt, the adopted revision parent and the exact submitted files into an
@@ -2425,8 +2477,15 @@ export class PluginControlPlaneService extends Service {
     idempotencyKey: string
     expectedBaseCommit: string
     signal?: AbortSignal
+    window?: { createdAt: number; expiresAt: number }
+    assertCurrent?: () => void
   }): Promise<{ instructionId: string; jobId: string }> => {
-    this.abort.signal.throwIfAborted()
+    const assertCurrent = () => {
+      this.abort.signal.throwIfAborted()
+      input.signal?.throwIfAborted()
+      input.assertCurrent?.()
+    }
+    assertCurrent()
     const config = this.config.sourceJobs
     const delivery = this.ctx.get('assistantDelivery' as never, false) as
       { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt } | undefined
@@ -2447,18 +2506,26 @@ export class PluginControlPlaneService extends Service {
     if (parent.name !== input.pluginName) throw new Error('plugin-control-plane: owner instruction target does not match the adopted parent')
     const instructionId = `instruction-${createHash('sha256').update(config.authorityId).update('\0')
       .update(input.idempotencyKey).digest('hex').slice(0, 32)}`
+    const prior = this.store.getOwnerInstruction(instructionId)
     const now = Date.now()
+    const createdAt = input.window?.createdAt ?? prior?.createdAt ?? now
+    const expiresAt = input.window?.expiresAt ?? prior?.expiresAt ?? createdAt + input.ttlMs
+    if (!Number.isSafeInteger(createdAt) || !Number.isSafeInteger(expiresAt)
+      || expiresAt - createdAt !== input.ttlMs || expiresAt <= now) {
+      throw new Error('plugin-control-plane: owner instruction request expired or invalid')
+    }
+    if (prior && !isSourceOwnerContinuation(receipt, prior.ownerReceipt)) throw new Error('plugin-control-plane: owner route changed')
     const gap = this.store.recordGap({
       idempotencyKey: `owner-instruction:${instructionId}`, capability: `plugin-revision:${input.pluginName}`,
       context: 'Owner instruction revision request', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0,
     })
-    if (gap.status !== 'open') throw new Error('plugin-control-plane: owner instruction gap is not open')
     const instruction = this.store.recordOwnerInstruction({
-      instructionId, ownerReceipt: receipt, ownerRouteId: config.ownerRouteId, planId: input.planId,
+      instructionId, ownerReceipt: prior?.ownerReceipt ?? receipt, ownerRouteId: config.ownerRouteId, planId: input.planId,
       pluginName: input.pluginName, filesDigest: controlPlaneDigest(input.files),
-      createdAt: now, expiresAt: now + input.ttlMs, idempotencyKey: input.idempotencyKey,
+      createdAt, expiresAt, idempotencyKey: input.idempotencyKey,
     })
-    const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
+    const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, expiresAt - Date.now())),
+      ...(input.signal === undefined ? [] : [input.signal])])
     return this.enqueueSourceJob({
       gapId: gap.id, mode: 'revise-created', name: input.pluginName, files: input.files,
       repository: config.repository, parentPlanId: input.planId,
@@ -2469,8 +2536,19 @@ export class PluginControlPlaneService extends Service {
       owner: { ownerRouteId: receipt.authorityId, principalId: receipt.principalId,
         principalRecordId: receipt.principalRecordId, principalVersion: receipt.principalVersion,
         workspace: receipt.workspace, preset: receipt.agentPreset },
-      signal, assertCurrent: () => this.abort.signal.throwIfAborted(),
-    }).then(job => ({ instructionId: instruction.instructionId, jobId: job.id }))
+      signal, assertCurrent,
+    }).then(job => {
+      const persisted = this.store.getSourceJob(job.id)
+      // A queued result from enqueue has passed native activation. For an
+      // already settled job, the bound definition alone only proves the
+      // paused registration existed. A durable occurrence proves dispatch.
+      if (persisted?.intent.ownerInstruction?.instructionId !== instruction.instructionId
+        || persisted.intent.ownerInstruction.digest !== controlPlaneDigest(instruction)
+        || !persisted.definitionHash || (persisted.status !== 'queued' && persisted.occurrenceId === undefined)) {
+        throw new Error('plugin-control-plane: source-job-registration-rejected')
+      }
+      return { instructionId: instruction.instructionId, jobId: job.id }
+    })
   }
 
   reconcileSourceJob = (input: { id: string; owner: SourceJobCaller }): Promise<SourceJobProjection> => {
@@ -2908,7 +2986,8 @@ export class PluginControlPlaneService extends Service {
       }
       // Only owner-bound creation jobs retain the exact package for the
       // independent verifier. Ordinary source tools never receive these bytes.
-      const capturePack = (creating || revising) && this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
+      const capturePack = (creating || revising) && (this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
+        || sourceJob?.intent.ownerInstruction !== undefined)
       const common = { worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`],
         environment, signal, assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
         ...(revision === undefined ? {} : { revision: { binding: revision, parentSource: parent!.source,

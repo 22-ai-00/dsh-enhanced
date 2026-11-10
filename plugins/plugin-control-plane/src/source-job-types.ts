@@ -86,6 +86,11 @@ export interface SourceOwnerInstructionRequest {
   expiresAt: number
   status: 'pending' | 'claimed' | 'accepted' | 'rejected'
   failureCode: string | null
+  /** Set while claimed; a stale value marks an orphaned claim safe to requeue. */
+  claimedAt: number | null
+  claimGeneration: number
+  instructionId: string | null
+  jobId: string | null
 }
 
 export interface SourceJobAuthority {

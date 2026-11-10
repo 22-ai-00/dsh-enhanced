@@ -301,26 +301,38 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
     const service = ctx.get('pluginControlPlane') as PluginControlPlaneService
     expect(service.canEnqueueSource()).toBe(false)
 
-    let executor: HostAutomationExecutor | undefined
-    let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
-    let automationStatus: 'active' | 'paused' = 'paused'
-    let definitionVersion = 0
+    // Keyed by automation/executor id, mirroring AssistantAutomationsService:
+    // the always-active drain automation must not clobber a source job slot.
+    type AutomationState = { definitionHash: string; activationNonce: string; ownerRouteId: string; automationStatus: 'active' | 'paused'; definitionVersion: number }
+    const automationsById = new Map<string, AutomationState>()
+    const executors = new Map<string, HostAutomationExecutor>()
     const automations = {
-      registerHostExecutor(value: HostAutomationExecutor): () => void { executor = value; return () => { executor = undefined } },
+      registerHostExecutor(value: HostAutomationExecutor): () => void {
+        executors.set(value.descriptor.executorId, value)
+        return () => { executors.delete(value.descriptor.executorId) }
+      },
       reconcileSystem(input: Parameters<AssistantAutomationsService['reconcileSystem']>[0]): ReturnType<AssistantAutomationsService['reconcileSystem']> {
         const definitionHash = automationDefinitionDigest(input.definition)
         const desiredStatus = input.desiredStatus ?? 'active'
-        if (activation?.definitionHash !== definitionHash || automationStatus !== desiredStatus) definitionVersion += 1
-        activation = { definitionHash, activationNonce: input.definition.execution!.activationNonce, ownerRouteId: input.definition.execution!.ownerRouteId }
-        automationStatus = desiredStatus
+        const prior = automationsById.get(input.automationId)
+        if (prior === undefined || prior.definitionHash !== definitionHash || prior.automationStatus !== desiredStatus) {
+          automationsById.set(input.automationId, { definitionHash, activationNonce: input.definition.execution!.activationNonce,
+            ownerRouteId: input.definition.execution!.ownerRouteId, automationStatus: desiredStatus, definitionVersion: (prior?.definitionVersion ?? 0) + 1 })
+        }
         return {} as ReturnType<AssistantAutomationsService['reconcileSystem']>
       },
       reconcileSystemExact(): never { throw new Error('modify lifecycle fixture must not rearm task-created plugins') },
       pauseSystemOwned(): never { throw new Error('modify lifecycle fixture must not revoke a Growth producer') },
-      inspectSystemOwnedActivation(): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> { return activation },
-      inspectSystemOwned(): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
-        return { latestTerminalRuns: {}, definitionHash: activation?.definitionHash,
-          definitionVersion, automationStatus } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
+      inspectSystemOwnedActivation(input: { automationId: string }): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> {
+        const state = automationsById.get(input.automationId)
+        return state === undefined ? undefined
+          : { definitionHash: state.definitionHash, activationNonce: state.activationNonce, ownerRouteId: state.ownerRouteId }
+      },
+      inspectSystemOwned(input: { automationId: string }): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
+        const state = automationsById.get(input.automationId)
+        if (state === undefined) throw new Error(`unknown system automation ${input.automationId}`)
+        return { latestTerminalRuns: {}, definitionHash: state.definitionHash,
+          definitionVersion: state.definitionVersion, automationStatus: state.automationStatus } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
       },
     } satisfies Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'reconcileSystemExact' | 'pauseSystemOwned' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
     const delivery = { validateOwnerRoute: () => ({ receiptVersion: 2 as const, authorityId: 'route-1', authorityHash: 'b'.repeat(64), principalId: 'owner-1',
@@ -337,14 +349,15 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
       owner: { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: value.root, preset: 'primary' },
       signal: new AbortController().signal, assertCurrent: () => undefined })
     expect(job.status).toBe('queued')
-    expect(executor).toBeDefined()
+    const captured = executors.get('plugin-control-plane-source-check')
+    expect(captured).toBeDefined()
     expect(await readFile(shell.logPath, 'utf8').catch(() => '')).toBe('')
-    const captured = executor!
+    const jobAutomation = automationsById.get(job.id)!
     await peer.dispose()
     expect(service.canEnqueueSource()).toBe(false)
-    const result = await captured.execute({ occurrenceId: 'old-peer', automationId: job.id, definitionHash: activation!.definitionHash,
+    const result = await captured!.execute({ occurrenceId: 'old-peer', automationId: job.id, definitionHash: jobAutomation.definitionHash,
       executionMode: 'production', targetScope: { workspace: value.root, preset: 'primary' }, principal: 'owner-1', ownerRouteId: 'route-1',
-      activationNonce: activation!.activationNonce, catalogDigest: captured.descriptor.catalogDigest, signal: new AbortController().signal })
+      activationNonce: jobAutomation.activationNonce, catalogDigest: captured!.descriptor.catalogDigest, signal: new AbortController().signal })
     expect(result.outcome).toBe('failed')
     await ctx.fiber.dispose()
   })

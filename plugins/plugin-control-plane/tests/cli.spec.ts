@@ -18,6 +18,7 @@ import { sourceReleaseAuthorizationSigningPayload, sourceReleaseEvidenceDigest, 
 import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
 import { startLocalHttpsRegistry } from '../src/registry-fetch.ts'
 import { loadTrustConfig } from '../src/trust.ts'
+import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import type { ActivationRetractionReceipt, ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan,
   PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthorization, SourceReleaseAuthority,
   SourceReleaseAuthorizationAuthority, SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
@@ -1580,7 +1581,7 @@ describe.sequential('trusted staged CLI', () => {
     await expect(loadTrustConfig(value.trustPath)).rejects.toThrow('digest changed')
   })
 
-  test('source revision-enqueue records a schema-38 owner-instruction request from a files directory', async () => {
+  test('source revision-enqueue records a pending owner-instruction request from a files directory', async () => {
     const value = await fixture()
     const filesDir = join(value.root, 'request-files')
     await mkdir(join(filesDir, 'src'), { recursive: true }); await writeFile(join(filesDir, 'README.md'), '# demo\n')
@@ -1605,4 +1606,123 @@ describe.sequential('trusted staged CLI', () => {
       status: 'pending', ttlMs: 900_000, idempotencyKey: 'req-1' })
     expect(recorded!.files.map(file => file.path).sort()).toEqual(['README.md', 'src/index.ts'])
   }, 30_000)
+
+  test('source revision-show reports pending, rejected, legacy accepted and absent requests', async () => {
+    const value = await fixture()
+    const store = new ControlPlaneStore({ path: value.state })
+    const input = { planId: 'parent-plan', pluginName: 'demo-plugin', expectedBaseCommit: 'a'.repeat(40),
+      files: [{ path: 'src/index.ts', content: 'export const payload = "PRIVATE-CANDIDATE-BYTES"\n' }],
+      createdAt: Date.now(), ttlMs: 900_000, idempotencyKey: 'private-key-idempotency' }
+    const pending = store.recordOwnerInstructionRequest(input)
+    const rejected = store.recordOwnerInstructionRequest({ ...input, idempotencyKey: 'rejected-request' })
+    const legacy = store.recordOwnerInstructionRequest({ ...input, idempotencyKey: 'legacy-request' })
+    const generation = store.claimOwnerInstructionRequest(rejected.requestId, input.createdAt)
+    expect(store.rejectOwnerInstructionRequest(rejected.requestId, generation!, 'request-corrupt')).toBe(true)
+    store.close()
+
+    // A migrated pre-v40 accepted row carries no recoverable receipt.
+    const db = new DatabaseSync(value.state)
+    try {
+      db.prepare("UPDATE source_owner_instruction_requests SET status = 'accepted' WHERE request_id = ?").run(legacy.requestId)
+      db.prepare("UPDATE source_owner_instruction_requests SET files_json = '[]' WHERE request_id = ?").run(rejected.requestId)
+    } finally { db.close() }
+
+    await withEnvironment({ DSH_HOME: value.dshHome }, async () => {
+      const show = async (id: string): Promise<unknown> => {
+        const stdout = vi.mocked(process.stdout.write)
+        stdout.mockClear()
+        await runPluginControl(['source', 'revision-show', '--request-id', id])
+        const json = String(stdout.mock.calls[0]?.[0])
+        expect(json).not.toContain('PRIVATE-CANDIDATE-BYTES')
+        return JSON.parse(json) as unknown
+      }
+      expect(await show(pending.requestId)).toEqual({ requestId: pending.requestId, planId: input.planId, pluginName: input.pluginName,
+        expectedBaseCommit: input.expectedBaseCommit, status: 'pending', failureCode: null,
+        createdAt: pending.createdAt, expiresAt: pending.expiresAt, instructionId: null, jobId: null, jobAssociation: null, job: null })
+      expect(await show(rejected.requestId)).toMatchObject({ status: 'rejected', failureCode: 'request-corrupt', job: null })
+      expect(await show(legacy.requestId)).toMatchObject({ status: 'accepted', instructionId: null, jobId: null, jobAssociation: 'unknown', job: null })
+      await expect(runPluginControl(['source', 'revision-show', '--request-id', 'absent-request'])).rejects.toMatchObject({ code: 'not-found' })
+      await expect(runPluginControl(['source', 'revision-show', '--request-id', pending.requestId, '--state', value.state])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    })
+  })
+
+  test('source revision-show refuses missing and old-schema ledgers without creating or migrating them', async () => {
+    const value = await fixture()
+    const show = () => withEnvironment({ DSH_HOME: value.dshHome }, () =>
+      runPluginControl(['source', 'revision-show', '--request-id', 'absent-request']))
+    await expect(show()).rejects.toMatchObject({ code: 'missing' })
+    await expect(stat(value.state)).rejects.toMatchObject({ code: 'ENOENT' })
+
+    new ControlPlaneStore({ path: value.state }).close()
+    const db = new DatabaseSync(value.state)
+    try {
+      db.exec('PRAGMA user_version = 39')
+      await expect(show()).rejects.toMatchObject({ code: 'schema-version' })
+      expect(db.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 39 })
+    } finally { db.close() }
+  })
+
+  test('source revision-show projects a matching receipt and suppresses a mismatched job', async () => {
+    const value = await fixture()
+    const store = new ControlPlaneStore({ path: value.state })
+    const createdAt = Date.now()
+    const digest = 'a'.repeat(64)
+    const jobId = `source-job-${digest}`
+    const files = [{ path: 'src/index.ts', content: 'export const payload = "PRIVATE-CANDIDATE-BYTES"\n' }]
+    const request = store.recordOwnerInstructionRequest({ planId: 'parent-plan', pluginName: 'demo-plugin', expectedBaseCommit: 'b'.repeat(40),
+      files, createdAt, ttlMs: 900_000, idempotencyKey: 'bound-request' })
+    const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: digest, principalId: 'owner',
+      principalRecordId: 'owner-record', principalVersion: 1, workspace: '/private-owner-workspace',
+      agentPreset: 'primary', bindingVersion: 1, generation: 1 }
+    const instruction = store.recordOwnerInstruction({ instructionId: 'instruction-fixture', ownerReceipt: owner,
+      ownerRouteId: owner.authorityId, planId: request.planId, pluginName: request.pluginName,
+      filesDigest: request.filesDigest, createdAt, expiresAt: request.expiresAt, idempotencyKey: request.idempotencyKey })
+    const generation = store.claimOwnerInstructionRequest(request.requestId, createdAt)
+    expect(store.acceptOwnerInstructionRequest(request.requestId, generation!, { instructionId: instruction.instructionId, jobId })).toBe(true)
+    store.close()
+
+    // Seed one decoded historical job without exercising native scheduling or execution.
+    const authority = { id: 'source-authority', digest, expiresAt: request.expiresAt, maxSubmissions: 1 }
+    const intent = { authority, owner, ownerDigest: instruction.ownerDigest, trustDigest: digest,
+      repository: '/private-source-repository', mode: 'revise-created', name: request.pluginName,
+      gapId: 'instruction-gap', gapRevision: 1, gapDigest: digest, baseCommit: request.expectedBaseCommit,
+      files, ttlMs: request.ttlMs, build: linuxSourceConfig(), worktree: '/private-source-worktree',
+      nativeResource: { backend: 'linux-native', key: jobId },
+      revision: { grant: { id: 'revision-grant', expiresAt: request.expiresAt, maxRevisions: 1, namePrefix: 'demo-' },
+        generatorDigest: digest, parent: { planId: request.planId, certificateDigest: digest,
+          artifactSha256: digest, sourceArchiveDigest: digest, sourceDigest: digest } },
+      ownerInstruction: { instructionId: instruction.instructionId, digest: controlPlaneDigest(instruction) } }
+    const show = async (): Promise<unknown> => withEnvironment({ DSH_HOME: value.dshHome }, async () => {
+      const stdout = vi.mocked(process.stdout.write)
+      stdout.mockClear()
+      await runPluginControl(['source', 'revision-show', '--request-id', request.requestId])
+      const json = String(stdout.mock.calls[0]?.[0])
+      expect(json).not.toMatch(/PRIVATE-CANDIDATE-BYTES|private-owner-workspace|private-source-repository|private-source-worktree/u)
+      return JSON.parse(json) as unknown
+    })
+    expect(await show()).toMatchObject({ status: 'accepted', jobAssociation: 'unknown', job: null })
+    const db = new DatabaseSync(value.state)
+    try {
+      db.exec('PRAGMA wal_autocheckpoint = 0')
+      db.prepare(`INSERT INTO source_job_authorities (authority_id, authority_digest, expires_at, max_submissions, submissions)
+        VALUES (?, ?, ?, 1, 1)`).run(authority.id, digest, authority.expiresAt)
+      db.prepare(`INSERT INTO source_jobs (id, automation_id, authority_id, idempotency_key, intent_json, intent_digest,
+        status, revision, created_at, expires_at, updated_at, failure_code)
+        VALUES (?, ?, ?, ?, ?, ?, 'failed', 2, ?, ?, ?, 'candidate-failed')`).run(jobId, jobId, authority.id, request.idempotencyKey,
+        JSON.stringify(intent), controlPlaneDigest(intent), createdAt, authority.expiresAt, createdAt)
+      expect((await stat(`${value.state}-wal`)).size).toBeGreaterThan(0)
+      expect(await show()).toMatchObject({ status: 'accepted', instructionId: instruction.instructionId, jobId,
+        jobAssociation: 'matched', job: { status: 'failed', failureCode: 'candidate-failed', candidatePlanId: null } })
+      const unrelated = { ...intent, files: [{ ...files[0], content: 'export const other = true\n' }] }
+      db.prepare('UPDATE source_jobs SET intent_json = ?, intent_digest = ? WHERE id = ?')
+        .run(JSON.stringify(unrelated), controlPlaneDigest(unrelated), jobId)
+      expect(await show()).toMatchObject({ status: 'accepted', jobAssociation: 'unknown', job: null })
+      db.prepare('UPDATE source_jobs SET intent_json = ?, intent_digest = ? WHERE id = ?')
+        .run(JSON.stringify(intent), controlPlaneDigest(intent), jobId)
+      db.prepare("UPDATE source_owner_instruction_requests SET files_json = '[]' WHERE request_id = ?").run(request.requestId)
+      expect(await show()).toMatchObject({ status: 'accepted', jobAssociation: 'unknown', job: null })
+      db.prepare('UPDATE source_owner_instruction_requests SET plugin_name = ? WHERE request_id = ?').run(' invalid target ', request.requestId)
+      await expect(show()).rejects.toMatchObject({ code: 'invalid-state' })
+    } finally { db.close() }
+  })
 })

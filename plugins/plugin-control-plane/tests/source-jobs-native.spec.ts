@@ -9,6 +9,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SourceBuildConfig } from '../src/source-build.js'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
+import { drainOwnerInstructionRequests, OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS } from '../src/owner-instruction-drain.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
@@ -40,7 +41,7 @@ function evidence(): SourcePreparedEvidence {
     logDigest: 'e'.repeat(64), durationMs: 1, preparedAt: Date.now() }
 }
 
-async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean } = {}) {
+async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean; linux?: boolean; drain?: (store: ControlPlaneStore, signal: AbortSignal) => Promise<void>; seedRequests?: (store: ControlPlaneStore) => void } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true }); await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export {}\n')
   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
@@ -54,11 +55,12 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
   const automations = new AssistantAutomationsService(ctx, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
   const owner = { receiptVersion: 2 as const, authorityId: OWNER.ownerRouteId, authorityHash: hex('route'), principalId: OWNER.principalId, principalRecordId: OWNER.principalRecordId, principalVersion: 1, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 }
   const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
+  options.seedRequests?.(store)
   const gap = options.continuations ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner,
     outcomeId: 'native-owner-feedback', sourceDigest: hex('native-source'),
     projection: { subjectKind: 'foreground-turn', subjectRef: 'native-inbox', version: 1, digest: hex('native-projection'), disposition: 'upsert' },
   }) : store.recordGap({ idempotencyKey: `gap:${options.budget ?? 'ok'}`, capability: 'health', context: 'native', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-  const config = { authorityId: 'source-authority', expiresAt: Date.now() + (options.continuations ? 3_600_000 : 60_000), maxSubmissions: 2, repository: root, ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId, budgetAmount: 1 }
+  const config = { authorityId: 'source-authority', expiresAt: Date.now() + (options.continuations || options.drain ? 3_600_000 : 60_000), maxSubmissions: 2, repository: root, ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId, budgetAmount: 1 }
   // The source fence and build/authority are fixture ports; admission, scheduling,
   // job/plan persistence and budget accounting use real services and SQLite.
   const withGapSourceFence = <T>(id: string, _owner: unknown, callback: () => T): T => store.withOwnerTaskFailureGapAdmission(id, callback)
@@ -70,6 +72,10 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
   const runtimeBuild: SourceBuildConfig = options.linux ? linuxSourceConfig() : build
   const createRuntime = () => new SourceJobRuntime({ config, build: runtimeBuild, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
     ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
+    ...(options.drain === undefined ? {} : {
+      hasOwnerInstructionRequests: () => store.hasOwnerInstructionRequestWork(Date.now(), OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS),
+      drainOwnerInstructionRequests: (signal: AbortSignal) => options.drain!(store, signal),
+    }),
   })
   const runtime = createRuntime()
   runtime.start()
@@ -166,5 +172,88 @@ describe('native Automations + Policy source jobs', () => {
       await f.automations.tick(); await f.automations.whenIdle()
       expect(f.store.getSourceJob(queued.id)?.revision).toBe(4)
     } finally { await restarted?.close(); f.store.close() }
+  })
+
+  const recordRequest = (store: ControlPlaneStore, createdAt = Date.now()) => store.recordOwnerInstructionRequest({
+    planId: 'parent', pluginName: 'health-helper', expectedBaseCommit: 'a'.repeat(40),
+    files: [{ path: 'README.md', content: '# revised' }], ttlMs: 900_000,
+    idempotencyKey: 'native-instruction', createdAt,
+  })
+
+  it.each(['startup', 'idle', 'orphan', 'expired'] as const)(
+    'uses budgeted native continuation to drain an owner instruction from %s', async scenario => {
+      let now = Date.UTC(2026, 8, 20, 12, 0, 5)
+      vi.spyOn(Date, 'now').mockImplementation(() => now)
+      let requestId: string
+      const admit = vi.fn(async () => ({ instructionId: 'instruction', jobId: 'source-job-' + 'a'.repeat(64) }))
+      const drain = vi.fn(async (store: ControlPlaneStore, signal: AbortSignal) => {
+        await drainOwnerInstructionRequests({ store, signal, admit, now })
+      })
+      const f = await fixture({ drain, seedRequests: store => {
+        if (scenario === 'idle') return
+        const request = recordRequest(store, scenario === 'expired' ? now - 1_000_000 : now - 400_000)
+        requestId = request.requestId
+        if (scenario === 'orphan') store.claimOwnerInstructionRequest(requestId, now - 350_000)
+      } })
+      const reserve = vi.spyOn(f.policy, 'reserve')
+      const status = () => f.automations.inspectSystemOwned({
+        owner: 'plugin-control-plane-source', automationId: 'source-job-prepared-continuations',
+      }).automationStatus
+      try {
+        expect(drain).not.toHaveBeenCalled()
+        if (scenario === 'idle') {
+          expect(status()).toBe('paused')
+          now += 60_000
+          await f.automations.tick(); await f.automations.whenIdle()
+          expect(reserve).not.toHaveBeenCalled()
+          requestId = recordRequest(f.store).requestId
+          await f.automations.tick(); await f.automations.whenIdle()
+        }
+        now += 60_000
+        await f.automations.tick(); await f.automations.whenIdle()
+        expect(drain).toHaveBeenCalledOnce()
+        expect(reserve).toHaveBeenCalledOnce()
+        expect(admit).toHaveBeenCalledTimes(scenario === 'expired' ? 0 : 1)
+        expect(f.store.getOwnerInstructionRequest(requestId!)).toMatchObject(scenario === 'expired'
+          ? { status: 'rejected', failureCode: 'request-expired' }
+          : { status: 'accepted', claimGeneration: scenario === 'orphan' ? 2 : 1 })
+        expect(status()).toBe('paused')
+        now += 60_000
+        await f.automations.tick(); await f.automations.whenIdle()
+        expect(reserve).toHaveBeenCalledOnce()
+      } finally { await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
+    })
+
+  it('cancels and joins a native owner instruction drain on close', async () => {
+    let now = Date.UTC(2026, 8, 20, 12, 0, 5)
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    let requestId: string
+    const entered = Promise.withResolvers<void>()
+    const aborted = Promise.withResolvers<void>()
+    const cleanup = Promise.withResolvers<void>()
+    const f = await fixture({ seedRequests: store => { requestId = recordRequest(store).requestId },
+      drain: async (store, signal) => {
+        await drainOwnerInstructionRequests({ store, now, signal, admit: async (_request, assertCurrent) => {
+          signal.addEventListener('abort', () => aborted.resolve(), { once: true })
+          entered.resolve()
+          await cleanup.promise
+          assertCurrent()
+          throw new Error('closed drain reached admission')
+        } })
+      },
+    })
+    try {
+      now += 60_000
+      const tick = f.automations.tick()
+      await entered.promise
+      const disposed = vi.fn()
+      const closing = f.runtime.close().then(disposed)
+      await aborted.promise
+      expect(disposed).not.toHaveBeenCalled()
+      cleanup.resolve()
+      await closing
+      await tick; await f.automations.whenIdle()
+      expect(f.store.getOwnerInstructionRequest(requestId!)).toMatchObject({ status: 'pending', jobId: null })
+    } finally { cleanup.resolve(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
   })
 })
