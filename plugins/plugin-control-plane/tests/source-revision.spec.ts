@@ -216,12 +216,16 @@ describe('revision of archived created plugin through the real Git generator', (
     expect(() => validateSourceRevisionGrant({ ...grant(), benefit: { contractDigest: hash } })).not.toThrow()
     expect(() => validateSourceRevisionGrant({ ...grant(), benefit: { contractDigest: 'not-a-digest' } })).toThrow()
     expect(() => validateSourceRevisionGrant({ ...grant(), benefit: {} })).toThrow()
-    expect(normalizeSourceRevisionGrant({ ...grant(), workItemFailures: true }))
-      .toEqual({ ...grant(), workItemFailures: true })
-    const withoutFlag = normalizeSourceRevisionGrant({ ...grant(), workItemFailures: false })
-    expect(withoutFlag).toEqual(grant())
+    // A grant's expiresAt is derived from Date.now(), so comparing two separate
+    // grant() calls can cross a millisecond boundary and fail without any
+    // behaviour change. Normalize one captured grant instead.
+    const normalizedBase = grant()
+    expect(normalizeSourceRevisionGrant({ ...normalizedBase, workItemFailures: true }))
+      .toEqual({ ...normalizedBase, workItemFailures: true })
+    const withoutFlag = normalizeSourceRevisionGrant({ ...normalizedBase, workItemFailures: false })
+    expect(withoutFlag).toEqual(normalizedBase)
     expect(Object.hasOwn(withoutFlag, 'workItemFailures')).toBe(false)
-    expect(normalizeSourceRevisionGrant(grant())).toEqual(grant())
+    expect(normalizeSourceRevisionGrant(normalizedBase)).toEqual(normalizedBase)
     expect(() => validateSourceRevisionBinding({ ...parent.binding, growthRun: {
       ...parent.binding.growthRun, revisionAcceptance: undefined } })).toThrow()
     const getter = { ...parent.binding }

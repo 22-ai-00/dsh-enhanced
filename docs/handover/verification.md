@@ -31,6 +31,7 @@
 3. 第三次冷标准门（A）同 4 文件仍失败：`TMPDIR` 51 字符使 RSI 夹具 socket 路径达 120 字节（上限 100），报 `runtime observer: invalid configuration`。改用 14 字符 `/data00/tmp/jt` 后通过。
 4. 包测试一次 load-induced flake：`assistant-goals` 的 event-wait 用例在包并发 6 下失败，单独 362/362 通过两次；最终门改用 CI 同参 `VITEST_MAX_WORKERS=2`、`DSH_TEST_CONCURRENCY=4` 后通过。
 5. `f1bb28a4` 的 CI 前两次尝试分别在 `plugin-control-plane`（2 例）与 `assistant-delivery`（1 例）时间敏感用例失败，两处均不在 A 的改动路径且本地重复通过；同 SHA 第 3 次尝试六 job 全绿。保留为已知 CI flake，未通过放宽门槛掩盖。
+6. 其中 `plugin-control-plane/tests/source-revision.spec.ts` 的失败已定位到测试自身缺陷并修复（提交见 Git）：该用例两次调用 `grant()`，而 `expiresAt` 由 `Date.now()+120s` 生成，跨毫秒就会必然不等。改为只捕获一次 grant 再归一化比较，其余断言不变；修复后该 spec 连跑两次通过，整个 `plugin-control-plane` 包 112 文件 1703 passed / 2 skipped、lint 干净。其它两处仍按已知 flake 记录，若复现再单独归因。
 
 三条环境前提的解析方法见 [交接入口](README.md)；缺任一项标准 `pnpm check` 会 EXIT 1。
 
