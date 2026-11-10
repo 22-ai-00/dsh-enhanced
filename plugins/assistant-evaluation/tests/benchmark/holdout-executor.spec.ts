@@ -7,7 +7,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HoldoutEvidenceStore } from '../../src/benchmark/holdout-evidence.js'
-import { openHoldoutProvider, type HoldoutProviderConfig, type HoldoutProviderTransport } from '../../src/benchmark/holdout-provider.js'
+import { HoldoutProviderError, openHoldoutProvider, type HoldoutProviderConfig, type HoldoutProviderTransport } from '../../src/benchmark/holdout-provider.js'
 import { holdoutUnsignedCanonicalJson } from '../../src/benchmark/holdout-protocol.js'
 import { createHoldoutEvidenceVerifier, runIndependentHoldout, runIndependentHoldoutInContext, type HoldoutDelegateBinding } from '../../src/benchmark/holdout.js'
 import { runBenchmark } from '../../src/benchmark/runner.js'
@@ -274,9 +274,11 @@ describe.runIf(process.platform === 'linux')('independent holdout runner integra
   it('binds a pending run to the current Cordis Fiber and awaits abort cleanup on unload', async () => {
     const directory = root(), evidenceRoot = join(directory, 'fiber-evidence'), databasePath = join(directory, 'fiber.sqlite')
     const ctx = new Context()
+    const entered = Promise.withResolvers<'entered'>()
     let running!: Promise<Readonly<{ results: readonly BenchmarkResult[] }>>
-    let release!: () => void
-    const close = vi.fn(async () => release())
+    let earlyExit!: Promise<{ status: string; reason: string }>
+    let release: (() => void) | undefined
+    const close = vi.fn(async () => release?.())
     const providerClose = vi.fn(async () => {})
     const plugin = (fiberContext: Context): void => {
       running = runIndependentHoldoutInContext(fiberContext, { plan: plan(), databasePath, evidenceRoot,
@@ -286,19 +288,34 @@ describe.runIf(process.platform === 'linux')('independent holdout runner integra
           providerClose.mockImplementation(() => opened.close())
           return { pid: opened.pid, request: (operation, value, requestSignal) => opened.request(operation, value, requestSignal), close: providerClose }
         },
-        openDelegate: async () => ({ close, async execute() { await new Promise<void>(resolve => { release = resolve }); return {
-          output: { contentType: 'text/plain', bytes: Uint8Array.from([52, 50]) }, versions, metrics: { inputTokens: 1, outputTokens: 1, costUsdMicros: null, toolCalls: 0, rework: null, interventions: null, latencyMs: null }, executionEvidenceDigest: sha('late-fiber'), quiescent: true,
-        } } }), delegateCloseTimeoutMs: 100 })
+        openDelegate: async () => ({ close, async execute() {
+          await new Promise<void>(resolve => {
+            release = resolve
+            entered.resolve('entered')
+          })
+          return {
+            output: { contentType: 'text/plain', bytes: Uint8Array.from([52, 50]) }, versions, metrics: { inputTokens: 1, outputTokens: 1, costUsdMicros: null, toolCalls: 0, rework: null, interventions: null, latencyMs: null }, executionEvidenceDigest: sha('late-fiber'), quiescent: true,
+          }
+        } }), delegateCloseTimeoutMs: 100 })
+      earlyExit = running.then(({ results }) => {
+        const result = results.at(-1)
+        return { status: result?.status ?? 'returned', reason: result?.reason ?? 'no-result' }
+      }, (error: unknown) => ({ status: 'rejected', reason: error instanceof HoldoutProviderError ? error.code : 'run-rejected' }))
     }
-    const fiber = await ctx.plugin(plugin)
-    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
-    await fiber.dispose()
-    const settled = await running
-    expect(settled.results).toHaveLength(1); expect(settled.results[0]).toMatchObject({ status: 'unknown', reason: 'interrupted' })
-    expect(close).toHaveBeenCalledTimes(1); expect(providerClose).toHaveBeenCalledTimes(1)
-    expect(() => new BenchmarkStore(databasePath).close()).not.toThrow()
-    expect(() => new HoldoutEvidenceStore({ root: evidenceRoot, verifier: createHoldoutEvidenceVerifier(publicKey), create: false }).close()).not.toThrow()
-    await ctx.fiber.dispose()
+    try {
+      const fiber = await ctx.plugin(plugin)
+      try {
+        const observed = await Promise.race([entered.promise, earlyExit])
+        if (observed !== 'entered') {
+          throw new Error(`holdout ended before delegate execution (status=${observed.status}, reason=${observed.reason})`)
+        }
+      } finally { await fiber.dispose() }
+      const settled = await running
+      expect(settled.results).toHaveLength(1); expect(settled.results[0]).toMatchObject({ status: 'unknown', reason: 'interrupted' })
+      expect(close).toHaveBeenCalledTimes(1); expect(providerClose).toHaveBeenCalledTimes(1)
+      expect(() => new BenchmarkStore(databasePath).close()).not.toThrow()
+      expect(() => new HoldoutEvidenceStore({ root: evidenceRoot, verifier: createHoldoutEvidenceVerifier(publicKey), create: false }).close()).not.toThrow()
+    } finally { await ctx.fiber.dispose() }
   })
 
   it('bounds an uncooperative provider startup during Fiber unload and closes a late provider without requests', async () => {
