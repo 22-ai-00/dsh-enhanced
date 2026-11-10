@@ -1,4 +1,2 @@
-# SHA-256	bytes	mode	path; portable recovery artifacts; not accepted runtime code
-579c47306aa64e23b21531083b69be541c750aab634cb51c983b6288358f108f	960436	0644	docs/handover/patches/ci-balance.patch
+# SHA-256	bytes	mode	path; portable recovery artifact; not accepted runtime code
 ff3f16ec6067087722f7dfd86fa5e689057cb1dadc5ce9c340f0d17d2ecfc643	64445	0644	docs/handover/patches/linux-original-recovery.patch
-e165c4e5d1b4a467b3d017b79fff777636b575e95f2a2c7c68c444cae3d6d154	319168	0644	docs/handover/patches/ordinary-acceptance.patch

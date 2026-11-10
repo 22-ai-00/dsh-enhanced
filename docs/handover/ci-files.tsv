@@ -1,9 +1,0 @@
-# SHA-256	bytes	mode	path; expected after ordinary-acceptance.patch THEN ci-balance.patch
-84772cd64700b8b54ae84b6dd4d12f30f5f32ef3ff894590933e1a7937171e1c	18810	0644	.github/workflows/ci.yml
-85096487f4b55323d907550a5afbd776323b2b0fc4c58e7242a932bafc852ee6	241882	0644	tests/installers.spec.ts
-f863c6b633d7d37acd0285bf4eac56edd2e10cf2d9d814083bda8abe3a7b4e20	264205	0644	tests/installers-linux-lifecycle.spec.ts
-5d19c3d83af4b61b63a5027004c10c6d9ca9d3b9350e902b701402945f94d25b	38211	0644	tests/installers-local-source.spec.ts
-2644a6c70b22555e016a8a5fae26bd5289a5ef77c1cd425519cf37bc4db3ab95	158226	0644	tests/helpers/installer-fixtures.ts
-e73045441068e680ad2eeffc03e4738d13af1efd08603d35bcba50c6964b0ba2	1081	0644	tests/root-test-sequencer.ts
-c9342805e24a2ef38255babda29b3aa7c2104776f5b361231a16d0f720d0645e	2469	0644	tests/root-test-sequencer.spec.ts
-62bf8737caf85e6758d6777ecb94038766b1c822231bb61693c675202ec48471	780	0644	tests/vitest.config.ts

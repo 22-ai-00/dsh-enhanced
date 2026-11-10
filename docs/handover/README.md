@@ -1,6 +1,6 @@
 # 接手续办、CI 与资料整理
 
-更新：2026-11-10。用户已暂停本轮功能开发；本目录是可随 GitHub `dev` 拉取的交接包。下一位 Agent 从这里开始，不需要上一会话、旧代理、执行句柄或被忽略的本地文件。
+更新：2026-11-10。能力 A（普通续办 + Isolation 测试前提）与 CI 均衡已交付 `dev` 并通过精确提交的 CI，本目录保留交接说明、环境前提与历史恢复件。下一位 Agent 从这里开始，不需要上一会话、旧代理、执行句柄或被忽略的本地文件。
 
 ## 先完成什么
 
@@ -8,29 +8,27 @@
 
 | 顺序 | 工作 | 可交付结果 | 操作说明 |
 | --- | --- | --- | --- |
-| 1 | 恢复并验收普通续办补丁，修复 Isolation 续租测试前提 | 可独立使用的能力提交，完整 Linux 检查与独立复核通过 | [功能计划 A](remaining-work.md#A) |
-| 2 | 恢复 CI 补丁，测量新分片和整条流水线 | 精确提交的六个 CI job 全绿、前后耗时可比较 | [CI 操作方案](ci-and-docs.md) |
+| 1 | ~~恢复并验收普通续办补丁，修复 Isolation 续租测试前提~~ | 已交付 `f1bb28a4`，CI 六 job 全绿 | [功能计划 A](remaining-work.md#A) |
+| 2 | ~~恢复 CI 补丁，测量新分片和整条流水线~~ | 已交付 `135ee06f`，慢片 979s→674s、两片比 1.03 | [CI 交付与测量](ci-and-docs.md) |
 | 3 | 首次普通委托与受保护的任务准则 | 从真实 owner 请求到可核实结果，不要求每任务手配 profile | [功能计划 B](remaining-work.md#B) |
 | 4 | 首装、学习、工程成长及普通使用收益 | 按能力逐个交付，保留授权、预算、独立验收和回退 | [后续 C–F](remaining-work.md#C) |
 
-开发只在 `dev`，发布验证后才合入 `main`。每项完成检查与独立复核后单独提交并推送，再开始下一主能力。当前运行代码保持最后已提交基线；下列 patch 是**未验收实现**，不会自动参与构建。
+开发只在 `dev`，发布验证后才合入 `main`。每项完成检查与独立复核后单独提交并推送，再开始下一主能力。能力 A 与 CI 均衡的恢复补丁在合入后已删除，实现与验证历史见 Git。
 
 ## 带走了什么
 
-补丁基线为 `8e608d4ab6ef0bd4bc015292fd15002801690589`；交接提交在此基线上只改变文档、校验清单和恢复资料。
+交接包起点为 `8e608d4ab6ef0bd4bc015292fd15002801690589`；此后 `dev` 已包含能力 A（`f1bb28a4`）与 CI 均衡（`135ee06f`），两份恢复补丁随合入删除。
 
 | 文件 | 范围与用法 |
 | --- | --- |
-| [ordinary-acceptance.patch](patches/ordinary-acceptance.patch) | 39 个路径：续办、Host proof、schema 18、相关回归与两个测试夹具修复；先应用 |
-| [ci-balance.patch](patches/ci-balance.patch) | 8 个路径：安装器拆组、分片器、CI 诊断；普通能力交付后应用 |
+| ~~ordinary-acceptance.patch~~ | 39 个路径，已合入 `f1bb28a4` 后删除 |
+| ~~ci-balance.patch~~ | 8 个路径，已合入 `135ee06f` 后删除 |
 | [linux-original-recovery.patch](patches/linux-original-recovery.patch) | 原 Linux 12 个源文件的历史恢复件；仅适用于 `d2a1e0da682484c88dd41a656b42e2a1174b4375`，**不要应用到新 dev** |
-| [patches.tsv](patches.tsv) | 三个补丁的 SHA-256、字节数、权限和路径 |
-| [ordinary-files.tsv](ordinary-files.tsv) | 第一份补丁应用后的 39 个目标文件 |
-| [ci-files.tsv](ci-files.tsv) | 先 ordinary、后 CI 应用后的 8 个目标文件；包含合并后的 installers 哈希 |
+| [patches.tsv](patches.tsv) | 现存恢复件的 SHA-256、字节数、权限和路径 |
 | [linux-original-files.tsv](linux-original-files.tsv) | 历史 Linux 恢复件的 12 个目标文件 |
 | [验证与归属记录](verification.md) | 真实通过/失败边界、历史 Linux 改动的处理与剩余清理条件 |
 
-原 40 文件现场中的 `docs/rsi-status.md` 已收敛到当前状态页及本交接，不重新应用过期进度文字。原 CI 12 文件中的四份资料清理已直接并入本次交接；剩余八份代码作为 CI patch 保存。原始日志、JSON、源码 tar 和全部 refs 不上传到本目录。
+原 40 文件现场中的 `docs/rsi-status.md` 已收敛到当前状态页及本交接，不重新应用过期进度文字。原 CI 12 文件中的四份资料清理已并入交接，八份代码已合入 `dev`。原始日志、JSON、源码 tar 和全部 refs 不上传到本目录。
 
 ## 新电脑启动
 
@@ -44,19 +42,9 @@ git log -1 --oneline
 python3 docs/handover/verify-files.py docs/handover/patches.tsv
 ```
 
-先读本文件、[当前状态](../rsi-status.md)和工作包 A。检查工作区无别人的改动、HEAD 与 `origin/dev` 一致，记录 `origin/main`。若 dev 已有后续能力提交，先检查补丁是否已被吸收，**不要重复应用或用旧 hash 覆盖新实现**。
+先读本文件、[当前状态](../rsi-status.md)与[剩余方案](remaining-work.md)。检查工作区无别人的改动、HEAD 与 `origin/dev` 一致，记录 `origin/main`。**不要重新应用已删除的 ordinary/CI 补丁**：它们已在 `f1bb28a4` / `135ee06f` 合入，历史从 Git 查。
 
-第一步仅恢复普通能力：
-
-```sh
-umask 022
-git apply --check --whitespace=error docs/handover/patches/ordinary-acceptance.patch
-git apply --whitespace=error docs/handover/patches/ordinary-acceptance.patch
-python3 docs/handover/verify-files.py docs/handover/ordinary-files.tsv
-git diff --check
-```
-
-`verify-files.py` 使用 Python 3.9+，只读文件，不修改仓库或执行 patch。清单包含精确文件权限；clone/apply 时用 `umask 022`，私有工作区父目录仍可为 0700，证据和运行目录用 077。补丁原字节应保留；不要清理 unified diff 的上下文前缀空格。若 apply 或哈希不符，检查最新 dev 的真实差量并重新整合，不能强行覆盖或继续引用旧快照的测试结论。
+`verify-files.py` 使用 Python 3.9+，只读文件，不修改仓库或执行 patch。清单包含精确文件权限；clone 或恢复历史件时用 `umask 022`。补丁原字节应保留；不要清理 unified diff 的上下文前缀空格。若哈希不符，检查最新 dev 的真实差量，不能强行覆盖或继续引用旧快照的测试结论。
 
 本轮已实测：基线临时副本应用普通补丁匹配 39 项；继续应用 CI 补丁匹配 8 项，普通能力新增的 schema 15–18 接受、19 拒绝断言仍在。后续修复 Isolation 或修改其他路径会产生新源码快照，必须重新记录和验证。
 
@@ -174,4 +162,4 @@ test "$check_exit" = 0
 
 ## 下一位 Agent 的一句话
 
-> 请在 GitHub 22-ai-00/dsh-enhanced 的最新 dev 上先读 AGENTS.md、docs/handover/README.md 和 docs/rsi-status.md，按交接先恢复并验收普通任务补丁、解决 Isolation 续租测试前提，再完成 CI 均衡与资料整理，随后推进首次自然语言委托到独立结果验收；以 Linux /data00 验证、保持两端源码一致，每个能力通过完整检查与独立复核后单独提交推送 dev，保留真实失败证据并按文档处理历史 Linux 恢复件。
+> 请在 GitHub 22-ai-00/dsh-enhanced 的最新 dev 上先读 AGENTS.md、docs/handover/README.md 和 docs/rsi-status.md；能力 A 与 CI 均衡已交付并有精确提交的 CI 证据，接下来推进首次自然语言委托到独立结果验收（工作包 B），再做首装/学习、工程成长与主动性；以 Linux /data00 验证、保持两端源码一致，注意完整门的三条环境前提（原生 @pnpm/exe、已填充 pnpm store、短 TMPDIR），每个能力通过完整检查与独立复核后单独提交推送 dev。

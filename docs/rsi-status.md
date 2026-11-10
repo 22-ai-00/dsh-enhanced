@@ -21,8 +21,8 @@
 
 ## 下一交付
 
-1. 用精确提交测量并报告 CI 均衡：两个根分片、linux-packages job 与整条 run 的前后耗时；未达标则按新文件耗时继续拆瓶颈，不删用例。
-2. 打通首次自然语言委托与受保护的动态准则，再修首装/学习、工程成长和主动性，按能力逐个提交；完整顺序及验收见[剩余方案](handover/remaining-work.md)。
+1. 打通首次自然语言委托与受保护的动态准则（工作包 B）：从空账本接真实 owner 请求、冻结目标与供应者/预算、准备可判定准则、独立验收并汇报；随后修首装/学习、工程成长和主动性，按能力逐个提交；完整顺序及验收见[剩余方案](handover/remaining-work.md)。
+2. CI 第二阶段（包测试关键路径）按测量另开工单：`linux-packages` 约 28 分钟已成为唯一关键路径，一次只改一个调度层，见 [CI 交付与测量](handover/ci-and-docs.md)。
 
 ## 最近验证
 
@@ -30,5 +30,6 @@
 - 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`（原生 `@pnpm/exe`）、`pnpm_config_store_dir`（已填充的 pnpm store）、**短** `TMPDIR`（RSI 夹具的 Unix socket 路径须 ≤100 字节）。缺失时分别表现为 `release-adapter` 快速失败、`npm cohort pnpm store 不存在`、`runtime observer: invalid configuration`，都不是代码缺陷；解析方法见[交接入口](handover/README.md)。
 - 包测试曾因包并发 6 出现一次 load-induced flake（`assistant-goals` 的 event-wait 用例，单独 362/362 通过两次）；最终门改用 CI 同参 `VITEST_MAX_WORKERS=2`、`DSH_TEST_CONCURRENCY=4` 后 EXIT 0。
 - CI 均衡能力（安装器拆组 + 根测试排序器 + 诊断 artifact）已交付：Linux 冷标准 `pnpm check` EXIT 0 / 2281s；根 101 文件 1618 passed / 2 skipped（新增 5 项排序器回归），39 包 11280 passed / 271 skipped，39 个 dry-run pack，lint 0 warning；2103 文件 hash/bytes/mode 稳定。用例迁移由 AST 对照证明 358/358 声明、describe 链、timeout 与测试体等价（唯一差异是上一提交的 schema 断言），三个拆分 spec 单跑的 (name,status) 与拆前 498/498 完全一致。
+- CI 均衡已交付（`135ee06f`，[run 42836374150](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42836374150) 六 job 全绿）：慢片 979s→674s、两片最大/最小 6.20→1.03、root job 1102s→876s；`linux-packages` 仍约 28 分钟，整条 run 1789s→1696s。冷标准 `pnpm check` EXIT 0 / 2281s（根 101 文件 1618 passed / 2 skipped，39 包 11280 passed / 271 skipped，39 packs，lint 干净）。
 - 已提交运行基线 `8e608d4a`：[CI #819](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42762151021) 六 job 成功；历史 Linux 全检 EXIT 0 / 2318s，根 1610 pass/4 skip、包 11244 pass/271 skip、39 packs。仅属于已提交能力。
-- 未验收：CI 均衡与真实分片收益、首次自然语言委托、真实模型/外部渠道与长期使用收益。没有发布 npm、升级生产 Home 或发送用户渠道消息。
+- 未验收：首次自然语言委托到独立结果验收（工作包 B）、首装/学习、工程成长、主动性，以及真实模型/外部渠道与长期使用收益。CI 第二阶段（包测试关键路径）尚未开始。没有发布 npm、升级生产 Home 或发送用户渠道消息。
