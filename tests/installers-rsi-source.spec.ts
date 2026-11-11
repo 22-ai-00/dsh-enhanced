@@ -91,22 +91,50 @@ describe('supervised RSI source and build preparation', () => {
     ])
   })
 
-  it('requests ordinary-use learning only for a fresh profile', async () => {
+  it('forwards the explicit persisted learning decision to owner setup', async () => {
     const { home, log } = await fixture()
-    const invoke = (fresh: string) => spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
-      common, 'web', home, 'npm', repoRoot, '0', '0', fresh], {
+    const invoke = (learning: string) => spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
+      common, 'web', home, 'npm', repoRoot, '0', '0', learning], {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
         PATH: `${join(dirname(home), 'fake-bin')}:${process.env.PATH ?? ''}`, RSI_ARGS_LOG: log },
     })
-    expect(invoke('1').status).toBe(0)
+    expect(invoke('authorize').status).toBe(0)
     expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
       '--install-owner', '--profile', 'web', '--dsh-home', home, '--enable-ordinary-use-learning',
     ])
     await writeFile(log, '')
-    expect(invoke('0').status).toBe(0)
+    expect(invoke('skip').status).toBe(0)
+    expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner', '--profile', 'web', '--dsh-home', home, '--skip-memory-learning',
+    ])
+    // A pre-existing installation without a recorded intent keeps its stored
+    // decision: the helper forwards no learning flag at all.
+    await writeFile(log, '')
+    expect(invoke('preserve').status).toBe(0)
     expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
       '--install-owner', '--profile', 'web', '--dsh-home', home,
     ])
+    expect(invoke('bogus').status).toBe(2)
+    expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner', '--profile', 'web', '--dsh-home', home,
+    ])
+    const invalid = invoke('bogus')
+    expect(invalid.stderr).toContain('学习授权决策不合法：bogus')
+  })
+
+  it('forwards an explicit skip decision from the supervised installer', async () => {
+    const { home } = await fixture()
+    const result = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'supervised',
+      '--lark', 'configure', '--yes', '--learning', 'skip'], {
+      cwd: repoRoot, encoding: 'utf8', env: { ...process.env, DSH_HOME: home, PATH: pathWithoutTraex },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('--skip-memory-learning')
+    expect(result.stdout).not.toContain('--enable-ordinary-use-learning')
+    expect(result.stdout).toContain('学习授权：已跳过')
+    const install = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    expect(install).toBeGreaterThanOrEqual(0)
+    expect(result.stdout.slice(install)).toContain('--skip-memory-learning')
   })
 
   it('prints the new supervised cohort and preparation between install and final setup without writing source', async () => {

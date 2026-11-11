@@ -73,6 +73,8 @@ export interface RsiSetupArgs {
   ackExistingAutomations?: boolean
   /** Fresh-install-only ordinary-use learning assembly; retries preserve the stored opt-in. */
   enableOrdinaryUseLearning?: boolean
+  /** Fresh-install-first skip decision: no ordinary-use or memory-learning chain is issued. */
+  skipMemoryLearning?: boolean
   intakeProvider?: string
   intakeModel?: string
   /** Installer's pre-stop source and destination inventories; never parsed from CLI. */
@@ -106,6 +108,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     }
     else if (key === '--ack-existing-automations') result.ackExistingAutomations = true
     else if (key === '--enable-ordinary-use-learning') result.enableOrdinaryUseLearning = true
+    else if (key === '--skip-memory-learning') result.skipMemoryLearning = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
     else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
     else if (key === '--add-memory-learning') result.addMemoryLearning = true
@@ -129,6 +132,8 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   }
   if (result.help) return result
   if (result.enableOrdinaryUseLearning && !result.installOwner) fail('--enable-ordinary-use-learning requires --install-owner')
+  if (result.skipMemoryLearning && !result.installOwner) fail('--skip-memory-learning requires --install-owner')
+  if (result.skipMemoryLearning && result.enableOrdinaryUseLearning) fail('--skip-memory-learning cannot be combined with --enable-ordinary-use-learning')
   if ((result.intakeProvider === undefined) !== (result.intakeModel === undefined)) fail('--intake-provider and --intake-model must be provided together')
   if ((result.intakeProvider !== undefined || result.intakeModel !== undefined) && result.enableOrdinaryUseLearning !== true) {
     fail('--intake-provider/--intake-model require --enable-ordinary-use-learning')
@@ -139,7 +144,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
       || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.optionalBuild
       || result.sourceRepository || result.ackExistingAutomations || result.installLocalCohort || result.bundles
       || result.prepareLocalUpdate || result.addMemoryLearning || result.enableOrdinaryUseLearning
-      || result.intakeProvider || result.intakeModel) {
+      || result.skipMemoryLearning || result.intakeProvider || result.intakeModel) {
       fail('owner DM wait cannot be combined with other operations')
     }
     if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('owner DM wait requires --profile and absolute DSH_HOME')
@@ -590,7 +595,7 @@ sleep: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) => new
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations] [--enable-ordinary-use-learning [--intake-provider <id> --intake-model <id>]]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\n--enable-ordinary-use-learning is accepted only with --install-owner and only on a fresh profile: it emits the observe-only intake evaluator (rules plus the Delivery or explicit provider/model) and the flagged memory grants. A retry preserves the stored opt-in and never expands an existing installation; no admission, revision key or Growth failure pin is added.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime and exports its release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations] [--enable-ordinary-use-learning [--intake-provider <id> --intake-model <id>] | --skip-memory-learning]\n       dsh-rsi-setup --wait-owner-dm --profile <name> [--dsh-home <absolute>] [--timeout-seconds <1-3600>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\n--enable-ordinary-use-learning is accepted only with --install-owner and only on a fresh profile: it emits the observe-only intake evaluator (rules plus the Delivery or explicit provider/model) and the flagged memory grants. A retry preserves the stored opt-in and never expands an existing installation; no admission, revision key or Growth failure pin is added.\n--skip-memory-learning is the mutually exclusive Linux inverse: a fresh install then issues no ordinary-use, memory-learning, review or adoption grant and writes no learner or personal-memory learning configuration. A retry preserves the recorded decision, and an existing installation that already issued those grants refuses to drop them. macOS native owner deployment always keeps the memory-learning chain, so --skip-memory-learning is accepted only for the Linux supervised owner deployment.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, prepares a pinned native offline runtime and exports its release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
     process.stdout.write('macOS: --prepare-build installs a pinned private Node and frozen manifest-only dependencies for offline Seatbelt checks; --optional-build does not suppress native preparation failure. --install-owner configures a native launchd Host with finite memory learning and verified plugin creation. Source replacement/release remains Linux-only.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. Linux builds with the native runtime. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
@@ -646,12 +651,16 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     const cancel = () => controller.abort(new Error('owner installation interrupted'))
     process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
     try {
+      if (process.platform === 'darwin' && args.skipMemoryLearning) {
+        fail('--skip-memory-learning is only supported by the Linux supervised owner deployment; macOS always issues the native memory-learning chain')
+      }
       const install = process.platform === 'darwin'
         ? (await import('./rsi-native-install.js')).installNativeRsiOwnerDeployment
         : (await import('./rsi-install.js')).installRsiOwnerDeployment
       const result = await install({ dshHome: args.dshHome, profile: args.profile!,
         sourceRepository: args.sourceRepository, ackExistingAutomations: args.ackExistingAutomations, signal: controller.signal,
         enableOrdinaryUseLearning: args.enableOrdinaryUseLearning === true,
+        skipMemoryLearning: args.skipMemoryLearning === true,
         ...(args.intakeProvider !== undefined ? { intakeProvider: args.intakeProvider } : {}),
         ...(args.intakeModel !== undefined ? { intakeModel: args.intakeModel } : {}) })
       process.stdout.write(`${JSON.stringify(result)}\n`)

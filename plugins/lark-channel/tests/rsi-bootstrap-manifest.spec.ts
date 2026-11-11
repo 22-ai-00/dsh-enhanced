@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { isMap, isSeq, parse, parseDocument, stringify, type Node } from 'yaml'
@@ -382,6 +382,52 @@ describe('ordinary-use RSI manifest factory', () => {
       }
       expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-proactive')?.services).toEqual(['assistantProactive'])
       expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-work-items')?.services).toEqual(['assistantWorkItems'])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('a skip decision omits the memory-learning chain and every derived row', async () => {
+    const { root, input } = await fixture()
+    try {
+      const authorized = createRsiBootstrapManifest(input)
+      const grants = authorized.memoryLearning!
+      // The authorized path still issues the three independent finite grants.
+      expect(new Set([grants.learning.authorityId, grants.reviews.authorityId, grants.adoption.authorityId,
+        grants.learning.owner.authorityId]).size).toBe(4)
+      const manifest = createRsiBootstrapManifest({ ...input, skipMemoryLearning: true })
+      expect(manifest.memoryLearning).toBeUndefined()
+      expect(manifest.ordinaryUseLearning).toBeUndefined()
+      expect(manifest.controlPlane.runtimeObserver!.targets.map(target => target.entryId))
+        .not.toContain('dsh-enhanced-assistant-memory-learning')
+      expect(() => createRsiBootstrapManifest({ ...input, skipMemoryLearning: true, enableOrdinaryUseLearning: true }))
+        .toThrow('mutually exclusive')
+      const compiled = await compileRsiProfiles({ manifest, dshHome: input.dshHome, targetPatch: '[]\n',
+        targetEffective: input.targetEffective, coordinatorPatch: '[]\n',
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner })
+      const rows = parse(compiled.targetPatch) as Array<{ id: string; config?: Record<string, any>; disabled?: boolean }>
+      const configOf = (id: string) => rows.find(row => row.id === id)!.config!
+      const personal = configOf('dsh-enhanced-personal-assistant')
+      expect(personal.personalMemory.automaticLearning).toBeUndefined()
+      expect((personal.assistantPolicy.budgets as Array<{ id?: string }>).filter(budget => String(budget.id).includes('memory'))).toEqual([])
+      expect((personal.assistantPolicy.rules as Array<{ id?: string }>).filter(rule => String(rule.id).includes('memory'))).toEqual([])
+      expect(configOf('dsh-enhanced-assistant-verifier').memoryReviews).toBeUndefined()
+      expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config).toBeUndefined()
+      const targets = manifest.controlPlane.runtimeObserver!.targets
+      // The skipped manifest still binds the final observer digests of the rows
+      // it does configure, now without any memory review grant.
+      expect(targets.find(target => target.entryId === 'dsh-enhanced-personal-assistant')!.configDigest)
+        .toBe(runtimeConfigDigest(personal))
+      expect(targets.find(target => target.entryId === 'dsh-enhanced-assistant-verifier')!.configDigest)
+        .toBe(runtimeConfigDigest(configOf('dsh-enhanced-assistant-verifier')))
+      // Persist the compiled patch as the profile file a skipped install would
+      // leave behind and prove, from the real bytes, that no learning grant,
+      // automation or configuration row is written.
+      const appliedPath = join(input.dshHome, 'profiles', input.targetProfile, 'cordis.patch.yml')
+      await writeFile(appliedPath, compiled.targetPatch, { mode: 0o600 })
+      const applied = await readFile(appliedPath, 'utf8')
+      expect(applied).not.toContain('automaticLearning')
+      expect(applied).not.toContain('memoryReviews')
+      expect(applied).not.toContain('rsi-memory-')
+      expect(applied).not.toContain('workItemExperiences')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 

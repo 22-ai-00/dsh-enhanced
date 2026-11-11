@@ -122,6 +122,16 @@ Options:
                             last configuration step; `skip` never applies one. Guided installs
                             offer `recommended` (default yes); a fresh supervised install also
                             applies it after the owner RSI setup; other runs skip unless set
+  --learning <decision>     Install: authorize or skip ordinary-use and memory learning.
+                            Default: authorize only for a fresh supervised install; another
+                            existing profile preserves its recorded decision. An explicit or
+                            default decision is persisted in
+                            $DSH_HOME/.dsh-enhanced/install-intent.json (0600) before the
+                            profile exists and reused by retries (skip never becomes authorize).
+                            Explicit --learning needs a fresh profile; an existing profile keeps
+                            its recorded decision. macOS native owner deployment must authorize:
+                            --learning skip is rejected there because its native memory-learning
+                            chain is mandatory
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help
 EOF
@@ -161,7 +171,9 @@ Scenarios:
              Recovery is model-free; TraeX remains an optional foreground model route (`--with traex`).
              Requires a resident service and installs content-free Health/bootstrap gates.
              Includes the observe-only WorkItems intake ledger and, on a fresh managed
-             install, the audited ordinary-use learning assembly preset.
+             install, the audited ordinary-use learning assembly preset. Learning grants are
+             an explicit decision (--learning authorize|skip, or the guided question) and are
+             persisted before the profile is created; skip issues no learning grant at all.
   full       Compatibility migration set containing every previous default top-level bundle.
 EOF
 }
@@ -1679,6 +1691,117 @@ dsh_enhanced_confirm_plugin_preset() {
   esac
 }
 
+
+# Guided onboarding: explicit ordinary-use learning authorization (default yes).
+dsh_enhanced_confirm_ordinary_use_learning() {
+  [[ -t 0 && -t 1 ]] || return 1
+  printf '\n启用普通使用学习？（owner 授权后的有限记忆抽取与普通使用经验学习；可随时用安装器 --learning skip 关闭）[Y/n]：' >&2
+  local answer
+  IFS= read -r answer || return 1
+  case "$answer" in
+    ''|y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve the effective learning decision for a managed supervised install.
+# Usage: <explicit: auto|authorize|skip> <scenario> <fresh 0|1> <guided 0|1> <assume_yes 0|1>
+# Prints authorize, skip, or preserve (keep an existing installation untouched).
+dsh_enhanced_resolve_learning_decision() {
+  local explicit="$1" scenario="$2" fresh="$3" guided="$4" assume_yes="$5"
+  case "$explicit" in
+    authorize|skip) printf '%s' "$explicit"; return 0 ;;
+    auto) ;;
+    *) return 2 ;;
+  esac
+  if [[ "$scenario" != 'supervised' ]]; then
+    printf 'skip'
+    return 0
+  fi
+  if [[ "$fresh" != '1' ]]; then
+    printf 'preserve'
+    return 0
+  fi
+  if [[ "$guided" == '1' && "$assume_yes" != '1' && -t 0 && -t 1 ]]; then
+    if dsh_enhanced_confirm_ordinary_use_learning; then printf 'authorize'; else printf 'skip'; fi
+    return 0
+  fi
+  printf 'authorize'
+}
+
+# Read the persisted pre-profile install intent. 0 = valid (prints one
+# "scenario learning preset at" line), 1 = absent, 2 = present but invalid.
+dsh_enhanced_read_install_intent() {
+  local dsh_home="$1" file
+  file="$dsh_home/.dsh-enhanced/install-intent.json"
+  if [[ -L "$file" || ( -e "$file" && ! -f "$file" ) ]]; then
+    printf 'install intent is not a regular file: %s\n' "$file" >&2
+    return 2
+  fi
+  [[ -f "$file" ]] || return 1
+  [[ -r "$file" ]] || return 2
+  local fields
+  fields="$(sed -n -E 's/^\{"schemaVersion":1,"scenario":"(core|web|autonomy|lark|supervised|full)","learning":"(authorize|skip)","pluginPreset":"([a-z][a-z0-9-]*)","at":([0-9]{1,15})\}$/\1 \2 \3 \4/p' "$file" | head -n 1)"
+  [[ -n "$fields" ]] || return 2
+  printf '%s\n' "$fields"
+}
+
+# Atomically persist the explicit install decisions before the profile exists.
+# The marker is private (0600 in a 0700 directory) and reused by retries.
+dsh_enhanced_write_install_intent() {
+  local dsh_home="$1" scenario="$2" learning="$3" preset="$4"
+  case "$scenario" in core|web|autonomy|lark|supervised|full) ;; *)
+    dsh_enhanced_fail 2 "安装意图场景不合法：$scenario"
+    return $?
+    ;;
+  esac
+  case "$learning" in authorize|skip) ;; *)
+    dsh_enhanced_fail 2 "安装意图学习决策不合法：$learning"
+    return $?
+    ;;
+  esac
+  if [[ ! "$preset" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    dsh_enhanced_fail 2 "安装意图插件预设不合法：$preset"
+    return $?
+  fi
+  if [[ -L "$dsh_home" || ( -e "$dsh_home" && ! -d "$dsh_home" ) ]]; then
+    dsh_enhanced_fail 1 "安装意图 DSH_HOME 不是可信目录：$dsh_home"
+    return $?
+  fi
+  # Create a missing DSH_HOME as 0700 (mkdir -p would inherit the caller's
+  # umask, typically 0755). An existing Home keeps its current permissions: the
+  # installer does not rewrite a parent directory it does not own wholesale.
+  if [[ ! -d "$dsh_home" ]]; then
+    if ! mkdir -p "$dsh_home" || ! chmod 700 "$dsh_home"; then
+      dsh_enhanced_fail 1 "无法创建私有 DSH_HOME：$dsh_home"
+      return $?
+    fi
+  fi
+  local directory="$dsh_home/.dsh-enhanced"
+  local file="$directory/install-intent.json"
+  local temporary="$directory/.install-intent.$$.tmp"
+  if [[ -L "$directory" ]]; then
+    dsh_enhanced_fail 1 "安装意图目录不能是符号链接：$directory"
+    return $?
+  fi
+  if ! mkdir -p "$directory" || ! chmod 700 "$directory"; then
+    dsh_enhanced_fail 1 "无法创建安装意图目录：$directory"
+    return $?
+  fi
+  if ! ( umask 077; printf '{"schemaVersion":1,"scenario":"%s","learning":"%s","pluginPreset":"%s","at":%s}\n' \
+      "$scenario" "$learning" "$preset" "$(date +%s)" > "$temporary" ); then
+    rm -f "$temporary" 2>/dev/null || true
+    dsh_enhanced_fail 1 "无法写入安装意图：$temporary"
+    return $?
+  fi
+  if ! chmod 600 "$temporary" || ! mv -f "$temporary" "$file"; then
+    rm -f "$temporary" 2>/dev/null || true
+    dsh_enhanced_fail 1 "无法提交安装意图：$file"
+    return $?
+  fi
+  printf '安装意图：已记录学习决策 %s 与插件预设 %s（%s）。\n' "$learning" "$preset" "$file"
+}
+
 # One-question guided onboarding: accept every recommended default (scenario,
 # model, Lark, route check) or fall back to the itemized menus.
 dsh_enhanced_choose_onboarding_mode() {
@@ -2907,15 +3030,21 @@ dsh_enhanced_prepare_rsi_source() {
 }
 
 dsh_enhanced_install_rsi_owner() {
-  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}" fresh="${7:-0}"
+  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}" learning="${7:-preserve}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
   local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
   if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
-  # Only a brand-new profile asks the RSI generator to assemble the
-  # no-signing-key ordinary-use rings. An existing installation keeps its
-  # stored opt-in and the generator refuses to expand it.
-  if [[ "$fresh" == '1' ]]; then args+=(--enable-ordinary-use-learning); fi
+  # authorize is the only path that asks the generator to assemble the
+  # no-signing-key ordinary-use rings; a recorded skip always forwards the
+  # explicit skip flag, while a pre-existing installation (no recorded intent)
+  # is left untouched so the generator preserves its stored decision.
+  case "$learning" in
+    authorize) args+=(--enable-ordinary-use-learning) ;;
+    skip) args+=(--skip-memory-learning) ;;
+    preserve) ;;
+    *) dsh_enhanced_fail 2 "学习授权决策不合法：$learning"; return $? ;;
+  esac
   printf '\nsupervised-growth：自动配置当前 owner 的学习与能力进化。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
@@ -3630,6 +3759,7 @@ dsh_enhanced_install() {
   local guided='0'
   local owner_wait_seconds='600'
   local plugin_preset='auto'
+  local learning_mode='auto'
   local dry_run='0'
   local add_ons=()
 
@@ -3805,6 +3935,17 @@ dsh_enhanced_install() {
           return $?
         fi
         plugin_preset="$2"
+        shift 2
+        ;;
+      --learning)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--learning 需要一个值。'; return $?; }
+        case "$2" in
+          authorize|skip) learning_mode="$2" ;;
+          *)
+            dsh_enhanced_fail 2 '--learning 只能是 authorize 或 skip。'
+            return $?
+            ;;
+        esac
         shift 2
         ;;
       --dry-run)
@@ -4255,6 +4396,133 @@ dsh_enhanced_install() {
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$dry_run" != '1' ]]; then
     dsh_home="$(dsh_enhanced_canonical_lifecycle_home "$dsh_home")" || return $?
     export DSH_HOME="$dsh_home"
+  fi
+  # Persist the explicit install decisions before `dsh plugin add` creates the
+  # profile. Guided onboarding asks for the plugin preset and the learning
+  # authorization up front; --yes and non-interactive runs use the same defaults
+  # and state them. The marker lets a retry reuse the recorded decision instead
+  # of re-deriving it from the profile directory.
+  local plugin_preset_requested="$plugin_preset"
+  local plugin_preset_declined='0'
+  local plugin_preset_explicit='1'
+  if [[ "$operation" == 'install' && "$plugin_preset" == 'auto' ]]; then
+    plugin_preset_explicit='0'
+    plugin_preset='skip'
+    if [[ "$guided" == '1' ]]; then
+      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
+    fi
+  fi
+  # Store the resolved decision, not the request: a guided answer or explicit
+  # preset must survive a retry. An implicit non-interactive skip keeps its
+  # implicit assembly semantics as `auto-skip`.
+  local install_intent_preset="$plugin_preset"
+  if [[ "$plugin_preset_requested" == 'auto' && "$plugin_preset" == 'skip' && "$plugin_preset_declined" != '1' ]]; then
+    install_intent_preset='auto-skip'
+  fi
+
+  # Ordinary-use and memory learning are an explicit, persisted install decision:
+  # a fresh supervised install defaults to authorize, an existing profile keeps
+  # its recorded decision, and a retry never flips skip into authorize or renews
+  # an already issued grant.
+  if [[ "$operation" != 'install' || "$deployment_mode" != 'supervised-growth' ]]; then
+    if [[ "$learning_mode" != 'auto' ]]; then
+      dsh_enhanced_fail 2 "--learning $learning_mode 仅适用于 supervised 安装。"
+      return $?
+    fi
+  fi
+  local learning_decision='preserve'
+  local rsi_learning_flag='preserve'
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
+    local install_intent_valid='0' intent_record='' intent_status=0 intent_preset_refresh='0'
+    local intent_scenario='' intent_learning='' intent_preset='' intent_at=''
+    if intent_record="$(dsh_enhanced_read_install_intent "$dsh_home")"; then
+      install_intent_valid='1'
+      read -r intent_scenario intent_learning intent_preset intent_at <<< "$intent_record"
+      if [[ "$intent_scenario" != 'supervised' ]]; then
+        dsh_enhanced_fail 2 "已记录的安装意图场景（${intent_scenario}）与本次 supervised 安装不一致；请检查 $dsh_home/.dsh-enhanced/install-intent.json。"
+        return $?
+      fi
+      printf '安装意图：沿用已记录的学习决策（%s）。\n' "$intent_learning"
+      if [[ "$learning_mode" != 'auto' && "$learning_mode" != "$intent_learning" ]]; then
+        dsh_enhanced_fail 2 "本次 --learning $learning_mode 与已记录的安装决策（${intent_learning}）冲突；重试必须沿用已记录决策。"
+        return $?
+      fi
+      learning_decision="$intent_learning"
+      if [[ "$intent_preset" == 'auto' || "$intent_preset" == 'auto-skip' ]]; then
+        # Legacy or implicit marker. An explicit retry may replace the implicit
+        # preset decision; otherwise the implicit semantics are replayed.
+        if [[ "$plugin_preset_requested" != 'auto' ]]; then
+          plugin_preset="$plugin_preset_requested"
+          plugin_preset_declined='0'
+          install_intent_preset="$plugin_preset"
+          intent_preset_refresh='1'
+        else
+          plugin_preset_requested='auto'
+          plugin_preset='skip'
+        fi
+      else
+        if [[ "$plugin_preset_requested" != 'auto' && "$plugin_preset_requested" != "$intent_preset" ]]; then
+          dsh_enhanced_fail 2 "本次 --plugin-preset $plugin_preset_requested 与已记录的安装预设（${intent_preset}）冲突；重试必须沿用已记录决策。"
+          return $?
+        fi
+        plugin_preset_requested="$intent_preset"
+        plugin_preset="$intent_preset"
+        plugin_preset_declined='0'
+        if [[ "$plugin_preset" == 'skip' ]]; then plugin_preset_declined='1'; fi
+      fi
+    else
+      intent_status=$?
+      if [[ "$intent_status" -eq 2 ]]; then
+        # A marker exists but fails the schema: fail closed instead of guessing a
+        # different install intent, which could silently authorize learning.
+        dsh_enhanced_fail 2 "已存在的 $dsh_home/.dsh-enhanced/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
+        return $?
+      fi
+      if [[ "$learning_mode" != 'auto' && "$fresh_profile" != '1' ]]; then
+        dsh_enhanced_fail 2 "既有安装不接受新的学习决策（--learning ${learning_mode}）；请使用全新 profile，或沿用已记录决策。"
+        return $?
+      fi
+      learning_decision="$(dsh_enhanced_resolve_learning_decision "$learning_mode" "$scenario" "$fresh_profile" "$guided" "$assume_yes")" || {
+        dsh_enhanced_fail 2 '学习授权选项无效。'
+        return $?
+      }
+    fi
+    if [[ "$install_intent_valid" != '1' && "$learning_mode" == 'auto' && "$learning_decision" == 'authorize' ]]; then
+      printf '学习授权：--yes 与非交互安装采用“全新 supervised 默认授权”的决定（可用 --learning skip 关闭）。\n'
+    fi
+    case "$learning_decision" in
+      authorize)
+        printf '学习授权：已授权普通使用与记忆学习；该决策会写入 install-intent.json 并在重试时沿用。\n'
+        ;;
+      skip)
+        printf '学习授权：已跳过；本次安装不签发普通使用或记忆学习授权，也不写入学习配置。\n'
+        ;;
+      preserve)
+        printf '学习授权：现有 profile 保留已记录的学习授权状态；本次安装不新增或撤销学习授权。\n'
+        ;;
+      *)
+        dsh_enhanced_fail 2 '学习授权选项无效。'
+        return $?
+        ;;
+    esac
+    rsi_learning_flag="$learning_decision"
+    if [[ "$install_intent_valid" != '1' && "$fresh_profile" != '1' ]]; then
+      rsi_learning_flag='preserve'
+    fi
+    if [[ "$learning_decision" == 'skip' && ( "$install_platform" == 'Darwin' || "$install_platform" == 'darwin' ) && "$dry_run" != '1' ]]; then
+      dsh_enhanced_fail 2 'supervised 安装跳过学习授权目前仅支持 Linux；macOS 原生 owner 部署固定启用记忆学习。'
+      return $?
+    fi
+    # Persist only real decisions: an existing installation without a marker keeps
+    # its stored grants untouched and records no new intent. An explicit preset
+    # override of a previously implicit marker refreshes the same intent.
+    if [[ "$dry_run" != '1' ]]; then
+      if [[ "$install_intent_valid" != '1' && ( "$learning_decision" == 'authorize' || "$learning_decision" == 'skip' ) ]]; then
+        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" || return $?
+      elif [[ "$install_intent_valid" == '1' && "$intent_preset_refresh" == '1' ]]; then
+        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" || return $?
+      fi
+    fi
   fi
   if [[ "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
@@ -4743,21 +5011,8 @@ NODE
       "$model_provider" || return $?
   fi
 
-  # Optional plugin preset: the last configuration write, before the final
-  # dump-config and postflight doctor verify the composed profile. Guided runs
-  # offer `recommended` (default yes); an explicit --plugin-preset is honored
-  # in any mode; everything else keeps package defaults. The requested value and
-  # a guided decline are kept for the post-owner-setup assembly pass below.
-  local plugin_preset_requested="$plugin_preset"
-  local plugin_preset_declined='0'
-  local plugin_preset_explicit='1'
-  if [[ "$plugin_preset" == 'auto' ]]; then
-    plugin_preset_explicit='0'
-    plugin_preset='skip'
-    if [[ "$operation" == 'install' && "$guided" == '1' ]]; then
-      if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
-    fi
-  fi
+  # Optional plugin preset application. The guided/--plugin-preset decision was
+  # made and persisted before the profile existed (see the install-intent block).
   if [[ "$operation" == 'install' && "$plugin_preset" != 'skip' ]]; then
     printf '\n'
     local plugin_preset_status=0
@@ -4815,7 +5070,7 @@ NODE
     dsh_enhanced_wait_owner_dm "$profile" "$dsh_home" "$owner_wait_seconds" "$dry_run"
   fi
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" "$fresh_profile" || return $?
+    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" "$rsi_learning_flag" || return $?
   fi
 
   # Fresh managed supervised installs get the audited ordinary-use learning

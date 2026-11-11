@@ -120,6 +120,42 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
     expect(f.ports.stop).not.toHaveBeenCalled()
   }, 120_000)
 
+  test('a fresh skip issues no memory-learning chain and a retry preserves that absence', async () => {
+    const f = await fixture()
+    const first = await installRsiOwnerDeployment({ ...f.input, skipMemoryLearning: true }, f.ports)
+    expect(first.mode).toBe('ready')
+    const manifestPath = join(f.f.input.resources.configRoot, 'manifest.json')
+    const bytes = await readFile(manifestPath, 'utf8')
+    const manifest = JSON.parse(bytes) as { memoryLearning?: unknown; ordinaryUseLearning?: unknown
+      controlPlane: { runtimeObserver: { targets: Array<{ entryId: string }> } } }
+    expect(manifest.memoryLearning).toBeUndefined()
+    expect(manifest.ordinaryUseLearning).toBeUndefined()
+    expect(manifest.controlPlane.runtimeObserver.targets.map(target => target.entryId))
+      .not.toContain('dsh-enhanced-assistant-memory-learning')
+    const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{
+      id: string; config?: Record<string, any>; disabled?: boolean }>
+    const personal = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config!
+    expect(personal.personalMemory.automaticLearning).toBeUndefined()
+    expect((personal.assistantPolicy.budgets as Array<{ id?: string }>).filter(budget => String(budget.id).includes('memory'))).toEqual([])
+    expect((personal.assistantPolicy.rules as Array<{ id?: string }>).filter(rule => String(rule.id).includes('memory'))).toEqual([])
+    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config!.memoryReviews).toBeUndefined()
+    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config).toBeUndefined()
+    expect(f.starts).toEqual([f.coordinator, f.profile])
+    // A retry without the explicit flag keeps exactly the recorded absence and
+    // never issues the skipped grants.
+    expect(await installRsiOwnerDeployment(f.input, f.ports)).toEqual(first)
+    expect(await readFile(manifestPath, 'utf8')).toBe(bytes)
+  }, 120_000)
+
+  test('refuses to drop an already authorized memory-learning chain with a skip decision', async () => {
+    const f = await fixture()
+    expect((await installRsiOwnerDeployment(f.input, f.ports)).mode).toBe('ready')
+    vi.mocked(f.ports.stop).mockClear()
+    await expect(installRsiOwnerDeployment({ ...f.input, skipMemoryLearning: true }, f.ports))
+      .rejects.toThrow('cannot drop memory learning')
+    expect(f.ports.stop).not.toHaveBeenCalled()
+  }, 120_000)
+
   test('rejects persisted creation, receipt and grant file drift before either Host is stopped', async () => {
     const f = await fixture()
     expect((await installRsiOwnerDeployment(f.input, f.ports)).mode).toBe('ready')

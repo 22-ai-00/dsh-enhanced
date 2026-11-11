@@ -46,6 +46,8 @@ export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild
   enableRevision?: boolean
   /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
   enableOrdinaryUseLearning?: boolean
+  /** Explicit skip decision: omit the whole memory-learning chain and its derived rows. */
+  skipMemoryLearning?: boolean
   /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
   intakeProvider?: string
   intakeModel?: string
@@ -157,8 +159,12 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     || input.sourceBuild.backend !== 'linux-native'
     || input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean'
     || input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
+    || input.skipMemoryLearning !== undefined && typeof input.skipMemoryLearning !== 'boolean'
     || input.intakeProvider !== undefined && typeof input.intakeProvider !== 'string'
     || input.intakeModel !== undefined && typeof input.intakeModel !== 'string') fail('prepared RSI inputs are incomplete')
+  if (input.skipMemoryLearning === true && input.enableOrdinaryUseLearning === true) {
+    fail('memory-learning skip and ordinary-use learning authorization are mutually exclusive')
+  }
   for (const [label, path] of [['resource root', input.resources.root], ['state root', input.resources.stateRoot],
     ['config root', input.resources.configRoot], ['source checkout', input.source.repository], ['source release remote', input.source.baseline.remote],
     ['runtime root', input.runtime.root], ['git', input.git?.path]] as const) canonical(path, label)
@@ -284,8 +290,8 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   const memoryConfig = personalConfig.get('personalMemory', true) as Node | undefined
   if (!isMap(memoryConfig)) fail('effective embedded Personal Memory is missing')
   const learner = rows.get('dsh-enhanced-assistant-memory-learning')
-  if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
-    || learner.get('disabled') === true && learner.has('config')) fail('effective memory learner must be the installed unconfigured bundle')
+  if (input.skipMemoryLearning !== true && (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+    || learner.get('disabled') === true && learner.has('config'))) fail('effective memory learner must be the installed unconfigured bundle')
   const policy = plain(mapping(rowConfig(personal, 'personal assistant').get('assistantPolicy', true) as Node | undefined, 'assistantPolicy'), 'assistantPolicy')
   let reviewLimit = 7
   const budgets = (policy.budgets as unknown[] | undefined) ?? []
@@ -336,10 +342,12 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   for (const phase of phases) targetEnvironment[`DSH_RELEASE_${phase.toUpperCase().replaceAll('-', '_')}_CONFIG`] = join(config, `release-${phase}.json`)
   const profilePath = join(input.dshHome, 'profiles', input.targetProfile)
   const installation = input.resources.installationId
-  const memoryLearning = createRsiMemoryLearningSetup({ installationId: installation,
+  // A skipped fresh install issues no memory-learning, review or adoption grant and
+  // writes no learner/provider configuration; the authorized path is unchanged.
+  const memoryLearning = input.skipMemoryLearning === true ? undefined : createRsiMemoryLearningSetup({ installationId: installation,
     stateRoot: state, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
     workItemExperiences: ordinaryUseLearning !== undefined })
-  if (learner.get('disabled') !== true) {
+  if (memoryLearning !== undefined && learner !== undefined && learner.get('disabled') !== true) {
     if (!learner.has('config') || !isDeepStrictEqual(plain(rowConfig(learner, 'memory learner'), 'memory learner'), memoryLearning.learning)) {
       fail('existing memory learner config differs from frozen owner grant')
     }
@@ -383,7 +391,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       plugins: [...input.plugins], owner: reviewOwner, reviewerPrincipal: `rsi-independent-reviewer-${installation}`,
       policy: 'Review the exact owner-bound source repair and its acceptance evidence independently.',
       maxChangedFiles: 256, maxInputBytes: 2_097_152, maxOutputTokens: 8192, timeoutMs: 300_000 },
-    memoryLearning,
+    ...(memoryLearning === undefined ? {} : { memoryLearning }),
     ...(ordinaryUseLearning !== undefined ? { ordinaryUseLearning } : {}),
     coordinator: { budgetId: `rsi-coordinator-${installation}`, budgetAmount: 1, timeoutMs: 300_000 },
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
@@ -435,7 +443,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
     { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
       configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
-        memoryReviews: memoryLearning.reviews,
+        ...(memoryLearning === undefined ? {} : { memoryReviews: memoryLearning.reviews }),
         ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}),
         ...(manifest.pluginRevision ? { revisionReviews: manifest.pluginRevision.reviews,
           revisionRegressions: manifest.pluginRevision.regressions } : {}) }), services: ['assistantVerifier'] },
@@ -446,8 +454,8 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
         budgetIds: { reviews: manifest.growthDriver.budgetId!, discovery: manifest.growthDriver.usageLearning!.scanBudgetId!,
           source: manifest.controlPlane.sourceJobs!.budgetId, observations: manifest.controlPlane.taskObservations!.budgetId },
       })), services: ['personalMemory', 'assistantPolicy', 'assistantAutomations'] },
-    { entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
-      configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] },
+    ...(memoryLearning === undefined ? [] : [{ entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
+      configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] }]),
   )
   if (ordinaryUseLearning !== undefined) {
     // These rows are modified by the profile compiler, so observe the final raw

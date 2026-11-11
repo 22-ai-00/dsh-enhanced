@@ -42,6 +42,8 @@ function fail(message: string): never { throw new Error(`rsi install: ${message}
 export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal; ackExistingAutomations?: boolean | undefined
   /** Fresh-install-only ordinary-use learning; a retry preserves the stored opt-in and never expands it. */
   enableOrdinaryUseLearning?: boolean | undefined
+  /** Fresh-install-only skip decision; a retry preserves the stored (missing) memory-learning chain. */
+  skipMemoryLearning?: boolean | undefined
   /** Explicit evaluator route when the composition has no Delivery agentProvider/agentModel. */
   intakeProvider?: string | undefined
   intakeModel?: string | undefined }
@@ -310,6 +312,7 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     let now = Date.now(), expiresAt = now + 365 * 86_400_000
     let enableCreation = true
     let enableOrdinaryUseLearning = input.enableOrdinaryUseLearning === true
+    let skipMemoryLearning = input.skipMemoryLearning === true
     let intakeProvider = input.intakeProvider, intakeModel = input.intakeModel
     let previousManifest: RsiSetupManifest | undefined
     if (await exists(storedManifest)) {
@@ -327,6 +330,13 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       // A retry preserves exactly the stored opt-in and route, like enableRevision.
       enableOrdinaryUseLearning = storedOrdinary !== undefined
       if (storedOrdinary !== undefined) { intakeProvider = storedOrdinary.provider; intakeModel = storedOrdinary.model }
+      // A skip decision is likewise frozen: an existing installation that already
+      // issued memory-learning grants must not drop or renew them, while an
+      // interrupted skip retry keeps the memory-learning chain absent.
+      if (input.skipMemoryLearning === true && previous.memoryLearning !== undefined) {
+        fail('existing installation cannot drop memory learning; reinstall a fresh profile to change the decision')
+      }
+      skipMemoryLearning = previous.memoryLearning === undefined
     }
     const manifest = createRsiBootstrapManifest({ dshHome: input.dshHome, targetProfile: pair[0], coordinatorProfile: pair[1],
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
@@ -334,6 +344,7 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       ...(prepared.runnerStates ? { runnerStates: prepared.runnerStates } : {}),
       ...(previousManifest ? { enableRevision: previousManifest.pluginRevision !== undefined } : {}),
       enableOrdinaryUseLearning,
+      skipMemoryLearning,
       ...(intakeProvider !== undefined ? { intakeProvider } : {}),
       ...(intakeModel !== undefined ? { intakeModel } : {}),
       git: installed.git, now, expiresAt, plugins: installed.plugins,

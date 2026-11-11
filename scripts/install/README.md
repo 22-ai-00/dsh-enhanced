@@ -24,6 +24,8 @@ dsh-rsi install
 
 全新 managed `supervised` 安装还会在 owner 学习配置生成后自动、幂等地再应用一次 `recommended` 装配（步骤显示为“自治学习装配”）：WorkItems 以 `enabled: true`、`mode: observe`、`intakeLedger.enabled: true` 落库，交付/评测/事件轮询等有限开关一并打开。全新 profile 的 RSI owner 安装同时生成只观察 intake evaluator 的规则与模型 route、WorkItems 评估开关和三份带 `workItemExperiences` 的记忆授权，预设随后只按既有前置打开对应开关。该装配只修改已安装且未禁用的插件行，不打开 admit/auto/worker，也不改 Policy、凭据、ownerRoutes 或密封状态；签名 `workItemAuthorities` pin、修订采用密钥等 owner 授权材料仍不自动生成，缺前置时在输出中逐项 skipped。显式 `--plugin-preset skip`、引导中选择否，或对已有 profile 重跑安装时都不会隐式改写其显式插件配置。
 
+全新 `supervised` 首装的普通使用/记忆学习授权是显式、可持久的安装决策：可用 `--learning authorize|skip` 指定（引导式首装会单独问一次；默认仅对全新 `supervised` 为 authorize，`--yes`/非交互采用同一默认并在输出中说明）。决策在创建 profile 前原子写入 `$DSH_HOME/.dsh-enhanced/install-intent.json`（0600，所在目录 0700；新建 DSH_HOME 也以 0700 创建，既有 Home 权限不改）；重试沿用该决策，不会把 skip 变 authorize，也不会重复签发或续期授权；marker 无法通过校验时拒绝继续（fail-closed，不回退猜测）。`--learning skip` 在 Linux 上不生成普通使用/记忆学习授权，也不写 learner、personal-memory 或 verifier 的学习配置（owner setup 收到 `--skip-memory-learning`）；supervised 常规 RSI 的 Growth/Automation 预算与规则仍按场景配置，它们不属于学习授权。显式 `--learning` 只接受全新 profile：既有安装（未记录决策）会拒绝并提示沿用记录或改用新 profile。macOS 原生 owner 部署必须 authorize，跳过会被拒绝。已有 profile 未记录决策时安装器保留其现状，不新增或撤销学习授权。
+
 `--yes` 跳过场景菜单；若环境中已有 `DEEPSEEK_API_KEY`（或 `DSH_ENHANCED_MODEL_API_KEY`）且尚未存储 Key，会自动配置上述默认模型并把 Key 写入 `.credentials.yaml`。`--yes` **不能跳过首次本人绑定**（飞书应用确认和 `DSH-CONNECT` 短语仍需本人完成，之后只有已绑定的 owner 能操作和授权），也不能确认已有 active/paused Automation；后者需要显式 `--ack-existing-automations`。
 
 已有模型选择会保留；没有可用默认模型时须在引导中配置。API Key 只从环境变量或隐藏输入读取，不要写在命令参数中，安装输出也不会打印 Key。授权有期限和预算，重试不会自动续期。事件来源、账号读取和主动提醒还需要单独配置与授权，见[事件来源](../../plugins/event-triggers/README.md)及[主动跟进](../../plugins/assistant-proactive/README.md)。

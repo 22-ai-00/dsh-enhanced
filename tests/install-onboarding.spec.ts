@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -223,6 +223,161 @@ describe('guided onboarding installer dry-run', () => {
 
   test('plugin preset confirmation declines without a terminal', () => {
     expect(library('dsh_enhanced_confirm_plugin_preset', {}, '\n').status).toBe(1)
+  })
+
+  test('learning decision defaults stay explicit and deterministic', () => {
+    const resolve = (...args: string[]) => library('dsh_enhanced_resolve_learning_decision ' + args.join(' '))
+    expect(resolve('auto', 'supervised', '1', '0', '1').stdout).toBe('authorize')
+    expect(resolve('auto', 'supervised', '0', '0', '1').stdout).toBe('preserve')
+    expect(resolve('auto', 'lark', '1', '0', '1').stdout).toBe('skip')
+    expect(resolve('auto', 'core', '1', '0', '0').stdout).toBe('skip')
+    expect(resolve('skip', 'supervised', '1', '0', '0').stdout).toBe('skip')
+    expect(resolve('authorize', 'supervised', '1', '0', '0').stdout).toBe('authorize')
+    expect(resolve('bogus', 'supervised', '1', '0', '0').status).toBe(2)
+    // No terminal: the guided question declines; callers fall back to the stated default.
+    expect(library('dsh_enhanced_confirm_ordinary_use_learning', {}, '\n').status).toBe(1)
+  })
+
+  test('install intent is private, schema-checked and reusable', async () => {
+    // A missing parent Home is created 0700; mkdir -p alone would leave the
+    // caller umask (typically 0755) on the Home the marker lives in.
+    const home = join(await temporaryHome(), 'nested', 'home')
+    const written = library('dsh_enhanced_write_install_intent ' + JSON.stringify(home) + ' supervised skip auto-skip')
+    expect(written.status, written.stderr).toBe(0)
+    const intentPath = join(home, '.dsh-enhanced', 'install-intent.json')
+    const intent = JSON.parse(await readFile(intentPath, 'utf8')) as Record<string, unknown>
+    expect(intent).toMatchObject({ schemaVersion: 1, scenario: 'supervised', learning: 'skip', pluginPreset: 'auto-skip' })
+    expect(Number.isSafeInteger(intent.at)).toBe(true)
+    expect((await stat(home)).mode & 0o777).toBe(0o700)
+    expect((await stat(join(home, '.dsh-enhanced'))).mode & 0o777).toBe(0o700)
+    expect((await stat(intentPath)).mode & 0o777).toBe(0o600)
+    const read = library('dsh_enhanced_read_install_intent ' + JSON.stringify(home))
+    expect(read.status).toBe(0)
+    expect(read.stdout.trim().split(' ')).toEqual(['supervised', 'skip', 'auto-skip', String(intent.at)])
+    // Invalid markers are rejected instead of being treated as the recorded decision.
+    await writeFile(intentPath, 'not-json\n')
+    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
+    const missing = await temporaryHome()
+    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(missing)).status).toBe(1)
+    // An existing Home keeps the permissions it already has.
+    const existing = await temporaryHome()
+    await mkdir(existing, { recursive: true })
+    await chmod(existing, 0o755)
+    expect(library('dsh_enhanced_write_install_intent ' + JSON.stringify(existing) + ' supervised authorize recommended').status).toBe(0)
+    expect((await stat(existing)).mode & 0o777).toBe(0o755)
+  })
+
+  test('learning authorization is explicit on the owner setup and skip forwards its own flag', async () => {
+    const authorized = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure'], await temporaryHome())
+    expect(authorized.status, authorized.stderr).toBe(0)
+    expect(authorized.stdout).toContain('学习授权：已授权普通使用与记忆学习')
+    expect(authorized.stdout).toContain('--enable-ordinary-use-learning')
+    expect(authorized.stdout).not.toContain('--skip-memory-learning')
+
+    const skippedHome = await temporaryHome()
+    const skipped = installer(['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', '--learning', 'skip'], skippedHome)
+    expect(skipped.status, skipped.stderr).toBe(0)
+    expect(skipped.stdout).toContain('学习授权：已跳过')
+    expect(skipped.stdout).toContain('--skip-memory-learning')
+    // The declined owner setup is never invoked with the learning authorization.
+    expect(skipped.stdout).not.toContain('--enable-ordinary-use-learning')
+    // Dry-run plans the decision but must not persist the marker.
+    expect(existsSync(join(skippedHome, '.dsh-enhanced'))).toBe(false)
+
+    const invalid = installer(['--dry-run', '--yes', '--lark', 'skip', '--learning', 'bogus'], await temporaryHome())
+    expect(invalid.status).toBe(2)
+    expect(invalid.stderr).toContain('--learning 只能是 authorize 或 skip')
+    for (const decision of ['authorize', 'skip']) {
+      const nonSupervised = installer(['--dry-run', '--yes', '--scenario', 'lark', '--lark', 'configure', '--learning', decision], await temporaryHome())
+      expect(nonSupervised.status, decision).toBe(2)
+      expect(nonSupervised.stderr).toContain('仅适用于 supervised 安装')
+    }
+  })
+
+  test('persisted install intent is replayed by retries instead of the profile directory', async () => {
+    const profileManifest = '{"name":"dsh-profile-web","type":"module","dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n'
+    const seed = async (learning: 'authorize' | 'skip' | null, withProfile: boolean, preset = 'auto') => {
+      const home = await temporaryHome()
+      if (withProfile) {
+        await mkdir(join(home, 'profiles', 'web'), { recursive: true })
+        await writeFile(join(home, 'profiles', 'web', 'package.json'), profileManifest)
+      }
+      if (learning !== null) {
+        await mkdir(join(home, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+        await writeFile(join(home, '.dsh-enhanced', 'install-intent.json'),
+          '{"schemaVersion":1,"scenario":"supervised","learning":"' + learning + '","pluginPreset":"' + preset + '","at":1794400000}\n', { mode: 0o600 })
+      }
+      return home
+    }
+    const run = (home: string, extra: string[] = []) => installer(
+      ['--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', ...extra], home)
+
+    // A recorded skip survives a profile that already exists: the marker, not
+    // package.json freshness, owns the learning decision.
+    const skipHome = await seed('skip', true)
+    const skipRetry = run(skipHome)
+    expect(skipRetry.status, skipRetry.stderr).toBe(0)
+    expect(skipRetry.stdout).toContain('沿用已记录的学习决策（skip）')
+    expect(skipRetry.stdout).toContain('--skip-memory-learning')
+    expect(skipRetry.stdout).not.toContain('--enable-ordinary-use-learning')
+
+    // A recorded authorize is replayed for a partial install even though the
+    // profile directory already exists, so the grant is issued exactly once.
+    const authorizeRetry = run(await seed('authorize', true))
+    expect(authorizeRetry.status, authorizeRetry.stderr).toBe(0)
+    expect(authorizeRetry.stdout).toContain('沿用已记录的学习决策（authorize）')
+    expect(authorizeRetry.stdout).toContain('--enable-ordinary-use-learning')
+    expect(authorizeRetry.stdout).not.toContain('--skip-memory-learning')
+
+    // An explicit decision cannot rewrite the recorded one (skip never becomes
+    // authorize) and the conflict fails before any mutation.
+    const conflict = run(skipHome, ['--learning', 'authorize'])
+    expect(conflict.status).toBe(2)
+    expect(conflict.stderr).toContain('与已记录的安装决策（skip）冲突')
+
+    // An existing profile without a marker keeps its stored decision untouched.
+    const preserve = run(await seed(null, true))
+    expect(preserve.status, preserve.stderr).toBe(0)
+    expect(preserve.stdout).toContain('保留已记录的学习授权状态')
+    expect(preserve.stdout).not.toContain('--enable-ordinary-use-learning')
+    expect(preserve.stdout).not.toContain('--skip-memory-learning')
+
+    // An existing installation without a marker rejects any new explicit
+    // decision instead of silently ignoring it: authorize cannot expand, and a
+    // skip that cannot drop existing grants must not record a lying marker or
+    // forward a flag that would issue the opposite grant on an old profile.
+    for (const decision of ['authorize', 'skip']) {
+      const home = await seed(null, true)
+      const rejected = run(home, ['--learning', decision])
+      expect(rejected.status, decision).toBe(2)
+      expect(rejected.stderr).toContain('既有安装不接受新的学习决策')
+      expect(rejected.stdout).not.toContain('dsh-rsi-setup --install-owner')
+      expect(existsSync(join(home, '.dsh-enhanced'))).toBe(false)
+    }
+
+    // The resolved guided/explicit preset decision is persisted, so a retry may
+    // pass the same explicit preset without a spurious conflict.
+    const guidedPresetRetry = run(await seed('authorize', false, 'recommended'), ['--plugin-preset', 'recommended'])
+    expect(guidedPresetRetry.status, guidedPresetRetry.stderr).toBe(0)
+    expect(guidedPresetRetry.stdout).toContain('dsh-plugin-setup preset recommended')
+    expect(guidedPresetRetry.stdout).toContain('--enable-ordinary-use-learning')
+    // An implicit marker can be replaced by an explicit retry decision.
+    const implicitOverride = run(await seed('skip', false, 'auto-skip'), ['--plugin-preset', 'recommended'])
+    expect(implicitOverride.status, implicitOverride.stderr).toBe(0)
+    expect(implicitOverride.stdout).toContain('dsh-plugin-setup preset recommended')
+    expect(implicitOverride.stdout).toContain('--skip-memory-learning')
+
+    // A corrupt marker fails closed instead of guessing a fresh decision (which
+    // could silently authorize learning).
+    for (const withProfile of [false, true]) {
+      const corrupt = await seed(null, withProfile)
+      await mkdir(join(corrupt, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+      await writeFile(join(corrupt, '.dsh-enhanced', 'install-intent.json'), '{}\n', { mode: 0o600 })
+      const rejectedMarker = run(corrupt)
+      expect(rejectedMarker.status, String(withProfile)).toBe(2)
+      expect(rejectedMarker.stderr).toContain('无法通过校验')
+      expect(rejectedMarker.stdout).not.toContain('--enable-ordinary-use-learning')
+    }
   })
 
   test('rejects an out-of-range owner wait', async () => {

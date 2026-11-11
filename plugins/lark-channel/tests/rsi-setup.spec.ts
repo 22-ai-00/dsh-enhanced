@@ -484,6 +484,20 @@ describe('RSI dual profile setup transaction', () => {
       .toThrow('cannot be combined')
     expect(parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--ack-existing-automations']).ackExistingAutomations).toBe(true)
   })
+  test('memory-learning skip is an owner-only decision exclusive with the learning authorization', () => {
+    const owner = ['--install-owner', '--profile', 'web', '--dsh-home', '/tmp/home']
+    expect(parseRsiSetupArgs([...owner, '--skip-memory-learning'])).toMatchObject({ installOwner: true, skipMemoryLearning: true })
+    expect(parseRsiSetupArgs([...owner, '--skip-memory-learning']).enableOrdinaryUseLearning).toBeUndefined()
+    expect(parseRsiSetupArgs([...owner, '--enable-ordinary-use-learning']).skipMemoryLearning).toBeUndefined()
+    expect(() => parseRsiSetupArgs([...owner, '--skip-memory-learning', '--enable-ordinary-use-learning']))
+      .toThrow('cannot be combined with --enable-ordinary-use-learning')
+    expect(() => parseRsiSetupArgs(['--manifest', '/tmp/manifest.json', '--dsh-home', '/tmp/home', '--apply',
+      '--confirm-hosts-stopped', '--skip-memory-learning'])).toThrow('requires --install-owner')
+    expect(() => parseRsiSetupArgs([...owner, '--skip-memory-learning', '--intake-provider', 'p', '--intake-model', 'm']))
+      .toThrow('require --enable-ordinary-use-learning')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm', '--install-owner', '--profile', 'web', '--dsh-home', '/tmp/home', '--skip-memory-learning']))
+      .toThrow('cannot be combined')
+  })
   test('owner DM wait is a standalone read-only operation with a bounded timeout', () => {
     expect(parseRsiSetupArgs(['--wait-owner-dm','--profile','web','--dsh-home','/tmp/home','--timeout-seconds','90']))
       .toMatchObject({ waitOwnerDm: true, profile: 'web', timeoutSeconds: 90, apply: false })
