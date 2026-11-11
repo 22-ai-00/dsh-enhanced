@@ -9,6 +9,9 @@ import type { RevisionCapabilityConfig, RevisionCapabilityReadiness } from './re
 import { inspectCreationCapabilityAvailabilityAttribution, inspectCreationCapabilityBenefitWindow,
   inspectCreationCapabilityOrdinaryUseReport, inspectCreationCapabilityOrdinaryUseTrend,
   inspectCreationCapabilityTaskAssociations, type CreationCapabilityFeedbackInput } from './creation-capability-feedback.js'
+import { autoRollbackInferiorRevision, evaluateRevisionBenefitEvidence,
+  inspectRevisionBenefitTerminal, inspectRevisionCapabilityBenefitWindow, mergeRevisionBenefitWindows,
+  revisionBenefitObservationDeadline, revisionBenefitPairedWindows } from './revision-capability-feedback.js'
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
@@ -27,7 +30,7 @@ import { isSourceOwnerContinuation, isPluginRevisionTaskSource, anySourceGrowthR
   type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
   type AnySourceGrowthRunBinding as SourceGrowthRunBinding, type AnySourceGrowthRunProducer as SourceGrowthRunProducer, type WorkItemSourceGrowthRunBinding, type WorkItemGrowthAuthorityPins,
   type WorkItemRevisionSourceGrowthRunBinding, type WorkItemRevisionAuthorityPins, validateWorkItemRevisionAuthorityPins,
-  evaluateRevisionBenefit, revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
+  revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
@@ -777,6 +780,12 @@ export class PluginControlPlaneService extends Service {
                   await capabilities.verifyArtifactExecution(certificate, signal)
                 },
                 matchesExecution: certificate => capabilities?.matchesArtifactExecution(certificate) === true,
+                inspectCall: (_record, execution, toolAlias, argumentsJson) => {
+                  if (!execution.agent || typeof delivery.inspectOwnerForegroundToolCall !== 'function') return undefined
+                  return delivery.inspectOwnerForegroundToolCall({ agent: execution.agent,
+                    authorityId: config.owner.authorityId, callId: String(execution.callId),
+                    toolName: toolAlias, argumentsJson })
+                },
                 assertCaller: execution => {
                   if (!execution.agent) throw new Error('revision capability requires an authenticated owner Agent')
                   const receipt = delivery.validateOwnerAgentForRoute(execution.agent, config.owner.authorityId)
@@ -884,6 +893,7 @@ export class PluginControlPlaneService extends Service {
             } } : {}),
           ...(this.config.sourceJobs?.revisionBenefit === undefined ? {} : {
             reconcileRevisionBenefits: () => this.reconcileRevisionBenefits(),
+            allowReviewOnlyFirstAdoption: this.config.sourceJobs.allowReviewOnlyFirstAdoption === true,
           }),
           ...(instructionDrainEnabled ? {
             hasOwnerInstructionRequests: () => this.store.hasOwnerInstructionRequestWork(Date.now(), OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS),
@@ -1250,34 +1260,33 @@ export class PluginControlPlaneService extends Service {
    * and stops this lineage from preparing further spontaneous revisions until
    * the owner re-authorizes. Anything else leaves the adoption untouched.
    */
-  autoRollbackRevisionIfInferior = async (planId: string, options: { observeWindowMs: number; signal?: AbortSignal }) => {
+  autoRollbackRevisionIfInferior = async (planId: string,
+    options: { observeWindowMs: number; signal?: AbortSignal; observationDeadline?: number }) => {
     this.abort.signal.throwIfAborted()
     const runtime = this.revisionCapabilityRuntime
     const contract = this.config.sourceJobs?.revisionBenefit
-    if (!runtime || !contract) return { rolledBack: false as const, reason: 'benefit-not-configured' as const }
-    const entryId = this.revisionEntryId(planId)
-    if (entryId === undefined) return { rolledBack: false as const, reason: 'entry-not-found' as const }
-    const entry = runtime.inspectEntry(entryId)
-    if (!entry || entry.currentPlanId !== planId) return { rolledBack: false as const, reason: 'not-current' as const }
-    const job = this.store.getPreparedRevisionJob(planId)
-    const pinned = job.intent.revision?.grant.benefit
-    if (!pinned || pinned.contractDigest !== revisionBenefitContractDigest(contract)) {
-      return { rolledBack: false as const, reason: 'benefit-not-pinned' as const }
+    if (runtime === undefined || contract === undefined) {
+      return { rolledBack: false as const, reason: 'benefit-not-configured' as const }
     }
-    const outcome = this.store.inspectRevisionBenefitOutcome(planId)
+    const intent = this.store.inspectRevisionBenefitIntent(planId)
+    const pinned = intent?.pinnedContractDigest === undefined ? undefined : { contractDigest: intent.pinnedContractDigest }
+    const liveDigest = revisionBenefitContractDigest(contract)
     const plan = this.store.getSourcePlan(planId)
-    const windowEnd = plan.sourceRevision?.growthRun?.createdAt === undefined ? undefined
-      : plan.sourceRevision.growthRun.createdAt + Math.max(1, options.observeWindowMs)
-    if (windowEnd === undefined || Date.now() < windowEnd) {
-      return { rolledBack: false as const, reason: 'observation-open' as const }
-    }
-    if (outcome === undefined || outcome.contractDigest !== pinned.contractDigest) {
-      return { rolledBack: false as const, reason: 'outcome-missing' as const }
-    }
-    if (outcome.status !== 'inferior') return { rolledBack: false as const, reason: `outcome:${outcome.status}` as const }
-    const record = await runtime.rollback({ entryId, expectedCurrentPlanId: planId,
-      ...(options.signal === undefined ? {} : { signal: options.signal }) })
-    return { rolledBack: true as const, reason: outcome.reason, record }
+    const result = await autoRollbackInferiorRevision({
+      runtime: { listEntries: () => runtime.listEntries(), inspectEntry: entryId => runtime.inspectEntry(entryId),
+        rollback: input => runtime.rollback(input) },
+      planId, benefitConfigured: true,
+      pinnedContractDigest: pinned !== undefined && pinned.contractDigest === liveDigest ? pinned.contractDigest : undefined,
+      growthRunCreatedAt: plan.sourceRevision?.growthRun?.createdAt,
+      observeWindowMs: options.observeWindowMs,
+      ...(options.observationDeadline === undefined ? {} : { observationDeadline: options.observationDeadline }),
+      outcome: this.store.inspectRevisionBenefitOutcome(planId), now: Date.now(),
+      ...(options.signal === undefined ? {} : {
+        rollback: (target, input) => target.rollback({ ...input, signal: options.signal! }),
+      }),
+    })
+    return { rolledBack: result.rolledBack, reason: result.reason,
+      ...(result.record === undefined ? {} : { record: result.record }) }
   }
 
   /**
@@ -1401,37 +1410,73 @@ export class PluginControlPlaneService extends Service {
   }
 
   /**
-   * Host-only, owner-invoked P1-4 benefit evaluation of one prepared revision:
-   * aggregates the parent and candidate benefit windows from their current
-   * certified associations, evaluates them against the owner-configured
-   * non-inferiority contract, and — only for a revision job whose grant pins
-   * this exact contract digest — records the outcome in the benefit ledger.
-   * Never adoption evidence by itself and never model-callable.
+   * Host-only P1-4 benefit evaluation of one prepared revision. Windows come
+   * from the revision journal's foreground-attributed entry calls (parent
+   * version before adoption, candidate version after it), never from the
+   * creation-capability association ledger. The outcome is recorded only for a
+   * revision job whose grant pins this exact contract digest. Never adoption
+   * evidence by itself and never model-callable.
    */
+  /**
+   * Host-only terminal read: the benefit ledger outcome/reason plus the latest
+   * exact-parent rollback from the revision journal. Not a model-callable tool.
+   */
+  inspectRevisionBenefitTerminal = (planId: string) =>
+    inspectRevisionBenefitTerminal({ planId, outcome: this.store.inspectRevisionBenefitOutcome(planId),
+      runtime: this.revisionCapabilityRuntime ?? { inspectBenefitEvidence: () => undefined, listEntries: () => [],
+        inspectLatestRollback: () => undefined } })
+
   evaluateRevisionBenefit = (planId: string) => {
     const contract = this.config.sourceJobs?.revisionBenefit
     const plan = this.store.getSourcePlan(planId)
-    if (!contract || plan.mode !== 'prepared-revise' || !plan.sourceRevision?.parent) return undefined
-    const job = this.store.getPreparedRevisionJob(planId)
-    const pinned = job.intent.revision?.grant.benefit
-    if (!pinned || !job.intent.revision?.growthRun?.revisionAcceptance) return undefined
+    const runtime = this.revisionCapabilityRuntime
+    // The benefit rows are owner-scope evidence; adoption and creation
+    // capabilities are validated to carry the same owner when both are set.
+    const owner = this.config.revisionCapabilities?.owner ?? this.config.creationCapabilities?.owner
+    if (!contract || !runtime || !owner || plan.mode !== 'prepared-revise'
+      || !plan.sourceRevision?.parent) return undefined
+    const intent = this.store.inspectRevisionBenefitIntent(planId)
+    if (intent === undefined || intent.pinnedContractDigest === undefined || !intent.growthRunAcceptance) return undefined
+    const pinned = { contractDigest: intent.pinnedContractDigest }
+    const evaluationPort = this.ctx.get('assistantEvaluation' as never, false) as AssistantEvaluationService | undefined
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!evaluationPort || !delivery) return undefined
+    // Candidate evidence is the revision journal's post-adoption foreground
+    // calls. Parent evidence combines its creation-adoption associations (before
+    // the switch) with revision-journal parent-version calls (after a rollback or
+    // for a chained revision parent); the two sources are disjoint by entry
+    // lifetime. Windows are equal-length and adjacent around the adoption.
+    const candidate = runtime.inspectBenefitEvidence(planId)
+    if (!candidate) return undefined
+    const parentPlanId = plan.sourceRevision.parent.planId
+    const parentRevision = runtime.inspectBenefitEvidence(parentPlanId)
+    const parentInput = this.createdCapabilityFeedbackInput(parentPlanId)
+    const parentVersion = parentRevision?.version ?? (() => {
+      const receipt = parentInput?.().record.receipt
+      return receipt === undefined ? undefined : { adoptedAt: receipt.adoptedAt, expiresAt: receipt.expiresAt }
+    })()
+    if (parentVersion === undefined) return undefined
     const now = Date.now()
-    const input = this.createdCapabilityFeedbackInput(planId)
-    if (!input) return undefined
-    try {
-      const candidate = inspectCreationCapabilityBenefitWindow(input())
-      const parentInput = this.createdCapabilityFeedbackInput(plan.sourceRevision.parent.planId)
-      if (!candidate || !parentInput) return undefined
-      const parent = inspectCreationCapabilityBenefitWindow(parentInput())
-      if (!parent) return undefined
-      const evaluation = evaluateRevisionBenefit(contract, parent, candidate, now)
-      const contractDigest = revisionBenefitContractDigest(contract)
-      if (contractDigest === pinned.contractDigest) {
-        this.store.recordRevisionBenefit(planId, { contractDigest, status: evaluation.verdict.status,
-          reason: evaluation.verdict.reason, evaluation })
-      }
-      return { planId, contractDigest, pinned: contractDigest === pinned.contractDigest, evaluation }
-    } catch { return undefined }
+    const windows = revisionBenefitPairedWindows({ candidate, parent: parentVersion, now })
+    if (windows === undefined) return undefined
+    const creationStats = parentInput === undefined ? undefined
+      : inspectCreationCapabilityBenefitWindow({ ...parentInput(), window: windows.parent })
+    const revisionParentStats = parentRevision === undefined ? undefined
+      : inspectRevisionCapabilityBenefitWindow({ sample: parentRevision, windowStart: windows.parent.start,
+        windowEnd: windows.parent.end, owner, evaluation: evaluationPort, delivery, now })
+    const parent = creationStats === undefined ? revisionParentStats
+      : revisionParentStats === undefined ? creationStats : mergeRevisionBenefitWindows(creationStats, revisionParentStats)
+    if (parent === undefined) return undefined
+    const result = evaluateRevisionBenefitEvidence({ contract, candidate, parent, windows, owner,
+      evaluation: evaluationPort, delivery, now })
+    if (result === undefined) return undefined
+    if (result.contractDigest === pinned.contractDigest) {
+      this.store.recordRevisionBenefit(planId, { contractDigest: result.contractDigest,
+        status: result.evaluation.verdict.status, reason: result.evaluation.verdict.reason,
+        evaluation: result.evaluation })
+    }
+    return { planId, contractDigest: result.contractDigest,
+      pinned: result.contractDigest === pinned.contractDigest, evaluation: result.evaluation }
   }
 
   /**
@@ -1442,20 +1487,51 @@ export class PluginControlPlaneService extends Service {
    */
   reconcileRevisionBenefits = (): void => {
     const contract = this.config.sourceJobs?.revisionBenefit
-    if (!contract || !this.revisionCapabilityRuntime) return
+    const runtime = this.revisionCapabilityRuntime
+    if (!contract || !runtime) return
+    const contractDigest = revisionBenefitContractDigest(contract)
     for (const plan of this.store.listPreparedSourcePlans()) {
       if (plan.mode !== 'prepared-revise') continue
       try {
-        const job = this.store.getPreparedRevisionJob(plan.id)
-        if (!job.intent.revision?.grant.benefit) continue
+        const intent = this.store.inspectRevisionBenefitIntent(plan.id)
+        if (intent?.pinnedContractDigest === undefined || intent.pinnedContractDigest !== contractDigest) continue
+        const evidence = runtime.inspectBenefitEvidence(plan.id)
+        if (evidence === undefined) continue
+        const now = Date.now()
+        const parentVersion = this.revisionBenefitParentVersion(plan)
+        const deadline = parentVersion === undefined ? undefined
+          : revisionBenefitObservationDeadline({ candidate: evidence, parent: parentVersion, now })
+        if (deadline === undefined) continue
         const evaluation = this.evaluateRevisionBenefit(plan.id)
-        if (evaluation === undefined || !evaluation.pinned) continue
-        if (evaluation.evaluation.verdict.status === 'inferior') {
+        const outcome = this.store.inspectRevisionBenefitOutcome(plan.id)
+        if (evaluation !== undefined && evaluation.pinned && evaluation.evaluation.verdict.status === 'inferior') {
           void this.autoRollbackRevisionIfInferior(plan.id, { observeWindowMs: 0 })
             .catch(() => { /* rollback failures stay visible through the benefit ledger */ })
+          continue
         }
+        // Bounded terminal: once the observation window elapsed without a
+        // non-inferior verdict, record the owner-visible unverified result and
+        // roll the stable entry back instead of leaving a silent mount.
+        if (now < deadline || outcome?.status === 'non-inferior') continue
+        if (outcome === undefined || outcome.status === 'insufficient') {
+          this.store.recordRevisionBenefit(plan.id, { contractDigest, status: 'insufficient',
+            reason: 'observation-expired-unverified',
+            evaluation: evaluation?.evaluation ?? { verdict: { status: 'insufficient', reason: 'observation-expired-unverified' } } })
+        }
+        void this.autoRollbackRevisionIfInferior(plan.id, { observeWindowMs: 0, observationDeadline: deadline })
+          .catch(() => { /* rollback failures stay visible through the benefit ledger */ })
       } catch { /* a plan without a current job or admission is skipped this tick */ }
     }
+  }
+
+  /** Parent adoption version for the same equal-length paired window as evaluation. */
+  private revisionBenefitParentVersion(plan: PluginSourcePlan) {
+    const parentPlanId = plan.sourceRevision?.parent?.planId
+    if (parentPlanId === undefined) return undefined
+    const revision = this.revisionCapabilityRuntime?.inspectBenefitEvidence(parentPlanId)
+    if (revision !== undefined) return revision.version
+    const receipt = this.createdCapabilityFeedbackInput(parentPlanId)?.().record.receipt
+    return receipt === undefined ? undefined : { adoptedAt: receipt.adoptedAt, expiresAt: receipt.expiresAt }
   }
 
   /**
@@ -1476,11 +1552,6 @@ export class PluginControlPlaneService extends Service {
       this.abort.signal.throwIfAborted()
       return this.store.listCreatedCapabilityTrendSnapshots(query)
     } catch { return undefined }
-  }
-
-  /** The stable revision entry currently pointing at this plan, if any. */
-  private revisionEntryId(planId: string): string | undefined {
-    return this.revisionCapabilityRuntime?.listEntries().find(entry => entry.currentPlanId === planId)?.entryId
   }
 
   /** The historical read is deferred so callers keep it inside their own failure boundary. */

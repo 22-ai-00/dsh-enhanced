@@ -25,6 +25,12 @@ export interface SourceJobsConfig {
    * non-inferior outcome evaluated under this exact contract.
    */
   revisionBenefit?: import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitContract
+  /**
+   * Explicit owner opt-in: with a pinned benefit contract, allow exactly one
+   * review-only first adoption before candidate evidence can exist. Default
+   * false preserves the contract's non-inferior-before-adoption requirement.
+   */
+  allowReviewOnlyFirstAdoption?: boolean
   ownerRouteId: string
   principalId: string
   workspace: string

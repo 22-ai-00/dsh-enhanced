@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { DeliveryAdapterRegistryStoppedError } from './coordinator.js'
-import { AssistantDeliveryService, Config, isTrustedDeliveryPreferenceProducer, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol } from './service.js'
+import { AssistantDeliveryService, Config, isTrustedDeliveryPreferenceProducer, normalizeForegroundToolArguments, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-delivery'
-export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, isTrustedDeliveryPreferenceProducer, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol, version }
+export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, isTrustedDeliveryPreferenceProducer, normalizeForegroundToolArguments, ownerNotificationReplyProtocol, ownerNotificationWithdrawalProtocol, version }
 export type {
   CommitOwnerAnchoredWorkflowTraceServiceResult,
   DeliveryInboundRuntime,

@@ -10,6 +10,7 @@ import { normalizeControlPlaneConfig, type Config } from '../src/index.js'
 import { RevisionCapabilityJournal, revisionCapabilityPublicKey, validateRevisionCapabilityConfig,
   verifyRevisionCapabilityAdoptionReceipt } from '../src/revision-capability-journal.js'
 import type { RevisionCapabilityConfig } from '../src/revision-capability-types.js'
+import { inspectRevisionCapabilityBenefitWindow } from '../src/revision-capability-feedback.js'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 
 const roots: string[] = []
@@ -267,5 +268,223 @@ describe('revision adoption configuration', () => {
     expect(() => normalizeControlPlaneConfig({ ...withoutVerification,
       sourceJobs: withoutRevisionLane as never }))
       .toThrow('revision adoption requires creation capabilities')
+  })
+})
+
+describe('revision call foreground attribution and benefit evidence', () => {
+  function committed() {
+    const f = setup()
+    const base = Date.now(), environment = { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' }
+    const parentArtifact = Buffer.from('parent artifact'), artifact = Buffer.from('revision artifact')
+    const parentCertificate = creationCertificate('parent-plan', 'rsi-revision-tool', parentArtifact, d('c'), environment, base)
+    const receipt = parentReceipt(parentCertificate, parentArtifact, base)
+    const revisionCertificate = { ...creationCertificate('revision-plan', 'rsi-revision-tool', artifact, d('c'), environment, base),
+      protocol: 'assistant-growth/revision-verification/v1' as const,
+      authority: { protocol: 'assistant-growth/revision-acceptance-authority/v1' as const, authorityId: 'revision-review',
+        keyId: 'revision-review-key', authorityDigest: d('e'), namePrefix: 'rsi-revision-', expiresAt: base + 200_000 },
+      parent: { planId: 'parent-plan', certificateDigest: sha(canonicalGrowthJson(parentCertificate)),
+        artifactSha256: sha(parentArtifact), sourceArchiveDigest: d('f'), sourceDigest: d('0') } }
+    const { signature: _signature, ...revisionUnsigned } = revisionCertificate
+    const signedRevision = { ...revisionUnsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(revisionUnsigned)),
+      generateKeyPairSync('ed25519').privateKey).toString('base64url') } as PluginRevisionVerificationCertificate
+    f.journal.claim({ planId: 'revision-plan', parentPlanId: 'parent-plan',
+      certificateDigest: sha(canonicalGrowthJson(signedRevision)) })
+    const adoptedAt = base + 100, expiresAt = Math.min(f.config.expiresAt, signedRevision.expiresAt)
+    const entryId = 'entry-fixture'
+    const adoptionReceipt = f.journal.signReceipt({ protocol: 'dsh-created-capability-revision-adoption/v1' as const,
+      authorityId: f.config.authorityId, authorityDigest: f.journal.authorityDigest, keyId: f.config.keyId,
+      planId: 'revision-plan', planDigest: signedRevision.plan.digest,
+      verificationDigest: sha(canonicalGrowthJson(signedRevision)), parentPlanId: 'parent-plan',
+      parentCertificateDigest: signedRevision.parent.certificateDigest, parentReceiptDigest: receipt.digest,
+      parentArtifactSha256: signedRevision.parent.artifactSha256, entryId,
+      aliasesDigest: hex(canonicalGrowthJson(tools.map(tool => tool.name))), artifactSha256: sha(artifact),
+      artifactBytes: artifact.length, schemaDigest: signedRevision.schemaDigest, source: signedRevision.source,
+      model: signedRevision.model, inFlightParentCalls: 0, expiresAt, adoptedAt })
+    const parentVersion = { planId: 'parent-plan', entryId, role: 'parent' as const, name: 'rsi-revision-tool',
+      certificate: parentCertificate, certificateDigest: sha(canonicalGrowthJson(parentCertificate)),
+      receiptJson: receipt.json, receiptDigest: receipt.digest, tools, artifact: parentArtifact,
+      artifactSha256: sha(parentArtifact), schemaDigest: parentCertificate.schemaDigest,
+      source: parentCertificate.source, model: parentCertificate.model, adoptedAt: base - 500, expiresAt: base + 120_000 }
+    const revisionVersion = { planId: 'revision-plan', entryId, role: 'revision' as const, name: 'rsi-revision-tool',
+      certificate: signedRevision, certificateDigest: sha(canonicalGrowthJson(signedRevision)),
+      receiptJson: canonicalGrowthJson(adoptionReceipt), receiptDigest: sha(canonicalGrowthJson(adoptionReceipt)),
+      tools, artifact, artifactSha256: sha(artifact), schemaDigest: signedRevision.schemaDigest,
+      source: signedRevision.source, model: signedRevision.model, adoptedAt, expiresAt }
+    f.journal.commit({ entry: { entryId, name: 'rsi-revision-tool', aliases: tools.map(tool => tool.name) },
+      parent: parentVersion, revision: revisionVersion, receipt: adoptionReceipt,
+      expectedCurrentPlanId: 'parent-plan', inFlightParentCalls: 0 })
+    return { f, entryId, adoptedAt, expiresAt }
+  }
+  function foreground(f: ReturnType<typeof committed>['f'], callId: string, inboxId = 'inbox-' + callId) {
+    const sessionId = 'session-1', toolName = tools[0]!.name, argumentsText = '{"query":"hello"}'
+    const argumentsDigest = sha(argumentsText)
+    const key = sha(canonicalGrowthJson({ entryId: 'entry-fixture', sessionId, callId, toolName }))
+    return { key, argumentsDigest, witness: { protocol: 'assistant-delivery/foreground-tool-call/v1',
+      task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId, sessionId,
+        scope: { workspace: f.config.owner.workspace, preset: f.config.owner.agentPreset },
+        owner: { principalRecordId: f.config.owner.principalRecordId, principalVersion: f.config.owner.principalVersion },
+        binding: { id: 'binding-' + callId, version: 1, generation: 1 }, dispatchedAt: Date.now() - 10 },
+      turn: 1, call: { id: callId, toolName, eventSeq: 1, eventDigest: d('1'), argumentsDigest } } }
+  }
+  test('records the exact foreground call witness and exposes it as benefit evidence', () => {
+    const { f, entryId, adoptedAt } = committed()
+    const call = foreground(f, 'call-one')
+    f.journal.claimCall({ entryId, key: call.key, argumentsDigest: call.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: call.witness as never })
+    f.journal.settleCall({ entryId, key: call.key, status: 'completed', result: { ok: true } })
+    const evidence = f.journal.listCallEvidence(entryId)[0]!
+    expect(evidence).toMatchObject({ attribution: 'foreground', role: 'revision', adoptedAt,
+      artifactSha256: sha(Buffer.from('revision artifact')), schemaDigest: d('c') })
+    expect(evidence.foreground).toEqual(call.witness)
+    const benefit = f.journal.listBenefitCallEvidence('revision-plan')
+    expect(benefit).toHaveLength(1)
+    expect(benefit[0]).toMatchObject({ key: call.key, attribution: 'foreground', status: 'completed' })
+    // Unattributed calls are retained but can never be benefit evidence rows.
+    const plain = foreground(f, 'call-two')
+    f.journal.claimCall({ entryId, key: plain.key, argumentsDigest: plain.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan' })
+    expect(f.journal.listCallEvidence(entryId)[1]).toMatchObject({ key: plain.key, attribution: 'unattributed' })
+    // A witness for another key/arguments is rejected at write time.
+    const wrong = foreground(f, 'call-three')
+    expect(() => f.journal.claimCall({ entryId, key: wrong.key, argumentsDigest: sha('other'),
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: wrong.witness as never })).toThrow()
+    f.journal.close()
+  })
+  test('migrates a schema 1 call row without inventing foreground attribution', () => {
+    const { f, entryId } = committed()
+    const call = foreground(f, 'legacy-call')
+    f.journal.claimCall({ entryId, key: call.key, argumentsDigest: call.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: call.witness as never })
+    f.journal.settleCall({ entryId, key: call.key, status: 'completed', result: { ok: true } })
+    f.journal.close()
+    const raw = new DatabaseSync(f.path)
+    try {
+      raw.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE calls RENAME TO calls_v2;
+        CREATE TABLE calls (entry_id TEXT NOT NULL REFERENCES entries(entry_id), call_key TEXT NOT NULL, version_plan_id TEXT NOT NULL,
+          tool_alias TEXT NOT NULL, arguments_digest TEXT NOT NULL CHECK(length(arguments_digest)=64),
+          status TEXT NOT NULL CHECK(status IN ('claimed','completed','unknown')),
+          result_json TEXT CHECK(result_json IS NULL OR (json_valid(result_json) AND length(result_json)<=65536)),
+          claimed_at INTEGER NOT NULL, settled_at INTEGER, PRIMARY KEY(entry_id, call_key),
+          CHECK((status='claimed' AND result_json IS NULL AND settled_at IS NULL) OR status IN ('completed','unknown'))) STRICT, WITHOUT ROWID;
+        INSERT INTO calls (entry_id, call_key, version_plan_id, tool_alias, arguments_digest, status, result_json, claimed_at, settled_at)
+          SELECT entry_id, call_key, version_plan_id, tool_alias, arguments_digest, status, result_json, claimed_at, settled_at FROM calls_v2;
+        DROP TABLE calls_v2;
+        PRAGMA user_version=1;
+        COMMIT;`)
+    } finally { raw.close() }
+    const reopened = new RevisionCapabilityJournal({ path: f.path, config: f.config })
+    expect(reopened.listCallEvidence(entryId)[0]).toMatchObject({ key: call.key, attribution: 'unattributed' })
+    expect(reopened.listBenefitCallEvidence('revision-plan')[0]?.foreground).toBeUndefined()
+    const next = foreground(f, 'post-migration')
+    reopened.claimCall({ entryId, key: next.key, argumentsDigest: next.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: next.witness as never })
+    expect(reopened.listCallEvidence(entryId).find(item => item.key === next.key)).toMatchObject({ attribution: 'foreground' })
+    reopened.close()
+  })
+
+  test('real foreground call rows produce one candidate window', async () => {
+    const { f, entryId } = committed()
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const argumentsText = '{"query":"hello"}'
+    const call = (callId: string, inboxId: string) => {
+      const sessionId = 'session-1', toolName = tools[0]!.name
+      const argumentsDigest = sha(argumentsText)
+      const key = sha(canonicalGrowthJson({ entryId, sessionId, callId, toolName }))
+      const foreground = { protocol: 'assistant-delivery/foreground-tool-call/v1',
+        task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId, sessionId,
+          scope: { workspace: f.config.owner.workspace, preset: f.config.owner.agentPreset },
+          owner: { principalRecordId: f.config.owner.principalRecordId, principalVersion: f.config.owner.principalVersion },
+          binding: { id: 'binding-' + callId, version: 1, generation: 1 }, dispatchedAt: Date.now() - 5 },
+        turn: 1, call: { id: callId, toolName, eventSeq: 1, eventDigest: d('1'), argumentsDigest } }
+      return { key, argumentsDigest, inboxId, callId, foreground }
+    }
+    const first = call('call-one', 'inbox-one'), second = call('call-two', 'inbox-two')
+    for (const item of [first, second]) {
+      f.journal.claimCall({ entryId, key: item.key, argumentsDigest: item.argumentsDigest,
+        toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: item.foreground as never })
+      f.journal.settleCall({ entryId, key: item.key, status: 'completed', result: { ok: true } })
+    }
+    const version = f.journal.inspectVersion('revision-plan')!
+    const calls = f.journal.listBenefitCallEvidence('revision-plan')
+    expect(calls).toHaveLength(2)
+    const learning = (inboxId: string) => {
+      const item = calls.find(entry => entry.foreground?.task.inboxId === inboxId)!.foreground!
+      return { protocol: 'assistant-delivery/owner-foreground-learning/v1' as const,
+        owner: { ...f.config.owner, bindingVersion: 1, generation: 1 },
+        canonical: { scope: { workspace: f.config.owner.workspace, preset: f.config.owner.agentPreset },
+          scopeKey: 'scope', scopeWatermark: 1, triggerOutcomeId: 'outcome-' + inboxId,
+          situation: 'foreground:task', objective: { outcomeId: 'objective-' + inboxId, status: 'achieved' as const,
+            source: { kind: 'evaluator' as const, id: 'assistant-verifier' },
+            evaluator: { id: 'assistant-verifier', version: '1' }, evidence: [], occurredAt: Date.now() },
+          projection: { subjectKind: 'foreground-turn' as const, subjectRef: inboxId, version: 1,
+            digest: d('4'), disposition: 'upsert' as const } },
+        judgement: 'independent-verifier' as const,
+        source: { sessionId: item.task.sessionId, inboxId, objective: 'ordinary task', quiescent: true,
+          truncated: false, modelSelectionState: 'frozen' as const, modelSelection: { provider: 'supplier', model: 'task-model' } } }
+    }
+    const heads = new Map(calls.map(entry => [entry.foreground!.task.inboxId,
+      learning(entry.foreground!.task.inboxId)]))
+    const evaluation = {
+      canonicalHostScope: (input: unknown) => input,
+      getTrustedForegroundLearningProjection: (input: { inboxId: string }) => heads.get(input.inboxId)?.canonical,
+      withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
+      inspectTrustedOutcomeMetrics: () => ({ inputTokens: 10, outputTokens: 5 }),
+    }
+    const delivery = {
+      inspectOwnerForegroundLearningTask: (input: { outcomeId: string }) =>
+        [...heads.values()].find(item => item.canonical.triggerOutcomeId === input.outcomeId),
+      inspectOwnerForegroundTaskSource: (input: { inboxId: string }) => {
+        const item = calls.find(entry => entry.foreground?.task.inboxId === input.inboxId)
+        if (item === undefined) return undefined
+        return { authorityId: f.config.owner.authorityId, authorityHash: f.config.owner.authorityHash,
+          principalId: f.config.owner.principalId,
+          owner: { principalRecordId: f.config.owner.principalRecordId, principalVersion: f.config.owner.principalVersion },
+          binding: { id: item.foreground!.task.binding.id, version: 1, generation: 1,
+            sessionId: item.foreground!.task.sessionId },
+          execution: { quiescent: true, dispatchedAt: Date.now() - 1_000, completedAt: Date.now() } }
+      },
+    }
+    const sample = { version: { planId: version.planId, entryId: version.entryId, role: version.role,
+      name: version.name, adoptedAt: version.adoptedAt, expiresAt: version.expiresAt,
+      receiptDigest: version.receiptDigest, artifactSha256: version.artifactSha256,
+      schemaDigest: version.schemaDigest, tools: version.tools }, calls }
+    const stats = inspectRevisionCapabilityBenefitWindow({ sample, windowStart: version.adoptedAt,
+      windowEnd: Date.now() + 1_000, owner: f.config.owner, evaluation: evaluation as never,
+      delivery: delivery as never })!
+    expect(stats).toMatchObject({ artifactSha256: version.artifactSha256, taskRevisions: 2,
+      failed: 0, correctedOrWithdrawn: 0 })
+    expect(stats.latencyMsTotal).toBeGreaterThan(0)
+    expect(stats.tokensTotal).toBe(30)
+    f.journal.close()
+  })
+
+  test('re-claiming the identical witness is byte-stable and a tampered row fails closed', () => {
+    const { f, entryId } = committed()
+    const call = foreground(f, 'stable-call')
+    const first = f.journal.claimCall({ entryId, key: call.key, argumentsDigest: call.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: call.witness as never })
+    expect(first.created).toBe(true)
+    const again = f.journal.claimCall({ entryId, key: call.key, argumentsDigest: call.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan', foreground: call.witness as never })
+    expect(again).toEqual({ created: false, call: first.call })
+    expect(() => f.journal.claimCall({ entryId, key: call.key, argumentsDigest: call.argumentsDigest,
+      toolAlias: tools[0]!.name, versionPlanId: 'revision-plan' })).toThrow()
+    f.journal.close()
+    const raw = new DatabaseSync(f.path)
+    try {
+      raw.exec("UPDATE calls SET foreground_json=json_set(foreground_json,'$.task.sessionId','other-session')")
+    } finally { raw.close() }
+    const reopened = new RevisionCapabilityJournal({ path: f.path, config: f.config })
+    expect(() => reopened.listCallEvidence(entryId)).toThrow()
+    reopened.close()
+  })
+
+  test('fails closed when a schema 2 journal carries an unknown extra call column', () => {
+    const { f } = committed()
+    f.journal.close()
+    const raw = new DatabaseSync(f.path)
+    try { raw.exec('ALTER TABLE calls ADD COLUMN extra_evidence TEXT') } finally { raw.close() }
+    expect(() => new RevisionCapabilityJournal({ path: f.path, config: f.config })).toThrow()
   })
 })

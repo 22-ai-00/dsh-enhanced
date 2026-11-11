@@ -4,7 +4,7 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
   validatePluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { CreationCapabilityTool } from './creation-capability-types.js'
+import type { CreationCapabilityForegroundCallWitness, CreationCapabilityTool } from './creation-capability-types.js'
 import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityCall,
   RevisionCapabilityCallEvidence, RevisionCapabilityConfig, RevisionCapabilityEntry, RevisionCapabilityJournalPort,
   RevisionCapabilityModel, RevisionCapabilityRollbackRecord, RevisionCapabilitySourceRef,
@@ -98,6 +98,46 @@ function model(value: unknown): RevisionCapabilityModel {
   if (Object.hasOwn(item, 'reasoningEffort')) str(item.reasoningEffort, /^[\s\S]+$/u, 500)
   return value as RevisionCapabilityModel
 }
+/**
+ * Host-only Delivery attestation of the exact foreground owner call that
+ * produced one revision entry invocation. Only structure, owner scope, call
+ * identity and digests are retained; no task text or arguments.
+ */
+/**
+ * Host-native tool arguments are normalized by Delivery as JSON.parse then
+ * JSON.stringify; mirror that exact normalization so the foreground witness,
+ * the journal row and the runtime agree for every key order. Do not substitute
+ * a canonicalizing serializer here.
+ */
+export function revisionCallArgumentsDigest(value: unknown): string {
+  return sha(JSON.stringify(value))
+}
+
+function foregroundWitness(value: unknown, config: RevisionCapabilityConfig, entryId: string, alias: string,
+  argumentsDigest: string, key: string): string {
+  const root = obj(value, ['protocol', 'task', 'turn', 'call'])
+  if (root.protocol !== 'assistant-delivery/foreground-tool-call/v1') fail()
+  const task = obj(root.task, ['protocol', 'inboxId', 'sessionId', 'scope', 'owner', 'binding', 'dispatchedAt'])
+  if (task.protocol !== 'assistant-delivery/foreground-task/v1') fail()
+  str(task.inboxId); str(task.sessionId)
+  const scope = obj(task.scope, ['workspace', 'preset'])
+  if (path(scope.workspace) !== config.owner.workspace || str(scope.preset) !== config.owner.agentPreset) fail()
+  const owner = obj(task.owner, ['principalRecordId', 'principalVersion'])
+  if (str(owner.principalRecordId, /^[\s\S]+$/u, 512) !== config.owner.principalRecordId
+    || int(owner.principalVersion, 1, Number.MAX_SAFE_INTEGER) !== config.owner.principalVersion) fail()
+  const binding = obj(task.binding, ['id', 'version', 'generation'])
+  str(binding.id, /^[\s\S]+$/u, 512)
+  int(binding.version, 1, Number.MAX_SAFE_INTEGER); int(binding.generation, 1, Number.MAX_SAFE_INTEGER)
+  int(task.dispatchedAt, 1, 8_640_000_000_000_000)
+  int(root.turn, 0, Number.MAX_SAFE_INTEGER)
+  const call = obj(root.call, ['id', 'toolName', 'eventSeq', 'eventDigest', 'argumentsDigest'])
+  str(call.id); str(call.toolName); int(call.eventSeq, 0, Number.MAX_SAFE_INTEGER)
+  str(call.eventDigest, SHA, 64); str(call.argumentsDigest, SHA, 64)
+  if (call.toolName !== alias || call.argumentsDigest !== argumentsDigest
+    || sha(json({ entryId, sessionId: task.sessionId, callId: call.id, toolName: alias })) !== key) fail()
+  return json(value, 4096)
+}
+
 function sourceRef(value: unknown): RevisionCapabilitySourceRef {
   const instruction = value !== null && typeof value === 'object' && Object.hasOwn(value as object, 'instructionDigest')
   const item = instruction ? obj(value, ['instructionDigest', 'ownerDigest']) : obj(value, ['referenceDigest', 'ownerDigest', 'growthRunDigest'])
@@ -245,7 +285,7 @@ interface AdoptionRow { plan_id: string; status: RevisionCapabilityAdoptionRecor
   entry_id: string | null; in_flight_parent_calls: number | null }
 interface CallRow { entry_id: string; call_key: string; version_plan_id: string; tool_alias: string;
   arguments_digest: string; status: RevisionCapabilityCall['status']; result_json: string | null;
-  claimed_at: number; settled_at: number | null }
+  foreground_json: string | null; claimed_at: number; settled_at: number | null }
 interface RollbackRow { seq: number; rollback_id: string; entry_id: string; from_plan_id: string; to_plan_id: string;
   parent_receipt_digest: string; authority_id: string; at: number; ordinal: number; digest: string }
 
@@ -279,16 +319,26 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
       this.db.exec('PRAGMA busy_timeout=1000; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE')
       try {
         const app = (this.db.prepare('PRAGMA application_id').get() as { application_id: number }).application_id
-        const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+        let version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
         const tables = (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map(row => row.name).sort()
         if (app === 0 && version === 0 && tables.length === 0) {
           this.db.exec(schemaSql())
         } else {
           // Append-only evolution: a known older version may only add tables/columns in a
           // forward migration; any unknown application id or schema version fails closed.
-          if (app !== APP_ID || version !== 1) fail()
+          if (app !== APP_ID || ![1, 2].includes(version)) fail()
           const expected = [...TABLES].sort().join('\0')
           if (tables.join('\0') !== expected) fail()
+          if (version === 1) {
+            // Schema 2 attributes entry calls to the exact foreground owner task.
+            this.db.exec(`ALTER TABLE calls ADD COLUMN foreground_json TEXT
+              CHECK(foreground_json IS NULL OR (json_valid(foreground_json) AND length(foreground_json)<=4096));
+              PRAGMA user_version=2;`)
+            version = 2
+          }
+          const callColumns = (this.db.prepare("PRAGMA table_info('calls')").all() as { name: string }[]).map(column => column.name).sort()
+          if (callColumns.join('\0') !== ['entry_id', 'call_key', 'version_plan_id', 'tool_alias', 'arguments_digest',
+            'status', 'result_json', 'foreground_json', 'claimed_at', 'settled_at'].sort().join('\0')) fail()
         }
         const row = this.db.prepare('SELECT * FROM authority WHERE authority_id=?').get(this.config.authorityId) as AuthorityRow | undefined
         const count = (this.db.prepare('SELECT COUNT(*) AS n FROM authority').get() as { n: number }).n
@@ -579,6 +629,14 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
       return { created: true, record: this.decodeRollback(this.row<RollbackRow>('SELECT * FROM rollbacks WHERE rollback_id=?', rollbackId)!) }
     })
   }
+  /** Host-only ordered rollback history of one stable entry. */
+  listRollbacks(entryId: string): readonly RevisionCapabilityRollbackRecord[] {
+    this.checkFiles()
+    str(entryId, ID)
+    const rows = this.db.prepare('SELECT * FROM rollbacks WHERE entry_id=? ORDER BY seq').all(entryId) as unknown as RollbackRow[]
+    return rows.map(row => this.decodeRollback(row))
+  }
+
   private decodeRollback(row: RollbackRow): RevisionCapabilityRollbackRecord {
     str(row.rollback_id, SHA, 64); str(row.entry_id, ID); str(row.from_plan_id, ID); str(row.to_plan_id, ID)
     str(row.parent_receipt_digest, SHA, 64); str(row.authority_id, ID); int(row.at, 1, 8_640_000_000_000_000)
@@ -588,14 +646,24 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
     if (digest(body) !== row.digest) fail()
     return { protocol: 'dsh-created-capability-revision-rollback/v1', ...body, digest: row.digest }
   }
-  claimCall(input: { entryId: string; key: string; argumentsDigest: string; toolAlias: string; versionPlanId: string }):
-    { created: boolean; call: RevisionCapabilityCall } {
+  private decodeForeground(row: CallRow): CreationCapabilityForegroundCallWitness {
+    if (row.foreground_json === null) fail()
+    const value = JSON.parse(row.foreground_json) as unknown
+    if (foregroundWitness(value, this.config, row.entry_id, row.tool_alias, row.arguments_digest, row.call_key) !== row.foreground_json) fail()
+    return value as CreationCapabilityForegroundCallWitness
+  }
+
+  claimCall(input: { entryId: string; key: string; argumentsDigest: string; toolAlias: string; versionPlanId: string;
+    foreground?: CreationCapabilityForegroundCallWitness }): { created: boolean; call: RevisionCapabilityCall } {
     str(input.entryId, ID); str(input.key, SHA, 64); str(input.argumentsDigest, SHA, 64)
     str(input.toolAlias, ALIAS, 96); str(input.versionPlanId, ID)
+    const foreground = input.foreground === undefined ? null
+      : foregroundWitness(input.foreground, this.config, input.entryId, input.toolAlias, input.argumentsDigest, input.key)
     return this.transaction(() => {
       const prior = this.row<CallRow>('SELECT * FROM calls WHERE entry_id=? AND call_key=?', input.entryId, input.key)
       if (prior) {
-        if (prior.arguments_digest !== input.argumentsDigest || prior.tool_alias !== input.toolAlias) fail()
+        if (prior.arguments_digest !== input.argumentsDigest || prior.tool_alias !== input.toolAlias
+          || prior.foreground_json !== foreground) fail()
         return { created: false, call: this.decodeCall(prior) }
       }
       const entryRow = this.row<EntryRow>('SELECT * FROM entries WHERE entry_id=?', input.entryId)
@@ -607,14 +675,15 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
       const version = this.decodeVersion(versionRow)
       if (version.entryId !== entry.entryId || Date.now() >= version.expiresAt) fail()
       if (this.count('calls') >= this.config.maxCallRecords) fail()
-      this.db.prepare("INSERT INTO calls(entry_id,call_key,version_plan_id,tool_alias,arguments_digest,status,claimed_at) VALUES (?,?,?,?,?,'claimed',?)")
-        .run(input.entryId, input.key, input.versionPlanId, input.toolAlias, input.argumentsDigest, Date.now())
+      this.db.prepare("INSERT INTO calls(entry_id,call_key,version_plan_id,tool_alias,arguments_digest,status,foreground_json,claimed_at) VALUES (?,?,?,?,?,'claimed',?,?)")
+        .run(input.entryId, input.key, input.versionPlanId, input.toolAlias, input.argumentsDigest, foreground, Date.now())
       return { created: true, call: { key: input.key, versionPlanId: input.versionPlanId, status: 'claimed' } }
     })
   }
   private decodeCall(row: CallRow): RevisionCapabilityCall {
     str(row.entry_id, ID); str(row.call_key, SHA, 64); str(row.version_plan_id, ID); str(row.tool_alias, ALIAS, 96)
     str(row.arguments_digest, SHA, 64); int(row.claimed_at, 1, 8_640_000_000_000_000)
+    if (row.foreground_json !== null) this.decodeForeground(row)
     if (!['claimed', 'completed', 'unknown'].includes(row.status)) fail()
     const call: RevisionCapabilityCall = { key: row.call_key, versionPlanId: row.version_plan_id, status: row.status }
     if (row.result_json !== null) {
@@ -638,6 +707,20 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
         .run(input.status, resultJson, Math.max(Date.now(), row.claimed_at), input.entryId, input.key)
     })
   }
+  private callEvidence(row: CallRow, version: RevisionCapabilityVersion): RevisionCapabilityCallEvidence {
+    if (row.entry_id !== version.entryId) fail()
+    const tool = version.tools.find(item => item.name === row.tool_alias)
+    return Object.freeze({
+      protocol: 'dsh-created-capability-revision-call/v1' as const, entryId: row.entry_id,
+      key: row.call_key, versionPlanId: row.version_plan_id, toolAlias: row.tool_alias, status: row.status,
+      attribution: row.foreground_json === null ? 'unattributed' as const : 'foreground' as const,
+      ...(tool === undefined ? {} : { originalName: tool.originalName }),
+      receiptDigest: version.receiptDigest, artifactSha256: version.artifactSha256, schemaDigest: version.schemaDigest,
+      role: version.role, adoptedAt: version.adoptedAt, expiresAt: version.expiresAt,
+      claimedAt: row.claimed_at, ...(row.settled_at === null ? {} : { settledAt: row.settled_at }),
+      ...(row.foreground_json === null ? {} : { foreground: this.decodeForeground(row) }),
+    })
+  }
   listCallEvidence(entryId: string): readonly RevisionCapabilityCallEvidence[] {
     this.checkFiles()
     str(entryId, ID)
@@ -646,15 +729,26 @@ export class RevisionCapabilityJournal implements RevisionCapabilityJournalPort 
     const entry = this.row<EntryRow>('SELECT * FROM entries WHERE entry_id=?', entryId)
     if (!entry) return []
     return rows.map(row => {
-      const call = this.decodeCall(row)
-      const versionRow = this.versionRow(call.versionPlanId)
+      this.decodeCall(row)
+      const versionRow = this.versionRow(row.version_plan_id)
       if (!versionRow) fail()
-      const version = this.decodeVersion(versionRow)
-      return { protocol: 'dsh-created-capability-revision-call/v1' as const, entryId, key: call.key,
-        versionPlanId: call.versionPlanId, toolAlias: row.tool_alias, status: call.status,
-        receiptDigest: version.receiptDigest, claimedAt: row.claimed_at,
-        ...(row.settled_at === null ? {} : { settledAt: row.settled_at }) }
+      return this.callEvidence(row, this.decodeVersion(versionRow))
     })
+  }
+  /**
+   * Calls attributed to one exact retained version. This is the only revision
+   * benefit evidence source: it never consults the creation ledger.
+   */
+  listBenefitCallEvidence(planId: string): readonly RevisionCapabilityCallEvidence[] {
+    this.checkFiles()
+    str(planId, ID)
+    const versionRow = this.versionRow(planId)
+    if (!versionRow) return []
+    const version = this.decodeVersion(versionRow)
+    const rows = this.db.prepare('SELECT * FROM calls WHERE version_plan_id=? ORDER BY claimed_at, call_key')
+      .all(planId) as unknown as CallRow[]
+    if (rows.length > this.config.maxCallRecords) fail()
+    return rows.map(row => { this.decodeCall(row); return this.callEvidence(row, version) })
   }
   recoverClaims(): void {
     this.transaction(() => {
@@ -689,12 +783,13 @@ function schemaSql(): string {
     'CREATE TABLE calls (entry_id TEXT NOT NULL REFERENCES entries(entry_id), call_key TEXT NOT NULL, version_plan_id TEXT NOT NULL,',
     '  tool_alias TEXT NOT NULL, arguments_digest TEXT NOT NULL CHECK(length(arguments_digest)=64),',
     "  status TEXT NOT NULL CHECK(status IN ('claimed','completed','unknown')), result_json TEXT CHECK(result_json IS NULL OR (json_valid(result_json) AND length(result_json)<=65536)),",
+    '  foreground_json TEXT CHECK(foreground_json IS NULL OR (json_valid(foreground_json) AND length(foreground_json)<=4096)),',
     '  claimed_at INTEGER NOT NULL, settled_at INTEGER, PRIMARY KEY(entry_id, call_key),',
     "  CHECK((status='claimed' AND result_json IS NULL AND settled_at IS NULL) OR status IN ('completed','unknown'))) STRICT, WITHOUT ROWID;",
     'CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT NOT NULL UNIQUE, entry_id TEXT NOT NULL REFERENCES entries(entry_id),',
     '  from_plan_id TEXT NOT NULL, to_plan_id TEXT NOT NULL, parent_receipt_digest TEXT NOT NULL CHECK(length(parent_receipt_digest)=64),',
     '  authority_id TEXT NOT NULL, at INTEGER NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal>=1), digest TEXT NOT NULL CHECK(length(digest)=64)) STRICT;',
     'PRAGMA application_id=' + APP_ID + ';',
-    'PRAGMA user_version=1;',
+    'PRAGMA user_version=2;',
   ].join('\n')
 }

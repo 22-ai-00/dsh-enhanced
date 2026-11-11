@@ -3494,6 +3494,23 @@ export class ControlPlaneStore {
     return job
   }
 
+  /**
+   * Host-only content-free benefit intent projection. Reading the pinned
+   * contract digest needs no owner-gap admission: it is Host metadata already
+   * validated against the plan binding, never task content or execution
+   * authority.
+   */
+  inspectRevisionBenefitIntent(planId: string): { pinnedContractDigest?: string; growthRunAcceptance: boolean } | undefined {
+    const plan = this.getSourcePlan(planId)
+    if (plan.mode !== 'prepared-revise' || plan.sourceRevision === undefined) return undefined
+    const job = this.#retainedPreparedRevisionJob(plan)
+    const pinned = job.intent.revision?.grant.benefit
+    return Object.freeze({
+      ...(pinned === undefined ? {} : { pinnedContractDigest: pinned.contractDigest }),
+      growthRunAcceptance: job.intent.revision?.growthRun?.revisionAcceptance !== undefined,
+    })
+  }
+
   #assertRevisionInstruction(job: SourceJobRecord, now?: number): void {
     const binding = job.intent.ownerInstruction
     const instruction = binding === undefined ? undefined : this.getOwnerInstruction(binding.instructionId)

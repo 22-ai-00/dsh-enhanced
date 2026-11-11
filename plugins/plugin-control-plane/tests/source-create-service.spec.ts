@@ -16,7 +16,7 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError, verifyPluginRevisionVerificationCertificate, pluginRevisionVerificationSigningPayload, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate, growthObjectDigest, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import { normalizeForegroundToolArguments, type ForegroundToolCallAttestation, type OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { AssistantVerifierService, compileRevisionReviewConfig, type PluginBehaviorRunnerInput, type RevisionReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
@@ -24,6 +24,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { runPluginControl } from '../src/cli.ts'
 import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
+import { revisionBenefitContractDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
@@ -32,6 +33,12 @@ import type { LinuxSourcePreparedEvidence } from '../src/types.ts'
 import * as linuxBuild from '../src/linux-source-build.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
 import type { CreationCapabilityConfig, CreationCapabilityObservation } from '../src/creation-capability-types.ts'
+import { RevisionCapabilityJournal } from '../src/revision-capability-journal.ts'
+import { RevisionCapabilityRuntime } from '../src/revision-capability-runtime.ts'
+import { autoRollbackInferiorRevision, evaluateRevisionBenefitEvidence, inspectRevisionBenefitTerminal,
+  revisionBenefitPairedWindows } from '../src/revision-capability-feedback.ts'
+import type { RevisionCapabilityConfig, RevisionCapabilityParentAdoption,
+  RevisionCapabilityPorts } from '../src/revision-capability-types.ts'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
@@ -113,7 +120,7 @@ class InstructionReviewAdapter extends LlmAdapter {
 }
 
 
-async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, _withLinux = false, withWorkItems = false, withRealRevisionReview = false) {
+async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, _withLinux = false, withWorkItems = false, withRealRevisionReview = false, withRevisionBenefit = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -255,7 +262,9 @@ async function fixture(withVerification = false, withAdoption = false, withReten
         manifestSha256: '4'.repeat(64), bytes: 4096, entries: 16 } },
     sourceJobs: { authorityId: 'source-grant', expiresAt: now + 600_000, maxSubmissions: 3, repository,
       ownerRouteId: 'route', principalId: 'owner', workspace: root, preset: 'primary', budgetId: 'source-budget', budgetAmount: 1,
-      ...(withRevision ? { revision: { id: 'owner-revise', expiresAt: now + 600_000, maxRevisions: 1, namePrefix: 'rsi-service-' } } : {}),
+      ...(withRevisionBenefit ? { revisionBenefit: revisionBenefitFixture(now) } : {}),
+      ...(withRevision ? { revision: { id: 'owner-revise', expiresAt: now + 600_000, maxRevisions: 1, namePrefix: 'rsi-service-',
+        ...(withRevisionBenefit ? { benefit: { contractDigest: revisionBenefitContractDigest(revisionBenefitFixture(now)) } } : {}) } } : {}),
       creation: { id: 'owner-create', expiresAt: now + 600_000, maxCreates: 2, namePrefix: 'rsi-service-' } } }
   if (capability) {
     const build = config.sourceBuild as build.LinuxSourceBuildConfig, base = build.runtime
@@ -1453,6 +1462,15 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
 }, 30_000)
 
 
+function revisionBenefitFixture(now: number) {
+  return { protocol: 'assistant-growth/revision-benefit-contract/v1' as const,
+    model: { provider: 'supplier', model: 'task-model' }, budget: { budgetId: 'source-budget', amount: 1 },
+    minimumTaskRevisions: 2,
+    thresholds: { maxFailureRateDelta: 0, maxReworkRateDelta: 0, maxCorrectionRateDelta: 0,
+      maxLatencyRatio: 2, maxCostRatio: 2 },
+    createdAt: now - 1_000, expiresAt: now + 600_000 }
+}
+
 function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
   alter?: (body: Omit<PluginRevisionVerificationCertificate, 'signature'>) => void): PluginRevisionVerificationCertificate {
   const prepared = f.service.inspectPreparedRevision(planId)
@@ -1490,8 +1508,8 @@ function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planI
 }
 
 
-async function revisionFixture(withRegression = false, withLinux = false, withRealRevisionReview = false) {
-  const f = await fixture(true, true, true, true, withRegression, withLinux, false, withRealRevisionReview)
+async function revisionFixture(withRegression = false, withLinux = false, withRealRevisionReview = false, withBenefit = false) {
+  const f = await fixture(true, true, true, true, withRegression, withLinux, false, withRealRevisionReview, withBenefit)
   f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
   installCandidateRunner(f)
   const initial = await f.service.enqueueSourceJob(f.request)
@@ -1921,3 +1939,259 @@ async function restartRegressionHost(f: Awaited<ReturnType<typeof revisionFixtur
   cleanup.push(async () => unregister())
   return { ctx: restored, service, automations }
 }
+
+function parentBenefitFeedback(f: Awaited<ReturnType<typeof revisionFixture>>, parentPlanId: string, nowMs: number) {
+  const owner = f.owner
+  const tool = { name: 'parent_tool', originalName: 'read_test', description: '', parameters: {} }
+  const receipt = { protocol: 'dsh-created-capability-adoption/v2' as const, planId: parentPlanId,
+    adoptedAt: nowMs - 120_000, expiresAt: nowMs + 600_000,
+    artifactSha256: 'a'.repeat(64), schemaDigest: 'b'.repeat(64) }
+  const receiptDigest = controlPlaneDigest(receipt)
+  const makeCall = (key: string, inboxId: string, sessionId: string) => ({
+    protocol: 'dsh-created-capability-call-evidence/v1' as const, planId: parentPlanId, key, status: 'completed' as const,
+    attribution: 'foreground' as const, toolAlias: tool.name, originalName: tool.originalName,
+    receiptDigest, artifactSha256: receipt.artifactSha256, schemaDigest: receipt.schemaDigest,
+    claimedAt: nowMs - 100_000, settledAt: nowMs - 99_000,
+    foreground: { protocol: 'assistant-delivery/foreground-tool-call/v1' as const,
+      task: { protocol: 'assistant-delivery/foreground-task/v1' as const, inboxId, sessionId,
+        scope: { workspace: owner.workspace, preset: owner.agentPreset },
+        owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        binding: { id: 'parent-binding-' + inboxId, version: 1, generation: 1 }, dispatchedAt: nowMs - 100_100 },
+      turn: 1, call: { id: key, toolName: tool.name, eventSeq: 1, eventDigest: 'c'.repeat(64), argumentsDigest: 'd'.repeat(64) } } })
+  const calls = [makeCall('parent-a', 'parent-inbox-a', 'parent-session'), makeCall('parent-b', 'parent-inbox-b', 'parent-session')]
+  const learning = (inboxId: string) => ({ protocol: 'assistant-delivery/owner-foreground-learning/v1' as const,
+    owner: { ...owner, bindingVersion: 1, generation: 1 },
+    canonical: { scope: { workspace: owner.workspace, preset: owner.agentPreset }, scopeKey: 'scope', scopeWatermark: 1,
+      triggerOutcomeId: 'outcome-' + inboxId, situation: 'foreground:parent-task',
+      objective: { outcomeId: 'objective-' + inboxId, status: 'achieved' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' },
+        evaluator: { id: 'assistant-verifier', version: '1' }, evidence: [], occurredAt: nowMs - 100_000 },
+      projection: { subjectKind: 'foreground-turn' as const, subjectRef: inboxId, version: 1, digest: 'e'.repeat(64), disposition: 'upsert' as const } },
+    judgement: 'independent-verifier' as const,
+    source: { sessionId: 'parent-session', inboxId, objective: 'parent ordinary task', quiescent: true, truncated: false,
+      modelSelectionState: 'frozen' as const, modelSelection: { provider: 'supplier', model: 'task-model' } } })
+  const heads = new Map(calls.map(call => [call.foreground.task.inboxId, learning(call.foreground.task.inboxId)]))
+  const evaluation = {
+    canonicalHostScope: (input: unknown) => input,
+    getTrustedForegroundLearningProjection: (input: { inboxId: string }) => heads.get(input.inboxId)?.canonical,
+    withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
+    inspectTrustedOutcomeMetrics: () => ({ inputTokens: 10, outputTokens: 5 }),
+  }
+  const delivery = {
+    inspectOwnerForegroundLearningTask: (input: { outcomeId: string }) =>
+      [...heads.values()].find(item => item.canonical.triggerOutcomeId === input.outcomeId),
+    inspectOwnerForegroundTaskSource: (input: { inboxId: string }) => {
+      const call = calls.find(item => item.foreground.task.inboxId === input.inboxId)
+      if (call === undefined) return undefined
+      return { authorityId: owner.authorityId, authorityHash: owner.authorityHash, principalId: owner.principalId,
+        owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        binding: { id: call.foreground.task.binding.id, version: 1, generation: 1, sessionId: 'parent-session' },
+        execution: { quiescent: true, dispatchedAt: nowMs - 100_100, completedAt: nowMs - 99_000 } }
+    },
+  }
+  return () => ({ record: { planId: parentPlanId, status: 'active' as const, receipt, tools: [tool] },
+    calls, triggerInboxId: 'parent-trigger', owner, evaluation: evaluation as never, delivery: delivery as never,
+    readSourceCurrent: () => ({ scopeWatermark: 1, projection: { subjectKind: 'foreground-turn' as const,
+      subjectRef: 'parent-trigger', version: 1, digest: 'f'.repeat(64), disposition: 'upsert' as const } }),
+    now: nowMs })
+}
+
+it('evaluates the paired revision benefit window from the creation and revision ledgers, records it and rolls back an inferior revision', async () => {
+  const f = await revisionFixture(false, true, false, true)
+  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(queued.id)!.planId!
+  expect(f.store.getRevisionVerificationStatus(planId)).toBe('verified')
+  const nowMs = Date.now(), owner = f.owner
+  const achieved = (value: typeof f.source) => ({ ...value, canonical: { ...value.canonical,
+    objective: { ...value.canonical.objective!, status: 'achieved' as const } } })
+  f.setSource(achieved(f.source)); f.setLaterSource(achieved(f.next))
+  const metrics = { inspectTrustedOutcomeMetrics: () => ({ inputTokens: 10, outputTokens: 5 }) }
+  Object.assign(f.evaluationPorts, metrics)
+  const originalSource = f.deliveryPorts.inspectOwnerForegroundTaskSource
+  f.deliveryPorts.inspectOwnerForegroundTaskSource = (input: { inboxId: string }) => {
+    const execution = { quiescent: true, dispatchedAt: nowMs - 40_100, completedAt: nowMs - 39_000 }
+    const found = originalSource(input)
+    if (found !== undefined) return { ...found, execution }
+    return input.inboxId === 'inbox' ? { authorityId: owner.authorityId, authorityHash: owner.authorityHash,
+      principalId: owner.principalId, owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+      binding: { id: 'parent-binding', version: 1, generation: 1, sessionId: 'session' }, execution } : undefined
+  }
+  const toolName = 'benefit_tool'
+  const version = { planId, entryId: 'entry-benefit', role: 'revision' as const, name: f.request.name,
+    adoptedAt: nowMs - 60_000, expiresAt: nowMs + 600_000, receiptDigest: '1'.repeat(64),
+    artifactSha256: '2'.repeat(64), schemaDigest: '3'.repeat(64),
+    tools: [{ name: toolName, originalName: 'read_test', description: '', parameters: {} }] }
+  const candidateCall = (key: string, inboxId: string, sessionId: string, evidence: string) => ({
+    protocol: 'dsh-created-capability-revision-call/v1' as const, entryId: version.entryId, key,
+    versionPlanId: planId, toolAlias: toolName, status: 'completed' as const, attribution: 'foreground' as const,
+    originalName: 'read_test', receiptDigest: version.receiptDigest, artifactSha256: version.artifactSha256,
+    schemaDigest: version.schemaDigest, role: 'revision' as const, adoptedAt: version.adoptedAt,
+    expiresAt: version.expiresAt, claimedAt: nowMs - 30_000, settledAt: nowMs - 29_000,
+    foreground: { protocol: 'assistant-delivery/foreground-tool-call/v1' as const,
+      task: { protocol: 'assistant-delivery/foreground-task/v1' as const, inboxId, sessionId,
+        scope: { workspace: owner.workspace, preset: owner.agentPreset },
+        owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        binding: { id: inboxId === 'inbox' ? 'parent-binding' : 'next-binding', version: 1, generation: 1 },
+        dispatchedAt: nowMs - 40_100 },
+      turn: 1, call: { id: key, toolName, eventSeq: 1, eventDigest: evidence, argumentsDigest: evidence } } })
+  const candidateSample = { version, calls: [
+    candidateCall('candidate-a', 'revision-inbox', 'revision-session', '4'.repeat(64)),
+    candidateCall('candidate-b', 'inbox', 'session', '5'.repeat(64))] }
+  const rollback = vi.fn(async (_input: { entryId: string; expectedCurrentPlanId: string }) =>
+    ({ fromPlanId: planId, toPlanId: f.parentPlanId }))
+  ;(f.service as unknown as { revisionCapabilityRuntime: unknown }).revisionCapabilityRuntime = {
+    inspectBenefitEvidence: (id: string) => id === planId ? candidateSample : undefined,
+    listEntries: () => [{ entryId: version.entryId, currentPlanId: planId }],
+    inspectEntry: () => ({ currentPlanId: planId }), rollback }
+  ;(f.service as unknown as { createdCapabilityFeedbackInput: unknown }).createdCapabilityFeedbackInput =
+    () => parentBenefitFeedback(f, f.parentPlanId, nowMs)
+  const nonInferior = f.service.evaluateRevisionBenefit(planId)!
+  expect(nonInferior.evaluation.verdict).toEqual({ status: 'non-inferior', reason: 'all-metrics-within-thresholds' })
+  expect(f.store.inspectRevisionBenefitOutcome(planId)).toMatchObject({ status: 'non-inferior',
+    contractDigest: revisionBenefitContractDigest(f.config.sourceJobs!.revisionBenefit!) })
+  // The same evidence with a failing candidate window records inferior and the
+  // pinned outcome then drives the exact parent rollback.
+  f.setLaterSource({ ...achieved(f.next), canonical: { ...achieved(f.next).canonical,
+    objective: { ...achieved(f.next).canonical.objective!, status: 'not-achieved' } } })
+  const inferior = f.service.evaluateRevisionBenefit(planId)!
+  expect(inferior.evaluation.verdict).toMatchObject({ status: 'inferior', reason: 'failure-rate' })
+  expect(f.store.inspectRevisionBenefitOutcome(planId)).toMatchObject({ status: 'inferior' })
+  const rolled = await f.service.autoRollbackRevisionIfInferior(planId, { observeWindowMs: 0 })
+  expect(rolled.rolledBack).toBe(true)
+  expect(rollback).toHaveBeenCalledWith({ entryId: version.entryId, expectedCurrentPlanId: planId })
+}, 60_000)
+
+it('runs the real revision benefit chain from journal evidence through the ledger to an exact parent rollback', async () => {
+  const f = await revisionFixture(false, true, false, true)
+  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
+  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(queued.id)!.planId!
+  const certificate = f.service.inspectVerifiedRevision(planId)!
+  const artifact = Buffer.from(f.service.inspectPreparedRevision(planId)!.artifact)
+  const source = f.store.readRevisionSource(planId)!
+  const owner = f.config.creationCapabilities!.owner, base = Date.now()
+  const journalKey = generateKeyPairSync('ed25519'), journalKeyPath = join(f.root, 'revision-benefit.key')
+  await writeFile(journalKeyPath, journalKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+  const namePrefix = certificate.plan.name.slice(0, certificate.plan.name.lastIndexOf('-') + 1)
+  const config: RevisionCapabilityConfig = { authorityId: 'owner-revision-benefit', keyId: 'revision-benefit-key',
+    keyPath: journalKeyPath, owner, namePrefix, expiresAt: base + 600_000, maxAdoptions: 1,
+    maxInputBytes: 4096, maxCallRecords: 8,
+    rollback: { authorityId: 'owner-revision-benefit-rollback', expiresAt: base + 600_000, maxRollbacks: 1 } }
+  const journal = new RevisionCapabilityJournal({ path: join(f.root, 'revision-adoptions.sqlite'), config })
+  const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
+  // Real creation-capability runtime state for the exact parent adoption; no
+  // synthetic certificate or artifact participates in the chain.
+  const creationRuntime = (f.service as unknown as { creationCapabilityRuntime: {
+    inspectAdoptionVersion(planId: string): RevisionCapabilityParentAdoption } }).creationCapabilityRuntime
+  const parent = creationRuntime.inspectAdoptionVersion(f.parentPlanId)!
+  const tool = parent.tools[0]!
+  const ports: RevisionCapabilityPorts = {
+    inspect: id => ({ certificate, artifact, source, plan: { id, digest: certificate.plan.digest,
+      name: certificate.plan.name }, owner }),
+    recheck: async () => {}, parent: () => parent as never, recheckParent: async () => {},
+    inFlightParentCalls: () => 0, suspendParent: async () => {}, resumeParent: async () => {},
+    runVersion: async input => {
+      const boundary = certificate.protocol === 'assistant-growth/revision-verification/v2'
+        ? { boundary: 'linux-native-process-seccomp-v1' as const, runtimeDigest: certificate.execution!.runtimeDigest } : {}
+      return input.operation.kind === 'discover'
+        ? { status: 'observed', quiescent: true, artifactSha256: sha(input.artifact),
+          schemaDigest: certificate.schemaDigest, environment: certificate.environment,
+          schemas: [{ name: tool.originalName }], ...boundary }
+        : { status: 'observed', quiescent: true, artifactSha256: sha(input.artifact),
+          schemaDigest: certificate.schemaDigest, environment: certificate.environment, ...boundary,
+          calls: [{ id: input.operation.calls[0]!.id, toolName: input.operation.calls[0]!.toolName,
+            result: { isError: false, value: { answer: 'revised' }, content: [{ type: 'text', text: 'revised' }] } }] }
+    },
+    recheckExecution: async () => {}, matchesExecution: () => true, assertCaller: () => {},
+    inspectCall: (_record, execution, toolAlias, argumentsJson) => {
+      const normalized = normalizeForegroundToolArguments(argumentsJson)!, sessionId = String(execution.agent!.session.id)
+      return { protocol: 'assistant-delivery/foreground-tool-call/v1',
+        task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId: 'benefit-inbox-' + String(execution.callId),
+          sessionId, scope: { workspace: owner.workspace, preset: owner.agentPreset },
+          owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+          binding: { id: 'benefit-binding', version: 1, generation: 1 }, dispatchedAt: Date.now() - 10 },
+        turn: 1, call: { id: String(execution.callId), toolName: toolAlias, eventSeq: 1,
+          eventDigest: 'b'.repeat(64), argumentsDigest: sha(normalized) } }
+    },
+  }
+  const revisionCtx = new Context()
+  await mountAgentLoopTestDependencies(revisionCtx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const runtime = new RevisionCapabilityRuntime({ ctx: revisionCtx, config, journal, ports, regressionRequired: false })
+  await runtime.start()
+  await runtime.adopt(planId, new AbortController().signal)
+  const entryId = journal.listEntries()[0]!.entryId, alias = journal.inspectEntry(entryId)!.entry.aliases[0]!
+  const exec = (callId: string): ToolRunContext => ({ callId, agent: { session: { id: 'benefit-session' } },
+    signal: new AbortController().signal }) as unknown as ToolRunContext
+  const args = { zeta: 'last', alpha: { beta: 2, alpha: 1 } }
+  for (const callId of ['benefit-call-a', 'benefit-call-b']) {
+    await revisionCtx.tools.get(alias)!.execute(args, exec(callId))
+  }
+  const candidate = runtime.inspectBenefitEvidence(planId)!
+  expect(candidate.calls).toHaveLength(2)
+  expect(candidate.calls.every(call => call.attribution === 'foreground' && call.role === 'revision')).toBe(true)
+  expect(candidate.calls[0]!.foreground!.call.argumentsDigest).toBe(sha(JSON.stringify(args)))
+  const adoption = candidate.version.adoptedAt
+  const windows = revisionBenefitPairedWindows({ candidate, parent: { adoptedAt: adoption - 10_000,
+    expiresAt: adoption + 600_000 }, now: adoption + 5_000 })!
+  const learning = (inboxId: string, outcome: 'achieved' | 'not-achieved') => ({
+    protocol: 'assistant-delivery/owner-foreground-learning/v1' as const,
+    owner: { ...owner, bindingVersion: 1, generation: 1 },
+    canonical: { scope: { workspace: owner.workspace, preset: owner.agentPreset }, scopeKey: 'scope',
+      scopeWatermark: 1, triggerOutcomeId: 'outcome-' + inboxId, situation: 'foreground:task',
+      objective: { outcomeId: 'objective-' + inboxId, status: outcome,
+        source: { kind: 'evaluator' as const, id: 'assistant-verifier' },
+        evaluator: { id: 'assistant-verifier', version: '1' }, evidence: [], occurredAt: Date.now() },
+      projection: { subjectKind: 'foreground-turn' as const, subjectRef: inboxId, version: 1,
+        digest: 'e'.repeat(64), disposition: 'upsert' as const } },
+    judgement: 'independent-verifier' as const,
+    source: { sessionId: 'benefit-session', inboxId, objective: 'ordinary task', quiescent: true,
+      truncated: false, modelSelectionState: 'frozen' as const,
+      modelSelection: { provider: 'supplier', model: 'task-model' } } })
+  const heads = new Map(candidate.calls.map(call => [call.foreground!.task.inboxId,
+    learning(call.foreground!.task.inboxId, 'not-achieved')]))
+  const evaluation = { canonicalHostScope: (input: unknown) => input,
+    getTrustedForegroundLearningProjection: (input: { inboxId: string }) => heads.get(input.inboxId)?.canonical,
+    withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
+    inspectTrustedOutcomeMetrics: () => ({ inputTokens: 10, outputTokens: 5 }) }
+  const delivery = { inspectOwnerForegroundLearningTask: (input: { outcomeId: string }) =>
+      [...heads.values()].find(item => item.canonical.triggerOutcomeId === input.outcomeId),
+    inspectOwnerForegroundTaskSource: (input: { inboxId: string }) => {
+      const call = candidate.calls.find(item => item.foreground!.task.inboxId === input.inboxId)
+      if (call === undefined) return undefined
+      return { authorityId: owner.authorityId, authorityHash: owner.authorityHash, principalId: owner.principalId,
+        owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+        binding: { id: call.foreground!.task.binding.id, version: 1, generation: 1, sessionId: 'benefit-session' },
+        execution: { quiescent: true, dispatchedAt: call.foreground!.task.dispatchedAt,
+          completedAt: call.settledAt! } } } }
+  // Parent baseline is a Host-derived creation-window statistic for this
+  // fixture parent; the candidate window is entirely real journal evidence.
+  const parentStats = { protocol: 'assistant-growth/revision-benefit-window/v1' as const,
+    artifactSha256: candidate.version.artifactSha256, windowStart: windows.parent.start,
+    windowEnd: windows.parent.end, taskRevisions: 2, correctedOrWithdrawn: 0, failed: 0, reworked: 0,
+    latencyMsTotal: 2_000, tokensTotal: 30, inputTokensTotal: 20, outputTokensTotal: 10 }
+  const contract = f.config.sourceJobs!.revisionBenefit!
+  const result = evaluateRevisionBenefitEvidence({ contract, candidate, parent: parentStats, windows, owner,
+    evaluation: evaluation as never, delivery: delivery as never, now: adoption + 5_000 })
+  expect(result?.evaluation.verdict).toMatchObject({ status: 'inferior', reason: 'failure-rate' })
+  f.store.recordRevisionBenefit(planId, { contractDigest: result!.contractDigest,
+    status: result!.evaluation.verdict.status, reason: result!.evaluation.verdict.reason,
+    evaluation: result!.evaluation })
+  expect(f.store.inspectRevisionBenefitOutcome(planId)).toMatchObject({ status: 'inferior' })
+  const decision = await autoRollbackInferiorRevision({ runtime, planId, benefitConfigured: true,
+    pinnedContractDigest: result!.contractDigest, growthRunCreatedAt: 0, observeWindowMs: 0,
+    now: Date.now(), outcome: f.store.inspectRevisionBenefitOutcome(planId) })
+  expect(decision.rolledBack).toBe(true)
+  expect(journal.inspectEntry(entryId)!.entry.currentPlanId).toBe(f.parentPlanId)
+  expect(journal.listRollbacks(entryId).at(-1)).toMatchObject({ fromPlanId: planId, toPlanId: f.parentPlanId })
+  // Terminal read combination: real ledger reason + real journal rollback record.
+  f.store.recordRevisionBenefit(planId, { contractDigest: result!.contractDigest, status: 'insufficient',
+    reason: 'observation-expired-unverified', evaluation: result!.evaluation })
+  const terminal = inspectRevisionBenefitTerminal({ planId, outcome: f.store.inspectRevisionBenefitOutcome(planId),
+    runtime })!
+  expect(terminal.outcome).toMatchObject({ status: 'insufficient', reason: 'observation-expired-unverified' })
+  expect(terminal.rollback).toMatchObject({ fromPlanId: planId, toPlanId: f.parentPlanId })
+  await runtime.close()
+  await revisionCtx.fiber.dispose()
+}, 120_000)

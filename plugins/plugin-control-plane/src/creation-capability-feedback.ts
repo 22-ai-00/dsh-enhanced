@@ -84,7 +84,7 @@ type CallGroups = Map<string, { sessionId: string; calls: CreationCapabilityCall
 
 /** Completed foreground calls of this exact adoption grouped by Inbox; undefined for a mixed-session Inbox. */
 function eligibleCalls(input: CreationCapabilityFeedbackInput, receipt: NonNullable<CreationCapabilityRecord['receipt']>,
-  receiptDigest: string, now: number): CallGroups | undefined {
+  receiptDigest: string, now: number, range?: { start: number; end: number }): CallGroups | undefined {
   const { record, calls, owner } = input
   const grouped = new Map<string, { sessionId: string; calls: CreationCapabilityCallEvidence[] }>()
   for (const call of calls) {
@@ -102,7 +102,9 @@ function eligibleCalls(input: CreationCapabilityFeedbackInput, receipt: NonNulla
       || !record.tools?.some(tool => tool.name === call.toolAlias && tool.originalName === call.originalName)
       || proof.task.scope.workspace !== owner.workspace || proof.task.scope.preset !== owner.agentPreset
       || proof.task.owner.principalRecordId !== owner.principalRecordId
-      || proof.task.owner.principalVersion !== owner.principalVersion) continue
+      || proof.task.owner.principalVersion !== owner.principalVersion
+      || (range !== undefined && (call.claimedAt < range.start || call.claimedAt > range.end
+        || call.settledAt > range.end))) continue
     const prior = grouped.get(proof.task.inboxId)
     if (prior && prior.sessionId !== proof.task.sessionId) return undefined
     if (prior) prior.calls.push(call)
@@ -142,14 +144,15 @@ const taskLatencyMs = (execution: { quiescent: boolean; dispatchedAt: number; co
  * One fenced read of grouped candidate Inboxes into current association rows. Undefined means no receipt, a mixed
  * session Inbox, a stale or changed fence, or a throw; `fenceEmpty` still checks the original task with no candidates.
  */
-function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty: boolean):
+function readAssociationRows(input: CreationCapabilityFeedbackInput, fenceEmpty: boolean,
+  range?: { start: number; end: number }):
 { rows: readonly AssociationRow[]; candidates: number; receiptDigest: string; now: number } | undefined {
   const { record, owner, evaluation } = input
   const receipt = record.receipt
   if (!receipt || receipt.planId !== record.planId || input.triggerInboxId.length === 0) return undefined
   const now = input.now ?? Date.now()
   const receiptDigest = controlPlaneDigest(receipt)
-  const grouped = eligibleCalls(input, receipt, receiptDigest, now)
+  const grouped = eligibleCalls(input, receipt, receiptDigest, now, range)
   if (!grouped) return undefined
   if (grouped.size === 0 && !fenceEmpty) return { rows: [], candidates: 0, receiptDigest, now }
   const scope = evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
@@ -682,16 +685,16 @@ CreationCapabilityOrdinaryUseTrend | undefined {
  * that as insufficient rather than passing.
  */
 export function inspectCreationCapabilityBenefitWindow(
-  input: CreationCapabilityFeedbackInput & { minimumWindowRevisions?: number },
+  input: CreationCapabilityFeedbackInput & { minimumWindowRevisions?: number; window?: { start: number; end: number } },
 ): import('@dsh-enhanced/assistant-growth-contract').RevisionBenefitWindowStats | undefined {
-  const read = readAssociationRows(input, true)
+  const read = readAssociationRows(input, true, input.window)
   const receipt = input.record.receipt
   if (!read || !receipt) return undefined
   const rows = [...read.rows].sort((a, b) => a.association.inboxId < b.association.inboxId ? -1
     : a.association.inboxId > b.association.inboxId ? 1 : 0)
   const now = read.now
-  const windowEnd = now
-  const windowStart = now - Math.max(1, Math.min(86_400_000, Math.max(1, receipt.expiresAt - receipt.adoptedAt)))
+  const windowEnd = input.window?.end ?? now
+  const windowStart = input.window?.start ?? now - Math.max(1, Math.min(86_400_000, Math.max(1, receipt.expiresAt - receipt.adoptedAt)))
   let correctedOrWithdrawn = 0, failed = 0, reworked = 0
   let latencyMsTotal = 0, tokensTotal = 0, inputTokensTotal = 0, outputTokensTotal = 0
   for (const row of rows) {

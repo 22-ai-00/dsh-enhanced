@@ -57,12 +57,15 @@ const evidence = () => ({ schemaVersion: 3 as const, kind: 'dsh-source-prepared-
 function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: number; revision?: boolean; regression?: boolean;
   sourceBuild?: sourceBuild.SourceBuildConfig; create?: boolean; creationReview?: boolean; workItem?: boolean
   revisionAdoption?: boolean; revisionAdoptionEligible?: boolean; revisionAdoptionFailure?: boolean
-  regressionAlreadyVerified?: boolean } = {}) {
+  regressionAlreadyVerified?: boolean; benefitPin?: boolean
+  benefitOutcome?: 'non-inferior' | 'inferior' | 'insufficient'
+  allowReviewOnlyFirstAdoption?: boolean; benefitHook?: boolean } = {}) {
   const now = Date.now(), expiry = now + (options.remainingMs ?? 10_800_000)
   const config: SourceJobsConfig = { authorityId: 'revision-timeouts', expiresAt: expiry, maxSubmissions: 1,
     repository: '/repository', allowedModes: [options.create ? 'create' : 'revise-created'], ownerRouteId: OWNER.ownerRouteId,
     principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'revision-runs', budgetAmount: 1,
-    revision: { id: 'revision-timeouts', expiresAt: expiry, maxRevisions: 1, namePrefix: 'agent-' },
+    revision: { id: 'revision-timeouts', expiresAt: expiry, maxRevisions: 1, namePrefix: 'agent-',
+      ...(options.benefitPin ? { benefit: { contractDigest: hex('benefit-contract') } } : {}) },
     ...(options.create ? { creation: { id: 'creation-timeouts', expiresAt: expiry, maxCreates: 1, namePrefix: 'agent-', ...(options.workItem ? { workItemFailures: true } : {}) } } : {}) }
   const settings = options.sourceBuild ?? linuxSourceConfig()
   const reference = { schemaVersion: 1 as const, owner: receipt(), outcomeId: 'revision-timeouts',
@@ -117,6 +120,8 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
     getSourcePlan: () => ({ id: 'revision-plan', mode: options.create ? 'prepared-create' : 'prepared-revise', status: 'pending-approval', expiresAt: expiry,
       sourceRevision: job.intent.revision, creation: job.intent.creation }), getCreationVerificationStatus: () => creationStatus, getRevisionVerificationStatus: () => revisionStatus,
     getRevisionRegressionStatus: () => regressionStatus,
+    inspectRevisionBenefitOutcome: () => options.benefitOutcome === undefined ? undefined : {
+      contractDigest: hex('benefit-contract'), status: options.benefitOutcome, reason: 'fixture', recordedAt: now },
     bindSourceJobDefinition: (input: { definitionHash: string }) => (job = { ...job, revision: job.revision + 1, definitionHash: input.definitionHash }),
     claimSourceJob: (input: { occurrenceId: string }) => (job = { ...job, revision: job.revision + 1, status: 'running', occurrenceId: input.occurrenceId }),
     settleSourceJob: (input: { status: SourceJobRecord['status']; failureCode: string }) => (job = { ...job, ...input }),
@@ -160,7 +165,9 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
     ...(options.create ? { creationAdoptionEligible: () => true, adoptVerifiedCreation: adoption } : {}), ...(options.revision === false ? {} : { verifyPreparedRevision: review }),
     ...(options.regression === false ? {} : { verifyPreparedRevisionRegression: regression }),
     ...(options.revisionAdoption ? { revisionAdoptionEligible: () => revisionAdoptionEligible,
-      adoptVerifiedRevision: revisionAdoption } : {}) })
+      adoptVerifiedRevision: revisionAdoption } : {}),
+    ...(options.benefitPin && options.benefitHook !== false ? { reconcileRevisionBenefits: () => {} } : {}),
+    ...(options.allowReviewOnlyFirstAdoption === true ? { allowReviewOnlyFirstAdoption: true } : {}) })
   runtime.start()
   const execute = (continuation = false, signal = new AbortController().signal) => {
     const automationId = continuation ? 'source-job-prepared-continuations' : job.automationId
@@ -319,6 +326,41 @@ describe('durable source-job runtime', () => {
       expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
       expect(f.review).toHaveBeenCalledOnce()
       expect(f.regression).toHaveBeenCalledOnce()
+      expect(f.revisionAdoption).not.toHaveBeenCalled()
+    } finally { await f.runtime.close() }
+  })
+
+  it('keeps the contract semantics by default: no outcome blocks adoption', async () => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true, benefitPin: true })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(f.revisionAdoption).not.toHaveBeenCalled()
+    } finally { await f.runtime.close() }
+  })
+  it('allows exactly the opted-in review-only first adoption, then the ledger decides', async () => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true, benefitPin: true, allowReviewOnlyFirstAdoption: true })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      expect(f.revisionAdoption).toHaveBeenCalledOnce()
+    } finally { await f.runtime.close() }
+  })
+  it.each([
+    ['non-inferior', true] as const,
+    ['inferior', false] as const,
+    ['insufficient', false] as const,
+  ])('benefit gate with a recorded %s outcome allows adoption: %s', async (benefitOutcome, allowed) => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true, benefitPin: true, benefitOutcome })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
+      if (allowed) expect(f.revisionAdoption).toHaveBeenCalledOnce()
+      else expect(f.revisionAdoption).not.toHaveBeenCalled()
+    } finally { await f.runtime.close() }
+  })
+  it('fails closed when the benefit contract is removed while the grant pin remains', async () => {
+    const f = revisionTimeoutFixture({ revisionAdoption: true, benefitPin: true,
+      benefitHook: false, allowReviewOnlyFirstAdoption: true })
+    try {
+      expect(await f.execute()).toMatchObject({ outcome: 'succeeded' })
       expect(f.revisionAdoption).not.toHaveBeenCalled()
     } finally { await f.runtime.close() }
   })

@@ -1,5 +1,6 @@
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { CreationCapabilityObservation, CreationCapabilityOwner, CreationCapabilityTool } from './creation-capability-types.js'
+import type { CreationCapabilityForegroundCallWitness, CreationCapabilityObservation, CreationCapabilityOwner,
+  CreationCapabilityTool } from './creation-capability-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionRegressionCertificate,
   PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
@@ -134,7 +135,12 @@ export interface RevisionCapabilityCall {
   result?: unknown
 }
 
-/** Bounded, content-free call attribution; arguments and results never escape. */
+/**
+ * Bounded, content-free call attribution; arguments and results never escape.
+ * `foreground` is the Host-only Delivery witness of the exact human task call
+ * that produced this entry invocation; it is absent for legacy/unattributed
+ * rows, and such rows are never benefit evidence.
+ */
 export interface RevisionCapabilityCallEvidence {
   protocol: 'dsh-created-capability-revision-call/v1'
   entryId: string
@@ -142,9 +148,34 @@ export interface RevisionCapabilityCallEvidence {
   versionPlanId: string
   toolAlias: string
   status: 'completed' | 'unknown' | 'claimed'
+  attribution: 'foreground' | 'unattributed' | 'legacy-unattributed'
+  originalName?: string
   receiptDigest: string
+  artifactSha256: string
+  schemaDigest: string
+  role: 'parent' | 'revision'
+  adoptedAt: number
+  expiresAt: number
   claimedAt: number
   settledAt?: number
+  foreground?: CreationCapabilityForegroundCallWitness
+}
+
+/** One adopted version plus the content-free calls it attributed to foreground tasks. */
+export interface RevisionCapabilityBenefitSample {
+  version: {
+    planId: string
+    entryId: string
+    role: 'parent' | 'revision'
+    name: string
+    adoptedAt: number
+    expiresAt: number
+    receiptDigest: string
+    artifactSha256: string
+    schemaDigest: string
+    tools: readonly CreationCapabilityTool[]
+  }
+  calls: readonly RevisionCapabilityCallEvidence[]
 }
 
 export interface RevisionCapabilityRollbackRecord {
@@ -196,6 +227,9 @@ export interface RevisionCapabilityPorts {
   matchesExecution(certificate: PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate): boolean
   /** Current authenticated owner Agent admission for one mounted call. */
   assertCaller(execution: ToolRunContext): void
+  /** Optional authenticated Host attribution; absence never implies a foreground task. */
+  inspectCall?(record: { entry: RevisionCapabilityEntry; current: RevisionCapabilityVersion },
+    execution: ToolRunContext, toolAlias: string, argumentsJson: string): CreationCapabilityForegroundCallWitness | undefined
 }
 
 export interface RevisionCapabilityParentAdoption {
@@ -239,10 +273,13 @@ export interface RevisionCapabilityJournalPort {
   settle(planId: string, status: 'closed' | 'unknown' | 'rejected', reason: string): void
   rollback(input: { entryId: string; expectedCurrentPlanId: string; authorityId: string }):
     { created: boolean; record: RevisionCapabilityRollbackRecord }
+  listRollbacks(entryId: string): readonly RevisionCapabilityRollbackRecord[]
   claimCall(input: { entryId: string; key: string; argumentsDigest: string; toolAlias: string;
-    versionPlanId: string }): { created: boolean; call: RevisionCapabilityCall }
+    versionPlanId: string; foreground?: CreationCapabilityForegroundCallWitness }): { created: boolean; call: RevisionCapabilityCall }
   settleCall(input: { entryId: string; key: string; status: 'completed' | 'unknown'; result?: unknown }): void
   listCallEvidence(entryId: string): readonly RevisionCapabilityCallEvidence[]
+  /** Content-free calls attributed to one exact retained version, for benefit windows. */
+  listBenefitCallEvidence(planId: string): readonly RevisionCapabilityCallEvidence[]
   recoverClaims(): void
   close(): void
 }

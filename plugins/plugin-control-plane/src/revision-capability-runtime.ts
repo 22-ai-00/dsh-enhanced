@@ -3,8 +3,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { canonicalGrowthJson, isPluginRevisionTaskSource } from '@dsh-enhanced/assistant-growth-contract'
 import type { CreationCapabilityObservation, CreationCapabilityTool } from './creation-capability-types.js'
-import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityCallEvidence,
-  RevisionCapabilityConfig, RevisionCapabilityInspection, RevisionCapabilityJournalPort,
+import { revisionCallArgumentsDigest } from './revision-capability-journal.js'
+import type { RevisionCapabilityAdoptionReceipt, RevisionCapabilityAdoptionRecord, RevisionCapabilityBenefitSample,
+  RevisionCapabilityCallEvidence, RevisionCapabilityConfig, RevisionCapabilityInspection, RevisionCapabilityJournalPort,
   RevisionCapabilityParentAdoption, RevisionCapabilityPorts, RevisionCapabilityReadiness,
   RevisionCapabilityRollbackRecord, RevisionCapabilityVersion } from './revision-capability-types.js'
 
@@ -107,6 +108,30 @@ export class RevisionCapabilityRuntime {
     try { return this.journal.listCallEvidence(entryId) } catch { return [] }
   }
 
+  /** Host-only latest exact-parent rollback of one stable entry, for terminal reads. */
+  inspectLatestRollback(entryId: string): RevisionCapabilityRollbackRecord | undefined {
+    try { return this.journal.listRollbacks(entryId).at(-1) } catch { return undefined }
+  }
+
+  /**
+   * Host-only benefit evidence for one retained version: the exact adopted
+   * version plus its foreground-attributed calls. Never reads the creation
+   * ledger and never exposes artifacts or results.
+   */
+  inspectBenefitEvidence(planId: string): RevisionCapabilityBenefitSample | undefined {
+    try {
+      const version = this.journal.inspectVersion(planId)
+      if (version === undefined) return undefined
+      return Object.freeze({
+        version: Object.freeze({ planId: version.planId, entryId: version.entryId, role: version.role, name: version.name,
+          adoptedAt: version.adoptedAt, expiresAt: version.expiresAt, receiptDigest: version.receiptDigest,
+          artifactSha256: version.artifactSha256, schemaDigest: version.schemaDigest,
+          tools: Object.freeze(version.tools.map(tool => Object.freeze({ ...tool }))) }),
+        calls: this.journal.listBenefitCallEvidence(planId),
+      })
+    } catch { return undefined }
+  }
+
   private assertCandidate(planId: string, inspection: RevisionCapabilityInspection): void {
     const certificate = inspection.certificate
     if (certificate.plan.id !== planId || inspection.plan.id !== planId
@@ -143,7 +168,11 @@ export class RevisionCapabilityRuntime {
       || !parent.certificate.plan.name.startsWith(this.config.namePrefix)
       || canonicalGrowthJson(parent.owner) !== canonicalGrowthJson(this.config.owner)
       || parent.certificate.schemaDigest !== certificate.schemaDigest
-      || json(parent.certificate.source) !== json(certificate.source)
+      // The parent certificate is an independently verified creation
+      // certificate. Its source uses the creation digest keys while a revision
+      // certificate uses the revision source keys, so they are not comparable;
+      // the exact parent binding is already proven by
+      // certificate.parent.certificateDigest above.
       || parent.tools.length < 1 || parent.tools.length > 16) {
       throw new RevisionCapabilityRejected('parent-adoption-mismatch')
     }
@@ -174,6 +203,18 @@ export class RevisionCapabilityRuntime {
     } catch { return false }
   }
 
+  /** Surfaces the exact ineligible reason (for example a parent binding mismatch). */
+  private rejectAdoption(planId: string): never {
+    try {
+      const inspection = this.ports.inspect(planId)
+      this.assertCandidate(planId, inspection)
+      this.assertParent(inspection.certificate, this.ports.parent(inspection.certificate.parent.planId))
+    } catch (error) {
+      if (error instanceof RevisionCapabilityRejected) throw error
+    }
+    throw new RevisionCapabilityRejected('candidate-ineligible')
+  }
+
   async adopt(planId: string, signal: AbortSignal): Promise<RevisionCapabilityAdoptionRecord> {
     return this.enqueue(async () => {
       const controller = new AbortController()
@@ -183,7 +224,7 @@ export class RevisionCapabilityRuntime {
       if (signal.aborted) cancel()
       const activeSignal = controller.signal
       try {
-        if (!this.eligible(planId)) throw new RevisionCapabilityRejected('candidate-ineligible')
+        if (!this.eligible(planId)) this.rejectAdoption(planId)
         activeSignal.throwIfAborted()
         const inspection = this.ports.inspect(planId)
         const certificate = inspection.certificate
@@ -392,10 +433,18 @@ export class RevisionCapabilityRuntime {
     const tool = version.tools.find(item => item.name === toolAlias)
     if (!tool) fail('capability unavailable')
     const encoded = json(args, this.config.maxInputBytes)
+    // Delivery attests the native JSON.parse/JSON.stringify normalization; use
+    // the same text and digest so a witness exists for every key order.
+    const argumentsJson = JSON.stringify(args)
+    if (Buffer.byteLength(argumentsJson) > this.config.maxInputBytes) fail('input exceeds bound')
     const key = sha(json({ entryId, sessionId: String(exec.agent.session.id), callId: String(exec.callId),
       toolName: toolAlias }))
-    const call = this.journal.claimCall({ entryId, key, argumentsDigest: sha(encoded), toolAlias,
-      versionPlanId: version.planId })
+    this.ports.assertCaller(exec)
+    const foreground = this.ports.inspectCall?.({ entry: record.entry, current: version }, exec, toolAlias, argumentsJson)
+    if (foreground !== undefined && (foreground.task.sessionId !== String(exec.agent.session.id)
+      || foreground.call.id !== String(exec.callId))) fail('foreground call differs from current execution')
+    const call = this.journal.claimCall({ entryId, key, argumentsDigest: revisionCallArgumentsDigest(args), toolAlias,
+      versionPlanId: version.planId, ...(foreground === undefined ? {} : { foreground }) })
     if (!call.created) {
       if (call.call.status === 'completed') return call.call.result
       fail('revision call already claimed or unknown')

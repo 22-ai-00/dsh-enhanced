@@ -75,7 +75,7 @@ export { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-
 class SourceGrowthNativeMismatchError extends Error {}
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
-  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'allowedModes', 'repository', 'baseline', 'creation', 'revision', 'revisionBenefit', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
+  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'allowedModes', 'repository', 'baseline', 'creation', 'revision', 'revisionBenefit', 'allowReviewOnlyFirstAdoption', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
   if (value === null || typeof value !== 'object' || Array.isArray(value) || build === undefined
     || Object.keys(value).some(key => !allowed.has(key))
     || ![value.authorityId, value.ownerRouteId, value.principalId, value.repository, value.workspace, value.preset].every(text => typeof text === 'string' && text !== '' && text.normalize('NFC').trim() === text && text.length <= 4096 && !/[\p{Cc}]/u.test(text))
@@ -97,6 +97,9 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
   if (value.creation !== undefined) validateSourceCreationGrant(value.creation)
   if (value.revision !== undefined) validateSourceRevisionGrant(value.revision)
   if (value.revisionBenefit !== undefined) validateRevisionBenefitContract(value.revisionBenefit)
+  if (value.allowReviewOnlyFirstAdoption !== undefined && typeof value.allowReviewOnlyFirstAdoption !== 'boolean') {
+    throw new Error('plugin-control-plane: invalid review-only adoption flag')
+  }
   if (value.revisionBenefit !== undefined && value.revision?.benefit?.contractDigest !== revisionBenefitContractDigest(value.revisionBenefit)) {
     throw new Error('plugin-control-plane: revisionBenefit contract does not match the revision grant benefit pin')
   }
@@ -167,6 +170,12 @@ export class SourceJobRuntime {
     adoptionTimeoutMs?: number
     /** Host-owned P1-4 benefit reconciliation, driven by this runtime's existing cron tick. */
     reconcileRevisionBenefits?: () => void
+    /**
+     * Explicit opt-in for one review-only first adoption when a benefit contract
+     * is pinned but no candidate evidence can exist before the entry is mounted.
+     * Default false keeps the contract's non-inferior-before-adoption semantics.
+     */
+    allowReviewOnlyFirstAdoption?: boolean
     /** Observe requests on the native scheduler wake and admit them inside its budgeted occurrence. */
     hasOwnerInstructionRequests?: () => boolean
     drainOwnerInstructionRequests?: (signal: AbortSignal) => Promise<void>
@@ -280,10 +289,19 @@ export class SourceJobRuntime {
     }
     const benefit = job.intent.revision?.grant.benefit
     if (benefit !== undefined) {
+      // Default contract semantics: a pinned benefit requires a recorded
+      // non-inferior outcome before adoption. Removing the benefit contract
+      // while the grant keeps its pin fails closed instead of silently
+      // degrading to review-only adoption.
+      if (this.options.reconcileRevisionBenefits === undefined) return false
       const outcome = this.options.store.inspectRevisionBenefitOutcome(planId)
-      if (outcome === undefined || outcome.status !== 'non-inferior' || outcome.contractDigest !== benefit.contractDigest) {
-        return false
+      if (outcome === undefined) {
+        // Only an explicit owner opt-in may adopt once before candidate
+        // evidence can exist; the reconcile pass then proves non-inferior or
+        // rolls the revision back at its bounded observation deadline.
+        return this.options.allowReviewOnlyFirstAdoption === true
       }
+      if (outcome.contractDigest !== benefit.contractDigest || outcome.status !== 'non-inferior') return false
     }
     return true
   }

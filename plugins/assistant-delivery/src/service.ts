@@ -1033,6 +1033,20 @@ const toolApprovalIdentityBytes = 512
 /** Bounded owner-ordered linked fallback list for one report route. */
 const maxLinkedReportFallback = 8
 
+/**
+ * Host-native tool arguments normalized exactly as Delivery attests them:
+ * JSON.parse then JSON.stringify, preserving key order and rejecting any
+ * non-object payload. Other components must hash this exact text instead of
+ * re-canonicalizing it, otherwise a foreground witness cannot be matched.
+ */
+export function normalizeForegroundToolArguments(raw: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    return JSON.stringify(parsed)
+  } catch { return undefined }
+}
+
 function inspectUnsettledNativeCall(
   events: readonly SessionEvent[], turn: number, callId: string,
   toolName: string, argumentsJson: string, argumentBytes = toolApprovalArgumentBytes,
@@ -1060,12 +1074,8 @@ function inspectUnsettledNativeCall(
     || currentStep.seq >= call.seq || currentStep.data.step !== call.data.step
     || events.filter(event => event.type === 'step/start' && event.data.turn === turn
       && event.data.step === call.data.step).length !== 1) return undefined
-  let normalizedArguments: string
-  try {
-    const parsed: unknown = JSON.parse(call.data.arguments)
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
-    normalizedArguments = JSON.stringify(parsed)
-  } catch { return undefined }
+  const normalizedArguments = normalizeForegroundToolArguments(call.data.arguments)
+  if (normalizedArguments === undefined) return undefined
   const argumentsDigest = createHash('sha256').update(normalizedArguments).digest('hex')
   if (argumentsDigest !== createHash('sha256').update(argumentsJson).digest('hex')) return undefined
   const eventDigest = createHash('sha256').update(JSON.stringify(['tool/call', call.seq,

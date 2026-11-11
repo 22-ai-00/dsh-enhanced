@@ -10,6 +10,7 @@ import { canonicalGrowthJson, type PluginCreationVerificationCertificate,
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RevisionCapabilityJournal, verifyRevisionCapabilityAdoptionReceipt } from '../src/revision-capability-journal.js'
 import { RevisionCapabilityRuntime } from '../src/revision-capability-runtime.js'
+import { autoRollbackInferiorRevision } from '../src/revision-capability-feedback.js'
 import type { CreationCapabilityObservation, CreationCapabilityTool } from '../src/creation-capability-types.js'
 import type { RevisionCapabilityConfig, RevisionCapabilityPorts } from '../src/revision-capability-types.js'
 
@@ -61,7 +62,8 @@ function certificate(protocol: 'assistant-growth/creation-verification/v1' | 'as
     .toString('base64url') } as PluginCreationVerificationCertificate | PluginRevisionVerificationCertificate
 }
 
-function fixture(options: { maxAdoptions?: number; maxRollbacks?: number; rollbackExpiresAt?: number } = {}) {
+function fixture(options: { maxAdoptions?: number; maxRollbacks?: number; rollbackExpiresAt?: number
+  mismatchedParentCertificate?: boolean } = {}) {
   const dir = root(), base = Date.now()
   const pair = generateKeyPairSync('ed25519')
   const keyPath = join(dir, 'revision.key')
@@ -75,14 +77,20 @@ function fixture(options: { maxAdoptions?: number; maxRollbacks?: number; rollba
   const journal = new RevisionCapabilityJournal({ path: join(dir, 'revision-adoptions.sqlite'), config })
   const parentArtifact = Buffer.from('parent artifact'), revisionArtifact = Buffer.from('revision artifact')
   const secondArtifact = Buffer.from('second revision artifact')
-  const parentCertificate = certificate('assistant-growth/creation-verification/v1', 'parent-plan',
-    parentArtifact, undefined, base) as PluginCreationVerificationCertificate
+  // Real creation certificate shape: source carries the creation digests, which
+  // are unrelated to the revision certificate's source keys.
+  const parentCertificate = { ...certificate('assistant-growth/creation-verification/v1', 'parent-plan',
+    parentArtifact, undefined, base), source: { referenceDigest: d('7'), ownerDigest: d('8'),
+    growthRunDigest: d('9') } } as PluginCreationVerificationCertificate
   const parentReceiptJson = canonicalGrowthJson({ protocol: 'dsh-created-capability-adoption/v1',
     authorityId: 'owner-creation', authorityDigest: d('a'), keyId: 'creation-key', planId: 'parent-plan',
     planDigest: parentCertificate.plan.digest, verificationDigest: sha(canonicalGrowthJson(parentCertificate)),
     artifactSha256: sha(parentArtifact), artifactBytes: parentArtifact.length, source: parentCertificate.source,
     schemaDigest, toolsDigest: d('f'), expiresAt: base + 120_000, adoptedAt: base - 500, signature: 'A'.repeat(86) })
-  const parent = { planId: 'parent-plan', name: 'rsi-revision-tool', owner, certificate: parentCertificate,
+  const parent = { planId: 'parent-plan', name: 'rsi-revision-tool', owner,
+    certificate: options.mismatchedParentCertificate === true
+      ? { ...parentCertificate, plan: { ...parentCertificate.plan, id: 'other-parent-plan' } }
+      : parentCertificate,
     artifact: parentArtifact, tools, receiptJson: parentReceiptJson, receiptDigest: sha(parentReceiptJson) }
   const candidate = (planId: string, artifact: Buffer) => {
     const revisionCertificate = certificate('assistant-growth/revision-verification/v1', planId, artifact,
@@ -130,6 +138,16 @@ function fixture(options: { maxAdoptions?: number; maxRollbacks?: number; rollba
     recheckExecution: async () => {},
     matchesExecution: () => true,
     assertCaller: () => {},
+    inspectCall: (_record, execution, toolAlias, argumentsJson) => {
+      const sessionId = String(execution.agent!.session.id), callId = String(execution.callId)
+      return { protocol: 'assistant-delivery/foreground-tool-call/v1',
+        task: { protocol: 'assistant-delivery/foreground-task/v1', inboxId: 'inbox-' + callId, sessionId,
+          scope: { workspace: owner.workspace, preset: owner.agentPreset },
+          owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion },
+          binding: { id: 'binding-' + callId, version: 1, generation: 1 }, dispatchedAt: Date.now() - 10 },
+        turn: 1, call: { id: callId, toolName: toolAlias, eventSeq: 1, eventDigest: d('1'),
+          argumentsDigest: sha(argumentsJson) } }
+    },
   }
   const ctx = new Context(); contexts.push(ctx)
   const runtime = new RevisionCapabilityRuntime({ ctx, config, journal, ports, regressionRequired: false })
@@ -173,9 +191,86 @@ describe('revision capability adoption', () => {
     expect(await call()).toMatchObject({ value: { answer: 'revised' } })
     expect(f.journal.listCallEvidence(f.entryId())).toMatchObject([{ versionPlanId: 'revision-plan-a',
       toolAlias: 'evolved_rsi_revision_0', status: 'completed' }])
+    const evidence = f.journal.listCallEvidence(f.entryId())[0]!
+    expect(evidence).toMatchObject({ attribution: 'foreground', role: 'revision',
+      artifactSha256: sha(f.revisionArtifact), schemaDigest, adoptedAt: entry.current.adoptedAt })
+    expect(evidence.foreground).toMatchObject({ protocol: 'assistant-delivery/foreground-tool-call/v1',
+      task: { inboxId: 'inbox-call-one', sessionId: 'session-1' },
+      call: { id: 'call-one', toolName: 'evolved_rsi_revision_0' } })
+    // Real journal benefit evidence for the exact adopted version.
+    const benefit = f.runtime.inspectBenefitEvidence('revision-plan-a')!
+    expect(benefit.version).toMatchObject({ planId: 'revision-plan-a', role: 'revision',
+      artifactSha256: sha(f.revisionArtifact), receiptDigest: entry.current.receiptDigest })
+    expect(benefit.calls).toHaveLength(1)
+    expect(benefit.calls[0]).toMatchObject({ key: evidence.key, attribution: 'foreground' })
     expect(f.counts()).toEqual({ discoveries: 1, invokes: 1 })
     await f.runtime.close()
     expect(f.ctx.tools.get('evolved_rsi_revision_0')).toBeUndefined()
+  })
+
+  test('adopts with a real creation-shaped parent certificate whose source differs from the revision source', async () => {
+    const f = fixture()
+    expect(f.parent.certificate.protocol).toBe('assistant-growth/creation-verification/v1')
+    await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    await f.runtime.start()
+    const record = await f.runtime.adopt('revision-plan-a', new AbortController().signal)
+    expect(record).toMatchObject({ status: 'active', parentPlanId: 'parent-plan' })
+    await f.runtime.close()
+  })
+
+  test('still rejects a parent certificate whose digest does not match the signed parent binding', async () => {
+    const f = fixture({ mismatchedParentCertificate: true })
+    await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    await f.runtime.start()
+    // The readiness/admission gate re-asserts the exact parent binding and
+    // refuses the candidate; removing the source comparison did not remove the
+    // certificate-digest binding check.
+    expect(f.runtime.eligible('revision-plan-a')).toBe(false)
+    await expect(f.runtime.adopt('revision-plan-a', new AbortController().signal))
+      .rejects.toThrow('parent-adoption-mismatch')
+    await f.runtime.close()
+  })
+
+  test('mirrors Delivery argument normalization so multi-key out-of-order calls stay attributed', async () => {
+    const f = fixture()
+    await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    await f.runtime.start()
+    await f.runtime.adopt('revision-plan-a', new AbortController().signal)
+    const args = { zeta: 'last', alpha: { beta: 2, alpha: 1 }, nested: ['b', 'a'] }
+    await expect(f.ctx.tools.get(tools[0]!.name)!.execute(args, f.exec('multi-key'))).resolves.toBeDefined()
+    const evidence = f.journal.listCallEvidence(f.entryId())[0]!
+    expect(evidence.attribution).toBe('foreground')
+    // Delivery hashes JSON.parse→JSON.stringify; the runtime must send and store
+    // that exact normalization instead of a canonical key-sorted serializer.
+    const expected = createHash('sha256').update(JSON.stringify(args)).digest('hex')
+    expect(evidence.foreground!.call.argumentsDigest).toBe(expected)
+    await f.runtime.close()
+  })
+
+  test('a pinned inferior benefit outcome rolls the active entry back to its exact parent', async () => {
+    const f = fixture()
+    await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    await f.runtime.start()
+    await f.runtime.adopt('revision-plan-a', new AbortController().signal)
+    const entryId = f.entryId(), pinned = d('9')
+    const decision = (status: 'non-inferior' | 'inferior' | 'insufficient') => autoRollbackInferiorRevision({
+      runtime: f.runtime, planId: 'revision-plan-a', benefitConfigured: true, pinnedContractDigest: pinned,
+      growthRunCreatedAt: Date.now() - 60_000, observeWindowMs: 0, now: Date.now(),
+      outcome: { contractDigest: pinned, status, reason: status === 'inferior' ? 'failure-rate' : 'fixture' },
+    })
+    // Non-inferior, insufficient and missing outcomes never change the entry.
+    expect(await decision('non-inferior')).toMatchObject({ rolledBack: false, reason: 'outcome:non-inferior' })
+    expect(await decision('insufficient')).toMatchObject({ rolledBack: false, reason: 'outcome:insufficient' })
+    expect(await autoRollbackInferiorRevision({ runtime: f.runtime, planId: 'revision-plan-a',
+      benefitConfigured: true, pinnedContractDigest: pinned, growthRunCreatedAt: Date.now() - 60_000,
+      observeWindowMs: 0, now: Date.now(), outcome: undefined })).toMatchObject({ rolledBack: false, reason: 'outcome-missing' })
+    expect(f.journal.inspectEntry(entryId)!.entry.currentPlanId).toBe('revision-plan-a')
+    // A pinned inferior outcome under the same digest performs the exact CAS rollback.
+    const rolled = await decision('inferior') as { rolledBack: boolean; record?: { fromPlanId: string; toPlanId: string } }
+    expect(rolled.rolledBack).toBe(true)
+    expect(rolled.record).toMatchObject({ fromPlanId: 'revision-plan-a', toPlanId: 'parent-plan' })
+    expect(f.journal.inspectEntry(entryId)!.entry.currentPlanId).toBe('parent-plan')
+    await f.runtime.close()
   })
 
   test('never switches an in-flight call mid-flight: it keeps its claim-time version across an exact rollback', async () => {
