@@ -38,7 +38,8 @@ const evidence = () => ({ schemaVersion: 3 as const, kind: 'dsh-source-prepared-
 
 /** Orchestration boundary only: durable source/reviewer ports are simulated.
  * The real revision enqueue, certificates and native definition are exercised
- * in source-create-service.spec.ts; these tests inspect the dispatched signals. */
+ * in source-create-service.spec.ts and source-create-revision.spec.ts; these
+ * tests inspect the dispatched signals. */
 function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: number; revision?: boolean; regression?: boolean;
   sourceBuild?: sourceBuild.SourceBuildConfig; create?: boolean; creationReview?: boolean; workItem?: boolean
   revisionAdoption?: boolean; revisionAdoptionEligible?: boolean; revisionAdoptionFailure?: boolean

@@ -1165,9 +1165,11 @@ describe('release version workflow', () => {
     expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm run test:packages')
     expect(manifest.scripts['test:packages']).toBe('pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000')
     // Lead with the two slowest packages: in directory order pnpm --no-sort only reached
-    // plugin-control-plane after ~297s and that package alone needs ~1052s, so it and
-    // lark-channel run in dedicated slots from t=0 while the remainder keeps two in flight.
-    expect(manifest.scripts['test:packages:control-plane']).toBe('pnpm --filter @dsh-enhanced/plugin-control-plane run test --testTimeout=15000')
+    // plugin-control-plane after ~297s, so it and lark-channel run in dedicated slots from
+    // t=0 while the remainder keeps two in flight. The pcp lane alone raises its vitest
+    // workers to 3 so the two halves of its former single spec file run at once; every other
+    // package keeps the repository-wide VITEST_MAX_WORKERS of 2.
+    expect(manifest.scripts['test:packages:control-plane']).toBe('VITEST_MAX_WORKERS=3 pnpm --filter @dsh-enhanced/plugin-control-plane run test --testTimeout=15000')
     expect(manifest.scripts['test:packages:lark-channel']).toBe('pnpm --filter @dsh-enhanced/lark-channel run test --testTimeout=15000')
     expect(manifest.scripts['test:packages:rest']).toBe("pnpm --recursive --no-sort --if-present --workspace-concurrency=2 --filter '!@dsh-enhanced/plugin-control-plane' --filter '!@dsh-enhanced/lark-channel' run test --testTimeout=15000")
     expect(manifest.scripts['check:quick']).toBe('pnpm run validate && pnpm run lint && pnpm --filter "{origin/dev}..." --if-present run build && pnpm --filter "{origin/dev}..." --if-present run typecheck && pnpm --filter "{origin/dev}" --if-present run test --testTimeout=15000')

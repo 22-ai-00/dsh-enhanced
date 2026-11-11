@@ -143,11 +143,13 @@ jobs:
         run: |
           set -o pipefail
           # Lead with the two slowest packages. In directory order pnpm --no-sort
-          # only starts plugin-control-plane after ~297s, and that package alone
-          # needs ~1052s, so it takes a background slot from t=0 instead. The two
-          # slots plus the two-pack-wide foreground keep four packages running,
-          # the same load as before. plugin-control-plane is the critical path, so the two
-          # sibling lanes run at lower CPU priority and only use cores it is not using.
+          # only starts plugin-control-plane after ~297s, so it takes a background
+          # slot from t=0 instead. Its former ~1046s single spec file now lives in
+          # two files; the lane's own script raises VITEST_MAX_WORKERS to 3 so both
+          # halves run at once while the global worker limit stays 2. The two slots
+          # plus the two-pack-wide foreground keep four package slots busy, and
+          # plugin-control-plane is still the critical path, so the two sibling
+          # lanes run at lower CPU priority and only use cores it is not using.
           control_plane_log="${RUNNER_TEMP}/package-tests-plugin-control-plane.log"
           lark_channel_log="${RUNNER_TEMP}/package-tests-lark-channel.log"
           rest_log="${RUNNER_TEMP}/package-tests-rest.log"

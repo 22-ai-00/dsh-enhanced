@@ -1,5 +1,6 @@
-// Real generator, Git worktrees, Control Plane/Automations/Policy and SQLite.
-// Delivery/Evaluation and native build/behavior observations use fixture ports.
+// Mechanical split of the former source-create-service.spec.ts (part 1): Linux creation
+// receipts, creation planning, revision admission/recovery and pre-dispatch revision faults.
+
 import { execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -14,11 +15,8 @@ import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk }
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
-  verifyPluginRevisionVerificationCertificate, verifyPluginRevisionRegressionCertificate,
-  pluginRevisionVerificationSigningPayload, pluginRevisionRegressionSigningPayload, type PluginRevisionRegressionCertificate, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate,
-  type WorkItemSourceGrowthRunBinding, growthObjectDigest, validateWorkItemSourceGrowthRunBinding, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
-import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask, OwnerWorkItemLearningTask } from '@dsh-enhanced/assistant-delivery'
+import { isSourceOwnerContinuation, pluginCreationVerificationSigningPayload, anySourceGrowthRunDigest as sourceGrowthRunDigest, SourceGrowthRunUnavailableError, verifyPluginRevisionVerificationCertificate, pluginRevisionVerificationSigningPayload, type RevisionRegressionAcceptanceAuthorityRef, type RevisionAcceptanceAuthorityRef, type PluginRevisionVerificationCertificate, growthObjectDigest, type SourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { ForegroundToolCallAttestation, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { linuxRuntimeDigest, type LinuxRepositoryRunnerConfig, type LinuxRepositoryRunnerResult, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import { AssistantVerifierService, compileRevisionReviewConfig, type PluginBehaviorRunnerInput, type RevisionReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
@@ -38,15 +36,20 @@ import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.ts
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
+
 vi.mock('../src/linux-source-build.ts', async original => ({ ...await original<typeof linuxBuild>(), runLinuxPreparedChecks: vi.fn() }))
+
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn() }))
+
 const linuxTransport = vi.hoisted(() => ({ inspect: vi.fn<() => Promise<LinuxRepositoryRunnerResult | undefined>>(),
   run: vi.fn(), close: vi.fn(async () => undefined), verify: vi.fn(async (runtime: LinuxRuntime) => runtime),
   adoptionVerify: vi.fn(async () => undefined) }))
+
 vi.mock('@dsh-enhanced/assistant-verifier/linux-behavior-runtime', async original => ({
   ...await original<typeof import('@dsh-enhanced/assistant-verifier/linux-behavior-runtime')>(),
   verifyLinuxPluginBehaviorAdoptionRuntime: linuxTransport.adoptionVerify,
 }))
+
 vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await original<typeof import('@dsh-enhanced/assistant-isolation')>(),
   verifyLinuxRuntime: linuxTransport.verify,
   LinuxRepositoryRunner: class {
@@ -58,7 +61,9 @@ vi.mock('@dsh-enhanced/assistant-isolation', async original => ({ ...await origi
     constructor(config: LinuxRepositoryRunnerConfig) { this.runtimeDigest = linuxRuntimeDigest(config.runtime) }
   },
 }))
+
 const runnerRun = vi.hoisted(() => vi.fn())
+
 // Both CP's package export and Verifier's relative import resolve to this
 // built module. Stub only observation, leaving the reviewer and signer real.
 vi.mock('../../assistant-verifier/lib/plugin-behavior-runner.js', () => ({
@@ -67,13 +72,20 @@ vi.mock('../../assistant-verifier/lib/plugin-behavior-runner.js', () => ({
     close = async () => undefined
   },
 }))
+
 const candidateSchemas = [{ name: 'read_test', description: 'candidate supplied description',
   parameters: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' } }, required: ['query'] } }]
+
 const candidateEnvironment = { node: 'v22.19.0', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
+
 const candidateSchemaDigest = createHash('sha256').update(JSON.stringify(candidateSchemas)).digest('hex')
+
 const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
+
 const cleanup: Array<() => Promise<void>> = []
+
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
+
 
 class InstructionReviewAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -99,6 +111,7 @@ class InstructionReviewAdapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
+
 
 async function fixture(withVerification = false, withAdoption = false, withRetention = false, withRevision = false, withRegression = false, _withLinux = false, withWorkItems = false, withRealRevisionReview = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
@@ -365,6 +378,7 @@ async function fixture(withVerification = false, withAdoption = false, withReten
     advance: (milliseconds = 1_100) => { now += milliseconds } }
 }
 
+
 function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
   privateKey: KeyObject = f.signing.privateKey,
   alter?: (body: Omit<PluginCreationVerificationCertificate, 'signature'>) => void): PluginCreationVerificationCertificate {
@@ -405,6 +419,7 @@ function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: strin
   return { ...unsigned, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(unsigned)), privateKey).toString('base64url') }
 }
 
+
 function signedAdoptionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string): PluginCreationVerificationCertificate {
   return signedCertificate(f, planId, f.signing.privateKey, body => {
     body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment
@@ -417,6 +432,7 @@ function signedAdoptionCertificate(f: Awaited<ReturnType<typeof fixture>>, planI
     }
   })
 }
+
 
 function installCandidateRunner(f: Awaited<ReturnType<typeof fixture>>): void {
   runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string;
@@ -432,6 +448,7 @@ function installCandidateRunner(f: Awaited<ReturnType<typeof fixture>>): void {
         result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
   })
 }
+
 
 async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>, verifierExtras: Record<string, unknown> = {}) {
   const context = new Context()
@@ -449,6 +466,7 @@ async function startCapabilityHost(f: Awaited<ReturnType<typeof fixture>>, verif
     runsPath: join(f.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
   return { context, service: new PluginControlPlaneService(context, f.config) }
 }
+
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('restores fresh Linux v1 adoption after its build reader is initialized without redispatch or renewed call quota', async () => {
   // Real Git preparation, adoption, cold source checks and restored calls share
@@ -545,6 +563,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('restores fresh L
   console.info('adoption recovery phases', diagnostics)
 }, 60_000)
 
+
 // The transport is controlled here; real native receipt/behavior acceptance is
 // separate. The generator, owner fence, source jobs, artifact store and signing are real.
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('verifies Linux creation through its original build receipt without replay or adoption', async () => {
@@ -583,6 +602,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('verifies Linux c
   expect(f.config.creationCapabilities).toBeUndefined()
 })
 
+
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each([
   'missing', 'receipt', 'runtime', 'contract', 'unknown', 'live', 'exit', 'path', 'artifact', 'extra-artifact', 'log',
 ] as const)('rejects Linux creation when original build evidence is %s', async fault => {
@@ -608,6 +628,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each([
   expect(linuxTransport.run).not.toHaveBeenCalled()
 })
 
+
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['cancel', 'owner', 'expiry', 'trust'] as const)(
   'fences Linux build receipt reads against concurrent %s changes', async fault => {
     const f = await fixture(true, false, false, false, false, true)
@@ -628,6 +649,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['cancel', '
     expect(linuxTransport.run).not.toHaveBeenCalled()
     expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
   })
+
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('preflights matching Linux build and adoption backends and retains undelivered authority gates', async () => {
   const f = await fixture(true, true, false, false, false, true)
@@ -660,6 +682,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('preflights match
     .toThrow(/invalid source adoption config/)
 })
 
+
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(
   'rejects a signed Linux creation certificate with mismatched %s provenance before discovery', async fault => {
     const f = await fixture(true, true, false, false, false, true)
@@ -683,6 +706,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol',
     expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
     expect(linuxTransport.run).not.toHaveBeenCalled()
   })
+
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['missing', 'receipt'] as const)(
   'fresh Linux adoption rechecks the original successful build after discovery and closes %s receipts without redispatch', async fault => {
@@ -710,6 +734,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['missing', 
     expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
     expect(linuxTransport.run).not.toHaveBeenCalled()
   })
+
 
 it('automatically verifies a pinned task creation after prepare and retains exact signed evidence without replay', async () => {
   const f = await fixture(true)
@@ -744,6 +769,7 @@ it('automatically verifies a pinned task creation after prepare and retains exac
   f.advance(300_000)
   expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
 }, 60_000)
+
 
 it.each(['correction', 'withdrawal'] as const)(
   'native task creation verifies, adopts and revokes its live wrapper after %s', async change => {
@@ -891,6 +917,7 @@ it.each(['correction', 'withdrawal'] as const)(
     f.notifyTaskChange()
   }, 60_000)
 
+
 it.for([
   { backend: 'docker', change: 'correction' }, { backend: 'docker', change: 'withdrawal' },
   { backend: 'linux-native', change: 'correction' }, { backend: 'linux-native', change: 'withdrawal' },
@@ -994,6 +1021,7 @@ it.for([
     expect(runnerRun).toHaveBeenCalledTimes(3)
   })
 
+
 it('preflights independent adoption key, owner and namespace before constructing a Host service', async () => {
   const f = await fixture(true, true)
   const config = f.config, capability = f.capability!
@@ -1006,6 +1034,7 @@ it('preflights independent adoption key, owner and namespace before constructing
   expect(() => normalizeControlPlaneConfig({ ...config, creationCapabilities: { ...capability,
     namePrefix: 'other-' } })).toThrow(/does not match its authenticated creation lane/)
 }, 60_000)
+
 
 it.each(['schema-digest', 'environment', 'schemas'] as const)(
   'refuses %s drift between signed verification and isolated discovery without redispatch', async mismatch => {
@@ -1031,6 +1060,7 @@ it.each(['schema-digest', 'environment', 'schemas'] as const)(
     expect(f.service.inspectCreatedCapability(planId)?.status).toBe('unknown')
   }, 60_000)
 
+
 it('retains unknown verification without another native model dispatch and leaves old unpinned creates pending', async () => {
   const f = await fixture(true)
   const job = await f.service.enqueueSourceJob(f.request)
@@ -1044,6 +1074,7 @@ it('retains unknown verification without another native model dispatch and leave
   expect(f.verification).toHaveBeenCalledOnce()
   expect(f.store.getSourcePlan(planId).status).toBe('pending-approval')
 }, 60_000)
+
 
 it('keeps a dispatched claim visible and excludes it from continuation while the verifier is in flight', async () => {
   const f = await fixture(true)
@@ -1075,6 +1106,7 @@ it('keeps a dispatched claim visible and excludes it from continuation while the
   expect(f.verification).toHaveBeenCalledOnce()
 }, 60_000)
 
+
 it('stores only a bounded rejection code and does not dispatch the verifier again', async () => {
   const f = await fixture(true)
   f.verification.mockResolvedValue({ status: 'rejected', reason: 'case-mismatch' })
@@ -1086,6 +1118,7 @@ it('stores only a bounded rejection code and does not dispatch the verifier agai
   f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
   expect(f.verification).toHaveBeenCalledOnce()
 }, 60_000)
+
 
 it('does not retrofit an old run lacking the pre-author policy and rejects a changed pinned policy', async () => {
   const f = await fixture(true)
@@ -1105,6 +1138,7 @@ it('does not retrofit an old run lacking the pre-author policy and rejects a cha
   expect(f.verification).not.toHaveBeenCalled()
 }, 60_000)
 
+
 it('rejects a foreign signature and source correction before certificate use', async () => {
   const f = await fixture(true), foreign = generateKeyPairSync('ed25519')
   f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId, foreign.privateKey) }))
@@ -1116,6 +1150,7 @@ it('rejects a foreign signature and source correction before certificate use', a
   expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
   expect(f.verification).toHaveBeenCalledOnce()
 }, 60_000)
+
 
 it.each(['plan', 'pack', 'reference', 'model', 'budget', 'schema', 'policy'] as const)(
   'rejects a signed certificate with a mismatched %s binding', async mismatch => {
@@ -1138,6 +1173,7 @@ it.each(['plan', 'pack', 'reference', 'model', 'budget', 'schema', 'policy'] as 
     expect(f.verification).toHaveBeenCalledOnce()
   }, 60_000)
 
+
 it('refuses a changed prepared worktree after independent result and never replays the claim', async () => {
   const f = await fixture(true)
   f.verification.mockImplementation(async request => {
@@ -1154,6 +1190,7 @@ it('refuses a changed prepared worktree after independent result and never repla
   f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
   expect(f.verification).toHaveBeenCalledOnce()
 }, 60_000)
+
 
 it('runs an ordinary owner failure through native scheduling into a checked new-plugin plan', async () => {
   const f = await fixture(), originalCatalog = await readFile(join(f.repository, 'plugins/README.md'), 'utf8')
@@ -1196,6 +1233,7 @@ it('runs an ordinary owner failure through native scheduling into a checked new-
   expect(() => f.service.inspectPreparedCreation(plan.id)).toThrow('task repair source or owner changed')
 }, 30_000)
 
+
 it('continues a task creation from a new session with the original owner, run and deadlines', async () => {
   const f = await fixture()
   const original = f.store.getOwnerTaskFailureReference(f.request.gapId)!.owner
@@ -1214,6 +1252,7 @@ it('continues a task creation from a new session with the original owner, run an
   expect(f.service.inspectPreparedCreation(prepared.planId!).reference.owner).toEqual(original)
 }, 30_000)
 
+
 it('rejects an unbound or caller-spoofed task creation before durable enqueue', async () => {
   const f = await fixture()
   const { growthRun: _omitted, ...unbound } = f.request
@@ -1224,6 +1263,7 @@ it('rejects an unbound or caller-spoofed task creation before durable enqueue', 
   expect(f.store.listSourceJobs()).toHaveLength(0)
   expect(f.inspectGrowthRun).toHaveBeenCalled()
 }, 30_000)
+
 
 it('binds an idempotency key to the exact run and budget', async () => {
   const f = await fixture()
@@ -1236,6 +1276,7 @@ it('binds an idempotency key to the exact run and budget', async () => {
   await expect(f.service.enqueueSourceJob({ ...f.request, growthRun: replacement })).rejects.toThrow('source job idempotency conflict')
   expect(f.store.getSourceJob(first.id)?.intent.creation?.growthRun).toEqual(f.growthRun)
 }, 30_000)
+
 
 it('keeps a queued creation pending without a producer and resumes via Host readiness nudge', async () => {
   const f = await fixture()
@@ -1260,6 +1301,7 @@ it('keeps a queued creation pending without a producer and resumes via Host read
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
   await unregister()
 }, 30_000)
+
 
 it('revokes and drains a claimed growth creation when its producer is disposed', async () => {
   const f = await fixture()
@@ -1291,6 +1333,7 @@ it('revokes and drains a claimed growth creation when its producer is disposed',
   await unregister()
 }, 30_000)
 
+
 it.each(['before-native-ack', 'after-native-ack'] as const)('recovers persisted queued rearm %s without a second job', async stage => {
   const f = await fixture()
   const queued = await f.service.enqueueSourceJob(f.request)
@@ -1321,6 +1364,7 @@ it.each(['before-native-ack', 'after-native-ack'] as const)('recovers persisted 
   await unregister()
 }, 30_000)
 
+
 it('rearms when the new native occurrence fires before its Control Plane bind', async () => {
   const f = await fixture()
   const queued = await f.service.enqueueSourceJob(f.request)
@@ -1347,6 +1391,7 @@ it('rearms when the new native occurrence fires before its Control Plane bind', 
   await unregister()
 }, 30_000)
 
+
 it('does not trust a different native definition during queued rearm recovery', async () => {
   const f = await fixture()
   const queued = await f.service.enqueueSourceJob(f.request)
@@ -1368,6 +1413,7 @@ it('does not trust a different native definition during queued rearm recovery', 
   await unregister()
 }, 30_000)
 
+
 it('expires an unacknowledged rearm without carrying its prior native tuple into a failed row', async () => {
   const f = await fixture()
   const queued = await f.service.enqueueSourceJob(f.request)
@@ -1382,6 +1428,7 @@ it('expires an unacknowledged rearm without carrying its prior native tuple into
   expect(f.store.getSourceJob(queued.id)?.previousDefinitionHash).toBeUndefined()
   await unregister()
 }, 30_000)
+
 
 it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] as const)('rejects late %s drift before committing a creation plan', async drift => {
   const f = await fixture()
@@ -1404,6 +1451,7 @@ it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] 
   expect(f.git('worktree', 'list', '--porcelain')).not.toContain(`worktree ${worktree}\n`)
   expect(f.store.getGap(f.request.gapId).status).toBe('open')
 }, 30_000)
+
 
 function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
   alter?: (body: Omit<PluginRevisionVerificationCertificate, 'signature'>) => void): PluginRevisionVerificationCertificate {
@@ -1441,6 +1489,7 @@ function signedRevisionCertificate(f: Awaited<ReturnType<typeof fixture>>, planI
   return { ...body, signature: sign(null, Buffer.from(pluginRevisionVerificationSigningPayload(body)), f.signing.privateKey).toString('base64url') }
 }
 
+
 async function revisionFixture(withRegression = false, withLinux = false, withRealRevisionReview = false) {
   const f = await fixture(true, true, true, true, withRegression, withLinux, false, withRealRevisionReview)
   f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedAdoptionCertificate(f, request.planId) }))
@@ -1468,6 +1517,7 @@ async function revisionFixture(withRegression = false, withLinux = false, withRe
     idempotencyKey: 'revise-from-new-task', files: [{ path: 'README.md', content: '# Revised helper\n' }] }
   return { ...f, parentPlanId, archive, next, revisionRun: growthRun, revisionRequest: request }
 }
+
 
 it('routes a CLI owner instruction through native scheduling and the independent Verifier to a signed v3 result', async () => {
   const f = await revisionFixture(false, true, true)
@@ -1576,6 +1626,7 @@ it('routes a CLI owner instruction through native scheduling and the independent
   // the package runs alone, so keep real headroom instead of racing the default bound.
 }, 90_000)
 
+
 it('recovers an owner instruction across admission interruptions and verifies its one durable revision', async () => {
   const f = await revisionFixture()
   const recorded = f.store.recordOwnerInstructionRequest({
@@ -1656,6 +1707,7 @@ it('recovers an owner instruction across admission interruptions and verifies it
   }
 }, 30_000)
 
+
 it('rejects an orphaned request if restart refuses native activation after definition binding', async () => {
   const f = await revisionFixture()
   const request = f.store.recordOwnerInstructionRequest({
@@ -1699,6 +1751,7 @@ it('rejects an orphaned request if restart refuses native activation after defin
   expect(f.store.listSourceJobs().filter(job => job.idempotencyKey === request.idempotencyKey)).toHaveLength(1)
   expect(f.revisionVerification).not.toHaveBeenCalled()
 }, 30_000)
+
 
 it('new ordinary task independently verifies a durable parent-bound revision without renewing creation or execution grants', async () => {
   const f = await revisionFixture()
@@ -1787,6 +1840,7 @@ it('new ordinary task independently verifies a durable parent-bound revision wit
   expect(restarted.inspectCreatedCapabilityRevisionCandidate(planId)).toBeUndefined()
 }, 60_000)
 
+
 it.each(['expired', 'parent', 'model', 'authority', 'new-task', 'quota'] as const)('revision %s fails before native dispatch without spending old creation or adoption grants', async fault => {
   const f = await revisionFixture()
   const parentReceipt = f.service.inspectCreatedCapability(f.parentPlanId)
@@ -1814,140 +1868,6 @@ it.each(['expired', 'parent', 'model', 'authority', 'new-task', 'quota'] as cons
   } finally { db.close() }
 }, 60_000)
 
-it.each(['parent', 'new-task', 'unknown', 'source-insert'] as const)('revision %s rejection retains its no-replay claim and never creates an execution receipt', async fault => {
-  const f = await revisionFixture()
-  f.revisionVerification.mockImplementation(async request => {
-    if (fault === 'unknown') return { status: 'unknown', reason: 'case-observation-unknown' }
-    const certificate = signedRevisionCertificate(f, request.planId, fault === 'parent'
-      ? body => { body.parent = { ...body.parent, sourceDigest: '0'.repeat(64) } } : undefined)
-    if (fault === 'new-task') f.setLaterSource({ ...f.next, source: { ...f.next.source, objective: 'new task corrected during verification' } })
-    if (fault === 'source-insert') {
-      const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
-      try { db.exec("CREATE TRIGGER reject_revision_source BEFORE INSERT ON source_revision_sources BEGIN SELECT RAISE(ABORT,'injected source failure'); END") }
-      finally { db.close() }
-    }
-    return { status: 'verified', certificate }
-  })
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const planId = f.store.getSourceJob(queued.id)!.planId!
-  expect(f.store.getRevisionVerificationStatus(planId)).toBe(fault === 'new-task' ? 'claimed' : 'unknown')
-  expect(f.store.getRevisionVerification(planId)).toBeUndefined()
-  expect(f.service.inspectCreatedCapabilityRevisionCandidate(planId)).toBeUndefined()
-  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
-  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.revisionVerification).toHaveBeenCalledOnce()
-}, 60_000)
-
-it('keeps a queued revision pending without a producer and resumes via Host readiness nudge', async () => {
-  const f = await revisionFixture()
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  await f.unregisterGrowthRun()
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('queued')
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(1)
-  let ready = false
-  const inspect = vi.fn((request: { runId: string }) => { if (!ready) throw new SourceGrowthRunUnavailableError(); return request.runId === f.revisionRun.runId ? structuredClone(f.revisionRun) : structuredClone(f.growthRun) })
-  const unregister = f.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect })
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('queued')
-  ready = true
-  f.service.reconcileSourceGrowthRuns()
-  expect(f.store.getSourceJob(queued.id)?.dispatchAt).toBeGreaterThan(f.store.getSourceJob(queued.id)!.createdAt + 1000)
-  f.advance()
-  await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('prepared')
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  f.service.reconcileSourceGrowthRuns()
-  await f.automations.tick(); await f.automations.whenIdle()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  await unregister()
-}, 60_000)
-
-it('revokes and drains a claimed growth revision when its producer is disposed', async () => {
-  const f = await revisionFixture()
-  let entered!: () => void, release!: () => void
-  const building = new Promise<void>(resolve => { entered = resolve })
-  const gate = new Promise<void>(resolve => { release = resolve })
-  vi.mocked(linuxBuild.runLinuxPreparedChecks).mockImplementationOnce(async () => { entered(); await gate; return f.checked })
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  f.advance()
-  await f.automations.tick()
-  await building
-  let drained = false
-  const disposing = f.unregisterGrowthRun().then(() => { drained = true })
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
-  expect(() => f.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1',
-    inspect: (request: { runId: string }) => request.runId === f.revisionRun.runId ? f.revisionRun : f.growthRun })).toThrow('already registered')
-  await Promise.resolve()
-  expect(drained).toBe(false)
-  release()
-  await disposing
-  await f.automations.whenIdle()
-  expect(drained).toBe(true)
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
-  expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
-  const unregister = f.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1',
-    inspect: (request: { runId: string }) => request.runId === f.revisionRun.runId ? f.revisionRun : f.growthRun })
-  await f.automations.tick(); await f.automations.whenIdle()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  await unregister()
-}, 60_000)
-
-it.each(['before-native-ack', 'after-native-ack'] as const)('recovers persisted revision queued rearm %s without a second job', async stage => {
-  const f = await revisionFixture()
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  await f.unregisterGrowthRun()
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const exact = f.automations.reconcileSystemExact.bind(f.automations)
-  const calls = vi.spyOn(f.automations, 'reconcileSystemExact').mockImplementationOnce(input => {
-    if (stage === 'after-native-ack') exact(input)
-    throw new Error('simulated crash before Control Plane definition bind')
-  })
-  const unregister = f.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1',
-    inspect: (request: { runId: string }) => request.runId === f.revisionRun.runId ? structuredClone(f.revisionRun) : structuredClone(f.growthRun) })
-  const pending = f.store.getSourceJob(queued.id)!
-  expect(pending.definitionHash).toBeUndefined()
-  expect(pending).toMatchObject({ status: 'queued',
-    previousDefinitionHash: expect.stringMatching(/^[a-f0-9]{64}$/u), previousDefinitionVersion: expect.any(Number), dispatchAt: expect.any(Number) })
-  f.service.reconcileSourceGrowthRuns()
-  const rebound = f.store.getSourceJob(queued.id)!
-  expect(rebound.status).toBe('queued')
-  expect(rebound.definitionHash).toMatch(/^[a-f0-9]{64}$/u)
-  expect(rebound.previousDefinitionHash).toBeUndefined()
-  expect(rebound.dispatchAt).toBe(pending.dispatchAt)
-  expect(calls).toHaveBeenCalledTimes(2)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('prepared')
-  expect(f.store.listSourceJobs()).toHaveLength(2)
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  await unregister()
-}, 60_000)
-
-it('rearms revision when the new native occurrence fires before its Control Plane bind', async () => {
-  const f = await revisionFixture()
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  await f.unregisterGrowthRun()
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const exact = f.automations.reconcileSystemExact.bind(f.automations)
-  vi.spyOn(f.automations, 'reconcileSystemExact').mockImplementationOnce(input => {
-    exact(input)
-    throw new Error('simulated crash after native ACK')
-  })
-  const unregister = f.service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1',
-    inspect: (request: { runId: string }) => request.runId === f.revisionRun.runId ? structuredClone(f.revisionRun) : structuredClone(f.growthRun) })
-  const pending = f.store.getSourceJob(queued.id)!
-  expect(pending.previousDefinitionHash).toBeDefined()
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const recovered = f.store.getSourceJob(queued.id)!
-  expect(recovered.status).toBe('queued')
-  expect(recovered.dispatchAt).toBeGreaterThan(pending.dispatchAt!)
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(1)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.store.getSourceJob(queued.id)?.status).toBe('prepared')
-  expect(f.store.listSourceJobs()).toHaveLength(2)
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  await unregister()
-}, 60_000)
 
 
 async function restartRegressionHost(f: Awaited<ReturnType<typeof revisionFixture>>) {
@@ -1973,548 +1893,3 @@ async function restartRegressionHost(f: Awaited<ReturnType<typeof revisionFixtur
   cleanup.push(async () => unregister())
   return { ctx: restored, service, automations }
 }
-
-function signedRegressionCertificate(f: Awaited<ReturnType<typeof revisionFixture>>, planId: string,
-  alter?: (body: Omit<PluginRevisionRegressionCertificate, 'signature'>) => void): PluginRevisionRegressionCertificate {
-  const prepared = f.service.inspectPreparedRevisionRegression(planId)
-  const candidate = prepared.candidate.certificate
-  const body: Omit<PluginRevisionRegressionCertificate, 'signature'> = {
-    protocol: 'assistant-growth/revision-regression/v1', verificationId: 'fixture-regression', authority: f.regressionAuthority,
-    plan: candidate.plan, parent: candidate.parent, source: candidate.source,
-    contractDigest: prepared.parent.certificate.contractDigest, schemaDigest: candidate.schemaDigest,
-    environment: candidate.environment, model: candidate.model,
-    candidateVerificationDigest: controlPlaneDigest(candidate), sourceDigest: prepared.candidate.sourceDigest,
-    schemaCompatibilityDigest: '2'.repeat(64), budget: { maxCases: 2, maxDurationMs: 60_000, maxRuns: 6 },
-    observations: prepared.parent.certificate.observations.map((entry, index) => ({ caseId: entry.caseId,
-      parent: { jobId: `regression-parent-${index}`, operationDigest: '3'.repeat(64), observationDigest: '4'.repeat(64) },
-      candidate: { jobId: `regression-candidate-${index}`, operationDigest: '5'.repeat(64), observationDigest: '6'.repeat(64) } })),
-    verifiedAt: Date.now(), expiresAt: Math.min(candidate.expiresAt, Date.now() + 120_000),
-  }
-  if (candidate.protocol === 'assistant-growth/revision-verification/v2') {
-    body.protocol = 'assistant-growth/revision-regression/v2'
-    const { boundary, runtimeDigest, observerPreparationDigest } = candidate.execution!
-    body.execution = { boundary, runtimeDigest, observerPreparationDigest }
-  }
-  alter?.(body)
-  return { ...body, signature: sign(null, Buffer.from(pluginRevisionRegressionSigningPayload(body)), f.signing.privateKey).toString('base64url') }
-}
-
-it.skipIf(process.platform !== 'linux' || !process.getuid?.())('Linux revision and paired regression bind the prepared build and retained observer through cold reads and GC', async () => {
-  const f = await revisionFixture(true, true)
-  const parentReceipt = f.service.inspectCreatedCapability(f.parentPlanId)
-  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
-  f.regressionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRegressionCertificate(f, request.planId) }))
-  const definitions = vi.spyOn(f.automations, 'reconcileSystem')
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  const registered = definitions.mock.calls.find(([input]) => input.automationId === queued.id)?.[0]
-  expect(registered?.definition.timeoutMs).toBeGreaterThanOrEqual(f.config.sourceBuild!.timeoutMs + 120_000 + 2 * 1_800_000)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const planId = f.store.getSourceJob(queued.id)!.planId!, candidate = f.store.getRevisionVerification(planId)!
-  const regression = f.service.inspectVerifiedRevisionRegression(planId)!
-  expect(candidate).toMatchObject({ protocol: 'assistant-growth/revision-verification/v2',
-    execution: { boundary: 'linux-native-process-seccomp-v1', buildEvidenceDigest: controlPlaneDigest(f.linuxChecked!.evidence) } })
-  expect(regression).toMatchObject({ protocol: 'assistant-growth/revision-regression/v2',
-    execution: { boundary: candidate.execution!.boundary, runtimeDigest: candidate.execution!.runtimeDigest,
-      observerPreparationDigest: candidate.execution!.observerPreparationDigest } })
-  expect(Object.keys(regression.execution!).sort()).toEqual(['boundary', 'observerPreparationDigest', 'runtimeDigest'])
-  expect(regression.candidateVerificationDigest).toBe(controlPlaneDigest(candidate))
-  expect(f.service.inspectCreatedCapability(f.parentPlanId)).toEqual(parentReceipt)
-  expect(f.service.inspectCreatedCapabilitySource(f.parentPlanId)).toEqual(f.archive)
-  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  const restarted = await restartRegressionHost(f)
-  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toEqual(regression)
-  f.advance(901_000)
-  await restarted.service.gcPreparedSourceWorktrees()
-  const historical = new ControlPlaneStore({ path: join(f.config.statePath, 'control.sqlite') })
-  try {
-    expect(historical.getRevisionVerification(planId)).toEqual(candidate)
-    expect(historical.getRevisionRegression(planId)).toEqual(regression)
-  } finally { historical.close() }
-  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toBeUndefined()
-  expect(f.revisionVerification).toHaveBeenCalledOnce()
-  expect(f.regressionVerification).toHaveBeenCalledOnce()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-  expect(linuxTransport.run).not.toHaveBeenCalled()
-}, 60_000)
-
-it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['protocol', 'build-runtime', 'build-evidence'] as const)(
-  'Linux revision rejects genuinely signed %s provenance without replay', async fault => {
-    const f = await revisionFixture(false, true)
-    f.revisionVerification.mockImplementation(async request => {
-      const certificate = signedRevisionCertificate(f, request.planId, body => {
-        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-verification/v1'; delete body.execution }
-        else body.execution![fault === 'build-runtime' ? 'buildRuntimeDigest' : 'buildEvidenceDigest'] = '0'.repeat(64)
-      })
-      expect(verifyPluginRevisionVerificationCertificate(certificate, f.revisionAuthority, f.publicKey)).toBe(true)
-      return { status: 'verified', certificate }
-    })
-    const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-    const planId = f.store.getSourceJob(queued.id)!.planId!
-    expect(f.store.getRevisionVerificationStatus(planId)).toBe('unknown')
-    expect(f.store.getRevisionVerification(planId)).toBeUndefined()
-    expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
-    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
-    expect(f.revisionVerification).toHaveBeenCalledOnce()
-    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledTimes(2)
-    expect(linuxTransport.run).not.toHaveBeenCalled()
-  }, 60_000)
-
-it.skipIf(process.platform !== 'linux' || !process.getuid?.()).each(['runtimeDigest', 'observerPreparationDigest'] as const)(
-  'Linux regression rejects a signed candidate from a different parent %s family', async field => {
-    const f = await revisionFixture(true, true)
-    f.revisionVerification.mockImplementation(async request => ({ status: 'verified',
-      certificate: signedRevisionCertificate(f, request.planId, body => { body.execution![field] = '0'.repeat(64) }) }))
-    f.regressionVerification.mockImplementation(async request => {
-      const certificate = signedRegressionCertificate(f, request.planId)
-      expect(verifyPluginRevisionRegressionCertificate(certificate, f.regressionAuthority, f.publicKey)).toBe(true)
-      return { status: 'verified', certificate }
-    })
-    const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-    const planId = f.store.getSourceJob(queued.id)!.planId!
-    expect(f.store.getRevisionVerificationStatus(planId)).toBe('verified')
-    expect(f.store.getRevisionRegressionStatus(planId)).toBe('unknown')
-    expect(f.store.getRevisionRegression(planId)).toBeUndefined()
-    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
-    expect(f.regressionVerification).toHaveBeenCalledOnce()
-    expect(f.revisionVerification).toHaveBeenCalledOnce()
-    expect(linuxTransport.run).not.toHaveBeenCalled()
-  }, 60_000)
-
-it.skipIf(process.platform !== 'linux' || !process.getuid?.())('Linux retained revision and regression reads reject signed provenance changes with recomputed row digests', async () => {
-  const f = await revisionFixture(true, true)
-  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
-  f.regressionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRegressionCertificate(f, request.planId) }))
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const planId = f.store.getSourceJob(queued.id)!.planId!, candidate = f.store.getRevisionVerification(planId)!
-  const regression = f.store.getRevisionRegression(planId)!, source = f.store.readRevisionSource(planId)!
-  const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
-  const write = (table: 'source_revision_verifications' | 'source_revision_regressions',
-    certificate: PluginRevisionVerificationCertificate | PluginRevisionRegressionCertificate) =>
-    db.prepare(`UPDATE ${table} SET certificate_json=?,certificate_digest=? WHERE plan_id=?`)
-      .run(JSON.stringify(certificate), controlPlaneDigest(certificate), planId)
-  try {
-    for (const fault of ['protocol', 'buildRuntimeDigest', 'buildEvidenceDigest', 'name', 'sourceTreeDigest', 'sourcePatchDigest'] as const) {
-      const changed = signedRevisionCertificate(f, planId, body => {
-        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-verification/v1'; delete body.execution }
-        else if (fault === 'name') body.plan.name = 'rsi-service-different'
-        else if (fault === 'sourceTreeDigest' || fault === 'sourcePatchDigest') body.plan[fault] = '0'.repeat(64)
-        else body.execution![fault] = '0'.repeat(64)
-      })
-      expect(verifyPluginRevisionVerificationCertificate(changed, f.revisionAuthority, f.publicKey)).toBe(true)
-      expect(() => f.store.withOwnerTaskFailureGapAdmission(f.revisionRequest.gapId,
-        () => f.store.recordRevisionVerification(changed, source))).toThrow()
-      write('source_revision_verifications', changed)
-      expect(() => f.store.getRevisionVerification(planId)).toThrow(/exact prepared source/)
-      write('source_revision_verifications', candidate)
-    }
-    for (const fault of ['protocol', 'runtimeDigest', 'observerPreparationDigest', 'candidateVerificationDigest'] as const) {
-      const changed = signedRegressionCertificate(f, planId, body => {
-        if (fault === 'protocol') { body.protocol = 'assistant-growth/revision-regression/v1'; delete body.execution }
-        else if (fault === 'candidateVerificationDigest') body.candidateVerificationDigest = '0'.repeat(64)
-        else body.execution![fault] = '0'.repeat(64)
-      })
-      expect(verifyPluginRevisionRegressionCertificate(changed, f.regressionAuthority, f.publicKey)).toBe(true)
-      expect(() => f.store.withOwnerTaskFailureGapAdmission(f.revisionRequest.gapId,
-        () => f.store.recordRevisionRegression(changed))).toThrow(/exact parent and candidate/)
-      write('source_revision_regressions', changed)
-      expect(() => f.store.getRevisionRegression(planId)).toThrow(/exact candidate execution/)
-      write('source_revision_regressions', regression)
-    }
-    expect(f.store.getRevisionVerification(planId)).toEqual(candidate)
-    expect(f.store.getRevisionRegression(planId)).toEqual(regression)
-  } finally {
-    write('source_revision_verifications', candidate)
-    write('source_revision_regressions', regression)
-    db.close()
-  }
-}, 60_000)
-
-it('native revision pins and retains independent parent regression without renewing any execution receipt', async () => {
-  const f = await revisionFixture(true)
-  const parent = f.service.inspectCreatedCapability(f.parentPlanId)
-  expect(f.service.inspectSourceRevisionRegressionAcceptanceAuthority()).toEqual(f.regressionAuthority)
-  f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
-  f.regressionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRegressionCertificate(f, request.planId) }))
-  const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const planId = f.store.getSourceJob(queued.id)!.planId!
-  expect(f.store.getRevisionRegressionStatus(planId)).toBe('verified')
-  const certificate = f.service.inspectVerifiedRevisionRegression(planId)!
-  expect(certificate.contractDigest).toBe(f.store.getCreationVerification(f.parentPlanId)!.contractDigest)
-  expect(certificate.model).toEqual(f.next.source.modelSelection)
-  expect(f.regressionVerification).toHaveBeenCalledOnce()
-  expect(f.revisionVerification).toHaveBeenCalledOnce()
-  expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
-  expect(f.service.inspectCreatedCapability(f.parentPlanId)).toEqual(parent)
-  const reopened = new ControlPlaneStore({ path: join(f.config.statePath, 'control.sqlite') })
-  try { expect(reopened.getRevisionRegression(planId)).toEqual(certificate) } finally { reopened.close() }
-  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
-  expect(f.regressionVerification).toHaveBeenCalledOnce()
-  const restarted = await restartRegressionHost(f)
-  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toEqual(certificate)
-  await restarted.automations.tick(); await restarted.automations.whenIdle()
-  expect(f.regressionVerification).toHaveBeenCalledOnce()
-  expect(f.revisionVerification).toHaveBeenCalledOnce()
-  expect(restarted.service.inspectCreatedCapability(planId)).toBeUndefined()
-  f.setLaterSource({ ...f.next, source: { ...f.next.source, objective: 'corrected new task' } })
-  expect(() => restarted.service.inspectVerifiedRevisionRegression(planId)).toThrow()
-  expect(f.store.getRevisionRegression(planId)).toEqual(certificate)
-  f.advance(901_000)
-  await restarted.service.gcPreparedSourceWorktrees()
-  expect(f.store.getRevisionRegression(planId)).toEqual(certificate)
-  expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toBeUndefined()
-}, 60_000)
-
-it.each(['missing-policy', 'changed-policy'] as const)('rejects %s before native revision admission', async fault => {
-  const f = await revisionFixture(true)
-  const run = structuredClone(f.revisionRun)
-  if (fault === 'missing-policy') delete run.revisionRegressionAcceptance
-  else run.revisionRegressionAcceptance!.authorityDigest = '0'.repeat(64)
-  f.inspectGrowthRun.mockImplementation(request => request.runId === run.runId ? run : f.growthRun)
-  await expect(f.service.enqueueSourceJob({ ...f.revisionRequest, growthRun: run })).rejects.toThrow()
-  expect(f.store.listSourceJobs()).toHaveLength(1)
-  expect(f.regressionVerification).not.toHaveBeenCalled()
-}, 60_000)
-
-it.each(['parent', 'candidate', 'source', 'contract', 'model', 'environment', 'reused-job', 'signature', 'late-settlement', 'new-task', 'unknown', 'settlement'] as const)(
-  'regression %s failure retains a no-replay claim and grants no execution', async fault => {
-    const f = await revisionFixture(true)
-    f.revisionVerification.mockImplementation(async request => ({ status: 'verified', certificate: signedRevisionCertificate(f, request.planId) }))
-    f.regressionVerification.mockImplementation(async request => {
-      if (fault === 'unknown') return { status: 'unknown', reason: 'case-observation-unknown' }
-      const certificate = signedRegressionCertificate(f, request.planId, body => {
-        if (fault === 'parent') body.parent = { ...body.parent, sourceDigest: '0'.repeat(64) }
-        if (fault === 'candidate') body.candidateVerificationDigest = '0'.repeat(64)
-        if (fault === 'source') body.sourceDigest = '0'.repeat(64)
-        if (fault === 'contract') body.contractDigest = '0'.repeat(64)
-        if (fault === 'model') body.model = { provider: 'other', model: 'other' }
-        if (fault === 'environment') body.environment = { ...body.environment, node: 'v99.0.0' }
-        if (fault === 'reused-job') body.observations[0]!.parent.jobId = 'job-one'
-      })
-      if (fault === 'signature') certificate.signature = sign(null,
-        Buffer.from('different-purpose'), generateKeyPairSync('ed25519').privateKey).toString('base64url')
-      if (fault === 'late-settlement') {
-        const inspect = f.service.inspectPreparedRevisionReviewContext.bind(f.service)
-        vi.spyOn(f.service, 'inspectPreparedRevisionReviewContext').mockImplementationOnce(async (...args) => {
-          const review = await inspect(...args); f.advance(121_000); return review
-        })
-      }
-      if (fault === 'new-task') f.setLaterSource({ ...f.next, source: { ...f.next.source, objective: 'corrected during regression' } })
-      if (fault === 'settlement') {
-        const db = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
-        try { db.exec("CREATE TRIGGER reject_regression BEFORE UPDATE ON source_revision_regressions WHEN NEW.status='verified' BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END") }
-        finally { db.close() }
-      }
-      return { status: 'verified', certificate }
-    })
-    const queued = await f.service.enqueueSourceJob(f.revisionRequest)
-    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-    const planId = f.store.getSourceJob(queued.id)!.planId!
-    expect(f.store.getRevisionRegressionStatus(planId)).toBe(fault === 'new-task' ? 'claimed' : 'unknown')
-    expect(f.store.getRevisionRegression(planId)).toBeUndefined()
-    expect(f.service.inspectCreatedCapability(planId)).toBeUndefined()
-    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
-    expect(f.regressionVerification).toHaveBeenCalledOnce()
-    const reopened = new ControlPlaneStore({ path: join(f.config.statePath, 'control.sqlite') })
-    try { expect(reopened.getRevisionRegressionStatus(planId)).toBe(fault === 'new-task' ? 'claimed' : 'unknown') }
-    finally { reopened.close() }
-    if (fault === 'unknown' || fault === 'new-task') {
-      const restarted = await restartRegressionHost(f)
-      await restarted.automations.tick(); await restarted.automations.whenIdle()
-      expect(f.regressionVerification).toHaveBeenCalledOnce()
-      expect(f.revisionVerification).toHaveBeenCalledOnce()
-      expect(restarted.service.inspectVerifiedRevisionRegression(planId)).toBeUndefined()
-      expect(restarted.service.inspectCreatedCapability(planId)).toBeUndefined()
-      expect(f.store.getRevisionRegressionStatus(planId)).toBe(fault === 'new-task' ? 'claimed' : 'unknown')
-    }
-  }, 60_000)
-
-it('configured regression authority expiry closes the pre-author revision lane instead of returning a legacy absence', async () => {
-  const f = await revisionFixture(true)
-  expect(f.service.inspectSourceRevisionRegressionAcceptanceAuthority()).toEqual(f.regressionAuthority)
-  f.advance(600_001)
-  expect(() => f.service.inspectSourceRevisionRegressionAcceptanceAuthority()).toThrow('configured revision regression authority unavailable')
-  expect(f.store.listSourceJobs()).toHaveLength(1)
-  expect(f.regressionVerification).not.toHaveBeenCalled()
-}, 60_000)
-
-
-// WorkItem cases run real Git preparation, adoption and cold remounts; under
-// heavy host load one case measured up to ~60s.
-const WORK_ITEM_ADOPTION_TIMEOUT_MS = 120_000
-
-it('uses actual work-item grant pins and the producer writer frame without reverse peer reads', async () => {
-  const f = await fixture(true, true, true, false, false, false, true)
-  await f.unregisterGrowthRun()
-  const objective = 'original owner engineering objective'
-  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
-    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
-      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
-    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
-  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
-    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
-    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
-  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
-  let producerHeld = false
-  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
-  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
-  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
-    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
-  // Usage froze the old owner before a legitimate new foreground session.
-  f.owner.generation += 1; f.owner.bindingVersion += 1
-  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
-  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
-    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
-    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
-  const gap = f.service.recordOwnerWorkItemFailureGap(source)
-  const before = f.store.health()
-  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
-  expect(readiness?.available).toBe(true)
-  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
-  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
-  expect(f.store.health()).toEqual(before)
-  if (!readiness) throw new Error('expected actual active readiness')
-  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
-    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
-    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
-      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
-      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
-      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
-  validateWorkItemSourceGrowthRunBinding(run)
-  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
-  let writes = 0
-  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
-    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
-  let unregister = f.service.registerSourceGrowthRunProducer(producer)
-  cleanup.push(async () => unregister())
-  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
-  const queued = await f.service.enqueueSourceJob(request)
-  expect(queued.status).toBe('queued')
-  expect(writes).toBeGreaterThan(0)
-  expect(inspect).not.toHaveBeenCalled()
-  // This exact operation consumed the final upstream slots.
-  const exhausted = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
-  expect(exhausted?.available).toBe(false)
-  expect(exhausted?.remaining.creates).toBe(0)
-  expect(exhausted?.pins).toEqual(readiness.pins)
-  expect((await f.service.enqueueSourceJob(request)).id).toBe(queued.id)
-  const queuedIntent = f.store.getSourceJob(queued.id)!.intentDigest
-  const beforeUnavailable = f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining
-  await unregister()
-  expect(f.service.inspectSourceJob({id:queued.id,owner:request.owner}).status).toBe('queued')
-  expect(f.store.getSourceJob(queued.id)!.intentDigest).toBe(queuedIntent)
-  unregister = f.service.registerSourceGrowthRunProducer(producer)
-  expect(f.service.inspectSourceJob({id:queued.id,owner:request.owner}).status).toBe('queued')
-  expect(f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining).toEqual(beforeUnavailable)
-  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
-  installCandidateRunner(f)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const stored = f.store.getSourceJob(queued.id)!
-  expect(stored.status).toBe('prepared')
-  const prepared = f.service.inspectPreparedCreation(stored.planId!)
-  expect(prepared.protocol).toBe('dsh-prepared-creation/v2')
-  if (prepared.protocol !== 'dsh-prepared-creation/v2') throw new Error('expected work item handoff')
-  expect(prepared.source.objective).toBe(objective)
-  expect(prepared.reference.schemaVersion).toBe(2)
-  expect(prepared.plan.creation?.growthRun).toEqual(run)
-  expect(f.service.withPreparedCreationFence({ planId: prepared.plan.id, planDigest: prepared.plan.digest,
-    artifactSha256: prepared.plan.preparedEvidence!.pack.sha256, growthRunDigest: sourceGrowthRunDigest(run),
-    referenceDigest: controlPlaneDigest(prepared.reference) }, actual => sourceGrowthRunDigest(actual!))).toBe(sourceGrowthRunDigest(run))
-  expect(inspect).not.toHaveBeenCalled()
-  const adopted = f.service.inspectCreatedCapability(prepared.plan.id)!
-  expect(adopted.status).toBe('active')
-  await unregister()
-  f.advance(901_000)
-  expect(f.service.inspectWorkItemCreationReadiness({ owner: f.owner })).toBeUndefined()
-  expect(() => f.service.inspectPreparedCreation(prepared.plan.id)).toThrow()
-  const alias = adopted.aliases[0]!, execute = (id: string) => f.ctx.tools.get(alias)!.execute({ query: 'retained' }, {
-    callId: id, agent: { session: { id: 'retained-owner' }, owner: f.owner }, signal: new AbortController().signal,
-  } as unknown as ToolRunContext)
-  await expect(execute('retained-after-author-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
-  expect(inspect).not.toHaveBeenCalled()
-  // A component policy-epoch drift must reject even a retained duplicate call.
-  const liveConfig = Reflect.get(f.service, 'config') as {sourceJobs:{creation:{maxCreates:number}}}
-  const originalMaxCreates = liveConfig.sourceJobs.creation.maxCreates
-  liveConfig.sourceJobs.creation.maxCreates += 1
-  await expect(execute('retained-after-author-expiry')).rejects.toThrow()
-  liveConfig.sourceJobs.creation.maxCreates = originalMaxCreates
-  await expect(execute('retained-after-author-expiry')).resolves.toMatchObject({ value: { answer: 'ok' } })
-  f.advance(1_200_000)
-  await expect(execute('retained-after-author-expiry')).rejects.toThrow()
-}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
-
-
-it('recovers an active current WorkItem adoption when its producer becomes ready before CP startup is published', async () => {
-  const f = await fixture(true, true, false, false, false, false, true)
-  await f.unregisterGrowthRun()
-  const objective = 'original owner engineering objective'
-  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
-    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
-      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
-    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
-  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
-    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
-    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
-  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
-  let producerHeld = false
-  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
-  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
-  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
-    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
-  // Usage froze the old owner before a legitimate new foreground session.
-  f.owner.generation += 1; f.owner.bindingVersion += 1
-  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
-  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
-    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
-    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
-  const gap = f.service.recordOwnerWorkItemFailureGap(source)
-  const before = f.store.health()
-  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
-  expect(readiness?.available).toBe(true)
-  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
-  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
-  expect(f.store.health()).toEqual(before)
-  if (!readiness) throw new Error('expected actual active readiness')
-  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
-    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
-    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
-      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
-      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
-      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
-  validateWorkItemSourceGrowthRunBinding(run)
-  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
-  let writes = 0
-  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
-    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
-  let unregister = f.service.registerSourceGrowthRunProducer(producer)
-  cleanup.push(async () => unregister())
-  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
-  const queued = await f.service.enqueueSourceJob(request)
-  expect(writes).toBeGreaterThan(0)
-  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
-  installCandidateRunner(f)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const originalJob = f.store.getSourceJob(queued.id)!, planId = originalJob.planId!
-  const adopted = f.service.inspectCreatedCapability(planId)!
-  expect(adopted.status).toBe('active')
-  const alias = adopted.aliases[0]!, quota = f.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining
-  const initialRunnerCalls = runnerRun.mock.calls.length
-  await unregister(); await f.ctx.fiber.dispose()
-  let release!: () => void, entered!: () => void
-  const gate = new Promise<void>(resolve => { release = resolve }), startupEntered = new Promise<void>(resolve => { entered = resolve })
-  const originalStart = CreationCapabilityRuntime.prototype.start
-  const start = vi.spyOn(CreationCapabilityRuntime.prototype, 'start').mockImplementation(function (this: CreationCapabilityRuntime) {
-    return originalStart.call(this).then(async () => { entered(); await gate })
-  })
-  let restored: Awaited<ReturnType<typeof startCapabilityHost>> | undefined
-  try {
-    restored = await startCapabilityHost(f, { inspectWorkItemCreationReviewReadiness: () => {
-      if (restored?.service.inspectWorkItemPreparedCreationProtocol() !== 'dsh-prepared-creation/v2') return undefined
-      return { protocol: 'assistant-growth/work-item-review-readiness/v1', sourceProtocol: unsigned.protocol,
-        runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true, authority: f.authority,
-        publicKey: f.publicKey, remainingVerifications: 1, available: true }
-    } })
-    await startupEntered
-    expect(restored.service.canEnqueueSource()).toBe(false)
-    expect(restored.context.tools.get(alias)).toBeUndefined()
-    const unregisterCold = restored.service.registerSourceGrowthRunProducer(producer)
-    cleanup.push(async () => unregisterCold())
-    // Mirror Growth's registration + binding-ready nudge, both arriving before
-    // the asynchronous CP source/adoption startup barrier is released.
-    restored.service.reconcileSourceGrowthRuns()
-    release()
-    // Publication and the post-publication remount run real source checks; wait
-    // for the conditions (no further nudge is sent) instead of a 1s window.
-    await vi.waitFor(() => expect(restored!.service.canEnqueueSource()).toBe(true), { timeout: 30_000 })
-    await vi.waitFor(() => expect(restored!.context.tools.get(alias)).toBeDefined(), { timeout: 30_000 })
-    expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
-    expect(restored.service.inspectWorkItemCreationReadiness({owner:f.owner})!.remaining).toEqual(quota)
-    expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
-    expect(f.verification).toHaveBeenCalledOnce()
-    expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
-    expect(runnerRun).toHaveBeenCalledTimes(initialRunnerCalls)
-    expect(inspect).not.toHaveBeenCalled()
-    await expect(restored.context.tools.get(alias)!.execute({query:'after-cold-reopen'}, {callId:'cold-current-call',
-      agent:{session:{id:'same-owner-cold'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).resolves.toMatchObject({value:{answer:'ok'}})
-    expect(f.verification).toHaveBeenCalledOnce()
-  } finally { release(); start.mockRestore() }
-}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
-
-
-it('restores an explicitly retained WorkItem capability from signed history without its current Growth producer', async () => {
-  const f = await fixture(true, true, true, false, false, false, true)
-  await f.unregisterGrowthRun()
-  const objective = 'original owner engineering objective'
-  const task = { protocol: 'assistant-delivery/owner-work-item-learning/v1', owner: { ...f.owner }, judgement: 'owner-feedback',
-    sourceDigest: '4'.repeat(64), presentationDigest: '5'.repeat(64), canonical: { ...f.source.canonical,
-      projection: { ...f.source.canonical.projection, subjectKind: 'work-item', subjectRef: 'wi-repair' } },
-    proofIdentity: { itemId: 'wi-repair', proofDigest: '6'.repeat(64), supplier: f.growthRun.model } } as unknown as OwnerWorkItemLearningTask
-  const unsigned = { protocol: 'assistant-delivery/work-item-engineering-context/v1' as const, itemId: 'wi-repair', rootItemId: 'wi-repair',
-    feedbackProofDigest: task.proofIdentity.proofDigest, materialDigest: '7'.repeat(64), nodes: [], reports: [],
-    objective: { protocol: 'work-item-owner-objective/v1' as const, fullTextDigest: createHash('sha256').update(objective).digest('hex'), fullBytes: Buffer.byteLength(objective) } }
-  const source = { task, manifest: { ...unsigned, manifestDigest: growthObjectDigest(unsigned) }, objective }
-  let producerHeld = false
-  const noReverse = () => { if (producerHeld) throw new Error('reverse source read under producer frame') }
-  const currentSource = () => ({ ...source, task: { ...source.task, owner: { ...f.owner } } })
-  Object.assign(f.deliveryPorts, { inspectOwnerWorkItemEngineeringContext: () => { noReverse(); return currentSource() },
-    withOwnerWorkItemEngineeringContextFence: (_input: unknown, callback: (source: unknown) => unknown) => { noReverse(); return callback(currentSource()) } })
-  // Usage froze the old owner before a legitimate new foreground session.
-  f.owner.generation += 1; f.owner.bindingVersion += 1
-  const verifier = f.ctx.get('assistantVerifier' as never) as unknown as Record<string, unknown>
-  verifier.inspectWorkItemCreationReviewReadiness = () => { noReverse(); return { protocol: 'assistant-growth/work-item-review-readiness/v1',
-    sourceProtocol: unsigned.protocol, runProtocol: 'assistant-growth/source-run/v2', workItemFailures: true,
-    authority: f.authority, publicKey: f.publicKey, remainingVerifications: 1, available: true } }
-  const gap = f.service.recordOwnerWorkItemFailureGap(source)
-  const before = f.store.health()
-  const readiness = f.service.inspectWorkItemCreationReadiness({ owner: f.owner })
-  expect(readiness?.available).toBe(true)
-  expect(readiness?.pins.sourceJobs.authorityDigest).toBe(controlPlaneDigest({ config: normalizeControlPlaneConfig(f.config).sourceJobs, build: normalizeControlPlaneConfig(f.config).sourceBuild }))
-  expect(f.service.inspectWorkItemCreationReadiness({ owner: { ...f.owner, principalRecordId: 'wrong-person' } })).toBeUndefined()
-  expect(f.store.health()).toEqual(before)
-  if (!readiness) throw new Error('expected actual active readiness')
-  const run: WorkItemSourceGrowthRunBinding = { ...f.growthRun, protocol: 'assistant-growth/source-run/v2', mode: 'create',
-    ownerDigest: controlPlaneDigest(task.owner), creationAcceptance: f.authority, authorities: readiness.pins,
-    source: { protocol: 'assistant-growth/work-item-source/v1', itemId: 'wi-repair', outcomeId: source.task.canonical.triggerOutcomeId,
-      projection: { ...source.task.canonical.projection, subjectKind: 'work-item', disposition: 'upsert' }, objectiveStatus: 'not-achieved',
-      sourceDigest: task.sourceDigest, presentationDigest: task.presentationDigest,
-      context: { protocol: unsigned.protocol, manifestDigest: source.manifest.manifestDigest, objectiveDigest: unsigned.objective.fullTextDigest, objectiveBytes: unsigned.objective.fullBytes } } }
-  validateWorkItemSourceGrowthRunBinding(run)
-  const inspect = vi.fn(() => { throw new Error('v2 may not use producer.inspect') })
-  let writes = 0
-  const producer = { protocol: 'assistant-growth-source-run-producer/v2' as const, inspect,
-    withWorkItemRunFence: <T>(_input: unknown, callback: (run: WorkItemSourceGrowthRunBinding) => T): T => { noReverse(); producerHeld = true; try { writes++; return callback(structuredClone(run)) } finally { producerHeld = false } } }
-  let unregister = f.service.registerSourceGrowthRunProducer(producer)
-  cleanup.push(async () => unregister())
-  const request = { ...f.request, gapId: gap.id, growthRun: run, idempotencyKey: 'work-item-create' }
-  const queued = await f.service.enqueueSourceJob(request)
-  expect(writes).toBeGreaterThan(0)
-  f.verification.mockImplementation(async input => ({ status: 'verified', certificate: signedAdoptionCertificate(f, input.planId) }))
-  installCandidateRunner(f)
-  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
-  const originalJob = f.store.getSourceJob(queued.id)!, planId = originalJob.planId!
-  const adopted = f.service.inspectCreatedCapability(planId)!
-  expect(adopted.status).toBe('active')
-  const alias = adopted.aliases[0]!, initialRunnerCalls = runnerRun.mock.calls.length
-  await unregister(); await f.ctx.fiber.dispose()
-  f.advance(901_000)
-  const restored = await startCapabilityHost(f)
-  // Cold restore runs real source checks before mounting; wait for the mount.
-  await vi.waitFor(() => expect(restored.context.tools.get(alias)).toBeDefined(), { timeout: 30_000 })
-  expect(restored.service.canEnqueueSource()).toBe(false)
-  expect(restored.service.inspectCreatedCapability(planId)).toEqual(adopted)
-  expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: originalJob.status, intentDigest: originalJob.intentDigest })
-  expect(f.verification).toHaveBeenCalledOnce()
-  expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
-  expect(runnerRun).toHaveBeenCalledTimes(initialRunnerCalls)
-  expect(inspect).not.toHaveBeenCalled()
-  await expect(restored.context.tools.get(alias)!.execute({query:'after-retained-reopen'}, {callId:'cold-retained-call',
-    agent:{session:{id:'same-owner-retained'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).resolves.toMatchObject({value:{answer:'ok'}})
-  expect(f.verification).toHaveBeenCalledOnce()
-  f.advance(1_200_000)
-  await expect(restored.context.tools.get(alias)!.execute({query:'after-retained-reopen'}, {callId:'cold-retained-call',
-    agent:{session:{id:'same-owner-retained'},owner:f.owner},signal:new AbortController().signal} as unknown as ToolRunContext)).rejects.toThrow()
-}, WORK_ITEM_ADOPTION_TIMEOUT_MS)
