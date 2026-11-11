@@ -139,8 +139,7 @@ function authorityCatalogEntry(authority: VerifierAuthority): AcceptanceAuthorit
       note: 'isolated-process-behavior criteria bind exactly one testSetId from this list.' })
     case 'document': return freeze({ id: authority.id, digest: authority.digest, kind: 'document',
       sourceIds: Object.freeze(authority.sources.map(source => source.id)),
-      sources: Object.freeze(authority.sources.map(source => Object.freeze({ id: source.id, url: source.url }))),
-      note: 'document-citations requiredText/quotes may cite these source ids; urls are informational only.' })
+      note: 'document-citations requiredText quotes may cite these source ids; case URLs stay inside the verifier.' })
     case 'readback': return freeze({ id: authority.id, digest: authority.digest, kind: 'readback',
       objectIdPointer: authority.objectIdPointer,
       note: 'target-readback objectId is a Host-configured object id resolved through this JSON pointer.' })

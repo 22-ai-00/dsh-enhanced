@@ -136,8 +136,10 @@ describe('owner-prepared goal acceptance', () => {
     expect(catalog.protocol).toBe('assistant-verifier/acceptance-authorities/v1')
     expect(catalog.authorities).toHaveLength(1)
     expect(catalog.authorities[0]).toMatchObject({ id: 'sources', digest: expect.stringMatching(/^[a-f0-9]{64}$/u), kind: 'document',
-      sourceIds: ['source'], sources: [{ id: 'source', url: 'https://example.org/source' }] })
-    expect(catalog.authorities[0]!.note).toMatch(/informational only/u)
+      sourceIds: ['source'] })
+    // Case URLs (which may carry query tokens) must never appear in a catalog.
+    expect(JSON.stringify(catalog)).not.toContain('example.org')
+    expect(catalog.authorities[0]!.note).toMatch(/stay inside the verifier/u)
     const text = JSON.stringify(catalog)
     expect(text).not.toMatch(/environment|executable|stateRoot|grantId|timeoutMs|maxResponseBytes/iu)
     expect(Object.isFrozen(catalog)).toBe(true)

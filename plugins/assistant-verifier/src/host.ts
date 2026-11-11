@@ -47,9 +47,8 @@ export interface AcceptanceAuthorityCatalogEntry {
   readonly artifactPath?: 'workspace-relative'
   /** Isolated runner criteria bind exactly one of these testSet ids. */
   readonly testSetIds?: readonly string[]
-  /** Document criteria may cite these source ids; urls are informational only. */
+  /** Document criteria may cite these source ids; source URLs never leave the verifier. */
   readonly sourceIds?: readonly string[]
-  readonly sources?: readonly Readonly<{ id: string; url: string }>[]
   /** Repository readback criteria must use this exact objectId. */
   readonly objectId?: string
   /** Plain readback criteria objectId is matched through this JSON pointer. */
