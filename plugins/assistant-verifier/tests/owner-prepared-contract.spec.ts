@@ -128,6 +128,29 @@ describe('owner-prepared goal acceptance', () => {
     expect(() => registration.prepareOwnerContract!(prepared({ objective: '  ' }) as never)).toThrow(/invalid owner-prepared objective/u)
   })
 
+
+  it('exposes a sanitized, read-only acceptance authority catalog for the exact owner scope', async () => {
+    const { root, service } = await harness()
+    const catalog = service.inspectAcceptanceAuthorities({ scope: { workspace: root, preset: 'primary' },
+      owner: { principalRecordId: 'owner-1', principalVersion: 1 } })
+    expect(catalog.protocol).toBe('assistant-verifier/acceptance-authorities/v1')
+    expect(catalog.authorities).toHaveLength(1)
+    expect(catalog.authorities[0]).toMatchObject({ id: 'sources', digest: expect.stringMatching(/^[a-f0-9]{64}$/u), kind: 'document',
+      sourceIds: ['source'], sources: [{ id: 'source', url: 'https://example.org/source' }] })
+    expect(catalog.authorities[0]!.note).toMatch(/informational only/u)
+    const text = JSON.stringify(catalog)
+    expect(text).not.toMatch(/environment|executable|stateRoot|grantId|timeoutMs|maxResponseBytes/iu)
+    expect(Object.isFrozen(catalog)).toBe(true)
+    expect(Object.isFrozen(catalog.authorities[0])).toBe(true)
+    // Invalid selections are rejected without reflecting any authority data.
+    for (const selection of [
+      { scope: { workspace: 'relative', preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 } },
+      { scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: '', principalVersion: 1 } },
+      { scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 0 } },
+      { scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 }, extra: true },
+    ]) expect(() => service.inspectAcceptanceAuthorities(selection as never)).toThrow(/invalid acceptance authority catalog selection/u)
+  })
+
   it('expires the seal instead of silently accepting it later', async () => {
     const { producer, prepared, time } = await harness()
     const registration = producer.registration!

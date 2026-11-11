@@ -35,7 +35,7 @@ import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateO
 import { assertGoalDependenciesAchieved, goalDependencies } from './dependency.js'
 import { buildGoalOwnerIntent, ownerIntentObjectiveSpan, type GoalOwnerIntent, type GoalOwnerIntentDelivery } from './owner-intent.js'
 import { GoalOwnerIntentStore, goalOwnerIntentSupplier } from './owner-intent-store.js'
-import { validateOwnerAcceptanceSeal, validateOwnerPreparedAcceptanceInput, preparedRegistration, type GoalOwnerAcceptanceSeal, type OwnerPreparedContractInput } from './owner-acceptance.js'
+import { validateOwnerAcceptanceSeal, validateOwnerPreparedAcceptanceInput, resolveOwnerPreparedAcceptanceInput, preparedRegistration, type GoalOwnerAcceptanceSeal, type OwnerPreparedAcceptanceInput, type OwnerPreparedContractInput, type OwnerPreparedRegistration } from './owner-acceptance.js'
 import { GoalOwnerAcceptanceStore } from './owner-acceptance-store.js'
 
 export interface Config { eventWaits?: boolean; ownerIntent?: boolean; ownerPreparedAcceptance?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
@@ -304,6 +304,7 @@ export class AssistantGoalsService extends Service {
   #preparingPreparedCreation = false
   readonly #ownerRepairBindings = new Map<Agent, { scope: GoalScope; ownerRouteId: string; expiresAt: number; routeReceipt: unknown; currentAuthority: () => void; dispose: () => void }>()
   readonly eventWaitsEnabled!: boolean
+  readonly ownerAcceptanceEnabled!: boolean
   readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
 
   constructor(ctx: Context, input: Config = {}) {
@@ -346,6 +347,7 @@ export class AssistantGoalsService extends Service {
     if (input.ownerPreparedAcceptance !== undefined && typeof input.ownerPreparedAcceptance !== 'boolean') throw new Error('assistant-goals: ownerPreparedAcceptance must be boolean')
     const ownerPreparedAcceptance = input.ownerPreparedAcceptance === true
     if (ownerPreparedAcceptance && path === ':memory:') throw new Error('assistant-goals: owner prepared acceptance requires a durable private database file')
+    Object.defineProperty(this, 'ownerAcceptanceEnabled', { value: ownerPreparedAcceptance, enumerable: true, writable: false, configurable: false })
     this.#store = new GoalStore(path)
     if (ownerIntent) {
       try { this.#ownerIntent = { store: new GoalOwnerIntentStore(`${path}.owner-intents`) } }
@@ -716,7 +718,9 @@ export class AssistantGoalsService extends Service {
    * ledger) keeps the historical create path; enabled means every native goal
    * creation requires a fresh Delivery proof and fails closed otherwise.
    */
-  createFromOwnerIntent = (execution: ToolExecution, objective: string, maxGoalRounds?: number): GoalRecord => {
+  createFromOwnerIntent = (execution: ToolExecution, objective: string, maxGoalRounds?: number, acceptance?: unknown): GoalRecord => {
+    if (this.#ownerAcceptance !== undefined) return this.#createFromOwnerIntentPrepared(execution, objective, maxGoalRounds, acceptance)
+    if (acceptance !== undefined) throw new Error('assistant-goals: owner-prepared acceptance is not enabled; omit acceptance or enable ownerPreparedAcceptance')
     if (this.#ownerIntent === undefined) return this.create(execution.agent, objective, maxGoalRounds)
     const agent = execution.agent
     if (agent === undefined) throw new Error('assistant-goals: owner intent requires the live owner tool call')
@@ -756,6 +760,68 @@ export class AssistantGoalsService extends Service {
     return record
   }
 
+  /** Owner-turn creation that also seals the protected acceptance before returning. */
+  #createFromOwnerIntentPrepared(execution: ToolExecution, objective: string, maxGoalRounds: number | undefined, acceptance: unknown): GoalRecord {
+    const agent = execution.agent
+    if (agent === undefined) throw new Error('assistant-goals: owner intent requires the live owner tool call')
+    if (acceptance === undefined) throw new Error('assistant-goals: owner-prepared acceptance requires explicit criteria')
+    const input = resolveOwnerPreparedAcceptanceInput(acceptance, this.#stepMaxDurationMs)
+    // Fail before native creation when the verifier side cannot seal at all.
+    this.#sealCapability()
+    if (this.#createMaxRounds > 0) {
+      maxGoalRounds ??= this.#createMaxRounds
+      if (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1 || maxGoalRounds > this.#createMaxRounds) throw new Error('assistant-goals: configured creation round limit exceeded')
+    }
+    const scope = this.#scope(agent, 'create')
+    this.#scope(agent, 'observe')
+    this.#requireOwnerTurn(agent, scope)
+    if (typeof objective !== 'string' || objective.trim().length === 0 || objective.length > 16384) throw new Error('assistant-goals: invalid objective')
+    if (maxGoalRounds !== undefined && (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1)) throw new Error('assistant-goals: invalid round limit')
+    const intent = this.#ownerIntent === undefined ? undefined : this.#freezeOwnerIntent(agent, execution, objective, scope)
+    const native = this.ctx.get('goals')
+    if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
+    // Match the native domain's normalization before looking up exact profiles.
+    this.#outcome?.preflight(scope, objective.trim())
+    this.#preparingPreparedCreation = true
+    try { native.create(agent, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) }) }
+    finally { this.#preparingPreparedCreation = false }
+    let record: GoalRecord | undefined
+    try { record = this.#observe(agent, true) } catch { record = undefined }
+    if (record === undefined) {
+      const rolledBack = this.#rollbackCurrentGoal(agent)
+      throw new Error(rolledBack
+        ? 'assistant-goals: native goal created but context could not be indexed; the native goal was rolled back'
+        : 'assistant-goals: native goal created but context could not be indexed; inspect and clear the current native goal before retrying')
+    }
+    try { this.#sealOwnerAcceptanceRecord(record, input) } catch (error) {
+      const rolledBack = this.#rollbackCreatedGoal(agent, record)
+      throw new Error(rolledBack
+        ? 'assistant-goals: native goal created but the owner acceptance could not be sealed; the native goal was rolled back'
+        : 'assistant-goals: native goal created without a sealed owner acceptance; inspect and clear it before use', { cause: error })
+    }
+    if (intent !== undefined) {
+      try { this.#ownerIntent!.store.record(intent, record.id, record.definition.digest) } catch (error) {
+        const rolledBack = this.#rollbackCreatedGoal(agent, record)
+        throw new Error(rolledBack
+          ? 'assistant-goals: native goal created but the owner intent could not be recorded; the native goal was rolled back'
+          : 'assistant-goals: native goal created without a frozen owner intent; inspect and clear it before use', { cause: error })
+      }
+    }
+    return record
+  }
+
+  /** Clear a just-created native goal when the business record could not be observed. */
+  #rollbackCurrentGoal(agent: Agent): boolean {
+    try {
+      const native = this.ctx.get('goals')
+      if (native === undefined) return false
+      const current = native.get(agent)
+      if (current === undefined) return true
+      native.clear(agent, { id: current.id, revision: current.revision })
+      return native.get(agent) === undefined
+    } catch { return false }
+  }
+
   #freezeOwnerIntent(agent: Agent, execution: ToolExecution, objective: string, scope: GoalScope): GoalOwnerIntent {
     const delivery = this.ctx.get('assistantDelivery') as unknown as GoalOwnerIntentDelivery | undefined
     if (delivery === undefined || typeof delivery.inspectOwnerForegroundToolCallForAgent !== 'function'
@@ -768,6 +834,24 @@ export class AssistantGoalsService extends Service {
       throw new Error("assistant-goals: objective must quote the owner's original words verbatim")
     }
     return intent
+  }
+
+  /**
+   * Read-only catalog of installed acceptance authorities for the caller's
+   * owner scope. The verifier keeps the authority list; Goals only proxies it
+   * inside a model tool that is registered in owner-prepared mode.
+   */
+  inspectAcceptanceAuthorities = (agent: Agent | undefined): unknown => {
+    const scope = this.#scope(agent, 'inspect')
+    const verifier = this.ctx.get('assistantVerifier', false) as unknown as {
+      inspectAcceptanceAuthorities?(input: { scope: { workspace: string; preset: string }
+        owner: { principalRecordId: string; principalVersion: number } }): unknown
+    } | undefined
+    if (verifier === undefined || typeof verifier.inspectAcceptanceAuthorities !== 'function') {
+      throw new Error('assistant-goals: acceptance authority catalog is unavailable; the verifier peer does not expose it')
+    }
+    return verifier.inspectAcceptanceAuthorities({ scope: { workspace: scope.workspace, preset: scope.preset },
+      owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion } })
   }
 
   /**
@@ -821,21 +905,14 @@ export class AssistantGoalsService extends Service {
   sealOwnerAcceptance = (agent: Agent | undefined, goalId: string, value: unknown): Readonly<{
     goalId: string; definitionDigest: string; outcome: Readonly<{ contractId: string; contractDigest: string }>; expiresAt: number
   }> => {
-    const store = this.#ownerAcceptance?.store
-    if (store === undefined) throw new Error('assistant-goals: owner prepared acceptance is not enabled')
     const scope = this.#scope(agent, 'create')
     const record = this.#store.get(scope, goalId)
     if (record === undefined) throw new Error('assistant-goals: goal not found')
     if (record.native.phase !== 'active' && record.native.phase !== 'paused') throw new Error('assistant-goals: only an active or paused goal can seal owner acceptance')
     const input = validateOwnerPreparedAcceptanceInput(value, this.#stepMaxDurationMs)
-    const registration = this.#acceptanceRegistration
-    if (registration === undefined) throw new Error('assistant-goals: owner prepared acceptance requires the goal verifier registration')
-    if (this.#outcome === undefined) throw new Error('assistant-goals: owner prepared acceptance requires whole-goal verification')
-    const verifier = this.ctx.get('assistantVerifier', false) as unknown as { inspectAcceptedTask?(contractId: string): { contract: TaskAcceptanceContract } | null } | undefined
-    const prepared = preparedRegistration(registration)
-    if (prepared === undefined) throw new Error('assistant-goals: the goal verifier does not support owner-prepared acceptance')
+    const capability = this.#sealCapability()
     const stepCriteria = input.stepCriteria ?? input.criteria
-    const existing = store.get(record.id)
+    const existing = capability.store.get(record.id)
     if (existing !== undefined) {
       const same = existing.definition.version === record.definition.version && existing.definition.digest === record.definition.digest
         && acceptanceDigest(existing.criteria) === acceptanceDigest(input.criteria)
@@ -843,11 +920,46 @@ export class AssistantGoalsService extends Service {
         && acceptanceDigest(existing.bounds) === acceptanceDigest(input.bounds)
         && existing.validityMs === input.validityMs && acceptanceDigest(existing.preparer) === acceptanceDigest(input.preparer)
       if (!same) throw new Error('assistant-goals: owner acceptance is already sealed for this goal with different criteria; create a new goal to change it')
-      this.#outcome.bindPrepared(record, existing)
-      return Object.freeze({ goalId: existing.goalId, definitionDigest: existing.definition.digest,
-        outcome: Object.freeze({ contractId: existing.outcome.contractId, contractDigest: existing.outcome.contractDigest }),
-        expiresAt: existing.outcomeExpiresAt })
+      this.#outcome!.bindPrepared(record, existing)
+      return this.#sealView(existing)
     }
+    try { return this.#sealView(this.#sealOwnerAcceptanceRecord(record, input)) }
+    catch (error) {
+      // An unsealed goal cannot run in prepared mode; never leave it silently usable.
+      const rolledBack = this.#rollbackCreatedGoal(agent as Agent, record)
+      throw new Error(rolledBack
+        ? 'assistant-goals: owner acceptance could not be sealed; the native goal was rolled back'
+        : 'assistant-goals: owner acceptance could not be sealed; the native goal remains without a sealed owner acceptance and must be inspected and cleared before use', { cause: error })
+    }
+  }
+
+  #sealView(seal: GoalOwnerAcceptanceSeal): Readonly<{
+    goalId: string; definitionDigest: string; outcome: Readonly<{ contractId: string; contractDigest: string }>; expiresAt: number
+  }> {
+    return Object.freeze({ goalId: seal.goalId, definitionDigest: seal.definition.digest,
+      outcome: Object.freeze({ contractId: seal.outcome.contractId, contractDigest: seal.outcome.contractDigest }),
+      expiresAt: seal.outcomeExpiresAt })
+  }
+
+  /** Resolve the live verifier capability required to seal prepared acceptance. */
+  #sealCapability(): { store: GoalOwnerAcceptanceStore; prepared: OwnerPreparedRegistration;
+    verifier: { inspectAcceptedTask?(contractId: string): { contract: TaskAcceptanceContract } | null } | undefined } {
+    const store = this.#ownerAcceptance?.store
+    if (store === undefined) throw new Error('assistant-goals: owner prepared acceptance is not enabled')
+    const registration = this.#acceptanceRegistration
+    if (registration === undefined) throw new Error('assistant-goals: owner prepared acceptance requires the goal verifier registration')
+    if (this.#outcome === undefined) throw new Error('assistant-goals: owner prepared acceptance requires whole-goal verification')
+    const verifier = this.ctx.get('assistantVerifier', false) as unknown as
+      { inspectAcceptedTask?(contractId: string): { contract: TaskAcceptanceContract } | null } | undefined
+    const prepared = preparedRegistration(registration)
+    if (prepared === undefined) throw new Error('assistant-goals: the goal verifier does not support owner-prepared acceptance')
+    return { store, prepared, verifier }
+  }
+
+  /** Seal one prepared outcome contract and persist it before the first round. */
+  #sealOwnerAcceptanceRecord(record: GoalRecord, input: OwnerPreparedAcceptanceInput): GoalOwnerAcceptanceSeal {
+    const capability = this.#sealCapability()
+    const stepCriteria = input.stepCriteria ?? input.criteria
     const assessmentId = `goal-assessment-${acceptanceDigest([record.scope, record.id, record.definition, 'initial'])}`
     const task = { kind: 'goal-outcome' as const, ref: assessmentId, goal: {
       id: record.id, definitionVersion: record.definition.version, definitionDigest: record.definition.digest,
@@ -858,36 +970,25 @@ export class AssistantGoalsService extends Service {
       task, objective: record.definition.objective, criteria: input.criteria, bounds: input.bounds,
       validityMs: input.validityMs, preparer: input.preparer,
     })
-    try {
-      const handle = prepared.prepareOwnerContract(request)
-      const contract = verifier?.inspectAcceptedTask?.(handle.contractId)?.contract
-      if (contract === undefined || contract.id !== handle.contractId || contract.digest !== handle.contractDigest
-        || contract.task.kind !== 'goal-outcome' || acceptanceDigest(contract.task) !== acceptanceDigest(task)
-        || contract.objective !== record.definition.objective
-        || acceptanceDigest(contract.criteria) !== acceptanceDigest(input.criteria)
-        || acceptanceDigest(contract.bounds) !== acceptanceDigest(input.bounds)
-        || contract.profile.id !== 'owner-prepared' || contract.profile.version !== 1
-        || contract.expiresAt <= Date.now()) throw new Error('assistant-goals: sealed owner acceptance readback failed')
-      const seal = validateOwnerAcceptanceSeal({
-        goalId: record.id, definition: record.definition, objective: record.definition.objective,
-        criteria: input.criteria, stepCriteria, bounds: input.bounds, validityMs: input.validityMs,
-        preparer: input.preparer, outcome: handle, preparedProfileDigest: contract.profile.digest,
-        outcomeExpiresAt: contract.expiresAt, at: Date.now(),
-      })
-      // Bind the frozen definition before persisting the seal: either both land
-      // or the native goal is rolled back below, never a half-sealed goal.
-      this.#outcome.bindPrepared(record, seal)
-      const recorded = store.record(seal)
-      return Object.freeze({ goalId: recorded.goalId, definitionDigest: recorded.definition.digest,
-        outcome: Object.freeze({ contractId: recorded.outcome.contractId, contractDigest: recorded.outcome.contractDigest }),
-        expiresAt: recorded.outcomeExpiresAt })
-    } catch (error) {
-      // An unsealed goal cannot run in prepared mode; never leave it silently usable.
-      const rolledBack = this.#rollbackCreatedGoal(agent as Agent, record)
-      throw new Error(rolledBack
-        ? 'assistant-goals: owner acceptance could not be sealed; the native goal was rolled back'
-        : 'assistant-goals: owner acceptance could not be sealed; the native goal remains without a sealed owner acceptance and must be inspected and cleared before use', { cause: error })
-    }
+    const handle = capability.prepared.prepareOwnerContract(request)
+    const contract = capability.verifier?.inspectAcceptedTask?.(handle.contractId)?.contract
+    if (contract === undefined || contract.id !== handle.contractId || contract.digest !== handle.contractDigest
+      || contract.task.kind !== 'goal-outcome' || acceptanceDigest(contract.task) !== acceptanceDigest(task)
+      || contract.objective !== record.definition.objective
+      || acceptanceDigest(contract.criteria) !== acceptanceDigest(input.criteria)
+      || acceptanceDigest(contract.bounds) !== acceptanceDigest(input.bounds)
+      || contract.profile.id !== 'owner-prepared' || contract.profile.version !== 1
+      || contract.expiresAt <= Date.now()) throw new Error('assistant-goals: sealed owner acceptance readback failed')
+    const seal = validateOwnerAcceptanceSeal({
+      goalId: record.id, definition: record.definition, objective: record.definition.objective,
+      criteria: input.criteria, stepCriteria, bounds: input.bounds, validityMs: input.validityMs,
+      preparer: input.preparer, outcome: handle, preparedProfileDigest: contract.profile.digest,
+      outcomeExpiresAt: contract.expiresAt, at: Date.now(),
+    })
+    // Bind the frozen definition before persisting the seal: either both land or
+    // the caller rolls the native goal back, never a half-sealed goal.
+    this.#outcome!.bindPrepared(record, seal)
+    return capability.store.record(seal)
   }
 
   control = (agent: Agent | undefined, value: GoalControlInput): GoalRecord => {

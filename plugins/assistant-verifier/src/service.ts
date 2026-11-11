@@ -7,9 +7,9 @@ import {
 import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, assertCriteriaDecidable, compileAcceptanceProfiles } from './config.js'
 import type { AcceptanceProfile } from './config.js'
-import { verifyAcceptanceCriteria, type IsolatedVerificationContext } from './drivers.js'
+import { verifyAcceptanceCriteria, type IsolatedVerificationContext, type VerifierAuthority } from './drivers.js'
 import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
-import type { AcceptanceHandle, AcceptanceTask, OwnerPreparedContractInput, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
+import type { AcceptanceAuthorityCatalog, AcceptanceAuthorityCatalogEntry, AcceptanceHandle, AcceptanceTask, OwnerPreparedContractInput, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
@@ -125,6 +125,30 @@ function freeze<T>(value: T): T {
 
 function profileCopy(profile: AcceptanceProfile): AcceptanceProfile {
   return freeze(structuredClone(profile))
+}
+
+/** Sanitized entry for one installed authority; never credentials or environment. */
+function authorityCatalogEntry(authority: VerifierAuthority): AcceptanceAuthorityCatalogEntry {
+  switch (authority.kind) {
+    case 'runner': return freeze({ id: authority.id, digest: authority.digest, kind: 'runner',
+      artifactPath: 'workspace-relative',
+      note: 'process-behavior artifactPath must be a workspace-relative path; expected stdout and exit code are compared with this fixed runner executable.' })
+    case 'isolated-runner': return freeze({ id: authority.id, digest: authority.digest, kind: 'isolated-runner',
+      artifactPath: 'workspace-relative',
+      testSetIds: Object.freeze(authority.testSets.map(testSet => testSet.id)),
+      note: 'isolated-process-behavior criteria bind exactly one testSetId from this list.' })
+    case 'document': return freeze({ id: authority.id, digest: authority.digest, kind: 'document',
+      sourceIds: Object.freeze(authority.sources.map(source => source.id)),
+      sources: Object.freeze(authority.sources.map(source => Object.freeze({ id: source.id, url: source.url }))),
+      note: 'document-citations requiredText/quotes may cite these source ids; urls are informational only.' })
+    case 'readback': return freeze({ id: authority.id, digest: authority.digest, kind: 'readback',
+      objectIdPointer: authority.objectIdPointer,
+      note: 'target-readback objectId is a Host-configured object id resolved through this JSON pointer.' })
+    case 'repository-readback':
+    case 'repository-commit-readback': return freeze({ id: authority.id, digest: authority.digest, kind: authority.kind,
+      objectId: `${authority.repository}:${authority.branch}`,
+      note: 'target-readback objectId must be exactly "<repository>:<branch>" as shown; expected pointers use the readback response shape.' })
+  }
 }
 
 function isProducer(value: unknown): value is TaskAcceptanceProducer {
@@ -390,6 +414,32 @@ export class AssistantVerifierService extends Service<Config> {
     const key = objectivesSelectionKey(selection)
     return Object.freeze([...new Set(this.#compiled.profiles.flatMap(({ profile }) =>
       acceptanceCanonicalJson([profile.scope, profile.owner, profile.taskKind]) === key ? [profile.objective] : []))])
+  }
+
+  /**
+   * Host-only read-only catalog of installed acceptance authorities for one
+   * owner scope. It never registers a model tool, writes state, or exposes
+   * credentials, environment, executable/state paths or grant identities; the
+   * kind-specific bindings are guidance for constructing decidable criteria.
+   */
+  inspectAcceptanceAuthorities = (input: Readonly<{
+    scope: Readonly<{ workspace: string; preset: string }>
+    owner: Readonly<{ principalRecordId: string; principalVersion: number }>
+  }>): AcceptanceAuthorityCatalog => {
+    this.#assertActive()
+    const selection = record(input, ['scope', 'owner'], 'acceptance authority catalog')
+    const scope = record(selection.scope, ['workspace', 'preset'], 'acceptance authority catalog scope')
+    const owner = record(selection.owner, ['principalRecordId', 'principalVersion'], 'acceptance authority catalog owner')
+    if (typeof scope.workspace !== 'string' || scope.workspace.includes('\0') || Buffer.byteLength(scope.workspace) > 4_096
+      || scope.workspace !== scope.workspace.normalize('NFC').trim() || !isAbsolute(scope.workspace)
+      || normalize(scope.workspace) !== scope.workspace || resolve(scope.workspace) !== scope.workspace
+      || typeof scope.preset !== 'string' || !PROFILE_SELECTION_PRESET.test(scope.preset)
+      || typeof owner.principalRecordId !== 'string' || !PROFILE_SELECTION_ID.test(owner.principalRecordId)
+      || typeof owner.principalVersion !== 'number' || !Number.isSafeInteger(owner.principalVersion) || owner.principalVersion < 1) {
+      throw new Error('assistant-verifier: invalid acceptance authority catalog selection')
+    }
+    return freeze({ protocol: 'assistant-verifier/acceptance-authorities/v1' as const,
+      authorities: freeze(this.#compiled.authorities.map(authorityCatalogEntry)) })
   }
 
   registerTrustedVerifierEvaluationSink = (registration: VerifierEvaluationRegistration): (() => void) => {

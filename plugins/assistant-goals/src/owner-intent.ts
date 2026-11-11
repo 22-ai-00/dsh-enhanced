@@ -100,7 +100,7 @@ export function ownerIntentObjectiveSpan(text: string, objective: string): { sta
 
 function goalCreateObjective(value: unknown): string {
   if (!plain(value) || Object.getOwnPropertySymbols(value).length !== 0) fail('requires the plain live goal_create arguments')
-  if (Object.keys(value).some(key => !['objective', 'max_goal_rounds', 'start_native_rounds'].includes(key))) fail('received unknown goal_create arguments')
+  if (Object.keys(value).some(key => !['objective', 'max_goal_rounds', 'start_native_rounds', 'acceptance'].includes(key))) fail('received unknown goal_create arguments')
   const objective = value.objective
   if (typeof objective !== 'string' || objective.length < 1 || objective.length > objectiveLimit
     || objective.trim() !== objective || !utf8(objective)) fail('objective must be a trimmed, non-empty UTF-8 owner quote')

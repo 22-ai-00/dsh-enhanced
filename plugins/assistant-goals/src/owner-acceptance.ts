@@ -137,6 +137,31 @@ export function validateOwnerPreparedAcceptanceInput(value: unknown, stepMaxDura
   return frozen({ criteria: criteriaValue, stepCriteria: stepCriteriaValue, bounds: boundsValue, validityMs: value.validityMs, preparer: preparerValue })
 }
 
+export const NATURAL_LANGUAGE_PREPARER_ID = 'assistant-goals-owner-turn'
+
+/**
+ * Resolve the model-proposed acceptance carried by the live owner goal_create
+ * call. Criteria remain a candidate proposal: the Goals wire/policy checks run
+ * here and the independent verifier decides decidability when sealing. The
+ * default validity covers the configured round plus verification and is bounded
+ * to the verifier's 1s-24h window.
+ */
+export function resolveOwnerPreparedAcceptanceInput(value: unknown, stepMaxDurationMs: number): OwnerPreparedAcceptanceInput {
+  if (!plain(value)) fail('owner acceptance must be a plain object')
+  const keys = Object.keys(value)
+  if (keys.some(key => !['criteria', 'bounds', 'validity_ms'].includes(key))
+    || !Object.hasOwn(value, 'criteria') || !Object.hasOwn(value, 'bounds')) fail('owner acceptance input has an invalid shape')
+  const boundsValue = bounds(value.bounds)
+  const validityMs = value.validity_ms === undefined
+    ? Math.min(Math.max(boundsValue.maxDurationMs + 60_000, 1_800_000), 86_400_000)
+    : value.validity_ms
+  const criteriaValue = criteria(value.criteria, 'criteria')
+  return validateOwnerPreparedAcceptanceInput({
+    criteria: criteriaValue, bounds: boundsValue, validityMs,
+    preparer: { id: NATURAL_LANGUAGE_PREPARER_ID,
+      digest: acceptanceDigest({ protocol: 'assistant-goals/natural-language-acceptance/v1', criteria: criteriaValue, bounds: boundsValue }) },
+  }, stepMaxDurationMs)
+}
 /** Strict exact-key validation of one persisted seal; any drift fails closed. */
 export function validateOwnerAcceptanceSeal(value: unknown): GoalOwnerAcceptanceSeal {
   if (!plain(value)) fail('seal is invalid')

@@ -81,6 +81,17 @@ Host 须提供 `0.1.5-rc.3` 的 AgentRegistry、GoalService、SessionProjectionR
 - **预授权创建不叠加**：prepared 模式与 `preauthorizedCreateMaxRounds` 的 bounded 预授权创建不组合；prepared 模式下 `preauthorizeCreate` 仍按静态 profile 判定并返回 false（有意 fail-closed，本能力不覆盖预授权创建），普通 `goal_create` 路径不受影响。
 - **失败回滚与开关**：seal 请求通过本地校验后，若 Verifier 封存、readback 或侧库写入失败，会尝试 `clear` 刚创建的原生目标（复用 B1 模式）；回滚失败则明确报告目标仍存在、必须先检查清理。重复 seal 的 criteria 冲突不会回滚已有健康目标。该开关实际消费还要求 `verifyNativeRounds` 与 `verifyGoalOutcome` 同时开启；否则 seal 会以 `owner prepared acceptance requires whole-goal verification` fail-closed。`ownerPreparedAcceptance` 默认 false，关闭时不调用任何 prepared API、保持现有 profile 行为；开启时 `databasePath` 必须是持久私有文件（`:memory:` 启动即拒绝）。对端 Verifier 必须提供 `prepareOwnerContract`，旧 peer 会以 `the goal verifier does not support owner-prepared acceptance` fail-closed。
 
+### 自然语言委托路径（prepared 模式）
+
+`ownerPreparedAcceptance: true` 时，owner turn 的模型可以在 `goal_create` 中附带 `acceptance: { criteria, bounds, validity_ms? }` 作为**候选**准则：
+
+- **criteria 只是候选人话，需要 Host authority 目录**：prepared 模式的 owner 前台 turn 内注册只读工具 `goal_acceptance_catalog`，代理 Verifier 的脱敏目录（authority 的 id/digest/kind 以及 runner 的 workspace-relative artifactPath、isolated-runner 的 testSetIds、document 的 source ids、readback 的 objectId 等绑定提示；无 verifier/旧 peer 时返回可诊断错误）。模型必须先用它取得可用 authority 再构造 `goal_create` 的 `acceptance`。Goals 先做 exact-key/共享 wire 校验（数量、大小上限、isolated 混合、authority 引用形状），随后由独立 Verifier 在封存前用 `assertCriteriaDecidable` 判断 criteria 是否可判定；不可判定、缺失或形状非法都会使 goal_create 失败且不留下可用目标。criteria 会出现在系统上下文与 outcome conditions 中，worker 只读，不能修改或重新封存。
+- **同一 owner turn 内完成创建与封存**：`native.create` → `#observe` → 真实 Verifier 封存 outcome 合同 → 写 `.owner-acceptance` 侧库；任一步失败复用 `native.clear` 回滚原生目标，错误区分 “the native goal was rolled back” 与 “without a sealed owner acceptance; inspect and clear it before use”。首轮 step 合同仍在 `#admit` 的 `next()` 之前按当前 run task 封存，失败即零 worker 模型请求。
+- **validity**：省略 `validity_ms` 时默认 `max(bounds.maxDurationMs + 60s, 30 分钟)`（上限 24h）；显式值必须满足 Verifier 的 1s–24h 且覆盖配置的 round + verification 窗口。
+- **preparer**：自然语言路径固定使用 Host 常数标签 `assistant-goals-owner-turn`，digest 绑定本次 criteria/bounds 提案；Verifier 不记录也不校验该身份，只有 Goals 的 `.owner-acceptance` 侧库记录它。它不参与验收判定（可判定性由 Verifier 校验，语义充分性不由 preparer 证明）。
+- **开关关闭**：`ownerPreparedAcceptance=false` 时传入 `acceptance` 会被明确拒绝（不静默忽略）；不传时完全保持旧 profile 路径与既有 fail-closed 行为。
+- **与 ownerIntent 组合**：`ownerIntent` 与 `ownerPreparedAcceptance` 可以同时开启；B1 的 owner 原文/供应商/binding 证明在 native.create 之前冻结，B2 seal 成功后再记录 owner intent。任一失败都会回滚原生目标并给出可诊断错误；seal 失败时 side 库不落记录，intent 记录失败时按现有 rollback 语义处理（原生目标被 clear，已封存侧库行不再可用）。
+
 插件在 `goal/changed` 时建立业务记录。安装前已有或身份不明时创建的目标不会被追认，以免归属转移泄漏历史。创建不覆盖尚未完成的原生目标；原生状态为 complete 后可按 DSH 规则创建新的 GoalId，旧业务记录仍保留为待验收；如果目标已经创建而业务索引失败，会明确报告部分完成，先检查原生目标再重试。已有 Host goal-round-driver 若已启用，会按其原生规则继续执行新目标；本插件自身不启用该 driver。
 
 1. `goal_context {}` 列出最近的目标摘要及版本；最多读取 50 条，输出受字符预算约束，`truncated` 明确标记省略。

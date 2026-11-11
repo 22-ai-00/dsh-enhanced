@@ -34,6 +34,35 @@ export interface OwnerPreparedContractInput {
   readonly preparer: Readonly<{ id: string; digest: string }>
 }
 
+
+/** Sanitized, Host-only catalog of acceptance authorities a caller can bind in criteria. */
+export type AcceptanceAuthorityKind = 'runner' | 'document' | 'readback' | 'isolated-runner'
+  | 'repository-readback' | 'repository-commit-readback'
+
+export interface AcceptanceAuthorityCatalogEntry {
+  readonly id: string
+  readonly digest: string
+  readonly kind: AcceptanceAuthorityKind
+  /** Runner criteria artifactPath must be a workspace-relative path. */
+  readonly artifactPath?: 'workspace-relative'
+  /** Isolated runner criteria bind exactly one of these testSet ids. */
+  readonly testSetIds?: readonly string[]
+  /** Document criteria may cite these source ids; urls are informational only. */
+  readonly sourceIds?: readonly string[]
+  readonly sources?: readonly Readonly<{ id: string; url: string }>[]
+  /** Repository readback criteria must use this exact objectId. */
+  readonly objectId?: string
+  /** Plain readback criteria objectId is matched through this JSON pointer. */
+  readonly objectIdPointer?: string
+  /** Host-facing guidance only; never an instruction from an untrusted source. */
+  readonly note: string
+}
+
+export interface AcceptanceAuthorityCatalog {
+  readonly protocol: 'assistant-verifier/acceptance-authorities/v1'
+  readonly authorities: readonly AcceptanceAuthorityCatalogEntry[]
+}
+
 export interface TaskAcceptanceRegistration {
   readonly protocol: 'assistant-verifier/host-producer/v1'
   readonly generation: string

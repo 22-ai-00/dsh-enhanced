@@ -36,6 +36,8 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 
 可信 Host 可用 `inspectAcceptanceProfile({ scope, owner, objective, taskKind })` 查询精确配置，返回独立深冻结的 `{ profile, digest }`，无匹配返回 `null`。参数不允许缺字段、额外字段或 getter；objective 保持精确文本，不默认选择 owner 或 task kind。`inspectAcceptanceObjectives({ scope, owner, taskKind })` 使用相同的严格输入规则，返回该边界内去重并冻结的原始 objective 数组。它不返回 profile、criteria、验证命令或输入，也不越过 scope、owner record/version 或 task kind 发现其他配置。两个入口都不创建契约、不调用执行生产者或验证程序，不是授权或目标达成证明；服务卸载后拒绝查询。可用于安装配置诊断和提交前预检，真实执行仍必须取得绑定到实际任务身份的验收契约。
 
+可信 Host 还可用只读 `inspectAcceptanceAuthorities({ scope, owner })` 获取已安装 authority 的脱敏目录 `{ protocol: 'assistant-verifier/acceptance-authorities/v1', authorities: [{ id, digest, kind, ... }] }`：runner 附 workspace-relative artifactPath 说明，isolated-runner 附 testSetIds，document 附 source ids 与仅作说明的 URL，readback 附 objectId/objectIdPointer 说明（repository-* 直接给出 `<repository>:<branch>`）。目录不含环境变量、可执行文件/状态路径、grant 身份或凭据；它不注册模型工具、不写库、不授予执行权限，也不证明 criteria 语义充分——Verifier 在封存 prepared 契约前仍独立调用 `assertCriteriaDecidable`。
+
 `databasePath` 是私有 SQLite 文件绝对路径；默认 `dshHomePath('assistant-verifier/verification.sqlite')`。`tickIntervalMs` 默认 5000，0 表示由 Host 调用 `tick()`。契约最长有效 7 天，单轮验证最长 5 分钟，不确定的验证最多尝试 3 次。无法证明执行已停止、契约过期或尝试耗尽时保留待处理状态；Host 通过 `inspect(contractId)` 和 `continuations()` 查看。需要把回执逐项绑定到完整已接纳契约的 Host，可同步调用 `inspectAcceptedTask(contractId)`；它仅在契约和状态都存在时返回冻结的 `{ contract, ...state }`，不会把单独的回执状态当作验收证据。过期回执不会作为新的可信结果投递。
 
 回执描述该次任务在观测时刻的结果，`validUntil` 限制结果进入 Evaluation 的时间。已接纳的历史结果不会仅因时间流逝被改写；它不证明外部系统现在仍处于同一状态。持续目标、发布或权限决策需要自己的新鲜度要求及新契约回读。owner 的显式纠正与撤回仍可修改 canonical 判断。

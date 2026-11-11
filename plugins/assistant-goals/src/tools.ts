@@ -66,10 +66,23 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   }
   const createTool = defineTool({
     name: 'goal_create',
-    description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. By default creation leaves this owner turn open for goal_schedule, goal_wait_event, or an authorized skill_capture registration in the same owner turn. Set start_native_rounds true only to conclude a successful owner turn so the Host native goal driver, if enabled, can start the next goal round.',
-    parameters: { objective: { type: 'string', required: true }, max_goal_rounds: { type: 'integer' }, start_native_rounds: { type: 'boolean' } }, output,
+    description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. By default creation leaves this owner turn open for goal_schedule, goal_wait_event, or an authorized skill_capture registration in the same owner turn. Set start_native_rounds true only to conclude a successful owner turn so the Host native goal driver, if enabled, can start the next goal round. When owner-prepared acceptance is enabled, pass the candidate acceptance criteria/bounds derived from the owner request words; Goals validates them and the independent verifier seals them in this same owner turn before any goal round. When it is disabled, omit acceptance.',
+    parameters: { objective: { type: 'string', required: true }, max_goal_rounds: { type: 'integer' }, start_native_rounds: { type: 'boolean' },
+      acceptance: { type: 'object', additionalProperties: false,
+        description: 'Candidate acceptance derived from the owner request; required when owner-prepared acceptance is enabled, otherwise omit it. Call goal_acceptance_catalog first to learn installed authority ids/digests and kind-specific bindings, then build criteria from them; bounds are verification limits. The independent verifier decides whether the installed authorities can verify the criteria.',
+        properties: {
+          criteria: { type: 'array', required: true,
+            description: 'Candidate acceptance criteria; the independent verifier rejects criteria it cannot decide.',
+            items: { type: 'object', additionalProperties: true } },
+          bounds: { type: 'object', required: true, additionalProperties: false, properties: {
+            maxDurationMs: { type: 'integer', required: true, description: 'Maximum verification duration in ms.' },
+            maxEvidenceBytes: { type: 'integer', required: true, description: 'Maximum accepted evidence bytes.' } } },
+          validity_ms: { type: 'integer', description: 'Optional absolute validity window; defaults to max(bounds + 60s, 30 minutes) capped at 24h.' },
+        } } }, output,
     async execute(args, exec) {
-      const created = service.createFromOwnerIntent(exec, args.objective, args.max_goal_rounds)
+      if (typeof args.objective !== 'string') throw new Error('assistant-goals: invalid objective')
+      const maxGoalRounds = typeof args.max_goal_rounds === 'number' ? args.max_goal_rounds : undefined
+      const created = service.createFromOwnerIntent(exec, args.objective, maxGoalRounds, args.acceptance)
       if (args.start_native_rounds === true) exec.concludeTurn()
       return { context: (args.start_native_rounds === true
         ? 'Goal created. This successful call concludes the owner request turn; the Host native goal driver must start the next goal round before goal-round work can begin.\n'
@@ -79,6 +92,17 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   })
   ctx.tools.register(createTool)
   if (service.preauthorizedCreateEnabled) ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, createTool, execution => service.preauthorizeCreate(execution))
+  if (service.ownerAcceptanceEnabled) {
+    const catalogTool = defineTool({
+      name: 'goal_acceptance_catalog',
+      description: 'Read-only catalog of installed acceptance authorities for this owner scope. Call this before goal_create with owner-prepared acceptance: use a returned id/digest and the kind-specific bindings (workspace-relative artifactPath, testSetIds, source ids, objectId) to build candidate criteria. It never grants authority, writes state, or exposes credentials; criteria the verifier cannot decide are rejected at creation.',
+      parameters: {}, output,
+      async execute(_args, exec) {
+        return { context: JSON.stringify(service.inspectAcceptanceAuthorities(exec.agent)) }
+      },
+    })
+    ctx.tools.register(catalogTool)
+  }
   const contextTool = defineTool({
     name: 'goal_context',
     description: 'Inspect owner-scoped business goal history and next steps. Optional focus supplies context in this session without starting or transferring a native goal. Native completion and cited evidence are not verified success.',
