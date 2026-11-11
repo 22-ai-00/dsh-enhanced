@@ -6,6 +6,7 @@ import type { AcceptanceHandle, AcceptedExecution, TaskAcceptanceRegistration } 
 import { GoalOutcomeStore } from './outcome-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
+import { preparedRegistration, type GoalOwnerAcceptanceSeal } from './owner-acceptance.js'
 
 export interface GoalOutcomeView {
   status: 'unverified' | 'pending' | 'achieved' | 'not-achieved' | 'unknown' | 'expired' | 'unavailable'
@@ -40,7 +41,10 @@ export class GoalOutcomeRuntime {
     private readonly stepMaxDurationMs: number,
     private readonly assertDependencies: (record: GoalRecord) => void,
     private readonly acceptsPausedEventWaitSettlement: (record: GoalRecord, run: GoalExecutionRun, agent: Agent) => boolean = () => false,
-    private readonly acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>, run: GoalExecutionRun) => boolean = () => false) {
+    private readonly acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>, run: GoalExecutionRun) => boolean = () => false,
+    /** Prepared-acceptance mode: whole-goal binding is deferred until the Host seals. */
+    private readonly deferredAcceptance: () => boolean = () => false,
+    private readonly sealFor: (record: GoalRecord) => GoalOwnerAcceptanceSeal | undefined = () => undefined) {
     this.#store = new GoalOutcomeStore(path)
     this.#store.recoverIncomplete()
     ctx.on('assistant-verifier/receipt', notice => {
@@ -96,6 +100,16 @@ export class GoalOutcomeRuntime {
   /** Configuration-only check before the owner bridge mutates a native goal. */
   preflight(scope: GoalScope, objective: string, record?: GoalRecord): void {
     this.#ready()
+    if (record !== undefined) {
+      const seal = this.sealFor(record)
+      if (seal !== undefined) { this.#preflightPrepared(scope, objective, record, seal); return }
+      if (this.deferredAcceptance()) throw new Error('assistant-goals: no sealed owner acceptance; seal before the first goal round')
+    } else if (this.deferredAcceptance()) {
+      // Prepared acceptance is sealed after the business goal exists, so create
+      // only verifies that the verifier can accept an owner-prepared contract.
+      this.#preparedCapability()
+      return
+    }
     const verifier = this.ctx.get('assistantVerifier', false)!
     const selection = { scope: { workspace: scope.workspace, preset: scope.preset },
       owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective }
@@ -124,6 +138,69 @@ export class GoalOutcomeRuntime {
       throw new Error('assistant-goals: frozen whole-goal deadline cannot cover another native round and verification')
     }
   }
+  #preparedCapability(): void {
+    const registration = this.#ready()
+    if (preparedRegistration(registration) === undefined) {
+      throw new Error('assistant-goals: the whole-goal verifier does not support owner-prepared acceptance')
+    }
+  }
+
+  #preflightPrepared(scope: GoalScope, objective: string, record: GoalRecord, seal: GoalOwnerAcceptanceSeal): void {
+    if (seal.goalId !== record.id || !same(record.scope, scope)
+      || seal.definition.version !== record.definition.version || seal.definition.digest !== record.definition.digest
+      || !same(seal.definition, record.definition)) {
+      throw new Error('assistant-goals: sealed owner acceptance is stale for the current goal definition; create a new goal')
+    }
+    if (objective !== record.definition.objective) {
+      throw new Error('assistant-goals: the objective is bound to the protected owner acceptance; create a new goal to change it')
+    }
+    const stepWindow = this.stepMaxDurationMs + seal.bounds.maxDurationMs
+    const wholeWindow = stepWindow + seal.bounds.maxDurationMs
+    if (seal.validityMs <= wholeWindow) throw new Error('assistant-goals: acceptance validity cannot cover the configured native round and verification')
+    if (Date.now() + wholeWindow >= seal.outcomeExpiresAt) throw new Error('assistant-goals: frozen whole-goal deadline cannot cover another native round and verification')
+    this.#preparedCapability()
+    const existing = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (existing === undefined) return
+    const template = existing.template
+    if (!same(existing.definition, record.definition) || !same(record.scope, scope)
+      || existing.sessionId !== record.native.sessionId || existing.nativeGoalId !== record.native.goalId) {
+      throw new Error('assistant-goals: whole-goal definition changed')
+    }
+    if (template.id !== seal.outcome.contractId || template.digest !== seal.outcome.contractDigest) {
+      throw new Error('assistant-goals: frozen whole-goal specification differs from the sealed owner acceptance')
+    }
+  }
+
+  /** Freeze the sealed owner-prepared outcome contract read back from the verifier. */
+  bindPrepared(record: GoalRecord, seal: GoalOwnerAcceptanceSeal): void {
+    this.#ready()
+    this.#preparedCapability()
+    if (seal.goalId !== record.id || seal.definition.version !== record.definition.version
+      || seal.definition.digest !== record.definition.digest || seal.objective !== record.definition.objective) {
+      throw new Error('assistant-goals: sealed owner acceptance is stale for the current goal definition; create a new goal')
+    }
+    const existing = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (existing !== undefined) {
+      if (!same(existing.definition, record.definition) || existing.sessionId !== record.native.sessionId
+        || existing.nativeGoalId !== record.native.goalId
+        || existing.template.id !== seal.outcome.contractId || existing.template.digest !== seal.outcome.contractDigest) {
+        throw new Error('assistant-goals: whole-goal definition changed')
+      }
+      return
+    }
+    const contract = this.ctx.get('assistantVerifier', false)?.inspectAcceptedTask(seal.outcome.contractId)?.contract
+    if (contract === undefined || contract.id !== seal.outcome.contractId || contract.digest !== seal.outcome.contractDigest
+      || contract.task.kind !== 'goal-outcome' || contract.objective !== record.definition.objective
+      || contract.task.goal.id !== record.id || contract.task.goal.definitionVersion !== record.definition.version
+      || contract.task.goal.definitionDigest !== record.definition.digest
+      || contract.task.goal.sessionId !== record.native.sessionId || contract.task.goal.nativeGoalId !== record.native.goalId
+      || !same(contract.criteria, seal.criteria) || !same(contract.bounds, seal.bounds)) {
+      throw new Error('assistant-goals: sealed owner acceptance readback failed')
+    }
+    this.#store.bind({ scope: record.scope, goalId: record.id, definition: record.definition,
+      sessionId: record.native.sessionId, nativeGoalId: record.native.goalId, template: contract })
+  }
+
   /** Called only while the owner creates/edits the definition, before native work. */
   bind(record: GoalRecord): void {
     const registration = this.#ready()
@@ -133,6 +210,9 @@ export class GoalOutcomeRuntime {
         || existing.nativeGoalId !== record.native.goalId) throw new Error('assistant-goals: whole-goal definition changed')
       return
     }
+    const seal = this.sealFor(record)
+    if (seal !== undefined) { this.bindPrepared(record, seal); return }
+    if (this.deferredAcceptance()) return
     const assessmentId = `goal-assessment-${acceptanceDigest([record.scope, record.id, record.definition, 'initial'])}`
     const accepted = registration.prepare(this.#input(record, assessmentId))
     const contract = accepted === null ? undefined : this.ctx.get('assistantVerifier', false)?.inspectAcceptedTask(accepted.contractId)?.contract
@@ -145,7 +225,13 @@ export class GoalOutcomeRuntime {
   prepare(agent: Agent, run: GoalExecutionRun): void {
     const registration = this.#ready()
     const record = this.current(agent)
-    const definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    let definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (definition === undefined && this.deferredAcceptance()) {
+      const seal = this.sealFor(record)
+      if (seal === undefined) throw new Error('assistant-goals: no sealed owner acceptance; seal before the first goal round')
+      this.bindPrepared(record, seal)
+      definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    }
     if (definition === undefined || !same(definition.definition, record.definition)) throw new Error('assistant-goals: whole-goal conditions were not frozen by the owner')
     const prior = this.#store.list(record.scope, record.id, 100).filter(item => item.definition.definition.version === record.definition.version)
     const replay = this.#store.getByTriggerRun(record.scope, record.id, record.definition.version, run.intent.runId)

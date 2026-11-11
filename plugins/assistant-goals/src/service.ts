@@ -35,14 +35,17 @@ import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateO
 import { assertGoalDependenciesAchieved, goalDependencies } from './dependency.js'
 import { buildGoalOwnerIntent, ownerIntentObjectiveSpan, type GoalOwnerIntent, type GoalOwnerIntentDelivery } from './owner-intent.js'
 import { GoalOwnerIntentStore, goalOwnerIntentSupplier } from './owner-intent-store.js'
+import { validateOwnerAcceptanceSeal, validateOwnerPreparedAcceptanceInput, preparedRegistration, type GoalOwnerAcceptanceSeal, type OwnerPreparedContractInput } from './owner-acceptance.js'
+import { GoalOwnerAcceptanceStore } from './owner-acceptance-store.js'
 
-export interface Config { eventWaits?: boolean; ownerIntent?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
+export interface Config { eventWaits?: boolean; ownerIntent?: boolean; ownerPreparedAcceptance?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   preauthorizedCreateMaxRounds: Schema.number().step(1).min(0).max(32).default(0),
   preauthorizedSchedule: Schema.boolean().default(false),
   eventWaits: Schema.boolean().default(false),
   ownerIntent: Schema.boolean().default(false),
+  ownerPreparedAcceptance: Schema.boolean().default(false),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   verifyGoalOutcome: Schema.boolean().default(false),
@@ -279,6 +282,7 @@ export class AssistantGoalsService extends Service {
   #active = true
   #maxChars: number
   #createMaxRounds: number
+  #stepMaxDurationMs = 60_000
   #preauthorizedSchedule = false
   readonly preauthorizedCreateEnabled!: boolean
   readonly preauthorizedScheduleEnabled!: boolean
@@ -292,6 +296,12 @@ export class AssistantGoalsService extends Service {
   #eventWait: GoalEventWaitRuntime | undefined
   /** Set only when owner intent freezing is enabled; every Goal still needs its own frozen proof. */
   #ownerIntent: { store: GoalOwnerIntentStore } | undefined
+  /** Set only when Host-prepared owner acceptance is enabled; every goal needs its own seal. */
+  #ownerAcceptance: { store: GoalOwnerAcceptanceStore } | undefined
+  /** The current Host producer registration; seal requests are rejected without it. */
+  #acceptanceRegistration: TaskAcceptanceRegistration | undefined
+  /** Native create emits goal/changed synchronously; this marker defers legacy binding. */
+  #preparingPreparedCreation = false
   readonly #ownerRepairBindings = new Map<Agent, { scope: GoalScope; ownerRouteId: string; expiresAt: number; routeReceipt: unknown; currentAuthority: () => void; dispose: () => void }>()
   readonly eventWaitsEnabled!: boolean
   readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
@@ -307,6 +317,7 @@ export class AssistantGoalsService extends Service {
     const path = input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite')
     const duration = input.stepMaxDurationMs ?? 60000
     if (!Number.isSafeInteger(duration) || duration < 1 || duration > 300000 || (input.verifyNativeRounds !== undefined && typeof input.verifyNativeRounds !== 'boolean')) throw new Error('assistant-goals: invalid execution limits')
+    this.#stepMaxDurationMs = duration
     const budget = input.executionBudget === undefined ? undefined : validateGoalBudgetConfig(input.executionBudget)
     if (budget !== undefined && input.verifyNativeRounds !== true) throw new Error('assistant-goals: execution budget requires verified native rounds')
     const strategy = input.strategy === undefined ? undefined : validateGoalStrategyConfig(input.strategy)
@@ -332,12 +343,27 @@ export class AssistantGoalsService extends Service {
     // The side ledger must be a durable private file: an in-memory goal database
     // cannot prove its intent ledger survived the exact owner request.
     if (ownerIntent && path === ':memory:') throw new Error('assistant-goals: owner intent requires a durable private database file')
+    if (input.ownerPreparedAcceptance !== undefined && typeof input.ownerPreparedAcceptance !== 'boolean') throw new Error('assistant-goals: ownerPreparedAcceptance must be boolean')
+    const ownerPreparedAcceptance = input.ownerPreparedAcceptance === true
+    if (ownerPreparedAcceptance && path === ':memory:') throw new Error('assistant-goals: owner prepared acceptance requires a durable private database file')
     this.#store = new GoalStore(path)
     if (ownerIntent) {
       try { this.#ownerIntent = { store: new GoalOwnerIntentStore(`${path}.owner-intents`) } }
       catch (error) { this.#store.close(); throw error }
     }
-    ctx.effect(() => () => { this.#active = false; for (const binding of this.#ownerRepairBindings.values()) binding.dispose(); this.#ownerRepairBindings.clear(); this.#store.close(); this.#ownerIntent?.store.close() }, 'assistant-goals.store')
+    if (ownerPreparedAcceptance) {
+      try { this.#ownerAcceptance = { store: new GoalOwnerAcceptanceStore(`${path}.owner-acceptance`) } }
+      catch (error) { this.#ownerIntent?.store.close(); this.#store.close(); throw error }
+    }
+    ctx.effect(() => () => {
+      this.#active = false
+      this.#acceptanceRegistration = undefined
+      for (const binding of this.#ownerRepairBindings.values()) binding.dispose()
+      this.#ownerRepairBindings.clear()
+      this.#store.close()
+      this.#ownerIntent?.store.close()
+      this.#ownerAcceptance?.store.close()
+    }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, (agent, consume = true) => {
       const scope = this.#scope(agent, 'execute', consume)
       const record = this.#observe(agent, false, consume)
@@ -346,7 +372,9 @@ export class AssistantGoalsService extends Service {
     }, input.verifyGoalOutcome === true ? {
       prepare: (agent, run) => this.#outcome!.prepare(agent, run),
       settled: (agent, run, assertCurrent) => this.#outcome!.settled(agent, run, assertCurrent),
-    } : undefined, record => this.#assertDependencies(record))
+    } : undefined, record => this.#assertDependencies(record),
+    () => this.#ownerAcceptance !== undefined,
+    record => this.#ownerAcceptance === undefined ? undefined : this.#sealFor(record))
     if (input.verifyGoalOutcome === true) this.#outcome = new GoalOutcomeRuntime(ctx, `${path}.outcomes`, agent => {
       this.#scope(agent, 'execute')
       const record = this.#observe(agent, false)
@@ -355,7 +383,9 @@ export class AssistantGoalsService extends Service {
     }, this.#execution.list, duration, record => this.#assertDependencies(record), (record, run, agent) =>
       this.#eventWait?.acceptsPausedOutcomeSettlement(record, run) === true
       && this.#execution.acceptsPausedEventWaitSettlement(record, run, agent), (record, wake, run) =>
-      this.#eventWait?.acceptsHistoricalPausedOutcomeCompletion(record, wake, run) === true)
+      this.#eventWait?.acceptsHistoricalPausedOutcomeCompletion(record, wake, run) === true,
+    () => this.#ownerAcceptance !== undefined,
+    record => this.#ownerAcceptance === undefined ? undefined : this.#sealFor(record))
     if (this.#outcome !== undefined) ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       signal.throwIfAborted()
       try { this.#outcome?.reconcileCompletion(agent) } catch { /* Missing authority leaves completion visibly pending. */ }
@@ -424,7 +454,8 @@ export class AssistantGoalsService extends Service {
           if (change.operation === 'clear') this.#clear(agent, change.ref.id, change.ref.revision)
           else {
             const record = this.#observe(agent, change.operation === 'create')
-            if (record !== undefined && (change.operation === 'create' || change.operation === 'edit')) this.#bindOutcome(agent, record)
+            if (record !== undefined && !this.#preparingPreparedCreation
+              && (change.operation === 'create' || change.operation === 'edit')) this.#bindOutcome(agent, record)
           }
           this.#eventWait?.reconcile()
         } catch { this.#observationFailures++ }
@@ -485,6 +516,14 @@ export class AssistantGoalsService extends Service {
 
   #bindOutcome(agent: Agent, record: GoalRecord): void {
     if (this.#outcome === undefined) return
+    if (this.#ownerAcceptance !== undefined) {
+      // Prepared acceptance is sealed by the Host after the business goal
+      // exists; never silently fall back to the legacy profile binding here.
+      const seal = this.#sealFor(record)
+      if (seal === undefined) return
+      this.#outcome.bindPrepared(record, seal)
+      return
+    }
     this.#requireOwnerTurn(agent, record.scope)
     this.#outcome.bind(record)
   }
@@ -657,7 +696,11 @@ export class AssistantGoalsService extends Service {
     this.#outcome?.preflight(scope, objective.trim())
     // Delivery retains its real source kind. Its current owner-turn proof is the
     // Host authority for this bridge; never forge a native direct-user event.
-    native.create(agent!, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) })
+    // Native create emits goal/changed synchronously; prepared mode must not
+    // attempt its legacy whole-goal binding before the Host seals acceptance.
+    this.#preparingPreparedCreation = this.#ownerAcceptance !== undefined
+    try { native.create(agent!, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) }) }
+    finally { this.#preparingPreparedCreation = false }
     try {
       const record = this.#observe(agent!, true)
       if (record !== undefined) { this.#bindOutcome(agent!, record); return record }
@@ -691,7 +734,9 @@ export class AssistantGoalsService extends Service {
     if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
     // Match the native domain's normalization before looking up exact profiles.
     this.#outcome?.preflight(scope, objective.trim())
-    native.create(agent, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) })
+    this.#preparingPreparedCreation = this.#ownerAcceptance !== undefined
+    try { native.create(agent, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) }) }
+    finally { this.#preparingPreparedCreation = false }
     let record: GoalRecord | undefined
     try { record = this.#observe(agent, true); if (record !== undefined) this.#bindOutcome(agent, record) } catch { record = undefined }
     if (record === undefined) {
@@ -703,15 +748,7 @@ export class AssistantGoalsService extends Service {
     try { this.#ownerIntent.store.record(intent, record.id, record.definition.digest) } catch (error) {
       // The native goal must never survive without its frozen proof. Roll it
       // back and report which outcome the caller must inspect.
-      let rolledBack = false
-      try {
-        const current = native.get(agent)
-        if (current === undefined) rolledBack = true
-        else if (String(current.id) === record.native.goalId) {
-          native.clear(agent, { id: current.id, revision: current.revision })
-          rolledBack = native.get(agent) === undefined
-        }
-      } catch { rolledBack = false }
+      const rolledBack = this.#rollbackCreatedGoal(agent, record)
       throw new Error(rolledBack
         ? 'assistant-goals: native goal created but the owner intent could not be recorded; the native goal was rolled back'
         : 'assistant-goals: native goal created without a frozen owner intent; inspect and clear it before use', { cause: error })
@@ -748,6 +785,109 @@ export class AssistantGoalsService extends Service {
     const stored = store.inspect(goalId)
     if (stored === undefined || stored.definitionDigest !== record.definition.digest) return undefined
     return stored.intent
+  }
+
+
+  /** Best-effort clear of a just-created native goal whose proof could not be frozen. */
+  #rollbackCreatedGoal(agent: Agent, record: GoalRecord): boolean {
+    try {
+      const native = this.ctx.get('goals')
+      if (native === undefined) return false
+      const current = native.get(agent)
+      if (current === undefined) return true
+      if (String(current.id) !== record.native.goalId) return false
+      native.clear(agent, { id: current.id, revision: current.revision })
+      return native.get(agent) === undefined
+    } catch { return false }
+  }
+
+  /** Current seal for one business goal; a stale definition digest fails closed. */
+  #sealFor(record: GoalRecord): GoalOwnerAcceptanceSeal | undefined {
+    const store = this.#ownerAcceptance?.store
+    if (store === undefined) return undefined
+    const seal = store.get(record.id)
+    if (seal === undefined) return undefined
+    if (seal.definition.version !== record.definition.version || seal.definition.digest !== record.definition.digest) {
+      throw new Error('assistant-goals: sealed owner acceptance is stale for the current goal definition; create a new goal')
+    }
+    return seal
+  }
+
+  /**
+   * Host-only: seal the protected acceptance for one owner-scoped business goal
+   * before its first native round. Criteria are Host-prepared and never reachable
+   * from model tool arguments; a goal in prepared mode cannot run unsealed.
+   */
+  sealOwnerAcceptance = (agent: Agent | undefined, goalId: string, value: unknown): Readonly<{
+    goalId: string; definitionDigest: string; outcome: Readonly<{ contractId: string; contractDigest: string }>; expiresAt: number
+  }> => {
+    const store = this.#ownerAcceptance?.store
+    if (store === undefined) throw new Error('assistant-goals: owner prepared acceptance is not enabled')
+    const scope = this.#scope(agent, 'create')
+    const record = this.#store.get(scope, goalId)
+    if (record === undefined) throw new Error('assistant-goals: goal not found')
+    if (record.native.phase !== 'active' && record.native.phase !== 'paused') throw new Error('assistant-goals: only an active or paused goal can seal owner acceptance')
+    const input = validateOwnerPreparedAcceptanceInput(value, this.#stepMaxDurationMs)
+    const registration = this.#acceptanceRegistration
+    if (registration === undefined) throw new Error('assistant-goals: owner prepared acceptance requires the goal verifier registration')
+    if (this.#outcome === undefined) throw new Error('assistant-goals: owner prepared acceptance requires whole-goal verification')
+    const verifier = this.ctx.get('assistantVerifier', false) as unknown as { inspectAcceptedTask?(contractId: string): { contract: TaskAcceptanceContract } | null } | undefined
+    const prepared = preparedRegistration(registration)
+    if (prepared === undefined) throw new Error('assistant-goals: the goal verifier does not support owner-prepared acceptance')
+    const stepCriteria = input.stepCriteria ?? input.criteria
+    const existing = store.get(record.id)
+    if (existing !== undefined) {
+      const same = existing.definition.version === record.definition.version && existing.definition.digest === record.definition.digest
+        && acceptanceDigest(existing.criteria) === acceptanceDigest(input.criteria)
+        && acceptanceDigest(existing.stepCriteria) === acceptanceDigest(stepCriteria)
+        && acceptanceDigest(existing.bounds) === acceptanceDigest(input.bounds)
+        && existing.validityMs === input.validityMs && acceptanceDigest(existing.preparer) === acceptanceDigest(input.preparer)
+      if (!same) throw new Error('assistant-goals: owner acceptance is already sealed for this goal with different criteria; create a new goal to change it')
+      this.#outcome.bindPrepared(record, existing)
+      return Object.freeze({ goalId: existing.goalId, definitionDigest: existing.definition.digest,
+        outcome: Object.freeze({ contractId: existing.outcome.contractId, contractDigest: existing.outcome.contractDigest }),
+        expiresAt: existing.outcomeExpiresAt })
+    }
+    const assessmentId = `goal-assessment-${acceptanceDigest([record.scope, record.id, record.definition, 'initial'])}`
+    const task = { kind: 'goal-outcome' as const, ref: assessmentId, goal: {
+      id: record.id, definitionVersion: record.definition.version, definitionDigest: record.definition.digest,
+      assessmentId, sessionId: record.native.sessionId, nativeGoalId: record.native.goalId } }
+    const request: OwnerPreparedContractInput = Object.freeze({
+      scope: Object.freeze({ workspace: record.scope.workspace, preset: record.scope.preset }),
+      owner: Object.freeze({ principalRecordId: record.scope.principalRecordId, principalVersion: record.scope.principalVersion }),
+      task, objective: record.definition.objective, criteria: input.criteria, bounds: input.bounds,
+      validityMs: input.validityMs, preparer: input.preparer,
+    })
+    try {
+      const handle = prepared.prepareOwnerContract(request)
+      const contract = verifier?.inspectAcceptedTask?.(handle.contractId)?.contract
+      if (contract === undefined || contract.id !== handle.contractId || contract.digest !== handle.contractDigest
+        || contract.task.kind !== 'goal-outcome' || acceptanceDigest(contract.task) !== acceptanceDigest(task)
+        || contract.objective !== record.definition.objective
+        || acceptanceDigest(contract.criteria) !== acceptanceDigest(input.criteria)
+        || acceptanceDigest(contract.bounds) !== acceptanceDigest(input.bounds)
+        || contract.profile.id !== 'owner-prepared' || contract.profile.version !== 1
+        || contract.expiresAt <= Date.now()) throw new Error('assistant-goals: sealed owner acceptance readback failed')
+      const seal = validateOwnerAcceptanceSeal({
+        goalId: record.id, definition: record.definition, objective: record.definition.objective,
+        criteria: input.criteria, stepCriteria, bounds: input.bounds, validityMs: input.validityMs,
+        preparer: input.preparer, outcome: handle, preparedProfileDigest: contract.profile.digest,
+        outcomeExpiresAt: contract.expiresAt, at: Date.now(),
+      })
+      // Bind the frozen definition before persisting the seal: either both land
+      // or the native goal is rolled back below, never a half-sealed goal.
+      this.#outcome.bindPrepared(record, seal)
+      const recorded = store.record(seal)
+      return Object.freeze({ goalId: recorded.goalId, definitionDigest: recorded.definition.digest,
+        outcome: Object.freeze({ contractId: recorded.outcome.contractId, contractDigest: recorded.outcome.contractDigest }),
+        expiresAt: recorded.outcomeExpiresAt })
+    } catch (error) {
+      // An unsealed goal cannot run in prepared mode; never leave it silently usable.
+      const rolledBack = this.#rollbackCreatedGoal(agent as Agent, record)
+      throw new Error(rolledBack
+        ? 'assistant-goals: owner acceptance could not be sealed; the native goal was rolled back'
+        : 'assistant-goals: owner acceptance could not be sealed; the native goal remains without a sealed owner acceptance and must be inspected and cleared before use', { cause: error })
+    }
   }
 
   control = (agent: Agent | undefined, value: GoalControlInput): GoalRecord => {
@@ -1881,7 +2021,11 @@ export class AssistantGoalsService extends Service {
     const execution = this.#execution.register(registration)
     let outcome: (() => void) | undefined
     try { outcome = this.#outcome?.register(registration) } catch (error) { execution(); throw error }
-    return () => { outcome?.(); execution() }
+    this.#acceptanceRegistration = registration
+    return () => {
+      if (this.#acceptanceRegistration === registration) this.#acceptanceRegistration = undefined
+      outcome?.(); execution()
+    }
   }
   currentArtifactAdmission = (agent: Agent) => this.#execution.currentArtifactAdmission(agent)
   inspectAcceptedArtifactSource = (contract: TaskAcceptanceContract) => contract.task.kind === 'goal-outcome'

@@ -9,7 +9,7 @@ import { Config, compileAcceptanceProfiles } from './config.js'
 import type { AcceptanceProfile } from './config.js'
 import { verifyAcceptanceCriteria, type IsolatedVerificationContext } from './drivers.js'
 import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
-import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
+import type { AcceptanceHandle, AcceptanceTask, OwnerPreparedContractInput, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
@@ -56,6 +56,15 @@ const producerTaskKinds: Readonly<Record<ProducerName, readonly TaskAcceptanceCo
 interface Binding { producer: TaskAcceptanceProducer; generation: string; dispose(): void }
 
 const PROFILE_SELECTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
+const PREPARED_PROFILE_ID = 'owner-prepared'
+const PREPARED_PROFILE_VERSION = 1
+/**
+ * Prepared profiles derive from the sealed criteria and bounds alone. That lets
+ * a restart re-verify a seal from the stored contract without another table,
+ * while static config profiles keep their own digests.
+ */
+const preparedProfileDigest = (criteria: TaskAcceptanceContract['criteria'], bounds: TaskAcceptanceContract['bounds']): string =>
+  acceptanceDigest({ protocol: 'assistant-goals/prepared-profile/v1', criteria, bounds })
 const PROFILE_SELECTION_PRESET = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u
 
 function record(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -458,6 +467,13 @@ export class AssistantVerifierService extends Service<Config> {
         handles.set(handle, accepted)
         return handle
       },
+      ...(name === 'assistantGoals' ? { prepareOwnerContract: (input: OwnerPreparedContractInput): AcceptanceHandle => {
+        current()
+        const accepted = this.#prepareOwnerContract(input)
+        const handle = Object.freeze({ contractId: accepted.id, contractDigest: accepted.digest })
+        handles.set(handle, accepted)
+        return handle
+      } } : {}),
       prepareGoalAssessment: (input: AcceptanceTask, template: AcceptanceHandle): AcceptanceHandle => {
         current()
         if (name !== 'assistantGoals') throw new Error('assistant-verifier: wrong Host assessment producer')
@@ -500,7 +516,12 @@ export class AssistantVerifierService extends Service<Config> {
     ]) === match)
     const previous = this.#store.getTaskContract(input)
     if (previous !== null) {
-      if (acceptanceDigest(previous.task) !== acceptanceDigest(input.task) || previous.objective !== input.objective || selected?.digest !== previous.profile.digest
+      // A prepared seal is self-describing: re-derive its profile digest from the
+      // frozen criteria instead of requiring a matching static config profile.
+      const prepared = previous.profile.id === PREPARED_PROFILE_ID && previous.profile.version === PREPARED_PROFILE_VERSION
+        && preparedProfileDigest(previous.criteria, previous.bounds) === previous.profile.digest
+      if (acceptanceDigest(previous.task) !== acceptanceDigest(input.task) || previous.objective !== input.objective
+        || (!prepared && selected?.digest !== previous.profile.digest)
         || previous.expiresAt <= this.#now()) throw new Error('assistant-verifier: accepted task changed or expired')
       return previous
     }
@@ -514,6 +535,62 @@ export class AssistantVerifierService extends Service<Config> {
       profile: { id: selected.profile.id, version: selected.profile.version, digest: selected.digest },
       issuedAt: now, expiresAt: now + selected.profile.validityMs,
       criteria: selected.profile.criteria, bounds: selected.profile.bounds }))
+  }
+
+  /**
+   * Seal Host-prepared criteria for one owner goal. The contract carries a
+   * prepared profile digest instead of a configured profile, so the frozen
+   * criteria stay outside worker write authority; every criterion must be
+   * decidable by an authority this deployment actually installed.
+   */
+  #prepareOwnerContract(input: OwnerPreparedContractInput): TaskAcceptanceContract {
+    const keys = ['scope', 'owner', 'task', 'objective', 'criteria', 'bounds', 'validityMs', 'preparer'].sort()
+    if (input === null || typeof input !== 'object' || Array.isArray(input)
+      || Object.getOwnPropertyNames(input).sort().join(',') !== keys.join(',')) {
+      throw new Error('assistant-verifier: invalid owner-prepared contract input')
+    }
+    const { scope, owner, task, objective, criteria, bounds, validityMs, preparer } = input
+    if (typeof objective !== 'string' || objective.trim().length === 0 || objective.length > 16_384) {
+      throw new Error('assistant-verifier: invalid owner-prepared objective')
+    }
+    if (task.kind !== 'goal-step' && task.kind !== 'goal-outcome') {
+      throw new Error('assistant-verifier: owner-prepared contracts require a goal task')
+    }
+    if (!Number.isSafeInteger(validityMs) || validityMs < 1_000 || validityMs > 86_400_000) {
+      throw new Error('assistant-verifier: invalid owner-prepared validity')
+    }
+    if (preparer === null || typeof preparer !== 'object' || Array.isArray(preparer)
+      || Object.getOwnPropertyNames(preparer).sort().join(',') !== 'digest,id'
+      || typeof preparer.id !== 'string' || !PROFILE_SELECTION_ID.test(preparer.id)
+      || typeof preparer.digest !== 'string' || !/^[a-f0-9]{64}$/u.test(preparer.digest)) {
+      throw new Error('assistant-verifier: invalid owner-prepared preparer')
+    }
+    const profileDigest = preparedProfileDigest(criteria, bounds)
+    const previous = this.#store.getTaskContract({ scope, owner, task })
+    if (previous !== null) {
+      if (acceptanceDigest(previous.task) !== acceptanceDigest(task) || previous.objective !== objective
+        || acceptanceDigest(previous.criteria) !== acceptanceDigest(criteria)
+        || acceptanceDigest(previous.bounds) !== acceptanceDigest(bounds)
+        || previous.profile.digest !== profileDigest) {
+        throw new Error('assistant-verifier: owner-prepared contract changed for this task')
+      }
+      if (previous.expiresAt <= this.#now()) throw new Error('assistant-verifier: owner-prepared contract expired')
+      return previous
+    }
+    const now = this.#now()
+    const contract = createTaskAcceptanceContract({
+      protocol: acceptanceProtocolForTask(task, criteria),
+      id: `acceptance-${acceptanceDigest([scope, owner, task])}`,
+      scope, owner, task, objective,
+      profile: { id: 'owner-prepared', version: 1, digest: profileDigest },
+      issuedAt: now, expiresAt: now + validityMs, criteria, bounds,
+    })
+    // Fail closed before sealing: an uninstalled authority means nobody can decide it.
+    if (contract.criteria.some(criterion => !this.#compiled.authorities.some(authority =>
+      authority.id === criterion.authority.id && authority.digest === criterion.authority.digest))) {
+      throw new Error('assistant-verifier: owner-prepared criterion has no installed authority')
+    }
+    return this.#store.accept(contract)
   }
 
   #prepareGoalAssessment(input: AcceptanceTask, template: AcceptanceHandle): TaskAcceptanceContract {
@@ -530,8 +607,12 @@ export class AssistantVerifierService extends Service<Config> {
       throw new Error('assistant-verifier: goal assessment changed its definition or owner')
     }
     const selected = this.#compiled.profiles.find(({ digest }) => digest === original.profile.digest)
+    // Prepared goal conditions stay usable after a restart or a config change: the
+    // seal carries everything needed to re-derive its profile identity.
+    const prepared = original.profile.id === PREPARED_PROFILE_ID && original.profile.version === PREPARED_PROFILE_VERSION
+      && preparedProfileDigest(original.criteria, original.bounds) === original.profile.digest
     const now = this.#now()
-    if (selected === undefined || now + original.bounds.maxDurationMs >= original.expiresAt) {
+    if ((!prepared && selected === undefined) || now + original.bounds.maxDurationMs >= original.expiresAt) {
       throw new Error('assistant-verifier: original goal conditions unavailable or expired')
     }
     const previous = this.#store.getTaskContract(input)

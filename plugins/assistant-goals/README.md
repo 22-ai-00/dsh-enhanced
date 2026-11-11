@@ -28,6 +28,7 @@ Host 须提供 `0.1.5-rc.3` 的 AgentRegistry、GoalService、SessionProjectionR
     verifyNativeRounds: false
     stepMaxDurationMs: 60000
 #    ownerIntent: true
+#    ownerPreparedAcceptance: true
 #    backgroundWake:
 #      ownerRouteId: local/owner
 #      budgetId: goal-budget/owner
@@ -67,6 +68,18 @@ Host 须提供 `0.1.5-rc.3` 的 AgentRegistry、GoalService、SessionProjectionR
 - **新增数据面**：侧库 `databasePath + '.owner-intents'` 是私有 SQLite 文件（0600、WAL/SHM，打开时校验文件权限与精确 schema），每行最多保存 65,536 字节人类原文的冻结 JSON 与 digest；它不含凭据或工具参数，但属于新增的磁盘数据面，备份/清理策略应覆盖它。
 - **失败回滚与崩溃窗口**：原生目标创建成功但侧库写入失败时，插件会尝试 `clear` 刚创建的原生目标：成功则报告“native goal was rolled back”，失败则报告“native goal exists without a frozen owner intent; inspect and clear it before use”。已知限制：若进程恰在 native create 与 side record 之间崩溃，会留下一个没有冻结证明的目标；恢复时必须先检查并清理，绝不能把它当作已冻结目标使用。
 - **对端版本**：Delivery 必须提供 agent 作用域的 `inspectOwnerForegroundToolCallForAgent` / `readOwnerForegroundToolInputForAgent`；旧 Host 缺少这些只读 API 时，`ownerIntent: true` 会以 `owner intent proof is unavailable` fail-closed（不静默降级）。
+
+### Host 预封存目标验收（可选）
+
+`ownerPreparedAcceptance: true` 时，目标验收不再依赖静态配置的 Verifier profile，而由 Host 在 owner scope 内用 `sealOwnerAcceptance(agent, goalId, { criteria, stepCriteria?, bounds, validityMs, preparer })` 预封存：
+
+- **seal 是 Host-only 且不可变**：Goals 复用 owner scope 与 GoalStore 归属校验，构造该 goal 的确定性 goal-outcome task 身份，调用 Verifier 的 `registration.prepareOwnerContract` 封存，并 readback 校验 contract id/digest/task/objective/criteria/bounds 与 `profile.id === 'owner-prepared'`。相同 goal 的重复 seal 只在 criteria/stepCriteria/bounds/validity/preparer 完全一致时幂等返回；任何差异都 conflict，必须新建目标。
+- **goal-outcome 只封存一次，goal-step 每次 run 封存**：whole-goal 合同绑定 business goal 与定义摘要；goal-step 合同在 `#admit` 中、`next()` 之前按当前 run 的真实 task 身份重新调 `prepareOwnerContract`（同一 run 重放幂等）。缺少 seal、stale definition digest、Verifier 缺少 prepared API、criteria 无已安装 authority 或合同期限无法覆盖本轮时，全部在模型请求前 fail-closed（零 worker 模型请求），错误信息含 `no sealed owner acceptance; seal before the first goal round` 等可诊断文本。
+- **criteria 对 worker 可见但只读**：封存后的 criteria/bounds/validity/expiresAt 会出现在 `goal_context` 的验收条件中供模型规划，但 worker 不能修改或重新封存；修改必须由 Host 以新 goal 完成。混合 isolated 与普通 criteria 会被共享 wire 校验拒绝。
+- **preparer 不参与判定**：Verifier 只校验 criteria 的 authority 已安装、可判定，不证明 criteria 语义充分；`preparer` 只是 Host 可信身份记录，不是验收结论。
+- **objective 与数据面**：已有 seal 的 goal 不能通过 `goal_control` 的 `edit` 修改 objective（会抛 `the objective is bound to the protected owner acceptance; create a new goal to change it`）；若通过其它原生入口绕过并改变 definition，seal 视为 stale 并在 preflight/prepare/admit 处 fail-closed。侧库 `databasePath + '.owner-acceptance'` 是私有 SQLite（0600/WAL/SHM），每行记录 goal_id、definition_digest、outcome contract id/digest、verifier 推导的 prepared profile digest、criteria/stepCriteria/bounds/validity/preparer 与 recorded_at；打开时逐行重解+digest 校验，篡改 fail-closed。
+- **预授权创建不叠加**：prepared 模式与 `preauthorizedCreateMaxRounds` 的 bounded 预授权创建不组合；prepared 模式下 `preauthorizeCreate` 仍按静态 profile 判定并返回 false（有意 fail-closed，本能力不覆盖预授权创建），普通 `goal_create` 路径不受影响。
+- **失败回滚与开关**：seal 请求通过本地校验后，若 Verifier 封存、readback 或侧库写入失败，会尝试 `clear` 刚创建的原生目标（复用 B1 模式）；回滚失败则明确报告目标仍存在、必须先检查清理。重复 seal 的 criteria 冲突不会回滚已有健康目标。该开关实际消费还要求 `verifyNativeRounds` 与 `verifyGoalOutcome` 同时开启；否则 seal 会以 `owner prepared acceptance requires whole-goal verification` fail-closed。`ownerPreparedAcceptance` 默认 false，关闭时不调用任何 prepared API、保持现有 profile 行为；开启时 `databasePath` 必须是持久私有文件（`:memory:` 启动即拒绝）。对端 Verifier 必须提供 `prepareOwnerContract`，旧 peer 会以 `the goal verifier does not support owner-prepared acceptance` fail-closed。
 
 插件在 `goal/changed` 时建立业务记录。安装前已有或身份不明时创建的目标不会被追认，以免归属转移泄漏历史。创建不覆盖尚未完成的原生目标；原生状态为 complete 后可按 DSH 规则创建新的 GoalId，旧业务记录仍保留为待验收；如果目标已经创建而业务索引失败，会明确报告部分完成，先检查原生目标再重试。已有 Host goal-round-driver 若已启用，会按其原生规则继续执行新目标；本插件自身不启用该 driver。
 

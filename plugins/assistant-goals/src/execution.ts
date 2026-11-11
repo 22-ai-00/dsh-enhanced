@@ -8,6 +8,7 @@ import type { GoalArtifactAdmission, TaskAcceptanceContract } from '@dsh-enhance
 import type { AcceptanceHandle, AcceptedExecution, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { GoalExecutionStore } from './execution-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
+import { preparedRegistration, type GoalOwnerAcceptanceSeal } from './owner-acceptance.js'
 
 interface ActiveRound {
   agent: Agent
@@ -60,6 +61,9 @@ export class GoalExecutionRuntime {
       settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void>
     },
     private readonly assertDependencies: (record: GoalRecord) => void = () => {},
+    /** Prepared-acceptance mode: every step contract is Host-sealed per run. */
+    private readonly preparedAcceptance: () => boolean = () => false,
+    private readonly sealFor: (record: GoalRecord) => GoalOwnerAcceptanceSeal | undefined = () => undefined,
   ) {
     if (path !== undefined) {
       this.#store = new GoalExecutionStore(path)
@@ -433,10 +437,16 @@ export class GoalExecutionRuntime {
         authorizationDigest: acceptanceDigest({ scope, action: 'execute', resource: { kind: 'goal', id: 'business-context' } }) },
     })
     if (prepared.dispatchedAt !== undefined || prepared.execution !== undefined) throw new Error('assistant-goals: prior dispatch requires reconciliation')
-    const handle = registration.prepare({ scope: { workspace: scope.workspace, preset: scope.preset },
-      owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion },
-      task: prepared.intent.task, objective: prepared.intent.objective })
-    if (handle === null) throw new Error('assistant-goals: no exact goal-step acceptance profile')
+    let handle: AcceptanceHandle
+    if (this.preparedAcceptance()) {
+      handle = this.#preparedStepHandle(registration, scope, record, prepared.intent.task, prepared.intent.objective, prepared.intent.admission.expiresAt)
+    } else {
+      const selected = registration.prepare({ scope: { workspace: scope.workspace, preset: scope.preset },
+        owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion },
+        task: prepared.intent.task, objective: prepared.intent.objective })
+      if (selected === null) throw new Error('assistant-goals: no exact goal-step acceptance profile')
+      handle = selected
+    }
     store.bindAcceptance(runId, handle)
     const round: ActiveRound = { agent, turn, run: store.get(runId)!, handle, registration, signal, finishing: false,
       timer: setTimeout(() => { this.#cancel(round); this.#track(this.#finish(round, false)) }, this.maxDurationMs),
@@ -457,6 +467,38 @@ export class GoalExecutionRuntime {
       await this.#finish(round, false)
       throw error
     }
+  }
+
+  /** Seal the prepared goal-step contract for one exact run before any request. */
+  #preparedStepHandle(registration: TaskAcceptanceRegistration, scope: GoalScope, record: GoalRecord,
+    task: GoalExecutionRun['intent']['task'], objective: string, admissionExpiresAt: number): AcceptanceHandle {
+    const seal = this.sealFor(record)
+    if (seal === undefined) throw new Error('assistant-goals: no sealed owner acceptance; seal before the first goal round')
+    const prepared = preparedRegistration(registration)
+    if (prepared === undefined) throw new Error('assistant-goals: the goal verifier does not support owner-prepared acceptance')
+    const now = Date.now()
+    const remaining = seal.outcomeExpiresAt - now
+    if (!(remaining > admissionExpiresAt - now + seal.bounds.maxDurationMs)) {
+      throw new Error('assistant-goals: sealed owner acceptance cannot cover this goal round; reseal or create a new goal')
+    }
+    const validityMs = Math.floor(Math.min(seal.validityMs, remaining))
+    if (validityMs < 1_000) throw new Error('assistant-goals: sealed owner acceptance cannot cover this goal round; reseal or create a new goal')
+    const accepted = prepared.prepareOwnerContract({ scope: { workspace: scope.workspace, preset: scope.preset },
+      owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, task, objective,
+      criteria: seal.stepCriteria, bounds: seal.bounds, validityMs, preparer: seal.preparer })
+    const verifier = this.ctx.get('assistantVerifier', false) as unknown as {
+      inspectAcceptedTask?(id: string): { contract: TaskAcceptanceContract } | null
+    } | undefined
+    const contract = verifier?.inspectAcceptedTask?.(accepted.contractId)?.contract
+    if (contract === undefined || contract.id !== accepted.contractId || contract.digest !== accepted.contractDigest
+      || contract.task.kind !== 'goal-step' || acceptanceDigest(contract.task) !== acceptanceDigest(task)
+      || contract.objective !== objective || acceptanceDigest(contract.criteria) !== acceptanceDigest(seal.stepCriteria)
+      || acceptanceDigest(contract.bounds) !== acceptanceDigest(seal.bounds)
+      || contract.profile.id !== 'owner-prepared' || contract.profile.version !== 1
+      || contract.expiresAt < admissionExpiresAt + seal.bounds.maxDurationMs) {
+      throw new Error('assistant-goals: sealed owner acceptance readback failed')
+    }
+    return accepted
   }
 
   #assertRound(round: ActiveRound, terminal = false, consume = true): void {
