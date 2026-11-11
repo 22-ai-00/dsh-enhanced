@@ -1,35 +1,35 @@
 # RSI 当前状态
 
-更新：2026-11-10。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)。原始日志留 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-11。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)。原始日志留 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标与当前安排
 
 通过认证任务与反馈、原生 Agent、持久学习、独立验证、有界采用和回退，减少主人的协调与返工；以后续真实任务的质量、成本和人工介入判断收益。
 
-本轮按[接手方案](handover/README.md)收束未验收补丁：能力 A（既有 owner 续办 + Isolation 续租测试前提）已通过 Linux 冷标准完整门与独立复核，单独提交。工作区不再保存该能力的未验收恢复补丁。
+本轮按[接手方案](handover/README.md)依次交付：A 普通续办、CI 均衡、B1 认证意图冻结已完成并有精确提交的 CI 证据；接下来是 B2/B3（受保护准则准备与真实路径验收）与 CI 第二阶段剩余项。
 
-开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。原 Linux 活跃工作树保留，12 个旧未提交文件已有可恢复历史 patch。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
+开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
 
 ## 已有能力与边界
 
-- Goals、WorkItems、原生执行、恢复、owner 反馈、独立验收与持久记忆已有实现；首次普通委托到动态准则仍未完整接通，现有 Verifier 依赖批准 profile。文件准则证明当前状态，尚不证明本次生成。
-- 已提交 Control Plane 能通过有预算的原生 continuation 消费修订请求，带 generation/receipt 与恢复栅栏；v3 审查证书不授权自动采用。采用前配对收益与入队时供应者冻结仍需完善。
-- 非 diagnosis 的 active 部署中的既有 owner 续办已交付：从认证前台输入冻结原始目标/来源/供应者/有限预算，首个 worker 模型请求前准备验收；Host proof 绑定同一 occurrence/attempt、原生 outcome、不可变 run 与已结算预算（schema 18 可空 `host_proof_json`，旧行 NULL，旧 writer 拒绝 18）；未绑定验收时持有 `ready` 报告，晚绑定/重试/重启只认当前 worker/occurrence/receipt；timeout 保持未验证。仍不覆盖首次任意委托、动态准则与产物生成来源绑定。
-- fresh supervised 默认 digest ceiling；首装预设/学习授权顺序、skip/decline 语义与普通使用收益仍待验收。学习成功不等于后续任务改善。
+- Goals、WorkItems、原生执行、恢复、owner 反馈、独立验收与持久记忆已有实现；首次普通委托到动态准则仍未完整接通，现有 Verifier 依赖批准 profile。
+- 已提交 Control Plane 能通过有预算的原生 continuation 消费修订请求，带 generation/receipt 与恢复栅栏；v3 审查证书不授权自动采用。
+- 非 diagnosis 的 active 部署中的既有 owner 续办已交付：认证前台输入冻结原始目标/来源/供应者/有限预算，首个 worker 模型调用前准备验收；Host proof 绑定同一 occurrence/attempt、原生 outcome、不可变 run 与已结算预算（schema 18）。
+- B1 已交付（开关默认关）：`goal_create` 可经 Delivery 的 agent 作用域只读证明冻结 owner 原文（分页+全文摘要）、owner 身份、binding、调用身份与 supplier；objective 必须逐字出现在原文中；冻结 supplier 对该 goal 内所有真实模型请求逐一校验；意图存私有 `.owner-intents` 侧库，edit 绑定目标被拒、记录失败回滚原生目标。仍缺 B2（受保护准则准备）与 B3（真实路径验收）。
+- fresh supervised 默认 digest ceiling；首装预设/学习授权顺序、skip/decline 语义与普通使用收益仍待验收。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - 主动准入、通知反馈、Dream 与 Web 均保留原边界；provider 接受不等于用户已读，Dream 默认关闭，长期收益未证明。
 
 ## 下一交付
 
-1. 打通首次自然语言委托与受保护的动态准则（工作包 B）：从空账本接真实 owner 请求、冻结目标与供应者/预算、准备可判定准则、独立验收并汇报；随后修首装/学习、工程成长和主动性，按能力逐个提交；完整顺序及验收见[剩余方案](handover/remaining-work.md)。
-2. CI 第二阶段（包测试关键路径）按测量另开工单：`linux-packages` 约 28 分钟已成为唯一关键路径，一次只改一个调度层，见 [CI 交付与测量](handover/ci-and-docs.md)。
+1. B2：把"准备验收准则"做成受限、可审查的 Host 阶段（候选准则 → 独立 Verifier 校验并封存 contract/digest → worker 只读），复用现有 task-acceptance-contract 与 Verifier，不新建并行任务循环。
+2. B3：至少两种普通自然语言任务从空账本跑到独立结果验收，覆盖错误/陈旧状态拒绝、零 worker 请求的不可判定准则、跨会话重启与 owner 更正。
+3. CI 第二阶段剩余项：`plugin-control-plane` 单文件 `source-create-service.spec.ts`（约 1046s）仍是包测试硬下限；按测量拆分该文件并只对该包提高 worker 数，不删用例。
 
 ## 最近验证
 
-- 能力 A 冷标准完整门（Linux，`timeout 5400 pnpm check`）：**EXIT 0 / 2521s**；根 98 文件 1613 passed / 2 skipped，39 包 11280 passed / 271 skipped，39 个 dry-run pack，lint 0 warning、0 error；验证前后 2098 个源文件 hash/bytes/mode 稳定。定向检查 isolation 6/6、work-items 187/187、automations 185/185、delivery 295/295、memory-learning 4/4、lark 176/176。独立只读复核 **PASS**（逐条 file:line 证据）。
-- 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`（原生 `@pnpm/exe`）、`pnpm_config_store_dir`（已填充的 pnpm store）、**短** `TMPDIR`（RSI 夹具的 Unix socket 路径须 ≤100 字节）。缺失时分别表现为 `release-adapter` 快速失败、`npm cohort pnpm store 不存在`、`runtime observer: invalid configuration`，都不是代码缺陷；解析方法见[交接入口](handover/README.md)。
-- 包测试曾因包并发 6 出现一次 load-induced flake（`assistant-goals` 的 event-wait 用例，单独 362/362 通过两次）；最终门改用 CI 同参 `VITEST_MAX_WORKERS=2`、`DSH_TEST_CONCURRENCY=4` 后 EXIT 0。
-- CI 均衡能力（安装器拆组 + 根测试排序器 + 诊断 artifact）已交付：Linux 冷标准 `pnpm check` EXIT 0 / 2281s；根 101 文件 1618 passed / 2 skipped（新增 5 项排序器回归），39 包 11280 passed / 271 skipped，39 个 dry-run pack，lint 0 warning；2103 文件 hash/bytes/mode 稳定。用例迁移由 AST 对照证明 358/358 声明、describe 链、timeout 与测试体等价（唯一差异是上一提交的 schema 断言），三个拆分 spec 单跑的 (name,status) 与拆前 498/498 完全一致。
-- CI 均衡已交付（`135ee06f`，[run 42836374150](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42836374150) 六 job 全绿）：慢片 979s→674s、两片最大/最小 6.20→1.03、root job 1102s→876s；`linux-packages` 仍约 28 分钟，整条 run 1789s→1696s。冷标准 `pnpm check` EXIT 0 / 2281s（根 101 文件 1618 passed / 2 skipped，39 包 11280 passed / 271 skipped，39 packs，lint 干净）。
-- 已提交运行基线 `8e608d4a`：[CI #819](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42762151021) 六 job 成功；历史 Linux 全检 EXIT 0 / 2318s，根 1610 pass/4 skip、包 11244 pass/271 skip、39 packs。仅属于已提交能力。
-- 未验收：首次自然语言委托到独立结果验收（工作包 B）、首装/学习、工程成长、主动性，以及真实模型/外部渠道与长期使用收益。CI 第二阶段（包测试关键路径）尚未开始。没有发布 npm、升级生产 Home 或发送用户渠道消息。
+- B1 + CI 第二阶段（提交 `5785f536`）：Linux 冷标准 `pnpm check` **EXIT 0 / 2130s**；根 102 文件 1619 passed / 2 skipped，39 包 11298 passed / 271 skipped（Goals 379），39 dry-run packs，lint 0 warning；验证前后 2102 个文件 hash/bytes/mode 稳定，Mac 与 Linux 逐文件 0 差异；[CI 六 job 全绿](https://github.com/22-ai-00/dsh-enhanced/actions/runs/42958695745)。
+- CI 实测（同 runner 类别）：linux-packages job 1638s → **1434s**，包测试 step 1349s → **1113s**（−17.5%）；根分片 554s / 715s（比值 1.29，基线 979s/158s=6.2）。包测试仍是关键路径，且新的硬下限是 `source-create-service.spec.ts` 单文件约 1046s。
+- 新调度暴露并修复了三处既有脆弱点：pcp 一个集成用例历史 24–27s 贴近默认 30s（改为 90s，与同文件兄弟一致）；`owner-recall` 夹具两次 `Date.now()` 可能跨毫秒（改为一次读取）；`dsh-rsi-cli` 托管运行时锁在 EEXIST 与 stat 之间被释放时报 ENOENT（生产代码改为重试）。
+- 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`、`pnpm_config_store_dir`、**短** `TMPDIR`；解析方法见[交接入口](handover/README.md)。
+- 未验收：B2/B3 的真实委托路径、首装/学习、工程成长、主动性、真实模型/外部渠道与长期使用收益。没有发布 npm、升级生产 Home 或发送用户渠道消息。
