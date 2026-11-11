@@ -1572,7 +1572,9 @@ it('routes a CLI owner instruction through native scheduling and the independent
     expect(row?.state).toBe('certificate')
     expect(JSON.parse(String(row?.data)).certificate).toEqual(certificate)
   } finally { verifierLedger.close() }
-}, 30_000)
+  // Full native scheduling plus the independent Verifier; it needs ~25-27s even when
+  // the package runs alone, so keep real headroom instead of racing the default bound.
+}, 90_000)
 
 it('recovers an owner instruction across admission interruptions and verifies its one durable revision', async () => {
   const f = await revisionFixture()

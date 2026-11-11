@@ -127,11 +127,14 @@ async function fixture(backgroundRead = false) {
   access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal, workspace: root, preset: 'primary', maxExecutionMs: 30000 })
   const source = await access.create({ sessionId: 'ordinary-source' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'local', model: 'scripted' } })
   await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: true, tickIntervalMs: 1000, reconcileIntervalMs: 0 }).await()
+  // One clock read: two Date.now() calls can straddle a millisecond and make the diagnosis
+  // expiry later than the owner scope, which config validation rejects.
+  const expiry = Date.now() + 3600000
   const workConfig: Config & { ownerRecall: { enabled: true } } = { enabled: true, mode: 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: 'diagnosis-worker',
-    scope: { workspace: root, preset: 'primary', principalId, ownerRouteId: scope.authorityId, expiresAt: Date.now() + 3600000 }, ownerRecall: { enabled: true },
+    scope: { workspace: root, preset: 'primary', principalId, ownerRouteId: scope.authorityId, expiresAt: expiry }, ownerRecall: { enabled: true },
     admission: { allowedKinds: ['diagnosis'], maxOpenItems: 10, maxAdmitsPerHour: 10, cooldownMs: 0 }, limits: { maxReportBytes: 8192 },
     sources: { foregroundFailures: { enabled: true, kind: 'diagnosis', includeTimedOut: true, sweepIntervalMs: 60000, maxCandidatesPerSweep: 10, maxAdmitsPerSweep: 1 } },
-    diagnosis: { enabled: true, budgetId: 'diagnosis-runs', budgetAmount: 1, maxModelCalls: 5, maxToolCalls: 4, maxOutputTokens: 512, timeoutMs: 15000, expiresAt: Date.now() + 3600000 } }
+    diagnosis: { enabled: true, budgetId: 'diagnosis-runs', budgetAmount: 1, maxModelCalls: 5, maxToolCalls: 4, maxOutputTokens: 512, timeoutMs: 15000, expiresAt: expiry } }
   await ctx.plugin(AssistantWorkItemsService, workConfig).await()
   expect(ctx.tools.schemas().map(t => t.name)).toEqual(expect.arrayContaining(['work_item_list', 'work_item_recall']))
   const authObservations: unknown[] = []
