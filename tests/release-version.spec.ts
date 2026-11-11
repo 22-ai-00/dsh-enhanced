@@ -1164,6 +1164,12 @@ describe('release version workflow', () => {
     expect(manifest.scripts['test:root']).toBe('vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests')
     expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm run test:packages')
     expect(manifest.scripts['test:packages']).toBe('pnpm --recursive --no-sort --if-present --workspace-concurrency=${DSH_TEST_CONCURRENCY:-6} run test --testTimeout=15000')
+    // Lead with the two slowest packages: in directory order pnpm --no-sort only reached
+    // plugin-control-plane after ~297s and that package alone needs ~1052s, so it and
+    // lark-channel run in dedicated slots from t=0 while the remainder keeps two in flight.
+    expect(manifest.scripts['test:packages:control-plane']).toBe('pnpm --filter @dsh-enhanced/plugin-control-plane run test --testTimeout=15000')
+    expect(manifest.scripts['test:packages:lark-channel']).toBe('pnpm --filter @dsh-enhanced/lark-channel run test --testTimeout=15000')
+    expect(manifest.scripts['test:packages:rest']).toBe("pnpm --recursive --no-sort --if-present --workspace-concurrency=2 --filter '!@dsh-enhanced/plugin-control-plane' --filter '!@dsh-enhanced/lark-channel' run test --testTimeout=15000")
     expect(manifest.scripts['check:quick']).toBe('pnpm run validate && pnpm run lint && pnpm --filter "{origin/dev}..." --if-present run build && pnpm --filter "{origin/dev}..." --if-present run typecheck && pnpm --filter "{origin/dev}" --if-present run test --testTimeout=15000')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts['typecheck:built']).toBe('pnpm --recursive --if-present run typecheck')
@@ -1175,7 +1181,12 @@ describe('release version workflow', () => {
     expect(releaseWorkflow).toContain('/usr/bin/bwrap')
     expect(releaseWorkflow).toContain('--unshare-all')
     const ciWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
-    expect(ciWorkflow).toContain("DSH_TEST_CONCURRENCY: '4'")
+    // The package lane pins its four slots explicitly (two background slow-package slots plus a
+    // two-wide foreground filter), so the top-level env no longer carries the workspace-concurrency
+    // knob; only the macOS job still tunes its own env.
+    const globalEnv = ciWorkflow.split('\nenv:\n')[1]?.split('\njobs:\n')[0]
+    expect(globalEnv).toBeDefined()
+    expect(globalEnv).not.toContain('DSH_TEST_CONCURRENCY')
     // Nightly gate is the prerequisite for any future test tiering; keep it wired.
     expect(ciWorkflow).toMatch(/^\s*schedule:\s*$/mu)
     expect(ciWorkflow).toMatch(/^\s*- cron: '\d+ \d+ \* \* \*'\s*$/mu)
@@ -1197,7 +1208,20 @@ describe('release version workflow', () => {
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
     expect(linuxPackages).toContain('run: pnpm run validate && pnpm run lint')
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
-    expect(linuxPackages).toContain('pnpm run test:packages')
+    expect(linuxPackages).toContain('pnpm run test:packages:control-plane > "${control_plane_log}" 2>&1 &')
+    expect(linuxPackages).toContain('pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &')
+    expect(linuxPackages).toContain('pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?')
+    // Failure propagation is part of the contract: each wait must capture its own status and the
+    // aggregation must consult all three slots before exiting, so a red slot can never be swallowed.
+    expect(linuxPackages).toContain('wait "${control_plane_pid}" || control_plane_status=$?')
+    expect(linuxPackages).toContain('wait "${lark_channel_pid}" || lark_channel_status=$?')
+    expect(linuxPackages).toContain('if [ "${control_plane_status}" -ne 0 ] || [ "${lark_channel_status}" -ne 0 ]')
+    expect(linuxPackages).toContain('[ "${rest_status}" -ne 0 ]; then')
+    expect(linuxPackages).toContain('exit 1')
+    // The legacy single-command lane must stay retired, otherwise a silent fallback could hide the topology.
+    expect(linuxPackages).not.toContain('pnpm run test:packages >')
+    expect(linuxPackages).toContain('wait "${lark_channel_pid}"')
+    expect(linuxPackages).toContain('cat "${control_plane_log}" "${lark_channel_log}" "${rest_log}"')
     expect(linuxPackages).toContain('package-tests.log')
     expect(linuxPackages).toContain('::error::')
     expect(linuxPackages).toContain('run: pnpm run pack:check')

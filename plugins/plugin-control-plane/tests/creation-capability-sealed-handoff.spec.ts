@@ -163,7 +163,22 @@ test('verify rejects later business, archive chmod, rewrite or replacement and a
   run(f => mutate(f.physicalPath, `INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha,reason) VALUES ('later','unknown','{}','${d('a')}',X'01','${d('b')}','unknown')`), 'nonempty')
   run(f => chmodSync(f.archivePhysicalPath, 0o600), 'archive')
   run(f => { chmodSync(f.archivePhysicalPath, 0o600); writeFileSync(f.archivePhysicalPath, 'rewritten'); chmodSync(f.archivePhysicalPath, 0o400) }, 'archive')
-  run(f => { const bytes = readFileSync(f.archivePhysicalPath); rmSync(f.archivePhysicalPath); writeFileSync(f.archivePhysicalPath, bytes, { mode: 0o400 }) }, 'archive identity')
+  run(f => {
+    // A same-bytes rm + rewrite can be handed the just-freed inode back (Linux), which made this
+    // exact-identity assertion flake. Retry the replacement a bounded five times; if allocation
+    // keeps returning the freed inode, swap in a staged copy that cannot reuse it while the
+    // current archive still owns it. Bytes, length, digest and mode stay identical either way.
+    const bytes = readFileSync(f.archivePhysicalPath), replaced = lstatSync(f.archivePhysicalPath).ino
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      rmSync(f.archivePhysicalPath)
+      writeFileSync(f.archivePhysicalPath, bytes, { mode: 0o400 })
+      if (lstatSync(f.archivePhysicalPath).ino !== replaced) return
+    }
+    const replacement = join(f.stage, 'creation-adoptions.replacement.sqlite')
+    writeFileSync(replacement, bytes, { mode: 0o400 })
+    renameSync(replacement, f.archivePhysicalPath)
+    expect(lstatSync(f.archivePhysicalPath).ino).not.toBe(replaced)
+  }, 'archive identity')
   const f = staged(), plan = planSealedAdoptionHandoff(f.scope); apply(plan)
   expect(() => verify(f, plan, d('f'))).toThrow('anchor')
 })

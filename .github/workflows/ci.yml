@@ -19,11 +19,11 @@ concurrency:
 
 env:
   # Ubuntu runners have 4 vCPU. Keep two workers per package (timing-sensitive
-  # suites starve at higher oversubscription) and run four packages at once,
-  # which is still twice the old 2/2 shape without re-introducing timeouts.
-  # macOS runners (3 vCPU) override these in their job.
+  # suites starve at higher oversubscription). The package lane keeps four
+  # package slots busy: plugin-control-plane and lark-channel each take a
+  # background slot from t=0, the remainder runs two at a time in the
+  # foreground. macOS runners (3 vCPU) override these in their job.
   VITEST_MAX_WORKERS: '2'
-  DSH_TEST_CONCURRENCY: '4'
   # Tiered test matrices (e.g. the Delivery schema 23-31 migration sweep) run
   # every version only on the nightly schedule; push and PR runs keep the
   # first/last representatives.
@@ -142,10 +142,38 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          # Job logs need repo-admin rights to download; on failure surface the
-          # failing test lines as check-run annotations instead so a red lane is
-          # diagnosable from the public API.
-          if ! pnpm run test:packages > "${RUNNER_TEMP}/package-tests.log" 2>&1; then
+          # Lead with the two slowest packages. In directory order pnpm --no-sort
+          # only starts plugin-control-plane after ~297s, and that package alone
+          # needs ~1052s, so it takes a background slot from t=0 instead. The two
+          # slots plus the two-pack-wide foreground keep four packages running,
+          # the same load as before.
+          control_plane_log="${RUNNER_TEMP}/package-tests-plugin-control-plane.log"
+          lark_channel_log="${RUNNER_TEMP}/package-tests-lark-channel.log"
+          rest_log="${RUNNER_TEMP}/package-tests-rest.log"
+          pnpm run test:packages:control-plane > "${control_plane_log}" 2>&1 &
+          control_plane_pid=$!
+          pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &
+          lark_channel_pid=$!
+
+          rest_status=0
+          pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?
+          # Wait for both slots even when the foreground already failed so no
+          # package test process outlives the step and the full logs survive.
+          control_plane_status=0
+          wait "${control_plane_pid}" || control_plane_status=$?
+          lark_channel_status=0
+          wait "${lark_channel_pid}" || lark_channel_status=$?
+
+          # Fixed merge order keeps the artifact (and the diagnostics below) stable.
+          cat "${control_plane_log}" "${lark_channel_log}" "${rest_log}" \
+            > "${RUNNER_TEMP}/package-tests.log"
+          if [ "${control_plane_status}" -ne 0 ] || [ "${lark_channel_status}" -ne 0 ] \
+            || [ "${rest_status}" -ne 0 ]; then
+            printf 'package test slots: plugin-control-plane=%s lark-channel=%s remainder=%s\n' \
+              "${control_plane_status}" "${lark_channel_status}" "${rest_status}"
+            # Job logs need repo-admin rights to download; on failure surface the
+            # failing test lines as check-run annotations instead so a red lane is
+            # diagnosable from the public API.
             grep -aE '(^| )(FAIL|×) |Error: |ERR_PNPM' "${RUNNER_TEMP}/package-tests.log" \
               | grep -av 'ExperimentalWarning' | head -40 \
               | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
