@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 17
+export const evaluationSchemaVersion = 18
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new' | 'schema-drift'
 
@@ -570,6 +570,46 @@ const attentionOwnerQuestionDeliverySchema = `
     BEGIN SELECT RAISE(ABORT, 'attention owner question replies are durable'); END;
 `
 
+/**
+ * WP22 E1: durable, append-only intake/attention agreement snapshots.
+ *
+ * One row is one bucket/scope/digest observation. Replaying a tick inside the
+ * same bucket must not append a second row, so (scope, window, digest) is
+ * unique; a late outcome revision that changes counts forms a new digest and
+ * is appended for the same window. Rows are immutable and durable.
+ */
+const intakeAttentionAgreementSchema = `
+  CREATE TABLE evaluation_intake_attention_agreement (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    from_notified_at INTEGER NOT NULL CHECK (from_notified_at >= 0),
+    to_notified_at INTEGER NOT NULL CHECK (to_notified_at > from_notified_at),
+    computed_at INTEGER NOT NULL CHECK (computed_at >= 0),
+    window_ms INTEGER NOT NULL CHECK (window_ms >= 60000),
+    scan_limit INTEGER NOT NULL CHECK (scan_limit >= 1),
+    truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+    provenance_available INTEGER NOT NULL CHECK (provenance_available IN (0, 1)),
+    not_intake INTEGER NOT NULL CHECK (not_intake >= 0),
+    unresolved INTEGER NOT NULL CHECK (unresolved >= 0),
+    foreign_count INTEGER NOT NULL CHECK (foreign_count >= 0),
+    intake_json TEXT NOT NULL CHECK (json_valid(intake_json)),
+    by_level_json TEXT NOT NULL CHECK (json_valid(by_level_json)),
+    snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    UNIQUE (scope_key, from_notified_at, to_notified_at, digest)
+  ) STRICT;
+  CREATE INDEX evaluation_intake_attention_agreement_scope_time
+    ON evaluation_intake_attention_agreement(scope_key, to_notified_at DESC, sequence DESC);
+  CREATE TRIGGER evaluation_intake_attention_agreement_immutable
+    BEFORE UPDATE ON evaluation_intake_attention_agreement
+    BEGIN SELECT RAISE(ABORT, 'intake attention agreement snapshots are immutable'); END;
+  CREATE TRIGGER evaluation_intake_attention_agreement_no_delete
+    BEFORE DELETE ON evaluation_intake_attention_agreement
+    BEGIN SELECT RAISE(ABORT, 'intake attention agreement snapshots are durable'); END;
+`
+
 const attentionOwnerQuestionDeliveryTables = Object.freeze([
   'evaluation_attention_owner_question_deliveries',
   'evaluation_attention_owner_question_replies',
@@ -612,6 +652,43 @@ function assertOwnerQuestionSchema(database: DatabaseSync): void {
   }
 }
 
+const intakeAttentionAgreementTables = Object.freeze(['evaluation_intake_attention_agreement'])
+
+function intakeAttentionAgreementSchemaObjects(database: DatabaseSync): string[] {
+  const placeholders = intakeAttentionAgreementTables.map(() => '?').join(',')
+  const rows = database.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_schema
+    WHERE tbl_name IN (${placeholders}) OR name IN (${placeholders})`)
+    .all(...intakeAttentionAgreementTables, ...intakeAttentionAgreementTables) as unknown as SchemaObject[]
+  return rows.map(row => JSON.stringify([row.type, row.name, row.tbl_name, row.sql?.replace(/\s+/g, ' ').trim() ?? null])).sort()
+}
+
+let expectedIntakeAttentionAgreementSchema: readonly string[] | undefined
+
+function expectedIntakeAttentionAgreementSchemaObjects(): readonly string[] {
+  if (expectedIntakeAttentionAgreementSchema === undefined) {
+    const reference = new DatabaseSync(':memory:')
+    try {
+      reference.exec(intakeAttentionAgreementSchema)
+      expectedIntakeAttentionAgreementSchema = Object.freeze(intakeAttentionAgreementSchemaObjects(reference))
+    } finally {
+      reference.close()
+    }
+  }
+  return expectedIntakeAttentionAgreementSchema
+}
+
+/**
+ * Fail closed unless the schema-18 agreement table, its index and its
+ * immutability triggers are exactly the ones the migration creates.
+ */
+function assertIntakeAttentionAgreementSchema(database: DatabaseSync): void {
+  const actual = intakeAttentionAgreementSchemaObjects(database)
+  const expected = expectedIntakeAttentionAgreementSchemaObjects()
+  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) {
+    throw new EvaluationDatabaseError('schema-drift', 'evaluation intake attention agreement schema does not match schema 18')
+  }
+}
+
 function migrate(database: DatabaseSync): void {
   migrateEvaluationDatabase(database)
 }
@@ -634,6 +711,7 @@ export function migrateEvaluationDatabase(database: DatabaseSync, target: number
   }
   if (initial >= target) {
     if (initial >= 17) assertOwnerQuestionSchema(database)
+    if (initial >= 18) assertIntakeAttentionAgreementSchema(database)
     return
   }
 
@@ -1027,10 +1105,25 @@ export function migrateEvaluationDatabase(database: DatabaseSync, target: number
         PRAGMA user_version = 17;
       `)
     }
+    if (schemaVersion(database) === 17 && target > 17) {
+      // A test/rollback fixture can leave the exact schema-18 objects behind
+      // while rewinding only the version. Reuse them after an exact drift
+      // check; anything else at schema 17 is genuine drift and fails closed.
+      if (intakeAttentionAgreementSchemaObjects(database).length > 0) {
+        assertIntakeAttentionAgreementSchema(database)
+      } else {
+        database.exec(intakeAttentionAgreementSchema)
+      }
+      database.exec(`
+        UPDATE evaluation_schema_meta SET value = '18' WHERE key = 'schema-version';
+        PRAGMA user_version = 18;
+      `)
+    }
     if (schemaVersion(database) !== target) {
       throw new Error('evaluation migration did not reach the current schema')
     }
     if (target >= 17) assertOwnerQuestionSchema(database)
+    if (target >= 18) assertIntakeAttentionAgreementSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     database.exec('ROLLBACK')

@@ -622,7 +622,7 @@ describe('attention owner question delivery', () => {
     const delivery = new FakeDelivery()
     const clock = { now: 10_000 }
     const current = setup({ path, delivery, clock })
-    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 17 })
+    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 18 })
     const questionId = withQuestion(current)
     expect(current.deliver()).toMatchObject([{ result: { action: 'queued', questionId } }])
     await current.ctx.fiber.restart(); contexts.splice(contexts.indexOf(current.ctx), 1)
@@ -630,7 +630,7 @@ describe('attention owner question delivery', () => {
     await fresh.ctx.fiber.restart(); contexts.splice(contexts.indexOf(fresh.ctx), 1)
     expect(schemaObjects(path)).toEqual(schemaObjects(freshPath))
     const newer = new DatabaseSync(path)
-    newer.exec("UPDATE evaluation_schema_meta SET value='18' WHERE key='schema-version'; PRAGMA user_version = 18")
+    newer.exec("UPDATE evaluation_schema_meta SET value='18' WHERE key='schema-version'; PRAGMA user_version = 19")
     newer.close()
     expect(() => setup({ path, delivery, clock })).toThrow()
   }, 45_000)

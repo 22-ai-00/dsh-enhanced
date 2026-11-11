@@ -362,6 +362,28 @@ export class NotificationOutcomeLedger {
     return Object.freeze({ records: Object.freeze(rows.slice(0, limit).map(row => stored(row).record)), truncated: rows.length > limit })
   }
 
+  /**
+   * Distinct owner scopes that currently have at least one work-item result
+   * notification. Used only by the E1 persistence tick; bounded and ordered so
+   * a multi-scope database rotates deterministically instead of scanning every
+   * scope on each tick.
+   */
+  workItemScopes(limit: number): readonly EvaluationScope[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) invalid('work item scope limit is invalid')
+    const rows = this.#database.prepare(`SELECT DISTINCT r.scope_key FROM evaluation_notification_outcome_heads h
+      JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
+      WHERE json_extract(r.record_json, '$.workItemId') IS NOT NULL
+      ORDER BY r.scope_key LIMIT ?`).all(limit) as { scope_key: string }[]
+    const scopes: EvaluationScope[] = []
+    for (const row of rows) {
+      let parsed: unknown
+      try { parsed = JSON.parse(row.scope_key) } catch { continue }
+      if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== 'string' || typeof parsed[1] !== 'string') continue
+      try { scopes.push(canonicalEvaluationScope({ workspace: parsed[0], preset: parsed[1] }).scope) } catch { continue }
+    }
+    return Object.freeze(scopes)
+  }
+
   counts(): Readonly<{ notifications: number; revisions: number }> {
     const heads = this.#database.prepare('SELECT COUNT(*) AS count FROM evaluation_notification_outcome_heads').get() as { count: number }
     const revisions = this.#database.prepare('SELECT COUNT(*) AS count FROM evaluation_notification_outcome_revisions').get() as { count: number }

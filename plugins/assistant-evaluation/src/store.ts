@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AttentionTuningLedger } from './attention-tuning.js'
 import { AttentionOwnerQuestionLedger } from './attention-owner-questions.js'
+import { IntakeAttentionAgreementLedger } from './intake-attention-agreement-store.js'
 import { NotificationOutcomeLedger } from './notification-outcomes.js'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
@@ -582,12 +583,15 @@ export class EvaluationStore {
   readonly attention: AttentionTuningLedger
   /** WP22 slice 4 at-most-once delivery and record-only reply ledger for owner questions. */
   readonly attentionQuestions: AttentionOwnerQuestionLedger
+  /** WP22 E1 append-only intake/attention agreement snapshots (default off). */
+  readonly intakeAttentionAgreement: IntakeAttentionAgreementLedger
 
   constructor(options: EvaluationStoreOptions) {
     this.#database = openEvaluationDatabase(options.path)
     this.#now = options.now ?? Date.now
     this.notifications = new NotificationOutcomeLedger(this.#database, this.#now)
     this.attentionQuestions = new AttentionOwnerQuestionLedger(this.#database, this.#now)
+    this.intakeAttentionAgreement = new IntakeAttentionAgreementLedger(this.#database)
     // The tuning ledger reads replies and records them atomically with a grant
     // or a proposal decision (slice 5); all ledgers share one database handle.
     this.attention = new AttentionTuningLedger(this.#database, this.#now, this.attentionQuestions)

@@ -116,7 +116,7 @@ describe('notification outcome ledger', () => {
     source.put(fact('n2', 2, { transport: { status: 'dead' } }))
     expect(evaluation.reconcileNotificationOutcomes()).toEqual({ ingested: 2, refreshed: 2, revised: 2, invalid: 0 })
     expect(evaluation.reconcileNotificationOutcomes()).toEqual({ ingested: 0, refreshed: 2, revised: 0, invalid: 0 })
-    expect(evaluation.health()).toMatchObject({ schemaVersion: 17, notificationOutcomes: 2, notificationOutcomeRevisions: 2 })
+    expect(evaluation.health()).toMatchObject({ schemaVersion: 18, notificationOutcomes: 2, notificationOutcomeRevisions: 2 })
 
     source.put(fact('n1', 1, { reaction: { firstAt: 1_900, count: 1 } }))
     clock.now = 3_000
@@ -344,12 +344,12 @@ describe('notification outcome ledger', () => {
     const before = snapshot(legacy)
     legacy.close()
     const current = setup({ path })
-    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 17, notificationOutcomes: 0 })
+    expect(current.evaluation.health()).toMatchObject({ schemaVersion: 18, notificationOutcomes: 0 })
     current.source.put(fact('n1', 1))
     expect(current.evaluation.reconcileNotificationOutcomes().revised).toBe(1)
     await current.ctx.fiber.restart(); contexts.splice(contexts.indexOf(current.ctx), 1)
     const migrated = new DatabaseSync(path, { readOnly: true })
-    expect(migrated.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 17 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 18 })
     expect(snapshot(migrated)).toEqual(before)
     expect(() => migrated.prepare('SELECT 1').get()).not.toThrow()
     migrated.close()

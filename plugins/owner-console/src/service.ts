@@ -229,6 +229,12 @@ export class OwnerConsoleService extends TypertRemoteService {
     return readIntakeAgreement(this.host.get('assistantEvaluation' as never), workspace, preset)
   }
 
+  /** Read-only newest-first history of Evaluation's durable intake/attention agreement snapshots.
+   * Counts and windows only: no workspace, id, digest or message text crosses to the panel. */
+  async intakeAgreementHistory(workspace: string, preset: string, limit = 20): Promise<OwnerConsoleIntakeAgreementHistory> {
+    return readIntakeAgreementHistory(this.host.get('assistantEvaluation' as never), workspace, preset, limit)
+  }
+
   /** Select or remove one installed project bundle layer; dependencies stay installed. */
   async setBundleEnabled(name: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
@@ -624,13 +630,23 @@ export function readTrendSnapshots(provider: unknown, planId: string, beforeSequ
 type IntakeAgreementProvider = { inspectIntakeAttentionAgreement?: (input: { scope: { workspace: string, preset: string } }) => unknown }
 const INTAKE_UNVERIFIABLE: OwnerConsoleIntakeAgreement = Object.freeze({ state: 'unverifiable', causal: false })
 
-function intakeAgreementCell(value: unknown) {
+interface IntakeAgreementCellView {
+  readonly notifications: number
+  readonly items: number
+  readonly agreed: number
+  readonly disagreed: number
+  readonly agreementPpm: number | null
+  readonly outcomes: Readonly<Record<typeof INTAKE_AGREEMENT_OUTCOMES[number], number>>
+}
+function intakeAgreementCell(value: unknown): IntakeAgreementCellView {
   const cell = record(value)
   const outcomes = record(cell['outcomes'])
   return {
-    notifications: cell['notifications'], items: cell['items'], agreed: cell['agreed'], disagreed: cell['disagreed'],
-    agreementPpm: cell['agreementPpm'],
-    outcomes: Object.fromEntries(INTAKE_AGREEMENT_OUTCOMES.map(outcome => [outcome, outcomes[outcome]])),
+    notifications: cell['notifications'] as number, items: cell['items'] as number,
+    agreed: cell['agreed'] as number, disagreed: cell['disagreed'] as number,
+    agreementPpm: cell['agreementPpm'] as number | null,
+    outcomes: Object.fromEntries(INTAKE_AGREEMENT_OUTCOMES.map(outcome => [outcome, outcomes[outcome]])) as
+      Readonly<Record<typeof INTAKE_AGREEMENT_OUTCOMES[number], number>>,
   }
 }
 
@@ -657,6 +673,100 @@ export function readIntakeAgreement(provider: unknown, workspace: string, preset
     return parsed.success && intakeAgreementConsistent(parsed.data.summary!) ? Object.freeze(parsed.data) : INTAKE_UNVERIFIABLE
   } catch {
     return INTAKE_UNVERIFIABLE
+  }
+}
+
+type IntakeAgreementHistoryProvider = {
+  inspectIntakeAttentionAgreementHistory?: (input: { scope: { workspace: string, preset: string }, limit?: number }) => unknown
+}
+export interface OwnerConsoleIntakeAgreementHistoryEntry {
+  readonly fromNotifiedAt: number
+  readonly toNotifiedAt: number
+  readonly computedAt: number
+  readonly windowMs: number
+  readonly scanLimit: number
+  readonly truncated: boolean
+  readonly provenanceAvailable: boolean
+  readonly notIntake: number
+  readonly unresolved: number
+  readonly foreign: number
+  readonly intake: IntakeAgreementCellView
+  /** Labeled levels, strongest-last like the current-agreement panel; counts only. */
+  readonly byLevel: readonly Readonly<{ level: (typeof INTAKE_AGREEMENT_LEVELS)[number]; cell: IntakeAgreementCellView }>[]
+}
+/** Labeled count cells keep the same level order as the current-agreement panel. */
+export interface OwnerConsoleIntakeAgreementHistory {
+  readonly state: 'absent' | 'disabled' | 'unverifiable' | 'ok'
+  readonly causal: false
+  readonly snapshots?: readonly OwnerConsoleIntakeAgreementHistoryEntry[]
+}
+const INTAKE_HISTORY_UNVERIFIABLE: OwnerConsoleIntakeAgreementHistory = Object.freeze({ state: 'unverifiable', causal: false })
+
+function historyCellConsistent(cell: ReturnType<typeof intakeAgreementCell>): boolean {
+  const total = INTAKE_AGREEMENT_OUTCOMES.reduce((sum, outcome) => sum + cell.outcomes[outcome], 0)
+  const decided = cell.agreed + cell.disagreed
+  return total === cell.notifications && cell.items <= cell.notifications
+    && cell.agreed === cell.outcomes.accepted + cell.outcomes.reacted
+    && cell.disagreed === cell.outcomes.rejected + cell.outcomes['expired-unhandled']
+    && cell.agreementPpm === (decided === 0 ? null : Math.round(cell.agreed * 1_000_000 / decided))
+}
+
+/** Validate one persisted snapshot without ever trusting the provider's arithmetic. */
+function intakeAgreementHistoryEntry(value: unknown): OwnerConsoleIntakeAgreementHistoryEntry | undefined {
+  try {
+    const entry = record(value)
+    if (entry['protocol'] !== 'assistant-evaluation/intake-attention-agreement-snapshot/v1'
+      || entry['snapshotVersion'] !== 1 || entry['causal'] !== false) return undefined
+    const integer = (label: string, minimum = 0): number => {
+      const candidate = entry[label]
+      return typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= minimum ? candidate : Number.NaN
+    }
+    const from = integer('fromNotifiedAt'), to = integer('toNotifiedAt'), computedAt = integer('computedAt')
+    const windowMs = integer('windowMs'), scanLimit = integer('scanLimit', 1)
+    const truncated = entry['truncated'], provenanceAvailable = entry['provenanceAvailable']
+    const intake = intakeAgreementCell(entry['intake'])
+    const levels = record(entry['byLevel'])
+    const byLevel = INTAKE_AGREEMENT_LEVELS.filter(level => levels[level] !== undefined)
+      .map(level => Object.freeze({ level, cell: intakeAgreementCell(levels[level]) }))
+    if (![from, to, computedAt, windowMs, scanLimit].every(Number.isSafeInteger)
+      || from < 0 || to <= from || windowMs < 60_000 || typeof truncated !== 'boolean' || typeof provenanceAvailable !== 'boolean'
+      || !historyCellConsistent(intake) || byLevel.some(entry => !historyCellConsistent(entry.cell))) return undefined
+    const notIntake = integer('notIntake'), unresolved = integer('unresolved'), foreign = integer('foreign')
+    if (![notIntake, unresolved, foreign].every(Number.isSafeInteger)
+      || intake.notifications + notIntake + unresolved + foreign > scanLimit
+      || byLevel.reduce((sum, entry) => sum + entry.cell.notifications, 0) !== intake.notifications) return undefined
+    return {
+      fromNotifiedAt: from, toNotifiedAt: to, computedAt, windowMs, scanLimit, truncated, provenanceAvailable,
+      notIntake, unresolved, foreign, intake, byLevel,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** Project Evaluation's durable agreement snapshots (newest first) onto counts only. */
+export function readIntakeAgreementHistory(provider: unknown, workspace: string, preset: string,
+  limit = 20): OwnerConsoleIntakeAgreementHistory {
+  if (provider === undefined || provider === null) return Object.freeze({ state: 'absent', causal: false })
+  const scope = { workspace: workspace.trim(), preset: preset.trim() }
+  if (scope.workspace === '' || scope.preset === '' || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) return INTAKE_HISTORY_UNVERIFIABLE
+  try {
+    const read = (provider as IntakeAgreementHistoryProvider).inspectIntakeAttentionAgreementHistory
+    if (typeof read !== 'function') return INTAKE_HISTORY_UNVERIFIABLE
+    const result = read.call(provider, { scope, limit })
+    if (result === undefined) return Object.freeze({ state: 'disabled', causal: false })
+    const history = record(result)
+    if (history['protocol'] !== 'assistant-evaluation/intake-attention-agreement-history/v1' || history['causal'] !== false) return INTAKE_HISTORY_UNVERIFIABLE
+    if (!Array.isArray(history['snapshots']) || history['snapshots'].length > limit) return INTAKE_HISTORY_UNVERIFIABLE
+    const snapshots: OwnerConsoleIntakeAgreementHistoryEntry[] = []
+    for (const item of history['snapshots']) {
+      const entry = intakeAgreementHistoryEntry(item)
+      if (entry === undefined) return INTAKE_HISTORY_UNVERIFIABLE
+      snapshots.push(entry)
+    }
+    return Object.freeze({ state: 'ok', causal: false, snapshots: Object.freeze(snapshots) })
+  } catch {
+    return INTAKE_HISTORY_UNVERIFIABLE
   }
 }
 

@@ -36,7 +36,16 @@ import {
   type AttentionOwnerQuestionTickAction,
 } from './attention-owner-questions.js'
 import { validateWorkItemOwnerFeedbackProof } from './work-item-owner-proof.js'
-import { computeIntakeAttentionAgreement, INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT, isIntakeProvenanceSource, type IntakeAttentionAgreement } from './intake-attention-agreement.js'
+import {
+  computeIntakeAttentionAgreement,
+  createIntakeAttentionAgreementSnapshot,
+  INTAKE_ATTENTION_AGREEMENT_HISTORY_PROTOCOL,
+  INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT,
+  isIntakeProvenanceSource,
+  type IntakeAttentionAgreement,
+  type IntakeAttentionAgreementHistory,
+  type IntakeAttentionAgreementSnapshot,
+} from './intake-attention-agreement.js'
 import type {
   EvaluationHealth,
   EvaluationCanonicalLearningEvidenceTuple,
@@ -128,6 +137,16 @@ export interface Config {
    * behaviour. Requires `notificationOutcomesEnabled`.
    */
   intakeAttentionAgreementEnabled?: boolean
+  /**
+   * WP22 E1: append a durable intake/attention agreement snapshot at most once
+   * per aligned interval bucket, on the existing notification sync tick.
+   * Off (absent) by default; requires `notificationOutcomesEnabled` and
+   * `intakeAttentionAgreementEnabled`. The snapshot is observational
+   * (`causal: false`); it never authorizes intake/auto, adopts parameters or
+   * sends anything. At most 60s-7d; the operator owns retention of this
+   * append-only history.
+   */
+  intakeAttentionAgreementPersistIntervalMs?: number
   /** Cohorts (`lane`, `sourceId`) eligible for tuning. Defaults to proactive reminders. */
   attentionTuningCohorts?: { lane: string; sourceId: string }[]
   /** Minimum decided notifications before any proposal or regression judgement. */
@@ -166,6 +185,23 @@ export interface Config {
   /** A question not queued within this long after it was recorded expires unsent; also the notice expiry. */
   attentionOwnerQuestionNoticeTtlMs?: number
 }
+
+export type IntakeAttentionAgreementPersistReason =
+  | 'disabled'
+  | 'work-items-unavailable'
+  | 'no-work-item-notifications'
+  | 'outside-window'
+
+/** One bounded persistence attempt; `recorded` and `replayed` are mutually exclusive successes. */
+export interface IntakeAttentionAgreementPersistResult {
+  readonly recorded: boolean
+  readonly replayed: boolean
+  readonly reason?: IntakeAttentionAgreementPersistReason
+  readonly scope?: EvaluationScope
+  readonly snapshot?: IntakeAttentionAgreementSnapshot
+}
+
+const PERSIST_DISABLED: IntakeAttentionAgreementPersistResult = Object.freeze({ recorded: false, replayed: false, reason: 'disabled' })
 
 /**
  * Structural Delivery port for owner questions. `attention.purpose` is
@@ -281,6 +317,7 @@ const configSchema = Schema.object({
   notificationSyncIntervalMs: Schema.number().step(1).min(0).max(86_400_000).default(60_000),
   attentionTuningAutoAdopt: Schema.boolean().default(false),
   intakeAttentionAgreementEnabled: Schema.boolean().default(false),
+  intakeAttentionAgreementPersistIntervalMs: Schema.number().step(1).min(60_000).max(604_800_000),
   attentionTuningCohorts: Schema.array(Schema.object({
     lane: Schema.string().required(),
     sourceId: Schema.string().required(),
@@ -602,6 +639,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private notificationFacts: NotificationOutcomeFactSource | undefined
   private lastNotificationSyncAt = Number.NEGATIVE_INFINITY
+  private lastIntakeAgreementPersistAt = Number.NEGATIVE_INFINITY
+  /** Rotates across scopes when one database serves several (bounded one row per tick). */
+  private intakeAgreementPersistCursor: string | undefined
   private ownerQuestionWithdrawal: Readonly<{ source: object; handle: string; dispose: () => void }> | undefined
   private readonly activeOwnerQuestionWithdrawals = new WeakSet<object>()
   private ownerQuestionReply: Readonly<{ source: object; registration: OwnerQuestionReplyRegistration; dispose: () => void }> | undefined
@@ -627,6 +667,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     if (this.config.intakeAttentionAgreementEnabled && !this.config.notificationOutcomesEnabled) {
       throw new Error('assistant-evaluation: intakeAttentionAgreementEnabled requires notificationOutcomesEnabled')
+    }
+    if (this.config.intakeAttentionAgreementPersistIntervalMs !== undefined) {
+      const value = this.config.intakeAttentionAgreementPersistIntervalMs
+      if (!Number.isSafeInteger(value) || value < 60_000 || value > 604_800_000) {
+        throw new Error('assistant-evaluation: intakeAttentionAgreementPersistIntervalMs must be between 60000 and 604800000')
+      }
+      if (!this.config.intakeAttentionAgreementEnabled || !this.config.notificationOutcomesEnabled) {
+        throw new Error('assistant-evaluation: intakeAttentionAgreementPersistIntervalMs requires intakeAttentionAgreementEnabled and notificationOutcomesEnabled')
+      }
     }
     if (this.config.attentionTuningAutoAdopt && !this.config.notificationOutcomesEnabled) {
       throw new Error('assistant-evaluation: attentionTuningAutoAdopt requires notificationOutcomesEnabled')
@@ -769,6 +818,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           try { this.reconcileNotificationOutcomes() } catch { /* isolated from projection; retried on a later tick */ }
           try { this.reconcileAttentionTuning() } catch { /* retried on a later sync */ }
           try { this.reconcileAttentionOwnerQuestions() } catch { /* retried on a later sync */ }
+          const agreementInterval = this.config.intakeAttentionAgreementPersistIntervalMs
+          if (agreementInterval !== undefined && now - this.lastIntakeAgreementPersistAt >= agreementInterval) {
+            this.lastIntakeAgreementPersistAt = now
+            try { this.reconcileIntakeAttentionAgreementPersistence() } catch { /* retried on a later sync */ }
+          }
         }
         void this.reconcileProjections().catch(() => {})
       }, this.config.projectionIntervalMs)
@@ -1368,10 +1422,77 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw new AssistantEvaluationError('invalid-input', 'intake attention agreement window is invalid')
     }
     const { scope } = canonicalEvaluationScope(input.scope)
+    return this.#intakeAttentionAgreement(scope, from, to)
+  }
+
+  /** Shared read model for the ad hoc inspect and the E1 persistence snapshot. */
+  #intakeAttentionAgreement(scope: EvaluationScope, from: number, to: number): IntakeAttentionAgreement {
     const heads = this.store.notifications.workItemHeads(scope, from, to, INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT)
     const workItems = this.ctx.get('assistantWorkItems' as never) as unknown
     return computeIntakeAttentionAgreement({ scope, fromNotifiedAt: from, toNotifiedAt: to, records: heads.records,
       truncated: heads.truncated, source: isIntakeProvenanceSource(workItems) ? workItems : undefined })
+  }
+
+  /**
+   * WP22 E1, default off: persist at most one agreement snapshot per call,
+   * using one aligned interval bucket. The window is
+   * `[bucketEnd - defaultSummaryWindowMs, bucketEnd)`, so a retry inside the
+   * same bucket computes the same window and the store replays the existing
+   * digest; a late outcome revision changes the digest and appends one
+   * immutable revision row for the same window. When the database serves
+   * several scopes the method rotates deterministically; one call writes at
+   * most one row and one credential-free scan.
+   *
+   * It never sends, adopts, authorizes intake/auto or changes the read model.
+   * Without a WorkItems peer it writes nothing and says so; with a peer that
+   * throws per item (including WorkItems' intake ledger off) the item is
+   * counted as `unresolved` inside a normal snapshot.
+   */
+  reconcileIntakeAttentionAgreementPersistence(): IntakeAttentionAgreementPersistResult {
+    this.assertActive()
+    const interval = this.config.intakeAttentionAgreementPersistIntervalMs
+    if (interval === undefined) return PERSIST_DISABLED
+    if (!this.config.notificationOutcomesEnabled || !this.config.intakeAttentionAgreementEnabled) return PERSIST_DISABLED
+    const workItems = this.ctx.get('assistantWorkItems' as never) as unknown
+    if (!isIntakeProvenanceSource(workItems)) return Object.freeze({ recorded: false, replayed: false, reason: 'work-items-unavailable' as const })
+    const scopes = this.store.notifications.workItemScopes(100)
+    if (scopes.length === 0) return Object.freeze({ recorded: false, replayed: false, reason: 'no-work-item-notifications' as const })
+    const scopeKeys = scopes.map(scope => canonicalEvaluationScope(scope).scopeKey)
+    const cursor = this.intakeAgreementPersistCursor
+    const next = cursor === undefined ? 0 : scopeKeys.findIndex(key => key > cursor)
+    const index = next === -1 ? 0 : next
+    const scope = scopes[index]!
+    const scopeKey = scopeKeys[index]!
+    const now = this.now()
+    const to = Math.floor(now / interval) * interval
+    const from = Math.max(0, to - this.config.defaultSummaryWindowMs)
+    if (to <= from) return Object.freeze({ recorded: false, replayed: false, reason: 'outside-window' as const })
+    this.intakeAgreementPersistCursor = scopeKey
+    const agreement = this.#intakeAttentionAgreement(scope, from, to)
+    if (agreement.scanned === 0) return Object.freeze({ recorded: false, replayed: false, reason: 'no-work-item-notifications' as const, scope })
+    const snapshot = createIntakeAttentionAgreementSnapshot({ agreement, computedAt: now,
+      windowMs: this.config.defaultSummaryWindowMs, scanLimit: INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT })
+    const result = this.store.intakeAttentionAgreement.record(scope, snapshot)
+    return Object.freeze({ recorded: !result.replayed, replayed: result.replayed, scope, snapshot: result.record })
+  }
+
+  /**
+   * WP22 E1 read-only history, newest first. Undefined when
+   * `intakeAttentionAgreementEnabled` is off; persisted rows are returned only
+   * for the exact owner scope. No snapshot is a causal claim and none may
+   * authorize intake/auto.
+   */
+  inspectIntakeAttentionAgreementHistory(input: { scope: EvaluationScope; limit?: number }): IntakeAttentionAgreementHistory | undefined {
+    this.assertActive()
+    if (!this.config.intakeAttentionAgreementEnabled) return undefined
+    const limit = input.limit ?? 20
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new AssistantEvaluationError('invalid-input', 'intake attention agreement history limit is invalid')
+    }
+    const { scope } = canonicalEvaluationScope(input.scope)
+    const snapshots = this.store.intakeAttentionAgreement.list(scope, limit)
+    return Object.freeze({ protocol: INTAKE_ATTENTION_AGREEMENT_HISTORY_PROTOCOL, causal: false as const,
+      scope: Object.freeze({ workspace: scope.workspace, preset: scope.preset }), snapshots: Object.freeze(snapshots) })
   }
 
   #attentionPolicy(): AttentionTuningPolicy {

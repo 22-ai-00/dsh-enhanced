@@ -284,6 +284,18 @@ describe('autonomy doctor static readiness snapshot', () => {
     expect(JSON.parse(JSON.stringify(report))).toEqual(report)
   })
 
+  it('names the E1 agreement persistence configuration without enabling anything', () => {
+    const report = inspectAutonomyReadiness(readinessBundles.replace(
+      '    notificationOutcomesEnabled: true',
+      '    notificationOutcomesEnabled: true\n    intakeAttentionAgreementPersistIntervalMs: 600000'), 'web')
+    const learning = readinessCheck(report, 'background-learning')
+    expect(learning.status).toBe('not-ready')
+    expect(learning.reasons.map(reason => reason.code)).toEqual(['evaluation-intake-agreement-persist-misconfigured'])
+    expect(learning.details).toMatchObject({ notificationOutcomesEnabled: true,
+      intakeAgreementPersistIntervalMs: 600_000, intakeAgreementEnabled: false })
+    expect(report.ready).toBe(false)
+  })
+
   it('reports the RSI intake evaluator and memory flags ready while naming the remaining growth pin gap', () => {
     const report = inspectAutonomyReadiness(
       readinessBundles.replace('      workItemFailures: true', '      workItemFailures: false'), 'web')

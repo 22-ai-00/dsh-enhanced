@@ -158,6 +158,29 @@ export const OwnerConsoleIntakeAgreementSchema = z.object({
 }).readonly()
 export type OwnerConsoleIntakeAgreement = Readonly<z.infer<typeof OwnerConsoleIntakeAgreementSchema>>
 
+/** One persisted E1 agreement snapshot; labeled level cells and counts only (no scope, ids or digest). */
+const intakeAgreementHistorySnapshot = z.object({
+  fromNotifiedAt: count,
+  toNotifiedAt: count,
+  computedAt: count,
+  windowMs: z.number().int().min(60_000),
+  scanLimit: z.number().int().min(1).max(10_000),
+  truncated: z.boolean(),
+  provenanceAvailable: z.boolean(),
+  notIntake: count,
+  unresolved: count,
+  foreign: count,
+  intake: intakeAgreementCell,
+  byLevel: z.array(z.object({ level: z.enum(INTAKE_AGREEMENT_LEVELS), cell: intakeAgreementCell }).strict().readonly())
+    .max(INTAKE_AGREEMENT_LEVELS.length).readonly(),
+}).strict().readonly()
+export const OwnerConsoleIntakeAgreementHistorySchema = z.object({
+  state: z.enum(['absent', 'disabled', 'unverifiable', 'ok']),
+  causal: z.literal(false),
+  snapshots: z.array(intakeAgreementHistorySnapshot).max(100).readonly().optional(),
+}).strict().readonly()
+export type OwnerConsoleIntakeAgreementHistory = Readonly<z.infer<typeof OwnerConsoleIntakeAgreementHistorySchema>>
+
 /** Strict Host and client descriptors: three reads plus owner-clicked one-step writes. */
 export const TYPERT = {
   package: '@dsh-enhanced/owner-console',
@@ -195,6 +218,19 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#OwnerConsoleIntakeAgreement', () => OwnerConsoleIntakeAgreementSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 109, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/intakeAgreementHistory',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'intakeAgreementHistory',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#intakeWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#intakePreset', () => z.string().max(200)) },
+        { name: 'limit', wire: 'limit', source: 'json',
+          codec: codec('owner-console#intakeHistoryLimit', () => z.number().int().min(1).max(100)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleIntakeAgreementHistory', () => OwnerConsoleIntakeAgreementHistorySchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 160, column: 3 },
     },
     {
       id: '@dsh-enhanced/owner-console#ownerConsole/configureFeishu',

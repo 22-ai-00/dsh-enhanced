@@ -347,13 +347,22 @@ export function inspectAutonomyReadiness(source: string, profile: string): Auton
   const notificationOutcomes = readinessValue(rows, 'assistant-evaluation', 'notificationOutcomesEnabled') === true
   if (evaluationLoaded !== true) learningReasons.push({ code: 'evaluation-unavailable', message: 'assistant-evaluation is not installed and loaded' })
   else if (!notificationOutcomes) learningReasons.push({ code: 'evaluation-notification-outcomes-off', message: 'assistant-evaluation.notificationOutcomesEnabled is off; notification results are not synced into the ledger' })
+  const agreementPersist = readinessValue(rows, 'assistant-evaluation', 'intakeAttentionAgreementPersistIntervalMs')
+  const agreementEnabled = readinessValue(rows, 'assistant-evaluation', 'intakeAttentionAgreementEnabled') === true
+  const agreementPersistConfigured = typeof agreementPersist === 'number' && Number.isSafeInteger(agreementPersist) && agreementPersist > 0
+  if (evaluationLoaded === true && agreementPersistConfigured && (!notificationOutcomes || !agreementEnabled)) {
+    learningReasons.push({ code: 'evaluation-intake-agreement-persist-misconfigured',
+      message: 'assistant-evaluation.intakeAttentionAgreementPersistIntervalMs is set but intakeAttentionAgreementEnabled / notificationOutcomesEnabled is off; Evaluation refuses this configuration' })
+  }
   checks.push({
     id: 'background-learning', required: true,
     status: learningReasons.length === 0 ? 'ready' : 'not-ready',
     summary: learningReasons.length === 0 ? 'ordinary-use learning switches are assembled' : `${learningReasons.length} background learning switch(es) not ready`,
     reasons: learningReasons,
     details: { memoryWorkItemExperiences: memoryFlag, memoryReviewGrant: reviewFlag, memoryAdoptionGrant: adoptionFlag,
-      growthEnabled, growthUsageLearning: usageEnabled, growthWorkItemFailures: workItemFailures, notificationOutcomesEnabled: notificationOutcomes },
+      growthEnabled, growthUsageLearning: usageEnabled, growthWorkItemFailures: workItemFailures, notificationOutcomesEnabled: notificationOutcomes,
+      intakeAgreementPersistIntervalMs: agreementPersistConfigured ? agreementPersist : null,
+      intakeAgreementEnabled: agreementEnabled },
   })
 
   const controlLoaded = readinessLoaded(rows, 'plugin-control-plane')

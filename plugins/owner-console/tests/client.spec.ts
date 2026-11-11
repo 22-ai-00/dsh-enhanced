@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TYPERT_REMOTE } from '../src/typert.ts'
 import { apply, askOwner, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, installWithApproval,
-  installWithCompanions, intakeAgreementView, larkConnectionLabel, remoteFailureText, trendSnapshotsView } from '../src/client.ts'
-import type { OwnerConsoleIntakeAgreement, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
+  installWithCompanions, intakeAgreementHistoryView, intakeAgreementView, larkConnectionLabel, remoteFailureText,
+  trendSnapshotsView } from '../src/client.ts'
+import type { OwnerConsoleIntakeAgreement, OwnerConsoleIntakeAgreementHistory, OwnerConsoleTrendSnapshots } from '../src/typert.ts'
 
 type Node = { type?: unknown, props?: Record<string, unknown> & { children?: unknown } }
 function walk(node: unknown, visit: (node: Node) => void): void {
@@ -234,5 +235,34 @@ describe('owner console client', () => {
     expect(text(intakeAgreementView({ state: 'absent', causal: false }, false))).toContain('assistant-evaluation 未加载')
     expect(text(intakeAgreementView(undefined, true))).toContain('暂时无法读取')
     expect(text(intakeAgreementView(undefined, false))).toContain('workspace 与 preset')
+  })
+  it('renders persisted intake agreement history read-only with labeled levels and no controls', () => {
+    const outcomes = { pending: 1, delivered: 0, reacted: 1, accepted: 1, rejected: 1, 'expired-unhandled': 0, failed: 0 }
+    const cell = { notifications: 4, items: 3, outcomes, agreed: 2, disagreed: 1, agreementPpm: 666_667 }
+    const empty = { ...cell, notifications: 0, items: 0, agreed: 0, disagreed: 0, agreementPpm: null }
+    const snapshot = { fromNotifiedAt: 1_700_000_000_000, toNotifiedAt: 1_700_000_100_000, computedAt: 1_700_000_050_000,
+      windowMs: 60_000, scanLimit: 1_000, truncated: true, provenanceAvailable: true, notIntake: 1, unresolved: 2, foreign: 1,
+      intake: cell, byLevel: [{ level: 'notify', cell: empty }, { level: 'accept', cell }] }
+    const history = { state: 'ok', causal: false, snapshots: [snapshot] } as unknown as OwnerConsoleIntakeAgreementHistory
+    const view = intakeAgreementHistoryView(history, false)
+    const controls: Node[] = []
+    walk(view, node => { if (['button', 'input', 'select', 'textarea', 'form'].includes(String(node.type))) controls.push(node) })
+    expect(controls).toEqual([])
+    const rendered = text(view)
+    expect(rendered).toContain('causal: false')
+    expect(rendered).toContain('窗口 [2023-11-14T22:13:20.000Z, 2023-11-14T22:15:00.000Z)')
+    expect(rendered).toContain('观察于 2023-11-14T22:14:10.000Z')
+    expect(rendered).toContain('扫描上限 1000')
+    expect(rendered).toContain('扫描已截断')
+    expect(rendered).toContain('notify（通知）')
+    expect(rendered).toContain('accept（准入）')
+    expect(rendered).toContain('吻合 2 / 不吻合 1 · 66.7%（通知 4，工作项 3）')
+    expect(rendered).toContain('非 intake / 无法判断 / 他 scope：1 / 2 / 1')
+    expect(text(intakeAgreementHistoryView({ state: 'disabled', causal: false }, false))).toContain('未启用')
+    expect(text(intakeAgreementHistoryView({ state: 'unverifiable', causal: false }, false))).toContain('未通过校验')
+    expect(text(intakeAgreementHistoryView({ state: 'absent', causal: false }, false))).toContain('assistant-evaluation 未加载')
+    expect(text(intakeAgreementHistoryView({ state: 'ok', causal: false, snapshots: [] }, false))).toContain('还没有持久化')
+    expect(text(intakeAgreementHistoryView(undefined, true))).toContain('暂时无法读取')
+    expect(text(intakeAgreementHistoryView(undefined, false))).toContain('读取后')
   })
 })

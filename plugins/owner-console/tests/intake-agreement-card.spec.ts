@@ -46,12 +46,13 @@ function harness() {
   hooks.states = []; hooks.refs = []
   const pending: Array<(value: unknown) => void> = []
   const intakeAgreement = vi.fn(() => new Promise(resolve => { pending.push(resolve) }))
-  const remote = { intakeAgreement } as never
+  const intakeAgreementHistory = vi.fn(async () => ({ ok: true as const, value: { state: 'ok' as const, causal: false as const, snapshots: [] } }))
+  const remote = { intakeAgreement, intakeAgreementHistory } as never
   const render = () => { hooks.state = 0; hooks.ref = 0; return expand(IntakeAgreementCard({ remote })) }
   const inputs = () => render().filter(node => node.type === 'input')
   const button = () => render().find(node => node.type === 'button')!
   const type = (index: number, value: string) => { (inputs()[index]!.props['onChange'] as (event: unknown) => void)({ target: { value } }) }
-  return { intakeAgreement, pending, render, button, type }
+  return { intakeAgreement, intakeAgreementHistory, pending, render, button, type }
 }
 
 describe('intake agreement card', () => {
@@ -64,10 +65,12 @@ describe('intake agreement card', () => {
     expect(f.button().props['disabled']).toBe(false)
     ;(f.button().props['onClick'] as () => void)()
     expect(f.intakeAgreement).toHaveBeenCalledExactlyOnceWith('/work/alpha', 'primary')
+    expect(f.intakeAgreementHistory).toHaveBeenCalledExactlyOnceWith('/work/alpha', 'primary', 20)
     expect(f.button().props).toMatchObject({ disabled: true, children: '读取中…' })
     f.pending[0]!({ ok: true, value: answer(3) })
     await Promise.resolve(); await Promise.resolve()
     expect(text(f.render())).toContain('吻合 3 / 不吻合 0')
+    expect(text(f.render())).toContain('还没有持久化')
     expect(f.button().props['disabled']).toBe(false)
   })
 

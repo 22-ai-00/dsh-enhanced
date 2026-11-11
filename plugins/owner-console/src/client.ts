@@ -4,8 +4,8 @@ import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { TYPERT_REMOTE } from './typert.js'
 import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_HERO_DATA_URI,
   WENYAO_HERO_HEIGHT, WENYAO_HERO_WIDTH, WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
-import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem,
-  OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
+import type { IntakeAgreementAvailability, OwnerConsoleIntakeAgreement, OwnerConsoleIntakeAgreementHistory,
+  OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots, OwnerConsoleWriteResult } from './typert.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
 import { OwnerConsoleChat, OwnerConsoleConversation, type OwnerConsoleRendererSeat } from './chat-view.js'
 import {
@@ -152,6 +152,7 @@ type ConsoleRemote = Readonly<{
   status(): Promise<RemoteResult<OwnerConsoleStatus>>
   trendSnapshots(planId: string, beforeSequence: number, limit: number): Promise<RemoteResult<OwnerConsoleTrendSnapshots>>
   intakeAgreement(workspace: string, preset: string): Promise<RemoteResult<OwnerConsoleIntakeAgreement>>
+  intakeAgreementHistory(workspace: string, preset: string, limit: number): Promise<RemoteResult<OwnerConsoleIntakeAgreementHistory>>
   configureFeishu(appId: string, appSecretEnv: string, credentialHandle: string,
     account: string, tenant: string, discoverAppId: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureTraex(enabled: boolean, command: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -286,6 +287,49 @@ export function intakeAgreementView(result: OwnerConsoleIntakeAgreement | undefi
       pill('WorkItems 未提供来源', 'warn'), '缺少 inspectIntakeProvenance，所有工作项计为无法判断。'))
 }
 
+type IntakeAgreementHistoryEntry = NonNullable<OwnerConsoleIntakeAgreementHistory['snapshots']>[number]
+const INTAKE_HISTORY_PAGE = 20
+const HISTORY_LEVEL_LABELS = {
+  ignore: 'ignore（忽略）', digest: 'digest（摘要）', notify: 'notify（通知）', accept: 'accept（准入）',
+} as const
+
+/**
+ * Hook-free rendering of the persisted E1 agreement snapshots. Each row is one
+ * immutable observation; counts and windows only, no scope, ids or digest.
+ */
+export function intakeAgreementHistoryView(result: OwnerConsoleIntakeAgreementHistory | undefined, failed: boolean) {
+  if (failed) return el('p', { role: 'alert', style: hintStyle }, '暂时无法读取历史快照，稍后重试。')
+  if (result === undefined) return placeholder('读取后将显示持久化的历史快照。')
+  if (result.state === 'absent') return placeholder('assistant-evaluation 未加载，没有历史快照。')
+  if (result.state === 'disabled') {
+    return el('div', { style: { ...actionsStyle, fontSize: 12, color: muted } }, pill('未启用', 'neutral'),
+      'Evaluation 未开启 intakeAttentionAgreementEnabled（默认关），没有历史快照。')
+  }
+  if (result.state === 'unverifiable' || result.snapshots === undefined) {
+    return el('div', { role: 'alert', style: { ...actionsStyle, fontSize: 12, color: muted } }, pill('未通过校验', 'error'),
+      '查询被拒绝或返回的结构不符；面板不会修复或改写它。')
+  }
+  if (result.snapshots.length === 0) return placeholder('还没有持久化的 intake 吻合度快照（E1 默认关闭）。')
+  return el('div', { style: gridStyle },
+    el('p', { style: hintStyle }, '只读历史：每行是一个不可改的观察快照（causal: false），不是 intake 准确率，也不能作为授权依据。'),
+    el('ol', { style: { ...listStyle, margin: 0, listStyle: 'none' } },
+      ...result.snapshots.map((entry: IntakeAgreementHistoryEntry, index) => el('li', {
+        key: `${entry.fromNotifiedAt}:${entry.toNotifiedAt}:${index}`,
+        style: { display: 'grid', gap: 4, padding: '10px 0', borderTop: `1px solid ${hairline}`, minWidth: 0, overflowWrap: 'anywhere' },
+      },
+      el('span', { style: actionsStyle },
+        el('span', { style: { fontWeight: 500 } }, `窗口 [${isoTime(entry.fromNotifiedAt)}, ${isoTime(entry.toNotifiedAt)})`),
+        entry.truncated ? pill('扫描已截断', 'warn') : null,
+        entry.provenanceAvailable ? null : pill('WorkItems 未提供来源', 'warn')),
+      el('span', { style: { fontSize: 12, color: caption } },
+        `观察于 ${isoTime(entry.computedAt)} · 回看 ${Math.round(entry.windowMs / 3_600_000)}h · 扫描上限 ${entry.scanLimit}`),
+      el('span', { style: { fontSize: 12 } }, agreementLabel(entry.intake)),
+      ...entry.byLevel.map(level => el('span', { style: { fontSize: 12 } },
+        `${HISTORY_LEVEL_LABELS[level.level]}：${agreementLabel(level.cell)}`)),
+      el('span', { style: { fontSize: 12, color: muted } },
+        `非 intake / 无法判断 / 他 scope：${entry.notIntake} / ${entry.unresolved} / ${entry.foreign}`)))))
+}
+
 const INTAKE_AVAILABILITY: Readonly<Record<IntakeAgreementAvailability, readonly [string, StatusTone]>> = {
   absent: ['未加载', 'neutral'],
   unknown: ['已加载，开关状态未知', 'warn'],
@@ -306,7 +350,9 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
   const [workspace, setWorkspace] = useState('')
   const [preset, setPreset] = useState('')
   const [result, setResult] = useState<OwnerConsoleIntakeAgreement>()
+  const [history, setHistory] = useState<OwnerConsoleIntakeAgreementHistory>()
   const [failed, setFailed] = useState(false)
+  const [historyFailed, setHistoryFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   // The result never echoes its scope, so only the answer to the latest read for the
   // scope still in the fields may be shown: editing a field or a newer read drops it.
@@ -315,13 +361,17 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
     request.current += 1
     set(value)
     setResult(undefined)
+    setHistory(undefined)
     setFailed(false)
+    setHistoryFailed(false)
     setBusy(false)
   }
   const load = () => {
     const id = ++request.current
     setFailed(false)
+    setHistoryFailed(false)
     setResult(undefined)
+    setHistory(undefined)
     setBusy(true)
     void remote.intakeAgreement(workspace, preset).then(read => {
       if (id !== request.current) return
@@ -333,6 +383,14 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
       setBusy(false)
       setFailed(true)
     })
+    void remote.intakeAgreementHistory(workspace, preset, INTAKE_HISTORY_PAGE).then(read => {
+      if (id !== request.current) return
+      if (read.ok) setHistory(read.value)
+      else setHistoryFailed(true)
+    }, () => {
+      if (id !== request.current) return
+      setHistoryFailed(true)
+    })
   }
   const blocked = busy || workspace.trim() === '' || preset.trim() === ''
   return card('intake 吻合度（只读）',
@@ -342,7 +400,9 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
       field('preset', preset, edit(setPreset), 'primary')),
     el('div', { style: actionsStyle },
       el('button', { style: idle(buttonStyle, blocked), disabled: blocked, onClick: load }, busy ? '读取中…' : '读取')),
-    intakeAgreementView(result, failed))
+    intakeAgreementView(result, failed),
+    el('p', { style: subheadStyle }, '历史快照（只读）'),
+    intakeAgreementHistoryView(history, historyFailed))
 }
 
 /** Sidebar entry: the 02 水墨化鹏 fish-and-peng mark, cropped square and shown as a round avatar. */

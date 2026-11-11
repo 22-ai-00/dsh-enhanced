@@ -8,6 +8,7 @@
  * notification and cannot be measured here; only auto-admitted items are.
  * Nothing is written, adopted or sent; the result is observational.
  */
+import { createHash } from 'node:crypto'
 import { canonicalEvaluationScope } from './store.js'
 import type { NotificationOutcome, NotificationOutcomeRecord } from './types.js'
 import { notificationOutcomes } from './types.js'
@@ -172,5 +173,107 @@ export function computeIntakeAttentionAgreement(input: Readonly<{
       const cell = byLevel.get(level)
       return cell === undefined ? [] : [[level, cell.freeze()]]
     }))),
+  })
+}
+
+/**
+ * WP22 E1: durable, append-only agreement snapshots.
+ *
+ * The persisted record is the same observational read as
+ * `computeIntakeAttentionAgreement`, plus the bucket it was computed for. It is
+ * never a causal claim and never an authorization input. The digest covers the
+ * scope, the exact window, the fixed configuration version and all counts, but
+ * not `computedAt`: repeated ticks inside one interval therefore replay the
+ * same digest instead of appending duplicates. A late outcome revision that
+ * changes the counts is appended as a new digest for the same window (immutable
+ * history), never as an update.
+ */
+export const INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_PROTOCOL = 'assistant-evaluation/intake-attention-agreement-snapshot/v1' as const
+export const INTAKE_ATTENTION_AGREEMENT_HISTORY_PROTOCOL = 'assistant-evaluation/intake-attention-agreement-history/v1' as const
+/** Fixed configuration generation mixed into the digest; bump only with a semantic change. */
+export const INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_VERSION = 1
+
+export interface IntakeAttentionAgreementSnapshotInput {
+  readonly agreement: IntakeAttentionAgreement
+  readonly computedAt: number
+  /** Look-back used to select the notification window. */
+  readonly windowMs: number
+  /** Fixed per-call notification scan limit. */
+  readonly scanLimit: number
+}
+
+export interface IntakeAttentionAgreementSnapshot {
+  readonly protocol: typeof INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_PROTOCOL
+  readonly snapshotVersion: typeof INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_VERSION
+  readonly causal: false
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly fromNotifiedAt: number
+  readonly toNotifiedAt: number
+  readonly computedAt: number
+  readonly windowMs: number
+  readonly scanLimit: number
+  readonly truncated: boolean
+  readonly provenanceAvailable: boolean
+  readonly notIntake: number
+  readonly unresolved: number
+  readonly foreign: number
+  readonly intake: IntakeAttentionAgreementCell
+  readonly byLevel: Readonly<Partial<Record<IntakeLevel, IntakeAttentionAgreementCell>>>
+  /** sha256 over the immutable content below; excludes `computedAt` so a replay is stable. */
+  readonly digest: string
+}
+
+export interface IntakeAttentionAgreementHistory {
+  readonly protocol: typeof INTAKE_ATTENTION_AGREEMENT_HISTORY_PROTOCOL
+  readonly causal: false
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  /** Newest first; immutable snapshots of earlier buckets are never rewritten. */
+  readonly snapshots: readonly IntakeAttentionAgreementSnapshot[]
+}
+
+/** Deterministic JSON with sorted object keys; arrays keep their order. */
+function canonical(value: unknown): string {
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(item => canonical(item)).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).filter(key => record[key] !== undefined).sort()
+    .map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`
+}
+
+/** The immutable content covered by the snapshot digest (no observation clock, no digest). */
+export type IntakeAttentionAgreementSnapshotContent = Omit<IntakeAttentionAgreementSnapshot, 'digest' | 'computedAt'>
+
+/** Digest of one snapshot's immutable content; exported for restart validation. */
+export function intakeAttentionAgreementSnapshotDigest(content: IntakeAttentionAgreementSnapshotContent): string {
+  return createHash('sha256').update(canonical(content)).digest('hex')
+}
+
+/** One immutable snapshot from the current read model. */
+export function createIntakeAttentionAgreementSnapshot(input: IntakeAttentionAgreementSnapshotInput): IntakeAttentionAgreementSnapshot {
+  const { agreement } = input
+  if (!Number.isSafeInteger(input.computedAt) || input.computedAt < 0) throw new Error('agreement snapshot computedAt is invalid')
+  if (!Number.isSafeInteger(input.windowMs) || input.windowMs < 60_000) throw new Error('agreement snapshot windowMs is invalid')
+  if (!Number.isSafeInteger(input.scanLimit) || input.scanLimit < 1) throw new Error('agreement snapshot scanLimit is invalid')
+  const content: IntakeAttentionAgreementSnapshotContent = {
+    protocol: INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_PROTOCOL,
+    snapshotVersion: INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_VERSION,
+    causal: false as const,
+    scope: agreement.scope,
+    fromNotifiedAt: agreement.fromNotifiedAt,
+    toNotifiedAt: agreement.toNotifiedAt,
+    windowMs: input.windowMs,
+    scanLimit: input.scanLimit,
+    truncated: agreement.truncated,
+    provenanceAvailable: agreement.provenanceAvailable,
+    notIntake: agreement.notIntake,
+    unresolved: agreement.unresolved,
+    foreign: agreement.foreign,
+    intake: agreement.intake,
+    byLevel: agreement.byLevel,
+  }
+  return Object.freeze({
+    ...content,
+    computedAt: input.computedAt,
+    digest: intakeAttentionAgreementSnapshotDigest(content),
   })
 }

@@ -8,8 +8,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { Config, apply, name, version } from '../src/index.ts'
 import type { OwnerConsoleService } from '../src/service.ts'
 import type { SettingsDescriptor, SettingsService } from '../src/settings.ts'
-import { OwnerConsoleStatusSchema, TYPERT, WRITE_RESULT } from '../src/typert.ts'
-import { applyInstall, blockedBuildNames, readIntakeAgreement, readIntakeAgreementAvailability, readTrendSnapshots } from '../src/service.ts'
+import { OwnerConsoleIntakeAgreementHistorySchema, OwnerConsoleStatusSchema, TYPERT, WRITE_RESULT } from '../src/typert.ts'
+import { applyInstall, blockedBuildNames, readIntakeAgreement, readIntakeAgreementAvailability, readIntakeAgreementHistory, readTrendSnapshots } from '../src/service.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -66,6 +66,16 @@ describe('dsh-enhanced-owner-console', () => {
     }
   })
 
+  it('registers every public async service method with a TYPERT invocation', () => {
+    // Private helpers are also async functions at runtime, so derive the public surface from the
+    // declarations themselves and keep the Typert table from silently dropping a remote method.
+    const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
+    const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
+      .map(match => match[1]!).sort()
+    expect(asyncMethods).toHaveLength(11)
+    expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
+  })
+
   it('keeps every remote wire order equal to its Host method parameter order', () => {
     // Typert dispatch is positional: parameters.map(p => named[p.wire]) is applied
     // to the service method, so the declared order must match the implementation.
@@ -81,6 +91,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/removeProjectBundle')).toEqual(['name'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreementHistory')).toEqual(['workspace', 'preset', 'limit'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -744,6 +755,57 @@ function agreement(overrides: Record<string, unknown> = {}) {
     intake: agreementCell(), byLevel: { accept: agreementCell(), notify: agreementCell({ notifications: 0, items: 0, agreed: 0, disagreed: 0, agreementPpm: null,
       outcomes: { pending: 0, delivered: 0, reacted: 0, accepted: 0, rejected: 0, 'expired-unhandled': 0, failed: 0 } }) }, ...overrides }
 }
+
+function agreementSnapshot(overrides: Record<string, unknown> = {}) {
+  return { protocol: 'assistant-evaluation/intake-attention-agreement-snapshot/v1', snapshotVersion: 1, causal: false,
+    scope: { workspace: '/work/alpha', preset: 'primary' }, fromNotifiedAt: 1_000, toNotifiedAt: 2_000, computedAt: 2_100,
+    windowMs: 60_000, scanLimit: 1_000, truncated: false, provenanceAvailable: true, notIntake: 0, unresolved: 0, foreign: 0,
+    intake: agreementCell(), byLevel: { accept: agreementCell() }, digest: 'a'.repeat(64), ...overrides }
+}
+function agreementHistory(overrides: Record<string, unknown> = {}) {
+  return { protocol: 'assistant-evaluation/intake-attention-agreement-history/v1', causal: false,
+    scope: { workspace: '/work/alpha', preset: 'primary' }, snapshots: [agreementSnapshot()], ...overrides }
+}
+
+describe('owner console intake agreement history (read-only)', () => {
+  it('reports absent, disabled and unverifiable without trusting provider shapes', () => {
+    expect(readIntakeAgreementHistory(undefined, '/work/alpha', 'primary')).toEqual({ state: 'absent', causal: false })
+    expect(readIntakeAgreementHistory({ inspectIntakeAttentionAgreementHistory: () => undefined }, '/work/alpha', 'primary'))
+      .toEqual({ state: 'disabled', causal: false })
+    const provider = (value: unknown) => ({ inspectIntakeAttentionAgreementHistory: () => value })
+    const unverifiable = { state: 'unverifiable', causal: false }
+    expect(readIntakeAgreementHistory({}, '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ causal: true })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ protocol: 'other/v1' })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ snapshots: [agreementSnapshot({ snapshotVersion: 2 })] })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ snapshots: [agreementSnapshot({ intake: agreementCell({ agreed: 3 }) })] })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ snapshots: [agreementSnapshot({ toNotifiedAt: 1_000 })] })), '/work/alpha', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory({ snapshots: [agreementSnapshot(), agreementSnapshot()] })), '/work/alpha', 'primary', 1)).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory()), ' ', 'primary')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory()), '/work/alpha', '')).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory()), '/work/alpha', 'primary', 0)).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory(provider(agreementHistory()), '/work/alpha', 'primary', 101)).toEqual(unverifiable)
+    expect(readIntakeAgreementHistory({ inspectIntakeAttentionAgreementHistory: () => { throw new Error('invalid-input') } }, '/work/alpha', 'primary'))
+      .toEqual(unverifiable)
+  })
+
+  it('maps persisted windows and counts without echoing scope, ids or digests', () => {
+    const read = vi.fn(() => agreementHistory({ snapshots: [agreementSnapshot({ truncated: true })] }))
+    const result = readIntakeAgreementHistory({ inspectIntakeAttentionAgreementHistory: read }, ' /work/alpha ', ' primary ', 5)
+    expect(read).toHaveBeenCalledExactlyOnceWith({ scope: { workspace: '/work/alpha', preset: 'primary' }, limit: 5 })
+    expect(result.state).toBe('ok')
+    expect(result.causal).toBe(false)
+    expect(result.snapshots).toHaveLength(1)
+    expect(result.snapshots![0]).toMatchObject({ fromNotifiedAt: 1_000, toNotifiedAt: 2_000, computedAt: 2_100,
+      windowMs: 60_000, scanLimit: 1_000, truncated: true, provenanceAvailable: true, intake: agreementCell() })
+    expect(result.snapshots![0]!.byLevel).toEqual([{ level: 'accept', cell: agreementCell() }])
+    expect(OwnerConsoleIntakeAgreementHistorySchema.safeParse(result).success).toBe(true)
+    expect(OwnerConsoleIntakeAgreementHistorySchema.safeParse({ ...result,
+      snapshots: [{ ...result.snapshots![0]!, scope: '/work/alpha' }] }).success).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('/work/alpha')
+    expect(JSON.stringify(result)).not.toContain('a'.repeat(64))
+  })
+})
 
 describe('owner console intake agreement (read-only)', () => {
   it('reports absent without Evaluation and disabled while its switch is off', () => {

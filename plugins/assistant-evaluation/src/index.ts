@@ -19,6 +19,8 @@ export {
 export type { ConfigType as AssistantEvaluationConfig }
 export type {
   EvaluationHostScope,
+  IntakeAttentionAgreementPersistReason,
+  IntakeAttentionAgreementPersistResult,
   OwnerQuestionReplyInput,
   OwnerQuestionReplyOutcome,
   OwnerQuestionReplyRegistration,
@@ -39,8 +41,29 @@ export {
   normalizeNotificationOutcomeFact,
   notificationOutcomeDigest,
 } from './notification-outcomes.js'
-export { INTAKE_ATTENTION_AGREEMENT_PROTOCOL, computeIntakeAttentionAgreement } from './intake-attention-agreement.js'
-export type { IntakeAttentionAgreement, IntakeAttentionAgreementCell } from './intake-attention-agreement.js'
+export {
+  INTAKE_ATTENTION_AGREEMENT_HISTORY_PROTOCOL,
+  INTAKE_ATTENTION_AGREEMENT_PROTOCOL,
+  INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT,
+  INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_PROTOCOL,
+  INTAKE_ATTENTION_AGREEMENT_SNAPSHOT_VERSION,
+  computeIntakeAttentionAgreement,
+  createIntakeAttentionAgreementSnapshot,
+  intakeAttentionAgreementSnapshotDigest,
+} from './intake-attention-agreement.js'
+export type {
+  IntakeAttentionAgreement,
+  IntakeAttentionAgreementCell,
+  IntakeAttentionAgreementHistory,
+  IntakeAttentionAgreementSnapshot,
+  IntakeAttentionAgreementSnapshotContent,
+  IntakeAttentionAgreementSnapshotInput,
+} from './intake-attention-agreement.js'
+export { IntakeAttentionAgreementLedger } from './intake-attention-agreement-store.js'
+export type {
+  IntakeAttentionAgreementRecordResult,
+  StoredIntakeAttentionAgreementSnapshot,
+} from './intake-attention-agreement-store.js'
 export {
   ATTENTION_HOLDOUT_PROTOCOL,
   ATTENTION_LOOSENING_GRANT_PROTOCOL,
