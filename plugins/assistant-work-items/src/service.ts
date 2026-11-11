@@ -2,8 +2,8 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { WorkItemEngineeringTargets, type WorkItemEngineeringMaterial } from './engineering-context.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import type { WorkItemIntakeInput, WorkItemIntakeResult } from './intake.js'
-import { classifyIntake, intakeSourcePolicy } from './intake.js'
+import type { WorkItemIntakeAcceptance, WorkItemIntakeInput, WorkItemIntakeObjective, WorkItemIntakeResult } from './intake.js'
+import { classifyIntake, intakeAcceptanceOf, intakeObjectiveOf, intakeSourcePolicy, MAX_INTAKE_OBJECTIVE_BYTES } from './intake.js'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.js'
 import { authenticatesIntakeText, WorkItemIntakeEvaluationRuntime, type WorkItemIntakeEvaluationHealth, type WorkItemIntakeEvaluatorRegistration } from './intake-evaluation-runtime.js'
 import { WorkItemIntakeAdmissionBridge, type WorkItemIntakeAdmissionRecord } from './intake-admission.js'
@@ -300,6 +300,9 @@ export class AssistantWorkItemsService extends Service {
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
   private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
+  /** Bounded, memory-only producer hints for inferred auto admission; never persisted. */
+  private readonly workItemsIntakeHints = new Map<string, Readonly<{ objective?: WorkItemIntakeObjective; acceptance?: WorkItemIntakeAcceptance }>>()
+  private static readonly MAX_INTAKE_HINTS = 256
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantWorkItems')
@@ -320,6 +323,12 @@ export class AssistantWorkItemsService extends Service {
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
       // The public Host path, so an admitted item wakes its worker like any decision.
       admit: decision => this.admitDecision(decision),
+      hint: (source, sourceEventId) => {
+        const hint = this.workItemsIntakeHints.get(this.intakeHintKey(source, sourceEventId))
+        if (hint?.objective === undefined) return undefined
+        return Object.freeze({ objective: hint.objective,
+          ...(hint.acceptance === undefined ? {} : { acceptance: hint.acceptance }) })
+      },
       log: message => ctx.logger.debug(message),
     })
     this.workItemsOwnerReads = new WorkItemOwnerRecall({ ...ownerDependencies, access })
@@ -1335,11 +1344,50 @@ export class AssistantWorkItemsService extends Service {
     if (sourceText !== undefined && !authenticatesIntakeText(sourceText, candidate.contentDigest)) {
       fail('invalid-input', 'intake source text must be at most 65,536 UTF-16 units and match the content digest')
     }
+    // Producer extensions are validated before any ledger write; an over-limit
+    // objective or malformed handle rejects the whole call instead of being
+    // truncated or stripped.
+    const objective = intakeObjectiveOf(input, sourceText)
+    // The objective becomes the work-item brief; admission truncates to
+    // admission.maxBriefBytes, so a longer objective is rejected here rather
+    // than silently truncated later.
+    if (objective !== undefined && Buffer.byteLength(objective.text, 'utf8') > Math.min(MAX_INTAKE_OBJECTIVE_BYTES, this.workItemsConfig.admission.maxBriefBytes)) {
+      fail('invalid-input', 'intake objective exceeds the configured admission brief limit')
+    }
+    const acceptance = intakeAcceptanceOf(input)
     const result = this.workItemsAvailable().store.recordIntake(candidate)
+    this.rememberIntakeHint(result.record.source, result.record.sourceEventId, objective, acceptance)
     // `sourceText` is the authenticated text the content digest covers; with
     // evaluation off it is ignored, with it on it is held in memory only.
     if (sourceText !== undefined) this.workItemsIntakeEvaluation?.observe(result.record, sourceText)
     return result
+  }
+
+  private intakeHintKey(source: string, sourceEventId: string): string {
+    return `${source}\u0000${sourceEventId}`
+  }
+
+  /**
+   * Remember producer-supplied objective/acceptance for at most
+   * `MAX_INTAKE_HINTS` candidates. The text is deliberately memory-only:
+   * restart loses it and auto admission fails closed to observe, rather than
+   * opening a new plaintext ledger for owner messages.
+   */
+  private rememberIntakeHint(source: string, sourceEventId: string, objective: WorkItemIntakeObjective | undefined,
+    acceptance: WorkItemIntakeAcceptance | undefined): void {
+    if (objective === undefined && acceptance === undefined) return
+    const key = this.intakeHintKey(source, sourceEventId)
+    const previous = this.workItemsIntakeHints.get(key)
+    this.workItemsIntakeHints.delete(key)
+    this.workItemsIntakeHints.set(key, Object.freeze({
+      ...(objective === undefined ? (previous?.objective === undefined ? {} : { objective: previous.objective }) : { objective }),
+      ...(acceptance === undefined ? (previous?.acceptance === undefined ? {} : { acceptance: previous.acceptance }) : { acceptance }),
+    }))
+    while (this.workItemsIntakeHints.size > AssistantWorkItemsService.MAX_INTAKE_HINTS) {
+      const oldest = this.workItemsIntakeHints.keys().next().value
+      if (oldest === undefined) break
+      this.workItemsIntakeHints.delete(oldest)
+    }
   }
 
   /**

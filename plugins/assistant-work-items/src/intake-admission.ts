@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { NormalizedIntakeAdmit } from './config.ts'
+import type { WorkItemIntakeAcceptance, WorkItemIntakeObjective } from './intake.ts'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
 import type { WorkItemStore } from './store.ts'
 import type { WorkItemDecisionAdmitResult, WorkItemDecisionRefusal, WorkItemErrorCode, WorkItemExecuteDecision } from './types.ts'
@@ -16,6 +17,17 @@ import { WorkItemError } from './types.ts'
  * the same evaluation twice and a refusal is final (no retry). Runs on the
  * existing scheduler wake; it owns no loop or timer.
  */
+
+/**
+ * Producer-supplied objective and optional acceptance handle for one inferred
+ * candidate. The bridge only reads it from the bounded in-memory hint; it is
+ * never persisted in the intake ledger. Auto admission requires both; without
+ * them the pass records the same `would-admit` row an observe deployment does.
+ */
+export interface WorkItemIntakeAdmissionHint {
+  readonly objective: WorkItemIntakeObjective
+  readonly acceptance?: WorkItemIntakeAcceptance
+}
 
 export type WorkItemIntakeAdmissionOutcome = 'would-admit' | 'admitted' | 'replayed' | 'refused'
 
@@ -44,8 +56,17 @@ export function intakeDecisionIdFor(record: Pick<WorkItemIntakeEvaluationRecord,
   return `intake:${sha256(JSON.stringify(['work-items/intake-decision/v1', record.source, record.sourceEventId, record.ruleId, record.policyVersion]))}`
 }
 
-/** Metadata-only mandate: the brief names the rule and event, never the inbound text. */
-export function intakeDecisionFor(record: WorkItemIntakeEvaluationRecord, config: NormalizedIntakeAdmit, budgetRemaining: number): WorkItemExecuteDecision {
+/**
+ * The execute decision for one accepted evaluation.
+ *
+ * Without a producer hint the mandate keeps the historical metadata-only brief.
+ * The auto bridge only calls this with a hint whose objective and acceptance
+ * are both present; the original objective becomes the mandate brief and the
+ * verifier handle rides the decision so `admitDecision` can freeze the real
+ * contract summary into the item.
+ */
+export function intakeDecisionFor(record: WorkItemIntakeEvaluationRecord, config: NormalizedIntakeAdmit,
+  budgetRemaining: number, hint?: WorkItemIntakeAdmissionHint): WorkItemExecuteDecision {
   const ref = `${record.source}/${record.sourceEventId}/${record.ruleId}@${record.policyVersion}`
   return Object.freeze({
     protocol: 'work-items/execute-decision/v1',
@@ -58,10 +79,11 @@ export function intakeDecisionFor(record: WorkItemIntakeEvaluationRecord, config
     mandate: Object.freeze({
       kind: config.kind,
       title: `Intake ${record.source}:${record.sourceEventId}`,
-      brief: `Inferred intake ${record.source} event ${record.sourceEventId} was accepted by rule ${record.ruleId} under Policy ${record.policyVersion}.`,
+      brief: hint?.objective.text ?? `Inferred intake ${record.source} event ${record.sourceEventId} was accepted by rule ${record.ruleId} under Policy ${record.policyVersion}.`,
       originBindingId: config.originBindingId,
       acceptanceRef: `intake-evaluation:${ref}`,
     }),
+    ...(hint?.acceptance === undefined ? {} : { acceptance: hint.acceptance }),
   })
 }
 
@@ -72,6 +94,7 @@ export class WorkItemIntakeAdmissionBridge {
   readonly #admit: (decision: WorkItemExecuteDecision) => WorkItemDecisionAdmitResult
   readonly #log: (message: string) => void
   readonly #now: () => number
+  readonly #hint: ((source: string, sourceEventId: string) => WorkItemIntakeAdmissionHint | undefined) | undefined
   #lastError: string | null = null
 
   constructor(options: {
@@ -81,6 +104,13 @@ export class WorkItemIntakeAdmissionBridge {
     admit: (decision: WorkItemExecuteDecision) => WorkItemDecisionAdmitResult
     log: (message: string) => void
     now?: () => number
+    /**
+     * Producer hint for the objective/acceptance of one candidate. When this
+     * option is absent (direct component use), the historical auto behavior is
+     * unchanged; the WorkItems service always supplies it, so production auto
+     * admission requires an acceptance handle and otherwise records observe.
+     */
+    hint?: (source: string, sourceEventId: string) => WorkItemIntakeAdmissionHint | undefined
   }) {
     this.#config = options.config
     this.#maxPerRun = options.maxPerRun
@@ -88,6 +118,7 @@ export class WorkItemIntakeAdmissionBridge {
     this.#admit = options.admit
     this.#log = options.log
     this.#now = options.now ?? (() => Date.now())
+    this.#hint = options.hint
   }
 
   /** One bounded pass over accepting evaluations without an admission row; never throws. */
@@ -115,10 +146,17 @@ export class WorkItemIntakeAdmissionBridge {
     const decisionId = intakeDecisionIdFor(evaluation)
     const key = { source: evaluation.source, sourceEventId: evaluation.sourceEventId, ruleId: evaluation.ruleId, policyVersion: evaluation.policyVersion, decisionId }
     if (this.#config.mode === 'observe') return store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+    const hint = this.#hint?.(evaluation.source, evaluation.sourceEventId)
+    if (this.#hint !== undefined && (hint?.objective === undefined || hint.acceptance === undefined)) {
+      // Auto without a real acceptance handle is not allowed to create work. It
+      // records the observe row instead, so a later hint cannot retroactively
+      // admit this evaluation (the admission ledger is append-only).
+      return store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+    }
     const budget = Math.max(0, this.#config.maxPerHour - store.countIntakeAdmitted(this.#now() - HOUR_MS))
     let result: WorkItemDecisionAdmitResult
     try {
-      result = this.#admit(intakeDecisionFor(evaluation, this.#config, budget))
+      result = this.#admit(intakeDecisionFor(evaluation, this.#config, budget, hint))
     } catch (error) {
       // A storage fault or a closing service may clear; anything else is a final refusal under its code.
       if (!(error instanceof WorkItemError) || DEFERRED.has(error.code)) { this.#fail(error); return undefined }

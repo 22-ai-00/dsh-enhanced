@@ -116,6 +116,9 @@ export function decisionRefusal(decision: NormalizedExecuteDecision): WorkItemDe
   if (decision.mode !== 'auto') return 'inferred-requires-auto'
   if (decision.policyRuleId === undefined) return 'inferred-requires-rule'
   if (decision.budgetRemaining < 1) return 'budget-exhausted'
+  // E2 invariant: an inferred auto decision without a verifier contract handle
+  // is never work — no rule hit can substitute for real acceptance.
+  if (decision.acceptance === undefined) return 'acceptance-required'
   return undefined
 }
 

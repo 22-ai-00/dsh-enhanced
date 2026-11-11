@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { MALFORMED_AUTHORITY_REASON, MANDATE_RULE_CHANGED_REASON } from '../src/authority.ts'
 import type { WorkItemExecuteDecision, WorkItemRecord } from '../src/types.ts'
 import { WorkItemError } from '../src/types.ts'
-import { claim, harness, report, type Harness } from './fixtures.ts'
+import { claim, fakeAcceptance, harness, report, type Harness } from './fixtures.ts'
 
 const RULE = 'inferred-review-admit'
 
@@ -28,6 +28,13 @@ function decision(overrides: Partial<WorkItemExecuteDecision> = {}): WorkItemExe
 function inferred(overrides: Partial<WorkItemExecuteDecision> = {}): WorkItemExecuteDecision {
   return decision({ origin: 'inferred', policyRuleId: RULE, ...overrides })
 }
+
+const acceptance = fakeAcceptance()
+const harnessWithAcceptance = (overrides: Parameters<typeof harness>[0] = {}) =>
+  harness(overrides, { verifier: () => acceptance.service })
+/** Inferred auto decisions now must carry a real acceptance handle (E2 invariant). */
+const acceptedInferred = (overrides: Partial<WorkItemExecuteDecision> = {}) =>
+  inferred({ acceptance: acceptance.handle(), ...overrides })
 
 function itemCount(fixture: Harness): number {
   return fixture.store.countItemsSince(0)
@@ -114,13 +121,14 @@ describe('execute decision admission', () => {
     expect(fixture.admission.admitDecision(decision()).outcome).toBe('replayed')
   })
 
-  test('inferred work needs auto mode, a named rule and remaining budget, all before Policy or a write', async () => {
+  test('inferred work needs auto mode, a named rule, remaining budget and a real acceptance handle, all before Policy or a write', async () => {
     const fixture = await harness()
     allowBy(fixture, RULE)
     const cases: Array<[WorkItemExecuteDecision, string]> = [
       [inferred({ mode: 'observe' }), 'inferred-requires-auto'],
       [decision({ origin: 'inferred' }), 'inferred-requires-rule'],
       [inferred({ budgetRemaining: 0 }), 'budget-exhausted'],
+      [inferred(), 'acceptance-required'],
     ]
     for (const [input, reasonCode] of cases) {
       expect(fixture.admission.admitDecision(input)).toEqual({ outcome: 'refused', reasonCode })
@@ -134,30 +142,30 @@ describe('execute decision admission', () => {
   })
 
   test('inferred work is admitted only when Policy allows by exactly the named rule', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, 'broad-allow')
-    expect(fixture.admission.admitDecision(inferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
+    expect(fixture.admission.admitDecision(acceptedInferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
     allowBy(fixture, undefined)
-    expect(fixture.admission.admitDecision(inferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
+    expect(fixture.admission.admitDecision(acceptedInferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
     expect(itemCount(fixture)).toBe(0)
     // The mismatch is found by the side-effect-free evaluate: no budget-consuming authorize call.
     expect(fixture.policy.evaluations).toHaveLength(2)
     expect(fixture.policy.requests).toHaveLength(0)
     fixture.policy.deny('rule-deny')
-    expect(() => fixture.admission.admitDecision(inferred())).toThrow(expect.objectContaining({ code: 'source-rejected' }))
+    expect(() => fixture.admission.admitDecision(acceptedInferred())).toThrow(expect.objectContaining({ code: 'source-rejected' }))
     expect(itemCount(fixture)).toBe(0)
     allowBy(fixture, RULE)
-    const item = admittedItem(fixture.admission.admitDecision(inferred()))
+    const item = admittedItem(fixture.admission.admitDecision(acceptedInferred()))
     expect(item.authority?.ruleId).toBe(RULE)
     expect(item.authority?.mandate).toMatchObject({ origin: 'inferred', ruleId: RULE, budgetRemaining: 3 })
     expect(fixture.policy.requests.at(-1)).toMatchObject({ action: 'admit', resource: { kind: 'automation', id: item.workerAutomationId } })
   })
 
   test('an older Policy peer without evaluate still refuses a rule mismatch after authorize', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     delete (fixture.policy.service as { evaluate?: unknown }).evaluate
     allowBy(fixture, 'broad-allow')
-    expect(fixture.admission.admitDecision(inferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
+    expect(fixture.admission.admitDecision(acceptedInferred())).toEqual({ outcome: 'refused', reasonCode: 'policy-rule-mismatch' })
     expect(fixture.policy.requests).toHaveLength(1)
     expect(itemCount(fixture)).toBe(0)
   })
@@ -170,9 +178,9 @@ describe('execute decision admission', () => {
   })
 
   test('dispatch re-verification pins a named rule: a different allowing rule parks, the same rule allows', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
-    const item = admittedItem(fixture.admission.admitDecision(inferred()))
+    const item = admittedItem(fixture.admission.admitDecision(acceptedInferred()))
     expect(fixture.authority.check(item)).toEqual({ kind: 'allow' })
     allowBy(fixture, 'broad-allow')
     expect(fixture.authority.check(item)).toEqual({ kind: 'revoked', reasonCode: MANDATE_RULE_CHANGED_REASON })
@@ -184,9 +192,9 @@ describe('execute decision admission', () => {
   })
 
   test('a malformed or inconsistent stored mandate is revoked, never treated as legacy', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
-    const item = admittedItem(fixture.admission.admitDecision(inferred()))
+    const item = admittedItem(fixture.admission.admitDecision(acceptedInferred()))
     const basis = item.authority!
     const variants = [
       { ...basis, mandate: { ...basis.mandate!, digest: 'not-a-digest' } },

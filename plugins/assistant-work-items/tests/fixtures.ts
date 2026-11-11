@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach } from 'vitest'
+import { createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { WorkItemAdmission } from '../src/admission.ts'
 import { WorkItemAuthority } from '../src/authority.ts'
 import { normalizeConfig, type Config, type NormalizedConfig } from '../src/config.ts'
@@ -58,6 +59,48 @@ export function deliveryPeer(overrides: Partial<PeerDeliveryService> = {}): Peer
     validateOwnerRoute: input => receipt(input),
     enqueueBackground: () => Promise.resolve({ id: 'outbox-1' }),
     ...overrides,
+  }
+}
+
+/**
+ * Minimal real-shape verifier double for admission tests: it holds
+ * awaiting-execution contracts created by the shared wire factory, so an
+ * acceptance-bound decision can be admitted without a runner or receipt.
+ */
+export interface FakeAcceptance {
+  readonly service: PeerVerifierService
+  /** One fresh, unused contract handle for the default owner scope. */
+  handle(): Readonly<{ contractId: string; contractDigest: string }>
+}
+
+export function fakeAcceptance(): FakeAcceptance {
+  const contracts = new Map<string, unknown>()
+  let sequence = 0
+  const service: PeerVerifierService = {
+    inspectAcceptedTask(contractId) {
+      const contract = contracts.get(contractId)
+      return contract === undefined ? null : { contract, state: 'awaiting-execution', attempts: 0, reason: null, receipt: null }
+    },
+  }
+  return {
+    service,
+    handle() {
+      sequence += 1
+      const contract = createTaskAcceptanceContract({
+        protocol: 'task-acceptance/v1', id: `acceptance-fake-${sequence}`,
+        scope: { workspace: WORKSPACE, preset: PRESET },
+        owner: { principalRecordId: 'principal-1', principalVersion: 7 },
+        task: { kind: 'automation-run', ref: `run-fake-${sequence}` }, objective: 'fake accepted objective',
+        profile: { id: 'fake-profile', version: 1, digest: 'a'.repeat(64) },
+        issuedAt: 1_699_999_999_000, expiresAt: 1_700_518_399_000,
+        criteria: [{ id: 'result', kind: 'process-behavior' as const,
+          authority: { id: 'fake-runner', digest: 'a'.repeat(64) },
+          artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }],
+        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
+      })
+      contracts.set(contract.id, contract)
+      return { contractId: contract.id, contractDigest: contract.digest }
+    },
   }
 }
 

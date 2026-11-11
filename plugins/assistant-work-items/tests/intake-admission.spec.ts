@@ -1,5 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { createHash } from 'node:crypto'
+import { createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -22,7 +23,7 @@ import type { IntakeAdmitConfig, NormalizedIntakeAdmit } from '../src/config.ts'
 import type { PeerOwnerRouteReceipt } from '../src/peers.ts'
 import { WorkItemStore } from '../src/store.ts'
 import { WorkItemError } from '../src/types.ts'
-import { harness, type Harness } from './fixtures.ts'
+import { fakeAcceptance, harness, type Harness } from './fixtures.ts'
 
 // WP21 slice 3: accepting WP20 evaluations become execute decisions. Every
 // evaluator is a scripted in-process supplier; nothing calls a model.
@@ -60,14 +61,30 @@ function evaluated(fixture: Harness, eventId = 'om_1', options: { wouldAccept?: 
   }).record
 }
 
-function bridge(fixture: Harness, config: NormalizedIntakeAdmit = admitConfig(), admit = (decision: Parameters<Harness['admission']['admitDecision']>[0]) => fixture.admission.admitDecision(decision)) {
+const acceptance = fakeAcceptance()
+const OBJECTIVE = 'Triage the reported build failure'
+const hints = new Map<string, Readonly<{ objective: { text: string; digest: string }; acceptance: { contractId: string; contractDigest: string } }>>()
+function acceptanceHint(sourceEventId: string) {
+  let hint = hints.get(sourceEventId)
+  if (hint === undefined) {
+    hint = Object.freeze({ objective: Object.freeze({ text: OBJECTIVE, digest: sha256(OBJECTIVE) }),
+      acceptance: Object.freeze(acceptance.handle()) })
+    hints.set(sourceEventId, hint)
+  }
+  return hint
+}
+
+function bridge(fixture: Harness, config: NormalizedIntakeAdmit = admitConfig(),
+  admit = (decision: Parameters<Harness['admission']['admitDecision']>[0]) => fixture.admission.admitDecision(decision),
+  hint = (_source: string, sourceEventId: string) => acceptanceHint(sourceEventId)) {
   const logs: string[] = []
-  const instance = new WorkItemIntakeAdmissionBridge({ config, maxPerRun: 5, store: () => fixture.store, admit, log: message => { logs.push(message) }, now: fixture.now })
+  const instance = new WorkItemIntakeAdmissionBridge({ config, maxPerRun: 5, store: () => fixture.store,
+    admit, hint, log: message => { logs.push(message) }, now: fixture.now })
   return { instance, logs }
 }
 
 async function allowing(ruleId: string | undefined = RULE) {
-  const fixture = await harness()
+  const fixture = await harness({}, { verifier: () => acceptance.service })
   fixture.policy.decision = { effect: 'allow', reasonCode: 'rule-allow', ...(ruleId === undefined ? {} : { ruleId }) }
   return fixture
 }
@@ -117,8 +134,10 @@ describe('intake admission bridge', () => {
       acceptanceRef: 'intake-evaluation:lark-channel/om_1/triage@v1', originBindingId: 'binding-origin-1' })
     expect(item.authority?.ruleId).toBe(RULE)
     expect(item.authority?.mandate).toMatchObject({ origin: 'inferred', mode: 'auto', ruleId: RULE, budgetRemaining: 5 })
-    // Metadata only: the inbound text never reaches the mandate.
-    expect(JSON.stringify(item)).not.toContain('build is red')
+    // The producer objective becomes the mandate brief; the inbound body itself is not copied elsewhere.
+    expect(item.brief).toBe(OBJECTIVE)
+    expect(item.authority?.mandate?.acceptance).toMatchObject({ protocol: 'work-items/acceptance-binding/v1',
+      contractId: hints.get('om_1')!.acceptance.contractId })
     expect(fixture.store.listIntakeAdmissions('lark-channel', 'om_1')).toEqual([record])
     expect(fixture.store.listIntakeAdmissions('lark-channel', 'om_2')).toEqual([])
     expect(items(fixture)).toBe(1)
@@ -150,7 +169,7 @@ describe('intake admission bridge', () => {
     const fixture = await allowing()
     const evaluation = evaluated(fixture)
     // The crash window: admitted, but the outcome row was never written.
-    const lost = fixture.admission.admitDecision(intakeDecisionFor(evaluation, admitConfig(), 5))
+    const lost = fixture.admission.admitDecision(intakeDecisionFor(evaluation, admitConfig(), 5, acceptanceHint('om_1')))
     expect(lost.outcome).toBe('admitted')
     const [record] = bridge(fixture).instance.run()
     expect(record).toMatchObject({ outcome: 'replayed', itemId: lost.outcome === 'refused' ? null : lost.item.id })
@@ -201,7 +220,7 @@ describe('intake admission bridge', () => {
     evaluated(fixture, 'om_1')
     expect(bridge(fixture, admitConfig({ kind: 'deploy' })).instance.run()).toMatchObject([{ outcome: 'refused', reasonCode: 'kind-rejected' }])
     const squatted = evaluated(fixture, 'om_2')
-    const changed = intakeDecisionFor(squatted, admitConfig(), 5)
+    const changed = intakeDecisionFor(squatted, admitConfig(), 5, acceptanceHint('om_2'))
     fixture.admission.admitDecision({ ...changed, mandate: { ...changed.mandate, brief: 'Something else.' } })
     expect(bridge(fixture).instance.run()).toMatchObject([{ sourceEventId: 'om_2', outcome: 'refused', reasonCode: 'identity-mismatch' }])
     fixture.policy.deny('rule-deny')
@@ -271,7 +290,8 @@ function supplier(): WorkItemIntakeEvaluatorRegistration {
   return { protocol: 1, policy: () => ({ version: 'v1', rules: [{ ruleId: RULE, ceiling: 'accept' }] }), evaluate: () => Promise.resolve({ level: 'accept', quotes: ['someone look'] }) }
 }
 
-async function serviceSetup(admit: IntakeAdmitConfig | undefined, options: { mode?: 'active' | 'observe'; root?: string } = {}) {
+async function serviceSetup(admit: IntakeAdmitConfig | undefined,
+  options: { mode?: 'active' | 'observe'; root?: string; acceptance?: boolean } = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'work-items-intake-admission-'))
   const ctx = new Context()
   contexts.push({ ctx, root })
@@ -282,6 +302,25 @@ async function serviceSetup(admit: IntakeAdmitConfig | undefined, options: { mod
     },
     enqueueBackground: () => Promise.resolve({ id: 'outbox' }),
   } as never)
+  let acceptance: { contractId: string; contractDigest: string } | undefined
+  if (options.acceptance === true) {
+    const contract = createTaskAcceptanceContract({
+      protocol: 'task-acceptance/v1', id: 'acceptance-intake-auto',
+      scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 },
+      task: { kind: 'automation-run', ref: 'run-intake-1' }, objective: TEXT,
+      profile: { id: 'intake-profile', version: 1, digest: sha256('intake-profile') },
+      issuedAt: Date.now() - 1_000, expiresAt: Date.now() + 3_600_000,
+      criteria: [{ id: 'result', kind: 'process-behavior' as const,
+        authority: { id: 'intake-runner', digest: sha256('intake-runner') },
+        artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }],
+      bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
+    })
+    acceptance = { contractId: contract.id, contractDigest: contract.digest }
+    ctx.provide('assistantVerifier' as never, {
+      inspectAcceptedTask: (contractId: string) => contractId === contract.id
+        ? { contract, state: 'awaiting-execution', attempts: 0, reason: null, receipt: null } : null,
+    } as never)
+  }
   await ctx.plugin(PolicyPeer)
   await ctx.plugin(SchedulerPeer)
   const databasePath = join(root, 'items.sqlite')
@@ -293,7 +332,12 @@ async function serviceSetup(admit: IntakeAdmitConfig | undefined, options: { mod
   const service = ctx.get('assistantWorkItems' as never) as unknown as AssistantWorkItemsService
   const scheduler = ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
   service.registerIntakeEvaluator(supplier())
-  return { ctx, root, databasePath, service, scheduler }
+  return { ctx, root, databasePath, service, scheduler, acceptance }
+}
+
+/** Input carrying the real objective and the producer-supplied acceptance handle. */
+function acceptedInput(acceptance: { contractId: string; contractDigest: string }): WorkItemIntakeInput {
+  return { ...input(), objective: TEXT, objectiveDigest: sha256(TEXT), acceptance }
 }
 
 const rows = (path: string, sql: string) => {
@@ -302,9 +346,9 @@ const rows = (path: string, sql: string) => {
 }
 
 describe('intake admission on the scheduler wake', () => {
-  test('auto: the wake evaluates then admits once; a restart replays nothing new', async () => {
-    const first = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' })
-    first.service.recordIntake(input(), TEXT)
+  test('auto: the wake evaluates then admits once when a real acceptance handle is supplied; a restart replays nothing new', async () => {
+    const first = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' }, { acceptance: true })
+    first.service.recordIntake(acceptedInput(first.acceptance!), TEXT)
     await vi.waitFor(() => expect(first.service.intakeEvaluations('lark-channel', 'om_1')).toMatchObject([{ wouldAccept: true }]))
     // Admission waits for the next scheduler wake; it owns no loop or timer.
     expect(first.service.intakeAdmissions('lark-channel', 'om_1')).toEqual([])
@@ -318,7 +362,7 @@ describe('intake admission on the scheduler wake', () => {
 
     await first.ctx.fiber.dispose()
     contexts.splice(contexts.indexOf(contexts.find(entry => entry.ctx === first.ctx)!), 1)
-    const second = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' }, { root: first.root })
+    const second = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' }, { root: first.root, acceptance: true })
     second.scheduler.wake()
     await new Promise<void>(resolve => setImmediate(resolve))
     expect(second.service.runIntakeAdmission()).toEqual([])
@@ -327,8 +371,8 @@ describe('intake admission on the scheduler wake', () => {
   })
 
   test('inspectIntakeProvenance names the intake judgment behind an auto-admitted item only', async () => {
-    const fixture = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' })
-    fixture.service.recordIntake(input(), TEXT)
+    const fixture = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' }, { acceptance: true })
+    fixture.service.recordIntake(acceptedInput(fixture.acceptance!), TEXT)
     await vi.waitFor(() => expect(fixture.service.intakeEvaluations('lark-channel', 'om_1')).toMatchObject([{ wouldAccept: true }]))
     fixture.scheduler.wake()
     await vi.waitFor(() => expect(fixture.service.intakeAdmissions('lark-channel', 'om_1')).toMatchObject([{ outcome: 'admitted' }]))
@@ -354,6 +398,16 @@ describe('intake admission on the scheduler wake', () => {
     expect(fixture.service.inspectIntakeProvenance(admission!.itemId!)).toMatchObject({ itemId: admission!.itemId, mode: 'auto' })
   })
 
+
+  test('auto without a producer acceptance handle records observe and creates no item', async () => {
+    const fixture = await serviceSetup({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-origin-1' })
+    fixture.service.recordIntake({ ...input(), objective: TEXT, objectiveDigest: sha256(TEXT) }, TEXT)
+    await vi.waitFor(() => expect(fixture.service.intakeEvaluations('lark-channel', 'om_1')).toMatchObject([{ wouldAccept: true }]))
+    fixture.scheduler.wake()
+    await vi.waitFor(() => expect(fixture.service.intakeAdmissions('lark-channel', 'om_1'))
+      .toMatchObject([{ mode: 'observe', outcome: 'would-admit', itemId: null }]))
+    expect(rows(fixture.databasePath, 'SELECT count(*) AS n FROM work_item')).toEqual([{ n: 0 }])
+  })
 
   test('inspectIntakeProvenance is undefined in observe mode, where no item exists', async () => {
     const fixture = await serviceSetup({ enabled: true, originBindingId: 'binding-origin-1' }, { mode: 'observe' })

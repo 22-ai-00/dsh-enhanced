@@ -227,6 +227,8 @@ export type WorkItemDecisionRefusal =
   | 'inferred-requires-auto'
   | 'inferred-requires-rule'
   | 'budget-exhausted'
+  /** Inferred auto work must carry a real verifier contract handle (E2 invariant). */
+  | 'acceptance-required'
   | 'policy-rule-mismatch'
   /** No verifier peer, or it holds no contract under the handle. */
   | 'acceptance-unavailable'

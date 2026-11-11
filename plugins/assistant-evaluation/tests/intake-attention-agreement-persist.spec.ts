@@ -11,6 +11,8 @@ import { createIntakeAttentionAgreementSnapshot } from '../src/intake-attention-
 import { EvaluationStore } from '../src/store.ts'
 import { AssistantWorkItemsService } from '../../assistant-work-items/lib/index.js'
 import type { Config as WorkItemsConfig } from '../../assistant-work-items/lib/config.js'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 
 const scope = { workspace: '/work/agree', preset: 'primary' }
 const otherScope = { workspace: '/work/other', preset: 'primary' }
@@ -337,6 +339,18 @@ class SchedulerPeer extends Service {
   wake(): void { for (const listener of Array.from(this.listeners)) listener() }
 }
 
+/** Real verifier producer for one goal-outcome contract; it never supplies a verdict. */
+class GoalsProducer implements TaskAcceptanceProducer {
+  registration: TaskAcceptanceRegistration | undefined
+  readonly generation = crypto.randomUUID()
+  trustedAcceptanceProducerGeneration(): string { return this.generation }
+  registerTaskAcceptanceSink(registration: TaskAcceptanceRegistration) {
+    this.registration = registration
+    return () => { if (this.registration === registration) this.registration = undefined }
+  }
+  async inspectAcceptedExecution() { return null }
+}
+
 describe('intake agreement persistence with the real WorkItems service', () => {
   test('persists a snapshot from a real auto-admitted item provenance and real Evaluation service', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-eval-agree-real-')); directories.push(root)
@@ -361,6 +375,31 @@ describe('intake agreement persistence with the real WorkItems service', () => {
     ctx.provide('assistantDelivery' as never, delivery as never)
     await ctx.plugin(PolicyPeer)
     await ctx.plugin(SchedulerPeer)
+    const intakeText = 'the build is red again, can someone look'
+    const authority = { kind: 'document' as const, id: 'sources',
+      sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
+    const [installed] = createVerifierAuthorities({ authorities: [authority] })
+    const producer = new GoalsProducer()
+    ctx.provide('assistantGoals' as never, producer as never)
+    const verifier = new AssistantVerifierService(ctx, {
+      databasePath: join(root, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: true, authorities: [authority],
+      profiles: [{ id: 'intake-agreement', version: 1, scope: { workspace: root, preset: 'primary' },
+        owner: { principalRecordId: 'owner-1', principalVersion: 1 },
+        taskKind: 'goal-outcome' as const, objective: intakeText, validityMs: 600_000,
+        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
+        criteria: [{ id: 'report', kind: 'document-citations' as const,
+          authority: { id: installed!.id, digest: installed!.digest }, artifactPath: 'report.md',
+          requiredText: ['Verified'], quotes: [] }] }],
+    })
+    const handle: AcceptanceHandle = producer.registration!.prepare({
+      scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 },
+      task: { kind: 'goal-outcome', ref: 'assessment-1', goal: { id: 'goal-1', definitionVersion: 2,
+        definitionDigest: 'a'.repeat(64), assessmentId: 'assessment-1', sessionId: 'session-1',
+        nativeGoalId: 'native-goal-1' } },
+      objective: intakeText,
+    } as AcceptanceTask)!
+    expect(handle.contractDigest).toMatch(/^[a-f0-9]{64}$/u)
+    expect(verifier.inspectAcceptedTask(handle.contractId)).toMatchObject({ state: 'awaiting-execution', receipt: null })
     const workItemsConfig: WorkItemsConfig = {
       enabled: true, mode: 'active', databasePath: join(root, 'work-items.sqlite'), workRoot: join(root, 'work'),
       workerAutomationId: 'worker',
@@ -374,10 +413,11 @@ describe('intake agreement persistence with the real WorkItems service', () => {
     const workItems = ctx.get('assistantWorkItems' as never) as unknown as AssistantWorkItemsService
     workItems.registerIntakeEvaluator({ protocol: 1, policy: () => ({ version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'accept' }] }),
       evaluate: () => Promise.resolve({ level: 'accept', quotes: ['someone look'] }) })
-    const intakeText = 'the build is red again, can someone look'
+    const intakeDigest = createHash('sha256').update(intakeText).digest('hex')
     workItems.recordIntake({ source: 'lark-channel', sourceEventId: 'om_1', kind: 'message', senderAllowlisted: true,
       addressed: false, threadFollowUp: false, senderIsBot: false, occurredAt: clock.now - 60_000,
-      contentDigest: createHash('sha256').update(intakeText).digest('hex') }, intakeText)
+      contentDigest: intakeDigest, objective: intakeText, objectiveDigest: intakeDigest,
+      acceptance: { contractId: handle.contractId, contractDigest: handle.contractDigest } }, intakeText)
     await vi.waitFor(() => expect(workItems.intakeEvaluations('lark-channel', 'om_1').length).toBe(1), { timeout: 5_000 })
     const admissions = workItems.runIntakeAdmission()
     expect(admissions).toHaveLength(1)

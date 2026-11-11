@@ -4,11 +4,20 @@ import { MALFORMED_AUTHORITY_REASON, MANDATE_RULE_CHANGED_REASON, WorkItemAuthor
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from '../src/policy-notice.ts'
 import { WorkItemStore } from '../src/store.ts'
 import type { WorkItemExecuteDecision, WorkItemRecord } from '../src/types.ts'
-import { admitted, claim, harness, report, type Harness } from './fixtures.ts'
+import { admitted, claim, fakeAcceptance, harness, report, type Harness } from './fixtures.ts'
 
 const RULE = 'inferred-review-admit'
+const acceptance = fakeAcceptance()
+const handles = new Map<string, ReturnType<typeof acceptance.handle>>()
+const harnessWithAcceptance = (overrides: Parameters<typeof harness>[0] = {}) =>
+  harness(overrides, { verifier: () => acceptance.service })
 
 function inferred(decisionId: string, overrides: Partial<WorkItemExecuteDecision> = {}): WorkItemExecuteDecision {
+  let acceptanceHandle = handles.get(decisionId)
+  if (acceptanceHandle === undefined) {
+    acceptanceHandle = acceptance.handle()
+    handles.set(decisionId, acceptanceHandle)
+  }
   return {
     protocol: 'work-items/execute-decision/v1',
     decisionId,
@@ -24,6 +33,7 @@ function inferred(decisionId: string, overrides: Partial<WorkItemExecuteDecision
       originBindingId: 'binding-origin-1',
       acceptanceRef: 'tac:deploy-review/v1',
     },
+    acceptance: acceptanceHandle,
     ...overrides,
   }
 }
@@ -55,7 +65,7 @@ function tamper(fixture: Harness, sql: string, ...parameters: Array<string | nul
 
 describe('policy-change notices (WP21 slice 2)', () => {
   test('a rule change notifies affected live items once per version and never cancels them', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const queued = admit(fixture, 'decision-queued')
     // Notices follow admission order; same-millisecond items tie on random ids.
@@ -98,7 +108,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('notices are durable and idempotent across a store restart', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const item = admit(fixture, 'decision-restart')
     fixture.policy.deny('owner-revoked')
@@ -118,7 +128,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('unaffected, legacy and malformed bases are classified deterministically', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const holds = admit(fixture, 'decision-holds')
     const legacy = admit(fixture, 'decision-legacy')
@@ -136,7 +146,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('a Policy peer that cannot evaluate writes nothing; a thrown evaluation is retried later', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const item = admit(fixture, 'decision-unavailable')
     const malformed = admit(fixture, 'decision-local')
@@ -160,7 +170,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('a mandate that does not name its item is malformed for notices exactly as at dispatch', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const item = admit(fixture, 'decision-own')
     const donor = admit(fixture, 'decision-donor')
@@ -173,7 +183,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('a pass larger than one page reports what remains and continues by cursor', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const items = ['decision-p1', 'decision-p2', 'decision-p3'].map(id => { fixture.advance(1); return admit(fixture, id) })
     allowBy(fixture, 'broad-allow')
@@ -193,7 +203,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('a missing Policy writes nothing even when every live basis is judged locally', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const malformed = admit(fixture, 'decision-only-local')
     tamper(fixture, 'UPDATE work_item SET authority_basis = ? WHERE id = ?',
@@ -204,7 +214,7 @@ describe('policy-change notices (WP21 slice 2)', () => {
   })
 
   test('a failing batch write records no notice at all and the retry writes them once', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const one = admit(fixture, 'decision-batch-1')
     fixture.advance(1)
@@ -240,7 +250,7 @@ function followUp(itemId: string, messageId: string, overrides: Record<string, u
 
 describe('follow-up ownership (WP21 slice 2)', () => {
   test('a live item owns its thread follow-ups; replay is idempotent; other identities mismatch', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const item = admit(fixture, 'decision-follow')
     const other = admit(fixture, 'decision-other')
@@ -262,7 +272,7 @@ describe('follow-up ownership (WP21 slice 2)', () => {
   })
 
   test('when the item ends, unprocessed follow-ups are released to judgment exactly once', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const item = admit(fixture, 'decision-release')
     fixture.store.ownFollowUp(followUp(item.id, 'msg-done'))
@@ -290,7 +300,7 @@ describe('follow-up ownership (WP21 slice 2)', () => {
   })
 
   test('release state survives a restart and pages in release order', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     allowBy(fixture, RULE)
     const first = admit(fixture, 'decision-a')
     const second = admit(fixture, 'decision-b')
@@ -319,14 +329,14 @@ describe('follow-up ownership (WP21 slice 2)', () => {
   })
 
   test('the same message id on another work thread is a different follow-up; observed items own nothing', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     const here = await admitted(fixture, { originBindingId: 'binding-origin-1' })
     const there = await admitted(fixture, { originBindingId: 'binding-origin-2' })
     expect(fixture.store.ownFollowUp(followUp(here.id, 'msg-shared'))).toMatchObject({ outcome: 'owned' })
     expect(fixture.store.ownFollowUp(followUp(there.id, 'msg-shared', { bindingId: 'binding-origin-2' })))
       .toMatchObject({ outcome: 'owned', followUp: { itemId: there.id, bindingId: 'binding-origin-2' } })
 
-    const shadow = await harness({ mode: 'observe' })
+    const shadow = await harnessWithAcceptance({ mode: 'observe' })
     const observed = await admitted(shadow)
     expect(observed.observed).toBe(true)
     expect(shadow.store.ownFollowUp(followUp(observed.id, 'msg-shadow'))).toMatchObject({ outcome: 'item-ended' })
@@ -334,7 +344,7 @@ describe('follow-up ownership (WP21 slice 2)', () => {
   })
 
   test('a withdrawn item releases its unprocessed follow-ups like any other end', async () => {
-    const fixture = await harness()
+    const fixture = await harnessWithAcceptance()
     const item = await admitted(fixture)
     fixture.store.ownFollowUp(followUp(item.id, 'msg-withdrawn'))
     expect(fixture.store.withdrawByDedupKey(item.dedupKey).outcome).toBe('withdrawn')

@@ -30,12 +30,32 @@ export type WorkItemIntakeReason =
   | 'unsubscribed-event-disabled'
 
 /**
+ * Optional acceptance reference supplied by the intake producer for one
+ * inferred candidate. It is a handle only, never a contract body or verdict;
+ * `admitDecision` re-reads the contract from the verifier before creating work.
+ */
+export interface WorkItemIntakeAcceptance {
+  readonly contractId: string
+  readonly contractDigest: string
+}
+
+/** Authenticated objective text for one inferred candidate; bounded and digest-bound. */
+export interface WorkItemIntakeObjective {
+  readonly text: string
+  readonly digest: string
+}
+
+/**
  * Host-normalized metadata for one inbound item.
  *
  * The field list is closed: any other key (for example `text` or `body`) is
  * rejected, so a caller cannot hand message content to the ledger by mistake.
  * `contentDigest` is an optional SHA-256 hex digest the Host computed over the
  * content it already holds; it is the only content-derived value accepted.
+ * `objective`/`objectiveDigest` and `acceptance` are optional producer
+ * extensions for the inferred auto-admission path; they are validated here,
+ * never copied into the intake ledger, and only the bounded in-memory hint
+ * carries them to admission.
  */
 export interface WorkItemIntakeInput {
   /** Host-registered inbound source, e.g. `lark-channel`. */
@@ -58,6 +78,12 @@ export interface WorkItemIntakeInput {
   readonly subscribed?: boolean
   readonly contentDigest?: string
   readonly occurredAt: number
+  /** Original objective text; requires `objectiveDigest` and an equal `contentDigest`. */
+  readonly objective?: string
+  /** SHA-256 hex of `objective`; must equal `contentDigest`. */
+  readonly objectiveDigest?: string
+  /** Optional verifier contract handle the producer prepared for this candidate. */
+  readonly acceptance?: WorkItemIntakeAcceptance
 }
 
 /** Per-source owner opt-ins; every flag defaults to off. */
@@ -115,7 +141,7 @@ export interface WorkItemIntakeResult {
 }
 
 const INPUT_KEYS = ['source', 'sourceEventId', 'kind', 'senderAllowlisted', 'addressed', 'threadFollowUp', 'senderIsBot',
-  'groupMessage', 'subscribed', 'contentDigest', 'occurredAt'] as const
+  'groupMessage', 'subscribed', 'contentDigest', 'occurredAt', 'objective', 'objectiveDigest', 'acceptance'] as const
 export const INTAKE_SOURCE_ID = /^[a-z][a-z0-9-]{0,63}$/u
 const SHA256_HEX = /^[0-9a-f]{64}$/u
 const MAX_EVENT_ID_BYTES = 256
@@ -129,8 +155,57 @@ function hasControl(value: string): boolean {
 }
 const DISABLED_POLICY: WorkItemIntakeSourcePolicy = Object.freeze({ unaddressedGroupMessages: false, unsubscribedEvents: false })
 
+/** Hard cap for the original objective text; over-limit input is rejected, never truncated. */
+export const MAX_INTAKE_OBJECTIVE_BYTES = 2_048
+const ACCEPTANCE_CONTRACT_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
+const ACCEPTANCE_KEYS = ['contractDigest', 'contractId'] as const
+
 function fail(code: WorkItemErrorCode, message: string): never {
   throw new WorkItemError(code, message)
+}
+
+/**
+ * Validate the optional original objective carried by an intake producer.
+ *
+ * The text is bounded, has no NUL/control ambiguity, is digest-bound to itself
+ * and to the authenticated `contentDigest`, and — when the observer also hands
+ * over the transient source text — must equal it byte for byte. The caller
+ * keeps it only in the bounded in-memory admission hint; it is never written to
+ * the intake ledger.
+ */
+export function intakeObjectiveOf(raw: WorkItemIntakeInput, sourceText?: string): WorkItemIntakeObjective | undefined {
+  const value = raw as unknown as Record<string, unknown>
+  const objective = value['objective'], digest = value['objectiveDigest']
+  if (objective === undefined && digest === undefined) return undefined
+  if (objective === undefined || digest === undefined) fail('invalid-input', 'intake objective and objectiveDigest must be supplied together')
+  if (typeof objective !== 'string' || objective.length === 0 || !objective.isWellFormed()
+    || Buffer.byteLength(objective, 'utf8') > MAX_INTAKE_OBJECTIVE_BYTES || objective.includes('\u0000')) {
+    fail('invalid-input', `intake objective must be 1-${MAX_INTAKE_OBJECTIVE_BYTES} UTF-8 bytes without NUL or lone surrogates`)
+  }
+  if (typeof digest !== 'string' || !SHA256_HEX.test(digest) || createHash('sha256').update(objective, 'utf8').digest('hex') !== digest) {
+    fail('invalid-input', 'intake objectiveDigest must be the SHA-256 hex of the objective')
+  }
+  if (value['contentDigest'] !== digest) fail('invalid-input', 'intake objectiveDigest must equal contentDigest')
+  if (sourceText !== undefined && sourceText !== objective) fail('invalid-input', 'intake objective must equal the authenticated source text')
+  return Object.freeze({ text: objective, digest })
+}
+
+/** Validate the optional verifier contract handle; ids/digests only, nothing else. */
+export function intakeAcceptanceOf(raw: WorkItemIntakeInput): WorkItemIntakeAcceptance | undefined {
+  const value = raw as unknown as Record<string, unknown>
+  const acceptance = value['acceptance']
+  if (acceptance === undefined) return undefined
+  if (acceptance === null || typeof acceptance !== 'object' || Array.isArray(acceptance)
+    || Object.getPrototypeOf(acceptance) !== Object.prototype) fail('invalid-input', 'intake acceptance must be a plain object')
+  const record = acceptance as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  if (keys.length !== ACCEPTANCE_KEYS.length || keys.some((key, index) => key !== ACCEPTANCE_KEYS[index])) {
+    fail('invalid-input', 'intake acceptance accepts exactly contractId and contractDigest')
+  }
+  const contractId = record['contractId'], contractDigest = record['contractDigest']
+  if (typeof contractId !== 'string' || !ACCEPTANCE_CONTRACT_ID.test(contractId)) fail('invalid-input', 'intake acceptance contractId is invalid')
+  if (typeof contractDigest !== 'string' || !SHA256_HEX.test(contractDigest)) fail('invalid-input', 'intake acceptance contractDigest is invalid')
+  return Object.freeze({ contractId, contractDigest })
 }
 
 function flag(value: unknown, field: string, fallback?: boolean): boolean {
