@@ -51,6 +51,22 @@ export interface CompiledAcceptanceProfile {
   readonly digest: string
 }
 
+/**
+ * Every criterion must be decidable by an installed authority of the matching
+ * kind, with the isolated test set or repository object it names. Static
+ * profiles and Host-prepared owner contracts share this check so undecidable
+ * criteria are refused before anything is sealed.
+ */
+export function assertCriteriaDecidable(contract: TaskAcceptanceContract, authorities: readonly VerifierAuthority[]): void {
+  for (const criterion of contract.criteria) {
+    const authority = authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
+    const expected = criterion.kind === 'isolated-process-behavior' ? 'isolated-runner' : criterion.kind === 'process-behavior' ? 'runner' : criterion.kind === 'document-citations' ? 'document' : 'readback'
+    if (authority?.kind !== expected && !(contract.task.kind === 'goal-outcome' && criterion.kind === 'target-readback' && (authority?.kind === 'repository-readback' || authority?.kind === 'repository-commit-readback') && criterion.objectId === `${authority.repository}:${authority.branch}`)) throw new Error('assistant-verifier: acceptance profile authority is unavailable or changed')
+    if (criterion.kind === 'isolated-process-behavior' && authority.kind === 'isolated-runner'
+      && !authority.testSets.some(set => set.id === criterion.testSetId)) throw new Error('assistant-verifier: isolated test set unavailable')
+  }
+}
+
 export function compileAcceptanceProfiles(config: Config): Readonly<{
   authorities: readonly VerifierAuthority[]
   profiles: readonly CompiledAcceptanceProfile[]
@@ -91,13 +107,7 @@ export function compileAcceptanceProfiles(config: Config): Readonly<{
     const match = acceptanceCanonicalJson([contract.scope, contract.owner, contract.task.kind, contract.objective])
     if (ids.has(input.id) || matches.has(match)) throw new Error('assistant-verifier: duplicate profile id or exact task match')
     ids.add(input.id); matches.add(match)
-    for (const criterion of contract.criteria) {
-      const authority = authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
-      const expected = criterion.kind === 'isolated-process-behavior' ? 'isolated-runner' : criterion.kind === 'process-behavior' ? 'runner' : criterion.kind === 'document-citations' ? 'document' : 'readback'
-      if (authority?.kind !== expected && !(contract.task.kind === 'goal-outcome' && criterion.kind === 'target-readback' && (authority?.kind === 'repository-readback' || authority?.kind === 'repository-commit-readback') && criterion.objectId === `${authority.repository}:${authority.branch}`)) throw new Error('assistant-verifier: acceptance profile authority is unavailable or changed')
-      if (criterion.kind === 'isolated-process-behavior' && authority.kind === 'isolated-runner'
-        && !authority.testSets.some(set => set.id === criterion.testSetId)) throw new Error('assistant-verifier: isolated test set unavailable')
-    }
+    assertCriteriaDecidable(contract, authorities)
     const profile: AcceptanceProfile = Object.freeze({ id: contract.profile.id, version: contract.profile.version,
       scope: contract.scope, owner: contract.owner, objective: contract.objective, taskKind: contract.task.kind,
       criteria: contract.criteria, validityMs: input.validityMs, bounds: contract.bounds })

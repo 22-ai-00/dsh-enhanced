@@ -5,7 +5,7 @@ import {
   acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract, createTaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
 import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import { Config, compileAcceptanceProfiles } from './config.js'
+import { Config, assertCriteriaDecidable, compileAcceptanceProfiles } from './config.js'
 import type { AcceptanceProfile } from './config.js'
 import { verifyAcceptanceCriteria, type IsolatedVerificationContext } from './drivers.js'
 import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
@@ -577,6 +577,9 @@ export class AssistantVerifierService extends Service<Config> {
       if (previous.expiresAt <= this.#now()) throw new Error('assistant-verifier: owner-prepared contract expired')
       return previous
     }
+    if (validityMs <= bounds.maxDurationMs) {
+      throw new Error('assistant-verifier: owner-prepared validity must exceed verification duration')
+    }
     const now = this.#now()
     const contract = createTaskAcceptanceContract({
       protocol: acceptanceProtocolForTask(task, criteria),
@@ -585,11 +588,10 @@ export class AssistantVerifierService extends Service<Config> {
       profile: { id: 'owner-prepared', version: 1, digest: profileDigest },
       issuedAt: now, expiresAt: now + validityMs, criteria, bounds,
     })
-    // Fail closed before sealing: an uninstalled authority means nobody can decide it.
-    if (contract.criteria.some(criterion => !this.#compiled.authorities.some(authority =>
-      authority.id === criterion.authority.id && authority.digest === criterion.authority.digest))) {
-      throw new Error('assistant-verifier: owner-prepared criterion has no installed authority')
-    }
+    // Fail closed before sealing: a criterion no installed authority can decide
+    // (wrong driver kind, missing isolated test set or repository object) must
+    // never reach a worker run.
+    assertCriteriaDecidable(contract, this.#compiled.authorities)
     return this.#store.accept(contract)
   }
 

@@ -76,8 +76,18 @@ describe('owner-prepared goal acceptance', () => {
   it('rejects a criterion no installed authority can decide', async () => {
     const { producer, prepared } = await harness()
     const input = prepared()
-    const criteria = [{ ...(input.criteria as unknown[])[0] as object, authority: { id: 'sources', digest: 'b'.repeat(64) } }]
-    expect(() => producer.registration!.prepareOwnerContract!(prepared({ criteria }) as never)).toThrow(/no installed authority/u)
+    const unknown = [{ ...(input.criteria as unknown[])[0] as object, authority: { id: 'sources', digest: 'b'.repeat(64) } }]
+    expect(() => producer.registration!.prepareOwnerContract!(prepared({ criteria: unknown }) as never)).toThrow(/authority is unavailable or changed/u)
+    // Right id+digest but the wrong driver kind for this criterion is equally undecidable.
+    const authority = (input.criteria as Array<{ authority: unknown }>)[0]!.authority
+    const wrongKind = [{ id: 'run', kind: 'process-behavior', authority, artifactPath: 'bin/tool', stdin: '', expectedStdout: '', expectedExitCode: 0 }]
+    expect(() => producer.registration!.prepareOwnerContract!(prepared({ criteria: wrongKind }) as never)).toThrow(/authority is unavailable or changed/u)
+  })
+
+  it('requires the seal to outlive the verification window', async () => {
+    const { producer, prepared } = await harness()
+    expect(() => producer.registration!.prepareOwnerContract!(prepared({ validityMs: 1_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 } }) as never))
+      .toThrow(/validity must exceed verification duration/u)
   })
 
   it('refuses to change the sealed criteria for the same task identity', async () => {
