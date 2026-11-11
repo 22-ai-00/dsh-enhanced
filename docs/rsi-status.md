@@ -20,6 +20,8 @@
 - C1a：普通使用学习成为安装期显式 `--learning authorize|skip` 决策，原子持久化到 `install-intent.json`（0700/0600），retry 必须重放同一决策；skip 不产生任何学习授权/配置，既有授权不可被 skip 撤销，坏 marker fail-closed，macOS 必须 authorize（`55f335e5`）。
 - D1a：owner-instruction 修订入队时冻结 review supplier+budget（schema 41，自摘要、write-once），旧行 NULL 一律 fail closed，审查只读冻结值、恢复每次重验，改活 owner route 不影响在途审查（`37e3fc95`）。残留：continuation 外层 wall-clock 仍用活窗口（只可能提前截断为 unknown，不扩大内层预算），按次收窄预算需 verifier 协议 v2。
 - E1（默认关）：intake would-admit 与 owner 结果的 canonical agreement 以 append-only 快照落库（Evaluation schema 18，immutable trigger、digest 重放幂等、drift fail-closed），owner console 经 TYPERT 只读 counts-only 历史，`causal:false` 不得作为授权依据（`9d18a395`）。
+- D1b：修订收益投影改读 revision journal（journal v1→v2 记录 foreground/task 归属，参数摘要与 Delivery 归一化统一）；等长相邻窗口（父 [adoptedAt-W,adoptedAt]、候选 [adoptedAt,adoptedAt+W]）跨创建账本与修订父调用合并，不配对窗口被拒绝；采用默认严格（无同 digest non-inferior 不采用），allowReviewOnlyFirstAdoption 为显式例外，观察到期写 observation-expired-unverified 并精确回退父版本，配置删除 fail closed；修复 adoption runtime 父子证书 source 相等检查（对真实创建父证书恒不成立、此前是休眠代码）。
+- E2：inferred 自动准入必须携带真实 objective（2048 字节上限、digest 绑定认证 contentDigest、拒绝不截断）与真实 verifier acceptance handle；服务恒注入 hint provider，缺失即 observe、digest 不符即 refused，新增 acceptance-required 终态拒绝；内存 hint 重启 fail-closed。生产方（Delivery/Proactive）尚未签发 handle，故生产保持 observe。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
@@ -33,8 +35,8 @@
 
 ## 最近验证
 
-- 提交 `f223870d`（B3 端到端）、`37e3fc95`（D1a）、`55f335e5`（C1a）、`9d18a395`（E1）均为 Linux 冷 `pnpm check` EXIT 0、39 dry-run packs、lint 干净、manifest 稳定（2110–2112 文件）；每个都有独立只读复核 PASS，复核发现的缺陷（C1a marker/flag 死锁与 0755、D1a 文档/漂移测试、E1 dead-code/毒行/跨包 worker 清单）均在提交前修复。
+- 提交 `f223870d`（B3 端到端）、`37e3fc95`（D1a）、`55f335e5`（C1a）、`9d18a395`（E1）、`68b91301`（E2）、`0eab022b`（D1b）均为 Linux 冷 `pnpm check` EXIT 0、39 dry-run packs、lint 干净、manifest 稳定（2110–2112 文件）；每个都有独立只读复核 PASS，复核发现的缺陷（C1a marker/flag 死锁与 0755、D1a 文档/漂移测试、E1 dead-code/毒行/跨包 worker 清单）均在提交前修复。
 - CI：`05957ae2`、`55f335e5` 六 job 全绿；`f223870d`、`37e3fc95` 的失败已确认为 GitHub runner DNS 故障（apt 解析 azure.archive.ubuntu.com 失败），非代码问题。
 - CI 均衡实测：根慢片 979s→674s、两片比 1.03；包测试 step 1349s→1113s；1046s 单文件已拆 74+35（2 worker，用例数不变）。
 - 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`、`pnpm_config_store_dir`、**短** `TMPDIR`；解析方法见[交接入口](handover/README.md)。
-- 未验收：B3 真实模型/渠道、D1b/D2、E2–E4、C1b/C1c 与 F；没有发布 npm、升级生产 Home 或发送用户渠道消息。
+- 未验收：B3 真实模型/渠道、D2、E3/E4、C1b/C1c 与 F；没有发布 npm、升级生产 Home 或发送用户渠道消息。
