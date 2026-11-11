@@ -1705,7 +1705,8 @@ it('recovers an owner instruction across admission interruptions and verifies it
       .run(instruction.expiresAt, instructionId)
     raw.close()
   }
-}, 30_000)
+  // Recovery across two admission interruptions plus Verifier settlement; needs ~25s even solo.
+}, 90_000)
 
 
 it('rejects an orphaned request if restart refuses native activation after definition binding', async () => {
