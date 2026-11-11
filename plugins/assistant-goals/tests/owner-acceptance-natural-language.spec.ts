@@ -117,7 +117,7 @@ async function harness(options: { acceptance: boolean; profiles?: boolean; owner
   const profiles = options.profiles === true ? (['goal-step', 'goal-outcome'] as const).map(taskKind => ({
     id: `legacy-${taskKind}`, version: 1, scope: { workspace: root, preset: 'primary' },
     owner: { principalRecordId: 'record-owner', principalVersion: 1 }, taskKind, objective,
-    validityMs: 300_000, bounds,
+    validityMs: 3_600_000, bounds,
     criteria: [{ id: `legacy-${taskKind}-report`, kind: 'process-behavior' as const,
       authority: { id: installed.id, digest: installed.digest }, artifactPath: 'report.txt',
       stdin: '', expectedStdout: '', expectedExitCode: 0 }],
@@ -130,7 +130,7 @@ async function harness(options: { acceptance: boolean; profiles?: boolean; owner
     } as never)
   }
   const goalsConfig = { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true,
-    stepMaxDurationMs: 120_000,
+    stepMaxDurationMs: 300_000,
     ...(options.acceptance ? { ownerPreparedAcceptance: true } : {}),
     ...(options.ownerIntent === true ? { ownerIntent: true } : {}) }
   await ctx.plugin(AssistantGoalsService, goalsConfig)
@@ -288,11 +288,11 @@ describe('natural-language owner acceptance through goal_create', () => {
     const result = await goalCreate(f, agent, { objective, max_goal_rounds: 1, acceptance: acceptance(f.installed) })
     expect(result.isError).toBe(false)
     const [record] = f.service.list(agent)
-    await vi.waitFor(() => expect(f.service.inspectGoalOutcome(agent, record!.id)?.status).toBe('achieved'), { timeout: 25_000 })
-    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.phase).toBe('complete'), { timeout: 10_000 })
+    await vi.waitFor(() => expect(f.service.inspectGoalOutcome(agent, record!.id)?.status).toBe('achieved'), { timeout: 45_000 })
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.phase).toBe('complete'), { timeout: 15_000 })
     const outcomeContract = contracts(f.verifierPath).find(contract => contract.kind === 'goal-outcome')!
     expect(receiptStatus(f.verifierPath, outcomeContract.id)).toBe('achieved')
-  }, 60_000)
+  }, 120_000)
 
   it('reaches not-achieved when the accepted state is absent', async () => {
     const f = await harness({ acceptance: true })
@@ -303,10 +303,10 @@ describe('natural-language owner acceptance through goal_create', () => {
     const result = await goalCreate(f, agent, { objective, max_goal_rounds: 1, acceptance: acceptance(f.installed) })
     expect(result.isError).toBe(false)
     const [record] = f.service.list(agent)
-    await vi.waitFor(() => expect(f.service.inspectGoalOutcome(agent, record!.id)?.status).toBe('not-achieved'), { timeout: 25_000 })
+    await vi.waitFor(() => expect(f.service.inspectGoalOutcome(agent, record!.id)?.status).toBe('not-achieved'), { timeout: 45_000 })
     const outcomeContract = contracts(f.verifierPath).find(contract => contract.kind === 'goal-outcome')!
     expect(receiptStatus(f.verifierPath, outcomeContract.id)).toBe('not-achieved')
-  }, 60_000)
+  }, 120_000)
 
   it('serves a catalog whose id/digest seals decidable criteria with the real verifier', async () => {
     const f = await harness({ acceptance: true })

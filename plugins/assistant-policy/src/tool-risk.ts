@@ -21,6 +21,11 @@ export interface ToolRiskInput {
 
 const WRITE_TOOLS = new Set(['write', 'edit'])
 const READ_ONLY_NETWORK_TOOLS = new Set(['web_fetch', 'web_search'])
+// Host-owned read-only metadata that never reaches the OS, network or stored
+// credentials: the acceptance catalog only lists the deployment's installed,
+// already-sanitized authorities, so requiring a human approval would interrupt
+// a harmless read that every owner-prepared delegation needs first.
+const READ_ONLY_HOST_TOOLS = new Set(['goal_acceptance_catalog'])
 const AUTO_ONLY_COORDINATION_TOOLS = new Set(['skill'])
 const NATIVE_ESCALATION_TOOLS = new Set(['bash', 'pwsh', 'write', 'edit'])
 const NATIVE_ESCALATION_TARGETS = new Set(['workspace-write', 'danger-full-access'])
@@ -590,6 +595,9 @@ export function classifyToolRisk(input: Readonly<ToolRiskInput>): ToolRiskClassi
   }
   if (escalation === 'invalid') return 'ask-human'
   if (READ_ONLY_NETWORK_TOOLS.has(input.name) || input.name === 'ask_user_question') return 'allow'
+  if (READ_ONLY_HOST_TOOLS.has(input.name)) {
+    return argumentsRecord === undefined || Object.keys(argumentsRecord).length === 0 ? 'allow' : 'ask-review'
+  }
   if (AUTO_ONLY_COORDINATION_TOOLS.has(input.name)) {
     return argumentsRecord !== undefined
       && hasOnlyKeys(argumentsRecord, new Set(['name']))

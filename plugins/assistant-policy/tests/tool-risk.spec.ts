@@ -506,6 +506,13 @@ if isinstance(d,dict):
       .toBe('allow')
   })
 
+  test('allows the read-only acceptance catalog but not parameterized calls', () => {
+    expect(classifyToolRisk({ name: 'goal_acceptance_catalog', arguments: {}, workspace }))
+      .toBe('allow')
+    expect(classifyToolRisk({ name: 'goal_acceptance_catalog', arguments: { scope: 'other' }, workspace }))
+      .toBe('ask-review')
+  })
+
   test('allows the dedicated user-question bridge so required clarification can reach the user', () => {
     expect(classifyToolRisk({ name: 'ask_user_question', arguments: { questions: [] }, workspace }))
       .toBe('allow')
