@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 40
+export const controlPlaneSchemaVersion = 41
 
 const sourceRevisionGrantSchema = `CREATE TABLE IF NOT EXISTS source_revision_grants (
   grant_id TEXT PRIMARY KEY,
@@ -131,6 +131,22 @@ const ownerInstructionRequestV40Columns = [
 ]
 const ownerInstructionRequestV40Schemas = [storedTableSchema(sourceOwnerInstructionRequestTableSchema), sourceOwnerInstructionRequestTableSchemaSpliced]
   .map(schema => ownerInstructionRequestV40Columns.reduce((sql, column) =>
+    sql.replace(/\) STRICT, WITHOUT ROWID$/u, `, ${column}) STRICT, WITHOUT ROWID`), schema))
+
+/**
+ * Schema 41 freezes the independent review supplier and budget on each owner
+ * instruction. Historical rows keep NULL here and every execution path fails
+ * closed instead of consulting the live owner route or live verifier config.
+ */
+const ownerInstructionReviewFreezeColumns = [
+  "review_supplier_json TEXT CHECK(review_supplier_json IS NULL OR (json_valid(review_supplier_json) AND json_type(review_supplier_json)='object' AND length(review_supplier_json)<=4096))",
+  "review_budget_json TEXT CHECK(review_budget_json IS NULL OR (json_valid(review_budget_json) AND json_type(review_budget_json)='object' AND length(review_budget_json)<=16384))",
+  "review_freeze_digest TEXT CHECK(review_freeze_digest IS NULL OR (length(review_freeze_digest)=64 AND review_freeze_digest NOT GLOB '*[^a-f0-9]*'))",
+]
+const ownerInstructionReviewFreezeColumnNames = ['review_supplier_json', 'review_budget_json', 'review_freeze_digest']
+/** SQLite splices ALTER-added columns before the table options. */
+const sourceOwnerInstructionSchemasV41 = [storedTableSchema(sourceOwnerInstructionTableSchema)]
+  .map(schema => ownerInstructionReviewFreezeColumns.reduce((sql, column) =>
     sql.replace(/\) STRICT, WITHOUT ROWID$/u, `, ${column}) STRICT, WITHOUT ROWID`), schema))
 
 
@@ -1586,7 +1602,8 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       throw new Error('missing source owner instruction schema')
     }
     if (ownerInstructionSchema !== undefined && (ownerInstructionSchema.type !== 'table'
-      || ownerInstructionSchema.sql !== storedTableSchema(sourceOwnerInstructionTableSchema))) {
+      || (ownerInstructionSchema.sql !== storedTableSchema(sourceOwnerInstructionTableSchema)
+        && !sourceOwnerInstructionSchemasV41.includes(ownerInstructionSchema.sql ?? '')))) {
       throw new Error('unknown source owner instruction schema')
     }
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 37) {
@@ -1656,6 +1673,30 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       } catch (error) { database.exec('ROLLBACK'); throw error }
     } else if (!ownerInstructionRequestV40Schemas.includes(requestTable.sql)) {
       throw new Error('unknown v40 source owner instruction request schema')
+    }
+    const ownerInstructionTable = database.prepare("SELECT type,sql FROM sqlite_schema WHERE name='source_owner_instructions'")
+      .get() as { type: string; sql: string } | undefined
+    if (ownerInstructionTable === undefined || ownerInstructionTable.type !== 'table') {
+      throw new Error('missing source owner instruction schema')
+    }
+    const ownerInstructionColumns = (database.prepare("PRAGMA table_info('source_owner_instructions')")
+      .all() as { name: string }[]).map(column => column.name)
+    const versionAfterReviewFreeze = Number(database.prepare('PRAGMA user_version').get()?.user_version)
+    if (versionAfterReviewFreeze < 41) {
+      const complete = ownerInstructionReviewFreezeColumnNames.every(name => ownerInstructionColumns.includes(name))
+      if (!complete && ownerInstructionReviewFreezeColumnNames.some(name => ownerInstructionColumns.includes(name))) {
+        throw new Error('unknown source owner instruction review freeze schema')
+      }
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        for (const column of complete ? [] : ownerInstructionReviewFreezeColumns) {
+          database.exec(`ALTER TABLE source_owner_instructions ADD COLUMN ${column}`)
+        }
+        database.exec('PRAGMA user_version = 41; COMMIT;')
+      } catch (error) { database.exec('ROLLBACK'); throw error }
+    } else if (!sourceOwnerInstructionSchemasV41.includes(ownerInstructionTable.sql)
+      || !ownerInstructionReviewFreezeColumnNames.every(name => ownerInstructionColumns.includes(name))) {
+      throw new Error('unknown v41 source owner instruction schema')
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

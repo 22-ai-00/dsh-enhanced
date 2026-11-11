@@ -18,10 +18,11 @@ import { validateScopedPluginFiles, type ScopedPluginFile } from './source-works
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
-import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, isSourceOwnerContinuation, isPluginRevisionTaskSource, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate,
-  type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, isSourceOwnerContinuation, isPluginRevisionTaskSource, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateRevisionAcceptanceAuthorityRef,
+  type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
-import type { SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,
+import type { OwnerInstructionReviewBudget, OwnerInstructionReviewFreeze, OwnerInstructionReviewWindow,
+  SourceJobCompletion, SourceJobIntent, SourceJobOwnerReceipt, SourceJobRecord, SourceJobStatus,
   SourceOwnerInstruction, SourceOwnerInstructionRequest } from './source-job-types.js'
 import type { AnyOwnerTaskFailureReference as OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
@@ -184,6 +185,105 @@ function canonical(value: unknown): string {
 
 export function controlPlaneDigest(value: unknown): string {
   return createHash('sha256').update(canonical(value)).digest('hex')
+}
+
+const OWNER_INSTRUCTION_REVIEW_FREEZE_PROTOCOL = 'plugin-control-plane/owner-instruction-review-freeze/v1'
+const OWNER_INSTRUCTION_REVIEW_BUDGET_PROTOCOL = 'plugin-control-plane/owner-instruction-review-budget/v1'
+const REVIEW_SUPPLIER_BYTES = 512
+const REVIEW_WINDOW_MAX_MS = 86_400_000
+
+function reviewPlainRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.getOwnPropertySymbols(value).length !== 0) {
+    throw new ControlPlaneStoreError('invalid-input', label + ' is invalid')
+  }
+  const record = value as Record<string, unknown>
+  const own = Object.keys(record)
+  if (own.length !== keys.length || !keys.every(key => Object.hasOwn(record, key))) {
+    throw new ControlPlaneStoreError('invalid-input', label + ' is invalid')
+  }
+  return record
+}
+
+function reviewSupplierText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > REVIEW_SUPPLIER_BYTES
+    || Buffer.byteLength(value, 'utf8') > REVIEW_SUPPLIER_BYTES || value.trim() !== value || /\p{Cc}/u.test(value)) {
+    throw new ControlPlaneStoreError('invalid-input', label + ' is invalid')
+  }
+  return value
+}
+
+function reviewSupplierOf(value: unknown): Readonly<{ provider: string; model: string; reasoningEffort?: string }> {
+  const hasEffort = value !== null && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, 'reasoningEffort')
+  const item = reviewPlainRecord(value, hasEffort ? ['provider', 'model', 'reasoningEffort'] : ['provider', 'model'], 'review supplier')
+  return Object.freeze({
+    provider: reviewSupplierText(item['provider'], 'review supplier provider'),
+    model: reviewSupplierText(item['model'], 'review supplier model'),
+    ...(item['reasoningEffort'] === undefined ? {} : { reasoningEffort: reviewSupplierText(item['reasoningEffort'], 'review supplier reasoning effort') }),
+  })
+}
+
+export function validateOwnerInstructionReviewWindow(value: unknown): OwnerInstructionReviewWindow {
+  const item = reviewPlainRecord(value, ['verificationMs', 'regressionMs', 'adoptionMs'], 'owner instruction review window')
+  const window = { verificationMs: item['verificationMs'], regressionMs: item['regressionMs'], adoptionMs: item['adoptionMs'] }
+  for (const [key, item] of Object.entries(window)) {
+    if (!Number.isSafeInteger(item) || (item as number) < 0 || (item as number) > REVIEW_WINDOW_MAX_MS) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction review window ' + key + ' is invalid')
+    }
+  }
+  return Object.freeze(window as OwnerInstructionReviewWindow)
+}
+
+function reviewBudgetOf(value: unknown): OwnerInstructionReviewBudget {
+  const item = reviewPlainRecord(value, ['protocol', 'authority', 'verifierKeyDigest', 'window'], 'owner instruction review budget')
+  if (item['protocol'] !== OWNER_INSTRUCTION_REVIEW_BUDGET_PROTOCOL || typeof item['verifierKeyDigest'] !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(item['verifierKeyDigest'])) {
+    throw new ControlPlaneStoreError('invalid-input', 'owner instruction review budget is invalid')
+  }
+  const authority = structuredClone(item['authority']) as RevisionAcceptanceAuthorityRef
+  try { validateRevisionAcceptanceAuthorityRef(authority) }
+  catch { throw new ControlPlaneStoreError('invalid-input', 'owner instruction review authority is invalid') }
+  return Object.freeze({ protocol: OWNER_INSTRUCTION_REVIEW_BUDGET_PROTOCOL, authority: Object.freeze(authority),
+    verifierKeyDigest: item['verifierKeyDigest'], window: validateOwnerInstructionReviewWindow(item['window']) })
+}
+
+function ownerInstructionReviewFreezePayload(supplier: OwnerInstructionReviewFreeze['supplier'],
+  budget: OwnerInstructionReviewBudget): Omit<OwnerInstructionReviewFreeze, 'digest'> {
+  return { protocol: OWNER_INSTRUCTION_REVIEW_FREEZE_PROTOCOL as OwnerInstructionReviewFreeze['protocol'],
+    supplier: Object.freeze({ ...supplier }), budget }
+}
+
+/** Validates one stored freeze, including its self-digest. */
+export function validateOwnerInstructionReviewFreeze(value: unknown): asserts value is OwnerInstructionReviewFreeze {
+  const item = reviewPlainRecord(value, ['protocol', 'supplier', 'budget', 'digest'], 'owner instruction review freeze')
+  if (item['protocol'] !== OWNER_INSTRUCTION_REVIEW_FREEZE_PROTOCOL || typeof item['digest'] !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(item['digest'])) {
+    throw new ControlPlaneStoreError('invalid-input', 'owner instruction review freeze is invalid')
+  }
+  const supplier = reviewSupplierOf(item['supplier'])
+  const budget = reviewBudgetOf(item['budget'])
+  if (controlPlaneDigest(ownerInstructionReviewFreezePayload(supplier, budget)) !== item['digest']) {
+    throw new ControlPlaneStoreError('invalid-input', 'owner instruction review freeze digest differs')
+  }
+}
+
+/** Builds the immutable review freeze written with a new owner instruction. */
+export function createOwnerInstructionReviewFreeze(input: Readonly<{
+  supplier: OwnerInstructionReviewFreeze['supplier']
+  budget: OwnerInstructionReviewBudget
+}>): Readonly<OwnerInstructionReviewFreeze> {
+  if (!input || typeof input !== 'object') throw new ControlPlaneStoreError('invalid-input', 'owner instruction review freeze is invalid')
+  const supplier = reviewSupplierOf(input.supplier)
+  const budget = reviewBudgetOf(input.budget)
+  const unsigned = ownerInstructionReviewFreezePayload(supplier, budget)
+  const freeze = Object.freeze({ ...unsigned, digest: controlPlaneDigest(unsigned) })
+  validateOwnerInstructionReviewFreeze(freeze)
+  return freeze
+}
+
+/** True only when a stored freeze is structurally valid and self-consistent. */
+export function ownerInstructionReviewFreezeMatches(value: unknown): value is OwnerInstructionReviewFreeze {
+  try { validateOwnerInstructionReviewFreeze(value); return true } catch { return false }
 }
 
 /** Structural validation precedes this exact prepared-build binding check. */
@@ -448,6 +548,10 @@ interface OwnerInstructionRow {
   instruction_id: string; owner_receipt_json: string; owner_digest: string; owner_route_id: string
   plan_id: string; plugin_name: string; files_digest: string; created_at: number; expires_at: number
   idempotency_key: string
+  /** Nullable only for rows written before schema 41; such rows fail closed. */
+  review_supplier_json: string | null
+  review_budget_json: string | null
+  review_freeze_digest: string | null
 }
 
 interface OwnerInstructionRequestRow {
@@ -1485,12 +1589,22 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   let ownerInstruction: SourceJobIntent['ownerInstruction']
   if (Object.hasOwn(intent, 'ownerInstruction')) {
     const item = objectRecord(intent['ownerInstruction'], 'source job owner instruction')
-    exactKeys(item, ['instructionId', 'digest'], 'source job owner instruction')
+    const keys = ['instructionId', 'digest']
+    if (Object.hasOwn(item, 'reviewFreezeDigest')) keys.push('reviewFreezeDigest')
+    if (Object.hasOwn(item, 'reviewWindow')) keys.push('reviewWindow')
+    exactKeys(item, keys, 'source job owner instruction')
     if (typeof item['instructionId'] !== 'string' || !KEY.test(item['instructionId'])
-      || typeof item['digest'] !== 'string' || !DIGEST.test(item['digest'])) {
+      || typeof item['digest'] !== 'string' || !DIGEST.test(item['digest'])
+      || (item['reviewFreezeDigest'] === undefined) !== (item['reviewWindow'] === undefined)
+      || item['reviewFreezeDigest'] !== undefined && (typeof item['reviewFreezeDigest'] !== 'string' || !DIGEST.test(item['reviewFreezeDigest']))) {
       throw new ControlPlaneStoreError('invalid-input', 'source job owner instruction is invalid')
     }
-    ownerInstruction = Object.freeze({ instructionId: item['instructionId'], digest: item['digest'] })
+    ownerInstruction = Object.freeze({
+      instructionId: item['instructionId'], digest: item['digest'],
+      ...(item['reviewFreezeDigest'] === undefined ? {} : {
+        reviewFreezeDigest: item['reviewFreezeDigest'] as string,
+        reviewWindow: validateOwnerInstructionReviewWindow(item['reviewWindow']) }),
+    })
   }
   if (revision !== undefined && !(intent['name'] as string).startsWith(revision.grant.namePrefix)) throw new ControlPlaneStoreError('invalid-input', 'source job plugin name is outside its revision grant')
   if (creation !== undefined && !(intent['name'] as string).startsWith(creation.grant.namePrefix)) {
@@ -2222,7 +2336,7 @@ export class ControlPlaneStore {
    * Record one Host-authenticated owner revision instruction. Idempotent on
    * idempotencyKey: reusing a key with a different payload fails closed, and
    * reusing the same full payload returns the stored instruction. The owner
-   * receipt and files digest are frozen at write time.
+   * receipt, files digest and independent-review freeze are written once.
    */
   recordOwnerInstruction(input: {
     instructionId: string
@@ -2234,6 +2348,8 @@ export class ControlPlaneStore {
     createdAt: number
     expiresAt: number
     idempotencyKey: string
+    /** Review supplier + budget identity frozen at enqueue; never backfilled later. */
+    review: Readonly<OwnerInstructionReviewFreeze>
   }): SourceOwnerInstruction {
     const instructionId = bounded(input.instructionId, 'instructionId', 160)
     const ownerRouteId = bounded(input.ownerRouteId, 'ownerRouteId', 200)
@@ -2250,6 +2366,11 @@ export class ControlPlaneStore {
     }
     const ownerDigest = controlPlaneDigest(input.ownerReceipt)
     if (!DIGEST.test(ownerDigest)) throw new ControlPlaneStoreError('invalid-input', 'owner receipt is invalid')
+    validateOwnerInstructionReviewFreeze(input.review)
+    const review = Object.freeze({ ...input.review })
+    if (review.budget.authority.expiresAt <= input.createdAt) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner instruction review authority is already expired')
+    }
     const receiptJson = JSON.stringify(input.ownerReceipt)
     const prior = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE idempotency_key = ? OR instruction_id = ?')
       .get(idempotencyKey, instructionId) as unknown as OwnerInstructionRow | undefined
@@ -2258,20 +2379,58 @@ export class ControlPlaneStore {
       // Retries may recompute createdAt; every frozen field must match. A
       // reused id or key with a different payload is a conflict either way.
       const expected = this.#ownerInstructionPayload({ ...input, ownerDigest, createdAt: stored.createdAt })
+      const storedReview = stored.instructionId === instructionId ? this.reviewFreezeFromRow(prior) : undefined
       if (stored.idempotencyKey !== idempotencyKey || stored.instructionId !== instructionId
-        || controlPlaneDigest(stored) !== controlPlaneDigest(expected)) {
+        || controlPlaneDigest(stored) !== controlPlaneDigest(expected)
+        || storedReview === undefined || controlPlaneDigest(storedReview) !== controlPlaneDigest(review)) {
         throw new ControlPlaneStoreError('conflict', 'owner instruction identity or idempotency key was reused with different input')
       }
       return stored
     }
     this.#database.prepare(`INSERT INTO source_owner_instructions
       (instruction_id, owner_receipt_json, owner_digest, owner_route_id, plan_id, plugin_name,
-        files_digest, created_at, expires_at, idempotency_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(instructionId, receiptJson, ownerDigest, ownerRouteId,
-      planId, pluginName, input.filesDigest, input.createdAt, input.expiresAt, idempotencyKey)
+        files_digest, created_at, expires_at, idempotency_key,
+        review_supplier_json, review_budget_json, review_freeze_digest)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(instructionId, receiptJson, ownerDigest, ownerRouteId,
+      planId, pluginName, input.filesDigest, input.createdAt, input.expiresAt, idempotencyKey,
+      JSON.stringify(review.supplier), JSON.stringify(review.budget), review.digest)
     const row = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE instruction_id = ?')
       .get(instructionId) as unknown as OwnerInstructionRow
     return this.ownerInstructionFromRow(row)
+  }
+
+  /**
+   * The immutable review supplier/budget written with one owner instruction.
+   * Undefined only for rows recorded before schema 41; every execution path
+   * treats that as unavailable and fails closed rather than consulting the live
+   * owner route or live verifier configuration.
+   */
+  getOwnerInstructionReviewFreeze(instructionId: string): Readonly<OwnerInstructionReviewFreeze> | undefined {
+    if (typeof instructionId !== 'string' || !KEY.test(instructionId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'instruction id is invalid')
+    }
+    const row = this.#database.prepare('SELECT * FROM source_owner_instructions WHERE instruction_id = ?')
+      .get(instructionId) as OwnerInstructionRow | undefined
+    if (row === undefined) return undefined
+    return this.reviewFreezeFromRow(row)
+  }
+
+  private reviewFreezeFromRow(row: OwnerInstructionRow): Readonly<OwnerInstructionReviewFreeze> | undefined {
+    const values = [row.review_supplier_json, row.review_budget_json, row.review_freeze_digest]
+    if (values.every(value => value === null)) return undefined
+    if (values.some(value => value === null)) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction review freeze is corrupt')
+    }
+    let supplier: unknown, budget: unknown
+    try {
+      supplier = JSON.parse(row.review_supplier_json!)
+      budget = JSON.parse(row.review_budget_json!)
+    } catch { throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction review freeze is corrupt') }
+    const freeze = { protocol: OWNER_INSTRUCTION_REVIEW_FREEZE_PROTOCOL,
+      supplier, budget, digest: row.review_freeze_digest }
+    try { validateOwnerInstructionReviewFreeze(freeze) }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored owner instruction review freeze is corrupt') }
+    return Object.freeze(freeze as OwnerInstructionReviewFreeze)
   }
 
   getOwnerInstruction(instructionId: string): SourceOwnerInstruction | undefined {

@@ -10,8 +10,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
 import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight } from '../src/linux-source-preflight.ts'
-import { SourceJobRuntime } from '../src/source-jobs.ts'
-import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
+import { SourceJobRuntime, instructionReviewWindowFor } from '../src/source-jobs.ts'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest, createOwnerInstructionReviewFreeze } from '../src/store.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import type { SourceJobRecord, SourceJobsConfig } from '../src/source-job-types.ts'
 import type { PluginSourcePlan, SourcePreparedEvidence } from '../src/types.ts'
@@ -26,6 +26,20 @@ const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecord
 const receipt = () => ({ receiptVersion: 2 as const, authorityId: OWNER.ownerRouteId, authorityHash: hex('route-1'), principalId: OWNER.principalId,
   principalRecordId: OWNER.principalRecordId, principalVersion: OWNER.principalVersion, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 })
 const build = { ...linuxSourceConfig() }
+const instructionReviewAuthority = {
+  protocol: 'assistant-growth/revision-acceptance-authority/v1' as const, authorityId: 'fixture-revision-review',
+  keyId: 'fixture-review-key', authorityDigest: '9'.repeat(64), namePrefix: 'health-', expiresAt: 8_640_000_000_000_000,
+}
+/** The fixture runtime enables one Linux review and the optional regression review. */
+const instructionReview = (
+  window: { verificationMs: number; regressionMs: number; adoptionMs: number } =
+    instructionReviewWindowFor({ linuxBackend: true, verification: true, regression: false, adoption: false }) as
+      { verificationMs: number; regressionMs: number; adoptionMs: number },
+) => createOwnerInstructionReviewFreeze({
+  supplier: { provider: 'supplier', model: 'review-model' },
+  budget: { protocol: 'plugin-control-plane/owner-instruction-review-budget/v1', authority: instructionReviewAuthority,
+    verifierKeyDigest: 'a'.repeat(64), window },
+})
 const evidence = () => ({ schemaVersion: 3 as const, kind: 'dsh-source-prepared-evidence' as const, boundary: 'linux-native-repository-v1' as const,
   runtimeDigest: 'a'.repeat(64), executionContractDigest: 'b'.repeat(64), buildScriptSha256: 'c'.repeat(64),
   archive: { sizeBytes: 1, sha256: 'f'.repeat(64) },
@@ -161,7 +175,7 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; instruction?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
+async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; instruction?: boolean; review?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -250,6 +264,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
     ...(options.preflightGeneration ? { isPreparationNotStarted: (error: unknown, owned: SourceJobRecord) => consumeCleanedLinuxSourcePreflight(error, owned, options.preflightGeneration!) } : {}),
     ...(options.inspectNativeQuiescence === undefined ? {} : { inspectNativeQuiescence: options.inspectNativeQuiescence }),
     assertGrowthRun: expected => { if (controlPlaneDigest(expected) !== controlPlaneDigest(growthRun)) throw new Error('growth run changed') },
+    ...(options.instruction && options.review !== false ? { verifyPreparedRevision: vi.fn(async () => {}) } : {}),
     ...(options.instruction ? { inspectRevisionParent: () => ({ name: 'health-helper',
       parent: { planId: 'parent-plan', certificateDigest: hex('certificate'), artifactSha256: hex('artifact'),
         sourceArchiveDigest: hex('archive'), sourceDigest: hex('parent-source') },
@@ -540,7 +555,7 @@ describe('durable source-job runtime', () => {
         const stored = f.store.recordOwnerInstruction({ instructionId: 'instruction-real', ownerReceipt: receipt(),
           ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
           filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
-          idempotencyKey: 'instruction-real-key' })
+          idempotencyKey: 'instruction-real-key', review: instructionReview() })
         await expect(revisionEnqueue(f, { ownerInstruction: { instructionId: 'instruction-real', digest: 'b'.repeat(64) } }))
           .rejects.toThrow('owner instruction changed')
         expect(stored.instructionId).toBe('instruction-real')
@@ -555,7 +570,7 @@ describe('durable source-job runtime', () => {
           const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
             ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
             filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
-            idempotencyKey: `${instructionId}-key`, ...overrides })
+            idempotencyKey: `${instructionId}-key`, review: instructionReview(), ...overrides })
           const gap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`,
             capability: 'plugin-revision:health-helper', context: 'instruction',
             expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
@@ -582,7 +597,7 @@ describe('durable source-job runtime', () => {
         const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
           ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
           filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
-          idempotencyKey: 'instruction-ok-key' })
+          idempotencyKey: 'instruction-ok-key', review: instructionReview() })
         const instructionGap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`, capability: 'plugin-revision:health-helper',
           context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
         // The lightweight fixture has no real parent archive or Host scaffold:
@@ -590,6 +605,59 @@ describe('durable source-job runtime', () => {
         // the real source inspection rather than an instruction gate.
         await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, instructionGap.id))
           .rejects.toThrow(/template or Host inputs are missing/u)
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('fails closed when a legacy instruction has no frozen review supplier', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        const instructionId = 'instruction-legacy'
+        const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
+          ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+          filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+          idempotencyKey: 'instruction-legacy-key', review: instructionReview() })
+        const raw = new DatabaseSync(join(f.root, 'control.sqlite'))
+        raw.exec(`UPDATE source_owner_instructions SET review_supplier_json=NULL,
+          review_budget_json=NULL, review_freeze_digest=NULL WHERE instruction_id='${instructionId}'`)
+        raw.close()
+        const gap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`, capability: 'plugin-revision:health-helper',
+          context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, gap.id))
+          .rejects.toThrow(/review freeze is unavailable/u)
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('fails closed when the frozen review budget differs from the live capability', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
+      try {
+        const instructionId = 'instruction-budget'
+        const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
+          ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+          filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+          idempotencyKey: 'instruction-budget-key',
+          review: instructionReview({ verificationMs: 0, regressionMs: 1_800_000, adoptionMs: 0 }) })
+        const gap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`, capability: 'plugin-revision:health-helper',
+          context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, gap.id))
+          .rejects.toThrow(/review budget changed/u)
+        expect(f.store.listSourceJobs(100)).toEqual([])
+      } finally { await f.runtime.close(); f.store.close() }
+    })
+
+    it('refuses an owner instruction when no independent review capability is configured', async () => {
+      const f = await fixture({ instruction: true, allowedModes: ['revise-created'], review: false })
+      try {
+        const instructionId = 'instruction-no-review'
+        const stored = f.store.recordOwnerInstruction({ instructionId, ownerReceipt: receipt(),
+          ownerRouteId: OWNER.ownerRouteId, planId: 'parent-plan', pluginName: 'health-helper',
+          filesDigest: controlPlaneDigest(revisionFiles), createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+          idempotencyKey: 'instruction-no-review-key', review: instructionReview() })
+        const gap = f.store.recordGap({ idempotencyKey: `owner-instruction:${instructionId}`, capability: 'plugin-revision:health-helper',
+          context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+        await expect(revisionEnqueue(f, { ownerInstruction: { instructionId, digest: controlPlaneDigest(stored) } }, gap.id))
+          .rejects.toThrow(/requires an available independent review/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
     })

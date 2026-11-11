@@ -57,7 +57,7 @@ import { Ed25519SourceReleaseAuthorizationAuthority } from './release.js'
 import { advanceSourceRelease, sourceReleaseAuthorities, validateSourceReleaseExecutionConfig, type SourceReleaseExecutionConfig } from './source-release-runner.js'
 import { adoptSourceRelease, validateSourceAdoptionConfig, type SourceAdoptionConfig } from './source-adoption-runner.js'
 import { Ed25519ApprovalAuthority } from './approval.js'
-import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest, createOwnerInstructionReviewFreeze } from './store.js'
 import { validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { runNativePreparedChecks } from './native-source-build.js'
 import { LINUX_PREPARED_SOURCE_BUILD_SCRIPT, LINUX_SOURCE_PACK_PATH, runLinuxPreparedChecks } from './linux-source-build.js'
@@ -70,9 +70,11 @@ import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
-import { SourceGrowthRunUnavailableError, SourceJobRuntime, normalizeSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
+import { SourceGrowthRunUnavailableError, SourceJobRuntime, normalizeSourceJobsConfig, instructionReviewWindowFor,
+  type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
 import { drainOwnerInstructionRequests as drainPendingOwnerInstructionRequests, OWNER_INSTRUCTION_CLAIM_TIMEOUT_MS } from './owner-instruction-drain.js'
-import type { SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+import type { OwnerInstructionReviewBudget, OwnerInstructionReviewFreeze, SourceJobIntent, SourceJobOwnerReceipt,
+  SourceJobProjection, SourceJobRecord, SourceJobsConfig, SourceOwnerInstruction } from './source-job-types.js'
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
@@ -2075,7 +2077,8 @@ export class PluginControlPlaneService extends Service {
       }
       this.assertInstructionRevisionOwner(stored.ownerReceipt, plan)
       return { protocol: 'dsh-prepared-revision/v3' as const, plan: structuredClone(plan), job: structuredClone(job),
-        source: { instruction: binding, owner: job.intent.owner, reviewModel: this.resolveInstructionReviewModel(stored) },
+        source: { instruction: binding, owner: job.intent.owner,
+          reviewModel: this.resolveInstructionReviewModel(stored, job.intent.ownerInstruction) },
         artifact: this.store.readPreparedSourceArtifact(plan.id) }
     }
     if(reference.schemaVersion===2){
@@ -2115,20 +2118,90 @@ export class PluginControlPlaneService extends Service {
     }
   }
 
-  /** Resolves the review supplier for an owner-instruction revision from the live owner route. */
-  private resolveInstructionReviewModel(stored: { ownerReceipt: { authorityId: string; principalId: string;
-    workspace: string; agentPreset: string } }): { provider: string; model: string; reasoningEffort?: string } {
+  /**
+   * Reads the review supplier frozen when the owner instruction was enqueued.
+   * Missing or drifted freeze fails closed: the live owner route and live
+   * verifier configuration are never substituted for the recorded values.
+   */
+  private resolveInstructionReviewModel(stored: SourceOwnerInstruction,
+    expected?: SourceJobIntent['ownerInstruction']): { provider: string; model: string; reasoningEffort?: string } {
+    const freeze = this.store.getOwnerInstructionReviewFreeze(stored.instructionId)
+    if (freeze === undefined) throw new Error('owner instruction has no frozen review supplier')
+    if (expected !== undefined && (expected.reviewFreezeDigest === undefined || expected.reviewWindow === undefined
+      || expected.reviewFreezeDigest !== freeze.digest
+      || controlPlaneDigest(expected.reviewWindow) !== controlPlaneDigest(freeze.budget.window))) {
+      throw new Error('owner instruction frozen review supplier or budget changed')
+    }
+    const live = this.ownerInstructionReviewBudget()
+    if (controlPlaneDigest(freeze.budget.authority) !== controlPlaneDigest(live.authority)
+      || freeze.budget.verifierKeyDigest !== live.verifierKeyDigest) {
+      throw new Error('frozen review budget no longer matches the configured revision verifier')
+    }
+    if (freeze.budget.authority.expiresAt <= Date.now()) throw new Error('frozen review authority expired')
+    return { provider: freeze.supplier.provider, model: freeze.supplier.model,
+      ...(freeze.supplier.reasoningEffort === undefined ? {} : { reasoningEffort: freeze.supplier.reasoningEffort }) }
+  }
+
+  /**
+   * The independent-review budget identity configured for this Host, evaluated
+   * once per use. The budget itself (maxOutputTokens/maxDurationMs/maxCases/
+   * maxVerifications/runner/policy) is committed by
+   * `RevisionAcceptanceAuthorityRef.authorityDigest`, so freezing this exact
+   * authority ref plus the verifier key digest pins the review budget identity.
+   * Narrowing the budget for one request (a per-plan token cap) is NOT possible
+   * under the current review request protocol, which carries only the plan id
+   * and lets the verifier compile its bounds once; that would require a
+   * verifier request/response protocol v2. Do not emulate it by re-resolving
+   * live configuration during recovery.
+   */
+  private ownerInstructionReviewBudget(): OwnerInstructionReviewBudget {
+    const verification = this.config.revisionVerifications
+    if (verification === undefined) throw new Error('owner-instruction revision requires a configured independent review authority')
+    const build = this.config.sourceBuild
+    const window = instructionReviewWindowFor({
+      linuxBackend: build !== undefined && 'backend' in build && build.backend === 'linux-native',
+      verification: true,
+      regression: this.config.revisionRegressions !== undefined,
+      adoption: this.config.revisionCapabilities !== undefined,
+    })
+    return Object.freeze({ protocol: 'plugin-control-plane/owner-instruction-review-budget/v1',
+      authority: Object.freeze(structuredClone(verification.authority)),
+      verifierKeyDigest: createHash('sha256').update(verification.publicKey).digest('hex'), window })
+  }
+
+  /** Live owner-route supplier resolution is allowed once, when the instruction is created. */
+  private resolveLiveInstructionReviewSupplier(receipt: SourceJobOwnerReceipt): OwnerInstructionReviewFreeze['supplier'] {
     const delivery = this.ctx.get('assistantDelivery' as never, false) as
       { inspectOwnerModelSelection?(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }):
         { provider?: string; model?: string; reasoningEffort?: string } } | undefined
-    const selection = delivery?.inspectOwnerModelSelection?.({ authorityId: stored.ownerReceipt.authorityId,
-      principalId: stored.ownerReceipt.principalId, workspace: stored.ownerReceipt.workspace,
-      agentPreset: stored.ownerReceipt.agentPreset })
+    const selection = delivery?.inspectOwnerModelSelection?.({ authorityId: receipt.authorityId,
+      principalId: receipt.principalId, workspace: receipt.workspace,
+      agentPreset: receipt.agentPreset })
     if (selection?.provider === undefined || selection.model === undefined) {
       throw new Error('owner-instruction revision requires a live owner model selection')
     }
     return { provider: selection.provider, model: selection.model,
       ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }) }
+  }
+
+  /** Builds the write-once freeze for a first instruction write. */
+  private frozenInstructionReview(receipt: SourceJobOwnerReceipt): Readonly<OwnerInstructionReviewFreeze> {
+    return createOwnerInstructionReviewFreeze({ supplier: this.resolveLiveInstructionReviewSupplier(receipt),
+      budget: this.ownerInstructionReviewBudget() })
+  }
+
+  /** Re-reads an existing freeze and fails closed if the review capability drifted. */
+  private reusedInstructionReview(stored: SourceOwnerInstruction): Readonly<OwnerInstructionReviewFreeze> {
+    const freeze = this.store.getOwnerInstructionReviewFreeze(stored.instructionId)
+    if (freeze === undefined) throw new Error('owner instruction was recorded without a frozen review supplier; request a new revision')
+    const live = this.ownerInstructionReviewBudget()
+    if (controlPlaneDigest(freeze.budget.authority) !== controlPlaneDigest(live.authority)
+      || freeze.budget.verifierKeyDigest !== live.verifierKeyDigest
+      || controlPlaneDigest(freeze.budget.window) !== controlPlaneDigest(live.window)) {
+      throw new Error('frozen review budget no longer matches the configured revision verifier')
+    }
+    if (freeze.budget.authority.expiresAt <= Date.now()) throw new Error('frozen review authority expired')
+    return freeze
   }
 
   inspectSourceRevisionAcceptanceAuthority = (): RevisionAcceptanceAuthorityRef | undefined => {
@@ -2515,6 +2588,10 @@ export class PluginControlPlaneService extends Service {
       throw new Error('plugin-control-plane: owner instruction request expired or invalid')
     }
     if (prior && !isSourceOwnerContinuation(receipt, prior.ownerReceipt)) throw new Error('plugin-control-plane: owner route changed')
+    // Resolve the independent review supplier and budget exactly once. An
+    // existing instruction reuses its write-once freeze; a changed owner model
+    // selection or changed verifier identity can never silently replace it.
+    const review = prior === undefined ? this.frozenInstructionReview(receipt) : this.reusedInstructionReview(prior)
     const gap = this.store.recordGap({
       idempotencyKey: `owner-instruction:${instructionId}`, capability: `plugin-revision:${input.pluginName}`,
       context: 'Owner instruction revision request', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0,
@@ -2522,7 +2599,7 @@ export class PluginControlPlaneService extends Service {
     const instruction = this.store.recordOwnerInstruction({
       instructionId, ownerReceipt: prior?.ownerReceipt ?? receipt, ownerRouteId: config.ownerRouteId, planId: input.planId,
       pluginName: input.pluginName, filesDigest: controlPlaneDigest(input.files),
-      createdAt, expiresAt, idempotencyKey: input.idempotencyKey,
+      createdAt, expiresAt, idempotencyKey: input.idempotencyKey, review,
     })
     const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, expiresAt - Date.now())),
       ...(input.signal === undefined ? [] : [input.signal])])

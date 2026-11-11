@@ -3,6 +3,7 @@ import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
 import type { SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
 import type { SourceRevisionBinding, SourceRevisionGrant } from './source-revision.js'
+import type { RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 
 /** Owner-configured authority for background checks, separate from an Agent wake. */
 export interface SourceJobsConfig {
@@ -63,6 +64,39 @@ export interface SourceOwnerInstruction {
   createdAt: number
   expiresAt: number
   idempotencyKey: string
+}
+
+/**
+ * Exact review/adoption windows frozen when an owner instruction is enqueued.
+ * The verifier review budget identity itself is committed by the frozen
+ * `RevisionAcceptanceAuthorityRef.authorityDigest`; these windows are the
+ * Host-side outer budget the source job definition may allocate for the
+ * review and adoption continuations.
+ */
+export interface OwnerInstructionReviewWindow {
+  verificationMs: number
+  regressionMs: number
+  adoptionMs: number
+}
+
+/** Independent review budget identity frozen at instruction enqueue. */
+export interface OwnerInstructionReviewBudget {
+  protocol: 'plugin-control-plane/owner-instruction-review-budget/v1'
+  authority: RevisionAcceptanceAuthorityRef
+  verifierKeyDigest: string
+  window: OwnerInstructionReviewWindow
+}
+
+/**
+ * The review supplier and budget an owner-instruction revision must use for
+ * its whole review lane. Written once at enqueue; recovery only re-reads it and
+ * fails closed if it is absent or no longer matches the configured verifier.
+ */
+export interface OwnerInstructionReviewFreeze {
+  protocol: 'plugin-control-plane/owner-instruction-review-freeze/v1'
+  supplier: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
+  budget: OwnerInstructionReviewBudget
+  digest: string
 }
 
 /**
@@ -130,8 +164,16 @@ export interface SourceJobIntent {
    * Present only on `revise-created` jobs authenticated by a Host-recorded
    * owner instruction instead of an owner task failure. The digest pins the
    * exact stored instruction row, so any drift fails the frozen intent.
+   * `reviewFreezeDigest`/`reviewWindow` pin the review supplier and budget
+   * frozen at instruction enqueue; both are absent only on legacy intents,
+   * which every execution path fails closed.
    */
-  ownerInstruction?: { instructionId: string; digest: string }
+  ownerInstruction?: {
+    instructionId: string
+    digest: string
+    reviewFreezeDigest?: string
+    reviewWindow?: OwnerInstructionReviewWindow
+  }
 }
 
 export type SourceJobStatus = 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'

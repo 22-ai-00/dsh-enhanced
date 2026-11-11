@@ -1567,6 +1567,13 @@ it('routes a CLI owner instruction through native scheduling and the independent
   await tick(60_000)
   const accepted = f.store.getOwnerInstructionRequest(requestId)!
   expect(accepted).toMatchObject({ status: 'accepted', jobId: expect.any(String), instructionId: expect.any(String) })
+  // The review supplier and budget are frozen at enqueue. Changing the live
+  // owner model selection afterwards must not change what the reviewer uses.
+  const frozenReview = f.store.getOwnerInstructionReviewFreeze(accepted.instructionId!)!
+  expect(frozenReview.supplier).toEqual({ provider: 'supplier', model: 'task-model', reasoningEffort: 'high' })
+  expect(frozenReview.budget.window).toEqual({ verificationMs: 1_800_000, regressionMs: 0, adoptionMs: 0 })
+  const liveModelSelection = f.deliveryPorts.inspectOwnerModelSelection
+  f.deliveryPorts.inspectOwnerModelSelection = () => ({ provider: 'changed-live', model: 'changed-live-model' })
   await tick(1_100)
   await tick(60_000)
 
@@ -1589,6 +1596,12 @@ it('routes a CLI owner instruction through native scheduling and the independent
   const prepared = f.service.inspectPreparedRevision(planId)
   if (prepared.protocol !== 'dsh-prepared-revision/v3') throw new Error('owner instruction handoff absent')
   const { plan, source, artifact } = prepared
+  expect(source.reviewModel).toEqual(frozenReview.supplier)
+  const frozenJob = jobs[0]!
+  expect(frozenJob.intent.ownerInstruction).toMatchObject({
+    instructionId: accepted.instructionId, reviewFreezeDigest: frozenReview.digest,
+    reviewWindow: frozenReview.budget.window,
+  })
   expect(artifact).toEqual(candidateArtifact)
   const certificate = f.store.getRevisionVerification(planId)!
   expect(certificate).toMatchObject({
@@ -1622,6 +1635,7 @@ it('routes a CLI owner instruction through native scheduling and the independent
     expect(row?.state).toBe('certificate')
     expect(JSON.parse(String(row?.data)).certificate).toEqual(certificate)
   } finally { verifierLedger.close() }
+  f.deliveryPorts.inspectOwnerModelSelection = liveModelSelection
   // Full native scheduling plus the independent Verifier; it needs ~25-27s even when
   // the package runs alone, so keep real headroom instead of racing the default bound.
 }, 90_000)
@@ -1678,6 +1692,19 @@ it('recovers an owner instruction across admission interruptions and verifies it
   await tick(1_100)
   expect(f.store.getSourceJob(id)).toMatchObject({ status: 'prepared' })
   const planId = f.store.getSourceJob(id)!.planId!
+  // D1a: a missing freeze makes prepared instruction revisions unavailable
+  // before any reviewer model call; restoring the exact row lets review run.
+  const freezeRow = f.store.getOwnerInstructionReviewFreeze(instructionId)!
+  const control = new DatabaseSync(join(f.config.statePath, 'control.sqlite'))
+  try {
+    control.exec("UPDATE source_owner_instructions SET review_supplier_json=NULL, review_budget_json=NULL, review_freeze_digest=NULL")
+    expect(() => f.service.inspectPreparedRevision(planId)).toThrow(/no frozen review supplier/u)
+    expect(f.revisionVerification).not.toHaveBeenCalled()
+  } finally {
+    control.prepare('UPDATE source_owner_instructions SET review_supplier_json=?, review_budget_json=?, review_freeze_digest=?')
+      .run(JSON.stringify(freezeRow.supplier), JSON.stringify(freezeRow.budget), freezeRow.digest)
+    control.close()
+  }
   await tick()
   await tick(241_000)
   // Advance once more if the wake just enabled the continuation for its next cron slot.

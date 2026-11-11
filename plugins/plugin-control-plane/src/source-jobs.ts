@@ -18,9 +18,31 @@ import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding
 import { inspectSourceCreationContext, validateSourceCreationFiles, validateSourceCreationGrant } from './source-creation.js'
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
-import type { SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord,
+import type { OwnerInstructionReviewFreeze, OwnerInstructionReviewWindow,
+  SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord,
   SourceJobsConfig, SourceOwnerInstruction } from './source-job-types.js'
 import { SOURCE_BUILD_CHECK_FAILED, type SourceBuildDiagnostics } from './source-build-diagnostics.js'
+
+const ZERO_REVIEW_WINDOW: Readonly<OwnerInstructionReviewWindow> = Object.freeze({ verificationMs: 0, regressionMs: 0, adoptionMs: 0 })
+const LINUX_REVIEW_WINDOW_MS = 1_800_000
+const ADOPTION_WINDOW_MS = 180_000
+
+/**
+ * The exact Host-side review/adoption windows a source job may allocate. It is
+ * computed from live capability presence only when an owner instruction is first
+ * enqueued; afterwards the frozen copy is authoritative and any difference
+ * fails closed instead of silently resizing the review budget.
+ */
+export function instructionReviewWindowFor(input: Readonly<{
+  linuxBackend: boolean; verification: boolean; regression: boolean; adoption: boolean
+}>): Readonly<OwnerInstructionReviewWindow> {
+  if (!input.linuxBackend) return ZERO_REVIEW_WINDOW
+  return Object.freeze({
+    verificationMs: input.verification ? LINUX_REVIEW_WINDOW_MS : 0,
+    regressionMs: input.regression ? LINUX_REVIEW_WINDOW_MS : 0,
+    adoptionMs: input.adoption ? ADOPTION_WINDOW_MS : 0,
+  })
+}
 
 export const SOURCE_JOB_OWNER = 'plugin-control-plane-source'
 const EXECUTOR = 'plugin-control-plane-source-check'
@@ -447,7 +469,7 @@ export class SourceJobRuntime {
    * target, files and owner; the gap must be the synthetic instruction gap.
    */
   #assertOwnerInstruction(binding: EnqueueSourceJobInput['ownerInstruction'],
-    input: EnqueueSourceJobInput): SourceOwnerInstruction {
+    input: EnqueueSourceJobInput): Readonly<{ stored: SourceOwnerInstruction; freeze: Readonly<OwnerInstructionReviewFreeze> }> {
     if (!binding) throw new Error('revision requires an authenticated owner task failure or owner instruction')
     const stored = this.options.store.getOwnerInstruction(binding.instructionId)
     if (!stored || controlPlaneDigest(stored) !== binding.digest) throw new Error('owner instruction changed')
@@ -460,7 +482,39 @@ export class SourceJobRuntime {
     if (gapKey !== `owner-instruction:${stored.instructionId}`) {
       throw new Error('owner instruction gap changed')
     }
-    return stored
+    const freeze = this.options.store.getOwnerInstructionReviewFreeze(stored.instructionId)
+    if (freeze === undefined) throw new Error('owner instruction review freeze is unavailable')
+    this.#assertInstructionReviewFreeze(freeze, undefined)
+    return Object.freeze({ stored, freeze })
+  }
+
+  /** Live capability identity; only used to validate an already frozen budget. */
+  private instructionReviewWindow(): Readonly<OwnerInstructionReviewWindow> {
+    return instructionReviewWindowFor({
+      linuxBackend: 'backend' in this.options.build && this.options.build.backend === 'linux-native',
+      verification: this.options.verifyPreparedRevision !== undefined,
+      regression: this.options.verifyPreparedRevisionRegression !== undefined,
+      adoption: this.options.adoptVerifiedRevision !== undefined,
+    })
+  }
+
+  /**
+   * A frozen review budget may only be consumed while the current reviewer
+   * capability is exactly the one frozen at enqueue. Any absence or difference
+   * fails closed: this guard never substitutes live config for the freeze.
+   */
+  #assertInstructionReviewFreeze(freeze: Readonly<OwnerInstructionReviewFreeze>,
+    expected: SourceJobIntent['ownerInstruction']): void {
+    if (this.options.verifyPreparedRevision === undefined) throw new Error('owner instruction revision requires an available independent review')
+    if (freeze.budget.authority.expiresAt <= Date.now()) throw new Error('owner instruction review authority expired')
+    if (controlPlaneDigest(this.instructionReviewWindow()) !== controlPlaneDigest(freeze.budget.window)) {
+      throw new Error('owner instruction review budget changed')
+    }
+    if (expected !== undefined && (expected.reviewFreezeDigest === undefined || expected.reviewWindow === undefined
+      || expected.reviewFreezeDigest !== freeze.digest
+      || controlPlaneDigest(expected.reviewWindow) !== controlPlaneDigest(freeze.budget.window))) {
+      throw new Error('owner instruction review freeze changed')
+    }
   }
 
   private assertOwner(job: SourceJobRecord): void {
@@ -489,6 +543,10 @@ export class SourceJobRuntime {
         || this.options.store.getGap(job.intent.gapId).idempotencyKey !== `owner-instruction:${stored.instructionId}`) {
         throw new Error('owner instruction changed or expired')
       }
+      // Recovery consumes only the review supplier/budget frozen at enqueue.
+      const freeze = this.options.store.getOwnerInstructionReviewFreeze(stored.instructionId)
+      if (freeze === undefined) throw new Error('owner instruction review freeze is unavailable')
+      this.#assertInstructionReviewFreeze(freeze, job.intent.ownerInstruction)
     }
     if (job.intent.revision) {
       const parent = this.options.inspectRevisionParent?.(job.intent.revision.parent.planId)
@@ -555,11 +613,11 @@ export class SourceJobRuntime {
     }
     // A revise-created job without a task failure is legal only through a
     // Host-recorded owner instruction; every frozen field must match it.
-    const instruction = input.mode === 'revise-created' && !reference
+    const ownerInstruction = input.mode === 'revise-created' && !reference
       ? this.#assertOwnerInstruction(input.ownerInstruction, input) : undefined
-    const owner = instruction?.ownerReceipt ?? reference?.owner ?? currentOwner
+    const owner = ownerInstruction?.stored.ownerReceipt ?? reference?.owner ?? currentOwner
     if (reference && !isSourceOwnerContinuation(currentOwner, owner)) throw new Error('source job task owner changed')
-    if (instruction !== undefined && !isSourceOwnerContinuation(currentOwner, instruction.ownerReceipt)) {
+    if (ownerInstruction !== undefined && !isSourceOwnerContinuation(currentOwner, ownerInstruction.stored.ownerReceipt)) {
       throw new Error('owner instruction owner changed')
     }
     this.withGapSource(input.gapId, currentOwner, () => this.assertGrowthRun(input.growthRun, input.mode, input.gapId, owner, true),input.growthRun)
@@ -572,6 +630,10 @@ export class SourceJobRuntime {
     const prior = this.options.store.getSourceJob(id)
     if (prior !== undefined) {
       const frozen = prior.intent
+      const instructionReviewMatches = ownerInstruction === undefined || (frozen.ownerInstruction?.digest === controlPlaneDigest(ownerInstruction.stored)
+        && frozen.ownerInstruction.reviewFreezeDigest === ownerInstruction.freeze.digest
+        && frozen.ownerInstruction.reviewWindow !== undefined
+        && controlPlaneDigest(frozen.ownerInstruction.reviewWindow) === controlPlaneDigest(ownerInstruction.freeze.budget.window))
       if (frozen.authority.digest !== this.authorityDigest || frozen.ownerDigest !== controlPlaneDigest(owner) || frozen.trustDigest !== controlPlaneDigest(trust)
         || frozen.mode !== input.mode || (input.mode === 'create' && (controlPlaneDigest(frozen.creation?.grant) !== controlPlaneDigest(config.creation)
           || (frozen.creation?.growthRun === undefined) !== (input.growthRun === undefined)
@@ -580,7 +642,7 @@ export class SourceJobRuntime {
           || controlPlaneDigest(frozen.revision?.parent) !== controlPlaneDigest(parent!.parent)
           || (frozen.revision?.growthRun === undefined) !== (input.growthRun === undefined)
           || (input.growthRun !== undefined && controlPlaneDigest(frozen.revision?.growthRun) !== controlPlaneDigest(input.growthRun))
-          || (frozen.ownerInstruction?.digest ?? null) !== (instruction === undefined ? null : controlPlaneDigest(instruction))))
+          || !instructionReviewMatches))
         || frozen.repository !== input.repository || frozen.name !== input.name || frozen.gapId !== input.gapId || frozen.baseCommit !== input.expectedBaseCommit
         || frozen.ttlMs !== input.ttlMs || controlPlaneDigest(frozen.files) !== controlPlaneDigest(input.files)) throw new Error('source job idempotency conflict')
       await assertCurrent()
@@ -615,8 +677,9 @@ export class SourceJobRuntime {
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`),
-      ...(instruction === undefined ? {} : {
-        ownerInstruction: { instructionId: instruction.instructionId, digest: controlPlaneDigest(instruction) } }),
+      ...(ownerInstruction === undefined ? {} : {
+        ownerInstruction: { instructionId: ownerInstruction.stored.instructionId, digest: controlPlaneDigest(ownerInstruction.stored),
+          reviewFreezeDigest: ownerInstruction.freeze.digest, reviewWindow: structuredClone(ownerInstruction.freeze.budget.window) } }),
       nativeResource: { backend: this.options.build.backend, key: id },
     }
     await assertCurrent()
@@ -675,7 +738,23 @@ export class SourceJobRuntime {
     catch (error) { if (error instanceof SourceGrowthRunUnavailableError) return true; throw error }
   }
 
-  private linuxRevisionReviewTimeoutMs(): number {
+  /**
+   * Per-job review/adoption window. A supplied `job` whose revision is authorized
+   * by an owner instruction uses ONLY the window frozen in its intent. The
+   * job-less overload remains live because continuationTimeoutMs() sizes the
+   * shared continuation occurrence: that outer wall-clock cap may shrink with
+   * live config but can never enlarge the frozen inner verifier authority/budget.
+   * A smaller live window only truncates the continuation earlier (settled
+   * unknown); the per-job definition and the verifier budget stay frozen.
+   */
+  private linuxRevisionReviewTimeoutMs(job?: SourceJobRecord): number {
+    // An owner-instruction revision uses only the review window frozen in its
+    // intent: a live-config change must fail closed, never resize the budget.
+    if (job?.intent.ownerInstruction !== undefined) {
+      const window = job.intent.ownerInstruction.reviewWindow
+      if (window === undefined) throw new Error('owner instruction review window is unavailable')
+      return window.verificationMs + window.regressionMs + window.adoptionMs
+    }
     // A Linux revision can run two independently bounded reviews after its
     // repository build. This outer window never changes their own budgets or
     // the frozen source expiry; legacy backend definitions retain their identity.
@@ -689,7 +768,7 @@ export class SourceJobRuntime {
     const config = this.options.config
     return { name: `Source check: ${job.intent.name}`, schedule: { kind: 'at', at: new Date(job.dispatchAt ?? job.createdAt + 1000).toISOString() },
       workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000
-        + (job.intent.mode === 'revise-created' ? this.linuxRevisionReviewTimeoutMs() : 0)
+        + (job.intent.mode === 'revise-created' ? this.linuxRevisionReviewTimeoutMs(job) : 0)
         + (job.intent.mode === 'create' && job.intent.creation?.growthRun?.protocol === 'assistant-growth/source-run/v2'
           && 'backend' in this.options.build
           && this.options.build.backend === 'linux-native' && this.options.verifyPreparedCreation ? 1_800_000 : 0)
@@ -835,6 +914,16 @@ export class SourceJobRuntime {
     return plan.status === 'release-complete' && this.options.adoptReleased !== undefined
   }
 
+  /**
+   * Outer wall-clock cap for the shared continuation automation definition, the
+   * owner-instruction request drain and the non-adoption continuation signal.
+   * This is NOT the frozen review budget: an owner-instruction job's inner
+   * verifier authority/budget and its own definition timeout are pinned by the
+   * intent plus the write-once instruction freeze. A live config change here can
+   * only truncate the continuation earlier (settled unknown); it can never
+   * enlarge the frozen inner budget. Narrowing the review budget for one request
+   * would require a verifier request/response protocol v2.
+   */
   private continuationTimeoutMs(): number {
     const release = this.options.releaseTimeoutMs ?? 40_000, adoption = this.options.adoptionTimeoutMs ?? 60_000
     const needed = (this.options.adoptReleased ? adoption : 0) + (this.options.advanceReleased ? release + 40_000 : this.options.releasePrepared ? 40_000 : 10_000)
@@ -961,8 +1050,8 @@ export class SourceJobRuntime {
     const signal = AbortSignal.any([input.signal, this.abort.signal,
       ...(growthController ? [growthController.signal] : []),
       AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000
-        + (job.intent.mode === 'revise-created' && this.linuxRevisionReviewTimeoutMs()
-          ? this.linuxRevisionReviewTimeoutMs() : this.options.verifyPreparedCreation ? 1_800_000 : 0)
+        + (job.intent.mode === 'revise-created' && this.linuxRevisionReviewTimeoutMs(job)
+          ? this.linuxRevisionReviewTimeoutMs(job) : this.options.verifyPreparedCreation ? 1_800_000 : 0)
         + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
     try {
       this.assertOwner(job)

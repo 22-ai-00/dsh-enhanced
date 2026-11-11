@@ -15,7 +15,7 @@ import { invokeConfiguredHostAttestor, prepareConfiguredHostAttestation } from '
 import { activationRetractionSigningPayload, postActivationEvidenceDigest, postActivationObservationSigningPayload } from '../src/post-activation.ts'
 import { sourceReleaseAuthorizationSigningPayload, sourceReleaseEvidenceDigest, sourceReleaseRequestDigest,
   sourceReleaseSigningPayload } from '../src/release.ts'
-import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
+import { controlPlaneDigest, createOwnerInstructionReviewFreeze, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
 import { startLocalHttpsRegistry } from '../src/registry-fetch.ts'
 import { loadTrustConfig } from '../src/trust.ts'
 import { linuxSourceConfig } from './helpers/linux-source-build-fixture.ts'
@@ -1676,7 +1676,14 @@ describe.sequential('trusted staged CLI', () => {
       agentPreset: 'primary', bindingVersion: 1, generation: 1 }
     const instruction = store.recordOwnerInstruction({ instructionId: 'instruction-fixture', ownerReceipt: owner,
       ownerRouteId: owner.authorityId, planId: request.planId, pluginName: request.pluginName,
-      filesDigest: request.filesDigest, createdAt, expiresAt: request.expiresAt, idempotencyKey: request.idempotencyKey })
+      filesDigest: request.filesDigest, createdAt, expiresAt: request.expiresAt, idempotencyKey: request.idempotencyKey,
+      review: createOwnerInstructionReviewFreeze({
+        supplier: { provider: 'fixture-supplier', model: 'fixture-review-model' },
+        budget: { protocol: 'plugin-control-plane/owner-instruction-review-budget/v1',
+          authority: { protocol: 'assistant-growth/revision-acceptance-authority/v1', authorityId: 'fixture-revision-review',
+            keyId: 'fixture-review-key', authorityDigest: '9'.repeat(64), namePrefix: 'demo-', expiresAt: createdAt + 60_000 },
+          verifierKeyDigest: 'a'.repeat(64), window: { verificationMs: 1_800_000, regressionMs: 0, adoptionMs: 0 } },
+      }) })
     const generation = store.claimOwnerInstructionRequest(request.requestId, createdAt)
     expect(store.acceptOwnerInstructionRequest(request.requestId, generation!, { instructionId: instruction.instructionId, jobId })).toBe(true)
     store.close()
