@@ -23,7 +23,8 @@ function complete(withUsage = false): AsyncIterable<StreamChunk> {
 }
 async function consume(stream: AsyncIterable<StreamChunk>): Promise<void> { for await (const _chunk of stream) {} }
 
-function fixture(path = ':memory:', modelCalls = 2, toolCalls = 1, createdAt = Date.now()) {
+function fixture(path = ':memory:', modelCalls = 2, toolCalls = 1, createdAt = Date.now(),
+  frozenSupplier?: (record: GoalRecord) => { provider: string; model: string; reasoningEffort?: string } | undefined) {
   const hooks = new Map<string, Function>()
   const signal = new AbortController()
   const agent = { id: 'agent-a', options: { provider: 'unrelated', model: 'unrelated' }, session: { snapshotEvents: () => [] }, cancel: vi.fn() } as unknown as Agent
@@ -35,7 +36,7 @@ function fixture(path = ':memory:', modelCalls = 2, toolCalls = 1, createdAt = D
     effect(callback: () => () => void) { cleanup = callback() },
     get(name: string) { return name === 'agents' ? { currentInitiator: () => agent, get: (id: string) => id === agent.id ? agent : undefined } : undefined },
   } as unknown as Context
-  const runtime = new GoalBudgetRuntime(ctx, path, { mode: 'calls', routes: [{ provider: 'relay', model: 'test-model' }], modelCalls, toolCalls, durationMs: 60_000, maxOutputTokensPerCall: 16 }, () => ({ record, run, signal: signal.signal }))
+  const runtime = new GoalBudgetRuntime(ctx, path, { mode: 'calls', routes: [{ provider: 'relay', model: 'test-model' }], modelCalls, toolCalls, durationMs: 60_000, maxOutputTokensPerCall: 16 }, () => ({ record, run, signal: signal.signal }), frozenSupplier)
   const result = { runtime, record, agent, signal, stream: hooks.get('llm/stream') as StreamHook, request: hooks.get('agent/request') as RequestHook, tool: hooks.get('tools/execute') as ToolHook, dispose: () => cleanup?.() }
   contexts.push(result)
   return result
@@ -97,6 +98,36 @@ describe('calls-only goal budget runtime', () => {
     expect(value.agent.cancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'assistant-goals-budget-expired' })
     let dispatched = false
     await expect(consume(value.stream(options(), () => { dispatched = true; return complete() }))).rejects.toThrow('execution budget')
+    expect(dispatched).toBe(false)
+  })
+})
+describe('frozen owner supplier pin', () => {
+  const pinned = () => ({ provider: 'relay', model: 'test-model' })
+
+  it('rejects a different provider, model or reasoning effort before any downstream dispatch', async () => {
+    const value = fixture(':memory:', 2, 1, Date.now(), pinned)
+    let dispatched = false
+    await expect(consume(value.stream(options('other-model'), () => { dispatched = true; return complete() }))).rejects.toThrow('frozen owner supplier')
+    expect(dispatched).toBe(false)
+    await expect(value.request({ agent: value.agent }, async () => ({ ...options(), provider: 'other-provider' }))).rejects.toThrow('frozen owner supplier')
+    await expect(value.request({ agent: value.agent }, async () => ({ ...options(), reasoningEffort: 'high' as never }))).rejects.toThrow('frozen owner supplier')
+    await expect(consume(value.stream(options(), () => { dispatched = true; return complete() }))).resolves.toBeUndefined()
+    expect(dispatched).toBe(true)
+    expect(value.runtime.inspect(value.record)).toMatchObject({ modelCalls: 1, heldCalls: 0 })
+  })
+
+  it('treats an absent frozen effort as a value and accepts only the exact route', async () => {
+    const value = fixture(':memory:', 2, 1, Date.now(), () => ({ provider: 'relay', model: 'test-model', reasoningEffort: 'high' }))
+    await expect(consume(value.stream(options(), () => complete()))).rejects.toThrow('frozen owner supplier')
+    await expect(consume(value.stream({ ...options(), reasoningEffort: 'high' as never }, () => complete()))).resolves.toBeUndefined()
+  })
+
+  it('never rejects a goal without a frozen owner intent and fails closed if the pin cannot be read', async () => {
+    const unfrozen = fixture(':memory:', 2, 1, Date.now(), () => undefined)
+    await expect(consume(unfrozen.stream(options(), () => complete()))).resolves.toBeUndefined()
+    const broken = fixture(':memory:', 2, 1, Date.now(), () => { throw new Error('ledger unavailable') })
+    let dispatched = false
+    await expect(consume(broken.stream(options(), () => { dispatched = true; return complete() }))).rejects.toThrow('execution budget unavailable or exhausted')
     expect(dispatched).toBe(false)
   })
 })

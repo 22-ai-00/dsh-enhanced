@@ -17,6 +17,9 @@ async function tools(create: (objective: string, rounds?: number) => unknown) {
   registerGoalTools(ctx, {
     strategyEnabled: false, preauthorizedScheduleEnabled: false, eventWaitsEnabled: false,
     preauthorizedCreateEnabled: false, create: (_agent, objective, rounds) => create(objective, rounds),
+    // goal_create always enters through the owner-intent entry point; with the
+    // feature disabled that entry point delegates to the legacy create path.
+    createFromOwnerIntent: (_agent, objective, rounds) => create(objective, rounds),
     describe: value => `record:${String(value)}`,
   } as unknown as AssistantGoalsService)
   let call = 0
@@ -45,6 +48,25 @@ describe('goal_create native-round handoff', () => {
     }
   })
 
+  test('routes creation through the owner-intent entry point', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    let legacy = 0, guarded = 0
+    registerGoalTools(ctx, {
+      strategyEnabled: false, preauthorizedScheduleEnabled: false, eventWaitsEnabled: false,
+      preauthorizedCreateEnabled: false,
+      create: () => { legacy += 1; return { id: 'legacy' } },
+      createFromOwnerIntent: () => { guarded += 1; return { id: 'guarded' } },
+      describe: value => `record:${String(value)}`,
+    } as unknown as AssistantGoalsService)
+    const result = await ctx.tools.execute({
+      signal, callId: ToolCallId('goal-create-guarded'), name: 'goal_create', arguments: { objective: 'guarded' },
+    })
+    expect(result).toMatchObject({ isError: false })
+    expect({ guarded, legacy }).toEqual({ guarded: 1, legacy: 0 })
+  })
   test('does not conclude when creation fails', async () => {
     const call = await tools(() => { throw new Error('creation rejected') })
     const result = await call({ objective: 'failure', start_native_rounds: true })

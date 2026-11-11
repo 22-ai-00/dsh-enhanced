@@ -45,6 +45,8 @@ Host-only `routeWorkItemReport({ sourceId, workspace, originBindingId, idempoten
 
 `readOwnerForegroundToolInput` 使用同一真实当前调用证明，按 UTF-8 字节分页读取已经持久保存的人类输入，并返回实际记录的供应商冻结状态。每页最多 8192 字节；sourceDigest 绑定 task、原 envelope、全文和 model state，不随调用 ID、模型工具参数或页窗口变化。缺失/不一致 supplier 由执行消费者拒绝。它不接受任意 Inbox、来源或路径选择器，不读取模型生成的替代正文，不新建任务、发送消息或授予执行权限；调用前后 owner/native-call 变化会使读取失效。Delivery 当前 schema 为 31。
 
+Host-only `inspectOwnerForegroundToolCallForAgent(agent, { callId, toolName, argumentsJson })` 与 `readOwnerForegroundToolInputForAgent(agent, { callId, toolName, argumentsJson, offset?, maxBytes? })` 是上述两个 route-scoped 证明的 agent 作用域入口。调用方不得自带 route id：Delivery 对每个已配置 owner route 调 `validateOwnerAgentForRoute`，仅当恰好 1 条 route 通过当前身份复核时才委托给 `inspectOwnerForegroundToolCall` / `readOwnerForegroundToolInput`；0 条（匿名、未配置、撤权、binding 轮换）或多条（owner 授权歧义）一律返回 undefined，失败关闭。PTC 子调用、Host 直接调用、重复/已结算调用和参数不符仍按原有证明规则无回执，因此在前台模型调用中经由 PTC 发起的消费者一律得不到证明。两个入口只读、不授权、不证明任务成功，也不新增数据库迁移。
+
 
 Host-only `inspectOwnerRequestedChange(execution, { sourceId })` 限定当前认证 owner 主 Agent 的未结 `memory_manage` 或 `wiki_upsert` 原生调用。它复核已认领的原 Inbox、当前 turn、实际工具名与参数（最多 64 KiB）、owner lineage 和 binding 代次，返回 `prepareAgentApproval` 的精确 route、Inbox 原始正文及只含身份与摘要的 SHA256 receipt。空正文、附件单独输入、PTC、历史或已结算调用均无证明。正文可能包含引用文字；哪些内容构成 owner 指令仍须由 Policy 隔离审查。原生 Web 输入在派发时登记同一前台执行记录并在 drain 时结算，失败或取消不留待结记录。该只读接口不要求 RSI `ownerRoutes` 配置、不注册 Agent 工具，也不授权写入。
 

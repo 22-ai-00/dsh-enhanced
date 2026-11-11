@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
+import type { OwnerRouteAuthority } from '../src/types.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -25,7 +26,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture(channel: 'lark' | 'web' = 'lark') {
+async function fixture(channel: 'lark' | 'web' = 'lark', extraRoutes: readonly OwnerRouteAuthority[] = []) {
   const ownerPrincipal = channel === 'lark' ? principal
     : { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
   const ownerConversation = channel === 'lark' ? conversation
@@ -48,7 +49,7 @@ async function fixture(channel: 'lark' | 'web' = 'lark') {
   ] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'),
     spoolPath: join(root, 'spool'), schedulerEnabled: false,
-    ownerRoutes: channel === 'web' ? [] : [ownerAuthority] })
+    ownerRoutes: channel === 'web' ? [] : [ownerAuthority, ...extraRoutes] })
   const service = ctx.assistantDelivery
   const store = (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
   const challenge = service.issuePairing('test', ownerPrincipal)
@@ -314,6 +315,8 @@ test('rejects fake Agent, open unrelated turn, mismatched arguments, duplicate a
     parentCallId: ToolCallId('root-call'), subCallId: ToolCallId('native-call'),
     name: 'created_tool', arguments: { value: 7 } })
   expect(ptc.service.inspectOwnerForegroundToolCall(request(ptc))).toBeUndefined()
+  expect(ptc.service.inspectOwnerForegroundToolCallForAgent(ptc.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toBeUndefined()
   const late = await fixture()
   claim(late, 'event-late', 1)
   late.agent.session.append('turn/start', { turn: 1 })
@@ -368,4 +371,43 @@ test('rejects owner rotation and binding drift even while the original call rema
   const owner = revoked.store.getPrincipal(principal)!
   revoked.store.revokePrincipal(owner.id, owner.version)
   expect(revoked.service.inspectOwnerForegroundToolCall(request(revoked))).toBeUndefined()
+})
+test('resolves foreground proofs only from the caller Agent unique configured owner route', async () => {
+  const f = await fixture()
+  claim(f, 'agent-scoped', 1, '主人原话：只从唯一 route 取证明。')
+  appendCall(f.agent, 1, 'native-call')
+  const routeProof = f.service.inspectOwnerForegroundToolCall(request(f))
+  expect(routeProof).toBeDefined()
+  expect(f.service.inspectOwnerForegroundToolCallForAgent(f.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toEqual(routeProof)
+  const page = f.service.readOwnerForegroundToolInputForAgent(f.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}', maxBytes: 4 })!
+  expect(page).toMatchObject({ protocol: 'assistant-delivery/foreground-tool-input/v1',
+    input: { offset: 0, fullBytes: Buffer.byteLength('主人原话：只从唯一 route 取证明。') } })
+  expect(page.input.returnedBytes).toBeGreaterThan(0)
+  expect(page.input.returnedBytes).toBeLessThanOrEqual(4)
+  expect(page.attestation).toEqual(routeProof)
+  // A caller cannot smuggle a route selector through the agent-scoped entry.
+  expect(f.service.inspectOwnerForegroundToolCallForAgent(f.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}', authorityId: 'owner-route' } as never)).toBeUndefined()
+  expect(f.service.readOwnerForegroundToolInputForAgent(f.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}', authorityId: 'owner-route' } as never)).toBeUndefined()
+
+  // Zero configured routes: fail closed instead of trusting a caller-selected route.
+  const anonymous = await fixture('web')
+  expect(anonymous.service.inspectOwnerForegroundToolCallForAgent(anonymous.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toBeUndefined()
+  expect(anonymous.service.readOwnerForegroundToolInputForAgent(anonymous.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toBeUndefined()
+
+  // Two routes that both revalidate for the same live session are ambiguous.
+  const ambiguous = await fixture('lark', [{ ...authority, id: 'owner-route-second' }])
+  claim(ambiguous, 'ambiguous-route', 1)
+  appendCall(ambiguous.agent, 1, 'native-call')
+  expect(ambiguous.service.inspectOwnerForegroundToolCall({ ...request(ambiguous), authorityId: authority.id })).toBeDefined()
+  expect(ambiguous.service.inspectOwnerForegroundToolCall({ ...request(ambiguous), authorityId: 'owner-route-second' })).toBeDefined()
+  expect(ambiguous.service.inspectOwnerForegroundToolCallForAgent(ambiguous.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toBeUndefined()
+  expect(ambiguous.service.readOwnerForegroundToolInputForAgent(ambiguous.agent,
+    { callId: 'native-call', toolName: 'created_tool', argumentsJson: '{"value":7}' })).toBeUndefined()
 })

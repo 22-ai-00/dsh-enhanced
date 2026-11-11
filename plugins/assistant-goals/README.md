@@ -27,6 +27,7 @@ Host 须提供 `0.1.5-rc.3` 的 AgentRegistry、GoalService、SessionProjectionR
     maxContextChars: 12000
     verifyNativeRounds: false
     stepMaxDurationMs: 60000
+#    ownerIntent: true
 #    backgroundWake:
 #      ownerRouteId: local/owner
 #      budgetId: goal-budget/owner
@@ -54,6 +55,18 @@ Host 须提供 `0.1.5-rc.3` 的 AgentRegistry、GoalService、SessionProjectionR
 ## 使用
 
 在已认证 owner 的当前人类回合中，用 `goal_create {"objective":"完成九月交付报告","max_goal_rounds":2}` 创建目标。DSH 原生 `create_goal` 只接受 `source.kind: user`；Delivery 保留真实 `delivery` 来源，由本插件核验 owner 当前 turn 后调用原生 GoalService，不伪造直接用户消息。工具执行权限还须按现有 Host/Policy 授权 `goal_create`、`goal_context`、`goal_checkpoint` 和 `goal_control`。
+
+### 冻结认证 owner 原始意图（可选）
+
+`ownerIntent: true` 时，`goal_create` 不再只信任模型给出的 `objective`。插件通过 Delivery 的 agent 作用域只读证明读取本次真实前台调用的人类原文（调用方不能自带 owner route id），按 4096 字节分页拼回全文（总上限 65,536 字节），要求供应商状态为 `frozen`、每页 attestation 与首次 proof 摘要相等、读完后 proof 仍未变化，并核对 task 的 session/scope/owner/binding 与当前 owner 回合并逐字要求 `objective` 出现在 owner 原文中（首次出现位置被冻结；改写、翻译、trim 不一致或未出现均拒绝）。冻结意图写入私有侧库 `databasePath + '.owner-intents'`，以业务目标 ID 和定义摘要为键；预算运行时还会在每次真实模型请求前要求 provider/model/reasoningEffort 与冻结 supplier 精确相等。Delivery 只接受当前 session 恰好匹配 1 条 owner route：0 条、多条、伪造或已结算调用、proof 中途变化、供应商非冻结都失败关闭且不创建原生目标。`goal_create` 若在 PTC 子调用中发起，Delivery 的未结算原生调用证明会拒绝，属预期失败关闭。未配置 `ownerIntent` 时完全保持原路径，不读取任何 foreground 证明 API；启用时 `databasePath` 必须是持久私有文件（`:memory:` 在启动时即拒绝）。
+
+冻结后的约束与数据面：
+
+- **supplier pin 覆盖该 goal 内所有真实模型请求**：前台继续回合、scheduled wake 恢复后的模型切换、以及 `goal_strategy` 的 `investigate`/`review`/`compare` 子调用都必须与冻结的 provider/model/reasoningEffort 一致（缺省 effort 也视为一个值），否则在派发前被拒绝。需要改线路时只能新建目标，不能静默切换。
+- **objective 不能被原地修改**：在已有冻结 intent 的 goal 上调用 `goal_control` 的 `edit` 会直接拒绝（`the objective is bound to the authenticated owner request; create a new goal to change it`）；如需新目标请新建 goal。若通过其它原生入口绕过了 business control 并改变了定义，`ownerIntent()` 会因 `definition_digest` 不一致返回 `undefined`（stale binding），预算的 supplier pin 也会 fail-closed，绝不退化为“无 pin”。
+- **新增数据面**：侧库 `databasePath + '.owner-intents'` 是私有 SQLite 文件（0600、WAL/SHM，打开时校验文件权限与精确 schema），每行最多保存 65,536 字节人类原文的冻结 JSON 与 digest；它不含凭据或工具参数，但属于新增的磁盘数据面，备份/清理策略应覆盖它。
+- **失败回滚与崩溃窗口**：原生目标创建成功但侧库写入失败时，插件会尝试 `clear` 刚创建的原生目标：成功则报告“native goal was rolled back”，失败则报告“native goal exists without a frozen owner intent; inspect and clear it before use”。已知限制：若进程恰在 native create 与 side record 之间崩溃，会留下一个没有冻结证明的目标；恢复时必须先检查并清理，绝不能把它当作已冻结目标使用。
+- **对端版本**：Delivery 必须提供 agent 作用域的 `inspectOwnerForegroundToolCallForAgent` / `readOwnerForegroundToolInputForAgent`；旧 Host 缺少这些只读 API 时，`ownerIntent: true` 会以 `owner intent proof is unavailable` fail-closed（不静默降级）。
 
 插件在 `goal/changed` 时建立业务记录。安装前已有或身份不明时创建的目标不会被追认，以免归属转移泄漏历史。创建不覆盖尚未完成的原生目标；原生状态为 complete 后可按 DSH 规则创建新的 GoalId，旧业务记录仍保留为待验收；如果目标已经创建而业务索引失败，会明确报告部分完成，先检查原生目标再重试。已有 Host goal-round-driver 若已启用，会按其原生规则继续执行新目标；本插件自身不启用该 driver。
 

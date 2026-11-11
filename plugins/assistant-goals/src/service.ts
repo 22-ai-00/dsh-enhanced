@@ -33,13 +33,16 @@ import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-f
 import { failureSummaryEvidenceDigest, OwnerVerifiedWorkflowSourceError, ownerGoalRunProof, verifiedWorkflowSource, verifiedWorkflowSourceChain, type VerifiedWorkflowSource } from './verified-workflow.js'
 import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
 import { assertGoalDependenciesAchieved, goalDependencies } from './dependency.js'
+import { buildGoalOwnerIntent, ownerIntentObjectiveSpan, type GoalOwnerIntent, type GoalOwnerIntentDelivery } from './owner-intent.js'
+import { GoalOwnerIntentStore, goalOwnerIntentSupplier } from './owner-intent-store.js'
 
-export interface Config { eventWaits?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
+export interface Config { eventWaits?: boolean; ownerIntent?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   preauthorizedCreateMaxRounds: Schema.number().step(1).min(0).max(32).default(0),
   preauthorizedSchedule: Schema.boolean().default(false),
   eventWaits: Schema.boolean().default(false),
+  ownerIntent: Schema.boolean().default(false),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   verifyGoalOutcome: Schema.boolean().default(false),
@@ -287,6 +290,8 @@ export class AssistantGoalsService extends Service {
   #wake: GoalWakeRuntime | undefined
   #outcome: GoalOutcomeRuntime | undefined
   #eventWait: GoalEventWaitRuntime | undefined
+  /** Set only when owner intent freezing is enabled; every Goal still needs its own frozen proof. */
+  #ownerIntent: { store: GoalOwnerIntentStore } | undefined
   readonly #ownerRepairBindings = new Map<Agent, { scope: GoalScope; ownerRouteId: string; expiresAt: number; routeReceipt: unknown; currentAuthority: () => void; dispose: () => void }>()
   readonly eventWaitsEnabled!: boolean
   readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
@@ -322,8 +327,17 @@ export class AssistantGoalsService extends Service {
     if (input.eventWaits !== undefined && typeof input.eventWaits !== 'boolean') throw new Error('assistant-goals: eventWaits must be boolean')
     Object.defineProperty(this, 'eventWaitsEnabled', { value: input.eventWaits === true, enumerable: true, writable: false, configurable: false })
     if (this.eventWaitsEnabled && (wake === undefined || budget === undefined || path === ':memory:' || input.verifyGoalOutcome !== true)) throw new Error('assistant-goals: event waits require durable wake, budgets and verified outcomes')
+    if (input.ownerIntent !== undefined && typeof input.ownerIntent !== 'boolean') throw new Error('assistant-goals: ownerIntent must be boolean')
+    const ownerIntent = input.ownerIntent === true
+    // The side ledger must be a durable private file: an in-memory goal database
+    // cannot prove its intent ledger survived the exact owner request.
+    if (ownerIntent && path === ':memory:') throw new Error('assistant-goals: owner intent requires a durable private database file')
     this.#store = new GoalStore(path)
-    ctx.effect(() => () => { this.#active = false; for (const binding of this.#ownerRepairBindings.values()) binding.dispose(); this.#ownerRepairBindings.clear(); this.#store.close() }, 'assistant-goals.store')
+    if (ownerIntent) {
+      try { this.#ownerIntent = { store: new GoalOwnerIntentStore(`${path}.owner-intents`) } }
+      catch (error) { this.#store.close(); throw error }
+    }
+    ctx.effect(() => () => { this.#active = false; for (const binding of this.#ownerRepairBindings.values()) binding.dispose(); this.#ownerRepairBindings.clear(); this.#store.close(); this.#ownerIntent?.store.close() }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, (agent, consume = true) => {
       const scope = this.#scope(agent, 'execute', consume)
       const record = this.#observe(agent, false, consume)
@@ -347,7 +361,8 @@ export class AssistantGoalsService extends Service {
       try { this.#outcome?.reconcileCompletion(agent) } catch { /* Missing authority leaves completion visibly pending. */ }
       return await next()
     })
-    if (budget !== undefined) this.#budget = new GoalBudgetRuntime(ctx, path === ':memory:' ? path : `${path}.budgets`, budget, this.#execution.budgetState)
+    if (budget !== undefined) this.#budget = new GoalBudgetRuntime(ctx, path === ':memory:' ? path : `${path}.budgets`, budget, this.#execution.budgetState,
+      record => goalOwnerIntentSupplier(this.#ownerIntent?.store, record))
     if (strategy) ctx.inject(['subagents'], runtime => {
       const instance = new GoalStrategyRuntime(runtime, `${path}.strategies`, strategy, {
         budget: this.#budget!, current: parent => {
@@ -611,6 +626,9 @@ export class AssistantGoalsService extends Service {
       const scope = this.#scope(execution.agent, 'create', false)
       this.#scope(execution.agent, 'observe', false)
       this.#requireOwnerTurn(execution.agent!, scope)
+      // Preauthorization is a read-only prediction of the same frozen proof the
+      // real execution will require; it never writes or consumes a budget.
+      if (this.#ownerIntent !== undefined) this.#freezeOwnerIntent(execution.agent!, execution, objective, scope)
       this.#outcome!.preflight(scope, objective)
       const verifier = this.ctx.get('assistantVerifier', false)!
       return (['goal-step', 'goal-outcome'] as const).every(taskKind => {
@@ -649,6 +667,89 @@ export class AssistantGoalsService extends Service {
       : 'assistant-goals: native goal created but context or whole-goal acceptance is unavailable; inspect the current native goal and exact acceptance profile before retrying')
   }
 
+  /**
+   * Create one goal from the live authenticated owner tool call after freezing
+   * the real owner text, supplier and call identity. Disabled (undefined
+   * ledger) keeps the historical create path; enabled means every native goal
+   * creation requires a fresh Delivery proof and fails closed otherwise.
+   */
+  createFromOwnerIntent = (execution: ToolExecution, objective: string, maxGoalRounds?: number): GoalRecord => {
+    if (this.#ownerIntent === undefined) return this.create(execution.agent, objective, maxGoalRounds)
+    const agent = execution.agent
+    if (agent === undefined) throw new Error('assistant-goals: owner intent requires the live owner tool call')
+    if (this.#createMaxRounds > 0) {
+      maxGoalRounds ??= this.#createMaxRounds
+      if (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1 || maxGoalRounds > this.#createMaxRounds) throw new Error('assistant-goals: configured creation round limit exceeded')
+    }
+    const scope = this.#scope(agent, 'create')
+    this.#scope(agent, 'observe')
+    this.#requireOwnerTurn(agent, scope)
+    if (typeof objective !== 'string' || objective.trim().length === 0 || objective.length > 16384) throw new Error('assistant-goals: invalid objective')
+    if (maxGoalRounds !== undefined && (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1)) throw new Error('assistant-goals: invalid round limit')
+    const intent = this.#freezeOwnerIntent(agent, execution, objective, scope)
+    const native = this.ctx.get('goals')
+    if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
+    // Match the native domain's normalization before looking up exact profiles.
+    this.#outcome?.preflight(scope, objective.trim())
+    native.create(agent, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) })
+    let record: GoalRecord | undefined
+    try { record = this.#observe(agent, true); if (record !== undefined) this.#bindOutcome(agent, record) } catch { record = undefined }
+    if (record === undefined) {
+      // Never attach the frozen intent to a goal we could not read back.
+      throw new Error(this.#outcome === undefined
+        ? 'assistant-goals: native goal created but context could not be indexed; inspect the current native goal before retrying'
+        : 'assistant-goals: native goal created but context or whole-goal acceptance is unavailable; inspect the current native goal and exact acceptance profile before retrying')
+    }
+    try { this.#ownerIntent.store.record(intent, record.id, record.definition.digest) } catch (error) {
+      // The native goal must never survive without its frozen proof. Roll it
+      // back and report which outcome the caller must inspect.
+      let rolledBack = false
+      try {
+        const current = native.get(agent)
+        if (current === undefined) rolledBack = true
+        else if (String(current.id) === record.native.goalId) {
+          native.clear(agent, { id: current.id, revision: current.revision })
+          rolledBack = native.get(agent) === undefined
+        }
+      } catch { rolledBack = false }
+      throw new Error(rolledBack
+        ? 'assistant-goals: native goal created but the owner intent could not be recorded; the native goal was rolled back'
+        : 'assistant-goals: native goal created without a frozen owner intent; inspect and clear it before use', { cause: error })
+    }
+    return record
+  }
+
+  #freezeOwnerIntent(agent: Agent, execution: ToolExecution, objective: string, scope: GoalScope): GoalOwnerIntent {
+    const delivery = this.ctx.get('assistantDelivery') as unknown as GoalOwnerIntentDelivery | undefined
+    if (delivery === undefined || typeof delivery.inspectOwnerForegroundToolCallForAgent !== 'function'
+      || typeof delivery.readOwnerForegroundToolInputForAgent !== 'function') throw new Error('assistant-goals: owner intent proof is unavailable')
+    const intent = buildGoalOwnerIntent({ delivery, agent, execution, scope })
+    // The model selects only words already present verbatim in the owner input;
+    // the frozen span must be exactly the span of the live objective argument.
+    const span = ownerIntentObjectiveSpan(intent.text, objective)
+    if (objective !== intent.objective.text || span.start !== intent.objective.start || span.end !== intent.objective.end) {
+      throw new Error("assistant-goals: objective must quote the owner's original words verbatim")
+    }
+    return intent
+  }
+
+  /**
+   * Host-only read of the frozen owner intent for one owner-scoped business
+   * goal. A stored row whose definition digest no longer matches the current
+   * goal definition is a stale binding and returns undefined instead of
+   * silently authorizing a different objective.
+   */
+  ownerIntent = (agent: Agent | undefined, goalId: string): GoalOwnerIntent | undefined => {
+    const store = this.#ownerIntent?.store
+    if (store === undefined) return undefined
+    const scope = this.#scope(agent, 'inspect')
+    const record = this.#store.get(scope, goalId)
+    if (record === undefined) return undefined
+    const stored = store.inspect(goalId)
+    if (stored === undefined || stored.definitionDigest !== record.definition.digest) return undefined
+    return stored.intent
+  }
+
   control = (agent: Agent | undefined, value: GoalControlInput): GoalRecord => {
     const input = this.#controlInput(value)
     const scope = this.#scope(agent, input.operation)
@@ -656,6 +757,12 @@ export class AssistantGoalsService extends Service {
     this.#requireOwnerTurn(agent!, scope)
     const record = this.#store.get(scope, input.goalId)
     if (record === undefined) throw new Error('assistant-goals: goal not found')
+    // A frozen owner intent binds the objective to the authenticated owner's
+    // words. Editing it would silently break that proof and orphan the ledger
+    // row, so the caller must create a new goal instead.
+    if (input.operation === 'edit' && this.#ownerIntent?.store.inspect(input.goalId) !== undefined) {
+      throw new Error('assistant-goals: the objective is bound to the authenticated owner request; create a new goal to change it')
+    }
     const native = this.ctx.get('goals')
     if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
     const current = native.get(agent!)

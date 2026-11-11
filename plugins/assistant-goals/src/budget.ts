@@ -5,6 +5,7 @@ import type { GenerateOptions, TokenUsage, StreamChunk } from '@deepseek-ai/dsh-
 import { GoalBudgetStore } from './budget-store.js'
 import type { GoalBudgetLimits, GoalBudgetScope, GoalBudgetRoute } from './budget-store.js'
 import type { GoalExecutionRun, GoalRecord } from './types.js'
+import type { GoalOwnerIntentSupplier } from './owner-intent.js'
 import { isStrategyChild } from './strategy-identity.js'
 
 export type GoalBudgetDelegateResolver = (agent: Agent) => { parent: Agent; runId: string; signal: AbortSignal; provider: string; model: string; accountingRunId: string } | undefined
@@ -95,7 +96,9 @@ export class GoalBudgetRuntime {
   #delegateResolver: GoalBudgetDelegateResolver | undefined
 
   constructor(private readonly ctx: Context, path: string, readonly config: Readonly<GoalBudgetConfig>,
-    private readonly current: (agent: Agent) => { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined) {
+    private readonly current: (agent: Agent) => { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined,
+    /** Read-only lookup of an owner-frozen supplier; absent means no pin for that goal. */
+    private readonly frozenSupplier?: (record: GoalRecord) => GoalOwnerIntentSupplier | undefined) {
     this.#store = new GoalBudgetStore(path)
     ctx.on('agent/request', async ({ agent }, next) => {
       const diagnostic = isStrategyChild(agent)
@@ -105,6 +108,7 @@ export class GoalBudgetRuntime {
       try {
         const bound = this.#current(agent)
         if (bound === undefined) return request
+        this.#assertSupplier(bound.record, request)
         const budget = this.inspect(bound.record)
         if (budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) { if (diagnostic) this.#note(agent, 'request-limit', false); fail() }
         if (this.#deadlines.get(agent)?.runId !== bound.run.intent.runId) {
@@ -163,6 +167,7 @@ export class GoalBudgetRuntime {
     let dispatched = false
     try {
       stage = 'meter'
+      this.#assertSupplier(bound.record, options)
       if (this.#inflight.has(agent) || (this.config.mode !== 'calls' && meter === undefined)) fail()
       if (this.config.mode === 'calls' && !this.#routeAllowed(options)) fail()
       stage = 'admission'
@@ -299,6 +304,17 @@ export class GoalBudgetRuntime {
       : { mode: 'tokens', routes: [], modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls, inputTokens: this.config.inputTokens, outputTokens: this.config.outputTokens, costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
   }
   #routeAllowed(route: { provider?: string; model?: string }): boolean { return this.config.mode === 'calls' && this.config.routes.some(item => item.provider === route.provider && item.model === route.model) }
+  #pinnedSupplier(record: GoalRecord): GoalOwnerIntentSupplier | undefined {
+    try { return this.frozenSupplier?.(record) } catch { fail() }
+  }
+  /** Exact provider/model/effort pin; a goal without a frozen owner intent is never rejected. */
+  #assertSupplier(record: GoalRecord, route: { provider?: string; model?: string; reasoningEffort?: string }): void {
+    const supplier = this.#pinnedSupplier(record)
+    if (supplier === undefined) return
+    if (route.provider !== supplier.provider || route.model !== supplier.model || route.reasoningEffort !== supplier.reasoningEffort) {
+      throw new Error('assistant-goals: model supplier differs from the frozen owner supplier')
+    }
+  }
   #assert(agent: Agent, run: GoalExecutionRun, meter: Readonly<GoalBudgetMeter> | undefined, options: GenerateOptions): void {
     const bound = this.#current(agent)
     if (!this.#active || this.ctx.get('agents')?.get(agent.id) !== agent

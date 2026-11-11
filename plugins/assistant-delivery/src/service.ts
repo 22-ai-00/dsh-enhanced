@@ -2827,6 +2827,52 @@ export class AssistantDeliveryService extends Service {
       attestation, ...page })
   }
 
+  /**
+   * The live caller's unique configured owner route. A caller never names a
+   * route here: zero matching routes (anonymous, unconfigured, or failed
+   * revalidation) and more than one matching route (ambiguous owner authority)
+   * both fail closed.
+   */
+  private ownerRouteForAgent(agent: Agent): string | undefined {
+    if (!this.active || typeof agent !== 'object' || agent === null || agent.session === undefined) return undefined
+    let resolved: string | undefined
+    try {
+      for (const authorityId of this.ownerRoutes.keys()) {
+        if (this.validateOwnerAgentForRoute(agent, authorityId) === undefined) continue
+        if (resolved !== undefined) return undefined
+        resolved = authorityId
+      }
+    } catch { return undefined }
+    return resolved
+  }
+
+  /** Host-only proof resolved from the caller Agent's unique live owner route. */
+  inspectOwnerForegroundToolCallForAgent(agent: Agent, input: Readonly<{
+    callId: string; toolName: string; argumentsJson: string
+  }>): Readonly<ForegroundToolCallAttestation> | undefined {
+    if (!input || typeof input !== 'object' || Reflect.ownKeys(input).some(key => typeof key !== 'string'
+      || !['callId', 'toolName', 'argumentsJson'].includes(key))) return undefined
+    const authorityId = this.ownerRouteForAgent(agent)
+    if (authorityId === undefined) return undefined
+    return this.inspectOwnerForegroundToolCall({ agent, authorityId, callId: input.callId,
+      toolName: input.toolName, argumentsJson: input.argumentsJson })
+  }
+
+  /** Read-only human-input pages resolved from the caller Agent's unique live
+   * owner route; the caller cannot select an Inbox, route, owner or replacement text. */
+  readOwnerForegroundToolInputForAgent(agent: Agent, input: Readonly<{
+    callId: string; toolName: string; argumentsJson: string; offset?: number; maxBytes?: number
+  }>): Readonly<OwnerForegroundToolInput> | undefined {
+    if (!input || typeof input !== 'object' || Reflect.ownKeys(input).some(key => typeof key !== 'string'
+      || !['callId', 'toolName', 'argumentsJson', 'offset', 'maxBytes'].includes(key))) return undefined
+    const authorityId = this.ownerRouteForAgent(agent)
+    if (authorityId === undefined) return undefined
+    return this.readOwnerForegroundToolInput({ agent, authorityId, callId: input.callId,
+      toolName: input.toolName, argumentsJson: input.argumentsJson,
+      ...(input.offset === undefined ? {} : { offset: input.offset }),
+      ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }) })
+  }
+
   /** Host-only, read-only source proof for an owner's live memory or wiki tool call. */
   inspectOwnerRequestedChange(
     execution: ToolExecution,
