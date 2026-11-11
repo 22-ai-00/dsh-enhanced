@@ -313,7 +313,14 @@ async function acquireLock(root: string, signal: AbortSignal): Promise<() => Pro
         throw error
       }
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const age = Date.now() - (await stat(lock)).mtimeMs
+      // The current owner may release between our EEXIST and this stat. That is
+      // not a failure: the lock is simply free again, so retry acquisition.
+      let age: number
+      try { age = Date.now() - (await stat(lock)).mtimeMs }
+      catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw statError
+      }
       if (age > 60_000) {
         try {
           const owner = JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8')) as { pid?: number }
