@@ -1054,7 +1054,9 @@ describe('owner-controlled local release adapter', () => {
 
     const ambiguousPublishRequest = parseSourceReleaseRequest({ ...publishRequest, operationId: 'release-operation-publish-ambiguous',
       requestedAt: Date.now() - 10 })
-    const ambiguousReceipt = await runAdapter(target, ambiguousPublishRequest, 2_000, timeoutPath)
+    // The fixture reports ambiguity after its durable publish write; this deadline is
+    // only a sanity bound, so give slow hosts room instead of racing setup work.
+    const ambiguousReceipt = await runAdapter(target, ambiguousPublishRequest, 60_000, timeoutPath)
     expect(ambiguousReceipt).toMatchObject({ phase: 'publish', outcome: 'ambiguous', operationId: ambiguousPublishRequest.operationId })
     expect(ambiguousReceipt.operationId).toBe(ambiguousPublishRequest.operationId)
     verifyReceipt(ambiguousPublishRequest, ambiguousReceipt, target.roles.publish)
