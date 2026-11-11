@@ -146,17 +146,18 @@ jobs:
           # only starts plugin-control-plane after ~297s, and that package alone
           # needs ~1052s, so it takes a background slot from t=0 instead. The two
           # slots plus the two-pack-wide foreground keep four packages running,
-          # the same load as before.
+          # the same load as before. plugin-control-plane is the critical path, so the two
+          # sibling lanes run at lower CPU priority and only use cores it is not using.
           control_plane_log="${RUNNER_TEMP}/package-tests-plugin-control-plane.log"
           lark_channel_log="${RUNNER_TEMP}/package-tests-lark-channel.log"
           rest_log="${RUNNER_TEMP}/package-tests-rest.log"
           pnpm run test:packages:control-plane > "${control_plane_log}" 2>&1 &
           control_plane_pid=$!
-          pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &
+          nice -n 10 pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &
           lark_channel_pid=$!
 
           rest_status=0
-          pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?
+          nice -n 10 pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?
           # Wait for both slots even when the foreground already failed so no
           # package test process outlives the step and the full logs survive.
           control_plane_status=0
