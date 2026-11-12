@@ -193,9 +193,12 @@ function localLockfile(plan: PluginActivationPlan, artifactPath: string, approve
   return `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n${dependencies}packages:\n${packages}snapshots:\n`
 }
 
-function localLockfileForDescriptor(plan: PluginActivationPlan): string {
-  const descriptor = `/proc/${process.pid}/fd/FD`
-  return localLockfile(plan, descriptor)
+function localLockfileForDescriptor(plan: PluginActivationPlan, approvedArtifactPath?: string): string {
+  const activationId = plan.activation?.id
+  if (activationId === undefined) throw new Error('descriptor lockfile fixture requires a claimed activation')
+  const cachePath = approvedArtifactPath ?? join(plan.target.dshHome, 'plugin-control', 'activation-artifacts',
+    activationId, `${createHash('sha256').update(plan.dossier.packages[0]!.package).digest('hex')}.tgz`)
+  return localLockfile(plan, cachePath)
 }
 
 function installedPackages(plan: PluginActivationPlan): string {
@@ -801,7 +804,7 @@ describe.sequential('trusted staged CLI', () => {
     expect(await readFile(value.executor, 'utf8')).toContain('evil')
   })
 
-  test('snapshots a verified local artifact before invoking the executor and installs only from the private copy', async () => {
+  test('regression: local artifact install spec is the stable .tgz cache path, never a descriptor URL', async () => {
     const value = await fixture(); const { plan, reference } = await approvedLocal(value, 'local-artifact', Buffer.from('verified-tarball'))
     const log = join(value.root, 'executor.log')
     const claimedStore = new ControlPlaneStore({ path: value.state })
@@ -814,7 +817,9 @@ describe.sequential('trusted staged CLI', () => {
       DSH_TEST_PACKAGES: installedPackages(claimed), DSH_TEST_EXECUTOR_LOG: log, DSH_TEST_FAIL: '0' }
     await withEnvironment(environment, () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)]))
     const calls = await readFile(log, 'utf8')
-    expect(calls).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+    expect(calls).toContain(pathToFileURL(cachePath).href)
+    expect(calls).toMatch(/\.tgz/u)
+    expect(calls).not.toMatch(/file:\/\/\/proc\//u)
     expect(calls).not.toContain(reference)
     expect(await readFile(cachePath)).toEqual(Buffer.from('verified-tarball'))
     expect((await stat(cachePath)).mode & 0o777).toBe(0o400)
@@ -845,11 +850,12 @@ describe.sequential('trusted staged CLI', () => {
     () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)]))
     expect(await readFile(source, 'utf8')).toBe('attacker')
     expect(await readFile(cachePath, 'utf8')).toBe('approved')
-    expect(await readFile(log, 'utf8')).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+    expect(await readFile(log, 'utf8')).toContain(pathToFileURL(cachePath).href)
+    expect(await readFile(log, 'utf8')).not.toMatch(/file:\/\/\/proc\//u)
     expect(await readFile(log, 'utf8')).not.toContain(reference)
   })
 
-  test('keeps local artifact bytes descriptor-pinned across the executor to package-manager boundary', async () => {
+  test('installs a local artifact from the stable cache path and observes a same-owner swap', async () => {
     const value = await fixture(); const { plan } = await approvedLocal(value, 'artifact-cache-swap', Buffer.from('approved-bytes'))
     const claimedStore = new ControlPlaneStore({ path: value.state }); const claimed = await claimedStore.claimActivation(claimInput(plan)); claimedStore.close()
     const cachePath = join(value.dshHome, 'plugin-control', 'activation-artifacts', claimed.activation!.id,
@@ -861,9 +867,34 @@ describe.sequential('trusted staged CLI', () => {
       DSH_TEST_ARTIFACT_ARGUMENT_LOG: argumentLog, DSH_TEST_ARTIFACT_BYTES_LOG: bytesLog, DSH_TEST_ARTIFACT_SWAP_SOURCE: cachePath,
       DSH_TEST_ARTIFACT_SWAP_REPLACEMENT: replacement },
     () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)]))
+    // The package manager now reads the stable cache path, so a same-owner swap
+    // can be observed by the installer. The actual security boundary is the
+    // post-install lockfile/manifest integrity check (verifyApprovedPackagesInLockfile)
+    // against the approved integrity, which fails closed for different bytes.
     expect(await readFile(cachePath, 'utf8')).toBe('evil-bytes')
-    expect(await readFile(bytesLog, 'utf8')).toBe('approved-bytes')
-    expect(await readFile(argumentLog, 'utf8')).toMatch(new RegExp(`^file:///proc/${process.pid}/fd/[0-9]+\\n$`, 'u'))
+    expect(await readFile(argumentLog, 'utf8')).toBe(pathToFileURL(cachePath).href + '\n')
+  })
+
+  test('rejects a swapped local artifact through the post-install integrity check', async () => {
+    // The package manager reads the stable cache path, so a same-owner swap is
+    // only caught after install: the lockfile it writes carries the swapped
+    // bytes' integrity, which verifyApprovedPackagesInLockfile compares against
+    // the catalog-approved sha512 and rejects.
+    const value = await fixture(); const { plan } = await approvedLocal(value, 'artifact-integrity-swap', Buffer.from('approved-bytes'))
+    const claimedStore = new ControlPlaneStore({ path: value.state }); const claimed = await claimedStore.claimActivation(claimInput(plan)); claimedStore.close()
+    const cachePath = join(value.dshHome, 'plugin-control', 'activation-artifacts', claimed.activation!.id,
+      `${createHash('sha256').update(candidate.package).digest('hex')}.tgz`)
+    const replacement = join(value.root, 'evil-cache.tgz'); await writeFile(replacement, 'evil-bytes', { mode: 0o400 })
+    const swappedIntegrity = `sha512-${createHash('sha512').update('evil-bytes').digest('base64')}`
+    const approvedIntegrity = claimed.dossier.packages[0]!.integrity
+    expect(swappedIntegrity).not.toBe(approvedIntegrity)
+    const installedLockfile = localLockfileForDescriptor(claimed).replace(approvedIntegrity, swappedIntegrity)
+    const raw = new DatabaseSync(value.state); raw.prepare('UPDATE activation_plans SET activation_lease_until = 0 WHERE id = ?').run(plan.id); raw.close()
+    await expect(withEnvironment({ ...activationEnvironment(value, claimed), DSH_TEST_LOCK: installedLockfile,
+      DSH_TEST_ARTIFACT_SWAP_SOURCE: cachePath, DSH_TEST_ARTIFACT_SWAP_REPLACEMENT: replacement },
+    () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)])))
+      .rejects.toThrow(/approved local artifact|integrity/u)
+    const inspect = new ControlPlaneStore({ path: value.state }); expect(inspect.getPlan(plan.id).status).toBe('rolled-back'); inspect.close()
   })
 
   test('rejects a wrong installed manifest after local artifact installation', async () => {
@@ -918,7 +949,8 @@ describe.sequential('trusted staged CLI', () => {
       expect(seen.path).toBe(`/packages/${encodedScope}/${candidate.version}/package.tgz`)
       expect(seen.authorization).toBe('Bearer fixture-token')
       const calls = await readFile(log, 'utf8')
-      expect(calls).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+      expect(calls).toContain(pathToFileURL(cachePath).href)
+    expect(calls).not.toMatch(/file:\/\/\/proc\//u)
       expect(calls).not.toContain('fixture-token')
       expect(await readFile(cachePath)).toEqual(bytes)
       expect((await stat(cachePath)).mode & 0o777).toBe(0o400)
@@ -959,7 +991,8 @@ describe.sequential('trusted staged CLI', () => {
         { path: tarballPath, authorization: 'Bearer fixture-token' }])
       expect(await readFile(cachePath)).toEqual(bytes)
       expect((await stat(cachePath)).mode & 0o777).toBe(0o400)
-      expect(await readFile(log, 'utf8')).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+      expect(await readFile(log, 'utf8')).toContain(pathToFileURL(cachePath).href)
+    expect(await readFile(log, 'utf8')).not.toMatch(/file:\/\/\/proc\//u)
       const inspect = new ControlPlaneStore({ path: value.state })
       expect(inspect.getPlan(plan.id).status).toBe('awaiting-reload'); inspect.close()
     } finally { await server.close() }

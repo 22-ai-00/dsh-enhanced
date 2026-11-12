@@ -475,11 +475,6 @@ async function syncDirectory(path: string): Promise<void> {
   try { await directory.sync() } finally { await directory.close() }
 }
 
-function descriptorReference(handle: FileHandle): string {
-  assertDescriptorFileSystem('local artifact activation')
-  return `/proc/${process.pid}/fd/${handle.fd}`
-}
-
 async function verifyActivationArtifactSnapshot(snapshot: ActivationArtifactSnapshot): Promise<void> {
   const before = await snapshot.handle.stat({ bigint: true })
   if (!before.isFile() || before.nlink > 1n || before.dev !== snapshot.device || before.ino !== snapshot.inode
@@ -544,8 +539,17 @@ async function snapshotLocalArtifact(plan: PluginActivationPlan, item: CatalogPa
 // Shared terminus for both artifact source paths (a local file URL and a
 // downloaded registry object): the approved bytes are materialized into an
 // owner-private 0400 cache, then reopened through a pinned file descriptor so
-// the package manager only ever reads /proc/self/fd/N while the control plane
-// re-verifies the bytes after the executor returns.
+// the control plane re-verifies the sealed inode after the executor returns.
+//
+// The package manager is given the stable cache path (not /proc/self/fd/N):
+// pnpm's "file:" installer treats an extension-less descriptor path as a
+// directory, so a descriptor URL can never install a local tarball. The
+// TOCTOU boundary remains closed because (1) the pinned fd still proves the
+// sealed inode was not modified while staging ran, and (2) after the executor
+// returns verifyApprovedPackagesInLockfile compares the lockfile entry and the
+// installed bytes against the approved integrity; replacing the path with
+// different bytes makes that check fail closed. The cache directory is owner
+// private and 0400, so another user cannot rewrite it in place.
 async function pinActivationArtifactBytes(plan: PluginActivationPlan, item: CatalogPackage,
   registry: NonNullable<CatalogPackage['registry']>, bytes: Buffer): Promise<ActivationArtifactSnapshot> {
   const cacheRoot = join(plan.target.dshHome, 'plugin-control', 'activation-artifacts')
@@ -590,7 +594,9 @@ async function pinActivationArtifactBytes(plan: PluginActivationPlan, item: Cata
       || !createHash('sha512').update(current).digest().equals(createHash('sha512').update(bytes).digest())) {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation artifact cache does not retain the approved bytes')
     }
-    const reference = pathToFileURL(descriptorReference(pinned)).href
+    // Install from the stable .tgz cache path; the pinned descriptor remains
+    // the integrity witness and is re-verified after the executor returns.
+    const reference = pathToFileURL(destination).href
     return { package: { ...item, registry: { ...registry, reference } }, handle: pinned, path: destination, device: metadata.dev,
       inode: metadata.ino, size: metadata.size, mtimeNs: metadata.mtimeNs, ctimeNs: metadata.ctimeNs,
       sha512: createHash('sha512').update(current).digest() }
