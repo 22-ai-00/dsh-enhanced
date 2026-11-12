@@ -6,6 +6,7 @@ import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { validateMemoryReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { validateMemoryLearningAdoptionGrant } from '@dsh-enhanced/personal-memory'
 import { createRsiMemoryLearningSetup } from '../../lark-channel/lib/rsi-memory-learning.js'
+import type { TrustedTaskLearningProjectionReceipt } from '../../assistant-evaluation/lib/types.js'
 import { validateLearningConfig } from '../src/config.ts'
 import { MemoryLearningRuntime } from '../src/runtime.ts'
 import { query, workItemLearningFixture } from './work-item-feedback.fixture.ts'
@@ -48,10 +49,7 @@ async function feedbackSource(f: Fixture) {
   expect(outbox).toMatchObject({ status: 'accepted', providerMessageId: expect.any(String) })
   const before = { requests: f.supplier.requests.length, runs: f.snapshot().runs, budget: f.snapshot().budget }
   const feedback = await f.reply(outbox.providerMessageId!, '还是不行', 'memory-owner-result')
-  await vi.waitFor(async () => {
-    await f.ctx.assistantDelivery.tick(); await f.ctx.assistantDelivery.whenIdle()
-    expect(f.ctx.assistantEvaluation.getTrustedWorkItemLearningProjection({ scope: f.ctx.assistantEvaluation.createHostScope({ workspace: f.workspace, preset: 'primary' }), itemId })).toMatchObject({ projection: { subjectKind: 'work-item', subjectRef: itemId }, objective: { status: 'not-achieved' } })
-  }, { timeout: 30000 })
+  await waitForWorkItemProjection(f, itemId, 'not-achieved')
   expect({ requests: f.supplier.requests.length, runs: f.snapshot().runs, budget: f.snapshot().budget }).toEqual(before)
   return { itemId, providerMessageId: outbox.providerMessageId!, feedback }
 }
@@ -69,6 +67,29 @@ async function adopted(f: Fixture) {
 }
 function memoryCalls(f: Fixture) {
   return f.supplier.requests.filter(call => /^memory-(extract|review)-/u.test(String(call.sessionId)))
+}
+async function waitForWorkItemProjection(f: Fixture, itemId: string, status: 'achieved' | 'not-achieved' | 'unknown') {
+  let receipt: TrustedTaskLearningProjectionReceipt | undefined
+  await vi.waitFor(async () => {
+    await f.ctx.assistantDelivery.tick(); await f.ctx.assistantDelivery.whenIdle()
+    receipt = f.ctx.assistantEvaluation.getTrustedWorkItemLearningProjection({ scope: f.ctx.assistantEvaluation.createHostScope({ workspace: f.workspace, preset: 'primary' }), itemId })
+    expect(receipt?.objective?.status).toBe(status)
+  }, { timeout: 30000 })
+  if (receipt === undefined) throw new Error('trusted work item learning projection is missing')
+  return receipt
+}
+function learningJobs(stateRoot: string) {
+  return query(join(stateRoot, 'memory-learning.sqlite'), 'SELECT id,state,intent_json,request_json FROM jobs ORDER BY rowid')
+}
+async function drainAutomations(f: Fixture, stateRoot: string) {
+  let quiet = 0
+  for (let index = 0; index < 80 && quiet < 4; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250))
+    await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+    const active = learningJobs(stateRoot).filter(job => ['pending', 'queued', 'running', 'unknown'].includes(String(job['state'])))
+    quiet = active.length === 0 ? quiet + 1 : 0
+  }
+  expect(quiet).toBeGreaterThanOrEqual(4)
 }
 function paidCounts(f: Fixture, stateRoot: string) {
   const learningPath = join(stateRoot, 'memory-learning.sqlite')
@@ -120,18 +141,58 @@ describe('installer-generated memory-learning configuration', () => {
     expect(counts.learning[0]!['authority_id']).toBe(grants.learning.authorityId)
     expect(counts.reviews[0]!['authority']).toBe(grants.reviews.authorityId)
     expect(counts.adoptions[0]!['authority_id']).toBe(grants.adoption.authorityId)
-    // Owner withdrawal hides adopted memory immediately and after a cold remount.
-    const paid = paidCounts(f, stateRoot), calls = memoryCalls(f).length
+    // Owner correction changes the canonical revision. The learner deliberately
+    // fences the old revision and pays for a new extraction bound to the new
+    // one; it must never adopt that ungrounded revision or expose old evidence.
+    const callsBeforeCorrection = memoryCalls(f).length
+    expect(callsBeforeCorrection).toBe(2)
     await revise(f, source.providerMessageId, '/feedback correct 1 not-achieved achieved', 'correct-installer-source')
-    await f.ctx.assistantDelivery.tick(); await f.ctx.assistantDelivery.whenIdle()
+    const corrected = await waitForWorkItemProjection(f, source.itemId, 'achieved')
+    // Remounting starts the scanner; drain every correction-driven job so the
+    // ledger assertions see settled rows instead of scheduler timing.
+    await f.remountMemoryStack()
+    await drainAutomations(f, stateRoot)
+    const correctedJobs = learningJobs(stateRoot)
+      .map(job => ({ id: job['id'], state: job['state'], request: job['request_json'], intent: JSON.parse(String(job['intent_json'])) }))
+      .filter(job => job.intent.sourceKind === 'work-item' && job.intent.canonical?.objectiveStatus === 'achieved')
+    expect(correctedJobs).toHaveLength(1)
+    expect(correctedJobs[0]!.intent.canonical).toMatchObject({ outcomeId: corrected.triggerOutcomeId,
+      version: corrected.projection.version, digest: corrected.projection.digest, objectiveStatus: 'achieved' })
+    // The scripted supplier only grounds failure testimony, so the corrected
+    // extraction is settled failed without a review request or adoption.
+    expect(correctedJobs[0]!.state).toBe('failed')
+    expect(correctedJobs[0]!.request).toBeNull()
+    expect(memoryCalls(f).length).toBeGreaterThan(callsBeforeCorrection)
+    expect(paidCounts(f, stateRoot)).toMatchObject({ reviews: [{ used: 1 }], adoptions: [{ used_mutations: 1 }] })
+    // The outdated adopted experience is hidden immediately after correction and
+    // after a fresh native owner query. Query turns are themselves ordinary-use
+    // learning sources, so drain them before taking the withdrawal baseline.
+    expect(await f.queryMemory()).toEqual([])
+    await drainAutomations(f, stateRoot)
+    const callsAfterCorrection = memoryCalls(f).length
+    const paidAfterCorrection = paidCounts(f, stateRoot)
+    const jobsBeforeWithdrawal = learningJobs(stateRoot).map(job => ({ id: job['id'], state: job['state'] }))
+    // Withdrawal is a retraction, not a new revision: it must create no paid
+    // extraction, no learning job, no review and no adoption.
+    await revise(f, source.providerMessageId, '/feedback withdraw 2 achieved', 'withdraw-installer-source')
+    await waitForWorkItemProjection(f, source.itemId, 'unknown')
+    await drainAutomations(f, stateRoot)
+    expect(memoryCalls(f)).toHaveLength(callsAfterCorrection)
+    expect(learningJobs(stateRoot).map(job => ({ id: job['id'], state: job['state'] }))).toEqual(jobsBeforeWithdrawal)
+    expect(paidCounts(f, stateRoot)).toEqual(paidAfterCorrection)
+    // The withdrawn task stays hidden in the current stack and after a cold
+    // remount; no further job may bind a revision newer than the corrected one.
     expect(await f.queryMemory()).toEqual([])
     await f.remountMemoryStack()
     expect(await f.queryMemory()).toEqual([])
-    await revise(f, source.providerMessageId, '/feedback withdraw 2 achieved', 'withdraw-installer-source')
-    await f.ctx.assistantDelivery.tick(); await f.ctx.assistantDelivery.whenIdle()
-    await f.remountMemoryStack(); expect(await f.queryMemory()).toEqual([])
-    expect(memoryCalls(f)).toHaveLength(calls)
-    expect(paidCounts(f, stateRoot)).toEqual(paid)
+    await drainAutomations(f, stateRoot)
+    const taskJobs = learningJobs(stateRoot)
+      .map(job => JSON.parse(String(job['intent_json'])))
+      .filter(intent => intent.itemId === source.itemId)
+    expect(taskJobs).toHaveLength(2)
+    expect(taskJobs[1]!.canonical.version).toBe(corrected.projection.version)
+    expect(taskJobs[1]!.canonical.objectiveStatus).toBe('achieved')
+    expect(paidCounts(f, stateRoot)).toMatchObject({ reviews: [{ used: 1 }], adoptions: [{ used_mutations: 1 }] })
   }, 180_000)
 
   test('an expired installer grant performs zero paid extraction or review', async () => {
