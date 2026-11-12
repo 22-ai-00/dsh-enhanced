@@ -131,6 +131,16 @@ export async function runDreamAgent(input: DreamAgentInput): Promise<DreamAgentR
           throw new Error('assistant-dreaming: dream Agent identity does not match the frozen owner scope')
         }
         combined.throwIfAborted()
+        // The wake is unattended: bind it as a background initiator so Policy
+        // never applies foreground/human-approval semantics to a dream tool
+        // call. Without this the tool would be evaluated as `foreground` and
+        // an owner foreground rule or approval requirement could leak in.
+        const policy = input.ctx.get('assistantPolicy' as never, false) as
+          { bindInitiator?: (agent: Agent, initiator: 'background', principal?: string) => () => void } | undefined
+        if (policy?.bindInitiator !== undefined) {
+          const unbind = policy.bindInitiator(agent, 'background', input.scope.principalId)
+          agentCtx.effect(() => unbind, 'assistant-dreaming.background-initiator')
+        }
         agentCtx.effect(() => installModelSelection(agentCtx, { current: selection, assembled: undefined }),
           'assistant-dreaming.model-selection')
         const submit: ToolDefinition = defineTool({

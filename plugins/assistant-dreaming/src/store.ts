@@ -376,11 +376,28 @@ export class DreamStore {
     return { runs, ideas, recorded }
   }
 
-  /** Hard-delete expired ideas per retention policy; runs keep audit digests only. */
+  /**
+   * Hard-delete expired ideas per retention policy; runs keep audit digests
+   * only. Events are removed first in the same transaction because
+   * `dream_idea_events.idea_id` is a foreign key without ON DELETE CASCADE:
+   * a single event row would otherwise abort the whole prune with
+   * FOREIGN KEY constraint failed and silently disable retention.
+   */
   prune(now: number, retentionDays: number): number {
     assertMutable(this.closed)
     const cutoff = now - retentionDays * 86_400_000
-    return Number(this.db.prepare('DELETE FROM dream_ideas WHERE lane=? AND created_at < ?').run(this.lane, cutoff).changes)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`DELETE FROM dream_idea_events WHERE idea_id IN (
+        SELECT id FROM dream_ideas WHERE lane=? AND created_at < ?)`).run(this.lane, cutoff)
+      const removed = Number(this.db.prepare('DELETE FROM dream_ideas WHERE lane=? AND created_at < ?')
+        .run(this.lane, cutoff).changes)
+      this.db.exec('COMMIT')
+      return removed
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   interrupt(): void {

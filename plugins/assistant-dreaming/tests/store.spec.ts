@@ -82,6 +82,25 @@ describe('dream store', () => {
     store.close()
     expect(store.isClosed).toBe(true)
   })
+
+  test('prunes an expired idea with lifecycle events instead of failing its foreign key', async () => {
+    const { store, path } = await makeStore()
+    store.beginDream('run-events', 1, '2026-11-08', 1, 'f'.repeat(64))
+    store.recordIdea({
+      id: 'old-with-events', runId: 'run-events', createdAt: 1, dayKey: '2026-01-01',
+      summary: 's', detail: 'd', evidenceRefs: [REF],
+    })
+    // A lifecycle event row references the idea; without deleting events first
+    // the delete would abort with FOREIGN KEY constraint failed.
+    store.transitionIdea('old-with-events', 'owner-acknowledged', 'owner', 2)
+    expect(store.prune(10_000 + 86_400_000 * 10, 10)).toBe(1)
+    expect(store.idea('old-with-events')).toBeUndefined()
+    store.close()
+    const check = new DatabaseSync(path)
+    const remaining = check.prepare('SELECT COUNT(*) AS n FROM dream_idea_events').get()!
+    check.close()
+    expect(Number(remaining['n'])).toBe(0)
+  })
 })
 
 describe('ownData guard', () => {

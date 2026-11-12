@@ -25,6 +25,12 @@ export interface DreamingActiveHours {
 
 export interface DreamingConfig {
   enabled?: boolean
+  /**
+   * Owner pause switch: load in the paused state (reconcile the system
+   * automation to paused, register no executor) while keeping full config.
+   * Removing the flag on the next load resumes with a fresh reconcile nonce.
+   */
+  retired?: boolean
   scope?: DreamingScopeConfig
   databasePath?: string
 
@@ -59,13 +65,13 @@ export interface DreamingConfig {
   provider?: string
   model?: string
   reasoningEffort?: string
-  apiKeyEnv?: string
 
   retentionDays?: number
 }
 
 export interface NormalizedDreamingConfig {
   readonly enabled: boolean
+  readonly retired: boolean
   readonly scope: DreamingScopeConfig | null
   readonly databasePath: string | null
   readonly baseIntervalMs: number
@@ -90,20 +96,18 @@ export interface NormalizedDreamingConfig {
   readonly provider: string | null
   readonly model: string | null
   readonly reasoningEffort: string | null
-  readonly apiKeyEnv: string | null
   readonly retentionDays: number
 }
 
 const fields = new Set([
-  'enabled', 'scope', 'databasePath', 'baseIntervalMs', 'runProbabilityPpm', 'idleMinMs', 'lotteryWindow',
+  'enabled', 'retired', 'scope', 'databasePath', 'baseIntervalMs', 'runProbabilityPpm', 'idleMinMs', 'lotteryWindow',
   'activeHours', 'randomSeed', 'maxDreamsPerDay', 'maxIdeasPerWake', 'maxModelCalls', 'maxToolCalls',
   'maxOutputTokens', 'maxDurationMs', 'maxInputBytes', 'maxEvidenceRefs', 'notifyOwner',
   'maxNotificationsPerDay', 'notifyMinIntervalMs', 'budgetId', 'budgetAmount', 'provider', 'model',
-  'reasoningEffort', 'apiKeyEnv', 'retentionDays',
+  'reasoningEffort', 'retentionDays',
 ])
 
 const boundedText = (max: number) => Schema.string().min(1).max(max)
-const ref = Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/u)
 
 const scopeSchema = Schema.object({
   workspace: boundedText(4_096).required(),
@@ -120,6 +124,7 @@ const activeHoursSchema = Schema.object({
 
 const schema = Schema.object({
   enabled: Schema.boolean().default(false),
+  retired: Schema.boolean().default(false),
   scope: scopeSchema,
   databasePath: boundedText(4_096),
 
@@ -144,11 +149,12 @@ const schema = Schema.object({
   notifyMinIntervalMs: Schema.natural().min(60_000).max(604_800_000).default(86_400_000),
 
   budgetId: boundedText(128),
-  budgetAmount: Schema.natural().min(1).max(1_000_000_000),
+  // Automations bounds the per-run budget amount to 10,000,000; reject larger
+  // values here instead of failing later while reconciling the definition.
+  budgetAmount: Schema.natural().min(1).max(10_000_000),
   provider: boundedText(256),
   model: boundedText(256),
   reasoningEffort: boundedText(128),
-  apiKeyEnv: ref,
 
   retentionDays: Schema.natural().min(1).max(365).default(90),
 }).default(undefined as never)
@@ -172,6 +178,7 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
   const config = (Config(input) ?? {}) as DreamingConfig
   const normalized: NormalizedDreamingConfig = Object.freeze({
     enabled: config.enabled ?? false,
+    retired: config.retired ?? false,
     scope: config.scope ? Object.freeze({ ...config.scope }) : null,
     databasePath: config.databasePath ?? null,
     baseIntervalMs: config.baseIntervalMs ?? 3_600_000,
@@ -197,11 +204,16 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
     provider: config.provider ?? null,
     model: config.model ?? null,
     reasoningEffort: config.reasoningEffort ?? null,
-    apiKeyEnv: config.apiKeyEnv ?? null,
     retentionDays: config.retentionDays ?? 90,
   })
   if (normalized.enabled) {
     if (!normalized.scope) throw new Error('assistant-dreaming: enabled requires an explicit owner scope')
+    // The frozen workspace becomes an Automations definition field, so it must
+    // already be the canonical absolute path that definition normalization
+    // accepts; reject it at load time instead of failing reconciliation later.
+    if (!isAbsolute(normalized.scope.workspace) || resolve(normalized.scope.workspace) !== normalized.scope.workspace) {
+      throw new Error('assistant-dreaming: enabled requires a canonical absolute scope.workspace')
+    }
     if (normalized.databasePath === null || !isAbsolute(normalized.databasePath)
       || resolve(normalized.databasePath) !== normalized.databasePath) {
       throw new Error('assistant-dreaming: enabled requires a canonical absolute databasePath')
@@ -227,6 +239,13 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
   }
   if (normalized.maxNotificationsPerDay > normalized.maxDreamsPerDay) {
     throw new Error('assistant-dreaming: maxNotificationsPerDay cannot exceed maxDreamsPerDay')
+  }
+  // `retired` only pauses through the enabled loading path (it reconciles the
+  // existing system automation to paused). A disabled row returns before that
+  // point and cannot pause anything, so accepting the combination would
+  // silently leave a previously active automation running. Fail closed instead.
+  if (normalized.retired && !normalized.enabled) {
+    throw new Error('assistant-dreaming: retired requires enabled: true; pause the enabled row first, then remove retired before disabling')
   }
   return normalized
 }

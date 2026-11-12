@@ -1,11 +1,10 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput,
-  HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
+  HostAutomationExecutorResult, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, normalizeConfig, type DreamingConfig, type NormalizedDreamingConfig } from './config.js'
@@ -33,28 +32,66 @@ export interface DreamingHealth {
 
 interface DreamPorts {
   automations: AssistantAutomationsService
-  policy: Pick<AssistantPolicyService, 'reserve' | 'finalize' | 'release'>
-  delivery: Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerModelSelection'
-    | 'resolveOwnerRoute' | 'enqueueOwnerNotification'>
+  delivery: Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'resolveOwnerRoute' | 'enqueueOwnerNotification'>
   evaluation: Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections'>
   goals: Pick<AssistantGoalsService, 'inspectOwnerGoals'>
   skills: Pick<AssistantSkillsService, 'inspectOwnerActiveSkills' | 'inspectOwnerSkillCandidates'>
+}
+
+type FailureClass = HostAutomationExecutorResult['failureClass']
+type FailurePhase = HostAutomationExecutorResult['failurePhase']
+
+/**
+ * Terminal outcomes for the Automations Host-executor contract. Success may
+ * only carry the literal `none` tuple; a possible side effect must be
+ * retryability-unsafe and a pure no-op success must be retryability-safe.
+ * Budget reservation/settlement belongs to Automations, never to this
+ * executor, so no result here reports a budget settlement.
+ */
+const NO_EFFECT: HostAutomationExecutorResult = Object.freeze({
+  outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+  sideEffectState: 'none', retryability: 'safe',
+})
+const EFFECT_OK: HostAutomationExecutorResult = Object.freeze({
+  outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+  sideEffectState: 'possible', retryability: 'unsafe',
+})
+
+function failed(
+  failureClass: FailureClass,
+  failurePhase: FailurePhase,
+  failureCode: string,
+  sideEffectState: HostAutomationExecutorResult['sideEffectState'],
+): HostAutomationExecutorResult {
+  const retryability = sideEffectState !== 'none' ? 'unsafe' as const
+    : failureClass === 'configuration' || failureClass === 'policy' || failureClass === 'budget'
+      ? 'after-intervention' as const : 'safe' as const
+  return Object.freeze({
+    outcome: failureClass === 'cancelled' || failureClass === 'unknown' ? 'unknown' : 'failed',
+    failureClass, failurePhase, failureCode, sideEffectState, retryability,
+  })
 }
 
 /**
  * The owner-enabled dreaming runtime. It registers exactly one system-owned
  * `every` automation and, per slot, re-derives the deterministic trigger, then
  * runs one frozen single-tool agent that may only record private ideas. It
- * never notifies, adopts, promotes, or writes goals/work-items; with
- * `enabled: false` it opens no database and registers nothing.
+ * never notifies unless L1 is explicitly enabled, never adopts, promotes, or
+ * writes goals/work-items; with `enabled: false` it opens no database and
+ * registers nothing.
+ *
+ * Scheduling and per-occurrence budget reservation/settlement belong to
+ * `assistant-automations`; this executor is a pure consumer of the Host
+ * executor contract and never reserves budget itself.
  */
 export class AssistantDreamingService extends Service {
   static Config = Config
-  static inject = ['assistantAutomations', 'assistantPolicy', 'assistantDelivery', 'assistantEvaluation',
+  static inject = ['assistantAutomations', 'assistantDelivery', 'assistantEvaluation',
     'assistantGoals', 'assistantSkills', 'agents', 'sessions', 'tools']
 
   readonly #config: NormalizedDreamingConfig
   readonly #lane: string
+  #ports: DreamPorts | undefined
   #store: DreamStore | undefined
   #flight: Promise<HostAutomationExecutorResult> | undefined
   #active = true
@@ -63,6 +100,14 @@ export class AssistantDreamingService extends Service {
   #lastRunOutcome: string | null = null
   #lastSkipReason: string | null = null
   #unregister: (() => void) | undefined
+  /**
+   * Fresh per-load reconcile nonce for the active transition. Automations
+   * caches `automation_system_reconciles` by idempotency key and replays the
+   * old receipt without touching the row, so a deterministic key would silently
+   * skip reactivation after a retire/reload. A new key per load converges to
+   * one active row (the store CAS is idempotent) and appends one audit receipt.
+   */
+  readonly #loadNonce = randomUUID()
 
   constructor(ctx: Context, input: DreamingConfig = {}) {
     super(ctx, 'assistantDreaming')
@@ -74,18 +119,37 @@ export class AssistantDreamingService extends Service {
       this.#scheduler = 'dormant'
       return
     }
-    const ports = this.#ports(ctx)
-    this.#scheduler = 'active'
+    const ports = this.#portsFor(ctx)
+    this.#ports = ports
     this.#store = new DreamStore(config.databasePath!, this.#lane)
-    this.#store.interrupt()
-    this.#unregister = ports.automations.registerHostExecutor(this.#executor(ports))
-    ports.automations.reconcileSystem({
-      owner: OWNER,
-      automationId: this.#automationId(),
-      idempotencyKey: `${this.#automationId()}:${this.#configDigest()}`,
-      desiredStatus: 'active',
-      definition: this.#definition(),
-    })
+    try {
+      this.#store.interrupt()
+      this.#pruneStore(Date.now())
+      if (config.retired) {
+        // Owner pause: keep the ledger and definition, make sure the system
+        // automation is paused, and register no executor. This is the supported
+        // way to stop dreaming before disabling/uninstalling the bundle.
+        ports.automations.reconcileSystem(this.#reconcileInput('paused'))
+        this.#scheduler = 'dormant'
+      } else {
+        this.#unregister = ports.automations.registerHostExecutor(this.#executor(ports))
+        ports.automations.reconcileSystem(this.#reconcileInput('active'))
+        this.#scheduler = 'active'
+      }
+    } catch (error) {
+      // Construction must not leak a registered executor or an open ledger:
+      // the Loader keeps this process alive and a retry would otherwise fail
+      // with a duplicate executor descriptor. This also covers a failed paused
+      // reconcile while the owner is trying to retire.
+      this.#active = false
+      this.#scheduler = 'unavailable'
+      try { this.#unregister?.() } catch { /* best-effort unload */ }
+      this.#unregister = undefined
+      try { this.#store.interrupt() } catch { /* store may already be closed */ }
+      this.#store.close()
+      this.#store = undefined
+      throw error
+    }
     ctx.effect(() => () => {
       this.#active = false
       this.#unregister?.()
@@ -94,6 +158,17 @@ export class AssistantDreamingService extends Service {
       this.#store?.close()
       return closing
     }, 'assistant-dreaming.runtime')
+  }
+
+  /**
+   * Enforce the owner retention policy over the private idea ledger. Runs on
+   * plugin load and after every completed dream so a long-lived Host cannot
+   * keep expired ideas forever. Failure is observable but never fails a wake.
+   */
+  #pruneStore(now: number): void {
+    try { this.#store?.prune(now, this.#config.retentionDays) } catch (error) {
+      this.ctx.logger.warn(`assistant-dreaming: idea retention prune failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /**
@@ -137,18 +212,17 @@ export class AssistantDreamingService extends Service {
     return { draw, hits }
   }
 
-  #ports(ctx: Context): DreamPorts {
+  #portsFor(ctx: Context): DreamPorts {
     const automations = ctx.get('assistantAutomations') as AssistantAutomationsService | undefined
-    const policy = ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     const delivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     const evaluation = ctx.get('assistantEvaluation') as AssistantEvaluationService | undefined
     const goals = ctx.get('assistantGoals') as AssistantGoalsService | undefined
     const skills = ctx.get('assistantSkills') as AssistantSkillsService | undefined
-    if (!automations || !policy || !delivery || !evaluation || !goals || !skills
+    if (!automations || !delivery || !evaluation || !goals || !skills
       || !ctx.get('agents') || !ctx.get('sessions') || !ctx.get('tools')) {
-      throw new Error('assistant-dreaming: enabled dreaming requires automations, policy, delivery, evaluation, goals, skills, agents, sessions and tools')
+      throw new Error('assistant-dreaming: enabled dreaming requires automations, delivery, evaluation, goals, skills, agents, sessions and tools')
     }
-    return { automations, policy, delivery, evaluation, goals, skills }
+    return { automations, delivery, evaluation, goals, skills }
   }
 
   #automationId(): string {
@@ -159,6 +233,24 @@ export class AssistantDreamingService extends Service {
     return acceptanceDigest({ lane: this.#lane, config: this.#config }).slice(0, 40)
   }
 
+  #reconcileInput(desiredStatus: 'active' | 'paused'): SystemAutomationReconcileInput {
+    // Both transitions are load-scoped. Automations replays a cached
+    // `automation_system_reconciles` receipt for a repeated idempotency key
+    // without touching the row, so a deterministic paused key would make a
+    // second retire (or retire after resume) silently leave the row active
+    // while this plugin is already dormant. Reconcile is a local CAS converge
+    // operation: a fresh key per load is safe, and a repeated retire() in the
+    // same load still just replays the same paused receipt.
+    const key = `${this.#automationId()}:${this.#configDigest()}:${desiredStatus}:${this.#loadNonce}`
+    return {
+      owner: OWNER,
+      automationId: this.#automationId(),
+      idempotencyKey: key,
+      desiredStatus,
+      definition: this.#definition(),
+    }
+  }
+
   #definition(): HostAutomationDefinition {
     const scope = this.#config.scope!
     return {
@@ -167,7 +259,9 @@ export class AssistantDreamingService extends Service {
       workspace: scope.workspace,
       agentPreset: scope.preset,
       timeoutMs: this.#config.maxDurationMs,
-      misfire: { kind: 'latest' },
+      // A missed slot is skipped, never replayed: dreaming must not catch up
+      // with a burst of paid model calls after downtime.
+      misfire: { kind: 'skip' },
       overlap: 'skip',
       retrySafety: 'never',
       maxRetries: 0,
@@ -209,14 +303,24 @@ export class AssistantDreamingService extends Service {
   }
 
   async #runSlot(ports: DreamPorts, input: HostAutomationExecutorInput): Promise<HostAutomationExecutorResult> {
-    const settled = (outcome: 'succeeded' | 'failed' | 'unknown', failureClass: HostAutomationExecutorResult['failureClass'],
-      failurePhase: HostAutomationExecutorResult['failurePhase'], failureCode: string,
-      sideEffectState: HostAutomationExecutorResult['sideEffectState'] = 'none'): HostAutomationExecutorResult =>
-      ({ outcome, failureClass, failurePhase, failureCode, sideEffectState, retryability: 'unsafe' })
-    if (!this.#active || this.#store === undefined) return settled('failed', 'cancelled', 'preflight', 'disposed')
+    if (!this.#active || this.#store === undefined) {
+      return failed('cancelled', 'preflight', 'disposed', 'none')
+    }
     const store = this.#store
     const config = this.#config
     const scopeConfig = config.scope!
+    if (input.executionMode !== 'production') {
+      // A dry-run/preview occurrence must never spend money or write ideas.
+      this.#lastSkipReason = 'preview'
+      return NO_EFFECT
+    }
+    if (input.targetScope?.workspace !== scopeConfig.workspace
+      || input.targetScope?.preset !== scopeConfig.preset
+      || input.principal !== scopeConfig.principalId
+      || input.ownerRouteId !== scopeConfig.ownerRouteId) {
+      this.#lastRunOutcome = 'failed'
+      return failed('configuration', 'preflight', 'dream-scope-mismatch', 'none')
+    }
     const now = Date.now()
     const timezone = config.activeHours?.timezone ?? 'UTC'
     const dayKey = localDayKey(now, timezone)
@@ -242,20 +346,30 @@ export class AssistantDreamingService extends Service {
     })
     if (!decision.fire) {
       this.#lastSkipReason = decision.reason
-      return settled('succeeded', 'none', 'none', `skip:${decision.reason}`)
+      return NO_EFFECT
     }
     // Per-subject lottery ("无事找事"): build material and tickets, then roll
     // one code-generated number. A miss is a normal no-thought slot and skips
     // the model entirely; a hit focuses the wake on the recalled subject.
-    const seedMaterial = buildDreamMaterial({
-      evaluation: ports.evaluation, delivery: ports.delivery, goals: ports.goals, skills: ports.skills,
-      scope: scopeConfig, maxInputBytes: config.maxInputBytes,
-    })
-    this.#registerTickets(store, seedMaterial, now, seedDigest)
+    let seedMaterial: DreamMaterial
+    try {
+      seedMaterial = buildDreamMaterial({
+        evaluation: ports.evaluation, delivery: ports.delivery, goals: ports.goals, skills: ports.skills,
+        scope: scopeConfig, maxInputBytes: config.maxInputBytes,
+      })
+      this.#registerTickets(store, seedMaterial, now, seedDigest)
+    } catch (error) {
+      // A revoked/missing owner route or projection failure is an owner
+      // configuration problem, not a dreamed result: fail closed with no
+      // model spend and no ledger write.
+      this.#lastRunOutcome = 'failed'
+      this.ctx.logger.warn(`assistant-dreaming: material unavailable: ${error instanceof Error ? error.message : String(error)}`)
+      return failed('configuration', 'preflight', 'dream-material-unavailable', 'none')
+    }
     const { draw, hits } = this.#drawRecallHits(store, occurrence, seedDigest)
     if (hits.length === 0) {
       this.#lastSkipReason = 'lottery-no-hit'
-      return settled('succeeded', 'none', 'none', 'skip:lottery-no-hit')
+      return NO_EFFECT
     }
     for (const hit of hits) {
       store.recordRecall({ occurrence, drawDigest: draw.drawDigest, drawValue: draw.value,
@@ -264,21 +378,9 @@ export class AssistantDreamingService extends Service {
     }
     this.#lastSkipReason = null
     const runId = `dream-${input.occurrenceId}`
-    let reserved: string | undefined
     let submitted = false
     try {
-      const model = this.#resolveModel(ports, scopeConfig)
-      const reservation = ports.policy.reserve({
-        budgetId: config.budgetId!,
-        subject: { kind: 'background', id: input.occurrenceId, workspace: scopeConfig.workspace, principal: scopeConfig.principalId },
-        amount: config.budgetAmount!,
-        idempotencyKey: `dream-budget:${input.occurrenceId}`,
-      })
-      if (reservation.status !== 'reserved') {
-        this.#lastSkipReason = `budget:${reservation.status}`
-        return settled('succeeded', 'budget', 'budget-reservation', `budget:${reservation.status}`)
-      }
-      reserved = reservation.reservationId
+      const model = this.#resolveModel()
       store.beginDream(runId, occurrence, decision.dayKey, now, decision.drawDigest)
       submitted = true
       this.#lastRunAt = now
@@ -318,45 +420,30 @@ export class AssistantDreamingService extends Service {
       this.#lastRunOutcome = result.outcome
       if (result.outcome === 'succeeded') {
         store.completeDream(runId, Date.now(), result.ideaCount)
+        this.#pruneStore(Date.now())
         this.#notifyOwner(store, runId, decision.dayKey, result.ideaCount, now)
-        ports.policy.finalize(reserved, config.budgetAmount!)
-        reserved = undefined
-        return settled('succeeded', 'none', 'none', 'dreamed', 'possible')
+        return EFFECT_OK
       }
-      if (submitted) store.markInterrupted(runId, Date.now())
-      // The agent may already have spent budget: settle conservatively.
-      ports.policy.finalize(reserved, config.budgetAmount!)
-      reserved = undefined
-      return settled(result.outcome === 'cancelled' ? 'unknown' : 'failed', 'execution', 'agent-setup',
-        `dream-agent:${result.outcome}`, 'possible')
+      store.markInterrupted(runId, Date.now())
+      return result.outcome === 'cancelled'
+        ? failed('cancelled', 'host-execution', 'dream-agent-cancelled', 'possible')
+        : failed('execution', 'host-execution', 'dream-agent-failed', 'possible')
     } catch (error) {
       if (this.#store !== undefined) {
         try { store.markInterrupted(runId, Date.now()) } catch { /* closed */ }
       }
       this.#lastRunOutcome = 'failed'
-      if (reserved !== undefined) {
-        try {
-          if (submitted) ports.policy.finalize(reserved, config.budgetAmount!)
-          else ports.policy.release(reserved)
-        } catch { /* ledger left visible */ }
-      }
-      const code = error instanceof Error ? error.message.slice(0, 120) : 'dream-failed'
-      return settled('failed', 'execution', 'host-execution', code.startsWith('assistant-dreaming:') ? code : 'dream-failed', submitted ? 'possible' : 'none')
+      this.ctx.logger.warn(`assistant-dreaming: dream wake failed: ${error instanceof Error ? error.message : String(error)}`)
+      return submitted
+        ? failed('execution', 'host-execution', 'dream-execution-failed', 'possible')
+        : failed('configuration', 'preflight', 'dream-preflight-failed', 'none')
     }
   }
 
-  #resolveModel(ports: DreamPorts, scope: { ownerRouteId: string; principalId: string; workspace: string; preset: string }): DreamAgentModel {
+  #resolveModel(): DreamAgentModel {
     const config = this.#config
-    if (config.provider !== null && config.model !== null) {
-      return { provider: config.provider, model: config.model,
-        ...(config.reasoningEffort === null ? {} : { reasoningEffort: config.reasoningEffort }) }
-    }
-    const selected = ports.delivery.inspectOwnerModelSelection({
-      authorityId: scope.ownerRouteId, principalId: scope.principalId,
-      workspace: scope.workspace, agentPreset: scope.preset })
-    if (!selected.provider || !selected.model) throw new Error('assistant-dreaming: owner model selection is unavailable')
-    return { provider: selected.provider, model: selected.model,
-      ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
+    return { provider: config.provider!, model: config.model!,
+      ...(config.reasoningEffort === null ? {} : { reasoningEffort: config.reasoningEffort }) }
   }
 
   /**
@@ -391,7 +478,10 @@ export class AssistantDreamingService extends Service {
     if (sent) store.incrementNotifications(dayKey, now)
   }
 
-  health(): DreamingHealth {
+  // Public surfaces are bound arrow properties: Cordis serves services through
+  // a traceable proxy whose method calls would otherwise lose the private-field
+  // receiver (the Loader and owner surfaces always read through that proxy).
+  health = (): DreamingHealth => {
     let counts = { runs: 0, ideas: 0, recorded: 0 }
     if (this.#store !== undefined) {
       try { counts = this.#store.counts() } catch { /* read failure keeps zeros */ }
@@ -407,16 +497,21 @@ export class AssistantDreamingService extends Service {
   }
 
   /** Read-only access to recorded ideas for the owner-facing surfaces. */
-  inspectIdeas(limit = 50): readonly DreamIdea[] {
+  inspectIdeas = (limit = 50): readonly DreamIdea[] => {
     if (this.#store === undefined) return Object.freeze([])
     return Object.freeze([...this.#store.listIdeas(Math.min(Math.max(1, limit), 200))])
   }
 
-  /** Owner-visible retirement: disable the automation without deleting ideas. */
-  retire(): void {
+  /**
+   * Owner-visible retirement: pause the system automation and unregister the
+   * executor, keeping the private ledger (ideas are never deleted here).
+   */
+  retire = (): void => {
     if (!this.#config.enabled || this.#store === undefined) return
+    this.#active = false
     this.#unregister?.()
     this.#unregister = undefined
+    try { this.#ports?.automations.reconcileSystem(this.#reconcileInput('paused')) } catch { /* ledger stays readable */ }
     this.#scheduler = 'dormant'
   }
 }

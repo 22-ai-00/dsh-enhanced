@@ -50,6 +50,13 @@ test('dream agent exposes exactly one submit tool and records only cited ideas',
     }
   }
   ctx.llm.registerAdapter(['dream-provider'], new Adapter())
+  const initiators: Array<{ initiator: string; principal: string | undefined }> = []
+  ctx.provide('assistantPolicy' as never, {
+    bindInitiator: (_agent: unknown, initiator: string, principal?: string) => {
+      initiators.push({ initiator, principal })
+      return () => {}
+    },
+  } as never)
   await ctx.plugin(AgentLoop, { agents: [] }).await()
   const recorded: unknown[] = []
   const result = await runDreamAgent({
@@ -62,6 +69,9 @@ test('dream agent exposes exactly one submit tool and records only cited ideas',
   expect(result).toMatchObject({ outcome: 'succeeded', ideaCount: 1 })
   expect(surface).toEqual(['dream_submit_ideas'])
   expect(recorded).toHaveLength(1)
+  // The unattended wake must be a background initiator so Policy never applies
+  // foreground/human-approval semantics to the dream tool call.
+  expect(initiators).toEqual([{ initiator: 'background', principal: 'p' }])
 })
 
 test('dream agent rejects uncited evidence and a second submit within one wake', async () => {
