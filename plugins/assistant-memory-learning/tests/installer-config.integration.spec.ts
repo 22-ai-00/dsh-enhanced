@@ -56,8 +56,14 @@ async function feedbackSource(f: Fixture) {
   return { itemId, providerMessageId: outbox.providerMessageId!, feedback }
 }
 async function adopted(f: Fixture) {
-  await vi.waitFor(async () => {
-    await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  // Drive the native scheduler exactly once, then only observe. Re-entering
+  // tick() inside the poll would let a slow first extraction turn a later scan
+  // into a second job for the same work item: the store dedupes a repeated feed
+  // sequence (store.ts stage cursor check) and a claimed job (store.claim CAS),
+  // but a changed canonical revision is intentionally superseded. The test must
+  // therefore wait for the single driven batch instead of re-driving scans.
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  await vi.waitFor(() => {
     expect(f.ctx.assistantMemoryLearning.health(), JSON.stringify(f.warnings)).toMatchObject({ counts: { adopted: 1 } })
   }, { timeout: 60000 })
 }
