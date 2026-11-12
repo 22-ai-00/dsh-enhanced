@@ -27,6 +27,8 @@ const cleanups: (() => Promise<void>)[] = []
 const nativeRuntime = liveNativeRuntime()
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function runRows(root: string): number { const database = new DatabaseSync(join(root, 'skills.sqlite')); try { return (database.prepare('SELECT count(*) AS count FROM skill_runs').get() as { count: number }).count } finally { database.close() } }
+/** Real comparison claims persisted by claimComparison, independent of native write counters. */
+function comparisonRows(root: string): number { const database = new DatabaseSync(join(root, 'skills.sqlite')); try { return (database.prepare('SELECT count(*) AS count FROM skill_comparisons').get() as { count: number }).count } finally { database.close() } }
 function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id): Agent {
   const sid = SessionId(sessionId), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
   const value: Agent = { id: SessionId(id), options: { provider: 'fixture', model: 'fixture' }, session,
@@ -127,7 +129,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   const dispatches: string[] = []; const lineage: { name: string; root: string; nested: boolean }[] = []
   ctx.on('tools/execute', async (exec, next) => { dispatches.push(exec.name); lineage.push({ name: exec.name, root: exec.rootCallId, nested: exec.parent !== undefined }); return next() })
   ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'write' && deniedTool ? { kind: 'deny', reason: 'fixture current permission revoked' } : next())
-  const comparisons: SkillComparisonProfile[] | undefined = comparison ? [{ id: 'service-comparison', version: 1, scope, stateRoot: comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+  const comparisons: SkillComparisonProfile[] | undefined = comparison ? [{ id: 'service-comparison', version: 1, scope, stateRoot: comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, dataset: { id: 'service-comparison', version: '1', digest: 'a'.repeat(64), split: 'development' as const }, cases: [
     { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 },
     { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
@@ -265,7 +267,7 @@ function installSuccessHost(f: Awaited<ReturnType<typeof fixture>>, options?: {
     successReadCount: () => reads, successInputs }
 }
 function sealedProfile(f: Awaited<ReturnType<typeof fixture>>): SkillComparisonProfile {
-  return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+  return { id: 'sealed-profile', version: 1, dataset: { id: 'sealed-host-attested', version: '1', digest: 'b'.repeat(64), split: 'holdout' }, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native', runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay' as const, inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation' as const, inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression' as const, inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }
 }
@@ -904,6 +906,34 @@ test('activation rejects business, repeated, foreign, and getter metadata proof 
   }
 })
 
+test('rejects a sealed plan without split proof before claiming a comparison', async () => {
+  const f = await fixture(false, true)
+  result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
+  f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
+  const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed split proof', trigger: 'owner review' }))
+  const service = f.ctx.assistantSkills
+  const { dataset: _dataset, ...withoutSplit } = sealedProfile(f)
+  service.registerSealedHoldoutProvider({ generation: 'host', read: () => ({ profile: withoutSplit as never, attestationDigest: '8'.repeat(64) }) })
+  const writesBefore = f.count()
+  await expect(service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never,
+    candidate.id, 'sealed', 'sealed-without-split')).rejects.toThrow(/sealed holdout plan requires a proven benchmark split/u)
+  // Two independent facts: the fixture write-tool counter proves no replay
+  // started, and the real skills.sqlite skill_comparisons count proves no
+  // claim row was inserted by claimComparison before the split check.
+  expect(f.count()).toBe(writesBefore)
+  expect(comparisonRows(f.root)).toBe(0)
+})
+
+test('binds a sealed Host-attested plan that carries split proof without claiming it', async () => {
+  const f = await fixture(false, true)
+  const service = f.ctx.assistantSkills, profile = sealedProfile(f)
+  service.registerSealedHoldoutProvider({ generation: 'host', read: () => ({ profile, attestationDigest: '8'.repeat(64) }) })
+  const binding = service.inspectSealedHoldout('sealed', { principalId: 'owner', principalRecordId: 'owner-record',
+    principalVersion: 1, workspace: f.root, preset: 'primary' })
+  expect(binding).toMatchObject({ protocol: 'assistant-skills/sealed-holdout-binding/v1', planId: 'sealed' })
+  expect(comparisonRows(f.root)).toBe(0)
+})
+
 const nativeTest = nativeRuntime ? test : test.skip
 nativeTest('compares a pending native-file candidate through isolated verification without changing the active skill', async () => {
   // Source and fresh-Goal admission below are Host seams. This test exercises the real
@@ -942,7 +972,7 @@ nativeTest('consumes a Host-attested plan through native replay while independen
   f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
   const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed host qualification', trigger: 'owner review' }))
   const service = f.ctx.assistantSkills
-  const configured = [{ id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native' as const, runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+  const configured = [{ id: 'sealed-profile', version: 1, dataset: { id: 'sealed-host-attested', version: '1', digest: 'b'.repeat(64), split: 'holdout' as const }, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, backend: 'linux-native' as const, runtime: syntheticLinuxRuntime(f.comparisonRoot!), cgroupRoots: syntheticCgroupRoots(), command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] as const
   service.registerSealedHoldoutProvider({ generation: 'host', read: ({ planId }) => planId === 'sealed' ? { profile: configured[0] as never, attestationDigest: '8'.repeat(64) } : undefined })

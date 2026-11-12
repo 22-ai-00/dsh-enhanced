@@ -14,5 +14,9 @@ export function sealedPlan(provider: SealedSkillHoldoutProvider, planId: string,
   const value = provider.read({ planId, scope })
   if (!value || typeof value.attestationDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.attestationDigest)) throw new Error('assistant-skills: sealed holdout plan unavailable')
   const profile = validateComparisonProfiles([value.profile])[0]!
+  // A Host-attested sealed plan still has to prove which benchmark split its
+  // cases belong to. This is the same split proof as ordinary comparison
+  // profiles, so there is no implicit exemption.
+  if (profile.dataset === undefined) throw new Error('assistant-skills: sealed holdout plan requires a proven benchmark split')
   return Object.freeze({ profile, profileDigest: acceptanceDigest(profile), attestationDigest: value.attestationDigest, bindingDigest: acceptanceDigest({ generation: provider.generation, planId, scope, profileDigest: acceptanceDigest(profile), attestationDigest: value.attestationDigest }) })
 }

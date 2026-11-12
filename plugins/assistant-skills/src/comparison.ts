@@ -28,6 +28,13 @@ export interface SkillComparisonProfile {
   maxBytes: number
   maxOutputBytes: number
   minimumEvaluationGain: number
+  /**
+   * Host-supplied benchmark split proof for this comparison suite. Absent means
+   * the split cannot be proven, so the comparison is rejected before execution.
+   * 'development' plans pass the candidate-generation guard; 'holdout' plans
+   * must still be disjoint from every public development manifest.
+   */
+  dataset?: { id: string; version: string; digest: string; split: 'development' | 'holdout' }
   cases: readonly {
     id: string
     kind: 'replay' | 'evaluation' | 'regression'
@@ -59,6 +66,10 @@ export function validateComparisonProfiles(value: unknown): readonly SkillCompar
       || !integer(p.cellDurationMs, 1000, 300000) || !integer(p.verificationDurationMs, 1, 300000) || p.verificationDurationMs >= p.cellDurationMs
       || !integer(p.maxToolCalls, 1, 32) || !integer(p.maxBytes, 1, 262144) || !integer(p.maxOutputBytes, 1, 262144)
       || typeof p.minimumEvaluationGain !== 'number' || !Number.isFinite(p.minimumEvaluationGain) || p.minimumEvaluationGain <= 0 || p.minimumEvaluationGain > 1
+      || (p.dataset !== undefined && (!plain(p.dataset) || typeof p.dataset.id !== 'string' || p.dataset.id.length > 128
+        || typeof p.dataset.version !== 'string' || p.dataset.version.length > 64
+        || !/^[a-f0-9]{64}$/u.test(p.dataset.digest)
+        || (p.dataset.split !== 'development' && p.dataset.split !== 'holdout')))
       || !Array.isArray(p.cases) || p.cases.length < 3 || p.cases.length > 12) throw new Error('assistant-skills: invalid comparison profile')
     const caseIds = new Set<string>()
     for (const entry of p.cases) {
@@ -95,6 +106,7 @@ export class SkillComparator {
   readonly #runtime: string
   constructor(profile: SkillComparisonProfile) {
     this.#profile = validateComparisonProfiles([profile])[0]!
+    if (this.#profile.dataset === undefined) throw new Error('assistant-skills: comparison requires a proven benchmark split')
     privateRoot(this.#profile.stateRoot)
     this.#runtime = runtimeDigest()
     const p = this.#profile, count = p.maxComparisons * p.cases.length * p.repeats * 2
@@ -106,7 +118,9 @@ export class SkillComparator {
   }
   async compare(id: string, baseline: SkillDefinition, candidate: SkillDefinition, signal: AbortSignal, authorize: () => void) {
     const p = this.#profile
-    const { BenchmarkStore, benchmarkReport, parseBenchmarkPlan, runBenchmark } = await import('@dsh-enhanced/assistant-evaluation/benchmark')
+    const { BenchmarkStore, assertCandidateGenerationInput, assertHoldoutIsolation, benchmarkReport,
+      parseBenchmarkPlan, runBenchmark } = await import('@dsh-enhanced/assistant-evaluation/benchmark')
+    if (p.dataset === undefined) throw new Error('assistant-skills: comparison requires a proven benchmark split')
     const runner = await this.#runner
     // Clone definitions and materialize every parameter set before any execution.
     const arms = JSON.parse(JSON.stringify({ baseline, candidate })) as { baseline: SkillDefinition; candidate: SkillDefinition }
@@ -116,14 +130,19 @@ export class SkillComparator {
     }
     const local = new AbortController(), combined = AbortSignal.any([signal, this.#abort.signal, local.signal])
     const revalidate = () => { combined.throwIfAborted(); if (Date.now() >= p.expiresAt) throw new Error('assistant-skills: comparison expired'); authorize() }
-    const root = join(p.stateRoot, id)
-    privateRoot(root)
     const common = { model: acceptanceDigest('no-model-fixed-tool-replay'), prompt: acceptanceDigest('no-prompt'), tools: acceptanceDigest(['read', 'write', 'edit']), policy: acceptanceDigest({ maxBytes: p.maxBytes, maxToolCalls: p.maxToolCalls, offline: true }), runtime: this.#runtime }
-    const plan: BenchmarkPlan = parseBenchmarkPlan({ schemaVersion: 1, id,
-      dataset: { id: p.id, version: String(p.version), digest: acceptanceDigest(p), split: 'development' }, comparison: 'capability',
+    // No hard-coded split: the caller must supply split evidence, and the
+    // evaluation benchmark guard decides whether this plan may feed generation.
+    const dataset = { id: p.dataset.id, version: p.dataset.version, digest: p.dataset.digest, split: p.dataset.split }
+    const plan: BenchmarkPlan = parseBenchmarkPlan({ schemaVersion: 1, id, dataset, comparison: 'capability',
       cases: p.cases.map(entry => ({ id: entry.id, domain: 'code', inputDigest: acceptanceDigest({ inputs: entry.inputs, files: entry.files, stdin: entry.stdin }), acceptanceDigest: acceptanceDigest({ command: p.command, artifactPath: p.artifactPath, expectedStdout: entry.expectedStdout, expectedExitCode: entry.expectedExitCode }) })),
       variants: (['baseline', 'candidate'] as const).map(role => ({ id: role, role, versions: { ...common, skills: acceptanceDigest(arms[role]) }, features: { memory: false, planning: false, review: false, growth: false } })),
       budget: { durationMs: p.cellDurationMs, toolCalls: p.maxToolCalls, inputTokens: 0, outputTokens: 0, costUsdMicros: 0 }, repeats: p.repeats, seed: 0 })
+    if (dataset.split === 'development') assertCandidateGenerationInput(plan)
+    else assertHoldoutIsolation(plan)
+    const root = join(p.stateRoot, id)
+    // Only after the split guard passed do we create the per-comparison root.
+    privateRoot(root)
     const store = new BenchmarkStore(join(root, 'benchmark.sqlite'))
     const cells: { id: string; artifactDigest: string; jobId: string; verdict: string; quiescent: boolean; toolCalls: number; executedToolCalls: number; omittedObservations: number }[] = []
     const active = new Set<Promise<BenchmarkObservation>>()

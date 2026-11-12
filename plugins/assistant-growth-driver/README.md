@@ -65,6 +65,7 @@ dsh --profile web --dump-config
    `resource: {kind: tool, id: run_code}`）。RSI 生成 profile 目前只给 `growth_*` / `plugin_source_*`
    建规则，**本切片不生成该规则、也不改 assistant-policy**；缺失时 `run_code` 按 default-deny 失败
    关闭（计入 `health().run.usage.ptc.failedRunCodeCalls`），wake 不会伪造成功。
+候选生成入口在创建 Agent 之前先做 provenance 校验：普通 owner 任务证据（`assistant-delivery/owner-foreground-learning/v1`、`assistant-delivery/work-item-engineering-context/v1`）结构上不属于 benchmark 数据，允许生成；任何 benchmark 派生的候选调用必须显式携带其 `BenchmarkPlan` 并通过 `@dsh-enhanced/assistant-evaluation/benchmark` 的 `assertCandidateGenerationInput`（holdout/非 development 计划在读取或写入前拒绝）。来源不明的任务证据 fail closed 且零候选写入，不是静默跳过。已知边界：普通证据的“非 holdout”依赖 Host-trust 的 Delivery 任务协议白名单（协议字符串是包内字面量，不可由模型或任务内容控制；未来新增的普通任务生产者若换了协议会 fail closed，需要显式加入白名单）；默认无 `benchmarkPlan` 时普通证据不触发 benchmark 守卫（goal/skill 复盘路径没有反馈、也不携带 benchmark 数据）；一旦调用方同时传入 `benchmarkPlan`，守卫仍会执行（无论 feedback 是否存在）；benchmark 守卫按需动态 import evaluation（optional peer），import 失败同样 fail closed 并给出可读 reason。
 4. WorkItem author lane（`usageLearning.workItemFailures`）暂不支持 PTC：其冻结预授权只含
    `plugin_source_*` 工具（创建走廊 4 个，修订走廊 6 个），保留传输不在其中。driver 在创建 Agent
    前直接拒绝（`PTC presentation is not supported for the WorkItem author lane yet`）；启用该

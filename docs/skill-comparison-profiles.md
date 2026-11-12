@@ -36,6 +36,11 @@ comparisons:
     maxBytes: 65536
     maxOutputBytes: 16384
     minimumEvaluationGain: 0.1
+    dataset: # host-supplied split proof; without it the profile is rejected
+      id: summary-quality-development
+      version: '1'
+      digest: '0000000000000000000000000000000000000000000000000000000000000000' # sha256 of the frozen dataset manifest
+      split: development
     cases:
       - id: ordinary-order
         kind: replay
@@ -59,6 +64,14 @@ comparisons:
         expectedStdout: "{}\n"
         expectedExitCode: 0
 ```
+
+### Split proof (required)
+
+Every comparison profile must carry a `dataset` block with the exact benchmark identity and split: `id`, `version`, a 64-hex `digest`, and `split: development` or `split: holdout`. There is no default and no hard-coded `development` split; a profile without this proof is rejected when the comparator is constructed, so no replay cell, benchmark row or isolated execution can happen. A `development` plan additionally passes Evaluation's `assertCandidateGenerationInput` (holdout data must never feed candidate generation); a `holdout` plan passes `assertHoldoutIsolation`, so it must be disjoint from every public development manifest. The split guard runs before the per-comparison private root/store and before any cell. Existing profiles must add a truthful `dataset` block before they can compare again; operators who cannot name the exact dataset/split must not fabricate one.
+
+### Sealed Host-attested plans
+
+A sealed Host-attested plan is not exempt from split proof. The provider-supplied comparison profile must carry the same `dataset` block (typically `split: holdout` for an isolated qualification). `sealedPlan` rejects a profile without it before any claim or replay, so a previously working sealed provider must be migrated by adding its exact dataset identity/split; otherwise `skill_qualify`/`skill_canary` sealed qualification fails closed instead of silently degrading to `unknown`. Adding `dataset` changes the profile digest and the sealed plan's `bindingDigest`/attestation binding, so existing sealing and qualification records must be re-confirmed under the new binding rather than treated as still valid.
 
 Use a future `expiresAt` appropriate for the finite experiment; the example is not a standing authorization. A profile supports 3–12 distinct cases covering replay, evaluation and regression, and 2–4 repeats. The benchmark alternates arm order and shares the same case seed. Replay makes zero model calls; its token and model-cost metrics are zero, not an estimate of model reasoning quality. Tool calls, wall time, input/workspace bytes and isolated execution/output limits remain bounded. Infrastructure, storage and developer costs are not included in the zero model-cost metric.
 

@@ -18,6 +18,7 @@ import { defineTool, RUN_CODE_NAME, type ToolDefinition, type ToolExecution, typ
 import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
 import type { AssistantSkillsService, SkillBinding } from '@dsh-enhanced/assistant-skills'
 import { workItemRunSource } from './work-item-source.js'
 import type { NormalizedGrowthDriverConfig } from './config.js'
@@ -275,6 +276,13 @@ export interface GrowthAgentInput {
   model: Readonly<ModelSelection>
   goals: Goals
   skills: Skills
+  /**
+   * Host-only benchmark provenance for any candidate derived from benchmark
+   * data. Production owner-task evidence leaves it absent; a benchmark-derived
+   * caller MUST pass the exact plan so the holdout guard can reject it before
+   * any candidate is written.
+   */
+  benchmarkPlan?: BenchmarkPlan
   /** Host source plane; the source kind and explicit grants freeze the exact realm tools. */
   sourcePlane?: GrowthSourcePlanePort
   signal?: AbortSignal
@@ -1111,12 +1119,54 @@ function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: 
     ...(presentation === 'ptc' ? { ptc: ptcTrajectory(events, admittedToolNames) } : {}) } }
 }
 
+const ORDINARY_TASK_PROTOCOLS = new Set([
+  'assistant-delivery/owner-foreground-learning/v1',
+  'assistant-delivery/work-item-engineering-context/v1',
+])
+
+/**
+ * Host-only provenance gate for candidate generation. Benchmark-derived input
+ * must carry its exact plan and pass the evaluation holdout guard; ordinary
+ * owner-task evidence is structurally not benchmark data. Anything else fails
+ * closed before any candidate write or model call.
+ */
+export async function assertCandidateGenerationOrigin(input: {
+  feedback?: GrowthAgentInput['feedback']
+  benchmarkPlan?: BenchmarkPlan
+}): Promise<void> {
+  if (input.benchmarkPlan !== undefined) {
+    // Evaluation is an optional peer: load the real guard lazily, after this
+    // entry is invoked but before any ctx, Agent, model or candidate write.
+    let assertCandidateGenerationInput: ((plan: BenchmarkPlan) => unknown) | undefined
+    try {
+      ;({ assertCandidateGenerationInput } = await import('@dsh-enhanced/assistant-evaluation/benchmark'))
+    } catch {
+      throw new Error('assistant-growth-driver: benchmark holdout guard is unavailable; refusing to generate candidates')
+    }
+    // A present-but-stale peer can load without the expected export; normalize
+    // that version skew to the same readable fail-closed reason.
+    if (typeof assertCandidateGenerationInput !== 'function') {
+      throw new Error('assistant-growth-driver: benchmark holdout guard is unavailable; refusing to generate candidates')
+    }
+    // Rejects holdout splits and non-development plans before any read.
+    assertCandidateGenerationInput(input.benchmarkPlan)
+    return
+  }
+  if (input.feedback === undefined) return
+  const protocol = (input.feedback as { protocol?: unknown }).protocol
+  if (typeof protocol === 'string' && ORDINARY_TASK_PROTOCOLS.has(protocol)) return
+  throw new Error('assistant-growth-driver: candidate generation input has no proven development origin; '
+    + 'ordinary owner-task evidence or an explicit development BenchmarkPlan is required')
+}
+
 /**
  * Create, run to idle and dispose exactly one bounded growth agent.  Never
  * mounts a preset: the complete realm tool surface is frozen for this source,
  * and any extra visible tool fails closed before the prompt is submitted.
  */
 export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Promise<GrowthAgentRunResult> {
+  await assertCandidateGenerationOrigin({ ...(input.feedback === undefined ? {} : { feedback: input.feedback }),
+    ...(input.benchmarkPlan === undefined ? {} : { benchmarkPlan: input.benchmarkPlan }) })
   const workItemSource = input.feedback?.protocol === 'assistant-delivery/work-item-engineering-context/v1'
   if (workItemSource) input = { ...input, config: { ...input.config, pluginSourceProposals: { ...input.config.pluginSourceProposals,
     allowModification: false,
