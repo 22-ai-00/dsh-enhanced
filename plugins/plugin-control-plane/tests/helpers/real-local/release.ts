@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../../../src/approval.ts'
 import * as release from '../../../src/release.ts'
 import { advanceSourceRelease } from '../../../src/source-release-runner.ts'
-import { ControlPlaneStore } from '../../../src/store.ts'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../../../src/store.ts'
 import { defaultHostAttestationPolicy, loadTrustConfig } from '../../../src/trust.ts'
 import type { PluginControlTrustConfig } from '../../../src/trust.ts'
 import type { SourceReleaseAuthorization } from '../../../src/types.ts'
@@ -37,7 +37,7 @@ function sourceDigests(repository: string, baseCommit: string, scope: readonly s
   return { treeDigest: createHash('sha256').update('dsh-source-tree-v2\0').update(binding).update(listing).digest('hex'),
     patchDigest: createHash('sha256').update('dsh-source-patch-v2\0').update(binding).update(patch).digest('hex') }
 }
-export async function realLocalReleaseFixture(input: { name?: string } = {}) {
+export async function realLocalReleaseFixture(input: { name?: string; ownerBound?: boolean } = {}) {
   const cleanup: (() => Promise<void>)[] = []
   const restoreEnv = new Map<string, string | undefined>()
   const setEnv = (key: string, value: string) => { if (!restoreEnv.has(key)) restoreEnv.set(key, process.env[key]); process.env[key] = value }
@@ -77,8 +77,9 @@ export async function realLocalReleaseFixture(input: { name?: string } = {}) {
   await writeFile(join(packageDir, 'cordis.patch.yml'), '- id: ' + name + '\n  name: ' + JSON.stringify(packageName) + '\n', { mode: 0o600 })
   await writeFile(join(packageDir, 'README.md'), '# E2E helper\n', { mode: 0o600 })
   await writeFile(join(packageDir, 'LICENSE'), 'MIT\n', { mode: 0o600 })
-  await writeFile(join(repository, 'plugins', 'README.md'), '# Plugins\n\n- ' + name + '\n', { mode: 0o600 })
-  const digests = sourceDigests(repository, baseCommit, ['plugins/README.md', 'plugins/' + name])
+  if (input.ownerBound !== true) await writeFile(join(repository, 'plugins', 'README.md'), '# Plugins\n\n- ' + name + '\n', { mode: 0o600 })
+  const scope = input.ownerBound === true ? ['plugins/' + name] : ['plugins/README.md', 'plugins/' + name]
+  const digests = sourceDigests(repository, baseCommit, scope)
 
   // Ed25519 identities.
   const pair = () => generateKeyPairSync('ed25519')
@@ -178,33 +179,47 @@ export async function realLocalReleaseFixture(input: { name?: string } = {}) {
     releaseAdapters: adapters }
   await writeFile(trustPath, JSON.stringify(rawTrust), { mode: 0o600 })
   const trust: PluginControlTrustConfig = await loadTrustConfig(trustPath)
-  const store = new ControlPlaneStore({ path: ledgerPath }); cleanup.push(async () => store.close())
-  const gap = store.recordGap({ idempotencyKey: 'd3a0-gap', capability: 'e2e', context: 'd3a0 release', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-  let plan = store.createSourcePlan({ gapId: gap.id, repository, worktree: repository, baseCommit, name,
-    generatorDigest: sha('d3a0-generator'), scope: ['plugins/README.md', 'plugins/' + name], ttlMs: 900_000, idempotencyKey: 'd3a0-plan' }).result
+  const store = new ControlPlaneStore({ path: ledgerPath, withOwnerActivationFence: (_gapId, callback) => callback() }); cleanup.push(async () => store.close())
+  const owner = { receiptVersion: 2 as const, authorityId: 'owner-route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
+  const gap = input.ownerBound === true
+    ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner, outcomeId: 'd3b-outcome', projection: { subjectKind: 'foreground-turn', subjectRef: 'd3b-task', version: 1, digest: sha('projection'), disposition: 'upsert' }, sourceDigest: sha('source') })
+    : store.recordGap({ idempotencyKey: 'd3a0-gap', capability: 'e2e', context: 'd3a0 release', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+  const withSourceFence = <T>(callback: () => T): T => input.ownerBound === true ? store.withOwnerTaskFailureGapAdmission(gap.id, callback) : callback()
+  const sourcePlanInput = input.ownerBound === true
+    ? { mode: 'modify' as const, generatorDigest: MODIFY_GENERATOR_DIGEST, scope,
+        prepared: { treeDigest: digests.treeDigest, patchDigest: digests.patchDigest, checkedAt: Date.now(),
+          evidence: { schemaVersion: 1 as const, kind: 'dsh-source-prepared-evidence' as const,
+            environment: { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true as const, nodeVersion: 'fixture', pnpmVersion: 'fixture' },
+            commands: [{ command: 'pnpm', args: ['check'], exitCode: 0 as const, durationMs: 1, logDigest: sha('log') }],
+            pack: { name, version, sizeBytes: 1, sha256: sha('pack') }, preparedAt: Date.now() } } }
+    : { generatorDigest: sha('d3a0-generator'), scope }
+  let plan = withSourceFence(() => store.createSourcePlan({ gapId: gap.id, repository, worktree: repository, baseCommit, name,
+    ttlMs: 900_000, idempotencyKey: 'd3a0-plan', ...sourcePlanInput })).result
   const approvalUnsigned = { schemaVersion: 1 as const, approvalId: 'd3a0-approval', authority: 'approval', keyId: 'approval',
     planId: plan.id, planDigest: plan.digest, decision: 'approved' as const, principal: 'owner', decidedAt: Date.now(), expiresAt: plan.expiresAt }
   const approvalReceipt = { ...approvalUnsigned, signature: sign(null, Buffer.from(approvalSigningPayload(approvalUnsigned)), approval.privateKey).toString('base64') }
   plan = (await store.approveSource({ planId: plan.id, expectedRevision: plan.revision, receipt: approvalReceipt,
-    idempotencyKey: 'd3a0-approval', withSourceFence: callback => callback(),
+    idempotencyKey: 'd3a0-approval', withSourceFence,
     resolveAuthority: () => new Ed25519ApprovalAuthority(approval.publicKey.export({ format: 'pem', type: 'spki' }).toString(), 'approval', 'approval') })).result
-  plan = store.beginSourceChecks({ planId: plan.id, expectedRevision: plan.revision })
-  plan = store.finishSourceChecks({ planId: plan.id, expectedRevision: plan.revision, succeeded: true,
-    checkedTreeDigest: digests.treeDigest, checkedPatchDigest: digests.patchDigest })
+  if (input.ownerBound === true) plan = store.verifyPreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision,
+    recheckedTreeDigest: plan.sourceCheck!.treeDigest, recheckedPatchDigest: plan.sourceCheck!.patchDigest, withSourceFence }).result
+  else { plan = store.beginSourceChecks({ planId: plan.id, expectedRevision: plan.revision })
+    plan = store.finishSourceChecks({ planId: plan.id, expectedRevision: plan.revision, succeeded: true,
+      checkedTreeDigest: plan.sourceCheck?.treeDigest ?? digests.treeDigest, checkedPatchDigest: plan.sourceCheck?.patchDigest ?? digests.patchDigest }) }
   const authorizationUnsigned = { schemaVersion: 1 as const, kind: 'dsh-source-release-authorization' as const,
     authorizationId: 'd3a0-authorization', authority: 'releaseOwner', keyId: 'releaseOwner', planId: plan.id, planDigest: plan.digest,
-    baseCommit, scope: plan.scope, checkedTreeDigest: digests.treeDigest, checkedPatchDigest: digests.patchDigest,
+    baseCommit, scope: plan.scope, checkedTreeDigest: plan.sourceCheck!.treeDigest, checkedPatchDigest: plan.sourceCheck!.patchDigest,
     releasePolicy: policy, authorizedAt: Date.now(), expiresAt: plan.expiresAt }
   const authorizationSignature = sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(authorizationUnsigned)), releaseOwner.privateKey).toString('base64')
   const authorization = { ...authorizationUnsigned, signature: authorizationSignature } as SourceReleaseAuthorization
   plan = (await store.startSourceRelease({ planId: plan.id, expectedRevision: plan.revision,
-    authorization, idempotencyKey: 'd3a0-start', withSourceFence: callback => callback(),
+    authorization, idempotencyKey: 'd3a0-start', withSourceFence,
     resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(
       releaseOwner.publicKey.export({ format: 'pem', type: 'spki' }).toString(), 'releaseOwner', 'releaseOwner') })).result
   const controller = new AbortController()
   const engineOptions: Parameters<typeof advanceSourceRelease>[0] = { store, planId: plan.id, trust,
     config: { reviewDecisionRoot: join(root, 'review-decisions'), timeoutMs: 120_000 }, signal: controller.signal,
-    assertCurrent: async () => controller.signal.throwIfAborted(), withSourceFence: callback => callback() }
+    assertCurrent: async () => controller.signal.throwIfAborted(), withSourceFence }
   const decided = new Set<string>()
   const decideReview = async (): Promise<void> => {
     const operation = store.findSourceReleaseOperation(plan.id, 'review', plan.release!.fence)
@@ -227,7 +242,7 @@ export async function realLocalReleaseFixture(input: { name?: string } = {}) {
     return current
   }
   return { root, home, repository, remote, trust, trustPath, store, plan, options: engineOptions, controller, policy, digests,
-    keys: { releaseOwner, approval, signer, registryVerifier, phases: phaseKeys }, adapters, configs,
+    keys: { releaseOwner, approval, host, signer, registryVerifier, phases: phaseKeys }, adapters, configs, rawTrust,
     advance, advanceOnce, advanceRaw, decideReview,
     async close() { controller.abort(); for (const action of cleanup.splice(0).reverse()) await action() } }
   } catch (error) {
