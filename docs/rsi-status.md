@@ -25,6 +25,8 @@
 - C1b/C1c：RSI owner 安装新增只读 readiness preflight（pinned bwrap/tar 字节哈希、delegated cgroup 可访问性、observer 私有路径、纯形状 manifest 校验），在停止 Host/写 grant 之前运行，失败 not-ready 可重试；fresh 与 retry 语义分开。真实 createRsiMemoryLearningSetup 产出的三份 grant 经真实 Delivery/Evaluation/WorkItems/Verifier/Memory 验证学习闭环与撤回（`e495c3f1`）。
 - D2：候选生成入口（growth-driver runGrowthAgent 第一行）与 SkillComparator（含 sealed Host-attested plan）都强制 holdout split 证明，evaluation peer 动态导入、缺失/版本偏斜 fail closed；native sealed 用例在 DSH_ISOLATION_TEST_NATIVE_RUNTIME 下真跑通过（`4ace12e7`）。
 - E3a：Lark im.message.message_read_v1 回执（best-effort、去重、不伪造 delivered）+ Evaluation classifier v2 的 read/ignored/missed 投影（missed 仅 complete coverage；不改 schema 18、主 7 态不变、v1 record 字节兼容）（`816afebb`）。
+- E3a-W：Web native notice 的 delivered/read ack（`acknowledgeNotices` 经绑定 owner session；整批经同一 native notice guard（过期/授权漂移/撤回）校验后才写 receipt；read 后迟到 delivered 不回退不写行；严格 TYPERT `deliveryNotices/ack`；client 渲染 ack delivered、点击 ack read 并明示不代表已读正文）（`06b3d50e`）。
+- D3a-0a：真实本地 release 八阶段 opt-in 集成测试——shipped `dsh-local-release-adapter.js`（shebang 固定 canonical interpreter）+ 真实 pinned bwrap/pnpm toolchain + file: registry，逐阶段真实 Ed25519 回执验签、tarball/catalog 校验，两条篡改 fail-closed；opt-in 缺省时 skip（`e9d94eb6`）。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
