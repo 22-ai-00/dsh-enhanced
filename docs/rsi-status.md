@@ -27,6 +27,7 @@
 - E3a：Lark im.message.message_read_v1 回执（best-effort、去重、不伪造 delivered）+ Evaluation classifier v2 的 read/ignored/missed 投影（missed 仅 complete coverage；不改 schema 18、主 7 态不变、v1 record 字节兼容）（`816afebb`）。
 - E3a-W：Web native notice 的 delivered/read ack（`acknowledgeNotices` 经绑定 owner session；整批经同一 native notice guard（过期/授权漂移/撤回）校验后才写 receipt；read 后迟到 delivered 不回退不写行；严格 TYPERT `deliveryNotices/ack`；client 渲染 ack delivered、点击 ack read 并明示不代表已读正文）（`06b3d50e`）。
 - D3a-0a：真实本地 release 八阶段 opt-in 集成测试——shipped `dsh-local-release-adapter.js`（shebang 固定 canonical interpreter）+ 真实 pinned bwrap/pnpm toolchain + file: registry，逐阶段真实 Ed25519 回执验签、tarball/catalog 校验，两条篡改 fail-closed；opt-in 缺省时 skip（`e9d94eb6`）。
+- D3a-0b：真实 activation 链 opt-in 集成测试（真实 `dsh plugin add` staging + 原子 profile swap + 真实 `dsh --profile` 进程 + shipped observer 采样真实 Loader Fiber + 测试 schema-2 host attestor 签 reload/readiness），断言停在 `awaiting-effect-blocked-replay` 且不进 `awaiting-live-tasks`（无独立效果证据不放行），含篡改样本被 readiness 拒绝的负例（`5058218d`）。同时修复一个真实生产缺陷：本地构建产物激活曾把无后缀 `/proc/<pid>/fd/N` 作为安装 spec 传给 pnpm 导致必然失败，改为稳定 `.tgz` cache 路径，pinned fd 封存校验与安装后 lockfile integrity fail-closed 保留（`a2ec42a1`）。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
