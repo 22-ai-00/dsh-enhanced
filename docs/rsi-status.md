@@ -6,7 +6,7 @@
 
 通过认证任务与反馈、原生 Agent、持久学习、独立验证、有界采用和回退，减少主人的协调与返工；以后续真实任务的质量、成本和人工介入判断收益。
 
-本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。B3 的真实模型/渠道验收、D1b 收益投影、E2/E3 与 F 仍待推进。
+本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。D1b 收益投影、D2 holdout 守卫、E2 inferred 合同准入、E3a read 回执、C1b/C1c 安装 readiness 与学习链也已交付；B3 真实渠道验收、E3b/E3a-W、D3/D5 与 F 仍待推进。
 
 开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
 
@@ -22,6 +22,9 @@
 - E1（默认关）：intake would-admit 与 owner 结果的 canonical agreement 以 append-only 快照落库（Evaluation schema 18，immutable trigger、digest 重放幂等、drift fail-closed），owner console 经 TYPERT 只读 counts-only 历史，`causal:false` 不得作为授权依据（`9d18a395`）。
 - D1b：修订收益投影改读 revision journal（journal v1→v2 记录 foreground/task 归属，参数摘要与 Delivery 归一化统一）；等长相邻窗口（父 [adoptedAt-W,adoptedAt]、候选 [adoptedAt,adoptedAt+W]）跨创建账本与修订父调用合并，不配对窗口被拒绝；采用默认严格（无同 digest non-inferior 不采用），allowReviewOnlyFirstAdoption 为显式例外，观察到期写 observation-expired-unverified 并精确回退父版本，配置删除 fail closed；修复 adoption runtime 父子证书 source 相等检查（对真实创建父证书恒不成立、此前是休眠代码）。
 - E2：inferred 自动准入必须携带真实 objective（2048 字节上限、digest 绑定认证 contentDigest、拒绝不截断）与真实 verifier acceptance handle；服务恒注入 hint provider，缺失即 observe、digest 不符即 refused，新增 acceptance-required 终态拒绝；内存 hint 重启 fail-closed。生产方（Delivery/Proactive）尚未签发 handle，故生产保持 observe。
+- C1b/C1c：RSI owner 安装新增只读 readiness preflight（pinned bwrap/tar 字节哈希、delegated cgroup 可访问性、observer 私有路径、纯形状 manifest 校验），在停止 Host/写 grant 之前运行，失败 not-ready 可重试；fresh 与 retry 语义分开。真实 createRsiMemoryLearningSetup 产出的三份 grant 经真实 Delivery/Evaluation/WorkItems/Verifier/Memory 验证学习闭环与撤回（`e495c3f1`）。
+- D2：候选生成入口（growth-driver runGrowthAgent 第一行）与 SkillComparator（含 sealed Host-attested plan）都强制 holdout split 证明，evaluation peer 动态导入、缺失/版本偏斜 fail closed；native sealed 用例在 DSH_ISOLATION_TEST_NATIVE_RUNTIME 下真跑通过（`4ace12e7`）。
+- E3a：Lark im.message.message_read_v1 回执（best-effort、去重、不伪造 delivered）+ Evaluation classifier v2 的 read/ignored/missed 投影（missed 仅 complete coverage；不改 schema 18、主 7 态不变、v1 record 字节兼容）（`816afebb`）。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
@@ -39,4 +42,4 @@
 - CI：`05957ae2`、`55f335e5` 六 job 全绿；`f223870d`、`37e3fc95` 的失败已确认为 GitHub runner DNS 故障（apt 解析 azure.archive.ubuntu.com 失败），非代码问题。
 - CI 均衡实测：根慢片 979s→674s、两片比 1.03；包测试 step 1349s→1113s；1046s 单文件已拆 74+35（2 worker，用例数不变）。
 - 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`、`pnpm_config_store_dir`、**短** `TMPDIR`；解析方法见[交接入口](handover/README.md)。
-- 未验收：B3 真实模型/渠道、D2、E3/E4、C1b/C1c 与 F；没有发布 npm、升级生产 Home 或发送用户渠道消息。
+- 未验收：B3 真实模型/渠道、E3b 真实飞书联调、E3a-W Web notice ack、D3/D5 真实外部执行链与第二事件源、F；没有发布 npm、升级生产 Home 或发送用户渠道消息。
