@@ -17,10 +17,14 @@ export const name = 'dsh-enhanced-assistant-web-owner'
 export { version }
 export const inject = [...BundledSessionController.inject, 'assistantDelivery', 'typert', 'loader']
 
+export type DeliveryNoticeStatus = 'accepted' | 'delivered'
+export type DeliveryNoticeAckStatus = 'delivered' | 'read'
 export interface DeliveryNotice {
   readonly id: string
   readonly text: string
   readonly createdAt: number
+  /** Delivery outbox status; absent only for older structural fixtures. */
+  readonly status?: DeliveryNoticeStatus
 }
 
 export interface Config {
@@ -38,6 +42,7 @@ export interface NativeWebOwnerAccess {
   assertSession(sessionId: SessionId): void
   ownsSession(sessionId: SessionId): boolean
   notifications(sessionId: SessionId): readonly DeliveryNotice[]
+  acknowledgeNotices(sessionId: SessionId, ids: readonly string[], status: DeliveryNoticeAckStatus): Readonly<{ acknowledged: number }>
   prompt<T>(input: { readonly sessionId: SessionId, readonly requestId: string, readonly text: string, readonly content: readonly unknown[] }, invoke: () => Promise<T>, signal: AbortSignal): Promise<T>
   dispose(): Promise<void>
 }

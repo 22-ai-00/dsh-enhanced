@@ -47,7 +47,17 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 
 Web Session Controller 的 Host 与 browser 两半都从当前 DSH 安装解析。本包通过只含一个精确源码入口的内存 Loader 子树，将原生包的 client 元数据与已有 owner-scoped Host 包装绑定：浏览器加载该 Host 自带的 Session client，而非构建时复制的旧版本。子树不启动未过滤的上游 Host Controller，不写 profile 或 node_modules，随 owner Fiber 卸载；无法解析当前 Host 的公开 Loader/Controller 契约时拒绝启动，不回退到旧客户端。本包自己的 browser 产物只实现主动提醒，不再复制 Session RPC、提交队列或 UI 状态。
 
-当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示只读“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。提醒保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
+当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。提醒保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
+
+E3a-W 增加了严格 Typert `deliveryNotices.ack(sessionId, ids, status)`：列表成功渲染后对未 ack 的提醒写 `delivered`，点击提醒时写 `read`。Host 重新校验绑定 Session、owner/route/Policy/期限、native-notice metadata 和 outbox 归属，整批校验后才写 receipt；foreign session、非 notice、越界/畸形 id、过期、撤权漂移或 withdrawn notice 整批拒绝且零写入。
+
+### notice ack 已知边界（E3a-W）
+
+- **R2 点击语义**：UI 的“点击确认”只是把 owner 的 viewed 动作映射为 `status=read`，不宣称用户已阅读正文、理解内容或完成任何任务；提醒文本仍只用于显示，不进入模型上下文。
+- **R3 不进 E3a deliveryState**：Web notice adapter 未声明 `readReceipts`，所以 Web 的 ack receipt 不会让 Evaluation 进入 classifier v2 的 read/ignored/missed 投影；它只影响 Delivery outbox 的 accepted/delivered/read 状态。Evaluation 的 E3a deliveryState 仍只由显式声明 coverage 的通道事实驱动。
+- **R5 top-100 边界**：ack 在绑定内最多扫描最近 100 条 outbox；client 的 list 只展示最近 50 条未读。更早/已滚出窗口的 notice id 无法 ack，按整批拒绝处理，避免绕过大范围查询。
+- **R7 delivered 是 owner 客户端自报**：delivered 只表示绑定 owner Session 的客户端成功 list/渲染并提交 ack，不是飞书/Web provider 的送达证明；信任边界是已绑定 Session + Host 重校验，不是网络回执。read 同理只是点击自报。
+- **R8 ack 失败静默重试**：delivered ack 失败不会显示错误，下一次 list 轮询会重试未标记的 id；read 点击失败静默丢弃且不自动重试。重复 delivered ack 由 Host 幂等处理；迟到 lower-rank ack 不写 receipt、不回退状态。
 
 ## 权限与数据
 

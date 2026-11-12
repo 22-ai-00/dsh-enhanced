@@ -109,6 +109,7 @@ describe('dsh-enhanced-assistant-web-owner', () => {
       expect(ownerRegistration.id).toBe('@dsh-enhanced/assistant-web-owner')
       expect(upstreamRegistration.id).toBe('@deepseek-ai/dsh-api-session-controller')
       expect(ownerRegistration.factory.toString()).toContain('deliveryNotices/list')
+      expect(ownerRegistration.factory.toString()).toContain('deliveryNotices/ack')
       expect(ownerRegistration.factory.toString()).toContain('conversation.input.dock')
       expect(ownerRegistration.factory.toString()).not.toContain('sessionControllerApply')
       expect(ownerRegistration.factory.toString()).not.toContain('class ClientSessions')
@@ -124,7 +125,7 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     }
   })
 
-  it('declares a strict, owner-scoped notice RPC rather than an SRC fallback', () => {
+  it('declares strict, owner-scoped notice list and ack RPCs rather than an SRC fallback', () => {
     const descriptor = TYPERT.invocations[0]
     expect(descriptor?.namespace).toBe('deliveryNotices')
     expect(descriptor?.method).toBe('list')
@@ -132,7 +133,19 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     expect(descriptor?.result.mode).toBe('strict')
     expect(() => descriptor?.parameters[0]?.codec.create().parse('')).toThrow()
     expect(descriptor?.result.create().parse([{ id: 'n1', text: '提醒', createdAt: 1 }])).toEqual([{ id: 'n1', text: '提醒', createdAt: 1 }])
+    expect(descriptor?.result.create().parse([{ id: 'n1', text: '提醒', createdAt: 1, status: 'delivered' }]))
+      .toEqual([{ id: 'n1', text: '提醒', createdAt: 1, status: 'delivered' }])
     expect(() => descriptor?.result.create().parse([{ id: 'n1', text: 1, createdAt: 1 }])).toThrow()
+
+    const ack = TYPERT.invocations[1]
+    expect(ack).toMatchObject({ namespace: 'deliveryNotices', method: 'ack' })
+    expect(ack?.parameters.map(parameter => parameter.name)).toEqual(['sessionId', 'ids', 'status'])
+    expect(ack?.parameters[1]?.codec.mode).toBe('strict')
+    expect(() => ack?.parameters[1]?.codec.create().parse([])).toThrow()
+    expect(() => ack?.parameters[1]?.codec.create().parse(Array.from({ length: 101 }, (_, index) => `notice-${index}`))).toThrow()
+    expect(() => ack?.parameters[2]?.codec.create().parse('accepted')).toThrow()
+    expect(ack?.parameters[2]?.codec.create().parse('delivered')).toBe('delivered')
+    expect(ack?.result.create().parse({ acknowledged: 2 })).toEqual({ acknowledged: 2 })
   })
 
   it('serves notices through a real strict Gateway binding', async () => {
@@ -146,10 +159,17 @@ describe('dsh-enhanced-assistant-web-owner', () => {
         id: 'web-owner-notices-test' as never, ctx, principal: { kind: 'owner' },
         signal: new AbortController().signal, interactions: 'none', dispose: async () => {},
       }
-      const access = { notifications: (sessionId: string) => {
-        if (sessionId !== 'owned-session') throw new Error('owner session denied')
-        return [{ id: 'notice-1', text: '已准备', createdAt: 1 }]
-      } }
+      const access = {
+        notifications: (sessionId: string) => {
+          if (sessionId !== 'owned-session') throw new Error('owner session denied')
+          return [{ id: 'notice-1', text: '已准备', createdAt: 1 }]
+        },
+        acknowledgeNotices: (sessionId: string, ids: readonly string[], status: string) => {
+          if (sessionId !== 'owned-session') throw new Error('owner session denied')
+          if (ids.length === 0 || ids.length > 100 || (status !== 'delivered' && status !== 'read')) throw new Error('invalid ack')
+          return { acknowledged: ids.length }
+        },
+      }
       const service = new DeliveryNoticesService(ctx, access as never)
       expect(service.typertRemote.service).toBe(service)
       expect(service.typertRemote.serviceKey).toBe('deliveryNotices')
@@ -160,6 +180,16 @@ describe('dsh-enhanced-assistant-web-owner', () => {
       ])
       await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'list', args: { sessionId: '' } })).rejects.toThrow()
       await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'list', args: { sessionId: 'foreign-session' } })).rejects.toThrow('owner session denied')
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'ack',
+        args: { sessionId: 'owned-session', ids: ['notice-1'], status: 'delivered' } })).resolves.toEqual({ acknowledged: 1 })
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'ack',
+        args: { sessionId: 'owned-session', ids: ['notice-1'], status: 'read' } })).resolves.toEqual({ acknowledged: 1 })
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'ack',
+        args: { sessionId: 'owned-session', ids: [], status: 'delivered' } })).rejects.toThrow()
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'ack',
+        args: { sessionId: 'owned-session', ids: ['notice-1'], status: 'accepted' } })).rejects.toThrow()
+      await expect(ctx.typertGateway.invoke({ peer, namespace: 'deliveryNotices', method: 'ack',
+        args: { sessionId: 'foreign-session', ids: ['notice-1'], status: 'delivered' } })).rejects.toThrow('owner session denied')
     } finally {
       await ctx.fiber.dispose()
     }

@@ -17,6 +17,8 @@ export interface NativeWebOwnerConfig {
   preset: string
   maxExecutionMs?: number
 }
+export type NativeWebNoticeStatus = 'accepted' | 'delivered'
+export type NativeWebNoticeAckStatus = 'delivered' | 'read'
 export interface NativeWebOwnerAccess {
   create(options: CreateAgentOptions): Promise<AgentHandle>
   resume(options: ResumeAgentOptions): Promise<AgentHandle>
@@ -25,7 +27,9 @@ export interface NativeWebOwnerAccess {
   ownsSession(sessionId: string): boolean
   prompt<T>(input: { sessionId: string; requestId: string; text: string; content: readonly unknown[] },
     invoke: () => Promise<T>, signal: AbortSignal): Promise<T>
-  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number }>
+  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }>
+  /** Acknowledge only visible native notices of this exact owner session/binding. */
+  acknowledgeNotices(sessionId: string, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }>
   dispose(): Promise<void>
 }
 interface OwnerPort {
@@ -39,7 +43,8 @@ interface OwnerPort {
   recordExecutionModelSelection(inboxId: string, input: { provider: string; model: string; reasoningEffort?: string }): void
   claimed(agent: Agent, envelope: InboundEnvelope, turn: number): void
   released(): void
-  notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number }>
+  notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }>
+  acknowledgeNotices(binding: ConversationBinding, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }>
 }
 interface Execution {
   handle: AgentHandle
@@ -145,7 +150,18 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   }
   assertSession(sessionId: string): void { this.#binding(sessionId) }
   ownsSession(sessionId: string): boolean { try { this.assertSession(sessionId); return true } catch { return false } }
-  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number }> { return this.port.notifications(this.#binding(sessionId)) }
+  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }> {
+    return this.port.notifications(this.#binding(sessionId))
+  }
+  acknowledgeNotices(sessionId: string, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }> {
+    if (status !== 'delivered' && status !== 'read') throw new Error('assistant-delivery: native notice ack status is invalid')
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100
+      || !ids.every(id => typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(id))) {
+      throw new Error('assistant-delivery: native notice ack ids are invalid')
+    }
+    const binding = this.#binding(sessionId)
+    return this.port.acknowledgeNotices(binding, Object.freeze([...new Set(ids)]), status)
+  }
   get(sessionId: string): Agent | undefined {
     this.#assertOwner()
     const entry = this.#entries.get(sessionId)

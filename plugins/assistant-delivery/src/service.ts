@@ -2749,10 +2749,50 @@ export class AssistantDeliveryService extends Service {
       recordExecutionModelSelection: (inboxId, input) => this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input }),
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
-      notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record => record.status === 'accepted'
-        // Already-accepted notices stay listed: withdrawal only gates the send attempt.
+      notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record =>
+        (record.status === 'accepted' || record.status === 'delivered')
+        // Acknowledged notices stay listed until read; withdrawal only gates the send attempt.
         && record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record, { withdrawal: false }) === undefined)
-        .map(record => ({ id: record.id, text: record.intent.text, createdAt: record.createdAt })),
+        .map(record => ({ id: record.id, text: record.intent.text, createdAt: record.createdAt,
+          status: record.status === 'delivered' ? 'delivered' as const : 'accepted' as const })),
+      acknowledgeNotices: (binding, ids, status) => {
+        // Validate the whole batch against this binding and the exact send-path
+        // guard before writing anything: one foreign/forged/expired id, drifted
+        // owner/binding/route/policy or withdrawn notice rejects the batch with
+        // zero receipts.
+        const byId = new Map(this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 100 }).map(record => [record.id, record]))
+        const targets = ids.map(id => {
+          const record = byId.get(id)
+          if (record === undefined || record.intent.metadata?.['dsh.native-notice'] !== 'v1'
+            || (record.status !== 'accepted' && record.status !== 'delivered' && record.status !== 'read')
+            || record.providerMessageId === undefined) {
+            throw new Error('assistant-delivery: native notice acknowledgement is invalid')
+          }
+          // Re-run the exact send-path guard: expiry, owner/binding version or
+          // generation drift, route/policy change and withdrawal all fail closed
+          // before any receipt is written. withdrawal:true is required so a
+          // withdrawn notice cannot be acknowledged after it was sent.
+          const refused = this.#nativeNoticeGuard(record.intent, { withdrawal: true })
+          if (refused !== undefined) throw new Error(`assistant-delivery: native notice acknowledgement is ${refused.failureCode}`)
+          return record
+        })
+        const rank = { accepted: 1, delivered: 2, read: 3 } as const
+        for (const record of targets) {
+          // A late lower-rank ack is a no-op: it must not append a stale receipt
+          // after read/delivered nor downgrade the outbox state.
+          if (rank[status] <= rank[record.status as keyof typeof rank]) continue
+          try {
+            this.deliveryStore.recordReceipt({ channel: binding.conversation.channel, account: binding.conversation.account,
+              providerMessageId: record.providerMessageId!, status, occurredAt: Date.now() })
+          } catch (error) {
+            // The web client re-acks every rendered notice. A repeat with a new
+            // timestamp is an idempotent no-op, not a client error; other
+            // storage failures still propagate.
+            if (!(error instanceof DeliveryStoreError) || error.code !== 'idempotency-conflict') throw error
+          }
+        }
+        return Object.freeze({ acknowledged: targets.length })
+      },
     }, config)
     this.nativeWebOwner = access
     this.nativeWebBound = true

@@ -56,7 +56,7 @@ export function apply(ctx: Context, config: import('./service.js').Config): void
 
 export default AssistantDeliveryService
 
-export type { NativeWebOwnerAccess, NativeWebOwnerConfig } from './native-web-owner.js'
+export type { NativeWebOwnerAccess, NativeWebOwnerConfig, NativeWebNoticeAckStatus, NativeWebNoticeStatus } from './native-web-owner.js'
 
 export type { WorkItemReportTarget, WorkItemReplySource, WorkItemReplyConsumerRegistration, WorkItemReplyReadInput, WorkItemReplyListInput } from './work-item-replies.js'
 export { WorkItemReplyCancelledError } from './work-item-replies.js'

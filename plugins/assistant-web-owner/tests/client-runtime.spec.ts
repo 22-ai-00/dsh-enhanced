@@ -24,7 +24,9 @@ describe('notice client Remote namespace lifecycle', () => {
       throw new Error(`unexpected Gateway client dependency ${id}`)
     })
     const ctx = new Context()
-    const call = vi.fn(async () => ({ ok: true, value: [{ id: 'notice-1', text: '已准备', createdAt: 1 }] }))
+    const call = vi.fn(async (_api: string, path: string) => path === 'deliveryNotices/ack'
+      ? { ok: true, value: { acknowledged: 1 } }
+      : { ok: true, value: [{ id: 'notice-1', text: '已准备', createdAt: 1 }] })
     let released = 0
     try {
       ctx.provide('connection' as never, {
@@ -37,14 +39,21 @@ describe('notice client Remote namespace lifecycle', () => {
       expect(ctx.get('remote.deliveryNotices' as never)).toBeUndefined()
       const unmount = await ctx.remote.$mount(TYPERT_REMOTE)
       const fiber = ctx.inject(['remote.deliveryNotices'], (runtime) => {
-        const namespace = (runtime.remote as unknown as { deliveryNotices: { list(sessionId: string): Promise<unknown> } }).deliveryNotices
+        const namespace = (runtime.remote as unknown as { deliveryNotices: {
+          list(sessionId: string): Promise<unknown>
+          ack(sessionId: string, ids: readonly string[], status: string): Promise<unknown>
+        } }).deliveryNotices
         expect(namespace).toBeDefined()
         void namespace.list('owned-session')
+        void namespace.ack('owned-session', ['notice-1'], 'delivered')
         return () => { released += 1 }
       })
       await fiber
       await vi.waitFor(() => expect(call).toHaveBeenCalledWith('/api', 'deliveryNotices/list', {
         args: { sessionId: 'owned-session' },
+      }, expect.any(AbortSignal)))
+      await vi.waitFor(() => expect(call).toHaveBeenCalledWith('/api', 'deliveryNotices/ack', {
+        args: { sessionId: 'owned-session', ids: ['notice-1'], status: 'delivered' },
       }, expect.any(AbortSignal)))
       await unmount()
       await vi.waitFor(() => expect(released).toBe(1))

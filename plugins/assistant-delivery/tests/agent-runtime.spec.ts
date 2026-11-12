@@ -1288,6 +1288,109 @@ describe('real native Delivery Agent runtime', () => {
     } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
+  test('native Web notice ack is binding/scope checked, monotonic, and keeps delivered notices listed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-ack-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
+    const ownerId = 'web/browser/local/owner'
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'web-owner-notice', conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', policyRef: 'web-owner', minimumGeneration: 1 }],
+      policyRules: [{ id: 'web-owner-notice-send', effect: 'allow', subject: { kind: 'background', id: 'proactive-engine', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    try {
+      operator.handoffOwner(webPrincipal)
+      access = fixture.service.bindNativeWebOwner(fixture.ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      const binding = store.createBinding({ conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', sessionId: 'web-owner-session', policyRef: 'web-owner' })
+      const owner = store.getPrincipal(webPrincipal)!
+      const enqueue = (idempotencyKey: string, text: string, expiresAt = Date.now() + 60_000) => fixture.service.enqueueOwnerNotification({
+        sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice',
+        scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' },
+        sessionId: binding.sessionId, idempotencyKey, text, expiresAt,
+      })
+      const receiptCount = (providerId: string) =>
+        (database.prepare('SELECT count(*) AS n FROM delivery_receipts WHERE provider_message_id=?').get(providerId) as { n: number }).n
+      const notice = enqueue('native-ack-notice', 'Owner acknowledgement target.')
+      await drive(fixture.service)
+      expect(store.getOutbox(notice.id)).toMatchObject({ status: 'accepted' })
+      expect(access.notifications(binding.sessionId)).toEqual([expect.objectContaining({ id: notice.id, status: 'accepted' })])
+
+      // (a) delivered ack: outbox monotonic and notice stays listed with status.
+      expect(access.acknowledgeNotices(binding.sessionId, [notice.id], 'delivered')).toEqual({ acknowledged: 1 })
+      expect(store.getOutbox(notice.id)).toMatchObject({ status: 'delivered' })
+      expect(access.notifications(binding.sessionId)).toEqual([expect.objectContaining({ id: notice.id, status: 'delivered' })])
+
+      // (c) read then late delivered: read wins and the notice disappears from the unread list.
+      expect(access.acknowledgeNotices(binding.sessionId, [notice.id], 'read')).toEqual({ acknowledged: 1 })
+      expect(store.getOutbox(notice.id)).toMatchObject({ status: 'read' })
+      expect(access.notifications(binding.sessionId)).toEqual([])
+      const noticeProvider = store.getOutbox(notice.id)!.providerMessageId!
+      const receiptsBeforeLateDelivery = receiptCount(noticeProvider)
+      expect(access.acknowledgeNotices(binding.sessionId, [notice.id], 'delivered')).toEqual({ acknowledged: 1 })
+      expect(store.getOutbox(notice.id)).toMatchObject({ status: 'read' })
+      // A late delivered ack neither downgrades nor appends a stale receipt row.
+      expect(receiptCount(noticeProvider)).toBe(receiptsBeforeLateDelivery)
+
+      // A different owner session is denied before any write.
+      const receiptsBeforeForeignSession = receiptCount(noticeProvider)
+      expect(() => access!.acknowledgeNotices('foreign-session', [notice.id], 'delivered')).toThrow()
+      expect(receiptCount(noticeProvider)).toBe(receiptsBeforeForeignSession)
+
+      const untouched = enqueue('native-ack-untouched', 'Must stay untouched.')
+      await drive(fixture.service)
+      expect(store.getOutbox(untouched.id)).toMatchObject({ status: 'accepted' })
+      // A real non-notice outbox on the same binding, accepted without the
+      // native-notice marker: ack must reject it even though the binding matches.
+      const plain = store.enqueue({ idempotencyKey: 'plain-not-notice', bindingId: binding.id,
+        target: { principal: webPrincipal, conversation: webConversation }, text: 'Not a native notice.', format: 'plain' })
+      database.prepare("UPDATE outbox_messages SET status='accepted', provider_message_id='plain-provider' WHERE id=?").run(plain.id)
+      expect(store.getOutbox(plain.id)).toMatchObject({ status: 'accepted' })
+      const providerId = store.getOutbox(untouched.id)!.providerMessageId!
+      const receipts = () => (database.prepare('SELECT count(*) AS n FROM delivery_receipts WHERE provider_message_id=?').get(providerId) as { n: number }).n
+      expect(receipts()).toBe(0)
+
+      // (b) non-notice outbox, empty/over-limit/overlong ids and mixed invalid
+      // batches all fail closed before the first receipt; untouched stays accepted.
+      expect(() => access!.acknowledgeNotices(binding.sessionId, [plain.id], 'delivered')).toThrow()
+      expect(() => access!.acknowledgeNotices(binding.sessionId, [], 'delivered')).toThrow()
+      expect(() => access!.acknowledgeNotices(binding.sessionId, Array.from({ length: 101 }, (_, index) => `notice-${index}`), 'delivered')).toThrow()
+      expect(() => access!.acknowledgeNotices(binding.sessionId, ['bad id!'], 'delivered')).toThrow()
+      expect(() => access!.acknowledgeNotices(binding.sessionId, ['x'.repeat(257)], 'delivered')).toThrow()
+      expect(() => access!.acknowledgeNotices(binding.sessionId, [untouched.id, plain.id], 'delivered')).toThrow()
+      const ackAny = access!.acknowledgeNotices.bind(access) as unknown as
+        (sessionId: string, ids: readonly string[], status: string) => { acknowledged: number }
+      expect(() => ackAny(binding.sessionId, [untouched.id], 'bogus')).toThrow()
+      expect(store.getOutbox(untouched.id)).toMatchObject({ status: 'accepted' })
+      expect(receipts()).toBe(0)
+
+      // (R1) Expired notices are rejected by the same send-path guard; no receipt.
+      const expiring = enqueue('native-ack-expired', 'Expired target.', Date.now() + 10_000)
+      await drive(fixture.service)
+      expect(store.getOutbox(expiring.id)).toMatchObject({ status: 'accepted' })
+      const expiringProvider = store.getOutbox(expiring.id)!.providerMessageId!
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 20_000)
+      try { expect(() => access!.acknowledgeNotices(binding.sessionId, [expiring.id], 'delivered')).toThrow() }
+      finally { clock.mockRestore() }
+      expect(receiptCount(expiringProvider)).toBe(0)
+
+      // (R1) Revoked owner/binding generation: rejected before any receipt.
+      const revokedNotice = enqueue('native-ack-revoked', 'Revoked owner target.')
+      await drive(fixture.service)
+      const revokedProvider = store.getOutbox(revokedNotice.id)!.providerMessageId!
+      store.revokePrincipal(owner.id, owner.version)
+      expect(() => access!.acknowledgeNotices(binding.sessionId, [revokedNotice.id], 'delivered')).toThrow()
+      expect(receiptCount(revokedProvider)).toBe(0)
+    } finally {
+      database.close()
+      await access?.dispose()
+      operator.close()
+      await fixture.ctx.fiber.restart()
+    }
+  })
+
   test('native Web notice adapter keeps a withdrawal-unavailable hold retryable and keeps accepted withdrawable notices listed after close', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-withdrawal-')); roots.push(root)
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
@@ -1298,6 +1401,7 @@ describe('real native Delivery Agent runtime', () => {
       policyRules: [{ id: 'web-owner-notice-send', effect: 'allow', subject: { kind: 'background', id: 'proactive-engine', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
     })
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    const database = new DatabaseSync(join(root, 'delivery.sqlite'))
     let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
     try {
       operator.handoffOwner(webPrincipal)
@@ -1317,6 +1421,12 @@ describe('real native Delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(store.getOutbox(accepted.id)).toMatchObject({ status: 'accepted' })
       expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
+      // A live, not-withdrawn notice can still be acked delivered.
+      expect(access.acknowledgeNotices(binding.sessionId, [accepted.id], 'delivered')).toEqual({ acknowledged: 1 })
+      expect(store.getOutbox(accepted.id)).toMatchObject({ status: 'delivered' })
+      const acceptedProvider = store.getOutbox(accepted.id)!.providerMessageId!
+      const acceptedReceipts = () => (database.prepare('SELECT count(*) AS n FROM delivery_receipts WHERE provider_message_id=?').get(acceptedProvider) as { n: number }).n
+      const receiptsBeforeWithdrawal = acceptedReceipts()
 
       // The coordinator's pre-send check passes, then the check becomes
       // unavailable inside the adapter's own send: the hold stays retryable.
@@ -1330,12 +1440,16 @@ describe('real native Delivery Agent runtime', () => {
       // The question closes, the check throws, then Evaluation unloads: the accepted notice stays listed.
       verdict = () => true
       expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
+      // (R1) The send-path guard sees the withdrawal: the known id cannot be acked.
+      expect(() => access!.acknowledgeNotices(binding.sessionId, [accepted.id], 'read')).toThrow()
+      expect(store.getOutbox(accepted.id)).toMatchObject({ status: 'delivered' })
+      expect(acceptedReceipts()).toBe(receiptsBeforeWithdrawal)
       verdict = () => { throw new Error('evaluation failed') }
       expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
       withdrawal.unregister()
       owned.clear()
       expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([accepted.id])
-    } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+    } finally { database.close(); await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each([false, true])('publishes one exact Web owner notice when a verified completed wake has no final text (attentionEnforce %s)', async enforce => {
