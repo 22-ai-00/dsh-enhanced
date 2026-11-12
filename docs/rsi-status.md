@@ -6,7 +6,7 @@
 
 通过认证任务与反馈、原生 Agent、持久学习、独立验证、有界采用和回退，减少主人的协调与返工；以后续真实任务的质量、成本和人工介入判断收益。
 
-本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。D1b 收益投影、D2 holdout 守卫、E2 inferred 合同准入、E3a read 回执、C1b/C1c 安装 readiness 与学习链也已交付；B3 真实渠道验收、E3b/E3a-W、D3/D5 与 F 仍待推进。
+本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。D1b 收益投影、D2 holdout 守卫、E2 inferred 合同准入、E3a read 回执与 Web notice ack、C1b/C1c 安装 readiness 与学习链、D3a 真实 release/activation 链也已交付，做梦机制按当前 Host 执行器合同复活；B3 真实渠道验收、E3b、D3a-1/D5 与 F 仍待推进。
 
 开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
 
@@ -28,6 +28,7 @@
 - E3a-W：Web native notice 的 delivered/read ack（`acknowledgeNotices` 经绑定 owner session；整批经同一 native notice guard（过期/授权漂移/撤回）校验后才写 receipt；read 后迟到 delivered 不回退不写行；严格 TYPERT `deliveryNotices/ack`；client 渲染 ack delivered、点击 ack read 并明示不代表已读正文）（`06b3d50e`）。
 - D3a-0a：真实本地 release 八阶段 opt-in 集成测试——shipped `dsh-local-release-adapter.js`（shebang 固定 canonical interpreter）+ 真实 pinned bwrap/pnpm toolchain + file: registry，逐阶段真实 Ed25519 回执验签、tarball/catalog 校验，两条篡改 fail-closed；opt-in 缺省时 skip（`e9d94eb6`）。
 - D3a-0b：真实 activation 链 opt-in 集成测试（真实 `dsh plugin add` staging + 原子 profile swap + 真实 `dsh --profile` 进程 + shipped observer 采样真实 Loader Fiber + 测试 schema-2 host attestor 签 reload/readiness），断言停在 `awaiting-effect-blocked-replay` 且不进 `awaiting-live-tasks`（无独立效果证据不放行），含篡改样本被 readiness 拒绝的负例（`5058218d`）。同时修复一个真实生产缺陷：本地构建产物激活曾把无后缀 `/proc/<pid>/fd/N` 作为安装 spec 传给 pnpm 导致必然失败，改为稳定 `.tgz` cache 路径，pinned fd 封存校验与安装后 lockfile integrity fail-closed 保留（`a2ec42a1`）。
+- 做梦机制（`assistant-dreaming`，默认关闭）：按当前 Automations Host-executor 合同复活——终态改为合同化结果（原先每个 wake 都在 registry 边界被拒）、删除重复预算扣减、misfire 跳过而非补跑、preview 零模型零账本、成功路径与加载时执行保留期清理（同事务删事件行避免外键静默失效）、dream Agent 绑定 background initiator、owner 读取面改绑定箭头属性以穿过 Cordis service proxy、reconcile key 每次加载唯一使暂停/恢复收敛、`retired` 与 `disabled` 组合 fail-closed；README 补真实启用步骤（Policy reconcile/execute/tool/send、budgets、scheduler、Delivery route）与 retired-first 关闭顺序（`0e15295a`）。- 发布账本：pending 集合补入 `assistant-dreaming`（38→39 与 workspace 对齐），否则 `release:prepare/record` 会拒绝；`install-npm.sh` 的既有 installer pin 漂移仍需在发布流程中重签（`4c454b0c`）。- 部署现状：Mac 桌面 profile 已装本仓库 dev 构建（37 包重打包、27 个内容更新，标记已验证，需重启 App 生效）；Linux 线上 `assistant` profile 仍为已发布 0.1.67——该 Home 是冻结本地 cohort owner 安装，receipt 0.1.64 与已装 0.1.67 不一致，普通/受管 upgrade 在 mutation 前被结构性拒绝，未绕过安装器手工改线上（详见交接证据）。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
@@ -44,5 +45,6 @@
 - 提交 `f223870d`（B3 端到端）、`37e3fc95`（D1a）、`55f335e5`（C1a）、`9d18a395`（E1）、`68b91301`（E2）、`0eab022b`（D1b）均为 Linux 冷 `pnpm check` EXIT 0、39 dry-run packs、lint 干净、manifest 稳定（2110–2112 文件）；每个都有独立只读复核 PASS，复核发现的缺陷（C1a marker/flag 死锁与 0755、D1a 文档/漂移测试、E1 dead-code/毒行/跨包 worker 清单）均在提交前修复。
 - CI：`05957ae2`、`55f335e5` 六 job 全绿；`f223870d`、`37e3fc95` 的失败已确认为 GitHub runner DNS 故障（apt 解析 azure.archive.ubuntu.com 失败），非代码问题。
 - CI 均衡实测：根慢片 979s→674s、两片比 1.03；包测试 step 1349s→1113s；1046s 单文件已拆 74+35（2 worker，用例数不变）。
+- 做梦机制、D3a-0b 与发布账本修复均通过 Linux 冷 `pnpm check` EXIT 0 / 2161s（39 packs、manifest 稳定）；`assistant-dreaming` 包 54 用例、独立复核两轮（拦截泄漏的 executor 注册、reconcile key 回放、缺 reconcile 规则、prune 外键）。CI 在 `0e15295a` 暴露一处 delivery 既有测试时序 flake（慢机上 `whenIdle()` 先于子 Agent 的 adapter 请求落账），已改为有界等待精确计数（不放宽断言）。
 - 完整门在本机需要三条前提：`DSH_TEST_PNPM_ROOT`、`pnpm_config_store_dir`、**短** `TMPDIR`；解析方法见[交接入口](handover/README.md)。
-- 未验收：B3 真实模型/渠道、E3b 真实飞书联调、E3a-W Web notice ack、D3/D5 真实外部执行链与第二事件源、F；没有发布 npm、升级生产 Home 或发送用户渠道消息。
+- 未验收：B3 真实模型/渠道、E3b 真实飞书联调（受 Linux 线上 Home 冻结 cohort 登记不一致阻塞，需先按发布流程发新版后 `dsh-rsi update --all`）、D3a-1/D5 真实外部执行链与第二事件源、F；没有发布 npm、升级生产 Home 或发送用户渠道消息。

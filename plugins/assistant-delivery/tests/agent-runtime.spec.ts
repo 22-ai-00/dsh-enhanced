@@ -12481,7 +12481,10 @@ describe('real native Delivery Agent runtime', () => {
       await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
       expect(goalId).not.toBe('')
       if (mode === 'late-start') expect(lateStopReasons).toEqual(['completed', 'completed'])
-      expect(fixture.llm.requests).toHaveLength(adapterCalls + 1)
+      // The rejected child records its adapter request from its own stream task, so
+      // whenIdle() can resolve first on a loaded runner. Wait for the exact count
+      // instead of sampling once; the expectation itself is unchanged.
+      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(adapterCalls + 1), { timeout: 60_000 })
       if (outerMeter) {
         outerMeter.assertComplete()
         const measured = outerMeter.snapshot()
