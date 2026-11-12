@@ -64,6 +64,8 @@ Policy 最少需要这些准确 owner/workspace、`initiators: ['background']` �
 
 后台专项经真实 Delivery owner 输入、WorkItems 报告接受记录和 Evaluation 的 not-achieved canonical，沿原 supplier 的零工具原生提取、独立原生审查 Session 与持久 review 账本，完成实际 Memory 采用。随后通过真实 `/new` 和普通 owner turn，在原生 Agent 的 pre-step 由 Host 调用 `Memory.search` 读回；此项不证明 Agent 自动选择检索工具。真实更正、撤回后，旧经验立即隐藏，并在同进程 Memory、Verifier、learner 卸载重挂后仍隐藏。实际采用后丢 ACK 且回执暂不可读时，已保存的 unknown 经组件重挂继续对账原操作，没有重复提取、审查或重付额度。
 
+`tests/installer-config.integration.spec.ts` 直接使用安装器生成器（lark-channel 的编译产物 `plugins/lark-channel/lib/rsi-memory-learning.js`）产出的三份 grant，注入真实 Delivery/Evaluation/WorkItems/Verifier/Memory 链路；因此该测试依赖仓库先 build 再 test 的顺序（根 `pnpm check` / `pnpm test` 已保证）。单独运行本包测试前先构建 lark-channel：`pnpm --filter @dsh-enhanced/lark-channel run build`。
+
 上述供应商与审查语义使用本地脚本 fixture；冷恢复仅重挂 Memory、Verifier、learner，同进程上游保持运行，不是完整 Host 进程冷启动或 Bot 实连验收。这些证据不证明任意真实模型能力或后续任务质量、成本、延迟收益。原始运行与冻结摘要位于 `docs/evidence/work-item-memory-learning/native/`。此前前台链路的本机 owner 部署与新鲜就绪已验收，不覆盖本轮后台经验的生产部署。普通任务驱动的新插件创建、Cordis 动态工程采用及后续真实任务收益仍按 [当前状态](../../docs/rsi-status.md) 继续验收。
 
 

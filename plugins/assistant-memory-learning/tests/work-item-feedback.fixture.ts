@@ -21,11 +21,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, vi } from 'vitest'
 import { AssistantWorkItemsService } from '../../assistant-work-items/lib/index.js'
 import type { Config } from '../../assistant-work-items/lib/config.js'
-import { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
-import { PersonalMemoryService, validateMemoryLearningAdoptionGrant } from '@dsh-enhanced/personal-memory'
+import { AssistantVerifierService, type MemoryReviewConfig } from '@dsh-enhanced/assistant-verifier'
+import { PersonalMemoryService, validateMemoryLearningAdoptionGrant, type MemoryLearningAdoptionGrant } from '@dsh-enhanced/personal-memory'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { validateMemoryReviewConfig } from '../../assistant-verifier/lib/memory-review.js'
-import { AssistantMemoryLearningService, type LearningConfig } from '../src/index.ts'
+import { AssistantMemoryLearningService, validateLearningConfig, type LearningConfig } from '../src/index.ts'
 import { randomUUID } from 'node:crypto'
 
 const closes: Array<() => Promise<void>> = []
@@ -141,7 +141,10 @@ function decoded<T>(content: readonly { type: string; text?: string }[]): T {
   const text = content.map(c => c.text ?? '').join('\n').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')
   return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as T
 }
-export async function workItemLearningFixture(options: { replyEnabled?:boolean; holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean } = {}) {
+export async function workItemLearningFixture(options: { replyEnabled?:boolean; holdSummary?: boolean; holdDispose?: boolean; markerAttack?: boolean; groupedResponse?: boolean
+  /** Installer-compatible authority/budget ids and the generated grant bundle used by the learning mount. */
+  learningPolicyIds?: { learningAuthorityId: string; reviewAuthorityId: string; adoptionAuthorityId: string; learningBudgetId: string; scanBudgetId: string }
+} = {}) {
   const queryResults:unknown[]=[]
   const sent: Array<{providerMessageId:string;intent:Readonly<OutboundIntent>}> = []
   const root = await realpath(await mkdtemp(join(tmpdir(), 'work-item-memory-native-')))
@@ -165,9 +168,11 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
   const principal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }, principalId = 'web/browser/local/owner'
   const conversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'ordinary-source' }
   const scope = { authorityId: 'recall-owner', principalId, workspace, agentPreset: 'primary' }
+  const learningPolicyIds = options.learningPolicyIds ?? { learningAuthorityId: 'learning-grant', reviewAuthorityId: 'review-grant',
+    adoptionAuthorityId: 'adoption-grant', learningBudgetId: 'learning-budget', scanBudgetId: 'scan-budget' }
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), proposalMaintenanceIntervalMs: 0,
-    budgets: ['diagnosis-runs','continuation-runs','learning-budget','scan-budget'].map(id=>({id, metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' as const})), rules: [
-      ...(['extract','review','adopt'] as const).map(action=>({id:`learning-${action}`,effect:'allow' as const,subject:{kind:'background' as const,id:'assistant-memory-learning',workspace,principal:principalId},actions:[action],resource:{kind:'memory' as const,id:`learning:${action==='review'?'review-grant':action==='adopt'?'adoption-grant':'learning-grant'}`},context:{initiators:['background' as const]}})),
+    budgets: ['diagnosis-runs','continuation-runs',learningPolicyIds.learningBudgetId,learningPolicyIds.scanBudgetId].map(id=>({id, metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' as const})), rules: [
+      ...(['extract','review','adopt'] as const).map(action=>({id:`learning-${action}`,effect:'allow' as const,subject:{kind:'background' as const,id:'assistant-memory-learning',workspace,principal:principalId},actions:[action],resource:{kind:'memory' as const,id:`learning:${action==='review'?learningPolicyIds.reviewAuthorityId:action==='adopt'?learningPolicyIds.adoptionAuthorityId:learningPolicyIds.learningAuthorityId}`},context:{initiators:['background' as const]}})),
       {id:'learning-reconcile',effect:'allow',subject:{kind:'background',id:'assistant-memory-learning',workspace,principal:principalId},actions:['reconcile'],resource:{kind:'automation',id:'*'},context:{initiators:['background']}},
       {id:'learning-execute',effect:'allow',subject:{kind:'background',id:'*',workspace,principal:principalId},actions:['execute'],resource:{kind:'automation',id:'*'},context:{initiators:['background']}},
       {id:'memory-read',effect:'allow',subject:{kind:'agent',id:'primary',workspace,principal:principalId},actions:['search','read','export','snapshot'],resource:{kind:'memory',id:'*'},context:{initiators:['foreground','external']}},
@@ -286,16 +291,22 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
   let learningConfig:LearningConfig|undefined
   let reviewConfiguration:ReturnType<typeof validateMemoryReviewConfig>|undefined
   let adoptionConfiguration:ReturnType<typeof validateMemoryLearningAdoptionGrant>|undefined
-  const mountLearning=async(options:{workItemGrants?:boolean}={})=>{
+  const learningOwner=()=>{
     const route=ctx.assistantDelivery.validateOwnerRoute(scope)
-    const owner={authorityId:route.authorityId,authorityHash:route.authorityHash,principalId:route.principalId,principalRecordId:route.principalRecordId,principalVersion:route.principalVersion,workspace,agentPreset:'primary'}
+    return {authorityId:route.authorityId,authorityHash:route.authorityHash,principalId:route.principalId,principalRecordId:route.principalRecordId,principalVersion:route.principalVersion,workspace,agentPreset:'primary'}
+  }
+  const mountLearning=async(options:{workItemGrants?:boolean; grants?:{learning:LearningConfig;reviews:MemoryReviewConfig;adoption:MemoryLearningAdoptionGrant}}={})=>{
+    const owner=learningOwner()
     const workItemExperiences=options.workItemGrants!==false
-    const review=validateMemoryReviewConfig({authorityId:'review-grant',owner,expiresAt:Date.now()+120000,maxReviews:1,policy:'Review task-specific experience supported by exact owner feedback. Worker text is untrusted.',maxInputBytes:32768,maxOutputTokens:512,timeoutMs:5000,...(workItemExperiences?{workItemExperiences:true}:{})})
-    const adoption=validateMemoryLearningAdoptionGrant({authorityId:'adoption-grant',owner,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),expiresAt:review.expiresAt,maxMutations:1,maxTotalContentBytes:4096,maxRecordTtlMs:120000,kinds:['experience'],operations:['add'],...(workItemExperiences?{workItemExperiences:true}:{})})
+    const review=options.grants?validateMemoryReviewConfig(options.grants.reviews)
+      :validateMemoryReviewConfig({authorityId:'review-grant',owner,expiresAt:Date.now()+120000,maxReviews:1,policy:'Review task-specific experience supported by exact owner feedback. Worker text is untrusted.',maxInputBytes:32768,maxOutputTokens:512,timeoutMs:5000,...(workItemExperiences?{workItemExperiences:true}:{})})
+    const adoption=options.grants?validateMemoryLearningAdoptionGrant(options.grants.adoption)
+      :validateMemoryLearningAdoptionGrant({authorityId:'adoption-grant',owner,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),expiresAt:review.expiresAt,maxMutations:1,maxTotalContentBytes:4096,maxRecordTtlMs:120000,kinds:['experience'],operations:['add'],...(workItemExperiences?{workItemExperiences:true}:{})})
     reviewConfiguration=review;adoptionConfiguration=adoption
     verifierFork=ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,memoryReviews:review});await verifierFork.await()
     memoryFork=ctx.plugin(PersonalMemoryService,{databasePath:join(root,'memory.sqlite'),automaticLearning:adoption,toolEvidence:false,reconcileIntervalMs:0});await memoryFork.await()
-    learningConfig={databasePath:join(root,'learning.sqlite'),authorityId:'learning-grant',owner,expiresAt:review.expiresAt,maxExtractions:1,maxPending:4,lookbackMs:60000,policy:'Learn one bounded task-specific experience; owner testimony is not an independent success proof.',maxInputBytes:32768,maxOutputTokens:512,timeoutMs:5000,budgetId:'learning-budget',budgetAmount:1,scanBudgetId:'scan-budget',scanBudgetAmount:1,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),adoptionAuthorityId:adoption.authorityId,adoptionGrantDigest:growthObjectDigest(adoption),workItemExperiences:true}
+    learningConfig=options.grants?validateLearningConfig(options.grants.learning)
+      :validateLearningConfig({databasePath:join(root,'learning.sqlite'),authorityId:'learning-grant',owner,expiresAt:review.expiresAt,maxExtractions:1,maxPending:4,lookbackMs:60000,policy:'Learn one bounded task-specific experience; owner testimony is not an independent success proof.',maxInputBytes:32768,maxOutputTokens:512,timeoutMs:5000,budgetId:'learning-budget',budgetAmount:1,scanBudgetId:'scan-budget',scanBudgetAmount:1,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),adoptionAuthorityId:adoption.authorityId,adoptionGrantDigest:growthObjectDigest(adoption),workItemExperiences:true})
     learningFork=ctx.plugin(AssistantMemoryLearningService,learningConfig);await learningFork.await()
   }
   const remountLearning=async()=>{if(!learningConfig)throw new Error('learning not mounted');await learningFork?.dispose();learningFork=ctx.plugin(AssistantMemoryLearningService,learningConfig);await learningFork.await()}
@@ -330,7 +341,7 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
     } finally {supplier.querySessions.delete(binding.sessionId);remove()}
   }
 
-  return { mountLearning,remountLearning,stopLearning,remountMemoryStack,queryMemory, workspace, evaluationConfig, stopWorkItems, deliveryConfig, reopen, reply,acceptReports,sent,workConfig,registerAdapter,conversation, markerPreparedStates,warnings,marker,lateAllows:()=>lateAllows,ctx,supplier,agents,operator,principal,scope,produce,snapshot,root,authObservations,restart,waitRuns,waitParentReport,releaseSummary:()=>releaseSummary?.(),releaseDispose:()=>releaseDispose?.(),recallApprovalAsks:()=>recallApprovalAsks }
+  return { learningOwner,mountLearning,remountLearning,stopLearning,remountMemoryStack,queryMemory, workspace, evaluationConfig, stopWorkItems, deliveryConfig, reopen, reply,acceptReports,sent,workConfig,registerAdapter,conversation, markerPreparedStates,warnings,marker,lateAllows:()=>lateAllows,ctx,supplier,agents,operator,principal,scope,produce,snapshot,root,authObservations,restart,waitRuns,waitParentReport,releaseSummary:()=>releaseSummary?.(),releaseDispose:()=>releaseDispose?.(),recallApprovalAsks:()=>recallApprovalAsks }
 }
 
 // Native Agent/Cordis/SQLite/Policy/Host are real. Only the LLM supplier is

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, readFile, realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { access, lstat, mkdir, readFile, realpath } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { listActiveAutomationsForReadiness } from '@dsh-enhanced/assistant-automations'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
@@ -22,7 +23,7 @@ import { prepareLinuxRsiCreationBuildEnvironment, readLinuxRsiCreationBuildEnvir
   RsiLinuxCreationBuildUnavailableError, type LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError } from './rsi-linux-cgroup-roots.js'
 import { prepareRsiLinuxRunnerStates, type RsiLinuxRunnerStates } from './rsi-linux-runner-states.js'
-import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from './rsi-bootstrap.js'
+import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration, type RsiOwnerConfigurationContext } from './rsi-bootstrap.js'
 import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from './rsi-install-inputs.js'
 import { captureRsiSystemdUnitProperties, readRsiSystemdUnitProperties } from './rsi-systemd-bootstrap.js'
 import { configureRsiSetupLocked, rsiSetupPorts, type RsiSetupPorts } from './rsi-setup.js'
@@ -37,7 +38,7 @@ import { assertRsiSchedulerActivation, captureRsiAutomationInventories, rsiDatab
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
-const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
+const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 function fail(message: string): never { throw new Error(`rsi install: ${message}`) }
 export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal; ackExistingAutomations?: boolean | undefined
   /** Fresh-install-only ordinary-use learning; a retry preserves the stored opt-in and never expands it. */
@@ -241,6 +242,207 @@ async function ready(manifest: RsiSetupManifest, pin: RsiAuthorityConfigInput['s
   }
   throw new Error('rsi install: dual Host readiness failed; applied configuration retained for retry', { cause: failure })
 }
+export class RsiOwnerPreflightUnavailableError extends Error {
+  readonly stage: string
+  constructor(stage: string, message: string) {
+    super(`rsi owner preflight unavailable (${stage}): ${message}`)
+    this.name = 'RsiOwnerPreflightUnavailableError'
+    this.stage = stage
+  }
+}
+
+export interface RsiOwnerPreflightInput {
+  input: RsiInstallInput
+  prepared: Awaited<ReturnType<typeof prepareResources>>
+  installed: Awaited<ReturnType<typeof collectRsiInstalledInputs>>
+  manifest: RsiSetupManifest
+  binding: RsiOwnerConfigurationContext['binding']
+  profiles: RsiOwnerConfigurationContext['profiles']
+  /** Present when this call replays an existing installation; fresh installs
+   * have no installed owner policies or prior profile objects to re-read. */
+  previousManifest?: RsiSetupManifest
+  signal: AbortSignal
+  /** Test seam: production reads the delegated cgroup roots from the host file
+   * system; shape-only fixtures inject a probe because those descriptors never
+   * touch the host. */
+  cgroupRootsProbe?: (path: string, signal: AbortSignal) => Promise<void>
+}
+
+async function preflightStage<T>(stage: string, action: () => Promise<T> | T): Promise<T> {
+  try { return await action() }
+  catch (error) {
+    if (error instanceof RsiOwnerPreflightUnavailableError) throw error
+    throw new RsiOwnerPreflightUnavailableError(stage, error instanceof Error ? error.message : String(error))
+  }
+}
+
+export interface RsiOwnerPreflightShapeInput {
+  home: string
+  manifest: RsiSetupManifest
+  profiles: RsiOwnerConfigurationContext['profiles']
+  installedPolicies?: readonly unknown[]
+  previousManifest?: RsiSetupManifest
+}
+
+/**
+ * Pure shape/consistency check for the owner manifest that is about to be
+ * written. It never reads the file system: the full compile still runs at the
+ * configure step after the profile directory and authority state exist. A fresh
+ * install therefore passes without any installed policies or lstat of paths it
+ * is about to create; a retry additionally proves the installed release policy
+ * set is still readable.
+ */
+export function validateRsiOwnerPreflightShape(value: RsiOwnerPreflightShapeInput): void {
+  const object = (value: unknown, label: string): Record<string, unknown> => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(label + ' is missing')
+    return value as Record<string, unknown>
+  }
+  const text = (value: unknown, label: string): string => {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 4096) throw new Error(label + ' is invalid')
+    return value
+  }
+  const manifest = object(value.manifest, 'manifest')
+  if (manifest.schemaVersion !== 1) throw new Error('manifest schema is unsupported')
+  const target = text(manifest.targetProfile, 'targetProfile')
+  const coordinator = text(manifest.coordinatorProfile, 'coordinatorProfile')
+  if (target === coordinator) throw new Error('target and coordinator profiles must differ')
+  const reviews = object(manifest.sourceReviews, 'sourceReviews')
+  const decisionRoot = text(reviews.decisionRoot, 'sourceReviews decisionRoot')
+  const controlPlane = object(manifest.controlPlane, 'controlPlane')
+  const releaseExecution = object(controlPlane.sourceReleaseExecution, 'sourceReleaseExecution')
+  const reviewDecisionRoot = text(releaseExecution.reviewDecisionRoot, 'sourceReleaseExecution reviewDecisionRoot')
+  if (decisionRoot !== reviewDecisionRoot) throw new Error('source review decision roots differ')
+  const stateRoot = join(value.home, 'rsi-authorities', target, 'state')
+  for (const [label, path] of [['sourceReviews decisionRoot', decisionRoot],
+    ['sourceReleaseExecution reviewDecisionRoot', reviewDecisionRoot]] as const) {
+    if (!isAbsolute(path) || resolve(path) !== path || !path.startsWith(stateRoot + '/')) {
+      throw new Error(label + ' is outside the installation state root')
+    }
+  }
+  for (const [label, group] of [['sourceJobs', controlPlane.sourceJobs], ['sourceBuild', controlPlane.sourceBuild],
+    ['sourceAdoptions', controlPlane.sourceAdoptions], ['taskObservations', controlPlane.taskObservations]] as const) {
+    object(group, label)
+  }
+  const jobs = object(controlPlane.sourceJobs, 'sourceJobs')
+  if (typeof jobs.budgetId !== 'string' || typeof jobs.ownerRouteId !== 'string') throw new Error('sourceJobs is incomplete')
+  const growth = object(manifest.growthDriver, 'growthDriver')
+  if (growth.enabled !== true || typeof growth.budgetId !== 'string' || typeof growth.usageLearning !== 'object') {
+    throw new Error('growthDriver is incomplete')
+  }
+  object(manifest.limits, 'limits')
+  const memory = manifest.memoryLearning
+  if (memory !== undefined) {
+    const group = object(memory, 'memoryLearning')
+    for (const key of ['learning', 'reviews', 'adoption'] as const) object(group[key], 'memoryLearning ' + key)
+  }
+  const ordinary = manifest.ordinaryUseLearning
+  if (ordinary !== undefined) object(object(ordinary, 'ordinaryUseLearning').intakeEvaluation, 'ordinaryUseLearning intakeEvaluation')
+  const creation = manifest.pluginCreation
+  if (creation !== undefined) {
+    const group = object(creation, 'pluginCreation')
+    for (const key of ['creation', 'reviews'] as const) object(group[key], 'pluginCreation ' + key)
+  }
+  const revision = manifest.pluginRevision
+  if (revision !== undefined) {
+    const group = object(revision, 'pluginRevision')
+    for (const key of ['revision', 'reviews'] as const) object(group[key], 'pluginRevision ' + key)
+  }
+  for (const [label, profile] of [['targetPatch', value.profiles.targetPatch],
+    ['targetEffective', value.profiles.targetEffective], ['coordinatorPatch', value.profiles.coordinatorPatch],
+    ['coordinatorEffective', value.profiles.coordinatorEffective], ['coordinatorBase', value.profiles.coordinatorBase]] as const) {
+    // Compiled profile patches are full YAML documents; only the raw manifest
+    // fields above are small bounded strings.
+    if (typeof profile !== 'string' || profile.length === 0 || profile.length > 2_097_152) {
+      throw new Error(label + ' is invalid')
+    }
+  }
+  if (value.previousManifest !== undefined && (!value.installedPolicies || value.installedPolicies.length < 1)) {
+    throw new Error('installed release policies are unavailable')
+  }
+}
+
+/**
+ * Read-only readiness gate. It runs before any Host is stopped and before any
+ * owner grant, authority configuration or manifest is written; failures map to a
+ * not-ready result so a retry can run after fixing the Host without reconciling
+ * a partially issued authorization. Environment checks are limited to state the
+ * installer itself prepared (pinned user manager, delegated cgroup descriptor,
+ * private profiles/observer paths) plus the sandbox tool the runner needs.
+ */
+export async function preflightRsiOwnerReadiness(value: RsiOwnerPreflightInput): Promise<void> {
+  const { input, prepared, manifest, profiles, signal } = value
+  const home = input.dshHome, pair = [manifest.targetProfile, manifest.coordinatorProfile] as const
+  signal.throwIfAborted()
+  // Service manager: the pinned user manager must answer a read-only query.
+  await preflightStage('service-manager', () => systemctl(value.installed.systemctl, ['show-environment'], signal))
+  // release-pinned tools: re-read the exact bwrap and tar pins recorded by the
+  // release build environment. Existence, executable mode and content digest
+  // must still match; a PATH lookup or a foreign binary is not accepted.
+  await preflightStage('tool-pin', async () => {
+    const pins = prepared.release.releaseBuild
+    for (const [label, pin] of [['bwrap', pins.sandboxExecutable], ['tar', pins.tarExecutable]] as const) {
+      if (!isAbsolute(pin.path) || resolve(pin.path) !== pin.path || !/^[a-f0-9]{64}$/u.test(pin.sha256)) {
+        throw new Error(label + ' release pin is invalid')
+      }
+      const entry = await lstat(pin.path)
+      if (!entry.isFile() || (entry.mode & 0o111) === 0) throw new Error(label + ' release pin is not an executable file: ' + pin.path)
+      if (hash(await readFile(pin.path)) !== pin.sha256) throw new Error(label + ' release pin content changed: ' + pin.path)
+    }
+  })
+  // cgroup: the delegated v1 descriptor frozen during preparation must still be
+  // complete, and each root must be a readable/searchable directory on the host.
+  await preflightStage('cgroup', async () => {
+    const roots = prepared.build.sourceBuild.cgroupRoots
+    const control = roots.mode === 'v1' ? [roots.cpu, roots.memory, roots.pids, roots.freezer] : []
+    if (roots.mode !== 'v1' || control.length !== 4 || new Set(control).size !== 4
+      || control.some(path => !isAbsolute(path) || resolve(path) !== path)) {
+      throw new Error('delegated cgroup v1 roots are incomplete')
+    }
+    const probe = value.cgroupRootsProbe ?? (async (path: string, probeSignal: AbortSignal) => {
+      probeSignal.throwIfAborted()
+      const entry = await lstat(path)
+      if (!entry.isDirectory()) throw new Error('delegated cgroup root is not a directory: ' + path)
+      await access(path, constants.R_OK | constants.X_OK)
+    })
+    for (const path of control) await probe(path, signal)
+  })
+  // observer: the native socket path must fit sun_path, stay inside the private
+  // installation roots and name both profiles. A fresh install validates the
+  // shape of paths it is about to create; a retry also re-reads the existing
+  // private profile directories and observer socket parent.
+  await preflightStage('observer', async () => {
+    const observer = manifest.controlPlane.runtimeObserver
+    if (!observer) throw new Error('runtime observer is missing')
+    if (!isAbsolute(observer.socketPath) || resolve(observer.socketPath) !== observer.socketPath
+      || Buffer.byteLength(observer.socketPath) > 100) throw new Error('runtime observer socket path is invalid')
+    const authorityRoot = join(home, 'rsi-authorities', pair[0])
+    if (!isAbsolute(observer.keyPath) || resolve(observer.keyPath) !== observer.keyPath
+      || observer.keyPath !== join(authorityRoot, 'config', 'observer.key')) throw new Error('runtime observer key path is invalid')
+    if (observer.profilePath !== join(home, 'profiles', pair[0])) throw new Error('runtime observer profile differs from the target installation')
+    const socketParent = dirname(observer.socketPath)
+    if (socketParent !== join(authorityRoot, 'state')) throw new Error('runtime observer socket is outside the installation state root')
+    const profilesRoot = join(home, 'profiles')
+    for (const profile of pair) {
+      const path = join(profilesRoot, profile)
+      if (!isAbsolute(path) || resolve(path) !== path || !path.startsWith(profilesRoot + '/')) throw new Error('owner profile path is invalid')
+    }
+    if (value.previousManifest !== undefined) {
+      for (const profile of pair) await io.directory(join(profilesRoot, profile), false)
+      await io.directory(socketParent)
+    }
+  })
+  // authority: shape and consistency only. The full compile remains at the
+  // configure step, where the profile directory and authority state exist; a
+  // fresh install must not require installed policies or lstat paths that are
+  // about to be created, while a retry still proves those policies are readable.
+  await preflightStage('authority', async () => {
+    validateRsiOwnerPreflightShape({ home, manifest, profiles,
+      ...(value.previousManifest === undefined ? {} : { previousManifest: value.previousManifest,
+        installedPolicies: value.installed.policies }) })
+  })
+}
+
+
 export interface RsiInstallPorts {
   prepare: typeof prepareResources
   collect: typeof collectRsiInstalledInputs
@@ -252,10 +454,11 @@ export interface RsiInstallPorts {
   ready: typeof ready
   configure: typeof configureRsiSetupLocked
   prepareOwner: typeof prepareRsiOwnerConfiguration
+  preflight: typeof preflightRsiOwnerReadiness
 }
 export const rsiInstallPorts: RsiInstallPorts = {
   prepare: prepareResources, collect: collectRsiInstalledInputs, coordinator: ensureCoordinator, setup: rsiSetupPorts,
-  capture: captureRsiSystemdUnitProperties, readUnit: readRsiSystemdUnitProperties, stop: stopManaged, ready, configure: configureRsiSetupLocked, prepareOwner: prepareRsiOwnerConfiguration,
+  capture: captureRsiSystemdUnitProperties, readUnit: readRsiSystemdUnitProperties, stop: stopManaged, ready, configure: configureRsiSetupLocked, prepareOwner: prepareRsiOwnerConfiguration, preflight: preflightRsiOwnerReadiness,
 }
 
 /** Installer-owned process, never invoked from the Host being restarted. */
@@ -359,6 +562,18 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile)
     assertRsiSchedulerActivation(inventories, input.ackExistingAutomations === true)
     const previousJournal = await exists(setupJournal) ? (await io.readStable(setupJournal,2_097_152,true)).toString('utf8') : null
+    // Readiness preflight before stopping Hosts or issuing grants: the owner
+    // configuration (authorities, manifest and memory-learning grants) is only
+    // written after the pinned user manager, sandbox, delegated cgroup roots,
+    // observer placement and compiled owner profile are all readable.
+    try {
+      await ports.preflight({ input, prepared, installed, manifest, binding, profiles, signal,
+        ...(previousManifest === undefined ? {} : { previousManifest }) })
+    } catch (error) {
+      signal.throwIfAborted()
+      if (error instanceof RsiOwnerPreflightUnavailableError) return { mode: 'not-ready', reason: error.message }
+      throw error
+    }
     const running = new Set<string>()
     let applied = false
     try {
