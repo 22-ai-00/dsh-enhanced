@@ -63,6 +63,7 @@ import {
   type LarkChannelHealth,
   type LarkInboundConfig,
   type LarkMessage,
+  type LarkReadReceipt,
   type LarkSendOptions,
   type LarkTransport,
 } from './types.js'
@@ -539,6 +540,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly toolApprovalTombstones = new Map<string, ToolApprovalTombstone>()
   private readonly toolApprovalUpdates = new Set<{ controller: AbortController; done: Promise<void> }>()
   private closing = false
+  private deliveryContext: DeliveryAdapterContext | undefined
   private presentationGeneration = 0
   private readonly modelSelectionUpdates = new Map<string, PendingModelSelectionUpdate>()
   private state: LarkChannelHealth['state'] = 'disconnected'
@@ -555,7 +557,10 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       && options.settlePermissionSelection !== undefined
     this.capabilities = Object.freeze({
       reconcileUnknownSend: false,
-      receipts: [] as const,
+      receipts: ['read'] as const,
+      // Feishu only reports DM reads; reconnect gaps are not replayable, so
+      // absence of a read event must never be treated as authoritative.
+      readReceipts: 'best-effort' as const,
       formats: permissionPickerAvailable
         ? ['plain', 'markdown', 'approval', 'model-picker', 'permission-picker'] as const
         : ['plain', 'markdown', 'approval', 'model-picker'] as const,
@@ -587,6 +592,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   }
 
   async start(context: DeliveryAdapterContext): Promise<() => Promise<void>> {
+    this.deliveryContext = context
     this.closing = false
     this.presentationGeneration += 1
     this.state = 'connecting'
@@ -640,6 +646,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         }
       },
       cardAction: async action => this.handleCardAction(action),
+      readReceipt: receipt => this.forwardReadReceipt(receipt),
       reconnecting: () => {
         this.cancelPendingToolApprovals('unavailable')
         this.gapGeneration += 1
@@ -666,6 +673,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       recoveryTimer = setInterval(recover, 10_000)
       recoveryTimer.unref?.()
     } catch (error) {
+      if (this.deliveryContext === context) this.deliveryContext = undefined
       this.progressPresenter.stop()
       unsubscribe()
       this.state = 'disconnected'
@@ -686,6 +694,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
+      if (this.deliveryContext === context) this.deliveryContext = undefined
       this.closing = true
       await this.drainToolApprovalUpdates()
       await this.transport.disconnect()
@@ -706,6 +715,24 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
    * and the transient normalized text the digest covers). Optional on older
    * Delivery cores and never allowed to affect acceptance.
    */
+  /**
+   * Best-effort read acknowledgement for bot-authored DM messages.
+   *
+   * Delivery owns the monotonic receipt state; an unknown provider id (for
+   * example a message the bot sent before this process) is expected and must
+   * not escape the WebSocket handler. Duplicate ids in one event are collapsed.
+   */
+  private forwardReadReceipt(receipt: LarkReadReceipt): void {
+    const context = this.deliveryContext
+    if (context === undefined) return
+    for (const messageId of new Set(receipt.messageIds)) {
+      void context.receipt({ channel: 'lark', account: this.account, providerMessageId: messageId,
+        status: 'read', occurredAt: receipt.readAt }).catch(() => {
+        // Receipt mismatch/conflict is a Delivery-side no-op for this adapter.
+      })
+    }
+  }
+
   private observeIntake(context: DeliveryAdapterContext, message: LarkMessage, addressed: boolean, text?: string): void {
     if (typeof context.observe !== 'function') return
     try {

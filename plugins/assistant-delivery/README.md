@@ -583,7 +583,14 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 ### 通知结果事实（WP22 切片 1，只读）
 
-`inspectNotificationOutcomeFacts({ afterSequence?, limit? })` 按审计序号分页（默认 100、最多 500），`inspectNotificationOutcomeFacts({ outboxIds })` 按 id 精确查（最多 500，不可与分页参数混用，未知或未审计 id 省略）。每条事实只含审计判定、binding 的 workspace/preset、传输状态（首次 accepted 时间取 attempt，其次 receipt，最后 `updated_at`；delivered/read 取 receipt，否则状态回退）、以 `replyToProviderMessageId` 精确引用该消息的入站回复首次时间与条数（同一会话、同一 principal，含新会话命令轮换后的新 binding），以及最新已记录的工作项反馈，或无错误的 owner 目标命令（无命令时取旧版已验证任务回执作为版本 1，与 Delivery 自身目标状态一致）。回复与工作项反馈的 JSON 查找每次调用整批一次。不返回消息或回复正文，不写库，不改 schema。
+`inspectNotificationOutcomeFacts({ afterSequence?, limit? })` 按审计序号分页（默认 100、最多 500），`inspectNotificationOutcomeFacts({ outboxIds })` 按 id 精确查（最多 500，不可与分页参数混用，未知或未审计 id 省略）。每条事实只含审计判定、binding 的 workspace/preset、传输状态（首次 accepted 时间取 attempt，其次 receipt，最后 `updated_at`；delivered/read 取 receipt，否则状态回退）、以 `replyToProviderMessageId` 精确引用该消息的入站回复首次时间与条数（同一会话、同一 principal，含新会话命令轮换后的新 binding），以及最新已记录的工作项反馈，或无错误的 owner 目标命令（无命令时取旧版已验证任务回执作为版本 1，与 Delivery 自身目标状态一致）。回复与工作项反馈的 JSON 查找每次调用整批一次。不返回消息或回复正文，不写库，不改 schema。E3a 起事实可带可选 `readReceipts: 'none' | 'best-effort' | 'complete'`，取自已注册 adapter 的 capabilities；只有 adapter 显式声明 `complete` 时 Evaluation 才可能区分 missed，未声明/旧 adapter 保持缺省，旧事实与 digest 不变。
+
+### 已知边界（E3a read 回执）
+
+- **deliveredAt 口径（重要）**：Lark adapter 不声明、不发送 delivered。当 outbox 因 read receipt 单调升到 `read` 时，fact 里的 `transport.deliveredAt` 是 Delivery 既有“read 蕴含 delivered”的本地兼容回退（取 `outbox.updated_at`），**不是通道 delivered 事实**，也不是 read 回执的时间；read 事实只看 `readAt`。
+- **迟到 delivered 不回退**：Receipt 状态按 accepted < delivered < read 单调，read 之后到达的 delivered receipt 只保留 receipt 记录，不会把 outbox 状态或 fact 已记录的时间降级。
+- **失败可观测性**：adapter 对未知 provider id/重复 read_time 的 receipt 错误静默 catch（不让单条事实中断 WS）；本轮不带 health/debug 计数，排障要靠 Delivery 的 receipt-mismatch/idempotency 错误与现有日志，后续切片再补可观测性。
+- **read_time 类型**：E3a 只接受飞书文档的字符串毫秒；真实 SDK/网关是否会返回 number 字段由 E3b 联调验证，未确认前按失败关闭处理。
 
 
 ### 进度来源与进度审计（WP19 第 2c 阶段）

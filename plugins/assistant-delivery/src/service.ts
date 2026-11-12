@@ -5939,7 +5939,7 @@ export class AssistantDeliveryService extends Service {
         throw new AssistantDeliveryError('runtime-conflict', 'invalid notification outcome lookup')
       }
       return Object.freeze({ protocol: NOTIFICATION_OUTCOME_FACTS_PROTOCOL,
-        facts: this.deliveryStore.attentionAudit.outcomeFactsFor([...new Set(input.outboxIds)]), hasMore: false, nextAfterSequence: null })
+        facts: this.notificationOutcomeFacts([...new Set(input.outboxIds)]), hasMore: false, nextAfterSequence: null })
     }
     const afterSequence = input.afterSequence ?? 0
     const limit = input.limit ?? 100
@@ -5947,9 +5947,24 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('runtime-conflict', 'invalid notification outcome scan')
     }
     const page = this.deliveryStore.attentionAudit.list(afterSequence, limit)
-    const facts = this.deliveryStore.attentionAudit.outcomeFactsFor(page.entries.map(entry => entry.outboxId))
+    const facts = this.notificationOutcomeFacts(page.entries.map(entry => entry.outboxId))
     return Object.freeze({ protocol: NOTIFICATION_OUTCOME_FACTS_PROTOCOL, facts, hasMore: page.hasMore,
       nextAfterSequence: page.entries.length === 0 ? null : page.entries.at(-1)!.sequence })
+  }
+
+  /**
+   * Attach the registered adapter's read-receipt completeness to each fact.
+   * The Delivery store owns transport facts but not adapter capabilities; only
+   * this read boundary can combine them. An undeclared capability stays absent
+   * so older Evaluation classifiers keep their pinned v1 digests.
+   */
+  private notificationOutcomeFacts(outboxIds: readonly string[]): readonly NotificationOutcomeFact[] {
+    return this.deliveryStore.attentionAudit.outcomeFactsFor(outboxIds).map(fact => {
+      const binding = this.deliveryStore.getBinding(fact.bindingId)
+      const readReceipts = binding === undefined ? undefined
+        : this.registry.get(binding.conversation.channel, binding.conversation.account)?.capabilities.readReceipts
+      return readReceipts === undefined ? fact : Object.freeze({ ...fact, readReceipts })
+    })
   }
 
   /**

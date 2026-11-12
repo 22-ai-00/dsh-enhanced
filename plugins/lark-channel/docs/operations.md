@@ -85,7 +85,10 @@ adapter 只接受同一入站消息的严格 message ID/image key，并固定请
 - Agent 回答本身是 Markdown；若以 plain 发送会暴露表格分隔符、`**` 等语法。Delivery 只在 adapter 声明 `markdown` 能力时请求该格式，否则降级为 plain，避免 coordinator 以 `unsupported-format` 丢弃整条消息。
 - Markdown 回答卡片不添加 header，避免与飞书气泡已有的机器人名称/头像重复；标题使用带字号的 Markdown 组件，顶级 GFM 表格使用原生 Table，其余正文保持 Markdown。单卡最多使用 5 个原生表格、每表最多 50 列；超限表格转为可读列表。只有飞书明确拒绝卡片格式时才按原始正文精确降级为 plain text，不会把成功卡片重复发送。
 - 权限或格式错误是确定未发送；限流和未连接可以安全重试；网络超时或未知 SDK 错误进入 `unknown_after_send`，不会盲目重发。
-- 飞书目前没有为该发送 UUID 提供可靠查询/对账接口，因此 adapter 声明 `reconcileUnknownSend: false`，也没有 delivered/read receipt。Delivery 保留 `unknown_after_send` 等待 owner 决策，不会反复领取无法实现的对账任务或消耗 attempt。
+- 飞书目前没有为该发送 UUID 提供可靠查询/对账接口，因此 adapter 声明 `reconcileUnknownSend: false`；也没有 delivered 事实，adapter 不伪造 delivered。
+- **E3a 范围**：假传输下的 read 回执与 deliveryState 状态机；真实飞书事件订阅/WS 联调、群聊 read_users、Web notice ack（E3a-W）、adopted 事实来源均属后续切片，不在本范围。
+- E3a read 回执：adapter 声明 `receipts: ['read']`、`readReceipts: 'best-effort'`，从官方单聊事件 `im.message.message_read_v1` 转发 read receipt（channel/account/provider message id/read_time）。事件只覆盖“用户阅读机器人发送的单聊消息”；群聊没有该事件，若需要群 read 只能另行调用 `GET /im/v1/messages/:message_id/read_users`（7 天窗口、1000 次/分钟、只返回已读用户，不返回未读/送达），不属于首版。
+- 前置权限：机器人能力、事件订阅“消息与群组 → 消息已读”、`im:message` 或 `im:message:readonly`。长连接断线无 replay cursor，read 事件可能丢失，因此声明 best-effort；Evaluation 不会据此把“没收到 read”判定为 missed，仍保持旧 `expired-unhandled`。
 
 官方长连接会自动重连，但没有可持久 replay cursor 或历史补拉接口。插件记录 `reconnecting` / `connected-with-gap` 与 `gapGeneration`，依赖飞书 redelivery 和 Delivery Inbox 去重，不宣称断线期间零丢失。将来若出现官方 cursor/backfill contract，应先加入崩溃和重放测试再启用。
 

@@ -1070,6 +1070,12 @@ export interface DeliveryAdapter {
   readonly capabilities: Readonly<{
     reconcileUnknownSend: boolean
     receipts: readonly ReceiptStatus[]
+    /**
+     * How complete this adapter's read receipts are. 'complete' is the only
+     * value that lets Evaluation distinguish "missed" from an event gap;
+     * absent/none/best-effort keep the legacy expired-unhandled classification.
+     */
+    readReceipts?: 'none' | 'best-effort' | 'complete'
     formats: readonly OutboundFormat[]
     inboundImages?: boolean
     toolApprovals?: boolean

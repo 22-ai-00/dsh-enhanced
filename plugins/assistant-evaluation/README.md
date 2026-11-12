@@ -121,6 +121,17 @@ schema 13 扩展任务投影的主体身份约束及投影 outbox 的状态约�
 
 schema 14 新增与任务投影分离的 `evaluation_notification_outcome_*` 表：以 Delivery Outbox id 为通知主键，每次分类变化追加不可改、不可删的 revision 并推进该 scope 独立的通知 watermark；digest 不变只刷新检查时间。分类器 `notification-outcome` v1 确定性、无模型调用，优先级：owner/工作项判断 `not-achieved`→`rejected`、`achieved`→`accepted`；回复或 `partial`→`reacted`；传输 `dead`→`failed`；已发出且超过响应窗口→`expired-unhandled`（含 `expiry: { at, responseWindowMs }`），否则 `delivered`；未发出→`pending`。撤回（`unknown`）不计入判断。响应窗口只写入 `expired-unhandled` 记录，改配置只对到期判定实际改变的通知形成新 revision。格式错误或 scope 与已记录 head 冲突的事实计入 `invalid` 并跳过，不阻塞游标。head 必须与其 revision 的 digest、结果、watermark、scope 与通知时间一致，通知 watermark 与同步游标只进不退、不可删（触发器保证）。回复条数与任何正文不入库。
 
+**E3a 范围**：假传输下的 read 回执与 deliveryState 状态机；真实飞书事件订阅/WS 联调、群聊 read_users、Web notice ack（E3a-W）、adopted 事实来源均属后续切片，不在本范围。
+
+E3a 的 classification v2 只在 Delivery fact 带 `readReceipts`（adapter 显式声明）时启用：record 仍是 `notification-outcome/v1` protocol、legacy 7 态 `outcome` 与 DB CHECK/schema 18 不变，额外携带可选 `deliveryState: 'read' | 'ignored' | 'missed' | 'adopted'`。有 readAt 且未到窗口为 `read`；有 readAt 且超窗为 `ignored`；无 readAt、超窗且 adapter 声明 `readReceipts: 'complete'` 才为 `missed`；`best-effort`/未声明时绝不产生 missed，保持旧 `expired-unhandled`。`adopted` 目前没有 Host adoption 事实来源，仅保留类型位、不产出；v1 旧 record 无新字段、digest/E1 快照/owner-console 不受影响。
+
+### 已知边界（E3a deliveryState）
+
+- **adapter 升级**：既有 fact 的 adapter 从“未声明 readReceipts”升级为显式声明后，下一次 refresh 会从 v1 生成一条 v2 revision，digest 一次性变化；此后稳定。旧 v1 record 永久可读，E1 snapshot、owner-console、attention tuning 旧统计均不读新字段。
+- **read_time 类型**：E3a 只接受飞书文档的字符串毫秒，真实 SDK/网关是否返回 number 由 E3b 联调确认；未确认前 malformed fact 计入 invalid，不进入 v2。
+- **adopted**：保留类型位但不产出，需要后续定义 Host adoption 事实来源（例如 owner 采纳/学习 adoption 与该 notification id 的绑定），另开切片。
+- **missed**：只有 Delivery adapter 显式声明 `readReceipts: 'complete'` 才可能产生；Lark/Web 首版 best-effort 永不产生 missed，保持旧 `expired-unhandled`。
+
 启用后每个 projection tick 先从持久游标摄入新审计行，再按最久未查顺序重查观察期内的已知通知；格式错误的事实计入 `invalid` 并跳过，不阻塞游标。Delivery 缺席时为零结果。读接口：`inspectNotificationOutcome({ scope, notificationId })`（当前 + 全部 revision）、`notificationOutcomeFeed({ scope, after?, limit? })`（按 watermark 可续读的当前 head）、`notificationOutcomeSummary({ scope, fromNotifiedAt?, toNotifiedAt? })`（按 outcome 与 attention verdict 计数）。本切片不写 Evolution、不改任何参数、不触发 Growth。
 
 ## intake 与注意力结果吻合度（WP22，只读）

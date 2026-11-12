@@ -23,6 +23,7 @@ import {
   type LarkMessage,
   type LarkProgressEvent,
   type LarkProgressHandle,
+  type LarkReadReceipt,
   type LarkSendInput,
   type LarkSendOptions,
   type LarkSendResult,
@@ -39,6 +40,43 @@ const LARK_MESSAGE_RESOURCE_API = '/open-apis/im/v1/messages'
 const LARK_MESSAGE_API = '/open-apis/im/v1/messages'
 const LARK_ERROR_BODY_MAX_BYTES = 16 * 1_024
 const larkResourceIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
+const LARK_READ_RECEIPT_ID_LIMIT = 100
+const LARK_READ_TIME = /^[0-9]{1,15}$/u
+
+/**
+ * Normalize the DM-only `im.message.message_read_v1` event.
+ *
+ * The SDK EventMap handler receives the event body directly; accept an
+ * `event` wrapper too so a webhook-normalized shape cannot silently become a
+ * read receipt for the wrong ids. Malformed/oversized events are ignored.
+ */
+export function normalizeReadReceipt(raw: unknown): LarkReadReceipt | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const outer = raw as Record<string, unknown>
+  const nested = outer['event']
+  const body = (nested !== null && typeof nested === 'object' && !Array.isArray(nested)
+    ? nested as Record<string, unknown> : outer)
+  const ids = body['message_id_list']
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > LARK_READ_RECEIPT_ID_LIMIT) return null
+  const messageIds = new Set<string>()
+  for (const id of ids) {
+    if (typeof id !== 'string' || !larkResourceIdentifier.test(id)) return null
+    messageIds.add(id)
+  }
+  if (messageIds.size === 0) return null
+  const reader = body['reader']
+  if (reader === null || typeof reader !== 'object' || Array.isArray(reader)) return null
+  const readTime = (reader as Record<string, unknown>)['read_time']
+  if (typeof readTime !== 'string' || !LARK_READ_TIME.test(readTime)) return null
+  const readAt = Number(readTime)
+  if (!Number.isSafeInteger(readAt) || readAt < 0) return null
+  const readerId = (reader as Record<string, unknown>)['reader_id']
+  const openId = readerId !== null && typeof readerId === 'object' && !Array.isArray(readerId)
+    ? (readerId as Record<string, unknown>)['open_id'] : undefined
+  if (openId !== undefined && (typeof openId !== 'string' || !larkResourceIdentifier.test(openId))) return null
+  return Object.freeze({ messageIds: Object.freeze([...messageIds]), readAt,
+    ...(openId === undefined ? {} : { readerOpenId: openId }) })
+}
 
 export type LarkImageMediaType = 'image/gif' | 'image/jpeg' | 'image/png' | 'image/webp'
 
@@ -1279,6 +1317,16 @@ export class OfficialLarkTransport implements LarkTransport {
           stripBotMentions: true,
         })
         await this.handlers.message(toSafeLarkMessage(message, rawSenderIsBot(raw)))
+      },
+      'im.message.message_read_v1': async (raw: unknown) => {
+        if (this.handlers?.readReceipt === undefined) return
+        const receipt = normalizeReadReceipt(raw)
+        if (receipt === null) return
+        try {
+          this.handlers.readReceipt(receipt)
+        } catch {
+          // A read fact is best-effort; one malformed consumer must not stop the WS loop.
+        }
       },
       'card.action.trigger': async (raw: unknown) => {
         if (this.handlers === undefined) return

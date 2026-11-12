@@ -379,6 +379,11 @@ export interface NotificationOutcomeFact {
     deliveredAt?: number
     readAt?: number
   }>
+  /**
+   * Completeness of this channel's read receipts at classification time.
+   * Present only when the registered adapter declares it explicitly.
+   */
+  readReceipts?: 'none' | 'best-effort' | 'complete'
   /** Earliest owner Inbox message on the same binding that replies to this notification. */
   reaction?: Readonly<{ firstAt: number; count: number }>
   /** Current Host-recorded owner judgement; `unknown` means withdrawn. */

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import { LarkDeliveryAdapter, type LarkAdapterOptions } from '../src/adapter.ts'
 import { signLarkApprovalAction, verifyLarkApprovalAction } from '../src/approval.ts'
-import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from '../src/sdk.ts'
+import { LARK_APPROVAL_CARD_MAX_BYTES, normalizeReadReceipt, renderLarkMessage } from '../src/sdk.ts'
 import { LarkTransportError } from '../src/types.ts'
 import type {
   DeliveryAdapterContext,
@@ -17,6 +17,7 @@ import type {
   LarkMessage,
   LarkSendInput,
   LarkSendOptions,
+  LarkReadReceipt,
   LarkTransport,
   LarkTransportHandlers,
 } from '../src/types.ts'
@@ -46,6 +47,7 @@ class FakeTransport implements LarkTransport {
   }
   async emitMessage(value: LarkMessage): Promise<void> { await this.handlers?.message(value) }
   async emitCardAction(value: LarkCardAction): Promise<unknown> { return this.handlers?.cardAction(value) }
+  emitRead(value: LarkReadReceipt): void { this.handlers?.readReceipt?.(value) }
 }
 
 const baseMessage: LarkMessage = {
@@ -144,6 +146,30 @@ function modelPickerElement(card: Record<string, unknown>, name: string): Record
 }
 
 describe('Lark delivery adapter', () => {
+  test('declares read receipts and forwards normalized DM read facts to Delivery', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    expect(f.adapter.capabilities).toMatchObject({ receipts: ['read'], readReceipts: 'best-effort' })
+    f.transport.emitRead({ messageIds: ['om_a', 'om_b', 'om_a'], readAt: 1_700_000_000_123, readerOpenId: 'ou_owner' })
+    await vi.waitFor(() => expect(f.context.receipt).toHaveBeenCalledTimes(2))
+    expect(f.context.receipt).toHaveBeenNthCalledWith(1, { channel: 'lark', account: 'primary-bot',
+      providerMessageId: 'om_a', status: 'read', occurredAt: 1_700_000_000_123 })
+    expect(f.context.receipt).toHaveBeenNthCalledWith(2, { channel: 'lark', account: 'primary-bot',
+      providerMessageId: 'om_b', status: 'read', occurredAt: 1_700_000_000_123 })
+  })
+
+  test('normalizes only bounded, valid read events and ignores malformed ones', () => {
+    const valid = { message_id_list: ['om_a', 'om_b', 'om_a'], reader: { read_time: '1700000000123', reader_id: { open_id: 'ou_owner' } } }
+    expect(normalizeReadReceipt(valid)).toEqual({ messageIds: ['om_a', 'om_b'], readAt: 1_700_000_000_123, readerOpenId: 'ou_owner' })
+    expect(normalizeReadReceipt({ event: valid })).toEqual({ messageIds: ['om_a', 'om_b'], readAt: 1_700_000_000_123, readerOpenId: 'ou_owner' })
+    for (const bad of [
+      null, {}, { message_id_list: [] }, { message_id_list: ['bad id!'], reader: { read_time: '1' } },
+      { message_id_list: ['om_a'] }, { message_id_list: ['om_a'], reader: { read_time: 'yesterday' } },
+      { message_id_list: ['om_a'], reader: { read_time: '1', reader_id: { open_id: 'bad id!' } } },
+      { message_id_list: Array.from({ length: 101 }, (_, index) => `om_${index}`), reader: { read_time: '1' } },
+    ]) expect(normalizeReadReceipt(bad)).toBeNull()
+  })
+
   test('hands Delivery an intake observation with a transient digest-matched text before acceptance', async () => {
     const f = fixture()
     const observe = vi.fn()

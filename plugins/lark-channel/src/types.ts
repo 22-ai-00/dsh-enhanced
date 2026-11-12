@@ -249,9 +249,24 @@ export class LarkTransportError extends Error {
 export interface LarkTransportHandlers {
   message(message: LarkMessage): Promise<void>
   cardAction(action: LarkCardAction): Promise<unknown>
+  /**
+   * Best-effort read fact from the DM-only `im.message.message_read_v1` event.
+   * Optional so older/fake transports keep working; the adapter only emits a
+   * Delivery receipt when this handler is present.
+   */
+  readReceipt?(receipt: LarkReadReceipt): void
   reconnecting(): void
   reconnected(): void
   error(error: LarkTransportError): void
+}
+
+/** Normalized read acknowledgement for bot-authored direct messages. */
+export interface LarkReadReceipt {
+  /** Provider message ids the reader has read; non-empty and bounded by the transport. */
+  readonly messageIds: readonly string[]
+  /** Provider read time in epoch milliseconds. */
+  readonly readAt: number
+  readonly readerOpenId?: string
 }
 
 export interface LarkCardAction {

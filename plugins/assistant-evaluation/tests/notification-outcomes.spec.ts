@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { AssistantEvaluationService } from '../src/service.ts'
 import { classifyNotificationOutcome, normalizeNotificationOutcomeFact, notificationOutcomeDigest } from '../src/notification-outcomes.ts'
+import { notificationDeliveryStates } from '../src/types.ts'
 
 const scope = { workspace: '/work/notify', preset: 'primary' }
 const hour = 3_600_000
@@ -76,6 +77,40 @@ describe('notification outcome classifier', () => {
     expect(withdrawn.outcome).toBe('delivered')
     expect(withdrawn).not.toHaveProperty('judgement')
   })
+  test('classifier v2 projects read/ignored/missed without changing the legacy 7-state outcome', () => {
+    const classify = (overrides: Record<string, unknown>, now = 2_000) =>
+      classifyNotificationOutcome(normalizeNotificationOutcomeFact(fact('n', 1, overrides)), now, hour)
+    const read = classify({ transport: { status: 'accepted', acceptedAt: 1_100, readAt: 1_500 }, readReceipts: 'best-effort' })
+    expect(read).toMatchObject({ classifier: { version: 2 }, outcome: 'delivered', deliveryState: 'read',
+      transport: { readAt: 1_500 } })
+    const ignored = classify({ transport: { status: 'accepted', acceptedAt: 1_100, readAt: 1_500 }, readReceipts: 'best-effort' },
+      1_100 + hour)
+    expect(ignored).toMatchObject({ outcome: 'expired-unhandled', deliveryState: 'ignored', expiry: { at: 1_100 + hour } })
+    const missed = classify({ transport: { status: 'accepted', acceptedAt: 1_100 }, readReceipts: 'complete' }, 1_100 + hour)
+    expect(missed).toMatchObject({ classifier: { version: 2 }, outcome: 'expired-unhandled', deliveryState: 'missed' })
+    const bestEffort = classify({ transport: { status: 'accepted', acceptedAt: 1_100 }, readReceipts: 'best-effort' }, 1_100 + hour)
+    expect(bestEffort).toMatchObject({ outcome: 'expired-unhandled' })
+    expect(bestEffort).not.toHaveProperty('deliveryState')
+    // Complete fact: readAt + owner reply. Owner outcomes win and adopted has no
+    // producer yet, so the classifier must never invent 'adopted'.
+    const full = classify({ transport: { status: 'read', acceptedAt: 1_100, deliveredAt: 1_200, readAt: 1_300 },
+      readReceipts: 'complete', reaction: { firstAt: 1_400, count: 1 } })
+    expect(full).toMatchObject({ outcome: 'reacted' })
+    expect(full).not.toHaveProperty('deliveryState')
+    expect(full.deliveryState).not.toBe('adopted')
+    expect(notificationDeliveryStates).toContain('adopted')
+    const judged = classify({ transport: { status: 'accepted', acceptedAt: 1_100, readAt: 1_500 },
+      readReceipts: 'complete', judgement: { source: 'owner-objective', version: 1, objectiveStatus: 'not-achieved' } }, 1_100 + hour)
+    expect(judged).toMatchObject({ outcome: 'rejected' })
+    expect(judged).not.toHaveProperty('deliveryState')
+    expect(classify({ transport: { status: 'accepted', acceptedAt: 1_100 }, readReceipts: 'complete' })).not.toHaveProperty('deliveryState')
+    // Old v1 facts/records stay byte-identical: no readReceipts → classifier v1 and no projection.
+    const v1 = classify({ transport: { status: 'accepted', acceptedAt: 1_100, readAt: 1_500 } })
+    expect(v1).toMatchObject({ classifier: { version: 1 }, outcome: 'delivered' })
+    expect(v1).not.toHaveProperty('deliveryState')
+    expect(v1).not.toHaveProperty('readReceipts')
+  })
+
   test('reaction count and text never enter the record', () => {
     const record = classifyNotificationOutcome(normalizeNotificationOutcomeFact(fact('n', 1, { reaction: { firstAt: 1_500, count: 9 } })), 2_000, hour)
     expect(record.reaction).toEqual({ firstAt: 1_500 })

@@ -6,6 +6,7 @@ import {
   notificationOutcomes,
   objectiveStatuses,
   type EvaluationScope,
+  type NotificationDeliveryState,
   type NotificationOutcome,
   type NotificationOutcomeFactInput,
   type NotificationOutcomeFeedPage,
@@ -77,6 +78,8 @@ export function normalizeNotificationOutcomeFact(input: unknown): NotificationOu
   const acceptedAt = optionalTime(transport.acceptedAt, 'transport.acceptedAt')
   const deliveredAt = optionalTime(transport.deliveredAt, 'transport.deliveredAt')
   const readAt = optionalTime(transport.readAt, 'transport.readAt')
+  const readReceipts = fact.readReceipts === undefined ? undefined
+    : member(fact.readReceipts, ['none', 'best-effort', 'complete'] as const, 'readReceipts')
   return {
     auditSequence: time(fact.auditSequence, 'auditSequence'),
     outboxId: text(fact.outboxId, 'outboxId'),
@@ -98,6 +101,7 @@ export function normalizeNotificationOutcomeFact(input: unknown): NotificationOu
       ...(deliveredAt === undefined ? {} : { deliveredAt }),
       ...(readAt === undefined ? {} : { readAt }),
     },
+    ...(readReceipts === undefined ? {} : { readReceipts }),
     ...(reaction === undefined ? {} : { reaction: { firstAt: time(reaction.firstAt, 'reaction.firstAt') } }),
     ...(judgement === undefined ? {} : { judgement: {
       source: member(judgement.source, judgementSources, 'judgement.source'),
@@ -124,6 +128,10 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
   const sentAt = sentTimes.length === 0 ? undefined : Math.min(...sentTimes)
   let outcome: NotificationOutcome
   let expiry: { at: number; responseWindowMs: number } | undefined
+  // v1 records stay byte-identical (no readReceipts → no new fields). v2 adds a
+  // delivery-state projection without touching the frozen outcome vocabulary.
+  const classifierVersion: 1 | 2 = fact.readReceipts === undefined ? 1 : 2
+  let deliveryState: NotificationDeliveryState | undefined
   if (judgement?.objectiveStatus === 'not-achieved') outcome = 'rejected'
   else if (judgement?.objectiveStatus === 'achieved') outcome = 'accepted'
   else if (fact.reaction !== undefined || judgement?.objectiveStatus === 'partial') outcome = 'reacted'
@@ -135,9 +143,17 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
     }
     else outcome = 'delivered'
   } else outcome = 'pending'
+  if (classifierVersion === 2 && judgement === undefined && fact.reaction === undefined
+    && outcome !== 'failed' && sentAt !== undefined) {
+    const expired = now >= sentAt + responseWindowMs
+    if (fact.transport.readAt !== undefined) deliveryState = expired ? 'ignored' : 'read'
+    // Absence of a read event is only evidence of a miss when the adapter
+    // declares complete coverage; best-effort gaps must not become "missed".
+    else if (expired && fact.readReceipts === 'complete') deliveryState = 'missed'
+  }
   return {
     protocol: NOTIFICATION_OUTCOME_RECORD_PROTOCOL,
-    classifier: { id: 'notification-outcome', version: 1 },
+    classifier: { id: 'notification-outcome', version: classifierVersion },
     notificationId: fact.outboxId,
     scope: { workspace: fact.scope.workspace, preset: fact.scope.preset },
     bindingId: fact.bindingId,
@@ -152,6 +168,7 @@ export function classifyNotificationOutcome(fact: NotificationOutcomeFactInput, 
     reasons: [...fact.reasons],
     notifiedAt: fact.auditedAt,
     outcome,
+    ...(deliveryState === undefined ? {} : { deliveryState }),
     transport: { ...fact.transport },
     ...(fact.reaction === undefined ? {} : { reaction: { firstAt: fact.reaction.firstAt } }),
     ...(judgement === undefined ? {} : { judgement }),

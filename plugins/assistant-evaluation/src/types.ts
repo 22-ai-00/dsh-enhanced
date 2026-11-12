@@ -651,6 +651,19 @@ export const notificationOutcomes = [
 ] as const
 export type NotificationOutcome = typeof notificationOutcomes[number]
 
+/**
+ * Optional delivery-state projection added by classifier v2 (E3a).
+ *
+ * It never replaces the frozen legacy 7-state `outcome`: E1 snapshots,
+ * owner-console schemas and old v1 digests stay untouched. `adopted` is a
+ * reserved value until a Host adoption fact source exists.
+ */
+export const notificationDeliveryStates = ['read', 'ignored', 'missed', 'adopted'] as const
+export type NotificationDeliveryState = typeof notificationDeliveryStates[number]
+
+/** Adapter-declared completeness of read receipts; only `complete` can prove a miss. */
+export type NotificationReadReceipts = 'none' | 'best-effort' | 'complete'
+
 export const NOTIFICATION_OUTCOME_RECORD_PROTOCOL = 'assistant-evaluation/notification-outcome/v1' as const
 export const NOTIFICATION_OUTCOME_FACTS_PROTOCOL = 'assistant-delivery/notification-outcome-facts/v1' as const
 
@@ -671,6 +684,8 @@ export interface NotificationOutcomeFactInput {
   reasons: readonly string[]
   auditedAt: number
   transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
+  /** Present only when the Delivery adapter explicitly declares read-receipt completeness. */
+  readReceipts?: NotificationReadReceipts
   reaction?: Readonly<{ firstAt: number; count?: number }>
   judgement?: Readonly<{
     source: 'owner-objective' | 'work-item-feedback'
@@ -684,7 +699,11 @@ export interface NotificationOutcomeFactInput {
 /** Canonical content of one notification-outcome revision; its SHA-256 is the revision digest. */
 export interface NotificationOutcomeRecord {
   protocol: typeof NOTIFICATION_OUTCOME_RECORD_PROTOCOL
-  classifier: Readonly<{ id: 'notification-outcome'; version: 1 }>
+  /**
+   * v1 is the frozen 7-state classifier; v2 adds an optional delivery-state
+   * projection when Delivery supplies `readReceipts`. Both are readable forever.
+   */
+  classifier: Readonly<{ id: 'notification-outcome'; version: 1 | 2 }>
   notificationId: string
   scope: Readonly<EvaluationScope>
   bindingId: string
@@ -699,6 +718,8 @@ export interface NotificationOutcomeRecord {
   reasons: readonly string[]
   notifiedAt: number
   outcome: NotificationOutcome
+  /** Classifier v2 projection only; absent on v1 records and when not derivable. */
+  deliveryState?: NotificationDeliveryState
   transport: Readonly<{ status: string; acceptedAt?: number; deliveredAt?: number; readAt?: number }>
   reaction?: Readonly<{ firstAt: number }>
   judgement?: Readonly<{ source: 'owner-objective' | 'work-item-feedback'; version: number; objectiveStatus: Exclude<ObjectiveStatus, 'unknown'> }>

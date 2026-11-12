@@ -18,7 +18,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture() {
+async function fixture(readReceipts?: 'none' | 'best-effort' | 'complete') {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-outcome-facts-'))
   roots.push(root)
   const ctx = new Context()
@@ -49,7 +49,8 @@ async function fixture() {
   let sent = 0
   const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: `provider-${++sent}` }))
   await service.registerAdapter({ channel: 'lark', account: 'bot-1',
-    capabilities: { reconcileUnknownSend: false, receipts: ['delivered', 'read'], formats: ['plain', 'markdown'] }, start: async () => {}, send })
+    capabilities: { reconcileUnknownSend: false, receipts: ['delivered', 'read'],
+      ...(readReceipts === undefined ? {} : { readReceipts }), formats: ['plain', 'markdown'] }, start: async () => {}, send })
   const background = (idempotencyKey: string, text: string) => service.enqueueBackground({
     sourceId: 'proactive-engine', workspace: '/work/alpha', bindingId: binding.id, idempotencyKey, text, format: 'plain' })
   const drain = async () => {
@@ -104,6 +105,29 @@ describe('notification outcome facts (WP22 read adapter)', () => {
     expect(f.service.inspectNotificationOutcomeFacts({ outboxIds: [second.id, 'missing', first.id] }).facts.map(fact => fact.outboxId))
       .toEqual([second.id, first.id])
     expect(Object.isFrozen(one)).toBe(true)
+  })
+
+  test('exposes read receipt readAt and adapter coverage; deliveredAt is only the local monotonic fallback', async () => {
+    const f = await fixture('complete')
+    const first = f.background('n-read', 'Read fact check.')
+    await f.drain()
+    f.store.recordReceipt({ channel: 'lark', account: 'bot-1', providerMessageId: 'provider-1', status: 'read', occurredAt: 7_000 })
+    const [fact] = f.service.inspectNotificationOutcomeFacts({ outboxIds: [first.id] }).facts
+    expect(fact).toMatchObject({ transport: { status: 'read', readAt: 7_000 }, readReceipts: 'complete' })
+    // No adapter delivered receipt exists; Delivery's existing read-implies-delivered
+    // fallback fills deliveredAt from the local outbox update time, never 7_000.
+    const outbox = f.store.getOutbox(first.id)!
+    expect(fact!.transport.deliveredAt).toBe(outbox.updatedAt)
+    expect(fact!.transport.deliveredAt).not.toBe(7_000)
+  })
+
+  test('omits readReceipts for an adapter that did not declare the capability (old byte shape)', async () => {
+    const f = await fixture()
+    const first = f.background('n-old', 'Old adapter notice.')
+    await f.drain()
+    const [fact] = f.service.inspectNotificationOutcomeFacts({ outboxIds: [first.id] }).facts
+    expect(fact).not.toHaveProperty('readReceipts')
+    expect(fact!.transport).not.toHaveProperty('readAt')
   })
 
   test('counts replies across a new-session binding and falls back to the legacy verified-task judgement', async () => {
