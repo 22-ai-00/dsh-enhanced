@@ -9218,7 +9218,7 @@ describe('real native Delivery Agent runtime', () => {
         await fixture.service.whenIdle()
         expect(store.getInbox(full.inboxId)).toMatchObject({ status: 'processed' })
         expect(store.getInbox(ask.inboxId)).toMatchObject({ status: 'processed' })
-      }, { timeout: 60_000, interval: 20 })
+      }, { timeout: 10_000, interval: 20 })
       expectSafeAskPermission(fixture.permissionPresets!, activeSessionEvents(fixture.service, saved))
     } finally {
       releaseFlush()
@@ -12487,7 +12487,7 @@ describe('real native Delivery Agent runtime', () => {
       // The rejected child records its adapter request from its own stream task, so
       // whenIdle() can resolve first on a loaded runner. Wait for the exact count
       // instead of sampling once; the expectation itself is unchanged.
-      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(adapterCalls + 1), { timeout: 60_000 })
+      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(adapterCalls + 1), { timeout: 10_000 })
       if (outerMeter) {
         outerMeter.assertComplete()
         const measured = outerMeter.snapshot()
