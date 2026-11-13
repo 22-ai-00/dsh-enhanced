@@ -1192,7 +1192,8 @@ describe('release version workflow', () => {
     // Nightly gate is the prerequisite for any future test tiering; keep it wired.
     expect(ciWorkflow).toMatch(/^\s*schedule:\s*$/mu)
     expect(ciWorkflow).toMatch(/^\s*- cron: '\d+ \d+ \* \* \*'\s*$/mu)
-    const linuxPackages = ciWorkflow.split('  linux-packages:\n')[1]?.split('  linux-root-tests:\n')[0]
+    const linuxPackages = ciWorkflow.split('  linux-packages:\n')[1]?.split('  linux-slow-package-tests:\n')[0]
+    const linuxSlow = ciWorkflow.split('  linux-slow-package-tests:\n')[1]?.split('  linux-root-tests:\n')[0]
     const linuxRoot = ciWorkflow.split('  linux-root-tests:\n')[1]?.split('  verify:\n')[0]
     const linuxGate = ciWorkflow.split('  verify:\n')[1]?.split('  macos-verify:\n')[0]
     expect(linuxPackages).toBeDefined()
@@ -1210,22 +1211,26 @@ describe('release version workflow', () => {
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
     expect(linuxPackages).toContain('run: pnpm run validate && pnpm run lint')
     expect(linuxPackages).toContain('run: pnpm run build && pnpm run typecheck:built')
-    expect(linuxPackages).toContain('pnpm run test:packages:control-plane > "${control_plane_log}" 2>&1 &')
-    expect(linuxPackages).toContain('pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &')
+    // The two dominant packages run on dedicated runners (linux-slow-package-tests matrix);
+    // the shared lane keeps only the remainder. The same three pnpm test scripts are used,
+    // with no shard/exclude, so the 39-package partition is rest + control-plane + lark-channel.
     expect(linuxPackages).toContain('pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?')
-    // Failure propagation is part of the contract: each wait must capture its own status and the
-    // aggregation must consult all three slots before exiting, so a red slot can never be swallowed.
-    expect(linuxPackages).toContain('wait "${control_plane_pid}" || control_plane_status=$?')
-    expect(linuxPackages).toContain('wait "${lark_channel_pid}" || lark_channel_status=$?')
-    expect(linuxPackages).toContain('if [ "${control_plane_status}" -ne 0 ] || [ "${lark_channel_status}" -ne 0 ]')
     expect(linuxPackages).toContain('[ "${rest_status}" -ne 0 ]; then')
     expect(linuxPackages).toContain('exit 1')
-    // The legacy single-command lane must stay retired, otherwise a silent fallback could hide the topology.
+    // The shared lane must not re-run the two slow packages or fall back to the legacy all-in-one.
+    expect(linuxPackages).not.toContain('test:packages:control-plane')
+    expect(linuxPackages).not.toContain('test:packages:lark-channel')
     expect(linuxPackages).not.toContain('pnpm run test:packages >')
-    expect(linuxPackages).toContain('wait "${lark_channel_pid}"')
-    expect(linuxPackages).toContain('cat "${control_plane_log}" "${lark_channel_log}" "${rest_log}"')
-    expect(linuxPackages).toContain('package-tests.log')
+    expect(linuxPackages).toContain('cat "${rest_log}" > "${RUNNER_TEMP}/package-tests.log"')
     expect(linuxPackages).toContain('::error::')
+    // Dedicated slow-package matrix lane: one runner per package, three workers, same scripts.
+    expect(linuxSlow).toContain('package: [control-plane, lark-channel]')
+    expect(linuxSlow).toContain("VITEST_MAX_WORKERS: '3'")
+    expect(linuxSlow).toContain('pnpm run "test:packages:${{ matrix.package }}"')
+    expect(linuxSlow).not.toContain('--shard')
+    expect(linuxSlow).toContain('package-tests-${{ matrix.package }}.log')
+    // The lane still builds and lints before testing, so no repository-wide gate was dropped.
+    expect(linuxSlow).toContain('run: pnpm run build')
     expect(linuxPackages).toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toContain('run: pnpm run test:root')
     expect(linuxRoot).toContain('--config ./tests/vitest.config.ts --testTimeout=15000 --dir tests --shard=${{ matrix.shard }}/2')
@@ -1235,10 +1240,12 @@ describe('release version workflow', () => {
     expect(linuxRoot).not.toContain('run: pnpm run pack:check')
     expect(linuxPackages).not.toMatch(/^\s+needs:/mu)
     expect(linuxRoot).not.toMatch(/^\s+needs:/mu)
-    expect(linuxGate).toContain('needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]')
+    expect(linuxGate).toContain('needs: [linux-packages, linux-slow-package-tests, linux-root-tests, macos-verify, windows-acp-smoke]')
     expect(linuxGate).toContain('if: ${{ always() }}')
     expect(linuxGate).toContain('timeout-minutes: 5')
     expect(linuxGate).toContain("packages='${{ needs.linux-packages.result }}'")
+    expect(linuxGate).toContain("slow='${{ needs.linux-slow-package-tests.result }}'")
+    expect(linuxGate).toContain('test "$slow" = success')
     expect(linuxGate).toContain("root='${{ needs.linux-root-tests.result }}'")
     expect(linuxGate).toContain("macos='${{ needs.macos-verify.result }}'")
     expect(linuxGate).toContain("windows='${{ needs.windows-acp-smoke.result }}'")

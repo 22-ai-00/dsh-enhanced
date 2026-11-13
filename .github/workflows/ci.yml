@@ -18,11 +18,16 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Ubuntu runners have 4 vCPU. Keep two workers per package (timing-sensitive
-  # suites starve at higher oversubscription). The package lane keeps four
-  # package slots busy: plugin-control-plane and lark-channel each take a
-  # background slot from t=0, the remainder runs two at a time in the
-  # foreground. macOS runners (3 vCPU) override these in their job.
+  # Ubuntu runners have 4 vCPU. Shared lanes keep two workers per package:
+  # timing-sensitive suites starve when the whole lane oversubscribes the
+  # vCPUs. The two packages that dominate the package lane
+  # (plugin-control-plane, lark-channel) run in linux-slow-package-tests,
+  # each on a dedicated runner with three workers. Three workers on four
+  # vCPUs is less contention than the old shared package lane, which ran
+  # eight worker processes on the same four vCPUs, so the extra worker adds
+  # throughput without reproducing the timing failures higher lane-wide
+  # oversubscription caused. macOS runners (3 vCPU) override these in their
+  # job.
   VITEST_MAX_WORKERS: '2'
   # Tiered test matrices (e.g. the Delivery schema 23-31 migration sweep) run
   # every version only on the nightly schedule; push and PR runs keep the
@@ -142,39 +147,19 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          # Lead with the two slowest packages. In directory order pnpm --no-sort
-          # only starts plugin-control-plane after ~297s, so it takes a background
-          # slot from t=0 instead. Its former ~1046s single spec file now lives in
-          # two files, so the two halves can run in parallel inside the lane while
-          # the global worker limit (two per package) still keeps eight workers on
-          # four vCPUs; raising it further only produced timing failures. The two
-          # slots plus the two-pack-wide foreground keep four package slots busy,
-          # and the background pair runs at lower CPU priority so the critical
-          # package can still use the cores it needs.
-          control_plane_log="${RUNNER_TEMP}/package-tests-plugin-control-plane.log"
-          lark_channel_log="${RUNNER_TEMP}/package-tests-lark-channel.log"
+          # plugin-control-plane and lark-channel run in
+          # linux-slow-package-tests on dedicated runners: measured 1,254s and
+          # 1,082s of the former 1,256s test step (eight worker processes
+          # sharing four vCPUs). This lane keeps the remaining 37 packages,
+          # two packages at a time, and still owns the repository-wide gate
+          # (validate, lint, build, typecheck, pack) exactly once.
           rest_log="${RUNNER_TEMP}/package-tests-rest.log"
-          pnpm run test:packages:control-plane > "${control_plane_log}" 2>&1 &
-          control_plane_pid=$!
-          nice -n 10 pnpm run test:packages:lark-channel > "${lark_channel_log}" 2>&1 &
-          lark_channel_pid=$!
-
           rest_status=0
-          nice -n 10 pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?
-          # Wait for both slots even when the foreground already failed so no
-          # package test process outlives the step and the full logs survive.
-          control_plane_status=0
-          wait "${control_plane_pid}" || control_plane_status=$?
-          lark_channel_status=0
-          wait "${lark_channel_pid}" || lark_channel_status=$?
-
-          # Fixed merge order keeps the artifact (and the diagnostics below) stable.
-          cat "${control_plane_log}" "${lark_channel_log}" "${rest_log}" \
-            > "${RUNNER_TEMP}/package-tests.log"
-          if [ "${control_plane_status}" -ne 0 ] || [ "${lark_channel_status}" -ne 0 ] \
-            || [ "${rest_status}" -ne 0 ]; then
-            printf 'package test slots: plugin-control-plane=%s lark-channel=%s remainder=%s\n' \
-              "${control_plane_status}" "${lark_channel_status}" "${rest_status}"
+          pnpm run test:packages:rest > "${rest_log}" 2>&1 || rest_status=$?
+          # Stable copy keeps the diagnostics artifact path unchanged.
+          cat "${rest_log}" > "${RUNNER_TEMP}/package-tests.log"
+          if [ "${rest_status}" -ne 0 ]; then
+            printf 'package test remainder status: %s\n' "${rest_status}"
             # Job logs need repo-admin rights to download; on failure surface the
             # failing test lines as check-run annotations instead so a red lane is
             # diagnosable from the public API.
@@ -194,6 +179,151 @@ jobs:
         with:
           name: linux-package-tests-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/package-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Dedicated runners for the two slowest packages. Measurements from runs
+  # 43347577910 / 43247212838: inside the shared lane these two packages took
+  # 1,254s / 1,195s (plugin-control-plane) and 1,082s / 1,008s (lark-channel)
+  # of vitest wall time while the other 37 packages summed 1,429s / 1,252s.
+  # This is a scheduling change only -- the same pnpm test scripts, the same
+  # test files (no --shard, --exclude or file lists), the same testTimeout and
+  # the same assertions; only the worker count per dedicated runner changes.
+  # vitest --shard is deliberately not used: its default sequencer hashes
+  # file paths and splits by file count, which simulated against these runs
+  # puts 1,938s of work in one shard and 523s in the other for
+  # plugin-control-plane.
+  linux-slow-package-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [control-plane, lark-channel]
+    env:
+      VITEST_MAX_WORKERS: '3'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up pinned Linux test Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.23.2'
+
+      - name: Install pinned Linux test Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = 'v22.23.2'
+          test_node="$(node -p 'process.execPath')"
+          # Namespace tests expose /usr read-only; workspace Node stays separate.
+          sudo install --owner=root --group=root --mode=0755 "${test_node}" /usr/bin/node
+          cmp "${test_node}" /usr/bin/node
+          test "$(/usr/bin/node --version)" = 'v22.23.2'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Verify Linux E2E prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v$(cat .node-version)"
+          test "$(/usr/bin/node --version)" = 'v22.23.2'
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            bubblewrap \
+            file \
+            git \
+            python3 \
+            tar
+
+          command -v bwrap >/dev/null
+          command -v git >/dev/null
+          command -v tar >/dev/null
+          command -v python3 >/dev/null
+          test -d /proc/self/fd
+
+          # ubuntu-latest enables an AppArmor restriction that lets bwrap create
+          # most namespaces but blocks the loopback setup for --unshare-net.
+          # The hosted runner is ephemeral; relax it here so the adapter test
+          # still exercises its real, network-isolated bubblewrap sandbox.
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] \
+            && [[ "$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == '1' ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          /usr/bin/bwrap \
+            --unshare-all \
+            --die-with-parent \
+            --new-session \
+            --ro-bind /usr /usr \
+            --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 \
+            --proc /proc \
+            --dev /dev \
+            /usr/bin/true
+
+      - name: Install native pnpm test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_prefix="${RUNNER_TEMP}/dsh-test-pnpm"
+          npm install \
+            --prefix "${runtime_prefix}" \
+            --no-audit \
+            --no-fund \
+            --no-save \
+            --package-lock=false \
+            @pnpm/exe@11.7.0
+
+          pnpm_root="${runtime_prefix}/node_modules/@pnpm/exe"
+          node -e '
+            const manifest = require(process.argv[1]);
+            if (manifest.name !== "@pnpm/exe" || manifest.version !== "11.7.0") {
+              throw new Error(`unexpected pnpm runtime: ${manifest.name}@${manifest.version}`);
+            }
+          ' "${pnpm_root}/package.json"
+          test -x "${pnpm_root}/pnpm"
+          file "${pnpm_root}/pnpm" | grep -Eq 'ELF .* executable'
+          printf 'DSH_TEST_PNPM_ROOT=%s\n' "${pnpm_root}" >> "${GITHUB_ENV}"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build test dependencies
+        run: pnpm run build
+
+      - name: Test ${{ matrix.package }}
+        shell: bash
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/package-tests-${{ matrix.package }}.log"
+          if ! pnpm run "test:packages:${{ matrix.package }}" > "${log}" 2>&1; then
+            grep -aE '(^| )(FAIL|×) |Error: |ERR_PNPM' "${log}" \
+              | grep -av 'ExperimentalWarning' | head -40 \
+              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            tail -30 "${log}" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            exit 1
+          fi
+          tail -5 "${log}"
+
+      - name: Retain slow package diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-slow-package-tests-${{ matrix.package }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/package-tests-${{ matrix.package }}.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -356,7 +486,7 @@ jobs:
           retention-days: 7
 
   verify:
-    needs: [linux-packages, linux-root-tests, macos-verify, windows-acp-smoke]
+    needs: [linux-packages, linux-slow-package-tests, linux-root-tests, macos-verify, windows-acp-smoke]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -366,11 +496,13 @@ jobs:
         shell: bash
         run: |
           packages='${{ needs.linux-packages.result }}'
+          slow='${{ needs.linux-slow-package-tests.result }}'
           root='${{ needs.linux-root-tests.result }}'
           macos='${{ needs.macos-verify.result }}'
           windows='${{ needs.windows-acp-smoke.result }}'
-          printf 'linux-packages=%s linux-root-tests=%s macos-verify=%s windows-acp-smoke=%s\n' "$packages" "$root" "$macos" "$windows"
+          printf 'linux-packages=%s linux-slow-package-tests=%s linux-root-tests=%s macos-verify=%s windows-acp-smoke=%s\n' "$packages" "$slow" "$root" "$macos" "$windows"
           test "$packages" = success
+          test "$slow" = success
           test "$root" = success
           test "$macos" = success
           test "$windows" = success
