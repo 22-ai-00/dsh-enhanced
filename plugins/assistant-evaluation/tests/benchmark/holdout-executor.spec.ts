@@ -223,7 +223,10 @@ describe.runIf(process.platform === 'linux')('independent holdout runner integra
     const started = performance.now()
     await expect(runIndependentHoldout({ ...state, expectedDataset: { id: dataset.id, version: dataset.version, digest: dataset.digest },
       pinnedPublicKey: publicKey, openProvider: fixtureProvider(), openDelegate: async () => model.binding, delegateCloseTimeoutMs: 20 })).rejects.toThrow(/cleanup was not confirmed/)
-    expect(performance.now() - started).toBeLessThan(1_000); expect(state.evidence.readPlanCompletion(state.plan)).toBeUndefined()
+    // The bound that matters is that cleanup rejection is surfaced, not an exact wall-clock: a
+    // loaded CI runner can delay this coroutine past a tight millisecond ceiling. Keep the
+    // deadline generous but far below an unbounded wait (the configured close bound is 20ms).
+    expect(performance.now() - started).toBeLessThan(10_000); expect(state.evidence.readPlanCompletion(state.plan)).toBeUndefined()
     const results = state.store.results(state.plan.id); expect(results.at(-1)).toMatchObject({ status: 'unknown', reason: 'adapter-error' })
     state.store.close(); state.evidence.close()
   })

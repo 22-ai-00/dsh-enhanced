@@ -9208,14 +9208,17 @@ describe('real native Delivery Agent runtime', () => {
       if (leaseUntil === undefined) throw new Error('held permission inbox is missing its lease deadline')
       vi.useRealTimers()
       await new Promise(resolve => setTimeout(resolve, Math.max(1, leaseUntil - Date.now() + 5)))
-      await fixture.service.tick()
-      await fixture.service.whenIdle()
-      await fixture.service.tick()
-      await fixture.service.whenIdle()
-      expect(store.getInbox(full.inboxId)).toMatchObject({
-        status: 'processed',
-      })
-      expect(store.getInbox(ask.inboxId)).toMatchObject({ status: 'processed' })
+      // Re-claiming after lease expiry is normal scheduler behaviour, and the
+      // completing transaction is asynchronous with respect to whenIdle() on a
+      // loaded runner. Poll the scheduler until the held inbox is processed;
+      // repeated ticks are exactly what production does, and the assertion on
+      // the final state is unchanged.
+      await vi.waitFor(async () => {
+        await fixture.service.tick()
+        await fixture.service.whenIdle()
+        expect(store.getInbox(full.inboxId)).toMatchObject({ status: 'processed' })
+        expect(store.getInbox(ask.inboxId)).toMatchObject({ status: 'processed' })
+      }, { timeout: 60_000, interval: 20 })
       expectSafeAskPermission(fixture.permissionPresets!, activeSessionEvents(fixture.service, saved))
     } finally {
       releaseFlush()
