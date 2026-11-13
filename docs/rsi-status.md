@@ -8,7 +8,7 @@
 
 本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。D1b 收益投影、D2 holdout 守卫、E2 inferred 合同准入、E3a read 回执与 Web notice ack、C1b/C1c 安装 readiness 与学习链、D3a 真实 release/activation 链也已交付，做梦机制按当前 Host 执行器合同复活；B3 真实渠道验收、E3b、D3a-1/D5 与 F 仍待推进。
 
-开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前版本 0.1.67，工具链与 Host 范围见[兼容说明](compatibility.md)。
+开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前 npm 已发布版本 0.1.68（39 包含 assistant-dreaming，dev=main=00ddb715），工具链与 Host 范围见[兼容说明](compatibility.md)。
 
 ## 已有能力与边界
 
@@ -29,6 +29,10 @@
 - D3a-0a：真实本地 release 八阶段 opt-in 集成测试——shipped `dsh-local-release-adapter.js`（shebang 固定 canonical interpreter）+ 真实 pinned bwrap/pnpm toolchain + file: registry，逐阶段真实 Ed25519 回执验签、tarball/catalog 校验，两条篡改 fail-closed；opt-in 缺省时 skip（`e9d94eb6`）。
 - D3a-0b：真实 activation 链 opt-in 集成测试（真实 `dsh plugin add` staging + 原子 profile swap + 真实 `dsh --profile` 进程 + shipped observer 采样真实 Loader Fiber + 测试 schema-2 host attestor 签 reload/readiness），断言停在 `awaiting-effect-blocked-replay` 且不进 `awaiting-live-tasks`（无独立效果证据不放行），含篡改样本被 readiness 拒绝的负例（`5058218d`）。同时修复一个真实生产缺陷：本地构建产物激活曾把无后缀 `/proc/<pid>/fd/N` 作为安装 spec 传给 pnpm 导致必然失败，改为稳定 `.tgz` cache 路径，pinned fd 封存校验与安装后 lockfile integrity fail-closed 保留（`a2ec42a1`）。
 - 做梦机制（`assistant-dreaming`，默认关闭）：按当前 Automations Host-executor 合同复活——终态改为合同化结果（原先每个 wake 都在 registry 边界被拒）、删除重复预算扣减、misfire 跳过而非补跑、preview 零模型零账本、成功路径与加载时执行保留期清理（同事务删事件行避免外键静默失效）、dream Agent 绑定 background initiator、owner 读取面改绑定箭头属性以穿过 Cordis service proxy、reconcile key 每次加载唯一使暂停/恢复收敛、`retired` 与 `disabled` 组合 fail-closed；README 补真实启用步骤（Policy reconcile/execute/tool/send、budgets、scheduler、Delivery route）与 retired-first 关闭顺序（`0e15295a`）。- 发布账本：pending 集合补入 `assistant-dreaming`（38→39 与 workspace 对齐），否则 `release:prepare/record` 会拒绝；`install-npm.sh` 的既有 installer pin 漂移仍需在发布流程中重签（`4c454b0c`）。- 部署现状：Mac 桌面 profile 已装本仓库 dev 构建（37 包重打包、27 个内容更新，标记已验证，需重启 App 生效）；Linux 线上 `assistant` profile 仍为已发布 0.1.67——该 Home 是冻结本地 cohort owner 安装，receipt 0.1.64 与已装 0.1.67 不一致，普通/受管 upgrade 在 mutation 前被结构性拒绝，未绕过安装器手工改线上（详见交接证据）。
+- 发布 0.1.68（tag v0.1.68，Release workflow success）：重签漂移的 installer pin，supersede 过期 pending 0.1.67 到 0.1.68 并把 39 包（含 dreaming）统一 bump；npm 全 39 包 latest=0.1.68（654ac496/64e9215e，CI 全绿）。
+- CI 第二阶段提速（00ddb715，CI 8 job 全绿）：测量显示 linux-packages 的包测试占 job 81-83%，其中 plugin-control-plane（约 1254s）与 lark-channel（约 1082s）两个包占 62-64%；新增 linux-slow-package-tests matrix 把这两个包各放一台独占 runner（3 worker），共享 lane 只跑其余 37 包与全部仓库级门；同一套 pnpm 测试脚本、无 shard/exclude，39 包覆盖不变，release-version 契约测试同步改写，无断言弱化。
+- 桌面 App 两处异常定性（非 dsh-enhanced 缺陷）：assistant-isolation 报 only the linux-native backend is supported 是平台门（bwrap/cgroup 仅 Linux，Mac 预期拒绝）；agentPresets 重复注册来自 0.2.2-rc.1 Host 内部组件，重装前后 acp 包字节一致、全仓库无任何插件注册该服务，Linux 0.2.1-rc.2 无此错。
+- 柳七月 Home 升级 0.1.68 阻塞决策（见 evidence/liuyue-upgrade-decision.md）：该 Home 是 registry 硬链接布局（8590 文件中 5383 个 nlink>=2）却注册为冻结本地 cohort（receipt 0.1.64），冻结升级器要求 nlink===1 而 fail-closed；去硬链接/手工 plugin add/purge 均否决，结论是先在 0.1.69 修安装器（store 后端硬链接改用内容哈希+权限校验，cohort 制品保留 nlink===1），发布后再标准 update，线上 0.1.67 保持不动、服务健康。
 - Linux namespace/cgroup v1 是当前原生执行方向；cgroup v2、arm64、活 Home 迁移与旧 opt-in E2E 尚待验收。Docker 执行后端已移除。
 - Dream 默认关闭，长期收益未证明；provider 接受不等于用户已读。
 
