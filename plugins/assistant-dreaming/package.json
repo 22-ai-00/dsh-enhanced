@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-dreaming",
-  "version": "0.1.67",
+  "version": "0.1.68",
   "description": "A DeepSeek Harness plugin for Assistant Dreaming.",
   "license": "MIT",
   "type": "module",
