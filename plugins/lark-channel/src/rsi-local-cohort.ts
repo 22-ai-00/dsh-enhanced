@@ -84,7 +84,7 @@ async function stableFile(path: string, limit: number, ownerPrivate = false): Pr
  * store, so nlink is 2 there even for an untouched install; requiring nlink===1
  * (as stableFile does for the private rsi-local-cohorts artifacts) would reject
  * every registry-layout profile. Every caller additionally pins the file inside
- * the profile root and verifies its sha256 against the signed cohort receipt,
+ * the profile root and verifies its sha256 against the cohort receipt digest,
  * so the trust anchor is the content hash plus containment rather than the link
  * count. Read-time inode/size/mtime stability and the symlink/owner/mode rules
  * are identical to stableFile.

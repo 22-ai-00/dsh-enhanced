@@ -118,7 +118,18 @@ test('rejects a pending row whose sealed status is not active', () => {
 test.each([
   ['mode', (file: string) => chmodSync(file, 0o600), 'archive mismatch'],
   ['digest', (file: string) => { chmodSync(file, 0o600); writeFileSync(file, Buffer.concat([readFileSync(file), Buffer.from([0])])); chmodSync(file, 0o400) }, 'archive mismatch'],
-  ['inode', (file: string) => { const bytes = readFileSync(file); rmSync(file); writeFileSync(file, bytes, { mode: 0o400 }) }, 'archive identity mismatch'],
+  ['inode', (file: string) => {
+    // Delete+recreate in place can hand back the same inode on some filesystems,
+    // which would make the inode-drift assertion non-deterministic. Create the
+    // replacement while the original still exists so it must get a distinct inode,
+    // then atomically move it over the original to guarantee dev/ino changes.
+    const bytes = readFileSync(file)
+    const replacement = `${file}.inode-replacement`
+    writeFileSync(replacement, bytes, { mode: 0o400 })
+    const originalIno = statSync(file).ino, replacementIno = statSync(replacement).ino
+    expect(replacementIno).not.toBe(originalIno)
+    rmSync(file); renameSync(replacement, file)
+  }, 'archive identity mismatch'],
   ['symlink', (file: string) => { renameSync(file, `${file}.moved`); symlinkSync(`${file}.moved`, file) }, 'unsafe file'],
 ] as const)('rejects archive %s drift', (_kind, change, message) => {
   const s = sealed()
