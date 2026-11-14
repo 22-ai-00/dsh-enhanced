@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, link, mkdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides,
@@ -81,6 +81,50 @@ describe('frozen local tarball cohort', () => {
     await expect(prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source,
       bundles: ['target'] }, ports)).rejects.toThrow('tracked build input changed')
     await expect(readRsiLocalCohort({ dshHome: f.home, profile: f.profile })).rejects.toThrow()
+  })
+
+  test('accepts pnpm store hard links in an installed profile when the content hash still matches', async () => {
+    const f = await fixture(), input = { dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }
+    const cohort = await prepareRsiLocalCohort(input, f.ports)
+    const installed = await installFixture(f, cohort)
+    const code = join(installed, 'node_modules', '@dsh-enhanced', 'target', 'lib', 'index.js')
+    // Model pnpm's isolated linker: the package file becomes a hard link to a
+    // content-addressed store entry outside the profile (nlink becomes 2).
+    const storeDir = join(f.root, 'pnpm-store')
+    await mkdir(storeDir, { recursive: true })
+    const storeEntry = join(storeDir, 'index.js')
+    await link(code, storeEntry)
+    expect((await stat(code)).nlink).toBe(2)
+    // nlink=2 must no longer reject the installed-profile verification, and the
+    // content hash still anchors trust.
+    await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })).resolves.toBeUndefined()
+
+    // Tampering through the other hard link changes the bytes the verifier reads,
+    // so the receipt hash check still fails closed.
+    await writeFile(storeEntry, 'tampered through store link\n')
+    await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })).rejects.toThrow('installed package file differs')
+    await writeFile(storeEntry, "export const identity = 'target-committed'\n")
+
+    // A symlink in place of a package file is still rejected regardless of nlink.
+    await rm(code)
+    await symlink(storeEntry, code)
+    await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })).rejects.toThrow()
+  })
+
+  test('still rejects a hard link inside the private local cohort (nlink===1 boundary is preserved)', async () => {
+    const f = await fixture(), input = { dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }
+    const cohort = await prepareRsiLocalCohort(input, f.ports)
+    // Baseline: the cohort reads cleanly while its files are single-link.
+    await expect(readRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source })).resolves.toEqual(cohort)
+    const receipt = join(cohort.root, 'receipt.json')
+    const outside = join(f.root, 'receipt-hardlink.json')
+    await link(receipt, outside)
+    expect((await stat(receipt)).nlink).toBe(2)
+    // stableFile must keep rejecting multi-link files for rsi-local-cohorts artifacts.
+    await expect(readRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source })).rejects.toThrow('unsafe file')
+    await rm(outside)
+    expect((await stat(receipt)).nlink).toBe(1)
+    await expect(readRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source })).resolves.toEqual(cohort)
   })
 })
 

@@ -77,6 +77,31 @@ async function stableFile(path: string, limit: number, ownerPrivate = false): Pr
     return bytes
   } finally { await fd.close() }
 }
+
+/**
+ * Read a file inside an installed profile's node_modules. pnpm's isolated
+ * linker materializes package files as hard links to the content-addressed
+ * store, so nlink is 2 there even for an untouched install; requiring nlink===1
+ * (as stableFile does for the private rsi-local-cohorts artifacts) would reject
+ * every registry-layout profile. Every caller additionally pins the file inside
+ * the profile root and verifies its sha256 against the signed cohort receipt,
+ * so the trust anchor is the content hash plus containment rather than the link
+ * count. Read-time inode/size/mtime stability and the symlink/owner/mode rules
+ * are identical to stableFile.
+ */
+async function stableInstalledFile(path: string, limit: number): Promise<Buffer> {
+  const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await fd.stat()
+    if (!before.isFile() || before.size > limit || before.size < 0
+      || process.getuid && before.uid !== process.getuid()) fail(`unsafe file: ${path}`)
+    const bytes = await fd.readFile(), after = await fd.stat(), entry = await lstat(path)
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || bytes.length !== before.size
+      || entry.dev !== before.dev || entry.ino !== before.ino || entry.isSymbolicLink()) fail(`file changed during read: ${path}`)
+    return bytes
+  } finally { await fd.close() }
+}
 async function privateDirectory(path: string): Promise<void> { await io.directory(path) }
 async function sourceManifest(root: string, path: string, version: string): Promise<Record<string, unknown>> {
   const manifest = JSON.parse((await stableFile(join(root, path, 'package.json'), 1_048_576)).toString('utf8')) as Record<string, unknown>
@@ -475,7 +500,7 @@ export async function rsiLocalPeerOverrides(input: { cohort: RsiLocalCohort; bun
   for (const parent of closure) {
     let bytes: Buffer | undefined
     if (input.profilePath) {
-      bytes = await stableFile(manifestPaths.get(parent.name)!, 1_048_576)
+      bytes = await stableInstalledFile(manifestPaths.get(parent.name)!, 1_048_576)
     } else {
       const manifest = await readRsiLocalArtifactManifest({ ...parent, version: cohort.version })
       for (const name of Object.keys(manifest.peerDependencies)) {
@@ -533,7 +558,7 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
     const visitKey = `${name}\0${physical}`
     if (visited.has(visitKey)) continue
     visited.add(visitKey)
-    const manifest = JSON.parse((await stableFile(manifestPath, 1_048_576)).toString('utf8')) as Record<string, unknown>
+    const manifest = JSON.parse((await stableInstalledFile(manifestPath, 1_048_576)).toString('utf8')) as Record<string, unknown>
     if (manifest.name !== name || manifest.version !== cohort.version || !same(runtimeDependencies(manifest), item.runtimeDependencies)) fail(`installed package identity differs: ${name}`)
     for (const file of item.files) {
       const path = join(packageRoot, file.path), physicalFile = await realpath(path)
@@ -541,7 +566,7 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
       const metadata = await lstat(path)
       if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o100) !== (file.mode & 0o100)
         || (metadata.mode & 0o022) !== 0
-        || digest(await stableFile(path, MAX_ARCHIVE)) !== file.sha256) fail(`installed package file differs: ${name}/${file.path}`)
+        || digest(await stableInstalledFile(path, MAX_ARCHIVE)) !== file.sha256) fail(`installed package file differs: ${name}/${file.path}`)
     }
     const actualFiles: string[] = []
     const walk = async (directory: string): Promise<void> => {
