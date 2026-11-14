@@ -692,6 +692,51 @@ describe('automation coordinator', () => {
     value.store.close()
   })
 
+  test('backs off a refused run-result delivery instead of retrying it on every tick', async () => {
+    // The owner never granted this result route, so Policy refuses durably.
+    const enqueue = vi.fn((): { id: string; status: string } => {
+      throw new Error('policy denied: default-deny')
+    })
+    const dispatcher: AutomationDeliveryDispatcher = {
+      enqueueBackground: vi.fn(),
+      enqueueAutomationResult: enqueue,
+    }
+    const value = await fixture({
+      async run() { return { outcome: 'succeeded', output: 'scheduled result', usage: {} } },
+    })
+    value.coordinator.setDeliveryDispatcher(dispatcher)
+    value.store.createApproved({
+      automationId: 'auto-delivery-refused', idempotencyKey: 'create:delivery-refused',
+      definition: definition({ deliveryBindingId: 'binding-owner' }),
+    })
+
+    await value.coordinator.tick()
+    await value.coordinator.whenIdle()
+    const attempts = () => enqueue.mock.calls.length
+    const settled = attempts()
+    expect(settled).toBeGreaterThanOrEqual(1)
+
+    // While the backoff window is open no further attempt is made, even though
+    // the delivery stays durably pending.
+    await value.coordinator.tick()
+    expect(attempts()).toBe(settled)
+    value.advance(999)
+    await value.coordinator.tick()
+    expect(attempts()).toBe(settled)
+
+    // Once the base delay elapses the durable alert is retried again.
+    value.advance(1)
+    await value.coordinator.tick()
+    expect(attempts()).toBeGreaterThan(settled)
+
+    // The successful execution stays authoritative and the delivery stays
+    // pending for a later authorized tick.
+    expect(value.store.listRuns({ automationId: 'auto-delivery-refused', limit: 10 })[0])
+      .toMatchObject({ status: 'succeeded', deliveryStatus: 'pending' })
+    await value.coordinator.stop()
+    value.store.close()
+  })
+
   test('never enqueues Delivery for a successful delivery-bound dry run', async () => {
     const dispatcher: AutomationDeliveryDispatcher = {
       enqueueBackground: vi.fn(() => ({ id: 'must-not-exist', status: 'pending' })),
@@ -783,6 +828,10 @@ describe('automation coordinator', () => {
     expect(value.store.listRuns({ automationId: 'auto-retry-delivery', limit: 10 })[0])
       .toMatchObject({ status: 'succeeded', deliveryStatus: 'pending' })
 
+    // A refused delivery result backs off before the same intent is retried.
+    await value.coordinator.tick()
+    expect(dispatcher.enqueueAutomationResult).toHaveBeenCalledTimes(1)
+    value.advance(1_000)
     await value.coordinator.tick()
     expect(dispatcher.enqueueAutomationResult).toHaveBeenCalledTimes(2)
     expect(value.store.listRuns({ automationId: 'auto-retry-delivery', limit: 10 })[0])
@@ -1387,6 +1436,64 @@ describe('automation coordinator', () => {
         stage: 'terminal', state: 'open', runId: terminal.id,
         notificationRouteId: 'lark/main/tenant/owner', failureCode: 'catalog-mismatch', alertStatus: 'pending',
       })])
+    await value.coordinator.stop()
+    value.store.close()
+  })
+
+  test('backs off a durably refused incident alert instead of retrying it on every tick', async () => {
+    const registry = new HostAutomationExecutorRegistry()
+    const run = vi.fn(async () => ({
+      outcome: 'succeeded' as const,
+      output: 'host complete', usage: {}, diagnostic: {
+        schemaVersion: 1 as const, failureClass: 'none' as const, failurePhase: 'none' as const,
+        failureCode: 'none', promptSubmissionState: 'not-applicable' as const,
+        sideEffectState: 'none' as const, retryability: 'safe' as const,
+        budgetSettlementState: 'not-required' as const,
+      },
+    }))
+    const value = await fixture({ run }, {}, registry)
+    // A Policy refusal is durable: the delivery dispatcher keeps rejecting the
+    // alert, so without backoff every tick would emit another denied send.
+    const route = vi.fn((_input: unknown): { id: string; status: string } => {
+      throw new Error('policy denied: default-deny')
+    })
+    value.coordinator.setDeliveryDispatcher({
+      enqueueBackground: vi.fn(), enqueueBackgroundRoute: route,
+      publishDeliveryPresentation: vi.fn(),
+    })
+    value.store.reconcileSystemOwned({
+      owner: 'assistant-recovery', automationId: 'growth-host', idempotencyKey: 'growth-host:v1',
+      definition: hostDefinition(),
+    })
+
+    await value.coordinator.tick()
+    await value.coordinator.whenIdle()
+    const first = route.mock.calls.length
+    expect(first).toBe(1)
+    expect(value.store.listIncidents({ automationId: 'growth-host', limit: 10 }))
+      .toEqual([expect.objectContaining({ state: 'open', alertStatus: 'pending' })])
+
+    // Same instant: the incident is in backoff, so no further attempt is made.
+    await value.coordinator.tick()
+    expect(route.mock.calls.length).toBe(first)
+
+    // First retry after the base delay, then the delay doubles.
+    value.advance(999)
+    await value.coordinator.tick()
+    expect(route.mock.calls.length).toBe(first)
+    value.advance(1)
+    await value.coordinator.tick()
+    expect(route.mock.calls.length).toBe(first + 1)
+    value.advance(1_999)
+    await value.coordinator.tick()
+    expect(route.mock.calls.length).toBe(first + 1)
+    value.advance(1)
+    await value.coordinator.tick()
+    expect(route.mock.calls.length).toBe(first + 2)
+
+    // The alert stays durable and pending for a later authorized tick.
+    expect(value.store.listIncidents({ automationId: 'growth-host', limit: 10 }))
+      .toEqual([expect.objectContaining({ state: 'open', alertStatus: 'pending' })])
     await value.coordinator.stop()
     value.store.close()
   })

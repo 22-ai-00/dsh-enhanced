@@ -133,6 +133,18 @@ export class AutomationRunnerFailureError extends Error {
   }
 }
 
+/**
+ * Backoff for retrying a durable incident alert whose dispatch keeps failing.
+ * A Policy refusal is durable evidence, not a transient fault: retrying it on
+ * every tick turns one denied alert into an unbounded stream of denial audits
+ * (and re-attempts an action the owner has not authorized). Back off
+ * exponentially per incident so a later authorized tick still retries, while
+ * bounding the attempt rate; a successful enqueue clears the state.
+ */
+const INCIDENT_ALERT_BACKOFF_BASE_MS = 1_000
+const INCIDENT_ALERT_BACKOFF_MAX_MS = 3_600_000
+const INCIDENT_ALERT_BACKOFF_PRUNE_AT = 1_024
+
 export interface AutomationCoordinatorOptions {
   /** Synchronous Host wake notification before duty acquisition or dispatch work. */
   beforeTick?: () => void
@@ -219,6 +231,8 @@ export class AutomationCoordinator {
   private delivery: AutomationDeliveryDispatcher | undefined
   private outcomeRecorder: AutomationOutcomeRecorder | undefined
   private evaluationRecorder: AutomationEvaluationRecorder | undefined
+  private readonly incidentAlertBackoff = new Map<string, { attempts: number; nextAttemptAt: number }>()
+  private readonly runDeliveryBackoff = new Map<string, { attempts: number; nextAttemptAt: number }>()
   private fencingToken: number | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private stopped = false
@@ -822,7 +836,15 @@ export class AutomationCoordinator {
   }
 
   private dispatchPendingDeliveries(): void {
-    for (const run of this.store.listPendingDeliveries(100)) {
+    const now = this.now()
+    const pending = this.store.listPendingDeliveries(100)
+    const live = new Set(pending.map(run => run.id))
+    if (this.runDeliveryBackoff.size > INCIDENT_ALERT_BACKOFF_PRUNE_AT) {
+      for (const id of this.runDeliveryBackoff.keys()) if (!live.has(id)) this.runDeliveryBackoff.delete(id)
+    }
+    for (const run of pending) {
+      const backoff = this.runDeliveryBackoff.get(run.id)
+      if (backoff !== undefined && now < backoff.nextAttemptAt) continue
       try {
         this.dispatchRunDelivery(run)
       } catch {
@@ -834,7 +856,15 @@ export class AutomationCoordinator {
   private dispatchPendingIncidentAlerts(): void {
     const delivery = this.delivery
     if (delivery === undefined) return
-    for (const incident of this.store.listPendingIncidentAlerts(100)) {
+    const now = this.now()
+    const pending = this.store.listPendingIncidentAlerts(100)
+    const live = new Set(pending.map(incident => incident.id))
+    if (this.incidentAlertBackoff.size > INCIDENT_ALERT_BACKOFF_PRUNE_AT) {
+      for (const id of this.incidentAlertBackoff.keys()) if (!live.has(id)) this.incidentAlertBackoff.delete(id)
+    }
+    for (const incident of pending) {
+      const backoff = this.incidentAlertBackoff.get(incident.id)
+      if (backoff !== undefined && now < backoff.nextAttemptAt) continue
       try {
         const target = this.store.getIncidentNotificationTarget(incident.id)
         if (target === undefined) continue
@@ -903,11 +933,29 @@ export class AutomationCoordinator {
           alertRef: outbox.id,
           now: this.now(),
         })
+        this.incidentAlertBackoff.delete(incident.id)
       } catch {
         // Emergency stop / Policy refusal keeps the durable incident and its
-        // pending alert. A later authorized tick uses the same idempotency key.
+        // pending alert. A later authorized tick uses the same idempotency key,
+        // but it must not run on every tick: back off exponentially per incident.
+        const attempts = (this.incidentAlertBackoff.get(incident.id)?.attempts ?? 0) + 1
+        const exponent = Math.min(attempts - 1, 20)
+        this.incidentAlertBackoff.set(incident.id, {
+          attempts,
+          nextAttemptAt: now + Math.min(INCIDENT_ALERT_BACKOFF_BASE_MS * 2 ** exponent, INCIDENT_ALERT_BACKOFF_MAX_MS),
+        })
       }
     }
+  }
+
+  /** Record one refused run-result delivery and open its bounded backoff window. */
+  private noteRunDeliveryFailure(runId: string): void {
+    const attempts = (this.runDeliveryBackoff.get(runId)?.attempts ?? 0) + 1
+    const exponent = Math.min(attempts - 1, 20)
+    this.runDeliveryBackoff.set(runId, {
+      attempts,
+      nextAttemptAt: this.now() + Math.min(INCIDENT_ALERT_BACKOFF_BASE_MS * 2 ** exponent, INCIDENT_ALERT_BACKOFF_MAX_MS),
+    })
   }
 
   private dispatchRunDelivery(run: AutomationRun): void {
@@ -950,9 +998,12 @@ export class AutomationCoordinator {
         deliveryRef: outbox.id,
         now: this.now(),
       })
+      this.runDeliveryBackoff.delete(run.id)
     } catch {
       // The successful execution remains authoritative. A later tick repeats the
-      // same Delivery idempotency key and cannot create a second outbound intent.
+      // same Delivery idempotency key and cannot create a second outbound intent,
+      // but a durable refusal must back off instead of retrying on every tick.
+      this.noteRunDeliveryFailure(run.id)
     }
   }
 }
