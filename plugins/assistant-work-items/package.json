@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-work-items",
-  "version": "0.1.69",
+  "version": "0.1.70",
   "description": "A durable work-item ledger with fail-closed admission and compare-and-swap claim/report tools for background agents.",
   "license": "MIT",
   "type": "module",
