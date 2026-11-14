@@ -283,6 +283,17 @@ export function createInstallerFixtures() {
     platform?: string,
     extraEnvironment: Record<string, string | undefined> = {},
   ) {
+    // The installer bootstraps pnpm for every install source. A fixture that owns a
+    // fake PATH gets the pinned shim automatically, so an install no longer depends
+    // on whichever pnpm the host happens to expose. Fixtures that provide their own
+    // pnpm keep it.
+    const firstPathEntry = (extraEnvironment.PATH ?? pathWithoutTraex).split(':')[0]
+    if (firstPathEntry !== '' && existsSync(firstPathEntry)) {
+      const pnpmShim = join(firstPathEntry, 'pnpm')
+      if (!existsSync(pnpmShim)) {
+        writeFileSync(pnpmShim, "#!/bin/bash\nprintf '11.7.0\\n'\n", { mode: 0o755 })
+      }
+    }
     const fixtureScript = join(dirname(dshHome), 'install', basename(script))
     return spawnSync('/bin/bash', [existsSync(fixtureScript) ? fixtureScript : script, ...args], {
       cwd: repoRoot,
