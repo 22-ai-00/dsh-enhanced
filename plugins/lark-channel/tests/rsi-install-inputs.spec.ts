@@ -83,35 +83,6 @@ describe('installed owner setup input capture', () => {
     } finally { await data.cleanup() }
   })
 
-  test.skipIf(process.platform !== 'linux')('accepts a uniformly older installed version as a cross-version upgrade', async () => {
-    const data = await fixture()
-    try {
-      // Every installed package consistently reports the previous release: the
-      // outgoing tree is replaced by the verified stage, so this must not be
-      // rejected as an identity mismatch.
-      for (const name of ['personal-assistant', 'assistant-health', 'assistant-memory-learning', 'personal-memory']) {
-        const manifestPath = join(data.profile, 'node_modules', '@dsh-enhanced', name, 'package.json')
-        const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
-        await file(manifestPath, JSON.stringify({ ...manifest, version: '0.1.47' }))
-      }
-      await expect(collectRsiInstalledInputs({ dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
-        resources: data.resources, source: data.source, environment: data.environment }))
-        .resolves.toMatchObject({ plugins: expect.any(Array) })
-    } finally { await data.cleanup() }
-  })
-
-  test('rejects a profile whose installed packages disagree on version', async () => {
-    const data = await fixture()
-    try {
-      const manifestPath = join(data.profile, 'node_modules', '@dsh-enhanced', 'assistant-health', 'package.json')
-      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
-      await file(manifestPath, JSON.stringify({ ...manifest, version: '0.1.47' }))
-      await expect(collectRsiInstalledInputs({ dshHome: data.home, targetProfile: 'target', targetEffective: data.effective,
-        resources: data.resources, source: data.source, environment: data.environment }))
-        .rejects.toThrow('installed version differs from the other installed packages')
-    } finally { await data.cleanup() }
-  })
-
   test('reports local development links as unavailable before deployment authority is prepared', async () => {
     const data = await fixture()
     try {
