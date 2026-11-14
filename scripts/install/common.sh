@@ -119,14 +119,14 @@ Options:
   --owner-wait-seconds <n>  Supervised first install: wait up to n seconds (default 600; 0 disables)
                             for the owner's first Lark DM before owner learning setup
   --plugin-preset <name>    Install: apply a dsh-plugin-setup preset (e.g. recommended) as the
-                            last configuration step; `skip` never applies one. Guided installs
-                            offer `recommended` (default yes); a fresh supervised install also
+                            last configuration step; \`skip\` never applies one. Guided installs
+                            offer \`recommended\` (default yes); a fresh supervised install also
                             applies it after the owner RSI setup; other runs skip unless set
   --learning <decision>     Install: authorize or skip ordinary-use and memory learning.
                             Default: authorize only for a fresh supervised install; another
                             existing profile preserves its recorded decision. An explicit or
                             default decision is persisted in
-                            $DSH_HOME/.dsh-enhanced/install-intent.json (0600) before the
+                            \$DSH_HOME/.dsh-enhanced/install-intent.json (0600) before the
                             profile exists and reused by retries (skip never becomes authorize).
                             Explicit --learning needs a fresh profile; an existing profile keeps
                             its recorded decision. macOS native owner deployment must authorize:
@@ -168,7 +168,7 @@ Scenarios:
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
   supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
-             Recovery is model-free; TraeX remains an optional foreground model route (`--with traex`).
+             Recovery is model-free; TraeX remains an optional foreground model route (\`--with traex\`).
              Requires a resident service and installs content-free Health/bootstrap gates.
              Includes the observe-only WorkItems intake ledger and, on a fresh managed
              install, the audited ordinary-use learning assembly preset. Learning grants are
