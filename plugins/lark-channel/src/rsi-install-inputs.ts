@@ -230,6 +230,11 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const path = await realpath(join(profile, entry)); within(profile, path, entry)
     await bytes(path, 64 * 1024 * 1024, entry)
   }
+  // The version this profile was installed at. A same-version re-verification
+  // must still match the target cohort byte for byte; a cross-version upgrade
+  // (the Docker -> linux-native migration path included) legitimately differs
+  // because the outgoing tree is about to be replaced by the verified stage.
+  let installedVersion: string | undefined
   for (const plugin of plugins) {
     const prefix = `node_modules/@dsh-enhanced/${plugin}/`, packageRoot = join(profile, 'node_modules', '@dsh-enhanced', plugin)
     const physical = await realpath(packageRoot)
@@ -245,9 +250,15 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     const exportMain = exported && typeof exported === 'object' && !Array.isArray(exported)
       ? (exported as Record<string, unknown>).default : undefined
     const main = relativeJs(manifest.main, `${plugin} main`, true)
-    if (manifest.name !== `@dsh-enhanced/${plugin}` || manifest.version !== input.source.version
+    if (manifest.name !== `@dsh-enhanced/${plugin}`
       || exportMain !== manifest.main || (manifest.dsh as { bundle?: { patch?: string } } | undefined)?.bundle?.patch !== './cordis.patch.yml') {
       fail(`${plugin} installed package identity or entry differs from source cohort`)
+    }
+    const version = manifest.version
+    if (typeof version !== 'string' || version === '') fail(`${plugin} installed package version is invalid`)
+    if (installedVersion === undefined) installedVersion = version
+    else if (installedVersion !== version) {
+      fail(`${plugin} installed version differs from the other installed packages`)
     }
     const declared = [`${prefix}package.json`, `${prefix}cordis.patch.yml`, `${prefix}${main}`]
     for (const entry of declared.slice(1)) {
@@ -276,7 +287,10 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   const memoryMain = memoryExport && typeof memoryExport === 'object' && !Array.isArray(memoryExport)
     ? (memoryExport as Record<string, unknown>).default : undefined
   const memoryEntry = relativeJs(memoryManifest.main, 'embedded Personal Memory main', true)
-  if (memoryManifest.name !== '@dsh-enhanced/personal-memory' || memoryManifest.version !== input.source.version
+  // The embedded Memory peer follows the same rule as the bundles: a
+  // cross-version upgrade carries the previous release until the stage swaps in.
+  if (memoryManifest.name !== '@dsh-enhanced/personal-memory'
+    || (installedVersion === input.source.version && memoryManifest.version !== input.source.version)
     || memoryMain !== memoryManifest.main
     || (memoryManifest.dsh as { bundle?: { patch?: string } } | undefined)?.bundle?.patch !== './cordis.patch.yml') {
     fail('embedded Personal Memory package identity or entry differs from source cohort')
@@ -292,7 +306,14 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   validateHostDeploymentInputs(hostDeploymentInputs)
   if (input.source.origin?.kind === 'local-head') {
     const cohort = await readRsiLocalCohort({dshHome:input.dshHome,profile:input.targetProfile,source:input.source})
-    await verifyRsiLocalInstalledPackages({cohort,profilePath:profile,bundles:[...new Set([...cohort.bundles,...activeBundles])]})
+    // Re-prove the installed tree against this exact cohort only when the profile
+    // is already at the target version. During an upgrade the outgoing profile is
+    // replaced atomically and the stage that becomes the new tree is verified
+    // against this cohort before the switch, so comparing the outgoing tree with
+    // the incoming cohort would reject every legitimate upgrade.
+    if (installedVersion === input.source.version) {
+      await verifyRsiLocalInstalledPackages({cohort,profilePath:profile,bundles:[...new Set([...cohort.bundles,...activeBundles])]})
+    }
   }
   if (input.resources.schemaVersion !== 1 || input.resources.root !== join(input.dshHome, 'rsi-authorities', input.targetProfile)
     || input.source.schemaVersion !== 1) fail('authority resources or source cohort differs from installation')
