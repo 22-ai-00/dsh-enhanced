@@ -122,7 +122,12 @@ describe('independent verifier drivers', () => {
       const criterion = { id: 'escape', kind: 'process-behavior' as const, authority: ref(runner), artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }
       const started = Date.now()
       const result = await verifyAcceptanceCriteria(contract(workspace, [criterion]), [runner], new AbortController().signal)
-      expect(Date.now() - started).toBeLessThan(1_000)
+      // The guarantee is that the run settles on its 50 ms deadline instead of
+      // waiting for the escaped descendant's 30 s lifetime. The absolute margin
+      // has to absorb process spawn and stdout-close work on a loaded CI runner
+      // (observed 1.2 s under load), so bound it well below the descendant but
+      // do not pretend the harness can settle in single-digit milliseconds.
+      expect(Date.now() - started).toBeLessThan(5_000)
       expect(result).toMatchObject([{ status: 'unknown', reason: 'verification-aborted' }])
     } finally {
       const pid = Number(await readFile(marker, 'utf8').catch(() => '0'))
