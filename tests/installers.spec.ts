@@ -2034,6 +2034,8 @@ exit 0
 if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.55"\\n'; exit 0; fi
 exit 0
 `)
+    // The installer bootstraps pnpm for every install source now; expose the pinned one.
+    await writeExecutable(join(fakeBin, 'pnpm'), "#!/bin/bash\nprintf '11.7.0\\n'\n")
     const result = runInstaller(npmInstaller, [
       '--profile', 'probe', '--scenario', 'core', '--lark', 'skip', '--model', 'skip', '--model-route', 'skip',
       '--no-service', '--yes', '--plugin-version', '0.1.55',

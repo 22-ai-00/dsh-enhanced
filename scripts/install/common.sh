@@ -4533,7 +4533,11 @@ dsh_enhanced_install() {
     [[ "$operation" == 'uninstall' ]] && lifecycle_requires_pnpm='0'
     dsh_enhanced_require_existing_runtime "$ack_unverified_host" "$lifecycle_requires_pnpm" || return $?
   fi
-  if [[ "$source_mode" == 'local' && "$operation" == 'install' ]]; then
+  # The deployment step runs "dsh plugin add", which shells out to pnpm, so a
+  # fresh install needs pnpm regardless of where the payload came from. Gate the
+  # bootstrap on the operation instead of the source, otherwise an npm install
+  # reaches deployment on a machine without pnpm and fails with "spawn pnpm ENOENT".
+  if [[ "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
