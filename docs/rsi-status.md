@@ -8,7 +8,7 @@
 
 本轮按[接手方案](handover/README.md)交付：A 普通续办、CI 均衡（两阶段）、B1 认证意图冻结、B2 受保护准则封存、B3 自然语言委托与真实 Delivery 端到端、C1a 显式学习决策、D1a 审查供应者冻结、E1 agreement 快照落库均已在 `dev` 且各有 Linux 冷完整门与独立复核。D1b 收益投影、D2 holdout 守卫、E2 inferred 合同准入、E3a read 回执与 Web notice ack、C1b/C1c 安装 readiness 与学习链、D3a 真实 release/activation 链也已交付，做梦机制按当前 Host 执行器合同复活；B3 真实渠道验收、E3b、D3a-1/D5 与 F 仍待推进。
 
-开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前 npm 已发布版本 0.1.68（39 包含 assistant-dreaming，dev=main=00ddb715），工具链与 Host 范围见[兼容说明](compatibility.md)。
+开发基线来自 Linux 进展，Mac 可开发、Linux `/data00` 独立副本验证，同一源码逐项核对。仅 dev/main，能力验证后推 dev，发布时才合 main。当前 npm 已发布版本 0.1.70（39 包含 assistant-dreaming，dev=main=84c65386，含 pnpm 硬链接安装器修复），工具链与 Host 范围见[兼容说明](compatibility.md)。 注：v0.1.69 tag 曾被误建在版本 bump 之前的提交上，因仓库 tag 不可变规则无法纠正，该 release 已 fail-closed、npm 未受影响，故跳过 0.1.69 改发 0.1.70。
 
 ## 已有能力与边界
 
