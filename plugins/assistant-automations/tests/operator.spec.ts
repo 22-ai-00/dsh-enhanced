@@ -309,6 +309,28 @@ function expectCode(operation: () => unknown, code: AutomationOperatorSnapshotEr
   expect(operation).toThrowError(expect.objectContaining<Partial<AutomationOperatorSnapshotError>>({ code }))
 }
 
+/**
+ * Assert the fail-closed code while the caller still holds a lock that makes the
+ * operation refuse. The lock is held for the whole window, so retrying briefly
+ * only absorbs a scheduling stall between taking the lock and observing it; a
+ * genuinely broken detection still fails every attempt and surfaces here.
+ */
+async function expectCodeWhileLocked(
+  operation: () => unknown, code: AutomationOperatorSnapshotError['code'], timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      operation()
+    } catch (error) {
+      expect(error).toMatchObject({ code })
+      return
+    }
+    if (Date.now() >= deadline) throw new Error('the operation never failed closed while the lock was held')
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+
 type RaceAction = 'chmod-parent' | 'remove-parent' | 'swap-parent'
 
 interface RaceWorker {
@@ -709,7 +731,7 @@ describe('read-only Automations operator snapshot', () => {
       // This is the production WAL writer shape: a plain BEGIN IMMEDIATE takes
       // only the SHM byte-120 WRITE lock, never a lock on the main inode.
       writer.exec('BEGIN IMMEDIATE')
-      expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'database-busy')
+      await expectCodeWhileLocked(() => inspectAutomationsOperatorSnapshot(f.path), 'database-busy')
       writer.exec('ROLLBACK')
     } finally {
       writer.close(); keeper.close()
