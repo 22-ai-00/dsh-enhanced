@@ -87,9 +87,9 @@ Options:
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto; Linux/macOS auto enables supervised learning)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
-  --isolation-backend <id>  linux-native or docker (Linux without image defaults native)
+  --isolation-backend <id>  linux-native (Linux) or macos-seatbelt (macOS); Docker is not supported
   --isolation-source-repository <absolute> Committed local HEAD for native runtime; otherwise official installed-version tag
-  --isolation-image <id>    Immutable sha256 image for Docker autonomy
+  --isolation-image <id>    Removed with the Docker backend; rejected
   --isolation-max-runs <n>  Autonomy grant run limit (default: 20)
   --isolation-lease-minutes <n> Autonomy grant lease (default: 60)
   --isolation-runtime-minutes <n> Cumulative reserved runtime budget (default: 10)
@@ -503,6 +503,69 @@ dsh_enhanced_ensure_dsh() {
     dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望精确版本 $target_version。"
     return $?
   fi
+}
+
+# Detect the native isolation backend this operating system can actually provide.
+# Self-evolution capabilities run user code inside that backend, so a platform
+# without one must be reported instead of silently installing a capability that
+# cannot execute (Docker is deliberately not a fallback: 0.1.70 removed it).
+DSH_ENHANCED_ISOLATION_CAPABILITY=''
+DSH_ENHANCED_ISOLATION_REASON=''
+dsh_enhanced_detect_isolation_capability() {
+  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+  case "$platform" in
+    Darwin)
+      DSH_ENHANCED_ISOLATION_CAPABILITY='macos-seatbelt'
+      DSH_ENHANCED_ISOLATION_REASON='macOS seatbelt sandbox'
+      return 0 ;;
+    Linux)
+      if ! command -v bwrap >/dev/null 2>&1; then
+        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
+        DSH_ENHANCED_ISOLATION_REASON='缺少 bubblewrap (bwrap)，无法提供 linux-native 隔离'
+        return 0
+      fi
+      local roots=0 controller
+      for controller in memory pids 'cpu,cpuacct' freezer; do
+        if [[ -d "/sys/fs/cgroup/$controller/dsh-native" ]]; then roots=$((roots + 1)); fi
+      done
+      if [[ $roots -lt 4 ]]; then
+        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
+        DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v1 隔离根（need memory/pids/cpu,cpuacct/freezer 下的 dsh-native）"
+        return 0
+      fi
+      if [[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" == '0' ]]; then
+        DSH_ENHANCED_ISOLATION_CAPABILITY='none'
+        DSH_ENHANCED_ISOLATION_REASON='宿主禁用了 user namespace，无法提供 linux-native 隔离'
+        return 0
+      fi
+      DSH_ENHANCED_ISOLATION_CAPABILITY='linux-native'
+      DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v1 + user namespace)'
+      return 0 ;;
+    *)
+      DSH_ENHANCED_ISOLATION_CAPABILITY='none'
+      DSH_ENHANCED_ISOLATION_REASON="平台 $platform 没有受支持的原生隔离后端"
+      return 0 ;;
+  esac
+}
+
+# Drop self-evolution bundles the host cannot execute, and say exactly what was
+# skipped. Mutates the caller's selected_slugs array. Docker is never a fallback.
+dsh_enhanced_apply_isolation_capability_gate() {
+  dsh_enhanced_detect_isolation_capability
+  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
+  local kept=() skipped=() slug
+  for slug in "${selected_slugs[@]}"; do
+    case "$slug" in
+      assistant-verifier|assistant-memory-learning|assistant-growth-driver|assistant-growth-experiments|assistant-evaluation|assistant-evolution|assistant-skills|assistant-work-items|assistant-isolation|plugin-control-plane)
+        skipped+=("$slug") ;;
+      *) kept+=("$slug") ;;
+    esac
+  done
+  if [[ ${#skipped[@]} -eq 0 ]]; then return 0; fi
+  selected_slugs=("${kept[@]}")
+  printf '平台能力检测：本机不提供原生隔离（%s）。\n' "$DSH_ENHANCED_ISOLATION_REASON"
+  printf '已跳过需要原生隔离的自进化能力：%s\n' "${skipped[*]}"
+  printf '已安装的能力在本机可正常运行；需要自进化时请先准备 bwrap + 委派 cgroup v1 + user namespace。\n'
 }
 
 dsh_enhanced_ensure_pnpm() {
@@ -3338,10 +3401,12 @@ dsh_enhanced_apply_web_owner() {
     return $?
   fi
   local args=(--dsh-home "$dsh_home" --profile "$profile" --workspace "$workspace" --preset "$preset")
-  if [[ "$isolation_backend" == 'linux-native' ]]; then
-    args+=(--isolation-backend linux-native --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms")
+  if [[ -n "$isolation_backend" ]]; then
+    # Forward whichever native backend this platform detected; there is no Docker
+    # branch any more, and the setup validator rejects an unsupported backend.
+    args+=(--isolation-backend "$isolation_backend" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms")
     if [[ -n "$isolation_source_repository" ]]; then args+=(--isolation-source-repository "$isolation_source_repository"); fi
-  elif [[ -n "$isolation_image" ]]; then args+=(--isolation-image "$isolation_image" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms"); fi
+  fi
   dsh_enhanced_run_profile_setup "$dry_run" "$dsh_home" "$profile" dsh-web-owner-setup "${args[@]}"
 }
 
@@ -3810,8 +3875,8 @@ dsh_enhanced_install() {
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-source-repository 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_source_repository="$2"; shift 2 ;;
       --isolation-image)
-        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-image 需要一个值。'; return $?; }
-        isolation_option_explicit=1; isolation_image="$2"; shift 2 ;;
+        dsh_enhanced_fail 2 '不支持 Docker 镜像隔离：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
+        return $? ;;
       --isolation-max-runs)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-max-runs 需要一个值。'; return $?; }
         isolation_option_explicit=1; isolation_max_runs="$2"; shift 2 ;;
@@ -4313,17 +4378,26 @@ dsh_enhanced_install() {
   fi
   if [[ "$scenario" == 'autonomy' && "$operation" == 'install' ]]; then
     if [[ -z "$isolation_backend" ]]; then
-      if [[ -z "$isolation_image" && "$install_platform" == 'Linux' ]]; then isolation_backend='linux-native'; else isolation_backend='docker'; fi
+      dsh_enhanced_detect_isolation_capability
+      if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then
+        dsh_enhanced_fail 2 "本机无法提供自演化所需的原生隔离：$DSH_ENHANCED_ISOLATION_REASON。请先准备隔离能力，或用 --scenario lark 安装不含自治执行能力的场景。"
+        return $?
+      fi
+      isolation_backend="$DSH_ENHANCED_ISOLATION_CAPABILITY"
     fi
     case "$isolation_backend" in
       linux-native)
         if [[ "$install_platform" != 'Linux' || -n "$isolation_image" ]]; then dsh_enhanced_fail 2 'linux-native 只支持 Linux，且不能同时指定 --isolation-image。'; return $?; fi
         if [[ -n "$isolation_source_repository" && "$isolation_source_repository" != /* ]]; then dsh_enhanced_fail 2 '--isolation-source-repository 必须是绝对路径。'; return $?; fi
         ;;
-      docker)
-        if [[ -n "$isolation_source_repository" || ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 'Docker autonomy 需要 --isolation-image sha256:<64位小写hex>，不能使用 native source repository。'; return $?; fi
+      macos-seatbelt)
+        if [[ "$install_platform" != 'Darwin' ]]; then dsh_enhanced_fail 2 'macos-seatbelt 只支持 macOS。'; return $?; fi
         ;;
-      *) dsh_enhanced_fail 2 '--isolation-backend 只能是 linux-native 或 docker。'; return $? ;;
+      docker)
+        dsh_enhanced_fail 2 '不支持 Docker：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'
+        return $?
+        ;;
+      *) dsh_enhanced_fail 2 '--isolation-backend 只能是 linux-native 或 macos-seatbelt。'; return $? ;;
     esac
     local value_limit value maximum label
     for value_limit in "$isolation_max_runs:10000:--isolation-max-runs" "$isolation_lease_minutes:10080:--isolation-lease-minutes" "$isolation_runtime_minutes:1440:--isolation-runtime-minutes"; do
@@ -4736,6 +4810,7 @@ NODE
       ;;
     esac
   fi
+  dsh_enhanced_apply_isolation_capability_gate
   if [[ "$operation" == 'install' && -n "${add_ons[0]+set}" ]]; then
     for slug in "${add_ons[@]}"; do
       case "$slug" in
