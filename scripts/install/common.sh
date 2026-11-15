@@ -519,7 +519,7 @@ dsh_enhanced_prepare_isolation_capability() {
   local dry_run="$1"
   dsh_enhanced_detect_isolation_capability
   if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
-  local platform="$DSH_ENHANCED_PLATFORM_OVERRIDE"
+  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-}"
   if [[ -z "$platform" ]]; then platform="$(uname -s)"; fi
   if [[ "$platform" != 'Linux' ]]; then return 0; fi
   local uid gid
