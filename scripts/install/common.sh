@@ -945,21 +945,21 @@ dsh_enhanced_choose_scenario() {
   local platform="$2"
   printf '\n选择部署场景（能力逐档叠加：core ⊂ lark ⊂ supervised）：\n' >&2
   if [[ "$platform" == 'Linux' || "$platform" == 'Darwin' ]]; then
-    printf '  1) 分级自治成长（推荐：普通使用中有限自迭代，额外消耗有限模型额度）\n' >&2
+    printf '  1) 仅本机核心（推荐：装完即可在浏览器使用，不接飞书、不启动仪式）\n' >&2
     if [[ "$configured" == '1' ]]; then
       printf '  2) 仅保留已配置的飞书常驻助理（不启用完整自迭代）\n' >&2
     else
-      printf '  2) 飞书/Lark 常驻助理（不启用完整自迭代）\n' >&2
+      printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
     fi
-    printf '  3) 仅本机核心（不启用完整自迭代）\n' >&2
+    printf '  3) 分级自治成长（完整自迭代，额外消耗有限模型额度；进阶）\n' >&2
     printf '  4) 实验性本机 Web owner（不配置飞书或常驻服务）\n' >&2
     printf '请选择 [1]：' >&2
     local choice
     IFS= read -r choice
     case "$choice" in
-      ''|'1') printf 'supervised' ;;
+      ''|'1') printf 'core' ;;
       '2') printf 'lark' ;;
-      '3') printf 'core' ;;
+      '3') printf 'supervised' ;;
       '4') printf 'web' ;;
       *) return 2 ;;
     esac
@@ -4435,6 +4435,17 @@ dsh_enhanced_install() {
     fi
     scenario='supervised'
   fi
+  # A scenario that always needs Lark onboarding cannot proceed in a non-interactive
+  # session without a decision. Detect that before the package install, so a fresh
+  # host is not filled with a full profile and then abandoned at the last step.
+  if [[ "$operation" == 'install' && "$assume_yes" != '1' && "$lark_mode" == 'auto'
+    && "$existing_lark_configured" != '1'
+    && ( "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' )
+    && ( ! -t 0 || ! -t 1 ) ]]; then
+    dsh_enhanced_fail 2 '非交互环境无法选择飞书应用。请显式加 --lark skip（仅本机使用，稍后可再配置飞书）或 --lark configure（配置飞书）。本次未开始安装，未改动任何文件。'
+    return $?
+  fi
+
   # Guided onboarding: one question replaces the scenario/model/Lark/route
   # menus with their recommended answers. Explicit flags still win; --yes and
   # non-interactive runs keep their existing non-prompting defaults.

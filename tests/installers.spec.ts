@@ -1681,15 +1681,16 @@ require('node:module').syncBuiltinESMExports()
     expect(result.stdout).toContain('dsh-rsi-setup --install-owner')
   })
 
-  test.each(['Linux', 'Darwin'])('%s interactive scenario menu defaults to supervised and offers limited opt-outs', platform => {
+  test.each(['Linux', 'Darwin'])('%s interactive scenario menu defaults to the local core profile and keeps the advanced opt-ins', platform => {
     const result = spawnSync('/bin/bash', [
       '-c', 'source "$1"; dsh_enhanced_choose_scenario 0 "$2"', 'installer-test', installerLibrary, platform,
     ], { encoding: 'utf8', input: '\n' })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toBe('supervised')
+    expect(result.stdout).toBe('core')
     expect(result.stderr).toContain('额外消耗有限模型额度')
-    expect(result.stderr).toContain('3) 仅本机核心')
+    expect(result.stderr).toContain('3) 分级自治成长')
+    expect(result.stderr).toContain('1) 仅本机核心')
   })
 
   test('standard Lark installs automatic preference learning without the supervised operations stack', async () => {
