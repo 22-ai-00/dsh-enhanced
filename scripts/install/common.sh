@@ -511,7 +511,112 @@ dsh_enhanced_ensure_dsh() {
 # cannot execute (Docker is deliberately not a fallback: 0.1.70 removed it).
 DSH_ENHANCED_ISOLATION_CAPABILITY=''
 DSH_ENHANCED_ISOLATION_REASON=''
+# Prepare the native isolation capability a fresh self-evolution install needs.
+# Everything privileged is shown as an exact fixed command and only runs after the
+# operator accepts it; a non-interactive run without passwordless sudo gets the
+# commands to run by hand instead of a partial install.
+dsh_enhanced_prepare_isolation_capability() {
+  local dry_run="$1"
+  dsh_enhanced_detect_isolation_capability
+  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
+  local platform="$DSH_ENHANCED_PLATFORM_OVERRIDE"
+  if [[ -z "$platform" ]]; then platform="$(uname -s)"; fi
+  if [[ "$platform" != 'Linux' ]]; then return 0; fi
+  local uid gid
+  uid="$(id -u)"
+  gid="$(id -g)"
+  local missing_bwrap=0 userns_off=0 roots_missing=0
+  command -v bwrap >/dev/null 2>&1 || missing_bwrap=1
+  if [[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || printf '0')" == '0' ]]; then userns_off=1; fi
+  local controller root
+  for controller in memory pids cpu,cpuacct freezer; do
+    root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
+    if [[ ! -d "$root" ]]; then roots_missing=1; fi
+  done
+  printf '\n自演化需要原生隔离，本机还缺：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"
+  local manager='' install_command=''
+  for candidate in apt-get dnf yum pacman zypper; do
+    if command -v "$candidate" >/dev/null 2>&1; then manager="$candidate"; break; fi
+  done
+  case "$manager" in
+    apt-get) install_command='apt-get install -y bubblewrap' ;;
+    dnf) install_command='dnf install -y bubblewrap' ;;
+    yum) install_command='yum install -y bubblewrap' ;;
+    pacman) install_command='pacman -S --noconfirm bubblewrap' ;;
+    zypper) install_command='zypper install -y bubblewrap' ;;
+    *) install_command='' ;;
+  esac
+  if [[ "$dry_run" == '1' ]]; then
+    if [[ -n "$install_command" ]]; then printf '将执行（需管理员）：sudo %s\n' "$install_command"; fi
+    if [[ "$userns_off" == '1' ]]; then printf '将执行（需管理员）：sudo sysctl -w user.max_user_namespaces=15000\n'; fi
+    if [[ "$roots_missing" == '1' ]]; then printf '将创建委派 cgroup v1 根：/sys/fs/cgroup/<controller>/dsh-native/uid-%s\n' "$uid"; fi
+    return 0
+  fi
+  local sudo_path=''
+  sudo_path="$(dsh_enhanced_trusted_system_command sudo 2>/dev/null || true)"
+  if [[ -z "$sudo_path" ]]; then
+    printf '未找到受信任的 sudo；请手工准备隔离后重装：\n' >&2
+    if [[ -n "$install_command" ]]; then printf '  sudo %s\n' "$install_command" >&2; fi
+    printf '  sudo sysctl -w user.max_user_namespaces=15000\n' >&2
+    for controller in memory pids cpu,cpuacct freezer; do printf '  sudo mkdir -p /sys/fs/cgroup/%s/dsh-native/uid-%s && sudo chown %s:%s /sys/fs/cgroup/%s/dsh-native/uid-%s\n' "$controller" "$uid" "$uid" "$gid" "$controller" "$uid" >&2; done
+    return 0
+  fi
+  local accepted=0
+  if [[ -t 0 && -t 1 ]]; then
+    printf '\n可以自动准备这些能力（需要一次管理员授权）：\n' >&2
+    if [[ -n "$install_command" ]]; then printf '  sudo %s\n' "$install_command" >&2; fi
+    if [[ "$userns_off" == '1' ]]; then printf '  sudo sysctl -w user.max_user_namespaces=15000\n' >&2; fi
+    if [[ "$roots_missing" == '1' ]]; then printf '  创建并授权 /sys/fs/cgroup/<controller>/dsh-native/uid-%s 委派根\n' "$uid" >&2; fi
+    printf '现在自动准备？[Y/n] ' >&2
+    local choice=''
+    if IFS= read -r choice; then
+      case "$choice" in ''|y|Y|yes|YES|Yes) accepted=1 ;; esac
+    fi
+  elif "$sudo_path" -n true >/dev/null 2>&1; then
+    accepted=1
+  fi
+  if [[ "$accepted" != '1' ]]; then
+    printf '已跳过自动准备（未获得授权或非交互环境）。安装会继续，但不包含自演化能力。\n' >&2
+    return 0
+  fi
+  if [[ -n "$install_command" ]]; then
+    printf '正在安装 bubblewrap…\n' >&2
+    "$sudo_path" sh -c "$install_command" || printf '警告：bubblewrap 安装失败，稍后可手工重试。\n' >&2
+  fi
+  if [[ "$userns_off" == '1' ]]; then
+    "$sudo_path" sysctl -w user.max_user_namespaces=15000 >/dev/null 2>&1 || true
+    if [[ -f /proc/sys/kernel/unprivileged_userns_clone ]]; then
+      "$sudo_path" sysctl -w kernel.unprivileged_userns_clone=1 >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ "$roots_missing" == '1' ]]; then
+    printf '正在准备委派 cgroup v1 根…\n' >&2
+    for controller in memory pids cpu,cpuacct freezer; do
+      root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
+      "$sudo_path" mkdir -p "$root" >/dev/null 2>&1 || true
+      "$sudo_path" chown "$uid:$gid" "$root" >/dev/null 2>&1 || true
+      "$sudo_path" chown "$uid:$gid" "$root/cgroup.procs" >/dev/null 2>&1 || true
+      if [[ -f "/sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" ]]; then
+        "$sudo_path" sh -c "printf 1 > /sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+  dsh_enhanced_detect_isolation_capability
+  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then
+    printf '提示：自动准备后仍不满足（%s）。安装继续，但不包含自演化能力。\n' "$DSH_ENHANCED_ISOLATION_REASON" >&2
+  else
+    printf '原生隔离已就绪：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"
+  fi
+  return 0
+}
 dsh_enhanced_detect_isolation_capability() {
+  # Operators who prepared isolation out of band, and test fixtures that simulate a
+  # foreign platform, can pin the answer explicitly. Everything else is detected.
+  if [[ -n "${DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE:-}" ]]; then
+    DSH_ENHANCED_ISOLATION_CAPABILITY="$DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE"
+    DSH_ENHANCED_ISOLATION_REASON='explicit DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE'
+    return 0
+  fi
   local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
   case "$platform" in
     Darwin)
@@ -551,6 +656,7 @@ dsh_enhanced_detect_isolation_capability() {
 # Drop self-evolution bundles the host cannot execute, and say exactly what was
 # skipped. Mutates the caller's selected_slugs array. Docker is never a fallback.
 dsh_enhanced_apply_isolation_capability_gate() {
+  dsh_enhanced_prepare_isolation_capability "${1:-0}"
   dsh_enhanced_detect_isolation_capability
   if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
   local kept=() skipped=() slug
@@ -4391,7 +4497,11 @@ dsh_enhanced_install() {
         if [[ -n "$isolation_source_repository" && "$isolation_source_repository" != /* ]]; then dsh_enhanced_fail 2 '--isolation-source-repository 必须是绝对路径。'; return $?; fi
         ;;
       macos-seatbelt)
-        if [[ "$install_platform" != 'Darwin' ]]; then dsh_enhanced_fail 2 'macos-seatbelt 只支持 macOS。'; return $?; fi
+        # Verifier/self-evolution can run under seatbelt, but the isolated Web-owner
+        # autonomy closure has no macOS backend yet: refuse instead of composing a
+        # profile whose autonomy step cannot execute.
+        dsh_enhanced_fail 2 'macOS 上暂无自治执行后端：autonomy 场景需要 linux-native（Linux）。可改用 --scenario web 或 supervised。'
+        return $?
         ;;
       docker)
         dsh_enhanced_fail 2 '不支持 Docker：任何平台都只用原生隔离（Linux linux-native / macOS macos-seatbelt）。'

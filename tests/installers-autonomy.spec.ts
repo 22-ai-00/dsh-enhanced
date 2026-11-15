@@ -23,10 +23,11 @@ const image = `sha256:${'a'.repeat(64)}`
 describe('autonomy installer scenario', () => {
   it('plans the isolated closure and setup before dump or activation', async () => {
     const dshHome = await home(); const workspace = join(dshHome, 'workspace')
-    const result = run(['--dry-run', '--scenario', 'autonomy', '--workspace', workspace, '--isolation-image', image, '--isolation-max-runs', '7', '--isolation-lease-minutes', '30', '--isolation-runtime-minutes', '5', '--yes'], dshHome)
+    const native = { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux', DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE: 'linux-native' }
+    const result = run(['--dry-run', '--scenario', 'autonomy', '--workspace', workspace, '--isolation-backend', 'linux-native', '--isolation-max-runs', '7', '--isolation-lease-minutes', '30', '--isolation-runtime-minutes', '5', '--yes'], dshHome, native)
     expect(result.status, result.stderr).toBe(0)
     for (const slug of ['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-evaluation', 'assistant-verifier', 'assistant-deepseek-budget', 'event-triggers', 'assistant-proactive', 'assistant-skills']) expect(result.stdout).toContain(join(root, 'plugins', slug))
-    const setup = `dsh-web-owner-setup --dsh-home ${dshHome} --profile web --workspace ${workspace} --preset standard --isolation-image ${image} --isolation-max-runs 7 --isolation-lease-ms 1800000 --isolation-runtime-ms 300000`
+    const setup = `dsh-web-owner-setup --dsh-home ${dshHome} --profile web --workspace ${workspace} --preset standard --isolation-backend linux-native --isolation-max-runs 7 --isolation-lease-ms 1800000 --isolation-runtime-ms 300000`
     expect(result.stdout).toContain(setup)
     expect(result.stdout.indexOf(setup)).toBeLessThan(result.stdout.indexOf('dsh --profile web --dump-config'))
     expect(result.stdout).toContain('凭据、外部目标验证与完整自治仍需单独配置')
@@ -47,9 +48,9 @@ describe('autonomy installer scenario', () => {
     expect(run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--agent-tools', 'allow'], dshHome).status).toBe(2)
   })
 
-  it('defaults Linux autonomy to native without Docker and preserves explicit image compatibility', async () => {
+  it('defaults autonomy to the platform backend and refuses Docker', async () => {
     const dshHome = await home(), workspace = join(dshHome, 'workspace')
-    const env = { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux' }
+    const env = { DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux', DSH_ENHANCED_ISOLATION_CAPABILITY_OVERRIDE: 'linux-native' }
     const result = run(['--dry-run', '--scenario', 'autonomy', '--workspace', workspace, '--yes'], dshHome, env)
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('dsh-web-owner-setup')
@@ -60,10 +61,10 @@ describe('autonomy installer scenario', () => {
     const local = run(['--dry-run', '--scenario', 'autonomy', '--isolation-source-repository', root, '--yes'], dshHome, env)
     expect(local.status, local.stderr).toBe(0)
     expect(local.stdout).toContain(`--isolation-source-repository ${root}`)
+    // Docker is gone on every platform: the flag fails before any Home write.
     const docker = run(['--dry-run', '--scenario', 'autonomy', '--isolation-image', image, '--yes'], dshHome, env)
-    expect(docker.status, docker.stderr).toBe(0)
-    expect(docker.stdout).toContain(`--isolation-image ${image}`)
-    expect(docker.stdout).not.toContain('--isolation-backend linux-native')
+    expect(docker.status, docker.stderr).toBe(2)
+    expect(docker.stderr).toContain('不支持 Docker')
   })
 
   it('rejects mixed backend/source/image and native on macOS before installation', async () => {
