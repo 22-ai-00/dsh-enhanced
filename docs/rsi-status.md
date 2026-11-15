@@ -14,7 +14,7 @@
 - 学习与自演化受 owner 授权、有限预算、独立验收与精确版本回退约束；模型自评、工具成功退出与部署关联都不构成验收。
 - 平台边界：Linux 原生执行仅支持 cgroup v1（拒绝 v2），arm64 与活 Home 迁移未验收；Docker 执行后端已移除，旧收据仅作只读迁移证据。Mac 可开发，Linux `/data00` 独立副本验证。
 - 已有 Docker 原安装的程序升级要求创建/修订审查与采用业务记录为空；非空创建历史迁移未实现，完整 live Docker→native 切换未验收。
-- 完整门在本机需要三条环境前提（原生 `@pnpm/exe`、已填充的 pnpm store、短 `TMPDIR`）；解析方法见[交接入口](handover/README.md)（该页为 2026-11-10 历史交接，待并入维护文档）。
+- 完整门在本机需要三条环境前提（原生 `@pnpm/exe`、已填充的 pnpm store、短 `TMPDIR`）；解析方法见 [Linux 验证环境](linux-validation.md)。
 
 ## 活跃阻塞
 

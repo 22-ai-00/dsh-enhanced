@@ -184,7 +184,7 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。普通 registry 更新仍不支持固定本地源码或 `rsi-local-cohorts` 制品，会在 registry 查询和停服前拒绝；不能将显式维护入口外推为所有本地安装可自动更新。跨版本 DSH Host 的独立迁移事务已通过工程验收；本机受审生产 Home 通过显式联合 Host / 源码迁移及签名后继修复，完成 `0.1.5-rc.3 → 0.2.0-rc.2` 的双 Host 新鲜就绪验收。这仅证明该特定 Home 与输入，其他部署组合仍待验证。普通插件升级与 Host 更新仍是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-20 核对官方 registry），公开增强包 `0.1.57` 配套该私有 Host 版本。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
+当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-20 核对官方 registry），公开增强包 `0.1.72`（`release-manifest.json` 的 `current.version`）配套该私有 Host 版本。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 
@@ -257,7 +257,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 
 该切片使用 manifest v3，把原 active service 集、owner/配置/数据库摘要、preview nonce/catalog、guardian intent、post-swap attestation 和最终 `serviceAcceptance` 绑定为一个恢复协议。`serviceAcceptance` 必须精确覆盖原 active units、unit 唯一、数值字段为非负安全整数，且目标 unit 的 InvocationID 与 post-swap proof 一致；未知、缺失、重复、额外或 inactive 替代项都拒绝恢复。安装器只会屏蔽并停止经 HOME 与 WorkingDirectory 双重证明归属当前 home 的 units；归属缺失、冲突、漂移或 guardian 无法 strict-realpath 证明时不会取得 mutation authority。swap 后失败保持服务收容并保留 current/original home 与 transaction evidence，不把已经迁移的状态自动回滚或重放。
 
-preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中运行；它唯一允许的 process-local external-provider exemption 是禁用 `larkChannel` 并从 preview Health required providers 移除该项，active 配置不得继承 exemption。真实 service 验收要求 fresh InvocationID/journal ready marker、required Lark health、严格前进且精确匹配 active 配置的 attestation，以及稳定窗口。这里的组合和生命周期语义按本仓实际 `@deepseek-ai/cordis@4.0.2`、Loader `1.0.3`、Include `1.0.7` 验证；sibling Cordis checkout 只用于解释 Fiber、injection、effect ownership 和 Loader composition。
+preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中运行；它唯一允许的 process-local external-provider exemption 是禁用 `larkChannel` 并从 preview Health required providers 移除该项，active 配置不得继承 exemption。真实 service 验收要求 fresh InvocationID/journal ready marker、required Lark health、严格前进且精确匹配 active 配置的 attestation，以及稳定窗口。这里的组合和生命周期语义按本仓实际 `@deepseek-ai/cordis@4.0.5`、Loader `1.0.6`、Include `1.0.10` 验证；sibling Cordis checkout 只用于解释 Fiber、injection、effect ownership 和 Loader composition。
 
 supervised uninstall 只停用目标 profile 的本地受管能力：事务停止并收容经证明归属该 canonical home 的 unit，归档目标 profile 的完整目录树，再用 installer-clean 的同名 Web profile 替换 live target。clean target 不再要求 Lark、Health 或 supervised active attestation，只通过 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness；原 active unit 恢复，原 inactive unit 保持停止。uninstall 不访问 npm registry 或 pnpm store，也不撤销凭据、owner binding、Session、Goal、数据库或其它共享/外置状态。完整 profile-tree 归档不等于整个 home 的逐字节证明，后续重装或共享同一状态库的其它 profile 仍可能解释这些保留状态。
 
@@ -287,14 +287,14 @@ Web Session 排他回归使用 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc
 
 特别注意原生 `resumeWith()` 的 `raceAbortCall()`：调用方、owner fiber 或 factory 取消可先拒绝公开 resume Promise，未合作的 `persistence.prepare()` 可在之后返回并由上游 dispose。公开 API 不提供区分错误来源和观察该迟到清理的凭证。包装器通过 Cordis 同步 `internal/service` 通知跟踪 `agentLoop` 有效代次，并在错误返回时核对同代原生 provider 仍可见、调用方 `FiberState.ACTIVE`、组合 signal 未取消；只有排除 rc.1 的全部三条取消路径，才能把普通加载错误作为已结束的 load。provider 消失/替换、调用方卸载、signal 取消或非原生 factory 无法提供该证明时，保留 unknown；迟到 preparation 的清理不会自动解锁。setup 已收到 Agent 后的失败仍依赖原生等待 Agent rollback 的契约。升级 Cordis/AgentLoop 必须重查同步服务代次通知、三个取消来源与错误返回时序，不能靠错误消息猜测。
 
-construction 自身的 owner effect 把卸载记入不可复位的组合取消信号；即使同一 fiber 很快重启并再次 ACTIVE，也不能清除旧构造的取消。`FiberState` 在 Cordis 4.0.2 发布物中是擦除的 const enum；实现用对应成员类型约束数值，避免转译器尝试读取不存在的运行时导出，升级时类型检查必须继续核对该值。
+construction 自身的 owner effect 把卸载记入不可复位的组合取消信号；即使同一 fiber 很快重启并再次 ACTIVE，也不能清除旧构造的取消。`FiberState` 在 Cordis 4.0.5 发布物中是擦除的 const enum；实现用对应成员类型约束数值，避免转译器尝试读取不存在的运行时导出，升级时类型检查必须继续核对该值。
 
 上述 factory 代次证明限定于官方 AgentLoop 向当前 AgentRegistry 注册 factory 的标准生命周期；其 setFactory effect 随 provider fiber 清理。AgentRegistry 没有公开私有 factory 槽的变更通知，不宣称追踪任意 Host 代码脱离该生命周期更换 factory 的行为。
 
 
 ### 可选原生 Web owner
 
-`assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.2` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
+`assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.5` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
 
 Delivery 集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；浏览器和 HTTP/WS 由独立命令验证。`assistant-web-owner` 已包含在当前发布基线中，安装、离线 owner 配置与验证入口见[插件说明](../plugins/assistant-web-owner/README.md)；当前版本见[发布账本](../release-manifest.json)。
 
@@ -307,10 +307,10 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 
 全部构建和类型检查完成后，根 `test:built` 与 CI 的包测试使用 `--no-sort`，让已有空闲测试槽直接运行下一个包，不再等待整组依赖包测试结束。pnpm 的工作区并发上限、Vitest worker 上限、测试超时和验收范围均保持原值；构建仍按上述顺序串行执行。测试只能读取共享构建产物：Verifier 的真实打包测试在私有临时源码副本中执行 `prepack`，避免重写其他测试正在读取的工作区 `lib`。新增会生成文件的测试也必须隔离输出，不能依赖包测试的先后顺序。
 
-PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.2 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
+PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.5 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
 
 
-`assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.2 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host、user namespace 与当前 UID 已委派的 cgroup v1 资源根；Docker 后端已删除，Docker 时代的 ledger 行只读保留。测试环境使用 cgroup v1/cgroupfs 与固定本地运行时 fixture。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。
+`assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.5 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host、user namespace 与当前 UID 已委派的 cgroup v1 资源根；Docker 后端已删除，Docker 时代的 ledger 行只读保留。测试环境使用 cgroup v1/cgroupfs 与固定本地运行时 fixture。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。
 
 Isolation 工作区使用内核 `size`/`nr_inodes` 上限的 tmpfs 与 cgroup 限额，由原生运行时在执行前创建并核对；固定运行时须包含获准的 Node、pnpm 与工具链，拒绝运行未经验证的远端产物，仍不自动下载。SQLite v1→v2 增加持久资源预留，降级前需保留数据库并停止旧运行体，不能由旧版本打开 v2 绕过预算。
 

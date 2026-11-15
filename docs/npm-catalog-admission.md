@@ -60,5 +60,3 @@ DSH_NPM_CATALOG_LIVE=1 node scripts/e2e/npm-catalog-admission-readback.mjs --out
 ```
 
 The probe retains public keys, requests, receipts, the observed catalog and runtime digests, then removes its private keys and temporary state. Its authorization, artifact statement and build auxiliaries are fixtures; it does not prove a real approved source build or publish. No production catalog, Host activation, monitoring or rollback is exercised. WP16 and WP18 still require their complete authorized external workflows.
-
-The 2026-09-19 readback passed against the historical `@dsh-enhanced/plugin-control-plane@0.1.32` artifact (195,256 bytes). The npm receipt and catalog receipt were both checked by the production Ed25519 authorities, and the catalog's independently reread digest matched the authorized after-state. Replaying the same operation returned the same receipt. This is a real registry read followed by a disposable local catalog admission, with the fixture limits above.

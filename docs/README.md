@@ -1,6 +1,6 @@
 # 文档索引
 
-第一次使用从[首页的三步安装](../README.md#开始使用)开始。无需先了解插件结构或自迭代架构。
+第一次使用从[首页的三步安装](../README.md#开始使用)开始。无需先了解插件结构或自迭代架构。本页把仓库内的参考说明类文档按「我要做什么」分类；一次性运行结果、过期交接快照与原始日志不入库，历史从 Git 查询。
 
 ## 使用帮助
 
@@ -27,8 +27,7 @@
 
 ## 开发与维护
 
-- [当前接手方案](handover/README.md)：未验收普通任务补丁、CI 提速、后续实施与 Linux 历史改动归属；可从 dev 完整拉取。
-
+- [Linux 验证环境与完整门前提](linux-validation.md)：在 Linux 独立副本复跑 `pnpm check` 的验证约定与三条环境前提（原生 `@pnpm/exe`、已填充 pnpm store、短 `TMPDIR`）。
 - [新增插件](creating-a-plugin.md)：插件目录、manifest、patch、测试、README 和目录登记的完整清单。
 - [仓库架构](architecture.md)：bundle 与共享库边界、独立发布和 Host/Web 双面设计。
 - [Cordis 运行时契约](cordis-runtime-contracts.md)：修改生命周期、注入、配置、资源归属或重载时必读。
@@ -40,7 +39,7 @@
 - [高级维护](../scripts/install/maintenance.md)：旧 Home 迁移、冻结源码维护和中断恢复。
 - [ACP Windows 兼容性复查](acp-windows-compatibility.md)：原生 Windows 支持现状和限制。
 
-## Provider 参考与历史研究
+## Provider 参考
 
 - [Coding subscription provider 详细参考](coding-subscription-provider-reference.md)：完整配置、认证门禁、传输协议、错误码与已知限制。
 - [CLIProxyAPI 设计依据](cliproxyapi-provider-evidence-review.md)：固定上游来源、已采用机制与当前 provider 契约入口。
@@ -53,7 +52,6 @@
 - [固定任务评测](benchmark-implementation.md)、[执行策略评测](goal-strategy-evaluation.md)：固定供应与预算的比较方法及证据限制。
 - [技能比较配置](skill-comparison-profiles.md)、[独立留出验收](skill-holdout-authority.md)：原生重放、冻结后生成任务、签名验收与有限 canary。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：当前验证合同；真实仓库 E2E 的 Docker 到 native 迁移仍待完成，旧命令暂不可运行。
-- [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：固定来源与第三方候选审查；旧安装方案和建设清单已移除，当前包列表见[插件目录](../plugins/README.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[阻断回放](effect-blocked-replay.md)：当前发布/启用组件契约与验证限制。
 - [发布 adapter](npm-publish-adapter.md)、[独立发布验签](npm-release-verifier.md)、[catalog 准入](npm-catalog-admission.md)、[registry 读回](npm-registry-readback.md)：发布组件与可复现探针；[adapter 生命周期](control-plane-adapter-lifetime.md)说明进程归属、取消和清理边界。
 
@@ -62,8 +60,12 @@
 ## 历史研究（仅按需读取）
 
 - [自迭代研究与开发原则](research-dsh-plugin-self-iteration-2026-09-19.md)：模型供应、原生组合与独立验收的设计依据。
+- [npm publish adapter 协议研究](research-npm-publish-adapter-2026-09-19.md)：发布 wire 协议、现有发布契约与有界接线的观测记录；当前协议见 [publish adapter](npm-publish-adapter.md)。
+- [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：固定来源与第三方候选审查；旧安装方案和建设清单已移除，当前包列表见[插件目录](../plugins/README.md)。
 
 以下飞书文档保存设计依据，不作为当前配置或行为说明；当前行为见 [`lark-channel`](../plugins/lark-channel/README.md) 与 [`assistant-delivery`](../plugins/assistant-delivery/README.md)。
 
 - [飞书连接与会话模型选择](lark-channel-open-source-design-notes.md)：官方与社区实现的设计取舍。
 - [消息 Reaction 与安全进度展示](lark-message-reactions-and-progress-notes.md)：API、权限、隐私和进度状态研究。
+
+2026-11-10 的接手/CI 交接快照（原 `docs/handover/`）已撤销：仍有效的 Linux 验证前提迁入 [Linux 验证环境](linux-validation.md)，进度与优先级以 [当前状态](rsi-status.md) 和 [验收合同](rsi-acceptance.md) 为准，其余历史从 Git 查询。

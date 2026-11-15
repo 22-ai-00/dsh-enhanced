@@ -26,10 +26,6 @@ DSH_NPM_REGISTRY_LIVE=1 node scripts/e2e/npm-registry-readback.mjs \
 
 CLI 集成测试使用真实 loopback HTTPS 和已有 executor/Host 夹具，验证元数据 → 下载 → 缓存描述符 → `awaiting-reload`，以及摘要替换在调用 executor 之前被拒绝。网络单元测试覆盖请求范围、TLS、期限、取消和有界响应。夹具中的 staging 不是生产 Host 激活证据。
 
-## 本次真实读取结果
-
-2026-09-19 证据记录了两个历史已发布包的只读验证：Control Plane 195,256 字节，personal-memory 96,602 字节；两者实际 SHA-512 与先前已提交的发布记录一致。错误的预期摘要被拒绝。运行未持有 registry token，也没有执行发布、安装或启用。
-
 验证入口为 `scripts/e2e/npm-registry-readback.mjs` 与 Control Plane 的 registry/CLI 测试；最新全仓门禁统一见 [RSI 当前状态](rsi-status.md)。历史原始日志和逐次运行数据保留本地。
 
 ## 发布协议边界
