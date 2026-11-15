@@ -631,7 +631,7 @@ dsh_enhanced_detect_isolation_capability() {
       fi
       local roots=0 controller
       for controller in memory pids 'cpu,cpuacct' freezer; do
-        if [[ -d "/sys/fs/cgroup/$controller/dsh-native" ]]; then roots=$((roots + 1)); fi
+        if [[ -d "/sys/fs/cgroup/$controller/dsh-native/uid-$(id -u)" ]]; then roots=$((roots + 1)); fi
       done
       if [[ $roots -lt 4 ]]; then
         DSH_ENHANCED_ISOLATION_CAPABILITY='none'
@@ -657,6 +657,7 @@ dsh_enhanced_detect_isolation_capability() {
 # skipped. Mutates the caller's selected_slugs array. Docker is never a fallback.
 dsh_enhanced_apply_isolation_capability_gate() {
   dsh_enhanced_prepare_isolation_capability "${1:-0}"
+  if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then printf '隔离能力：不提供（%s）\n' "$DSH_ENHANCED_ISOLATION_REASON"; else printf '隔离能力：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"; fi
   dsh_enhanced_detect_isolation_capability
   if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" != 'none' ]]; then return 0; fi
   local kept=() skipped=() slug
@@ -2446,6 +2447,10 @@ dsh_enhanced_apply_auto_traex() (
 
 dsh_enhanced_check_web_port_available() {
   local port="$1"
+  if ! command -v node >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 '需要 Node.js 22.19+ 或 24+；请先安装 Node.js（安装器尚未修改本机）。'
+    return $?
+  fi
   if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] || (( port < 1 || port > 65535 )); then
     dsh_enhanced_fail 2 'Web 端口必须是 1..65535。'
     return $?
@@ -5321,6 +5326,11 @@ NODE
     printf '立即使用：dsh --profile %s\n' "$profile"
     printf '  该命令会打印一行带 token 的完整 URL（形如 http://127.0.0.1:PORT/?token=...）；\n'
     printf '  Web 开启了认证，请使用输出中的完整 URL 访问，不要只打开裸地址。\n'
+  elif [[ "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ]]; then
+    if [[ "$lark_mode" == 'skip' ]]; then
+      printf '立即使用：dsh --profile %s\n' "$profile"
+      printf '  （本次跳过了飞书；该命令打印带 token 的完整 URL，请用完整 URL 打开。）\n'
+    fi
   elif [[ "$scenario" == 'autonomy' ]]; then
     printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
   fi
