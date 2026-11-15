@@ -519,13 +519,19 @@ dsh_enhanced_ensure_pnpm() {
   if [[ "$current_version" == "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" ]]; then
     return 0
   fi
-  npm install --global "pnpm@$DSH_ENHANCED_DEFAULT_PNPM_VERSION"
+  if ! npm install --global "pnpm@$DSH_ENHANCED_DEFAULT_PNPM_VERSION"; then
+    printf '警告：pnpm 全局安装失败。若后续插件部署失败并提示找不到 pnpm，请手工执行 npm install --global pnpm@%s 并确保全局 npm bin 目录在 PATH 中。\n' \
+      "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" >&2
+    return 0
+  fi
   hash -r
   dsh_enhanced_refresh_global_path || true
   current_version="$(pnpm --version 2>/dev/null || true)"
   if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" ]]; then
-    dsh_enhanced_fail 1 "pnpm 版本校验失败：得到 ${current_version:-unknown}，期望 $DSH_ENHANCED_DEFAULT_PNPM_VERSION。"
-    return $?
+    # Do not abort: the deployment step reports the actionable failure itself, and a
+    # prefixed npm install may still place pnpm where this shell cannot see it yet.
+    printf '警告：pnpm 未能解析到 %s（当前 %s）。若后续插件部署失败，请确认全局 npm bin 目录在 PATH 中。\n' \
+      "$DSH_ENHANCED_DEFAULT_PNPM_VERSION" "${current_version:-unknown}" >&2
   fi
 }
 
@@ -4533,7 +4539,11 @@ dsh_enhanced_install() {
     [[ "$operation" == 'uninstall' ]] && lifecycle_requires_pnpm='0'
     dsh_enhanced_require_existing_runtime "$ack_unverified_host" "$lifecycle_requires_pnpm" || return $?
   fi
-  if [[ "$source_mode" == 'local' && "$operation" == 'install' ]]; then
+  # The deployment step runs "dsh plugin add", which shells out to pnpm, so a fresh
+  # install needs pnpm regardless of where the payload came from. Gate the bootstrap
+  # on the operation instead of the source; otherwise an npm install reaches
+  # deployment on a machine without pnpm and fails with "spawn pnpm ENOENT".
+  if [[ "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
