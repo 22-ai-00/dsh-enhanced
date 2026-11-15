@@ -65,3 +65,21 @@ Linux x64/cgroup v1 的资源原语、普通执行、整仓源码 prepare、创�
 仓库持久执行通过独立合同和二进制通道支持 64 MiB 归档、32 MiB 产物、8 GiB workspace、4 GiB 可执行 tmp 与嵌套 namespace。双 UID 使用 schema 3，额外绑定固定映射、系统工具快照及执行实现摘要；历史 schema 1/2 不重新解释。候选退出且资源消失后才接收产物；私有收据绑定摘要，字节保存在受限 spool。账本准入包含全部临时挂载与持久存储，上层归档和 pack 暂存另外预留。完整源码 prepare 已在本机真实执行全新离线冻结安装、根 `pnpm check`、输入复核及打包；明确未启动且清理完成的本次失败可以终结，历史缺证仍保持 unknown，不重派或退还预算。当前证明范围及检查计数见[当前状态](rsi-status.md)。
 
 现有 Linux 实机证据来自 cgroup v1；`systemd-run --user` 对 MemoryMax/TasksMax/CPUQuota 返回成功，但进程未进入这些控制器的独立任务组，因此这不能作为硬配额证明。原生 system 级任务确有独立控制器组。已验证用户 namespace 与 bubblewrap 可执行；bubblewrap 的 `--size` 单独只限制 tmpfs 字节数，不能代替明确的 inode 限额。验收必须核对实际控制器归属和限额读回，不能只看命令返回成功。
+
+## 平台能力检测与自动准备
+
+安装器不再假设任何主机都具备原生隔离，也不再用 Docker 兜底：
+
+| 平台 | 检测到的后端 | 自演化能力 |
+| --- | --- | --- |
+| macOS | `macos-seatbelt` | 安装 |
+| Linux（bwrap + 委派 cgroup v1 根 + user namespace 齐全） | `linux-native` | 安装 |
+| Linux（缺上述任一前置） | 检测为 `none`，随后尝试自动准备 | 准备成功后安装 |
+| 其他平台 | 无原生后端 | 不安装，并说明原因 |
+
+自动准备只在 Linux 上发生，按宿主包管理器安装 `bubblewrap`、打开 user namespace、为当前 uid 创建并授权
+`/sys/fs/cgroup/<controller>/dsh-native/uid-<uid>` 委派根。所有提权动作先以固定命令显示，交互式安装需显式确认；
+非交互安装仅在 passwordless sudo 可用时自动执行，否则打印可手工执行的命令并继续安装（此时不包含自演化能力）。
+提权只使用受信任的 `/usr/bin`、`/bin` 可执行文件，不接受 PATH 解析结果。
+
+`--isolation-backend docker` 与 `--isolation-image` 在任何平台都会被拒绝，且在写入 Home 之前失败。
