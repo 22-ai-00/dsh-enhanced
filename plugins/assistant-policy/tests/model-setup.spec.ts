@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -11,6 +11,7 @@ import {
   runModelSetup,
 } from '../src/model-setup.ts'
 import type { ResolvedModelSetup } from '../src/model-setup.ts'
+import { resolveDshExecutable } from '../src/profile-setup.ts'
 
 const temporaryRoots: string[] = []
 
@@ -567,5 +568,122 @@ describe('model setup', () => {
     await expect(applyModelSetup(resolved)).rejects.toThrow('top-level YAML sequence')
     // settings.yaml is written before the patch step, but the patch is untouched.
     expect(await readFile(join(profileDir, 'cordis.patch.yml'), 'utf8')).toBe('notASequence: true\n')
+  })
+
+  test('enables agy-agent without overwriting traex enabled/command and preserves agy keys when updating traex', async () => {
+    const home = await temporaryHome()
+    await writeFile(join(home, 'cordis.patch.yml'), [
+      '- id: dsh-enhanced-traex-acp-provider',
+      '  disabled: true',
+      '  config:',
+      '    enabled: true',
+      '    command: /opt/traex/bin/traex',
+      '    timeoutMs: 9000',
+      '',
+    ].join('\n'), 'utf8')
+
+    const agyResolved = resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--provider', 'agy-agent', '--enable-in-profile', 'web', '--agent-command', '/path/to/agy',
+    ]))
+    expect(agyResolved.provider).toBe('agy-agent')
+    expect(agyResolved.agent?.enableKey).toBe('agyEnabled')
+    expect(agyResolved.agent?.commandKey).toBe('agyCommand')
+    const agyResult = await applyModelSetup(agyResolved)
+    expect(agyResult.routeAction).toBe('enabled')
+    expect(agyResult.agentCommandAction).toBe('set')
+
+    const patchAfterAgy = await readFile(agyResult.profilePatchPath!, 'utf8')
+    const rowsAfterAgy = parse(patchAfterAgy, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    const configAfterAgy = rowsAfterAgy.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config
+    expect(rowsAfterAgy.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.disabled).toBe(false)
+    expect(configAfterAgy).toMatchObject({
+      enabled: true,
+      command: '/opt/traex/bin/traex',
+      agyEnabled: true,
+      agyCommand: '/path/to/agy',
+      timeoutMs: 9000,
+    })
+
+    // Updating traex-agent in the same profile preserves existing non-empty command AND keeps agyEnabled and agyCommand intact.
+    const traexPreserved = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--agent-command', '/usr/local/bin/traex',
+    ])))
+    expect(traexPreserved.agentCommandAction).toBe('preserved')
+    const rowsAfterTraex = parse(await readFile(traexPreserved.profilePatchPath!, 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; config?: Record<string, unknown> }>
+    expect(rowsAfterTraex.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config).toMatchObject({
+      enabled: true,
+      command: '/opt/traex/bin/traex',
+      agyEnabled: true,
+      agyCommand: '/path/to/agy',
+    })
+
+    // Fresh profile with agy-only configured sets traex command when traex-agent is later enabled.
+    const agyOnlyHome = await temporaryHome()
+    await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', agyOnlyHome, '--provider', 'agy-agent', '--enable-in-profile', 'web', '--agent-command', '/path/to/agy',
+    ])))
+    const traexFresh = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', agyOnlyHome, '--provider', 'traex-agent', '--enable-in-profile', 'web', '--agent-command', '/usr/local/bin/traex',
+    ])))
+    expect(traexFresh.agentCommandAction).toBe('set')
+    const freshRows = parse(await readFile(traexFresh.profilePatchPath!, 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }) as Array<{ id: string; config?: Record<string, unknown> }>
+    expect(freshRows.find(r => r.id === 'dsh-enhanced-traex-acp-provider')?.config).toMatchObject({
+      enabled: true,
+      command: '/usr/local/bin/traex',
+      agyEnabled: true,
+      agyCommand: '/path/to/agy',
+    })
+
+    // --default-if-absent preserves existing agyCommand when already configured.
+    const defaultAbsent = await applyModelSetup(resolveModelSetup(parseModelSetupArgs([
+      '--dsh-home', home, '--provider', 'agy-agent', '--enable-in-profile', 'web', '--default-if-absent', '--agent-command', '/other/agy',
+    ])))
+    expect(defaultAbsent.routeAction).toBe('already-enabled')
+    expect(defaultAbsent.agentCommandAction).toBe('preserved')
+  })
+
+  test('resolves bound host executable from .dsh-rsi-host.json when PATH lacks dsh and rejects unsafe binding files', async () => {
+    const home = await realpath(await temporaryHome())
+    const cacheRoot = await realpath(await temporaryHome())
+    const hostRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh')
+    const bootRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+    const binDir = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin')
+    await mkdir(join(hostRoot, 'bin'), { recursive: true })
+    await mkdir(bootRoot, { recursive: true })
+    await mkdir(binDir, { recursive: true })
+    await writeFile(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.3', bin: { dsh: 'bin/dsh.js' } }), 'utf8')
+    await writeFile(join(hostRoot, 'bin', 'dsh.js'), '#!/usr/bin/env node\n', 'utf8')
+    await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.3' }), 'utf8')
+    await symlink('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
+
+    const bindingPath = join(home, '.dsh-rsi-host.json')
+    await writeFile(bindingPath, JSON.stringify({
+      schemaVersion: 1,
+      cacheRoot,
+      version: '0.2.2-rc.3',
+      receiptDigest: 'a'.repeat(64),
+    }), { encoding: 'utf8', mode: 0o600 })
+    await chmod(bindingPath, 0o600)
+
+    const previousPath = process.env.PATH
+    process.env.PATH = ''
+    try {
+      const resolved = await resolveDshExecutable(home)
+      expect(resolved).toBe(await realpath(join(hostRoot, 'bin', 'dsh.js')))
+
+      // Fail-closed on group/world-readable binding permissions.
+      await chmod(bindingPath, 0o644)
+      await expect(resolveDshExecutable(home)).rejects.toThrow('unsafe permissions')
+
+      // Fail-closed on symlinked binding file.
+      await chmod(bindingPath, 0o600)
+      const targetFile = join(cacheRoot, 'real.json')
+      await writeFile(targetFile, '{}', { encoding: 'utf8', mode: 0o600 })
+      await rm(bindingPath)
+      await symlink(targetFile, bindingPath)
+      await expect(resolveDshExecutable(home)).rejects.toThrow('inaccessible or a symlink')
+    } finally {
+      process.env.PATH = previousPath
+    }
   })
 })

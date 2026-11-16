@@ -23,6 +23,11 @@ export const providerIds = [
   'larkChannel',
   'assistantVerifier',
   'assistantGoals',
+  'assistantDreaming',
+  'assistantProactive',
+  'assistantGrowthDriver',
+  'assistantMemoryLearning',
+  'assistantWorkItems',
 ] as const
 
 export type HealthProviderId = typeof providerIds[number]
@@ -53,6 +58,11 @@ const providerServiceNames: Readonly<Record<HealthProviderId, string>> = Object.
   larkChannel: 'larkChannel',
   assistantVerifier: 'assistantVerifier',
   assistantGoals: 'assistantGoals',
+  assistantDreaming: 'assistantDreaming',
+  assistantProactive: 'assistantProactive',
+  assistantGrowthDriver: 'assistantGrowthDriver',
+  assistantMemoryLearning: 'assistantMemoryLearning',
+  assistantWorkItems: 'assistantWorkItems',
 })
 
 export interface Config {
@@ -219,6 +229,28 @@ const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecifi
     budgetEnabled: 'boolean', registeredBudgetMeters: 'number', activeBudgetCalls: 'number',
     wakeEnabled: 'boolean', wakeConnected: 'boolean', wakeReconciliationFailures: 'number',
     observationFailures: 'number' },
+  assistantDreaming: { enabled: 'boolean', scheduler: ['active', 'dormant', 'unavailable'],
+    runs: 'number', ideas: 'number', recorded: 'number', lastRunAt: 'optional-number' },
+  assistantProactive: { enabled: 'boolean', registered: 'boolean',
+    readiness: ['disabled', 'unavailable', 'registered', 'degraded'],
+    consecutiveFailures: 'number', callsInWindow: 'number', budgetExhausted: 'boolean',
+    hasError: 'boolean' },
+  assistantGrowthDriver: { outcome: ['never-run', 'ran', 'skipped', 'failed'],
+    usageEnabled: 'boolean', usageConnected: 'boolean', usageError: 'optional-boolean',
+    usagePending: 'optional-number', usageRunning: 'optional-number',
+    usageFailed: 'optional-number', usageUnknown: 'optional-number',
+    ownerAnchoredAbstained: 'optional-number' },
+  assistantMemoryLearning: { enabled: 'boolean', connected: 'boolean', available: 'boolean',
+    hasError: 'boolean', remainingExtractions: 'number', pending: 'number',
+    queued: 'number', running: 'number', unknown: 'number', adopted: 'number', failed: 'number' },
+  assistantWorkItems: { enabled: 'boolean', mode: ['observe', 'active'],
+    openItems: 'number', dispatchUnknown: 'number', workerConnected: 'boolean',
+    ownerRouteValid: 'boolean', followsUnresolved: 'number', followsDegraded: 'boolean',
+    authorityParked: 'number', settlementEnabled: 'boolean', settlementUnverified: 'number',
+    settlementDegraded: 'boolean', evaluationEnabled: 'boolean', evaluationConnected: 'boolean',
+    evaluationDegraded: 'boolean', schedulerWakeSubscribed: 'boolean', schedulerWakeError: 'boolean',
+    interventionRequired: 'boolean', intakeEvaluationRegistered: 'optional-boolean',
+    intakeEvaluationUnpersisted: 'optional-number' },
 }
 
 interface HealthSummary {
@@ -374,6 +406,65 @@ function operationalAssessments(
         'degraded', 'wake-reconciliation-failures')
       add((metric('observationFailures') as number) > 0,
         'degraded', 'observation-failures')
+      break
+    case 'assistantDreaming':
+      add(metric('enabled') === true && metric('scheduler') === 'unavailable',
+        'unhealthy', 'scheduler-unavailable', required)
+      add(metric('enabled') === true && metric('scheduler') === 'dormant',
+        'degraded', 'scheduler-dormant')
+      break
+    case 'assistantProactive':
+      add(metric('enabled') === true && metric('readiness') === 'unavailable',
+        'unhealthy', 'intake-evaluation-unavailable', required)
+      add(metric('enabled') === true && metric('readiness') === 'degraded',
+        'degraded', 'intake-evaluation-degraded')
+      add(metric('budgetExhausted') === true,
+        'degraded', 'intake-evaluation-budget-exhausted')
+      add(metric('hasError') === true,
+        'degraded', 'intake-evaluation-error')
+      break
+    case 'assistantGrowthDriver':
+      add(metric('outcome') === 'failed',
+        'degraded', 'wake-failed')
+      add(metric('usageEnabled') === true && metric('usageConnected') === false,
+        'degraded', 'usage-learning-disconnected')
+      add(metric('usageError') === true,
+        'degraded', 'usage-learning-error')
+      add(typeof metric('usageUnknown') === 'number' && (metric('usageUnknown') as number) > 0,
+        'degraded', 'usage-jobs-unknown')
+      add(typeof metric('usageFailed') === 'number' && (metric('usageFailed') as number) > 0,
+        'degraded', 'usage-jobs-failed')
+      break
+    case 'assistantMemoryLearning':
+      add(metric('enabled') === true && metric('connected') === false,
+        'unhealthy', 'memory-learning-disconnected', required)
+      add(metric('enabled') === true && metric('available') === false,
+        'degraded', 'memory-learning-unavailable')
+      add(metric('hasError') === true,
+        'degraded', 'memory-learning-error')
+      add((metric('unknown') as number) > 0,
+        'degraded', 'memory-learning-jobs-unknown')
+      add((metric('failed') as number) > 0,
+        'degraded', 'memory-learning-jobs-failed')
+      break
+    case 'assistantWorkItems':
+      add(metric('enabled') === true && metric('workerConnected') === false,
+        'unhealthy', 'automations-disconnected', required)
+      add(metric('enabled') === true && metric('ownerRouteValid') === false,
+        'degraded', 'owner-route-invalid')
+      add((metric('dispatchUnknown') as number) > 0,
+        'degraded', 'dispatch-unknown')
+      add((metric('followsUnresolved') as number) > 0 || metric('followsDegraded') === true,
+        'degraded', 'follows-degraded')
+      add((metric('settlementUnverified') as number) > 0 || metric('settlementDegraded') === true,
+        'degraded', 'settlement-degraded')
+      add(metric('evaluationEnabled') === true
+        && (metric('evaluationConnected') === false || metric('evaluationDegraded') === true),
+        'degraded', 'evaluation-disconnected')
+      add(metric('schedulerWakeError') === true,
+        'degraded', 'scheduler-wake-error')
+      add(metric('interventionRequired') === true,
+        'degraded', 'intervention-required')
       break
     default:
       break
@@ -594,6 +685,136 @@ function metrics(id: HealthProviderId, value: unknown): Readonly<Record<string, 
   return Object.freeze(output)
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isPlainRecord(value)) throw new Error(`invalid ${label} health payload`)
+  return value
+}
+
+function presenceBoolean(record: Record<string, unknown>, key: string): boolean {
+  const value = record[key]
+  if (value === null || value === undefined) return false
+  if (typeof value !== 'string') throw new Error(`invalid ${key} health field`)
+  return value.length > 0
+}
+
+function resolveErrorFlag(record: Record<string, unknown>, boolKey: string, errorKey: string): unknown {
+  if (boolKey in record && record[boolKey] !== undefined) return record[boolKey]
+  if (errorKey in record) return presenceBoolean(record, errorKey)
+  return undefined
+}
+
+function collectProviderHealth(id: HealthProviderId, provider: Record<string, unknown>): unknown {
+  const healthFn = typeof provider.health === 'function' ? provider.health as () => unknown : undefined
+  if (id === 'assistantProactive') {
+    const reader = healthFn ?? (typeof provider.intakeEvaluationHealth === 'function'
+      ? provider.intakeEvaluationHealth as () => unknown
+      : undefined)
+    if (reader === undefined) return undefined
+    const raw = requireRecord(reader.call(provider), 'proactive')
+    return { ...raw, hasError: resolveErrorFlag(raw, 'hasError', 'lastError') }
+  }
+  if (healthFn === undefined) return undefined
+  const value = healthFn.call(provider)
+  if (id === 'assistantDreaming') {
+    const raw = requireRecord(value, 'dreaming')
+    const counts = 'counts' in raw ? requireRecord(raw.counts, 'dreaming.counts') : raw
+    return {
+      enabled: raw.enabled,
+      scheduler: raw.scheduler,
+      runs: counts.runs,
+      ideas: counts.ideas,
+      recorded: counts.recorded,
+      lastRunAt: raw.lastRunAt === null ? undefined : raw.lastRunAt,
+    }
+  }
+  if (id === 'assistantGrowthDriver') {
+    const raw = requireRecord(value, 'growthDriver')
+    const usageFn = typeof provider.usageHealth === 'function' ? provider.usageHealth as () => unknown : undefined
+    const usage = usageFn === undefined ? undefined : requireRecord(usageFn.call(provider), 'growthDriver.usage')
+    const usageCounts = usage !== undefined && 'counts' in usage && usage.counts !== undefined
+      ? requireRecord(usage.counts, 'growthDriver.usage.counts')
+      : undefined
+    const ownerAnchored = 'ownerAnchored' in raw && raw.ownerAnchored !== undefined && raw.ownerAnchored !== null
+      ? requireRecord(raw.ownerAnchored, 'growthDriver.ownerAnchored')
+      : undefined
+    return {
+      outcome: raw.outcome,
+      usageEnabled: usage !== undefined ? usage.enabled : raw.usageEnabled,
+      usageConnected: usage !== undefined ? usage.connected : raw.usageConnected,
+      usageError: usage !== undefined ? ('lastError' in usage ? presenceBoolean(usage, 'lastError') : undefined) : raw.usageError,
+      usagePending: usageCounts !== undefined ? usageCounts.pending : raw.usagePending,
+      usageRunning: usageCounts !== undefined ? usageCounts.running : raw.usageRunning,
+      usageFailed: usageCounts !== undefined ? usageCounts.failed : raw.usageFailed,
+      usageUnknown: usageCounts !== undefined ? usageCounts.unknown : raw.usageUnknown,
+      ownerAnchoredAbstained: ownerAnchored !== undefined ? ownerAnchored.abstained : raw.ownerAnchoredAbstained,
+    }
+  }
+  if (id === 'assistantMemoryLearning') {
+    const raw = requireRecord(value, 'memoryLearning')
+    const counts = 'counts' in raw ? requireRecord(raw.counts, 'memoryLearning.counts') : raw
+    return {
+      enabled: raw.enabled,
+      connected: raw.connected,
+      available: raw.available,
+      hasError: resolveErrorFlag(raw, 'hasError', 'lastError'),
+      remainingExtractions: raw.remainingExtractions,
+      pending: counts.pending,
+      queued: counts.queued,
+      running: counts.running,
+      unknown: counts.unknown,
+      adopted: counts.adopted,
+      failed: counts.failed,
+    }
+  }
+  if (id === 'assistantWorkItems') {
+    const raw = requireRecord(value, 'workItems')
+    const follows = 'follows' in raw ? requireRecord(raw.follows, 'workItems.follows') : undefined
+    const authority = 'authority' in raw ? requireRecord(raw.authority, 'workItems.authority') : undefined
+    const settlement = 'settlement' in raw ? requireRecord(raw.settlement, 'workItems.settlement') : undefined
+    const evaluation = 'evaluation' in raw ? requireRecord(raw.evaluation, 'workItems.evaluation') : undefined
+    const schedulerWake = 'schedulerWake' in raw ? requireRecord(raw.schedulerWake, 'workItems.schedulerWake') : undefined
+    const diagnosis = 'diagnosis' in raw && raw.diagnosis !== undefined ? requireRecord(raw.diagnosis, 'workItems.diagnosis') : undefined
+    const ownerContinuation = 'ownerContinuation' in raw && raw.ownerContinuation !== undefined
+      ? requireRecord(raw.ownerContinuation, 'workItems.ownerContinuation')
+      : undefined
+    const intakeFn = typeof provider.intakeEvaluationHealth === 'function'
+      ? provider.intakeEvaluationHealth as () => unknown
+      : undefined
+    const intakeRaw = intakeFn === undefined ? undefined : intakeFn.call(provider)
+    const intake = intakeRaw === undefined ? undefined : requireRecord(intakeRaw, 'workItems.intakeEvaluation')
+    const hasIntervention = 'interventionRequired' in raw
+      ? raw.interventionRequired
+      : Boolean(diagnosis?.interventionRequired === true || ownerContinuation?.interventionRequired === true)
+    return {
+      enabled: raw.enabled,
+      mode: raw.mode,
+      openItems: raw.openItems,
+      dispatchUnknown: raw.dispatchUnknown,
+      workerConnected: raw.workerConnected,
+      ownerRouteValid: raw.ownerRouteValid,
+      followsUnresolved: follows !== undefined ? follows.unresolved : raw.followsUnresolved,
+      followsDegraded: follows !== undefined ? presenceBoolean(follows, 'degraded') : raw.followsDegraded,
+      authorityParked: authority !== undefined ? authority.parked : raw.authorityParked,
+      settlementEnabled: settlement !== undefined ? settlement.enabled : raw.settlementEnabled,
+      settlementUnverified: settlement !== undefined ? settlement.unverified : raw.settlementUnverified,
+      settlementDegraded: settlement !== undefined ? presenceBoolean(settlement, 'degraded') : raw.settlementDegraded,
+      evaluationEnabled: evaluation !== undefined ? evaluation.enabled : raw.evaluationEnabled,
+      evaluationConnected: evaluation !== undefined ? evaluation.connected : raw.evaluationConnected,
+      evaluationDegraded: evaluation !== undefined ? presenceBoolean(evaluation, 'degraded') : raw.evaluationDegraded,
+      schedulerWakeSubscribed: schedulerWake !== undefined ? schedulerWake.subscribed : raw.schedulerWakeSubscribed,
+      schedulerWakeError: schedulerWake !== undefined ? presenceBoolean(schedulerWake, 'lastError') : raw.schedulerWakeError,
+      interventionRequired: hasIntervention,
+      intakeEvaluationRegistered: intake !== undefined ? intake.registered : raw.intakeEvaluationRegistered,
+      intakeEvaluationUnpersisted: intake !== undefined ? intake.unpersisted : raw.intakeEvaluationUnpersisted,
+    }
+  }
+  return value
+}
+
 export class AssistantHealthService extends Service {
   static Config = configSchema
   private readonly context: Context
@@ -698,11 +919,12 @@ export class AssistantHealthService extends Service {
   private collect(): ProviderHealth[] {
     const get = (this.context as unknown as { get(name: string): unknown }).get.bind(this.context)
     return providerIds.map(id => {
-      const provider = get(providerServiceNames[id]) as { health?: () => unknown } | undefined
+      const provider = get(providerServiceNames[id]) as Record<string, unknown> | undefined
       if (provider === undefined) return Object.freeze({ id, status: 'missing' as const, metrics: Object.freeze({}) })
-      if (typeof provider.health !== 'function') return Object.freeze({ id, status: 'error' as const, metrics: Object.freeze({}) })
       try {
-        return Object.freeze({ id, status: 'ready' as const, metrics: metrics(id, provider.health()) })
+        const raw = collectProviderHealth(id, provider)
+        if (raw === undefined) return Object.freeze({ id, status: 'error' as const, metrics: Object.freeze({}) })
+        return Object.freeze({ id, status: 'ready' as const, metrics: metrics(id, raw) })
       } catch {
         return Object.freeze({ id, status: 'error' as const, metrics: Object.freeze({}) })
       }

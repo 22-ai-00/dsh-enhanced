@@ -104,4 +104,63 @@ describe('local Web owner profile setup', () => {
     await expect(configureWebOwner(input, effective)).rejects.toThrow('symlink')
     expect(await readFile(other, 'utf8')).toBe('[]')
   })
+
+  test('scopes inherited global ~/.dsh SQLite defaults for goals, proactive, dreaming, and growth usage under $DSH_HOME without enabling dreaming', async () => {
+    const { input, effective } = await fixture()
+    const fakeHome = await mkdtemp(join(tmpdir(), 'web-owner-user-home-')); roots.push(fakeHome)
+    const fakeDshGlobal = join(fakeHome, '.dsh'); await mkdir(fakeDshGlobal, { recursive: true })
+    const withGlobalDefaults = effective
+      .replace(
+        '- id: dsh-enhanced-assistant-goals\n  name: "@dsh-enhanced/assistant-goals"\n',
+        `- id: dsh-enhanced-assistant-goals\n  name: "@dsh-enhanced/assistant-goals"\n  config:\n    databasePath: ${join(fakeDshGlobal, 'assistant-goals.sqlite')}\n`,
+      ) + [
+      '- id: dsh-enhanced-assistant-proactive',
+      '  name: "@dsh-enhanced/assistant-proactive"',
+      '  config:',
+      `    databasePath: ${join(fakeDshGlobal, 'assistant-proactive.sqlite')}`,
+      '- id: dsh-enhanced-assistant-dreaming',
+      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '  config: {}',
+      '- id: dsh-enhanced-assistant-memory-learning',
+      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '  disabled: true',
+      '  config: {}',
+      '- id: dsh-enhanced-assistant-growth-driver',
+      '  name: "@dsh-enhanced/assistant-growth-driver"',
+      '  config:',
+      '    usageLearning:',
+      '      enabled: true',
+      `      databasePath: ${join(fakeDshGlobal, 'assistant-growth-driver.sqlite')}`,
+      '',
+    ].join('\n')
+
+    const savedHome = process.env.HOME
+    process.env.HOME = fakeHome
+    try {
+      const plan = prepareWebOwnerProfile(input, '[]', withGlobalDefaults)
+      const rows = parseDocument(plan.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
+      const cfg = (id: string) => rows.find(r => r.id === id)?.config
+      expect(cfg('dsh-enhanced-assistant-goals')?.databasePath).toBe(join(input.dshHome, 'assistant-goals', 'web.sqlite'))
+      expect(cfg('dsh-enhanced-assistant-proactive')?.databasePath).toBe(join(input.dshHome, 'assistant-proactive', 'web.sqlite'))
+      expect(cfg('dsh-enhanced-assistant-dreaming')).toEqual({ databasePath: join(input.dshHome, 'assistant-dreaming', 'web.sqlite') })
+      expect(cfg('dsh-enhanced-assistant-dreaming')?.enabled).toBeUndefined()
+      expect(rows.some(r => r.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
+      expect(cfg('dsh-enhanced-assistant-growth-driver')?.usageLearning?.databasePath).toBe(join(input.dshHome, 'assistant-growth-driver', 'web-usage.sqlite'))
+
+      // Byte-idempotent on second pass against the configured output.
+      expect(prepareWebOwnerProfile(input, plan.patch, plan.patch).patch).toBe(plan.patch)
+
+      // Fails closed if inherited global SQLite state already exists outside $DSH_HOME.
+      await writeFile(join(fakeDshGlobal, 'assistant-goals.sqlite'), 'state')
+      expect(() => prepareWebOwnerProfile(input, '[]', withGlobalDefaults)).toThrow(/offline migration/u)
+
+      // Fails closed if explicit databasePath escapes $DSH_HOME.
+      const escapedPatch = `- id: dsh-enhanced-assistant-proactive\n  config:\n    databasePath: /outside/proactive.sqlite\n`
+      expect(() => prepareWebOwnerProfile(input, escapedPatch, withGlobalDefaults.replace(join(fakeDshGlobal, 'assistant-goals.sqlite'), join(input.dshHome, 'goals.sqlite'))))
+        .toThrow(/within DSH_HOME/u)
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedHome
+    }
+  })
 })

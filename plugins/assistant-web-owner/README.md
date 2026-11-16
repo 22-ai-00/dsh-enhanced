@@ -253,6 +253,9 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 | `revision-adoption` | Control Plane `revisionCapabilities` 及 `creationCapabilities`/`revisionVerifications`/`sourceJobs.revision` 前置 | 未配置（需要 owner 密钥，预设/doctor 不生成） |
 | `event-poller` | event-triggers 已加载且 `pollerEnabled: true`（trigger 数量一并报告） | 轮询关闭、包缺失 |
 | `ptc-presentation`（可选，不计入退出码） | Growth `toolPresentation` 为 `native` 时 ready；为 `ptc` 时标 `not-verified` | PTC 仍需运行时/审批/Policy，静态无法证明 |
+| `dreaming`（可选，不计入退出码） | 未安装/禁用/安全休眠时 ready；已启用时要求 `retired!=true`、完整 `scope`、`$DSH_HOME` `databasePath`、`provider`/`model` 与有限预算 | 启用状态下缺项、retired=true 或 `databasePath` 泄漏至全局 `~/.dsh` |
+| `proactive-opportunities`（可选，不计入退出码） | `assistant-proactive` 与 `assistant-goals` 数据库均严格位于 `$DSH_HOME` 内且已声明 `profiles.preparation` 含完整模型/预算；汇总 `goals` 等待与执行预算声明 | `databasePath` 泄漏至全局 `~/.dsh` 或 preparation 缺项 |
+| `autonomy-subsystems`（可选，不计入退出码） | `work-items`、`memory-learning`、`growth-driver.usageLearning` 状态路径不越界且不指向全局 `~/.dsh`；汇总 admit/settlement/verdictGate/attention 等标志 | 任一状态路径越界或泄漏至全局 `~/.dsh` |
 
 必需环节全部 ready 时退出码 0；任一 not-ready 时退出码 1（fail-closed），但 doctor 本身不会因缺服务或配置不符而崩溃：解析失败、dump 失败都降级为一条 not-ready 原因。JSON 每环包含 `id`、`required`、`status`（`ready`/`not-ready`/`not-verified`）、`summary`、`reasons[{code,message}]` 与 `details`，顶层 `runtime.observed` 恒为 `false`。因此它只能证明“配置声明就绪”，不能证明运行时注册、模型调用、Policy 或外部送达；这些仍需真实 Host 与一次真实使用验收。
 

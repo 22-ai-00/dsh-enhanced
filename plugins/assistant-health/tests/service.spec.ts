@@ -1120,4 +1120,182 @@ describe('assistant health service', () => {
     expect(() => fixture.service.liveness())
       .toThrowError(expect.objectContaining<Partial<AssistantHealthError>>({ code: 'disposed' }))
   })
+
+  test('reports healthy normalized metrics for Dreaming, Proactive, GrowthDriver, MemoryLearning and WorkItems without leaking errors or paths', () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    new FakePolicy(ctx)
+    new Provider(ctx, 'assistantDreaming', {
+      enabled: true,
+      scheduler: 'active',
+      lastRunAt: 120_000,
+      lastRunOutcome: 'completed',
+      lastSkipReason: 'SENTINEL-SKIP-PATH',
+      counts: { runs: 2, ideas: 5, recorded: 3 },
+    })
+    class ProactiveMock extends Service {
+      constructor(c: Context) { super(c, 'assistantProactive') }
+      intakeEvaluationHealth = () => ({
+        enabled: true,
+        registered: true,
+        policyVersion: 'v1',
+        lastError: null,
+        readiness: 'registered',
+        provider: 'deepseek-official',
+        model: 'deepseek-chat',
+        consecutiveFailures: 0,
+        callsInWindow: 3,
+        budgetExhausted: false,
+      })
+    }
+    new ProactiveMock(ctx)
+    class GrowthDriverMock extends Service {
+      constructor(c: Context) { super(c, 'assistantGrowthDriver') }
+      health = () => ({
+        lastWakeAt: 110_000,
+        outcome: 'ran',
+        reason: 'SENTINEL-WAKE-REASON',
+        run: null,
+        ownerAnchored: { considered: 2, attempted: 1, recorded: 1, replayed: 0, abstained: 1, stopped: null },
+      })
+      usageHealth = () => ({
+        enabled: true,
+        connected: true,
+        lastScanAt: 111_000,
+        lastError: null,
+        counts: { pending: 1, running: 0, failed: 0, unknown: 0 },
+      })
+    }
+    new GrowthDriverMock(ctx)
+    new Provider(ctx, 'assistantMemoryLearning', {
+      enabled: true,
+      connected: true,
+      available: true,
+      lastScanAt: 112_000,
+      lastError: null,
+      remainingExtractions: 8,
+      counts: { pending: 1, queued: 0, running: 0, unknown: 0, adopted: 4, rejected: 0, noop: 1, failed: 0, superseded: 0 },
+    })
+    class WorkItemsMock extends Service {
+      constructor(c: Context) { super(c, 'assistantWorkItems') }
+      health() {
+        return {
+          enabled: true,
+          mode: 'observe',
+          openItems: 2,
+          lastAdmitAt: 100_000,
+          lastDispatchAt: 101_000,
+          dispatchUnknown: 0,
+          workerConnected: true,
+          ownerRouteValid: true,
+          follows: { open: 1, closed: 2, unresolved: 0, degraded: null },
+          authority: { legacy: 0, parked: 0, lastDeniedAt: null, lastDeniedReason: 'SENTINEL-DENIED' },
+          settlement: { enabled: true, pending: 0, observed: 1, unverified: 0, degraded: null },
+          evaluation: { enabled: true, connected: true, pending: 0, exported: 3, skipped: 0, degraded: null },
+          schedulerWake: { subscribed: true, lastWakeAt: 105_000, lastError: null },
+          diagnosis: { enabled: true, ready: true, running: 0, lastError: null, interventionRequired: false },
+          ownerContinuation: { enabled: true, ready: true, running: 0, lastError: null, interventionRequired: false },
+        }
+      }
+      intakeEvaluationHealth() {
+        return { enabled: true, registered: true, unpersisted: 0, lastError: null }
+      }
+    }
+    new WorkItemsMock(ctx)
+
+    const service = new AssistantHealthService(ctx, {
+      requiredProviders: ['assistantDreaming', 'assistantProactive', 'assistantGrowthDriver', 'assistantMemoryLearning', 'assistantWorkItems'],
+    }, { now: () => 123_000 })
+
+    expect(service.readiness()).toEqual({ ready: true, warnings: [] })
+    const report = service.report(agent())
+    expect(report.ready).toBe(true)
+    expect(report.severity).toBe('healthy')
+    expect(report.providers).toEqual(expect.arrayContaining([
+      { id: 'assistantDreaming', status: 'ready', metrics: { enabled: true, scheduler: 'active', runs: 2, ideas: 5, recorded: 3, lastRunAt: 120_000 } },
+      { id: 'assistantProactive', status: 'ready', metrics: { enabled: true, registered: true, readiness: 'registered', consecutiveFailures: 0, callsInWindow: 3, budgetExhausted: false, hasError: false } },
+      { id: 'assistantGrowthDriver', status: 'ready', metrics: { outcome: 'ran', usageEnabled: true, usageConnected: true, usageError: false, usagePending: 1, usageRunning: 0, usageFailed: 0, usageUnknown: 0, ownerAnchoredAbstained: 1 } },
+      { id: 'assistantMemoryLearning', status: 'ready', metrics: { enabled: true, connected: true, available: true, hasError: false, remainingExtractions: 8, pending: 1, queued: 0, running: 0, unknown: 0, adopted: 4, failed: 0 } },
+      { id: 'assistantWorkItems', status: 'ready', metrics: {
+        enabled: true, mode: 'observe', openItems: 2, dispatchUnknown: 0, workerConnected: true,
+        ownerRouteValid: true, followsUnresolved: 0, followsDegraded: false, authorityParked: 0,
+        settlementEnabled: true, settlementUnverified: 0, settlementDegraded: false, evaluationEnabled: true,
+        evaluationConnected: true, evaluationDegraded: false, schedulerWakeSubscribed: true,
+        schedulerWakeError: false, interventionRequired: false, intakeEvaluationRegistered: true,
+        intakeEvaluationUnpersisted: 0,
+      } },
+    ]))
+    const serialized = JSON.stringify(report)
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThan(16_384)
+    expect(serialized).not.toContain('SENTINEL')
+  })
+
+  test('detects degraded/unhealthy states and fails closed on malformed or throwing new autonomy providers', () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    new FakePolicy(ctx)
+    new Provider(ctx, 'assistantDreaming', {
+      enabled: true,
+      scheduler: 'unavailable',
+      lastRunAt: null,
+      counts: { runs: 0, ideas: 0, recorded: 0 },
+    })
+    class DegradedProactive extends Service {
+      constructor(c: Context) { super(c, 'assistantProactive') }
+      intakeEvaluationHealth = () => ({
+        enabled: true,
+        registered: true,
+        readiness: 'degraded',
+        consecutiveFailures: 2,
+        callsInWindow: 10,
+        budgetExhausted: true,
+        lastError: 'SENTINEL-PROACTIVE-ERR',
+      })
+    }
+    new DegradedProactive(ctx)
+    class DegradedGrowth extends Service {
+      constructor(c: Context) { super(c, 'assistantGrowthDriver') }
+      health = () => ({ lastWakeAt: 10, outcome: 'failed', reason: 'SENTINEL-GROWTH-FAIL', run: null })
+      usageHealth = () => ({
+        enabled: true,
+        connected: false,
+        lastError: 'SENTINEL-USAGE-ERR',
+        counts: { pending: 0, running: 0, failed: 1, unknown: 2 },
+      })
+    }
+    new DegradedGrowth(ctx)
+    // assistantMemoryLearning throwing when runtime is unmounted fails closed to status='error'.
+    new Provider(ctx, 'assistantMemoryLearning', {}, true)
+    // assistantWorkItems missing nested required fields fails closed to status='error'.
+    new Provider(ctx, 'assistantWorkItems', { enabled: true, mode: 'observe' })
+
+    const service = new AssistantHealthService(ctx, {
+      requiredProviders: ['assistantDreaming', 'assistantMemoryLearning'],
+    }, { now: () => 123_000 })
+
+    const readiness = service.readiness()
+    expect(readiness.ready).toBe(false)
+    expect(readiness.warnings).toEqual(expect.arrayContaining([
+      'provider-unhealthy:assistantDreaming:scheduler-unavailable',
+      'provider-error:assistantMemoryLearning',
+    ]))
+    const report = service.report(agent())
+    expect(report.severity).toBe('unhealthy')
+    expect(report.warnings).toEqual(expect.arrayContaining([
+      'provider-degraded:assistantProactive:intake-evaluation-degraded',
+      'provider-degraded:assistantProactive:intake-evaluation-budget-exhausted',
+      'provider-degraded:assistantProactive:intake-evaluation-error',
+      'provider-degraded:assistantGrowthDriver:wake-failed',
+      'provider-degraded:assistantGrowthDriver:usage-learning-disconnected',
+      'provider-degraded:assistantGrowthDriver:usage-learning-error',
+      'provider-degraded:assistantGrowthDriver:usage-jobs-unknown',
+      'provider-degraded:assistantGrowthDriver:usage-jobs-failed',
+      'provider-degraded:assistantWorkItems:health-seam-error',
+    ]))
+    expect(report.providers).toEqual(expect.arrayContaining([
+      { id: 'assistantMemoryLearning', status: 'error', metrics: {} },
+      { id: 'assistantWorkItems', status: 'error', metrics: {} },
+    ]))
+    expect(JSON.stringify(report)).not.toContain('SENTINEL')
+  })
 })

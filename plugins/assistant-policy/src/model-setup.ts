@@ -39,6 +39,8 @@ export interface ResolvedModelSetup {
   agent?: {
     rowId: string
     packageName: string
+    enableKey: string
+    commandKey: string
     requiredConfig: { key: string; value: string; jsExpression: boolean }[]
   }
   storeKey: boolean
@@ -72,6 +74,8 @@ export interface AgentRouteDefinition {
   model: string
   rowId: string
   packageName: string
+  enableKey: string
+  commandKey: string
   requiredConfig: { key: string; value: string; jsExpression: boolean }[]
 }
 
@@ -80,6 +84,16 @@ export const AGENT_ROUTES: Readonly<Record<string, AgentRouteDefinition>> = Obje
     model: 'default',
     rowId: 'dsh-enhanced-traex-acp-provider',
     packageName: '@dsh-enhanced/traex-acp-provider',
+    enableKey: 'enabled',
+    commandKey: 'command',
+    requiredConfig: [{ key: 'cwd', value: "dshHomePath('assistant-workspace')", jsExpression: true }],
+  },
+  'agy-agent': {
+    model: 'default',
+    rowId: 'dsh-enhanced-traex-acp-provider',
+    packageName: '@dsh-enhanced/traex-acp-provider',
+    enableKey: 'agyEnabled',
+    commandKey: 'agyCommand',
     requiredConfig: [{ key: 'cwd', value: "dshHomePath('assistant-workspace')", jsExpression: true }],
   },
 })
@@ -201,7 +215,13 @@ export function resolveModelSetup(args: ModelSetupArgs): ResolvedModelSetup {
       model: args.model.length > 0 ? args.model : agentRoute.model,
       apiKeyEnv,
       kind: 'agent',
-      agent: { rowId: agentRoute.rowId, packageName: agentRoute.packageName, requiredConfig: agentRoute.requiredConfig },
+      agent: {
+        rowId: agentRoute.rowId,
+        packageName: agentRoute.packageName,
+        enableKey: agentRoute.enableKey,
+        commandKey: agentRoute.commandKey,
+        requiredConfig: agentRoute.requiredConfig,
+      },
       storeKey: false,
       keyEnvVar: args.keyEnvVar,
       ...(args.enableInProfile !== undefined ? { enableInProfile: args.enableInProfile } : {}),
@@ -472,12 +492,12 @@ async function writeProfilePatch(resolved: ResolvedModelSetup, nativeConfigs: Re
     if (!isMap(config)) throw new Error('assistant-policy model setup: agent route config must be a YAML mapping')
     profileConfig = config
   }
-  const routeAction = existing?.get('disabled') === false && profileConfig?.get('enabled') === true
+  const routeAction = existing?.get('disabled') === false && profileConfig?.get(agent.enableKey) === true
     ? 'already-enabled' : 'enabled'
   if (existing === undefined) {
     const created = document.createNode({ id: agent.rowId, disabled: false }) as YAMLMap
     const config = inheritedConfig
-    config.set('enabled', true)
+    config.set(agent.enableKey, true)
     for (const field of agent.requiredConfig) {
       if (config.get(field.key) === undefined) config.set(field.key, field.jsExpression ? jsScalar(field.value) : field.value)
     }
@@ -492,10 +512,10 @@ async function writeProfilePatch(resolved: ResolvedModelSetup, nativeConfigs: Re
     if (currentConfig === undefined) {
       // A profile config replaces the home config as a whole. If a later row
       // only changes row metadata, carry forward the last profile config;
-      // otherwise inherit the last home config before adding enabled:true.
+      // otherwise inherit the last home config before adding enableKey:true.
       existing.set('config', profileConfig?.clone() ?? inheritedConfig)
     }
-    existing.setIn(['config', 'enabled'], true)
+    existing.setIn(['config', agent.enableKey], true)
     // Re-add required non-defaulted config only when the row is missing it, so
     // we never overwrite an operator's explicit override.
     for (const field of agent.requiredConfig) {
@@ -507,8 +527,8 @@ async function writeProfilePatch(resolved: ResolvedModelSetup, nativeConfigs: Re
   const routeRow = patchRows(sequence).filter(row => row.get('id') === agent.rowId).at(-1)!
   let commandAction: 'set' | 'preserved' | undefined
   if (resolved.agentCommand !== undefined) {
-    if (routeRow.getIn(['config', 'command']) === undefined) {
-      routeRow.setIn(['config', 'command'], resolved.agentCommand)
+    if (routeRow.getIn(['config', agent.commandKey]) === undefined) {
+      routeRow.setIn(['config', agent.commandKey], resolved.agentCommand)
       commandAction = 'set'
     } else commandAction = 'preserved'
   }
@@ -594,7 +614,7 @@ export function modelSetupUsage(): string {
     '--enable-only leaves settings.yaml untouched and does not select a default.',
     '--default-if-absent selects the route only for the target profile when settings.yaml,',
     'the home patch, and the profile patch contain no explicit default-model selection.',
-    '--agent-command fills a missing agent command without replacing command or cwd overrides.',
+    '--agent-command fills a missing agent command (command / agyCommand) without replacing existing overrides or cwd.',
     '',
     `The key value is read only from the environment variable named by --key-env-var (default ${DEFAULT_KEY_ENV_VAR})`,
     'or the credential reference; it is never accepted as a command-line argument.',
@@ -640,7 +660,7 @@ export async function runModelSetup(
     } else {
       process.stdout.write(
         `Set agent route ${resolved.provider} as the default model; enable ${resolved.agent!.packageName} in the profile `
-        + '(add the bundle and set enabled: true, e.g. via --enable-in-profile) before it can serve requests.\n',
+        + `(add the bundle and set ${resolved.agent!.enableKey}: true, e.g. via --enable-in-profile) before it can serve requests.\n`,
       )
     }
     if (resolved.enableOnly) process.stdout.write(`Left ${result.settingsPath} unchanged (--enable-only).\n`)

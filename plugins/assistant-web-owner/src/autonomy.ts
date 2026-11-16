@@ -1,10 +1,17 @@
 import type { LinuxRuntime, LinuxCgroupRoots } from '@dsh-enhanced/assistant-isolation'
 import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
-import { lstatSync, realpathSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, normalize, sep } from 'node:path'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
+import {
+  canonicalPath,
+  findExactRow,
+  globalDshDatabasePath,
+  mergeConfigMaps,
+  publishedDatabaseDefault,
+  sqliteStateExists,
+  withinDshHome,
+} from './host-dsh.js'
 
 export interface FiniteAutonomyTerms { maxRuns: number; leaseMs: number; maxTotalDurationMs: number }
 export type AutonomyLinuxSource = { kind: 'official-tag' } | { kind: 'local-head'; repository: string }
@@ -37,69 +44,29 @@ function parse(source: string, label: string): { document: Document; rows: YAMLS
   return { document, rows: document.contents }
 }
 function row(rows: YAMLSeq, bundle: Bundle, required: boolean): YAMLMap | undefined {
-  const id = `dsh-enhanced-${bundle}`; const name = `@dsh-enhanced/${bundle}`
-  const matches = rows.items.filter(item => isMap(item) && (item.get('id') === id || item.get('name') === name)) as YAMLMap[]
-  if (matches.length > 1) fail(`duplicate or shadowed ${id}`)
-  const found = matches[0]
-  if (!found) { if (required) fail(`install ${name} before autonomy setup`); return undefined }
-  if (found.get('id') !== id || (found.has('name') && found.get('name') !== name) || (found.has('disabled') && found.get('disabled') !== false)) fail(`invalid or disabled ${id}`)
-  return found
-}
-function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
-  const result = map(base.clone(), 'config')
-  for (const pair of overlay.items) {
-    if (!isScalar(pair.key) || typeof pair.key.value !== 'string') fail('config keys must be strings')
-    const inherited = result.get(pair.key.value, true); const value = pair.value as Node | null
-    result.set(pair.key.value, isMap(inherited) && isMap(value) ? merge(inherited, value) : value?.clone() ?? null)
-  }
-  return result
+  return findExactRow(rows, bundle, { required, label: `install @dsh-enhanced/${bundle} before autonomy setup` }, fail)
 }
 function path(value: unknown, label: string): string {
   if (!isScalar(value) || typeof value.value !== 'string' || value.tag !== undefined && value.tag !== 'tag:yaml.org,2002:str') fail(`${label} must be a literal absolute path`)
   if (!isAbsolute(value.value) || value.value.includes('\0') || normalize(value.value) !== value.value) fail(`${label} must be a canonical absolute path`)
   return value.value
 }
-function canonicalPath(value: string, label: string, rejectLeafSymlink = false): string {
-  let cursor = value; const suffix: string[] = []
-  for (;;) {
-    let stat
-    try { stat = lstatSync(cursor) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') fail(`${label} has an inaccessible filesystem ancestor`)
-      const parent = dirname(cursor)
-      if (parent === cursor) fail(`${label} has no existing filesystem ancestor`)
-      suffix.unshift(basename(cursor)); cursor = parent
-      continue
-    }
-    if (rejectLeafSymlink && suffix.length === 0 && stat.isSymbolicLink()) fail(`${label} must not be a symbolic link`)
-    try { return resolve(realpathSync(cursor), ...suffix) } catch { fail(`${label} has an unresolved filesystem ancestor`) }
-  }
-}
 function dshStatePath(value: unknown, label: string, dshHome: string): string {
-  const resolved = path(value, label)
-  const canonical = canonicalPath(resolved, label, true)
-  const within = relative(canonicalPath(dshHome, 'DSH_HOME'), canonical)
-  if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) fail(`${label} must be within DSH_HOME`)
-  // Setup cannot hold filesystem descriptors until every runtime opens its state.
-  // Each state-owning runtime must retain its private/no-follow checks for TOCTOU defense.
-  return canonical
+  return withinDshHome(path(value, label), dshHome, label, fail)
+}
+function optionalDshStatePath(value: unknown, label: string, dshHome: string): string | undefined {
+  if (isScalar(value) && typeof value.value === 'string' && value.tag === 'tag:yaml.org,2002:js') {
+    const match = /^dshHomePath\(['"]([^'"\n]+)['"]\)$/u.exec(value.value)
+    if (match === null || isAbsolute(match[1]!) || match[1]!.split('/').includes('..')) fail(`${label} needs a literal path or dshHomePath`)
+    withinDshHome(join(dshHome, match[1]!), dshHome, label, fail)
+    return undefined
+  }
+  return dshStatePath(value, label, dshHome)
 }
 function sequence(value: unknown, label: string): YAMLSeq { if (!isSeq(value)) fail(`${label} must be a sequence`); return value }
 function scalar(value: unknown, label: string): string { if (!isScalar(value) || typeof value.value !== 'string') fail(`${label} must be a string`); return value.value }
 function publishedCredentialDefault(value: unknown): boolean {
   return isScalar(value) && value.tag === 'tag:yaml.org,2002:js' && value.value === "dshHomePath('credentials-keychain/ledger.sqlite')"
-}
-function publishedDatabaseDefault(value: unknown, expected: string): boolean {
-  return isScalar(value) && (value.tag === undefined || value.tag === 'tag:yaml.org,2002:str') && value.value === expected
-}
-function exists(path: string): boolean {
-  try { lstatSync(path); return true } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    fail(`cannot inspect inherited database state at ${path}`)
-  }
-}
-function sqliteStateExists(databasePath: string, companion = false): boolean {
-  const databases = companion ? [databasePath, `${databasePath}.preparations`] : [databasePath]
-  return databases.some(value => [value, `${value}-journal`, `${value}-wal`, `${value}-shm`].some(exists))
 }
 function canonicalizeNestedStateRoots(document: Document, node: Node | null, dshHome: string, label: string): void {
   if (isAlias(node)) fail(`${label} config must not use YAML aliases`)
@@ -152,10 +119,9 @@ export function literalAutonomyLinux(value: unknown): AutonomyLinuxConfig {
 export function validateAutonomyLinuxPaths(linux: AutonomyLinuxConfig, stateRoot: string, home: string): void {
   const root = linux.runtime.root.path
   if (!isAbsolute(root) || normalize(root) !== root || /[\p{Cc}*]/u.test(root) || root === '/') fail('invalid Linux runtime root')
-  const canonical = canonicalPath(root, 'Linux runtime root', true)
+  const canonical = canonicalPath(root, 'Linux runtime root', fail, true)
   if (canonical !== root) fail('Linux runtime root must be realpath canonical')
-  const within = relative(canonicalPath(home, 'DSH_HOME'), canonical)
-  if (within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) fail('Linux runtime must be within DSH_HOME')
+  withinDshHome(canonical, home, 'Linux runtime', fail)
   if (root === stateRoot || root.startsWith(stateRoot + sep) || stateRoot.startsWith(root + sep)) fail('Isolation state overlaps Linux runtime')
 }
 
@@ -187,13 +153,13 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
       continue
     }
     const base = inherited.has('config') ? map(inherited.get('config', true), bundle) : target.document.createNode({}) as YAMLMap
-    const config = existing?.has('config') ? merge(base, map(existing.get('config', true), bundle)) : map(base.clone(), bundle)
+    const config = existing?.has('config') ? mergeConfigMaps(base, map(existing.get('config', true), bundle), fail) : map(base.clone(), bundle)
     explicit.set(bundle, existing?.has('config') ? new Set(map(existing.get('config', true), bundle).items.map(pair => scalar(pair.key, 'config key'))) : new Set())
     const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${bundle}`, name: `@dsh-enhanced/${bundle}` }) as YAMLMap
     destination.set('config', config); if (!existing) target.rows.add(destination); configs.set(bundle, config)
   }
   const isolation = configs.get('assistant-isolation')!; const actions = configs.get('assistant-actions')!; const credentials = configs.get('credentials-keychain')!
-  const canonicalHome = canonicalPath(input.dshHome, 'DSH_HOME')
+  const canonicalHome = canonicalPath(input.dshHome, 'DSH_HOME', fail)
   const roots = {
     isolation: join(canonicalHome, 'assistant-isolation', input.profile),
     actions: join(canonicalHome, 'assistant-actions', input.profile),
@@ -209,19 +175,61 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
   if (credentialPath === undefined || (!explicit.get('credentials-keychain')!.has('databasePath') && publishedCredentialDefault(credentialPath))) credentials.set('databasePath', target.document.createNode(roots.credentials))
   credentials.set('databasePath', target.document.createNode(dshStatePath(credentials.get('databasePath', true), 'Credential databasePath', canonicalHome)))
   for (const [bundle, fallback, published, label] of [
-    ['assistant-skills', roots.skills, join(homedir(), '.dsh', 'assistant-skills.sqlite'), 'Skills databasePath'],
-    ['assistant-proactive', roots.proactive, join(homedir(), '.dsh', 'assistant-proactive.sqlite'), 'Proactive databasePath'],
+    ['assistant-skills', roots.skills, globalDshDatabasePath('assistant-skills'), 'Skills databasePath'],
+    ['assistant-proactive', roots.proactive, globalDshDatabasePath('assistant-proactive'), 'Proactive databasePath'],
   ] as const) {
     const config = configs.get(bundle)
     if (!config) continue
     const current = config.get('databasePath', true)
     const inheritedDefault = !explicit.get(bundle)!.has('databasePath') && (current === undefined || publishedDatabaseDefault(current, published))
-    if (inheritedDefault && sqliteStateExists(published, bundle === 'assistant-proactive')) fail(`${label} published default contains existing state; perform an offline migration to ${fallback} before setup`)
+    if (inheritedDefault && sqliteStateExists(published, bundle === 'assistant-proactive', fail)) fail(`${label} published default contains existing state; perform an offline migration to ${fallback} before setup`)
     if (inheritedDefault) config.set('databasePath', target.document.createNode(fallback))
     config.set('databasePath', target.document.createNode(dshStatePath(config.get('databasePath', true), label, canonicalHome)))
   }
   const skills = configs.get('assistant-skills')
   if (skills) canonicalizeNestedStateRoots(target.document, skills, canonicalHome, 'Skills')
+  const optionalAutonomyStateRows = [
+    { slug: 'assistant-goals', pathKeys: ['databasePath'], label: 'Goals databasePath', subdir: 'assistant-goals', filename: `${input.profile}.sqlite`, createIfMissing: true },
+    { slug: 'assistant-dreaming', pathKeys: ['databasePath'], label: 'Dreaming databasePath', subdir: 'assistant-dreaming', filename: `${input.profile}.sqlite`, createIfMissing: true },
+    { slug: 'assistant-memory-learning', pathKeys: ['databasePath'], label: 'Memory learning databasePath', subdir: 'assistant-memory-learning', filename: `${input.profile}.sqlite`, createIfMissing: true },
+    { slug: 'assistant-work-items', pathKeys: ['databasePath'], label: 'Work-items databasePath', subdir: 'assistant-work-items', filename: `${input.profile}.sqlite`, createIfMissing: true },
+    { slug: 'assistant-growth-driver', pathKeys: ['usageLearning', 'databasePath'], label: 'Growth usage databasePath', subdir: 'assistant-growth-driver', filename: `${input.profile}-usage.sqlite`, createIfMissing: false },
+  ] as const
+  for (const spec of optionalAutonomyStateRows) {
+    const inherited = findExactRow(effective.rows, spec.slug, { required: false, allowDisabled: true }, fail)
+    if (inherited === undefined) continue
+    const existing = findExactRow(target.rows, spec.slug, { required: false, allowDisabled: true }, fail)
+    const existingConfig = existing?.has('config') ? map(existing.get('config', true), spec.slug) : undefined
+    const base = inherited.has('config') ? map(inherited.get('config', true), spec.slug) : target.document.createNode({}) as YAMLMap
+    const config = existingConfig !== undefined ? mergeConfigMaps(base, existingConfig, fail) : map(base.clone(), spec.slug)
+    const published = globalDshDatabasePath(spec.slug)
+    const fallback = join(canonicalHome, spec.subdir, spec.filename)
+    const current = config.getIn(spec.pathKeys, true)
+    const explicitKey = existingConfig !== undefined && existingConfig.hasIn(spec.pathKeys)
+    const createMissing = spec.slug === 'assistant-growth-driver' ? config.getIn(['usageLearning', 'enabled']) === true : spec.createIfMissing
+    const inheritedDefault = !explicitKey && ((current === undefined && createMissing) || publishedDatabaseDefault(current, published))
+    let updated = false
+    if (inheritedDefault) {
+      if (current !== undefined && sqliteStateExists(published, false, fail)) {
+        fail(`${spec.label} published default contains existing state; perform an offline migration to ${fallback} before setup`)
+      }
+      config.setIn(spec.pathKeys, target.document.createNode(fallback))
+      updated = true
+    }
+    const candidate = config.getIn(spec.pathKeys, true)
+    if (candidate !== undefined) {
+      const canonical = optionalDshStatePath(candidate, spec.label, canonicalHome)
+      if (canonical !== undefined && canonical !== candidate) {
+        config.setIn(spec.pathKeys, target.document.createNode(canonical))
+        updated = true
+      }
+    }
+    if (existing !== undefined || updated) {
+      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${spec.slug}`, name: `@dsh-enhanced/${spec.slug}` }) as YAMLMap
+      destination.set('config', config)
+      if (existing === undefined) target.rows.add(destination)
+    }
+  }
   const configuredBackend = isolation.has('backend') ? scalar(isolation.get('backend', true), 'Isolation backend') : isolation.has('linux') ? 'linux-native' : undefined
   const oldImage = isolation.has('image') ? scalar(isolation.get('image', true), 'Isolation image') : undefined
   // Existing Docker profiles are never rewritten in place: the owner must run an

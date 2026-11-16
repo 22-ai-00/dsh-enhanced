@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
@@ -282,6 +283,7 @@ describe('plugin setup: recommended preset', () => {
     expect(result.skipped).toEqual([
       { id: 'dsh-enhanced-assistant-work-items', reason: 'waiting for explicit configuration: dsh-enhanced-assistant-proactive is not installed' },
       { id: 'dsh-enhanced-assistant-proactive', reason: 'not installed' },
+      { id: 'dsh-enhanced-assistant-dreaming', reason: 'not installed' },
       { id: 'dsh-enhanced-assistant-evaluation', reason: 'not installed' },
       { id: 'dsh-enhanced-assistant-memory-learning', reason: 'plugin is disabled in this profile; enable it first' },
       { id: 'dsh-enhanced-assistant-growth-driver', reason: 'not installed' },
@@ -416,13 +418,15 @@ describe('plugin setup: assembly preset guards', () => {
       { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
     expect(result.skipped.map(skip => skip.id)).toEqual([
+      'dsh-enhanced-assistant-dreaming',
       'dsh-enhanced-assistant-memory-learning',
       'dsh-enhanced-assistant-growth-driver',
       'dsh-enhanced-plugin-control-plane',
     ])
-    expect(result.skipped[0]!.reason).toMatch(/waiting for explicit configuration: .*memoryReviews\.workItemExperiences/u)
-    expect(result.skipped[1]!.reason).toMatch(/signed workItemAuthorities pins/u)
-    expect(result.skipped[2]!.reason).toMatch(/ed25519 key material/u)
+    expect(result.skipped[0]!.reason).toBe('not installed')
+    expect(result.skipped[1]!.reason).toMatch(/waiting for explicit configuration: .*memoryReviews\.workItemExperiences/u)
+    expect(result.skipped[2]!.reason).toMatch(/signed workItemAuthorities pins/u)
+    expect(result.skipped[3]!.reason).toMatch(/ed25519 key material/u)
     const source = await profilePatch(home)
     const patchRows = parseDocument(source, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] }).toJSON() as Array<Record<string, any>>
     const configOf = (id: string) => patchRows.find(row => row.id === id)?.config
@@ -447,7 +451,11 @@ describe('plugin setup: assembly preset guards', () => {
       .replace('      automaticLearning:\n        workItemExperiences: false', '      automaticLearning:\n        workItemExperiences: true')
     const result = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, { readDump: dumpFixture(expanded) })
     expect(result.changes).toContainEqual({ id: 'dsh-enhanced-assistant-memory-learning', key: 'workItemExperiences', from: undefined, to: true })
-    expect(result.skipped.map(skip => skip.id)).toEqual(['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-plugin-control-plane'])
+    expect(result.skipped.map(skip => skip.id)).toEqual([
+      'dsh-enhanced-assistant-dreaming',
+      'dsh-enhanced-assistant-growth-driver',
+      'dsh-enhanced-plugin-control-plane',
+    ])
     expect(await profilePatch(home)).toContain('workItemExperiences: true')
   })
 
@@ -495,5 +503,164 @@ describe('plugin setup: CLI', () => {
     expect(io.output).toContain('dsh-enhanced-assistant-work-items.enabled: false -> true')
     expect(io.output).toContain('looks like a secret')
     expect(await profilePatch(home)).not.toContain('appSecret')
+  })
+
+  test('fails closed when enabling assistant-dreaming without explicit scope, model, budget and $DSH_HOME databasePath', async () => {
+    const home = await temporaryHome()
+    const incompleteDreaming = `
+- id: dsh-enhanced-assistant-dreaming
+  name: '@dsh-enhanced/assistant-dreaming'
+  config:
+    enabled: false
+    retired: false
+    notifyOwner: true
+`
+    const dumpIncomplete = { readDump: dumpFixture(incompleteDreaming) }
+    await expect(setPluginEnabled({ dshHome: home, profile: 'web', plugin: 'assistant-dreaming', enabled: true }, dumpIncomplete))
+      .rejects.toThrow(/owner scope.*scope\.\{?workspace/u)
+    await expect(setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-dreaming', key: 'enabled', value: 'true' }, dumpIncomplete))
+      .rejects.toThrow(/owner scope.*scope\.\{?workspace/u)
+    await expect(setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-dreaming', key: 'databasePath', value: 'relative/dream.sqlite' }, dumpIncomplete))
+      .rejects.toThrow(/canonical absolute path/u)
+
+    const presetIncomplete = await applyRecommendedPluginPreset({ dshHome: home, profile: 'web' }, dumpIncomplete)
+    expect(presetIncomplete.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-dreaming',
+      key: 'databasePath',
+      from: undefined,
+      to: join(home, 'assistant-dreaming', 'web.sqlite'),
+    })
+    expect(presetIncomplete.changes.some(c => c.id === 'dsh-enhanced-assistant-dreaming' && c.key === 'enabled')).toBe(false)
+    expect(presetIncomplete.skipped).toContainEqual({
+      id: 'dsh-enhanced-assistant-dreaming',
+      reason: expect.stringMatching(/scope\.workspace/u),
+    })
+
+    const completeDreaming = `
+- id: dsh-enhanced-assistant-dreaming
+  name: '@dsh-enhanced/assistant-dreaming'
+  config:
+    enabled: false
+    retired: false
+    notifyOwner: true
+    schedulerEnabled: false
+    scope:
+      workspace: /srv/owner/ws
+      preset: web-owner
+      principalId: web:default
+      ownerRouteId: route-web-1
+    provider: deepseek-official
+    model: deepseek-chat
+    budgetId: dreaming-budget-1
+    budgetAmount: 20
+`
+    const homeComplete = await temporaryHome()
+    const dumpComplete = { readDump: dumpFixture(completeDreaming) }
+    const enabled = await applyRecommendedPluginPreset({ dshHome: homeComplete, profile: 'web' }, dumpComplete)
+    expect(enabled.changes).toEqual([
+      { id: 'dsh-enhanced-assistant-dreaming', key: 'databasePath', from: undefined, to: join(homeComplete, 'assistant-dreaming', 'web.sqlite') },
+      { id: 'dsh-enhanced-assistant-dreaming', key: 'enabled', from: false, to: true },
+    ])
+    const listed = await listProfilePlugins({ dshHome: homeComplete, profile: 'web' }, dumpComplete)
+    const dreamingSummary = listed.plugins.find(p => p.slug === 'assistant-dreaming')!
+    expect(dreamingSummary.flags).toMatchObject({ retired: false, notifyOwner: true, schedulerEnabled: false })
+
+    // Missing `enabled` in assistant-dreaming reports idle until explicitly enabled, and retired=true keeps it disabled.
+    const homeRetired = await temporaryHome()
+    const retiredDump = {
+      readDump: dumpFixture(
+        completeDreaming
+          .replace('    enabled: false\n', `    databasePath: ${join(homeRetired, 'assistant-dreaming', 'web.sqlite')}\n`)
+          .replace('    retired: false\n', '    retired: true\n'),
+      ),
+    }
+    const retiredListed = await listProfilePlugins({ dshHome: homeRetired, profile: 'web' }, retiredDump)
+    expect(retiredListed.plugins.find(p => p.slug === 'assistant-dreaming')?.enabled).toBe(false)
+    await expect(setPluginEnabled({ dshHome: homeRetired, profile: 'web', plugin: 'assistant-dreaming', enabled: true }, retiredDump))
+      .rejects.toThrow(/retired/u)
+  })
+
+  test('lists known optional keys and scopes published ~/.dsh SQLite defaults under $DSH_HOME', async () => {
+    const home = await temporaryHome()
+    const publishedProactive = join(homedir(), '.dsh', 'assistant-proactive.sqlite')
+    const publishedGoals = join(homedir(), '.dsh', 'assistant-goals.sqlite')
+    const multiPluginDump = `
+- id: dsh-enhanced-owner-console
+  name: '@dsh-enhanced/owner-console'
+  config:
+    enabled: false
+- id: dsh-enhanced-assistant-proactive
+  name: '@dsh-enhanced/assistant-proactive'
+  config:
+    databasePath: ${publishedProactive}
+    schedulerEnabled: false
+- id: dsh-enhanced-assistant-goals
+  name: '@dsh-enhanced/assistant-goals'
+  config:
+    databasePath: ${publishedGoals}
+    eventWaits: true
+- id: dsh-enhanced-assistant-growth-driver
+  name: '@dsh-enhanced/assistant-growth-driver'
+  config:
+    usageLearning:
+      workItemFailures: false
+- id: dsh-enhanced-assistant-evaluation
+  name: '@dsh-enhanced/assistant-evaluation'
+  config:
+    attentionTuningAutoAdopt: true
+`
+    const dumpOpts = { readDump: dumpFixture(multiPluginDump) }
+    await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'owner-console', key: 'feishuAppId', value: 'cli_test_app' }, dumpOpts)
+    await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-growth-driver', key: 'usageLearning.workItemFailures', value: 'yes' }, dumpOpts)
+    await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-proactive', key: 'intakeEvaluation.maxCallsPerHour', value: '12' }, dumpOpts)
+    await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-goals', key: 'verifyGoalOutcome', value: 'true' }, dumpOpts)
+    await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-evaluation', key: 'attentionLooseningEnabled', value: 'true' }, dumpOpts)
+
+    const patchText = await profilePatch(home)
+    expect(patchText).toContain('feishuAppId: cli_test_app')
+    expect(patchText).toContain('workItemFailures: true')
+    expect(patchText).toContain('maxCallsPerHour: 12')
+    expect(patchText).toContain('verifyGoalOutcome: true')
+    expect(patchText).toContain('attentionLooseningEnabled: true')
+
+    const listed = await listProfilePlugins({ dshHome: home, profile: 'web' }, dumpOpts)
+    expect(listed.plugins.find(p => p.slug === 'assistant-evaluation')?.flags.attentionTuningAutoAdopt).toBe(true)
+    expect(listed.plugins.find(p => p.slug === 'assistant-growth-driver')?.flags['usageLearning.workItemFailures']).toBe(true)
+
+    // Verify guided menu surfaces documented key hints for plugins like owner-console & assistant-dreaming.
+    const ownerIdx = listed.plugins.findIndex(p => p.slug === 'owner-console') + 1
+    const guidedIo = memoryIo([String(ownerIdx), 'b', 'q'], true)
+    await runPluginSetup(['--dsh-home', home], guidedIo, dumpOpts)
+    expect(guidedIo.output).toContain('Documented keys:')
+    expect(guidedIo.output).toContain('feishuAppId (string)')
+
+    const homePreset = await temporaryHome()
+    const presetResult = await applyRecommendedPluginPreset({ dshHome: homePreset, profile: 'web' }, dumpOpts)
+    if (existsSync(publishedProactive)) {
+      expect(presetResult.skipped).toContainEqual({
+        id: 'dsh-enhanced-assistant-proactive',
+        reason: expect.stringMatching(/offline migration/u),
+      })
+    } else {
+      expect(presetResult.changes).toContainEqual({
+        id: 'dsh-enhanced-assistant-proactive',
+        key: 'databasePath',
+        from: publishedProactive,
+        to: join(homePreset, 'assistant-proactive', 'web.sqlite'),
+      })
+    }
+    if (existsSync(publishedGoals)) {
+      expect(presetResult.skipped).toContainEqual({
+        id: 'dsh-enhanced-assistant-goals',
+        reason: expect.stringMatching(/offline migration/u),
+      })
+    } else {
+      expect(presetResult.changes).toContainEqual({
+        id: 'dsh-enhanced-assistant-goals',
+        key: 'databasePath',
+        from: publishedGoals,
+        to: join(homePreset, 'assistant-goals', 'web.sqlite'),
+      })
+    }
   })
 })

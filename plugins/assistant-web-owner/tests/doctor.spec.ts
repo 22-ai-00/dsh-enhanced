@@ -276,6 +276,9 @@ describe('autonomy doctor static readiness snapshot', () => {
       ['revision-adoption', 'ready'],
       ['event-poller', 'ready'],
       ['ptc-presentation', 'ready'],
+      ['dreaming', 'ready'],
+      ['proactive-opportunities', 'ready'],
+      ['autonomy-subsystems', 'ready'],
     ])
     const text = formatAutonomyReadiness(report)
     expect(text).toContain('READY')
@@ -404,6 +407,131 @@ describe('autonomy doctor static readiness snapshot', () => {
       else process.env.PATH = savedPath
       if (savedFixture === undefined) delete process.env.READINESS_FIXTURE
       else process.env.READINESS_FIXTURE = savedFixture
+    }
+  })
+
+  it('inspects dreaming fail-closed completeness, goals/proactive preparation and $DSH_HOME SQLite path leaks', () => {
+    const home = '/srv/dsh-home'
+    const incompleteDreaming = `${readinessBundles}
+- id: dsh-enhanced-assistant-dreaming
+  name: '@dsh-enhanced/assistant-dreaming'
+  config:
+    enabled: true
+    retired: true
+    databasePath: /outside/dreaming.sqlite
+`
+    const badDream = inspectAutonomyReadiness(incompleteDreaming, 'web', home)
+    expect(badDream.ready).toBe(true) // dreaming is an optional ring
+    const dreamCheck = readinessCheck(badDream, 'dreaming')
+    expect(dreamCheck.status).toBe('not-ready')
+    expect(dreamCheck.reasons.map(r => r.code)).toEqual(expect.arrayContaining([
+      'dreaming-database-not-scoped',
+      'dreaming-retired-while-enabled',
+      'dreaming-scope-missing',
+      'dreaming-model-missing',
+      'dreaming-budget-missing',
+    ]))
+
+    const completeOptional = `${readinessBundles}
+- id: dsh-enhanced-assistant-dreaming
+  name: '@dsh-enhanced/assistant-dreaming'
+  config:
+    enabled: true
+    retired: false
+    notifyOwner: true
+    databasePath: ${home}/assistant-dreaming/web.sqlite
+    scope:
+      workspace: /srv/owner/ws
+      preset: web-owner
+      principalId: web/web/local/operator
+      ownerRouteId: route-1
+    provider: deepseek-official
+    model: deepseek-chat
+    budgetId: dreaming-1
+    budgetAmount: 10
+- id: dsh-enhanced-assistant-goals
+  name: '@dsh-enhanced/assistant-goals'
+  config:
+    databasePath: ${home}/assistant-goals/web.sqlite
+    eventWaits: true
+    verifyNativeRounds: true
+    verifyGoalOutcome: true
+    executionBudget:
+      mode: calls
+      modelCalls: 4
+`
+    const ok = inspectAutonomyReadiness(completeOptional, 'web', home)
+    expect(readinessCheck(ok, 'dreaming')).toMatchObject({
+      status: 'ready',
+      details: { enabled: true, databaseScoped: true, scopeConfigured: true, modelConfigured: true, budgetConfigured: true, notifyOwner: true },
+    })
+    expect(readinessCheck(ok, 'proactive-opportunities')).toMatchObject({
+      status: 'ready',
+      details: { proactiveLoaded: true, intakeEvaluationEnabled: true, goalsLoaded: true, goalsDatabaseScoped: true, goalsEventWaits: true, goalsExecutionBudgetConfigured: true },
+    })
+
+    // Detect global ~/.dsh default SQLite leaks on goals / proactive / memory-learning / growth-driver.
+    const savedUserHome = process.env.HOME
+    process.env.HOME = '/tmp/fake-user-home-for-doctor'
+    try {
+      const leaking = `${readinessBundles}
+- id: dsh-enhanced-assistant-goals
+  name: '@dsh-enhanced/assistant-goals'
+  config:
+    databasePath: /tmp/fake-user-home-for-doctor/.dsh/assistant-goals.sqlite
+`
+      const leaked = inspectAutonomyReadiness(leaking, 'web', home)
+      expect(readinessCheck(leaked, 'proactive-opportunities').status).toBe('not-ready')
+      expect(readinessCheck(leaked, 'proactive-opportunities').reasons.map(r => r.code)).toContain('goals-database-not-scoped')
+    } finally {
+      if (savedUserHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedUserHome
+    }
+  })
+
+  it('falls back to verified $DSH_HOME/.dsh-rsi-host.json when PATH lacks dsh', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-bound-'))); roots.push(home)
+    const cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-cache-'))); roots.push(cacheRoot)
+    const hostRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh')
+    const bootRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+    const binDir = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin')
+    mkdirSync(join(hostRoot, 'bin'), { recursive: true })
+    mkdirSync(bootRoot, { recursive: true })
+    mkdirSync(binDir, { recursive: true })
+    const dumpPath = join(home, 'bound-dump.yml')
+    writeFileSync(dumpPath, readinessBundles)
+    writeFileSync(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.3', bin: { dsh: 'bin/dsh.js' } }))
+    writeFileSync(join(hostRoot, 'bin', 'dsh.js'), '#!/bin/bash\ncat "$BOUND_READINESS_FIXTURE"\n')
+    chmodSync(join(hostRoot, 'bin', 'dsh.js'), 0o755)
+    writeFileSync(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.3' }))
+    symlinkSync('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
+    writeFileSync(join(home, '.dsh-rsi-host.json'), JSON.stringify({
+      schemaVersion: 1,
+      cacheRoot,
+      version: '0.2.2-rc.3',
+      receiptDigest: 'b'.repeat(64),
+    }), { mode: 0o600 })
+    chmodSync(join(home, '.dsh-rsi-host.json'), 0o600)
+
+    const savedPath = process.env.PATH
+    const savedFixture = process.env.BOUND_READINESS_FIXTURE
+    const chunks: string[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => { chunks.push(String(chunk)); return true }) as never)
+    try {
+      process.env.PATH = '/bin:/usr/bin'
+      process.env.BOUND_READINESS_FIXTURE = dumpPath
+      await runAutonomyDoctor(['--readiness', '--dsh-home', home, '--profile', 'web'])
+      expect(process.exitCode ?? 0).toBe(0)
+      const parsed = JSON.parse(chunks.join('').trim().split('\n').at(-1)!) as { ready: boolean; checks: Array<{ id: string }> }
+      expect(parsed.ready).toBe(true)
+      expect(parsed.checks.some(c => c.id === 'dreaming')).toBe(true)
+    } finally {
+      process.exitCode = undefined
+      spy.mockRestore()
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedFixture === undefined) delete process.env.BOUND_READINESS_FIXTURE
+      else process.env.BOUND_READINESS_FIXTURE = savedFixture
     }
   })
 })

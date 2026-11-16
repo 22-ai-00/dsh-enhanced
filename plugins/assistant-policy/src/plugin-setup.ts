@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { lstatSync } from 'node:fs'
 import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, normalize, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { type Document, isMap, isScalar, isSeq, parseDocument, Scalar, stringify, YAMLMap, YAMLSeq } from 'yaml'
 import { type EffectiveProfileDumpReader, findRow, readEffectiveProfileDump } from './profile-setup.js'
@@ -39,21 +41,142 @@ const protectedKeys: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['dsh-enhanced-assistant-delivery', new Set(['ownerRoutes', 'policyRef'])],
 ])
 
-type KnownType = 'boolean' | 'number' | 'string' | readonly string[]
+type KnownType = 'boolean' | 'number' | 'string' | 'path' | readonly string[]
 
 /**
  * Documented optional keys that are absent from bundle defaults. `set` accepts
  * them without `--force` and validates their type.
  */
 const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = new Map([
+  ['dsh-enhanced-owner-console', new Map<string, KnownType>([
+    ['feishuAppId', 'string'],
+  ])],
+  ['dsh-enhanced-assistant-proactive', new Map<string, KnownType>([
+    ['databasePath', 'path'],
+    ['intakeEvaluation.enabled', 'boolean'],
+    ['intakeEvaluation.provider', 'string'],
+    ['intakeEvaluation.model', 'string'],
+    ['intakeEvaluation.maxCallsPerHour', 'number'],
+    ['intakeEvaluation.timeoutMs', 'number'],
+    ['intakeEvaluation.maxConsecutiveFailures', 'number'],
+  ])],
+  ['dsh-enhanced-assistant-dreaming', new Map<string, KnownType>([
+    ['enabled', 'boolean'],
+    ['retired', 'boolean'],
+    ['databasePath', 'path'],
+    ['scope.workspace', 'path'],
+    ['scope.preset', 'string'],
+    ['scope.principalId', 'string'],
+    ['scope.ownerRouteId', 'string'],
+    ['baseIntervalMs', 'number'],
+    ['runProbabilityPpm', 'number'],
+    ['idleMinMs', 'number'],
+    ['lotteryWindow', 'number'],
+    ['activeHours.timezone', 'string'],
+    ['activeHours.startMinute', 'number'],
+    ['activeHours.endMinute', 'number'],
+    ['maxDreamsPerDay', 'number'],
+    ['maxIdeasPerWake', 'number'],
+    ['maxModelCalls', 'number'],
+    ['maxToolCalls', 'number'],
+    ['maxOutputTokens', 'number'],
+    ['maxDurationMs', 'number'],
+    ['maxInputBytes', 'number'],
+    ['maxEvidenceRefs', 'number'],
+    ['notifyOwner', 'boolean'],
+    ['maxNotificationsPerDay', 'number'],
+    ['notifyMinIntervalMs', 'number'],
+    ['budgetId', 'string'],
+    ['budgetAmount', 'number'],
+    ['provider', 'string'],
+    ['model', 'string'],
+    ['reasoningEffort', 'string'],
+    ['retentionDays', 'number'],
+  ])],
+  ['dsh-enhanced-assistant-growth-driver', new Map<string, KnownType>([
+    ['enabled', 'boolean'],
+    ['intervalMs', 'number'],
+    ['maxReviewsPerWake', 'number'],
+    ['minRepeatedSuccesses', 'number'],
+    ['candidateTtlMs', 'number'],
+    ['maxModelCalls', 'number'],
+    ['maxToolCalls', 'number'],
+    ['maxOutputTokens', 'number'],
+    ['maxDurationMs', 'number'],
+    ['toolPresentation', ['native', 'ptc']],
+    ['provider', 'string'],
+    ['model', 'string'],
+    ['reasoningEffort', 'string'],
+    ['budgetId', 'string'],
+    ['budgetAmount', 'number'],
+    ['apiKeyEnv', 'string'],
+    ['scope.workspace', 'path'],
+    ['scope.preset', 'string'],
+    ['scope.principalId', 'string'],
+    ['scope.ownerRouteId', 'string'],
+    ['workflowOwnerAnchored.enabled', 'boolean'],
+    ['workflowOwnerAnchored.maxCommitsPerWake', 'number'],
+    ['workflowOwnerAnchored.lookbackMs', 'number'],
+    ['pluginSourceProposals.enabled', 'boolean'],
+    ['pluginSourceProposals.allowCreation', 'boolean'],
+    ['pluginSourceProposals.allowModification', 'boolean'],
+    ['pluginSourceProposals.allowRevision', 'boolean'],
+    ['pluginSourceProposals.preparationMode', ['inline', 'durable']],
+    ['pluginSourceProposals.repository', 'path'],
+    ['pluginSourceProposals.maxPlansPerWake', 'number'],
+    ['pluginSourceProposals.isolatedBuildTimeoutMs', 'number'],
+    ['pluginSourceProposals.offline', 'boolean'],
+    ['pluginSourceProposals.planTtlMs', 'number'],
+    ['usageLearning.enabled', 'boolean'],
+    ['usageLearning.databasePath', 'path'],
+    ['usageLearning.maxPending', 'number'],
+    ['usageLearning.lookbackMs', 'number'],
+    ['usageLearning.workItemFailures', 'boolean'],
+    ['usageLearning.scanBudgetId', 'string'],
+    ['usageLearning.scanBudgetAmount', 'number'],
+  ])],
+  ['dsh-enhanced-assistant-memory-learning', new Map<string, KnownType>([
+    ['databasePath', 'path'],
+    ['workItemExperiences', 'boolean'],
+    ['maxExtractions', 'number'],
+    ['maxPending', 'number'],
+    ['lookbackMs', 'number'],
+    ['timeoutMs', 'number'],
+    ['maxInputBytes', 'number'],
+    ['maxOutputTokens', 'number'],
+    ['budgetId', 'string'],
+    ['budgetAmount', 'number'],
+    ['scanBudgetId', 'string'],
+    ['scanBudgetAmount', 'number'],
+    ['model.provider', 'string'],
+    ['model.model', 'string'],
+    ['model.reasoningEffort', 'string'],
+  ])],
   ['dsh-enhanced-assistant-work-items', new Map<string, KnownType>([
     ['mode', ['observe', 'active']],
+    ['databasePath', 'path'],
+    ['workRoot', 'path'],
     ['intakeLedger.enabled', 'boolean'],
+    ['intakeLedger.evaluation.enabled', 'boolean'],
+    ['intakeLedger.evaluation.timeoutMs', 'number'],
+    ['intakeLedger.evaluation.maxConsecutiveFailures', 'number'],
+    ['intakeLedger.evaluation.maxPerRun', 'number'],
+    ['intakeLedger.evaluation.maxCallsPerHour', 'number'],
+    ['intakeLedger.evaluation.admit.enabled', 'boolean'],
+    ['intakeLedger.evaluation.admit.mode', ['observe', 'auto']],
+    ['intakeLedger.evaluation.admit.kind', 'string'],
+    ['intakeLedger.evaluation.admit.originBindingId', 'string'],
+    ['intakeLedger.evaluation.admit.maxPerHour', 'number'],
+    ['ownerRecall.enabled', 'boolean'],
     ['ownerReplyContinuation', 'boolean'],
     ['ownerReportFeedback', 'boolean'],
     ['follows.eventTriggers.enabled', 'boolean'],
     ['follows.eventTriggers.acceptHeadRef', 'boolean'],
     ['ownerReportRouting.prefer', ['origin', 'recent']],
+    ['settlement.enabled', 'boolean'],
+    ['settlement.windowMs', 'number'],
+    ['sources.foregroundFailures.enabled', 'boolean'],
+    ['sources.foregroundFailures.kind', 'string'],
     ['acceptance.autoSettle.enabled', 'boolean'],
     ['acceptance.autoSettle.maxPerTick', 'number'],
     ['acceptance.bindWorkerRun.enabled', 'boolean'],
@@ -69,6 +192,24 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
   ['dsh-enhanced-assistant-evaluation', new Map<string, KnownType>([
     ['notificationOutcomesEnabled', 'boolean'],
     ['notificationSyncIntervalMs', 'number'],
+    ['attentionTuningAutoAdopt', 'boolean'],
+    ['intakeAttentionAgreementEnabled', 'boolean'],
+    ['intakeAttentionAgreementPersistIntervalMs', 'number'],
+    ['attentionLooseningEnabled', 'boolean'],
+    ['attentionLooseningReplayWindowMs', 'number'],
+    ['attentionOwnerQuestionDeliveryEnabled', 'boolean'],
+    ['attentionOwnerQuestionNoticeTtlMs', 'number'],
+  ])],
+  ['dsh-enhanced-assistant-goals', new Map<string, KnownType>([
+    ['databasePath', 'path'],
+    ['eventWaits', 'boolean'],
+    ['ownerIntent', 'boolean'],
+    ['ownerPreparedAcceptance', 'boolean'],
+    ['preauthorizedCreateMaxRounds', 'number'],
+    ['preauthorizedSchedule', 'boolean'],
+    ['verifyNativeRounds', 'boolean'],
+    ['verifyGoalOutcome', 'boolean'],
+    ['stepMaxDurationMs', 'number'],
   ])],
   ['dsh-enhanced-event-triggers', new Map<string, KnownType>([['pollerEnabled', 'boolean']])],
 ])
@@ -257,21 +398,30 @@ function requireInstalled(name: string, installed: InstalledPlugins): string {
     + `add it first: dsh plugin --profile ${installed.profile} add ${packageScope}${base}`)
 }
 
+const notableTopLevelFlags = new Set(['attentionAttachOverCap', 'retired', 'notifyOwner', 'workItemExperiences', 'attentionTuningAutoAdopt'])
+
+function collectBooleanFlags(mapping: YAMLMap, prefix: string, flags: Record<string, boolean>, depth: number): void {
+  for (const pair of mapping.items) {
+    const key = isScalar(pair.key) ? String(pair.key.value) : String(pair.key)
+    const value = pair.value
+    const path = prefix === '' ? key : `${prefix}.${key}`
+    if (isScalar(value) && typeof value.value === 'boolean') {
+      if (prefix === '' && key === 'enabled') continue
+      if (prefix !== '' && (key === 'enabled' || path === 'usageLearning.workItemFailures')) flags[path] = value.value
+      else if (prefix === '' && (key.endsWith('Enabled') || notableTopLevelFlags.has(key))) flags[key] = value.value
+    } else if (isMap(value) && depth < 3) {
+      collectBooleanFlags(value, path, flags, depth + 1)
+    }
+  }
+}
+
 function summarize(id: string, row: YAMLMap, overridden: boolean): ProfilePluginSummary {
   const config = rowConfig(row)
   const flags: Record<string, boolean> = {}
-  let enabled: boolean | undefined
-  for (const pair of config.items) {
-    const key = isScalar(pair.key) ? String(pair.key.value) : String(pair.key)
-    const value = pair.value
-    if (isScalar(value) && typeof value.value === 'boolean') {
-      if (key === 'enabled') enabled = value.value
-      else if (key.endsWith('Enabled') || key === 'attentionAttachOverCap') flags[key] = value.value
-    } else if (isMap(value)) {
-      const nested = value.get('enabled')
-      if (typeof nested === 'boolean') flags[`${key}.enabled`] = nested
-    }
-  }
+  const rawEnabled = config.get('enabled')
+  let enabled = typeof rawEnabled === 'boolean' ? rawEnabled : undefined
+  if (id === 'dsh-enhanced-assistant-dreaming' && enabled === undefined) enabled = false
+  collectBooleanFlags(config, '', flags, 0)
   const slug = id.slice(rowPrefix.length)
   return {
     id,
@@ -371,6 +521,12 @@ function coerceKnown(raw: string, key: string, type: KnownType): unknown {
   if (type === 'boolean') return parseBoolean(raw, key)
   if (type === 'number') return parseNumber(raw, key)
   if (type === 'string') return raw
+  if (type === 'path') {
+    if (raw.length === 0 || !isAbsolute(raw) || raw.includes('\0') || resolve(raw) !== raw) {
+      fail(`${key} expects a canonical absolute path, got ${JSON.stringify(raw)}`)
+    }
+    return raw
+  }
   if (!type.includes(raw)) fail(`${key} must be one of ${type.join(', ')}`)
   return raw
 }
@@ -417,6 +573,63 @@ function larkPlaceholder(effective: YAMLMap): boolean {
   const tenant = effective.get('tenant')
   const appId = effective.get('appId')
   return tenant === 'replace-with-tenant-key' || appId === 'cli_0000000000000000'
+}
+
+function nonEmptyText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isValidDreamingPath(node: unknown): boolean {
+  if (isScalar(node) && isJsScalar(node) && typeof node.value === 'string') {
+    return /^dshHomePath\(['"]([^'"\n]+)['"]\)$/u.test(node.value)
+  }
+  const value = nodeValue(node)
+  return typeof value === 'string' && value.length > 0 && isAbsolute(value) && !value.includes('\0') && resolve(value) === value
+}
+
+function assertDreamingEnableAllowed(effective: YAMLMap): void {
+  if (effective.get('retired') === true) {
+    fail('assistant-dreaming.retired is true; set retired=false before enabling dreaming')
+  }
+  const missing: string[] = []
+  const scope = effective.get('scope', true)
+  if (!isMap(scope)) {
+    missing.push('scope.{workspace,preset,principalId,ownerRouteId}')
+  } else {
+    const workspace = scope.get('workspace')
+    if (typeof workspace !== 'string' || !isAbsolute(workspace) || resolve(workspace) !== workspace) missing.push('scope.workspace')
+    for (const field of ['preset', 'principalId', 'ownerRouteId'] as const) {
+      if (!nonEmptyText(scope.get(field))) missing.push(`scope.${field}`)
+    }
+  }
+  if (!isValidDreamingPath(effective.get('databasePath', true))) missing.push('databasePath')
+  if (!nonEmptyText(effective.get('provider'))) missing.push('provider')
+  if (!nonEmptyText(effective.get('model'))) missing.push('model')
+  if (!nonEmptyText(effective.get('budgetId'))) missing.push('budgetId')
+  const budgetAmount = effective.get('budgetAmount')
+  if (typeof budgetAmount !== 'number' || !Number.isSafeInteger(budgetAmount) || budgetAmount < 1) missing.push('budgetAmount')
+  if (missing.length > 0) {
+    fail(`assistant-dreaming requires explicit owner scope, $DSH_HOME databasePath, provider/model and finite budget before enabling (missing: ${missing.join(', ')})`)
+  }
+}
+
+function sqliteStateExists(databasePath: string, companion = false): boolean {
+  const candidates = companion ? [databasePath, `${databasePath}.preparations`] : [databasePath]
+  return candidates.some(base => [base, `${base}-journal`, `${base}-wal`, `${base}-shm`].some(file => {
+    try {
+      lstatSync(file)
+      return true
+    } catch (error: unknown) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false
+      return true
+    }
+  }))
+}
+
+function patchHasConfigKey(patch: LoadedPatch, id: string, key: string): boolean {
+  const row = profileRows(patch.sequence, id).at(-1)
+  const config = row?.get('config', true)
+  return isMap(config) && config.getIn(splitKey(key), true) !== undefined
 }
 
 interface PendingEdit {
@@ -527,7 +740,14 @@ export async function setPluginEnabled(
     changes.push({ id, key: 'disabled', from: !wasLoaded, to: !target.enabled })
   }
   const gate = effective.get('enabled')
-  if (typeof gate === 'boolean' && gate !== target.enabled && !protectedRows.has(id)) {
+  const shouldSetDreamingEnabled = id === 'dsh-enhanced-assistant-dreaming' && (target.enabled || gate === true)
+  if (id === 'dsh-enhanced-assistant-dreaming') {
+    if (target.enabled) assertDreamingEnableAllowed(effective)
+    else if (effective.get('retired') === true) {
+      fail('assistant-dreaming.retired is true; set retired=false before disabling dreaming')
+    }
+  }
+  if ((typeof gate === 'boolean' || shouldSetDreamingEnabled) && gate !== target.enabled && !protectedRows.has(id)) {
     if (target.enabled && id === 'dsh-enhanced-assistant-work-items' && effective.get('mode') === 'active'
       && (effective.get('workerAutomationId') === undefined || effective.get('scope') === undefined)) {
       fail('assistant-work-items mode: active needs workerAutomationId and scope; set mode observe first or complete the active config')
@@ -553,6 +773,15 @@ export async function setPluginConfigValue(
   const parent = segments.length > 1 ? effective.getIn(segments.slice(0, -1), true) : effective
   if (parent !== undefined && !isMap(parent)) fail(`${segments.slice(0, -1).join('.')} is not a mapping`)
   const value = coerceConfigValue(id, target.key, target.value, current, target.force === true)
+  if (id === 'dsh-enhanced-assistant-dreaming') {
+    if (target.key === 'enabled' && value === true) assertDreamingEnableAllowed(effective)
+    if (target.key === 'enabled' && value === false && effective.get('retired') === true) {
+      fail('assistant-dreaming.retired is true; set retired=false before setting enabled=false')
+    }
+    if (target.key === 'retired' && value === true && effective.get('enabled') !== true) {
+      fail('assistant-dreaming.retired requires enabled=true; configure and enable dreaming before retiring it')
+    }
+  }
   const from = nodeValue(current)
   const patch = await loadProfilePatch(target.dshHome, installed.profile)
   const changes: PluginChange[] = []
@@ -597,18 +826,31 @@ export interface PresetRequirement {
   key: string
   /** Exact value the existing setting must have. Absent means presence only. */
   equals?: boolean | string
+  /** Allow an absent key while still rejecting an invalid present value. */
+  optional?: boolean
   /** The existing value must be a non-empty array. */
   nonEmptyArray?: boolean
   /** Extra structural check on the existing value. */
-  validate?: (value: unknown) => boolean
+  validate?: (value: unknown, dshHome: string) => boolean
   /** Shown as the skip reason when this requirement is not met. */
   reason: string
+}
+
+export interface PresetResolveContext {
+  dshHome: string
+  profile: string
+  effective: YAMLMap
+  patch: LoadedPatch
 }
 
 export interface PresetItem {
   id: string
   purpose: string
   set: ReadonlyArray<readonly [key: string, value: boolean | string]>
+  /** Skip silently when the plugin is not installed (used for path-scoping helpers). */
+  whenInstalled?: boolean
+  /** Dynamically resolve key/value updates for installed rows (e.g. $DSH_HOME DB scoping). */
+  resolveSet?: (context: PresetResolveContext) => ReadonlyArray<readonly [key: string, value: unknown]> | { skip: string }
   /** Only applied when every requirement is already configured; never generated here. */
   requires?: readonly PresetRequirement[]
   /** Reported as skipped with this reason instead of guessing an ambiguous value. */
@@ -618,6 +860,67 @@ export interface PresetItem {
 /** Work-item intake evaluation levels; mirrors the work-items INTAKE_EVALUATION_LEVELS enum. */
 const intakeEvaluationCeilings: ReadonlySet<string> = new Set(['ignore', 'digest', 'notify', 'accept'])
 const intakeRuleIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+
+function scopedDatabaseResolver(options: {
+  id: string
+  subdir: string
+  publishedDefault: string
+  companion?: boolean
+  setWhenMissing?: boolean
+}): NonNullable<PresetItem['resolveSet']> {
+  return ({ dshHome, profile, effective, patch }) => {
+    const current = effective.get('databasePath', true)
+    const targetPath = join(dshHome, options.subdir, `${profile}.sqlite`)
+    if (patchHasConfigKey(patch, options.id, 'databasePath')) return []
+    if (current === undefined) return options.setWhenMissing ? [['databasePath', targetPath]] : []
+    const currentValue = nodeValue(current)
+    if (currentValue !== options.publishedDefault) return []
+    if (normalize(options.publishedDefault) === normalize(targetPath)) return []
+    if (sqliteStateExists(options.publishedDefault, options.companion)) {
+      return {
+        skip: `${options.subdir} published default ${options.publishedDefault} contains existing state; perform an offline migration to ${targetPath} before switching`,
+      }
+    }
+    return [['databasePath', targetPath]]
+  }
+}
+
+function positiveInteger(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+function canonicalAbsolutePath(value: unknown): boolean {
+  if (typeof value === 'string') {
+    if (value.startsWith('!!js ')) return /^!!js dshHomePath\(['"]([^'"\n]+)['"]\)$/u.test(value)
+    return value.length > 0 && isAbsolute(value) && !value.includes('\0') && resolve(value) === value
+  }
+  return false
+}
+
+const dreamingAuthorization: readonly PresetRequirement[] = [
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'retired', optional: true, validate: value => value !== true,
+    reason: 'assistant-dreaming.retired is true; clear retired before enabling dreaming' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.workspace', validate: canonicalAbsolutePath,
+    reason: 'assistant-dreaming.scope.workspace is missing; dreaming requires an explicit canonical owner workspace' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.preset', validate: nonEmptyText,
+    reason: 'assistant-dreaming.scope.preset is missing; dreaming requires an explicit owner preset' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.principalId', validate: nonEmptyText,
+    reason: 'assistant-dreaming.scope.principalId is missing; dreaming requires an explicit owner principalId' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'scope.ownerRouteId', validate: nonEmptyText,
+    reason: 'assistant-dreaming.scope.ownerRouteId is missing; dreaming requires an explicit ownerRouteId' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'databasePath',
+    validate: (value, dshHome) => canonicalAbsolutePath(value)
+      && (value !== join(homedir(), '.dsh', 'assistant-dreaming.sqlite') || normalize(resolve(dshHome)) === normalize(resolve(join(homedir(), '.dsh')))),
+    reason: 'assistant-dreaming.databasePath is missing or points outside $DSH_HOME; dreaming requires an explicit $DSH_HOME-scoped databasePath' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'provider', validate: nonEmptyText,
+    reason: 'assistant-dreaming.provider is missing; the preset never guesses a dreaming model route' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'model', validate: nonEmptyText,
+    reason: 'assistant-dreaming.model is missing; the preset never guesses a dreaming model route' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'budgetId', validate: nonEmptyText,
+    reason: 'assistant-dreaming.budgetId is missing; dreaming requires an explicit finite Policy budget' },
+  { plugin: 'dsh-enhanced-assistant-dreaming', key: 'budgetAmount', validate: positiveInteger,
+    reason: 'assistant-dreaming.budgetAmount is missing; dreaming requires an explicit finite Policy budget amount' },
+]
 
 /** Refuse to enable a producer whose declared rules could not pass the work-items intake contract. */
 function validIntakeEvaluationRules(value: unknown): boolean {
@@ -668,9 +971,50 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-proactive',
+    purpose: 'scope assistant-proactive databasePath to $DSH_HOME instead of leaking to global ~/.dsh',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-proactive',
+      subdir: 'assistant-proactive',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-proactive.sqlite'),
+      companion: true,
+    }),
+  },
+  {
+    id: 'dsh-enhanced-assistant-goals',
+    purpose: 'scope assistant-goals databasePath to $DSH_HOME instead of leaking to global ~/.dsh',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-goals',
+      subdir: 'assistant-goals',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-goals.sqlite'),
+    }),
+  },
+  {
+    id: 'dsh-enhanced-assistant-dreaming',
+    purpose: 'scope assistant-dreaming databasePath to $DSH_HOME while keeping dreaming dormant until explicit scope, model and budget are provided',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-dreaming',
+      subdir: 'assistant-dreaming',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-dreaming.sqlite'),
+      setWhenMissing: true,
+    }),
+  },
+  {
+    id: 'dsh-enhanced-assistant-proactive',
     purpose: 'register the production intake evaluator in observe-only mode using the provider, model and rule ceilings already declared by the owner (WS1)',
     requires: intakeEvaluationAuthorization,
     set: [['intakeEvaluation.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-dreaming',
+    purpose: 'enable bounded idle dreaming only when owner scope, $DSH_HOME databasePath, model route and finite budget are explicitly declared',
+    requires: dreamingAuthorization,
+    set: [['enabled', true]],
   },
   {
     id: 'dsh-enhanced-assistant-delivery',
@@ -726,16 +1070,16 @@ function addPresetSkip(skipped: PluginSkip[], id: string, reason: string): void 
 }
 
 /** Undefined when the requirement is already satisfied; otherwise the owner-facing reason. */
-function unmetRequirement(requirement: PresetRequirement, installed: InstalledPlugins): string | undefined {
+function unmetRequirement(requirement: PresetRequirement, installed: InstalledPlugins, dshHome: string): string | undefined {
   const id = resolvePluginId(requirement.plugin, installed.rows.keys())
   if (id === undefined) return `${requirement.plugin} is not installed`
   const row = installed.rows.get(id)!
   if (row.get('disabled') === true) return `${requirement.plugin} is disabled in this profile`
   const value = nodeValue(rowConfig(row).getIn(splitKey(requirement.key), true))
-  if (value === undefined) return requirement.reason
+  if (value === undefined) return requirement.optional ? undefined : requirement.reason
   if (requirement.equals !== undefined && !sameValue(value, requirement.equals)) return requirement.reason
   if (requirement.nonEmptyArray === true && (!Array.isArray(value) || value.length === 0)) return requirement.reason
-  if (requirement.validate !== undefined && !requirement.validate(value)) return requirement.reason
+  if (requirement.validate !== undefined && !requirement.validate(value, dshHome)) return requirement.reason
   return undefined
 }
 
@@ -766,8 +1110,14 @@ export async function applyPluginPreset(
   const verify: PendingEdit[] = []
   for (const item of preset) {
     const row = installed.rows.get(item.id)
-    if (row === undefined) { addPresetSkip(skipped, item.id, 'not installed'); continue }
-    if (row.get('disabled') === true) { addPresetSkip(skipped, item.id, 'plugin is disabled in this profile; enable it first'); continue }
+    if (row === undefined) {
+      if (!item.whenInstalled) addPresetSkip(skipped, item.id, 'not installed')
+      continue
+    }
+    if (row.get('disabled') === true) {
+      if (!item.whenInstalled) addPresetSkip(skipped, item.id, 'plugin is disabled in this profile; enable it first')
+      continue
+    }
     const effective = rowConfig(row)
     if (item.id === 'dsh-enhanced-assistant-work-items' && effective.get('mode') === 'active' && effective.get('enabled') !== true) {
       addPresetSkip(skipped, item.id, 'mode is active but not enabled; complete the active config deliberately')
@@ -775,16 +1125,24 @@ export async function applyPluginPreset(
     }
     if (item.manual !== undefined) { addPresetSkip(skipped, item.id, item.manual); continue }
     const unmet = [...new Set((item.requires ?? [])
-      .map(requirement => unmetRequirement(requirement, installed))
+      .map(requirement => unmetRequirement(requirement, installed, target.dshHome))
       .filter((reason): reason is string => reason !== undefined))]
     if (unmet.length > 0) { addPresetSkip(skipped, item.id, `waiting for explicit configuration: ${unmet.join('; ')}`); continue }
-    for (const [key, value] of item.set) {
+    const dynamic = item.resolveSet?.({ dshHome: target.dshHome, profile: installed.profile, effective, patch })
+    if (dynamic !== undefined && 'skip' in dynamic) {
+      addPresetSkip(skipped, item.id, dynamic.skip)
+      continue
+    }
+    const entries: ReadonlyArray<readonly [string, unknown]> = [...item.set, ...(dynamic ?? [])]
+    for (const [key, value] of entries) {
       const segments = splitKey(key)
       const parent = segments.length > 1 ? effective.getIn(segments.slice(0, -1), true) : effective
       if (parent !== undefined && !isMap(parent)) { addPresetSkip(skipped, item.id, `${key} parent is not a mapping`); continue }
       const from = nodeValue(effective.getIn(segments, true))
       if (sameValue(from, value)) continue
       profileRowConfig(patch, item.id, effective).setIn(segments, value)
+      if (!isMap(row.get('config', true))) row.set('config', effective)
+      effective.setIn(segments, value)
       changes.push({ id: item.id, key, from, to: value })
       verify.push({ id: item.id, segments, value })
     }
@@ -874,6 +1232,8 @@ export function pluginSetupUsage(): string {
     '                                 the value is checked against the current type; prompts if omitted',
     '  unset <plugin> <key>           drop one key from the profile override (plugin default applies)',
     '  preset [recommended]           turn on the recommended opt-in features of installed plugins;',
+    '                                 scopes profile DBs under $DSH_HOME and keeps assistant-dreaming',
+    '                                 dormant unless owner scope/model/budget are explicitly provided;',
     '                                 owner-generated routes, rules, pins and keys are never guessed',
     '',
     'Options:',
@@ -938,6 +1298,19 @@ function formatWrite(result: PluginWriteResult): string {
   return `${lines.join('\n')}\n`
 }
 
+function formatKnownTypeHint(type: KnownType): string {
+  if (typeof type !== 'string') return type.join('|')
+  if (type === 'path') return 'absolute path under $DSH_HOME'
+  return type
+}
+
+function formatKnownKeysHint(pluginId: string): string | undefined {
+  const keys = knownOptionalKeys.get(pluginId)
+  if (!keys || keys.size === 0) return undefined
+  const formatted = [...keys.entries()].map(([key, type]) => `${key} (${formatKnownTypeHint(type)})`)
+  return `  Documented keys: ${formatted.join(', ')}\n`
+}
+
 async function guided(args: PluginSetupArgs, io: PluginSetupIo, options: PluginSetupOptions): Promise<void> {
   const ask = io.ask!
   const target = { dshHome: args.dshHome, ...(args.profile !== undefined ? { profile: args.profile } : {}) }
@@ -961,13 +1334,20 @@ async function guided(args: PluginSetupArgs, io: PluginSetupIo, options: PluginS
     try {
       const shown = await showProfilePlugin({ ...target, profile: listed.profile, plugin }, options)
       io.write(`\n${shown.summary.id}:\n${shown.config.replace(/^/gmu, '  ')}\n`)
+      const keysHint = formatKnownKeysHint(shown.summary.id)
+      if (keysHint !== undefined) io.write(keysHint)
+      if (shown.summary.id === 'dsh-enhanced-assistant-dreaming') {
+        io.write('  Note: enabling assistant-dreaming requires explicit scope, $DSH_HOME databasePath, provider, model, budgetId and budgetAmount.\n')
+      }
       const action = (await ask('[e]nable, [d]isable, [s]et key, [u]nset key, [b]ack: ')).toLowerCase()
       let result: PluginWriteResult | undefined
       if (action === 'e' || action === 'd') {
         result = await setPluginEnabled({ ...target, profile: listed.profile, plugin, enabled: action === 'e' }, options)
       } else if (action === 's') {
         const key = await ask('Key (dotted): ')
-        const value = await ask(`Value for ${key}: `)
+        const expected = knownOptionalKeys.get(shown.summary.id)?.get(key)
+        const prompt = expected === undefined ? `Value for ${key}: ` : `Value for ${key} (${formatKnownTypeHint(expected)}): `
+        const value = await ask(prompt)
         result = await setPluginConfigValue({ ...target, profile: listed.profile, plugin, key, value, force: args.force }, options)
       } else if (action === 'u') {
         result = await unsetPluginConfigValue({ ...target, profile: listed.profile, plugin, key: await ask('Key (dotted): ') }, options)

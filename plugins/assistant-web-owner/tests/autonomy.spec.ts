@@ -271,4 +271,35 @@ describe('prepareAutonomyProfile', () => {
     expect(() => validateAutonomyOptions({ ...finite, maxTotalDurationMs: 1 })).toThrow(/maxTotalDurationMs/)
     expect(() => validateAutonomyOptions({ ...finite, backend: 'linux-native', source: { kind: 'local-head', repository: 'relative' } })).toThrow(/canonical absolute path/)
   })
+
+  it('scopes optional goals, dreaming, memory-learning and growth usage DBs under canonical DSH_HOME and skips disabled rows', () => {
+    const extraRows = rows() + [
+      `- id: dsh-enhanced-assistant-goals`,
+      `  name: '@dsh-enhanced/assistant-goals'`,
+      `  config:`,
+      `    databasePath: ${join(publishedUserHome, '.dsh', 'assistant-goals.sqlite')}`,
+      `- id: dsh-enhanced-assistant-dreaming`,
+      `  name: '@dsh-enhanced/assistant-dreaming'`,
+      `  config: {}`,
+      `- id: dsh-enhanced-assistant-memory-learning`,
+      `  name: '@dsh-enhanced/assistant-memory-learning'`,
+      `  disabled: true`,
+      `  config: {}`,
+      `- id: dsh-enhanced-assistant-growth-driver`,
+      `  name: '@dsh-enhanced/assistant-growth-driver'`,
+      `  config:`,
+      `    usageLearning:`,
+      `      enabled: true`,
+      `      databasePath: ${join(publishedUserHome, '.dsh', 'assistant-growth-driver.sqlite')}`,
+      '',
+    ].join('\n')
+    const patch = prepareAutonomyProfile(input, '[]', extraRows, owner, 1_000)
+    expect(config(patch, 'dsh-enhanced-assistant-goals').databasePath).toBe('/dsh-autonomy-fixture/home/assistant-goals/web.sqlite')
+    expect(config(patch, 'dsh-enhanced-assistant-dreaming')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-dreaming/web.sqlite' })
+    expect(object(patch).some(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
+    expect((config(patch, 'dsh-enhanced-assistant-growth-driver').usageLearning as Record<string, unknown>).databasePath)
+      .toBe('/dsh-autonomy-fixture/home/assistant-growth-driver/web-usage.sqlite')
+    const escaped = extraRows.replace(join(publishedUserHome, '.dsh', 'assistant-goals.sqlite'), '/outside/goals.sqlite')
+    expect(() => prepareAutonomyProfile(input, '[]', escaped, owner, 1_000)).toThrow(/Goals databasePath must be within DSH_HOME/)
+  })
 })

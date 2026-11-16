@@ -25,6 +25,8 @@ Verifier 也是可选 provider，Health 通过动态 `assistantVerifier.health()
 
 Goals 同样通过动态 `assistantGoals.health()` seam 接入，且只接受扁平、低基数的当前能力指标：上下文是否就绪、受验证执行是否启用且连到 Verifier、目标结果验收是否连通、预算 meter/在途调用，以及 durable wake 是否连到 Automations 和其 reconciliation/观察失败计数。Health 不引入 Goals 的运行时依赖，也不输出 owner、目标正文、路由或数据库信息。已安装但仅有 context 的 Goals 会报告 `execution-disabled`，因此不会被当作自治执行就绪；预算或 wake 未启用本身不是故障。已启用的执行缺 Verifier、outcome 未连、无 budget meter、wake 未连或 reconciliation/观察失败会产生对应的 degraded 诊断。Goals 仍是可选 provider；旧安装缺少它不会影响 core readiness。
 
+Health 亦可选聚合并规范化以下自治子系统的低基数健康投影（全部通过 Cordis 动态服务名读取，绝不引入运行时包依赖，也不透出数据库路径、原始错误串、任务正文或 owner 身份）：`assistantDreaming`（`enabled`、`scheduler` 状态与 `runs/ideas/recorded` 计数）、`assistantProactive`（兼容 `.health()` 与 `.intakeEvaluationHealth()`，投影 `enabled/registered/readiness/consecutiveFailures/callsInWindow/budgetExhausted/hasError`）、`assistantGrowthDriver`（组合 `health()` 与 `usageHealth()` 的 wake 结果与使用学习连接/异常计数）、`assistantMemoryLearning`（提取连接、可用性、错误标志与队列/采纳计数；runtime 未挂载抛错时 fail-closed 为 `error`）以及 `assistantWorkItems`（`enabled/mode/openItems/dispatchUnknown/workerConnected/ownerRouteValid`、follow/settlement/evaluation/schedulerWake 降级标志、人工介入提示与可选 intake 评估状态）。
+
 Delivery v9 的死信与 unknown 状态按 `actionable*` 指标判断；已经写入不可变 operator resolution
 receipt 的 terminal 历史仍可审计，但不会永久污染健康。滚动升级期间若 Delivery 尚未提供这些新
 指标，Health 会保守回退到原始 terminal 计数。Delivery v10 还原子投影

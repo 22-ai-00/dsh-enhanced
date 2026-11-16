@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import { lstatSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { isDeepStrictEqual, promisify } from 'node:util'
+import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, YAMLMap, type YAMLSeq } from 'yaml'
 import { literalAutonomyLinux, validateAutonomyLinuxPaths, type AutonomyLinuxConfig } from './autonomy.js'
+import { dumpEffectiveProfile, globalDshDatabasePath, withinDshHome } from './host-dsh.js'
 import type { IsolationGrant } from '@dsh-enhanced/assistant-isolation'
 
 interface AutonomyDoctorBase {
@@ -196,8 +196,8 @@ function readinessPlain(node: unknown): unknown {
   return node
 }
 
-/** Read one dotted config value without evaluating tagged expressions. */
-function readinessValue(rows: YAMLSeq, slug: string, key: string): unknown {
+/** Read the raw YAML node at one dotted config key without evaluating tags. */
+function readinessNode(rows: YAMLSeq, slug: string, key: string): unknown {
   const config = readinessConfig(rows, slug)
   if (config === undefined) return undefined
   let node: unknown = config
@@ -205,7 +205,49 @@ function readinessValue(rows: YAMLSeq, slug: string, key: string): unknown {
     if (!isMap(node)) return undefined
     node = node.get(segment, true)
   }
-  return readinessPlain(node)
+  return node
+}
+
+/** Read one dotted config value without evaluating tagged expressions. */
+function readinessValue(rows: YAMLSeq, slug: string, key: string): unknown {
+  return readinessPlain(readinessNode(rows, slug, key))
+}
+
+function inspectDatabasePathScope(
+  rows: YAMLSeq,
+  slug: string,
+  key: string,
+  globalSlug: string,
+  dshHome?: string,
+): { configured: boolean; scoped: boolean; issue?: 'invalid' | 'global-default' | 'outside-home' } {
+  const node = readinessNode(rows, slug, key)
+  if (node === undefined) return { configured: false, scoped: true }
+  if (!isScalar(node) || typeof node.value !== 'string') return { configured: true, scoped: false, issue: 'invalid' }
+  let resolved = node.value
+  if (node.tag === 'tag:yaml.org,2002:js') {
+    const match = /^dshHomePath\(['"]([^'"\n]+)['"]\)$/u.exec(resolved)
+    if (match === null || isAbsolute(match[1]!) || match[1]!.split('/').includes('..')) {
+      return { configured: true, scoped: false, issue: 'invalid' }
+    }
+    if (dshHome === undefined) return { configured: true, scoped: true }
+    resolved = join(dshHome, match[1]!)
+  } else if (node.tag !== undefined && node.tag !== 'tag:yaml.org,2002:str') {
+    return { configured: true, scoped: false, issue: 'invalid' }
+  } else {
+    if (!isAbsolute(resolved) || resolved.includes('\0') || resolved.includes('*')) {
+      return { configured: true, scoped: false, issue: 'invalid' }
+    }
+    if (normalize(resolved) === normalize(globalDshDatabasePath(globalSlug))) {
+      return { configured: true, scoped: false, issue: 'global-default' }
+    }
+  }
+  if (dshHome === undefined) return { configured: true, scoped: true }
+  try {
+    withinDshHome(resolved, dshHome, slug, fail)
+    return { configured: true, scoped: true }
+  } catch {
+    return { configured: true, scoped: false, issue: 'outside-home' }
+  }
 }
 
 function validIntakeEvaluationRules(value: unknown): boolean {
@@ -232,7 +274,7 @@ function routeText(value: unknown): string | null {
  * `not-ready` with a reason; this function never throws for an incomplete
  * assembly, so a doctor run degrades into a snapshot instead of a crash.
  */
-export function inspectAutonomyReadiness(source: string, profile: string): AutonomyReadinessReport {
+export function inspectAutonomyReadiness(source: string, profile: string, dshHome?: string): AutonomyReadinessReport {
   const runtime = { observed: false as const,
     note: 'static composed profile only; runtime registration, model calls, external delivery and Policy readiness are not observed' }
   const rows = readinessRows(source)
@@ -422,6 +464,154 @@ export function inspectAutonomyReadiness(source: string, profile: string): Auton
     details: { toolPresentation: typeof toolPresentation === 'string' ? toolPresentation : 'native' },
   })
 
+  // Optional ring: assistant-dreaming fail-closed config & $DSH_HOME DB scoping.
+  const dreamingLoaded = readinessLoaded(rows, 'assistant-dreaming')
+  const dreamingEnabled = readinessValue(rows, 'assistant-dreaming', 'enabled') === true
+  const dreamingRetired = readinessValue(rows, 'assistant-dreaming', 'retired') === true
+  const dreamingDbScope = dreamingLoaded === true
+    ? inspectDatabasePathScope(rows, 'assistant-dreaming', 'databasePath', 'assistant-dreaming', dshHome)
+    : { configured: false, scoped: true }
+  const dreamingScope = readinessValue(rows, 'assistant-dreaming', 'scope') as Record<string, unknown> | undefined
+  const dreamingScopeValid = dreamingScope !== null && typeof dreamingScope === 'object' && !Array.isArray(dreamingScope)
+    && typeof dreamingScope.workspace === 'string' && isAbsolute(dreamingScope.workspace)
+    && routeText(dreamingScope.preset) !== null && routeText(dreamingScope.principalId) !== null && routeText(dreamingScope.ownerRouteId) !== null
+  const dreamingModelValid = routeText(readinessValue(rows, 'assistant-dreaming', 'provider')) !== null
+    && routeText(readinessValue(rows, 'assistant-dreaming', 'model')) !== null
+  const dreamingBudgetAmount = readinessValue(rows, 'assistant-dreaming', 'budgetAmount')
+  const dreamingBudgetValid = routeText(readinessValue(rows, 'assistant-dreaming', 'budgetId')) !== null
+    && typeof dreamingBudgetAmount === 'number' && Number.isSafeInteger(dreamingBudgetAmount) && dreamingBudgetAmount >= 1
+  const dreamingReasons: AutonomyReadinessReason[] = []
+  if (dreamingLoaded === true) {
+    if (!dreamingDbScope.scoped) {
+      dreamingReasons.push({
+        code: 'dreaming-database-not-scoped',
+        message: 'assistant-dreaming.databasePath must be $DSH_HOME-scoped rather than global ~/.dsh',
+      })
+    }
+    if (dreamingEnabled) {
+      if (dreamingRetired) dreamingReasons.push({ code: 'dreaming-retired-while-enabled', message: 'assistant-dreaming.retired is true while enabled=true' })
+      if (!dreamingScopeValid) dreamingReasons.push({ code: 'dreaming-scope-missing', message: 'assistant-dreaming requires explicit scope.{workspace,preset,principalId,ownerRouteId}' })
+      if (!dreamingDbScope.configured) dreamingReasons.push({ code: 'dreaming-database-missing', message: 'assistant-dreaming requires an explicit $DSH_HOME-scoped databasePath' })
+      if (!dreamingModelValid) dreamingReasons.push({ code: 'dreaming-model-missing', message: 'assistant-dreaming requires explicit provider and model' })
+      if (!dreamingBudgetValid) dreamingReasons.push({ code: 'dreaming-budget-missing', message: 'assistant-dreaming requires explicit budgetId and positive integer budgetAmount' })
+    }
+  }
+  checks.push({
+    id: 'dreaming', required: false,
+    status: dreamingReasons.length === 0 ? 'ready' : 'not-ready',
+    summary: dreamingReasons.length > 0
+      ? 'assistant-dreaming has incomplete or un-scoped configuration'
+      : dreamingLoaded === undefined
+        ? 'assistant-dreaming is not installed (optional)'
+        : dreamingLoaded === false
+          ? 'assistant-dreaming is disabled in this profile'
+          : dreamingEnabled
+            ? 'assistant-dreaming is enabled with explicit owner scope, $DSH_HOME databasePath, model route and finite budget'
+            : 'assistant-dreaming is dormant (enabled=false)',
+    reasons: dreamingReasons,
+    details: {
+      installed: dreamingLoaded !== undefined,
+      loaded: dreamingLoaded === true,
+      enabled: dreamingEnabled,
+      retired: dreamingRetired,
+      databaseConfigured: dreamingDbScope.configured,
+      databaseScoped: dreamingDbScope.scoped,
+      scopeConfigured: dreamingScopeValid,
+      modelConfigured: dreamingModelValid,
+      budgetConfigured: dreamingBudgetValid,
+      notifyOwner: readinessValue(rows, 'assistant-dreaming', 'notifyOwner') === true,
+    },
+  })
+
+  // Optional ring: assistant-proactive opportunities & assistant-goals DB scoping and readiness.
+  const proactiveActive = proactiveLoaded === true
+  const proactiveDbScope = proactiveActive
+    ? inspectDatabasePathScope(rows, 'assistant-proactive', 'databasePath', 'assistant-proactive', dshHome)
+    : { configured: false, scoped: true }
+  const proactiveProfilesRaw = readinessValue(rows, 'assistant-proactive', 'profiles')
+  const proactiveProfiles = Array.isArray(proactiveProfilesRaw) ? proactiveProfilesRaw : []
+  const invalidPreparedProfile = proactiveProfiles.some(entry => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return true
+    const prep = (entry as Record<string, unknown>).preparation as Record<string, unknown> | undefined
+    if (prep === undefined) return false
+    return routeText(prep.provider) === null || routeText(prep.model) === null || routeText(prep.budgetId) === null
+  })
+  const goalsLoaded = readinessLoaded(rows, 'assistant-goals') === true
+  const goalsDbScope = goalsLoaded
+    ? inspectDatabasePathScope(rows, 'assistant-goals', 'databasePath', 'assistant-goals', dshHome)
+    : { configured: false, scoped: true }
+  const proactiveGoalsReasons: AutonomyReadinessReason[] = []
+  if (proactiveActive && !proactiveDbScope.scoped) {
+    proactiveGoalsReasons.push({ code: 'proactive-database-not-scoped', message: 'assistant-proactive.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  }
+  if (proactiveActive && invalidPreparedProfile) {
+    proactiveGoalsReasons.push({ code: 'proactive-profile-preparation-invalid', message: 'one or more assistant-proactive profiles omit preparation provider, model or budgetId' })
+  }
+  if (goalsLoaded && !goalsDbScope.scoped) {
+    proactiveGoalsReasons.push({ code: 'goals-database-not-scoped', message: 'assistant-goals.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  }
+  checks.push({
+    id: 'proactive-opportunities', required: false,
+    status: proactiveGoalsReasons.length === 0 ? 'ready' : 'not-ready',
+    summary: proactiveGoalsReasons.length === 0
+      ? `proactive profiles (${proactiveProfiles.length}) and goals DB scoping ready`
+      : 'proactive/goals state scoping or profile preparation is incomplete',
+    reasons: proactiveGoalsReasons,
+    details: {
+      proactiveLoaded: proactiveActive,
+      proactiveDatabaseConfigured: proactiveDbScope.configured,
+      proactiveDatabaseScoped: proactiveDbScope.scoped,
+      proactiveProfileCount: proactiveProfiles.length,
+      intakeEvaluationEnabled: readinessValue(rows, 'assistant-proactive', 'intakeEvaluation.enabled') === true,
+      goalsLoaded,
+      goalsDatabaseConfigured: goalsDbScope.configured,
+      goalsDatabaseScoped: goalsDbScope.scoped,
+      goalsEventWaits: readinessValue(rows, 'assistant-goals', 'eventWaits') === true,
+      goalsVerifyNativeRounds: readinessValue(rows, 'assistant-goals', 'verifyNativeRounds') === true,
+      goalsVerifyGoalOutcome: readinessValue(rows, 'assistant-goals', 'verifyGoalOutcome') === true,
+      goalsExecutionBudgetConfigured: readinessValue(rows, 'assistant-goals', 'executionBudget') !== undefined,
+    },
+  })
+
+  // Optional ring: DB scoping and extended autonomy flags for work-items, memory-learning, growth-driver and evaluation.
+  const workItemsDbScope = readinessLoaded(rows, 'assistant-work-items') === true
+    ? inspectDatabasePathScope(rows, 'assistant-work-items', 'databasePath', 'assistant-work-items', dshHome)
+    : { configured: false, scoped: true }
+  const memoryDbScope = readinessLoaded(rows, 'assistant-memory-learning') === true
+    ? inspectDatabasePathScope(rows, 'assistant-memory-learning', 'databasePath', 'assistant-memory-learning', dshHome)
+    : { configured: false, scoped: true }
+  const growthUsageDbScope = readinessLoaded(rows, 'assistant-growth-driver') === true
+    ? inspectDatabasePathScope(rows, 'assistant-growth-driver', 'usageLearning.databasePath', 'assistant-growth-driver', dshHome)
+    : { configured: false, scoped: true }
+  const subsystemReasons: AutonomyReadinessReason[] = []
+  if (!workItemsDbScope.scoped) subsystemReasons.push({ code: 'work-items-database-not-scoped', message: 'assistant-work-items.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  if (!memoryDbScope.scoped) subsystemReasons.push({ code: 'memory-learning-database-not-scoped', message: 'assistant-memory-learning.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  if (!growthUsageDbScope.scoped) subsystemReasons.push({ code: 'growth-usage-database-not-scoped', message: 'assistant-growth-driver.usageLearning.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  checks.push({
+    id: 'autonomy-subsystems', required: false,
+    status: subsystemReasons.length === 0 ? 'ready' : 'not-ready',
+    summary: subsystemReasons.length === 0
+      ? 'work-items, memory-learning, growth-driver and evaluation state paths are clean'
+      : 'one or more autonomy subsystem database paths escape $DSH_HOME or point to global ~/.dsh',
+    reasons: subsystemReasons,
+    details: {
+      workItemsAdmitEnabled: readinessValue(rows, 'assistant-work-items', 'intakeLedger.evaluation.admit.enabled') === true,
+      workItemsSettlementEnabled: readinessValue(rows, 'assistant-work-items', 'settlement.enabled') === true,
+      workItemsVerdictGateEnabled: readinessValue(rows, 'assistant-work-items', 'acceptance.verdictGate.enabled') === true,
+      workItemsDatabaseScoped: workItemsDbScope.scoped,
+      memoryLearningDatabaseConfigured: memoryDbScope.configured,
+      memoryLearningDatabaseScoped: memoryDbScope.scoped,
+      growthUsageLearningEnabled: readinessValue(rows, 'assistant-growth-driver', 'usageLearning.enabled') === true,
+      growthUsageDatabaseConfigured: growthUsageDbScope.configured,
+      growthUsageDatabaseScoped: growthUsageDbScope.scoped,
+      growthWorkflowOwnerAnchoredEnabled: readinessValue(rows, 'assistant-growth-driver', 'workflowOwnerAnchored.enabled') === true,
+      growthPluginSourceProposalsEnabled: readinessValue(rows, 'assistant-growth-driver', 'pluginSourceProposals.enabled') === true,
+      evaluationAttentionTuningAutoAdopt: readinessValue(rows, 'assistant-evaluation', 'attentionTuningAutoAdopt') === true,
+      evaluationAttentionLooseningEnabled: readinessValue(rows, 'assistant-evaluation', 'attentionLooseningEnabled') === true,
+      evaluationAttentionOwnerQuestionDeliveryEnabled: readinessValue(rows, 'assistant-evaluation', 'attentionOwnerQuestionDeliveryEnabled') === true,
+    },
+  })
+
   const ready = checks.filter(check => check.required).every(check => check.status === 'ready')
   return { protocol: 'dsh-enhanced/autonomy-readiness/v1', profile, scope: 'ordinary-use-learning', ready, checks, runtime }
 }
@@ -457,10 +647,7 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
     index += 2
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile) || !isAbsolute(dshHome) || normalize(dshHome) !== dshHome || /[\p{Cc}*]/u.test(dshHome)) fail('invalid profile or home')
-  const dump = async () => {
-    try { return (await promisify(execFile)('dsh', ['--profile', profile, '--dump-config'], { env: { ...process.env, DSH_HOME: dshHome }, timeout: 30_000, maxBuffer: 8 * 1024 * 1024 })).stdout }
-    catch { fail('could not compose profile; inspect installed bundles and configuration') }
-  }
+  const dump = () => dumpEffectiveProfile(dshHome, profile, fail, 'could not compose profile; inspect installed bundles and configuration')
   if (readinessOnly) {
     let source: string
     try { source = await dump() } catch (error: unknown) {
@@ -474,7 +661,7 @@ export async function runAutonomyDoctor(argv = process.argv.slice(2)): Promise<v
       process.exitCode = 1
       return
     }
-    const report = inspectAutonomyReadiness(source, profile)
+    const report = inspectAutonomyReadiness(source, profile, dshHome)
     process.stdout.write(formatAutonomyReadiness(report))
     process.stdout.write(`${JSON.stringify(report)}\n`)
     if (!report.ready) process.exitCode = 1

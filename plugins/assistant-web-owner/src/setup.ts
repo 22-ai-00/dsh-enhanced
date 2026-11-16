@@ -1,12 +1,21 @@
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, normalize } from 'node:path'
-import { isDeepStrictEqual, promisify } from 'node:util'
+import { isDeepStrictEqual } from 'node:util'
 import { preflightAutonomyProfile, prepareAutonomyProfile, validateAutonomyOptions, type AutonomySetupOptions, type AutonomyResolvedOptions } from './autonomy.js'
+import {
+  canonicalPath,
+  dumpEffectiveProfile,
+  findExactRow,
+  globalDshDatabasePath,
+  mergeConfigMaps,
+  publishedDatabaseDefault,
+  sqliteStateExists,
+  withinDshHome,
+} from './host-dsh.js'
 import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
-import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap, type YAMLSeq } from 'yaml'
 
 export interface WebOwnerSetupInput {
   dshHome: string
@@ -33,30 +42,41 @@ function parse(source: string, label: string): { document: Document, rows: YAMLS
   if (document.errors.length > 0 || !isSeq(document.contents)) fail(`${label} must be an unambiguous YAML sequence`)
   return { document, rows: document.contents }
 }
-function row(rows: YAMLSeq, slug: typeof slugs[number], required: boolean): YAMLMap | undefined {
-  const id = `dsh-enhanced-${slug}`
-  const name = `@dsh-enhanced/${slug}`
-  const matches = rows.items.filter(item => isMap(item) && (item.get('id') === id || item.get('name') === name)) as YAMLMap[]
-  if (matches.length > 1) fail(`duplicate or shadowed ${id}`)
-  const match = matches[0]
-  if (match === undefined) { if (required) fail(`install ${name} before setup`); return undefined }
-  if (match.get('id') !== id || (match.has('name') && match.get('name') !== name)
-    || (match.has('disabled') && match.get('disabled') !== false)) fail(`invalid or disabled ${id}`)
-  return match
-}
 function map(value: unknown, label: string): YAMLMap {
   if (!isMap(value)) fail(`${label} must be a mapping`)
   return value
 }
-function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
-  const result = map(base.clone(), 'cloned config')
-  for (const pair of overlay.items) {
-    if (!isScalar(pair.key) || typeof pair.key.value !== 'string') fail('config keys must be strings')
-    const inherited = result.get(pair.key.value, true)
-    const value = pair.value as Node | null
-    result.set(pair.key.value, isMap(inherited) && isMap(value) ? merge(inherited, value) : value?.clone() ?? null)
+function scopeConfigDatabasePath(options: {
+  config: YAMLMap
+  explicitConfig: YAMLMap | undefined
+  pathKeys: readonly string[]
+  fallback: string
+  publishedDefault: string
+  label: string
+  companion?: boolean
+  createIfMissing: boolean
+  input: WebOwnerSetupInput
+  document: Document
+}): boolean {
+  const { config, explicitConfig, pathKeys, fallback, publishedDefault, label, companion = false, createIfMissing, input, document } = options
+  const current = config.getIn(pathKeys, true)
+  const explicit = explicitConfig !== undefined && explicitConfig.hasIn(pathKeys)
+  let modified = false
+  const inheritedDefault = !explicit && ((current === undefined && createIfMissing) || publishedDatabaseDefault(current, publishedDefault))
+  if (inheritedDefault) {
+    if (current !== undefined
+      && sqliteStateExists(publishedDefault, companion, fail)
+      && canonicalPath(publishedDefault, label, fail) !== canonicalPath(fallback, label, fail)) {
+      fail(`${label} published default contains existing state; perform an offline migration to ${fallback} before setup`)
+    }
+    config.setIn(pathKeys, document.createNode(fallback))
+    modified = true
   }
-  return result
+  const updated = config.getIn(pathKeys, true)
+  if (updated !== undefined) {
+    withinDshHome(literalPath(updated, input, label), input.dshHome, label, fail)
+  }
+  return modified
 }
 export function literalPath(node: unknown, input: WebOwnerSetupInput, label: string): string {
   if (!isScalar(node) || typeof node.value !== 'string') fail(`${label} must be an absolute path`)
@@ -79,11 +99,14 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
   const target = parse(source, 'profile patch')
   const effective = parse(effectiveSource, 'effective profile')
   const configs = new Map<typeof slugs[number], YAMLMap>()
+  const explicitConfigs = new Map<typeof slugs[number], YAMLMap | undefined>()
   for (const slug of slugs) {
-    const inherited = row(effective.rows, slug, true)!
-    const existing = row(target.rows, slug, false)
+    const inherited = findExactRow(effective.rows, slug, { required: true }, fail)!
+    const existing = findExactRow(target.rows, slug, { required: false }, fail)
+    const existingConfig = existing?.has('config') ? map(existing.get('config', true), slug) : undefined
+    explicitConfigs.set(slug, existingConfig)
     const base = inherited.has('config') ? map(inherited.get('config', true), slug) : target.document.createNode({}) as YAMLMap
-    const config = existing?.has('config') ? merge(base, map(existing.get('config', true), slug)) : map(base.clone(), slug)
+    const config = existingConfig !== undefined ? mergeConfigMaps(base, existingConfig, fail) : map(base.clone(), slug)
     const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${slug}`, name: `@dsh-enhanced/${slug}` }) as YAMLMap
     destination.set('config', config)
     if (existing === undefined) target.rows.add(destination)
@@ -104,18 +127,28 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
   if (!owner.has('maxExecutionMs')) owner.set('maxExecutionMs', 300_000)
   const delivery = configs.get('assistant-delivery')!
   const databasePath = literalPath(delivery.get('databasePath', true), input, 'Delivery databasePath')
-  literalPath(delivery.get('spoolPath', true), input, 'Delivery spoolPath')
+  withinDshHome(databasePath, input.dshHome, 'Delivery databasePath', fail)
+  withinDshHome(literalPath(delivery.get('spoolPath', true), input, 'Delivery spoolPath'), input.dshHome, 'Delivery spoolPath', fail)
   // YAMLMap.set(string) mutates an existing scalar and retains its !!js tag.
   // A selected literal must replace that node, or Loader evaluates /path as JS.
   delivery.set('defaultWorkspace', target.document.createNode(input.workspace))
   delivery.set('defaultAgentPreset', target.document.createNode(input.preset))
   const goals = configs.get('assistant-goals')!
-  if (!goals.has('databasePath')) goals.set('databasePath', join(input.dshHome, 'assistant-goals', `${input.profile}.sqlite`))
-  else literalPath(goals.get('databasePath', true), input, 'Goals databasePath')
+  scopeConfigDatabasePath({
+    config: goals,
+    explicitConfig: explicitConfigs.get('assistant-goals'),
+    pathKeys: ['databasePath'],
+    fallback: join(input.dshHome, 'assistant-goals', `${input.profile}.sqlite`),
+    publishedDefault: globalDshDatabasePath('assistant-goals'),
+    label: 'Goals databasePath',
+    createIfMissing: true,
+    input,
+    document: target.document,
+  })
   const personal = configs.get('personal-assistant')!
   for (const sibling of ['personalMemory', 'personalWiki', 'assistantAutomations']) map(personal.get(sibling, true), sibling)
   const policy = map(personal.get('assistantPolicy', true), 'assistantPolicy')
-  literalPath(policy.get('databasePath', true), input, 'Policy databasePath')
+  withinDshHome(literalPath(policy.get('databasePath', true), input, 'Policy databasePath'), input.dshHome, 'Policy databasePath', fail)
   let rules: unknown = policy.get('rules', true)
   if (rules === undefined || (isScalar(rules) && rules.value === null)) { rules = target.document.createNode([]); policy.set('rules', rules) }
   if (!isSeq(rules)) fail('Policy rules must be a sequence')
@@ -131,6 +164,44 @@ export function prepareWebOwnerProfile(input: WebOwnerSetupInput, source: string
       // Customizations are not silently overwritten, including edited allow/deny rules.
       if (!isDeepStrictEqual(matches[0].toJSON(), rule)) fail(`managed rule ${rule.id} was customized; review it before setup`)
     } else rules.add(target.document.createNode(rule))
+  }
+  const optionalStateRows = [
+    { slug: 'assistant-proactive', pathKeys: ['databasePath'], label: 'Proactive databasePath', subdir: 'assistant-proactive', filename: `${input.profile}.sqlite`, companion: true, createIfMissing: true, publishedSlug: 'assistant-proactive' },
+    { slug: 'assistant-dreaming', pathKeys: ['databasePath'], label: 'Dreaming databasePath', subdir: 'assistant-dreaming', filename: `${input.profile}.sqlite`, companion: false, createIfMissing: true, publishedSlug: 'assistant-dreaming' },
+    { slug: 'assistant-memory-learning', pathKeys: ['databasePath'], label: 'Memory learning databasePath', subdir: 'assistant-memory-learning', filename: `${input.profile}.sqlite`, companion: false, createIfMissing: true, publishedSlug: 'assistant-memory-learning' },
+    { slug: 'assistant-work-items', pathKeys: ['databasePath'], label: 'Work-items databasePath', subdir: 'assistant-work-items', filename: `${input.profile}.sqlite`, companion: false, createIfMissing: true, publishedSlug: 'assistant-work-items' },
+    { slug: 'assistant-growth-driver', pathKeys: ['usageLearning', 'databasePath'], label: 'Growth usage databasePath', subdir: 'assistant-growth-driver', filename: `${input.profile}-usage.sqlite`, companion: false, createIfMissing: false, publishedSlug: 'assistant-growth-driver' },
+  ] as const
+  for (const spec of optionalStateRows) {
+    const inherited = findExactRow(effective.rows, spec.slug, { required: false, allowDisabled: true }, fail)
+    if (inherited === undefined) continue
+    const existing = findExactRow(target.rows, spec.slug, { required: false, allowDisabled: true }, fail)
+    const existingConfig = existing?.has('config') ? map(existing.get('config', true), spec.slug) : undefined
+    const base = inherited.has('config') ? map(inherited.get('config', true), spec.slug) : target.document.createNode({}) as YAMLMap
+    const config = existingConfig !== undefined ? mergeConfigMaps(base, existingConfig, fail) : map(base.clone(), spec.slug)
+    const createMissing = spec.slug === 'assistant-growth-driver'
+      ? spec.createIfMissing || config.getIn(['usageLearning', 'enabled']) === true
+      : spec.createIfMissing
+    const modified = scopeConfigDatabasePath({
+      config,
+      explicitConfig: existingConfig,
+      pathKeys: spec.pathKeys,
+      fallback: join(input.dshHome, spec.subdir, spec.filename),
+      publishedDefault: globalDshDatabasePath(spec.publishedSlug),
+      label: spec.label,
+      companion: spec.companion,
+      createIfMissing: createMissing,
+      input,
+      document: target.document,
+    })
+    if (spec.slug === 'assistant-work-items' && config.has('workRoot')) {
+      withinDshHome(literalPath(config.get('workRoot', true), input, 'Work-items workRoot'), input.dshHome, 'Work-items workRoot', fail)
+    }
+    if (existing !== undefined || modified) {
+      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${spec.slug}`, name: `@dsh-enhanced/${spec.slug}` }) as YAMLMap
+      destination.set('config', config)
+      if (existing === undefined) target.rows.add(destination)
+    }
   }
   return { patch: target.document.toString({ lineWidth: 0 }), databasePath, principal }
 }
@@ -235,12 +306,12 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   if (listGoalSessions && (goalAdmission !== undefined || repairAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, repair admission, or isolation options')
   if (sessionId !== undefined && goalAdmission === undefined) fail('--session-id requires --goal-admission')
   if (repairAdmission !== undefined && (goalAdmission !== undefined || sessionId !== undefined || isolated)) fail('--repair-admission cannot be combined with goal admission, session selection, or isolation options')
-  const readEffectiveSource = async (): Promise<string> => { try {
-    const result = await promisify(execFile)('dsh', ['--profile', input.profile, '--dump-config'], {
-      env: { ...process.env, DSH_HOME: input.dshHome }, timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
-    })
-    return result.stdout
-  } catch { fail('could not read the effective DSH profile; check installed bundles and dsh --dump-config') } }
+  const readEffectiveSource = () => dumpEffectiveProfile(
+    input.dshHome,
+    input.profile,
+    fail,
+    'could not read the effective DSH profile; check installed bundles and dsh --dump-config',
+  )
   const effective = await readEffectiveSource()
   if (listGoalSessions) {
     const { listGoalAdmissionSessions } = await import('./goal-setup.js')
