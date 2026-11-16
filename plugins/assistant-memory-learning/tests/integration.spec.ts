@@ -189,11 +189,12 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
 }
 
 test.each([
-  { timing: 'within one minute', offset: 10_000, scanRuns: 0 },
-  { timing: 'across a minute boundary', offset: 59_800, scanRuns: 1 },
-])('ordinary source flows through native Automations and independent review ledger into later Memory prompt $timing', async ({ offset, scanRuns }) => {
-  const minute = Math.floor(Date.now() / 60_000) * 60_000
-  let now = minute + offset
+  { timing: 'within one minute', unit: 60_000, offset: 10_000, scanRuns: 0 },
+  { timing: 'across a minute boundary without idle cron scan', unit: 60_000, offset: 59_800, scanRuns: 0 },
+  { timing: 'across an hour boundary', unit: 3_600_000, offset: 3_599_800, scanRuns: 1 },
+])('ordinary source flows through native Automations and independent review ledger into later Memory prompt $timing', async ({ unit, offset, scanRuns }) => {
+  const windowStart = Math.floor(Date.now() / unit) * unit
+  let now = windowStart + offset
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture()
   const deliveryWriter = new DatabaseSync(join(f.root, 'delivery.sqlite'))
@@ -249,13 +250,13 @@ test.each(['rejected', 'unknown'] as const)('independent %s review cannot adopt 
   expect(f.reviewCalls).toHaveBeenCalledOnce()
 })
 
-test('minute-boundary scan leaves the learning job queued until the next native tick', async () => {
-  const minute = Math.floor(Date.now() / 60_000) * 60_000
-  let now = minute + 59_800
+test('hour-boundary scan leaves the learning job queued until the next native tick', async () => {
+  const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000
+  let now = hour + 3_599_800
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture({ verdict: 'unknown' })
   f.source()
-  const observations = await f.run(() => { now = minute + 61_000 })
+  const observations = await f.run(() => { now = hour + 3_601_000 })
   expect(observations.map(counts => ({ queued: counts.queued, unknown: counts.unknown })))
     .toEqual([{ queued: 1, unknown: 0 }, { queued: 0, unknown: 1 }])
   expect(f.extract).toHaveBeenCalledOnce()
@@ -358,7 +359,7 @@ test('real revoked principal version below the frozen grant cannot retire a newe
 
 
 test('startup retirement inspection outage establishes a fresh native Memory wake and recovers in the same instance', async () => {
-  let now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+  let now = Math.floor(Date.now() / 3_600_000) * 3_600_000 + 3_540_000
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture()
   const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
@@ -419,7 +420,7 @@ test('explicitly revoked Memory owner blocks reconciliation even when retirement
 
 
 test('native scheduler wake silently initializes fresh Memory after both retirement inspection and reconcile recover', async () => {
-  let now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+  let now = Math.floor(Date.now() / 3_600_000) * 3_600_000 + 3_540_000
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture()
   const inspection = vi.spyOn(f.ctx.assistantAutomations, 'inspectSystemOwnedRetirement')
@@ -472,4 +473,32 @@ test('Memory close unregisters native scheduler recovery before its store closes
   expect(restored).not.toHaveBeenCalled()
   expect(f.ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-memory-learning' })).toEqual([])
   expect(f.extract).not.toHaveBeenCalled(); expect(f.reviewCalls).not.toHaveBeenCalled()
+})
+
+test('Delivery completion and Evaluation outcomes promptly trigger Memory learning without waiting an hour', async () => {
+  const f = await fixture()
+  f.runtime.start()
+  expect(f.runtime.health().counts.queued).toBe(0)
+
+  f.source('Atlas uses pnpm for this workspace.')
+  // Simulate live Delivery completion notification after foreground persistence.
+  ;(f.ctx.assistantDelivery as unknown as { notifyForegroundTaskCompletion(): void }).notifyForegroundTaskCompletion()
+  await vi.waitFor(() => expect(f.runtime.health().counts.queued).toBe(1))
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+  expect(f.runtime.health().counts.adopted).toBe(1)
+
+  // Subsequent Evaluation change triggers experience discovery promptly via onTrustedTaskChange.
+  const task2 = f.source('When dependency updates fail, inspect the pnpm lockfile.')
+  f.feedback(task2, 'achieved')
+  ;(f.ctx.assistantEvaluation as unknown as { notifyTrustedTaskChange(): void }).notifyTrustedTaskChange()
+  await vi.waitFor(() => expect(f.runtime.health().counts.queued).toBeGreaterThanOrEqual(1))
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await f.ctx.assistantAutomations.tick(); await f.ctx.assistantAutomations.whenIdle()
+    const counts = f.runtime.health().counts
+    if (counts.pending + counts.queued + counts.running === 0) break
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  expect(f.runtime.health().counts.adopted).toBe(2)
 })

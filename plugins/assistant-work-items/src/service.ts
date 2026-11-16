@@ -65,6 +65,9 @@ import type {
   WorkItemThreadClosure,
   WorkItemThreadSourceRegistration,
   WorkItemIntakeProvenance,
+  WorkItemIntakeAdmissionInspection,
+  WorkItemIntakeQueueStatus,
+  WorkItemObservedItemInspection,
 } from './types.js'
 import { TERMINAL_STATES, WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
@@ -387,6 +390,8 @@ export class AssistantWorkItemsService extends Service {
           return
         }
         const evaluation = this.workItemsIntakeEvaluation
+        const admit = this.workItemsConfig.intakeLedger?.evaluation?.admit
+        const autoAdmit = admit?.mode === 'auto'
         const observer = Object.freeze({ protocol: 1 as const, observe: (signal: WorkItemIntakeInput): void => {
           if (this.workItemsClosed || this.workItemsIntakeObserver !== observer) return
           try {
@@ -395,7 +400,13 @@ export class AssistantWorkItemsService extends Service {
             const { sourceText, ...metadata } = signal as WorkItemIntakeInput & { sourceText?: unknown }
             this.recordIntake(metadata, typeof sourceText === 'string' ? sourceText : undefined)
           } catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
-        }, ...(evaluation === undefined ? {} : { acceptsSourceText: true as const }) })
+        }, ...(evaluation === undefined ? {} : { acceptsSourceText: true as const }),
+        ...(autoAdmit ? {
+          acceptsIntakeObjective: true as const,
+          originBindingId: admit.originBindingId,
+          maxObjectiveBytes: Math.min(MAX_INTAKE_OBJECTIVE_BYTES, this.workItemsConfig.admission.maxBriefBytes),
+          ...(admit.acceptanceObjective === undefined ? {} : { acceptanceObjective: admit.acceptanceObjective }),
+        } : {}) })
         this.workItemsIntakeObserver = observer
         let unregister: () => void
         try { unregister = peer.registerInboundIntakeObserver(observer) }
@@ -1458,6 +1469,114 @@ export class AssistantWorkItemsService extends Service {
   intakeEvaluations(source: string, sourceEventId: string): readonly WorkItemIntakeEvaluationRecord[] {
     if (this.workItemsConfig.intakeLedger === undefined || !this.workItemsConfig.enabled) fail('disabled', 'the work-item intake ledger is disabled')
     return this.workItemsAvailable().store.listIntakeEvaluations(source, sourceEventId)
+  }
+
+  private toAdmissionInspection(entry: {
+    admission: WorkItemIntakeAdmissionRecord
+    level: WorkItemIntakeEvaluationRecord['level'] | null
+    wouldAccept: boolean | null
+  }): WorkItemIntakeAdmissionInspection {
+    const admission = entry.admission
+    const observeReason = admission.outcome === 'would-admit'
+      ? (this.workItemsIntakeAdmission?.observeReasonOf(admission)
+        ?? (this.workItemsConfig.intakeLedger?.evaluation?.admit?.mode === 'auto' ? 'missing-acceptance' : 'configured-observe'))
+      : null
+    return Object.freeze({
+      source: admission.source,
+      sourceEventId: admission.sourceEventId,
+      ruleId: admission.ruleId,
+      policyVersion: admission.policyVersion,
+      mode: admission.mode,
+      outcome: admission.outcome,
+      reasonCode: admission.reasonCode,
+      observeReason,
+      decisionId: admission.decisionId,
+      itemId: admission.itemId,
+      recordedAt: admission.recordedAt,
+      level: entry.level,
+      wouldAccept: entry.wouldAccept,
+    })
+  }
+
+  /** Host-only read-only status overview of intake counts, pending queue and recent admission outcomes. */
+  inspectIntakeQueue(options: { limit?: number } = {}): WorkItemIntakeQueueStatus {
+    const admitConfig = this.workItemsConfig.intakeLedger?.evaluation?.admit
+    const configuredMode: WorkItemIntakeQueueStatus['mode'] = admitConfig?.mode ?? 'disabled'
+    if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
+      return Object.freeze({
+        enabled: false,
+        intakeCounts: Object.freeze({ stored: 0, duplicate: 0, filtered: 0 }),
+        evaluationCounts: Object.freeze({ decided: 0, unavailable: 0 }),
+        admissionCounts: Object.freeze({ 'would-admit': 0, admitted: 0, replayed: 0, refused: 0 }),
+        pendingEvaluations: 0,
+        pendingAdmissions: 0,
+        mode: configuredMode,
+        lastEvaluationError: this.workItemsIntakeEvaluation?.health().lastError ?? null,
+        lastAdmissionError: this.workItemsIntakeAdmission?.lastError() ?? null,
+        recent: Object.freeze([]),
+      })
+    }
+    const store = this.workItemsAvailable().store
+    const evalHealth = this.workItemsIntakeEvaluation?.health()
+    const recent = store.listRecentIntakeAdmissions({ limit: options.limit ?? 20 }).map(entry => this.toAdmissionInspection(entry))
+    return Object.freeze({
+      enabled: true,
+      intakeCounts: store.countIntake(),
+      evaluationCounts: store.countIntakeEvaluations(),
+      admissionCounts: store.countIntakeAdmissions(),
+      pendingEvaluations: evalHealth?.queued ?? 0,
+      pendingAdmissions: store.countPendingIntakeAdmissions(),
+      mode: configuredMode,
+      lastEvaluationError: evalHealth?.lastError ?? null,
+      lastAdmissionError: this.workItemsIntakeAdmission?.lastError() ?? null,
+      recent: Object.freeze(recent),
+    })
+  }
+
+  /** Host-only read-only list of intake admission decisions, including observe reasons (`would-admit`) and refusals. */
+  listIntakeAdmissions(options: {
+    source?: string
+    sourceEventId?: string
+    outcome?: WorkItemIntakeAdmissionRecord['outcome']
+    mode?: 'observe' | 'auto'
+    limit?: number
+  } = {}): readonly WorkItemIntakeAdmissionInspection[] {
+    if (options.outcome !== undefined && !['would-admit', 'admitted', 'replayed', 'refused'].includes(options.outcome)) {
+      fail('invalid-input', 'invalid intake admission outcome filter')
+    }
+    if (options.mode !== undefined && options.mode !== 'observe' && options.mode !== 'auto') {
+      fail('invalid-input', 'invalid intake admission mode filter')
+    }
+    if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
+      return Object.freeze([])
+    }
+    const store = this.workItemsAvailable().store
+    return Object.freeze(store.listRecentIntakeAdmissions(options).map(entry => this.toAdmissionInspection(entry)))
+  }
+
+  /** Host-only read-only list of `would-admit` observed intake candidates and why they stayed in observe mode. */
+  listObservedItems(options: { limit?: number } = {}): readonly WorkItemObservedItemInspection[] {
+    if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
+      return Object.freeze([])
+    }
+    const configuredMode: 'observe' | 'auto' = this.workItemsConfig.intakeLedger.evaluation?.admit?.mode ?? 'observe'
+    const store = this.workItemsAvailable().store
+    const rows = store.listRecentIntakeAdmissions({ outcome: 'would-admit', limit: options.limit ?? 50 })
+    return Object.freeze(rows.map(entry => {
+      const inspected = this.toAdmissionInspection(entry)
+      return Object.freeze({
+        source: inspected.source,
+        sourceEventId: inspected.sourceEventId,
+        ruleId: inspected.ruleId,
+        policyVersion: inspected.policyVersion,
+        decisionId: inspected.decisionId,
+        configuredMode,
+        observeReason: inspected.observeReason ?? (configuredMode === 'observe' ? 'configured-observe' : 'missing-acceptance'),
+        recordedAt: inspected.recordedAt,
+        level: 'accept' as const,
+        occurredAt: entry.occurredAt,
+      })
+    }))
   }
 
   intakeEvaluationHealth(): WorkItemIntakeEvaluationHealth | undefined {

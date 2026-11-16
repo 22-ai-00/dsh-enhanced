@@ -46,3 +46,89 @@ export interface OpportunityEvaluation {
   disposition: 'defer' | 'consume' | 'execute'
   decision: Readonly<OpportunityDecision>
 }
+
+export type ProactiveDraftState = 'queued' | 'running' | 'draft' | 'failed' | 'cancelled' | 'unknown'
+
+export interface ProactiveDraftFilter {
+  scope?: OpportunityScope
+  goalId?: string
+  state?: ProactiveDraftState
+  limit?: number
+}
+
+export interface ProactiveDraftInspection {
+  id: string
+  goalId: string
+  profileId: string
+  scope: OpportunityScope
+  objective: string
+  state: ProactiveDraftState
+  reason?: string
+  feedback?: 'accepted' | 'rejected'
+  decisionState: OpportunityDecision['state']
+  createdAt: number
+  updatedAt: number
+  deadlineAt: number
+  output?: string
+  sessionId?: string
+  usage?: Readonly<Record<string, unknown>>
+  diagnostic?: Readonly<{ failureClass: string; failurePhase: string; failureCode: string }>
+  verified: false
+}
+
+export interface ProactiveOpportunityFilter {
+  scope?: OpportunityScope
+  workspace?: string
+  preset?: string
+  principalId?: string
+  goalId?: string
+  state?: OpportunityDecision['state']
+  mode?: OpportunityDecision['mode']
+  limit?: number
+}
+
+export interface ProactiveOpportunityInspection extends OpportunityDecision {
+  preparation?: {
+    state: ProactiveDraftState
+    reason?: string | undefined
+    updatedAt: number
+    output?: string | undefined
+    sessionId?: string | undefined
+    usage?: Readonly<Record<string, unknown>> | undefined
+    diagnostic?: Readonly<{ failureClass: string; failurePhase: string; failureCode: string }> | undefined
+    verified?: false | undefined
+  }
+}
+
+export interface ProactiveAttentionQuestionFilter {
+  scope?: { workspace: string; preset: string }
+  limit?: number
+}
+
+export interface ProactiveAttentionQuestionInspection {
+  questionId: string
+  scope: { workspace: string; preset: string }
+  proposalId: string
+  parameter: string
+  parentValue: number | boolean
+  candidateValue: number | boolean
+  delta: number | boolean
+  exceeded: readonly string[]
+  choices: readonly ['authorize-once', 'decline']
+  delivery: { status: 'queued' | 'closed' | 'expired'; outboxId: string | null; recordedAt: number } | null
+  reply: { choice: 'authorize-once' | 'decline'; repliedAt: number } | null
+  decision: { decision: string; reason: string; decidedAt: number } | null
+  open: boolean
+  createdAt: number
+}
+
+export type ProactiveAttentionQuestionResolveResult =
+  | {
+    status: 'applied'
+    questionId: string
+    choice: 'authorize-once' | 'decline'
+    proposalId: string
+    grantId: string | null
+    adoption: 'deferred' | 'declined' | 'proposal-terminal'
+  }
+  | { status: 'rejected'; reason: string }

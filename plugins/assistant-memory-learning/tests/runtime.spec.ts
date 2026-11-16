@@ -59,6 +59,7 @@ async function fixture(options: { maxPending?: number; maxExtractions?: number; 
   }
   const cursor = (sequence: number) => ({ protocol: 'assistant-delivery/owner-foreground-source-cursor/v1' as const,
     epoch: 'delivery-epoch', scopeKey: 'delivery-owner-scope', sequence })
+  const completionListeners = new Set<() => void>()
   const delivery = {
     validateOwnerRoute: () => ({ ...owner }),
     inspectOwnerRouteState: () => ({ status: 'active' as const, receipt: { ...owner } }),
@@ -69,6 +70,10 @@ async function fixture(options: { maxPending?: number; maxExtractions?: number; 
     inspectOwnerForegroundTaskSource: ({ inboxId }: { inboxId: string }) => {
       const value = sources.get(inboxId); return value ? metadata(value) : undefined
     },
+    onForegroundTaskCompletion: vi.fn((listener: () => void) => {
+      completionListeners.add(listener)
+      return () => { completionListeners.delete(listener) }
+    }),
     withOwnerForegroundTaskSourcesFence: (_input: unknown, callback: (items: unknown[]) => unknown) => {
       const refs = (_input as { sources: { inboxId: string; expectedSourceDigest: string }[] }).sources
       const contents = refs.flatMap(ref => {
@@ -203,11 +208,11 @@ test('unreadable Outbox reply leaves a durable intent; a later native scanner di
 })
 
 test('native periodic scanner notices a reply that appears after startup without a local scan call', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:59:50Z'))
   const f = await fixture(); f.addSource('late-reply', null); const runtime = f.create()
   expect(runtime.health().counts.pending).toBe(1)
   f.source('late-reply').reply = 'Reply was delivered later.'
-  vi.setSystemTime(new Date('2026-09-29T12:01:10Z'))
+  vi.setSystemTime(new Date('2026-09-29T13:00:10Z'))
   await f.automations.tick(); await f.automations.whenIdle()
   expect(runtime.health().counts.queued).toBe(1)
   await f.tick()
@@ -427,7 +432,7 @@ test('unavailable learning owner does not retire or supersede queued jobs and re
 
 
 test('startup with a temporarily unavailable owner recovers in the same instance through the native cron', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:00:10Z'))
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-09-29T12:59:10Z'))
   const f = await fixture()
   const inspection = vi.spyOn(f.delivery, 'inspectOwnerRouteState').mockReturnValue({ status: 'unavailable', reason: 'missing-binding' } as never)
   const runtime = f.create()
@@ -653,4 +658,73 @@ for (const background of [false, true]) test(`persisted unknown request stays re
   f.adoption.set(request.operationId, 'f'.repeat(64)); runtime.scan()
   expect(runtime.health().counts.unknown).toBe(0); expect(runtime.health().counts.adopted).toBe(1)
   expect(f.extract).toHaveBeenCalledOnce(); expect(f.verifier.reviewMemoryLearning).toHaveBeenCalledOnce()
+})
+
+test('registers hourly fallback cron and debounces Delivery and Evaluation completion notifications with cleanup', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const f = await fixture()
+  const evalUnsubscribe = vi.fn()
+  const originalOnChange = f.evaluation.onTrustedTaskChange.bind(f.evaluation)
+  let fireEvalChange: (() => void) | undefined
+  vi.spyOn(f.evaluation, 'onTrustedTaskChange').mockImplementation((listener: () => void) => {
+    fireEvalChange = listener
+    const inner = originalOnChange(listener)
+    return () => { evalUnsubscribe(); inner() }
+  })
+  const reconcileSpy = vi.spyOn(f.automations, 'reconcileSystem')
+
+  const runtime = f.create()
+  const identity = f.automations.listSystemOwned({ owner: 'assistant-memory-learning' })[0]!
+  expect(reconcileSpy.mock.calls.some(call => call[0]?.automationId === identity.automationId
+    && call[0]?.definition.schedule.kind === 'cron'
+    && call[0]?.definition.schedule.expression === '0 * * * *')).toBe(true)
+
+  const scanSpy = vi.spyOn(runtime, 'scan')
+  f.addSource('event-driven-task')
+  // Rapid burst across Delivery and Evaluation notifications coalesces into one debounced scan.
+  const deliveryListener = (f.delivery as unknown as { onForegroundTaskCompletion: { mock: { calls: Array<[() => void]> } } }).onForegroundTaskCompletion.mock.calls[0]?.[0]
+  deliveryListener?.()
+  deliveryListener?.()
+  fireEvalChange?.()
+  expect(scanSpy).not.toHaveBeenCalled()
+
+  await vi.waitFor(() => expect(scanSpy).toHaveBeenCalledTimes(1))
+  expect(runtime.health().counts.queued).toBe(1)
+  await f.tick()
+  expect(runtime.health().counts.adopted).toBe(1)
+
+  await runtime.close()
+  expect(evalUnsubscribe).toHaveBeenCalledOnce()
+  scanSpy.mockClear()
+  deliveryListener?.()
+  fireEvalChange?.()
+  await new Promise(resolve => setTimeout(resolve, 80))
+  expect(scanSpy).not.toHaveBeenCalled()
+})
+
+test('completion notifications fail closed when review or adoption grants are unavailable', async () => {
+  const ungranted = await fixture({ reviewAvailable: false })
+  const ungrantedRuntime = ungranted.create()
+  ungranted.addSource('blocked-by-grant')
+  const ungrantedListener = (ungranted.delivery as unknown as { onForegroundTaskCompletion: { mock: { calls: Array<[() => void]> } } }).onForegroundTaskCompletion.mock.calls[0]?.[0]
+  ungrantedListener?.()
+  await vi.waitFor(() => expect(ungrantedRuntime.health().lastError).toBe('learning-authority-or-budget-unavailable'))
+  expect(ungrantedRuntime.health().counts.queued).toBe(0)
+  expect(ungranted.extract).not.toHaveBeenCalled()
+})
+
+test('completion notifications fail closed when extraction budget is exhausted', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const exhausted = await fixture({ maxExtractions: 1 })
+  exhausted.addSource('used-budget')
+  const exhaustedRuntime = exhausted.create()
+  await exhausted.tick()
+  expect(exhaustedRuntime.health().counts.adopted).toBe(1)
+  expect(exhaustedRuntime.health().remainingExtractions).toBe(0)
+  exhausted.addSource('blocked-by-budget')
+  const exhaustedListener = (exhausted.delivery as unknown as { onForegroundTaskCompletion: { mock: { calls: Array<[() => void]> } } }).onForegroundTaskCompletion.mock.calls[0]?.[0]
+  exhaustedListener?.()
+  await vi.waitFor(() => expect(exhaustedRuntime.health().lastError).toBe('learning-authority-or-budget-unavailable'))
+  expect(exhaustedRuntime.health().counts.queued).toBe(0)
+  expect(exhausted.extract).toHaveBeenCalledTimes(1)
 })

@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { acceptanceDigest, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { AssistantDeliveryService, externalPrincipalId, ownerRouteAuthorityHash, type DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
+import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import type { AcceptedExecution, AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { classifyIntake, intakeAcceptanceOf, intakeObjectiveOf } from '../src/intake.ts'
@@ -288,6 +290,276 @@ describe('inferred intake carries objective and real acceptance', () => {
       expect(() => service.recordIntake({ ...input, sourceEventId: 'om-mismatch', contentDigest: sha256(short),
         objective: short, objectiveDigest: sha256('other') }, short)).toThrow(/objectiveDigest|SHA-256/u)
     } finally { service.close() }
+  })
+
+  test('real Delivery -> Verifier -> WorkItems continuity admits auto mode and fails closed with inspectable observe reasons when incomplete', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'work-items-real-auto-intake-')); roots.push(root)
+    await writeFile(join(root, 'report.md'), 'Verified\n')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const principal = { channel: 'lark', account: 'auto-test', tenant: 'tenant', user: 'owner' }
+    const conversation = { channel: 'lark', account: 'auto-test', tenant: 'tenant', kind: 'group' as const, chat: 'ops-room', thread: 'ops-thread' }
+    const authority = {
+      id: 'route-auto',
+      principal,
+      conversation,
+      workspace: root,
+      agentPreset: PRESET,
+      policyRef: 'owner-group',
+      minimumGeneration: 1,
+    }
+    const principalId = externalPrincipalId(principal)
+    const authorityHash = ownerRouteAuthorityHash(authority)
+    expect(authorityHash).toHaveLength(64)
+
+    const verifierAuthority = {
+      kind: 'document' as const,
+      id: 'sources',
+      sources: [{ id: 'source', url: 'https://example.org/source' }],
+      timeoutMs: 1_000,
+      maxResponseBytes: 1_024,
+    }
+    const [installedAuthority] = createVerifierAuthorities({ authorities: [verifierAuthority] })
+
+    const ctx = new Context(); contexts.push(ctx)
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      rules: [
+        {
+          id: 'triage',
+          effect: 'allow',
+          subject: { kind: 'background', id: '*', workspace: root, principal: principalId },
+          actions: ['admit'],
+          resource: { kind: 'automation', id: '*' },
+          context: { initiators: ['background'] },
+        },
+        {
+          id: 'send',
+          effect: 'allow',
+          subject: { kind: 'background', id: '*', workspace: root, principal: principalId },
+          actions: ['send'],
+          resource: { kind: 'message', id: '*' },
+          context: { initiators: ['background'] },
+        },
+      ],
+    })
+    await ctx.plugin(AssistantDeliveryService, {
+      databasePath: deliveryPath,
+      spoolPath: join(root, 'spool'),
+      schedulerEnabled: false,
+      ownerRoutes: [authority],
+    })
+    const delivery = ctx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService
+    const deliveryStore = (delivery as unknown as {
+      deliveryStore: {
+        issuePairing(p: typeof principal, opts: { ttlMs: number; maxAttempts: number }): { challenge: { id: string }; code: string }
+        confirmPairing(input: { challengeId: string; principal: typeof principal; code: string }): unknown
+        getPrincipal(p: typeof principal): { id: string; version: number } | undefined
+        createBinding(input: { conversation: typeof conversation; principal: typeof principal; workspace: string; agentPreset: string; policyRef: string; sessionId: string }): { id: string }
+      }
+    }).deliveryStore
+    const issued = deliveryStore.issuePairing(principal, { ttlMs: 60_000, maxAttempts: 3 })
+    deliveryStore.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code })
+    const principalRow = deliveryStore.getPrincipal(principal)!
+    const binding = deliveryStore.createBinding({
+      conversation,
+      principal,
+      workspace: root,
+      agentPreset: PRESET,
+      policyRef: 'owner-group',
+      sessionId: 'owner-session',
+    })
+    await ctx.plugin(AssistantVerifierService, {
+      databasePath: join(root, 'verifier.sqlite'),
+      tickIntervalMs: 0,
+      requireAcceptance: true,
+      authorities: [verifierAuthority],
+      profiles: [{
+        id: 'inferred-review-profile',
+        version: 1,
+        scope: { workspace: root, preset: PRESET },
+        owner: { principalRecordId: principalRow.id, principalVersion: principalRow.version },
+        taskKind: 'foreground-turn' as const,
+        objective: 'Handle inferred review work item',
+        validityMs: 600_000,
+        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 },
+        criteria: [{
+          id: 'report',
+          kind: 'document-citations' as const,
+          authority: { id: installedAuthority!.id, digest: installedAuthority!.digest },
+          artifactPath: 'report.md',
+          requiredText: ['Verified'],
+          quotes: [],
+        }],
+      }],
+    })
+
+    let adapterCtx: DeliveryAdapterContext | undefined
+    await delivery.registerAdapter({
+      channel: 'lark',
+      account: 'auto-test',
+      capabilities: { formats: ['plain'], receipts: [], reconcileUnknownSend: false },
+      start: async context => { adapterCtx = context },
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'msg-1' }),
+    })
+
+    await ctx.plugin(AssistantWorkItemsService, {
+      enabled: true,
+      mode: 'active',
+      databasePath: join(root, 'items.sqlite'),
+      workRoot: join(root, 'work'),
+      workerAutomationId: 'worker',
+      scope: {
+        workspace: root,
+        preset: PRESET,
+        principalId,
+        ownerRouteId: 'route-auto',
+        expiresAt: fixtureExpiry(),
+      },
+      admission: { allowedKinds: ['review'], maxOpenItems: 10, maxAdmitsPerHour: 10, cooldownMs: 0 },
+      intakeLedger: {
+        enabled: true,
+        sources: { 'lark-channel': { unaddressedGroupMessages: true } },
+        evaluation: {
+          enabled: true,
+          admit: {
+            enabled: true,
+            mode: 'auto',
+            kind: 'review',
+            originBindingId: binding.id,
+            maxPerHour: 5,
+            acceptanceObjective: 'Handle inferred review work item',
+          },
+        },
+      },
+    })
+    const service = ctx.get('assistantWorkItems' as never) as unknown as AssistantWorkItemsService
+
+    try {
+      service.registerIntakeEvaluator({
+        protocol: 1,
+        policy: () => ({ version: 'v1', rules: [{ ruleId: 'triage', ceiling: 'accept' }] }),
+        evaluate: () => Promise.resolve({ level: 'accept', quotes: ['release'] }),
+      })
+
+      // 1) Valid bounded auto admission through Delivery -> Verifier -> WorkItems
+      const body = 'please run the release review today'
+      const bodyDigest = sha256(body)
+      adapterCtx!.observe!({
+        eventId: 'om-auto-ok',
+        occurredAt: Date.now(),
+        principal,
+        conversation: { kind: 'group', chat: conversation.chat },
+        addressed: false,
+        senderIsBot: false,
+        contentDigest: bodyDigest,
+        text: body,
+      })
+
+      await vi.waitFor(() => expect(service.intakeEvaluations('lark-channel', 'auto-test/om-auto-ok')).toHaveLength(1), { timeout: 5_000 })
+      const firstRun = service.runIntakeAdmission()
+      expect(firstRun).toMatchObject([{
+        source: 'lark-channel',
+        sourceEventId: 'auto-test/om-auto-ok',
+        mode: 'auto',
+        outcome: 'admitted',
+      }])
+      const item = service.listIntakeAdmissions({ outcome: 'admitted' })
+      expect(item).toHaveLength(1)
+      expect(item[0]).toMatchObject({
+        sourceEventId: 'auto-test/om-auto-ok',
+        mode: 'auto',
+        outcome: 'admitted',
+        observeReason: null,
+        level: 'accept',
+        wouldAccept: true,
+      })
+
+      // 2) Message matching evaluation quote without verifier acceptance fails closed to observe ('missing-acceptance').
+      const noAcceptanceText = 'release check without verifier profile'
+      const noAcceptanceDigest = sha256(noAcceptanceText)
+      service.recordIntake({
+        source: 'lark-channel',
+        sourceEventId: 'auto-test/om-no-acceptance',
+        kind: 'message',
+        senderAllowlisted: true,
+        addressed: false,
+        threadFollowUp: false,
+        senderIsBot: false,
+        groupMessage: true,
+        contentDigest: noAcceptanceDigest,
+        occurredAt: Date.now(),
+        objective: noAcceptanceText,
+        objectiveDigest: noAcceptanceDigest,
+      }, noAcceptanceText)
+
+      await vi.waitFor(() => expect(service.intakeEvaluations('lark-channel', 'auto-test/om-no-acceptance')).toHaveLength(1), { timeout: 5_000 })
+      const secondRun = service.runIntakeAdmission()
+      expect(secondRun).toMatchObject([{
+        sourceEventId: 'auto-test/om-no-acceptance',
+        mode: 'observe',
+        outcome: 'would-admit',
+        itemId: null,
+      }])
+
+      // 3) Metadata-only Delivery observation stores the row cleanly without creating an item;
+      // missing objective on an evaluated row fails closed to observe ('missing-objective').
+      adapterCtx!.observe!({
+        eventId: 'om-metadata-only',
+        occurredAt: Date.now(),
+        principal,
+        conversation: { kind: 'group', chat: conversation.chat },
+        addressed: false,
+        senderIsBot: false,
+        contentDigest: sha256('metadata-only inbound event'),
+      })
+      const noObjectiveText = 'release check missing objective'
+      service.recordIntake({
+        source: 'lark-channel',
+        sourceEventId: 'auto-test/om-no-objective-eval',
+        kind: 'message',
+        senderAllowlisted: true,
+        addressed: false,
+        threadFollowUp: false,
+        senderIsBot: false,
+        groupMessage: true,
+        contentDigest: sha256(noObjectiveText),
+        occurredAt: Date.now(),
+      }, noObjectiveText)
+      await vi.waitFor(() => expect(service.intakeEvaluations('lark-channel', 'auto-test/om-no-objective-eval')).toHaveLength(1), { timeout: 5_000 })
+      const thirdRun = service.runIntakeAdmission()
+      expect(thirdRun).toMatchObject([{
+        sourceEventId: 'auto-test/om-no-objective-eval',
+        mode: 'observe',
+        outcome: 'would-admit',
+        itemId: null,
+      }])
+
+      const queue = service.inspectIntakeQueue()
+      expect(queue).toMatchObject({
+        enabled: true,
+        mode: 'auto',
+        intakeCounts: { stored: 4, duplicate: 0, filtered: 0 },
+        pendingEvaluations: 0,
+        pendingAdmissions: 0,
+        admissionCounts: { admitted: 1, 'would-admit': 2, replayed: 0, refused: 0 },
+      })
+      expect(queue.recent).toHaveLength(3)
+
+      const observed = service.listObservedItems()
+      expect(observed).toHaveLength(2)
+      expect(observed.find(entry => entry.sourceEventId === 'auto-test/om-no-acceptance')).toMatchObject({
+        configuredMode: 'auto',
+        observeReason: 'missing-acceptance',
+        level: 'accept',
+      })
+      expect(observed.find(entry => entry.sourceEventId === 'auto-test/om-no-objective-eval')).toMatchObject({
+        configuredMode: 'auto',
+        observeReason: 'missing-objective',
+        level: 'accept',
+      })
+    } finally {
+      service.close()
+    }
   })
 })
 

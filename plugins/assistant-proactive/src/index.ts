@@ -9,7 +9,11 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { OpportunityEngine, validateProfile } from './engine.js'
-import type { OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
+import type {
+  OpportunityDecision, OpportunityInput, OpportunityProfile, OpportunityScope,
+  ProactiveAttentionQuestionFilter, ProactiveAttentionQuestionInspection, ProactiveAttentionQuestionResolveResult,
+  ProactiveDraftFilter, ProactiveDraftInspection, ProactiveOpportunityFilter, ProactiveOpportunityInspection,
+} from './types.js'
 import { reminderText, reminderExpiresAt } from './reminder.js'
 import { attentionOverlay, proactiveAttentionCohort, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
 import {
@@ -37,6 +41,30 @@ export type { AttentionOverlay }
 export type * from './types.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
 interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): unknown }
+interface EvaluationAttentionPort {
+  attentionLooseningStatus?: (input: { scope: { workspace: string; preset: string }; cohort: { lane: string; sourceId: string } }) => {
+    enabled: boolean
+    grant: { grant: { grantId: string }; used: number; remaining: number } | null
+    proposals: readonly { proposalId: string; decision: { decision: string; reason: string; decidedAt: number } | null }[]
+    questions: readonly {
+      questionId: string
+      question: {
+        proposalId: string
+        change: { parameter: string; parentValue: number | boolean; candidateValue: number | boolean; delta: number | boolean }
+        exceeded: readonly string[]
+        grantId: string | null
+        choices: readonly ['authorize-once', 'decline']
+        createdAt: number
+      }
+    }[]
+  }
+  attentionOwnerQuestionStatus?: (input: { scope: { workspace: string; preset: string }; cohort: { lane: string; sourceId: string } }) => {
+    enabled: boolean
+    deliveries: readonly { questionId: string; status: 'queued' | 'closed' | 'expired'; outboxId: string | null; recordedAt: number }[]
+    replies: readonly { questionId: string; choice: 'authorize-once' | 'decline'; repliedAt: number }[]
+  }
+  applyAttentionOwnerQuestionReply?: (input: { scope: { workspace: string; preset: string }; cohort: { lane: string; sourceId: string }; questionId: string; choice: 'authorize-once' | 'decline' }) => ProactiveAttentionQuestionResolveResult
+}
 export interface Config {
   databasePath?: string
   profiles?: OpportunityProfile[]
@@ -95,7 +123,8 @@ export class AssistantProactiveService extends Service {
     this.#engine = new OpportunityEngine(config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite'), [...this.#profiles.values()])
     ctx.effect(() => () => { this.#active = false; this.#engine.close() }, 'assistant-proactive.store')
     const preparationPath = config.databasePath === ':memory:' ? ':memory:' : `${config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite')}.preparations`
-    this.#preparations = new PreparationRuntime(ctx, new PreparationStore(preparationPath))
+    const hasPrepareProfiles = [...this.#profiles.values()].some(profile => profile.mode === 'prepare' && profile.preparation !== undefined)
+    this.#preparations = new PreparationRuntime(ctx, new PreparationStore(preparationPath), { active: hasPrepareProfiles })
     ctx.inject(['tools', 'agents', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const output = {
         schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
@@ -241,12 +270,188 @@ export class AssistantProactiveService extends Service {
     if (decision?.effect !== 'allow') throw new Error('assistant-proactive: policy denied')
     return scope
   }
-  inspect = (agent: Agent | undefined, goalId?: string) => {
-    return this.#engine.list(this.#scope(agent, false), goalId).map(decision => {
-      const preparation = this.#preparations.store.get(decision.id)
-      return preparation ? { ...decision, preparation: { state: preparation.state, reason: preparation.reason, updatedAt: preparation.updatedAt,
-        ...(preparation.result ? { output: preparation.result.output, sessionId: preparation.result.sessionId, usage: preparation.result.usage, diagnostic: preparation.result.diagnostic, verified: false } : {}) } } : decision
+  #formatOpportunity = (decision: Readonly<OpportunityDecision>): ProactiveOpportunityInspection => {
+    const preparation = this.#preparations.store.get(decision.id)
+    if (!preparation) return decision
+    return Object.freeze({
+      ...decision,
+      preparation: Object.freeze({
+        state: preparation.state,
+        reason: preparation.reason,
+        updatedAt: preparation.updatedAt,
+        ...(preparation.result ? {
+          output: preparation.result.output,
+          sessionId: preparation.result.sessionId,
+          usage: preparation.result.usage,
+          diagnostic: preparation.result.diagnostic,
+          verified: false as const,
+        } : {}),
+      }),
     })
+  }
+  #attentionScopes(requested?: { workspace: string; preset: string }): readonly { workspace: string; preset: string }[] {
+    if (requested !== undefined) {
+      if (!requested || typeof requested.workspace !== 'string' || !requested.workspace.startsWith('/') || typeof requested.preset !== 'string' || requested.preset.length === 0) {
+        throw new Error('assistant-proactive: invalid attention question scope')
+      }
+      return [{ workspace: requested.workspace, preset: requested.preset }]
+    }
+    const unique = new Map<string, { workspace: string; preset: string }>()
+    const addScope = (workspace: unknown, preset: unknown) => {
+      if (typeof workspace !== 'string' || !workspace.startsWith('/') || typeof preset !== 'string' || preset.length === 0) return
+      const key = `${workspace}\0${preset}`
+      if (!unique.has(key)) unique.set(key, { workspace, preset })
+    }
+    for (const scope of this.#engine.listScopes()) addScope(scope.workspace, scope.preset)
+    try {
+      const delivery = this.ctx.get('assistantDelivery' as never) as { listOwnerRoutes?: () => readonly { workspace?: unknown; agentPreset?: unknown }[] } | undefined
+      if (typeof delivery?.listOwnerRoutes === 'function') {
+        for (const route of delivery.listOwnerRoutes()) addScope(route.workspace, route.agentPreset)
+      }
+    } catch { /* Optional Delivery discovery failed; continue with recorded proactive scopes. */ }
+    return [...unique.values()]
+  }
+  inspect = (agent: Agent | undefined, goalId?: string) => {
+    return this.#engine.list(this.#scope(agent, false), goalId).map(this.#formatOpportunity)
+  }
+  /** Host-only read-only draft inspection for owner operator surfaces (zero execution authority). */
+  inspectDrafts = (filter: ProactiveDraftFilter = {}): readonly ProactiveDraftInspection[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return Object.freeze(this.#preparations.store.list(filter).map(record => {
+      const decision = this.#engine.get(record.id)
+      return Object.freeze({
+        id: record.id,
+        goalId: record.decision.goalId,
+        profileId: record.decision.profileId,
+        scope: record.decision.scope,
+        objective: record.decision.objective,
+        state: record.state,
+        ...(record.reason === undefined ? {} : { reason: record.reason }),
+        ...(decision?.feedback === undefined ? {} : { feedback: decision.feedback }),
+        decisionState: decision?.state ?? record.decision.state,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        deadlineAt: record.deadlineAt,
+        ...(record.result === undefined ? {} : {
+          output: record.result.output,
+          ...(record.result.sessionId === undefined ? {} : { sessionId: record.result.sessionId }),
+          usage: record.result.usage,
+          ...(record.result.diagnostic === undefined ? {} : { diagnostic: record.result.diagnostic }),
+        }),
+        verified: false as const,
+      })
+    }))
+  }
+  /** Host-only opportunity decision inspection across owner scopes. */
+  inspectOpportunities = (filter: ProactiveOpportunityFilter = {}): readonly ProactiveOpportunityInspection[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return Object.freeze(this.#engine.listAll(filter).map(this.#formatOpportunity))
+  }
+  /** Host-only action to accept or reject/dismiss an existing opportunity draft. */
+  resolveDraft = (input: { id: string; decision: 'accepted' | 'rejected' }): Readonly<OpportunityDecision> | undefined => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    if (!input || typeof input.id !== 'string' || input.id.length === 0 || (input.decision !== 'accepted' && input.decision !== 'rejected')) {
+      throw new Error('assistant-proactive: invalid draft resolution input')
+    }
+    const existing = this.#engine.get(input.id)
+    if (!existing) return undefined
+    if (existing.state === 'closed' && existing.feedback === input.decision) {
+      if (input.decision === 'rejected') this.#preparations.store.cancel(existing.id)
+      return existing
+    }
+    const resolved = this.#engine.feedback(existing.id, existing.scope, input.decision)
+    if (input.decision === 'rejected') this.#preparations.store.cancel(existing.id)
+    return resolved
+  }
+  /** Host-only read-only view of WP22 proactive attention-loosening owner questions. */
+  inspectAttentionQuestions = (filter: ProactiveAttentionQuestionFilter = {}): readonly ProactiveAttentionQuestionInspection[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as EvaluationAttentionPort | undefined
+    if (!evaluation || typeof evaluation.attentionLooseningStatus !== 'function') return Object.freeze([])
+    const scopes = this.#attentionScopes(filter.scope)
+    const items: ProactiveAttentionQuestionInspection[] = []
+    for (const scope of scopes) {
+      let status: ReturnType<NonNullable<EvaluationAttentionPort['attentionLooseningStatus']>>
+      try {
+        status = evaluation.attentionLooseningStatus({ scope, cohort: { ...proactiveAttentionCohort } })
+      } catch {
+        continue
+      }
+      let questionStatus: ReturnType<NonNullable<EvaluationAttentionPort['attentionOwnerQuestionStatus']>> | undefined
+      if (typeof evaluation.attentionOwnerQuestionStatus === 'function') {
+        try {
+          questionStatus = evaluation.attentionOwnerQuestionStatus({ scope, cohort: { ...proactiveAttentionCohort } })
+        } catch {
+          questionStatus = undefined
+        }
+      }
+      const proposalDecisions = new Map(status.proposals.map(entry => [entry.proposalId, entry.decision]))
+      const deliveries = new Map((questionStatus?.deliveries ?? []).map(entry => [entry.questionId, entry]))
+      const replies = new Map((questionStatus?.replies ?? []).map(entry => [entry.questionId, entry]))
+      const activeGrantId = status.grant?.grant.grantId
+      for (const entry of status.questions) {
+        const question = entry.question
+        const proposalDecision = proposalDecisions.get(question.proposalId) ?? null
+        const delivery = deliveries.get(entry.questionId) ?? null
+        const reply = replies.get(entry.questionId) ?? null
+        const open = reply === null
+          && delivery?.status !== 'closed'
+          && delivery?.status !== 'expired'
+          && proposalDecision === null
+          && (activeGrantId === undefined || activeGrantId === question.grantId)
+        items.push(Object.freeze({
+          questionId: entry.questionId,
+          scope: Object.freeze({ workspace: scope.workspace, preset: scope.preset }),
+          proposalId: question.proposalId,
+          parameter: question.change.parameter,
+          parentValue: question.change.parentValue,
+          candidateValue: question.change.candidateValue,
+          delta: question.change.delta,
+          exceeded: Object.freeze([...question.exceeded]),
+          choices: question.choices,
+          delivery: delivery === null ? null : Object.freeze({
+            status: delivery.status,
+            outboxId: delivery.outboxId,
+            recordedAt: delivery.recordedAt,
+          }),
+          reply: reply === null ? null : Object.freeze({
+            choice: reply.choice,
+            repliedAt: reply.repliedAt,
+          }),
+          decision: proposalDecision === null ? null : Object.freeze({
+            decision: proposalDecision.decision,
+            reason: proposalDecision.reason,
+            decidedAt: proposalDecision.decidedAt,
+          }),
+          open,
+          createdAt: question.createdAt,
+        }))
+      }
+    }
+    items.sort((left, right) => right.createdAt - left.createdAt || left.questionId.localeCompare(right.questionId))
+    const limit = typeof filter.limit === 'number' && Number.isSafeInteger(filter.limit) && filter.limit > 0
+      ? Math.min(filter.limit, 500) : 50
+    return Object.freeze(items.slice(0, limit))
+  }
+  /** Host-only action delegating an owner attention reply to Evaluation's verified apply path. */
+  resolveAttentionQuestion = (input: { scope: { workspace: string; preset: string }; questionId: string; choice: 'authorize-once' | 'decline' }): Readonly<ProactiveAttentionQuestionResolveResult> => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    if (!input || !input.scope || typeof input.scope.workspace !== 'string' || !input.scope.workspace.startsWith('/')
+      || typeof input.scope.preset !== 'string' || input.scope.preset.length === 0
+      || typeof input.questionId !== 'string' || input.questionId.length === 0
+      || (input.choice !== 'authorize-once' && input.choice !== 'decline')) {
+      throw new Error('assistant-proactive: invalid attention question reply input')
+    }
+    const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as EvaluationAttentionPort | undefined
+    if (!evaluation || typeof evaluation.applyAttentionOwnerQuestionReply !== 'function') {
+      return Object.freeze({ status: 'rejected', reason: 'evaluation-unavailable' })
+    }
+    return Object.freeze(evaluation.applyAttentionOwnerQuestionReply({
+      scope: { workspace: input.scope.workspace, preset: input.scope.preset },
+      cohort: { ...proactiveAttentionCohort },
+      questionId: input.questionId,
+      choice: input.choice,
+    }))
   }
   reconcilePreparations = (): Promise<void> => this.#preparations.tick()
   feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => { const decision = this.#engine.feedback(id, this.#scope(agent, true), feedback); if (feedback === 'rejected') this.#preparations.store.cancel(id); return decision }

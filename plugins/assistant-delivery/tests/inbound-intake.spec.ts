@@ -62,7 +62,7 @@ async function fixture() {
   const observation = (overrides: Partial<DeliveryInboundObservation> = {}): DeliveryInboundObservation => ({
     eventId: 'om_1', occurredAt: 1_000, principal, conversation: { kind: 'dm', chat: conversation.chat },
     addressed: true, senderIsBot: false, contentDigest: digest, ...overrides })
-  return { service, store, observer, observe, signals, report, observation, context: () => adapterContext!,
+  return { service, store, binding, observer, observe, signals, report, observation, context: () => adapterContext!,
     own: (value: unknown) => { owned = value } }
 }
 
@@ -149,5 +149,131 @@ describe('Delivery inbound intake observation', () => {
     expect(f.signals.map(signal => signal.sourceEventId)).toEqual(['intake-test/om_after'])
     // Observation writes nothing to Delivery.
     expect(f.store.getInboxByProviderEvent('lark', 'intake-test', 'om_after')).toBeUndefined()
+  })
+
+  test('prepares a foreground-turn acceptance contract only when opted into intake objective with matching owner binding', async () => {
+    const f = await fixture()
+    const prepare = vi.fn(() => ({ contractId: 'contract-intake-1', contractDigest: 'c'.repeat(64) }))
+    const verifierStub = {
+      ownsTaskAcceptanceRegistration: (value: unknown) => value === registration,
+    }
+    const ctx = (f.service as unknown as { context: Context }).context
+    ctx.provide('assistantVerifier' as never, verifierStub as never)
+    const registration = {
+      protocol: 'assistant-verifier/host-producer/v1' as const,
+      generation: (f.service as unknown as { trustedAcceptanceProducerGeneration(): string }).trustedAcceptanceProducerGeneration(),
+      owner: verifierStub,
+      requiresAcceptance: true,
+      prepare,
+      completed: async () => {},
+    }
+    const unregisterSink = f.service.registerTaskAcceptanceSink(registration)
+    try {
+      const binding = f.binding
+      const objective = 'Run verification check on workspace'
+      const objectiveDigest = createHash('sha256').update(objective, 'utf8').digest('hex')
+      const observer = Object.freeze({
+        protocol: 1 as const,
+        acceptsSourceText: true as const,
+        acceptsIntakeObjective: true as const,
+        originBindingId: binding.id,
+        acceptanceObjective: 'Bounded intake acceptance profile',
+        observe: f.observe,
+      }) as DeliveryInboundIntakeObserver
+      f.own(observer)
+      f.service.registerInboundIntakeObserver(observer)
+
+      // Allowlisted inferred candidate receives objective, objectiveDigest, and prepared acceptance handle.
+      f.context().observe!(f.observation({
+        eventId: 'om_inferred_1',
+        addressed: false,
+        contentDigest: objectiveDigest,
+        text: objective,
+      }))
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(prepare).toHaveBeenCalledWith({
+        scope,
+        owner: { principalRecordId: expect.any(String), principalVersion: 1 },
+        task: { kind: 'foreground-turn', ref: 'intake:lark:intake-test:om_inferred_1' },
+        objective: 'Bounded intake acceptance profile',
+      })
+      expect(f.signals[0]).toMatchObject({
+        sourceEventId: 'intake-test/om_inferred_1',
+        sourceText: objective,
+        objective,
+        objectiveDigest,
+        acceptance: { contractId: 'contract-intake-1', contractDigest: 'c'.repeat(64) },
+      })
+
+      // Explicit addressed message carries objective when verified, but does not mint extra verifier contracts.
+      prepare.mockClear()
+      f.context().observe!(f.observation({
+        eventId: 'om_explicit_1',
+        addressed: true,
+        contentDigest: objectiveDigest,
+        text: objective,
+      }))
+      expect(prepare).not.toHaveBeenCalled()
+      expect(f.signals[1]).toMatchObject({ objective, objectiveDigest })
+      expect(Object.hasOwn(f.signals[1]!, 'acceptance')).toBe(false)
+
+      // Stranger or missing-profile fails closed without acceptance handle and never throws.
+      prepare.mockReturnValueOnce(null as never)
+      f.context().observe!(f.observation({
+        eventId: 'om_null_profile',
+        addressed: false,
+        contentDigest: objectiveDigest,
+        text: objective,
+      }))
+      expect(Object.hasOwn(f.signals[2]!, 'acceptance')).toBe(false)
+
+      f.context().observe!(f.observation({
+        eventId: 'om_stranger',
+        principal: stranger,
+        addressed: false,
+        contentDigest: objectiveDigest,
+        text: objective,
+      }))
+      expect(Object.hasOwn(f.signals[3]!, 'acceptance')).toBe(false)
+    } finally {
+      unregisterSink()
+    }
+  })
+
+  test('notifies foreground task completion listeners on execution finish and unregisters cleanly', async () => {
+    const f = await fixture()
+    const binding = f.binding
+    const row = f.store.getPrincipal(principal)!
+    const claimAndBind = (suffix: string) => {
+      const admitted = f.store.claimNativeInbox({
+        envelope: { channel: principal.channel, account: principal.account, eventId: `evt-${suffix}`, occurredAt: Date.now(), principal, conversation, kind: 'text', text: 'hello' },
+        binding,
+        ownerLineage: { principalRecordId: row.id, principalVersion: row.version },
+        ownerId: 'worker-1',
+        leaseMs: 60_000,
+      })
+      f.store.bindForegroundTaskExecution({
+        inboxId: admitted.record.id,
+        scope,
+        owner: { principalRecordId: row.id, principalVersion: row.version },
+        binding,
+        dispatchedAt: Date.now(),
+      })
+      return admitted
+    }
+
+    const first = claimAndBind('1')
+    const listener = vi.fn()
+    const unsubscribe = f.service.onForegroundTaskCompletion(listener)
+    ;(f.service as unknown as { completeForegroundTaskExecution(id: string, input: { status: 'succeeded'; quiescent: boolean }): void })
+      .completeForegroundTaskExecution(first.record.id, { status: 'succeeded', quiescent: true })
+    f.store.finishInbox({ inboxId: first.record.id, ownerId: 'worker-1', fencingToken: first.fencingToken!, outcome: 'processed' })
+    expect(listener).toHaveBeenCalledOnce()
+
+    unsubscribe()
+    const second = claimAndBind('2')
+    ;(f.service as unknown as { completeForegroundTaskExecution(id: string, input: { status: 'succeeded'; quiescent: boolean }): void })
+      .completeForegroundTaskExecution(second.record.id, { status: 'succeeded', quiescent: true })
+    expect(listener).toHaveBeenCalledOnce()
   })
 })

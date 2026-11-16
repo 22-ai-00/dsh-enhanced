@@ -83,3 +83,44 @@ it('retains failed runner diagnostics across restart without retrying the paid i
   try { expect(reopened.get(value.id)).toMatchObject({ state: 'unknown', result }); expect(reopened.pending()).toHaveLength(0) }
   finally { reopened.close() }
 })
+
+it('avoids idle setInterval polling and wakes cleanly on enqueue, port injection, drain and disposal', async () => {
+  const intervalSpy = vi.spyOn(globalThis, 'setInterval')
+  try {
+    const ctx = new Context(); contexts.push(ctx)
+    const store = new PreparationStore(':memory:')
+    const run = vi.fn(async (input: { id: string }) => ({
+      outcome: 'succeeded',
+      output: `draft:${input.id}`,
+      usage: { outputTokens: 3 },
+      sessionId: `prep:${input.id}`,
+      quiescent: true,
+    }))
+    const runtime = new PreparationRuntime(ctx, store, { active: false })
+    expect(intervalSpy).not.toHaveBeenCalled()
+
+    const first = decision()
+    const second = { ...first, id: 'second-prep' }
+    store.enqueue(first, settings)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(run).not.toHaveBeenCalled()
+
+    runtime.setActive(true)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(run).not.toHaveBeenCalled()
+
+    ctx.provide('assistantAutomations' as never, { runPreparation: run } as never)
+    ctx.provide('assistantGoals' as never, { assertPreparationCurrent: vi.fn() } as never)
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1))
+    expect(store.get(first.id)).toMatchObject({ state: 'draft', result: { output: `draft:${first.id}` } })
+
+    store.enqueue(second, settings)
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+    expect(store.get(second.id)).toMatchObject({ state: 'draft', result: { output: `draft:${second.id}` } })
+    expect(intervalSpy).not.toHaveBeenCalled()
+
+    await ctx.fiber.dispose(); contexts.splice(contexts.indexOf(ctx), 1)
+  } finally {
+    intervalSpy.mockRestore()
+  }
+})

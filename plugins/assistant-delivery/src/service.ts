@@ -992,8 +992,24 @@ interface ModelSelectionWaiter {
 
 /** UTF-16 bound on transient inbound text forwarded to an opted-in intake observer. */
 const MAX_INBOUND_INTAKE_TEXT = 65_536
+const MAX_INBOUND_INTAKE_OBJECTIVE_BYTES = 2_048
 const MODEL_SELECTION_WAIT_POLL_MS = 500
 const MODEL_SELECTION_WAIT_TIMEOUT_MS = 120_000
+
+interface IntakeObserverWithObjective extends DeliveryInboundIntakeObserver {
+  readonly acceptsIntakeObjective?: unknown
+  readonly acceptanceObjective?: unknown
+  readonly originBindingId?: unknown
+  readonly maxObjectiveBytes?: unknown
+}
+
+interface IntakeSignalBuildOptions {
+  readonly withText: boolean
+  readonly withObjective?: boolean
+  readonly acceptanceObjective?: string | undefined
+  readonly originBindingId?: string | undefined
+  readonly maxObjectiveBytes?: number | undefined
+}
 
 interface ApprovalSettlementInput {
   operationId: string
@@ -1348,6 +1364,7 @@ export class AssistantDeliveryService extends Service {
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
   private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
   private inboundIntakeObserver: DeliveryInboundIntakeObserver | undefined
+  private readonly foregroundTaskCompletionListeners = new Set<() => void>()
   /** Send-time withdrawal checks for `withdrawable` owner notices, one per (authority, canonical source id). */
   private readonly ownerNotificationWithdrawals = new Map<string, Readonly<{ handle: string; authority: string; sourceId: string; registration: OwnerNotificationWithdrawal }>>()
   /** Live handles issued by `registerOwnerNotificationWithdrawal`, mapped to their (authority, source) key. */
@@ -1675,6 +1692,7 @@ export class AssistantDeliveryService extends Service {
       this.preferenceFeedbackSink = undefined
       this.acceptanceSink = undefined
       this.foregroundObserver = undefined
+      this.foregroundTaskCompletionListeners.clear()
       this.workItemReplyConsumer = undefined
       this.evaluationSink = undefined
       this.workflowTraceSink = undefined
@@ -2518,20 +2536,24 @@ export class AssistantDeliveryService extends Service {
 
   private completeForegroundTaskExecution(inboxId: string, input: { status: ForegroundExecution['status']; quiescent: boolean; termination?: Readonly<ForegroundTerminationObservation> }): void {
     this.deliveryStore.finishForegroundTaskExecution({ inboxId, ...input, completedAt: Date.now() })
-    const sink = this.foregroundObserver; const observed = sink?.handles.get(inboxId)
-    if (sink === undefined || observed === undefined) return
-    sink.handles.delete(inboxId)
-    if (!this.observerCurrent(sink)) return
-    const actual = this.deliveryStore.inspectForegroundExecutionForOwner({ inboxId, scope: observed.task.scope, owner: observed.task.owner,
-      bindingId: observed.task.binding.id, bindingVersion: observed.task.binding.version, bindingGeneration: observed.task.binding.generation })
-    if (actual === null) return
     try {
-      const result: unknown = sink.registration.completed(observed.handle, observed.task, actual)
-      if (!isSynchronousForegroundObservationHandle(result)) {
-        void Promise.resolve(result).catch(error => this.context.logger.warn(`assistant-delivery: foreground observer completion must be synchronous: ${String(error)}`))
+      const sink = this.foregroundObserver; const observed = sink?.handles.get(inboxId)
+      if (sink === undefined || observed === undefined) return
+      sink.handles.delete(inboxId)
+      if (!this.observerCurrent(sink)) return
+      const actual = this.deliveryStore.inspectForegroundExecutionForOwner({ inboxId, scope: observed.task.scope, owner: observed.task.owner,
+        bindingId: observed.task.binding.id, bindingVersion: observed.task.binding.version, bindingGeneration: observed.task.binding.generation })
+      if (actual === null) return
+      try {
+        const result: unknown = sink.registration.completed(observed.handle, observed.task, actual)
+        if (!isSynchronousForegroundObservationHandle(result)) {
+          void Promise.resolve(result).catch(error => this.context.logger.warn(`assistant-delivery: foreground observer completion must be synchronous: ${String(error)}`))
+        }
       }
+      catch (error) { this.context.logger.warn(`assistant-delivery: foreground observer completion failed: ${String(error)}`) }
+    } finally {
+      this.notifyForegroundTaskCompletion()
     }
-    catch (error) { this.context.logger.warn(`assistant-delivery: foreground observer completion failed: ${String(error)}`) }
   }
 
   private prepareForegroundTaskAcceptance(
@@ -5467,14 +5489,100 @@ export class AssistantDeliveryService extends Service {
     try {
       const observer = this.currentInboundIntakeObserver()
       if (observer === undefined) return
-      const signal = this.inboundIntakeSignal(observation, observer.acceptsSourceText === true)
+      const extended = observer as IntakeObserverWithObjective
+      const withText = observer.acceptsSourceText === true
+      const withObjective = withText && extended.acceptsIntakeObjective === true
+      const acceptanceObjective = typeof extended.acceptanceObjective === 'string'
+        && extended.acceptanceObjective.length > 0
+        && extended.acceptanceObjective.isWellFormed()
+        && !extended.acceptanceObjective.includes('\u0000')
+        && Buffer.byteLength(extended.acceptanceObjective, 'utf8') <= MAX_INBOUND_INTAKE_OBJECTIVE_BYTES
+        ? extended.acceptanceObjective : undefined
+      const originBindingId = typeof extended.originBindingId === 'string' && extended.originBindingId.length > 0
+        ? extended.originBindingId : undefined
+      const maxObjectiveBytes = typeof extended.maxObjectiveBytes === 'number'
+        && Number.isSafeInteger(extended.maxObjectiveBytes) && extended.maxObjectiveBytes >= 1
+        ? Math.min(extended.maxObjectiveBytes, MAX_INBOUND_INTAKE_OBJECTIVE_BYTES)
+        : MAX_INBOUND_INTAKE_OBJECTIVE_BYTES
+      const signal = this.inboundIntakeSignal(observation, {
+        withText,
+        withObjective,
+        acceptanceObjective,
+        originBindingId,
+        maxObjectiveBytes,
+      })
       if (signal !== undefined) observer.observe(signal)
     } catch (error) {
       this.context.logger.debug(`assistant-delivery: inbound intake observation dropped: ${String(error)}`)
     }
   }
 
-  private inboundIntakeSignal(input: Readonly<DeliveryInboundObservation>, withText = false): Readonly<DeliveryInboundIntakeSignal> | undefined {
+  /** Subscribe to foreground task completion or inbound reply persistence notifications. */
+  onForegroundTaskCompletion(listener: () => void): () => void {
+    this.assertActive()
+    if (typeof listener !== 'function') {
+      throw new AssistantDeliveryError('runtime-conflict', 'invalid foreground task completion listener')
+    }
+    this.foregroundTaskCompletionListeners.add(listener)
+    return () => { this.foregroundTaskCompletionListeners.delete(listener) }
+  }
+
+  private notifyForegroundTaskCompletion(): void {
+    if (!this.active) return
+    for (const listener of Array.from(this.foregroundTaskCompletionListeners)) {
+      try { listener() } catch { /* Consumer recovery reconciles durably on startup/fallback cron. */ }
+    }
+  }
+
+  private prepareIntakeAcceptance(
+    input: Readonly<DeliveryInboundObservation>,
+    key: Readonly<ExternalPrincipalKey>,
+    principalRecord: ReturnType<DeliveryStore['getPrincipal']>,
+    senderAllowlisted: boolean,
+    threadFollowUp: boolean,
+    options: IntakeSignalBuildOptions,
+  ): Readonly<{ contractId: string; contractDigest: string }> | undefined {
+    // Only prepare verifier contracts for inferred allowlisted candidates when
+    // an active owner binding and verifier producer are both bound.
+    const inferredCandidate = senderAllowlisted && ((!input.addressed && !threadFollowUp) || input.senderIsBot)
+    if (!inferredCandidate || principalRecord === undefined) return undefined
+    const sink = this.acceptanceSink
+    if (sink === undefined || typeof options.originBindingId !== 'string' || options.originBindingId.length === 0) {
+      return undefined
+    }
+    const binding = this.deliveryStore.getBinding(options.originBindingId)
+    if (binding === undefined || binding.status !== 'active'
+      || binding.principal.channel !== key.channel || binding.principal.account !== key.account) {
+      return undefined
+    }
+    const bindingPrincipal = this.deliveryStore.getPrincipal(binding.principal)
+    const owner = this.ownerLineageForBinding(binding)
+    if (owner === undefined || bindingPrincipal === undefined
+      || bindingPrincipal.id !== principalRecord.id || bindingPrincipal.version !== principalRecord.version) {
+      return undefined
+    }
+    const objective = options.acceptanceObjective ?? input.text
+    if (typeof objective !== 'string' || objective.length === 0) return undefined
+    try {
+      const prepared = sink.registration.prepare(Object.freeze({
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        owner: Object.freeze({ principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion }),
+        task: Object.freeze({ kind: 'foreground-turn' as const, ref: `intake:${key.channel}:${key.account}:${input.eventId}` }),
+        objective,
+      }))
+      if (prepared === null) return undefined
+      return Object.freeze({ contractId: prepared.contractId, contractDigest: prepared.contractDigest })
+    } catch {
+      return undefined
+    }
+  }
+
+  private inboundIntakeSignal(
+    input: Readonly<DeliveryInboundObservation>,
+    buildOptions: boolean | IntakeSignalBuildOptions = false,
+  ): Readonly<DeliveryInboundIntakeSignal> | undefined {
+    const options: IntakeSignalBuildOptions = typeof buildOptions === 'boolean' ? { withText: buildOptions } : buildOptions
+    const withText = options.withText
     const principal = input?.principal, conversation = input?.conversation
     const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256
     if (!principal || !conversation || !text(input.eventId) || !text(principal.channel) || !text(principal.account)
@@ -5500,6 +5608,29 @@ export class AssistantDeliveryService extends Service {
       threadFollowUp = report !== undefined && ['accepted', 'delivered', 'read'].includes(report.outbox.status)
         && target?.kind === conversation.kind && target.chat === conversation.chat
     }
+    const verifiedText = withText && input.contentDigest !== undefined && typeof input.text === 'string'
+      && input.text.length <= MAX_INBOUND_INTAKE_TEXT
+      && createHash('sha256').update(input.text, 'utf8').digest('hex') === input.contentDigest
+      ? input.text : undefined
+    let objectiveFields: {
+      objective: string
+      objectiveDigest: string
+      acceptance?: Readonly<{ contractId: string; contractDigest: string }>
+    } | undefined
+    if (options.withObjective === true && verifiedText !== undefined && input.contentDigest !== undefined) {
+      const maxBytes = options.maxObjectiveBytes === undefined
+        ? MAX_INBOUND_INTAKE_OBJECTIVE_BYTES
+        : Math.min(options.maxObjectiveBytes, MAX_INBOUND_INTAKE_OBJECTIVE_BYTES)
+      if (verifiedText.length > 0 && verifiedText.isWellFormed() && !verifiedText.includes('\u0000')
+        && Buffer.byteLength(verifiedText, 'utf8') <= maxBytes) {
+        const acceptance = this.prepareIntakeAcceptance(input, key, principalRecord, senderAllowlisted, threadFollowUp, options)
+        objectiveFields = {
+          objective: verifiedText,
+          objectiveDigest: input.contentDigest,
+          ...(acceptance === undefined ? {} : { acceptance }),
+        }
+      }
+    }
     return Object.freeze({
       source: `${key.channel}-channel`,
       sourceEventId: `${key.account}/${input.eventId}`,
@@ -5511,8 +5642,8 @@ export class AssistantDeliveryService extends Service {
       groupMessage: conversation.kind === 'group',
       ...(input.contentDigest === undefined ? {} : { contentDigest: input.contentDigest }),
       // Only an opted-in observer sees the text, and only when it is the digested text.
-      ...(withText && input.contentDigest !== undefined && typeof input.text === 'string' && input.text.length <= MAX_INBOUND_INTAKE_TEXT
-        && createHash('sha256').update(input.text, 'utf8').digest('hex') === input.contentDigest ? { sourceText: input.text } : {}),
+      ...(verifiedText === undefined ? {} : { sourceText: verifiedText }),
+      ...objectiveFields,
       occurredAt: input.occurredAt,
     })
   }
@@ -7523,7 +7654,9 @@ export class AssistantDeliveryService extends Service {
     replyToEventId?: string
   }): OutboxRecord {
     const prepared = this.prepareAgentReply(agent, input)
-    return this.deliveryStore.enqueue(prepared.intent)
+    const outbox = this.deliveryStore.enqueue(prepared.intent)
+    if (input.replyToEventId !== undefined) this.notifyForegroundTaskCompletion()
+    return outbox
   }
 
   /** Host-only replay boundary. The returned tombstone fences this exact Agent object permanently. */
@@ -7565,6 +7698,7 @@ export class AssistantDeliveryService extends Service {
       return events
     })
     if (projected) await this.drainPreferenceProjections()
+    this.notifyForegroundTaskCompletion()
     return projected ? 'recorded' : 'unavailable'
   }
 

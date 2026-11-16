@@ -915,3 +915,47 @@ export interface WorkItemIntakeProvenance {
   readonly wouldAccept: boolean
   readonly admittedAt: number
 }
+
+export type WorkItemIntakeObserveReason = 'configured-observe' | 'missing-objective' | 'missing-acceptance'
+
+export interface WorkItemIntakeAdmissionInspection {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly mode: 'observe' | 'auto'
+  readonly outcome: 'would-admit' | 'admitted' | 'replayed' | 'refused'
+  readonly reasonCode: WorkItemDecisionRefusal | WorkItemErrorCode | null
+  readonly observeReason: WorkItemIntakeObserveReason | null
+  readonly decisionId: string
+  readonly itemId: string | null
+  readonly recordedAt: number
+  readonly level: 'ignore' | 'digest' | 'notify' | 'accept' | null
+  readonly wouldAccept: boolean | null
+}
+
+export interface WorkItemObservedItemInspection {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly decisionId: string
+  readonly configuredMode: 'observe' | 'auto'
+  readonly observeReason: WorkItemIntakeObserveReason
+  readonly recordedAt: number
+  readonly level: 'accept'
+  readonly occurredAt: number | null
+}
+
+export interface WorkItemIntakeQueueStatus {
+  readonly enabled: boolean
+  readonly intakeCounts: Readonly<Record<'stored' | 'duplicate' | 'filtered', number>>
+  readonly evaluationCounts: Readonly<Record<'decided' | 'unavailable', number>>
+  readonly admissionCounts: Readonly<Record<'would-admit' | 'admitted' | 'replayed' | 'refused', number>>
+  readonly pendingEvaluations: number
+  readonly pendingAdmissions: number
+  readonly mode: 'disabled' | 'observe' | 'auto'
+  readonly lastEvaluationError: string | null
+  readonly lastAdmissionError: string | null
+  readonly recent: readonly WorkItemIntakeAdmissionInspection[]
+}

@@ -1284,6 +1284,60 @@ export class WorkItemStore {
     return Number(row['count'])
   }
 
+  /** Count accepting evaluations that do not yet have an admission row; read-only. */
+  countPendingIntakeAdmissions(): number {
+    const row = this.#statement(`SELECT COUNT(*) AS count FROM work_item_intake_evaluation e
+      WHERE e.would_accept = 1 AND NOT EXISTS (SELECT 1 FROM work_item_intake_admission a
+        WHERE a.source = e.source AND a.source_event_id = e.source_event_id AND a.rule_id = e.rule_id AND a.policy_version = e.policy_version)`).get() as Row
+    return Number(row['count'])
+  }
+
+  /** Recent intake admission outcomes joined with evaluation and intake metadata; read-only. */
+  listRecentIntakeAdmissions(options: {
+    source?: string
+    sourceEventId?: string
+    outcome?: WorkItemIntakeAdmissionRecord['outcome']
+    mode?: 'observe' | 'auto'
+    limit?: number
+  } = {}): readonly {
+    admission: WorkItemIntakeAdmissionRecord
+    level: WorkItemIntakeEvaluationRecord['level'] | null
+    wouldAccept: boolean | null
+    occurredAt: number | null
+  }[] {
+    const limit = typeof options.limit === 'number' && Number.isSafeInteger(options.limit) && options.limit > 0
+      ? Math.min(options.limit, 500) : 50
+    const rows = this.#statement(`
+      SELECT a.*, e.level AS eval_level, e.would_accept AS eval_would_accept, i.occurred_at AS intake_occurred_at
+      FROM work_item_intake_admission a
+      LEFT JOIN work_item_intake_evaluation e
+        ON e.source = a.source AND e.source_event_id = a.source_event_id
+        AND e.rule_id = a.rule_id AND e.policy_version = a.policy_version
+      LEFT JOIN work_item_intake i
+        ON i.source = a.source AND i.source_event_id = a.source_event_id
+      WHERE (? IS NULL OR a.source = ?)
+        AND (? IS NULL OR a.source_event_id = ?)
+        AND (? IS NULL OR a.outcome = ?)
+        AND (? IS NULL OR a.mode = ?)
+      ORDER BY a.recorded_at DESC, a.source, a.source_event_id, a.rule_id, a.policy_version
+      LIMIT ?
+    `).all(
+      options.source ?? null, options.source ?? null,
+      options.sourceEventId ?? null, options.sourceEventId ?? null,
+      options.outcome ?? null, options.outcome ?? null,
+      options.mode ?? null, options.mode ?? null,
+      limit,
+    ) as Row[]
+    return Object.freeze(rows.map(row => Object.freeze({
+      admission: intakeAdmissionFromRow(row),
+      level: row['eval_level'] === null || row['eval_level'] === undefined
+        ? null : String(row['eval_level']) as WorkItemIntakeEvaluationRecord['level'],
+      wouldAccept: row['eval_would_accept'] === null || row['eval_would_accept'] === undefined
+        ? null : Number(row['eval_would_accept']) === 1,
+      occurredAt: optNumber(row['intake_occurred_at']),
+    })))
+  }
+
   /** Outcome counts over the admission table; read-only. */
   countIntakeAdmissions(): Readonly<Record<WorkItemIntakeAdmissionRecord['outcome'], number>> {
     const counts = { 'would-admit': 0, admitted: 0, replayed: 0, refused: 0 }

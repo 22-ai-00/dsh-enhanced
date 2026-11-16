@@ -17,6 +17,7 @@ export interface PreparationRecord {
 /** The preparation intent and result are private, durable data; neither is goal completion evidence. */
 export class PreparationStore {
   readonly #db: DatabaseSync
+  readonly #enqueueListeners = new Set<(record: PreparationRecord) => void>()
   constructor(path: string) {
     if (path !== ':memory:') privatePath(path)
     this.#db = new DatabaseSync(path)
@@ -30,6 +31,10 @@ export class PreparationStore {
       this.#write({ ...value, state: 'unknown', reason: 'process-interrupted', updatedAt: Date.now() }, 'running')
     }
   }
+  onEnqueue(listener: (record: PreparationRecord) => void): () => void {
+    this.#enqueueListeners.add(listener)
+    return () => { this.#enqueueListeners.delete(listener) }
+  }
   enqueue(decision: OpportunityDecision, settings: PreparationSettings, deadlineAt = decision.expiresAt): PreparationRecord {
     const existing = this.get(decision.id)
     if (existing) {
@@ -37,10 +42,39 @@ export class PreparationStore {
       return existing
     }
     const value: PreparationRecord = { id: decision.id, decision, settings, deadlineAt, state: 'queued', createdAt: Date.now(), updatedAt: Date.now() }
-    this.#db.prepare('INSERT OR IGNORE INTO proactive_preparations VALUES(?,?,?,?,?,?)').run(value.id, acceptanceDigest(decision.scope), decision.goalId, value.state, null, JSON.stringify(value))
+    const result = this.#db.prepare('INSERT OR IGNORE INTO proactive_preparations VALUES(?,?,?,?,?,?)').run(value.id, acceptanceDigest(decision.scope), decision.goalId, value.state, null, JSON.stringify(value))
     const saved = this.get(value.id)!
     if (acceptanceDigest([saved.decision, saved.settings, saved.deadlineAt]) !== acceptanceDigest([decision, settings, deadlineAt])) throw new Error('assistant-proactive: preparation identity conflict')
+    if (result.changes === 1 && saved.state === 'queued') {
+      for (const listener of Array.from(this.#enqueueListeners)) {
+        try { listener(saved) } catch { /* Enqueue notifications must not abort persistence. */ }
+      }
+    }
     return saved
+  }
+  hasPending(): boolean {
+    return this.#db.prepare("SELECT 1 AS found FROM proactive_preparations WHERE state='queued' LIMIT 1").get() !== undefined
+  }
+  list(filter: { scope?: OpportunityScope; goalId?: string; state?: PreparationRecord['state']; limit?: number } = {}): PreparationRecord[] {
+    const conditions: string[] = []
+    const params: (string | number)[] = []
+    if (filter.scope !== undefined) {
+      conditions.push('scope_key=?')
+      params.push(acceptanceDigest(filter.scope))
+    }
+    if (filter.goalId !== undefined) {
+      conditions.push('goal_id=?')
+      params.push(filter.goalId)
+    }
+    if (filter.state !== undefined) {
+      conditions.push('state=?')
+      params.push(filter.state)
+    }
+    const limit = typeof filter.limit === 'number' && Number.isSafeInteger(filter.limit) && filter.limit > 0
+      ? Math.min(filter.limit, 500) : 100
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const rows = this.#db.prepare(`SELECT payload_json FROM proactive_preparations ${where} ORDER BY rowid DESC LIMIT ?`).all(...params, limit) as { payload_json: string }[]
+    return rows.map(row => JSON.parse(row.payload_json) as PreparationRecord)
   }
   get(id: string): PreparationRecord | undefined {
     const row = this.#db.prepare('SELECT payload_json FROM proactive_preparations WHERE id=?').get(id) as { payload_json: string } | undefined
@@ -74,5 +108,5 @@ export class PreparationStore {
     return this.#db.prepare(`UPDATE proactive_preparations SET state=?,token=?,payload_json=? WHERE id=? AND state=?${token === undefined ? '' : ' AND token=?'}`)
       .run(value.state, value.token ?? null, JSON.stringify(value), value.id, expected, ...(token === undefined ? [] : [token])).changes === 1
   }
-  close(): void { this.#db.close() }
+  close(): void { this.#enqueueListeners.clear(); this.#db.close() }
 }

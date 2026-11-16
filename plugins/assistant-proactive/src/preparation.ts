@@ -10,18 +10,49 @@ interface GoalPort { assertPreparationCurrent(input: OpportunityDecision): void 
 export class PreparationRuntime {
   readonly #abort = new AbortController()
   #operation: Promise<void> | undefined
+  #wakeTimer: ReturnType<typeof setTimeout> | undefined
+  #active: boolean
   #closed = false
-  constructor(private readonly ctx: Context, readonly store: PreparationStore) {
+  constructor(private readonly ctx: Context, readonly store: PreparationStore, options: { active?: boolean } = {}) {
+    this.#active = options.active ?? true
     ctx.effect(() => {
-      const timer = setInterval(() => { void this.tick().catch(() => {}) }, 500)
-      timer.unref?.()
+      const unsubEnqueue = this.store.onEnqueue(() => { this.wake() })
+      const injectFork = this.ctx.inject(['assistantAutomations', 'assistantGoals'] as never, () => {
+        this.wake()
+      }) as { dispose?: () => void } | undefined
+      this.wake()
       return async () => {
-        this.#closed = true; clearInterval(timer); this.#abort.abort()
+        this.#closed = true
+        this.#clearWake()
+        unsubEnqueue()
+        injectFork?.dispose?.()
+        this.#abort.abort()
         // The Automation runner owns cancellation and joins its Agent before returning.
         await this.#operation?.catch(() => {})
         this.store.close()
       }
     }, 'assistant-proactive.preparations')
+  }
+  setActive(active: boolean): void {
+    if (this.#closed) return
+    this.#active = active
+    if (active) this.wake()
+    else this.#clearWake()
+  }
+  wake(): void {
+    if (this.#closed || !this.#active || this.#operation || this.#wakeTimer !== undefined || !this.available()) return
+    if (!this.store.hasPending()) return
+    this.#wakeTimer = setTimeout(() => {
+      this.#wakeTimer = undefined
+      void this.tick().catch(() => {})
+    }, 0)
+    this.#wakeTimer.unref?.()
+  }
+  #clearWake(): void {
+    if (this.#wakeTimer !== undefined) {
+      clearTimeout(this.#wakeTimer)
+      this.#wakeTimer = undefined
+    }
   }
   available(): boolean { const ports = this.#ports(); return typeof ports.automation?.runPreparation === 'function' && typeof ports.goals?.assertPreparationCurrent === 'function' }
   #ports() { return { automation: this.ctx.get('assistantAutomations' as never, false) as PreparationPort | undefined, goals: this.ctx.get('assistantGoals' as never, false) as GoalPort | undefined } }
@@ -34,11 +65,16 @@ export class PreparationRuntime {
     goals.assertPreparationCurrent(record.decision)
   }
   tick(): Promise<void> {
+    this.#clearWake()
     if (this.#closed || !this.available()) return Promise.resolve()
     if (this.#operation) return this.#operation
+    if (!this.store.hasPending()) return Promise.resolve()
     const operation = this.#run()
     this.#operation = operation
-    void operation.finally(() => { if (this.#operation === operation) this.#operation = undefined }).catch(() => {})
+    void operation.finally(() => {
+      if (this.#operation === operation) this.#operation = undefined
+      if (!this.#closed && this.#active && this.store.hasPending()) this.wake()
+    }).catch(() => {})
     return operation
   }
   async #run(): Promise<void> {

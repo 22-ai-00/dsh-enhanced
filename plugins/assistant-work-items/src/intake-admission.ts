@@ -3,7 +3,7 @@ import type { NormalizedIntakeAdmit } from './config.ts'
 import type { WorkItemIntakeAcceptance, WorkItemIntakeObjective } from './intake.ts'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
 import type { WorkItemStore } from './store.ts'
-import type { WorkItemDecisionAdmitResult, WorkItemDecisionRefusal, WorkItemErrorCode, WorkItemExecuteDecision } from './types.ts'
+import type { WorkItemDecisionAdmitResult, WorkItemDecisionRefusal, WorkItemErrorCode, WorkItemExecuteDecision, WorkItemIntakeObserveReason } from './types.ts'
 import { WorkItemError } from './types.ts'
 
 /**
@@ -88,6 +88,7 @@ export function intakeDecisionFor(record: WorkItemIntakeEvaluationRecord, config
 }
 
 export class WorkItemIntakeAdmissionBridge {
+  static readonly MAX_OBSERVE_REASONS = 1_024
   readonly #config: NormalizedIntakeAdmit
   readonly #maxPerRun: number
   readonly #store: () => WorkItemStore | undefined
@@ -95,6 +96,7 @@ export class WorkItemIntakeAdmissionBridge {
   readonly #log: (message: string) => void
   readonly #now: () => number
   readonly #hint: ((source: string, sourceEventId: string) => WorkItemIntakeAdmissionHint | undefined) | undefined
+  readonly #observeReasons = new Map<string, WorkItemIntakeObserveReason>()
   #lastError: string | null = null
 
   constructor(options: {
@@ -141,17 +143,45 @@ export class WorkItemIntakeAdmissionBridge {
     return this.#lastError
   }
 
+  observeReasonOf(record: Pick<WorkItemIntakeAdmissionRecord, 'source' | 'sourceEventId' | 'ruleId' | 'policyVersion' | 'outcome'>): WorkItemIntakeObserveReason | undefined {
+    if (record.outcome !== 'would-admit') return undefined
+    const existing = this.#observeReasons.get(this.#reasonKey(record))
+    if (existing !== undefined) return existing
+    return this.#config.mode === 'observe' ? 'configured-observe' : 'missing-acceptance'
+  }
+
+  #reasonKey(record: Pick<WorkItemIntakeAdmissionRecord, 'source' | 'sourceEventId' | 'ruleId' | 'policyVersion'>): string {
+    return `${record.source}\u0000${record.sourceEventId}\u0000${record.ruleId}\u0000${record.policyVersion}`
+  }
+
+  #rememberObserveReason(record: Pick<WorkItemIntakeAdmissionRecord, 'source' | 'sourceEventId' | 'ruleId' | 'policyVersion'>, reason: WorkItemIntakeObserveReason): void {
+    const key = this.#reasonKey(record)
+    this.#observeReasons.delete(key)
+    this.#observeReasons.set(key, reason)
+    while (this.#observeReasons.size > WorkItemIntakeAdmissionBridge.MAX_OBSERVE_REASONS) {
+      const oldest = this.#observeReasons.keys().next().value
+      if (oldest === undefined) break
+      this.#observeReasons.delete(oldest)
+    }
+  }
+
   /** `undefined` leaves the row pending for the next wake (a transient storage failure). */
   #decide(store: WorkItemStore, evaluation: WorkItemIntakeEvaluationRecord): WorkItemIntakeAdmissionRecord | undefined {
     const decisionId = intakeDecisionIdFor(evaluation)
     const key = { source: evaluation.source, sourceEventId: evaluation.sourceEventId, ruleId: evaluation.ruleId, policyVersion: evaluation.policyVersion, decisionId }
-    if (this.#config.mode === 'observe') return store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+    if (this.#config.mode === 'observe') {
+      const written = store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+      this.#rememberObserveReason(key, 'configured-observe')
+      return written
+    }
     const hint = this.#hint?.(evaluation.source, evaluation.sourceEventId)
     if (this.#hint !== undefined && (hint?.objective === undefined || hint.acceptance === undefined)) {
-      // Auto without a real acceptance handle is not allowed to create work. It
-      // records the observe row instead, so a later hint cannot retroactively
-      // admit this evaluation (the admission ledger is append-only).
-      return store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+      // Auto without both an objective and a real verifier contract handle fails
+      // closed to observe; an append-only row guarantees replays never bypass it.
+      const reason: WorkItemIntakeObserveReason = hint?.objective === undefined ? 'missing-objective' : 'missing-acceptance'
+      const written = store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+      this.#rememberObserveReason(key, reason)
+      return written
     }
     const budget = Math.max(0, this.#config.maxPerHour - store.countIntakeAdmitted(this.#now() - HOUR_MS))
     let result: WorkItemDecisionAdmitResult

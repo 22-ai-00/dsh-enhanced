@@ -12,13 +12,19 @@ import type { LearningConfig, LearningJob, LearningSnapshot, WorkItemPresentatio
 const OWNER = 'assistant-memory-learning'
 const EXECUTOR = 'assistant-memory-learning-v1'
 const CATALOG = growthObjectDigest({ executor: EXECUTOR, contract: 1 })
+const EVENT_DEBOUNCE_MS = 50
+const EVENT_DEBOUNCE_MAX_WAIT_MS = 250
+const FALLBACK_CRON_EXPRESSION = '0 * * * *'
 type WorkItemFenceInput = OwnerForegroundTaskSourceScope & { itemId: string; outcomeId: string; expectedSourceDigest: string; expectedContentDigest: string; canonical: { version: number; digest: string; objectiveStatus: 'achieved' | 'not-achieved' } }
 type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerRouteState' | 'listOwnerForegroundTaskSources' | 'withOwnerForegroundTaskSourcesFence' | 'inspectOwnerForegroundLearningTask'> & {
   inspectOwnerWorkItemLearningTask?: AssistantDeliveryService['inspectOwnerWorkItemLearningTask']
   withOwnerWorkItemLearningTaskFence?<T>(input: WorkItemFenceInput, callback: (task: Readonly<OwnerWorkItemLearningTask>) => T): T
   inspectOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & { inboxId: string }): Readonly<OwnerForegroundTaskSource> | undefined
+  onForegroundTaskCompletion?(listener: () => void): () => void
 }
-type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalScopeWriterFence' | 'getTrustedForegroundLearningProjection' | 'inspectTrustedTaskOwnerRevision' | 'getTrustedWorkItemLearningProjection'>
+type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'listTrustedTaskLearningProjections' | 'withTrustedCanonicalScopeWriterFence' | 'getTrustedForegroundLearningProjection' | 'inspectTrustedTaskOwnerRevision' | 'getTrustedWorkItemLearningProjection'> & {
+  onTrustedTaskChange?(listener: () => void): () => void
+}
 type Automations = Pick<AssistantAutomationsService, 'inspectSystemOwnedRetirement' | 'retireSystemOwned' | 'onSchedulerWake' | 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
 type Target = LearningSnapshot['targets'][number]
 interface Memory {
@@ -66,6 +72,10 @@ export class MemoryLearningRuntime {
   private unregister: (() => void) | undefined
   private readonly ownerGuard: ScannerOwnerGuard
   private unsubscribeWake: (() => void) | undefined
+  private readonly eventUnsubscribes: Array<() => void> = []
+  private scanDebounceTimer: ReturnType<typeof setTimeout> | undefined
+  private scanDebounceDeadline: number | null = null
+  private scanRescanPending = false
   private initialized = false
   private active = false
   private scanning = false
@@ -119,8 +129,14 @@ export class MemoryLearningRuntime {
         try { this.initializeScanner() }
         catch (error) { this.lastError = String(error).slice(0, 200) }
       })
+      if (typeof this.ports.delivery.onForegroundTaskCompletion === 'function') {
+        this.eventUnsubscribes.push(this.ports.delivery.onForegroundTaskCompletion(() => { this.scheduleEventScan() }))
+      }
+      if (typeof this.ports.evaluation.onTrustedTaskChange === 'function') {
+        this.eventUnsubscribes.push(this.ports.evaluation.onTrustedTaskChange(() => { this.scheduleEventScan() }))
+      }
 
-      // One bounded activation reconciliation; subsequent scans are native jobs.
+      // One bounded activation reconciliation; subsequent scans are driven by completion events or hourly fallback cron.
       if (recoverNativeScanner) {
         try {
           this.ports.automations.reconcileSystem({ owner: OWNER, automationId: this.scanId,
@@ -129,8 +145,44 @@ export class MemoryLearningRuntime {
       }
       this.scan()
     } catch (error) {
-      this.active = false; this.unsubscribeWake?.(); this.unregister?.(); this.abort.abort(error); this.store.close(); throw error
+      this.active = false; this.cleanupSubscriptions(); this.abort.abort(error); this.store.close(); throw error
     }
+  }
+  private clearEventDebounce(): void {
+    if (this.scanDebounceTimer !== undefined) {
+      clearTimeout(this.scanDebounceTimer)
+      this.scanDebounceTimer = undefined
+    }
+    this.scanDebounceDeadline = null
+    this.scanRescanPending = false
+  }
+  private cleanupSubscriptions(): void {
+    this.clearEventDebounce()
+    this.unsubscribeWake?.()
+    this.unsubscribeWake = undefined
+    for (const unsubscribe of this.eventUnsubscribes.splice(0)) {
+      try { unsubscribe() } catch { /* Best-effort cleanup during shutdown. */ }
+    }
+    this.unregister?.()
+    this.unregister = undefined
+  }
+  private scheduleEventScan(): void {
+    if (!this.active || this.closing || this.ownerGuard.retired) return
+    if (this.scanning) {
+      this.scanRescanPending = true
+      return
+    }
+    const now = Date.now()
+    const deadline = this.scanDebounceDeadline ??= now + EVENT_DEBOUNCE_MAX_WAIT_MS
+    const delay = Math.min(EVENT_DEBOUNCE_MS, Math.max(0, deadline - now))
+    if (this.scanDebounceTimer !== undefined) clearTimeout(this.scanDebounceTimer)
+    this.scanDebounceTimer = setTimeout(() => {
+      this.scanDebounceTimer = undefined
+      this.scanDebounceDeadline = null
+      if (!this.active || this.closing || this.ownerGuard.retired) return
+      this.scan()
+    }, delay)
+    this.scanDebounceTimer.unref?.()
   }
   private initializeScanner() {
     const owner = this.owner()
@@ -145,7 +197,7 @@ export class MemoryLearningRuntime {
 
   close(): Promise<void> {
     return this.closing ??= (async () => {
-      this.active = false; this.unsubscribeWake?.(); this.unregister?.()
+      this.active = false; this.cleanupSubscriptions()
       this.abort.abort(new Error('memory learning provider disposed'))
       if (!this.ownerGuard.retired && this.initialized) this.store.interrupt(this.lane)
       const deadline = AbortSignal.timeout(5000)
@@ -403,14 +455,20 @@ export class MemoryLearningRuntime {
       this.lastScanAt = Date.now()
       if (this.lastError === 'learning-authority-or-budget-unavailable') this.lastError = null
     } catch (error) { this.lastError = String(error).slice(0, 200) }
-    finally { this.scanning = false }
+    finally {
+      this.scanning = false
+      if (this.scanRescanPending && this.active && !this.closing && !this.ownerGuard.retired) {
+        this.scanRescanPending = false
+        this.scheduleEventScan()
+      }
+    }
   }
 
   private definition(job?: LearningJob): HostAutomationDefinition {
     const owner = this.config.owner
     return { name: job ? 'Learn from an ordinary owner task' : 'Discover ordinary owner learning',
       schedule: job ? { kind: 'at', at: new Date(job.intent.createdAt + 1000).toISOString() }
-        : { kind: 'cron', expression: '* * * * *', timezone: 'UTC' }, workspace: owner.workspace, agentPreset: owner.agentPreset,
+        : { kind: 'cron', expression: FALLBACK_CRON_EXPRESSION, timezone: 'UTC' }, workspace: owner.workspace, agentPreset: owner.agentPreset,
       timeoutMs: job ? this.config.timeoutMs + 310_000 : 30_000, misfire: { kind: 'latest' }, overlap: 'skip',
       retrySafety: 'never', maxRetries: 0, principal: owner.principalId,
       budgetId: job ? this.config.budgetId : this.config.scanBudgetId,

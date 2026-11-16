@@ -3,7 +3,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { WorkItemErrorCode, WorkItemReportStatus, WorkItemScope } from './types.ts'
 import { WorkItemError } from './types.ts'
 import type { WorkItemIntakeSourcePolicy } from './intake.ts'
-import { INTAKE_SOURCE_ID } from './intake.ts'
+import { INTAKE_SOURCE_ID, MAX_INTAKE_OBJECTIVE_BYTES } from './intake.ts'
 
 /** Raw operator configuration. Every field is optional except the two paths. */
 export interface Config {
@@ -108,6 +108,7 @@ export interface IntakeAdmitConfig {
   kind?: string
   originBindingId?: string
   maxPerHour?: number
+  acceptanceObjective?: string
 }
 
 /** A separately authorized Host worker; it never changes the diagnosis worker. */
@@ -277,6 +278,8 @@ export interface NormalizedIntakeAdmit {
   readonly originBindingId: string
   /** Items admitted from intake per rolling hour; reported to `admitDecision` as the remaining budget. */
   readonly maxPerHour: number
+  /** Optional bounded opt-in acceptance objective forwarded to Delivery's verifier contract preparation. */
+  readonly acceptanceObjective?: string
 }
 
 export interface NormalizedForegroundFailureSource {
@@ -342,7 +345,7 @@ const FOLLOWS_KEYS = ['eventTriggers'] as const
 const FOLLOW_SOURCE_KEYS = ['enabled', 'acceptHeadRef'] as const
 const INTAKE_LEDGER_KEYS = ['enabled', 'sources', 'evaluation'] as const
 const INTAKE_EVALUATION_KEYS = ['enabled', 'timeoutMs', 'maxConsecutiveFailures', 'maxPerRun', 'maxCallsPerHour', 'admit'] as const
-const INTAKE_ADMIT_KEYS = ['enabled', 'mode', 'kind', 'originBindingId', 'maxPerHour'] as const
+const INTAKE_ADMIT_KEYS = ['enabled', 'mode', 'kind', 'originBindingId', 'maxPerHour', 'acceptanceObjective'] as const
 const BINDING_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/
 const INTAKE_SOURCE_KEYS = ['unaddressedGroupMessages', 'unsubscribedEvents'] as const
 const MAX_INTAKE_SOURCES = 32
@@ -431,6 +434,7 @@ export const ConfigSchema = Schema.object({
         enabled: Schema.boolean().default(false),
         mode: Schema.union(['observe', 'auto'] as const).default('observe'),
         kind: Schema.string(), originBindingId: Schema.string(), maxPerHour: Schema.number().step(1),
+        acceptanceObjective: Schema.string(),
       }),
     }),
   }),
@@ -872,9 +876,19 @@ function normalizeIntakeAdmit(raw: unknown): NormalizedIntakeAdmit | undefined {
   if (!KIND.test(kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind has an invalid shape')
   const originBindingId = text(value['originBindingId'], 'intakeLedger.evaluation.admit.originBindingId', 256)
   if (!BINDING_ID.test(originBindingId)) fail('invalid-input', 'intakeLedger.evaluation.admit.originBindingId has an invalid shape')
+  let acceptanceObjective: string | undefined
+  if (value['acceptanceObjective'] !== undefined) {
+    const rawObjective = value['acceptanceObjective']
+    if (typeof rawObjective !== 'string' || rawObjective.length === 0 || !rawObjective.isWellFormed()
+      || rawObjective.includes('\u0000') || Buffer.byteLength(rawObjective, 'utf8') > MAX_INTAKE_OBJECTIVE_BYTES) {
+      fail('invalid-input', `intakeLedger.evaluation.admit.acceptanceObjective must be 1-${MAX_INTAKE_OBJECTIVE_BYTES} UTF-8 bytes without NUL or lone surrogates`)
+    }
+    acceptanceObjective = rawObjective
+  }
   return Object.freeze({
     enabled: true as const, mode, kind, originBindingId,
     maxPerHour: integer(value['maxPerHour'] ?? 5, 'intakeLedger.evaluation.admit.maxPerHour', 1, 100),
+    ...(acceptanceObjective === undefined ? {} : { acceptanceObjective }),
   })
 }
 

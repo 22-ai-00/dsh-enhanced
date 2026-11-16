@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { reminderContentDigest, type ReminderContent } from './reminder.js'
 import { attentionOverlay, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
-import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
+import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope, ProactiveOpportunityFilter } from './types.js'
 
 const max = 1_000_000_000
 const integer = (value: unknown, limit = max): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= limit
@@ -150,9 +150,60 @@ export class OpportunityEngine {
     this.#put(next); this.#db.exec('COMMIT'); return next
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
+  get(id: string): OpportunityDecision | undefined {
+    if (!text(id)) fail()
+    return this.#decision(id)
+  }
   list(scopeInput: OpportunityScope, goalId?: string): readonly OpportunityDecision[] {
     const scope = scopeKey(scopeInput); if (goalId !== undefined && !text(goalId)) fail()
     const rows = this.#db.prepare(`SELECT payload_json FROM proactive_decisions WHERE scope_json = ? ${goalId === undefined ? '' : 'AND goal_id = ?'} ORDER BY json_extract(payload_json, '$.firstObservedAt'), id`).all(...(goalId === undefined ? [scope] : [scope, goalId])) as Array<{ payload_json: string }>
+    return freeze(rows.map(row => this.#parse(row.payload_json))) as readonly OpportunityDecision[]
+  }
+  listScopes(): readonly OpportunityScope[] {
+    const rows = this.#db.prepare('SELECT DISTINCT scope_json FROM proactive_decisions').all() as Array<{ scope_json: string }>
+    return freeze(rows.map(row => JSON.parse(row.scope_json) as OpportunityScope)) as readonly OpportunityScope[]
+  }
+  listAll(filter: ProactiveOpportunityFilter = {}): readonly OpportunityDecision[] {
+    const conditions: string[] = []
+    const params: (string | number)[] = []
+    if (filter.scope !== undefined) {
+      conditions.push('scope_json = ?')
+      params.push(scopeKey(filter.scope))
+    }
+    if (filter.workspace !== undefined) {
+      if (!content(filter.workspace, 4096) || !filter.workspace.startsWith('/')) fail()
+      conditions.push("json_extract(scope_json, '$.workspace') = ?")
+      params.push(filter.workspace)
+    }
+    if (filter.preset !== undefined) {
+      if (!text(filter.preset, 4096)) fail()
+      conditions.push("json_extract(scope_json, '$.preset') = ?")
+      params.push(filter.preset)
+    }
+    if (filter.principalId !== undefined) {
+      if (!text(filter.principalId, 4096)) fail()
+      conditions.push("json_extract(scope_json, '$.principalId') = ?")
+      params.push(filter.principalId)
+    }
+    if (filter.goalId !== undefined) {
+      if (!text(filter.goalId)) fail()
+      conditions.push('goal_id = ?')
+      params.push(filter.goalId)
+    }
+    if (filter.state !== undefined) {
+      if (!['pending', 'decided', 'closed'].includes(filter.state)) fail()
+      conditions.push("json_extract(payload_json, '$.state') = ?")
+      params.push(filter.state)
+    }
+    if (filter.mode !== undefined) {
+      if (!['prepare', 'remind', 'execute', 'suppress'].includes(filter.mode)) fail()
+      conditions.push("json_extract(payload_json, '$.mode') = ?")
+      params.push(filter.mode)
+    }
+    const limit = typeof filter.limit === 'number' && Number.isSafeInteger(filter.limit) && filter.limit > 0
+      ? Math.min(filter.limit, 500) : 100
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+    const rows = this.#db.prepare(`SELECT payload_json FROM proactive_decisions ${where} ORDER BY json_extract(payload_json, '$.updatedAt') DESC, rowid DESC LIMIT ?`).all(...params, limit) as Array<{ payload_json: string }>
     return freeze(rows.map(row => this.#parse(row.payload_json))) as readonly OpportunityDecision[]
   }
   profileSnapshot(scope: OpportunityScope, goalId: string, profileId: string): Readonly<OpportunityProfile> {

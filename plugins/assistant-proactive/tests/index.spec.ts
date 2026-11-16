@@ -76,8 +76,135 @@ describe('assistant-proactive bundle and owner access', () => {
     expect(f.service.preauthorizeStatus(valid as never)).toBe(false)
   })
   it('keeps an empty profile configuration inert', async () => {
-    const f = await harness([])
-    expect(f.service.availableProfiles(f.agent)).toEqual([])
-    expect(() => f.service.assertProfile('report')).toThrow('configured active')
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval')
+    try {
+      const f = await harness([])
+      expect(f.service.availableProfiles(f.agent)).toEqual([])
+      expect(() => f.service.assertProfile('report')).toThrow('configured active')
+      expect(intervalSpy).not.toHaveBeenCalled()
+    } finally {
+      intervalSpy.mockRestore()
+    }
+  })
+  it('exposes Host-only draft inspection and resolution without requiring an active agent', async () => {
+    const prepareProfile: OpportunityProfile = {
+      ...profile,
+      id: 'prepare-draft',
+      mode: 'prepare',
+      preparation: { provider: 'mock', model: 'draft', budgetId: 'prep', maxOutputTokens: 128, timeoutMs: 5_000 },
+    }
+    const f = await harness([prepareProfile])
+    const runPreparation = vi.fn(async () => ({
+      outcome: 'succeeded',
+      output: 'Suggested diff ready',
+      usage: { outputTokens: 12 },
+      sessionId: 'prep-session-1',
+      quiescent: true,
+    }))
+    f.ctx.provide('assistantAutomations' as never, { runPreparation } as never)
+    f.ctx.provide('assistantGoals' as never, { assertPreparationCurrent: vi.fn() } as never)
+
+    const input = { ...opportunity(), profileId: 'prepare-draft' }
+    const evaluated = f.service.evaluate(input)
+    expect(evaluated.disposition).toBe('consume')
+    await vi.waitFor(() => expect(f.service.inspectDrafts({ state: 'draft' })).toHaveLength(1))
+
+    const drafts = f.service.inspectDrafts()
+    expect(drafts).toHaveLength(1)
+    expect(drafts[0]).toMatchObject({
+      id: evaluated.decision.id,
+      goalId: input.goalId,
+      profileId: 'prepare-draft',
+      objective: input.objective,
+      state: 'draft',
+      reason: 'unverified-draft',
+      decisionState: 'decided',
+      output: 'Suggested diff ready',
+      sessionId: 'prep-session-1',
+      verified: false,
+    })
+
+    const opportunities = f.service.inspectOpportunities({ workspace: scope.workspace, mode: 'prepare' })
+    expect(opportunities).toHaveLength(1)
+    expect(opportunities[0]?.preparation).toMatchObject({ state: 'draft', output: 'Suggested diff ready', verified: false })
+
+    expect(f.service.resolveDraft({ id: 'missing-id', decision: 'accepted' })).toBeUndefined()
+    const rejected = f.service.resolveDraft({ id: evaluated.decision.id, decision: 'rejected' })
+    expect(rejected).toMatchObject({ id: evaluated.decision.id, state: 'closed', feedback: 'rejected' })
+    expect(f.service.resolveDraft({ id: evaluated.decision.id, decision: 'rejected' })).toMatchObject({ state: 'closed', feedback: 'rejected' })
+    expect(() => f.service.resolveDraft({ id: evaluated.decision.id, decision: 'accepted' })).toThrow('unavailable')
+    expect(f.service.inspectDrafts()[0]).toMatchObject({ feedback: 'rejected', decisionState: 'closed' })
+
+    const second = f.service.evaluate({ ...input, event: { ...input.event, id: 'event-2', sequence: 2, digest: 'digest-2' } })
+    expect(second.decision).toMatchObject({ mode: 'suppress', reason: 'rejected-cooldown' })
+  })
+  it('exposes Host-only WP22 owner attention question inspection and reply application', async () => {
+    const f = await harness()
+    expect(f.service.inspectAttentionQuestions()).toEqual([])
+    expect(f.service.resolveAttentionQuestion({ scope: { workspace: scope.workspace, preset: scope.preset }, questionId: 'q-1', choice: 'decline' }))
+      .toEqual({ status: 'rejected', reason: 'evaluation-unavailable' })
+
+    f.service.evaluate(opportunity())
+    const applyReply = vi.fn(() => ({
+      status: 'applied' as const,
+      questionId: 'q-open',
+      choice: 'authorize-once' as const,
+      proposalId: 'p-1',
+      grantId: 'g-once',
+      adoption: 'deferred' as const,
+    }))
+    f.ctx.provide('assistantEvaluation' as never, {
+      attentionLooseningStatus: vi.fn(() => ({
+        enabled: true,
+        grant: null,
+        proposals: [{ proposalId: 'p-1', decision: null }],
+        questions: [{
+          questionId: 'q-open',
+          question: {
+            proposalId: 'p-1',
+            change: { parameter: 'minimumUtilityDelta', parentValue: 0, candidateValue: -5, delta: -5 },
+            exceeded: ['no-grant'],
+            grantId: null,
+            choices: ['authorize-once', 'decline'] as const,
+            createdAt: 1_700_000_000_000,
+          },
+        }],
+      })),
+      attentionOwnerQuestionStatus: vi.fn(() => ({
+        enabled: true,
+        deliveries: [{ questionId: 'q-open', status: 'queued' as const, outboxId: 'out-1', recordedAt: 1_700_000_000_100 }],
+        replies: [],
+      })),
+      applyAttentionOwnerQuestionReply: applyReply,
+    } as never)
+
+    const questions = f.service.inspectAttentionQuestions()
+    expect(questions).toHaveLength(1)
+    expect(questions[0]).toMatchObject({
+      questionId: 'q-open',
+      scope: { workspace: scope.workspace, preset: scope.preset },
+      proposalId: 'p-1',
+      parameter: 'minimumUtilityDelta',
+      parentValue: 0,
+      candidateValue: -5,
+      delta: -5,
+      exceeded: ['no-grant'],
+      open: true,
+      delivery: { status: 'queued', outboxId: 'out-1' },
+      reply: null,
+    })
+
+    const resolved = f.service.resolveAttentionQuestion({
+      scope: { workspace: scope.workspace, preset: scope.preset },
+      questionId: 'q-open',
+      choice: 'authorize-once',
+    })
+    expect(resolved).toMatchObject({ status: 'applied', questionId: 'q-open', choice: 'authorize-once', grantId: 'g-once' })
+    expect(applyReply).toHaveBeenCalledWith({
+      scope: { workspace: scope.workspace, preset: scope.preset },
+      cohort: { lane: 'owner-notification', sourceId: 'assistant-proactive/v1' },
+      questionId: 'q-open',
+      choice: 'authorize-once',
+    })
   })
 })
