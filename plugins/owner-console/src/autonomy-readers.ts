@@ -72,9 +72,12 @@ export function resolveOverviewScope(
 
 function dreamingMissingPrereqs(config: Record<string, unknown>): readonly string[] {
   const missing: string[] = []
+  if (config['retired'] === true) missing.push('retired=false')
   const scope = record(config['scope'])
   if (typeof scope['workspace'] !== 'string' || scope['workspace'].trim() === '') missing.push('scope.workspace')
   if (typeof scope['preset'] !== 'string' || scope['preset'].trim() === '') missing.push('scope.preset')
+  if (typeof scope['principalId'] !== 'string' || scope['principalId'].trim() === '') missing.push('scope.principalId')
+  if (typeof scope['ownerRouteId'] !== 'string' || scope['ownerRouteId'].trim() === '') missing.push('scope.ownerRouteId')
   if (typeof config['databasePath'] !== 'string' || config['databasePath'].trim() === '') missing.push('databasePath')
   if (typeof config['provider'] !== 'string' || config['provider'].trim() === '') missing.push('provider')
   if (typeof config['model'] !== 'string' || config['model'].trim() === '') missing.push('model')
@@ -167,13 +170,15 @@ function readDreamingOverview(
   }
 }
 
-function formatQuestionSummary(question: unknown): string | undefined {
+function formatQuestionSummary(question: unknown, flatItem?: Record<string, unknown>): string | undefined {
   const q = record(question)
   const change = record(q['change'])
-  const param = str(change['parameter'], 80)
+  const param = str(change['parameter'], 80) ?? str(flatItem?.['parameter'], 80)
   if (param !== undefined) {
-    const fromVal = change['from'] === undefined ? '?' : String(change['from'])
-    const toVal = change['to'] === undefined ? '?' : String(change['to'])
+    const rawFrom = change['parameter'] !== undefined ? change['from'] : flatItem?.['parentValue']
+    const rawTo = change['parameter'] !== undefined ? change['to'] : flatItem?.['candidateValue']
+    const fromVal = rawFrom === undefined ? '?' : String(rawFrom)
+    const toVal = rawTo === undefined ? '?' : String(rawTo)
     return `${param}: ${fromVal} → ${toVal}`
   }
   return str(q['summary'], 240)
@@ -194,27 +199,37 @@ function readProactiveOverview(
   let populatedQuestionsViaProactive = false
   if (proactive !== undefined && proactive !== null && typeof proactive['inspectAttentionQuestions'] === 'function') {
     try {
-      const inspected = record((proactive['inspectAttentionQuestions'] as (filter?: unknown) => unknown)({
-        ...(scope === undefined ? {} : { workspace: scope.workspace, preset: scope.preset }),
+      const inspectedRaw = (proactive['inspectAttentionQuestions'] as (filter?: unknown) => unknown)({
+        ...(scope === undefined ? {} : {
+          scope: { workspace: scope.workspace, preset: scope.preset },
+          workspace: scope.workspace,
+          preset: scope.preset,
+        }),
         includeResolved: true,
         limit: MAX_LIST,
-      }))
-      const fallbackCohort = record(inspected['cohort'])
+      })
+      const inspected = Array.isArray(inspectedRaw) ? undefined : record(inspectedRaw)
+      const rawItems = Array.isArray(inspectedRaw) ? inspectedRaw : list(inspected?.['items'])
+      const fallbackCohort = record(inspected?.['cohort'])
       const defaultLane = str(fallbackCohort['lane'], 128) ?? 'owner-notification'
       const defaultSourceId = str(fallbackCohort['sourceId'], 128) ?? 'assistant-proactive/v1'
-      for (const raw of list(inspected['items']).slice(0, MAX_LIST)) {
+      for (const raw of rawItems.slice(0, MAX_LIST)) {
         const item = record(raw)
         const qid = str(item['questionId'], 160)
         if (qid === undefined) continue
         const itemCohort = record(item['cohort'])
         const itemScope = record(item['scope'])
-        const delivery = record(item['delivery'])
+        const delivery = item['delivery'] !== undefined && item['delivery'] !== null ? record(item['delivery']) : {}
         const reply = item['reply'] !== undefined && item['reply'] !== null ? record(item['reply']) : undefined
         const replyChoice = str(reply?.['choice'], 64)
-        const questionSummary = formatQuestionSummary(item['question'])
+        const questionSummary = formatQuestionSummary(item['question'], item)
         const proposalId = str(item['proposalId'], 160)
         const qWs = str(itemScope['workspace'], 4_096)
         const qPr = str(itemScope['preset'], 200)
+        const isOpen = typeof item['open'] === 'boolean' ? item['open'] : undefined
+        const actionable = typeof item['actionable'] === 'boolean'
+          ? item['actionable']
+          : (isOpen ?? true) && replyChoice === undefined
         attentionQuestions.push(Object.freeze({
           questionId: qid,
           ...(proposalId === undefined ? {} : { proposalId }),
@@ -222,10 +237,10 @@ function readProactiveOverview(
           cohortSourceId: str(itemCohort['sourceId'], 128) ?? defaultSourceId,
           ...(qWs === undefined ? {} : { workspace: qWs }),
           ...(qPr === undefined ? {} : { preset: qPr }),
-          open: item['open'] === true,
-          actionable: item['actionable'] === true,
-          deliveryStatus: str(delivery['status'], 32) ?? (item['open'] === true ? 'queued' : 'closed'),
-          recordedAt: intOrZero(delivery['recordedAt'] ?? record(item['question'])['createdAt']),
+          ...(isOpen === undefined ? {} : { open: isOpen }),
+          actionable,
+          deliveryStatus: str(delivery['status'], 32) ?? (isOpen === true ? 'queued' : 'closed'),
+          recordedAt: intOrZero(delivery['recordedAt'] ?? record(item['question'])['createdAt'] ?? item['createdAt']),
           ...(questionSummary === undefined ? {} : { questionSummary }),
           ...(replyChoice === undefined ? {} : { replyChoice, repliedAt: intOrZero(reply?.['repliedAt']) }),
         }))
@@ -378,6 +393,7 @@ function readWorkItemsOverview(
       : undefined
     const admitCfg = inspectQueue === undefined ? undefined : record(inspectQueue['admit'])
     const queueCounts = inspectQueue === undefined ? undefined : record(inspectQueue['counts'])
+    const admitMode = str(admitCfg?.['mode'], 32) ?? str(inspectQueue?.['mode'], 32)
     const health = Object.freeze({
       enabled,
       mode: str(h['mode'], 32) ?? 'observe',
@@ -391,19 +407,25 @@ function readWorkItemsOverview(
         intakeEvaluated: intOrZero(intakeEvalH['evaluated']),
       }),
       ...(inspectQueue === undefined ? {} : {
-        intakeLedgerEnabled: bool(inspectQueue['intakeLedgerEnabled']),
-        ...(str(admitCfg?.['mode'], 32) === undefined ? {} : { admitMode: str(admitCfg?.['mode'], 32)! }),
-        hasAcceptanceObjective: bool(admitCfg?.['hasAcceptanceObjective']),
-        pendingAdmissions: intOrZero(queueCounts?.['pendingAdmissions']),
+        intakeLedgerEnabled: inspectQueue['intakeLedgerEnabled'] === true || inspectQueue['enabled'] === true,
+        ...(admitMode === undefined ? {} : { admitMode }),
+        ...(admitCfg?.['hasAcceptanceObjective'] === undefined ? {} : { hasAcceptanceObjective: bool(admitCfg['hasAcceptanceObjective']) }),
+        pendingAdmissions: intOrZero(queueCounts?.['pendingAdmissions'] ?? inspectQueue['pendingAdmissions']),
       }),
     })
 
     const queueEntries: Array<OwnerConsoleAssistantOverview['workItems']['queue'][number]> = []
     if (inspectQueue !== undefined) {
-      for (const raw of list(inspectQueue['admissions']).slice(0, MAX_LIST)) {
+      const admissionRows = list(inspectQueue['admissions']).length > 0
+        ? list(inspectQueue['admissions'])
+        : list(inspectQueue['recent'])
+      const seenDecisions = new Set<string>()
+      for (const raw of admissionRows.slice(0, MAX_LIST)) {
         const row = record(raw)
         const id = str(row['sourceEventId'], 160) ?? str(row['decisionId'], 160)
         if (id === undefined) continue
+        const decId = str(row['decisionId'], 160)
+        if (decId !== undefined) seenDecisions.add(decId)
         const src = str(row['source'], 80)
         const mode = str(row['mode'], 32)
         const reasonCode = str(row['reasonCode'], 80)
@@ -421,13 +443,22 @@ function readWorkItemsOverview(
           recordedAt: intOrZero(row['recordedAt']),
         }))
       }
-      for (const raw of list(inspectQueue['observedItems']).slice(0, MAX_LIST)) {
+      const hasInlineObserved = Object.hasOwn(inspectQueue, 'observedItems')
+      const observedRows = hasInlineObserved
+        ? list(inspectQueue['observedItems'])
+        : (typeof svc['listObservedItems'] === 'function'
+            ? list((svc['listObservedItems'] as (opts?: unknown) => unknown)({ limit: MAX_LIST }))
+            : [])
+      for (const raw of observedRows.slice(0, MAX_LIST)) {
         const row = record(raw)
-        const id = str(row['id'], 160)
+        const decId = str(row['decisionId'], 160)
+        if (!hasInlineObserved && decId !== undefined && seenDecisions.has(decId)) continue
+        const id = str(row['id'], 160) ?? str(row['sourceEventId'], 160) ?? decId
         if (id === undefined) continue
-        const kind = str(row['kind'], 80)
-        const reasonCode = str(row['stateReason'], 80)
-        const summary = str(row['title'], 240)
+        const kind = str(row['kind'], 80) ?? str(row['source'], 80)
+        const mode = str(row['configuredMode'], 32)
+        const reasonCode = str(row['stateReason'], 80) ?? str(row['observeReason'], 80)
+        const summary = str(row['title'], 240) ?? str(row['ruleId'], 240)
         const wouldReject = list(row['wouldReject'])
           .map(entry => str(entry, 80))
           .filter((entry): entry is string => entry !== undefined)
@@ -436,11 +467,12 @@ function readWorkItemsOverview(
           id,
           entryKind: 'observed',
           ...(kind === undefined ? {} : { source: kind }),
-          outcome: str(row['state'], 64) ?? 'observed',
+          ...(mode === undefined ? {} : { mode }),
+          outcome: str(row['state'], 64) ?? 'would-admit',
           ...(reasonCode === undefined ? {} : { reasonCode }),
           ...(summary === undefined ? {} : { summary }),
           ...(wouldReject.length === 0 ? {} : { wouldReject: Object.freeze(wouldReject) }),
-          recordedAt: intOrZero(row['createdAt']),
+          recordedAt: intOrZero(row['createdAt'] ?? row['recordedAt']),
         }))
       }
     } else if (typeof svc['outcomes'] === 'function') {

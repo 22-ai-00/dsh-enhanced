@@ -258,7 +258,7 @@ export class CodingToolProber {
           : `${label} CLI 已安装但未登录${cli.errorDetail ? `（${cli.errorDetail}）` : ''}`,
         remediation: tool === 'traex'
           ? `请在本机终端运行 \`${command} login\` 完成登录后重新探测`
-          : `请在本机终端运行 \`${command} auth login\` 完成登录后重新探测`,
+          : `请在本机终端运行 \`${command}\` 或 \`${command} acp --login\` 完成登录后重新探测`,
         checkedAt: cli.checkedAt, cached,
       })
     }

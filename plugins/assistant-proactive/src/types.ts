@@ -51,8 +51,11 @@ export type ProactiveDraftState = 'queued' | 'running' | 'draft' | 'failed' | 'c
 
 export interface ProactiveDraftFilter {
   scope?: OpportunityScope
+  workspace?: string
+  preset?: string
   goalId?: string
   state?: ProactiveDraftState
+  onlyDrafts?: boolean
   limit?: number
 }
 
@@ -102,6 +105,9 @@ export interface ProactiveOpportunityInspection extends OpportunityDecision {
 
 export interface ProactiveAttentionQuestionFilter {
   scope?: { workspace: string; preset: string }
+  workspace?: string
+  preset?: string
+  includeResolved?: boolean
   limit?: number
 }
 

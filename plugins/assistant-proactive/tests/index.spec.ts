@@ -206,5 +206,57 @@ describe('assistant-proactive bundle and owner access', () => {
       questionId: 'q-open',
       choice: 'authorize-once',
     })
+
+    // Also supports flat workspace/preset filters & action-based calls used by owner-console.
+    expect(f.service.inspectAttentionQuestions({ workspace: scope.workspace, preset: scope.preset, includeResolved: false })).toHaveLength(1)
+    expect(f.service.resolveAttentionQuestion({
+      workspace: scope.workspace,
+      preset: scope.preset,
+      questionId: 'q-open',
+      choice: 'decline',
+    })).toMatchObject({ status: 'applied', questionId: 'q-open' })
+  })
+
+  it('supports action-based resolveDraft and workspace/preset draft filtering for owner-console', async () => {
+    const prepareProfile: OpportunityProfile = {
+      ...profile,
+      id: 'prepare-console',
+      mode: 'prepare',
+      preparation: { provider: 'mock', model: 'draft', budgetId: 'prep', maxOutputTokens: 128, timeoutMs: 5_000 },
+    }
+    const f = await harness([prepareProfile])
+    f.ctx.provide('assistantAutomations' as never, {
+      runPreparation: async () => ({
+        outcome: 'succeeded',
+        output: 'Console draft output',
+        usage: { outputTokens: 8 },
+        sessionId: 'prep-console-1',
+        quiescent: true,
+      }),
+    } as never)
+    f.ctx.provide('assistantGoals' as never, { assertPreparationCurrent: vi.fn() } as never)
+
+    const input = { ...opportunity(), profileId: 'prepare-console' }
+    const evaluated = f.service.evaluate(input)
+    await vi.waitFor(() => expect(f.service.inspectDrafts({
+      workspace: scope.workspace,
+      preset: scope.preset,
+      onlyDrafts: true,
+    })).toHaveLength(1))
+
+    expect(() => f.service.resolveDraft({
+      id: evaluated.decision.id,
+      action: 'accept',
+      workspace: '/wrong-ws',
+      preset: scope.preset,
+    })).toThrow('scope mismatch')
+
+    const accepted = f.service.resolveDraft({
+      id: evaluated.decision.id,
+      action: 'accept',
+      workspace: scope.workspace,
+      preset: scope.preset,
+    })
+    expect(accepted).toMatchObject({ id: evaluated.decision.id, state: 'closed', feedback: 'accepted' })
   })
 })

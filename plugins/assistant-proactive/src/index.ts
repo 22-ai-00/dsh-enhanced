@@ -317,7 +317,23 @@ export class AssistantProactiveService extends Service {
   /** Host-only read-only draft inspection for owner operator surfaces (zero execution authority). */
   inspectDrafts = (filter: ProactiveDraftFilter = {}): readonly ProactiveDraftInspection[] => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
-    return Object.freeze(this.#preparations.store.list(filter).map(record => {
+    if (filter.onlyDrafts && filter.state !== undefined && filter.state !== 'draft') {
+      return Object.freeze([])
+    }
+    const effectiveState = filter.onlyDrafts ? 'draft' as const : filter.state
+    const hasScopeParts = filter.workspace !== undefined || filter.preset !== undefined
+    const records = this.#preparations.store.list({
+      ...(filter.scope !== undefined ? { scope: filter.scope } : {}),
+      ...(filter.goalId !== undefined ? { goalId: filter.goalId } : {}),
+      ...(effectiveState !== undefined ? { state: effectiveState } : {}),
+      ...(hasScopeParts ? { limit: 500 } : filter.limit === undefined ? {} : { limit: filter.limit }),
+    }).filter(record =>
+      (filter.workspace === undefined || record.decision.scope.workspace === filter.workspace)
+      && (filter.preset === undefined || record.decision.scope.preset === filter.preset),
+    )
+    const limit = typeof filter.limit === 'number' && Number.isSafeInteger(filter.limit) && filter.limit > 0
+      ? Math.min(filter.limit, 500) : 100
+    return Object.freeze(records.slice(0, limit).map(record => {
       const decision = this.#engine.get(record.id)
       return Object.freeze({
         id: record.id,
@@ -348,19 +364,49 @@ export class AssistantProactiveService extends Service {
     return Object.freeze(this.#engine.listAll(filter).map(this.#formatOpportunity))
   }
   /** Host-only action to accept or reject/dismiss an existing opportunity draft. */
-  resolveDraft = (input: { id: string; decision: 'accepted' | 'rejected' }): Readonly<OpportunityDecision> | undefined => {
+  resolveDraft = (input: {
+    id: string
+    decision?: 'accepted' | 'rejected'
+    action?: 'accept' | 'reject' | 'cancel'
+    workspace?: string
+    preset?: string
+  }): Readonly<OpportunityDecision> | undefined => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
-    if (!input || typeof input.id !== 'string' || input.id.length === 0 || (input.decision !== 'accepted' && input.decision !== 'rejected')) {
+    if (!input || typeof input.id !== 'string' || input.id.length === 0) {
+      throw new Error('assistant-proactive: invalid draft resolution input')
+    }
+    let mappedDecision: 'accepted' | 'rejected' | undefined = input.decision
+    if (input.action !== undefined) {
+      if (input.action !== 'accept' && input.action !== 'reject' && input.action !== 'cancel') {
+        throw new Error('assistant-proactive: invalid draft resolution input')
+      }
+      const fromAction = input.action === 'accept' ? 'accepted' as const : 'rejected' as const
+      if (mappedDecision !== undefined && mappedDecision !== fromAction) {
+        throw new Error('assistant-proactive: invalid draft resolution input')
+      }
+      mappedDecision = fromAction
+    }
+    if (mappedDecision !== 'accepted' && mappedDecision !== 'rejected') {
       throw new Error('assistant-proactive: invalid draft resolution input')
     }
     const existing = this.#engine.get(input.id)
     if (!existing) return undefined
-    if (existing.state === 'closed' && existing.feedback === input.decision) {
-      if (input.decision === 'rejected') this.#preparations.store.cancel(existing.id)
+    if ((input.workspace !== undefined && existing.scope.workspace !== input.workspace)
+      || (input.preset !== undefined && existing.scope.preset !== input.preset)) {
+      throw new Error('assistant-proactive: draft scope mismatch')
+    }
+    if (input.action === 'accept') {
+      const preparation = this.#preparations.store.get(existing.id)
+      if (!preparation || preparation.state !== 'draft') {
+        throw new Error('assistant-proactive: draft is not ready to accept')
+      }
+    }
+    if (existing.state === 'closed' && existing.feedback === mappedDecision) {
+      if (mappedDecision === 'rejected') this.#preparations.store.cancel(existing.id)
       return existing
     }
-    const resolved = this.#engine.feedback(existing.id, existing.scope, input.decision)
-    if (input.decision === 'rejected') this.#preparations.store.cancel(existing.id)
+    const resolved = this.#engine.feedback(existing.id, existing.scope, mappedDecision)
+    if (mappedDecision === 'rejected') this.#preparations.store.cancel(existing.id)
     return resolved
   }
   /** Host-only read-only view of WP22 proactive attention-loosening owner questions. */
@@ -368,7 +414,10 @@ export class AssistantProactiveService extends Service {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
     const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as EvaluationAttentionPort | undefined
     if (!evaluation || typeof evaluation.attentionLooseningStatus !== 'function') return Object.freeze([])
-    const scopes = this.#attentionScopes(filter.scope)
+    const requestedScope = filter.scope ?? (filter.workspace !== undefined && filter.preset !== undefined
+      ? { workspace: filter.workspace, preset: filter.preset }
+      : undefined)
+    const scopes = this.#attentionScopes(requestedScope)
     const items: ProactiveAttentionQuestionInspection[] = []
     for (const scope of scopes) {
       let status: ReturnType<NonNullable<EvaluationAttentionPort['attentionLooseningStatus']>>
@@ -399,6 +448,7 @@ export class AssistantProactiveService extends Service {
           && delivery?.status !== 'expired'
           && proposalDecision === null
           && (activeGrantId === undefined || activeGrantId === question.grantId)
+        if (filter.includeResolved === false && !open) continue
         items.push(Object.freeze({
           questionId: entry.questionId,
           scope: Object.freeze({ workspace: scope.workspace, preset: scope.preset }),
@@ -434,10 +484,19 @@ export class AssistantProactiveService extends Service {
     return Object.freeze(items.slice(0, limit))
   }
   /** Host-only action delegating an owner attention reply to Evaluation's verified apply path. */
-  resolveAttentionQuestion = (input: { scope: { workspace: string; preset: string }; questionId: string; choice: 'authorize-once' | 'decline' }): Readonly<ProactiveAttentionQuestionResolveResult> => {
+  resolveAttentionQuestion = (input: {
+    scope?: { workspace: string; preset: string }
+    workspace?: string
+    preset?: string
+    questionId: string
+    choice: 'authorize-once' | 'decline'
+  }): Readonly<ProactiveAttentionQuestionResolveResult> => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
-    if (!input || !input.scope || typeof input.scope.workspace !== 'string' || !input.scope.workspace.startsWith('/')
-      || typeof input.scope.preset !== 'string' || input.scope.preset.length === 0
+    const scope = input?.scope ?? (input?.workspace !== undefined && input?.preset !== undefined
+      ? { workspace: input.workspace, preset: input.preset }
+      : undefined)
+    if (!input || !scope || typeof scope.workspace !== 'string' || !scope.workspace.startsWith('/')
+      || typeof scope.preset !== 'string' || scope.preset.length === 0
       || typeof input.questionId !== 'string' || input.questionId.length === 0
       || (input.choice !== 'authorize-once' && input.choice !== 'decline')) {
       throw new Error('assistant-proactive: invalid attention question reply input')
@@ -447,7 +506,7 @@ export class AssistantProactiveService extends Service {
       return Object.freeze({ status: 'rejected', reason: 'evaluation-unavailable' })
     }
     return Object.freeze(evaluation.applyAttentionOwnerQuestionReply({
-      scope: { workspace: input.scope.workspace, preset: input.scope.preset },
+      scope: { workspace: scope.workspace, preset: scope.preset },
       cohort: { ...proactiveAttentionCohort },
       questionId: input.questionId,
       choice: input.choice,

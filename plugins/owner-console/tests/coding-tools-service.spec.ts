@@ -237,7 +237,7 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
       expect(needAuth.state).toBe('auth-required')
       expect(needAuth.binaryFound).toBe(true)
       expect(needAuth.loggedIn).toBe(false)
-      expect(needAuth.remediation).toContain('auth login')
+      expect(needAuth.remediation).toContain('acp --login')
     } finally {
       await ctx.fiber.dispose()
     }

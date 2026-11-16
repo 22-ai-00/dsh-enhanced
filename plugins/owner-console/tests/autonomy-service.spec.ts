@@ -189,4 +189,85 @@ describe('owner console autonomy & dreaming overview/action RPCs', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('consumes live B4 assistantProactive array & assistantWorkItems recent/listObservedItems shapes cleanly', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+
+    ctx.provide('assistantProactive' as never, {
+      intakeEvaluationHealth: () => ({ enabled: true, registered: true, callsLastHour: 1, consecutiveFailures: 0 }),
+      inspectDrafts: () => [{
+        id: 'draft-live-1', goalId: 'goal-live-1', profileId: 'prep-live', objective: 'Draft checklist',
+        state: 'draft', reason: 'unverified-draft', decisionState: 'decided',
+        createdAt: 1_000, updatedAt: 2_000, deadlineAt: 9_000, output: 'Live output preview', verified: false,
+      }],
+      resolveDraft: vi.fn(),
+      inspectAttentionQuestions: () => [{
+        questionId: 'q-live-1',
+        scope: { workspace: '/ws/live', preset: 'standard' },
+        proposalId: 'prop-live-1',
+        parameter: 'minimumUtilityDelta',
+        parentValue: 10,
+        candidateValue: 4,
+        delta: -6,
+        exceeded: ['no-grant'],
+        choices: ['authorize-once', 'decline'],
+        delivery: null,
+        reply: null,
+        decision: null,
+        open: true,
+        createdAt: 3_000,
+      }],
+    } as never)
+
+    ctx.provide('assistantWorkItems' as never, {
+      health: () => ({
+        enabled: true, mode: 'observe', openItems: 0, workerConnected: true, ownerRouteValid: true,
+        evaluation: { pending: 1 },
+      }),
+      inspectIntakeQueue: () => ({
+        enabled: true,
+        intakeCounts: { stored: 2, duplicate: 0, filtered: 0 },
+        evaluationCounts: { decided: 2, unavailable: 0 },
+        admissionCounts: { 'would-admit': 2, admitted: 0, replayed: 0, refused: 0 },
+        pendingEvaluations: 0,
+        pendingAdmissions: 1,
+        mode: 'observe',
+        lastEvaluationError: null,
+        lastAdmissionError: null,
+        recent: [{
+          source: 'lark-channel', sourceEventId: 'evt-live-1', ruleId: 'rule-1', policyVersion: 'v1',
+          mode: 'observe', outcome: 'would-admit', reasonCode: null, observeReason: 'configured-observe',
+          decisionId: 'dec-live-1', itemId: null, recordedAt: 4_000, level: 'accept', wouldAccept: true,
+        }],
+      }),
+      listObservedItems: () => [{
+        source: 'lark-channel', sourceEventId: 'evt-live-1', ruleId: 'rule-1', policyVersion: 'v1',
+        decisionId: 'dec-live-1', configuredMode: 'observe', observeReason: 'configured-observe',
+        recordedAt: 4_000, level: 'accept', occurredAt: 3_900,
+      }, {
+        source: 'lark-channel', sourceEventId: 'evt-live-2', ruleId: 'rule-2', policyVersion: 'v1',
+        decisionId: 'dec-live-2', configuredMode: 'auto', observeReason: 'missing-acceptance',
+        recordedAt: 3_500, level: 'accept', occurredAt: 3_400,
+      }],
+    } as never)
+
+    const console = new OwnerConsoleService(ctx, { feishuAppId: '' })
+    try {
+      const overview = OwnerConsoleAssistantOverviewSchema.parse(await console.assistantOverview('/ws/live', 'standard'))
+      expect(overview.proactive.drafts[0]).toMatchObject({
+        id: 'draft-live-1', state: 'draft', outputPreview: 'Live output preview', verified: false,
+      })
+      expect(overview.proactive.attentionQuestions[0]).toMatchObject({
+        questionId: 'q-live-1', actionable: true, open: true, deliveryStatus: 'queued',
+        questionSummary: 'minimumUtilityDelta: 10 → 4',
+      })
+      expect(overview.workItems.health).toMatchObject({
+        intakeLedgerEnabled: true, admitMode: 'observe', pendingAdmissions: 1,
+      })
+      expect(overview.workItems.queue.map(q => q.id)).toEqual(['evt-live-1', 'evt-live-2'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
