@@ -7,6 +7,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import { AssistantVerifierService, createVerifierAuthorities, type AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -26,7 +27,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 test('starts a real background native goal round, executes its tool, and records independent outcome acceptance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'repair-native-')), ctx = new Context(), scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: root, preset: 'repair' }
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const driver = await import(pathToFileURL(goalsRequire.resolve('@deepseek-ai/dsh-goal-round-driver')).href)
   await ctx.plugin({ inject: driver.inject, apply: driver.apply } as never, {} as never)
   let current = true
@@ -99,7 +100,8 @@ test('starts a real background native goal round, executes its tool, and records
   expect((agent.session.snapshotEvents() as any[]).some(event => event.type === 'user/message' && event.data.source.kind === 'goal')).toBe(true)
   expect(agent.session.snapshotEvents().some(event => event.type === 'tool/result')).toBe(true)
   expect(ctx.assistantGoals.inspectGoalOutcome(agent, started.goalId)).toMatchObject({ status: 'achieved' })
-  const denied = await agent.ctx.tools.execute({ callId: ToolCallId('forbidden-preset'), agent, name: 'preset_shell', arguments: {}, signal: new AbortController().signal })
+  const deniedBatch = await agent.ctx.tools.execute({ calls: [{ type: 'tool-call', id: ToolCallId('forbidden-preset'), name: 'preset_shell', arguments: '{}' }], agent, signal: new AbortController().signal })
+  const denied = deniedBatch.results[0]!.result
   expect(denied.isError).toBe(true)
   expect(forbiddenCalls).toBe(0)
   await runtime.closeSession(started.sessionId)
@@ -108,7 +110,7 @@ test('starts a real background native goal round, executes its tool, and records
 test('rejects and cancels an unadvertised preset-local tool call before its execution body starts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'repair-native-unadvertised-')), ctx = new Context(), scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: root, preset: 'repair' }
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const driver = await import(pathToFileURL(goalsRequire.resolve('@deepseek-ai/dsh-goal-round-driver')).href)
   await ctx.plugin({ inject: driver.inject, apply: driver.apply } as never, {} as never)
   let current = true
@@ -164,7 +166,7 @@ test('rejects and cancels an unadvertised preset-local tool call before its exec
 test('revocation prevents the queued native background round from reaching the model', async () => {
   const root = await mkdtemp(join(tmpdir(), 'repair-native-revoke-')), ctx = new Context(), scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: root, preset: 'repair' }
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await(); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const driver = await import(pathToFileURL(goalsRequire.resolve('@deepseek-ai/dsh-goal-round-driver')).href)
   await ctx.plugin({ inject: driver.inject, apply: driver.apply } as never, {} as never)
   let current = true

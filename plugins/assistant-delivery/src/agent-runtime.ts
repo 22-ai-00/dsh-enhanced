@@ -2164,7 +2164,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
     const unbind = this.policy.bindInitiator(agent, initiator, principal)
     agentCtx.effect(() => unbind, `assistant-delivery.${initiator}-initiator`)
-    installModelSelection(agentCtx, { current: selected, assembled: undefined })
+    installModelSelection(agentCtx)
+    agent.model.select(selected)
     // The trusted post-cancellation clarification is installed LAZILY and only
     // for a session whose history actually contains a human-aborted turn with an
     // aborted-before-dispatch tool result. Merely registering a runtime context
@@ -4003,12 +4004,20 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let progressQueue = Promise.resolve()
     let progressTerminal = false
     const drainProgress = async (): Promise<void> => {
+      const control = this.activeSessionControls.get(binding.sessionId)
+      // `/new` and `/stop` abandon presentation follow-through so user-initiated
+      // session resets do not stall on a wedged adapter progress stream.
+      if (control?.command !== undefined) return
       let timeout: ReturnType<typeof setTimeout> | undefined
       try {
-        await Promise.race([progressQueue, new Promise<void>(resolve => {
-          timeout = setTimeout(resolve, 5_000)
-          timeout.unref?.()
-        })])
+        await Promise.race([
+          progressQueue,
+          ...(control === undefined ? [] : [control.cancelRequested]),
+          new Promise<void>(resolve => {
+            timeout = setTimeout(resolve, 5_000)
+            timeout.unref?.()
+          }),
+        ])
       } finally { if (timeout !== undefined) clearTimeout(timeout) }
     }
     // WP19 stage 2c: only turns that claimed this inbound message (or one of its

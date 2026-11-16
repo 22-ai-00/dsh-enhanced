@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "nextVerifiedHostRange": ">=0.2.1-rc.2 <0.3.0",
-  "nextPinnedHostVersion": "0.2.2-rc.1",
+  "nextVerifiedHostRange": ">=0.2.2-rc.3 <0.3.0",
+  "nextPinnedHostVersion": "0.2.2-rc.3",
   "current": {
     "version": "0.1.73",
     "releasedAt": "2026-11-16T12:15:57.433Z",

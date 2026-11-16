@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { Context } from '../plugins/assistant-goals/node_modules/@deepseek-ai/cordis'
 import { ToolCallId } from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-llm'
 import ToolRuntime from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tool-executor-native'
 import SystemPrompt from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-system-prompt'
 import { registerGoalTools } from '../plugins/assistant-goals/src/tools.ts'
 import type { AssistantGoalsService } from '../plugins/assistant-goals/src/service.ts'
@@ -14,6 +15,7 @@ async function tools(create: (objective: string, rounds?: number) => unknown) {
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   registerGoalTools(ctx, {
     strategyEnabled: false, preauthorizedScheduleEnabled: false, eventWaitsEnabled: false,
     preauthorizedCreateEnabled: false, create: (_agent, objective, rounds) => create(objective, rounds),
@@ -23,9 +25,18 @@ async function tools(create: (objective: string, rounds?: number) => unknown) {
     describe: value => `record:${String(value)}`,
   } as unknown as AssistantGoalsService)
   let call = 0
-  return (arguments_: unknown) => ctx.tools.execute({
-    signal, callId: ToolCallId(`goal-create-${++call}`), name: 'goal_create', arguments: arguments_,
-  })
+  return async (arguments_: unknown) => {
+    const batch = await ctx.tools.execute({
+      calls: [{
+        type: 'tool-call',
+        id: ToolCallId(`goal-create-${++call}`),
+        name: 'goal_create',
+        arguments: typeof arguments_ === 'string' ? arguments_ : JSON.stringify(arguments_),
+      }],
+      signal,
+    })
+    return batch.results[0]!.result
+  }
 }
 
 afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -53,6 +64,7 @@ describe('goal_create native-round handoff', () => {
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     let legacy = 0, guarded = 0
     registerGoalTools(ctx, {
       strategyEnabled: false, preauthorizedScheduleEnabled: false, eventWaitsEnabled: false,
@@ -61,9 +73,16 @@ describe('goal_create native-round handoff', () => {
       createFromOwnerIntent: () => { guarded += 1; return { id: 'guarded' } },
       describe: value => `record:${String(value)}`,
     } as unknown as AssistantGoalsService)
-    const result = await ctx.tools.execute({
-      signal, callId: ToolCallId('goal-create-guarded'), name: 'goal_create', arguments: { objective: 'guarded' },
+    const batch = await ctx.tools.execute({
+      calls: [{
+        type: 'tool-call',
+        id: ToolCallId('goal-create-guarded'),
+        name: 'goal_create',
+        arguments: JSON.stringify({ objective: 'guarded' }),
+      }],
+      signal,
     })
+    const result = batch.results[0]!.result
     expect(result).toMatchObject({ isError: false })
     expect({ guarded, legacy }).toEqual({ guarded: 1, legacy: 0 })
   })

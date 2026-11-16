@@ -92,12 +92,14 @@ async function open(root: string, options: { provision?: boolean; model?: EventG
   if (options.provision !== false) await writeFile(watched, 'before')
   const ctx = new Context(); contexts.add(ctx)
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
-  ctx.on('session/created', session => {
+  ctx.on('agent/created', ({ agent }) => {
+    const session = agent.session
+    if (session.snapshotEvents().some(event => event.type === 'approval/policy' || event.type === 'sandbox/mode')) return
     session.append('approval/policy', { policy: 'never' })
     session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     const append = session.append as unknown as (type: string, data: unknown) => unknown
     append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
-  })
+  }, { prepend: true })
   await installJsonlPersistence(ctx, root)
   ctx.provide('agentPresets' as never, { resolve: async () => ({ id: 'primary' }), mount: async () => ({ id: 'primary' }) } as never)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'event-wake-runs', metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [
@@ -218,12 +220,22 @@ async function armWait(fixture: Awaited<ReturnType<typeof open>>, eventId: strin
   let goalId = ''
   const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     if (fixture.ctx.assistantDelivery.currentPreferenceTurn(agent) === undefined || goalId !== '') return await next()
-    const created = await fixture.ctx.tools.execute({ callId: ToolCallId(`${eventId}-create`), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+    const createdBatch = await fixture.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`${eventId}-create`), name: 'goal_create', arguments: JSON.stringify({ objective, max_goal_rounds: 1 }) }],
+      agent,
+      signal,
+    })
+    const created = createdBatch.results[0]!.result
     if (created.isError) throw new Error(`goal_create rejected: ${JSON.stringify(created.content)}`)
     const record = fixture.ctx.assistantGoals.list(agent)[0]
     if (record === undefined) throw new Error('goal record was unavailable')
     goalId = record.id
-    const waited = await fixture.ctx.tools.execute({ callId: ToolCallId(`${eventId}-wait`), name: 'goal_wait_event', agent, signal, arguments: { goal_id: goalId, expected_revision: record.native.revision, trigger_id: 'file', expires_at: Date.now() + 20_000 } })
+    const waitedBatch = await fixture.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`${eventId}-wait`), name: 'goal_wait_event', arguments: JSON.stringify({ goal_id: goalId, expected_revision: record.native.revision, trigger_id: 'file', expires_at: Date.now() + 20_000 }) }],
+      agent,
+      signal,
+    })
+    const waited = waitedBatch.results[0]!.result
     if (waited.isError) throw new Error(`goal_wait_event rejected: ${JSON.stringify(waited.content)}`)
     return await next()
   })
@@ -280,10 +292,20 @@ if (phase === undefined) describe('native event-goal wake', () => {
       preSteps.push({ human })
       if (!human || goalId !== '') return await next()
       ownerAgent = agent
-      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('event-goal-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+      const createdBatch = await fixture.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('event-goal-create'), name: 'goal_create', arguments: JSON.stringify({ objective, max_goal_rounds: 1 }) }],
+        agent,
+        signal,
+      })
+      const created = createdBatch.results[0]!.result
       expect(created.isError, JSON.stringify(created)).not.toBe(true)
       const record = fixture.ctx.assistantGoals.list(agent)[0]!; goalId = record.id; revision = record.native.revision
-      const waited = await fixture.ctx.tools.execute({ callId: ToolCallId('event-goal-wait'), name: 'goal_wait_event', agent, signal, arguments: { goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 } })
+      const waitedBatch = await fixture.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('event-goal-wait'), name: 'goal_wait_event', arguments: JSON.stringify({ goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 }) }],
+        agent,
+        signal,
+      })
+      const waited = waitedBatch.results[0]!.result
       expect(waited.isError, JSON.stringify(waited)).not.toBe(true)
       return await next()
     })
@@ -396,10 +418,20 @@ if (phase === undefined) describe('native event-goal wake', () => {
     let goalId = ''; let revision = 0
     const remove = first.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (first.ctx.assistantDelivery.currentPreferenceTurn(agent) === undefined || goalId !== '') return await next()
-      const created = await first.ctx.tools.execute({ callId: ToolCallId('restart-event-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+      const createdBatch = await first.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('restart-event-create'), name: 'goal_create', arguments: JSON.stringify({ objective, max_goal_rounds: 1 }) }],
+        agent,
+        signal,
+      })
+      const created = createdBatch.results[0]!.result
       expect(created.isError, JSON.stringify(created)).not.toBe(true)
       const record = first.ctx.assistantGoals.list(agent)[0]!; goalId = record.id; revision = record.native.revision
-      const waited = await first.ctx.tools.execute({ callId: ToolCallId('restart-event-wait'), name: 'goal_wait_event', agent, signal, arguments: { goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 } })
+      const waitedBatch = await first.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('restart-event-wait'), name: 'goal_wait_event', arguments: JSON.stringify({ goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 }) }],
+        agent,
+        signal,
+      })
+      const waited = waitedBatch.results[0]!.result
       expect(waited.isError, JSON.stringify(waited)).not.toBe(true)
       return await next()
     })
@@ -452,10 +484,20 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const arm = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.ctx.assistantDelivery.currentPreferenceTurn(agent) === undefined || goalId !== '') return await next()
       ownerAgent = agent
-      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('revision-event-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+      const createdBatch = await fixture.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('revision-event-create'), name: 'goal_create', arguments: JSON.stringify({ objective, max_goal_rounds: 1 }) }],
+        agent,
+        signal,
+      })
+      const created = createdBatch.results[0]!.result
       expect(created.isError, JSON.stringify(created)).not.toBe(true)
       const record = fixture.ctx.assistantGoals.list(agent)[0]!; goalId = record.id; revision = record.native.revision
-      const waited = await fixture.ctx.tools.execute({ callId: ToolCallId('revision-event-wait'), name: 'goal_wait_event', agent, signal, arguments: { goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 } })
+      const waitedBatch = await fixture.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('revision-event-wait'), name: 'goal_wait_event', arguments: JSON.stringify({ goal_id: goalId, expected_revision: revision, trigger_id: 'file', expires_at: Date.now() + 20_000 }) }],
+        agent,
+        signal,
+      })
+      const waited = waitedBatch.results[0]!.result
       expect(waited.isError, JSON.stringify(waited)).not.toBe(true)
       return await next()
     })
@@ -465,7 +507,12 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const revise = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.ctx.assistantDelivery.currentPreferenceTurn(agent) === undefined || changed) return await next()
       const pausedRevision = readWait(root).intent.wake.native.revision
-      const control = await fixture.ctx.tools.execute({ callId: ToolCallId('revision-event-control'), name: 'goal_control', agent, signal, arguments: { goal_id: goalId, expected_revision: pausedRevision, operation: 'edit', objective: revisedObjective } })
+      const controlBatch = await fixture.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId('revision-event-control'), name: 'goal_control', arguments: JSON.stringify({ goal_id: goalId, expected_revision: pausedRevision, operation: 'edit', objective: revisedObjective }) }],
+        agent,
+        signal,
+      })
+      const control = controlBatch.results[0]!.result
       expect(control.isError, JSON.stringify(control)).not.toBe(true); changed = true
       return await next()
     })

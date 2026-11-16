@@ -53,7 +53,7 @@ async function fixture() {
     sessionId: 'same-owner-session', policyRef: 'owner-dm' })
   const session = ctx.sessions.create(SessionId(binding.sessionId), { meta: { cwd: root, agentPreset: 'primary' } })
   const agent: Agent = { id: SessionId(binding.sessionId), options: {}, session, inbox: createInboxStub(), ctx: new Context(),
-    status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
+    status: 'idle', model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} }, cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
   ctx.agents.register(agent)
   await delivery.registerAdapter({ channel: 'lark', account: 'bot', capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },

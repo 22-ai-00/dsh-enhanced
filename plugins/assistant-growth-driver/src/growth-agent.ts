@@ -14,7 +14,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { defineTool, RUN_CODE_NAME, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, projectToolSchema, RUN_CODE_NAME, type ToolDefinition, type ToolExecution, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
+import type { PtcExecutor as PtcExecutorInstance } from '@deepseek-ai/dsh-tool-executor-ptc'
 import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -1194,6 +1196,9 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         + '(e.g. @deepseek-ai/dsh-ptc-runtime-node); load a PTC runtime in this profile or set toolPresentation to "native"')
     }
   }
+  const PtcExecutor = presentation === 'ptc'
+    ? (await import('@deepseek-ai/dsh-tool-executor-ptc')).PtcExecutor
+    : undefined
   const sourcePlane = config.pluginSourceProposals.enabled ? input.sourcePlane : undefined
   let creationNamespace: string | undefined
   if (sourcePlane !== undefined && config.pluginSourceProposals.allowCreation
@@ -1352,7 +1357,8 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         combined.throwIfAborted()
         // Background principal before anything else can run.
         agentCtx.effect(() => policy.bindInitiator(agent, 'background', authority.scope.principalId), 'assistant-growth-driver.initiator')
-        agentCtx.effect(() => installModelSelection(agentCtx, { current: model, assembled: undefined }), 'assistant-growth-driver.model-selection')
+        agentCtx.effect(() => installModelSelection(agentCtx), 'assistant-growth-driver.model-selection')
+        agent.model.select(model)
 
         registerGrowthTools(agent, input, sourcePlane, creationNamespace, revisionNamespace, revisionAuthority,
           revisionRegressionAuthority,
@@ -1362,35 +1368,36 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         // that restrict() cannot remove. Verify the complete frozen realm below.
         const denied = globalNames.filter(name => !allowedTools.has(name))
         if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
+        let ptcExecutor: PtcExecutorInstance | undefined
         if (presentation === 'ptc') {
-          // PTC is presentation only. The single reserved `run_code` transport is
-          // appended by the Host registry through this scoped presentAs() effect
-          // (an effect owned by the Agent realm, released with it); the driver
-          // never registers, wraps or overrides that reserved name. Refuse any
-          // pre-existing definition before the declaration so a forged or
-          // duplicate transport can never be mistaken for the Host one.
-          if (typeof agentCtx.tools.presentAs !== 'function') {
-            throw new Error('assistant-growth-driver: toolPresentation "ptc" requires a Host tool registry with presentAs()')
-          }
           if (agentCtx.tools.schemas(agent).some(schema => schema.name === RUN_CODE_NAME)) {
             throw new Error('assistant-growth-driver: reserved run_code transport is already visible before PTC presentation')
           }
-          agentCtx.tools.presentAs('ptc')
-          const reserved = agentCtx.tools.get(RUN_CODE_NAME, agent)
-          if (reserved === undefined || reserved.name !== RUN_CODE_NAME || agentCtx.tools.get(RUN_CODE_NAME, agent) !== reserved) {
+          ptcExecutor = new PtcExecutor!(agentCtx)
+          agentCtx.tools.setExecutor(ptcExecutor)
+          const described = ptcExecutor.describe(agentCtx.tools.definitions(agent)).schemas
+          if (described.length !== 1 || described[0]?.name !== RUN_CODE_NAME) {
             throw new Error('assistant-growth-driver: PTC growth Agent does not expose the Host reserved run_code transport')
           }
+        } else {
+          // Ensure native presentation stays independent of any root executor.
+          const pipeline = new ToolExecutionPipeline(agentCtx)
+          agentCtx.tools.setExecutor({
+            describe: visible => ({
+              schemas: visible.filter(definition => allowedTools.has(definition.name)).map(definition => projectToolSchema(definition, false)),
+              knownNames: visible.map(definition => definition.name),
+            }),
+            execute: batch => executeToolBatch(batch, pipeline, () => 10),
+          })
         }
         const finalSchemas = agentCtx.tools.schemas(agent)
         const { surface: allowlistedSchemas, reserved: reservedSchemas } = splitGrowthToolSurface(finalSchemas)
         const outsideAllowlist = allowlistedSchemas.filter(schema => !allowedTools.has(schema.name)).map(schema => schema.name)
         const missing = [...allowedTools].filter(name => !allowlistedSchemas.some(schema => schema.name === name))
-        // Exactly the frozen allowlist plus, only under PTC, exactly one reserved
-        // transport definition. Missing, extra, duplicated or foreign entries all
-        // fail closed before any model request.
-        if (outsideAllowlist.length > 0 || missing.length > 0
-          || reservedSchemas.length !== (presentation === 'ptc' ? 1 : 0)
-          || reservedSchemas.some(schema => schema.name !== RUN_CODE_NAME)) {
+        // Exactly the frozen allowlist in ToolsService; the PTC transport is
+        // owned by PtcExecutor outside registered capabilities. Missing, extra,
+        // duplicated or foreign entries all fail closed before any model request.
+        if (outsideAllowlist.length > 0 || missing.length > 0 || reservedSchemas.length !== 0) {
           throw new Error(`assistant-growth-driver: growth Agent tool surface is not exactly the frozen allowlist: ${[...outsideAllowlist, ...missing].join(', ')}`)
         }
         // Contract digest: allowlist-only, so the same configuration persists the
@@ -1442,19 +1449,25 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
           const assembly = await next()
           if (context.agent !== agent) return assembly
+          // 0.2.2: model-facing tool declarations are owned by the selected
+          // ToolExecutor. Pin the wire digest from the executor's projected view;
+          // this waterfall only rewrites prompt sections.
           if (presentation === 'ptc') {
-            // The Host assembles the collapsed PTC wire surface; anything other
-            // than exactly the reserved transport means the presentation did not
-            // take effect and must fail closed, never leak the native surface.
-            if (assembly.tools.length !== 1 || assembly.tools[0]?.name !== RUN_CODE_NAME) {
+            const reserved = ptcExecutor!.describe(agentCtx.tools.definitions(agent, context.toolSet)).schemas.map(({ name, description, parameters, deferLoading }) => ({
+              name,
+              description,
+              parameters: structuredClone(parameters),
+              ...(deferLoading === true ? { deferLoading } : {}),
+            }))
+            if (reserved.length !== 1 || reserved[0]?.name !== RUN_CODE_NAME) {
               throw new Error('assistant-growth-driver: PTC growth Agent must present exactly the reserved run_code transport')
             }
-            wireDigest = acceptanceDigest(assembly.tools)
-            return { ...assembly, tools: assembly.tools }
+            wireDigest = acceptanceDigest(reserved)
+            return assembly
           }
-          const tools = assembly.tools.filter(tool => allowedTools.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name))
+          const tools = agentCtx.tools.schemas(agent, context.toolSet).filter(tool => allowedTools.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name))
           wireDigest = acceptanceDigest(tools)
-          return { ...assembly, tools }
+          return assembly
         })
 
         agentCtx.on('llm/stream', async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {

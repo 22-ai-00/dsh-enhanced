@@ -37,11 +37,18 @@ test('dream agent exposes exactly one submit tool and records only cited ideas',
       agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
       if (requests === 1) {
         surface = agent.ctx.tools.schemas(agent).map(schema => schema.name).sort()
-        const result = await ctx.tools.execute({ name: 'dream_submit_ideas',
-          arguments: { ideas: [{ summary: 'A playful cron idea', detail: 'detail',
-            evidence_refs: ['b'.repeat(64)] }] },
-          agent, callId: ToolCallId('dream-1'), signal: new AbortController().signal })
-        expect(result.isError).toBe(false)
+        const batch = await ctx.tools.execute({
+          calls: [{
+            type: 'tool-call',
+            id: ToolCallId('dream-1'),
+            name: 'dream_submit_ideas',
+            arguments: JSON.stringify({ ideas: [{ summary: 'A playful cron idea', detail: 'detail',
+              evidence_refs: ['b'.repeat(64)] }] }),
+          }],
+          agent,
+          signal: new AbortController().signal,
+        })
+        expect(batch.results[0]!.result.isError).toBe(false)
       }
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Dreamed one idea.' } }
@@ -84,8 +91,16 @@ test('dream agent rejects uncited evidence and a second submit within one wake',
       requests += 1
       const agent = ctx.agents.get(SessionId(options.sessionId!))!
       agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
-      const call = async (name: string, args: unknown) => ctx.tools.execute({ name, arguments: args as never,
-        agent, callId: ToolCallId(`dream-${requests}`), signal: new AbortController().signal })
+      const call = async (name: string, args: unknown) => (await ctx.tools.execute({
+        calls: [{
+          type: 'tool-call',
+          id: ToolCallId(`dream-${requests}`),
+          name,
+          arguments: JSON.stringify(args),
+        }],
+        agent,
+        signal: new AbortController().signal,
+      })).results[0]!.result
       const first = await call('dream_submit_ideas', { ideas: [{ summary: 's', detail: 'd', evidence_refs: ['c'.repeat(64)] }] })
       expect(first.isError).toBe(true)
       yield { type: 'block-start', index: 0, blockType: 'text' }

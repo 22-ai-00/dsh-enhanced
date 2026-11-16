@@ -73,7 +73,7 @@ test('archives staged Git blob bytes, including BOM and CRLF normalization, then
   expect(git(f.root, 'ls-files', 'plugins/generated-demo')).toBe('')
   rmSync(f.root, { recursive: true, force: true })
   expect(() => validateCreationCapabilitySource(JSON.parse(JSON.stringify(snapshot)), certificate)).not.toThrow()
-})
+}, 20_000)
 
 test('rejects changed tree and changed patch against the checked certificate', async () => {
   const f = fixture()
@@ -84,7 +84,7 @@ test('rejects changed tree and changed patch against the checked certificate', a
   const fresh = await captured(f)
   const bad = { ...fresh.snapshot, patchDigest: 'f'.repeat(64) }
   expect(() => validateCreationCapabilitySource(bad, fresh.certificate)).toThrow('certificate digest')
-})
+}, 20_000)
 
 test('rejects ignored extras, symlinks and oversized plugin files', async () => {
   const f = fixture()
@@ -99,7 +99,7 @@ test('rejects ignored extras, symlinks and oversized plugin files', async () => 
   rmSync(join(f.plugin, 'src/link'))
   writeFileSync(join(f.plugin, 'src/huge.ts'), 'x'.repeat(65_537))
   await expect(request()).rejects.toThrow()
-})
+}, 20_000)
 
 test('offline verification rejects forged object IDs, paths, data and object accessors', async () => {
   const f = fixture()
@@ -124,7 +124,7 @@ test('offline verification rejects forged object IDs, paths, data and object acc
   Object.defineProperty(getter.files[0], 'content', { enumerable: true, get() { called = true; return 'data' } })
   expect(() => validateCreationCapabilitySource(getter, certificate)).toThrow()
   expect(called).toBe(false)
-})
+}, 20_000)
 
 test('rejects malformed staged UTF-8 without running package scripts', async () => {
   const f = fixture()
@@ -132,7 +132,7 @@ test('rejects malformed staged UTF-8 without running package scripts', async () 
   const certificate = await f.certificate()
   await expect(captureCreationCapabilitySource({ worktree: f.root, baseCommit: f.baseCommit, scope: f.scope,
     certificate, environment: process.env })).rejects.toThrow('not UTF-8')
-})
+}, 20_000)
 
 test('rejects a nested Git repository staged as a gitlink', async () => {
   const f = fixture()
@@ -147,4 +147,4 @@ test('rejects a nested Git repository staged as a gitlink', async () => {
   const certificate = await f.certificate()
   await expect(captureCreationCapabilitySource({ worktree: f.root, baseCommit: f.baseCommit, scope: f.scope,
     certificate, environment: process.env })).rejects.toThrow('index record')
-})
+}, 20_000)

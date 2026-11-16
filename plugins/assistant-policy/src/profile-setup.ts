@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 
 const execFileAsync = promisify(execFile)
-const supportedHostVersions = new Set(['0.2.1-rc.2', '0.2.2-rc.1'])
+const supportedHostVersions = new Set(['0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3'])
 
 export type EffectiveProfileConfigReader = (dshHome: string, profile: string, rowId: string) => Promise<YAMLMap>
 

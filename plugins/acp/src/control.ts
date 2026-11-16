@@ -4,7 +4,12 @@ import type {
   SessionConfigSelectOption,
   SessionModeState,
 } from '@agentclientprotocol/sdk'
-import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+
+/** Session-owned model selection state; 0.2.2 replaced the agent-side ref with AgentModel.select(). */
+export interface ModelSelectionState {
+  current: ModelSelection | undefined
+}
 import {
   ReasoningEffortId,
   type LlmResolvedModelInfo,
@@ -93,7 +98,7 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function selected(selection: ModelSelectionRef): ModelSelection {
+function selected(selection: ModelSelectionState): ModelSelection {
   if (selection.current === undefined) throw new Error('the DSH session has no model selection')
   return selection.current
 }
@@ -216,7 +221,7 @@ async function catalog(llm: NativeLlmControl, current: ModelSelection): Promise<
 
 export async function buildSessionConfigOptions(
   llm: NativeLlmControl,
-  selection: ModelSelectionRef,
+  selection: ModelSelectionState,
 ): Promise<SessionConfigOption[]> {
   const current = selected(selection)
   const { groups, failures } = await catalog(llm, current)
@@ -287,7 +292,7 @@ export async function buildSessionConfigOptions(
 
 export async function setSessionConfigOption(
   llm: NativeLlmControl,
-  selection: ModelSelectionRef,
+  selection: ModelSelectionState,
   configId: string,
   value: string | boolean,
 ): Promise<SessionConfigOption[]> {

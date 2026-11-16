@@ -150,7 +150,9 @@ function agent(sessionId = `memory-promotion-integration-${Math.random()}`): Age
   return {
     id, options: {}, session,
     inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle',
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},
   }
 }

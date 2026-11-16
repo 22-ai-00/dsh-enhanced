@@ -3,7 +3,7 @@ import { matchesIsolatedModelMessages } from '../src/native-model-messages.js'
 
 const expected = { system: 'Only review this source.', user: '{"task":"review"}', workspace: '/work/owner' }
 const directoryText = `Current working directory: ${JSON.stringify(expected.workspace)}.`
-const runtimeText = `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n${directoryText}`
+const runtimeText = `<system-reminder>\nThe following information describes your current session:\n\n${directoryText}\n</system-reminder>`
 
 function request() {
   return [

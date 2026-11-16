@@ -5,15 +5,26 @@
 // global tool surface to exist (Agent tool restriction rejects unknown names),
 // so this module registers a bounded synthetic isolation_run tool and never
 // starts a process. Live tests keep the real module.
+import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type * as isolation from '@dsh-enhanced/assistant-isolation'
+
+const nonLinuxConfig = Schema.transform(Schema.any(), (value: unknown, options) => {
+  const record = value as { backend?: unknown; linux?: { runtime?: unknown; cgroupRoots?: unknown } } | null | undefined
+  if (!record || typeof record !== 'object' || record.backend !== 'linux-native'
+    || !record.linux || typeof record.linux !== 'object'
+    || !record.linux.runtime || !record.linux.cgroupRoots) {
+    throw new Schema.ValidationError('assistant-isolation: Linux native runtime and cgroup roots required', options ?? { path: [] })
+  }
+  return record
+})
 
 export function syntheticIsolationModule(actual: typeof isolation): typeof isolation {
   return {
     ...actual,
     default: {
       name: 'synthetic-assistant-isolation',
-      Config: actual.Config,
+      Config: process.platform === 'linux' ? actual.Config : nonLinuxConfig,
       inject: ['tools'],
       apply: async (ctx: { tools: { register(tool: unknown): void } }) => {
         ctx.tools.register(defineTool({

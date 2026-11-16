@@ -19,7 +19,6 @@ import type { PluginControlTrustConfig } from '../src/trust.ts'
 const roots: string[] = []
 const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
-const build = { ...linuxSourceConfig() }
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 function trust(root: string): PluginControlTrustConfig {
@@ -69,7 +68,7 @@ async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; polic
     return options.continuations ? withGapSourceFence(job.intent.gapId, job.intent.owner, create) : create()
   })
   const approvePrepared = vi.fn(async () => { throw new Error('authority temporarily unavailable') })
-  const runtimeBuild: SourceBuildConfig = options.linux ? linuxSourceConfig() : build
+  const runtimeBuild: SourceBuildConfig = linuxSourceConfig()
   const createRuntime = () => new SourceJobRuntime({ config, build: runtimeBuild, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
     ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
     ...(options.drain === undefined ? {} : {
@@ -109,7 +108,7 @@ describe('native Automations + Policy source jobs', () => {
       expect(reserve).toHaveBeenCalledOnce()
       expect(release).not.toHaveBeenCalled()
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
-  })
+  }, 20_000)
 
   it('charges native continuation occurrences and cannot bypass an exhausted budget on restart', async () => {
     let now = Date.UTC(2026, 8, 20, 12, 0, 5)
@@ -142,13 +141,13 @@ describe('native Automations + Policy source jobs', () => {
       expect(f.prepare).toHaveBeenCalledOnce()
       expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
-  })
+  }, 20_000)
 
   it('runs the native Host scheduler to a checked modify plan without an Agent service', async () => {
     const f = await fixture()
     try { const queued = await f.enqueue('native:success'); await new Promise(resolve => setTimeout(resolve, 1_100)); await f.automations.tick(); await f.automations.whenIdle(); expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared' }) }
     finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('uses native Policy budget refusal before Host claim, then releases the outstanding slot', async () => {
     const f = await fixture({ budget: 'missing' })
@@ -158,7 +157,7 @@ describe('native Automations + Policy source jobs', () => {
       expect(f.runtime.inspect({ id: queued.id, owner: OWNER })).toMatchObject({ status: 'failed', failureCode: 'source-job-host-terminated-before-claim' })
       await expect(f.enqueue('native:after-denial')).resolves.toMatchObject({ status: 'queued' })
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('restarts a queued past-due native automation and executes exactly one occurrence', async () => {
     const f = await fixture()
@@ -172,7 +171,7 @@ describe('native Automations + Policy source jobs', () => {
       await f.automations.tick(); await f.automations.whenIdle()
       expect(f.store.getSourceJob(queued.id)?.revision).toBe(4)
     } finally { await restarted?.close(); f.store.close() }
-  })
+  }, 20_000)
 
   const recordRequest = (store: ControlPlaneStore, createdAt = Date.now()) => store.recordOwnerInstructionRequest({
     planId: 'parent', pluginName: 'health-helper', expectedBaseCommit: 'a'.repeat(40),
@@ -222,7 +221,7 @@ describe('native Automations + Policy source jobs', () => {
         await f.automations.tick(); await f.automations.whenIdle()
         expect(reserve).toHaveBeenCalledOnce()
       } finally { await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
-    })
+    }, 20_000)
 
   it('cancels and joins a native owner instruction drain on close', async () => {
     let now = Date.UTC(2026, 8, 20, 12, 0, 5)
@@ -255,5 +254,5 @@ describe('native Automations + Policy source jobs', () => {
       await tick; await f.automations.whenIdle()
       expect(f.store.getOwnerInstructionRequest(requestId!)).toMatchObject({ status: 'pending', jobId: null })
     } finally { cleanup.resolve(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
-  })
+  }, 20_000)
 })

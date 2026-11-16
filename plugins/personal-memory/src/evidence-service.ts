@@ -111,12 +111,29 @@ export class SessionEvidenceBridge {
           || !source.sections.some(section => section.name === 'personal-memory:tool-evidence')) continue
         const [block] = event.data.content
         const sections = source.sections.filter(section => section.name !== 'personal-memory:tool-evidence')
-        const prefix = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n'
-        const original = prefix + source.sections.map(section => section.text).join('\n\n')
+        const escapeReminder = (value: string): string => value.replace(/<\/system-reminder\s*>/giu, tag => `<\\${tag.slice(1)}`)
+        const clearedReminder = '<system-reminder>\nCurrent runtime context: none. Earlier runtime-context snapshots no longer apply.\n</system-reminder>'
+        const legacyPrefix = 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n'
+        const reminderIntros = [
+          'The following information describes your current session:',
+          'The following information describes your current session. It replaces earlier versions of this context, including any retained in conversation summaries.',
+        ]
         // If the Host's body and named sections disagree, discard the body;
         // it cannot be safely attributed to individual providers.
-        const text = event.data.content.length === 1 && block?.type === 'text' && block.text === original
-          ? prefix + sections.map(section => section.text).join('\n\n') : ''
+        let text = ''
+        if (event.data.content.length === 1 && block?.type === 'text') {
+          const legacyOriginal = legacyPrefix + source.sections.map(section => section.text).join('\n\n')
+          if (block.text === legacyOriginal) {
+            text = sections.length === 0 ? '' : legacyPrefix + sections.map(section => section.text).join('\n\n')
+          } else {
+            const rawOriginalBody = escapeReminder(source.sections.map(section => section.text).join('\n\n'))
+            const matchedIntro = reminderIntros.find(intro => block.text === `<system-reminder>\n${intro}\n\n${rawOriginalBody}\n</system-reminder>`)
+            if (matchedIntro !== undefined) {
+              const nextBody = escapeReminder(sections.map(section => section.text).join('\n\n'))
+              text = sections.length === 0 ? clearedReminder : `<system-reminder>\n${matchedIntro}\n\n${nextBody}\n</system-reminder>`
+            }
+          }
+        }
         agent.session.append('user/message', {
           ...event.data,
           content: [{ type: 'text', text }],

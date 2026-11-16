@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { describe, expect, test, vi } from 'vitest'
 import { Context } from '../plugins/assistant-goals/node_modules/@deepseek-ai/cordis'
 import ToolRuntime, { defineTool } from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tool-executor-native'
 import { ToolCallId } from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-llm'
 import SystemPrompt from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-system-prompt'
 
@@ -193,13 +194,23 @@ describe('real repair guard', () => {
     const repair = await fixture({ phase: 'repair', ownerSessionId: 'owner', repairSessionId: 'repair', ownerArm: { name: 'skill_repair_arm', arguments: {} }, artifactPath: 'render.mjs' })
     const contexts: Context[] = []
     const execute = async (item: Awaited<ReturnType<typeof fixture>>, sessionId: string, name: 'skill_save' | 'skill_repair_arm' | 'edit', fails = false) => {
-      const ctx = new Context(); contexts.push(ctx); await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime)
+      const ctx = new Context(); contexts.push(ctx); await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
       const parameters = name === 'edit' ? { file_path: { type: 'string', required: true }, old_string: { type: 'string', required: true }, new_string: { type: 'string', required: true } } : {}
       const tools = ctx.get('tools')!
       tools.register(defineTool({ name, description: name, parameters, output: { schema: { type: 'object', additionalProperties: true }, render: () => [] }, execute: async () => { if (fails) throw new Error('tool body rejected'); return { name } } }))
       apply(ctx, { controlPath: item.controlPath, logPath: item.logPath, workspace: item.root, provider: 'relay', model: 'm1' })
       const arguments_ = name === 'edit' ? { file_path: 'render.mjs', old_string: 'old', new_string: 'new' } : {}
-      return tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`pinned-${name}-${sessionId}`), name, arguments: arguments_, agent: { session: { id: sessionId } } as never })
+      const batch = await tools.execute({
+        calls: [{
+          type: 'tool-call',
+          id: ToolCallId(`pinned-${name}-${sessionId}`),
+          name,
+          arguments: JSON.stringify(arguments_),
+        }],
+        agent: { session: { id: sessionId } } as never,
+        signal: new AbortController().signal,
+      })
+      return batch.results[0]!.result
     }
     try {
       await expect(execute(bootstrap, 'owner', 'skill_save')).resolves.toMatchObject({ isError: false, concludesTurn: true })

@@ -141,8 +141,8 @@ export async function runDreamAgent(input: DreamAgentInput): Promise<DreamAgentR
           const unbind = policy.bindInitiator(agent, 'background', input.scope.principalId)
           agentCtx.effect(() => unbind, 'assistant-dreaming.background-initiator')
         }
-        agentCtx.effect(() => installModelSelection(agentCtx, { current: selection, assembled: undefined }),
-          'assistant-dreaming.model-selection')
+        agentCtx.effect(() => installModelSelection(agentCtx), 'assistant-dreaming.model-selection')
+        agent.model.select(selection)
         const submit: ToolDefinition = defineTool({
           name: SUBMIT_TOOL,
           description: 'Record at most maxIdeasPerWake private dreaming ideas, each citing evidence_refs digests from the provided material. No scores or self-ratings.',

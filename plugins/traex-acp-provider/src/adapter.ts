@@ -107,7 +107,7 @@ const CATALOG_STDERR_DIAGNOSTIC = 'TraeX model catalog discovery wrote to stderr
 
 function ensureProvider(provider: string): void {
   if (provider !== TRAEX_PROVIDER_ROUTE) {
-    throw new LlmError(`unknown TraeX ACP provider: ${provider}`, 'INVALID_PROVIDER')
+    throw LlmError.fromFailure({ message: `unknown TraeX ACP provider: ${provider}`, code: 'INVALID_PROVIDER' })
   }
 }
 
@@ -143,42 +143,38 @@ function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>
 function connectorFailure(command: string, error: unknown): Error {
   if (error instanceof Error && error.cause === 'abort') return error
   if (error instanceof TrustedSessionCwdError) {
-    return new LlmError(
-      'TraeX ACP requires a live loop-owned session whose canonical cwd matches the configured local workspace',
-      'LOCAL_SESSION_CWD_REQUIRED',
-      { cause: error },
-    )
+    return LlmError.fromFailure({ message: 'TraeX ACP requires a live loop-owned session whose canonical cwd matches the configured local workspace', code: 'LOCAL_SESSION_CWD_REQUIRED' }, { cause: error })
   }
   const candidate = error as (NodeJS.ErrnoException & { systemCode?: string }) | undefined
   const code = candidate?.systemCode ?? candidate?.code
   if (code === 'ENOENT') {
-    return new LlmError(`TraeX executable was not found: ${command}`, 'CLI_NOT_FOUND', { cause: error })
+    return LlmError.fromFailure({ message: `TraeX executable was not found: ${command}`, code: 'CLI_NOT_FOUND' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'auth') {
-    return new LlmError('TraeX ACP requires a local login; authenticate with TraeX before using this provider', 'ACP_AUTH_REQUIRED', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP requires a local login; authenticate with TraeX before using this provider', code: 'ACP_AUTH_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'entitlement') {
-    return new LlmError('TraeX ACP did not expose any model for the active Trae account', 'ACP_ENTITLEMENT_REQUIRED', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP did not expose any model for the active Trae account', code: 'ACP_ENTITLEMENT_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'model') {
-    return new LlmError('TraeX ACP does not provide the requested model', 'ACP_MODEL_UNAVAILABLE', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP does not provide the requested model', code: 'ACP_MODEL_UNAVAILABLE' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'reasoning') {
-    return new LlmError('TraeX ACP does not provide the requested reasoning effort', 'UNSUPPORTED_REASONING_EFFORT', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP does not provide the requested reasoning effort', code: 'UNSUPPORTED_REASONING_EFFORT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'refusal') {
-    return new LlmError('TraeX ACP refused the request', 'ACP_REFUSAL', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP refused the request', code: 'ACP_REFUSAL' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'timeout') {
-    return new LlmError('TraeX ACP prompt timed out', 'ACP_TIMEOUT', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP prompt timed out', code: 'ACP_TIMEOUT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'output-limit') {
-    return new LlmError('TraeX ACP output exceeded the configured safety limit', 'ACP_OUTPUT_LIMIT', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP output exceeded the configured safety limit', code: 'ACP_OUTPUT_LIMIT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'protocol') {
-    return new LlmError('TraeX ACP returned an invalid or incomplete protocol exchange', 'ACP_PROTOCOL_ERROR', { cause: error })
+    return LlmError.fromFailure({ message: 'TraeX ACP returned an invalid or incomplete protocol exchange', code: 'ACP_PROTOCOL_ERROR' }, { cause: error })
   }
-  return new LlmError('TraeX ACP process failed', 'ACP_PROCESS_FAILED', { cause: error })
+  return LlmError.fromFailure({ message: 'TraeX ACP process failed', code: 'ACP_PROCESS_FAILED' }, { cause: error })
 }
 
 /**
@@ -188,11 +184,11 @@ function connectorFailure(command: string, error: unknown): Error {
  */
 function preflightFailure(error: unknown): Error {
   if (error instanceof Error && error.cause === 'prompt-limit') {
-    return new LlmError(error.message, CONTEXT_WINDOW_EXCEEDED_CODE, { cause: error })
+    return LlmError.fromFailure({ message: error.message, code: CONTEXT_WINDOW_EXCEEDED_CODE }, { cause: error })
   }
   return error instanceof Error
-    ? new LlmError(error.message, 'ACP_PROMPT_INVALID', { cause: error })
-    : new LlmError('TraeX ACP could not serialize the DSH request', 'ACP_PROMPT_INVALID', { cause: error })
+    ? LlmError.fromFailure({ message: error.message, code: 'ACP_PROMPT_INVALID' }, { cause: error })
+    : LlmError.fromFailure({ message: 'TraeX ACP could not serialize the DSH request', code: 'ACP_PROMPT_INVALID' }, { cause: error })
 }
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */

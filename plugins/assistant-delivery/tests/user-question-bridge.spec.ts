@@ -2,6 +2,7 @@ import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -67,6 +68,7 @@ async function liveAgent(ctx: Context, sessionId: string): Promise<Agent> {
     options: {},
     session,
     inbox: createInboxStub(),
+    model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     ctx: new Context(),
     status: 'idle',
     cancel() {},
@@ -94,6 +96,7 @@ async function fixture(options: { blockingAnswererBeforeDelivery?: boolean } = {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(UserQuestionService)
   const earlierAnswerer = vi.fn(() => new Promise<AskUserQuestionAnswer>(() => {}))

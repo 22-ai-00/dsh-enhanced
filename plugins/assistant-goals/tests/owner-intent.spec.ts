@@ -8,6 +8,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolExecution } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -62,7 +63,7 @@ async function harness(options: { ownerIntent?: boolean; databasePath?: string; 
   await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } })
   await ctx.loader.await()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const human = new Set<Agent>()
   const proof: ProofState = { text: '', callId: 'real-call', supplier: { provider: 'fixture', model: 'fixture' }, supplierState: 'frozen',
     available: true, changeAfterReads: undefined, changed: false, reads: 0, inspects: 0, offsets: [] }
@@ -241,9 +242,11 @@ describe('frozen authenticated owner intent', () => {
     expect(f.proof.reads).toBe(0)
     // The registered goal_create tool delegates through the same disabled path.
     const other = await f.create('owner-intent-disabled-tool', 'other-owner'); f.human.add(other)
-    const result = await f.ctx.tools.execute({ callId: ToolCallId('plain-tool-call'), name: 'goal_create',
-      arguments: { objective: '第二个目标' }, signal: new AbortController().signal, agent: other })
-    expect(result.isError).toBe(false)
+    const batch = await f.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId('plain-tool-call'), name: 'goal_create', arguments: JSON.stringify({ objective: '第二个目标' }) }],
+      signal: new AbortController().signal, agent: other,
+    })
+    expect(batch.results[0]!.result.isError).toBe(false)
     expect(f.ctx.goals.get(other)).toBeDefined()
     expect(f.proof.inspects).toBe(0)
     expect(f.proof.reads).toBe(0)

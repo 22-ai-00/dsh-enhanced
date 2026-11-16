@@ -113,7 +113,9 @@ export class EffectBlockedReplayRuntime {
     this.providers = ['tools', 'loader', 'assistantDelivery', 'agents'].map(name => {
       const implementation = ctx.reflect.store[ctx[Context.isolate][name]!]
       if (!implementation) fail(`missing ${name} provider`)
-      return { name, implementation, store: implementation!.fiber.store }
+      // Cordis 4.1: the providing fiber is reachable through Impl.ctx.fiber and its
+      // per-activation implementation map is Fiber.committed (Fiber.store is private).
+      return { name, implementation, store: implementation!.ctx.fiber.committed }
     })
     this.sample = createRuntimeSampler(ctx, this.config)
     ctx.effect(() => {
@@ -205,12 +207,17 @@ export class EffectBlockedReplayRuntime {
         if (item.kind === 'tool') {
           const inputDigest = runtimeConfigDigest(item.arguments)
           state.expected = { callId, name: item.name, inputDigest }; delete state.observed
-          const outcome = await agent.ctx.tools.execute({ callId: callId as ToolExecutionInput['callId'], name: item.name,
-            arguments: item.arguments, agent, signal: state.abort.signal })
+          // 0.2.2: one direct dispatch is a single-call ToolBatch with raw JSON arguments.
+          const batch = await agent.ctx.tools.execute({
+            calls: [{ type: 'tool-call', id: callId as ToolExecutionInput['callId'], name: item.name,
+              arguments: JSON.stringify(item.arguments) }],
+            agent, signal: state.abort.signal,
+          })
+          const outcome = batch.results[0]?.result
           delete state.expected
           stable()
           const observed = this.states.get(agent)?.observed
-          if (!observed || !outcome.isError || outcome.error.message !== DENIAL) throw new Error('effect-blocked replay: native monotonic denial was not observed')
+          if (!observed || outcome === undefined || !outcome.isError || outcome.error.message !== DENIAL) throw new Error('effect-blocked replay: native monotonic denial was not observed')
           attempts.push({ caseId: item.id, kind: item.kind, callId, inputDigest, blockedAt: 'native-tool-guard',
             observedAt: observed.observedAt, resultDigest: runtimeConfigDigest(outcome) })
         } else {
@@ -267,7 +274,7 @@ export class EffectBlockedReplayRuntime {
   private assertProviders(): void {
     for (const provider of this.providers) {
       const current = this.ctx.reflect.store[this.ctx[Context.isolate][provider.name]!]
-      if (current !== provider.implementation || current?.fiber.store !== provider.store) fail(`${provider.name} provider changed`)
+      if (current !== provider.implementation || current?.ctx.fiber.committed !== provider.store) fail(`${provider.name} provider changed`)
     }
   }
 }

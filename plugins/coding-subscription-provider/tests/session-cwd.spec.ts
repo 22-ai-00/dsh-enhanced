@@ -128,7 +128,7 @@ describe('coding subscription live session cwd binding', () => {
     const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
     roots.push(root)
     await expect(() => resolveTrustedSessionCwd({
-      request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }),
+      request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }) as unknown as GenerateOptions,
       configuredCwd: root,
       sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
       attestor: { claim: () => true, claimCompaction: () => true },
@@ -140,7 +140,7 @@ describe('coding subscription live session cwd binding', () => {
     roots.push(root)
     const compaction = {
       ...request('session-live'),
-      purpose: 'compaction' as const,
+      purpose: 'compaction' as never,
       signal: new AbortController().signal,
     }
     let ordinaryClaimed = false
@@ -169,7 +169,7 @@ describe('coding subscription live session cwd binding', () => {
     roots.push(root)
     const unsealed = {
       ...request('session-live'),
-      purpose: 'compaction' as const,
+      purpose: 'compaction' as never,
       signal: new AbortController().signal,
     }
     await expect(() => resolveTrustedSessionCwd({

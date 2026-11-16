@@ -35,7 +35,7 @@ export function parseProgramUpgradeArgs(args) {
   }
   if (!isAbsolute(result.home ?? '') || resolve(result.home) !== result.home
     || !profilePattern.test(result.profile ?? '')
-    || !['latest', '0.2.1-rc.2', '0.2.2-rc.1'].includes(result.selector)) fail('expected an absolute Home, an existing profile and a supported Host selector')
+    || !['latest', '0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3'].includes(result.selector)) fail('expected an absolute Home, an existing profile and a supported Host selector')
   if (result.restartConfigPath !== undefined && (!isAbsolute(result.restartConfigPath)
     || resolve(result.restartConfigPath) !== result.restartConfigPath)) fail('restart config path must be absolute and canonical')
   if ((result.recoverReadiness || result.recoverRollbackReadiness)
@@ -127,7 +127,7 @@ export async function runProgramUpgrade(options) {
   }
   if (options.recoverRollbackReadiness) {
     if (!isAbsolute(binding.cacheRoot ?? '') || resolve(binding.cacheRoot) !== binding.cacheRoot
-      || !/^0\.2\.[01]-rc\.2$/u.test(binding.version ?? '')) fail('completed rollback Host binding differs')
+      || !/^0\.2\.(?:[01]-rc\.2|2-rc\.(?:1|3))$/u.test(binding.version ?? '')) fail('completed rollback Host binding differs')
     const binDirectory = join(binding.cacheRoot, binding.version, 'node_modules', '.bin')
     const dshPath = join(binDirectory, 'dsh')
     const env = { ...process.env, DSH_HOME: home, NODE_OPTIONS: '', NODE_PATH: '',
@@ -151,8 +151,8 @@ export async function runProgramUpgrade(options) {
   try {
     const { prepareHostUpdatePlan } = await import(pathToFileURL(join(root, 'packages/dsh-rsi-cli/lib/install-host.js')).href)
     const hostPlan = await prepareHostUpdatePlan({ dshHome: home, selector: options.selector, signal: controller.signal })
-    if (!['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1'].includes(hostPlan.originalRuntime.version)
-      || hostPlan.candidateRuntime.version !== '0.2.2-rc.1'
+    if (!['0.2.0-rc.2', '0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3'].includes(hostPlan.originalRuntime.version)
+      || hostPlan.candidateRuntime.version !== '0.2.2-rc.3'
       || binding.receiptDigest !== hostPlan.originalRuntime.receiptDigest) fail('unsupported or changed bound Host')
     process.stdout.write(`准备程序升级：${profile}；DSH ${hostPlan.originalRuntime.version} → ${hostPlan.candidateRuntime.version}。\n`)
     const { prepareRsiLocalUpdate } = await import(pathToFileURL(join(root, 'plugins/lark-channel/lib/rsi-local-update.js')).href)

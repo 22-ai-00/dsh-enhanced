@@ -11,6 +11,7 @@ import {
   type SessionEvent,
 } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool, type ToolExecution, type ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -60,6 +61,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
   return {
     id,
     options: { provider: 'test-provider', model: 'test-model' },
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
     session,
     inbox,
     status: 'idle',
@@ -91,6 +93,23 @@ function appendSandboxMode(owner: Agent, mode: 'workspace-write' | 'danger-full-
   append.call(owner.session, 'sandbox/mode', { mode })
 }
 
+function provideSessionProjections(ctx: Context): void {
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: {
+      init(header: unknown, inherited: number): unknown
+      apply(state: unknown, event: unknown): unknown
+    }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
+}
+
 function provideCompatibleSessionPersistence(ctx: Context): void {
   ctx.provide('sessionPersistence' as never, {
     coordinator: {
@@ -104,6 +123,23 @@ function provideCompatibleSessionPersistence(ctx: Context): void {
   } as never)
 }
 
+async function executeTool(
+  ctx: Context,
+  input: { callId: ReturnType<typeof ToolCallId>; name: string; arguments: unknown; signal: AbortSignal; agent?: Agent },
+) {
+  const batch = await ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: input.callId,
+      name: input.name,
+      arguments: typeof input.arguments === 'string' ? input.arguments : JSON.stringify(input.arguments),
+    }],
+    ...(input.agent === undefined ? {} : { agent: input.agent }),
+    signal: input.signal,
+  })
+  return batch.results[0]!.result
+}
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -114,7 +150,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     const flush = vi.fn(async () => true)
     ctx.provide('sessions' as never, { flush, list: () => [] } as never)
@@ -144,7 +181,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const result = await ctx.tools.execute({
+    const result = await executeTool(ctx, {
       callId: ToolCallId('native-full-registration-unproven'),
       name: 'future_external_tool',
       arguments: {},
@@ -165,7 +202,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     let startFlush!: () => void
     const flushStarted = new Promise<void>(resolve => { startFlush = resolve })
@@ -210,7 +248,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const first = ctx.tools.execute({
+    const first = executeTool(ctx, {
       callId: ToolCallId('native-full-adoption'),
       name: 'future_external_tool',
       arguments: {},
@@ -224,7 +262,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
         reconciliationSettled = true
         return result
       })
-    const second = ctx.tools.execute({
+    const second = executeTool(ctx, {
       callId: ToolCallId('native-full-adoption-concurrent'),
       name: 'future_external_tool',
       arguments: {},
@@ -269,7 +307,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     const createPolicyContext = async (root: string, flush: (session: Session) => Promise<boolean>) => {
       const ctx = new Context()
       await ctx.plugin(SystemPrompt)
-      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+      provideSessionProjections(ctx)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       ctx.provide('sessions' as never, { flush, list: () => [] } as never)
       ctx.provide('permissionPresets' as never, {
@@ -299,7 +338,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       flushStartedResolve()
       return flushGate
     })
-    const oldExecution = oldCtx.tools.execute({
+    const oldExecution = executeTool(oldCtx, {
       callId: ToolCallId('native-full-old-instance'),
       name: 'future_external_tool',
       arguments: {},
@@ -313,7 +352,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     const newCtx = await createPolicyContext(roots[1]!, async () => {
       throw new Error('replacement must share the old migration flight')
     })
-    const newExecution = newCtx.tools.execute({
+    const newExecution = executeTool(newCtx, {
       callId: ToolCallId('native-full-new-instance'),
       name: 'future_external_tool',
       arguments: {},
@@ -335,7 +374,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     const persisted: Array<ReturnType<Session['snapshotEvents']>> = []
     const flush = vi.fn(async (session: Session) => {
@@ -371,7 +411,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const result = await ctx.tools.execute({
+    const result = await executeTool(ctx, {
       callId: ToolCallId('native-full-compensation'),
       name: 'future_external_tool',
       arguments: {},
@@ -444,7 +484,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
     const flush = vi.fn(async () => {
@@ -484,7 +525,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const result = await ctx.tools.execute({
+    const result = await executeTool(ctx, {
       callId: ToolCallId('native-full-stale-compensation'),
       name: 'future_external_tool',
       arguments: {},
@@ -504,7 +545,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     let startFlush!: () => void
     const flushStarted = new Promise<void>(resolve => { startFlush = resolve })
@@ -554,7 +596,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const execution = ctx.tools.execute({
+    const execution = executeTool(ctx, {
       callId: ToolCallId('native-full-downgrade'),
       name: 'future_external_tool',
       arguments: {},
@@ -584,7 +626,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'never' })
     let executions = 0
     ctx.tools.register(defineTool({
@@ -608,7 +651,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
     owner.session.append('turn/start', { turn: 1 })
 
-    const result = await ctx.tools.execute({
+    const result = await executeTool(ctx, {
       callId: ToolCallId('approval-never-attribution'),
       name: 'future_external_tool',
       arguments: {},
@@ -636,7 +679,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       const { ctx, service } = await serviceWithConfig({ toolDefaultEffect: 'allow', rules: [] })
       try {
         await ctx.plugin(SystemPrompt)
-        await ctx.plugin(ToolRuntime)
+        await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+        provideSessionProjections(ctx)
         await ctx.plugin(ApprovalService, { policy: 'ask' })
         let nativeAutoLive = true
         ctx.provide('permissionPresets' as never, {
@@ -660,7 +704,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
           approvalRequests += 1
           return 'rejected'
         })
-        const run = (id: string) => ctx.tools.execute({
+        const run = (id: string) => executeTool(ctx, {
           callId: ToolCallId(id), name: 'future_external_tool', arguments: {},
           signal: new AbortController().signal, agent: owner,
         })
@@ -692,7 +736,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       const { ctx } = await serviceWithConfig({ toolDefaultEffect: 'allow', rules: [] })
       try {
         await ctx.plugin(SystemPrompt)
-        await ctx.plugin(ToolRuntime)
+        await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+        provideSessionProjections(ctx)
         await ctx.plugin(ApprovalService, { policy: 'ask' })
         const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
         let native = false
@@ -745,7 +790,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
           output: { schema: { type: 'string' }, render: (_arguments, value) => [{ type: 'text', text: value }] },
           execute,
         }))
-        const result = await ctx.tools.execute({
+        const result = await executeTool(ctx, {
           callId: ToolCallId('native-auto-transition'),
           name: 'future_external_tool',
           arguments: {},
@@ -767,7 +812,8 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
+    provideSessionProjections(ctx)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     const executions: string[] = []
     for (const name of ['web_fetch', 'ask_user_question', 'read', 'glob', 'skill']) {
@@ -798,7 +844,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       ['glob', { path: '/opt/dsh', pattern: '**/*.json' }],
       ['skill', { name: 'firecrawl-scrape' }],
     ] as const) {
-      const result = await ctx.tools.execute({
+      const result = await executeTool(ctx, {
         callId: ToolCallId(`default-auto-${name}`), name, arguments: arguments_,
         signal: new AbortController().signal, agent: owner,
       })
@@ -816,7 +862,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
     const executions: string[] = []
     for (const name of ['read', 'future_external_tool']) {
       ctx.tools.register(defineTool({
@@ -837,14 +883,14 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     })
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
 
-    const read = await ctx.tools.execute({
+    const read = await executeTool(ctx, {
       callId: ToolCallId('risk-read'),
       name: 'read',
       arguments: { file_path: 'README.md' },
       signal: new AbortController().signal,
       agent: owner,
     })
-    const unknown = await ctx.tools.execute({
+    const unknown = await executeTool(ctx, {
       callId: ToolCallId('risk-unknown'),
       name: 'future_external_tool',
       arguments: {},
@@ -858,7 +904,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
 
     owner.session.append('approval/policy', { policy: 'never' })
     setApprovalReviewer(owner.session, 'none')
-    const incoherentNever = await ctx.tools.execute({
+    const incoherentNever = await executeTool(ctx, {
       callId: ToolCallId('risk-incoherent-never'),
       name: 'future_external_tool',
       arguments: {},
@@ -869,7 +915,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     expect(executions).toEqual(['read'])
 
     appendSandboxMode(owner, 'danger-full-access')
-    const fullAccess = await ctx.tools.execute({
+    const fullAccess = await executeTool(ctx, {
       callId: ToolCallId('risk-full-access'),
       name: 'future_external_tool',
       arguments: {},
@@ -946,7 +992,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     temporaryRoots.push(root)
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
     let executions = 0
     ctx.tools.register(defineTool({
       name: 'probe',
@@ -971,7 +1017,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       }],
     })
 
-    const result = await ctx.tools.execute({
+    const result = await executeTool(ctx, {
       callId: ToolCallId('probe-call'),
       name: 'probe',
       arguments: {},

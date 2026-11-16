@@ -4,6 +4,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { projectToolSchema } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
 import type { GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -213,18 +215,28 @@ export class OwnerRepairAgentRuntime {
     }
     const denied = globalNames.filter(name => !allowed.has(name))
     if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
+    if (typeof agentCtx.tools.setExecutor === 'function') {
+      const pipeline = new ToolExecutionPipeline(agentCtx)
+      agentCtx.tools.setExecutor({
+        describe: definitions => ({
+          schemas: definitions.filter(definition => allowed.has(definition.name)).map(definition => projectToolSchema(definition, false)),
+        }),
+        execute: batch => executeToolBatch(batch, pipeline, () => 10),
+      })
+    }
     this.#toolSchemaDigests.set(String(agent.session.id), acceptanceDigest(agentCtx.tools.schemas(agent).filter(tool => allowed.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name))))
-    // Pinned DSH restrict() masks globals only. Preset-local registrations stay
-    // in their owning scope; model presentation and the monotonic execution
-    // guard below enforce the frozen allowlist for both kinds of tool.
+    // Pinned DSH restrict() masks globals only; mounting a scoped executor on
+    // agentCtx additionally filters preset/own tool schemas in describe(), and
+    // the monotonic guard below enforces the frozen allowlist at execution.
   }
 
   #setupRepairAgent(agentCtx: Agent['ctx'], agent: Agent, input: OwnerRepairAgentInput, combined: AbortSignal, timer: ReturnType<typeof setTimeout>): void {
     const policy = this.ctx.get('assistantPolicy' as never, false) as Policy | undefined
     if (policy === undefined) throw new Error('assistant-skills: repair policy changed')
     agentCtx.effect(() => policy.bindInitiator(agent, 'background', input.scope.principalId), 'assistant-skills.owner-repair-initiator')
-    agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: input.provider, model: input.model,
-      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.reasoningEffort) }) }, assembled: undefined }), 'assistant-skills.owner-repair-model')
+    agentCtx.effect(() => installModelSelection(agentCtx), 'assistant-skills.owner-repair-model')
+    agent.model.select({ provider: input.provider, model: input.model,
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.reasoningEffort) }) })
     const allowed = new Set(input.allowedTools)
     const schemaDigests = this.#toolSchemaDigests
     const key = String(agent.session.id)
@@ -255,7 +267,9 @@ export class OwnerRepairAgentRuntime {
     agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const assembly = await next()
       if (context.agent !== agent) return assembly
-      return { ...assembly, tools: assembly.tools.filter(tool => allowed.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name)) }
+      // 0.2.2: model-facing tool declarations are provider-owned; #checkRepairTools
+      // installs the registry restriction and the monotonic guard denies the rest.
+      return assembly
     })
     let calls = input.initialModelCalls ?? 0
     let toolCalls = input.initialToolCalls ?? 0

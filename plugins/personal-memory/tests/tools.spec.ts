@@ -4,7 +4,8 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -40,6 +41,7 @@ function agent(): Agent {
     inbox,
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -67,6 +69,7 @@ async function harness(ownerRequest?: { text: string; decision: 'execute' | 'ask
   } } as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [
@@ -122,6 +125,35 @@ async function harness(ownerRequest?: { text: string; decision: 'execute' | 'ask
   return { ctx, agent: agent() }
 }
 
+function batchInput(input: {
+  callId: ToolCallId
+  name: string
+  arguments: Record<string, unknown>
+  signal: AbortSignal
+  agent?: Agent
+}): ToolBatchInput {
+  return {
+    calls: [{
+      type: 'tool-call',
+      id: input.callId,
+      name: input.name,
+      arguments: JSON.stringify(input.arguments),
+    }],
+    signal: input.signal,
+    ...(input.agent === undefined ? {} : { agent: input.agent }),
+  }
+}
+
+async function executeCall(ctx: Context, input: {
+  callId: ToolCallId
+  name: string
+  arguments: Record<string, unknown>
+  signal: AbortSignal
+  agent?: Agent
+}) {
+  return (await ctx.tools.execute(batchInput(input))).results[0]!.result
+}
+
 describe('personal memory rc.1 tools', () => {
   test('current owner direct add returns an actual record; ask, sensitive and remove stay pending', async () => {
     const fixture = await harness({ text: 'Remember my name is Rui now', decision: 'execute' })
@@ -133,15 +165,15 @@ describe('personal memory rc.1 tools', () => {
     const exec = { callId: ToolCallId('owner-name'), name: 'memory_manage', agent: fixture.agent,
       signal: new AbortController().signal, arguments: args, rootCallId: ToolCallId('owner-name') }
     expect(fixture.ctx.assistantPolicy.isPreauthorizedTool(exec as never)).toBe(true)
-    const direct = await fixture.ctx.tools.execute(exec)
+    const direct = await executeCall(fixture.ctx, exec)
     expect(direct.isError).toBe(false)
     const value = direct.isError ? undefined : direct.value as { status: string; record?: { id: string; content: string; version: number } }
     expect(value).toMatchObject({ status: 'approved', record: { content: 'My name is Rui', version: 1 } })
     expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'Rui' })[0]?.record.id).toBe(value?.record?.id)
-    const replay = await fixture.ctx.tools.execute({ ...exec, callId: ToolCallId('owner-name-replay') })
+    const replay = await executeCall(fixture.ctx, { ...exec, callId: ToolCallId('owner-name-replay') })
     expect(replay.isError ? undefined : replay.value).toMatchObject({ status: 'approved',
       record: { id: value!.record!.id, version: 1 } })
-    const sensitive = await fixture.ctx.tools.execute({ ...exec, callId: ToolCallId('owner-sensitive'),
+    const sensitive = await executeCall(fixture.ctx, { ...exec, callId: ToolCallId('owner-sensitive'),
       arguments: { ...args, idempotency_key: 'owner:sensitive', entry: { ...entry, content: 'secret', sensitivity: 'sensitive' } } })
     expect(sensitive.isError ? undefined : sensitive.value).toMatchObject({ status: 'pending' })
     const sensitiveProposal = sensitive.isError ? undefined : sensitive.value as { proposalId: string; version: number }
@@ -153,20 +185,20 @@ describe('personal memory rc.1 tools', () => {
       memory_id: sensitiveRecord.id, expected_version: sensitiveRecord.version,
       entry: { ...entry, content: 'nonsecret', sensitivity: 'private' } }
     expect(fixture.ctx.assistantPolicy.isPreauthorizedTool({ ...exec, arguments: downgradeArgs } as never)).toBe(false)
-    const downgrade = await fixture.ctx.tools.execute({ ...exec, callId: ToolCallId('owner-downgrade'), arguments: downgradeArgs })
+    const downgrade = await executeCall(fixture.ctx, { ...exec, callId: ToolCallId('owner-downgrade'), arguments: downgradeArgs })
     expect(downgrade.isError ? undefined : downgrade.value).toMatchObject({ status: 'pending' })
     expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'secret' })[0]?.record.sensitivity).toBe('sensitive')
     const removeArgs = { operation: 'remove', owner: 'user', scope: 'user-global',
       idempotency_key: 'owner:remove', memory_id: value!.record!.id, expected_version: 1 }
     expect(fixture.ctx.assistantPolicy.isPreauthorizedTool({ ...exec, arguments: removeArgs } as never)).toBe(false)
-    const removed = await fixture.ctx.tools.execute({ ...exec, callId: ToolCallId('owner-remove'), arguments: removeArgs })
+    const removed = await executeCall(fixture.ctx, { ...exec, callId: ToolCallId('owner-remove'), arguments: removeArgs })
     expect(removed.isError ? undefined : removed.value).toMatchObject({ status: 'pending' })
     expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'Rui' })).toHaveLength(1)
     await fixture.ctx.fiber.restart()
 
     const asked = await harness({ text: 'Wait for my approval before remembering my nickname', decision: 'ask' })
     vi.spyOn(asked.agent.session, 'requestHeader').mockReturnValue({ config: { provider: 'p', model: 'm' } } as never)
-    const pending = await asked.ctx.tools.execute({ ...exec, agent: asked.agent,
+    const pending = await executeCall(asked.ctx, { ...exec, agent: asked.agent,
       callId: ToolCallId('owner-ask'), arguments: { ...args, idempotency_key: 'owner:ask',
         entry: { ...entry, content: 'Nickname Rui' } } })
     expect(pending.isError ? undefined : pending.value).toMatchObject({ status: 'pending' })
@@ -207,12 +239,12 @@ describe('personal memory rc.1 tools', () => {
     vi.spyOn(fixture.agent.session, 'requestHeader').mockReturnValue({ config: { provider: 'p', model: 'm' } } as never)
     const entry = { kind: 'fact', content: 'My first name is Rui', sensitivity: 'private',
       trust: 'user-confirmed', confidence: 1, source: 'user', observed_at: 10_000 }
-    const first = await fixture.ctx.tools.execute({ callId: ToolCallId('budget-first'), name: 'memory_manage',
+    const first = await executeCall(fixture.ctx, { callId: ToolCallId('budget-first'), name: 'memory_manage',
       agent: fixture.agent, signal: new AbortController().signal,
       arguments: { operation: 'add', owner: 'user', scope: 'user-global', idempotency_key: 'budget:first', entry } })
     expect(first.isError ? undefined : first.value).toMatchObject({ status: 'approved' })
     expect(reviews).toBe(1)
-    const second = await fixture.ctx.tools.execute({ callId: ToolCallId('budget-second'), name: 'memory_manage',
+    const second = await executeCall(fixture.ctx, { callId: ToolCallId('budget-second'), name: 'memory_manage',
       agent: fixture.agent, signal: new AbortController().signal,
       arguments: { operation: 'add', owner: 'user', scope: 'user-global', idempotency_key: 'budget:second',
         entry: { ...entry, content: 'My second name is Tao' } } })
@@ -232,7 +264,7 @@ describe('personal memory rc.1 tools', () => {
     const old = fixture.ctx.personalMemory.decideProposal({ proposalId: initial.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: initial.version,
       decision: 'approved', reason: 'seed' }).record!
-    const updated = await fixture.ctx.tools.execute({ callId: ToolCallId('owner-replace'), name: 'memory_manage',
+    const updated = await executeCall(fixture.ctx, { callId: ToolCallId('owner-replace'), name: 'memory_manage',
       agent: fixture.agent, signal: new AbortController().signal, arguments: {
         operation: 'replace', owner: 'user', scope: 'user-global', idempotency_key: 'owner:replace',
         memory_id: old.id, expected_version: old.version,
@@ -259,7 +291,7 @@ describe('personal memory rc.1 tools', () => {
     const old = fixture.ctx.personalMemory.decideProposal({ proposalId: seed.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: seed.version,
       decision: 'approved', reason: 'seed' }).record!
-    const attempt = await fixture.ctx.tools.execute({ callId: ToolCallId('metadata-remove'), name: 'memory_manage',
+    const attempt = await executeCall(fixture.ctx, { callId: ToolCallId('metadata-remove'), name: 'memory_manage',
       agent: fixture.agent, signal: new AbortController().signal,
       arguments: { operation: 'replace', owner: 'user', scope: 'user-global',
         idempotency_key: 'metadata:remove', memory_id: old.id, expected_version: old.version,
@@ -293,7 +325,7 @@ describe('personal memory rc.1 tools', () => {
     const old = fixture.ctx.personalMemory.decideProposal({ proposalId: seed.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: seed.version,
       decision: 'approved', reason: 'seed' }).record!
-    const pending = fixture.ctx.tools.execute({ callId: ToolCallId('drift-review'), name: 'memory_manage',
+    const pending = executeCall(fixture.ctx, { callId: ToolCallId('drift-review'), name: 'memory_manage',
       agent: fixture.agent, signal: new AbortController().signal,
       arguments: { operation: 'replace', owner: 'user', scope: 'user-global', idempotency_key: 'drift:owner',
         memory_id: old.id, expected_version: old.version,
@@ -340,7 +372,7 @@ describe('personal memory rc.1 tools', () => {
       } })
       fixture.ctx.personalMemory.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1, decision: 'approved', reason: 'confirmed' })
     }
-    const result = await fixture.ctx.tools.execute({ callId: ToolCallId(`conflict-${name}`), name, agent: fixture.agent,
+    const result = await executeCall(fixture.ctx, { callId: ToolCallId(`conflict-${name}`), name, agent: fixture.agent,
       signal: new AbortController().signal, arguments: { query: 'Legacyroute', limit: 1 } })
     expect(result.isError).toBe(false)
     expect(result.isError ? undefined : result.value).toMatchObject({ hits: [{
@@ -352,7 +384,7 @@ describe('personal memory rc.1 tools', () => {
 
   test('memory_manage creates a proposal without committing memory', async () => {
     const fixture = await harness()
-    const managed = await fixture.ctx.tools.execute({
+    const managed = await executeCall(fixture.ctx, {
       callId: ToolCallId('memory-manage-1'),
       name: 'memory_manage',
       agent: fixture.agent,
@@ -388,7 +420,7 @@ describe('personal memory rc.1 tools', () => {
     })
     expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'coffee' })[0]?.record)
       .toMatchObject({ content: 'User prefers hand-brewed coffee', knowledge: { applicability: ['manual brew'], counterexamples: ['instant coffee'], claim: { key: 'coffee.method', value: 'hand-brewed' } } })
-    const replay = await fixture.ctx.tools.execute({
+    const replay = await executeCall(fixture.ctx, {
       callId: ToolCallId('memory-manage-2'),
       name: 'memory_manage',
       agent: fixture.agent,
@@ -441,7 +473,7 @@ describe('personal memory rc.1 tools', () => {
       reason: 'confirmed',
     })
 
-    const result = await fixture.ctx.tools.execute({
+    const result = await executeCall(fixture.ctx, {
       callId: ToolCallId('memory-search-1'),
       name: 'memory_search',
       agent: fixture.agent,
@@ -503,7 +535,7 @@ describe('personal memory rc.1 tools', () => {
       content: 'review-guidance sensitive instruction',
     })
 
-    const result = await fixture.ctx.tools.execute({
+    const result = await executeCall(fixture.ctx, {
       callId: ToolCallId('memory-search-confirmed'), name: 'memory_search_confirmed', agent: fixture.agent,
       signal: new AbortController().signal, arguments: { query: 'review-guidance', limit: 20 },
     })
@@ -533,7 +565,7 @@ describe('personal memory rc.1 tools', () => {
     fixture.ctx.personalMemory.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner',
       expectedVersion: 1, decision: 'approved', reason: 'test fixture' })
 
-    const result = await fixture.ctx.tools.execute({
+    const result = await executeCall(fixture.ctx, {
       callId: ToolCallId('memory-search-tainted'), name: 'memory_search', agent: fixture.agent,
       signal: new AbortController().signal, arguments: { query: 'safe continue' },
     })
@@ -551,7 +583,7 @@ describe('personal memory rc.1 tools', () => {
   test('fails closed before either tool body when no trusted agent is present', async () => {
     const { ctx } = await harness()
 
-    const result = await ctx.tools.execute({
+    const result = await executeCall(ctx, {
       callId: ToolCallId('memory-search-no-agent'),
       name: 'memory_search',
       signal: new AbortController().signal,

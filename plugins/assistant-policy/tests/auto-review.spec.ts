@@ -13,6 +13,8 @@ import LlmRuntime, {
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import * as PtcToolExecutor from '@deepseek-ai/dsh-tool-executor-ptc'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -100,6 +102,7 @@ function createAgent(): Agent {
   return {
     id,
     options: { provider: 'main', model: 'main-model' },
+    model: { current: () => ({ provider: 'main', model: 'main-model' }), select: () => {} },
     session,
     inbox: createInboxStub(),
     ctx: new Context(),
@@ -122,6 +125,23 @@ interface Fixture {
   fallbackCalls: number
   fallbackEscalations: readonly boolean[]
   request(signal?: AbortSignal): Promise<ApprovalOutcome>
+}
+
+async function provideSessionProjections(ctx: Context): Promise<void> {
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: {
+      init(header: unknown, inherited: number): unknown
+      apply(state: unknown, event: unknown): unknown
+    }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
 }
 
 async function fixture(
@@ -152,9 +172,16 @@ async function fixture(
   const ctx = new Context()
   contexts.add(ctx)
   await ctx.plugin(SystemPrompt)
+  await provideSessionProjections(ctx)
   if (options.lateLlm !== true && options.missingLlm !== true) await ctx.plugin(LlmRuntime)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
-  await ctx.plugin(ToolRuntime, { mode: options.toolMode ?? 'native' })
+  await ctx.plugin(ToolRuntime)
+  if (options.toolMode === 'ptc') {
+    ctx.provide('ptcRuntime' as never, { language: 'typescript', retainsState: false } as never)
+    await ctx.plugin(PtcToolExecutor, {})
+  } else {
+    await ctx.plugin(NativeToolExecutor)
+  }
   const adapter = new ReviewerAdapter(scripts)
   if (options.lateLlm !== true && options.missingLlm !== true) ctx.llm.registerAdapter(['main', 'fixed-reviewer'], adapter)
   await ctx.plugin(AssistantPolicyService, {
@@ -313,6 +340,23 @@ function assessment(overrides: Record<string, unknown> = {}): string {
     rationale: 'Narrow read-only repository inspection.',
     ...overrides,
   })
+}
+
+async function executeTool(
+  ctx: Context,
+  input: { callId: ReturnType<typeof ToolCallId>; name: string; arguments: unknown; signal: AbortSignal; agent: Agent },
+) {
+  const batch = await ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: input.callId,
+      name: input.name,
+      arguments: typeof input.arguments === 'string' ? input.arguments : JSON.stringify(input.arguments),
+    }],
+    agent: input.agent,
+    signal: input.signal,
+  })
+  return batch.results[0]!.result
 }
 
 describe('isolated automatic approval reviewer', () => {
@@ -572,7 +616,7 @@ describe('isolated automatic approval reviewer', () => {
         },
       }))
 
-      const result = await current.ctx.tools.execute({
+      const result = await executeTool(current.ctx, {
         callId: current.callId,
         name: 'bash',
         arguments: { command },
@@ -618,7 +662,7 @@ describe('isolated automatic approval reviewer', () => {
         },
       }))
 
-      const result = await current.ctx.tools.execute({
+      const result = await executeTool(current.ctx, {
         callId: current.callId,
         name: 'bash',
         arguments: { command },
@@ -658,7 +702,7 @@ describe('isolated automatic approval reviewer', () => {
         },
       }))
 
-      const result = await current.ctx.tools.execute({
+      const result = await executeTool(current.ctx, {
         callId: current.callId,
         name: toolName,
         arguments: arguments_,
@@ -696,7 +740,7 @@ describe('isolated automatic approval reviewer', () => {
       },
     }))
 
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId,
       name: 'skill_run',
       arguments: arguments_,
@@ -728,7 +772,7 @@ describe('isolated automatic approval reviewer', () => {
       appendSandboxMode(current.agent, 'danger-full-access')
     }
 
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId,
       name: 'run_code',
       arguments: arguments_,
@@ -1057,7 +1101,7 @@ describe('isolated automatic approval reviewer', () => {
       },
     }))
 
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId,
       name: 'bash',
       arguments: { command: 'node script.js' },

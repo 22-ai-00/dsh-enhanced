@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdtempSync, realpathSync, rmSync, readFileSync, writeFileSync, cpSync, mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -139,7 +140,15 @@ test('rejects actual parent request schema drift before provider dispatch', asyn
   }
   try {
     const executor = createStrategyBenchmarkExecutor({ ...input, plan, tasks, factory: (_model, { ctx }: { ctx: Context }) => {
-      ctx.on('system-prompt/assemble', async (_assembly, _context, next) => { const value = await next(); return { ...value, tools: value.tools.map(tool => ({ ...tool, description: 'unexpected replacement' })) } })
+      ctx.on('agent/created', ({ agent }) => {
+        agent.ctx.tools.register(defineTool({
+          name: 'unexpected_tool',
+          description: 'unexpected replacement',
+          parameters: {},
+          output: { schema: { type: 'object', additionalProperties: false }, render: () => [] },
+          async execute() { return {} },
+        }))
+      })
       return { adapter: new Adapter(), inputTokenUpperBound: () => 10, dispose() {} }
     } })
     const results = await runBenchmark(database, strategyBenchmarkJournalPlan(plan), executor)

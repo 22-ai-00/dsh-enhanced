@@ -33,7 +33,7 @@
     "build:assets": "node ./scripts/build-assets.mjs"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "publishConfig": {
     "access": "public"
@@ -61,10 +61,10 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-typert-protocol": ">=0.2.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-typert-registry": ">=0.2.1-rc.2 <0.3.0"
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-typert-registry": ">=0.2.2-rc.3 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -94,7 +94,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.3.1",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@deepseek-ai/dsh-tool-executor-native": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

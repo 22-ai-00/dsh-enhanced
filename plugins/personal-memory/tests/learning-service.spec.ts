@@ -78,6 +78,7 @@ async function fixture(options: { prompt?: boolean; allowAdoption?: boolean; tas
   if (options.task !== false) session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Atlas package manager' }] }), { surfaceOp: 'append' })
   const injections: UserMessage[] = []
   const agent: Agent = { id, session, options: {}, inbox: createInboxStub(), ctx, status: 'idle',
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
     cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {},
     inject: message => { injections.push(message) } }
   const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))

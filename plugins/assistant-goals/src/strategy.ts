@@ -89,6 +89,7 @@ export class GoalStrategyRuntime {
   readonly #guarded = new WeakSet<Agent>()
   readonly #observedToolGuards = new WeakSet<object>()
   #active = true
+  #toolsCtx: Context | undefined
   #closed = false
   #removeResolver: (() => void) | undefined
 
@@ -107,6 +108,7 @@ export class GoalStrategyRuntime {
       start: request => this.#start(request),
     }
     ctx.inject(['subagents', 'tools', 'systemPrompt'], runtime => {
+      this.#toolsCtx = runtime
       const removeProvider = runtime.subagents.registerProvider(provider)
       this.#removeResolver = this.callbacks.budget.registerDelegateResolver(agent => this.#delegate(agent))
       // The native AgentLoop assembles the first prompt before pre-step appends
@@ -119,7 +121,9 @@ export class GoalStrategyRuntime {
         if (!agent || !permit || agent.session.header.origin !== 'subagent'
           || String(agent.session.header.parentSession) !== String(permit.parent.session.id)) throw new Error('assistant-goals: strategy prompt is not admitted')
         this.#assertPermit(permit)
-        return { ...assembly, tools: [], sections: assembly.sections.filter(section => !section.name.startsWith('tools:')).map(section =>
+        // 0.2.2: model-facing tool declarations are provider-owned; the child guard
+        // still denies every late tool call. Only prompt sections are rewritten here.
+        return { ...assembly, sections: assembly.sections.filter(section => !section.name.startsWith('tools:')).map(section =>
           section.name === 'deployment:persona-prefix' ? { ...section, text: 'Analyze the supplied material only. Return unverified advice; do not invoke tools or take actions.' } : section) }
       })
       // The descriptor exists before the first request. This also keeps scoped
@@ -219,10 +223,12 @@ export class GoalStrategyRuntime {
           childSlots[index] = child
           let text: string | undefined
           try {
+            // 0.2.2: SubagentActivationSpec carries the request fields directly
+            // instead of a nested `request` object.
             const started = this.ctx.subagents.startActivation({
               provider: STRATEGY_PROVIDER, label: permit.label, signal: combined, delivery: 'caller',
-              request: { prompt: [...permit.prompt], parent,
-                agentOptions: { provider, model, ...(maxTokens === undefined ? {} : { maxTokens }) }, maxDepth: permit.maxDepth },
+              prompt: [...permit.prompt], parent,
+              agentOptions: { provider, model, ...(maxTokens === undefined ? {} : { maxTokens }) }, maxDepth: permit.maxDepth,
             })
             const run = await this.#boundedStart(started, permit, combined, expiresAt)
             child.run = run; child.sessionId = String(run.childId)
@@ -394,7 +400,7 @@ export class GoalStrategyRuntime {
         ...(permit.maxTokens === undefined ? {} : { maxTokens: permit.maxTokens }) }, maxDepth: permit.maxDepth }, child => {
       if (permit.child !== undefined) throw new Error('assistant-goals: strategy child already created')
       permit.child = child
-    })
+    }, this.#toolsCtx)
     started.catch(() => { permit.rejected = true })
     return started
   }

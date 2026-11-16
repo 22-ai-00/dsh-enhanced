@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
@@ -35,7 +36,7 @@ async function privateFixtureRoot(prefix: string): Promise<string> {
 function ownerAgent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as unknown as { ctx: Context }).ctx = createScope(ctx, agent).ctx
   session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
   return agent
@@ -86,7 +87,7 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
   const delivery = { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, bindingId: 'binding', bindingVersion: currentBinding, bindingGeneration: 1, sessionId: String(agent.id) }),
     validateOwnerRoute: () => ({ principalRecordId: 'record', principalVersion: 1, bindingVersion: currentBinding, generation: 1 }),
     resolveOwnerRoute: () => ({ binding: { id: 'binding', sessionId: String(agent.id) } }) }
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
   ctx.provide('agents' as never, { get: (id: string) => id === agent.id ? agent : undefined } as never)
   ctx.provide('assistantPolicy' as never, policy as never); ctx.provide('assistantDelivery' as never, delivery as never)
   const config = await externalConfig(root, [projection(root, grantOverrides?.(root))])
@@ -94,7 +95,11 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
   await new Promise(resolve => setTimeout(resolve, 0))
   const cleanup = async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }; cleanups.push(cleanup)
   return { root, ctx, agent, service, config, dispatch, localCommit, localWorkflow, localCompensation, authorize, setActionBudget: (value: number) => { actionBudget = value }, changeBinding: () => { currentBinding++ }, denyPolicy: () => { policyAllowed = false },
-    execute: (name: string, args: object) => ctx.tools.execute({ callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent }) }
+    execute: async (name: string, args: object) => (await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`${name}-${Math.random()}`), name, arguments: JSON.stringify(args) }],
+      signal: new AbortController().signal,
+      agent,
+    })).results[0]!.result }
 }
 
 describe('external broker configuration', () => {

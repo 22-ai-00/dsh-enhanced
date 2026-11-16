@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -30,11 +31,22 @@ async function fixture(enabled = true) {
   await writeFile(join(root, 'secret'), secret, { mode: 0o600 })
   const ctx = new Context(), id = SessionId('workflow-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
-  const owner: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const owner: Agent = { id, options: { provider: 'test', model: 'test' }, model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(owner as unknown as { ctx: Context }).ctx = createScope(ctx, owner).ctx
   session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
   const grant: ActionGrant = { id: 'fix', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['a.txt'], credentialHandle: 'github', expiresAt: Date.now() + 120_000, maxActions: 10, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: true } }
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: { init(header: unknown, inherited: number): unknown; apply(state: unknown, event: unknown): unknown }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
     { id: 'action', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:fix' } },
     { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
@@ -54,7 +66,11 @@ async function fixture(enabled = true) {
   await load()
   const result = { ctx, workflow, grant, load,
     dispose: async () => await plugin.dispose(),
-    execute: async (name: string, args: object) => await ctx.tools.execute({ callId: ToolCallId(Math.random().toString()), name, arguments: args, signal: new AbortController().signal, agent: owner }),
+    execute: async (name: string, args: object) => (await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(Math.random().toString()), name, arguments: JSON.stringify(args) }],
+      signal: new AbortController().signal,
+      agent: owner,
+    })).results[0]!.result,
     revoke: () => { const ledger = new ActionLedger(join(root, 'actions/ledger.sqlite')); try { ledger.revoke('fix', 1) } finally { ledger.close() } },
     rows: () => { const db = new DatabaseSync(join(root, 'actions/ledger.sqlite')); try { return db.prepare('SELECT * FROM actions').all() } finally { db.close() } },
     cleanup: async () => { await plugin.dispose(); await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) },

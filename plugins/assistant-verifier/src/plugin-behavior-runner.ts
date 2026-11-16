@@ -471,7 +471,8 @@ import { writeSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { projectToolSchema } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
 
 const safeTool = /^[a-z][a-z0-9_-]{0,95}$/
 let fiber, ctx, result, disposed = true
@@ -490,7 +491,12 @@ try {
     || !request.operation || !['discover', 'invoke'].includes(request.operation.kind)) throw new Error('candidate-input-invalid')
   ctx = new Context()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(ToolRuntime)
+  const pipeline = new ToolExecutionPipeline(ctx)
+  ctx.tools.setExecutor({
+    describe: tools => ({ schemas: tools.map(definition => projectToolSchema(definition, false)) }),
+    execute: input => executeToolBatch(input, pipeline, () => 1),
+  })
   const mod = await import(pathToFileURL(request.entry).href)
   fiber = ctx.plugin(mod.default ?? mod)
   let activationTimer
@@ -515,9 +521,13 @@ try {
     const calls = []
     for (const call of request.operation.calls) {
       if (!names.has(call.toolName)) throw new Error('unknown-invoked-tool')
-      const observed = await ctx.tools.execute({ callId: call.id, name: call.toolName,
-        arguments: call.arguments, signal: new AbortController().signal })
-      calls.push({ id: call.id, toolName: call.toolName, result: observed })
+      const batch = await ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: call.id, name: call.toolName, arguments: JSON.stringify(call.arguments) }],
+        signal: new AbortController().signal,
+      })
+      if (!batch || !Array.isArray(batch.results) || batch.results.length !== 1 || !batch.results[0]?.result)
+        throw new Error('tool-batch-invalid')
+      calls.push({ id: call.id, toolName: call.toolName, result: batch.results[0].result })
     }
     result = { wireVersion: 1, status: 'result', schemas, calls }
   }

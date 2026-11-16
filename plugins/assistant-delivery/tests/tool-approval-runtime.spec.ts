@@ -3,8 +3,10 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import ToolRuntime, { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService, isAutoReviewEscalation as peerRecognizesEscalation } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -60,6 +62,7 @@ async function registerAgent(ctx: Context, sessionId: string, input: {
     inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -91,9 +94,11 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: {
   contexts.add(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   const nativeAnswerer = vi.fn(async () => 'unavailable' as const)
   if (options.nativeFirst) ctx.on('approval/request', nativeAnswerer)
   // Variable imports keep this runtime duplication fixture out of Delivery's
@@ -234,13 +239,25 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: {
   }
 }
 
+async function executeTool(
+  ctx: Context,
+  input: { callId: ReturnType<typeof ToolCallId>; name: string; arguments: Record<string, unknown>; signal: AbortSignal; agent: Agent },
+): Promise<ToolExecutionResult> {
+  const batch = await ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: input.callId, name: input.name, arguments: JSON.stringify(input.arguments) }],
+    agent: input.agent,
+    signal: input.signal,
+  })
+  return batch.results[0]!.result
+}
+
 describe('owner-DM approval through the real tool runtime', () => {
   test.each(['allowed-once', 'rejected'] as const)('routes a separately loaded Policy handoff to its owner card and settles %s without executing while pending', async outcome => {
     // The mounted TS graph and the peer's published JS graph are genuinely
     // separate modules. A static peer WeakSet cannot see the mounted marker.
     const current = await fixture(outcome, { nativeFirst: true, auto: true, separatePolicy: true, holdApproval: true })
     expect(current.mountedRecognizesEscalation).not.toBe(peerRecognizesEscalation)
-    const execution = current.ctx.tools.execute({
+    const execution = executeTool(current.ctx, {
       callId: current.callId, name: 'delivery_mutation_probe', arguments: current.arguments_,
       signal: new AbortController().signal, agent: current.agent,
     })
@@ -273,7 +290,7 @@ describe('owner-DM approval through the real tool runtime', () => {
 
   test.each([false, true])('does not let an earlier Web answerer swallow Lark approvals (auto=%s)', async auto => {
     const current = await fixture('allowed-once', { nativeFirst: true, auto })
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId, name: 'delivery_mutation_probe', arguments: current.arguments_,
       signal: new AbortController().signal, agent: current.agent,
     })
@@ -286,7 +303,7 @@ describe('owner-DM approval through the real tool runtime', () => {
   test('an allowed-once owner decision dispatches the exact tool exactly once', async () => {
     const current = await fixture('allowed-once')
 
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId,
       name: 'delivery_mutation_probe',
       arguments: current.arguments_,
@@ -315,7 +332,7 @@ describe('owner-DM approval through the real tool runtime', () => {
   test('a rejected owner decision leaves the exact tool body unexecuted', async () => {
     const current = await fixture('rejected')
 
-    const result = await current.ctx.tools.execute({
+    const result = await executeTool(current.ctx, {
       callId: current.callId,
       name: 'delivery_mutation_probe',
       arguments: current.arguments_,

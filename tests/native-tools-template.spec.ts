@@ -7,6 +7,7 @@ import { afterEach, expect, test } from 'vitest'
 import { Context } from '../plugins/assistant-goals/node_modules/@deepseek-ai/cordis'
 import { ToolCallId } from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-llm'
 import SystemPrompt from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '../plugins/assistant-goals/node_modules/@deepseek-ai/dsh-tools'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -36,7 +37,7 @@ async function generatedPackage() {
   const modules = join(plugin, 'node_modules')
   await mkdir(join(modules, '@deepseek-ai'), { recursive: true })
   await mkdir(join(modules, '@types'), { recursive: true })
-  for (const name of ['cordis', 'dsh-system-prompt', 'dsh-tools']) {
+  for (const name of ['cordis', 'dsh-system-prompt', 'dsh-tool-executor-native', 'dsh-tools']) {
     await symlink(resolve(repo, 'plugins', 'assistant-goals', 'node_modules', '@deepseek-ai', name), join(modules, '@deepseek-ai', name), 'dir')
   }
   await symlink(resolve(repo, 'node_modules', '@types', 'node'), join(modules, '@types', 'node'), 'dir')
@@ -55,7 +56,7 @@ test('generated manifest pins the optional Host Tools contract and default entry
     peerDependenciesMeta: Record<string, { optional: boolean }>
     devDependencies: Record<string, string>
   }
-  expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.2.1-rc.2 <0.3.0')
+  expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.2.2-rc.3 <0.3.0')
   expect(manifest.peerDependenciesMeta['@deepseek-ai/dsh-tools']).toEqual({ optional: true })
   expect(manifest.devDependencies['@deepseek-ai/dsh-tools']).toBe('catalog:')
   expect(manifest.devDependencies['@deepseek-ai/dsh-system-prompt']).toBe('catalog:')
@@ -92,25 +93,34 @@ test('README example builds and registers a native tool only while its required 
   expect(consumer.state).toBe(0)
   expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).not.toContain(toolName)
 
-  let provider = await ctx.plugin(ToolRuntime, { mode: 'native' })
+  let provider = await ctx.plugin(ToolRuntime)
+  let executor = await ctx.plugin(NativeToolExecutor)
   await consumer.await()
   expect(consumer.state).toBe(2)
   expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toContain(toolName)
-  const result = await ctx.tools.execute({
-    callId: ToolCallId('native-template-call-1'), name: toolName,
-    arguments: { text: 'hello from native Tools' }, signal: new AbortController().signal,
+  const batch = await ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId('native-template-call-1'),
+      name: toolName,
+      arguments: JSON.stringify({ text: 'hello from native Tools' }),
+    }],
+    signal: new AbortController().signal,
   })
-  expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hello from native Tools' }] })
+  expect(batch.results[0]!.result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hello from native Tools' }] })
 
+  await executor.dispose()
   await provider.dispose()
   await consumer.await()
   expect(consumer.state).toBe(0)
   expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).not.toContain(toolName)
 
-  provider = await ctx.plugin(ToolRuntime, { mode: 'native' })
+  provider = await ctx.plugin(ToolRuntime)
+  executor = await ctx.plugin(NativeToolExecutor)
   await consumer.await()
   expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).toContain(toolName)
   await consumer.dispose()
   expect((await ctx.systemPrompt.assemble()).tools.map(tool => tool.name)).not.toContain(toolName)
+  await executor.dispose()
   await provider.dispose()
 }, 30_000)

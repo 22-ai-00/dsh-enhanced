@@ -36,7 +36,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "publishConfig": {
     "access": "public"
@@ -69,7 +69,7 @@
     "@dsh-enhanced/assistant-isolation": "workspace:*"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis": "^4.1.0",
     "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
@@ -168,6 +168,7 @@
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@dsh-enhanced/assistant-memory-learning": "workspace:*",
     "@dsh-enhanced/personal-memory": "workspace:*",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
+    "@deepseek-ai/dsh-tool-executor-native": "catalog:"
   }
 }

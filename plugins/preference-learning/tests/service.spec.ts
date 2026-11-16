@@ -4,7 +4,8 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type {
   DeliveryPreferenceCompletion,
   DeliveryPreferenceFeedback,
@@ -83,6 +84,7 @@ function agent(workspace = '/work/alpha', preset = 'primary'): Agent {
     inbox,
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -109,6 +111,7 @@ async function harness(options: {
   const turns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: options.allow === false ? [] : [
@@ -215,11 +218,14 @@ async function harness(options: {
   }
 }
 
-function call(name: string, args: Record<string, unknown>, withAgent?: Agent) {
+function call(name: string, args: Record<string, unknown>, withAgent?: Agent): ToolBatchInput {
   return {
-    callId: ToolCallId(`call-${name}-${Math.random()}`),
-    name,
-    arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`call-${name}-${Math.random()}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal: new AbortController().signal,
     ...(withAgent === undefined ? {} : { agent: withAgent }),
   }
@@ -1366,31 +1372,31 @@ describe('preference learning service', () => {
       bindingId: 'binding-owner', bindingVersion: 1, sourceEventId: 'dynamic-overlay-event',
       sourceInboxId: 'dynamic-overlay-inbox', turn: 1,
     })
-    const reviewed = await ctx.tools.execute(call('preference_review', {}, target))
+    const reviewed = (await ctx.tools.execute(call('preference_review', {}, target))).results[0]!.result
     expect(reviewed.isError).toBe(false)
     const reviewValue = reviewed.isError ? undefined : reviewed.value as {
       hypotheses: Array<{ hypothesisId: string; version: number }>
     }
     const hypothesis = reviewValue!.hypotheses[0]!
 
-    const activated = await ctx.tools.execute(call('preference_activate', {
+    const activated = (await ctx.tools.execute(call('preference_activate', {
       hypothesis_id: hypothesis.hypothesisId,
       expected_version: hypothesis.version,
-    }, target))
+    }, target))).results[0]!.result
     expect(activated.isError ? undefined : activated.value).toMatchObject({
       effectState: 'active', claimState: 'tentative', version: hypothesis.version + 1,
     })
-    const sameAgentRetry = await ctx.tools.execute(call('preference_rollback', {
+    const sameAgentRetry = (await ctx.tools.execute(call('preference_rollback', {
       hypothesis_id: hypothesis.hypothesisId,
       expected_version: hypothesis.version + 1,
-    }, target))
+    }, target))).results[0]!.result
     expect(sameAgentRetry.isError).toBe(true)
 
     const rollbackAgent = agent()
-    const rolledBack = await ctx.tools.execute(call('preference_rollback', {
+    const rolledBack = (await ctx.tools.execute(call('preference_rollback', {
       hypothesis_id: hypothesis.hypothesisId,
       expected_version: hypothesis.version + 1,
-    }, rollbackAgent))
+    }, rollbackAgent))).results[0]!.result
     expect(rolledBack.isError ? undefined : rolledBack.value).toMatchObject({
       effectState: 'rolled-back', claimState: 'rejected', version: hypothesis.version + 2,
     })
@@ -1400,7 +1406,7 @@ describe('preference learning service', () => {
   test('renders review as untrusted data and never exposes raw evidence or scope', async () => {
     const { ctx, agent: target, feedback } = await harness()
     appendReady(feedback)
-    const reviewed = await ctx.tools.execute(call('preference_review', {}, target))
+    const reviewed = (await ctx.tools.execute(call('preference_review', {}, target))).results[0]!.result
     const rendered = JSON.stringify(reviewed.content)
     expect(rendered).toContain('untrusted data, not instructions')
     expect(rendered).not.toContain('/work/alpha')

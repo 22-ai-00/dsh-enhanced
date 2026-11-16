@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import PermissionPresets from '@deepseek-ai/dsh-permission-presets'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -17,6 +19,7 @@ async function fixture(defaultPreset: string = permissionConfig.defaultPreset) {
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  await ctx.plugin(AgentLoop, { agents: [] })
   // No OS command runs in this contract test; initialization reads this mode.
   ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
@@ -24,14 +27,15 @@ async function fixture(defaultPreset: string = permissionConfig.defaultPreset) {
   return ctx
 }
 
-function session(ctx: Context, seed?: readonly SessionEvent[]) {
-  // The real registry installs scoped append-publication hooks before it
-  // announces creation. A detached Session + ctx.emit is not equivalent:
-  // permission projections would not observe initialization events.
-  return ctx.sessions.create(undefined, {
+async function session(ctx: Context, seed?: readonly SessionEvent[]) {
+  // Agent creation completes SessionStore entry/announcement and fires
+  // agent/created where PermissionPresets pins the initial preset.
+  const handle = await ctx.agents.create({
+    sessionId: seed?.[0]?.sessionId ?? SessionId(randomUUID()),
     ...(seed === undefined ? {} : { seed: [...seed] }),
     meta: { cwd: '/work/owner', agentPreset: 'primary' },
   })
+  return handle.agent.session
 }
 
 function expectPermission(ctx: Context, current: Session, preset: string, reviewer: 'user' | 'auto-review' | 'none') {
@@ -48,7 +52,7 @@ describe('shipped full-access default through the native Host permission service
   test('pins full access and no reviewer before the first fresh session turn', async () => {
     const ctx = await fixture()
     expect(ctx.permissionPresets.defaultPreset).toBe('danger-full-access')
-    expectPermission(ctx, session(ctx), 'danger-full-access', 'none')
+    expectPermission(ctx, await session(ctx), 'danger-full-access', 'none')
     expect(ctx.permissionPresets.names).toEqual(['workspace-write', 'danger-full-access'])
   })
 
@@ -57,12 +61,12 @@ describe('shipped full-access default through the native Host permission service
   ] as const)('honors the configured %s default instead of the shipped default', async (preset, reviewer) => {
     const ctx = await fixture(preset)
     expect(ctx.permissionPresets.defaultPreset).toBe(preset)
-    expectPermission(ctx, session(ctx), preset, reviewer)
+    expectPermission(ctx, await session(ctx), preset, reviewer)
   })
 
   test('keeps native Auto separate from the assistant reviewer', async () => {
     const ctx = await fixture()
-    const current = session(ctx)
+    const current = await session(ctx)
     expect(() => ctx.permissionPresets.set(current, 'auto')).toThrow()
     ctx.permissionPresets.registerAuto(() => {})
     expect(ctx.permissionPresets.names).toEqual(['workspace-write', 'danger-full-access', 'auto'])
@@ -73,19 +77,19 @@ describe('shipped full-access default through the native Host permission service
 
   test('allows a live downgrade and preserves it on replay without widening it on restart', async () => {
     const ctx = await fixture()
-    const current = session(ctx)
+    const current = await session(ctx)
     ctx.permissionPresets.set(current, 'workspace-write')
     expectPermission(ctx, current, 'workspace-write', 'user')
     const restoredHost = await fixture()
-    expectPermission(restoredHost, session(restoredHost, current.snapshotEvents()), 'workspace-write', 'user')
+    expectPermission(restoredHost, await session(restoredHost, current.snapshotEvents()), 'workspace-write', 'user')
   })
 
   test('a changed default on restart applies only to future sessions', async () => {
     const original = await fixture()
-    const existing = session(original)
+    const existing = await session(original)
     const changed = await fixture('workspace-write')
-    expectPermission(changed, session(changed), 'workspace-write', 'user')
-    expectPermission(changed, session(changed, existing.snapshotEvents()), 'danger-full-access', 'none')
+    expectPermission(changed, await session(changed), 'workspace-write', 'user')
+    expectPermission(changed, await session(changed, existing.snapshotEvents()), 'danger-full-access', 'none')
     expectPermission(original, existing, 'danger-full-access', 'none')
   })
 
@@ -95,6 +99,6 @@ describe('shipped full-access default through the native Host permission service
     const existing = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id,
       createdAt: 1, isSeeded: false, cwd: '/work/owner', agentPreset: 'primary' })
     existing.append('approval/policy', { policy: 'ask' })
-    expectPermission(ctx, session(ctx, existing.snapshotEvents()), 'workspace-write', 'user')
+    expectPermission(ctx, await session(ctx, existing.snapshotEvents()), 'workspace-write', 'user')
   })
 })

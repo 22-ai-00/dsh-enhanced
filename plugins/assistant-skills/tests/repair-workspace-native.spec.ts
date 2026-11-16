@@ -9,6 +9,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -21,7 +22,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 function repairAgent(ctx: Context, workspace: string, id: SessionId): Agent {
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'repair' })
-  const agent: Agent = { id, options: { provider: 'fixture', model: 'image-fixture' }, session,
+  const agent: Agent = { id, options: { provider: 'fixture', model: 'image-fixture' }, model: { current: () => ({ provider: 'fixture', model: 'image-fixture' }), select: () => {} }, session,
     inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as unknown as { ctx: Context }).ctx = createScope(ctx, agent).ctx
@@ -56,7 +57,8 @@ test('native filesystem tools run through the production repair wrapper and reje
     return { agent, dispose: async () => {} }
   } } as never)
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(LocalFileSystem, { cwd: workspace })
   await ctx.plugin(WorkingDirectoryService, { defaultDirectory: workspace })
   await ctx.plugin(FileTools)
@@ -70,7 +72,7 @@ test('native filesystem tools run through the production repair wrapper and reje
   await runtime.create({ id: 'native-repair', authorizationDigest: 'digest', scope, ownerRouteId: 'route', trigger, objective: 'Repair artifact', maxGoalRounds: 1, expiresAt: Date.now() + 60_000, provider: 'fixture', model: 'image-fixture', maxModelCalls: 1, maxToolCalls: 16, maxOutputTokens: 128, maxDurationMs: 60_000, allowedTools: ['read', 'write', 'edit', 'read_image'], assertCurrent: () => {} })
 
   let call = 0
-  const execute = async (name: string, arguments_: object) => await agent.ctx.tools.execute({ callId: ToolCallId(`native-${++call}`), name, arguments: arguments_, signal: new AbortController().signal, agent })
+  const execute = async (name: string, arguments_: object) => (await agent.ctx.tools.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`native-${++call}`), name, arguments: JSON.stringify(arguments_) }], signal: new AbortController().signal, agent })).results[0]!.result
   expect((await execute('write', { file_path: 'nested/artifact.txt', content: 'before' })).isError).toBe(false)
   expect(await readFile(join(workspace, 'nested/artifact.txt'), 'utf8')).toBe('before')
   expect((await execute('read', { file_path: join(workspace, 'nested/artifact.txt') })).isError).toBe(false)

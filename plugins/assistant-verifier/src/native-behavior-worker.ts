@@ -60,10 +60,16 @@ try {
   } })
   const { Context } = await import(pathToFileURL(approved.get('@deepseek-ai/cordis')).href)
   const { default: SystemPrompt } = await import(pathToFileURL(approved.get('@deepseek-ai/dsh-system-prompt')).href)
-  const { default: ToolRuntime } = await import(pathToFileURL(approved.get('@deepseek-ai/dsh-tools')).href)
+  const { default: ToolRuntime, projectToolSchema } = await import(pathToFileURL(approved.get('@deepseek-ai/dsh-tools')).href)
+  const { ToolExecutionPipeline, executeToolBatch } = await import(pathToFileURL(resolver.resolve('@deepseek-ai/dsh-tools/pipeline')).href)
   ctx = new Context()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(ToolRuntime)
+  const pipeline = new ToolExecutionPipeline(ctx)
+  ctx.tools.setExecutor({
+    describe: tools => ({ schemas: tools.map(definition => projectToolSchema(definition, false)) }),
+    execute: input => executeToolBatch(input, pipeline, () => 1),
+  })
   const module = await import(pathToFileURL(join(process.cwd(), request.entry)).href)
   fiber = ctx.plugin(module.default ?? module)
   let timer
@@ -88,9 +94,13 @@ try {
     const calls = []
     for (const call of request.operation.calls) {
       if (!names.has(call.toolName)) throw new Error('unknown-invoked-tool')
-      const result = await ctx.tools.execute({ callId: call.id, name: call.toolName,
-        arguments: call.arguments, signal: new AbortController().signal })
-      calls.push({ id: call.id, toolName: call.toolName, result })
+      const batch = await ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: call.id, name: call.toolName, arguments: stringify(call.arguments) }],
+        signal: new AbortController().signal,
+      })
+      if (!batch || !Array.isArray(batch.results) || batch.results.length !== 1 || !batch.results[0]?.result)
+        throw new Error('tool-batch-invalid')
+      calls.push({ id: call.id, toolName: call.toolName, result: batch.results[0].result })
     }
     frame = { status: 'result', schemaDigest, calls }
   }

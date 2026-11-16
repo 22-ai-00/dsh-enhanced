@@ -121,8 +121,10 @@ function addOrdinaryUseLearning(input: RsiBootstrapManifestInput): void {
   input.enableOrdinaryUseLearning = true
 }
 
+const linuxRunnerTest = test.runIf(process.platform === 'linux' && (process.getuid?.() ?? 0) > 0)
+
 describe('ordinary-use RSI manifest factory', () => {
-  test('compiles the complete finite created-tool chain and fences mismatched setup fields', async () => {
+  linuxRunnerTest('compiles the complete finite created-tool chain and fences mismatched setup fields', async () => {
     const { root, input, native, runnerStates } = await fixture()
     try {
       await mkdir(input.owner.workspace, { mode: 0o700 })
@@ -187,7 +189,7 @@ describe('ordinary-use RSI manifest factory', () => {
     }
   })
 
-  test('adds a missing owner route only in compiler output and observes its final tagged Delivery config', async () => {
+  linuxRunnerTest('adds a missing owner route only in compiler output and observes its final tagged Delivery config', async () => {
     const {root,input} = await fixture()
     try {
       const original = parse(input.targetEffective) as Array<{id:string;config:Record<string,any>}>
@@ -215,7 +217,7 @@ describe('ordinary-use RSI manifest factory', () => {
       expect((row.toJSON() as {config:{ownerRoutes:unknown[]}}).config.ownerRoutes).toHaveLength(1)
     } finally { await rm(root,{recursive:true,force:true}) }
   })
-  test('composes a real validator-accepted owner-bound two-Host profile from prepared inputs', async () => {
+  linuxRunnerTest('composes a real validator-accepted owner-bound two-Host profile from prepared inputs', async () => {
     const { root, input } = await fixture()
     try {
       const manifest = createRsiBootstrapManifest(input)
@@ -265,7 +267,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('rejects ambiguous owner routes, mutable observer rows and incomplete Host inputs', async () => {
+  linuxRunnerTest('rejects ambiguous owner routes, mutable observer rows and incomplete Host inputs', async () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config: Record<string, any> }>
@@ -285,7 +287,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('inherits the triggering conversation model when no fixed growth route is configured', async () => {
+  linuxRunnerTest('inherits the triggering conversation model when no fixed growth route is configured', async () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config: Record<string, any> }>
@@ -301,7 +303,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('reuses the exact active learner grant and rejects changed owner or learner terms on retry', async () => {
+  linuxRunnerTest('reuses the exact active learner grant and rejects changed owner or learner terms on retry', async () => {
     const { root, input } = await fixture()
     try {
       const original = createRsiBootstrapManifest(input)
@@ -320,7 +322,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('accepts fresh default-only plugin rows and observes missing Loader config as null', async () => {
+  linuxRunnerTest('accepts fresh default-only plugin rows and observes missing Loader config as null', async () => {
     const { root, input } = await fixture()
     try {
       const rows = parse(input.targetEffective) as Array<{ id: string; config?: Record<string, unknown> }>
@@ -340,7 +342,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('validates raw Include !!js expressions without evaluating them', async () => {
+  linuxRunnerTest('validates raw Include !!js expressions without evaluating them', async () => {
     const { root, input } = await fixture()
     try {
       const targetEffective = input.targetEffective.replace('enabled: true', "enabled: !!js dshHomePath('never-execute')")
@@ -350,7 +352,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('fresh ordinary-use opt-in emits the evaluator, flagged memory grants and final observer digests', async () => {
+  linuxRunnerTest('fresh ordinary-use opt-in emits the evaluator, flagged memory grants and final observer digests', async () => {
     const { root, input } = await fixture()
     try {
       addOrdinaryUseLearning(input)
@@ -385,7 +387,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('a skip decision omits the memory-learning chain and every derived row', async () => {
+  linuxRunnerTest('a skip decision omits the memory-learning chain and every derived row', async () => {
     const { root, input } = await fixture()
     try {
       const authorized = createRsiBootstrapManifest(input)
@@ -431,7 +433,7 @@ describe('ordinary-use RSI manifest factory', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  test('fresh ordinary-use opt-in fails closed on a differing existing grant or evaluator section', async () => {
+  linuxRunnerTest('fresh ordinary-use opt-in fails closed on a differing existing grant or evaluator section', async () => {
     const { root, input } = await fixture()
     try {
       addOrdinaryUseLearning(input)

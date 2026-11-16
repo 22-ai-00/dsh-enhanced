@@ -1,6 +1,7 @@
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolCallId, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -37,6 +38,7 @@ async function fixture(channel: 'lark' | 'web' = 'lark', extraRoutes: readonly O
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'issue', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
@@ -58,7 +60,7 @@ async function fixture(channel: 'lark' | 'web' = 'lark', extraRoutes: readonly O
     agentPreset: authority.agentPreset, sessionId: 'owner-session', policyRef: authority.policyRef })
   const id = SessionId(binding.sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: authority.workspace, agentPreset: authority.agentPreset } })
-  const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(),
+  const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(), model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
   await ctx.agents.register(agent)

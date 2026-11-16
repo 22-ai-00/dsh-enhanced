@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -33,6 +34,7 @@ function makeAgent(ctx: Context, workspace: string, sid: string): Agent {
   const id = SessionId(sid)
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
   const value: Agent = { id, options: { provider: 'test', model: 'test' }, session,
+    model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} },
     inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
@@ -157,7 +159,18 @@ async function makeHarness(options: HarnessOptions = {}) {
     workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'allowed', paths: ['a.txt', 'b.txt'],
     credentialHandle: 'github', expiresAt: fixedNow + 120_000, maxActions: 8, maxTotalBytes: 1_000_000,
     rollback: { allowRollback: true, budgetId: 'rollbacks', maxActions: 2, maxTotalBytes: 200_000 } }
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: { init(header: unknown, inherited: number): unknown; apply(state: unknown, event: unknown): unknown }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', budgets: [
     { id: 'commits', metric: 'dispatches', limit: 1, periodMs: 60_000, scope: 'subject' },
     { id: 'rollbacks', metric: 'github-compensations', limit: 1, periodMs: 60_000, scope: 'subject' },
@@ -189,9 +202,13 @@ async function makeHarness(options: HarnessOptions = {}) {
 
   type ToolResult = { isError: boolean; result: string }
   const call = async (name: string, args: unknown, who: Agent = owner): Promise<ToolResult> => {
-    const toolResult = await ctx.tools.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent: who }) as
-      { isError: boolean; content: Array<{ type: string; text?: string }> }
-    return { isError: toolResult.isError, result: toolResult.content.map(block => block.text ?? '').join('') }
+    const batch = await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`call-${Math.random()}`), name, arguments: JSON.stringify(args) }],
+      signal: new AbortController().signal,
+      agent: who,
+    })
+    const toolResult = batch.results[0]!.result
+    return { isError: toolResult.isError, result: toolResult.content.map(block => block.type === 'text' ? block.text : '').join('') }
   }
   const forward = async (key = 'forward-key') => {
     const request = { grantId: 'fix', idempotencyKey: key, expectedHeadOid: serverHead, headline: 'bounded change', files: forwardFiles }

@@ -7,6 +7,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import ToolRuntime, { type ToolExecution } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
@@ -26,7 +27,7 @@ async function fixture(discoveryAllowed = true, legacyPolicy = false, directClas
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-'))); roots.push(root)
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'); await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
   const owners = new Map<Agent, string | undefined>()
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: (agent: Agent) => {
     const principalId = owners.get(agent)
@@ -118,7 +119,12 @@ linuxTest.each([false, true])('preauthorizes only a current exact-owner grant di
     const current = discoveryExecution(f.handle.agent)
     expect(f.ctx.assistantIsolation.preauthorizeDiscovery(current)).toBe(true)
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(current)).toBe(true)
-    expect((await f.ctx.tools.execute(current)).isError).toBe(false)
+    const batch = await f.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: current.callId, name: current.name, arguments: JSON.stringify(current.arguments) }],
+      signal: current.signal,
+      ...(current.agent ? { agent: current.agent } : {}),
+    })
+    expect(batch.results[0]!.result.isError).toBe(false)
     expect(asks).toBe(0)
 
     const foreign = await f.ctx.agents.create({ sessionId: SessionId('grant-discovery-foreign'), meta: { cwd: join(f.workspace, 'other'), agentPreset: 'primary' } })

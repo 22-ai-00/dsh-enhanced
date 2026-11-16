@@ -531,10 +531,14 @@ export class AssistantAutomationsService extends Service implements
       }, 'assistant-automations.reconcile')
     }
     ctx.inject(['tools'], toolsCtx => registerAutomationTools(toolsCtx, this))
+    ctx.on('internal/plugin', fiber => {
+      if (fiber === ctx.fiber && fiber.uid === null) this.beginDispose()
+    })
+    ctx.on('internal/status', fiber => {
+      if (fiber === ctx.fiber && (fiber.state === 5 || fiber.state === 4)) this.beginDispose()
+    })
     ctx.effect(() => async () => {
-      this.stopping = true
-      this.#hostAgents.suspend()
-      this.schedulerWakeListeners.clear()
+      this.beginDispose()
       try {
         const stopped = await Promise.allSettled([...this.hostShutdowns].map(stop => stop()))
         for (const result of stopped) if (result.status === 'rejected') ctx.logger.error(result.reason)
@@ -2301,8 +2305,19 @@ export class AssistantAutomationsService extends Service implements
     return { principal: dispatch.principal, dispatch }
   }
 
+  private beginDispose(): void {
+    if (this.stopping) return
+    this.stopping = true
+    this.#hostAgents.suspend()
+    this.schedulerWakeListeners.clear()
+  }
+
   private assertActive(): void {
-    if (!this.active || this.stopping) throw new AssistantAutomationsError('disposed', 'assistant-automations service is disposed')
+    const fiber = this.ctx?.fiber
+    // Cordis 4.1.0 transitions fiber.state to UNLOADING (5) before dependents unload or uid clears.
+    if (!this.active || this.stopping || fiber?.uid === null || fiber?.state === 5 || fiber?.state === 4) {
+      throw new AssistantAutomationsError('disposed', 'assistant-automations service is disposed')
+    }
   }
 }
 

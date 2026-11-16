@@ -1,6 +1,6 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolExecutionToken, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { FsInfo, FsTarget } from '@deepseek-ai/dsh-fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createHash } from 'node:crypto'
@@ -20,6 +20,7 @@ function digest(value: unknown): string {
 interface ExecuteCall {
   name: string
   arguments: Record<string, unknown>
+  rootCallId: unknown
   parent: unknown
 }
 
@@ -75,14 +76,32 @@ class ToolsService extends Service {
     // The production registry returns a stable definition reference across lookups;
     // cache one per tool so the revalidation identity check sees no spurious swap.
     let definition = this.definitions.get(name)
-    if (definition === undefined) { definition = { name, generation: 0 }; this.definitions.set(name, definition) }
+    if (definition === undefined) {
+      definition = {
+        name,
+        generation: 0,
+        output: {
+          schema: { type: 'string' },
+          render: (_args: unknown, value: unknown) => [{ type: 'text', text: String(value) }],
+        },
+        execute: async (args: Record<string, unknown>, runCtx: ToolRunContext) => {
+          this.executeCalls.push({
+            name,
+            arguments: args,
+            rootCallId: runCtx.rootCallId,
+            parent: runCtx.parent,
+          })
+          if (this.executeError) throw new Error('error')
+          return 'ok'
+        },
+      }
+      this.definitions.set(name, definition)
+    }
     this.getCount.set(name, (this.getCount.get(name) ?? 0) + 1)
     return definition
   }
-  async execute(input: { name: string; arguments: Record<string, unknown>; parent: unknown }): Promise<{ isError: boolean; content: unknown }> {
-    this.executeCalls.push({ name: input.name, arguments: input.arguments, parent: input.parent })
-    return { isError: this.executeError, content: [{ type: 'text', text: 'ok' }] }
-  }
+  executable(name: string): object | undefined { return this.get(name) }
+  checkGuards(): undefined { return undefined }
 }
 
 class AgentsService extends Service {
@@ -174,7 +193,8 @@ describe('revalidateFileEvidence', () => {
     expect(h.executeCalls).toHaveLength(1)
     expect(h.executeCalls[0]!.name).toBe('read')
     expect(h.executeCalls[0]!.arguments).toEqual({ file_path: PATH, offset: 10, limit: 20 })
-    // Nested replay is never a top-level observation (parent set), so it cannot self-anchor.
+    // Nested replay preserves rootCallId and parent token, and bypasses BatchSettlement logging.
+    expect(h.executeCalls[0]!.rootCallId).toBe(h.exec.rootCallId)
     expect(h.executeCalls[0]!.parent).toBe(h.exec.token)
   })
 

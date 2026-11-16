@@ -8,6 +8,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { AcceptanceCriterion } from '@dsh-enhanced/task-acceptance-contract'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -68,7 +69,7 @@ async function harness(options: { acceptance: boolean; profiles?: boolean; owner
   await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } })
   await ctx.loader.await()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const human = new Set<Agent>()
   const principalFor = (agent: Agent) => {
     const principal = owners.get(agent)
@@ -166,13 +167,17 @@ async function ownerTurn(agent: Agent, adapter: ScriptedAdapter): Promise<void> 
 }
 
 async function goalCreate(f: Awaited<ReturnType<typeof harness>>, agent: Agent, args: unknown) {
-  return await f.ctx.tools.execute({ callId: ToolCallId(`goal-create-${Math.random()}`), name: 'goal_create',
-    arguments: args as never, signal: new AbortController().signal, agent })
+  return (await f.ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: ToolCallId(`goal-create-${Math.random()}`), name: 'goal_create', arguments: JSON.stringify(args) }],
+    signal: new AbortController().signal, agent,
+  })).results[0]!.result
 }
 
 async function goalCatalog(f: Awaited<ReturnType<typeof harness>>, agent: Agent) {
-  return await f.ctx.tools.execute({ callId: ToolCallId(`goal-catalog-${Math.random()}`), name: 'goal_acceptance_catalog',
-    arguments: {} as never, signal: new AbortController().signal, agent })
+  return (await f.ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: ToolCallId(`goal-catalog-${Math.random()}`), name: 'goal_acceptance_catalog', arguments: '{}' }],
+    signal: new AbortController().signal, agent,
+  })).results[0]!.result
 }
 
 function catalogOf(result: Awaited<ReturnType<typeof goalCatalog>>) {

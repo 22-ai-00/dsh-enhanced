@@ -148,7 +148,7 @@ const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
 
 function definitionFor(route: string): RouteDefinition {
   const definition = routeDefinitions.find(candidate => candidate.route === route)
-  if (definition === undefined) throw new LlmError(`unknown coding subscription provider: ${route}`, 'INVALID_PROVIDER')
+  if (definition === undefined) throw LlmError.fromFailure({ message: `unknown coding subscription provider: ${route}`, code: 'INVALID_PROVIDER' })
   return definition
 }
 
@@ -159,41 +159,25 @@ function abortReason(signal: AbortSignal): Error {
 function cliFailure(definition: RouteDefinition, command: string, error: unknown): Error {
   if (error instanceof Error && error.cause === 'abort') return error
   if (error instanceof TrustedSessionCwdError) {
-    return new LlmError(
-      `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`,
-      'LOCAL_SESSION_CWD_REQUIRED',
-      { cause: error },
-    )
+    return LlmError.fromFailure({ message: `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`, code: 'LOCAL_SESSION_CWD_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'subscription-auth') {
-    return new LlmError(
-      `${definition.name} refused the request because a subscription-compatible login could not be verified`,
-      'SUBSCRIPTION_AUTH_REQUIRED',
-      { cause: error },
-    )
+    return LlmError.fromFailure({ message: `${definition.name} refused the request because a subscription-compatible login could not be verified`, code: 'SUBSCRIPTION_AUTH_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'working-directory') {
-    return new LlmError(
-      `${definition.name} refused the configured working directory; set config.cwd to a Git repository (relative paths resolve from the DSH process directory) and restart DSH`,
-      'CLI_WORKING_DIRECTORY',
-      { cause: error },
-    )
+    return LlmError.fromFailure({ message: `${definition.name} refused the configured working directory; set config.cwd to a Git repository (relative paths resolve from the DSH process directory) and restart DSH`, code: 'CLI_WORKING_DIRECTORY' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'protocol') {
-    return new LlmError(`${definition.name} returned an unrecognized or incomplete event stream`, 'CLI_PROTOCOL_ERROR', { cause: error })
+    return LlmError.fromFailure({ message: `${definition.name} returned an unrecognized or incomplete event stream`, code: 'CLI_PROTOCOL_ERROR' }, { cause: error })
   }
   const code = (error as NodeJS.ErrnoException | undefined)?.code
   if (code === 'ENOENT') {
-    return new LlmError(`${definition.name} executable was not found: ${command}`, 'CLI_NOT_FOUND', { cause: error })
+    return LlmError.fromFailure({ message: `${definition.name} executable was not found: ${command}`, code: 'CLI_NOT_FOUND' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'timeout') {
-    return new LlmError(`${definition.name} timed out`, 'CLI_TIMEOUT', { cause: error })
+    return LlmError.fromFailure({ message: `${definition.name} timed out`, code: 'CLI_TIMEOUT' }, { cause: error })
   }
-  return new LlmError(
-    `${definition.name} failed; verify that the official CLI is installed and logged in with the intended subscription`,
-    'CLI_FAILED',
-    { cause: error },
-  )
+  return LlmError.fromFailure({ message: `${definition.name} failed; verify that the official CLI is installed and logged in with the intended subscription`, code: 'CLI_FAILED' }, { cause: error })
 }
 
 export const CODEX_DIRECT_PROVIDER_HTTP_CODE = 'CODEX_DIRECT_PROVIDER_HTTP'
@@ -206,66 +190,41 @@ function directFailure(definition: RouteDefinition, error: unknown): Error {
   if (error instanceof LlmError) return error
   if (error instanceof Error && error.cause === 'abort') return error
   if (error instanceof TrustedSessionCwdError) {
-    return new LlmError(
-      `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`,
-      'LOCAL_SESSION_CWD_REQUIRED',
-      { cause: error },
-    )
+    return LlmError.fromFailure({ message: `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`, code: 'LOCAL_SESSION_CWD_REQUIRED' }, { cause: error })
   }
   const cause = error instanceof Error ? error.cause : undefined
   const status = validHttpStatus(error)
   if (cause === 'subscription-auth') {
-    return new LlmError(
-      'Codex private Responses could not use the local ChatGPT session',
-      'SUBSCRIPTION_AUTH_REQUIRED',
-      status === undefined ? undefined : { status },
-    )
+    return LlmError.fromFailure({ message: 'Codex private Responses could not use the local ChatGPT session', code: 'SUBSCRIPTION_AUTH_REQUIRED', ...(status === undefined ? {} : { status }) })
   }
   if (cause === 'timeout') {
-    return new LlmError('Codex private Responses request timed out', 'CLI_TIMEOUT')
+    return LlmError.fromFailure({ message: 'Codex private Responses request timed out', code: 'CLI_TIMEOUT' })
   }
   if (cause === 'protocol') {
-    return new LlmError(
-      'Codex private Responses returned an unrecognized or incomplete stream',
-      'CLI_PROTOCOL_ERROR',
-    )
+    return LlmError.fromFailure({ message: 'Codex private Responses returned an unrecognized or incomplete stream', code: 'CLI_PROTOCOL_ERROR' })
   }
   if (cause === 'provider-http') {
-    return new LlmError(
-      'Codex private Responses provider request failed',
-      CODEX_DIRECT_PROVIDER_HTTP_CODE,
-      status === undefined ? undefined : { status },
-    )
+    return LlmError.fromFailure({ message: 'Codex private Responses provider request failed', code: CODEX_DIRECT_PROVIDER_HTTP_CODE, ...(status === undefined ? {} : { status }) })
   }
   if (cause === 'context-window') {
-    return new LlmError(
-      'Codex private Responses exceeded the model context window',
-      CONTEXT_WINDOW_EXCEEDED_CODE,
-    )
+    return LlmError.fromFailure({ message: 'Codex private Responses exceeded the model context window', code: CONTEXT_WINDOW_EXCEEDED_CODE })
   }
   if (cause === 'quota') {
-    return new LlmError('Codex private Responses account quota was exhausted', QUOTA_EXCEEDED_CODE)
+    return LlmError.fromFailure({ message: 'Codex private Responses account quota was exhausted', code: QUOTA_EXCEEDED_CODE })
   }
   if (cause === 'provider-failure') {
-    return new LlmError(
-      'Codex private Responses reported a provider failure',
-      CODEX_DIRECT_PROVIDER_FAILURE_CODE,
-    )
+    return LlmError.fromFailure({ message: 'Codex private Responses reported a provider failure', code: CODEX_DIRECT_PROVIDER_FAILURE_CODE })
   }
   if (cause === 'content-filter') {
-    return new LlmError('Codex private Responses output was filtered', CODEX_DIRECT_CONTENT_FILTER_CODE)
+    return LlmError.fromFailure({ message: 'Codex private Responses output was filtered', code: CODEX_DIRECT_CONTENT_FILTER_CODE })
   }
   if (cause === 'empty-response') {
-    return new LlmError('Codex private Responses returned no visible output', EMPTY_RESPONSE_CODE)
+    return LlmError.fromFailure({ message: 'Codex private Responses returned no visible output', code: EMPTY_RESPONSE_CODE })
   }
   if (cause === 'transport') {
-    return new LlmError('Codex private Responses transport failed', CODEX_DIRECT_TRANSPORT_ERROR_CODE)
+    return LlmError.fromFailure({ message: 'Codex private Responses transport failed', code: CODEX_DIRECT_TRANSPORT_ERROR_CODE })
   }
-  return new LlmError(
-    'Codex private Responses request failed',
-    'CODEX_DIRECT_RESPONSES_FAILED',
-    { cause: error },
-  )
+  return LlmError.fromFailure({ message: 'Codex private Responses request failed', code: 'CODEX_DIRECT_RESPONSES_FAILED' }, { cause: error })
 }
 
 function validHttpStatus(error: unknown): number | undefined {
@@ -279,10 +238,10 @@ function validHttpStatus(error: unknown): number | undefined {
 /** Keep local serialization safety limits distinct from a model context refusal. */
 function preflightFailure(error: unknown): Error {
   if (error instanceof Error && error.cause === CLI_PROMPT_LIMIT_CAUSE) {
-    return new LlmError(error.message, CLI_PROMPT_LIMIT_CODE, { cause: error })
+    return LlmError.fromFailure({ message: error.message, code: CLI_PROMPT_LIMIT_CODE }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'prompt-limit') {
-    return new LlmError(error.message, CONTEXT_WINDOW_EXCEEDED_CODE, { cause: error })
+    return LlmError.fromFailure({ message: error.message, code: CONTEXT_WINDOW_EXCEEDED_CODE }, { cause: error })
   }
   return error instanceof Error ? error : new Error('coding subscription provider could not serialize the DSH request')
 }

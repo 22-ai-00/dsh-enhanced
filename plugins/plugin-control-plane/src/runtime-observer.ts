@@ -42,9 +42,11 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
   const observerConfigDigest = runtimeConfigDigest(config)
   const epochs = new WeakMap<object, number>(); let nextEpoch = 0
   const instance = (fiber: Fiber | undefined): RuntimeObserverInstance | null => {
-    if (!fiber || fiber.uid === null || fiber.state !== ACTIVE || fiber.inertia || !fiber.store) return null
-    let epoch = epochs.get(fiber.store)
-    if (epoch === undefined) { epoch = ++nextEpoch; epochs.set(fiber.store, epoch) }
+    // Cordis 4.1: Fiber.store became private; `committed` is the per-activation
+    // implementation map, so it keeps the same reload-generation identity.
+    if (!fiber || fiber.uid === null || fiber.state !== ACTIVE || fiber.inertia || !fiber.committed) return null
+    let epoch = epochs.get(fiber.committed)
+    if (epoch === undefined) { epoch = ++nextEpoch; epochs.set(fiber.committed, epoch) }
     return { uid: fiber.uid, epoch }
   }
   const ownedBy = (fiber: Fiber, owner: Fiber): boolean => {
@@ -95,11 +97,11 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
         || (options.config && !('value' in options.config)) || (options.disabled && !('value' in options.disabled))) runtimeObserverFail()
       const module = options.name.value as string
       const configDigest = runtimeConfigDigest(options.config?.value ?? null)
-      const dependencies = Object.keys(fiber?.inject ?? {}).sort().map(name => ({ name, instance: instance(fiber?.store?.[name]?.fiber) }))
+      const dependencies = Object.keys(fiber?.inject ?? {}).sort().map(name => ({ name, instance: instance(fiber?.committed?.[name]?.ctx.fiber) }))
       const services = target.services.map(name => {
         const realm = fiber?.ctx[Context.isolate][name]
         const impl = realm ? fiber?.ctx.reflect.store[realm] : undefined
-        return { name, instance: impl && fiber && ownedBy(impl.fiber, fiber) && fiber.ctx.get(name) !== undefined ? instance(impl.fiber) : null }
+        return { name, instance: impl && fiber && ownedBy(impl.ctx.fiber, fiber) && fiber.ctx.get(name) !== undefined ? instance(impl.ctx.fiber) : null }
       })
       return { entryId: target.entryId, module, configDigest,
         active: !entry.disabled && module === target.module && configDigest === target.configDigest

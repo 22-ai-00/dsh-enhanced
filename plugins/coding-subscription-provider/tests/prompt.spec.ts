@@ -266,7 +266,7 @@ describe('DSH request serialization', () => {
 
   it('keeps schemas but forbids tool delegation during an attested compaction request', () => {
     const options = request()
-    options.purpose = 'compaction'
+    options.purpose = 'compaction' as never
     options.tools = [{
       name: 'read',
       description: 'Read one workspace file.',

@@ -11,6 +11,7 @@ import { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { developmentCases, developmentDataset, developmentPrompt, judgeDevelopmentResponse } from './corpus.js'
 import { familiesDevelopmentCases, familiesDevelopmentDataset, familiesDevelopmentPrompt, judgeFamiliesDevelopmentResponse } from './families-corpus.js'
@@ -226,7 +227,7 @@ export function createNativeBenchmarkExecutor(raw: NativeBenchmarkConfig, factor
     let calls = 0; let reserved = false; let reservedInput = 0; let observedUsage: TokenUsage | undefined; let unexpectedTool = false
     try {
       const memoryTask = isMemorySuite(input) ? memoryDevelopmentTask(request.cell.caseId, memoryVersion(input)) : undefined
-      await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: memoryTask !== undefined, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+      await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: memoryTask !== undefined, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       binding = await factory(Object.freeze({ ...input.model }), Object.freeze({ ctx, workspace }))
       const countInput = input.model.inputLimitMode === 'estimate' ? binding?.inputTokenEstimate : binding?.inputTokenUpperBound
       if (!binding || !(binding.adapter instanceof LlmAdapter) || typeof countInput !== 'function' || typeof binding.dispose !== 'function') throw new Error('invalid native adapter binding')

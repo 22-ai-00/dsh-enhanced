@@ -21,6 +21,7 @@ function agent(id: string): Agent {
   const session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false,
     cwd: '/work/owner', agentPreset: 'primary' })
   return { id: sid, options: { provider: 'test-provider', model: 'test-model' }, session, inbox: createInboxStub(),
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
     status: 'idle', ctx: new Context(), cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }

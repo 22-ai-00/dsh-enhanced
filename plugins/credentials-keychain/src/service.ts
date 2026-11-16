@@ -104,15 +104,17 @@ export class CredentialsKeychainService extends Service {
     this.providerTimeoutMs = config.providerTimeoutMs
     this.now = options.now ?? Date.now
     this.ledger = new CredentialLedger({ path: config.databasePath, now: this.now })
+    const beginDispose = () => this.beginDispose()
+    ctx.on('internal/plugin', fiber => {
+      if (fiber === ctx.fiber && fiber.uid === null) beginDispose()
+    })
+    ctx.on('internal/status', fiber => {
+      // Cordis 4.1 Fiber._unload() runs effect disposers after dependents unload;
+      // mark stopping and abort active leases synchronously as unloading starts.
+      if (fiber === ctx.fiber && (fiber.state === 5 || fiber.state === 4)) beginDispose()
+    })
     ctx.effect(() => async () => {
-      this.active = false
-      for (const [leaseId, controller] of this.controllers) {
-        const current = this.ledger.get(leaseId)
-        if (current?.status === 'active') {
-          this.ledger.settle({ leaseId, expectedVersion: current.version, status: 'failed', failureCode: 'service-disposed' })
-        }
-        controller.abort(new CredentialLeaseAbortError('disposed', 'credentials-keychain disposed'))
-      }
+      this.beginDispose()
       await Promise.allSettled(this.operations)
       this.ledger.close()
     }, 'credentials-keychain.ledger')
@@ -250,8 +252,25 @@ export class CredentialsKeychainService extends Service {
     }
   }
 
+  private beginDispose(): void {
+    if (!this.active) return
+    this.active = false
+    for (const [leaseId, controller] of this.controllers) {
+      const current = this.ledger.get(leaseId)
+      if (current?.status === 'active') {
+        this.ledger.settle({ leaseId, expectedVersion: current.version, status: 'failed', failureCode: 'service-disposed' })
+      }
+      controller.abort(new CredentialLeaseAbortError('disposed', 'credentials-keychain disposed'))
+    }
+  }
+
+  private isDisposing(): boolean {
+    const fiber = this.ctx?.fiber
+    return !this.active || fiber?.uid === null || fiber?.state === 5 || fiber?.state === 4
+  }
+
   private assertActive(): void {
-    if (!this.active) throw new CredentialsKeychainError('disposed', 'credentials-keychain service is disposed')
+    if (this.isDisposing()) throw new CredentialsKeychainError('disposed', 'credentials-keychain service is disposed')
   }
 
   private assertLeaseDeliverable(expected: CredentialLeaseRecord, controller: AbortController): void {
@@ -263,7 +282,7 @@ export class CredentialsKeychainService extends Service {
       controller.abort(new CredentialLeaseAbortError('expired', 'credential lease expired'))
       current = this.ledger.get(expected.id)
     }
-    if (!this.active) throw new CredentialLeaseAbortError('disposed', 'credentials-keychain disposed')
+    if (this.isDisposing()) throw new CredentialLeaseAbortError('disposed', 'credentials-keychain disposed')
     if (controller.signal.aborted) {
       throw this.leaseAbortError(current, controller.signal.reason)
     }

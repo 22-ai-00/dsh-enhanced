@@ -8,6 +8,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { AcceptanceCriterion } from '@dsh-enhanced/task-acceptance-contract'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
@@ -73,7 +74,7 @@ async function harness(config: GoalConfig) {
   await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } })
   await ctx.loader.await()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const human = new Set<Agent>()
   const principalFor = (agent: Agent) => {
     const principal = owners.get(agent)

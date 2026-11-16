@@ -56,8 +56,15 @@ export async function runNativeSourceReview(ctx: Context, input: {
         assertCurrent(); signal.throwIfAborted()
         if (agent.session.snapshotEvents().some(event => event.type === 'assistant/message' || event.type === 'turn/end')) throw new Error('source review session is not fresh')
         agentCtx.effect(() => policy.bindInitiator(agent, 'background', request.source.owner.principalId), 'source-review.initiator')
-        agentCtx.effect(() => installModelSelection(agentCtx, { current: nativeModel, assembled: undefined }), 'source-review.model')
+        agentCtx.effect(() => installModelSelection(agentCtx), 'source-review.model')
+        agent.model.select(nativeModel)
         agentCtx.tools.restrict({ allow: [] })
+        if (typeof agentCtx.tools.setExecutor === 'function') {
+          agentCtx.tools.setExecutor({
+            describe: () => ({ schemas: [] }),
+            execute: async () => { throw new Error('tools forbidden in isolated review/extraction turn') },
+          })
+        }
         if (agentCtx.tools.schemas(agent).length !== 0) throw new Error('source review tools are not empty')
         agentCtx.tools.guard(() => {
           violated = true; agent.cancel({ kind: 'hook', reason: 'source-review-tool-rejected' })
@@ -66,7 +73,9 @@ export async function runNativeSourceReview(ctx: Context, input: {
         agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
           const assembly = await next()
           if (context.agent !== agent) return assembly
-          return { sections: [{ name: 'source-review', text: prompt }], contexts: [], tools: [], variables: {} }
+          // 0.2.2: tool declarations are owned by the selected ToolExecutor; this scope
+          // already restricts the registry to an empty surface.
+          return { sections: [{ name: 'source-review', text: prompt }], contexts: [], variables: {} }
         })
         agentCtx.on('llm/stream', async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
           if (options.sessionId !== agent.session.id) { yield* next(); return }

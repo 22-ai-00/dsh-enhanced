@@ -286,6 +286,7 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
   const ask = async (sessionId: string, commands: Command | Command[], text = 'Continue this owner task 🧭 with the new requirements.', provider = 'local', model = 'scripted') => {
     supplier.plans.set(sessionId,[...(Array.isArray(commands)?commands:[commands]),undefined])
     const handle = await access!.resume({ resumeSessionId: sessionId as SessionId, agentOptions: { provider, model } })
+    handle.agent.model.select({ provider, model })
     const requestId = crypto.randomUUID(), content = [{ type: 'text' as const, text }]
     try {
       return await access!.prompt({ sessionId, requestId, text: content[0]!.text, content }, async () => {

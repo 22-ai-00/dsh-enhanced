@@ -1,6 +1,7 @@
 import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -29,6 +30,7 @@ async function fixture() {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'issue', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
@@ -52,7 +54,7 @@ async function fixture() {
 async function register(ctx: Context, sessionId: string): Promise<Agent> {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: authority.workspace, agentPreset: authority.agentPreset } })
-  const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(),
+  const agent: Agent = { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(), model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }

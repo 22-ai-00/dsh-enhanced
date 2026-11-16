@@ -4,6 +4,7 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -29,7 +30,7 @@ function agent(sessionId: string): Agent {
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
   const append = session.append as unknown as (type: string, data: unknown) => unknown
   append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
-  const created = { id, options: {}, session, inbox: createInboxStub(),
+  const created = { id, options: {}, session, inbox: createInboxStub(), model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} } as Agent
   agents.push(created)
@@ -42,6 +43,7 @@ async function harness() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'],
       resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
@@ -77,9 +79,16 @@ async function harness() {
 }
 
 function toolReply(agent_: Agent) {
-  return { callId: ToolCallId(`reply-replay-${Math.random()}`), name: 'delivery_reply',
-    arguments: { idempotency_key: 'blocked-reply', text: 'must not escape' }, agent: agent_,
-    signal: new AbortController().signal }
+  return {
+    calls: [{
+      type: 'tool-call' as const,
+      id: ToolCallId(`reply-replay-${Math.random()}`),
+      name: 'delivery_reply',
+      arguments: JSON.stringify({ idempotency_key: 'blocked-reply', text: 'must not escape' }),
+    }],
+    agent: agent_,
+    signal: new AbortController().signal,
+  }
 }
 
 describe('reply replay block', () => {
@@ -88,7 +97,8 @@ describe('reply replay block', () => {
     const handle = f.service.blockAgentRepliesForReplay(f.blocked, {
       operationId: 'replay-1', maximumAttempts: 2, expiresAt: Date.now() + 60_000,
     })
-    const native = await f.ctx.tools.execute(toolReply(f.blocked))
+    const batch = await f.ctx.tools.execute(toolReply(f.blocked))
+    const native = batch.results[0]!.result
     expect(native.isError).toBe(true)
     expect(f.service.history(f.blocked, {}).outbox).toEqual([])
     expect(f.send).not.toHaveBeenCalled()

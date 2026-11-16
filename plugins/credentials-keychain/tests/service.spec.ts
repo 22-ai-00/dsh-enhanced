@@ -236,15 +236,18 @@ describe('credentials-keychain Cordis service', () => {
     const provider = delayedProvider()
     const f = await harness({ provider: 'macos-keychain', run: provider.run })
     const callback = vi.fn(async () => 'used')
+    let leasePromise!: Promise<unknown>
     const running = f.ctx.plugin(consumer(async caller => {
-      await caller.credentialsKeychain.withSecret(caller, {
+      leasePromise = caller.credentialsKeychain.withSecret(caller, {
         handleId: 'lark-secret', purpose: 'connect', ttlMs: 5_000, idempotencyKey: 'dispose-while-reading',
       }, callback)
+      await leasePromise
     }))
     await provider.ready
     const disposing = f.ctx.fiber.dispose()
     provider.release()
-    await expect(running).rejects.toEqual(expect.objectContaining({ code: 'disposed' }))
+    await expect(leasePromise).rejects.toEqual(expect.objectContaining({ code: 'disposed' }))
+    await running
     await disposing
     expect(callback).not.toHaveBeenCalled()
     const ledger = new CredentialLedger({ path: f.databasePath })

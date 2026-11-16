@@ -6,6 +6,7 @@ import { LlmRuntime, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { createTaskAcceptanceContract, type GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
@@ -38,7 +39,7 @@ async function setup(maxRuns = 12) {
   cleanups.push(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
   let owner = 'owner'
   let admission: GoalArtifactAdmission | undefined
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: (agent: Agent) => ({ principalId: owner,
@@ -63,10 +64,14 @@ async function setup(maxRuns = 12) {
   const signal = new AbortController().signal
   let calls = 0
   const call = async (request: IsolationRequest, callSignal = signal): Promise<IsolationResult> => {
-    const output = await ctx.tools.execute({ callId: ToolCallId(`linux-${++calls}`), name: 'isolation_run', agent, signal: callSignal,
-      arguments: { grant_id: request.grantId, idempotency_key: request.idempotencyKey, command: request.command,
-        ...(request.files ? { files: request.files } : {}), ...(request.artifacts ? { artifacts: request.artifacts } : {}),
-        ...(request.timeoutMs ? { timeout_ms: request.timeoutMs } : {}) } })
+    const batch = await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`linux-${++calls}`), name: 'isolation_run',
+        arguments: JSON.stringify({ grant_id: request.grantId, idempotency_key: request.idempotencyKey, command: request.command,
+          ...(request.files ? { files: request.files } : {}), ...(request.artifacts ? { artifacts: request.artifacts } : {}),
+          ...(request.timeoutMs ? { timeout_ms: request.timeoutMs } : {}) }) }],
+      agent, signal: callSignal,
+    })
+    const output = batch.results[0]!.result
     const text = output.content[0]
     if (output.isError || text?.type !== 'text') throw new Error(JSON.stringify(output))
     return JSON.parse(text.text.slice(text.text.indexOf('\n') + 1)) as IsolationResult

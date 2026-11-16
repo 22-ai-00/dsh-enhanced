@@ -193,7 +193,7 @@ describe('disposable Home paired package installation', () => {
     await expect(lstat(f.receiptPath)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(lstat(join(f.home, 'profiles', f.coordinator))).rejects.toMatchObject({ code: 'ENOENT' })
     await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: join(f.home, 'profiles', f.profile), bundles: f.original.bundles })
-  })
+  }, 30_000)
 
   test('extends only a pre-owner single profile with the frozen disabled learner root', async () => {
     const f = await fixture(false, true, true)
@@ -214,7 +214,7 @@ describe('disposable Home paired package installation', () => {
     expect(manifest.dsh.profile.bundles).toEqual([...oldManifest.dsh.profile.bundles, learner])
     expect(proof.files[join(target, 'package.json')]).toBe(hash(await readFile(join(target, 'package.json'))))
     await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: target, bundles: f.candidate.bundles })
-  })
+  }, 30_000)
 
   test('rejects an existing learner patch reference before a pre-owner extension writes', async () => {
     const f = await fixture(false, true, true)

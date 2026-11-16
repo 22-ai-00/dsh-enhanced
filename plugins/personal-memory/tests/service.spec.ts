@@ -48,6 +48,7 @@ function stubAgent(options: { cwd?: string; preset?: string } = {}) {
     inbox,
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),

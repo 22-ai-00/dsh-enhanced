@@ -251,6 +251,7 @@ function dreamingAgents(input: { workspace: string; preset: string; evidenceRef:
       }
       const agent = {
         session,
+        model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
         followup: () => {},
         whenIdle: async () => {
           await submit!.execute({

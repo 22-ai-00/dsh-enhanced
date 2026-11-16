@@ -10,6 +10,8 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import * as PtcExecutor from '@deepseek-ai/dsh-tool-executor-ptc'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
@@ -28,7 +30,7 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
-  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false, realPolicy = false) {
+  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false, realPolicy = false, ptcRuntime?: unknown) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   ctx.provide('workingDirectory' as never, { ensure: async () => root, set: async () => root } as never)
@@ -39,7 +41,10 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     ...(productionPersistence ? {} : { compression: 'none' }) } })
   await ctx.loader.await()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime)
+  if (ptcRuntime !== undefined) { ctx.provide('ptcRuntime' as never, ptcRuntime as never); await ctx.plugin(PtcExecutor) }
+  else await ctx.plugin(NativeToolExecutor)
+  await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const handles = new Map<Agent, { dispose(): Promise<void> }>(); const human = new Set<Agent>(); let allowed = true; let routeAvailable = true; let routeBinding: { id: string; version: number; generation: number; sessionId: string; workspace: string; agentPreset: string } | undefined; const deniedActions = new Set<string>()
   const attestation = (agent: Agent) => {
     const principalId = owners.get(agent)
@@ -156,7 +161,11 @@ describe('owner-scoped native goal context', () => {
     const execution = (arguments_: unknown, candidate = agent, signal = new AbortController().signal) => ({ callId: ToolCallId(`checkpoint-${Math.random()}`), rootCallId: ToolCallId(`checkpoint-root-${Math.random()}`), name: 'goal_checkpoint', arguments: arguments_, signal, agent: candidate, token: Symbol('checkpoint') as never })
     const policy = f.ctx.assistantPolicy as unknown as { isPreauthorizedTool(value: unknown): boolean }
     expect(policy.isPreauthorizedTool(execution(args))).toBe(true)
-    expect((await f.ctx.tools.execute(execution(args))).isError).toBe(false)
+    const batch = await f.ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId('checkpoint-call-1'), name: 'goal_checkpoint', arguments: JSON.stringify(args) }],
+      signal: new AbortController().signal, agent,
+    })
+    expect(batch.results[0]!.result.isError).toBe(false)
     expect(f.service.inspect(agent, record.id)).toMatchObject({ version: record.version + 1, checkpoint: { nextStep: args.next_step } })
     expect(policy.isPreauthorizedTool(execution(args))).toBe(false)
 
@@ -1529,7 +1538,7 @@ describe('goal strategy compare concurrency', () => {
     await agent.whenIdle()
     const record = f.service.create(agent, objective, 2)
     await expect(f.ctx.subagents.startActivation({ provider: 'assistant-goals-strategy/v1', label: 'forged',
-      request: { parent: agent, prompt: [{ type: 'text', text: 'forged' }], agentOptions: { provider: 'fixture', model: 'fixture' } },
+      parent: agent, prompt: [{ type: 'text', text: 'forged' }], agentOptions: { provider: 'fixture', model: 'fixture' },
       signal: new AbortController().signal, delivery: 'caller' })).rejects.toThrow(/strategy provider request is not admitted/)
     await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
     // Both persona streams must be parked inside the barrier at the same time,
@@ -1653,6 +1662,81 @@ describe('goal strategy compare concurrency', () => {
     expect(durable).toMatchObject({ state: 'unknown', outcome: 'unknown', terminationReason: 'deadline' })
     expect(durable.outputDigest).toBeUndefined()
     expect(durable.children).toHaveLength(2)
+  })
+
+  it('presents zero tools (no run_code) to strategy child even when parent scope mounts PtcExecutor', async () => {
+    const objective = 'Compare approaches when parent uses PTC executor'
+    const ptcRuntime = {
+      language: 'typescript',
+      isolation: 'process',
+      programFormat: 'function',
+      retainsState: false,
+      release: async () => {},
+      executionInstructions: '',
+      sandboxMode: undefined,
+      timeout: { defaultMs: 30_000, maxMs: 60_000 },
+      resolve: (request: { bindings: Array<{ functions: Record<string, (args: unknown) => Promise<unknown>> }>; timeoutMs?: number }) => ({
+        ...request, timeoutMs: request.timeoutMs ?? 30_000,
+      }),
+      run: async (spec: { bindings: Array<{ functions: Record<string, (args: unknown) => Promise<unknown>> }> }) => {
+        const value = await spec.bindings[0]!.functions.goal_strategy!(JSON.parse(compareArguments))
+        return { logs: [], value }
+      },
+    }
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, { executionBudget: compareBudget, strategy: {} }, false, false, ptcRuntime)
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-ptc-parent', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+    const parentToolNames: string[][] = []
+    const childToolNames: string[][] = []
+    let parentRequests = 0
+    class PtcCompareAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (!isStrategyChild(options)) {
+          parentRequests += 1
+          parentToolNames.push((options.tools ?? []).map(tool => tool.name))
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            const runCodeArgs = JSON.stringify({ code: 'return await tools.goal_strategy({})', description: 'Invoke goal_strategy via PTC' })
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('ptc-compare-call'), name: 'run_code', argumentsDelta: runCodeArgs }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('ptc-compare-call'), name: 'run_code', arguments: runCodeArgs } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'noted' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        childToolNames.push((options.tools ?? []).map(tool => tool.name))
+        expect(options.tools ?? []).toEqual([])
+        const text = isSkepticalPersona(options) ? 'SKEPTICAL-PTC' : 'ALTERNATIVE-PTC'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    f.ctx.llm.registerAdapter(['fixture'], new PtcCompareAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(parentToolNames.length).toBeGreaterThanOrEqual(2)
+    expect(parentToolNames[1]).toEqual(['run_code'])
+    expect(childToolNames).toEqual([[], []])
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed' })
   })
 })
 

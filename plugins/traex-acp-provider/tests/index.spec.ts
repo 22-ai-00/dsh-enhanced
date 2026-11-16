@@ -19,7 +19,7 @@ describe('dsh-enhanced-traex-acp-provider', () => {
       peerDependencies: Record<string, string>
     }
     for (const name of ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session']) {
-      expect(manifest.peerDependencies[name]).toBe('>=0.2.1-rc.2 <0.3.0')
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.2-rc.3 <0.3.0')
     }
   })
 
@@ -27,6 +27,9 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    ctx.provide('sessionProjections', {
+      register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+    } as never)
     await ctx.plugin(AgentRegistry)
     const fiber = await ctx.plugin(Plugin, Plugin.Config())
     expect(ctx.llm.listProviders()).toEqual([])
@@ -38,6 +41,9 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    ctx.provide('sessionProjections', {
+      register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+    } as never)
     await ctx.plugin(AgentRegistry)
     const config = Plugin.Config()
     config.enabled = true

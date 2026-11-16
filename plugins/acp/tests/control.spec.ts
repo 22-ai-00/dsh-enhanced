@@ -1,12 +1,12 @@
 import { Context } from '@deepseek-ai/cordis'
 import {
-  agentEvents,
   installModelSelection,
   type Agent,
-  type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, ReasoningEffortId, createMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import {
   MODEL_CONFIG_ID,
@@ -17,6 +17,7 @@ import {
   reasoningValue,
   setNativeMode,
   setSessionConfigOption,
+  type ModelSelectionState,
   type NativeAgentPresetControl,
   type NativeLlmControl,
 } from '../src/control.ts'
@@ -60,9 +61,8 @@ function llm(): NativeLlmControl {
 
 describe('ACP native session controls', () => {
   it('publishes DSH provider/model and exact-model reasoning metadata', async () => {
-    const selection: ModelSelectionRef = {
+    const selection: ModelSelectionState = {
       current: { provider: 'alpha', model: 'reasoner', reasoningEffort: ReasoningEffortId('high') },
-      assembled: undefined,
     }
     const options = await buildSessionConfigOptions(llm(), selection)
     const model = options.find(option => option.id === MODEL_CONFIG_ID)
@@ -97,9 +97,8 @@ describe('ACP native session controls', () => {
   })
 
   it('switches the model and reasoning on the same native selection ref', async () => {
-    const selection: ModelSelectionRef = {
+    const selection: ModelSelectionState = {
       current: { provider: 'alpha', model: 'chat' },
-      assembled: undefined,
     }
 
     await setSessionConfigOption(llm(), selection, MODEL_CONFIG_ID, modelValue('alpha', 'reasoner'))
@@ -118,26 +117,61 @@ describe('ACP native session controls', () => {
 
   it('keeps prompt assembly and request routing atomic across an in-session switch', async () => {
     const ctx = new Context()
-    await ctx.plugin(SystemPrompt)
-    const selection: ModelSelectionRef = {
-      current: { provider: 'alpha', model: 'chat' },
-      assembled: undefined,
+    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const requests: GenerateOptions[] = []
+    class RecordingAdapter extends LlmAdapter {
+      override resolveModel(provider: string, model: string) {
+        return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 64_000 } })
+      }
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        requests.push(options)
+        const text = `reply-${requests.length}`
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
     }
-    installModelSelection(ctx, selection)
-    const agent = {} as Agent
-    const signal = new AbortController().signal
-    const seed: LlmCallConfig = { provider: 'seed', model: 'seed' }
+    ctx.llm.registerAdapter(['alpha'], new RecordingAdapter())
+    ctx.systemPrompt.section({
+      name: 'selected-model',
+      order: 100,
+      text: 'MODEL={{provider}}/{{model}}',
+    })
 
-    expect((await ctx.systemPrompt.assemble()).variables).toMatchObject({ provider: 'alpha', model: 'chat' })
-    await setSessionConfigOption(llm(), selection, MODEL_CONFIG_ID, modelValue('alpha', 'reasoner'))
-    await expect(agentEvents(ctx, agent).waterfall(
-      'agent/request', { turn: 1, step: 1, signal }, () => Promise.resolve(seed),
-    )).resolves.toMatchObject({ provider: 'alpha', model: 'chat' })
+    const selection: ModelSelectionState = { current: { provider: 'alpha', model: 'chat' } }
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('atomic-switch'),
+      agentOptions: { provider: 'alpha', model: 'chat' },
+      setup: (agentCtx, agent) => {
+        installModelSelection(agentCtx)
+        agent.model.select(selection.current!)
+      },
+    })
+    let switchedDuringFirstRequest = false
+    handle.agent.ctx.on('agent/request', async (_payload, next) => {
+      const config = await next()
+      if (!switchedDuringFirstRequest) {
+        switchedDuringFirstRequest = true
+        await setSessionConfigOption(llm(), selection, MODEL_CONFIG_ID, modelValue('alpha', 'reasoner'))
+        handle.agent.model.select(selection.current!)
+      }
+      return config
+    })
 
-    expect((await ctx.systemPrompt.assemble()).variables).toMatchObject({ provider: 'alpha', model: 'reasoner' })
-    await expect(agentEvents(ctx, agent).waterfall(
-      'agent/request', { turn: 1, step: 2, signal }, () => Promise.resolve(seed),
-    )).resolves.toMatchObject({ provider: 'alpha', model: 'reasoner' })
+    handle.agent.followup(createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] }))
+    await handle.agent.whenIdle()
+    handle.agent.followup(createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'second' }] }))
+    await handle.agent.whenIdle()
+
+    expect(requests).toHaveLength(2)
+    expect(requests[0]).toMatchObject({ provider: 'alpha', model: 'chat' })
+    expect(JSON.stringify(requests[0]?.messages[0])).toContain('MODEL=alpha/chat')
+    expect(requests[1]).toMatchObject({ provider: 'alpha', model: 'reasoner' })
+    expect(JSON.stringify(requests[1]?.messages[0])).toContain('MODEL=alpha/reasoner')
+    expect(JSON.stringify(requests[1]?.messages)).toContain('model changed')
+    await handle.dispose()
     await ctx.fiber.dispose()
   })
 

@@ -187,6 +187,7 @@ export class PersonalMemoryService extends Service {
   private readonly headlessNamespaces = new WeakMap<Agent, MemoryOwnerNamespace>()
   private readonly config: Required<Omit<Config, 'automaticLearning'>> & Pick<Config, 'automaticLearning'>
   private readonly sessionSnapshots = new WeakMap<Agent, MemorySnapshot>()
+  private toolsCtx: Context | undefined
   private active = true
 
   constructor(ctx: Context, input: Config) {
@@ -221,7 +222,9 @@ export class PersonalMemoryService extends Service {
       scope: (agent, action) => this.evidenceScope(agent, action),
       allowTool: (agent, name) => REVALIDATABLE_READ_TOOLS.has(name) && this.ctx.get('tools', false)?.get(name, agent) !== undefined
         && this.policy.authorizeAgent(agent, 'execute', { kind: 'tool', id: name }).effect === 'allow',
-      revalidate: (exec, source, anchor) => revalidateFileEvidence(this.ctx, this.policy, exec, source, anchor),
+      revalidate: (exec, source, anchor) => this.toolsCtx === undefined
+        ? Promise.resolve(false)
+        : revalidateFileEvidence(this.toolsCtx, this.policy, exec, source, anchor),
     }) : undefined
     this.proposals = new MemoryProposalManager(
       this.memoryStore,
@@ -283,7 +286,11 @@ export class PersonalMemoryService extends Service {
       text: ({ agent }) => this.evidenceBridge?.snapshot(agent) ?? '',
     }))
     ctx.inject(['tools'], (toolsCtx) => {
+      this.toolsCtx = toolsCtx
       registerMemoryTools(toolsCtx, this)
+      return () => {
+        if (this.toolsCtx === toolsCtx) this.toolsCtx = undefined
+      }
     })
   }
 

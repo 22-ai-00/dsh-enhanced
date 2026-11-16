@@ -111,8 +111,15 @@ export async function runNativeMemoryExtraction(ctx: Context, input: {
           throw new Error('memory extraction session is not fresh')
         }
         agentCtx.effect(() => policy.bindInitiator(agent, 'background', job.intent.owner.principalId), 'memory-extraction.initiator')
-        agentCtx.effect(() => installModelSelection(agentCtx, { current: nativeModel, assembled: undefined }), 'memory-extraction.model')
+        agentCtx.effect(() => installModelSelection(agentCtx), 'memory-extraction.model')
+        agent.model.select(nativeModel)
         agentCtx.tools.restrict({ allow: [] })
+        if (typeof agentCtx.tools.setExecutor === 'function') {
+          agentCtx.tools.setExecutor({
+            describe: () => ({ schemas: [] }),
+            execute: async () => { throw new Error('tools forbidden in isolated review/extraction turn') },
+          })
+        }
         if (agentCtx.tools.schemas(agent).length !== 0) throw new Error('memory extraction tools are not empty')
         agentCtx.tools.guard(() => {
           violated = true; agent.cancel({ kind: 'hook', reason: 'memory-extraction-tool-rejected' })
@@ -121,7 +128,9 @@ export async function runNativeMemoryExtraction(ctx: Context, input: {
         agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
           const assembly = await next()
           if (context.agent !== agent) return assembly
-          return { sections: [{ name: 'memory-extraction', text: prompt }], contexts: [], tools: [], variables: {} }
+          // 0.2.2: tool declarations are owned by the selected ToolExecutor; this scope
+          // already restricts the registry to an empty surface.
+          return { sections: [{ name: 'memory-extraction', text: prompt }], contexts: [], variables: {} }
         })
         agentCtx.on('llm/stream', async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
           if (options.sessionId !== agent.session.id) { yield* next(); return }

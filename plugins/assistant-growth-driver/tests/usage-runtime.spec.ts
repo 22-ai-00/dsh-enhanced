@@ -1002,9 +1002,10 @@ for (const mode of ['allowed-last-slot', 'policy-deny', 'withdraw', 'expired', '
       if (!agent) throw new Error('real author Agent missing')
       agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
       expect(getApprovalReviewer(agent.session)).toBe('user')
-      const invoke = (name: string, target = agent, signal = new AbortController().signal) => f.ctx.tools.execute({
-        name, arguments: name === 'plugin_source_job_status' ? { id: 'existing-job' } : {}, agent: target,
-        callId: ToolCallId(`preauthorized-${++count}`), signal })
+      const invoke = async (name: string, target = agent, signal = new AbortController().signal): Promise<ToolExecutionResult> => (await f.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: ToolCallId(`preauthorized-${++count}`), name,
+          arguments: JSON.stringify(name === 'plugin_source_job_status' ? { id: 'existing-job' } : {}) }],
+        agent: target, signal })).results[0]!.result
       if (mode === 'policy-replaced-in-source-check') replacePolicyDuringCheck = true
       if (mode === 'withdraw') f.withdraw()
       if (mode === 'expired') vi.setSystemTime(Date.now() + 200_000)
@@ -1097,9 +1098,11 @@ test('real Policy revise-created WorkItem lane exposes exactly the six revision 
       const agent = f.ctx.agents.get(SessionId(options.sessionId!))!
       agent.session.append('approval/policy', { policy: 'ask' }); setApprovalReviewer(agent.session, 'user')
       if (this.requests === 1) {
-        const result = await f.ctx.tools.execute({ name: 'plugin_source_gaps', arguments: {}, agent,
-          callId: ToolCallId(`revision-gap-${++count}`), signal: new AbortController().signal })
-        expect(result.isError).toBe(false)
+        const batch = await f.ctx.tools.execute({
+          calls: [{ type: 'tool-call', id: ToolCallId(`revision-gap-${++count}`), name: 'plugin_source_gaps', arguments: '{}' }],
+          agent, signal: new AbortController().signal,
+        })
+        expect(batch.results[0]!.result.isError).toBe(false)
         capturedSurface = agent.ctx.tools.schemas(agent).map(schema => schema.name).sort()
       }
       yield { type: 'block-start', index: 0, blockType: 'text' }

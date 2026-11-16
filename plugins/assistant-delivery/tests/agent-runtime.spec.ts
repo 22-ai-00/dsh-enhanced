@@ -539,7 +539,19 @@ async function runtimeHarness(
       }))
       return { id: id ?? agentPreset }
     })
-    ctx.provide('agentPresets' as never, { resolve: presetResolve, mount: presetMount } as never)
+    const presetForSession = vi.fn((session: Session) => (
+      session.snapshotEvents().findLast(event => event.type === 'agent-preset/selected')
+        ?.data as { agentPreset?: string } | undefined
+    )?.agentPreset)
+    ctx.provide('agentPresets' as never, {
+      resolve: presetResolve,
+      mount: presetMount,
+      presetForSession,
+      select: vi.fn(async (agent: Agent, id: string) => {
+        const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
+        append.call(agent.session, 'agent-preset/selected', { agentPreset: id })
+      }),
+    } as never)
   } else if (useNativePresetRegistry) {
     ctx.loader.builtins['assistant-delivery-test-tools'] = presetToolsPlugin
     await ctx.plugin(AgentPresets, { default: agentPreset })
@@ -698,7 +710,7 @@ async function runtimeHarness(
   if (permissionPresets !== undefined) {
     ctx.provide('permissionPresets' as never, permissionPresets as never)
     const defaultPreset = permissions?.seedDefaultPreset ?? permissionPresets.names[0]!
-    ctx.on('session/created', session => {
+    ctx.on('agent/created', ({ agent: { session } }) => {
       if (session.snapshotEvents().some(event => [
         'permission/preset', 'sandbox/mode', 'approval/policy',
       ].includes(String(event.type)))) return
@@ -707,7 +719,7 @@ async function runtimeHarness(
       const append = session.append as unknown as (type: string, data: unknown) => unknown
       append.call(session, 'sandbox/mode', { mode: spec.sandbox })
       append.call(session, 'approval/policy', { policy: spec.approval })
-    })
+    }, { prepend: true })
   }
   if (permissions !== undefined && permissions.provideApproval !== false) {
     ctx.provide('approval' as never, {
@@ -763,6 +775,29 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
   await service.tick()
   await service.whenIdle()
+}
+
+async function executeToolCall(
+  ctx: Context,
+  input: {
+    callId: ReturnType<typeof ToolCallId>
+    name: string
+    arguments: Record<string, unknown> | string
+    agent?: Agent
+    signal?: AbortSignal
+  },
+): Promise<ToolExecutionResult> {
+  const batch = await ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: input.callId,
+      name: input.name,
+      arguments: typeof input.arguments === 'string' ? input.arguments : JSON.stringify(input.arguments),
+    }],
+    ...(input.agent ? { agent: input.agent } : {}),
+    signal: input.signal ?? new AbortController().signal,
+  })
+  return batch.results[0]!.result
 }
 
 // Fixed marker phrase from the Host's user-cancelled-tool notice
@@ -946,10 +981,10 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     let scheduled: { id: string; wakeAt: number; expiresAt: number } | undefined
     const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
-      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('wake-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+      const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('wake-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
       expect(created.isError).not.toBe(true)
       const record = fixture.ctx.assistantGoals.list(agent)[0]!
-      const result = await fixture.ctx.tools.execute({ callId: ToolCallId('wake-schedule'), name: 'goal_schedule', agent, signal,
+      const result = await executeToolCall(fixture.ctx, { callId: ToolCallId('wake-schedule'), name: 'goal_schedule', agent, signal,
         arguments: { goal_id: record.id, expected_revision: record.native.revision, wake_at: Date.now() + 1_500 } })
       expect(result.isError, JSON.stringify(result)).not.toBe(true)
       const context = result.content.filter(block => block.type === 'text').map(block => block.text).join('')
@@ -966,11 +1001,11 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     let waiting: { id: string; state: string } | undefined
     const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
-      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('event-wake-create'), name: 'goal_create', agent, signal,
+      const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('event-wake-create'), name: 'goal_create', agent, signal,
         arguments: { objective, max_goal_rounds: 1 } })
       expect(created.isError).not.toBe(true)
       const record = fixture.ctx.assistantGoals.list(agent)[0]!
-      const result = await fixture.ctx.tools.execute({ callId: ToolCallId('event-wake-wait'), name: 'goal_wait_event', agent, signal, arguments: {
+      const result = await executeToolCall(fixture.ctx, { callId: ToolCallId('event-wake-wait'), name: 'goal_wait_event', agent, signal, arguments: {
         goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'scheduled-report', expires_at: Date.now() + 30_000,
       } })
       expect(result.isError, JSON.stringify(result)).not.toBe(true)
@@ -1068,8 +1103,12 @@ function scopedLeaseAgents(ctx: Context, leases: TestSessionLeases): Context {
   const registry = ctx.agents
   scoped.provide('agents' as never, {
     get: registry.get.bind(registry),
+    list: registry.list.bind(registry),
+    turnBoundaryOf: registry.turnBoundaryOf.bind(registry),
     currentInitiator: registry.currentInitiator.bind(registry),
-    isOwnedBy: registry.isOwnedBy.bind(registry),
+    requireInitiator: registry.requireInitiator.bind(registry),
+    withInitiator: registry.withInitiator.bind(registry),
+    withoutInitiator: registry.withoutInitiator.bind(registry),
     create: (options: CreateAgentOptions) => leases.create(scoped, options),
     resume: (options: ResumeAgentOptions) => leases.resume(scoped, options),
   } as never)
@@ -1254,6 +1293,54 @@ function textPromptAttachments() {
     ...attachmentFixture().attachments,
     admitPromptContent: async (content: unknown) => content,
   } as never
+}
+
+function rerouteModelAfterTurn(
+  ctx: Context,
+  afterTurn = 1,
+  selection = { provider: 'alternate', model: 'precise' },
+): void {
+  ctx.on('agent/created', ({ agent }) => {
+    agent.ctx.on('agent/turn-stopping', ({ turn }) => {
+      if (turn === afterTurn) agent.model.select(selection)
+    })
+  })
+}
+
+async function mountSessionControllerDeps(ctx: Context, root: string): Promise<void> {
+  if (ctx.get('attachments' as never) === undefined) ctx.provide('attachments', textPromptAttachments())
+  if (ctx.get('fs' as never) === undefined) await ctx.plugin(LocalFileSystem, { cwd: root })
+  if (ctx.get('agentDefaultModel' as never) === undefined) {
+    await ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
+  }
+  if (ctx.get('sessionQuery' as never) === undefined) {
+    // SessionQueryEngine is declared abstract because search backends extend it, while its
+    // production base implements the live/cold observeSession path exercised here.
+    await ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
+  }
+  if (ctx.get('workspaceRegistry' as never) === undefined) {
+    ctx.provide('workspaceRegistry' as never, {
+      archivedSessionIds: [],
+      get: () => undefined,
+      list: () => [],
+      resolveByPath: async () => undefined,
+      create: async () => { throw new Error('unexpected workspace registration') },
+    } as never)
+  }
+  if (ctx.get('remoteAccess' as never) === undefined) {
+    ctx.provide('remoteAccess' as never, {
+      decide: () => ({ kind: 'deny', reason: 'test-owner-only' }),
+      allows: () => true,
+    } as never)
+  }
+  if (ctx.get('typert' as never) === undefined) await ctx.plugin(TypertRegistry)
+  if (ctx.get('typertGateway' as never) === undefined) await ctx.plugin(TypertGatewayService, {})
+}
+
+async function mountSessionController(ctx: Context, root: string): Promise<SessionController> {
+  await mountSessionControllerDeps(ctx, root)
+  await ctx.plugin(SessionController, {})
+  return ctx.get('sessionController' as never) as unknown as SessionController
 }
 
 describe('real native Delivery Agent runtime', () => {
@@ -1757,7 +1844,7 @@ describe('real native Delivery Agent runtime', () => {
     const observations: Array<{ session: string; human: boolean }> = []
     restarted.ctx.on('agent/pre-step', async ({ agent }, next) => {
       observations.push({ session: String(agent.session.id), human: restarted.service.currentPreferenceTurn(agent) !== undefined })
-      const prohibited = await restarted.ctx.tools.execute({ callId: ToolCallId('wake-cannot-create'), name: 'goal_create', agent,
+      const prohibited = await executeToolCall(restarted.ctx, { callId: ToolCallId('wake-cannot-create'), name: 'goal_create', agent,
         signal: new AbortController().signal, arguments: { objective: 'Do not forge a new owner request' } })
       expect(prohibited.isError).toBe(true)
       return await next()
@@ -1912,7 +1999,7 @@ describe('real native Delivery Agent runtime', () => {
       expect(fixture.readWake(wake.id)).toMatchObject({ state: 'unknown', dispatched_at: expect.any(Number) })
       expect(retainedAgent).toBeDefined()
       expect(fixture.ctx.agents.get(retainedAgent!.id)).toBe(retainedAgent)
-      const late = await retainedAgent!.ctx.tools.execute({
+      const late = await executeToolCall(retainedAgent!.ctx, {
         callId: ToolCallId('scheduled-goal-deadline-late'), name: 'preset_probe', agent: retainedAgent!,
         signal: new AbortController().signal, arguments: {},
       })
@@ -2569,7 +2656,7 @@ describe('real native Delivery Agent runtime', () => {
         // the second probes the interval after its finally block but before owner teardown.
         queueMicrotask(() => {
           queueMicrotask(() => {
-            void event.agent.ctx.tools.execute({
+            void executeToolCall(event.agent.ctx, {
               callId: ToolCallId('call-auto-post-enqueue-barrier-probe'),
               name: 'preset_probe',
               arguments: {},
@@ -3321,12 +3408,7 @@ describe('real native Delivery Agent runtime', () => {
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map())
     try {
-      let requestCount = 0
-      if (switchRouteDuringCompletion) fixture.ctx.on('agent/request', async (_payload, next) => {
-        const config = await next()
-        requestCount += 1
-        return requestCount === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
-      })
+      if (switchRouteDuringCompletion) rerouteModelAfterTurn(fixture.ctx)
       const pairing = fixture.service.issuePairing('test', principal)
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       const owner = runtimeStore(fixture.service).getPrincipal(principal)!
@@ -3671,12 +3753,7 @@ describe('real native Delivery Agent runtime', () => {
       const pairing = fixture.service.issuePairing('test', principal)
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
-      let requestCount = 0
-      fixture.ctx.on('agent/request', async (_payload, next) => {
-        const config = await next()
-        requestCount += 1
-        return requestCount === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
-      })
+      rerouteModelAfterTurn(fixture.ctx)
       const original = fixture.llm.stream.bind(fixture.llm)
       vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
         if (fixture.llm.requests.length === 0) {
@@ -3935,16 +4012,10 @@ describe('real native Delivery Agent runtime', () => {
     await first.ctx.fiber.restart()
 
     const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
-    await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
-    // SessionQueryEngine is declared abstract because search backends extend it, while its
-    // production base implements the live/cold observeSession path exercised here.
-    await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
-    await reopened.ctx.plugin(TypertRegistry)
-    reopened.ctx.provide('attachments', textPromptAttachments())
-    const controller = new SessionController(reopened.ctx, {})
+    const controller = await mountSessionController(reopened.ctx, root)
     const abort = new AbortController()
     const follower = controller.follow(
-      { address: { kind: 'session', sessionId: binding.sessionId as SessionId } },
+      { address: { kind: 'session', sessionId: binding.sessionId as SessionId }, activate: true },
       abort.signal,
     )[Symbol.asyncIterator]()
     let promotion: ReturnType<typeof follower.next> | undefined
@@ -4160,7 +4231,7 @@ describe('real native Delivery Agent runtime', () => {
         const human = fixture.service.currentPreferenceTurn(agent)
         expect(human).toMatchObject({ sessionId: created.sessionId, principalId: 'web/browser/local/owner' })
         humanTurn = human !== undefined
-        const result = await fixture.ctx.tools.execute({ callId: ToolCallId('web-native-goal'), name: 'goal_create', agent, signal,
+        const result = await executeToolCall(fixture.ctx, { callId: ToolCallId('web-native-goal'), name: 'goal_create', agent, signal,
           arguments: { objective: 'Finish the Web owner project', max_goal_rounds: 2 } })
         if (result.isError) throw new Error(JSON.stringify(result.content))
         goalCreated = true
@@ -4221,7 +4292,7 @@ describe('real native Delivery Agent runtime', () => {
       }
       const owner = operator.getPrincipal(webPrincipal)!
       operator.revokePrincipal(owner.id, owner.version)
-      await expect(controller.inspect(created.sessionId)).rejects.toThrow('denied')
+      await expect(controller.state({ sessionId: created.sessionId }, new AbortController().signal)).rejects.toThrow('denied')
       // Native follow has already buffered this turn. Revocation must prevent
       // its next frame from crossing the previously opened read boundary.
       await expect(ownerHistory.next()).rejects.toThrow('denied')
@@ -4269,7 +4340,7 @@ describe('real native Delivery Agent runtime', () => {
       const handle = await access!.create({ sessionId: 'native-goal-flush' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
       fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
         if (agent !== handle.agent || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('native-goal-flush-create'), name: 'goal_create', agent, signal,
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('native-goal-flush-create'), name: 'goal_create', agent, signal,
           arguments: { objective: 'Durably checkpoint before my native round', max_goal_rounds: 1 } })
         if (created.isError) throw new Error(JSON.stringify(created.content))
         gate = true
@@ -4400,7 +4471,7 @@ describe('real native Delivery Agent runtime', () => {
         if (agent !== handle.agent) return await next()
         step += 1
         if (step === 1) {
-          const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-memory-create'), name: 'goal_create', agent, signal,
+          const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-memory-create'), name: 'goal_create', agent, signal,
             arguments: { objective: 'Maintain Atlas project', max_goal_rounds: 2 } })
           if (created.isError) throw new Error(JSON.stringify(created.content))
         }
@@ -4480,10 +4551,9 @@ describe('real native Delivery Agent runtime', () => {
     let markStarted!: () => void
     const started = new Promise<void>(resolve => { markStarted = resolve })
     if (mode === 'rerouted') {
-      let requests = 0
-      fixture.ctx.on('agent/request', async (_payload, next) => {
-        const config = await next()
-        return ++requests === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
+      fixture.presetExecute.mockImplementationOnce(async () => {
+        fixture.ctx.agents.get(sessionId as SessionId)?.model.select({ provider: 'alternate', model: 'precise' })
+        return { mounted: true }
       })
     }
     if (mode !== 'success') vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (request) {
@@ -4731,18 +4801,18 @@ describe('real native Delivery Agent runtime', () => {
     let follower: AsyncIterator<unknown> | undefined
     let promotion: Promise<IteratorResult<unknown>> | undefined
     try {
-      reopened.ctx.provide('attachments', textPromptAttachments())
-      await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
-      await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
-      await reopened.ctx.plugin(TypertRegistry)
+      await mountSessionControllerDeps(reopened.ctx, root)
+      let controllerFiber: ReturnType<Context['plugin']> | undefined
       const fiber = reopened.ctx.plugin({
         inject: ['agents', 'sessions', 'llm', 'sessionProjections', 'agentDefaultModel', 'sessionQuery', 'typert', 'attachments'],
         apply(webCtx: Context) {
           controllerCtx = scopedLeaseAgents(webCtx, runtimeSessionLeases(reopened.service))
-          controller = new SessionController(controllerCtx, {})
+          controllerFiber = controllerCtx.plugin(SessionController, {})
         },
       })
       await fiber
+      await controllerFiber
+      controller = controllerCtx?.get('sessionController' as never) as SessionController | undefined
       webFiber = fiber
       if (controller === undefined || controllerCtx === undefined) throw new Error('Web controller fixture did not start')
       abort = new AbortController()
@@ -4755,7 +4825,7 @@ describe('real native Delivery Agent runtime', () => {
           .get(binding.sessionId) as { fencing_token: number }).fencing_token
       } finally { admitted.close() }
       follower = controller.follow(
-        { address: { kind: 'session', sessionId: binding.sessionId as SessionId } },
+        { address: { kind: 'session', sessionId: binding.sessionId as SessionId }, activate: true },
         abort.signal,
       )[Symbol.asyncIterator]()
       const opening = await follower.next()
@@ -4978,9 +5048,7 @@ describe('real native Delivery Agent runtime', () => {
       const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
       const live = fixture.ctx.agents.get(binding.sessionId as SessionId)
       expect(live).toBeDefined()
-      await fixture.ctx.plugin(TypertRegistry)
-      fixture.ctx.provide('attachments', textPromptAttachments())
-      const controller = new SessionController(fixture.ctx, {})
+      const controller = await mountSessionController(fixture.ctx, root)
       await expect(controller.prompt({
         sessionId: binding.sessionId as SessionId,
         requestId: 'web-live-lease-regression' as never,
@@ -5010,10 +5078,7 @@ describe('real native Delivery Agent runtime', () => {
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map())
     try {
-      await fixture.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
-      await fixture.ctx.plugin(TypertRegistry)
-      fixture.ctx.provide('attachments', textPromptAttachments())
-      const controller = new SessionController(fixture.ctx, {})
+      const controller = await mountSessionController(fixture.ctx, root)
       const created = await controller.create({ cwd: root })
       await expect(controller.prompt({
         sessionId: created.sessionId,
@@ -10400,7 +10465,7 @@ describe('real native Delivery Agent runtime', () => {
         ran = true
         liveOwnerAgent = agent
         try {
-          const rejectedNativeCreate = await first.ctx.tools.execute({
+          const rejectedNativeCreate = await executeToolCall(first.ctx, {
             callId: ToolCallId('delivery-native-create-goal-rejected'), name: 'create_goal', agent, signal,
             arguments: { objective: 'Close the September delivery report', max_goal_rounds: 2 },
           })
@@ -10408,14 +10473,14 @@ describe('real native Delivery Agent runtime', () => {
             block.type === 'text' && block.text.includes('direct human turn'))) {
             throw new Error('native create_goal did not reject the delivery source as a non-direct-human turn')
           }
-          const createdGoal = await first.ctx.tools.execute({
+          const createdGoal = await executeToolCall(first.ctx, {
             callId: ToolCallId('delivery-goal-create'), name: 'goal_create', agent, signal,
             arguments: { objective: 'Close the September delivery report', max_goal_rounds: 2 },
           })
           if (createdGoal.isError) throw new Error(`goal_create was rejected: ${JSON.stringify(createdGoal.content)}`)
           const record = first.ctx.assistantGoals.list(agent).at(0)
           if (record === undefined) throw new Error('native goal was not indexed during the owner turn')
-          const checkpoint = await first.ctx.tools.execute({
+          const checkpoint = await executeToolCall(first.ctx, {
             callId: ToolCallId('native-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
             arguments: {
               goal_id: record.id, expected_version: record.version, next_step: 'Review the owner report', blockers: [],
@@ -10488,24 +10553,24 @@ describe('real native Delivery Agent runtime', () => {
     let controlled: ReturnType<AssistantGoalsService['list']>[number] | undefined
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || controlled !== undefined) return await next()
-      const create = await fixture.ctx.tools.execute({
+      const create = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('owner-goal-control-create'), name: 'goal_create', agent, signal,
         arguments: { objective: 'Preserve the original objective', max_goal_rounds: 2 },
       })
       if (create.isError) throw new Error(`goal_control setup create failed: ${JSON.stringify(create.content)}`)
       const initial = fixture.ctx.assistantGoals.list(agent).at(0)
       if (initial === undefined) throw new Error('goal_control setup goal missing')
-      const checkpoint = await fixture.ctx.tools.execute({
+      const checkpoint = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('owner-goal-control-checkpoint'), name: 'goal_checkpoint', agent, signal,
         arguments: { goal_id: initial.id, expected_version: initial.version, next_step: 'Retain this checkpoint', blockers: [], assumptions: [], evidence_refs: ['delivery:owner'], dependencies: [] },
       })
       if (checkpoint.isError) throw new Error('goal_control setup checkpoint failed')
-      const edit = await fixture.ctx.tools.execute({
+      const edit = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('owner-goal-control-edit'), name: 'goal_control', agent, signal,
         arguments: { goal_id: initial.id, expected_revision: 1, operation: 'edit', objective: 'Revised native objective' },
       })
       if (edit.isError) throw new Error(`goal_control edit failed: ${JSON.stringify(edit.content)}`)
-      const stalePause = await fixture.ctx.tools.execute({
+      const stalePause = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('owner-goal-control-stale'), name: 'goal_control', agent, signal,
         arguments: { goal_id: initial.id, expected_revision: 1, operation: 'pause' },
       })
@@ -10513,7 +10578,7 @@ describe('real native Delivery Agent runtime', () => {
       for (const [callId, expectedRevision, operation] of [
         ['owner-goal-control-pause', 2, 'pause'], ['owner-goal-control-resume', 3, 'resume'], ['owner-goal-control-clear', 4, 'clear'],
       ] as const) {
-        const result = await fixture.ctx.tools.execute({ callId: ToolCallId(callId), name: 'goal_control', agent, signal,
+        const result = await executeToolCall(fixture.ctx, { callId: ToolCallId(callId), name: 'goal_control', agent, signal,
           arguments: { goal_id: initial.id, expected_revision: expectedRevision, operation } })
         if (result.isError) throw new Error(`goal_control ${operation} failed: ${JSON.stringify(result.content)}`)
       }
@@ -10564,15 +10629,15 @@ describe('real native Delivery Agent runtime', () => {
     let paused: ReturnType<AssistantGoalsService['list']>[number] | undefined
     first.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (first.service.currentPreferenceTurn(agent) === undefined || paused !== undefined) return await next()
-      const created = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-create'), name: 'goal_create', agent, signal,
+      const created = await executeToolCall(first.ctx, { callId: ToolCallId('round-driver-create'), name: 'goal_create', agent, signal,
         arguments: { objective: 'Drive exactly two retained goal rounds', max_goal_rounds: 2 } })
       if (created.isError) throw new Error(`round-driver create failed: ${JSON.stringify(created.content)}`)
       const record = first.ctx.assistantGoals.list(agent).at(0)
       if (record === undefined) throw new Error('round-driver goal was not indexed')
-      const checkpoint = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-checkpoint'), name: 'goal_checkpoint', agent, signal,
+      const checkpoint = await executeToolCall(first.ctx, { callId: ToolCallId('round-driver-checkpoint'), name: 'goal_checkpoint', agent, signal,
         arguments: { goal_id: record.id, expected_version: record.version, next_step: 'Resume only when the owner requests it', blockers: [], assumptions: [], evidence_refs: ['delivery:round-driver'], dependencies: [] } })
       if (checkpoint.isError) throw new Error('round-driver checkpoint failed')
-      const pause = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-pause'), name: 'goal_control', agent, signal,
+      const pause = await executeToolCall(first.ctx, { callId: ToolCallId('round-driver-pause'), name: 'goal_control', agent, signal,
         arguments: { goal_id: record.id, expected_revision: record.native.revision, operation: 'pause' } })
       if (pause.isError) throw new Error(`round-driver pause failed: ${JSON.stringify(pause.content)}`)
       paused = first.ctx.assistantGoals.list(agent).at(0)
@@ -10591,12 +10656,12 @@ describe('real native Delivery Agent runtime', () => {
     await mountGoals(reopened.ctx)
     let resumedSnapshot = ''
     let resumedRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
-    let autonomousControl: Awaited<ReturnType<typeof reopened.ctx.tools.execute>> | undefined
+    let autonomousControl: ToolExecutionResult | undefined
     reopened.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (reopened.service.currentPreferenceTurn(agent) === undefined) {
         const live = nativeGoals(reopened.ctx).get(agent)
         if (live !== undefined && live.roundsStarted > 0 && autonomousControl === undefined) {
-          autonomousControl = await reopened.ctx.tools.execute({
+          autonomousControl = await executeToolCall(reopened.ctx, {
             callId: ToolCallId('round-driver-autonomous-control'), name: 'goal_control', agent, signal,
             arguments: { goal_id: goalId, expected_revision: live.id === nativeGoalId ? 3 : 1, operation: 'pause' },
           })
@@ -10606,7 +10671,7 @@ describe('real native Delivery Agent runtime', () => {
       if (resumedRecord !== undefined) return await next()
       const existing = reopened.ctx.assistantGoals.list(agent).at(0)
       if (existing === undefined || existing.id !== goalId || existing.native.phase !== 'paused') throw new Error('paused goal was not restored as owner context')
-      const resume = await reopened.ctx.tools.execute({ callId: ToolCallId('round-driver-resume'), name: 'goal_control', agent, signal,
+      const resume = await executeToolCall(reopened.ctx, { callId: ToolCallId('round-driver-resume'), name: 'goal_control', agent, signal,
         arguments: { goal_id: goalId, expected_revision: existing.native.revision, operation: 'resume' } })
       if (resume.isError) throw new Error(`round-driver resume failed: ${JSON.stringify(resume.content)}`)
       resumedSnapshot = reopened.ctx.assistantGoals.snapshot(agent)
@@ -10640,7 +10705,7 @@ describe('real native Delivery Agent runtime', () => {
       if (reader.service.currentPreferenceTurn(agent) !== undefined) {
         const record = reader.ctx.assistantGoals.list(agent).at(0)
         if (record === undefined) throw new Error('exhausted goal record missing after restore')
-        exhaustedResume = await reader.ctx.tools.execute({
+        exhaustedResume = await executeToolCall(reader.ctx, {
           callId: ToolCallId('exhausted-native-goal-resume'), name: 'goal_control', agent, signal,
           arguments: { goal_id: goalId, expected_revision: record.native.revision, operation: 'resume' },
         })
@@ -10686,7 +10751,7 @@ describe('real native Delivery Agent runtime', () => {
     let created: ReturnType<typeof nativeGoals> extends { get(agent: Agent): infer Goal } ? Goal : never
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || created !== undefined) return await next()
-      const result = await fixture.ctx.tools.execute({
+      const result = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('native-goal-continuation-disabled-create'), name: 'goal_create', agent, signal,
         arguments: { objective: 'Do not retain this goal after the foreground reply', max_goal_rounds: 2 },
       })
@@ -10935,7 +11000,7 @@ describe('real native Delivery Agent runtime', () => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined) return await next()
       const existing = nativeGoals(fixture.ctx).get(agent)
       if (existing !== undefined) return await next()
-      const result = await fixture.ctx.tools.execute({
+      const result = await executeToolCall(fixture.ctx, {
         callId: ToolCallId('native-goal-tool-revocation-create'), name: 'goal_create', agent, signal,
         arguments: { objective: 'Never continue after owner revocation', max_goal_rounds: 2 },
       })
@@ -11016,7 +11081,7 @@ describe('real native Delivery Agent runtime', () => {
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
       retainedAgent = agent
-      const result = await fixture.ctx.tools.execute({ callId: ToolCallId('native-goal-timeout-create'), name: 'goal_create', agent, signal,
+      const result = await executeToolCall(fixture.ctx, { callId: ToolCallId('native-goal-timeout-create'), name: 'goal_create', agent, signal,
         arguments: { objective: 'Bound an uncooperative goal tool', max_goal_rounds: 2 } })
       if (result.isError) throw new Error(`timeout setup failed: ${JSON.stringify(result.content)}`)
       return await next()
@@ -11100,7 +11165,7 @@ describe('real native Delivery Agent runtime', () => {
       expect(retainedAgent).toBeDefined()
       // Native handle.dispose is still blocked in whenIdle on the first tool.
       expect(fixture.ctx.agents.get(retainedAgent!.id)).toBe(retainedAgent)
-      const late = await retainedAgent!.ctx.tools.execute({
+      const late = await executeToolCall(retainedAgent!.ctx, {
         callId: ToolCallId('native-goal-late-tool'), name: 'preset_probe', agent: retainedAgent!,
         signal: new AbortController().signal, arguments: {},
       })
@@ -11219,7 +11284,7 @@ describe('real native Delivery Agent runtime', () => {
       } finally { observed.close() }
       // Finishing presentation does not claim the underlying operation stopped.
       expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-host', 1_000)).toMatchObject({ kind: 'unknown' })
-      const late = await retainedAgent!.ctx.tools.execute({ callId: ToolCallId('late-after-deadline'),
+      const late = await executeToolCall(retainedAgent!.ctx, { callId: ToolCallId('late-after-deadline'),
         name: 'preset_probe', agent: retainedAgent!, signal: new AbortController().signal, arguments: {} })
       expect(late.isError).toBe(true)
       expect(fixture.presetExecute).toHaveBeenCalledTimes(mode === 'tool' ? 1 : 0)
@@ -11471,7 +11536,7 @@ describe('real native Delivery Agent runtime', () => {
     })
     fixture.ctx.on('agent/pre-step', async ({ agent: current, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(current) === undefined || nativeGoals(fixture.ctx).get(current) !== undefined) return await next()
-      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-v2-create'), name: 'goal_create', agent: current, signal, arguments: { objective, max_goal_rounds: 1 } })
+      const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-v2-create'), name: 'goal_create', agent: current, signal, arguments: { objective, max_goal_rounds: 1 } })
       if (created.isError) throw new Error('goal-step setup create rejected')
       return await next()
     })
@@ -11544,7 +11609,7 @@ describe('real native Delivery Agent runtime', () => {
     })
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-feedback-create'), name: 'goal_create', agent, signal,
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-feedback-create'), name: 'goal_create', agent, signal,
           arguments: { objective, max_goal_rounds: 2 } })
         if (created.isError) throw new Error(`goal-step feedback setup rejected: ${JSON.stringify(created.content)}`)
       }
@@ -11674,7 +11739,7 @@ describe('real native Delivery Agent runtime', () => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
         // Exercise the actual tool / Delivery owner bridge. A configuration
         // failure must leave no native goal, business row or contract to adopt.
-        const rejected = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-outcome-v3-missing-profile'), name: 'goal_create', agent, signal,
+        const rejected = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-outcome-v3-missing-profile'), name: 'goal_create', agent, signal,
           arguments: { objective: 'A goal without a whole-goal profile', max_goal_rounds: 3 } })
         expect(rejected.isError).toBe(true)
         expect(JSON.stringify(rejected.content)).toContain('configure an exact whole-goal success specification')
@@ -11683,7 +11748,7 @@ describe('real native Delivery Agent runtime', () => {
         try { expect(noContracts.prepare('SELECT id FROM acceptance_contracts').all()).toEqual([]) } finally { noContracts.close() }
         const noGoals = new DatabaseSync(join(root, 'goals.sqlite'), { readOnly: true })
         try { expect(noGoals.prepare('SELECT id FROM goal_records').all()).toEqual([]) } finally { noGoals.close() }
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-outcome-v3-create'), name: 'goal_create', agent, signal,
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-outcome-v3-create'), name: 'goal_create', agent, signal,
           arguments: { objective: `  ${objective}\n`, max_goal_rounds: 3 } })
         if (created.isError) throw new Error(`whole-goal v3 setup rejected: ${JSON.stringify(created.content)}`)
       }
@@ -11868,7 +11933,7 @@ describe('real native Delivery Agent runtime', () => {
     let goalId = ''
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
         if (created.isError) throw new Error('goal-step budget setup rejected')
         goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''
       }
@@ -11955,7 +12020,7 @@ describe('real native Delivery Agent runtime', () => {
     let goalId = ''
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('deepseek-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('deepseek-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
         if (created.isError) throw new Error('production route goal setup rejected')
         goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''
       }
@@ -12028,7 +12093,7 @@ describe('real native Delivery Agent runtime', () => {
     const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
     await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-budget-usage', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
     let goalId = ''
-    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-budget-usage-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } }); if (created.isError) throw new Error('goal-step missing usage setup rejected'); goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? '' }; return await next() })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-budget-usage-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } }); if (created.isError) throw new Error('goal-step missing usage setup rejected'); goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? '' }; return await next() })
     fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-missing-usage', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
     const original = fixture.llm.stream.bind(fixture.llm)
     vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
@@ -12063,7 +12128,7 @@ describe('real native Delivery Agent runtime', () => {
     const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
     await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-tool-budget', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
-    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-tool-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step tool budget setup rejected') }; return await next() })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-tool-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step tool budget setup rejected') }; return await next() })
     fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-tool-budget', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
     const original = fixture.llm.stream.bind(fixture.llm)
     vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
@@ -12096,7 +12161,7 @@ describe('real native Delivery Agent runtime', () => {
     const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
     await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-meter-deadline', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
-    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-meter-deadline-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step meter deadline setup rejected') }; return await next() })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-meter-deadline-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step meter deadline setup rejected') }; return await next() })
     fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-never-settles', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => new Promise<number>(() => {}), inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
     await fixture.service.acceptInbound(message('evt-goal-step-meter-deadline', objective)); await drive(fixture.service); await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
     expect(fixture.llm.requests).toHaveLength(1)
@@ -12118,7 +12183,7 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false })
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-no-profile-create'), name: 'goal_create', agent, signal, arguments: { objective: 'No profile may run', max_goal_rounds: 1 } })
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('goal-step-no-profile-create'), name: 'goal_create', agent, signal, arguments: { objective: 'No profile may run', max_goal_rounds: 1 } })
         if (created.isError) throw new Error('goal-step no-profile create rejected')
       }
       return await next()
@@ -12146,7 +12211,7 @@ describe('real native Delivery Agent runtime', () => {
     await writeFile(join(root, 'report.md'), 'Confirmed result'); await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'definition', version: 2, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
     let goalAgent: Agent | undefined
     let goalSignal: AbortSignal | undefined
-    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { goalAgent = agent; const created = await fixture.ctx.tools.execute({ callId: ToolCallId('definition-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('definition setup rejected') }; return await next() })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { goalAgent = agent; const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('definition-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('definition setup rejected') }; return await next() })
     fixture.presetExecute.mockImplementationOnce(async () => {
       const goal = nativeGoals(fixture.ctx).get(goalAgent!)
       if (!goal) throw new Error('missing native goal')
@@ -12158,7 +12223,7 @@ describe('real native Delivery Agent runtime', () => {
         })
         // The running tool ignores cancellation until this point. Even a new
         // signal cannot grant a second tool call after the admission expired.
-        const late = await goalAgent!.ctx.tools.execute({
+        const late = await executeToolCall(goalAgent!.ctx, {
           callId: ToolCallId('expired-goal-step-late-tool'), name: 'preset_probe',
           agent: goalAgent!, signal: new AbortController().signal, arguments: {},
         })
@@ -12234,19 +12299,19 @@ describe('real native Delivery Agent runtime', () => {
 
     let oldRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
     let replacementContext: unknown
-    let replacementCheckpoint: Awaited<ReturnType<typeof fixture.ctx.tools.execute>> | undefined
-    let replacementControl: Awaited<ReturnType<typeof fixture.ctx.tools.execute>> | undefined
+    let replacementCheckpoint: ToolExecutionResult | undefined
+    let replacementControl: ToolExecutionResult | undefined
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       const turn = fixture.service.currentPreferenceTurn(agent)
       if (turn?.principalId === externalId(principal) && oldRecord === undefined) {
-        const createdGoal = await fixture.ctx.tools.execute({
+        const createdGoal = await executeToolCall(fixture.ctx, {
           callId: ToolCallId('old-owner-goal-create'), name: 'goal_create', agent, signal,
           arguments: { objective: 'Protect the old owner delivery report', max_goal_rounds: 2 },
         })
         if (createdGoal.isError) throw new Error(`old owner goal_create was rejected: ${JSON.stringify(createdGoal.content)}`)
         const indexed = fixture.ctx.assistantGoals.list(agent).at(0)
         if (indexed === undefined) throw new Error('old owner native goal was not indexed')
-        const checkpoint = await fixture.ctx.tools.execute({
+        const checkpoint = await executeToolCall(fixture.ctx, {
           callId: ToolCallId('old-owner-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
           arguments: { goal_id: indexed.id, expected_version: indexed.version, next_step: 'Keep private', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] },
         })
@@ -12255,14 +12320,14 @@ describe('real native Delivery Agent runtime', () => {
         nativeGoals(fixture.ctx).complete(agent, { id: indexed.native.goalId, revision: indexed.native.revision })
       }
       if (turn?.principalId === externalId(replacement) && oldRecord !== undefined) {
-        replacementContext = await fixture.ctx.tools.execute({
+        replacementContext = await executeToolCall(fixture.ctx, {
           callId: ToolCallId('replacement-goal-context'), name: 'goal_context', agent, signal, arguments: {},
         })
-        replacementCheckpoint = await fixture.ctx.tools.execute({
+        replacementCheckpoint = await executeToolCall(fixture.ctx, {
           callId: ToolCallId('replacement-old-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
           arguments: { goal_id: oldRecord.id, expected_version: oldRecord.version, next_step: 'Take over', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] },
         })
-        replacementControl = await fixture.ctx.tools.execute({
+        replacementControl = await executeToolCall(fixture.ctx, {
           callId: ToolCallId('replacement-old-goal-control'), name: 'goal_control', agent, signal,
           arguments: { goal_id: oldRecord.id, expected_revision: oldRecord.native.revision, operation: 'pause' },
         })
@@ -12345,7 +12410,7 @@ describe('real native Delivery Agent runtime', () => {
     let goalId = ''
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
-        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('native-strategy-create'), name: 'goal_create', agent, signal,
+        const created = await executeToolCall(fixture.ctx, { callId: ToolCallId('native-strategy-create'), name: 'goal_create', agent, signal,
           arguments: { objective: 'Compare two native delegated analyses', max_goal_rounds: 1 } })
         if (created.isError) throw new Error(`native strategy goal setup rejected: ${JSON.stringify(created.content)}`)
         goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''

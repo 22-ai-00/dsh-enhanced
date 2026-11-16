@@ -310,6 +310,9 @@ describe('TraeX ACP LLM adapter', () => {
         /* @vite-ignore */ `${import.meta.resolve('@deepseek-ai/dsh-llm')}?foreign-agent-loop-marker`,
       ) as typeof import('@deepseek-ai/dsh-llm')
       const ctx = new Context()
+      ctx.provide('sessionProjections', {
+        register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+      } as never)
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(LlmRuntime)
 
@@ -343,6 +346,7 @@ describe('TraeX ACP LLM adapter', () => {
         id: TEST_SESSION_ID,
         session,
         status: 'running',
+        model: { current: () => ({ provider: 'traex-agent', model: 'default' }), select: () => {} },
         ctx,
       } as unknown as Agent
       ctx.agents.register(agent)

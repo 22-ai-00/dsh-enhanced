@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -28,7 +29,7 @@ async function fixture(acceptance?: 'goal-step', external = false, direct = fals
   const root = await realpath(await mkdtemp(join(tmpdir(), 'avd-'))); const ctx = new Context(); const id = SessionId('owner-session')
   await writeFile(join(root, 'secret'), 'fixture-secret', { mode: 0o600 })
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
-  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as any).ctx = createScope(ctx, agent).ctx; session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
   const grant: ActionGrant = { id: 'verified', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['artifacts/release.txt'], credentialHandle: 'github', expiresAt: Date.now() + 60_000, maxActions: 12, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: !direct }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', ...(acceptance ? { acceptance } : {}) } }
   const agents = new Map<string, Agent>([[id, agent]]); let route = { principalRecordId: 'record', principalVersion: 1, bindingVersion: 1, generation: 1 }; let receiptVersion = 1
@@ -37,7 +38,18 @@ async function fixture(acceptance?: 'goal-step', external = false, direct = fals
   let registration: any; let proof: any = null
   const goals = { trustedAcceptanceProducerGeneration: () => 'goals', registerTaskAcceptanceSink: (value: any) => { registration = value; return () => { registration = undefined } }, inspectAcceptedExecution: async () => proof, taskContext: () => ({ goal: { id: 'goal' } }), inspectGoalLifecycle: () => ({ definition: { digest: 'd'.repeat(64), version: 1 }, native: { sessionId: 'owner-session', goalId: 'native-goal', phase: 'active' } }), inspectWorkflowRunContext: vi.fn(() => ({ goalId: 'goal', nativeGoalId: 'native-goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } })), inspectOwnerGoalExecution: vi.fn((): any => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'complete', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'achieved' } })), inspectOwnerVerifiedArtifacts: vi.fn(() => snapshot()), inspectOwnerAcceptedStepArtifacts: vi.fn(() => ({ ...snapshot(), protocol: 'assistant-goals/accepted-step-artifacts/v1' })) }
   const executors: any[] = [], reconciles: any[] = []; const automations = { registerHostExecutor: (executor: any) => { executors.push(executor); return () => {} }, reconcileSystem: (input: any) => { reconciles.push(input); return { definition: input.definition } } }
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: { init(header: unknown, inherited: number): unknown; apply(state: unknown, event: unknown): unknown }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
     { id: 'agent', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
     { id: 'background', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
@@ -68,7 +80,11 @@ async function fixture(acceptance?: 'goal-step', external = false, direct = fals
   if (broker) cleanups.push(() => broker.close())
   let service!: AssistantActionsService
   const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, broker?.config ?? { stateRoot: join(root, 'actions'), grants: [grant] }, external ? vi.fn() : commit, external ? { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() } as any : { branch: vi.fn(), pullRequest, inspect } as any, undefined, broker?.dispatch) } })
-  const execute = (name: string, args: any) => ctx.tools.execute({ callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
+  const execute = async (name: string, args: any) => (await ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: ToolCallId(`${name}-${Math.random()}`), name, arguments: JSON.stringify(args) }],
+    signal: new AbortController().signal,
+    agent,
+  })).results[0]!.result
   const activate = async (event = 'goal/changed') => { (ctx.emit as any)(event, { taskKind: 'goal-step' }); await new Promise(resolve => setTimeout(resolve, 0)); const active = reconciles.filter(entry => entry.desiredStatus === 'active').at(-1)!; return executors[0].execute({ occurrenceId: 'o', automationId: active.automationId, definitionHash: createHash('sha256').update(JSON.stringify(active.definition)).digest('hex'), executionMode: 'production', targetScope: { workspace: root, preset: 'primary' }, principal: 'owner', ownerRouteId: 'route', activationNonce: active.automationId, catalogDigest: executors[0].descriptor.catalogDigest, signal: new AbortController().signal }) }
   cleanups.push(async () => { await plugin.dispose(); await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   return { root, broker, service, ctx, agent, agents, goals, registration: () => registration, setProof: (value: any) => { proof = value }, repositoryAuthority: compiledAuthority, executors, reconciles, grant, commit, pullRequest, inspect, verifier, notifications, execute, activate, read: (input: any) => service.readRepositoryGoalOutcome(input, new AbortController().signal), prepare: (input: any) => service.prepareVerifiedDelivery(agent, input), revokeRoute: () => { route = { ...route, bindingVersion: 2 } }, changeReceipt: () => { receiptVersion++ } }

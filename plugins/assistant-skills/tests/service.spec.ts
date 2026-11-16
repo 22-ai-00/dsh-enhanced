@@ -7,6 +7,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool, type ToolDefinition, type ToolExecution } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { generateKeyPairSync } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
@@ -31,7 +32,7 @@ function runRows(root: string): number { const database = new DatabaseSync(join(
 function comparisonRows(root: string): number { const database = new DatabaseSync(join(root, 'skills.sqlite')); try { return (database.prepare('SELECT count(*) AS count FROM skill_comparisons').get() as { count: number }).count } finally { database.close() } }
 function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id): Agent {
   const sid = SessionId(sessionId), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id: SessionId(id), options: { provider: 'fixture', model: 'fixture' }, session,
+  const value: Agent = { id: SessionId(id), options: { provider: 'fixture', model: 'fixture' }, model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} }, session,
     inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
@@ -122,7 +123,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     onTrustedTaskChange: (listener: (notice: unknown) => void) => { canonicalListeners.add(listener); return () => canonicalListeners.delete(listener) },
   } as never)
   await new Promise<void>(resolve => setImmediate(resolve))
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(SkillRegistry)
   ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, runtime) => { count++; if (writeGate) await (ignoreWriteAbort ? writeGate : Promise.race([writeGate, new Promise<void>((_resolve, reject) => runtime.signal.addEventListener('abort', () => reject(runtime.signal.reason), { once: true }))])); await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
   if (sourceTool === 'isolation_run') ctx.tools.register(defineTool({ name: 'isolation_run', description: 'Fixture isolated execution marker', parameters: { data: { type: 'string', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async () => 'isolated' }))
@@ -143,7 +144,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: [sourceTool] as string[], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', ...repairProfile, ...(repairIterations > 1 ? { maxIterations: repairIterations, followupProfileIds: ['repair-followup'] } : {}) }, ...(repairIterations > 1 ? [{ id: 'repair-followup', ...repairProfile }] : [])] } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
-  const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
+  const execute = async (name: string, args: unknown, agent = owner) => (await agent.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`call-${Math.random()}`), name, arguments: typeof args === 'string' ? args : JSON.stringify(args) }], signal: new AbortController().signal, agent })).results[0]!.result
   const save = () => execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write the saved artifact with a typed message.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), expected_version: 0 })
   const run = (id = 'first') => execute('skill_run', { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"reused"}', invocation_id: id })
   const candidate = (parentVersion = 0) => execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate writer.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), parent_version: parentVersion, reason: 'Owner requested a trial.', trigger: 'manual review' })

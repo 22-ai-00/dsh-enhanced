@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "publishConfig": {
     "access": "public"
@@ -49,8 +49,8 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0"
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

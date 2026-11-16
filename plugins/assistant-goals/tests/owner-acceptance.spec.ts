@@ -8,6 +8,7 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceCriterion, AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceHandle, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
@@ -146,7 +147,7 @@ async function harness(options: { enabled?: boolean; profiles?: boolean } = {}) 
   await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } })
   await ctx.loader.await()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const human = new Set<Agent>()
   ctx.provide('assistantDelivery' as never, {
     preferencePrincipalForAgent: (agent: Agent) => {

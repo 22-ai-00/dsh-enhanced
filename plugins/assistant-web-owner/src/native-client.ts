@@ -28,7 +28,7 @@ export async function resolveHostWebModules(hostEntrypoint = process.argv[1]): P
 export function createOwnerSessionTree(ctx: Context, Tree: typeof EntryTree, controllerPath: string, adapter: Plugin): EntryTree {
   if (!isAbsolute(controllerPath)) throw new Error('assistant-web-owner: canonical Host controller path required')
   class OwnerSessionTree extends Tree {
-    override write(): void { /* Runtime composition only; no profile write-back. */ }
+    override commit(): void { /* Runtime composition only; no profile write-back. */ }
     override async import(name: string): Promise<Plugin> {
       if (name !== controllerPath) throw new Error('assistant-web-owner: unexpected native client entry')
       return adapter

@@ -125,6 +125,7 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
   session.append('user/message', createUserMessage({ source: { kind: 'user' },
     content: [{ type: 'text', text: 'What package manager does Atlas use?' }] }), { surfaceOp: 'append' })
   const agent: Agent = { id, session, options: {}, inbox: createInboxStub(), ctx, status: 'idle',
+    model: { current: () => ({ provider: 'frozen-provider', model: 'frozen-model' }), select: () => {} },
     cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
   cleanups.push(async () => { for (const instance of runtimes) await instance.close(); await reviewer.close(); reviewLedger.close();

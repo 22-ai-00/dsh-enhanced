@@ -11,6 +11,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { afterEach, expect, test, vi } from 'vitest'
 const repairInputs = vi.hoisted(() => [] as any[])
 vi.mock('../src/repair-agent.ts', () => ({ OwnerRepairAgentRuntime: class {
@@ -32,7 +33,7 @@ import { nativeExecution } from './helpers/native-holdout-fixture.ts'
 const cleanups: (() => Promise<void>)[] = []
 function agent(ctx: Context, workspace: string, id: string): Agent {
   const sid = SessionId(id), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id: sid, options: { provider: 'fixture', model: 'fixture' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context,
+  const value: Agent = { id: sid, options: { provider: 'fixture', model: 'fixture' }, model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
   session.append('turn/start', { turn: 1 }); return value
@@ -61,13 +62,13 @@ test('a public arm mints the Goals capability once through the actual Service cr
   ctx.provide('assistantVerifier' as never, {} as never); ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never)
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source, inspectOwnerGoalExecution: inspection, inspectOwnerFailureTrigger: async () => trigger,
     startOwnerAuthorizedRepair: async (_repairAgent: Agent, input: any, callback: () => void) => { expect(ctx.assistantSkills.ownsOwnerAuthorizedRepair(input, callback)).toBe(true); minted++; repairAchieved = true; return { id: 'repair-goal' } } } as never)
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(SkillRegistry)
   const key = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
   await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], externalHoldouts: [{ id: 'holdout', version: 1, scope, execution: { ...nativeExecution(stateRoot), command: 'true', artifactPath: 'result', expiresAt: Date.now() + 60_000, repeats: 2, maxToolCalls: 1, maxBytes: 1024, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }, authority: { executable: process.execPath, args: [], publicKey: key, generatorDigest: 'e'.repeat(64) }, canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'repair-skill', taskFamily: { goalDefinitionDigest: 'a'.repeat(64), outcomeProfile: { id: 'outcome', version: 1, digest: 'f'.repeat(64) } } }, maxComparisons: 1 }], repairProfiles: [{ id: 'repair', scope, skillName: 'repair-skill', taskFamilyId: 'family', description: 'Repair', externalHoldoutProfileId: 'holdout', allowedTools: ['write'], maxGoalRounds: 1, maxModelCalls: 1, maxToolCalls: 1, maxOutputTokens: 32, maxDurationMs: 30_000, canaryRuns: 1, maxCanaryRuns: 1 }] })
   const service = ctx.assistantSkills
-  const execute = (name: string, arguments_: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${name}`), name, arguments: arguments_, signal: new AbortController().signal, agent: owner })
+  const execute = async (name: string, arguments_: object) => (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`call-${name}`), name, arguments: JSON.stringify(arguments_) }], signal: new AbortController().signal, agent: owner })).results[0]!.result
   expect((await execute('skill_save', { goal_id: 'failed-goal', name: 'repair-skill', description: 'Saved repair skill', bindings_json: '[]' })).isError).toBe(false)
-  const result = await owner.ctx.get('tools')!.execute({ callId: ToolCallId('repair-arm'), name: 'skill_repair_arm', arguments: { goal_id: 'failed-goal', profile_id: 'repair', owner_route_id: 'route', invocation_id: 'once', expires_at: Date.now() + 20_000 }, signal: new AbortController().signal, agent: owner })
+  const result = (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId('repair-arm'), name: 'skill_repair_arm', arguments: JSON.stringify({ goal_id: 'failed-goal', profile_id: 'repair', owner_route_id: 'route', invocation_id: 'once', expires_at: Date.now() + 20_000 }) }], signal: new AbortController().signal, agent: owner })).results[0]!.result
   expect(result.isError).toBe(false); human = false
   await expect.poll(() => (service.repairStatus(owner) as { continuations: readonly unknown[] }).continuations[0], { timeout: 3_000, interval: 100 }).toMatchObject({ state: 'repairing', repair: { goalId: 'repair-goal' } })
   expect(minted).toBe(1)

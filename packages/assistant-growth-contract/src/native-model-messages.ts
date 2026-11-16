@@ -25,9 +25,10 @@ export function matchesIsolatedModelMessages(
   if (messages.length === 2) return true
 
   const contextText = `Current working directory: ${JSON.stringify(expected.workspace)}.`
+  const escapedContextText = contextText.replace(/<\/system-reminder\s*>/giu, tag => `<\\${tag.slice(1)}`)
   const runtime = messages[2]
   if (!isTextMessage(runtime, 'user',
-    `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n${contextText}`)
+    `<system-reminder>\nThe following information describes your current session:\n\n${escapedContextText}\n</system-reminder>`)
     || !isGrowthRecord(runtime)) return false
   const source = runtime.source
   if (!isGrowthRecord(source) || !hasKeys(source, ['kind', 'form', 'sections'])

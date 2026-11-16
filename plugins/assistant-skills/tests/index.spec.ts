@@ -30,7 +30,7 @@ describe('dsh-enhanced-assistant-skills', () => {
       expect(dependency.startsWith('@deepseek-ai/dsh-')).toBe(false)
     }
     for (const dependency of hostPackages) {
-      expect(manifest.peerDependencies[dependency]).toBe('>=0.2.1-rc.2 <0.3.0')
+      expect(manifest.peerDependencies[dependency]).toBe('>=0.2.2-rc.3 <0.3.0')
       expect(manifest.peerDependenciesMeta[dependency]?.optional).toBe(true)
     }
   })

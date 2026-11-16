@@ -49,6 +49,7 @@ function agentFor(sessionId: string, workspace: string, preset: string): Agent {
   session.append('user/message', createUserMessage({ source: { kind: 'user' },
     content: [{ type: 'text', text: 'pnpm project' }] }), { surfaceOp: 'append' })
   return { id, options: {}, session, inbox: createInboxStub(), ctx: new Context(), status: 'idle',
+    model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
     cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal),
     send() {}, followup() {}, steer() {}, inject() {} }
 }

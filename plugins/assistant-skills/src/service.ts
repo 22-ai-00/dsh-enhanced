@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { executeNestedTool } from './tool-batch.js'
 import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -279,6 +280,7 @@ export class AssistantSkillsService extends Service {
   readonly #captureDirty = new Set<string>()
   readonly #captureTasks = new Set<Promise<void>>()
   readonly #deployedExecutions = new Set<AbortController>()
+  #toolsCtx: Context | undefined
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantSkills')
@@ -305,6 +307,10 @@ export class AssistantSkillsService extends Service {
       }, 'assistant-skills.benchmark-service-generation')
     })
     if (this.#repairProfiles.length > 0) this.#installRepairRuntime(ctx)
+    ctx.inject(['tools'], toolsCtx => {
+      this.#toolsCtx = toolsCtx
+      return () => { if (this.#toolsCtx === toolsCtx) this.#toolsCtx = undefined }
+    })
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
@@ -1874,10 +1880,12 @@ export class AssistantSkillsService extends Service {
           revalidate()
           if (!this.#allowed.includes('read')) throw new Error('assistant-skills: current tool allowlist denied required file observation')
           dispatched = true
-          const observed = await settle(exec.agent!.ctx.get('tools')!.execute({
+          if (this.#toolsCtx === undefined) throw new Error('assistant-skills: tools service unavailable')
+          const observed = await settle(executeNestedTool(this.#toolsCtx, {
             callId: ToolCallId(`${exec.callId}:skill-observation:${index + 1}`),
             rootCallId: exec.rootCallId,
             parent: exec.token,
+            ...(exec.toolSet === undefined ? {} : { toolSet: exec.toolSet }),
             agent: exec.agent!,
             name: 'read',
             arguments: { file_path: observation.filePath, limit: 1 },
@@ -1912,7 +1920,17 @@ export class AssistantSkillsService extends Service {
         if (compensation.stopRemainingSteps && step.dependsOn.some(dependency => !succeededById.has(dependency))) { state = 'failed'; break stepsLoop }
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
         dispatched = true
-        const result = await settle(exec.agent!.ctx.get('tools')!.execute({ callId: ToolCallId(`${exec.callId}:skill:${index + 1}`), rootCallId: exec.rootCallId, parent: exec.token, agent: exec.agent!, name: step.toolName, arguments: step.arguments, signal }))
+        if (this.#toolsCtx === undefined) throw new Error('assistant-skills: tools service unavailable')
+        const result = await settle(executeNestedTool(this.#toolsCtx, {
+          callId: ToolCallId(`${exec.callId}:skill:${index + 1}`),
+          rootCallId: exec.rootCallId,
+          parent: exec.token,
+          ...(exec.toolSet === undefined ? {} : { toolSet: exec.toolSet }),
+          agent: exec.agent!,
+          name: step.toolName,
+          arguments: step.arguments,
+          signal,
+        }))
         if (delegated) await delegated.refresh(signal)
         revalidate()
         for (const context of result.additionalContexts ?? []) exec.deferContext(context)

@@ -18,6 +18,7 @@ import { SessionStore } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { DeliveryAdapter, DeliveryOwnerLineage, InboundEnvelope, OutboundIntent, OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery/types'
 import { AssistantPolicyService, type PolicyRule } from '@dsh-enhanced/assistant-policy'
 import { benchmarkSnapshot } from './schema.js'
@@ -179,7 +180,8 @@ export async function createBenchmarkStrategyOwnerRuntime(
     new SessionProjectionRegistry(ctx)
     await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
     ctx.systemPrompt.section({ name: 'benchmark-strategy-persona', order: 0, text: persona, complete: true })
-    await ctx.plugin(ToolRuntime, { mode: 'native' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(runtimeRoot, 'sessions'), compression: 'none' } }); await ctx.loader.await()
     await ctx.plugin(AssistantPolicyService, { databasePath: join(runtimeRoot, 'policy.sqlite'), toolDefaultEffect: 'deny', rules: [

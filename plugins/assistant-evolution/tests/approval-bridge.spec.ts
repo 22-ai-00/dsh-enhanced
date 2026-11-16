@@ -9,7 +9,8 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import {
   AssistantPolicyService,
   setApprovalReviewer,
@@ -128,6 +129,7 @@ function agent(options: { id?: string; cwd?: string; preset?: string } = {}): Ag
     inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -154,6 +156,7 @@ async function openHarness(options: {
   if (options.tools === true) {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
   }
   await ctx.plugin(AssistantPolicyService, {
     databasePath: policyPath,
@@ -279,11 +282,14 @@ async function seedAttributedRetirementEvidence(
   return episodes
 }
 
-function call(name: string, args: Record<string, unknown>, target: Agent) {
+function call(name: string, args: Record<string, unknown>, target: Agent): ToolBatchInput {
   return {
-    callId: ToolCallId(`call-${name}-${Math.random()}`),
-    name,
-    arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`call-${name}-${Math.random()}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal: new AbortController().signal,
     agent: target,
   }
@@ -354,11 +360,11 @@ describe('assistant evolution approval bridge', () => {
     const target = agent()
     await seedCandidate(fixture, 'tool-weekly-report')
 
-    const proposed = await fixture.ctx.tools.execute(call('evolution_propose', {
+    const proposed = (await fixture.ctx.tools.execute(call('evolution_propose', {
       operation: 'adopt',
       situation: 'automation:tool-weekly-report',
       guidance: 'Draft the report a day early.',
-    }, target))
+    }, target))).results[0]!.result
 
     expect(proposed.isError).toBe(false)
     expect(proposed.isError ? undefined : proposed.value).toMatchObject({ status: 'pending' })

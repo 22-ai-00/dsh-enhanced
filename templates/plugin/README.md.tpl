@@ -64,7 +64,7 @@ test('registers and unregisters the native tool with its owning plugin', async (
     const consumer = ctx.plugin(plugin)
     await consumer.await()
     expect(consumer.state).toBe(0) // pending until Tools appears
-    await ctx.plugin(Tools, { mode: 'native' })
+    await ctx.plugin(Tools)
     await consumer.await()
     expect(ctx.tools.schemas().map(tool => tool.name)).toContain('{{PLUGIN_NAME}}_echo')
     await consumer.dispose()

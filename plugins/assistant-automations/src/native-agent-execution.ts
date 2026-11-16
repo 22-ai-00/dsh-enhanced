@@ -477,13 +477,11 @@ class NativeAgentExecution implements AutomationRunner {
             const unbindApproval = delivery.bindAgentApprovalRoute(agent, { bindingId })
             agentCtx.effect(() => unbindApproval, 'assistant-automations.approval-route')
           }
-          installModelSelection(agentCtx, {
-            current: {
-              provider: definition.provider,
-              model: definition.model,
-              ...(this.hostContract?.contract.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(this.hostContract.contract.reasoningEffort) }),
-            },
-            assembled: undefined,
+          installModelSelection(agentCtx)
+          agent.model.select({
+            provider: definition.provider,
+            model: definition.model,
+            ...(this.hostContract?.contract.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(this.hostContract.contract.reasoningEffort) }),
           })
           if (!this.modelOnly) await agentPresets?.mount(agentCtx, presetId)
           const mountedNames = agentCtx.tools.schemas(agent).map(schema => schema.name)

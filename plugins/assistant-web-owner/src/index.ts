@@ -2,7 +2,7 @@ import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from 
 import { SessionController as BundledSessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionAddress, SessionControlFrame, SessionCreateRequest, SessionPromptRequest } from '@deepseek-ai/dsh-api-session-controller'
 import Schema from '@deepseek-ai/schemastery'
-import type { Context } from '@deepseek-ai/cordis'
+import { Service, type Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { realpath } from 'node:fs/promises'
@@ -76,10 +76,14 @@ function ownedControl(frame: SessionControlFrame, access: NativeWebOwnerAccess):
 function ownedAgents(originalRegistry: Context['agents'], access: NativeWebOwnerAccess): unknown {
   return {
     get: (sessionId: SessionId) => access.get(sessionId),
+    list: () => originalRegistry.list().filter(agent => access.ownsSession(agent.id)),
     create: (options: CreateAgentOptions) => access.create(options),
     resume: (options: ResumeAgentOptions) => access.resume(options),
+    turnBoundaryOf: originalRegistry.turnBoundaryOf.bind(originalRegistry),
     currentInitiator: originalRegistry.currentInitiator.bind(originalRegistry),
-    isOwnedBy: originalRegistry.isOwnedBy.bind(originalRegistry),
+    requireInitiator: originalRegistry.requireInitiator.bind(originalRegistry),
+    withInitiator: originalRegistry.withInitiator.bind(originalRegistry),
+    withoutInitiator: originalRegistry.withoutInitiator.bind(originalRegistry),
   }
 }
 
@@ -166,19 +170,33 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
     const tree = createOwnerSessionTree(active, EntryTree, controllerPath, {
       name: 'assistant-web-owner-native-controller',
       inject: Controller.inject,
-      apply(controllerCtx: Context) {
+      async apply(controllerCtx: Context) {
     const controller = new Controller(controllerCtx, {})
+    const controllerRecord = controller as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>
     // Keep the unwrapped methods before installing own properties.  The Typert
     // gateway resolves a Remote operation with Reflect.get(), so the own
     // properties below are intentionally what the gateway sees.
-    const native = Object.fromEntries([
-    'resolveAgent', 'inspect', 'list', 'search', 'create', 'selectModel', 'rename',
-    'attachment', 'updateQueue', 'cancel', 'prompt', 'page', 'follow', 'control',
-    ].map(method => [method, (controller as unknown as Record<string, (...args: unknown[]) => unknown>)[method]!.bind(controller)])) as Record<string, (...args: unknown[]) => unknown>
+    const requiredMethods = [
+      'resolveAgent', 'list', 'search', 'create', 'selectModel', 'rename',
+      'attachment', 'updateQueue', 'cancel', 'prompt', 'page', 'follow', 'control',
+    ] as const
+    const optionalMethods = [
+      'events', 'observeEvent', 'projections', 'observeProjections',
+      'state', 'observeState', 'wait', 'workspaceDesktop',
+    ] as const
+    const native: Record<string, (...args: unknown[]) => unknown> = {}
+    for (const method of requiredMethods) {
+      const fn = controllerRecord[method]
+      if (typeof fn !== 'function') fail(`Host SessionController method "${method}" is unavailable`)
+      native[method] = fn.bind(controller)
+    }
+    for (const method of optionalMethods) {
+      const fn = controllerRecord[method]
+      if (typeof fn === 'function') native[method] = fn.bind(controller)
+    }
     const replace = (method: string, wrapper: (...args: never[]) => unknown) => Object.defineProperty(controller, method, { value: wrapper, enumerable: true, configurable: true, writable: false })
     const call = (method: string, args: unknown[]) => Reflect.apply(native[method]!, controller, args)
     replace('resolveAgent', async (id: SessionId) => { assertOwned(access, id); return call('resolveAgent', [id]) })
-    replace('inspect', async (id: SessionId, signal?: AbortSignal) => { assertOwned(access, id); return call('inspect', [id, signal]) })
     replace('list', async (request: never, signal: AbortSignal) => { const value = await call('list', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
     replace('search', async (request: never, signal: AbortSignal) => { const value = await call('search', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
     replace('create', async (request: SessionCreateRequest) => {
@@ -217,6 +235,13 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
     assertOwned(access, id)
     return page
     })
+    if (native.events !== undefined) replace('events', async (request: { address: SessionAddress }, signal: AbortSignal) => {
+      const id = sessionIdForAddress(request.address)
+      assertOwned(access, id)
+      const page = await call('events', [request, signal])
+      assertOwned(access, id)
+      return page
+    })
     replace('follow', async function* (request: { address: SessionAddress }, signal: AbortSignal) {
     const id = sessionIdForAddress(request.address)
     assertOwned(access, id)
@@ -225,9 +250,38 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
       yield frame
     }
     })
+    if (native.observeEvent !== undefined) replace('observeEvent', async function* (request: { address: SessionAddress }, signal: AbortSignal) {
+      const id = sessionIdForAddress(request.address)
+      assertOwned(access, id)
+      for await (const frame of call('observeEvent', [request, signal]) as AsyncIterable<unknown>) {
+        assertOwned(access, id)
+        yield frame
+      }
+    })
+    for (const method of ['projections', 'state', 'wait'] as const) {
+      if (native[method] !== undefined) replace(method, async (request: { sessionId: SessionId }, signal: AbortSignal) => {
+        assertOwned(access, request.sessionId)
+        return call(method, [request, signal])
+      })
+    }
+    for (const method of ['observeProjections', 'observeState'] as const) {
+      if (native[method] !== undefined) replace(method, async function* (request: { sessionId: SessionId }, signal: AbortSignal) {
+        assertOwned(access, request.sessionId)
+        for await (const frame of call(method, [request, signal]) as AsyncIterable<unknown>) {
+          assertOwned(access, request.sessionId)
+          yield frame
+        }
+      })
+    }
     replace('control', async function* (signal: AbortSignal) { for await (const frame of call('control', [signal]) as AsyncIterable<SessionControlFrame>) { const filtered = ownedControl(frame, access); if (filtered !== undefined) yield filtered } })
     replace('openWorkspacePath', async () => fail('opening arbitrary host paths is disabled for the Web owner'))
     replace('canOpenWorkspacePath', () => false)
+    if (typeof controllerRecord.workspacePathApplications === 'function') replace('workspacePathApplications', async () => [])
+    if (native.workspaceDesktop !== undefined) replace('workspaceDesktop', () => ({ ...(call('workspaceDesktop', []) as Record<string, unknown>), available: false }))
+    if (typeof controllerRecord.initializeDefaultModel === 'function') replace('initializeDefaultModel', async () => fail('initializing the Host default model is disabled for the Web owner'))
+    // Cordis Service classes defer async initialization to [Service.init], which only
+    // runs automatically when mounted directly rather than constructed inside apply().
+    await (controller as unknown as Partial<Record<symbol, () => Promise<void> | void>>)[Service.init]?.()
       },
     })
     // Register cleanup before starting any child, including a partial failure.

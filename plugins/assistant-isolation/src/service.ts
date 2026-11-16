@@ -86,6 +86,7 @@ export class AssistantIsolationService extends Service {
     }
     this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
     ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) this.#abortStartup() })
+    ctx.on('internal/status', fiber => { if (fiber === ctx.fiber && (fiber.state === 5 || fiber.state === 4)) this.#abortStartup() })
     ctx.on('tools/execute', async (execution, next) => {
       const header = execution.agent?.session.header
       if (header !== undefined && this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
@@ -107,6 +108,12 @@ export class AssistantIsolationService extends Service {
   get ready(): Promise<void> { return this.#ready }
 
   async [Service.init](): Promise<void> { await this.#ready }
+
+  #isActive(): boolean {
+    const fiber = this.ctx?.fiber
+    // Cordis 4.1.0 transitions fiber.state to UNLOADING (5) before dependents unload or uid clears.
+    return this.#active && fiber?.uid !== null && fiber?.state !== 5 && fiber?.state !== 4
+  }
 
   #abortStartup(): void {
     this.#active = false
@@ -144,14 +151,60 @@ export class AssistantIsolationService extends Service {
     this.ctx.inject(['systemPrompt'], runtime => runtime.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
       const assembly = await next()
       if (!this.#configuredOwnerScope(agent)) return assembly
+      // Model-facing tool declarations are restricted via agent.ctx.tools.restrict;
+      // filter matching tool prompt sections and append the isolated capability notice.
       return { ...assembly,
-        tools: assembly.tools.filter(tool => isolatedPromptTools.has(tool.name)),
         // Append a capability fact without replacing deployment persona or safety sections.
         sections: [...assembly.sections.filter(section => !section.name.startsWith('tools:') || isolatedPromptTools.has(section.name.slice('tools:'.length))),
           { name: 'assistant-isolation:restricted-scope', text: restrictedScopeSection }],
       }
     }))
-    this.ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))
+    this.ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => {
+      registerIsolationTools(runtime, this)
+      const restrictions = new Map<Agent, () => void>()
+      let syncing = false
+      const syncAgent = (agent: Agent): void => {
+        restrictions.get(agent)?.()
+        restrictions.delete(agent)
+        const header = agent.session.header
+        if (!this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)) return
+        const candidates = runtime.tools.schemas(agent).map(schema => schema.name).filter(name => !isolatedPromptTools.has(name))
+        if (candidates.length === 0) return
+        try {
+          restrictions.set(agent, agent.ctx.tools.restrict({ deny: candidates }))
+        } catch {
+          // If the agent owns a scope-local registration, restrict() refuses that
+          // name; fall back to restricting all global non-isolated tools instead.
+          const globalDenied = runtime.tools.schemas().map(schema => schema.name).filter(name => !isolatedPromptTools.has(name))
+          if (globalDenied.length > 0) restrictions.set(agent, agent.ctx.tools.restrict({ deny: globalDenied }))
+        }
+      }
+      const syncAll = (): void => {
+        if (syncing) return
+        syncing = true
+        try {
+          for (const agent of runtime.agents.list()) syncAgent(agent)
+        } finally { syncing = false }
+      }
+      syncAll()
+      runtime.on('agent/created', ({ agent }) => {
+        if (syncing) return
+        syncing = true
+        try { syncAgent(agent) } finally { syncing = false }
+      })
+      runtime.on('agent/disposed', ({ agent }) => {
+        restrictions.get(agent)?.()
+        restrictions.delete(agent)
+      })
+      runtime.on('tools/change', () => syncAll())
+      runtime.effect(() => () => {
+        syncing = true
+        try {
+          for (const dispose of restrictions.values()) dispose()
+          restrictions.clear()
+        } finally { syncing = false }
+      }, 'assistant-isolation.scoped-tool-restrictions')
+    })
   }
 
   #scheduleSweep(): void {
@@ -179,7 +232,7 @@ export class AssistantIsolationService extends Service {
   }
 
   #ownerIdentity(agent: Agent | undefined): IsolationIdentity {
-    if (!this.#active || !this.#ledger.hasController(this.#controller())) throw new Error('assistant-isolation: controller unavailable')
+    if (!this.#isActive() || !this.#ledger.hasController(this.#controller())) throw new Error('assistant-isolation: controller unavailable')
     if (agent === undefined || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-isolation: exact live agent required')
     const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
     if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-isolation: authenticated owner required')
@@ -237,7 +290,7 @@ export class AssistantIsolationService extends Service {
 
   /** Private Host readback; never exposed as a model tool or filesystem path. */
   readAcceptedArtifact = (input: TaskAcceptanceContract, path: string) => {
-    if (!this.#active || !this.#ledger.hasController(this.#controller())) throw new Error('assistant-isolation: artifact source unavailable')
+    if (!this.#isActive() || !this.#ledger.hasController(this.#controller())) throw new Error('assistant-isolation: artifact source unavailable')
     const contract = validateTaskAcceptanceContract(input)
     if (contract.protocol !== 'task-acceptance/v4' || contract.task.kind !== 'goal-step') throw new Error('assistant-isolation: artifact source must be a goal step')
     const job = this.#ledger.acceptedArtifactJob(contract.id, contract.digest, path)

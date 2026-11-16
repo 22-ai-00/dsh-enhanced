@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import { isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
 import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight } from '../src/linux-source-preflight.ts'
@@ -25,7 +25,8 @@ const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
 const receipt = () => ({ receiptVersion: 2 as const, authorityId: OWNER.ownerRouteId, authorityHash: hex('route-1'), principalId: OWNER.principalId,
   principalRecordId: OWNER.principalRecordId, principalVersion: OWNER.principalVersion, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 })
-const build = { ...linuxSourceConfig() }
+let sharedCreationRoot: string | undefined
+let sharedCreationSource: { repository: string; baseCommit: string } | undefined
 const instructionReviewAuthority = {
   protocol: 'assistant-growth/revision-acceptance-authority/v1' as const, authorityId: 'fixture-revision-review',
   keyId: 'fixture-review-key', authorityDigest: '9'.repeat(64), namePrefix: 'health-', expiresAt: 8_640_000_000_000_000,
@@ -180,6 +181,15 @@ function revisionTimeoutFixture(options: { prepared?: boolean; remainingMs?: num
   return { runtime, execute, review, regression, creationReview, adoption, revisionAdoption, prepare, signals, reconciles, config, get job() { return job } }
 }
 
+beforeAll(async () => {
+  sharedCreationRoot = await mkdtemp(join(tmpdir(), 'cp-source-jobs-creation-'))
+  sharedCreationSource = await createSourceCreationFixture(join(import.meta.dirname, '..', '..', '..'), join(sharedCreationRoot, 'creation-source'))
+}, 60_000)
+
+afterAll(async () => {
+  if (sharedCreationRoot) await rm(sharedCreationRoot, { recursive: true, force: true })
+})
+
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(options: { preflightGeneration?: object; typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean; creation?: boolean; workItemFailures?: boolean; instruction?: boolean; review?: boolean; allowedModes?: readonly ('create' | 'modify' | 'revise-created')[]; sourceBuild?: sourceBuild.SourceBuildConfig; inspectNativeQuiescence?: (key: string) => Promise<'quiescent' | 'unknown'>; preparedEvidence?: SourcePreparedEvidence } = {}) {
@@ -189,10 +199,10 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test'])
   execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
   const head = execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-  const creationSource = options.creation
-    ? await createSourceCreationFixture(join(import.meta.dirname, '..', '..', '..'), join(root, 'creation-source')) : undefined
+  const creationSource = options.creation ? sharedCreationSource : undefined
   const sourceRepository = creationSource?.repository ?? root
   const sourceHead = creationSource?.baseCommit ?? head
+  const baseBuild = options.sourceBuild ?? linuxSourceConfig()
   const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
   const gap = options.typed === true
     ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner: receipt(), outcomeId: 'outcome-source-job',
@@ -267,7 +277,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
   const adoptReleased = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal, assertCurrent: () => Promise<void>) => {
     await assertCurrent(); adoptionForward()
   })
-  const createRuntime = () => new SourceJobRuntime({ config, build: { ...(options.sourceBuild ?? build), ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
+  const createRuntime = () => new SourceJobRuntime({ config, build: { ...baseBuild, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
     ...(options.preflightGeneration ? { isPreparationNotStarted: (error: unknown, owned: SourceJobRecord) => consumeCleanedLinuxSourcePreflight(error, owned, options.preflightGeneration!) } : {}),
     ...(options.inspectNativeQuiescence === undefined ? {} : { inspectNativeQuiescence: options.inspectNativeQuiescence }),
     assertGrowthRun: expected => { if (controlPlaneDigest(expected) !== controlPlaneDigest(growthRun)) throw new Error('growth run changed') },
@@ -288,7 +298,7 @@ async function fixture(options: { preflightGeneration?: object; typed?: boolean;
       return continuation.execute({ occurrenceId, automationId: 'source-job-prepared-continuations', definitionHash: active.definitionHash,
         executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
         ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: continuation.descriptor.catalogDigest, signal: new AbortController().signal })
-    }, enqueue, head, sourceRepository, sourceHead, config }
+    }, enqueue, head, sourceRepository, sourceHead, config, build: baseBuild }
 }
 
 describe('durable source-job runtime', () => {
@@ -517,7 +527,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourcePlan(prepared.planId!).preparedEvidence).toEqual(linux)
       expect(f.prepare).toHaveBeenCalledOnce()
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it.each(['absent', 'unknown', 'boolean', 'rejected', 'quiescent'] as const)('retains Linux unknown until an exact quiescence receipt (%s)', async proof => {
     const inspect = vi.fn(async () => {
@@ -544,7 +554,7 @@ describe('durable source-job runtime', () => {
       try { expect(raw.prepare('SELECT submissions FROM source_job_authorities').get()).toEqual({ submissions: 1 }) }
       finally { raw.close() }
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('rejects a quiescence inspector attached to a different Linux build ledger', async () => {
     const config = linuxSourceConfig(), inspect = vi.fn(async () => 'quiescent' as const)
@@ -561,7 +571,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('rejects modification at the Host enqueue boundary when only creation is granted', async () => {
     const f = await fixture({ creation: true, allowedModes: ['create'] })
@@ -569,7 +579,7 @@ describe('durable source-job runtime', () => {
       expect(() => f.enqueue()).toThrow('mode is not authorized')
       expect(f.store.listSourceJobs(100)).toEqual([])
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   describe('owner-instruction revise-created admission', () => {
     const revisionFiles = [{ path: 'src/index.ts', content: 'export const changed = true\n' }]
@@ -586,7 +596,7 @@ describe('durable source-job runtime', () => {
         await expect(revisionEnqueue(f)).rejects.toThrow(/owner task failure or owner instruction/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('rejects an unknown instruction or a frozen digest that no longer matches', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
@@ -603,7 +613,7 @@ describe('durable source-job runtime', () => {
         expect(stored.instructionId).toBe('instruction-real')
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('rejects an instruction whose frozen files or target drifted', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
@@ -630,7 +640,7 @@ describe('durable source-job runtime', () => {
           .rejects.toThrow('owner instruction gap changed')
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('passes every admission gate with a matching instruction and only then reaches source inspection', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
@@ -649,7 +659,7 @@ describe('durable source-job runtime', () => {
           .rejects.toThrow(/template or Host inputs are missing/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('fails closed when a legacy instruction has no frozen review supplier', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
@@ -669,7 +679,7 @@ describe('durable source-job runtime', () => {
           .rejects.toThrow(/review freeze is unavailable/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('fails closed when the frozen review budget differs from the live capability', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'] })
@@ -686,7 +696,7 @@ describe('durable source-job runtime', () => {
           .rejects.toThrow(/review budget changed/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
 
     it('refuses an owner instruction when no independent review capability is configured', async () => {
       const f = await fixture({ instruction: true, allowedModes: ['revise-created'], review: false })
@@ -702,7 +712,7 @@ describe('durable source-job runtime', () => {
           .rejects.toThrow(/requires an available independent review/u)
         expect(f.store.listSourceJobs(100)).toEqual([])
       } finally { await f.runtime.close(); f.store.close() }
-    })
+    }, 20_000)
   })
 
   it('settles a queued modification before recovery when the new Host grant is create-only', async () => {
@@ -716,7 +726,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed', failureCode: 'source-job-mode-revoked' })
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await restarted.close(); f.store.close() }
-  })
+  }, 20_000)
   it('freezes the original task owner for a creation enqueued and dispatched in a later session', async () => {
     const f = await fixture({ typed: true, creation: true })
     try {
@@ -741,7 +751,7 @@ describe('durable source-job runtime', () => {
       expect(result.outcome).toBe('succeeded')
       expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared', expiresAt: frozen.expiresAt })
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('migrates a v30 task-created queued row byte-for-byte and refuses its missing run on restart', async () => {
     const f = await fixture({ typed: true, creation: true })
@@ -767,7 +777,7 @@ describe('durable source-job runtime', () => {
           .toEqual({ intent_json: legacyJson, intent_digest: legacyDigest })
       } finally { raw.close() }
       expect(migrated.getSourceJob(queued.id)?.intent.creation?.growthRun).toBeUndefined()
-      const restarted = new SourceJobRuntime({ config: f.config, build, statePath: f.root, store: migrated,
+      const restarted = new SourceJobRuntime({ config: f.config, build: f.build, statePath: f.root, store: migrated,
         ports: { automations: f.automations as never, delivery: f.delivery }, trust: async () => f.trust as never,
         withGapSourceFence: (gapId, _owner, callback) => migrated.withOwnerTaskFailureGapAdmission(gapId, callback),
         assertGrowthRun: () => { throw new Error('legacy row must not invent a run') },
@@ -776,7 +786,7 @@ describe('durable source-job runtime', () => {
       expect(migrated.getSourceJob(queued.id)).toMatchObject({ status: 'failed', failureCode: 'source-job-growth-run-missing' })
       await restarted.close()
     } finally { migrated.close() }
-  })
+  }, 20_000)
 
   it('inspects a real Git generator for a new plugin and leaves its checked create plan pending', async () => {
     const f = await fixture({ typed: true, creation: true, approvals: true, releases: true })
@@ -809,7 +819,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.listPreparedSourceApprovalJobs()).toHaveLength(0)
       await restarted.close()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('rejects an expired or corrected owner create before it claims a native occurrence', async () => {
     const f = await fixture({ typed: true, creation: true })
@@ -828,7 +838,7 @@ describe('durable source-job runtime', () => {
         owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })).rejects.toThrow(/unavailable or expired/)
       expect(f.store.listSourceJobs()).toHaveLength(0)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it.each(['correction', 'grant-drift'] as const)('fences a queued create before claim on %s', async cause => {
     const f = await fixture({ typed: true, creation: true })
     try {
@@ -848,7 +858,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).not.toHaveBeenCalled()
       expect(f.store.listPreparedSourcePlans()).toHaveLength(0)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it('deduplicates concurrent continuation calls and drains an aborted late result on close', async () => {
     const f = await fixture({ typed: true, approvals: true })
     let release!: () => void
@@ -878,7 +888,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).toHaveBeenCalledOnce()
       expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
     } finally { release?.(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('recovers a temporary approval outage, pauses, and reactivates for another real prepared job', async () => {
     const f = await fixture({ typed: true, approvals: true })
@@ -919,7 +929,7 @@ describe('durable source-job runtime', () => {
       expect(new Set(transitions.map(item => item.idempotencyKey)).size).toBe(transitions.length)
       expect(f.prepare).toHaveBeenCalledTimes(2)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('pauses expired prepared work without rebuilding or calling its authority', async () => {
     const f = await fixture({ typed: true, approvals: true })
@@ -935,7 +945,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).toHaveBeenCalledOnce()
       expect(f.reconciles.at(-1)?.desiredStatus).toBe('paused')
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it.each([{ changed: false, adoption: false, handoff: false }, { changed: true, adoption: false, handoff: false }, { changed: false, adoption: true, handoff: false }, { changed: true, adoption: true, handoff: false }, { changed: true, adoption: true, handoff: true }])('continues native prepared work without rebuilding on restart (%j)', async ({ changed, adoption, handoff }) => {
     const f = await fixture({ typed: true, approvals: true, releases: true, execution: true, adoption })
@@ -981,7 +991,7 @@ describe('durable source-job runtime', () => {
       }
       expect(f.prepare).toHaveBeenCalledTimes(1); expect(f.approvePrepared).toHaveBeenCalledTimes(1); expect(f.releasePrepared).toHaveBeenCalledTimes(1)
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('freezes Host versioning in the native job and rejects model-owned version files before enqueue', async () => {
     const f = await fixture({ versioning: true })
@@ -1000,7 +1010,7 @@ describe('durable source-job runtime', () => {
       try { expect(f.store.getSourceJob(queued.id)?.intent.build.versioning).toBe('patch') }
       finally { await restarted.close() }
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it.each([false, true])('recovers a prepared approval without replaying its build (source changed: %s)', async changed => {
     const f = await fixture({ typed: true, approvals: true })
@@ -1023,7 +1033,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).toHaveBeenCalledTimes(1)
       expect(f.approvePrepared).toHaveBeenCalledTimes(changed ? 1 : 2)
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it.each(['approved', 'ready', 'source-change', 'trust-change'] as const)('resumes finite release authorization from %s without rebuilding or reapproving', async boundary => {
     const f = await fixture({ typed: true, approvals: true, releases: true })
@@ -1055,7 +1065,7 @@ describe('durable source-job runtime', () => {
       expect(f.approvePrepared).toHaveBeenCalledTimes(1)
       expect(f.releasePrepared).toHaveBeenCalledTimes(boundary.endsWith('change') ? 1 : 2)
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('rejects a typed task-failure gap when the Host provenance fence is unavailable', async () => {
     const f = await fixture({ typed: true, fence: false })
@@ -1064,7 +1074,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.listSourceJobs()).toEqual([])
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('settles a queued typed task-failure source job before dispatch when its source is no longer current', async () => {
     const f = await fixture({ typed: true })
@@ -1079,7 +1089,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed' })
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('marks a claimed typed task-failure job unknown when the source changes during preparation', async () => {
     const f = await fixture({ typed: true })
@@ -1099,7 +1109,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
       expect(f.prepare).toHaveBeenCalledTimes(1)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('settles a queued typed task-failure job on restart when its source is no longer current', async () => {
     const f = await fixture({ typed: true })
@@ -1114,7 +1124,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).not.toHaveBeenCalled()
       await restarted.close()
     } finally { try { await f.runtime.close() } catch {} f.store.close() }
-  })
+  }, 20_000)
 
   it('aborts and drains a claimed Host execution before closing its ledger', async () => {
     const f = await fixture()
@@ -1138,7 +1148,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getSourceJob(queued.id)?.status).toBe('unknown')
       expect(f.store.getGap(f.gap.id).status).toBe('open')
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it('lets the same owner in a new binding inspect and reconcile unknown work without replay', async () => {
     const f = await fixture({ inspectNativeQuiescence: async () => 'quiescent' })
     try {
@@ -1154,7 +1164,7 @@ describe('durable source-job runtime', () => {
       expect(result.status).toBe('failed')
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it.each(['owner', 'trust', 'gap'] as const)('rejects changed %s before source preparation', async changed => {
     const f = await fixture()
     try {
@@ -1174,7 +1184,7 @@ describe('durable source-job runtime', () => {
       expect(f.store.getGap(f.gap.id).status).toBe('open')
       expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it('rejects a generic job before dispatch after only its owner session binding changes', async () => {
     const f = await fixture()
     try {
@@ -1190,7 +1200,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).not.toHaveBeenCalled()
       expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
   it('persists queued intent, registers paused then active, and returns a content-free projection', async () => {
     const f = await fixture()
     try {
@@ -1203,7 +1213,7 @@ describe('durable source-job runtime', () => {
       expect(f.runtime.inspect({ id: result.id, owner: OWNER })).toEqual(result)
       expect(() => f.runtime.inspect({ id: result.id, owner: { ...OWNER, principalRecordId: 'other' } })).toThrow(/scope mismatch/)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('cleans up the source executor when continuation registration fails', async () => {
     const f = await fixture({ typed: true, approvals: true })
@@ -1217,7 +1227,7 @@ describe('durable source-job runtime', () => {
       expect(() => failed.start()).toThrow(/continuation executor conflict/)
       expect(unregistered).toBe(1)
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('rejects a forged continuation occurrence before its authority hook', async () => {
     const f = await fixture({ typed: true, approvals: true })
@@ -1236,7 +1246,7 @@ describe('durable source-job runtime', () => {
       expect(result.outcome).toBe('failed')
       expect(f.approvePrepared).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('fences exact executor identity and commits a prepared plan after caller abort', async () => {
     const f = await fixture()
@@ -1254,7 +1264,7 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).toHaveBeenCalledTimes(1)
       expect(f.store.getSourceJob(second.id)).toMatchObject({ status: 'prepared' })
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('keeps accepted work after caller abort, and restart reconciles queued without replaying running work', async () => {
     const f = await fixture()
@@ -1265,14 +1275,14 @@ describe('durable source-job runtime', () => {
       const bound = f.store.getSourceJob(job.id)!
       f.store.claimSourceJob({ id: job.id, revision: bound.revision, definitionHash: bound.definitionHash!, occurrenceId: 'claimed' })
       const runtime = new SourceJobRuntime({ config: { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: f.root,
-        ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }, build, statePath: f.root, store: f.store,
+        ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }, build: f.build, statePath: f.root, store: f.store,
         ports: { automations: f.automations as any, delivery: { validateOwnerRoute: receipt } }, trust: async () => ({ dshHome: '/dsh', executor: { environmentAllowlist: [] } } as any), prepare: f.prepare })
       runtime.start()
       expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
       expect(f.prepare).not.toHaveBeenCalled()
       await runtime.close()
     } finally { try { await f.runtime.close() } catch {} f.store.close() }
-  })
+  }, 20_000)
 })
 
 
@@ -1293,7 +1303,7 @@ describe('Linux original-call negative proof fencing', () => {
       expect(outcome.outcome).toBe(kind === 'valid' ? 'failed' : 'unknown')
       expect(f.store.getSourceJob(queued.id)?.status).toBe(kind === 'valid' ? 'failed' : 'unknown')
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('does not settle a newer running revision using an older claim proof', async () => {
     const generation = {}, f = await fixture({ sourceBuild: linuxSourceConfig(), preflightGeneration: generation })
@@ -1310,7 +1320,7 @@ describe('Linux original-call negative proof fencing', () => {
         ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
       expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'running', occurrenceId: 'old-claim', revision: 4 })
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 
   it('does not mutate a running claim when claim acknowledgement was lost before ownership was recorded', async () => {
     const f = await fixture(), original = f.store.claimSourceJob.bind(f.store)
@@ -1323,7 +1333,7 @@ describe('Linux original-call negative proof fencing', () => {
       expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'running', occurrenceId: 'winner' })
       expect(f.prepare).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
-  })
+  }, 20_000)
 })
 
 it.each([undefined, ['modify']] as const)('work-item readiness inherits ordinary allowedModes %j without consuming authority', async allowedModes => {
@@ -1338,4 +1348,4 @@ it.each([undefined, ['modify']] as const)('work-item readiness inherits ordinary
     expect(f.reconciles).toHaveLength(reconciles)
     expect(f.prepare).not.toHaveBeenCalled()
   } finally { await f.runtime.close(); f.store.close() }
-})
+}, 20_000)

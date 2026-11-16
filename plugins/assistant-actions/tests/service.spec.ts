@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -32,6 +33,7 @@ function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('action-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
   const value: Agent = { id, options: { provider: 'test', model: 'test' }, session,
+    model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} },
     inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
@@ -73,7 +75,18 @@ test.runIf(process.platform === 'linux')('real ToolRuntime, Keychain and HTTP ex
   const grant: ActionGrant = { id: 'fix', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1,
     workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'allowed', paths: ['a.txt'], credentialHandle: 'github', expiresAt: Date.now() + 120_000, maxActions: 8, maxTotalBytes: 100_000 }
   try {
-    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
+    ctx.provide('sessionProjections' as never, {
+      async register(definition: { init(header: unknown, inherited: number): unknown; apply(state: unknown, event: unknown): unknown }) {
+        return Object.assign(() => {}, {
+          stateOf(session: Session) {
+            let state = definition.init(session.header, 0)
+            for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+            return state
+          },
+        })
+      },
+    } as never)
+    await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(ApprovalService, { policy: 'ask' })
     await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', budgets: [{ id: 'commits', metric: 'dispatches', limit: 3, periodMs: 60_000, scope: 'subject' }], rules: [
       { id: 'action', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:fix' }, budget: { id: 'commits', amount: 1 } },
       { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
@@ -91,8 +104,16 @@ test.runIf(process.platform === 'linux')('real ToolRuntime, Keychain and HTTP ex
     ctx.tools.register(defineTool({ name: 'bash', description: 'Host execution canary', parameters: {}, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async () => { hostExecutions++; return 'host executed' } }))
     plugin = await load()
     const input = { grantId: 'fix', idempotencyKey: 'first', expectedHeadOid: head, headline: 'bounded change', files: [{ path: 'a.txt', content: 'content' }] }
-    const execute = async (request = input) => await ctx.tools.execute({ callId: ToolCallId(`call-${Math.random()}`), name: 'action_github_commit', arguments: request, signal: new AbortController().signal, agent: owner })
-    const hostResult = await ctx.tools.execute({ callId: ToolCallId('host-canary'), name: 'bash', arguments: {}, signal: new AbortController().signal, agent: owner })
+    const execute = async (request = input) => (await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId(`call-${Math.random()}`), name: 'action_github_commit', arguments: JSON.stringify(request) }],
+      signal: new AbortController().signal,
+      agent: owner,
+    })).results[0]!.result
+    const hostResult = (await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId('host-canary'), name: 'bash', arguments: '{}' }],
+      signal: new AbortController().signal,
+      agent: owner,
+    })).results[0]!.result
     expect(hostResult.isError).toBe(true); expect(hostExecutions).toBe(0)
     allowHostCanary = false; asks = 0
     const first = await execute()

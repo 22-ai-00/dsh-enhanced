@@ -14,6 +14,7 @@ import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
@@ -2697,7 +2698,12 @@ export class AssistantDeliveryService extends Service {
       if (live !== agent || live.session !== agent.session || String(agent.session.id) !== sessionId) {
         return { state: 'invalid' }
       }
-      if (!agents.roots().includes(agent)) return { state: 'invalid' }
+      // 0.2.2 removed AgentRegistry.roots(): creation ownership is implicit in the
+      // creating fiber, so a subagent child is identified by its durable session
+      // lineage instead of a registry ownership query.
+      if (agent.session.header.origin === 'subagent' || agent.session.header.delegationDepth !== undefined) {
+        return { state: 'invalid' }
+      }
     }
     const binding = this.deliveryStore.getBindingBySession(sessionId)
     // Absence from Delivery means this question may belong to another UI

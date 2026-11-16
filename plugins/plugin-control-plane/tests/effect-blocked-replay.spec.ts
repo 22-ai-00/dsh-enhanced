@@ -97,9 +97,11 @@ test('uses actual native ToolRuntime and Delivery admission: target effects are 
   expect(f.toolBodies()).toBe(0)
   expect(f.outbox()).toEqual([])
   expect(f.ctx.agents.get(f.target.agent.id)).toBeUndefined()
-  const allowed = await f.other.agent.ctx.tools.execute({ callId: 'other-agent-call' as never, name: 'replay_effect_probe', arguments: {},
-    agent: f.other.agent, signal: new AbortController().signal })
-  expect(allowed).toMatchObject({ isError: false })
+  const allowedBatch = await f.other.agent.ctx.tools.execute({
+    calls: [{ type: 'tool-call', id: 'other-agent-call' as never, name: 'replay_effect_probe', arguments: '{}' }],
+    agent: f.other.agent, signal: new AbortController().signal,
+  })
+  expect(allowedBatch.results[0]?.result).toMatchObject({ isError: false })
   expect(f.toolBodies()).toBe(1)
   await f.other.dispose()
 })
@@ -135,8 +137,10 @@ test('rejects an additional native ToolRuntime call for the owned Agent', async 
   f.ctx.on('tools/pre-execute', async (execution, next) => {
     if (execution.agent === f.target.agent && !injected) {
       injected = true
-      await f.target.agent.ctx.tools.execute({ callId: 'unexpected-native-call' as never, name: 'replay_effect_probe', arguments: {},
-        agent: f.target.agent, signal: new AbortController().signal })
+      await f.target.agent.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: 'unexpected-native-call' as never, name: 'replay_effect_probe', arguments: '{}' }],
+        agent: f.target.agent, signal: new AbortController().signal,
+      })
     }
     return await next()
   })

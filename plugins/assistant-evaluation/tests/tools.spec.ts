@@ -5,7 +5,8 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { afterEach, describe, expect, test } from 'vitest'
 import { ASSISTANT_EVALUATION_SKILL, AssistantEvaluationService } from '../src/service.ts'
 import { installTrustedTestProducers } from './trusted-producer-fixture.ts'
@@ -21,14 +22,21 @@ function agent(workspace = '/work/alpha'): Agent {
   return {
     id, options: {}, session,
     inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},
   }
 }
 
-function call(name: string, args: Record<string, unknown>, target?: Agent) {
+function call(name: string, args: Record<string, unknown>, target?: Agent): ToolBatchInput {
   return {
-    callId: ToolCallId(`evaluation-call-${Math.random()}`), name, arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`evaluation-call-${Math.random()}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal: new AbortController().signal, ...(target === undefined ? {} : { agent: target }),
   }
 }
@@ -38,6 +46,7 @@ async function harness() {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(SkillRegistry)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   const producers = installTrustedTestProducers(ctx)
   const fiber = await ctx.plugin(AssistantEvaluationService, { databasePath: ':memory:', maxReviewOutcomes: 5 })
   return { ctx, service: ctx.assistantEvaluation, fiber, ...producers }
@@ -76,11 +85,11 @@ describe('evaluation review tool', () => {
         idempotencyKey: key, evaluatorVersion: 'terminal-v1',
       })
     }
-    const missing = await ctx.tools.execute(call('evaluation_review', {}))
+    const missing = (await ctx.tools.execute(call('evaluation_review', {}))).results[0]!.result
     expect(missing.isError).toBe(true)
     expect(JSON.stringify(missing.content)).toContain('missing-agent')
 
-    const result = await ctx.tools.execute(call('evaluation_review', { lookback_days: 30, limit: 5 }, agent()))
+    const result = (await ctx.tools.execute(call('evaluation_review', { lookback_days: 30, limit: 5 }, agent()))).results[0]!.result
     expect(result.isError).toBe(false)
     const value = result.isError ? undefined : result.value as { summary: { total: number }, outcomes: unknown[] }
     expect(value?.summary.total).toBe(1)
@@ -103,18 +112,18 @@ describe('evaluation review tool', () => {
       metrics: {}, occurredAt: Date.now(), idempotencyKey: 'daily-review', evaluatorVersion: 'terminal-v1',
     })
 
-    const before = await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))
+    const before = (await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))).results[0]!.result
     expect(before.isError).toBe(false)
     expect(before.isError ? undefined : before.value).toMatchObject({
       outcomes: [expect.objectContaining({ outcomeId: outcome.id, automationRunId: runId })],
       selfAssessments: [],
     })
 
-    const assessed = await ctx.tools.execute(call('evaluation_self_assess', {
+    const assessed = (await ctx.tools.execute(call('evaluation_self_assess', {
       outcome_id: outcome.id,
       objective_status: 'achieved',
       memory_ids: ['memory-owner-format'],
-    }, target))
+    }, target))).results[0]!.result
     expect(assessed.isError).toBe(false)
     expect(assessed.isError ? undefined : assessed.value).toMatchObject({
       outcomeId: outcome.id, objectiveStatus: 'achieved', trust: 'self-reported',
@@ -128,9 +137,9 @@ describe('evaluation review tool', () => {
       }),
     ])
 
-    const wrongScope = await ctx.tools.execute(call('evaluation_self_assess', {
+    const wrongScope = (await ctx.tools.execute(call('evaluation_self_assess', {
       outcome_id: outcome.id, objective_status: 'achieved',
-    }, agent('/work/beta')))
+    }, agent('/work/beta')))).results[0]!.result
     expect(wrongScope.isError).toBe(true)
     expect(JSON.stringify(wrongScope.content)).toContain('current Agent scope')
   })
@@ -173,7 +182,7 @@ describe('evaluation review tool', () => {
     expect(review.outcomes[0]?.projection).toMatchObject({
       status: 'ready', subjectKind: 'automation-run',
     })
-    const rendered = await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))
+    const rendered = (await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))).results[0]!.result
     expect(rendered.isError).toBe(false)
     expect(rendered.isError ? undefined : rendered.value).toMatchObject({
       summary: { total: 1 },
@@ -184,9 +193,9 @@ describe('evaluation review tool', () => {
         automationRunId: runId,
       })],
     })
-    const selfAssessment = await ctx.tools.execute(call('evaluation_self_assess', {
+    const selfAssessment = (await ctx.tools.execute(call('evaluation_self_assess', {
       outcome_id: terminal.id, objective_status: 'partial',
-    }, target))
+    }, target))).results[0]!.result
     expect(selfAssessment.isError).toBe(true)
     expect(JSON.stringify(selfAssessment.content)).toContain('unknown objective')
   })
@@ -223,7 +232,7 @@ describe('evaluation review tool', () => {
       occurredAt: base.occurredAt, idempotencyKey: 'first-party', evaluatorVersion: 'terminal-v1',
     })
 
-    const result = await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))
+    const result = (await ctx.tools.execute(call('evaluation_review', { limit: 5 }, target))).results[0]!.result
     expect(result.isError).toBe(false)
     const outcomes = result.isError ? [] : (result.value as { outcomes: Array<Record<string, unknown>> }).outcomes
     expect(outcomes.filter(value => value.automationRunId !== undefined)).toEqual([

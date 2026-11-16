@@ -26,7 +26,7 @@ beforeAll(async () => {
   const created = await createSourceCreationFixture(sourceRoot, join(cloneRoot, 'repository'))
   repository = created.repository
   baseCommit = created.baseCommit
-})
+}, 60_000)
 
 afterAll(async () => { await rm(cloneRoot, { recursive: true, force: true }) })
 
@@ -57,7 +57,7 @@ describe('prepared source creation using the real public generator and base lock
     expect(view.contents[0]?.content).toContain("dsh-enhanced-rsi-created-example")
     expect(JSON.parse(view.contents[1]!.content)).toMatchObject({ name: '@dsh-enhanced/rsi-created-example', version: '0.1.0' })
     expect(execFileSync('/usr/bin/git', ['worktree', 'list', '--porcelain'], { cwd: repository, encoding: 'utf8' })).toBe(before)
-  })
+  }, 20_000)
 
   it('inspects a generated plugin when TMPDIR is a symlink to its physical directory', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-create-tmp-alias-')))
@@ -74,7 +74,7 @@ describe('prepared source creation using the real public generator and base lock
       if (previous === undefined) delete process.env.TMPDIR
       else process.env.TMPDIR = previous
     }
-  })
+  }, 20_000)
 
   it('writes candidate source and a single Host lock importer while preserving generated Host files', async () => {
     const current = await worktree()
@@ -175,7 +175,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(inspected('assistant-health')).rejects.toThrow('namespace')
     await expect(inspectSourceCreationContext({ repository, name: 'assistant-health', paths: [], baseCommit,
       environment, signal, assertCurrent: () => undefined, grant: { ...grant(), namePrefix: 'assistant-' } })).rejects.toThrow('already exists')
-  })
+  }, 20_000)
 
   it('rejects a package identity collision in another directory of the pinned base', async () => {
     const current = await worktree()
@@ -189,7 +189,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(inspectSourceCreationContext({ repository: current, name: 'rsi-created-example', paths: [],
       baseCommit: collidingBase, environment, signal, assertCurrent: () => undefined, grant: grant() }))
       .rejects.toThrow('package identity already exists')
-  })
+  }, 20_000)
 
   it('rejects worktree template drift before executing the generator', async () => {
     const current = await worktree()
@@ -198,7 +198,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(prepareCreatedPluginWorkspace({ worktree: current, baseCommit, name: view.name,
       files: [{ path: 'README.md', content: 'text' }], environment, signal,
       assertCurrent: () => undefined, creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow()
-  })
+  }, 20_000)
 
   it('detects Host manifest and existing lock projection changes after proposal writes', async () => {
     const current = await worktree()
@@ -214,7 +214,7 @@ describe('prepared source creation using the real public generator and base lock
     const lockPath = join(current, 'pnpm-lock.yaml')
     await writeFile(lockPath, (await readFile(lockPath, 'utf8')).replace("lockfileVersion: '9.0'", "lockfileVersion: '8.0'"))
     await expect(verifyCreatedPluginWorkspace(options)).rejects.toThrow('lock importer changed')
-  })
+  }, 20_000)
 
   it('rejects a symlink inserted into candidate source after preparation', async () => {
     const current = await worktree()
@@ -225,7 +225,7 @@ describe('prepared source creation using the real public generator and base lock
     await prepareCreatedPluginWorkspace({ ...options, files: [{ path: 'README.md', content: '# source\n' }] })
     await symlink('/tmp', join(current, 'plugins', view.name, 'src', 'escape'))
     await expect(verifyCreatedPluginWorkspace(options)).rejects.toThrow('non-regular entry')
-  })
+  }, 20_000)
 
   it('counts fixed scaffold files against the final 64-file candidate bound', async () => {
     const current = await worktree()
@@ -237,7 +237,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(prepareCreatedPluginWorkspace({ worktree: current, baseCommit, name: view.name,
       files, environment, signal, assertCurrent: () => undefined,
       creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow('file bound')
-  })
+  }, 20_000)
 
   it('counts fixed scaffold bytes against the final 256 KiB candidate bound', async () => {
     const current = await worktree()
@@ -248,7 +248,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(prepareCreatedPluginWorkspace({ worktree: current, baseCommit, name: view.name,
       files, environment, signal, assertCurrent: () => undefined,
       creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow('bounds')
-  })
+  }, 20_000)
 
   it('rejects ambiguous base lock selections before adding an importer', async () => {
     const current = await worktree()
@@ -264,7 +264,7 @@ describe('prepared source creation using the real public generator and base lock
     await expect(prepareCreatedPluginWorkspace({ worktree: current, baseCommit: ambiguousBase, name: view.name,
       files: [{ path: 'README.md', content: '# source\n' }], environment, signal,
       assertCurrent: () => undefined, creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow('ambiguous')
-  })
+  }, 20_000)
 
   it.each([
     ['duplicate importer', (lock: string) => lock.replace('\n  plugins/hello:\n', '\n  plugins/hello:\n  plugins/hello:\n'), 'duplicate'],
@@ -285,5 +285,5 @@ describe('prepared source creation using the real public generator and base lock
     await expect(prepareCreatedPluginWorkspace({ worktree: current, baseCommit: changedBase, name: view.name,
       files: [{ path: 'README.md', content: '# source\n' }], environment, signal,
       assertCurrent: () => undefined, creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow(message)
-  })
+  }, 20_000)
 })

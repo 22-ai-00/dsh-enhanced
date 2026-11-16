@@ -28,7 +28,7 @@ import type { Context } from '@deepseek-ai/cordis'
  * the plugin's default behavior and `--dump-config` output do not change.
  */
 
-// Cordis 4.0.5 exports `FiberState` as an ambient const enum that is unavailable
+// Cordis 4.1.0 exports `FiberState` as an ambient const enum that is unavailable
 // at runtime, so the numeric values are used directly.
 const ACTIVE = 2
 
@@ -40,7 +40,7 @@ const MAX_TIMEOUT_MS = 120_000
 interface RuntimeFiber {
   uid: number | null
   state: number
-  store?: object | null
+  committed?: object | null
 }
 
 /** Structural mirror of the loader's `Entry` surface used by the probe. */
@@ -242,7 +242,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     /** The fiber object captured before the reload; used to prove it disposed. */
     fiber: RuntimeFiber
     uid: number | null
-    store: object | null
+    committed: object | null
     state: number
     moduleNamespace: unknown
     profileDigest: string
@@ -257,7 +257,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     if (!fiber) throw new Error(`the target entry ${localEntryId} has no running fiber`)
     return { mount, identity: {
       fiber,
-      uid: fiber.uid, store: fiber.store ?? null, state: fiber.state,
+      uid: fiber.uid, committed: fiber.committed ?? null, state: fiber.state,
       moduleNamespace: mount.target.moduleNamespace, profileDigest: await profileDigest(),
       pid, invocationId, hostGeneration: options.hostGeneration(),
     } }
@@ -281,17 +281,17 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       const hostGeneration = options.hostGeneration()
       after = {
         fiber: fiber ?? before.fiber,
-        uid: fiber?.uid ?? null, store: fiber?.store ?? null, state: fiber?.state ?? -1,
+        uid: fiber?.uid ?? null, committed: fiber?.committed ?? null, state: fiber?.state ?? -1,
         moduleNamespace: mount.target.moduleNamespace, profileDigest: currentProfileDigest,
         pid, invocationId, hostGeneration,
       }
       if (currentProfileDigest !== before.profileDigest) good(); else bad('profile-changed')
       if (fiber !== undefined && fiber.state === ACTIVE) good(); else bad('fiber-active')
       // A config-only reload restarts the same fiber in place: Cordis keeps the
-      // uid and rebuilds the store, so a *changed* uid would mean the entry was
-      // replaced by code this adapter cannot bind to an artifact digest.
+      // uid and rebuilds the committed map, so a *changed* uid would mean the
+      // entry was replaced by code this adapter cannot bind to an artifact digest.
       if (fiber !== undefined && fiber.uid !== null && fiber.uid === before.uid) good(); else bad('fiber-preserved')
-      if (fiber !== undefined && fiber.store !== undefined && fiber.store !== null && fiber.store !== before.store) good(); else bad('store-rebuilt')
+      if (fiber !== undefined && fiber.committed !== undefined && fiber.committed !== null && fiber.committed !== before.committed) good(); else bad('store-rebuilt')
       // Config-only scope: the mounted module code must be the same module
       // instance, otherwise the reload would have replaced code that this
       // adapter cannot bind to the authorized artifact digest.
@@ -303,7 +303,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       if (before.fiber.state === ACTIVE && fiber === before.fiber) good(); else bad('same-fiber-live')
       observations.profileChanged = currentProfileDigest !== before.profileDigest
       observations.fiberPreserved = after.uid === before.uid
-      observations.storeRebuilt = after.store !== before.store
+      observations.storeRebuilt = after.committed !== before.committed
       observations.moduleReused = mount.target.moduleNamespace === before.moduleNamespace
       observations.probe = { pid, invocationId, hostGeneration }
     } catch (error) {
@@ -313,11 +313,11 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     }
     // A config-only reload disposes effects and re-runs `apply` on the same fiber;
     // no fiber reaches DISPOSED, so the count stays 0 and the restart is proven by
-    // the rebuilt store plus the recorded effect disposals in the caller's probe.
+    // the rebuilt committed map plus the recorded effect disposals in the caller's probe.
     const fibersDisposed = 0
     const reloaded = after !== null && failures === 0
       && after.profileDigest !== before.profileDigest
-      && after.store !== before.store && after.uid === before.uid && after.state === ACTIVE
+      && after.committed !== before.committed && after.uid === before.uid && after.state === ACTIVE
     observations.before = { uid: before.uid, state: before.state, profileDigest: before.profileDigest }
     observations.after = after === null ? null : { uid: after.uid, state: after.state, profileDigest: after.profileDigest }
     observations.failedChecks = failedChecks

@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "publishConfig": {
     "access": "public"
@@ -55,9 +55,9 @@
     "@deepseek-ai/schemastery": "catalog:"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": ">=0.2.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-credentials": ">=0.2.2-rc.3 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.3 <0.3.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {

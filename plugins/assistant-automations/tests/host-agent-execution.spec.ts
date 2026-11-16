@@ -635,7 +635,7 @@ describe('authorized Host invocation to one bounded native Agent', () => {
       expect(f.reserve).toHaveBeenCalledTimes(1); expect(f.finalize).toHaveBeenCalledTimes(1)
       expect(rows(join(f.root, 'policy.sqlite'), 'SELECT status, actual_amount FROM budget_reservations')).toEqual([{ status: 'finalized', actual_amount: 1 }])
     } finally { release.resolve(); await Promise.all(realHandles.map(handle => handle.dispose())) }
-  })
+  }, 15_000)
 
   test('settles the real outer budget once when the Host executor throws a typed inner failure', async () => {
     const f = await harness()

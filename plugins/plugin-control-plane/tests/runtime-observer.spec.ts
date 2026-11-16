@@ -145,7 +145,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))('owner runtime 
     const include = f.ctx.loader.resolve('include')
     // Loader.await() does not drain Include's deferred config write. Finish it before installing accessors.
     expect(include.subtree).toBeInstanceOf(Include)
-    await (include.subtree as unknown as { flushWrite(): Promise<void> }).flushWrite()
+    await (include.subtree as unknown as { flush(): Promise<void> }).flush()
     expect(await readFile(join(f.profile, 'cordis.yml'), 'utf8')).toContain('id: candidate')
     const candidate = f.ctx.loader.resolve('include:candidate')
     let getterCalls = 0

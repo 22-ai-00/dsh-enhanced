@@ -222,3 +222,30 @@ linuxTest('cancellation while waiting cannot claim later or mutate grants and us
     } finally { reader.close() }
   } finally { await context.fiber.dispose(); ledger.close() }
 })
+
+linuxTest('marks service inactive on Cordis UNLOADING restart state before dependent effects finish', async () => {
+  const { ledger, authority, config } = await fixture(30_000)
+  ledger.releaseController(authority)
+  const context = new Context()
+  try {
+    const mounted = context.plugin(AssistantIsolationService, config)
+    await mounted
+    const service = context.get('assistantIsolation')!
+    let releaseDependent!: () => void
+    const dependentBlocked = new Promise<void>(resolve => { releaseDependent = resolve })
+    let dependentEnteredDispose!: () => void
+    const enteredDispose = new Promise<void>(resolve => { dependentEnteredDispose = resolve })
+    await context.inject(['assistantIsolation'], dependentCtx => {
+      dependentCtx.effect(() => async () => {
+        dependentEnteredDispose()
+        await dependentBlocked
+      })
+    })
+    const restarting = mounted.restart()
+    await enteredDispose
+    expect(() => service.readAcceptedArtifact({} as never, 'artifact.json')).toThrow(/artifact source unavailable/)
+    releaseDependent()
+    await restarting
+    expect(context.get('assistantIsolation')).toBeDefined()
+  } finally { await context.fiber.dispose(); ledger.close() }
+})

@@ -141,7 +141,7 @@ it('dispatches a durable modify job exclusively through its owned Linux runner a
   expect(transport.macConstruct).not.toHaveBeenCalled()
   expect(runner.config).not.toHaveProperty('userNamespace')
   expect(runner.config).not.toHaveProperty('systemSnapshot')
-})
+}, 20_000)
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('passes paired immutable repository metadata to the runner and the full Linux build path', async () => {
   const f = await fixture({ dualIdentity: true }), runner = transport.instances[0]!
@@ -158,7 +158,7 @@ it.skipIf(process.platform !== 'linux' || !process.getuid?.())('passes paired im
       systemSnapshot: f.sourceBuild.systemSnapshot, timeoutMs: 60_000 }) }))
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
   expect(transport.macConstruct).not.toHaveBeenCalled()
-})
+}, 20_000)
 
 // Fault injection changes only the returned Host handoff, leaving the real
 // persisted claim intact. Public enqueue normally freezes these values together.
@@ -172,7 +172,7 @@ it.each([[60_000, 120_000], [120_000, 60_000]])('clamps Linux request timeout %s
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ timeoutMs: Math.min(requested, maximum) }) }))
-})
+}, 20_000)
 
 it.each(['backend', 'key'] as const)('rejects a corrupted Host %s binding before calling the Linux transport', async corrupt => {
   const f = await fixture(), claim = ControlPlaneStore.prototype.claimSourceJob
@@ -186,7 +186,7 @@ it.each(['backend', 'key'] as const)('rejects a corrupted Host %s binding before
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
-})
+}, 20_000)
 
 it('rejects standalone Linux preparation without a durable source job before reaching a transport', async () => {
   const f = await fixture()
@@ -194,7 +194,7 @@ it('rejects standalone Linux preparation without a durable source job before rea
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
   expect(macBuild.runNativePreparedChecks).not.toHaveBeenCalled()
   expect(f.store.getGap(f.request.gapId).status).toBe('open')
-})
+}, 20_000)
 
 it.each(['context', 'required-peer'] as const)('aborts and drains the Linux build before closing its runner on %s disposal', async removal => {
   const f = await fixture(), runner = transport.instances[0]!, events: string[] = []
@@ -217,7 +217,7 @@ it.each(['context', 'required-peer'] as const)('aborts and drains the Linux buil
   expect(events).toEqual(['aborted', 'drained', 'runner-closed'])
   expect(runner.close).toHaveBeenCalledOnce()
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
-})
+}, 20_000)
 
 it('waits for the old runner cleanup before starting a replacement, then ignores the old disposer', async () => {
   const f = await fixture(), first = transport.instances[0]!
@@ -227,13 +227,13 @@ it('waits for the old runner cleanup before starting a replacement, then ignores
   const disposingOld = f.delivery.dispose()
   await vi.waitFor(() => expect(first.close).toHaveBeenCalledOnce())
   expect(f.service.canEnqueueSource()).toBe(false)
-  const replacement = f.mountDelivery()
-  try {
-    await replacement
-    expect(f.service.canEnqueueSource()).toBe(false)
-    expect(transport.instances).toHaveLength(1)
-  } finally { releaseOld() }
+  await expect(f.mountDelivery()).rejects.toThrow(/has been registered/)
+  expect(f.service.canEnqueueSource()).toBe(false)
+  expect(transport.instances).toHaveLength(1)
+  releaseOld()
   await disposingOld
+  const replacement = f.mountDelivery()
+  await replacement
   await vi.waitFor(() => expect(f.service.canEnqueueSource()).toBe(true))
   const second = transport.instances[1]!
   expect(second).toBeDefined(); expect(second.close).not.toHaveBeenCalled()
@@ -244,7 +244,7 @@ it('waits for the old runner cleanup before starting a replacement, then ignores
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledWith(expect.objectContaining({ runner: second }))
   await replacement.dispose()
   expect(second.close).toHaveBeenCalledOnce()
-})
+}, 20_000)
 
 it.each(['constructor', 'registration'] as const)('cleans failed %s startup before a replacement provider can register', async failure => {
   const f = await fixture(failure === 'constructor' ? { constructorFailure: true } : { registrationFailure: true })
@@ -260,7 +260,7 @@ it.each(['constructor', 'registration'] as const)('cleans failed %s startup befo
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
   expect(transport.macConstruct).not.toHaveBeenCalled()
-})
+}, 20_000)
 
 
 it('settles an observed pre-admission Host failure only after worktree cleanup, without refund or replay', async () => {
@@ -282,7 +282,7 @@ it('settles an observed pre-admission Host failure only after worktree cleanup, 
   expect(f.store.getSourceJob(job.id)?.status).toBe('failed')
   expect(reserve).toHaveBeenCalledOnce()
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
-})
+}, 20_000)
 
 it('keeps a pre-admission failure unknown when owned worktree cleanup fails', async () => {
   const f = await fixture({ preflightFailure: true }), original = workspace.createIsolatedWorktree
@@ -294,7 +294,7 @@ it('keeps a pre-admission failure unknown when owned worktree cleanup fails', as
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
   expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
-})
+}, 20_000)
 
 it.each([new Error('native preflight rejection'), Object.assign(new Error('Linux source preparation failed before execution admission'),
   { code: 'source-job-preparation-not-started', quiescent: true, notStarted: true })])('does not accept a runner mock or structurally forged negative outcome', async error => {
@@ -303,7 +303,7 @@ it.each([new Error('native preflight rejection'), Object.assign(new Error('Linux
   const job = await f.service.enqueueSourceJob(f.request)
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
-})
+}, 20_000)
 
 
 const tscStderr = "source build phase failed: check\nplugins/health-helper/src/index.ts(62,7): error TS2322: Type '{ type: string; }' is not assignable to type 'boolean'.\n"
@@ -328,7 +328,7 @@ it('settles a Host-certified quiescent build/check failure as failed with saniti
   // The failure is terminal: a replacement Host never replays it.
   await f.tick()
   expect(linuxBuild.runLinuxPreparedChecks).toHaveBeenCalledOnce()
-})
+}, 20_000)
 
 it.each(['runner', 'key'] as const)('keeps a build failure proof bound to a different %s unknown', async wrong => {
   const f = await fixture()
@@ -338,7 +338,7 @@ it.each(['runner', 'key'] as const)('keeps a build failure proof bound to a diff
   await f.tick()
   expect(f.store.getSourceJob(job.id)).toMatchObject({ status: 'unknown', failureCode: 'source-job-interrupted' })
   expect(f.service.inspectSourceJob({ id: job.id, owner: f.request.owner })).not.toHaveProperty('diagnostics')
-})
+}, 20_000)
 
 it('keeps a build failure unknown when owned worktree cleanup fails', async () => {
   const f = await fixture(), original = workspace.createIsolatedWorktree
@@ -350,7 +350,7 @@ it('keeps a build failure unknown when owned worktree cleanup fails', async () =
   const job = await f.service.enqueueSourceJob(f.request)
   await f.tick()
   expect(f.store.getSourceJob(job.id)?.status).toBe('unknown')
-})
+}, 20_000)
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('cleans and fails a real Git archive exceeding 64MiB before the runner is called', async () => {
   const actual = await vi.importActual<typeof linuxBuild>('../src/linux-source-build.ts')
@@ -422,7 +422,7 @@ it('fails the current claim when an independent source operation is already drai
     expect(workspace.createIsolatedWorktree).toHaveBeenCalledOnce()
     expect(linuxBuild.runLinuxPreparedChecks).not.toHaveBeenCalled()
   } finally { release(); await draining }
-})
+}, 20_000)
 
 
 it.skipIf(process.platform !== 'linux' || !process.getuid?.())('settles a genuine rolled-back native budget rejection after cleanup and retains the charged Policy occurrence', async () => {

@@ -31,13 +31,13 @@ export interface DeepSeekAdapterDependencies {
   credentialResolver?: () => DeepSeekCredentialResolver | undefined
 }
 
-function fail(message: string, code = 'DEEPSEEK_PROTOCOL'): never { throw new LlmError(`DeepSeek response rejected: ${message}`, code) }
-function requestError(code: string): never { throw new LlmError('DeepSeek request failed', code) }
+function fail(message: string, code = 'DEEPSEEK_PROTOCOL'): never { throw LlmError.fromFailure({ message: `DeepSeek response rejected: ${message}`, code: code }) }
+function requestError(code: string): never { throw LlmError.fromFailure({ message: 'DeepSeek request failed', code: code }) }
 
 /** Race every untrusted async boundary so cancellation does not depend on a service or stream cooperating. */
 function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
-    const abort = () => { signal.removeEventListener('abort', abort); reject(new LlmError('DeepSeek request failed', 'DEEPSEEK_ABORTED')) }
+    const abort = () => { signal.removeEventListener('abort', abort); reject(LlmError.fromFailure({ message: 'DeepSeek request failed', code: 'DEEPSEEK_ABORTED' })) }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     void operation.then(value => { signal.removeEventListener('abort', abort); resolve(value) }, error => { signal.removeEventListener('abort', abort); reject(error) })

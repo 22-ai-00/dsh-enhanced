@@ -8,7 +8,8 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import {
   acceptanceDigest,
   goalDefinitionSituation,
@@ -140,6 +141,7 @@ function foregroundSession(workspace: string, id: string): { agent: Agent; injec
     inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -186,6 +188,7 @@ function analystAgent(
     inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -229,6 +232,7 @@ async function fixture(): Promise<Target> {
   // runtime, and execute() enforces the per-tool `execute` policy below.
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
 
   // The document the goal produces deliberately OMITS the verifier's required
   // text, so the whole-goal objective is judged not-achieved (a real local
@@ -511,11 +515,14 @@ function tableCount(databasePath: string, table: string): number {
 
 /** Dispatch an evolution tool through the REAL ToolRuntime, exactly as the
  * production analyst heartbeat agent loop does. */
-function toolCall(name: string, args: Record<string, unknown>, agent: Agent) {
+function toolCall(name: string, args: Record<string, unknown>, agent: Agent): ToolBatchInput {
   return {
-    callId: ToolCallId(`call-${name}-${Math.random()}`),
-    name,
-    arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`call-${name}-${Math.random()}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal: new AbortController().signal,
     agent,
   }
@@ -529,7 +536,7 @@ async function executeTool<T>(
   args: Record<string, unknown>,
   agent: Agent,
 ): Promise<ToolValue<T>> {
-  return await ctx.tools.execute(toolCall(name, args, agent)) as ToolValue<T>
+  return (await ctx.tools.execute(toolCall(name, args, agent))).results[0]!.result as ToolValue<T>
 }
 
 /** Read-only: resolve the evolution-local proposal id to the policy proposal

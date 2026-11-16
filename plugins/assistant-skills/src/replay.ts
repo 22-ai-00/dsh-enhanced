@@ -2,9 +2,11 @@ import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { executeSingleTool } from './tool-batch.js'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import { lstat, mkdir, mkdtemp, realpath, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -134,7 +136,8 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
     ctx = new Context()
     new SessionProjectionRegistry(ctx)
     await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime, { mode: 'native' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(WorkingDirectoryService, { defaultDirectory: root })
     await ctx.plugin(FileTools)
@@ -149,7 +152,8 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
       // Deterministic provenance-only observations cannot fail; mark their node
       // satisfied so a later executable step may legally depend on them.
       if (step.trace.outcome === 'omitted-observation') { done.push(step.trace); succeededSteps.add(step.id); continue }
-      const result = await ctx.tools.execute({ callId: ToolCallId(`skill-replay-${done.length + 1}`), name: step.toolName as 'read' | 'write' | 'edit', arguments: step.arguments, signal: input.signal })
+      const batch = await executeSingleTool(ctx.tools, { callId: ToolCallId(`skill-replay-${done.length + 1}`), name: step.toolName as 'read' | 'write' | 'edit', arguments: step.arguments, signal: input.signal })
+      const result = batch.results[0]!.result
       input.signal.throwIfAborted(); input.authorize()
       const observedAbsent = step.observationAllowsAbsent === true && result.isError && result.error.info?.code === 'FS_NOT_FOUND'
       if (result.isError && !observedAbsent) throw new Error(`assistant-skills: replay ${step.toolName} failed`)

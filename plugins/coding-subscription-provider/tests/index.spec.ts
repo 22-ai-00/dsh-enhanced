@@ -6,6 +6,17 @@ import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { describe, expect, it } from 'vitest'
 import * as Plugin from '../src/index.ts'
 
+async function mountRuntime(): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(SessionStore)
+  ctx.provide('sessionProjections', {
+    register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+  } as never)
+  await ctx.plugin(AgentRegistry)
+  return ctx
+}
+
 describe('dsh-enhanced-coding-subscription-provider', () => {
   it('exposes stable plugin and injection identity', () => {
     expect(Plugin.name).toBe('dsh-enhanced-coding-subscription-provider')
@@ -13,10 +24,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
   })
 
   it('registers enabled providers and releases them with its Cordis fiber', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    const ctx = await mountRuntime()
     const fiber = await ctx.plugin(Plugin, Plugin.Config())
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual([
       'codex-subscription',
@@ -34,10 +42,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
   })
 
   it('can mount with only one explicitly enabled CLI', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    const ctx = await mountRuntime()
     const config = Plugin.Config()
     config.claude.enabled = false
     config.cursor.enabled = false
@@ -52,10 +57,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
   })
 
   it('publishes the controlled tool bridge for every CLI-backed route', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    const ctx = await mountRuntime()
     const config = Plugin.Config()
     config.claude.enabled = true
     config.grok.enabled = true
@@ -77,10 +79,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
   })
 
   it('advertises native tool calls only for Codex direct while CLI routes use the controlled bridge', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    const ctx = await mountRuntime()
     const config = Plugin.Config()
     config.codex.transport = 'direct-responses'
     config.cursor.enabled = false
@@ -94,10 +93,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
   })
 
   it('observes attachment service installation and removal live without retaining the store', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(AgentRegistry)
+    const ctx = await mountRuntime()
     const config = Plugin.Config()
     config.codex.transport = 'direct-responses'
     config.cursor.enabled = false

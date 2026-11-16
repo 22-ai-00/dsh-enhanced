@@ -116,7 +116,7 @@ function attestorFixture(
 
 function envelope(
   messages: GenerateOptions['messages'],
-  overrides: Partial<GenerateOptions> = {},
+  overrides: Partial<GenerateOptions<string>> = {},
 ): GenerateOptions {
   return deepFreeze({
     provider: 'traex-agent',
@@ -127,7 +127,7 @@ function envelope(
     tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
     sessionId: SESSION_ID,
     signal: new AbortController().signal,
-    ...overrides,
+    ...(overrides as Partial<GenerateOptions>),
   })
 }
 
@@ -153,7 +153,7 @@ function compactionInstruction() {
 
 function compactionEnvelope(
   prefix: GenerateOptions['messages'],
-  overrides: Partial<GenerateOptions> = {},
+  overrides: Partial<GenerateOptions<string>> = {},
 ): GenerateOptions {
   return {
     provider: 'traex-agent',
@@ -163,9 +163,9 @@ function compactionEnvelope(
     toolHistory: { tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }], updates: [] },
     tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
     sessionId: SESSION_ID,
-    purpose: 'compaction',
+    purpose: 'compaction' as never,
     signal: new AbortController().signal,
-    ...overrides,
+    ...(overrides as Partial<GenerateOptions>),
   }
 }
 

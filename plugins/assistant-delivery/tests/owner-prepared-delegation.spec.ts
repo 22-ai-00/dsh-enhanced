@@ -250,8 +250,15 @@ async function harness(options: { artifactContent?: string } = {}) {
         || service.currentPreferenceTurn(agent) === undefined) return await next()
       consumed = true
       removePreStep()
-      const catalogResult = await ctx.tools.execute({ callId: ToolCallId('catalog-' + eventId),
-        name: 'goal_acceptance_catalog', agent, signal, arguments: {} })
+      const executeTool = async (callId: ReturnType<typeof ToolCallId>, name: string, args: unknown) => {
+        const batch = await ctx.tools.execute({
+          calls: [{ type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) }],
+          agent,
+          signal,
+        })
+        return batch.results[0]!.result
+      }
+      const catalogResult = await executeTool(ToolCallId('catalog-' + eventId), 'goal_acceptance_catalog', {})
       expect(catalogResult.isError, JSON.stringify(catalogResult)).not.toBe(true)
       const catalog = JSON.parse(resultText(catalogResult as never)) as {
         authorities: Array<{ id: string; digest: string; kind: string; artifactPath?: string }> }
@@ -259,12 +266,13 @@ async function harness(options: { artifactContent?: string } = {}) {
         && authority.artifactPath === 'workspace-relative')
       if (runner === undefined) throw new Error('acceptance catalog did not expose a local runner authority')
       if (!ownerText.includes(objective)) throw new Error('owner text does not quote the objective verbatim')
-      const createdGoal = await ctx.tools.execute({ callId: ToolCallId('goal-create-' + eventId),
-        name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1,
-          acceptance: { criteria: [{ id: 'report-ready', kind: 'process-behavior',
-            authority: { id: runner.id, digest: runner.digest }, artifactPath: 'report.txt',
-            stdin: '', expectedStdout: '', expectedExitCode: 0 }],
-          bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 } } } })
+      const createdGoal = await executeTool(ToolCallId('goal-create-' + eventId), 'goal_create', {
+        objective, max_goal_rounds: 1,
+        acceptance: { criteria: [{ id: 'report-ready', kind: 'process-behavior',
+          authority: { id: runner.id, digest: runner.digest }, artifactPath: 'report.txt',
+          stdin: '', expectedStdout: '', expectedExitCode: 0 }],
+        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 } },
+      })
       expect(createdGoal.isError, JSON.stringify(createdGoal)).not.toBe(true)
       return await next()
     })

@@ -8,6 +8,7 @@ import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -24,7 +25,7 @@ async function fixture() {
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
-  await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
+  await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
   await ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
   await ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)

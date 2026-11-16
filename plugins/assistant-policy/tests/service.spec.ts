@@ -36,6 +36,7 @@ describe('assistant policy Cordis service', () => {
       new SessionStore(ctx)
       ctx.provide('shell' as never, { sandboxMode: 'workspace-write' } as never)
       ctx.provide('approval' as never, { config: { policy: 'ask' } } as never)
+      ctx.provide('agents' as never, { list: () => [] } as never)
       ctx.provide('sessionProjections' as never, { register() {}, stateOf() { return { preset: null, sandbox: null, approval: null, seeded: false } } } as never)
       await ctx.plugin(PermissionPresetService, { presets: {
         'workspace-write': { sandbox: 'workspace-write', approval: 'ask', name: 'Ask' },

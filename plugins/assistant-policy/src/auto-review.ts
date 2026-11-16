@@ -7,6 +7,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type { ApprovalRequest, ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import {
   approvalPermissionFingerprint,

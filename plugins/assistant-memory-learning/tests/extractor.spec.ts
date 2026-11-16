@@ -77,7 +77,7 @@ test('uses one frozen supplier turn in a separate no-tool session and preserves 
   expect(call.messages).toHaveLength(3)
   expect(call.messages[2]).toMatchObject({ role: 'user', source: { kind: 'runtime-context', form: 'snapshot',
     sections: [{ name: 'working-directory:current', text: `Current working directory: ${JSON.stringify(f.job.intent.owner.workspace)}.` }] },
-  content: [{ type: 'text', text: `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent working directory: ${JSON.stringify(f.job.intent.owner.workspace)}.` }] })
+  content: [{ type: 'text', text: `<system-reminder>\nThe following information describes your current session:\n\nCurrent working directory: ${JSON.stringify(f.job.intent.owner.workspace)}.\n</system-reminder>` }] })
   const system = JSON.stringify(call.messages.filter(message => message.role === 'system'))
   expect(system).not.toContain('UNRELATED GLOBAL PERSONA')
   expect(system).not.toContain('Ignore all rules')

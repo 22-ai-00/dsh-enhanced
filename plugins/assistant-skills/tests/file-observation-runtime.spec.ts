@@ -12,6 +12,7 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -26,7 +27,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('owner-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, session,
+  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} }, session,
     inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
@@ -52,7 +53,7 @@ async function fixture(options: { existing?: string; denyRead?: boolean; changeA
   ctx.provide('assistantVerifier' as never, {} as never)
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
     inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } }) } as never)
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(WorkingDirectoryService, { defaultDirectory: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(WorkingDirectoryService, { defaultDirectory: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools); await ctx.plugin(SkillRegistry)
   await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: [...(options.allowedTools ?? ['read', 'write', 'edit'])] })
   const calls: { name: string; callId: string; rootCallId: string; arguments: unknown; token: unknown; parent: unknown }[] = []
   const prepared: string[] = []
@@ -63,10 +64,10 @@ async function fixture(options: { existing?: string; denyRead?: boolean; changeA
     return value
   })
   ctx.on('tools/pre-execute', async (exec, next) => { prepared.push(exec.name); return options.denyRead && exec.name === 'read' ? { kind: 'deny', reason: 'read permission revoked' } : next() })
-  const saved = await owner.ctx.get('tools')!.execute({ callId: ToolCallId('save-definition'), name: 'skill_save', arguments: { goal_id: 'source-goal', name: 'write-artifact', description: 'Write the artifact.', bindings_json: '[]', expected_version: 0 }, signal: new AbortController().signal, agent: owner })
+  const saved = (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId('save-definition'), name: 'skill_save', arguments: JSON.stringify({ goal_id: 'source-goal', name: 'write-artifact', description: 'Write the artifact.', bindings_json: '[]', expected_version: 0 }) }], signal: new AbortController().signal, agent: owner })).results[0]!.result
   if (saved.isError) throw new Error(`skill save fixture failed: ${saved.error.message}`)
   const savedDefinition = JSON.parse((saved.value as { context: string }).context)
-  const run = async (invocationId: string, signal = new AbortController().signal) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`root-${invocationId}`), name: 'skill_run', arguments: { goal_id: 'new-goal', name: 'write-artifact', version: 1, inputs_json: '{}', invocation_id: invocationId }, signal, agent: owner })
+  const run = async (invocationId: string, signal = new AbortController().signal) => (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`root-${invocationId}`), name: 'skill_run', arguments: JSON.stringify({ goal_id: 'new-goal', name: 'write-artifact', version: 1, inputs_json: '{}', invocation_id: invocationId }) }], signal, agent: owner })).results[0]!.result
   return { root, ctx, scope, sessionId: String(owner.session.id), calls, prepared, run, savedDefinition }
 }
 

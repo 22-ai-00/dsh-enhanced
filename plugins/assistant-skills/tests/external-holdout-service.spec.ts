@@ -10,6 +10,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { generateKeyPairSync, createHash } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -61,7 +62,7 @@ const wrongTopologyImplementation = "process.stdin.resume(); process.stdin.on('e
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner'), session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx; session.append('turn/start', { turn: 1 }); return value
 }
 
@@ -77,13 +78,13 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   ctx.provide('assistantPolicy' as never, { evaluateAgent: () => ({ effect: 'allow' }), authorizeAgent: () => ({ effect: 'allow' }) } as never)
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'goal', definition: { version: 1, digest: digest('goal'), objective: 'write' }, sessionId: String(owner.session.id), nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: digest('contract'), receiptDigest: digest('receipt'), verifiedAt: Date.now(), validUntil: Date.now() + 60000 }, steps: [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: 'printf bad' } }], failedObservations: [] }
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source } as never)
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(SkillRegistry)
   await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools)
   const keys = generateKeyPairSync('ed25519')
   const execution = { ...nativeExecution(root), command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }
   const plugin = await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], comparisons: [{ id: 'external', version: 1, scope, stateRoot: comparisonStateRoot, backend: execution.backend, runtime: syntheticLinuxRuntime(comparisonStateRoot), cgroupRoots: syntheticCgroupRoots(), command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt, maxComparisons: 1, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1, minimumEvaluationGain: 0.1, dataset: { id: 'external-comparison', version: '1', digest: 'a'.repeat(64), split: 'development' as const }, cases: [{ id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }] }], externalHoldouts: [{ id: 'external', version: 1, scope, execution: { ...execution, stateRoot }, authority: { executable: process.execPath, args: [script, marker], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }, { id: 'cancelled', version: 1, scope, execution: { ...execution, stateRoot: cancelledStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'hold'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }, { id: 'prospective', version: 1, scope, execution: { ...execution, stateRoot: prospectiveStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'prospective'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest }, maxComparisons: 1 }, { id: 'foreign', version: 1, scope: { ...scope, principalId: 'foreign', principalRecordId: 'foreign-record' }, execution: { ...execution, stateRoot: foreignStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'foreign'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('foreign-dataset') }, maxComparisons: 1 }] })
   cleanups.push(() => plugin.dispose())
-  const execute = (name: string, toolArguments: object, signal = new AbortController().signal) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal, agent: owner })
+  const execute = async (name: string, toolArguments: object, signal = new AbortController().signal) => (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`call-${Math.random()}`), name, arguments: JSON.stringify(toolArguments) }], signal, agent: owner })).results[0]!.result
   const json = async (name: string, toolArguments: object) => {
     const result = await execute(name, toolArguments)
     expect(result.isError, inspect(result)).toBe(false)
@@ -224,11 +225,11 @@ test.skipIf(!nativeRuntime)('qualification leaves the source workspace and pendi
     ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never)
   }
 
-  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
+  await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor); await ctx.plugin(SkillRegistry)
   await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools)
   const baseConfig = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['read', 'write'] }
   let plugin = await ctx.plugin(AssistantSkillsService, baseConfig); cleanups.push(() => plugin.dispose())
-  const execute = (name: string, toolArguments: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal: new AbortController().signal, agent: owner })
+  const execute = async (name: string, toolArguments: object) => (await owner.ctx.get('tools')!.execute({ calls: [{ type: 'tool-call', id: ToolCallId(`call-${Math.random()}`), name, arguments: JSON.stringify(toolArguments) }], signal: new AbortController().signal, agent: owner })).results[0]!.result
   const json = async (name: string, toolArguments: object) => {
     const result = await execute(name, toolArguments)
     expect(result.isError, inspect(result)).toBe(false)

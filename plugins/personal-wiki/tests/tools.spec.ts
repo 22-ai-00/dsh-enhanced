@@ -4,7 +4,8 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -30,7 +31,9 @@ function agent(): Agent {
   return {
     id, options: {}, session,
     inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},
   }
 }
@@ -51,6 +54,7 @@ async function harness(ownerRequest?: { text: string; decision: 'execute' | 'ask
   } } as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [
@@ -89,14 +93,32 @@ async function harness(ownerRequest?: { text: string; decision: 'execute' | 'ask
   return { ctx, agent: agent(), root }
 }
 
-function call(name: string, arguments_: Record<string, unknown>, current?: Agent) {
+function call(
+  name: string,
+  arguments_: Record<string, unknown>,
+  current?: Agent,
+  callId = ToolCallId(`wiki-${name}-${Math.random()}`),
+): ToolBatchInput {
   return {
-    callId: ToolCallId(`wiki-${name}-${Math.random()}`),
-    name,
+    calls: [{
+      type: 'tool-call',
+      id: callId,
+      name,
+      arguments: JSON.stringify(arguments_),
+    }],
     ...(current === undefined ? {} : { agent: current }),
     signal: new AbortController().signal,
-    arguments: arguments_,
   }
+}
+
+async function executeCall(
+  ctx: Context,
+  name: string,
+  arguments_: Record<string, unknown>,
+  current?: Agent,
+  callId?: ToolCallId,
+) {
+  return (await ctx.tools.execute(call(name, arguments_, current, callId))).results[0]!.result
 }
 
 describe('personal wiki rc.1 tools', () => {
@@ -110,21 +132,21 @@ describe('personal wiki rc.1 tools', () => {
     const exec = { callId: ToolCallId('owner-wiki-create'), rootCallId: ToolCallId('owner-wiki-create'),
       name: 'wiki_upsert', agent: fixture.agent, signal: new AbortController().signal, arguments: args }
     expect(fixture.ctx.assistantPolicy.isPreauthorizedTool(exec as never)).toBe(true)
-    const direct = await fixture.ctx.tools.execute(exec)
+    const direct = await executeCall(fixture.ctx, 'wiki_upsert', args, fixture.agent, exec.callId)
     expect(direct.isError).toBe(false)
     const value = direct.isError ? undefined : direct.value as { status: string; page?: { metadata: { id: string; title: string } } }
     expect(value).toMatchObject({ status: 'approved', page: { metadata: { title: 'Coffee notes' } } })
     expect(fixture.ctx.personalWiki.read(fixture.agent, { ref: value!.page!.metadata.id }).text)
       .toContain('Hand-brewed coffee notes.')
-    const replay = await fixture.ctx.tools.execute({ ...exec, callId: ToolCallId('owner-wiki-replay') })
+    const replay = await executeCall(fixture.ctx, 'wiki_upsert', args, fixture.agent, ToolCallId('owner-wiki-replay'))
     expect(replay.isError ? undefined : replay.value).toMatchObject({ status: 'approved',
       page: { metadata: { id: value!.page!.metadata.id } } })
     await fixture.ctx.fiber.restart()
 
     const asked = await harness({ text: 'Draft a page and wait for my approval', decision: 'ask' })
     vi.spyOn(asked.agent.session, 'requestHeader').mockReturnValue({ config: { provider: 'p', model: 'm' } } as never)
-    const pending = await asked.ctx.tools.execute({ ...exec, agent: asked.agent,
-      callId: ToolCallId('owner-wiki-ask'), arguments: { ...args, idempotency_key: 'owner:wiki:ask' } })
+    const pending = await executeCall(asked.ctx, 'wiki_upsert',
+      { ...args, idempotency_key: 'owner:wiki:ask' }, asked.agent, ToolCallId('owner-wiki-ask'))
     expect(pending.isError ? undefined : pending.value).toMatchObject({ status: 'pending' })
     expect(asked.ctx.personalWiki.search(asked.agent, { query: 'coffee' })).toEqual([])
     await asked.ctx.fiber.restart()
@@ -139,12 +161,12 @@ describe('personal wiki rc.1 tools', () => {
     const old = fixture.ctx.personalWiki.decideProposal({ proposalId: initial.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: initial.version,
       decision: 'approved', reason: 'seed' }).page!
-    const updated = await fixture.ctx.tools.execute({ callId: ToolCallId('owner-wiki-update'),
-      name: 'wiki_upsert', agent: fixture.agent, signal: new AbortController().signal,
-      arguments: { operation: 'update', idempotency_key: 'owner:wiki:update',
-        page_id: old.metadata.id, expected_revision: old.revision,
-        title: 'Coffee notes', type: 'concept', status: 'active', tags: ['coffee'], aliases: [],
-        sources: [], body: '# Coffee notes\n\nPour-over coffee notes.' } })
+    const updated = await executeCall(fixture.ctx, 'wiki_upsert', {
+      operation: 'update', idempotency_key: 'owner:wiki:update',
+      page_id: old.metadata.id, expected_revision: old.revision,
+      title: 'Coffee notes', type: 'concept', status: 'active', tags: ['coffee'], aliases: [],
+      sources: [], body: '# Coffee notes\n\nPour-over coffee notes.',
+    }, fixture.agent, ToolCallId('owner-wiki-update'))
     expect(updated.isError ? undefined : updated.value).toMatchObject({ status: 'approved',
       page: { metadata: { id: old.metadata.id }, body: '# Coffee notes\n\nPour-over coffee notes.' } })
     await fixture.ctx.fiber.restart()
@@ -163,11 +185,11 @@ describe('personal wiki rc.1 tools', () => {
     const old = fixture.ctx.personalWiki.decideProposal({ proposalId: seed.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: seed.version,
       decision: 'approved', reason: 'seed' }).page!
-    const attempt = await fixture.ctx.tools.execute({ callId: ToolCallId('wiki-metadata-remove'),
-      name: 'wiki_upsert', agent: fixture.agent, signal: new AbortController().signal,
-      arguments: { operation: 'update', idempotency_key: 'metadata:remove', page_id: old.metadata.id,
-        expected_revision: old.revision, title: 'Coffee notes', type: 'concept', status: 'draft',
-        tags: [], aliases: [], sources: [], body: '# Coffee notes\n\nNew unsourced notes.' } })
+    const attempt = await executeCall(fixture.ctx, 'wiki_upsert', {
+      operation: 'update', idempotency_key: 'metadata:remove', page_id: old.metadata.id,
+      expected_revision: old.revision, title: 'Coffee notes', type: 'concept', status: 'draft',
+      tags: [], aliases: [], sources: [], body: '# Coffee notes\n\nNew unsourced notes.',
+    }, fixture.agent, ToolCallId('wiki-metadata-remove'))
     expect(attempt.isError ? undefined : attempt.value).toMatchObject({ status: 'pending' })
     const message = (reviewed as { messages: Array<{ content: Array<{ text: string }> }> }).messages[0]!.content[0]!.text
     const target = (JSON.parse(message) as { currentTarget: unknown }).currentTarget
@@ -197,11 +219,11 @@ describe('personal wiki rc.1 tools', () => {
     const old = fixture.ctx.personalWiki.decideProposal({ proposalId: seed.proposalId,
       principal: 'lark/main/tenant/owner', expectedVersion: seed.version,
       decision: 'approved', reason: 'seed' }).page!
-    const pending = fixture.ctx.tools.execute({ callId: ToolCallId('wiki-drift-review'),
-      name: 'wiki_upsert', agent: fixture.agent, signal: new AbortController().signal,
-      arguments: { operation: 'update', idempotency_key: 'drift:owner', page_id: old.metadata.id,
-        expected_revision: old.revision, title: 'Coffee notes', type: 'concept', status: 'active',
-        tags: ['coffee'], aliases: [], sources: [], body: '# Coffee notes\n\nPour-over notes.' } })
+    const pending = executeCall(fixture.ctx, 'wiki_upsert', {
+      operation: 'update', idempotency_key: 'drift:owner', page_id: old.metadata.id,
+      expected_revision: old.revision, title: 'Coffee notes', type: 'concept', status: 'active',
+      tags: ['coffee'], aliases: [], sources: [], body: '# Coffee notes\n\nPour-over notes.',
+    }, fixture.agent, ToolCallId('wiki-drift-review'))
     await reviewing
     const other = fixture.ctx.personalWiki.propose(fixture.agent, { idempotencyKey: 'drift:other',
       mutation: { op: 'update', pageId: old.metadata.id, expectedRevision: old.revision,
@@ -231,13 +253,13 @@ describe('personal wiki rc.1 tools', () => {
 
   test('wiki_upsert only proposes, then search/read expose the approved page without host paths', async () => {
     const fixture = await harness()
-    const proposed = await fixture.ctx.tools.execute(call('wiki_upsert', {
+    const proposed = await executeCall(fixture.ctx, 'wiki_upsert', {
       operation: 'create', idempotency_key: 'tool:create:coffee',
       title: 'Coffee notes', type: 'concept', status: 'active',
       tags: ['coffee'], aliases: ['Coffee'],
       sources: [{ uri: 'https://example.test/coffee', sha256: 'f'.repeat(64) }],
       body: '# Coffee\n\nHand-brewed coffee notes.',
-    }, fixture.agent))
+    }, fixture.agent)
     expect(proposed.isError).toBe(false)
     expect(proposed.isError ? undefined : proposed.value).toMatchObject({ status: 'pending', version: 1 })
     expect(fixture.ctx.personalWiki.search(fixture.agent, { query: 'coffee' })).toEqual([])
@@ -248,8 +270,8 @@ describe('personal wiki rc.1 tools', () => {
     })
     expect(approved.page?.metadata.authority).toBe('curated')
 
-    const search = await fixture.ctx.tools.execute(call('wiki_search', { query: 'coffee', limit: 5 }, fixture.agent))
-    const read = await fixture.ctx.tools.execute(call('wiki_read', { ref: approved.page!.metadata.id }, fixture.agent))
+    const search = await executeCall(fixture.ctx, 'wiki_search', { query: 'coffee', limit: 5 }, fixture.agent)
+    const read = await executeCall(fixture.ctx, 'wiki_read', { ref: approved.page!.metadata.id }, fixture.agent)
     expect(search.isError).toBe(false)
     expect(search.isError ? undefined : JSON.stringify(search.value)).not.toContain(fixture.root)
     expect(read.isError).toBe(false)
@@ -259,8 +281,8 @@ describe('personal wiki rc.1 tools', () => {
 
   test('wiki_lint is read-only and tools fail closed without an agent', async () => {
     const { ctx, agent: current } = await harness()
-    const lint = await ctx.tools.execute(call('wiki_lint', { limit: 10 }, current))
-    const denied = await ctx.tools.execute(call('wiki_search', { query: 'anything' }))
+    const lint = await executeCall(ctx, 'wiki_lint', { limit: 10 }, current)
+    const denied = await executeCall(ctx, 'wiki_search', { query: 'anything' })
     expect(lint.isError).toBe(false)
     expect(lint.isError ? undefined : lint.value).toMatchObject({ findings: expect.any(Array), truncated: false })
     expect(denied.isError).toBe(true)
@@ -281,7 +303,7 @@ describe('personal wiki rc.1 tools', () => {
     fixture.ctx.personalWiki.decideProposal({ proposalId: proposed.proposalId, principal: 'lark/main/tenant/owner',
       expectedVersion: 1, decision: 'approved', reason: 'test fixture' })
 
-    const result = await fixture.ctx.tools.execute(call('wiki_search', { query: 'safe continue' }, fixture.agent))
+    const result = await executeCall(fixture.ctx, 'wiki_search', { query: 'safe continue' }, fixture.agent)
     const rendered = result.content[0]
 
     expect(rendered).toMatchObject({ type: 'text' })

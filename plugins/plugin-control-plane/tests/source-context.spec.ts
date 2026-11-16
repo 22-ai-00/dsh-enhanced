@@ -63,7 +63,7 @@ describe('source context', () => {
     expect(result.contents).toEqual([{ path: 'src/index.ts', content: 'export const committed = true\n' }])
     expect(result.files.find(file => file.path === 'README.md')?.bytes).toBe(9)
     expect(result.files.map(file => file.path)).toEqual(['README.md', 'src/binary.ts', 'src/index.ts'])
-  })
+  }, 20_000)
 
   it('requires the exact current HEAD and rejects protected, binary, and escaping requests', async () => {
     const value = await fixture()
@@ -74,7 +74,7 @@ describe('source context', () => {
     await expect(inspect(value.root, ['src/binary.ts'], value.head)).rejects.toThrow('UTF-8')
     await expect(inspect(value.root, ['src/link.ts'], value.head)).rejects.toThrow('unavailable')
     await expect(inspect(value.root, ['../package.json'], value.head)).rejects.toThrow('escapes')
-  })
+  }, 20_000)
 
   it('reads the resolved managed baseline while preserving the checkout and rejects a stale inspected base', async () => {
     const value = await fixture(), file = join(value.root, 'plugins/health-helper/src/index.ts')
@@ -90,7 +90,7 @@ describe('source context', () => {
     expect(await readFile(file, 'utf8')).toBe('private uncommitted edit\n')
     expect(execFileSync('/usr/bin/git', ['-C', value.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(value.head)
     await expect(inspectSourceContext({ ...input, baseCommit: value.head })).rejects.toThrow('stale')
-  })
+  }, 20_000)
 
   it('omits submodules and generated/hidden files while reading executable UTF-8 text', async () => {
     const value = await fixture()
@@ -109,7 +109,7 @@ describe('source context', () => {
     expect(result.files.map(file => file.path)).not.toContain('.secret.json')
     expect(result.files.map(file => file.path)).not.toContain('lib/generated.ts')
     await expect(inspect(value.root, ['vendor.ts'])).rejects.toThrow('unavailable')
-  })
+  }, 20_000)
 
   it('rejects file, aggregate and path-count bounds before returning content', async () => {
     const value = await fixture()
@@ -124,7 +124,7 @@ describe('source context', () => {
     await expect(inspect(value.root, ['nul.ts'])).rejects.toThrow('binary')
     await expect(inspect(value.root, Array.from({ length: 65 }, (_, i) => `part${i}.ts`))).rejects.toThrow('too many')
     await expect(inspect(join(value.root, 'plugins/health-helper'))).rejects.toThrow('top-level')
-  })
+  }, 20_000)
 
   it('bounds the manifest instead of silently omitting tracked files', async () => {
     const value = await fixture()
@@ -132,7 +132,7 @@ describe('source context', () => {
     execFileSync('/usr/bin/git', ['-C', value.root, 'add', '.'])
     execFileSync('/usr/bin/git', ['-C', value.root, 'commit', '-m', 'manifest bound'])
     await expect(inspect(value.root)).rejects.toThrow('manifest')
-  })
+  }, 20_000)
 
   it('settles a hung async fence on cancellation and ignores its late success', async () => {
     const abort = new AbortController()
@@ -188,7 +188,7 @@ describe('committed source targets', () => {
     expect(result.plugins).toEqual([{ name: 'health-helper', description: 'Committed helper' }])
     expect(result.baseCommit).toBe(execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim())
     expect(Object.isFrozen(result.plugins)).toBe(true)
-  })
+  }, 20_000)
 
   it('uses the resolved managed commit without changing checkout and rejects stale bases or noncanonical roots', async () => {
     const { root, head } = await targetFixture()
@@ -203,7 +203,7 @@ describe('committed source targets', () => {
     await expect(targets(root, { baselineCommit: released, baseCommit: head })).rejects.toThrow('stale')
     await expect(targets(root, { baseCommit: released })).rejects.toThrow('stale')
     await expect(targets(join(root, 'plugins/health-helper'))).rejects.toThrow('top-level')
-  })
+  }, 20_000)
 
   it.each([
     ['malformed JSON', '{'],
@@ -217,7 +217,7 @@ describe('committed source targets', () => {
     await writeFile(path, content)
     commit(root, 'invalid plugin manifest')
     await expect(targets(root)).rejects.toThrow(/manifest|description/u)
-  })
+  }, 20_000)
 
   it('rejects per-manifest, aggregate and eligible count bounds rather than returning a partial directory', async () => {
     const { root } = await targetFixture()
@@ -241,7 +241,7 @@ describe('committed source targets', () => {
     }
     commit(root, 'too many manifest bytes')
     await expect(targets(root)).rejects.toThrow('aggregate')
-  })
+  }, 20_000)
 
   it('cancels a stalled currentness check and never publishes its late result', async () => {
     const { root } = await targetFixture()

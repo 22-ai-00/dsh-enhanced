@@ -4,6 +4,7 @@ import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -23,7 +24,7 @@ function agent(sessionId: string): Agent {
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
   const append = session.append as unknown as (type: string, data: unknown) => unknown
   append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
-  return { id, options: {}, session, inbox: createInboxStub(),
+  return { id, options: {}, session, inbox: createInboxStub(), model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
@@ -34,6 +35,7 @@ async function harness() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'],
       resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
@@ -59,8 +61,16 @@ async function harness() {
 }
 
 function call(name: string, arguments_: Record<string, unknown>, current?: Agent) {
-  return { callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: arguments_, signal: new AbortController().signal,
-    ...(current === undefined ? {} : { agent: current }) }
+  return {
+    calls: [{ type: 'tool-call' as const, id: ToolCallId(`${name}-${Math.random()}`), name, arguments: JSON.stringify(arguments_) }],
+    signal: new AbortController().signal,
+    ...(current === undefined ? {} : { agent: current }),
+  }
+}
+
+async function executeSingle(ctx: Context, name: string, arguments_: Record<string, unknown>, current?: Agent) {
+  const batch = await ctx.tools.execute(call(name, arguments_, current))
+  return batch.results[0]!.result
 }
 
 describe('delivery tools', () => {
@@ -75,9 +85,9 @@ describe('delivery tools', () => {
 
   test('reply persists an intent and status excludes bodies and route identifiers', async () => {
     const f = await harness()
-    const reply = await f.ctx.tools.execute(call('delivery_reply', { idempotency_key: 'reply-1', text: 'secret body' }, f.current))
+    const reply = await executeSingle(f.ctx, 'delivery_reply', { idempotency_key: 'reply-1', text: 'secret body' }, f.current)
     expect(reply.isError ? undefined : reply.value).toMatchObject({ status: 'pending' })
-    const status = await f.ctx.tools.execute(call('delivery_status', { limit: 5 }, f.current))
+    const status = await executeSingle(f.ctx, 'delivery_status', { limit: 5 }, f.current)
     expect(status.isError).toBe(false)
     const serialized = JSON.stringify(status.isError ? undefined : status.value)
     expect(serialized).not.toContain('secret body')
@@ -89,7 +99,7 @@ describe('delivery tools', () => {
   test('fails closed without a trusted Agent', async () => {
     const f = await harness()
     for (const [name, args] of [['delivery_reply', { idempotency_key: 'x', text: 'x' }], ['delivery_status', {}]] as const) {
-      const value = await f.ctx.tools.execute(call(name, args))
+      const value = await executeSingle(f.ctx, name, args)
       expect(value.isError).toBe(true)
     }
     await f.ctx.fiber.restart()

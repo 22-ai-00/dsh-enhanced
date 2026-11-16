@@ -4,6 +4,7 @@ import { Context as RealContext } from '@deepseek-ai/cordis'
 import { LlmAdapter, LlmRuntime, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { installStrategyBenchmarkMeter, type StrategyBenchmarkMeter } from '../../src/benchmark/strategy-meter.js'
 
 const meters: StrategyBenchmarkMeter[] = []
@@ -38,7 +39,7 @@ async function* complete(input = 3, output = 2): AsyncIterable<StreamChunk> {
 
 describe('strategy benchmark outer meter', () => {
   test('observes actual LlmRuntime streams and ToolRuntime dispatch in one Context', async () => {
-    const ctx = new RealContext(); contexts.push(ctx); await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' })
+    const ctx = new RealContext(); contexts.push(ctx); await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' }); await ctx.plugin(ToolRuntime); await ctx.plugin(NativeToolExecutor)
     class Adapter extends LlmAdapter { override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
       expect(options.signal?.aborted).toBe(false)
       yield { type: 'usage', usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } }
@@ -54,8 +55,11 @@ describe('strategy benchmark outer meter', () => {
     await consume(ctx.llm.stream({ ...options(), signal: meter.signal, sessionId: 'strategy-child' as never }))
     let ran = 0
     ctx.tools.register(defineTool({ name: 'meter_tool', description: 'test meter tool', parameters: {}, output: { schema: { type: 'object', properties: {}, additionalProperties: false }, render: () => [] }, async execute() { ran++; return {} } }))
-    const result = await ctx.tools.execute({ callId: ToolCallId('meter-tool'), name: 'meter_tool', arguments: {}, signal: meter.signal })
-    expect(result.isError).toBe(false); expect(ran).toBe(1)
+    const batch = await ctx.tools.execute({
+      calls: [{ type: 'tool-call', id: ToolCallId('meter-tool'), name: 'meter_tool', arguments: '{}' }],
+      signal: meter.signal,
+    })
+    expect(batch.results[0]!.result.isError).toBe(false); expect(ran).toBe(1)
     expect(meter.snapshot()).toMatchObject({ modelCalls: 2, toolCalls: 1, heldModelCalls: 0 })
     meter.assertComplete(); meter.dispose()
   })

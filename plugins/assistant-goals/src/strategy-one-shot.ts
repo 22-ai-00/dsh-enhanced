@@ -1,15 +1,21 @@
 import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
 import { foldConsumedWork, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { appendDelegatedPolicyOverrides, applyChildComposition, assertSubagentMaxDepth, captureDelegatedPolicyOverrides, childSessionMeta, finalAssistantOutput, resolveChildAgentOptions, resolveChildDepth } from '@deepseek-ai/dsh-subagent'
 import type { ResolvedSubagentStartRequest, SubagentRun, SubagentStopReason } from '@deepseek-ai/dsh-subagent'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
 import { STRATEGY_PROVIDER } from './strategy-identity.js'
 
 // Adapted from @deepseek-ai/dsh-subagent-in-process-driver 0.2.0-rc.2
 // (MIT, Copyright (c) 2026 DeepSeek). AgentRegistry and AgentLoop still own
 // creation and the single native turn.
-export async function startStrategyOneShot(request: ResolvedSubagentStartRequest, onCreate: (child: Agent) => void): Promise<SubagentRun> {
+export async function startStrategyOneShot(
+  request: ResolvedSubagentStartRequest,
+  onCreate: (child: Agent) => void,
+  toolsCtx?: Context,
+): Promise<SubagentRun> {
   assertSubagentMaxDepth(request.maxDepth)
   if (request.signal.aborted) throw new Error('assistant-goals: strategy start was cancelled')
   if (request.label === undefined) throw new Error('assistant-goals: strategy label is required')
@@ -24,7 +30,6 @@ export async function startStrategyOneShot(request: ResolvedSubagentStartRequest
     ...(request.label === undefined ? {} : { label: request.label }) }
   const handle = await request.parent.ctx.agents.create({
     sessionId: id,
-    parentAgent: request.parent,
     meta: childSessionMeta(request.parent, depth, false),
     agentOptions: resolveChildAgentOptions(request.parent, request.agentOptions, depth),
     signal: request.signal,
@@ -32,6 +37,16 @@ export async function startStrategyOneShot(request: ResolvedSubagentStartRequest
       onCreate(child)
       appendDelegatedPolicyOverrides(child.session, inherited)
       applyChildComposition(childCtx, request.parent, { persona: `${STRATEGY_PROVIDER}:${request.label}`, toolFilter: { allow: [] } })
+      if (childCtx.get('tools') !== undefined && toolsCtx !== undefined) {
+        // Keep zero model-visible schemas (including overriding parent PtcExecutor)
+        // while routing any rejected tool call through ToolExecutionPipeline so
+        // tools/pre-execute and tools/result still fire.
+        const pipeline = new ToolExecutionPipeline(toolsCtx)
+        childCtx.tools.setExecutor({
+          describe: () => ({ schemas: [] }),
+          execute: batch => executeToolBatch(batch, pipeline, () => 1),
+        })
+      }
       let appended = false
       childCtx.on('agent/pre-step', async ({ agent }, next) => {
         const decision = await next()

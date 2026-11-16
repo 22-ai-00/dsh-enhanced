@@ -283,10 +283,10 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
   if (expectedGeneratorDigest !== undefined && !prospectiveBinding(begin, frozen, pinnedPublicKey, expectedGeneratorDigest)) fail('prospective certificate does not match the frozen plan')
   revalidate()
   const { IsolatedVerifierRunner } = await import('@dsh-enhanced/assistant-isolation')
-  const runner = new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(execution.stateRoot, 'verification'),
-    runtime: execution.runtime, cgroupRoots: execution.cgroupRoots,
-    authorityDigest: digest({ protocol: 'assistant-skills/holdout-qualification/v1', binding: frozen }), command: execution.command, expiresAt: execution.expiresAt,
-    maxRuns: begin.cellCount, maxTotalDurationMs: begin.cellCount * execution.verificationDurationMs, maxDurationMs: execution.verificationDurationMs, maxOutputBytes: execution.maxOutputBytes })
+  // Construct the isolated runner lazily on the first verified cell so pre-cell
+  // protocol checks (e.g. an empty run or an unsigned next cell) fail closed on
+  // their exact protocol error without opening an unused verification ledger.
+  let runner: InstanceType<typeof IsolatedVerifierRunner> | undefined
   const seen = new Map<string, string>()
   try {
     while (true) {
@@ -295,6 +295,10 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
       if (!validCell(next, begin, seen, seen.size, execution.maxBytes)) fail('next cell signature or binding is invalid')
       const signed = next as SignedCell
       seen.set(signed.cellId, signed.armDigest)
+      runner ??= new IsolatedVerifierRunner({ backend: 'linux-native', stateRoot: join(execution.stateRoot, 'verification'),
+        runtime: execution.runtime, cgroupRoots: execution.cgroupRoots,
+        authorityDigest: digest({ protocol: 'assistant-skills/holdout-qualification/v1', binding: frozen }), command: execution.command, expiresAt: execution.expiresAt,
+        maxRuns: begin.cellCount, maxTotalDurationMs: begin.cellCount * execution.verificationDurationMs, maxDurationMs: execution.verificationDurationMs, maxOutputBytes: execution.maxOutputBytes })
       const originalArm = signed.armDigest === begin.baselineDigest ? arms.baseline : arms.candidate
       const executedArm = signed.armDigest === begin.baselineDigest ? materialized.baseline : materialized.candidate
       const cellSignal = AbortSignal.any([input.signal, AbortSignal.timeout(execution.cellDurationMs)])
@@ -314,5 +318,5 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
     return { receipt, quality: quality(receipt, expectedGeneratorDigest !== undefined), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact',
       ...(expectedGeneratorDigest === undefined ? {} : { prospectiveHoldout: 'authority-attested-after-freeze' as const }),
       ...(canaryAdmission === undefined ? {} : { admissionDigest: digest(canaryAdmission) }) }
-  } finally { await runner.close() }
+  } finally { if (runner !== undefined) await runner.close() }
 }

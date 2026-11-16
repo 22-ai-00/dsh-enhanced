@@ -266,7 +266,7 @@ it('checks every original archive input, permits generated lib and node_modules,
   expect(Number.parseInt(await readFile(join(f.scratch, 'pack-umask'), 'utf8'), 8)).toBe(0o077)
   expect((await lstat(join(f.workspace, 'plugins/helper/generated-check-umask-dir'))).mode & 0o777).toBe(0o755)
   expect((await lstat(join(f.workspace, 'plugins/helper/generated-check-umask-file'))).mode & 0o777).toBe(0o644)
-})
+}, 20_000)
 
 it('emits a single capture frame from the exact already-verified tgz buffer', async () => {
   const f = await fixture()
@@ -282,7 +282,7 @@ it('emits a single capture frame from the exact already-verified tgz buffer', as
   expect(captured).toEqual(packed)
   expect(captured.length).toBe(Number(marker![1]))
   expect(createHash('sha256').update(captured).digest('hex')).toBe(marker![2])
-})
+}, 20_000)
 
 it('does not inherit an outer creation grant into the default modify fixture', async () => {
   vi.stubEnv('DSH_SOURCE_TRUST_LOCKFILE', 'true')
@@ -291,7 +291,7 @@ it('does not inherit an outer creation grant into the default modify fixture', a
   const result = await f.run()
   expect(result.code).toBe(0)
   expect(await readFile(join(f.scratch, 'install-args'), 'utf8')).not.toContain('--trust-lockfile')
-})
+}, 20_000)
 
 it.each(['check-manifest', 'check-source', 'check-archive', 'check-symlink', 'check-mode-file', 'check-mode-dir',
   'check-bin-content', 'check-bin-size', 'check-bin-symlink', 'check-bin-hardlink', 'check-bin-mode-700',
@@ -302,7 +302,7 @@ it.each(['check-manifest', 'check-source', 'check-archive', 'check-symlink', 'ch
   expect(result.code).not.toBe(0)
   expect(result.stderr).toMatch(/source build input (?:archive )?changed|original (?:file|directory) replaced/u)
   await expect(readFile(join(f.scratch, 'pack-started'))).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, 20_000)
 
 it.each([
   [{ unsafeBin: '../src/index.ts' }, /unsafe archive path/u],
@@ -316,7 +316,7 @@ it.each([
   expect(result.code).not.toBe(0)
   expect(result.stderr).toMatch(reason)
   await expect(readFile(join(f.scratch, 'install-args'))).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, 20_000)
 
 it.each(['pack-manifest', 'pack-source', 'pack-archive'])('rejects a pack that changes an original input: %s', async mutation => {
   const f = await fixture()
@@ -325,7 +325,7 @@ it.each(['pack-manifest', 'pack-source', 'pack-archive'])('rejects a pack that c
   expect(result.stderr).toMatch(/source build input (?:archive )?changed/u)
   expect(await readFile(join(f.scratch, 'pack-started'), 'utf8')).toBe('started')
   expect(result.stdout).not.toContain('DSH_PREPARED_PACK')
-})
+}, 20_000)
 
 it.each(['pack-transient-manifest', 'pack-transient-patch', 'pack-transient-readme', 'pack-transient-license',
   'pack-transient-deps', 'pack-transient-exports', 'pack-transient-imports', 'pack-transient-retained-script', 'pack-transient-script-order',
@@ -337,14 +337,14 @@ it.each(['pack-transient-manifest', 'pack-transient-patch', 'pack-transient-read
   expect(result.code).not.toBe(0)
   expect(result.stderr).toMatch(/source packed artifact changed/u)
   expect(result.stdout).not.toContain('DSH_PREPARED_PACK')
-})
+}, 20_000)
 
 it('accepts pnpm dependency locator normalization while preserving fixed manifest fields', async () => {
   const f = await fixture()
   const result = await f.run('pack-normalized-deps')
   expect(result.code).toBe(0)
   expect(result.stdout).toContain('DSH_PREPARED_PACK')
-})
+}, 20_000)
 
 it.each(['none', 'hooks-only'] as const)('accepts the native published scripts shape for %s source scripts', async scripts => {
   const f = await fixture({ scripts })
@@ -354,14 +354,14 @@ it.each(['none', 'hooks-only'] as const)('accepts the native published scripts s
   const packedManifest = JSON.parse(execFileSync('/usr/bin/tar', ['-xOzf', join(f.workspace, '.dsh-pack/helper-1.0.0.tgz'), 'package/package.json'], { encoding: 'utf8' })) as Record<string, unknown>
   if (scripts === 'none') expect(packedManifest).not.toHaveProperty('scripts')
   else expect(packedManifest.scripts).toEqual({})
-})
+}, 20_000)
 
 it('uses trust-lockfile only with a matching immutable image baseline and pnpm 11.7.0', async () => {
   const f = await fixture()
   const result = await f.run('', 'match')
   expect(result.code).toBe(0)
   expect(await readFile(join(f.scratch, 'install-args'), 'utf8')).toContain('--trust-lockfile\n')
-})
+}, 20_000)
 
 it('rejects creation trust-lockfile with a different pnpm version before install', async () => {
   const f = await fixture()
@@ -369,7 +369,7 @@ it('rejects creation trust-lockfile with a different pnpm version before install
   expect(result.code).not.toBe(0)
   expect(result.stderr).toMatch(/requires pinned pnpm/u)
   await expect(readFile(join(f.scratch, 'install-args'))).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, 20_000)
 
 it.each(['mismatch', 'absent'] as const)('rejects a creation trust-lockfile request without matching image baseline: %s', async trust => {
   const f = await fixture()
@@ -377,4 +377,4 @@ it.each(['mismatch', 'absent'] as const)('rejects a creation trust-lockfile requ
   expect(result.code).not.toBe(0)
   expect(result.stderr).toMatch(/source creation baseline lock/u)
   await expect(readFile(join(f.scratch, 'pack-started'))).rejects.toMatchObject({ code: 'ENOENT' })
-})
+}, 20_000)

@@ -5,6 +5,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRuntime, { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -31,6 +32,7 @@ function createAgent(ctx: Context): Agent {
   const owner: Agent = {
     id,
     options: { provider: 'test', model: 'test' },
+    model: { current: () => ({ provider: 'test', model: 'test' }), select: () => {} },
     session,
     inbox: createInboxStub(),
     ctx: undefined as unknown as Context,
@@ -64,12 +66,31 @@ function definition(name: string, execute: () => void): ToolDefinition {
   })
 }
 
+function provideSessionProjections(ctx: Context): void {
+  ctx.provide('sessionProjections' as never, {
+    async register(definition: {
+      init(header: unknown, inherited: number): unknown
+      apply(state: unknown, event: unknown): unknown
+    }) {
+      return Object.assign(() => {}, {
+        stateOf(session: Session) {
+          let state = definition.init(session.header, 0)
+          for (const event of session.snapshotEvents()) state = definition.apply(state, event)
+          return state
+        },
+      })
+    },
+  } as never)
+}
+
 async function fixture(policy: Pick<Config, 'rules' | 'toolDefaultEffect' | 'budgets'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-policy-preauthorized-'))
   roots.push(root)
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  provideSessionProjections(ctx)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
@@ -87,13 +108,17 @@ async function fixture(policy: Pick<Config, 'rules' | 'toolDefaultEffect' | 'bud
 }
 
 async function execute(ctx: Context, owner: Agent, name = 'action_github_commit', signal = new AbortController().signal) {
-  return await ctx.tools.execute({
-    callId: ToolCallId(`preauthorized-${Math.random()}`),
-    name,
-    arguments: { command: 'node trusted-task.js' },
+  const batch = await ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`preauthorized-${Math.random()}`),
+      name,
+      arguments: JSON.stringify({ command: 'node trusted-task.js' }),
+    }],
     signal,
     agent: owner,
   })
+  return batch.results[0]!.result
 }
 
 function trustedActionsCaller(ctx: Context, name = 'dsh-enhanced-assistant-actions'): Context {
@@ -130,9 +155,16 @@ describe('trusted Host tool preauthorization', () => {
       })
       const admitted = current.ctx.assistantWorkItems.admit({ kind: 'review', externalId: 'native-tool-pipeline', title: 'Inspect a report', brief: 'Produce and recall a report.', originBindingId: 'owner-binding' })
       current.owner.ctx.provide('assistantAutomationExecution' as never, Object.freeze({ mode: 'production', automationId: 'work-item-worker', occurrenceId: 'work-item-occurrence' }) as never)
-      const invoke = async (name: string, args: Record<string, unknown>) => await current.ctx.tools.execute({
-        callId: ToolCallId(`work-item-${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent: current.owner,
-      })
+      const invoke = async (name: string, args: Record<string, unknown>) => (await current.ctx.tools.execute({
+        calls: [{
+          type: 'tool-call',
+          id: ToolCallId(`work-item-${name}-${Math.random()}`),
+          name,
+          arguments: JSON.stringify(args),
+        }],
+        signal: new AbortController().signal,
+        agent: current.owner,
+      })).results[0]!.result
       expect((await invoke('work_item_claim', {})).isError).toBe(false)
       expect((await invoke('work_item_report', { status: 'ready', summary: 'Verified stored facts.' })).isError).toBe(false)
       expect((await invoke('work_item_status', {})).isError).toBe(false)

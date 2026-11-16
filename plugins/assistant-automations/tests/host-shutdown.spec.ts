@@ -166,6 +166,28 @@ test('an old consumer shutdown cannot pause a newer nonce for the same owner and
   expect(readStoredDefinitions(databasePath).find(item => item.id === 'same')?.status).toBe('paused')
 })
 
+test('marks service disposed on Cordis UNLOADING restart state before dependent effects finish', async () => {
+  const { ctx, provider } = await setup()
+  const service = ctx.get('assistantAutomations')!
+  let releaseDependent!: () => void
+  const dependentBlocked = new Promise<void>(resolve => { releaseDependent = resolve })
+  let dependentEnteredDispose!: () => void
+  const enteredDispose = new Promise<void>(resolve => { dependentEnteredDispose = resolve })
+  await ctx.inject(['assistantAutomations'], dependentCtx => {
+    dependentCtx.effect(() => async () => {
+      dependentEnteredDispose()
+      await dependentBlocked
+    })
+  })
+  const restarting = provider.restart()
+  await enteredDispose
+  expect(() => service.health()).toThrow(/disposed/)
+  await expect(service.tick()).rejects.toThrow(/disposed/)
+  releaseDependent()
+  await restarting
+  expect(() => ctx.get('assistantAutomations')?.health()).not.toThrow()
+})
+
 test('a never-settling Host callback reaches its deadline and closes the provider store', async () => {
   const { ctx, provider, databasePath } = await setup()
   const owner = ctx.plugin({ name: 'stuck-host-shutdown', inject: ['assistantAutomations'], apply(child: Context) {

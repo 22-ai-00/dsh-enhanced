@@ -6,12 +6,12 @@ Policy 与 Delivery 须成套升级。Policy 不再注册保留档位 `auto`，�
 
 原生 Auto 只支持当前会话，不能成为 `permission.defaultPreset`。配置 CLI 和安装器拒绝显式 `auto` 默认值，并保留原文件；静态默认仍支持 `workspace-write` / `danger-full-access`。安装器读取到 legacy settings.yaml 的旧 `auto` 默认也拒绝保留安装，要求明确选择静态默认；不自动重写其他 profile。
 
-## 0.2.2-rc.1 Host 上的一键安装
+## 0.2.2-rc.3 Host 基线与一键安装
 
-当前桌面 Host 运行 `0.2.2-rc.1`，而仓库验证基线仍是 `0.2.1-rc.2`（catalog、锁文件与测试依赖不变）。两处有限修复只影响安装：
+当前桌面 Host 与仓库验证基线均已升级为 `0.2.2-rc.3`（Cordis `^4.1.0`，锁定 Loader/Include/Group `1.1.0`）：
 
-- 所有插件与共享包的 `@deepseek-ai/*` peer 范围从精确 `0.2.1-rc.2` 放宽为 `>=0.2.1-rc.2 <0.3.0`。只放宽 Host 版本声明，不改变 catalog、锁文件、测试基线或任何 `@dsh-enhanced/*` 内部 peer。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配，因此同时接受已验证基线和当前 `0.2.2-rc.1`；低于基线或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许精确基线或这条已验证的 0.2 线。
-- 插件不得把 `@deepseek-ai/dsh-*` 运行时包写成普通 `dependencies`。这类依赖会随插件装进 profile 的 `node_modules`，Loader 解析 base bundle 的同名行时优先拿到 profile 里的旧副本，兼容门随即禁用 `working-directory`、`session-projection` 等根服务，导致所有下游插件 pending。`assistant-skills` 0.1.65 曾以普通依赖引入 5 个 `0.2.1-rc.2` 包并触发该故障；0.1.66 起改为可选 Host peer（`>=0.2.1-rc.2 <0.3.0`），构建/测试用 devDependency，`index.spec` 断言 `dependencies` 中不出现 `@deepseek-ai/dsh-*`。
+- 所有插件与共享包的 `@deepseek-ai/*` peer 范围收紧为 `>=0.2.2-rc.3 <0.3.0`（`@deepseek-ai/cordis` 为 `^4.1.0`），不改变任何 `@dsh-enhanced/*` 内部 peer。Host 用 `semver.satisfies(..., { includePrerelease: true })` 匹配；低于 `0.2.2-rc.3` 或未验证的 0.3 仍拒绝。根 `tests/dsh-compatibility.spec.ts` 只允许精确基线或 `>=0.2.2-rc.3 <0.3.0`。
+- 插件不得把 `@deepseek-ai/dsh-*` 运行时包写成普通 `dependencies`。这类依赖会随插件装进 profile 的 `node_modules`，Loader 解析 base bundle 的同名行时优先拿到 profile 里的旧副本，兼容门随即禁用 `working-directory`、`session-projection` 等根服务，导致所有下游插件 pending。`assistant-skills` 0.1.65 曾以普通依赖引入 5 个旧版包并触发该故障；0.1.66 起改为可选 Host peer，构建/测试用 devDependency，`index.spec` 断言 `dependencies` 中不出现 `@deepseek-ai/dsh-*`。
 - lark-channel 一键安装会被 Host 的 ANSI 解析缺陷挡住：`plugin-manager` 的 `/\bIgnored build scripts:/` 在 pnpm 11 的彩色输出中匹配失败，`pendingBuilds` 为空，之后 `approvedBuilds` 重试返回 `stale-approval`。面板侧有限兜底：安装失败时从 pnpm 原始输出（去 ANSI）解析受影响的依赖名并交给主人确认；确认后若 Host 仍无待批准记录，面板把确认过的名字写入 profile 的 `pnpm-workspace.yaml`（`allowBuilds: <name>: true`，原子写入、0600），再不带批准参数重试一次。名称仍受上限 64、长度 200、禁止通配符与控制字符约束；不自动批准，不触碰其他 profile 键。Host 自身仍保留缺陷，此兜底不改 Host 安装器。
 
 ## 插件配置 CLI 与 recommended 预设
@@ -71,7 +71,7 @@ Delivery v26 只新增与 Inbox claim 同库的持久维护栅栏，owner snapsh
 
 ## Linux 既有 owner 的程序升级
 
-`dsh-rsi update --all --yes` 为受支持的冻结源码 Linux owner 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受原安装为 Docker 后端、未发生源码采用且无未结 activation 的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` 原 Host，候选固定为 `0.2.2-rc.1`。Docker→native 另要求创建 review 与 adoption 业务历史为空；已是 native 的 owner 安装拒绝，完整 live 切换尚未验收。详细前提及独立的 pre-owner 维护入口见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
+`dsh-rsi update --all --yes` 为受支持的冻结源码 Linux owner 安装提供专用程序升级事务：沿安装收据绑定的官方 `dev` / `main` 分支快进源码，在 Home 外准备依赖，再成对停服、复制 Home、更新程序和私有 Host，最后检查本次启动的目标与协调器。它保留原 owner 绑定、模型配置、凭据引用、授权原期限、累计已用额度和业务历史；不重新 onboarding，不重置额度或自动续期。当前入口仅接受原安装为 Docker 后端、未发生源码采用且无未结 activation 的安装及 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` 原 Host，候选固定为 `0.2.2-rc.3`。Docker→native 另要求创建 review 与 adoption 业务历史为空；已是 native 的 owner 安装拒绝，完整 live 切换尚未验收。详细前提及独立的 pre-owner 维护入口见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。它不扩展 Mac 冻结 Home 或 `0.1 → 0.2` 迁移范围。
 
 升级追加独立签名的 `rsi-owner-program-update-overlay` 和源码维护记录，保留原 bootstrap 与此前 repair 链。后续 reader 必须支持两种 owner overlay，并核对最近记录的 creation / journal 摘要。候选启动前失败可恢复原 Home；候选已启动后只继续核验当前 Home，不能用旧副本覆盖可能新增的业务记录。未完成事务优先恢复，不先拉取或重建其已固定的安装器。操作说明见 [CLI 指南](../packages/dsh-rsi-cli/README.md#升级与重装)，实际验收状态见 [当前状态](rsi-status.md)。
 
@@ -184,11 +184,11 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。普通 registry 更新仍不支持固定本地源码或 `rsi-local-cohorts` 制品，会在 registry 查询和停服前拒绝；不能将显式维护入口外推为所有本地安装可自动更新。跨版本 DSH Host 的独立迁移事务已通过工程验收；本机受审生产 Home 通过显式联合 Host / 源码迁移及签名后继修复，完成 `0.1.5-rc.3 → 0.2.0-rc.2` 的双 Host 新鲜就绪验收。这仅证明该特定 Home 与输入，其他部署组合仍待验证。普通插件升级与 Host 更新仍是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-当前源码兼容基线为 **DSH `0.2.1-rc.2`**（2026-10-20 核对官方 registry），公开增强包 `0.1.72`（`release-manifest.json` 的 `current.version`）配套该私有 Host 版本。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
+当前源码兼容基线为 **DSH `0.2.2-rc.3`**（2026-11-16 核对官方 registry），公开增强包 `0.1.73`（`release-manifest.json` 的 `current.version`；下一轮待发 pinned Host 为 `0.2.2-rc.3`，peer 范围 `>=0.2.2-rc.3 <0.3.0`）。安装默认解析 `latest` 并冻结精确版本，只接受已适配的版本；未知新版本拒绝安装，不静默退回旧版或选择 Alpha/Beta。现有私有 Host 收据仍保留读取和回滚能力；新版插件不得装入旧 Host。发布历史和远端引导器的固定制品由 release prepare 单独更新，迁移验收状态见 [RSI 状态](rsi-status.md)。
 
 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。此前 `0.1` 的 Session format 为 3，当前 `0.2` 为 4；持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 
-`0.2.1-rc.2` 继续使用 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。仓库锁定的 Cordis/Loader/Include 基线为 `4.0.5` / `1.0.6` / `1.0.10`。验收须核对安装树、Host 运行时解析和插件声明的 peer 范围；独立 setup CLI 通过所选 Host 的原生 `createRuntimeResolution` 启动，不调用已移除的 fallback API。
+`0.2.2-rc.3` 使用显式 `ToolExecutor`（`@deepseek-ai/dsh-tool-executor-native` / `@deepseek-ai/dsh-tool-executor-ptc`）、批量 `tools.execute(ToolBatchInput)` 与 Provider 拥有的模型工具 schema 呈现（`ToolsService` 不再接受 `mode` 配置），以及 Session format 4、生产者专属 MessageSource、顶层工具结果消息、动态 Auto 与 agent-preset-registry。仓库锁定的 Cordis/Loader/Include/Group 基线为 `4.1.0` / `1.1.0` / `1.1.0` / `1.1.0`。验收须核对安装树、Host 运行时解析和插件声明的 peer 范围；独立 setup CLI 通过所选 Host 的原生 `createRuntimeResolution` 启动，不调用已移除的 fallback API。
 
 新版子任务改用 `SubagentRuntime.startActivation()`。Goals 保持原生 external provider 的 one-shot 合同：兼容驱动复用原生 AgentRegistry / AgentLoop 执行单轮，持久化不可恢复的 descriptor，继续校验父会话、有限 permit、预算与工具限制；停用 Goals 后原生 `sendMessage` 仍拒绝冷恢复。外部 activation ID 与真实子会话 ID 由 descriptor label 关联。旧 `subagent-in-process-driver` 与未使用的 `dsh-invariants` 已移出依赖。JSONL persistence 改为命名插件导出；Policy 仍要求精确后端与实际持久化基类，使用原生 reader oracle 验证事件，不降低伪造后端检查。
 
@@ -212,7 +212,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 
 以下记录接口约束和升级回归点；标注旧版本的条目保留接口引入或迁移背景，不代表当前安装版本。当前 DSH/Cordis 版本以本节基线、[依赖目录](../pnpm-workspace.yaml)及锁文件为准：
 
-- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.1-rc.2`。Session 保持通过公开 `snapshotEvents()` 读取；模型请求允许无持久身份的 RequestUserInput，不能把该输入伪装为认证用户事件。
+- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.2-rc.3`。Session 保持通过公开 `snapshotEvents()` 读取；模型请求允许无持久身份的 RequestUserInput，不能把该输入伪装为认证用户事件。
 - `@deepseek-ai/dsh-user-questions@0.1.2-rc.1` 定义 `ctx.userQuestions.ask()` 与 `user-questions/request` answerer waterfall。带 `agent` 的请求只会派发到 exact live runtime root 的 Agent scope；随产品交付的 Web Host 通过 Remote Events 在该 scope 贡献 answerer。没有 answerer 接受请求时以 `NO_PROVIDER` 失败，不会无限等待。
 - `0.1.2-rc.1` 不再发布 `@deepseek-ai/dsh-host-apiproxy`，`dsh-user-questions` 也不发布独立的 question request/answer 审计流。渠道集成若要承接 `ask_user_question`，必须直接在同一 Agent scope 注册 `user-questions/request` answerer；旧版 Host question bridge 的并发结算语义不属于当前公开契约。
 - `@deepseek-ai/dsh-system-prompt@0.1.2-rc.1`：Personal Memory 使用可选 Host peer 的 `context()` 在每次模型步骤组装时贡献任务相关记忆；当前任务取自 `Session.deriveMessages()` 的有效 surface，忽略已被 compaction replacement 移除的消息。注册随 Cordis injection 释放。AgentLoop 将变化后的 context 追加为持久 user-role snapshot，并声明它覆盖旧快照的有效语义；该 API 不会从历史消息中擦除原始记忆。无该服务时仅保留启动快照兼容路径。升级时须重跑实际 AgentLoop 两步之间记忆撤回与 provenance 测试。
@@ -234,7 +234,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 - Goals 可选 `eventWaits` 声明 EventTriggers `>=0.1.24 <0.2.0` optional Host peer，运行时检查 `sourceSnapshot` / `firstEventAfter` / `subscribeSourceChanges`；不静态导入或自动激活 EventTriggers。`dsh-event-source/v1` 快照绑定来源配置、目标和单调高水位，EventTriggers schema v4 从 v3 添加 outbox 序号，Goals 独立 event-waits schema v1 保存 matched→固定 wake 的恢复身份。升级时重跑来源迁移、重复事件、失效授权和原 Session 恢复场景；不能并行运行使用旧 schema 的 writer。 Delivery 另须提供 `goalWakeResultVersion() === 1`：只为显式请求输出的 wake 返回本次 exact native turn 的完整可见文本；`enqueueScheduledGoalResult` 使用进程内 capability 与入队时精确 owner/binding fence，不接调用者自报正文。
 - 官方 ACP 行为复查基线：`@deepseek-ai/dsh-acp@0.1.0-rc.5`（上游源码提交 `47f943859bef60e4160492346772ded9b24f765a`）
 - Cordis 运行时 ABI 使用本节锁定的 Cordis/Loader/Include 基线，并核对 [pnpm-workspace.yaml](../pnpm-workspace.yaml)、锁文件和当前安装产物。本地的锁定 Cordis fork checkout 可作为“万物皆插件”的架构参考，但其 checkout 版本不能替代本仓锁定运行时的可执行证据；任何 Cordis/Loader/Include 升级都必须按 [AGENTS.md](../AGENTS.md) 的运行时契约重新验收。
-- Node.js：`^22.19.0 || >=24.0.0`
+- Node.js：`>=24.9.0`（仓库 `.node-version` 锁定 `24.9.0`；Linux 只读 `/usr` bwrap 隔离行为验证运行时仍使用 `/usr/bin/node` `v22.23.2`）
 - pnpm：`11.7.0`
 - `0.1.4` 配置迁移：`assistant-delivery` 与 `assistant-automations` 已废弃 `toolCapableProviders`、`unknownRouteToolCalls`。旧键会被配置解析器保留但运行时忽略，升级时应删除；工具与 skill catalog 只由 Agent/preset 决定，模型 route 不是能力授权边界。同一 Agent/preset 在所有 route 获得相同 Host 工具、执行器和 Policy；route 缺少协议元数据以及声明 `native`/`bridge` 均准入，只有 adapter 明确声明 `toolCalls: none` 且最终工具非空时因协议未实现而失败。
 - Codex CLI `0.147.0`–`0.150.1`（显式 fallback）：App Server 的 `initialize` + `model/list` 用于无 prompt 模型目录发现，生成走 JSONL。Agent 工具由兼容 prompt 中的 `dsh-tool-calls/v1` 严格信封桥接回 DSH，CLI 自身不执行这些工具。生成正文不进入 argv：Codex 以末尾 `-` 明确读取 stdin，Claude 与 Cursor 使用 stdin；Grok 在 Linux、macOS、Windows 均使用 OS 用户临时目录内独占创建的私有 prompt 文件，并在子进程关闭后清理，避免 Node `child_process` 下重新打开 `/dev/stdin` 触发 `ENXIO`。标准助手工作区不必是 Git 仓库，因此经 live Host session 与 canonical cwd 严格证明后，Codex 固定接收 `--skip-git-repo-check`；这不改变 read-only sandbox、工具禁用或 DSH Policy。默认 `maxPromptBytes` 为 4 MiB，是本地序列化/输入内存安全边界；超限返回 `CLI_PROMPT_LIMIT`，与模型 `CONTEXT_WINDOW_EXCEEDED` 分离。兼容诊断识别 0.147.0 与 0.150.1 两种 stdin 提示，但只在进程以 code `1` 退出、没有 stdout 协议输出，且 stderr 含精确仓库拒绝行时映射 `CLI_WORKING_DIRECTORY`，其他退出保持通用分类。
@@ -257,7 +257,7 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 
 该切片使用 manifest v3，把原 active service 集、owner/配置/数据库摘要、preview nonce/catalog、guardian intent、post-swap attestation 和最终 `serviceAcceptance` 绑定为一个恢复协议。`serviceAcceptance` 必须精确覆盖原 active units、unit 唯一、数值字段为非负安全整数，且目标 unit 的 InvocationID 与 post-swap proof 一致；未知、缺失、重复、额外或 inactive 替代项都拒绝恢复。安装器只会屏蔽并停止经 HOME 与 WorkingDirectory 双重证明归属当前 home 的 units；归属缺失、冲突、漂移或 guardian 无法 strict-realpath 证明时不会取得 mutation authority。swap 后失败保持服务收容并保留 current/original home 与 transaction evidence，不把已经迁移的状态自动回滚或重放。
 
-preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中运行；它唯一允许的 process-local external-provider exemption 是禁用 `larkChannel` 并从 preview Health required providers 移除该项，active 配置不得继承 exemption。真实 service 验收要求 fresh InvocationID/journal ready marker、required Lark health、严格前进且精确匹配 active 配置的 attestation，以及稳定窗口。这里的组合和生命周期语义按本仓实际 `@deepseek-ai/cordis@4.0.5`、Loader `1.0.6`、Include `1.0.10` 验证；sibling Cordis checkout 只用于解释 Fiber、injection、effect ownership 和 Loader composition。
+preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中运行；它唯一允许的 process-local external-provider exemption 是禁用 `larkChannel` 并从 preview Health required providers 移除该项，active 配置不得继承 exemption。真实 service 验收要求 fresh InvocationID/journal ready marker、required Lark health、严格前进且精确匹配 active 配置的 attestation，以及稳定窗口。这里的组合和生命周期语义按本仓实际 `@deepseek-ai/cordis@4.1.0`、Loader `1.1.0`、Include `1.1.0` 验证；sibling Cordis checkout 只用于解释 Fiber、injection、effect ownership 和 Loader composition。
 
 supervised uninstall 只停用目标 profile 的本地受管能力：事务停止并收容经证明归属该 canonical home 的 unit，归档目标 profile 的完整目录树，再用 installer-clean 的同名 Web profile 替换 live target。clean target 不再要求 Lark、Health 或 supervised active attestation，只通过 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness；原 active unit 恢复，原 inactive unit 保持停止。uninstall 不访问 npm registry 或 pnpm store，也不撤销凭据、owner binding、Session、Goal、数据库或其它共享/外置状态。完整 profile-tree 归档不等于整个 home 的逐字节证明，后续重装或共享同一状态库的其它 profile 仍可能解释这些保留状态。
 

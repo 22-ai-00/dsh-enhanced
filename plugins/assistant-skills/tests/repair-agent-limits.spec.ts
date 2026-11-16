@@ -32,7 +32,7 @@ const readSchema = { name: 'read', description: 'read a file', parameters: { typ
 
 type StreamListener = (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
 type Guard = (execution: { name: string }) => string | undefined
-type AssembleListener = (assembly: { tools: Array<{ name: string }> }, context: { agent: unknown }, next: () => Promise<{ tools: Array<{ name: string}> }>) => Promise<{ tools: Array<{ name: string }> }>
+type Executor = { describe(definitions: Array<{ name: string; description?: string; parameters?: unknown }>): { schemas: Array<{ name: string }> } }
 
 interface Harness {
   sessionId: string
@@ -40,27 +40,27 @@ interface Harness {
   cancel: ReturnType<typeof vi.fn>
   stream: StreamListener
   guard: Guard
-  assemble: AssembleListener
+  executor: Executor
   restrict: ReturnType<typeof vi.fn>
 }
 
 /** Mounts the real runtime against a stub Agent factory and captures its hooks. */
-async function mount(overrides: Partial<OwnerRepairAgentInput> = {}, mounted: Array<{ name: string }> = [readSchema]): Promise<{ runtime: OwnerRepairAgentRuntime; harness: Harness }> {
-  let stream!: StreamListener, guard!: Guard, assemble!: AssembleListener
+async function mount(overrides: Partial<OwnerRepairAgentInput> = {}, mounted: Array<{ name: string; description?: string; parameters?: unknown }> = [readSchema]): Promise<{ runtime: OwnerRepairAgentRuntime; harness: Harness }> {
+  let stream!: StreamListener, guard!: Guard, executor!: Executor
   const cancel = vi.fn()
   const restrict = vi.fn()
-  const agent = { session: { id: '' }, cancel }
+  const agent = { session: { id: '' }, model: { current: () => undefined, select: vi.fn() }, cancel }
   const agentCtx = {
     effect: (acquire: () => unknown) => acquire(),
     tools: {
       // Real API: schemas() lists globals, schemas(agent) lists mounted tools.
-      schemas: (target?: unknown) => (target === undefined ? [...mounted, { name: 'bash' }] : mounted),
+      schemas: (target?: unknown) => (target === undefined ? [...mounted, { name: 'bash', description: 'bash', parameters: { type: 'object' } }] : mounted),
       restrict,
+      setExecutor: (value: Executor) => { executor = value; return () => {} },
       guard: (callback: Guard) => { guard = callback },
     },
     on: (name: string, listener: unknown) => {
       if (name === 'llm/stream') stream = listener as StreamListener
-      else if (name === 'system-prompt/assemble') assemble = listener as AssembleListener
       return () => {}
     },
   }
@@ -76,7 +76,7 @@ async function mount(overrides: Partial<OwnerRepairAgentInput> = {}, mounted: Ar
   } } as unknown as Context
   const runtime = new OwnerRepairAgentRuntime(ctx)
   const made = await runtime.create({ ...baseInput(), ...overrides })
-  return { runtime, harness: { sessionId: made.sessionId, agent, cancel, stream, guard, assemble, restrict } }
+  return { runtime, harness: { sessionId: made.sessionId, agent, cancel, stream, guard, executor, restrict } }
 }
 
 async function finishOnce(next: () => AsyncIterable<StreamChunk>): Promise<void> {
@@ -180,19 +180,19 @@ test('the tool guard rejects calls beyond maxToolCalls', async () => {
   } finally { await runtime.dispose() }
 })
 
-test('the system-prompt filter hides non-allowlisted tools and name-sorts the rest', async () => {
+test('the repair tool scope restricts globals and filters executor descriptions to the allowlist', async () => {
   // `bash` exists only as a global in this stub (schemas(undefined)), never as a
-  // mounted preset tool, so it lands in restrict({deny}) and is filtered from
-  // the model-facing assembly.
-  const mountedTools = [{ name: 'write' }, readSchema]
+  // mounted preset tool, so it lands in restrict({deny}); the scoped executor's
+  // describe() also enforces the frozen allowlist for any preset-local tools.
+  const mountedTools = [{ name: 'write', description: 'write a file', parameters: { type: 'object' } }, readSchema]
   const { runtime, harness } = await mount({ allowedTools: ['read', 'write'] }, mountedTools)
   try {
     expect(harness.restrict).toHaveBeenCalledWith({ deny: ['bash'] })
-    const next = vi.fn(async () => ({ tools: [{ name: 'bash' }, { name: 'write' }, { name: 'read' }] }))
-    const own = await harness.assemble({ tools: [] }, { agent: harness.agent }, next)
-    expect(own.tools.map(tool => tool.name)).toEqual(['read', 'write'])
-    // A different Agent's assembly is returned untouched.
-    const foreign = await harness.assemble({ tools: [] }, { agent: { session: { id: 'other' } } }, next)
-    expect(foreign.tools.map(tool => tool.name)).toEqual(['bash', 'write', 'read'])
+    const described = harness.executor.describe([
+      { name: 'bash', description: 'bash', parameters: { type: 'object' } },
+      mountedTools[0]!,
+      readSchema,
+    ])
+    expect(described.schemas.map(tool => tool.name)).toEqual(['write', 'read'])
   } finally { await runtime.dispose() }
 })

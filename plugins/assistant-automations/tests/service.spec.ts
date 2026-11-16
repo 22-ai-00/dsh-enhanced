@@ -29,6 +29,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
   })
   return {
     id, options: {}, session,
+    model: { current: () => undefined, select: () => {} },
     inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},

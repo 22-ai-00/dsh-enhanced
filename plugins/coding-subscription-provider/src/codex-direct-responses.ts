@@ -361,7 +361,7 @@ async function buildInput(
   signal: AbortSignal,
 ): Promise<unknown[]> {
   const offloadImages = requiredImageOffload(options.messages, { maxBytes: maxRequestImageBytes, representation: 'raw' }, block => block.attachment.bytes)
-  if (offloadImages > 0) throw new LlmError('Codex private Responses requires older images to be offloaded', IMAGE_OFFLOAD_REQUIRED_CODE, { offloadImages })
+  if (offloadImages > 0) throw LlmError.fromFailure({ message: 'Codex private Responses requires older images to be offloaded', code: IMAGE_OFFLOAD_REQUIRED_CODE, offloadImages })
   const messages = projectOffloadedImages(options.messages,
     () => '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]')
   const input: unknown[] = []

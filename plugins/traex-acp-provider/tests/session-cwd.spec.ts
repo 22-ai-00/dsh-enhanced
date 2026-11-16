@@ -94,7 +94,7 @@ describe('TraeX live session cwd binding', () => {
     const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
     roots.push(root)
     await expect(() => resolveTrustedSessionCwd({
-      request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }),
+      request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }) as unknown as GenerateOptions,
       configuredCwd: root,
       sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
       attestor: { claim: () => true },

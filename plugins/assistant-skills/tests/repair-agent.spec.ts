@@ -62,7 +62,7 @@ test('production repair runtime confines native file tools before their delegate
   let dispatch!: (execution: { agent: unknown, name: string, arguments: unknown, signal: AbortSignal, callId: string }, next: () => Promise<{ isError: boolean }>) => Promise<{ isError: boolean }>
   let delegated = 0
   let current = true
-  const agent = { session: { id: 'repair-files' }, cancel: vi.fn() }
+  const agent = { session: { id: 'repair-files' }, model: { current: () => undefined, select: vi.fn() }, cancel: vi.fn() }
   const agentCtx = {
     effect: (acquire: () => unknown) => acquire(),
     tools: { schemas: () => [{ name: 'read' }, { name: 'write' }, { name: 'edit' }, { name: 'read_image' }], guard: () => {} },
@@ -114,7 +114,7 @@ test.each(['native', 'repair'] as const)('a %s abort at normal provider return k
   const repairAbort = new AbortController(), nativeAbort = new AbortController()
   let stream!: (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
   const create = async ({ sessionId, setup }: { sessionId: string; setup: (ctx: unknown, agent?: unknown) => Promise<void> }) => {
-    const agent = { session: { id: sessionId }, cancel: vi.fn() }
+    const agent = { session: { id: sessionId }, model: { current: () => undefined, select: vi.fn() }, cancel: vi.fn() }
     const runtime = { effect: (acquire: () => unknown) => acquire(), tools: { schemas: () => [], guard: () => {} },
       on: (name: string, listener: typeof stream) => { if (name === 'llm/stream') stream = listener; return () => {} } }
     const agentCtx = new Proxy(runtime, { get(target, key, receiver) {

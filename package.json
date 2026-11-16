@@ -7,7 +7,7 @@
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "scripts": {
     "build": "pnpm run build:bootstrap && pnpm --recursive --workspace-concurrency=1 --if-present run build",
@@ -74,6 +74,7 @@
     "@deepseek-ai/dsh-skill": "catalog:",
     "@deepseek-ai/dsh-subprocess": "catalog:",
     "@deepseek-ai/dsh-tool-skill": "catalog:",
+    "@deepseek-ai/dsh-tool-executor-ptc": "catalog:",
     "@deepseek-ai/dsh-token-meter": "catalog:",
     "@deepseek-ai/dsh-user-approval": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
@@ -117,6 +118,7 @@
     "@deepseek-ai/dsh-llm-retry": "catalog:",
     "@deepseek-ai/dsh-storage": "catalog:",
     "@deepseek-ai/dsh-storage-domain": "catalog:",
-    "@deepseek-ai/cordis-plugin-loader": "catalog:"
+    "@deepseek-ai/cordis-plugin-loader": "catalog:",
+    "@deepseek-ai/dsh-tool-executor-native": "catalog:"
   }
 }

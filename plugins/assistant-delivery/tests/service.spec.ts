@@ -13,6 +13,7 @@ import LlmRuntime, {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
   AUTO_REVIEW_APPROVAL_REASON,
@@ -50,7 +51,8 @@ function foreground(sessionId: string): Agent {
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
     cwd: '/work/alpha', isSeeded: false, agentPreset: 'primary' })
   return { id, options: {}, session, inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle', model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
 
@@ -60,7 +62,8 @@ function foregroundWithHeader(sessionId: string, cwd: string, agentPreset: strin
     version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd, isSeeded: false, agentPreset,
   })
   return { id, options: {}, session, inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle', model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
 
@@ -124,6 +127,7 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
   const ctx = new Context()
   if (options.approval === true) {
     await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ApprovalService)
     if (options.reviewer !== undefined && options.reviewerMountOrder !== 'after-delivery') {
@@ -230,7 +234,8 @@ async function registerApprovalAgent(ctx: Context, sessionId: string, input: {
   const session = ctx.sessions.create(id, { meta: { cwd: '/work/alpha', agentPreset: 'primary' } })
   const agent: Agent = { id, options: {}, session,
     inbox: createInboxStub(),
-    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    ctx: new Context(), status: 'idle', model: { current: () => ({ provider: 'fixture', model: 'fixture' }), select: () => {} },
+    cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   await ctx.agents.register(agent)
   session.append('turn/start', { turn: 1 })

@@ -3,6 +3,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import type { FileSystem, FsInfo } from '@deepseek-ai/dsh-fs'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline'
 import { createHash } from 'node:crypto'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { EvidenceAnchor } from './evidence-ledger.js'
@@ -138,15 +139,21 @@ export async function revalidateFileEvidence(
     if (!regularFile(before) || exec.signal.aborted) return false
     if (policy.authorizeAgent(agent, 'read', { kind: 'filesystem', id: processPath }).effect !== 'allow') return false
 
-    const result = await tools.execute({
+    const pipeline = new ToolExecutionPipeline(ctx)
+    const prepared = await pipeline.prepare({
       callId: ToolCallId(`${exec.callId}:evidence-revalidate`),
       rootCallId: exec.rootCallId,
       parent: exec.token,
+      ...(exec.toolSet === undefined ? {} : { toolSet: exec.toolSet }),
       name: toolName,
+      arguments: { ...replayedArguments(args), file_path: processPath },
       agent,
       signal: exec.signal,
-      arguments: { ...replayedArguments(args), file_path: processPath },
     })
+    const outcome = prepared.kind === 'dispatch'
+      ? await pipeline.dispatch(prepared.exec)
+      : prepared
+    const result = await pipeline.complete(prepared.exec, outcome)
     if (result.isError || exec.signal.aborted) return false
 
     // Re-resolve the original spelling to detect an alias/symlink replacement

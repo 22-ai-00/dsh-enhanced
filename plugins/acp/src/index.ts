@@ -40,7 +40,6 @@ import {
   installModelSelection,
   type Agent,
   type ModelSelection,
-  type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
@@ -54,6 +53,7 @@ import {
   modeState,
   setNativeMode,
   setSessionConfigOption,
+  type ModelSelectionState,
 } from './control.ts'
 import { version } from './version.js'
 
@@ -97,7 +97,7 @@ export const Config: Schema<AcpConfig> = Schema.object({
 interface SessionRecord {
   agent: Agent
   dispose: () => Promise<void>
-  selection: ModelSelectionRef
+  selection: ModelSelectionState
   mapper: SessionEventMapper
   inflight: {
     resolve: (reason: StopReason) => void
@@ -379,14 +379,15 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
           initialSelection(),
           agentPresets.resolve(),
         ])
-        const selection: ModelSelectionRef = { current, assembled: undefined }
+        const selection: ModelSelectionState = { current }
         const sessionId = SessionId(randomUUID())
         const handle = await agents.create({
           sessionId,
           meta: { cwd: params.cwd, agentPreset: initialPreset.id },
           agentOptions: { provider: current.provider, model: current.model },
-          setup: async (agentCtx) => {
-            installModelSelection(agentCtx, selection)
+          setup: async (agentCtx, agent) => {
+            installModelSelection(agentCtx)
+            agent.model.select(current)
             await agentPresets.mount(agentCtx, initialPreset.id)
           },
         })
@@ -454,6 +455,9 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
             params.configId,
             params.value,
           )
+          // 0.2.2: AgentModel.select() is the durable switch; the ACP session keeps
+          // only the display state used to build config options.
+          if (record.selection.current !== undefined) record.agent.model.select(record.selection.current)
           return {
             configOptions,
             _meta: { dsh: { selection: copySelection(record.selection.current as ModelSelection) } },

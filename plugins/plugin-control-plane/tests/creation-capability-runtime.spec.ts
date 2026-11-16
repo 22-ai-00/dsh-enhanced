@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, type WorkItemSourceGrowthRunBinding,
   verifyPluginCreationVerificationCertificate, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
@@ -603,8 +603,19 @@ test('native tool policy still guards proxy, while repeated and unknown direct c
   await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
   const runtime = f.runtime(); await runtime.start(); await runtime.adopt('plan-1', new AbortController().signal)
   const name = f.journal.inspect('plan-1')!.tools![0]!.name
+  const executeSingleTool = async (
+    tools: Context['tools'],
+    input: { callId: string; name: string; arguments: Record<string, unknown>; agent?: unknown; signal?: AbortSignal },
+  ): Promise<ToolExecutionResult> => {
+    const batch = await tools.execute({
+      calls: [{ type: 'tool-call', id: input.callId as never, name: input.name, arguments: JSON.stringify(input.arguments) }],
+      ...(input.agent ? { agent: input.agent as never } : {}),
+      signal: input.signal ?? new AbortController().signal,
+    })
+    return batch.results[0]!.result
+  }
   f.ctx.tools.guard(() => 'blocked by native guard')
-  const blocked = await f.ctx.tools.execute({ name, callId: 'guarded' as never,
+  const blocked = await executeSingleTool(f.ctx.tools, { name, callId: 'guarded',
     arguments: { query: 'test' }, signal: new AbortController().signal })
   expect(blocked.isError).toBe(true)
   if (blocked.isError) expect(blocked.error.message).toContain('blocked by native guard')
@@ -883,8 +894,14 @@ test('revoking plan A does not abort a pending native call on plan B; global clo
     const aliasB = records.get('plan-b')!.tools![0]!.name
     expect(ctx.tools.get(aliasA)).toBeDefined()
     expect(ctx.tools.get(aliasB)).toBeDefined()
-    const invokeB = (callId: string) => handle.agent.ctx.tools.execute({ callId: callId as never, name: aliasB,
-      arguments: { query: callId }, agent: handle.agent, signal: new AbortController().signal })
+    const invokeB = async (callId: string) => {
+      const batch = await handle.agent.ctx.tools.execute({
+        calls: [{ type: 'tool-call', id: callId as never, name: aliasB, arguments: JSON.stringify({ query: callId }) }],
+        agent: handle.agent,
+        signal: new AbortController().signal,
+      })
+      return batch.results[0]!.result
+    }
     const pendingB = invokeB('b-first')
     await expect.poll(() => gates.length).toBe(1)
     revokedA = true

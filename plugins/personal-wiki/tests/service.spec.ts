@@ -31,6 +31,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
     inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),

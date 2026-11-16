@@ -4,7 +4,8 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { type ToolBatchInput } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -45,6 +46,7 @@ function agent(): Agent {
     inbox,
     ctx: new Context(),
     status: 'idle',
+    model: { current: () => ({ provider: 'mock', model: 'mock' }), select: () => {} },
     cancel() {},
     whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal),
@@ -61,6 +63,7 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [
@@ -119,21 +122,28 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
   return { ctx, agent: agent() }
 }
 
-function call(name: string, args: Record<string, unknown>, withAgent?: Agent) {
+function call(name: string, args: Record<string, unknown>, withAgent?: Agent): ToolBatchInput {
   return {
-    callId: ToolCallId(`call-${name}-${Math.random()}`),
-    name,
-    arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`call-${name}-${Math.random()}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal: new AbortController().signal,
     ...(withAgent === undefined ? {} : { agent: withAgent }),
   }
 }
 
+async function executeCall(ctx: Context, name: string, args: Record<string, unknown>, withAgent?: Agent) {
+  return (await ctx.tools.execute(call(name, args, withAgent))).results[0]!.result
+}
+
 async function observe(ctx: Context, target: Agent, situation: string, outcome: string, index: number) {
-  return ctx.tools.execute(call('evolution_observe', {
+  return executeCall(ctx, 'evolution_observe', {
     situation, outcome, detail: `attempt ${index}`, idempotency_key: `${situation}:${index}`,
     occurred_at: 1_000 + index,
-  }, target))
+  }, target)
 }
 
 function observeTrusted(
@@ -247,7 +257,7 @@ describe('assistant evolution tools', () => {
         operation_id: 'owner-undo:no-agent',
       }],
     ] as const) {
-      const result = await ctx.tools.execute(call(name, args))
+      const result = await executeCall(ctx, name, args)
       expect(result.isError).toBe(true)
       expect(JSON.stringify(result.content)).toContain('missing-agent')
     }
@@ -258,7 +268,7 @@ describe('assistant evolution tools', () => {
     const { ctx, agent: target } = await harness()
     await observe(ctx, target, 'weekly-report', 'failed', 1)
 
-    const reviewed = await ctx.tools.execute(call('evolution_review', {}, target))
+    const reviewed = await executeCall(ctx, 'evolution_review', {}, target)
 
     expect(reviewed.isError).toBe(false)
     expect(reviewed.isError ? undefined : reviewed.value).toEqual({ candidates: [], activeRules: [] })
@@ -269,7 +279,7 @@ describe('assistant evolution tools', () => {
     const { ctx, agent: target } = await harness()
     for (let index = 1; index <= 4; index += 1) await observe(ctx, target, 'weekly-report', 'failed', index)
 
-    const reviewed = await ctx.tools.execute(call('evolution_review', {}, target))
+    const reviewed = await executeCall(ctx, 'evolution_review', {}, target)
     const value = reviewed.isError ? undefined : reviewed.value as { candidates: unknown[] }
 
     expect(value?.candidates).toEqual([])
@@ -280,11 +290,11 @@ describe('assistant evolution tools', () => {
     const { ctx, agent: target } = await harness()
     const rule = await approvedRule(ctx, target, 'automation:tool-owner-undo')
 
-    const requested = await ctx.tools.execute(call('evolution_undo', {
+    const requested = await executeCall(ctx, 'evolution_undo', {
       rule_id: rule.id,
       expected_version: rule.version,
       operation_id: 'tool-owner-undo:42',
-    }, target))
+    }, target)
 
     expect(requested.isError).toBe(false)
     expect(requested.isError ? undefined : requested.value).toMatchObject({
@@ -303,10 +313,10 @@ describe('assistant evolution tools', () => {
     const { ctx, agent: target } = await harness()
 
     // Guidance must be earned by recorded outcomes, not asserted by the model.
-    const result = await ctx.tools.execute(call('evolution_propose', {
+    const result = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'unobserved', guidance: 'Invented lesson.',
-    }, target))
+    }, target)
 
     expect(result.isError).toBe(true)
     expect(JSON.stringify(result.content)).toContain('no adopt candidate')
@@ -317,13 +327,13 @@ describe('assistant evolution tools', () => {
     const { ctx, agent: target } = await harness()
     for (let index = 1; index <= 4; index += 1) await observeTrusted(ctx, 'weekly-report', 'failed', index)
 
-    const proposed = await ctx.tools.execute(call('evolution_propose', {
+    const proposed = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'automation:weekly-report', guidance: 'Draft the report a day early.',
-    }, target))
+    }, target)
 
     expect(proposed.isError ? undefined : proposed.value).toMatchObject({ status: 'pending' })
-    const reviewed = await ctx.tools.execute(call('evolution_review', {}, target))
+    const reviewed = await executeCall(ctx, 'evolution_review', {}, target)
     expect((reviewed.isError ? undefined : reviewed.value as { activeRules: unknown[] })?.activeRules).toEqual([])
     await ctx.fiber.restart()
   })
@@ -336,16 +346,16 @@ describe('assistant evolution tools', () => {
       }
     }
 
-    const first = await ctx.tools.execute(call('evolution_propose', {
+    const first = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'automation:first-lesson',
       guidance: 'Use the first reviewed lesson.',
-    }, target))
-    const second = await ctx.tools.execute(call('evolution_propose', {
+    }, target)
+    const second = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'automation:second-lesson',
       guidance: 'Use a different second lesson.',
-    }, target))
+    }, target)
 
     expect(first.isError).toBe(false)
     expect(second.isError).toBe(true)
@@ -356,20 +366,20 @@ describe('assistant evolution tools', () => {
 
   test('a rejected tool proposal attempt does not consume the Agent instance allowance', async () => {
     const { ctx, agent: target } = await harness()
-    const rejected = await ctx.tools.execute(call('evolution_propose', {
+    const rejected = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'not-ready',
       guidance: 'No evidence yet.',
-    }, target))
+    }, target)
     for (let index = 1; index <= 4; index += 1) {
       await observeTrusted(ctx, 'now-ready', 'failed', index)
     }
 
-    const accepted = await ctx.tools.execute(call('evolution_propose', {
+    const accepted = await executeCall(ctx, 'evolution_propose', {
       operation: 'adopt',
       situation: 'automation:now-ready',
       guidance: 'Evidence now supports this lesson.',
-    }, target))
+    }, target)
 
     expect(rejected.isError).toBe(true)
     expect(accepted.isError).toBe(false)
@@ -386,7 +396,7 @@ describe('assistant evolution tools', () => {
       }))
     }
 
-    const reviewed = await ctx.tools.execute(call('evolution_review', {}, target))
+    const reviewed = await executeCall(ctx, 'evolution_review', {}, target)
     const value = reviewed.isError ? undefined : reviewed.value as {
       candidates: Array<{
         evidenceDigest: string
@@ -431,10 +441,10 @@ describe('assistant evolution tools', () => {
     const rule = await approvedRule(ctx, target, 'automation:tool-rollback')
     await recordAttributedFailures(ctx, rule)
 
-    const rolled = await ctx.tools.execute(call('evolution_rollback', {
+    const rolled = await executeCall(ctx, 'evolution_rollback', {
       rule_id: rule.id,
       expected_version: rule.version,
-    }, target))
+    }, target)
     const value = rolled.isError ? undefined : rolled.value as {
       ruleId: string
       status: string
@@ -472,9 +482,9 @@ describe('assistant evolution tools', () => {
     await recordAttributedFailures(ctx, rule)
     const args = { rule_id: rule.id, expected_version: rule.version }
 
-    const first = await ctx.tools.execute(call('evolution_rollback', args, target))
-    const sameAgentReplay = await ctx.tools.execute(call('evolution_rollback', args, target))
-    const newAgentReplay = await ctx.tools.execute(call('evolution_rollback', args, agent()))
+    const first = await executeCall(ctx, 'evolution_rollback', args, target)
+    const sameAgentReplay = await executeCall(ctx, 'evolution_rollback', args, target)
+    const newAgentReplay = await executeCall(ctx, 'evolution_rollback', args, agent())
 
     expect(first.isError).toBe(false)
     expect(sameAgentReplay.isError).toBe(true)
@@ -491,21 +501,21 @@ describe('assistant evolution tools', () => {
 
   test('a failed rollback consumes the Agent attempt and disabled mode mutates nothing', async () => {
     const enabled = await harness()
-    const invalid = await enabled.ctx.tools.execute(call('evolution_rollback', {
+    const invalid = await executeCall(enabled.ctx, 'evolution_rollback', {
       rule_id: 'not-a-server-rule', expected_version: 1,
-    }, enabled.agent))
-    const retry = await enabled.ctx.tools.execute(call('evolution_rollback', {
+    }, enabled.agent)
+    const retry = await executeCall(enabled.ctx, 'evolution_rollback', {
       rule_id: 'rule-00000000-0000-4000-8000-000000000000', expected_version: 1,
-    }, enabled.agent))
+    }, enabled.agent)
     expect(invalid.isError).toBe(true)
     expect(retry.isError).toBe(true)
     expect(JSON.stringify(retry.content)).toMatch(/one|already|attempt/iu)
     await enabled.ctx.fiber.restart()
 
     const disabled = await harness({ autonomousRollback: false })
-    const denied = await disabled.ctx.tools.execute(call('evolution_rollback', {
+    const denied = await executeCall(disabled.ctx, 'evolution_rollback', {
       rule_id: 'rule-00000000-0000-4000-8000-000000000000', expected_version: 1,
-    }, disabled.agent))
+    }, disabled.agent)
     expect(denied.isError).toBe(true)
     expect(JSON.stringify(denied.content)).toMatch(/disabled|forbidden/iu)
     expect(disabled.ctx.assistantEvolution.health().autonomousRollbacks).toBe(0)
