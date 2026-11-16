@@ -9,6 +9,7 @@
 | 安装、选择场景、解决启动问题 | [安装指南](../scripts/install/README.md) |
 | 添加 API 模型、使用 TraeX、切换模型 | [模型配置](models.md) |
 | 连接飞书、绑定机器人、排查没有回复 | [飞书接入](../plugins/lark-channel/docs/setup.md) |
+| 接入另一个 bot（peer agent）、配置白名单与排障 | [Peer agent 白名单与真实渠道验收](peer-agent-verification.md) |
 | 查状态、看日志、升级、重装或卸载 | [dsh-rsi 命令参考](../packages/dsh-rsi-cli/README.md) |
 | 了解当前能力与平台限制 | [当前状态](rsi-status.md) |
 | 安装更多功能 | [插件目录](../plugins/README.md) |
