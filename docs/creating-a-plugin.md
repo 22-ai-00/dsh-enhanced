@@ -34,6 +34,10 @@ pnpm create:plugin my-plugin
 - 进入模型的内容必须沿 DSH 的持久事件/上下文 seam 注册，不能只保存在不可重放的进程内状态。
 - Patch 覆盖已有行时会替换整段 `config`，不是深合并；必须重述该行需要保留的键。
 
+### 客户端 UI 与原生 Settings 槽位
+
+带 Web 界面的插件可在 `package.json` 的 `dsh.client` 声明预构建浏览器入口（如 `owner-console` 产出 `./lib/client.js`），并在客户端通过 Host `slots` 扩展 DSH 原生界面：除 `sidebar.panellist` / `main` 外，还可注册 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer`（出现在左侧栏原生设置中），以及按包名 `key` 注册的 `plugins.bundle.config` 摘要/详情卡片（由插件自有 Typert `remote` 提供脱敏状态与受控操作，不在浏览器直接持有密钥或模型调用）。
+
 ## 4. 测试与文档
 
 至少覆盖插件的核心行为和清理路径。插件 README 需要包含：用途、兼容性、安装、配置、使用、权限/数据边界和限制。随后把插件加入 [插件目录](../plugins/README.md)。

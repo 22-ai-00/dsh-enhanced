@@ -45,11 +45,13 @@ plugins/<name>/
 
 ## Host 与 Web 双端插件
 
-普通插件只有 Node/Host 入口。需要改动 Web UI 时，一个包通常同时拥有 Host 与 browser 两半：Host 提供数据/RPC，browser 入口通过 `dsh.client` 声明 `platform: web` 和依赖边，并从 `exports["./client"]` 发布已构建的客户端文件。
+普通插件只有 Node/Host 入口。需要改动 Web UI 时，一个包通常同时拥有 Host 与 browser 两半：Host 提供数据/Typert RPC，browser 入口通过 `dsh.client` 声明 `platform: web` 和依赖边，并从 `exports["./client"]` 发布预构建客户端产物（如 `owner-console` 产出 `./lib/client.js`，注册 `sidebar.panellist` / `main` 与 DSH 原生左栏设置槽位 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer` 及 `plugins.bundle.config`）。
 
-双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
+双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH `0.2.2-rc.3` 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
 
-Web owner 适配通过内存 `EntryTree` 将宿主实际 Session Controller 包的 client 元数据，与 owner-scoped 的 Host 包装绑定。唯一原生入口的 import 仅返回该包装，不启动未过滤 Controller；浏览器通过既有 ClientModuleRegistry 加载同一 Host 的原生 Session client。本包构建产物只含提醒 UI，不复制旧版 Session 协议。子树由 Cordis effect 释放，无 profile 写回或 node_modules 修改；跨版本浏览器测试覆盖审批后续答、历史恢复与页面异常。
+Web owner 适配通过内存 `EntryTree` 将宿主 Session Controller 的 client 元数据与 owner-scoped 的 Host 包装绑定，只在浏览器加载同源原生 client，不复制旧版 Session 协议；子树由 Cordis effect 释放，不回写 profile 或 `node_modules`。
+
+此外，跨插件纯契约库放在 `packages/*`（如 `assistant-growth-contract`、`task-acceptance-contract`、`llm-route-capabilities`、`dsh-rsi-cli`），而 `assistant-dreaming` 等需要感知兄弟能力但不必强制装入的插件通过**可选 `peerDependencies`** 接入，保证独立包边界不被拉链锁定。
 
 ## 分发
 
@@ -65,100 +67,27 @@ Web owner 适配通过内存 `EntryTree` 将宿主实际 Session Controller 包�
 
 ## 持续目标上下文
 
-`assistant-goals` 是独立、可移除的业务 bundle。DSH `goals` 仍拥有原生状态、revision、轮次和 activation；本插件只在真实 Delivery owner 当前人类 turn 创建原生目标时绑定不可变 owner lineage，保存目标原文、原生状态投影与未验证的规划笔记。它不复制 AgentLoop、调度器或原生 goal 状态机。
+`assistant-goals` 是独立、可移除的业务 bundle，复用 DSH 原生 `goals` 与 `assistant-automations`（不复制 AgentLoop、调度器或 goal 状态机）：仅在真实 Delivery owner 当前人类 turn 创建目标时绑定不可变 owner lineage、scope（workspace/preset/principal）与目标原文；业务 focus 存在私有 SQLite，原生 `complete` 仅表示待验收，只有绑定当前定义与实际执行的独立验收才能确认 `achieved`。目标累计预算与可选后台唤醒由私有 `.budgets` / `Session lease` 排他门及 Automations Host executor 串行化，过期或 `unknown` 不自动重放。
 
-业务记录以原 SessionId + GoalId 确定身份，scope 包含 principal record/version、workspace 和 preset。当前会话的 focus 是业务数据库中的引用，可以读取同 owner 其他会话的上下文，不改变原生执行归属。卸载插件不留下无法被标准 Session reader 识别的自定义事件。原生 `complete` 显示为待验收，不能写入可信 achieved；Goals 已复用 Automations 的持久唤醒与 Verifier 的独立结果协议；只有绑定当前定义和实际执行的独立验收才能确认目标达成。
+### 自主协同与成长管线
 
-原生回合累计预算仍属于 `assistant-goals` 独立 bundle：可信 Host 注册精确模型路由的计量声明，插件在现有 `llm/stream` 与 `tools/execute` 管线执行预留和计数。私有 `.budgets` SQLite 以 owner scope + 业务目标 ID 保存不可变上限、绝对期限和 held/settled 记录；不与普通前台或账户级预算混算。它不创建模型循环或持久调度器；可选后台唤醒复用 Automations 的 Host executor，并与 Delivery 前台共享持久 Session 排他和后台 owner 证明；恢复原 Session，不走会创建新 Session 的普通 Automation runner。
+日常闭环沿单向来源与锁序流转，全部可独立启停并保持未知不重放与撤回失效：
 
-Delivery 内置运行时通过同一 schema 19 Session lease 表序列化 active binding 的恢复与绑定前 construction，Session ID 是最终排他键。新会话的持久身份在 binding 写入前就固定，released orphan 不允许换主体接管。生命周期由原生 AgentLoop 驱动；lease 不负责调度，过期的 dispatched/unknown 也不授予恢复权限。Goals wake 已接入同一 gate，与前台共享排他，再按既有 Automations 的持久任务意图派发。
+- **入站与主动跟进（`assistant-work-items` / `assistant-proactive` / `assistant-delivery`）**：Delivery 在受认证人类回复上落盘独占入站、自然结果反馈及续办序（不把模型自报或 `role:user` Host notice 当作授权）；WorkItems 以 `observe` 模式记录 intake 台账、受控召回（owner recall）与显式 continuation；Proactive 对已授权事件做收益评估（`intakeEvaluation`）、去重提醒与主人注意力调节提问。
+- **记忆与经验学习（`assistant-memory-learning` / `personal-memory`）**：在三份独立签名授权齐备后通过 canonical 游标提取前台或 WorkItem 经验，并在查询与模型组装边界按当前 owner 实时复核/隐藏已撤回条目。
+- **做梦奇想与成长驱动（`assistant-dreaming` / `assistant-growth-driver` / `assistant-growth-contract`）**：`assistant-dreaming` 默认休眠（fail-closed），启用后经确定性 HMAC 抽签与空闲/冷启动门由单工具冻结 Agent 仅写入私有 idea 账本（L0）；只有经 owner 受策略验证的 idea，才允许可选 `assistant-growth-driver` 结合前台真实反馈或认证后台失败（`workItemFailures`）在冻结模型路由与预算下形成持久成长作业，再交 Control Plane 与 Verifier 独立审查、有限采用或物理回退。
+- **多 ACP 编码 Agent 与控制台（`traex-acp-provider` / `owner-console`）**：同时提供 `traex-agent` 与 Antigravity `agy-agent` 本机 ACP 接入并支持配置热重载；`owner-console` 聚合各插件的脱敏健康与概览（经 `assistant-health` / 服务读写端），写入全部走 Host `settings`/`pluginManager` 或受授权服务方法，浏览器端不持密钥、不发模型请求。
 
-Delivery schema 24 增加自然任务反馈日志：同一 owner 对原普通前台结果的明确回复，在保持正常 Agent 续答的同时生成初评、更正或撤回。Host 从持久原文与回复目标建立身份，冻结 canonical 版本前置条件；恢复只补记反馈，不能重派模型请求。Evaluation 的当前 owner revision 提供操作身份，Delivery 据此附上对应的有界纠正原文，Growth 将其视为不可信任务材料。
+## 离线隔离执行与独立验收
 
-Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery owner 来源校验，把真实前台结果转成持久复盘意图；Delivery schema 23 的普通任务执行回执独立于验收契约，内置外部渠道运行时捕获实际模型并在资源释放后结束记录，已认证 owner 对具体回复的反馈即可进入 canonical 结果；它只保存消费游标和作业快照，不复制结果账本。Evaluation writer fence 内同步提交游标与意图，原生 Automations 拥有每分钟恢复扫描、一次性作业、执行准入和预算。模型在来源任务实际请求时固定并持久保存，后台恢复不重新读取用户当前模型选择。queued 可恢复，派发后的 unknown 不自动重放；纠正、撤回及 owner 换代在模型/工具边界阻止旧来源继续使用。启用源码轨时，可信失败在 Control Plane schema 16 自动形成带 owner/canonical 来源的私有 gap，自动复盘仅看到本次 gap；源码检查和计划提交持续重验来源，最终写入处于 Evaluation writer fence 内。有限源码审批、发布/独立审查和精确制品采用已接续同一原生作业。Control Plane schema 20 另在目标 Host 通过 Delivery 前台生命周期记录部署归因：共享认证 observer 的 Cordis 采样器，对照已应用 readiness 的签名观测，保存任务开始/完成时的精确运行实例；不改变 Delivery 学习来源摘要。schema 21 的可选 taskObservations 由原生 Automations 按当前 owner 反馈/独立验证结果形成有限任务批次，外部签名器只读持久批次并执行次数/期限/部署授权；最终 Evaluation writer fence 包裹 watch 与批次落账，回滚复用既有物理恢复链。任务组关联不证明工具调用或结果因果；目标 Host 自重启仍需外部协调器继续恢复。
+`assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy 与 SQLite 授权账本：Linux 唯一支持 `backend: 'linux-native'`（bubblewrap、user/mount/PID/network namespace、tmpfs 与已委派 cgroup v1 控制器，Docker 后端已移除，旧账本只读留存），macOS 使用原生 sandbox/seatbelt。每条 Isolation grant 精确绑定 owner lineage、scope、期限与有限次数/时长，按 `unknown` 保留资源占位、不自动重放。
 
-
-WorkItems 的可选 owner recall 将前台任务查询与后台执行权限分开：Delivery 证明当前活人 turn 和精确原生工具调用，Policy 独立授权读取，账本先按 owner lineage、route、workspace/preset 和 worker automation 过滤再分页。同一主人进入较新 Session 代次后可沿任务 ID 和报告 revision 召回历史；该读取不恢复 occurrence、续期或修改执行预算，也不以 worker 自报替代独立结果。现有 worker/diagnosis 合同和 `follows` 关闭语义保持独立。
-
-WorkItems 的显式 owner continuation 用新子项连接已静止的父任务，复用 Automations Host executor 和原生 AgentLoop。前台 `work_item_continue` 的 v1 计划冻结当前真实输入及实际 supplier；可选 `ownerReplyContinuation` 的 v2 计划则由 Delivery 真实报告回复建立来源，继承执行父项的冻结 supplier，不虚构前台调用。Delivery 在 schema 29 引入同一事务保存独占转交与回复原文的机制，并维护回复序列：下一条回复等待上一子项静止，再读取其报告。WorkItems 先持久创建子项，Delivery 验证后 ACK 并推进序列，运行时只有来源仍有效且 ACK 精确绑定该子项时才能派发和调用工具。取消、重启和未知派发不允许消息再次进入普通前台；该机制不等同于任意跨信道身份合并或完整 Thread 订阅。
-
-可选 `ownerReportFeedback` 将报告结果评价与任务续办分开。Delivery schema 30 在真实 typed 报告回复上先识别明确结果反馈，独立核对当前 owner 与反馈 Policy，再持久保存独占入站、原报告目标和结果版本前置条件。Evaluation schema 13 以原 `itemId` 维护 `work-item` 当前结果；report revision、production occurrence 和模型快照属于证据，不增加同一任务的票数。WorkItems 的进程内 capability 只证明准确历史报告和实际执行终止，目标成功或失败由主人单独声明；原 worker settlement 仍只能记录 unknown。更正、撤回、冷恢复均沿 Evaluation 的现有版本与 writer fence 处理。历史报告读取不续期执行授权，已接受的反馈也不会转回前台或生成续办任务。
-
-后台结果的 Host 来源读取保持独立协议：完整证据在服务端复核，展示文本有界并过滤常见凭据形状。Memory 学习、独立审查与采用三份授权都显式启用 `workItemExperiences` 后，学习器通过独立 canonical 游标保存后台结果意图，使用 v2 来源协议提取经验。任务简报和 worker 报告仅作背景，引文必须来自当前认证主人反馈；截断材料拒绝，脱敏材料仅使用可见文本。事实学习仍限前台来源；工程 Growth 使用下述另行授权的完整任务来源。
-
-后台经验提交遵循 Delivery → Evaluation → WorkItems 来源锁 → Memory（或独立审查账本）的顺序。混合来源批量检查先完成外部来源读取，再在锁内整组复核，避免后一来源的回调改变前一来源后仍写入。后续检索重核当前来源，更正、撤回或暂不可用会隐藏不再有效的自动经验；只有准确的主人撤回才能确认永久失效。已保存请求的未知操作继续查询原采用/审查回执，来源变化不允许重做提取、审查或返还额度。这条链复用原生 Automations/Agent，不增加循环；经验可召回不等于后续任务质量已经改善。
-
-### 后台失败的工程成长
-
-此通道正在集成验收，交付状态见[当前状态](rsi-status.md)。Growth 从独立的工作项结果游标保存认证失败，再经 Delivery 沿封存父链取得完整主人原始输入。工程目标最多 16 KiB，必须全部为可验证的非空白纯文字；附件、缺失原文及无法证明来源的旧 v1 续办链均拒绝。worker 报告、任务简报和反馈短句只提供背景，不能代替目标。Memory 的既有来源与证明保持不变。
-
-运行复用原生 Automations、AgentLoop、Control Plane 持久构建、Verifier 和 Cordis 采用。Growth、创建、独立审查、采用分别显式开启 `workItemFailures`；作者运行冻结实际 supplier、预算、来源版本和四份授权标识。首次作者调用前核对全链能力与剩余额度；之后各阶段只消耗自己的原授权额度，不因本次创建已用完最后一个名额而阻止后续审查。未知结果只对账原操作，不换模型或返还额度。
-
-后台作者的工具预授权绑定已持久化的实际原生运行、准确 Agent 和工具定义，只覆盖 `plugin_source_gaps`、`plugin_source_read`、`plugin_source_create`、`plugin_source_job_status`。调用仍受当前主人与来源、冻结工具集合、期限、调用次数及独立 Policy guard 约束；撤回、停止或身份变化使许可失效。该授权复用初始有限创建配置，前台的交互审批设置保持原语义。
-
-最终来源检查采用 Delivery → Evaluation → 单个 WorkItems 来源锁 → Growth 作业账本 → Control Plane → 审查或采用账本的顺序，锁内消费者不反向查询上游服务。已采用工具的后续使用从签名历史复核来源，不要求重新启动作者作业。新来源目前只授权工具创建，后台 worker 使用动态工具、既有工具修订和长期收益仍各有待交付或验收边界。
-
-## 离线隔离执行
-
-独立验证后创建的工具由 Control Plane 的私有采用账本保存证书、不可变制品和签名使用回执，再以 Cordis 子 Fiber 注册 Host 别名，实际候选代码仍在离线 runner 中执行。显式 `creationCapabilities.retention` 将首次采用的新鲜证书门与采用后的有限使用期分开：v2 回执冻结采用时间和截止，后续调用及重启依靠原账本证据、精确计划/作业摘要和当前 owner/canonical 来源复核；单个创建作业、计划和证书到期或工作树回收不续期，也不重置额度或重放 unknown；原使用授权截止仍是硬门。无此配置的 v1 回执保持原证书到期语义。细节见 [Control Plane](../plugins/plugin-control-plane/README.md)。
-
-动态工具的实际使用与其触发来源分别记录：Delivery 只读证明当前真实前台 Agent 的具体 Inbox、开放 turn 和唯一未结算的原生调用事件，Control Plane 在调用 claim 事务中绑定该证明与冻结采用回执、工具及制品版本。旧调用不回填任务，无证明或 PTC 调用不计前台归因；unknown 继续消费额度且不重放。内容无关的 Host 查询只证明使用，任务收益仍由认证 canonical 修订或独立验收给出，不能从 Session、部署关联或工具成功推导。
-
-Control Plane 的 Host-only 任务关联查询从既有采用/调用账本读取精确版本，在 Evaluation canonical writer fence 内重验原创建来源和后续 Inbox 的当前认证判断，并由 Delivery 核对 owner lineage、执行绑定和真实任务证据。同一 plan/Inbox 的完成调用去重，更正切换到当前修订，撤回或 owner 漂移使关联失效；原创建任务和 unknown 不进入后续结果。该查询不增加结果账本或调度循环，不重新授权历史版本；签名使用期限只描述时间窗口。关联快照是观察证据，后续晋升或回退仍须独立验证并取得新鲜授权，不能将关联解释为因果收益。
-
-已采用工具的历史源码与执行权分开：同一 Git index 的 staged 插件 blobs 经独立证书摘要核验后，与采用 claim 原子持久化并由采用密钥在独立域签名。源码账本迁移不修改原授权或补写旧历史；Host 只在当前 owner continuation 下懒读取冻结数据，反馈更正、入口关闭与期限结束不续权，也不妨碍同一主人检查旧源码。新修复和版本替换仍需当前认证触发与独立有限授权。
-
-有限修订沿用当前 Usage → 原生 Automation → Control Plane 构建 → Verifier 独立验收，无新增调度循环。Host 从已采用签名归档重建当前基线上的同名候选，冻结父证书/制品/归档/源码与新失败任务的模型、预算和修订授权；创建计数、修订计数、采用计数分别保存。独立修订证书与精确 staged 源码原子落账，历史只读入口不延续执行权限。可选独立回归门在首个作者请求前冻结专用验收引用；Verifier 私有读取原父 held-out cases，在新有限额度下配对观察父/候选并分别比较 expected，不重新生成旧验收用例。回归 claim/证书独立落账，未知不重放；历史父数据读取不延续旧执行权限。本阶段不切换动态工具版本，稳定入口替换与回退仍是下一交付。
-
-`assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy 与 SQLite 授权/结果账本。`backend: 'linux-native'` 是唯一 Linux 后端，使用固定工具链、namespace/seccomp、双 cgroup 及受控 keeper：持久 intent 先于准入，私有收据与真实资源消失共同决定静止；Docker 后端已删除，Docker 时代的 ledger 行只保留原身份、预算和恢复规则供只读，不能据此构造新执行。离线任意 shell 代码进入 user/mount/PID/network namespace 内的受限进程；每任务使用有字节/inode 硬限制的独立 tmpfs，Host 输入经受限复制进入工作区，不暴露 Host bind mount、真实项目、Host 状态或凭据。独立 keeper 持续持有工作目录，候选进程结束后才导出已验证类型/链接/字节限制的文本产物，最后核对并删除资源。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，沙箱内也没有动作或出网代理。
-
-Isolation 的 `./native-resources` 是不挂载服务的公共子入口，由 Web 安装器和 Lark RSI 适配器复用。调用方冻结已安装版本的官方 tag 或显式本地已提交 HEAD，只读取 Git 中的 manifests/lockfile；制备函数下载校验固定工具链并准备私有依赖闭包，读接口只复核既有 schema 3 收据、路径和文件身份。它不创建 owner、grant、RSI 修复仓库、协调器或服务。cgroup 发现与工具链制备独立，原 RSI 构建准备不会新增运行阶段的 cgroup 前提；适配器仍在准备前后核对原 RSI 来源收据。
-
-普通 Web autonomy 在 Linux 固定选用 native，写入明确的 backend/runtime/cgroup 配置；遇到旧 profile 中的镜像或 dockerPath 时 fail-closed 要求显式迁移，不静默改写。setup 在配对 owner 前完成资源和固定任务探测，重试只读验证已有 runtime，不延长 grant 或重置预算；doctor 使用既有描述符诊断，不准备资源。普通 Goal admission 固定配置 `linux-native` 的 `isolated-runner` 验收器，沿用既有 runtime、cgroup、有限运行次数与期限；完整原生 Goal 链路的脚本供应商证据及平台限制见当前状态，不能据此宣称真实模型或任意任务已经验收。
-
-Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含原生运行时与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止受限进程。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。
-
-此切片的 Host/容器边界不能替代后续独立动作与凭据 broker、审计保留、生产 bootstrap 或外部补偿。可信 Host 插件仍处于现有 Host 信任域，不能据此声称全部第三方插件已经隔离。
-
-Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace capacity + 32 MiB keeper 及工作卷 inode；尚未确认删除全部运行资源的 unknown 保留占用。v1 行迁移后保留，旧活动行用量不明时先恢复清理再接收新预留。资源池只覆盖同一个 stateRoot 的任务，不代表对全机 kernel/cgroup 协调开销的硬约束。
-
+`assistant-verifier`、`assistant-goals`、`assistant-skills` 与 `plugin-control-plane` 通过共享非激活契约库（`task-acceptance-contract`、`assistant-growth-contract`）解耦：候选源码在无网离线环境构造，独立评测/回归使用私有 held-out 用例与冻结父基线比对；动态采用的新工具、技能与有限修订（`creationCapabilities.retention` / Control Plane 签名证书与物理回退）均保留独立创建/审查/采用账本，详见各包 README 与 [Control Plane 有限试用合同](bounded-live-adoption.md)。
 
 ## 受限外部提交 broker
 
-`assistant-actions` 仍是一个独立发布的 bundle，但包含两个明确分离的运行面。Cordis 挂载的 Host facade 注册现有工具、重验当前 Delivery owner 与 Policy，并通过 `actionSocketPath` 把显式选择的外部请求送到 broker；`dsh-actions-broker` 是同一包发布的独立进程入口，不是第二个 Cordis 插件，也不会由 `apply()` 或 import side effect 自动启动。外部模式使用版本化、签名、有界且角色分离的 action/admin Unix-domain sockets；broker 独占 GitHub credential、grant、动作 journal、controller generation 和固定 HTTPS 出口，Host 与模型均不接收 token。
-
-外部协议支持 expected-head commit、显式授权的 PR 创建和有界 repository/branch/file/PR/checks/reviews/commit-checks inspection。可信 Host 复用原有 verified-delivery 状态机，将 Goals 独立验收的产物经签名请求送往 broker，并用历史签名回执与新鲜 CI/review/branch 读取支持 repository outcome 验收。Host 本地交付日志只保存调度、去除 payload 的签名历史与通知状态，完整 payload 从当前已验收产物重建；它不拥有 broker 动作账本或凭据。分支创建和补偿/rollback 仍只属于显式 embedded compatibility mode；外部模式遇到这些操作、daemon 不可达、协议/签名/代次不匹配或 socket 身份漂移时一律 fail closed，绝不回退到同进程 Keychain 或 GitHub transport。Host 的 deployment mirror 包含嵌套的 owner、destination、期限和预算，以及用于保守 discovery/preauthorization 的 `allowedOperations` 与 `allowedInspectKinds`；external config 对后者接受七种有界读取，PR 相关操作必须绑定不同的 head/base；可选 verifiedDelivery 绑定 Host route/budget/acceptance，旧 grant 不自动获得新权限。投影不包含 credential、client key/identity 或 policy/emergency epoch，且只能收窄 Host 工具可见性和执行前检查，不能扩张 broker 自己保存的 grant revision/digest 所定义的外部动作 authority。daemon grant 还精确绑定 client key、owner lineage 与 Session、source Host instance/generation、destination broker instance、repo/branch/paths、期限、action/byte limits 和有限 `github-api-units` 累计预算；该单位不是金额或 provider billing 保证。`source.classification` / `provenanceDigest` 只是 operator-issued grant 与 Host-signed request 的 exact-match 字段，不是可信内容分类器或 DLP 证明；broker 对所有已配置凭据原文及有限常见 credential-shaped literal 的拒绝也只是纵深防御，不能保证识别编码、拆分或未知凭据。
-
-Broker 在自己的 WAL/FULL journal 中先保存请求，再跨越 `dispatched` 边界，之后至多执行一次固定 GitHub 请求。崩溃恢复把尚未派发的 `prepared` 终结为 `failed`；连接中断、撤权、stop、超时、lost ACK 或崩溃若发生在可能发送之后，结果保持 `unknown` 并禁止自动重放。admin `stop` 是持久 emergency admission stop：拒绝新动作、终结/取消相关在途请求并推进 emergency epoch，但不退出 daemon，admin control plane 保持可供 status/resume；真正停止进程由 service manager、SIGTERM 或 SIGINT 完成。resume 再次推进 emergency epoch，旧请求不会复活；这些控制仍不能撤回 GitHub 已接受的效果。Host Policy 与 broker journal 是跨进程、跨库边界，不假装具有原子事务。容器继续无网络，也不存在通用出网代理。
-
-`serve` 同时绑定 distinct `actionSocketPath` / `adminSocketPath`，并分别固定两端的 parent/socket UID、GID、mode、peer UID/GID 和连接容量；action execution 另有独立并发上限。action endpoint 可由部署系统通过专用 group 或等价 ACL 开放给独立 Host UID，admin endpoint 则保持 broker/operator 私有。两套 listener、连接集合与容量彼此独立，action 连接池或执行并发耗尽不能占用 admin 的保留准入容量；协议也拒绝在错误 endpoint 上使用另一角色的请求。`serve` 与 admin 命令读取不同的 owner-only 配置：前者持有 admin public key，operator 配置仅指向 `adminSocketPath` 并持有 admin private key。server、Host client 与 admin 三把 Ed25519 key material 必须两两不同，即使位于不同路径，相同 material 也会在 bind 前拒绝；client/admin key id 也必须不同。包依赖提供基于 `koffi` 的固定 Linux `getsockopt(SO_PEERCRED)` 检查；daemon 对 action/admin 客户端分别固定 peer UID/GID，Host 与 operator 客户端也各自通过 required `expectedBrokerPeerUid`/`expectedBrokerPeerGid` 固定 daemon 身份。客户端完成 pathname identity 双检后、读取 signed hello 前执行内核 peer 检查。非 Linux、native binding 不可用或 peer 身份不匹配时 fail closed，其中平台/binding 可用性在 bind/connect 前验证。
-
-这些 socket access control 与进程分离本身不等于独立 UID。若 Host 与 broker 以同一 UID 运行，同 UID 恶意进程仍属于威胁边界之外。生产隔离需由部署系统分配独立服务身份、不可由 Host 写入的 broker 状态及 Linux protected-file credential，以及受控 IPC 权限；broker 不从环境取得 token。本包只发布 daemon executable，不创建或管理独立 UID、systemd unit、密钥、凭据、基础设施或真实 profile 授权。
-
-子进程集成测试分两层：一层启动 built production CLI 验证本机 `serve/status/stop` 与派发前拒绝；另一层启动加载 built core/server 和受控 test transport 的 fixture child，在 durable dispatch 后 `SIGKILL`，验证重启同 key 返回 `unknown` 且不产生第二次 transport call。后者不是 production GitHub transport；两层都不证明 live GitHub 或独立 UID 部署。
-
-显式 embedded compatibility 模式中的可选 `verifiedDelivery` grant 将提交改为验收后的 Host 交付：模型只登记路径、预期分支 head 和交付意图；Goals 从同一准确原生回合的步骤及整体验收中回读、重验隔离产物。Actions 在原授权与当前 owner route 内，通过已有 Automations 一次性执行器交给同一动作账本和 Keychain，再将实际终态送入现有 Delivery 主人通知。external broker 同样支持此交付组合，但权威 grant、凭据和动作账本由独立 broker 持有，Host 只保存调度及签名回执；外部模式失败不会回退 embedded。该组合不增加 AgentLoop 或调度器，不向模型开放验收私有数据；Goals、Automations 和 Delivery 仍是独立 Host bundle。
-
-## 隔离产物的独立验收
-
-任务协议 v4 为 Goals step/outcome 增加只含 testSet 引用的 isolated criterion；具体测试向量属于 Verifier Host authority。Isolation 普通依赖共享任务协议；Verifier 将 Isolation 声明为可选 Host peer，只在隔离验收时使用其私有 runner。Goals 通过共享 admission 值和 Host producer 方法交接来源，Isolation 不反向依赖 Goals 包。引导构建在 Delivery 后、Verifier 前先构建 Isolation，独立发布 bundle 的边界保持不变。
-
-来源 worker 与 verification worker 使用不同持久账本和有限授权。Verifier 从实时 Goals producer 获取 step acceptance，核验精确任务与 scope 后读 Isolation 的不可变产物；全目标验收由持久 trigger run 选取来源。固定验收命令在独立容器读取 artifact/input，Host 保存预期结果并生成 v4 回执。原生 GoalLoop 继续拥有调度；此路径没有新增模型循环，也不授予通用 Host 代码执行权。
-
-
-单次 Goals wake 通过 Delivery 的版本化 Host capability 等待终态验收。Delivery 仅调用 Goals 提供的 `settle(agent, signal)` 并维持当前 Session lease；Goals 只等待该 Agent 已结束回合的步骤/全目标结算。此等待仍服从原期限和取消信号，不引入第二套目标循环。末轮 `blocked` 到独立验收后的 `complete` 多一次 revision，只有同 owner/定义/Session/最终执行及验收回执的证明才允许该转移；旧 Delivery 缺少结算能力时拒绝调度。
+`assistant-actions` 将 Cordis Host facade 与独立守护进程 `dsh-actions-broker` 分离：`external-unix-v1` 模式经角色分离、双向 Ed25519 签名与 Linux `SO_PEERCRED` 校验的 action/admin Unix sockets 通信，GitHub 凭据与动作账本由 broker 独占（Host 与模型均不接触 token）；支持 expected-head commit、有限 repository/branch/file 检视及经独立 `verifiedDelivery` 验收后的 PR 提交，并在发送窗口发生未知结果时保守记为 `unknown`、禁止重放（`embedded-compat` 保留兼容回滚路径）。
 
 ## 固定模型路由的目标预算
 
-`assistant-deepseek-budget` 是可选独立 bundle，持有自己的 `deepseek-goal-metered` provider 和两个精确文本模型的 Goals meter。它不为其他 provider 同名配置背书，不读取可配置模型目录来推导预算。固定 HTTPS Chat Completions 请求禁止重定向，不使用内部自动重试；按有限响应字节和期限读取完整 JSON，然后才向原生 LLM stream 发布验证后的内容、usage 和终态。AgentLoop、工具执行、Goal 轮次和持久预算仍由现有服务拥有。
-
-计量依赖有期限的官方 API 契约：使用覆盖文档上下文口径的保守输入预留，成功时按包含缓存的实际输入结算；无法确认时保留原预留。它不声明金额上限，价格快照不能成为稳定账单保证。普通前台与辅助请求不属于 Goals 原生回合预算，仍受单次输出、响应字节和请求期限约束；完整账户预算另行接入。
-
-已有 Web owner 的目标配置继续由 `assistant-web-owner` 的安装内 CLI 负责。离线 `--goal-admission` 路径动态加载可选 Goals/Verifier/DeepSeek peers，将工作区外私有任务规格编译成 owner/scope/objective 精确验收、有限预算及可选的 Session wake route；每个 bundle 仍独立安装，autonomy 安装器只预装禁用的模型 bundle。Delivery 提供只读 owner/binding 快照，配置器不构造会迁移数据库的 DeliveryStore，也不获取运行 lease、续期 grant 或创建 Goal。配置锁只序列化 setup，DB 快照与文件替换不构成跨库事务；Host 停止后配置，重启后运行时再次核对权限。持久 Session/settings 模型选择由原生 UI 管理，改默认配置不会迁移既有选择。
-
-
-## 私有技能配对比较
-
-Skills 的比较器复用 Evaluation 的 BenchmarkStore/runBenchmark/report，按固定输入与预算调度两个技能版本。每个 cell 新建仅含原生文件工具的 Context 与私有临时 workspace；它不创建 AgentLoop，也不继承调用方任意 Host 工具。生成的 artifact 交给独立 IsolatedVerifierRunner，在有限离线容器中执行，Host 对照配置答案判定。Native FS 库随 Skills 包交付，Evaluation/Isolation 是可选 peer，导入不激活其 bundle。比较报告没有发布或晋升权限；调用方 Host 本身的高权限尚不构成密封留出边界，必须与未来自动推广授权分开验证。
-
-Control Plane 的可选 [bounded-live 合同](bounded-live-adoption.md)在原部署状态机中增加普通任务资格阶段：有限 owner 授权固定整个 profile 的试用窗口，独立签名绑定现有 Delivery/Evaluation 证据，最终采用用一个 canonical writer fence 同时复核原失败与资格票。后台工作仍归原生 Automations 和 Cordis effect，失败/失效继续复用物理回退；严格 Host 阶段不会被伪造的成功凭证跳过。
+`assistant-deepseek-budget` 持有独立的 `deepseek-goal-metered` provider 与保守输入预留计量器（不改变其他普通模型路由），面向有限 Goals 回合执行按次/输出/时长限制；Web 场景下由 `assistant-web-owner` 的离线 `--goal-admission` 编译私有任务规格与固定路由绑定，并保留与原生 Session/UI 模型选择一致的运行前核对。

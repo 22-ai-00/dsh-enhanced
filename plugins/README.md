@@ -8,7 +8,7 @@
 |---|---|---|---|
 | [acp](acp) | `@dsh-enhanced/acp` | 实验性 | 原生优先的 ACP stdio bridge，支持四种 DSH Agent 预设、动态模型/推理等级、富事件映射与可选原始事件出口。 |
 | [coding-subscription-provider](coding-subscription-provider) | `@dsh-enhanced/coding-subscription-provider` | 实验性 | 将本机已登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 编程套餐注册为 DSH 模型 provider；四者动态发现模型，Codex/Claude/Grok 支持逐模型 reasoning effort。 |
-| [traex-acp-provider](traex-acp-provider) | `@dsh-enhanced/traex-acp-provider` | 实验性 | 让 DSH 作为 ACP client 调用本机 TraeX coding agent，并实时发现可选模型及逐模型 reasoning effort。 |
+| [traex-acp-provider](traex-acp-provider) | `@dsh-enhanced/traex-acp-provider` | 实验性 | 让 DSH 作为 ACP client 调用本机 TraeX（`traex-agent`）与 Antigravity CLI（`agy-agent`），支持模型发现、推理强度与配置热重载。 |
 | [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
 
 ## 个人助理核心
@@ -33,10 +33,10 @@
 | [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账。 |
 | [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
 | [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding 与 launchd/systemd/Windows Task 常驻。 |
-| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性 | 左侧栏主人控制台：飞书远程接入、TraeX 与本项目 bundle/条目的一页管理；只读状态 + 主人点击的配置/启用/安装，写入只经 Host `settings`/`pluginManager`，不发起模型调用。 |
+| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性（`web`/`supervised` 包含） | 统一「文鳐」控制台与 DSH 原生左栏 Settings UI（`settings.section` / `general` / `models` / `plugins.bundle.config`）：飞书接入、TraeX / Antigravity `agy` 启用切换，以及 Dreaming/Proactive/WorkItems/Learning/Growth 只读状态与受控操作。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
 | [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
-| [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
+| [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性（`supervised`/`autonomy` 场景包含） | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；含 intake 评估与主人注意力提问；实际执行仍经 Goals 验收。 |
 | [assistant-work-items](assistant-work-items) | `@dsh-enhanced/assistant-work-items` | 实验性 | 默认关闭、observe 模式；持久认领/汇报与有界 resume，显式授权可启用诊断、主人召回、报告回复续办及结果反馈。复用 Automations/Delivery/Policy，不新增 loop、timer 或 outbox；结果反馈可另行授权进入经验学习，工程 Growth 仍待完整验收。 |
 
 ## 技能与持续成长
@@ -46,7 +46,7 @@
 | [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
 | [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（supervised 场景包含） | 审批后的工作流 replay/shadow/单次 canary、晋升与撤回；已接入真实 Automations 服务及组合测试。core/lark 不默认安装，阶段通过不单独证明能力相对基线改善。 |
-| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | 按真实前台 owner 任务反馈创建持久成长作业，复用原生调度并冻结实际模型与预算；技能/工作流候选仍需独立验证，新工具创建可在配套授权下独立验收并有限采用，修订替换另有验收门。完整长期成长闭环尚未验收。 |
+| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性（`supervised` 场景包含） | 按真实前台 owner 任务反馈创建持久成长作业，并在启用可选 `assistant-dreaming` 时接通已验证 idea 消费；复用原生调度并冻结实际模型与预算，完整长期成长闭环尚未验收。 |
 
 ## 安全、治理与运维
 
@@ -65,7 +65,7 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
-| [assistant-dreaming](assistant-dreaming) | `@dsh-enhanced/assistant-dreaming` | 实验性 | 默认关闭的"做梦"插件：确定性随机抽签+空闲门，单工具冻结 Agent 只记录私有 idea（L0），无通知/无自动采用/永不模型自评。 |
+| [assistant-dreaming](assistant-dreaming) | `@dsh-enhanced/assistant-dreaming` | 实验性（`--with dreaming` / `--dreaming` 显式选装，默认休眠） | 默认关闭的“做梦”插件：确定性 HMAC 召回抽签+空闲/冷启动门，单工具冻结 Agent 只记录私有 idea（L0），通过可选 peer 接入外部插件，无自动采用/自评。 |
 
 <!-- plugin-catalog:end -->
 

@@ -144,7 +144,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 文件系统：创建一个 SQLite 数据库及 WAL/SHM 辅助文件；新目录权限 `0700`，主数据库 `0600`。数据库使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本。
 - 网络：插件不直接打开 socket；启用隔离自动 reviewer 时会调用宿主 `dsh-llm`，所选 provider route 可能使用网络。provider 的认证与传输仍由宿主拥有，本插件不直接读取其凭据。
 - 子进程：无。
-- 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带三个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`、`dsh-plugin-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载。`dsh-plugin-setup` 见下方[插件配置 CLI](#插件配置-clidsh-plugin-setup)。安装器始终传 `--profile <name>`：前两个 CLI 先校验所选 DSH Host 并读取目标 profile 的原生 `--dump-config`，再原子改写其 `cordis.patch.yml`，分别写入 `permission.defaultPreset` 与 `agent-default-model`（自定义网关还写入 `llm-pi-ai.providers.<route>`），保留原生有效整段配置中的其它预设、网关、注释和 `!!js`。读取或组合失败时拒绝写入。若省略 `--profile`，CLI 仍写旧版全局 `settings.yaml`；DSH 0.2 在下次启动时把它一次性导入第一个启动的 profile，不适合多 profile 设置。目标配置对应区段尚留在 `settings.yaml` 时，显式 `--profile` 拒绝写入，须先把旧设置迁移至目标 profile，避免首启覆盖。显式 `--store-key` 时 API Key 仅从环境变量读取，原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。agent route（如 `traex-agent`）不涉及 API Key；`--enable-in-profile` 与 `--profile` 同时使用时必须同名。
+- 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带三个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`、`dsh-plugin-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载。`dsh-plugin-setup` 见下方[插件配置 CLI](#插件配置-clidsh-plugin-setup)。安装器始终传 `--profile <name>`：前两个 CLI 先校验所选 DSH Host 并读取目标 profile 的原生 `--dump-config`，再原子改写其 `cordis.patch.yml`，分别写入 `permission.defaultPreset` 与 `agent-default-model`（自定义网关还写入 `llm-pi-ai.providers.<route>`），保留原生有效整段配置中的其它预设、网关、注释和 `!!js`。读取或组合失败时拒绝写入。若省略 `--profile`，CLI 仍写旧版全局 `settings.yaml`；DSH 0.2 在下次启动时把它一次性导入第一个启动的 profile，不适合多 profile 设置。目标配置对应区段尚留在 `settings.yaml` 时，显式 `--profile` 拒绝写入，须先把旧设置迁移至目标 profile，避免首启覆盖。显式 `--store-key` 时 API Key 仅从环境变量读取，原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。agent route（如 `traex-agent` / `agy-agent`）不涉及 API Key；`--enable-in-profile` 与 `--profile` 同时使用时必须同名。
 
 自动发现本机 agent 时可调用 `dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`（或 `--provider agy-agent` 写入同一包行上的 `config.agyEnabled` / `config.agyCommand`，互不覆盖 `traex` 的 `enabled` / `command`）：仅启用目标 profile 的 route，不改模型选择。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查待导入的 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和对应启用键（`config.enabled: true` 或 `config.agyEnabled: true`），保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的命令键（`config.command` 或 `config.agyCommand`），保留已有命令与 `cwd`；当 `PATH` 缺少 `dsh` 时按 `O_NOFOLLOW` 与宿主校验回退到 `$DSH_HOME/.dsh-rsi-host.json` 绑定的批准 Host。显式 model setup 传 `--profile` 时只设置目标 profile；不传时保留旧版 `settings.yaml` 行为。
 - 浏览器：无。
@@ -154,7 +154,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ## 兼容性
 
-本包已在安装的 DeepSeek Harness `0.2.0-rc.2` 上通过类型检查及包测试；完整宿主安装和外部模型/渠道仍按仓库[兼容性基线](../../docs/compatibility.md)验收。
+本包已在安装的 DeepSeek Harness `0.2.2-rc.3` 上通过类型检查及包测试；完整宿主安装和外部模型/渠道仍按仓库[兼容性基线](../../docs/compatibility.md)验收。
 
 ### Finite action broker preauthorization
 
@@ -201,7 +201,7 @@ $bin preset recommended --yes
 行为：
 
 - 读取与校验：先校验选定 Host 为已批准版本并读取原生 `--dump-config`。Cordis 中行级 `config` 整段替换继承配置，所以首次编辑会从有效配置完整克隆该行，保留注释、其它行与 `!!js`。
-- 值校验：按当前值类型转换（布尔、数字、字符串、JSON 对象/数组）；未知 key 和 `!!js` 值需 `--force`，少数可选开关（如 `work-items.mode`、`intakeLedger.enabled`、`delivery.attentionAttachOverCap`、`evaluation.notificationOutcomesEnabled`、`event-triggers.pollerEnabled`）已登记，无需 `--force`。
+- 值校验：按当前值类型转换（布尔、数字、字符串、JSON 对象/数组）；未知 key 和 `!!js` 值需 `--force`，已登记的可选键（如 `work-items.mode`、`intakeLedger.*`、`delivery.attentionAttachOverCap`、`evaluation.notificationOutcomesEnabled`、`event-triggers.pollerEnabled`、`owner-console.feishuAppId`、`assistant-proactive.*`、`assistant-dreaming.*`、`assistant-growth-driver.*`、`assistant-memory-learning.*` 等，可用 `$bin show <plugin>` 查看清单）无需 `--force`。
 - 写入：`0600` 临时文件原子替换，再次 dump 核对每项改动真实生效；失败即恢复原文件（或删除新建文件）并报错。
 - 拒绝项（`--force` 也不放开）：修改 `assistant-policy` 与 `plugin-control-plane` 配置；停用 `assistant-policy`；写入 secret/password/token/apiKey 等秘密 key（凭据用对应 `*Handle` 或专用 setup CLI）；修改 Delivery `ownerRoutes`、`policyRef` 授权 key；在占位 tenant/appId 下启用 lark-channel（改用 `dsh-lark-setup`）；启用缺少 `workerAutomationId` 或 `scope` 的 active 模式 work-items。
 - 不改任何权限默认值，不改 owner 认证、密封验证或凭据处理。

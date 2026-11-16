@@ -4,13 +4,14 @@
 
 ## 打开模型设置
 
-默认安装完成后运行：
+默认安装或轻量 `core` / `web` 安装完成后，可直接打开本地 Web 并前往左侧栏 **Settings → Models**（或在 **Settings → 文鳐助手** 中查看本机 ACP Agent）：
 
 ```sh
-dsh-rsi web-url --profile web
+dsh-rsi open --profile web          # 自动接通受管服务或前台启动并打开浏览器
+dsh-rsi web-url --profile web       # 仅查看已运行受管服务的 Web 地址
 ```
 
-在本机浏览器打开输出的完整地址，进入「设置 → 模型」。`web` 是默认配置名称；使用其他 profile 时替换命令中的名称。轻量 `core` 安装的启动方式见[安装指南](../scripts/install/README.md#场景与参数入口)。
+`web` 是默认配置名称；使用其他 profile 时替换命令中的名称。各场景参数详见[安装指南](../scripts/install/README.md#场景与参数入口)。
 
 ## 添加 API 模型
 
@@ -46,17 +47,27 @@ API Key 通过专门的凭据接口保存，页面不会回显密钥，也不会
 
 **添加模型不会切换当前选择。** 聊天里的模型选择作用于该会话；安装引导中的默认模型用于后续新会话，已有会话不会随之统一切换。
 
-## 使用 TraeX
+## 使用本机 ACP Coding Agent（TraeX 与 Antigravity `agy`）
 
-在本机完成 TraeX 登录后，安装器会自动发现 `traex` 或 `trae-cli` 并启用接入，无需 API Key。打开模型选择器，选择 `traex-agent` 下的具体模型；`default` 表示沿用 TraeX 自己的默认模型。
+`traex-acp-provider` 同时支持本机 TraeX（provider `traex-agent`）与 Antigravity CLI（provider `agy-agent`），无需 API Key，且可在左侧栏 **Settings → 文鳐助手**（或 **Settings → Models** 底部）实时检测、启用与热切换：
 
-模型目录来自当前 TraeX 账号，首次打开可能需要短暂等待。只有 `default` 或发现失败时，先确认本机 CLI 已登录、支持 ACP，再看[TraeX 帮助](../plugins/traex-acp-provider/README.md)。
+1. **TraeX（`traex-agent`）**：安装器或控制台检测到 `traex` / `trae-cli` 且 `traex login status` 通过时自动启用；默认以 `traex --sandbox read-only --ask-for-approval never acp serve` 运行，可在模型选择器中选 `traex-agent` 下的模型（`default` 沿用 TraeX 默认模型）。
+2. **Antigravity CLI（`agy-agent`）**：检测到 `agy` 可用后（安装器与控制台以 `agy models` 做无交互检测；未登录时在终端交互运行 `agy` 或 `agy acp --login`），启用 `agyEnabled` 后通过 `agy acp --sandbox --include-default-customizations=false --disable-telemetry --stdio` 启动，可在模型选择器中选择 `agy-agent` 下发现的模型或 `default`。
+   - **沙盒与信任边界**：`agy acp --sandbox` 仅约束终端命令执行，且 `agy acp` 不支持 `--ask-for-approval never`。不要在 `~/.gemini/antigravity-cli/settings.json` 中为不可信仓库启用自动批准（auto-approve）；仅需只读规划时可在 `traex-acp-provider` 配置中设置 `agyMode: 'plan'`。
+3. **CLI 手工注册或切换**：安装可传 `--model-provider traex-agent` 或 `--model-provider agy-agent`；已有 profile 可运行：
+
+```sh
+dsh-model-setup --profile web --provider traex-agent --enable-in-profile web --default-if-absent
+dsh-model-setup --profile web --provider agy-agent   --enable-in-profile web --default-if-absent
+```
+
+模型目录来自当前本机 CLI 账号，首次打开可能需要短暂等待。只出现 `default` 或发现失败时，先用 `dsh-rsi doctor --profile web` 检查登录与 CLI 可执行文件状态，详见[ACP Provider 帮助](../plugins/traex-acp-provider/README.md)。
 
 ## 常见问题
 
 | 现象 | 先检查什么 |
 | --- | --- |
-| 没有模型列表 | 服务可能不支持列表查询；手填服务给出的准确模型 ID。TraeX 则先检查登录。 |
+| 没有模型列表 | 服务可能不支持列表查询；手填服务给出的准确模型 ID。TraeX / Antigravity 则先运行 `traex login status` 或 `agy models`（或 `dsh-rsi doctor`）确认登录。 |
 | 401 / 403 或密钥缺失 | API Key、模型访问权限，以及当前机器是否能访问该服务。 |
 | 404 或协议错误 | API 地址是否误填了完整请求路径，协议是否与服务一致。 |
 | 页面只读或无法保存 | 用本机 `localhost` / `127.0.0.1` 的授权地址访问；当前 Host 不允许从非本机页面持久化设置。 |

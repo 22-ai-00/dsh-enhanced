@@ -10,10 +10,11 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 
 ```sh
 dsh-rsi install                     # 交互式安装，默认 supervised 场景
-dsh-rsi status                      # 查看 Home、profile 和服务状态
-dsh-rsi doctor                      # 查看状态和已知错误日志线索
+dsh-rsi open --profile web          # 打开本地 Web UI 与「文鳐」控制台
+dsh-rsi status --json               # 结构化查看 Home、.dsh-rsi-host.json 绑定与服务状态
+dsh-rsi doctor --json               # 只读实时体检（配置、traex/agy 登录、autonomy、OS 前提）
 dsh-rsi logs --profile web            # 查看日志尾部
-dsh-rsi web-url --profile web         # 查看日志中最近的 Web 授权 URL
+dsh-rsi web-url --profile web         # 仅读取受管服务最近的 Web 授权 URL
 dsh-rsi restart --profile web         # 重启已注册的常驻服务
 ```
 
@@ -25,10 +26,11 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制�
 
 | 命令 | 用途 |
 | --- | --- |
-| `status`（省略命令时默认） | 只读查看 DSH Home、profile、安装形态、全局 PATH 上的 Host 和受管服务等状态；不显示 Home 绑定的私有 Host 入口。 |
-| `doctor` | 只读查看状态，并扫描 Host 错误日志中的已知问题。 |
+| `status`（省略命令时默认） | 只读查看 DSH Home、`.dsh-rsi-host.json` 私有 Host 绑定、`.dsh-enhanced/install-intent.json`、profile、安装形态（npm/local）、受管服务、`.credentials.yaml` 键名（不含密钥值）及生命周期残留；支持 `--json`。 |
+| `doctor` | 全面实时只读诊断：检查 `.dsh-rsi-host.json` 绑定 Host、`--dump-config` 组合（含 `traex`/`agy`、`dreaming` 前置）、凭据权限与环境变量、`traex login status` 与无交互 `agy models`、`dsh-autonomy-doctor --readiness`、回环监听与脱敏 Web URL、OS 前提及错误日志；支持 `--json`（隐藏 token 与密钥）。 |
+| `open` | 读取 `.dsh-rsi-host.json` 绑定 Host 打开 Web UI 与「文鳐」Owner Console：受管服务等待 URL 最多 `--wait` 秒（默认 `8`），未注册服务的轻量场景（`core`/`web`/`autonomy`）在前台启动并捕获地址；桌面上自动拉起浏览器（可用 `--no-browser` 跳过，按凭据保护带 token URL）。 |
 | `logs` | 查看各 profile 的 Host 日志尾部；`--lines <n>` 设置每份日志行数（1–10000，默认 200），`--errors-only` 只看错误日志。 |
-| `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
+| `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL（支持 `--wait <0..60>`，默认 `0`）；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
 | `start` / `stop` / `restart` | 只切换**已注册**常驻服务的运行状态，保留服务定义和数据；未注册时会报错，需通过 `install` 注册。 |
 | `maintenance` | 运维结算两个没有模型入口的台账：`dead-letters` / `resolve` 结算 Delivery 死信，`system-automations` / `pause-system` 暂停卡在未授权恢复重试上的系统自有 automation。写操作会先在同一事务里落不可变 receipt，再做精确状态与版本的 CAS 更新；重复提交同一决定会重放，换操作者或相反决定会冲突。 |
 | `version` | 打印 CLI 版本。 |
@@ -46,13 +48,9 @@ dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
 dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
 
-`update --all` 先升级 CLI，再更新已安装程序；它不是对所有 Home 通用的升级路径。从 CLI `0.1.57` 起，**原安装为 Docker 后端且满足下述条件的 Linux 冻结 owner/cohort Home** 可用上面的 `update --all --yes`：从 Home 原来绑定的官方源码仓库拉取干净的 `dev` 或 `main` 分支，若绑定仓库是 detached HEAD，则仅当它位于本机记录的 `origin/dev` 或 `origin/main` 历史上时按该分支快进、更新后仍保持 detached（两者历史都包含 HEAD 时优先 `dev`；本机连 `origin/dev`、`origin/main` 的跟踪引用都没有，或浅历史无法判定时同样先拒绝），否则在写操作前拒绝；把私有 Host 从 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` 更新到 `0.2.2-rc.3`，同时更新冻结插件，并在事务中停启已注册服务。要求原 owner 授权有效、target/coordinator 双服务均活动，且无已采用的源码 activation 或未结 activation；原 owner 绑定、授权期限和已用额度、权限、凭据、模型、Session、Goal 及历史保留，不重新配对、续期或扩权。已过期授权会在预检中被拒绝，需先按原授权流程处理。
+`update --all` 先升级 CLI，再按原场景升级插件。对于保留的**原 Docker 后端 Linux 冻结 owner/cohort Home**，`dsh-rsi update --all --yes` 仅在全部前置成立时执行一次性 docker→native 升级（将候选固定更新至 `0.2.2-rc.3`，保留原 owner 绑定、期限、已用额度、凭据、模型、Session、Goal 与历史）：绑定官方仓库 `dev`/`main` 可干净快进（detached HEAD 须在本机记录的 `origin/dev` 或 `origin/main` 历史内）、原 Host 属于支持基线（`0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3`）、owner 授权未过期且 target/coordinator 双服务均活动、无已采用源码或未结 activation，以及已配置的 `creation-review` / `revision-review` / `revision-regression` / `creation-adoptions` 业务记录均为空（不存在的库不算空库）。已有 owner 的 native→native 程序升级、非空创建历史迁移与完整 live Docker→native 切换均不支持/未验收。
 
-owner 的 Docker→native 切换还要求 已配置的 creation-review、revision-review 及 revision-regression 库中的 grants、verifications 均空，以及 creation-adoptions 库中的 adoptions、calls、source_archives 全空；不存在的已配置审查库不算空库。任何状态的历史行都不能忽略。已建立 owner 的 native→native 程序升级会在预检中拒绝；非空创建历史迁移尚未实现，完整 live Docker→native 服务切换仍未验收，不能把这一命令理解为通用保权升级。不要删库或重装以满足前提。
-
-尚无 owner 的 pre-owner Home 另有 checkout 内的 v3 维护入口，支持 Docker→native 和 native→native 的基础运行时、发布资源与 cohort 更新；它不授予 owner 权限，也不代表 native owner 程序升级已支持。适用条件见[pre-owner 维护](../../scripts/install/maintenance.md#checkout-内的-pre-owner-冻结源码维护)。
-
-如果当前 CLI 仍是 `0.1.55` 等旧版，先单独运行一次 `dsh-rsi update`，确认新进程为 `0.1.57` 或更新版本，再运行 `dsh-rsi update --all --yes`；旧版 `--all` 不会重新执行新 CLI 来识别冻结 owner。普通待恢复事务会先用原安装器恢复，本次不拉取源码；恢复后再次运行同一升级命令。已绑定签名 readiness 修复的特殊事务按报错和[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)处理。当前发布与实机验收状态见[RSI 状态](../../docs/rsi-status.md)。
+尚无 owner 的 pre-owner Home 另有 checkout 内的 v3 维护入口，见 [pre-owner 维护](../../scripts/install/maintenance.md#checkout-内的-pre-owner-冻结源码维护)。若本机旧版 CLI 尚不能识别冻结 owner 升级，先单独执行一次 `dsh-rsi update` 自举 CLI 后再运行 `dsh-rsi update --all --yes`；普通待恢复事务与已绑定 readiness 修复按[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)处理，能力状态见[RSI 状态](../../docs/rsi-status.md)。
 
 普通 Linux npm cohort 升级由安装器事务停服并恢复已注册受管服务，额外的手工 Host 须先停止。macOS 须先停止**同一 DSH Home 的全部 Host**，在整个升级期间保持停止，并显式传 `--confirm-dsh-home-stopped`；冻结的原生 owner/source Home 不支持普通原地升级。未冻结的 Mac Home 更新完成后，使用 `dsh-rsi start` 恢复服务。可用 `update --version <精确版本或dist-tag>` 选择 CLI 版本；`--all` 下的其它安装器选项只适用于非冻结 Home。
 
@@ -75,7 +73,7 @@ dsh-rsi purge --yes --keep-keychain      # 保留外部凭据
 
 ## 选项与退出码
 
-用法：`dsh-rsi [全局选项] <命令> [命令参数]`。`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
+用法：`dsh-rsi [全局选项] <命令> [命令参数]`。`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--json` 让 `status` / `doctor` 输出结构化 JSON；`--wait <0..60>` 与 `--no-browser` 控制 `open` / `web-url` 行为；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
 
 | 退出码 | 含义 |
 | --- | --- |
