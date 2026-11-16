@@ -1158,7 +1158,8 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-memory-learning run build'
       + ' && pnpm --filter @dsh-enhanced/credentials-keychain run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-actions run build'
-      + ' && pnpm --filter @dsh-enhanced/event-triggers run build',
+      + ' && pnpm --filter @dsh-enhanced/event-triggers run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-dreaming run build',
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
     expect(manifest.scripts['test:root']).toBe('vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests')
