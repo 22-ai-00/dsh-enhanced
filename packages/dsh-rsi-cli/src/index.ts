@@ -23,6 +23,13 @@ import {
   type ServiceActionOutcome,
 } from './services.ts'
 import { version as VERSION } from './version.ts'
+import {
+  MaintenanceError,
+  listDeadLetters,
+  listSystemAutomations,
+  pauseSystemAutomation,
+  resolveDeadLetter,
+} from './maintenance.ts'
 
 export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
@@ -60,6 +67,8 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
+  maintenance 运维结算：列出并结算死信、列出并暂停系统自有 automation（写 receipt）
+  maintenance 运维结算：列出/结算死信、列出/暂停系统自有 automation（写 receipt）
   version     打印 dsh-rsi 版本
 
 全局选项：
@@ -151,7 +160,7 @@ interface ParsedArgs {
 
 const KNOWN_COMMANDS = new Set([
   'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'web-url', 'update',
-  'install', 'reinstall', 'purge', 'version',
+  'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
 const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version'])
@@ -232,6 +241,11 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
     }
 
+    // maintenance 自行解析子命令与选项，rsi 不再解释其余 token。
+    if (result.command === 'maintenance') {
+      result.passthrough.push(token)
+      continue
+    }
     // 命令之后：install/reinstall/update --all 走「消费少数 rsi 选项 + 其余透传」。
     if (result.command === 'install' || result.command === 'reinstall' || result.command === 'update') {
       i = consumeInstallToken(result, argv, i)
@@ -578,6 +592,149 @@ async function assertMacHostProcessesStopped(dshHome: string, profiles: readonly
   }
 }
 
+
+const MAINTENANCE_HELP = `dsh-rsi maintenance — 运维结算两个没有模型入口的台账
+
+用法：
+  dsh-rsi maintenance dead-letters                  列出全部待结算死信（只读）
+  dsh-rsi maintenance resolve <inbox|outbox> <id>
+      --attempt <n> --resolution <cancel|retry> [--operator <id>]
+                                                    结算一条死信（写 receipt）
+  dsh-rsi maintenance system-automations            列出系统自有 automation 与熔断状态（只读）
+  dsh-rsi maintenance pause-system <automationId>
+      --owner <owner> --hash <definitionHash> --version <n> --operation-id <id>
+                                                    暂停一条系统自有 automation（写 receipt）
+
+这些操作正是 Host 服务内部的 resolveDeadLetter / pauseSystemOwned 所做的事：
+先在同一个事务里写入不可变 receipt，再做带精确状态与版本的 CAS 更新。
+重复提交同一决定会重放（replayed: true），换操作者或相反决定会冲突。
+`
+
+function parseMaintenanceArgs(tokens: readonly string[]): {
+  subcommand: string
+  positional: string[]
+  values: Record<string, string>
+} {
+  const positional: string[] = []
+  const values: Record<string, string> = {}
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!
+    if (token.startsWith('--')) {
+      const value = tokens[++i]
+      if (value === undefined || value.startsWith('--')) throw new MaintenanceError('invalid-input', token + ' 需要一个值')
+      values[token.slice(2)] = value
+      continue
+    }
+    positional.push(token)
+  }
+  const [subcommand = '', ...rest] = positional
+  return { subcommand, positional: rest, values }
+}
+
+async function runMaintenance(dshHome: string, tokens: readonly string[]): Promise<number> {
+  let parsed: ReturnType<typeof parseMaintenanceArgs>
+  try {
+    parsed = parseMaintenanceArgs(tokens)
+  } catch (error) {
+    process.stderr.write((error as Error).message + '\n')
+    return 2
+  }
+  const { subcommand, positional, values } = parsed
+  if (subcommand === '' || subcommand === 'help') {
+    process.stdout.write(MAINTENANCE_HELP)
+    return 0
+  }
+  try {
+    switch (subcommand) {
+      case 'dead-letters': {
+        const rows = listDeadLetters(dshHome)
+        if (rows.length === 0) {
+          process.stdout.write('没有待结算的死信。\n')
+          return 0
+        }
+        process.stdout.write('待结算死信 ' + rows.length + ' 条：\n')
+        for (const row of rows) {
+          process.stdout.write('  ' + row.kind + '  ' + row.id + '  attempt=' + row.attemptCount
+            + '  status=' + row.status + (row.failureCode === null ? '' : '  failure=' + row.failureCode) + '\n')
+        }
+        process.stdout.write('\n结算示例：dsh-rsi maintenance resolve inbox <id> --attempt <n> --resolution cancel\n')
+        return 0
+      }
+      case 'resolve': {
+        const [kind, id] = positional
+        if (kind !== 'inbox' && kind !== 'outbox') {
+          process.stderr.write('resolve 需要第一个位置参数是 inbox 或 outbox\n')
+          return 2
+        }
+        if (id === undefined) {
+          process.stderr.write('resolve 需要死信 id\n')
+          return 2
+        }
+        if (values.attempt === undefined || values.resolution === undefined) {
+          process.stderr.write('resolve 需要 --attempt 与 --resolution\n')
+          return 2
+        }
+        const resolved = resolveDeadLetter({
+          dshHome, kind, id,
+          expectedAttemptCount: Number(values.attempt),
+          resolution: values.resolution as 'cancel' | 'retry',
+          operatorId: values.operator ?? 'dsh-rsi-operator',
+        })
+        process.stdout.write(JSON.stringify(resolved, null, 2) + '\n')
+        return 0
+      }
+      case 'system-automations': {
+        const rows = listSystemAutomations(dshHome)
+        if (rows.length === 0) {
+          process.stdout.write('没有系统自有的 automation。\n')
+          return 0
+        }
+        process.stdout.write('系统自有 automation ' + rows.length + ' 条：\n')
+        for (const row of rows) {
+          process.stdout.write('  ' + row.automationId + '  status=' + row.status + '  version=' + row.version
+            + '  circuit=' + (row.circuitState ?? 'closed')
+            + (row.circuitFailureCode === null ? '' : '  failure=' + row.circuitFailureCode) + '\n')
+          process.stdout.write('    owner=' + row.systemOwner + '  hash=' + row.definitionHash + '\n')
+        }
+        process.stdout.write('\n暂停示例：dsh-rsi maintenance pause-system <id> --owner <owner> --hash <hash> --version <n> --operation-id <unique-id>\n')
+        return 0
+      }
+      case 'pause-system': {
+        const [automationId] = positional
+        if (automationId === undefined) {
+          process.stderr.write('pause-system 需要 automation id\n')
+          return 2
+        }
+        for (const required of ['owner', 'hash', 'version', 'operation-id']) {
+          if (values[required] === undefined) {
+            process.stderr.write('pause-system 需要 --' + required + '\n')
+            return 2
+          }
+        }
+        const receipt = pauseSystemAutomation({
+          dshHome, automationId,
+          owner: values.owner!,
+          definitionHash: values.hash!,
+          expectedVersion: Number(values.version),
+          operationId: values['operation-id']!,
+        })
+        process.stdout.write(JSON.stringify(receipt, null, 2) + '\n')
+        return 0
+      }
+      default:
+        process.stderr.write('未知 maintenance 子命令：' + subcommand + '\n')
+        process.stdout.write(MAINTENANCE_HELP)
+        return 2
+    }
+  } catch (error) {
+    if (error instanceof MaintenanceError) {
+      process.stderr.write('maintenance: ' + error.code + ': ' + error.message + '\n')
+      return 1
+    }
+    throw error
+  }
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
@@ -613,6 +770,8 @@ export async function main(
   }
   try {
     switch (args.command) {
+      case 'maintenance':
+        return runMaintenance(args.dshHome, args.passthrough)
       case 'version':
         process.stdout.write(`${VERSION}\n`)
         return 0

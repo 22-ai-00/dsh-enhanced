@@ -30,6 +30,7 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制�
 | `logs` | 查看各 profile 的 Host 日志尾部；`--lines <n>` 设置每份日志行数（1–10000，默认 200），`--errors-only` 只看错误日志。 |
 | `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
 | `start` / `stop` / `restart` | 只切换**已注册**常驻服务的运行状态，保留服务定义和数据；未注册时会报错，需通过 `install` 注册。 |
+| `maintenance` | 运维结算两个没有模型入口的台账：`dead-letters` / `resolve` 结算 Delivery 死信，`system-automations` / `pause-system` 暂停卡在未授权恢复重试上的系统自有 automation。写操作会先在同一事务里落不可变 receipt，再做精确状态与版本的 CAS 更新；重复提交同一决定会重放，换操作者或相反决定会冲突。 |
 | `version` | 打印 CLI 版本。 |
 
 不带 `--profile` 时，服务、日志和 Web URL 命令面向当前 DSH Home 下的全部真实 profile。可用 `--profile <name>` 指定一个。`status` / `doctor` 返回 0 只说明诊断命令执行成功，不证明真实模型可用或普通使用学习闭环通过；当前能力边界见[RSI 状态](../../docs/rsi-status.md)。
