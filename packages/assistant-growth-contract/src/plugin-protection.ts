@@ -8,7 +8,7 @@
  * sealed manifest validation in rsi-authority-runtime, which bounds and
  * audits exactly those two packages.
  *
- * `MODEL_PROPOSAL_PROTECTED_PLUGINS` (23 names) is the growth-proposal
+ * `MODEL_PROPOSAL_PROTECTED_PLUGINS` (24 names) is the growth-proposal
  * boundary: plugins the growth model may never read targets for, read source
  * of, or prepare modify/revision proposals against. Both defence layers
  * (growth-driver allowlist and control-plane worktree gate) consume it.
@@ -46,6 +46,7 @@ export const MODEL_PROPOSAL_PROTECTED_PLUGINS: ReadonlySet<string> = new Set([
   'assistant-heartbeat',
   'assistant-proactive',
   'assistant-memory-learning',
+  'assistant-dreaming',
 ])
 
 /** Immutable safety roots excluded even from the owner source-repair channel. */

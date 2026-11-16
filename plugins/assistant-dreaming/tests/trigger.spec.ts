@@ -64,6 +64,19 @@ describe('dream gate decision', () => {
     expect(localDayKey(now, 'UTC')).toBe('2026-11-08')
     expect(slotOccurrence(now, 3_600_000)).toBe(Math.floor(now / 3_600_000))
   })
+
+  test('coldStartAnchorAt unlocks idle detection only after idleMinMs while real activity takes precedence', () => {
+    expect(isIdle(now, null, 1_800_000, null)).toBe(false)
+    expect(isIdle(now, null, 1_800_000, now - 60_000)).toBe(false)
+    expect(isIdle(now, null, 1_800_000, now - 1_800_000)).toBe(true)
+    // Recent real activity supersedes an old cold-start anchor.
+    expect(isIdle(now, now - 60_000, 1_800_000, now - 10_000_000)).toBe(false)
+    expect(decideTrigger({ ...common, latestActivityAt: null, coldStartAnchorAt: now - 60_000 }))
+      .toMatchObject({ fire: false, reason: 'not-idle' })
+    expect(decideTrigger({
+      ...common, latestActivityAt: null, coldStartAnchorAt: now - 1_800_000, probabilityPpm: 1_000_000,
+    })).toMatchObject({ fire: true })
+  })
 })
 
 describe('dream lottery tickets', () => {

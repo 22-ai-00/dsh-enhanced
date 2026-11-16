@@ -65,6 +65,7 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0",
     "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-dreaming": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
@@ -97,6 +98,9 @@
       "optional": true
     },
     "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-dreaming": {
       "optional": true
     },
     "@dsh-enhanced/assistant-goals": {
@@ -136,6 +140,7 @@
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-dreaming": "workspace:*",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-goals": "workspace:*",
     "@dsh-enhanced/assistant-isolation": "workspace:*",

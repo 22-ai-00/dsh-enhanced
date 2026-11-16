@@ -4,6 +4,7 @@ import type { HostAutomationDefinition, HostAutomationExecutor, HostAutomationEx
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -38,11 +39,21 @@ class FakeAutomations {
   readonly reconciles: SystemAutomationReconcileInput[] = []
   readonly executors: HostAutomationExecutor[] = []
   readonly receipts = new Map<string, { inputHash: string; status: string }>()
+  readonly wakeHandlers = new Set<(event: { automationId: string }) => void>()
   currentStatus: 'active' | 'paused' | undefined
   lastDefinition: HostAutomationDefinition | undefined
   failReconcileOnce = false
 
   constructor(readonly registry?: ExecutorRegistryLike) {}
+
+  onSchedulerWake(handler: (event: { automationId: string }) => void): () => void {
+    this.wakeHandlers.add(handler)
+    return () => { this.wakeHandlers.delete(handler) }
+  }
+
+  emitWake(automationId: string): void {
+    for (const handler of Array.from(this.wakeHandlers)) handler({ automationId })
+  }
 
   registerHostExecutor(executor: HostAutomationExecutor): () => void {
     if (this.registry !== undefined) return this.registry.register(executor)
@@ -143,7 +154,7 @@ function fakeContext(options: FakeContextOptions = {}): { ctx: Context; fakes: F
   ctx.provide('assistantAutomations' as never, fakes.automations as never)
   ctx.provide('assistantDelivery' as never, {
     validateOwnerRoute: (input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) =>
-      Object.freeze({ authorityId: input.authorityId, principalId: input.principalId,
+      Object.freeze({ authorityId: input.authorityId, authorityHash: 'auth-hash-1', principalId: input.principalId,
         workspace: input.workspace, agentPreset: input.agentPreset,
         principalRecordId: 'principal-record', principalVersion: 1 }),
     resolveOwnerRoute: () => Object.freeze({ binding: { sessionId: 'owner-session' } }),
@@ -228,7 +239,7 @@ function occurrenceOf(definitionHash: string, occurrenceId: string): number {
 }
 
 /** A fake Agent service whose one model turn submits one cited idea. */
-function dreamingAgents(input: { workspace: string; preset: string; evidenceRef: string }) {
+function dreamingAgents(input: { workspace: string; preset: string; evidenceRef: string; summary?: string }) {
   return {
     create: async (createOptions: {
       setup: (agentCtx: unknown, agent: unknown) => Promise<void>
@@ -255,7 +266,7 @@ function dreamingAgents(input: { workspace: string; preset: string; evidenceRef:
         followup: () => {},
         whenIdle: async () => {
           await submit!.execute({
-            ideas: [{ summary: 'Playful idea', detail: 'bounded detail', evidence_refs: [input.evidenceRef] }],
+            ideas: [{ summary: input.summary ?? 'Playful idea', detail: 'bounded detail', evidence_refs: [input.evidenceRef] }],
           }, { signal: new AbortController().signal })
         },
         cancel: () => {},
@@ -652,5 +663,323 @@ describe('enabled configuration safety', () => {
       databasePath: join(root(), 'dream.sqlite'),
       provider: 'p', model: 'm', budgetId: 'b', budgetAmount: 1,
     })).toThrow(/scope\.workspace/u)
+  })
+})
+
+describe('cold start, pre-gates, personalMemory recall and owner idea transitions', () => {
+  interface PolicyDecisionStub {
+    effect: 'allow' | 'deny'
+    reasonCode: string
+  }
+
+  function makePolicyMock(overrides: {
+    emergencyStop?: boolean
+    budget?: { metric: string; limit: number } | undefined
+    evaluateEffect?: 'allow' | 'deny'
+    authorizeEffect?: 'allow' | 'deny'
+  } = {}) {
+    const authorizeCalls: Array<{ request: unknown; options?: unknown }> = []
+    return {
+      authorizeCalls,
+      service: {
+        getEmergencyStop: () => ({ enabled: overrides.emergencyStop ?? false }),
+        getBudgetConfig: (id: string) => {
+          if (id !== 'dream-budget') return undefined
+          return 'budget' in overrides ? overrides.budget : { metric: 'automation-runs', limit: 10 }
+        },
+        evaluate: () => ({
+          effect: overrides.evaluateEffect ?? 'allow',
+          reasonCode: overrides.evaluateEffect === 'deny' ? 'policy-denied' : 'ok',
+        } satisfies PolicyDecisionStub),
+        authorize: (request: unknown, options?: unknown) => {
+          authorizeCalls.push({ request, options })
+          const effect = overrides.authorizeEffect ?? 'allow'
+          return {
+            effect,
+            reasonCode: effect === 'allow' ? 'owner-approved' : 'owner-denied',
+          } satisfies PolicyDecisionStub
+        },
+      },
+    }
+  }
+
+  test('cold-start with empty projections avoids deadlock without fabricating evidence and waits idleMinMs', async () => {
+    const workspace = root()
+    const databasePath = join(workspace, 'dream.sqlite')
+    const { ctx, fakes } = fakeContext({ withProjection: false, brokenAgents: true })
+    await ctx.plugin(AssistantDreamingService, enabledConfig(workspace, databasePath, {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000, idleMinMs: 1_800_000,
+    }))
+    const executor = fakes.automations.executors[0]!
+    // Fresh cold-start anchor starts at now, so the first slot waits idleMinMs.
+    const tooEarly = await executor.execute(executorInput(fakes, 'occ-cold-early'))
+    assertHostExecutorContract(tooEarly)
+    expect(tooEarly).toMatchObject({ outcome: 'succeeded', sideEffectState: 'none', retryability: 'safe' })
+    expect(ctx.assistantDreaming.health()).toMatchObject({ lastSkipReason: 'not-idle', counts: { runs: 0 } })
+
+    // Age only the persisted per-lane cold-start anchor and re-mount: once idle,
+    // empty material must skip cleanly instead of fabricating task evidence.
+    await ctx.fiber.restart()
+    contexts.pop()
+    const db = new DatabaseSync(databasePath)
+    db.prepare('UPDATE dream_lane_state SET cold_start_anchor_at = ?').run(Date.now() - 3_600_000)
+    db.close()
+
+    const second = fakeContext({ withProjection: false, brokenAgents: true })
+    await second.ctx.plugin(AssistantDreamingService, enabledConfig(workspace, databasePath, {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000, idleMinMs: 1_800_000,
+    }))
+    const agedExecutor = second.fakes.automations.executors[0]!
+    const noMaterial = await agedExecutor.execute(executorInput(second.fakes, 'occ-cold-empty'))
+    assertHostExecutorContract(noMaterial)
+    expect(noMaterial).toMatchObject({ outcome: 'succeeded', sideEffectState: 'none', retryability: 'safe' })
+    expect(second.ctx.assistantDreaming.health()).toMatchObject({
+      lastSkipReason: 'no-recallable-material', lastRunOutcome: null, counts: { runs: 0, ideas: 0 },
+    })
+  })
+
+  test('recalls strictly non-sensitive personalMemory summaries on cold start and ignores throwing/sensitive targets', async () => {
+    const workspace = root()
+    const databasePath = join(workspace, 'dream.sqlite')
+    const { lane } = { lane: laneOf(workspace, databasePath) }
+    const seedStore = new DreamStore(databasePath, lane)
+    seedStore.ensureColdStartAnchor(Date.now() - 3_600_000)
+    seedStore.close()
+
+    const { ctx, fakes } = fakeContext({ withProjection: false })
+    let capturedPrompt = ''
+    ctx.provide('personalMemory' as never, {
+      listLearningTargets: () => [
+        {
+          id: 'mem-private-1',
+          version: 1,
+          kind: 'preference',
+          content: 'Owner prefers concise morning briefings',
+          sensitivity: 'private',
+        },
+        {
+          id: 'mem-sensitive-1',
+          version: 1,
+          kind: 'fact',
+          content: 'SECRET_API_TOKEN_SHOULD_NEVER_ENTER_DREAMING',
+          sensitivity: 'sensitive',
+        },
+      ],
+    } as never)
+    fakes.agents.create = (async (createOptions: {
+      setup: (agentCtx: unknown, agent: unknown) => Promise<void>
+    }) => {
+      let submit: { execute: (args: unknown, exec: { signal: AbortSignal }) => Promise<unknown> } | undefined
+      const agentCtx = {
+        effect: (callback: () => unknown) => { callback(); return () => {} },
+        on: () => () => {},
+        tools: {
+          register: (definition: unknown) => { submit = definition as typeof submit },
+          restrict: () => {},
+          schemas: () => [{ name: 'dream_submit_ideas' }],
+          guard: () => {},
+        },
+      }
+      const agent = {
+        session: {
+          id: 'dream-session',
+          header: { cwd: workspace, agentPreset: 'primary' },
+          snapshotEvents: () => [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }],
+        },
+        model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
+        followup: (prompt: unknown) => {
+          if (typeof prompt === 'string') { capturedPrompt = prompt; return }
+          const blocks = (prompt as { content?: Array<{ text?: string }> }).content
+          capturedPrompt = blocks?.map(b => b.text ?? '').join('\n') ?? JSON.stringify(prompt)
+        },
+        whenIdle: async () => {
+          const match = /"kind":"memory-summary","summary":"memory \(preference\): Owner prefers concise morning briefings","evidenceRef":"([a-f0-9]{64})"/u.exec(capturedPrompt)
+          expect(match).not.toBeNull()
+          await submit!.execute({
+            ideas: [{ summary: 'Morning briefing nudge', detail: 'Use concise bullets', evidence_refs: [match![1]!] }],
+          }, { signal: new AbortController().signal })
+        },
+        cancel: () => {},
+      }
+      await createOptions.setup(agentCtx, agent)
+      return { agent, dispose: async () => {} }
+    }) as never
+
+    await ctx.plugin(AssistantDreamingService, enabledConfig(workspace, databasePath, {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000, idleMinMs: 300_000,
+    }))
+    const executor = fakes.automations.executors[0]!
+    const res = await executor.execute(executorInput(fakes, 'occ-memory-cold'))
+    assertHostExecutorContract(res)
+    expect(res).toMatchObject({ outcome: 'succeeded', sideEffectState: 'possible' })
+    expect(capturedPrompt).toContain('Owner prefers concise morning briefings')
+    expect(capturedPrompt).not.toContain('SECRET_API_TOKEN_SHOULD_NEVER_ENTER_DREAMING')
+    expect(ctx.assistantDreaming.inspectIdeas()[0]!.summary).toBe('Morning briefing nudge')
+
+    // Soft degradation when personalMemory throws (e.g. automatic learning disabled).
+    await ctx.fiber.restart()
+    contexts.pop()
+    const d2Path = join(root(), 'd2.sqlite')
+    const seedStore2 = new DreamStore(d2Path, laneOf(workspace, d2Path))
+    seedStore2.ensureColdStartAnchor(Date.now() - 3_600_000)
+    seedStore2.close()
+
+    const second = fakeContext({ withProjection: false, brokenAgents: true })
+    second.ctx.provide('personalMemory' as never, {
+      listLearningTargets: () => { throw new Error('automatic learning disabled') },
+    } as never)
+    await second.ctx.plugin(AssistantDreamingService, enabledConfig(workspace, d2Path, {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000, idleMinMs: 300_000,
+    }))
+    const soft = await second.fakes.automations.executors[0]!.execute(executorInput(second.fakes, 'occ-mem-throw'))
+    expect(soft).toMatchObject({ outcome: 'succeeded', sideEffectState: 'none' })
+    expect(second.ctx.assistantDreaming.health().lastSkipReason).toBe('no-recallable-material')
+  })
+
+  test('pre-gates dormant without executor when prerequisites fail and auto-activates when wake/llm become ready', async () => {
+    const workspace = root()
+    let providers: Array<{ id: string }> = []
+    let budget: { metric: string; limit: number } | undefined = undefined
+    const automations = new FakeAutomations()
+    const { ctx, fakes } = fakeContext({ automations })
+    ctx.provide('llm' as never, {
+      listProviders: () => providers,
+      resolveModelInfo: async (provider: string) => {
+        if (!providers.some(item => item.id === provider)) throw new Error('model missing')
+        return { provider, id: 'test-model' }
+      },
+    } as never)
+    ctx.provide('assistantPolicy' as never, {
+      getEmergencyStop: () => ({ enabled: false }),
+      getBudgetConfig: () => budget,
+      evaluate: () => ({ effect: 'allow', reasonCode: 'ok' }),
+    } as never)
+
+    await ctx.plugin(AssistantDreamingService, enabledConfig(workspace))
+    // Missing budget keeps the service paused with zero executor registration.
+    expect(ctx.assistantDreaming.health()).toMatchObject({
+      enabled: true, scheduler: 'dormant', lastSkipReason: 'budget-unavailable',
+    })
+    expect(fakes.automations.executors).toHaveLength(0)
+    expect(fakes.automations.currentStatus).toBe('paused')
+
+    // Supply budget, but provider is still absent -> wake keeps it paused on model-unavailable.
+    budget = { metric: 'automation-runs', limit: 1 }
+    automations.emitWake('unrelated')
+    expect(ctx.assistantDreaming.health()).toMatchObject({
+      scheduler: 'dormant', lastSkipReason: 'model-unavailable',
+    })
+    expect(fakes.automations.executors).toHaveLength(0)
+
+    // Register provider and emit llm/adapters-updated -> auto-activates cleanly!
+    providers = [{ id: 'test-provider' }]
+    await (ctx as unknown as { emit: (event: string) => unknown }).emit('llm/adapters-updated')
+    expect(ctx.assistantDreaming.health()).toMatchObject({
+      scheduler: 'active', lastSkipReason: null,
+    })
+    expect(fakes.automations.executors).toHaveLength(1)
+    expect(fakes.automations.currentStatus).toBe('active')
+
+    // If model vanishes right before slot execution (resolveModelInfo throws),
+    // the slot fails closed at preflight before beginDream burns a run/day-cap.
+    providers = []
+    const res = await fakes.automations.executors[0]!.execute(executorInput(fakes, 'occ-model-vanished'))
+    assertHostExecutorContract(res)
+    expect(res).toMatchObject({
+      outcome: 'failed', failureClass: 'configuration', failurePhase: 'preflight',
+      failureCode: 'dream-model-unavailable', sideEffectState: 'none', retryability: 'after-intervention',
+    })
+    expect(ctx.assistantDreaming.health().counts.runs).toBe(0)
+  })
+
+  test('acknowledgeIdea and transitionIdea enforce owner route, policy authorization and audit log', async () => {
+    const workspace = root()
+    const { ctx, fakes } = fakeContext()
+    const evidenceRef = acceptanceDigest(fakes.projection!).slice(0, 64)
+    fakes.agents.create = (dreamingAgents({ workspace, preset: 'primary', evidenceRef }).create) as never
+
+    const policyState = { emergencyStop: false, authorizeEffect: 'allow' as 'allow' | 'deny' }
+    const policy = makePolicyMock()
+    policy.service.getEmergencyStop = () => ({ enabled: policyState.emergencyStop })
+    policy.service.authorize = (request: unknown, options?: unknown) => {
+      policy.authorizeCalls.push({ request, options })
+      return {
+        effect: policyState.authorizeEffect,
+        reasonCode: policyState.authorizeEffect === 'allow' ? 'owner-ok' : 'owner-forbidden',
+      }
+    }
+    ctx.provide('assistantPolicy' as never, policy.service as never)
+
+    await ctx.plugin(AssistantDreamingService, enabledConfig(workspace, undefined, {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000,
+    }))
+    const execRes = await fakes.automations.executors[0]!.execute(executorInput(fakes, 'occ-auth'))
+    expect(execRes.outcome).toBe('succeeded')
+    const idea = ctx.assistantDreaming.inspectIdeas()[0]!
+    expect(idea.state).toBe('recorded')
+    expect(ctx.assistantDreaming.inspectValidatedIdeas()).toEqual([])
+
+    // Principal mismatch is rejected before touching state or calling authorize.
+    expect(() => ctx.assistantDreaming.acknowledgeIdea({
+      ideaId: idea.id, principalId: 'intruder',
+    })).toThrow(/principalId/u)
+
+    // Policy deny & emergency stop both fail closed.
+    policyState.authorizeEffect = 'deny'
+    expect(() => ctx.assistantDreaming.acknowledgeIdea({ ideaId: idea.id })).toThrow(/owner-forbidden/u)
+    policyState.authorizeEffect = 'allow'
+    policyState.emergencyStop = true
+    expect(() => ctx.assistantDreaming.acknowledgeIdea({ ideaId: idea.id })).toThrow(/emergency stop/u)
+    policyState.emergencyStop = false
+
+    // Missing assistantPolicy fails closed too.
+    const { ctx: noPolicyCtx, fakes: noPolicyFakes } = fakeContext()
+    const npEvidenceRef = acceptanceDigest(noPolicyFakes.projection!).slice(0, 64)
+    noPolicyFakes.agents.create = (dreamingAgents({ workspace, preset: 'primary', evidenceRef: npEvidenceRef }).create) as never
+    await noPolicyCtx.plugin(AssistantDreamingService, enabledConfig(workspace, join(root(), 'np.sqlite'), {
+      runProbabilityPpm: 1_000_000, lotteryWindow: 500_000,
+    }))
+    await noPolicyFakes.automations.executors[0]!.execute(executorInput(noPolicyFakes, 'occ-np'))
+    const npIdea = noPolicyCtx.assistantDreaming.inspectIdeas()[0]!
+    expect(() => noPolicyCtx.assistantDreaming.acknowledgeIdea({ ideaId: npIdea.id })).toThrow(/assistantPolicy/u)
+
+    // Owner acknowledge -> validate -> inspectValidatedIdeas -> retire (withdrawn) + full audit trail.
+    const ackRes = ctx.assistantDreaming.acknowledgeIdea({
+      ideaId: idea.id, note: 'triaged by owner', principalId: 'owner-1',
+    })
+    expect(ackRes.idea.state).toBe('owner-acknowledged')
+    expect(ackRes.event).toMatchObject({ state: 'owner-acknowledged', actor: 'owner', note: 'triaged by owner' })
+
+    const valRes = ctx.assistantDreaming.transitionIdea({
+      ideaId: idea.id, transition: 'validate', note: 'promote to bounded review',
+    })
+    expect(valRes.idea.state).toBe('validated')
+    expect(ctx.assistantDreaming.inspectValidatedIdeas().map(item => item.id)).toEqual([idea.id])
+
+    const retRes = ctx.assistantDreaming.transitionIdea({
+      ideaId: idea.id, transition: 'retire', note: 'done',
+    })
+    expect(retRes.idea.state).toBe('withdrawn')
+    expect(ctx.assistantDreaming.inspectValidatedIdeas()).toEqual([])
+    expect(ctx.assistantDreaming.inspectIdeaEvents(idea.id).map(ev => ev.state)).toEqual([
+      'recorded', 'owner-acknowledged', 'validated', 'withdrawn',
+    ])
+
+    // Fresh slot creates a second idea that the owner rejects cleanly.
+    fakes.agents.create = (dreamingAgents({
+      workspace, preset: 'primary', evidenceRef, summary: 'Second playful idea',
+    }).create) as never
+    await fakes.automations.executors[0]!.execute(executorInput(fakes, 'occ-auth-reject'))
+    const rejectedCandidate = ctx.assistantDreaming.inspectIdeas().find(item => item.id !== idea.id)!
+    const rejRes = ctx.assistantDreaming.transitionIdea({
+      ideaId: rejectedCandidate.id, transition: 'reject', note: 'not actionable',
+    })
+    expect(rejRes.idea.state).toBe('rejected')
+    expect(ctx.assistantDreaming.inspectIdeaEvents(rejectedCandidate.id).map(ev => ev.state)).toEqual([
+      'recorded', 'rejected',
+    ])
+    expect(policy.authorizeCalls.map(c => (c.request as { action: string }).action)).toEqual([
+      'dream.acknowledge', 'dream.acknowledge', 'dream.validate', 'dream.retire', 'dream.reject',
+    ])
   })
 })

@@ -1,13 +1,15 @@
 # @dsh-enhanced/assistant-dreaming
 
 默认关闭、owner 显式启用的"做梦/突发奇想"插件。启用后它以低频率、确定性随机、
-空闲感知的方式回顾**已认证的历史投影**（可信任务投影、owner 目标、活动技能的
-有界摘要），在随机时刻让一个冻结的单工具 Agent 产生少量结构化 idea，并只写入
-插件私有的 SQLite 账本。
+空闲感知的方式回顾**已认证的历史投影**（可信任务投影、owner 目标、活动技能，以及可选
+`personalMemory` 提供的严格非敏感 `private` 摘要），在随机时刻让一个冻结的单工具
+Agent 产生少量结构化 idea，并只写入插件私有的 SQLite 账本。
 
 它**不是**成长复盘：输入是跨任务的模式与空白，输出是未验证假设。默认级别 L0
 （仅私有 idea），默认不通知、不开 Goal/WorkItem、不形成候选、不自动采用；模型输出
-schema 不允许任何评分/置信度/自收益字段，沉默不算正向。
+schema 不允许任何评分/置信度/自收益字段，沉默不算正向。只有 owner 通过受策略保护的
+接口显式 `acknowledgeIdea` / `transitionIdea(..., 'validate')` 验证后，其他受控管线
+（如可选的 `assistant-growth-driver`）才可在有限预算内读取已验证 idea。
 
 ## 召回抽奖（"无事找事"）
 
@@ -27,17 +29,30 @@ Agent，并把
 
 ## 信任边界与权限
 
-- Cordis 注入：`assistantAutomations`、`assistantDelivery`、`assistantEvaluation`、
-  `assistantGoals`、`assistantSkills`、`agents`、`sessions`、`tools`（全部是 Host
-  提供的服务）。模型调用本身经 `agents`/Agent Loop 与 Host 的 `llm` route 发生，
-  不直接持有 `llm` 服务；`assistantAutomations` 自带 `assistantPolicy` 依赖，授权与
-  预算检查发生在 Automations 边界。可选 `assistantPolicy` 存在时，插件会把 dream
-  Agent 绑定为 `background` initiator，避免前台规则/人工审批语义渗入无人值守 wake。
-- 不读 Memory、不读原始 transcript/工具参数/验收回执、不读凭据；所有输入是 Host
-  投影后的有界摘要，每条带证据摘要，idea 必须引用本 wake 材料内的证据 digest。
+- Cordis 注入：必需注入仅保留 Host/Automations 协调所需服务
+  （`assistantAutomations`、`assistantDelivery`、`assistantEvaluation`、
+  `assistantGoals`、`assistantSkills`、`agents`、`sessions`、`tools`），所有
+  sibling DSH bundle（含可选 `assistantPolicy`、`personalMemory`）在 `package.json`
+  中均声明为**可选** `peerDependencies`（不放入 `dependencies`），只有
+  `@deepseek-ai/schemastery` 与 `@dsh-enhanced/task-acceptance-contract` 等非激活
+  共享库留在 `dependencies`。模型调用本身经 `agents`/Agent Loop 与 Host 的 `llm`
+  route 发生；启用阶段会做前置门禁（`validateOwnerRoute`、可选 `assistantPolicy`
+  emergency-stop/budget/execute 规则、可选 `llm.listProviders()` 与执行前
+  `resolveModelInfo`），前置条件未就绪时保持 `dormant` 暂停态且不注册执行器，等
+  `onSchedulerWake` 或 `llm/adapters-updated` 就绪后再激活，避免空烧稀缺预算。
+- 可选 `personalMemory` 仅调用 `listLearningTargets({ owner, limit })` 读取严格非敏感
+  （`sensitivity === 'private'` 或缺省）且受长度限制的摘要并记为 `memory-summary`；
+  仍不读敏感（`sensitive`）记忆、不读原始 transcript/工具参数/验收回执、不读凭据；所有
+  输入是 Host 投影后的有界摘要，每条带证据 digest，idea 必须引用本 wake 材料内的
+  证据 digest。
 - 工具面冻结为恰好一个 `dream_submit_ideas`；其余全局工具在 Agent setup 中
   `restrict` 拒绝，并做精确 allowlist 断言。真实 Host 的 Policy 仍会检查这次工具
   调用，默认拒绝的部署需要为它添加一条后台 allow 规则（见“安装与启用”）。
+- Owner 状态迁移（`acknowledgeIdea` / `transitionIdea({ ideaId, transition: 'validate' | 'reject' | 'retire' })`）
+  强制实时校验 `validateOwnerRoute`、`principalId` 一致性与 `assistantPolicy.authorize`
+  （action 为 `dream.acknowledge` / `dream.validate` / `dream.reject` / `dream.retire`，
+  resource kind 为 `evolution`，missing policy/emergency-stop/deny 一律 fail-closed），
+  并把操作记录进 `dream_idea_events` 审计轨迹。
 - 每次 occurrence 的预算预留/结算由 `assistant-automations` 持有；dreaming 执行器
   不再重复预留，只在自己的账本里按 `maxDreamsPerDay` 计日上限。模型/工具调用
   次数、输出 token、时长、输入字节、每日次数都有硬顶。
@@ -54,7 +69,7 @@ Agent，并把
 | `databasePath` | 无 | 私有 SQLite 绝对规范路径；启用时必填，目录不可组/全局可写。 |
 | `baseIntervalMs` | `3600000` | 抽签节拍（15 分钟–24 小时），复用原生 Automations `every`。 |
 | `runProbabilityPpm` | `250000` | 每节拍抽中率（0–1,000,000）。 |
-| `idleMinMs` | `1800000` | 距最近可信活动至少 30 分钟才触发；缺活动标记 fail-closed。 |
+| `idleMinMs` | `1800000` | 距最近可信活动至少 30 分钟才触发；冷启动完全无任务投影（`latestActivityAt === null`）时回退到账本持久化的 per-lane 冷启动锚点（`dream_lane_state.cold_start_anchor_at`），锚点经过 `idleMinMs` 后解锁空闲门，若完全没有真实目标/技能/非敏感记忆材料则以 `no-recallable-material` 干净跳过，绝不伪造任务证据；两者皆无时 fail-closed。 |
 | `lotteryWindow` | `5000` | 召回开奖号环形窗口半宽（0–500,000；0 = 仅精确票号命中），按命中率调节召回频率。 |
 | `activeHours` | 无 | 同日窗口 `timezone/startMinute/endMinute`，不跨午夜。 |
 | `randomSeed` | 无 | 可选 HMAC seed；只持久化其 digest。 |
@@ -192,13 +207,14 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
      未命中抽奖的槽位零模型调用。
    - 写入 `databasePath` 指向的插件私有 SQLite（WAL/SHM；目录必须 owner-private，
      组/全局可写会拒绝启动）：`dream_runs`/`dream_ideas`/`dream_idea_events`/
-     `dream_counters`/`dream_tickets`/`dream_recalls`。
+     `dream_counters`/`dream_tickets`/`dream_recalls`/`dream_lane_state`。
    - 默认只有私有 idea，不写 Goals/WorkItems、不创建候选、不自动采用、不发消息；
      `notifyOwner: true` 时才通过 Delivery 认证通道发有界摘要（每日/间隔门内）。
-   - 自有 idea 读取：服务只读 `health()` / `inspectIdeas()`。`retire()` 方法会
-     暂停 system automation、注销执行器并保留账本，但**仓库当前没有普通 owner 可
-     直接调用的 retire 入口**（它是 Host 侧 service API，只有测试/新的 Host 调用方
-     会用到），所以 owner 的实际退役路径是配置项 `retired: true`：
+   - 服务接口：只读 `health()` / `inspectIdeas()` / `inspectValidatedIdeas()` /
+     `inspectIdeaEvents(ideaId)`，以及受 owner 路由与 `assistantPolicy.authorize`
+     门禁保护的 `acknowledgeIdea(...)`、`transitionIdea(...)`（支持 `validate` /
+     `reject` / `retire` -> `withdrawn`）与 `retire()`（暂停 system automation、
+     注销执行器并保留账本）。owner 也可通过配置项 `retired: true` 完成静态退役：
      1) 在 profile patch 里保持完整配置、加 `retired: true`，重载/重启 profile：
         automation 收敛为 paused、执行器不注册；构造失败时插件会自行回滚
         executor 与账本再抛错，不会留下半装状态；
@@ -219,17 +235,20 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 
 `dream_runs`（每次抽签/运行与 drawDigest）、`dream_ideas`（含状态机
 `recorded → owner-acknowledged → validated/rejected` 或 `withdrawn`，同 lane 同日
-同摘要去重）、`dream_idea_events`、`dream_counters`（每日做梦/通知计数）、
-`dream_tickets`（每个 subject 的稳定票号，重复登记不覆盖原票）、`dream_recalls`
-（每次开奖命中的审计行，槽位重放幂等）。
-`PRAGMA user_version=2`（schema 2 仅对 1 做加法迁移），schema 变新即拒绝启动。
+同摘要去重）、`dream_idea_events`（含初始 `recorded` 与后续 `owner`/`host` 迁移
+审计事件）、`dream_counters`（每日做梦/通知计数）、`dream_tickets`（每个 subject
+的稳定票号，支持 `task-projection`/`goal`/`skill`/`recorded-idea`/`memory-summary`，
+重复登记不覆盖原票）、`dream_recalls`（每次开奖命中的审计行，槽位重放幂等）与
+`dream_lane_state`（per-lane `cold_start_anchor_at` 与 `last_activity_at`）。
+`PRAGMA user_version=3`（schema 2/3 均对旧版本做幂等迁移不丢数据），schema 变新即
+拒绝启动。
 插件加载时把重启遗留的 running 行改为 `interrupted`，并按 `retentionDays` 硬删除
 过期 idea（每次成功做梦后再执行一次）；`dream_runs` 的审计摘要保留。
 
 ## 不做的事
 
-- 除可选 L1 摘要通知外不发消息；不读 Memory（S4）、不读 web、不调用任何写工具或
-  Goal/WorkItem 候选 API。
+- 除可选 L1 摘要通知外不发消息；不读 `sensitive` 记忆、不读 web、不直接调用写工具或
+  Goal/WorkItem 候选 API，也不在无证据时伪造任务投影。
 - 不评分、不排序、不把工具成功或 owner 沉默当作收益证据；任何"采用"只认后续真实
   owner 动作或独立验收轨道。
 - 不新建循环或定时器：调度完全走 `assistant-automations`，`misfire: skip`、
@@ -253,11 +272,14 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 
 ## 测试
 
-`pnpm --filter @dsh-enhanced/assistant-dreaming test`（54 个用例，6 个文件）：
-config fail-closed、确定性抽签/active-hours/idle/日上限门、确定性票号/环形窗口匹配、
-SQLite 账本/状态机/保留期（含带生命周期事件的过期 idea）/schema 1→2 迁移/ownData
-防护、L1 通知路由验证与 fail-closed、真实 AgentLoop 冻结单工具集成，以及真实
-Cordis 装载测试：
+`pnpm --filter @dsh-enhanced/assistant-dreaming test`（62 个用例，6 个文件）：
+config fail-closed、包依赖边界（sibling DSH bundle 仅在可选 `peerDependencies`）、
+确定性抽签/active-hours/idle（含 `coldStartAnchorAt`）/日上限门、确定性票号/环形窗口
+匹配、SQLite 账本/状态机/保留期（含带生命周期事件的过期 idea）/schema 1→2→3 迁移/
+`ownData` 防护、L1 通知路由验证与 fail-closed、真实 AgentLoop 冻结单工具集成，以及真实
+Cordis 装载、前置门禁（`budget`/`policy`/`llm` 就绪前保持 `dormant` 并在 wake/`llm` 更新
+后自动激活）、可选 `personalMemory` 仅召回非敏感摘要、owner `acknowledgeIdea` /
+`transitionIdea` 授权审计测试：
 
 - 默认导出服务类可被 `ctx.plugin` 以 `(ctx, config)` 装载；关闭态不注册 automation、
   不注册执行器、不打开 SQLite。

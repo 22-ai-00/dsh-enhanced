@@ -191,3 +191,72 @@ describe('lottery tickets and recalls (schema 2)', () => {
     migrated.close()
   })
 })
+
+describe('audit trail, withdrawals, cold-start anchor and memory tickets (schema 3)', () => {
+  const DIGEST = (n: number) => n.toString(16).padStart(64, '0')
+
+  test('persists cold-start anchor idempotently per lane and updates lastActivityAt when newer', async () => {
+    const { store } = await makeStore()
+    const first = store.ensureColdStartAnchor(1_000)
+    expect(first).toBe(1_000)
+    expect(store.ensureColdStartAnchor(9_000)).toBe(1_000)
+    store.close()
+  })
+
+  test('records initial event, supports owner withdrawal, validates notes and lists validated ideas', async () => {
+    const { store } = await makeStore()
+    store.beginDream('run-1', 1, '2026-11-08', 1, 'f'.repeat(64))
+    store.recordIdea({
+      id: 'idea-1', runId: 'run-1', createdAt: 10, dayKey: '2026-11-08',
+      summary: 's1', detail: 'd1', evidenceRefs: [REF],
+    })
+    store.recordIdea({
+      id: 'idea-2', runId: 'run-1', createdAt: 11, dayKey: '2026-11-08',
+      summary: 's2', detail: 'd2', evidenceRefs: [REF],
+    })
+    expect(store.listIdeaEvents('idea-1')).toEqual([
+      { ideaId: 'idea-1', state: 'recorded', actor: 'host', at: 10 },
+    ])
+    const acked = store.transitionIdea('idea-1', 'owner-acknowledged', 'owner', 20, 'looks worth checking')
+    expect(acked.idea.state).toBe('owner-acknowledged')
+    expect(acked.event).toEqual({
+      ideaId: 'idea-1', state: 'owner-acknowledged', actor: 'owner', at: 20, note: 'looks worth checking',
+    })
+    const validated = store.transitionIdea('idea-1', 'validated', 'owner', 30)
+    expect(validated.idea.state).toBe('validated')
+    expect(store.listValidatedIdeas().map(item => item.id)).toEqual(['idea-1'])
+
+    // Both owner-acknowledged and validated ideas can be withdrawn (retired), while oversized notes fail closed.
+    expect(() => store.transitionIdea('idea-2', 'owner-acknowledged', 'owner', 25, 'x'.repeat(1_025))).toThrow(/note/)
+    const retiredAck = store.transitionIdea('idea-2', 'owner-acknowledged', 'owner', 26)
+    expect(retiredAck.idea.state).toBe('owner-acknowledged')
+    store.transitionIdea('idea-2', 'withdrawn', 'owner', 27, 'duplicate')
+    store.transitionIdea('idea-1', 'withdrawn', 'owner', 40, 'superseded')
+    expect(store.listValidatedIdeas()).toEqual([])
+    expect(store.listIdeaEvents('idea-1')).toHaveLength(4)
+    store.close()
+  })
+
+  test('migrates a schema 2 ledger to schema 3 without losing ideas or tickets', async () => {
+    const { store, path } = await makeStore()
+    store.beginDream('run-1', 1, '2026-11-08', 1, 'f'.repeat(64))
+    store.recordIdea({
+      id: 'idea-1', runId: 'run-1', createdAt: 10, dayKey: '2026-11-08',
+      summary: 's', detail: 'd', evidenceRefs: [REF],
+    })
+    store.upsertTicket({ subjectKind: 'goal', subjectKey: 'goal-1', value: 11, digest: DIGEST(1), now: 5 })
+    store.close()
+
+    const legacy = new DatabaseSync(path)
+    legacy.exec('DROP TABLE dream_lane_state; PRAGMA user_version = 2;')
+    legacy.close()
+
+    const migrated = new DreamStore(path, 'test-lane')
+    expect(migrated.idea('idea-1')).toMatchObject({ id: 'idea-1', state: 'recorded' })
+    expect(migrated.listTickets()).toHaveLength(1)
+    migrated.upsertTicket({ subjectKind: 'memory-summary', subjectKey: 'mem-1', value: 22, digest: DIGEST(2), now: 6 })
+    expect(migrated.listTickets().map(item => item.subjectKind)).toEqual(['goal', 'memory-summary'])
+    expect(migrated.ensureColdStartAnchor(500)).toBe(500)
+    migrated.close()
+  })
+})

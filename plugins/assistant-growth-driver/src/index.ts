@@ -11,6 +11,11 @@ import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer,
   type SourceGrowthRunRequest, type WorkItemSourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
+import {
+  readValidatedDreamIdeas,
+  type DreamingIntakeSummary,
+  type ValidatedDreamIdeaInput,
+} from './dreaming-intake.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
 import { version } from './version.js'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from './source-port.js'
@@ -18,7 +23,12 @@ import { UsageLearningRuntime, type UsageReviewInput, type AnyUsageReviewInput, 
 
 export const name = 'dsh-enhanced-assistant-growth-driver'
 export { version, Config, normalizeConfig }
-export type { AssistantGrowthDriverConfig } from './config.js'
+export type {
+  AssistantGrowthDriverConfig,
+  DreamingIdeasIntakeConfig,
+  NormalizedDreamingIdeasIntakeConfig,
+} from './config.js'
+export type { DreamingIntakeSummary, ValidatedDreamIdeaInput } from './dreaming-intake.js'
 export type { GrowthAuthority } from './deposit.js'
 
 /**
@@ -46,6 +56,7 @@ export interface GrowthWakeHealth {
   // when the opt-in owner-anchored track never ran, and exactOptionalPropertyTypes
   // rejects assigning an implicit-undefined optional property otherwise.
   readonly ownerAnchored?: OwnerAnchoredWakeSummary | undefined
+  readonly dreamingIntake?: DreamingIntakeSummary | undefined
 }
 
 type InspectedOwnerGoal = ReturnType<AssistantGoalsService['inspectOwnerGoals']>[number]
@@ -423,16 +434,21 @@ export class AssistantGrowthDriverService extends Service {
         startedAt, authority, goals, delivery: delivery as unknown as GrowthDeliveryPort,
       })
     }
+    let dreamingIntake: DreamingIntakeSummary | undefined = config.dreamingIdeas.enabled && input.usage === undefined
+      ? Object.freeze({ enabled: false, considered: 0, ingested: 0, rejectedUnvalidated: 0, ideaIds: Object.freeze([]) })
+      : undefined
+    const spreadDreamingHealth = dreamingIntake === undefined ? {} : { dreamingIntake }
+
     if (model === undefined || modelFailure !== undefined) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored, ...spreadDreamingHealth }
       return
     }
     if (!await this.#resolveCredential()) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored, ...spreadDreamingHealth }
       return
     }
     if (policy === undefined) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-policy', run: null, ownerAnchored }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-policy', run: null, ownerAnchored, ...spreadDreamingHealth }
       return
     }
 
@@ -448,17 +464,24 @@ export class AssistantGrowthDriverService extends Service {
           idempotencyKey: `growth-budget:${wakeId}`,
         })
         if (reservation.status !== 'reserved') {
-          this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${reservation.status}`, run: null, ownerAnchored }
+          this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${reservation.status}`, run: null, ownerAnchored, ...spreadDreamingHealth }
           return
         }
         reservationId = reservation.reservationId
       } catch (error) {
-        this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${errorMessage(error)}`, run: null, ownerAnchored }
+        this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${errorMessage(error)}`, run: null, ownerAnchored, ...spreadDreamingHealth }
         return
       }
     }
 
     try {
+      let validatedDreamIdeas: readonly ValidatedDreamIdeaInput[] = []
+      if (config.dreamingIdeas.enabled && input.usage === undefined) {
+        const intake = readValidatedDreamIdeas(this.ctx, authority, config.dreamingIdeas.maxIdeasPerWake)
+        validatedDreamIdeas = intake.ideas
+        dreamingIntake = intake.summary
+      }
+      const nextDreamingHealth = dreamingIntake === undefined ? {} : { dreamingIntake }
       agentSubmitted = true
       const bound = this.#sourceBinding
       const source = bound !== undefined && bound.available() ? bound : undefined
@@ -525,6 +548,7 @@ export class AssistantGrowthDriverService extends Service {
       }
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
         ...(sourcePort === undefined ? {} : { sourcePlane: sourcePort }),
+        ...(validatedDreamIdeas.length === 0 ? {} : { validatedDreamIdeas }),
         ...(input.usage === undefined ? {} : { feedback: input.usage.source,
           ...(workItemUsage ? { assertFirstModelAdmission: workItemUsage.assertFirstModelAdmission, workItemAuthorization: { runId: workItemUsage.id, intentDigest: workItemUsage.intentDigest, definitionHash: workItemUsage.definitionHash, occurrenceId: workItemUsage.occurrenceId, assertCurrent: workItemUsage.assertCurrent } } : {}),
           generationDeadlineAt: input.usage.expiresAt,
@@ -535,7 +559,7 @@ export class AssistantGrowthDriverService extends Service {
           ...(input.usage === undefined ? [] : [input.usage.signal])]),
       })
       if (reservationId !== undefined) { policy.finalize(reservationId, config.budgetAmount!); reservationSettled = true }
-      this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored }
+      this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored, ...nextDreamingHealth }
     } catch (error) {
       if (reservationId !== undefined && !reservationSettled) {
         // The agent factory may already have submitted a request: charge the
@@ -545,7 +569,7 @@ export class AssistantGrowthDriverService extends Service {
           else policy.release(reservationId)
         } catch { /* leave the reservation ledger state visible for the owner */ }
       }
-      this.#health = { lastWakeAt: startedAt, outcome: 'failed', reason: errorMessage(error), run: null, ownerAnchored }
+      this.#health = { lastWakeAt: startedAt, outcome: 'failed', reason: errorMessage(error), run: null, ownerAnchored, ...(dreamingIntake === undefined ? {} : { dreamingIntake }) }
       this.ctx.logger.warn(`assistant-growth-driver: wake ${wakeId} failed: ${errorMessage(error)}`)
     }
   }

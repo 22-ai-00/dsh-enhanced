@@ -135,8 +135,11 @@ export async function runDreamAgent(input: DreamAgentInput): Promise<DreamAgentR
         // never applies foreground/human-approval semantics to a dream tool
         // call. Without this the tool would be evaluated as `foreground` and
         // an owner foreground rule or approval requirement could leak in.
-        const policy = input.ctx.get('assistantPolicy' as never, false) as
-          { bindInitiator?: (agent: Agent, initiator: 'background', principal?: string) => () => void } | undefined
+        const policyRaw = input.ctx.get('assistantPolicy' as never, false) as
+          | (({ bindInitiator?: (agent: Agent, initiator: 'background', principal?: string) => () => void })
+            & { [key: symbol]: unknown })
+          | undefined
+        const policy = (policyRaw as Record<symbol, typeof policyRaw> | undefined)?.[Symbol.for('cordis.original')] ?? policyRaw
         if (policy?.bindInitiator !== undefined) {
           const unbind = policy.bindInitiator(agent, 'background', input.scope.principalId)
           agentCtx.effect(() => unbind, 'assistant-dreaming.background-initiator')

@@ -35,7 +35,7 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     expect(bundle).not.toContain('enabled: true')
   })
 
-  test('declares every runtime Host import as an optional peer', () => {
+  test('declares every runtime Host import and sibling DSH bundle as an optional peer', () => {
     // These are imported as values by lib/*.js; they must never be ordinary
     // dependencies (a second Host runtime copy breaks service identity).
     for (const peer of ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-tools']) {
@@ -43,6 +43,23 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
       expect(manifest.peerDependenciesMeta?.[peer]?.optional).toBe(true)
       expect(manifest.dependencies?.[peer]).toBeUndefined()
     }
+    for (const sibling of [
+      '@dsh-enhanced/assistant-automations',
+      '@dsh-enhanced/assistant-delivery',
+      '@dsh-enhanced/assistant-evaluation',
+      '@dsh-enhanced/assistant-goals',
+      '@dsh-enhanced/assistant-policy',
+      '@dsh-enhanced/assistant-skills',
+      '@dsh-enhanced/personal-memory',
+    ]) {
+      expect(manifest.peerDependencies?.[sibling]).toBeTruthy()
+      expect(manifest.peerDependenciesMeta?.[sibling]?.optional).toBe(true)
+      expect(manifest.dependencies?.[sibling]).toBeUndefined()
+    }
+    expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual([
+      '@deepseek-ai/schemastery',
+      '@dsh-enhanced/task-acceptance-contract',
+    ])
   })
 
   test('dormant default configuration has no scheduler, scope or store path', () => {

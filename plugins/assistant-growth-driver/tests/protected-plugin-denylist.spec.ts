@@ -10,6 +10,7 @@ describe('protected plugin denylists', () => {
   test('the growth driver itself and other self-evolution roots stay immutable', () => {
     for (const name of [
       'assistant-growth-driver',
+      'assistant-dreaming',
       'plugin-control-plane',
       'assistant-policy',
       'assistant-verifier',

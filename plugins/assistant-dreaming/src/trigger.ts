@@ -79,13 +79,22 @@ export function isWithinActiveHours(now: number, activeHours: DreamingActiveHour
 }
 
 /**
- * Conservative idle gate based on the latest trusted activity timestamp. The
- * caller supplies activity measured through Host projections (never model
- * prose); a missing marker means "not idle" so the first run fails closed.
+ * Conservative idle gate based on the latest trusted activity timestamp (or a
+ * persisted cold-start anchor when zero trusted task projections exist yet).
+ * When both are missing or non-finite, the gate still fails closed.
  */
-export function isIdle(now: number, latestActivityAt: number | null, idleMinMs: number): boolean {
-  if (latestActivityAt === null || !Number.isFinite(latestActivityAt)) return false
-  return now - latestActivityAt >= idleMinMs
+export function isIdle(
+  now: number,
+  latestActivityAt: number | null,
+  idleMinMs: number,
+  coldStartAnchorAt: number | null = null,
+): boolean {
+  if (latestActivityAt !== null) {
+    if (!Number.isFinite(latestActivityAt)) return false
+    return now - latestActivityAt >= idleMinMs
+  }
+  if (coldStartAnchorAt === null || !Number.isFinite(coldStartAnchorAt)) return false
+  return now - coldStartAnchorAt >= idleMinMs
 }
 
 export type SkipReason =
@@ -102,6 +111,8 @@ export interface TriggerInput {
   probabilityPpm: number
   activeHours: DreamingActiveHours | null
   latestActivityAt: number | null
+  /** Persisted cold-start anchor used only when latestActivityAt is null. */
+  coldStartAnchorAt?: number | null
   idleMinMs: number
   dreamsToday: number
   maxDreamsPerDay: number
@@ -121,7 +132,7 @@ export function decideTrigger(input: TriggerInput): TriggerDecision {
   if (!isWithinActiveHours(input.now, input.activeHours)) {
     return { fire: false, reason: 'outside-active-hours', dayKey }
   }
-  if (!isIdle(input.now, input.latestActivityAt, input.idleMinMs)) {
+  if (!isIdle(input.now, input.latestActivityAt, input.idleMinMs, input.coldStartAnchorAt ?? null)) {
     return { fire: false, reason: 'not-idle', dayKey }
   }
   if (input.dreamsToday >= input.maxDreamsPerDay) {
@@ -159,7 +170,7 @@ export const TICKET_MODULUS = 1_000_000
 /** Default rolling window around the draw value in each direction. */
 export const DEFAULT_TICKET_WINDOW = 5_000
 
-export type LotterySubjectKind = 'task-projection' | 'goal' | 'skill' | 'recorded-idea'
+export type LotterySubjectKind = 'task-projection' | 'goal' | 'skill' | 'recorded-idea' | 'memory-summary'
 
 export interface LotterySubject {
   kind: LotterySubjectKind

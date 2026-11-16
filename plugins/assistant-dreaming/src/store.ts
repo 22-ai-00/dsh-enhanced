@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
  * module adopts, notifies or promotes anything.
  */
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 export type IdeaState = 'recorded' | 'withdrawn' | 'owner-acknowledged' | 'validated' | 'rejected'
 
@@ -182,7 +182,36 @@ export class DreamStore {
           UNIQUE (lane, occurrence, subject_kind, subject_key)
         ) STRICT;
       `)
-      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+      this.db.exec(`PRAGMA user_version = 2`)
+    }
+    // Schema 3: cold-start lane idle anchor and memory-summary lottery subject kind.
+    if (version < 3) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS dream_lane_state (
+            lane TEXT PRIMARY KEY,
+            cold_start_anchor_at INTEGER NOT NULL CHECK(cold_start_anchor_at > 0)
+          ) STRICT, WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS dream_tickets_v3 (
+            subject_kind TEXT NOT NULL CHECK(subject_kind IN ('task-projection','goal','skill','recorded-idea','memory-summary')),
+            subject_key TEXT NOT NULL CHECK(length(subject_key) > 0 AND length(subject_key) <= 500),
+            ticket_value INTEGER NOT NULL CHECK(ticket_value >= 0 AND ticket_value < 1000000),
+            ticket_digest TEXT NOT NULL CHECK(length(ticket_digest) = 64 AND ticket_digest NOT GLOB '*[^a-f0-9]*'),
+            created_at INTEGER NOT NULL CHECK(created_at > 0),
+            PRIMARY KEY (subject_kind, subject_key)
+          ) STRICT, WITHOUT ROWID;
+          INSERT INTO dream_tickets_v3 (subject_kind, subject_key, ticket_value, ticket_digest, created_at)
+            SELECT subject_kind, subject_key, ticket_value, ticket_digest, created_at FROM dream_tickets;
+          DROP TABLE dream_tickets;
+          ALTER TABLE dream_tickets_v3 RENAME TO dream_tickets;
+          PRAGMA user_version = ${SCHEMA_VERSION};
+        `)
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
     }
   }
 
@@ -256,6 +285,15 @@ export class DreamStore {
     return row?.at ?? null
   }
 
+  /** Persist and return the lane's initial load timestamp for cold-start idle gating. */
+  ensureColdStartAnchor(now: number): number {
+    assertMutable(this.closed)
+    if (!Number.isSafeInteger(now) || now < 1) throw new Error('dream store: invalid cold-start anchor timestamp')
+    this.db.prepare('INSERT OR IGNORE INTO dream_lane_state (lane, cold_start_anchor_at) VALUES (?, ?)').run(this.lane, now)
+    const row = this.db.prepare('SELECT cold_start_anchor_at FROM dream_lane_state WHERE lane=?').get(this.lane) as { cold_start_anchor_at: number }
+    return row.cold_start_anchor_at
+  }
+
   /**
    * Register one subject's lottery ticket. The value is derived by the caller
    * from the plugin seed, so the store never invents randomness; re-registering
@@ -263,7 +301,7 @@ export class DreamStore {
    */
   upsertTicket(ticket: { subjectKind: string; subjectKey: string; value: number; digest: string; now: number }): void {
     assertMutable(this.closed)
-    if (!['task-projection', 'goal', 'skill', 'recorded-idea'].includes(ticket.subjectKind)
+    if (!['task-projection', 'goal', 'skill', 'recorded-idea', 'memory-summary'].includes(ticket.subjectKind)
       || typeof ticket.subjectKey !== 'string' || !ticket.subjectKey || ticket.subjectKey.length > 500
       || !Number.isSafeInteger(ticket.value) || ticket.value < 0 || ticket.value >= 1_000_000
       || !/^[a-f0-9]{64}$/u.test(ticket.digest) || !Number.isSafeInteger(ticket.now) || ticket.now < 1) {
@@ -277,7 +315,7 @@ export class DreamStore {
   /** All unsolved lottery tickets for this lane, oldest first. */
   listTickets(): readonly { subjectKind: string; subjectKey: string; value: number; digest: string }[] {
     return (this.db.prepare(`SELECT subject_kind, subject_key, ticket_value, ticket_digest FROM dream_tickets
-      WHERE subject_kind IN ('task-projection','goal','skill','recorded-idea') ORDER BY created_at, subject_key`)
+      WHERE subject_kind IN ('task-projection','goal','skill','recorded-idea','memory-summary') ORDER BY created_at, subject_key`)
       .all() as Array<{ subject_kind: string; subject_key: string; ticket_value: number; ticket_digest: string }>)
       .map(row => ({ subjectKind: row.subject_kind, subjectKey: row.subject_key, value: row.ticket_value, digest: row.ticket_digest }))
   }
@@ -325,10 +363,19 @@ export class DreamStore {
       throw new Error('dream store: idea text exceeds bounds')
     }
     const summaryDigest = createHashSafe(`${value.summary}\0${value.dayKey}`)
-    this.db.prepare(`INSERT INTO dream_ideas (id, lane, run_id, created_at, day_key, state, summary, detail, evidence_refs, summary_digest)
-      VALUES (?, ?, ?, ?, ?, 'recorded', ?, ?, ?, ?)`)
-      .run(value.id, this.lane, value.runId, value.createdAt, value.dayKey, value.summary, value.detail, JSON.stringify(refs), summaryDigest)
-    this.db.prepare('UPDATE dream_runs SET idea_count = idea_count + 1 WHERE id=? AND lane=?').run(value.runId, this.lane)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO dream_ideas (id, lane, run_id, created_at, day_key, state, summary, detail, evidence_refs, summary_digest)
+        VALUES (?, ?, ?, ?, ?, 'recorded', ?, ?, ?, ?)`)
+        .run(value.id, this.lane, value.runId, value.createdAt, value.dayKey, value.summary, value.detail, JSON.stringify(refs), summaryDigest)
+      this.db.prepare('UPDATE dream_runs SET idea_count = idea_count + 1 WHERE id=? AND lane=?').run(value.runId, this.lane)
+      this.db.prepare('INSERT INTO dream_idea_events (idea_id, state, actor, at, note) VALUES (?, ?, ?, ?, ?)')
+        .run(value.id, 'recorded', 'host', value.createdAt, null)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     return this.idea(value.id)!
   }
 
@@ -343,8 +390,25 @@ export class DreamStore {
     }
   }
 
-  transitionIdea(id: string, state: Exclude<IdeaState, 'recorded'>, actor: 'owner' | 'host', at: number, note?: string): void {
+  transitionIdea(
+    id: string,
+    state: Exclude<IdeaState, 'recorded'>,
+    actor: 'owner' | 'host',
+    at: number,
+    note?: string,
+  ): { readonly idea: Readonly<DreamIdea>; readonly event: Readonly<IdeaEvent> } {
     assertMutable(this.closed)
+    if (!Number.isSafeInteger(at) || at < 1) throw new Error('dream store: invalid transition timestamp')
+    let normalizedNote: string | undefined
+    if (note !== undefined) {
+      const checked = ownData(note)
+      if (typeof checked !== 'string' || checked.includes('\0') || !checked.isWellFormed()) {
+        throw new Error('dream store: invalid transition note')
+      }
+      const trimmed = checked.normalize('NFC').trim()
+      if (Buffer.byteLength(trimmed, 'utf8') > 1_024) throw new Error('dream store: transition note exceeds bounds')
+      if (trimmed.length > 0) normalizedNote = trimmed
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const current = this.idea(id)
@@ -352,20 +416,56 @@ export class DreamStore {
       const allowed: Readonly<Record<IdeaState, readonly IdeaState[]>> = {
         recorded: ['withdrawn', 'owner-acknowledged', 'validated', 'rejected'],
         withdrawn: [],
-        'owner-acknowledged': ['validated', 'rejected'],
-        validated: [],
+        'owner-acknowledged': ['validated', 'rejected', 'withdrawn'],
+        validated: ['withdrawn'],
         rejected: [],
       }
       if (!allowed[current.state].includes(state)) throw new Error(`dream store: transition ${current.state} -> ${state} is not allowed`)
       this.db.prepare('UPDATE dream_ideas SET state=? WHERE id=? AND lane=?').run(state, id, this.lane)
       this.db.prepare('INSERT INTO dream_idea_events (idea_id, state, actor, at, note) VALUES (?, ?, ?, ?, ?)')
-        .run(id, state, actor, at, note ?? null)
+        .run(id, state, actor, at, normalizedNote ?? null)
       this.db.exec('COMMIT')
+      const updated = Object.freeze({ ...this.idea(id)!, evidenceRefs: Object.freeze([...current.evidenceRefs]) })
+      const event: Readonly<IdeaEvent> = Object.freeze({
+        ideaId: id,
+        state,
+        actor,
+        at,
+        ...(normalizedNote === undefined ? {} : { note: normalizedNote }),
+      })
+      return Object.freeze({ idea: updated, event })
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  listIdeaEvents(ideaId: string, limit = 50): readonly IdeaEvent[] {
+    const safeLimit = Math.min(Math.max(1, Math.trunc(limit)), 200)
+    const rows = this.db.prepare(`
+      SELECT e.idea_id, e.state, e.actor, e.at, e.note
+      FROM dream_idea_events e
+      INNER JOIN dream_ideas i ON i.id = e.idea_id
+      WHERE e.idea_id = ? AND i.lane = ?
+      ORDER BY e.seq ASC
+      LIMIT ?
+    `).all(ideaId, this.lane, safeLimit) as Array<{
+      idea_id: string; state: IdeaState; actor: 'owner' | 'host'; at: number; note: string | null
+    }>
+    return Object.freeze(rows.map(row => Object.freeze({
+      ideaId: row.idea_id,
+      state: row.state,
+      actor: row.actor,
+      at: row.at,
+      ...(row.note === null ? {} : { note: row.note }),
+    })))
   }
 
   listIdeas(limit = 50): readonly DreamIdea[] {
     const rows = this.db.prepare('SELECT id FROM dream_ideas WHERE lane=? ORDER BY created_at DESC LIMIT ?').all(this.lane, limit) as Array<{ id: string }>
+    return rows.map(row => this.idea(row.id)!)
+  }
+
+  listValidatedIdeas(limit = 50): readonly DreamIdea[] {
+    const rows = this.db.prepare("SELECT id FROM dream_ideas WHERE lane=? AND state='validated' ORDER BY created_at DESC LIMIT ?")
+      .all(this.lane, limit) as Array<{ id: string }>
     return rows.map(row => this.idea(row.id)!)
   }
 
