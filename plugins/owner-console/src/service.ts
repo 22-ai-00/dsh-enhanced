@@ -2,22 +2,32 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { OwnerConsoleConfig } from './index.js'
 import {
-  boundedConfig, configFacts, findEntry, isAppId, isEntryId, isEnvName, isProjectBundle, isProjectPackage, isSecretRef,
-  type BundleInfoLike, type ChangeResultLike, type LoaderService, type PluginInfoLike, type PluginManagerService,
-  type SettingsDescriptor, type SettingsPathOp, type SettingsService,
+  boundedConfig, configFacts, findEntry, hasControlChars, isAppId, isEntryId, isEnvName, isProjectBundle,
+  isProjectPackage, isSecretRef, isSingleLineCommand,
+  type AgentDefaultModelService, type BundleInfoLike, type ChangeResultLike, type LlmRuntimeService,
+  type LoaderService, type PluginInfoLike, type PluginManagerService, type SettingsDescriptor,
+  type SettingsPathOp, type SettingsService,
 } from './settings.js'
 import {
   INTAKE_AGREEMENT_LEVELS, INTAKE_AGREEMENT_OUTCOMES, LARK_CONNECTIONS, LARK_ERROR_CODES, OwnerConsoleIntakeAgreementSchema,
   OwnerConsoleTrendSnapshotsSchema, TREND_SNAPSHOT_PAGE_MAX,
-  type IntakeAgreementAvailability, type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
+  type CodingToolProbe, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
+  type OwnerConsoleIntakeAgreement, type OwnerConsoleStatus, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
 } from './typert.js'
 import { componentState, missingRemedy, repairPatch } from './state.js'
 import { persistAllowedBuilds } from './build-approvals.js'
+import { CodingToolProber, type CodingToolId } from './probes.js'
+import {
+  executeAttentionQuestionReply, executeDreamingIdeaAction, executeProactiveDraftAction,
+  readAssistantOverview, type DreamingIdeaAction,
+} from './autonomy-readers.js'
 
 /** Companions worth surfacing; a missing one is a setup hint, never a hard failure. */
 const DEPENDENCIES = ['assistantPolicy', 'assistantDelivery', 'assistantSkills'] as const
 const LARK = /(^|[-_/])lark(-channel)?($|[-_/])/u
 const TRAEX = /traex/iu
+const DEFAULT_MODEL_NS = /^(?:agent[-_]?default[-_]?model|default[-_]?model)$/iu
+const PROVIDER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
 const APP_ID_ENV = ['LARK_APP_ID', 'FEISHU_APP_ID'] as const
 const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 
@@ -26,10 +36,12 @@ const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
  * entry, uses CAS on its revision, and returns a business reason instead of throwing. */
 export class OwnerConsoleService extends TypertRemoteService {
   private readonly host: Context
+  private readonly prober: CodingToolProber
 
-  constructor(ctx: Context, private readonly config: OwnerConsoleConfig) {
+  constructor(ctx: Context, private readonly config: OwnerConsoleConfig, prober: CodingToolProber = new CodingToolProber()) {
     super(ctx, 'ownerConsole')
     this.host = ctx
+    this.prober = prober
   }
 
   private settings(): SettingsService {
@@ -149,17 +161,74 @@ export class OwnerConsoleService extends TypertRemoteService {
     })
   }
 
+  private registeredLlmProviders(): readonly Readonly<{ id: string; name: string }>[] {
+    const llm = this.host.get('llm' as never) as LlmRuntimeService | undefined
+    if (llm === undefined || llm === null || typeof llm.listProviders !== 'function') return Object.freeze([])
+    try {
+      const rows = llm.listProviders()
+      if (!Array.isArray(rows)) return Object.freeze([])
+      return Object.freeze(rows.flatMap(provider => typeof provider?.id === 'string' && provider.id.trim() !== ''
+        ? [Object.freeze({
+          id: provider.id,
+          name: typeof provider.name === 'string' && provider.name.trim() !== '' ? provider.name : provider.id,
+        })]
+        : []))
+    } catch {
+      return Object.freeze([])
+    }
+  }
+
+  private defaultModelEntry(entries: readonly SettingsDescriptor[]): SettingsDescriptor | undefined {
+    const direct = findEntry(entries, ns => DEFAULT_MODEL_NS.test(ns))
+    if (direct !== undefined) return direct
+    const loader = this.host.get('loader' as never) as Partial<LoaderService> | undefined
+    if (typeof loader?.entries !== 'function') return undefined
+    try {
+      for (const entry of loader.entries()) {
+        if (entry.options.name === '@deepseek-ai/dsh-agent-default-model') {
+          const found = findEntry(entries, ns => ns === entry.options.id)
+          if (found !== undefined) return found
+        }
+      }
+    } catch {
+      return undefined
+    }
+    return undefined
+  }
+
   async status(): Promise<OwnerConsoleStatus> {
     const settings = this.host.get('settings' as never) as SettingsService | undefined
     const entries = settings?.describe({ redactSecrets: true }) ?? []
     const inventory = await this.inventory()
     const lark = findEntry(entries, ns => LARK.test(ns))
     const traex = findEntry(entries, ns => TRAEX.test(ns))
+    const defaultModelEntry = this.defaultModelEntry(entries)
     const larkValue = configFacts(lark?.value)
     const traexValue = configFacts(traex?.value)
+    const defaultModelService = this.host.get('agentDefaultModel' as never) as AgentDefaultModelService | undefined
+    let defaultSelection: Readonly<{ provider: string; model: string; reasoningEffort?: string }> | undefined
+    try {
+      if (typeof defaultModelService?.currentSelection === 'function') {
+        defaultSelection = defaultModelService.currentSelection()
+      }
+    } catch {
+      defaultSelection = undefined
+    }
+    const defaultModelFacts = configFacts(defaultModelEntry?.value)
+    const defaultProvider = typeof defaultSelection?.provider === 'string'
+      ? defaultSelection.provider
+      : typeof defaultModelFacts['provider'] === 'string' ? defaultModelFacts['provider'] : ''
+    const defaultModelId = typeof defaultSelection?.model === 'string'
+      ? defaultSelection.model
+      : typeof defaultModelFacts['model'] === 'string' ? defaultModelFacts['model'] : ''
+    const defaultEffort = typeof defaultSelection?.reasoningEffort === 'string' && defaultSelection.reasoningEffort !== ''
+      ? defaultSelection.reasoningEffort
+      : typeof defaultModelFacts['reasoningEffort'] === 'string' && defaultModelFacts['reasoningEffort'] !== ''
+        ? defaultModelFacts['reasoningEffort'] : undefined
     const installed = (name: string) => inventory.phases.bundles === 'ok'
       && inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
     const larkHealth = readLarkHealth(this.host.get('larkChannel' as never))
+    const traexInstalled = installed('@dsh-enhanced/traex-acp-provider')
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
@@ -171,10 +240,24 @@ export class OwnerConsoleService extends TypertRemoteService {
       }),
       traex: Object.freeze({
         ...(traex === undefined ? {} : { entry: traex.ns }),
-        installed: installed('@dsh-enhanced/traex-acp-provider'),
+        installed: traexInstalled,
         enabled: traexValue['enabled'] === true,
         command: typeof traexValue['command'] === 'string' ? traexValue['command'] : '',
       }),
+      agy: Object.freeze({
+        ...(traex === undefined ? {} : { entry: traex.ns }),
+        installed: traexInstalled,
+        enabled: traexValue['agyEnabled'] === true,
+        command: typeof traexValue['agyCommand'] === 'string' ? traexValue['agyCommand'] : '',
+      }),
+      defaultModel: Object.freeze({
+        ...(defaultModelEntry === undefined ? {} : { entry: defaultModelEntry.ns }),
+        available: defaultModelService !== undefined || defaultModelEntry !== undefined,
+        provider: defaultProvider,
+        model: defaultModelId,
+        ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
+      }),
+      llmProviders: this.registeredLlmProviders(),
       host: Object.freeze({
         settings: settings !== undefined,
         pluginManager: this.host.get('pluginManager' as never) !== undefined,
@@ -407,6 +490,149 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const reloaded = await this.reload(entry)
     return Object.freeze({ applied: true, entry, note: '已合并写入' + reloaded })
+  }
+
+  /** Antigravity (agy): toggle the local ACP route and optional binary path via volatile fields. */
+  async configureAgy(enabled: boolean, command: string): Promise<OwnerConsoleWriteResult> {
+    const settings = this.settings()
+    const traex = findEntry(this.descriptors(), ns => TRAEX.test(ns))
+    if (traex === undefined) {
+      return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+    }
+    const value = command.trim()
+    if (value !== '' && !isSingleLineCommand(value)) {
+      return refuse(traex.ns, 'command 必须是单行且不超过 1024 字符（不含控制字符）')
+    }
+    const ops: SettingsPathOp[] = [{ op: 'set', path: ['agyEnabled'], value: enabled }]
+    if (value !== '') ops.push({ op: 'set', path: ['agyCommand'], value })
+    try {
+      await settings.mutate(traex.ns, ops, traex.revision)
+    } catch (cause) {
+      return writeFailure(traex.ns, cause)
+    }
+    const reloaded = await this.reload(traex.ns)
+    return Object.freeze({
+      applied: true,
+      entry: traex.ns,
+      note: (enabled ? 'Antigravity (agy) 路由已启用' : 'Antigravity (agy) 路由已停用') + reloaded,
+    })
+  }
+
+  /** Safe read-only binary + auth probe for TraeX or Antigravity (zero LLM prompt calls). */
+  async probeCodingTool(tool: CodingToolId, command: string, force: boolean): Promise<CodingToolProbe> {
+    const snapshot = await this.status()
+    const routeId = tool === 'traex' ? 'traex-agent' : 'agy-agent'
+    const current = tool === 'traex' ? snapshot.traex : snapshot.agy
+    const effectiveCommand = command.trim() !== '' ? command.trim() : current.command
+    const routeRegistered = snapshot.llmProviders.some(provider => provider.id === routeId)
+    return this.prober.probe(tool, {
+      command: effectiveCommand,
+      installed: current.installed,
+      enabled: current.enabled,
+      routeRegistered,
+    }, force)
+  }
+
+  /** Switch `agent-default-model`; when choosing an ACP coding route, enable it first if inactive. */
+  async setDefaultModelRoute(provider: string, model: string, reasoningEffort: string): Promise<OwnerConsoleWriteResult> {
+    const cleanProvider = provider.trim()
+    const cleanModel = model.trim() === '' ? 'default' : model.trim()
+    const cleanEffort = reasoningEffort.trim()
+    if (!PROVIDER_TOKEN.test(cleanProvider)) {
+      return refuse('agent-default-model', 'provider 格式无效')
+    }
+    if (cleanModel.length > 256 || hasControlChars(cleanModel)) {
+      return refuse('agent-default-model', 'model 格式无效')
+    }
+    if (cleanEffort !== '' && (cleanEffort.length > 128 || hasControlChars(cleanEffort))) {
+      return refuse('agent-default-model', 'reasoningEffort 格式无效')
+    }
+
+    let extraNote = ''
+    if (cleanProvider === 'traex-agent' || cleanProvider === 'agy-agent') {
+      const descriptors = this.descriptors()
+      const traex = findEntry(descriptors, ns => TRAEX.test(ns))
+      if (traex === undefined) {
+        return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
+      }
+      const facts = configFacts(traex.value)
+      const enableKey = cleanProvider === 'traex-agent' ? 'enabled' : 'agyEnabled'
+      if (facts[enableKey] !== true) {
+        const settings = this.settings()
+        try {
+          await settings.mutate(traex.ns, [{ op: 'set', path: [enableKey], value: true }], traex.revision)
+          const reloaded = await this.reload(traex.ns)
+          extraNote = `（已同步启用 ${cleanProvider}${reloaded}）`
+        } catch (cause) {
+          return writeFailure(traex.ns, cause)
+        }
+      }
+    }
+
+    const descriptors = this.descriptors()
+    const target = this.defaultModelEntry(descriptors)
+    const defaultModelService = this.host.get('agentDefaultModel' as never) as AgentDefaultModelService | undefined
+    if (target !== undefined) {
+      const settings = this.settings()
+      const ops: SettingsPathOp[] = [
+        { op: 'set', path: ['provider'], value: cleanProvider },
+        { op: 'set', path: ['model'], value: cleanModel },
+        cleanEffort === ''
+          ? { op: 'unset', path: ['reasoningEffort'] }
+          : { op: 'set', path: ['reasoningEffort'], value: cleanEffort },
+      ]
+      try {
+        await settings.mutate(target.ns, ops, target.revision)
+      } catch (cause) {
+        return writeFailure(target.ns, cause)
+      }
+      return Object.freeze({
+        applied: true,
+        entry: target.ns,
+        note: `默认模型已切换为 ${cleanProvider} / ${cleanModel}${cleanEffort === '' ? '' : `（${cleanEffort}）`}${extraNote}`,
+      })
+    }
+    if (typeof defaultModelService?.saveSelection === 'function') {
+      try {
+        await defaultModelService.saveSelection({
+          provider: cleanProvider,
+          model: cleanModel,
+          ...(cleanEffort === '' ? {} : { reasoningEffort: cleanEffort }),
+        })
+        return Object.freeze({
+          applied: true,
+          entry: 'agent-default-model',
+          note: `默认模型已切换为 ${cleanProvider} / ${cleanModel}${extraNote}`,
+        })
+      } catch (cause) {
+        return writeFailure('agent-default-model', cause)
+      }
+    }
+    return refuse('agent-default-model', 'Host agent-default-model 未加载，无法写入默认模型路由')
+  }
+
+  /** Read-only aggregate view of Dreaming, Proactive, WorkItems, MemoryLearning, and GrowthDriver. */
+  async assistantOverview(workspace: string, preset: string): Promise<OwnerConsoleAssistantOverview> {
+    const inventory = await this.inventory()
+    const installedModules = new Set(inventory.bundles.filter(bundle => bundle.installed).map(bundle => bundle.name))
+    return readAssistantOverview(this.host, workspace, preset, installedModules)
+  }
+
+  /** Owner-authorized state change on assistant-dreaming (ack / validate / reject / retire). */
+  async actDreamingIdea(ideaId: string, action: DreamingIdeaAction, note: string): Promise<OwnerConsoleWriteResult> {
+    return executeDreamingIdeaAction(this.host, ideaId, action, note)
+  }
+
+  /** Owner-authorized reply to a WP22 attention-loosening owner question in assistant-evaluation. */
+  async actAttentionQuestion(workspace: string, preset: string, cohortLane: string, cohortSourceId: string,
+    questionId: string, choice: 'authorize-once' | 'decline'): Promise<OwnerConsoleWriteResult> {
+    return executeAttentionQuestionReply(this.host, workspace, preset, cohortLane, cohortSourceId, questionId, choice)
+  }
+
+  /** Host-only owner disposition of a proactive preparation draft (`unverified-draft`). */
+  async actProactiveDraft(id: string, action: 'accept' | 'reject' | 'cancel',
+    workspace: string, preset: string): Promise<OwnerConsoleWriteResult> {
+    return executeProactiveDraftAction(this.host, id, action, workspace, preset)
   }
 }
 

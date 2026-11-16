@@ -59,6 +59,15 @@ export const OwnerConsoleStatusSchema = z.object({
     lastErrorCode: z.enum(LARK_ERROR_CODES).optional(),
   }).readonly(),
   traex: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
+  agy: z.object({ entry: z.string().min(1).optional(), installed: z.boolean(), enabled: z.boolean(), command: z.string() }).readonly(),
+  defaultModel: z.object({
+    entry: z.string().min(1).optional(),
+    available: z.boolean(),
+    provider: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string().optional(),
+  }).readonly(),
+  llmProviders: z.array(z.object({ id: z.string().min(1), name: z.string() }).readonly()).readonly(),
   host,
   dependencies: z.array(dependency).readonly(),
   evaluation: z.object({ intakeAgreement: z.enum(INTAKE_AGREEMENT_AVAILABILITY) }).readonly(),
@@ -66,6 +75,190 @@ export const OwnerConsoleStatusSchema = z.object({
   plugins: z.array(plugin).readonly(),
 }).readonly()
 export type OwnerConsoleStatus = Readonly<z.infer<typeof OwnerConsoleStatusSchema>>
+
+export const CODING_TOOL_PROBE_STATES = [
+  'ready', 'missing-binary', 'auth-required', 'disabled', 'not-installed', 'invalid-command', 'error',
+] as const
+export const CodingToolProbeSchema = z.object({
+  tool: z.enum(['traex', 'agy']),
+  command: z.string().max(1_024),
+  installed: z.boolean(),
+  binaryFound: z.boolean(),
+  loggedIn: z.boolean(),
+  enabled: z.boolean(),
+  routeRegistered: z.boolean(),
+  ready: z.boolean(),
+  state: z.enum(CODING_TOOL_PROBE_STATES),
+  summary: z.string().max(1_024),
+  remediation: z.string().max(1_024).optional(),
+  modelCount: z.number().int().nonnegative().optional(),
+  checkedAt: z.number().int().nonnegative(),
+  cached: z.boolean(),
+}).readonly()
+export type CodingToolProbe = Readonly<z.infer<typeof CodingToolProbeSchema>>
+
+const subsystemState = z.enum(['absent', 'disabled', 'ok', 'error'])
+const boundedCountMap = z.record(z.string(), z.number().int().nonnegative())
+
+const dreamIdeaSummary = z.object({
+  id: z.string().min(1).max(200),
+  runId: z.string().max(200),
+  createdAt: z.number().int().nonnegative(),
+  dayKey: z.string().max(32),
+  state: z.string().max(32),
+  summary: z.string().max(400),
+  detail: z.string().max(800),
+  evidenceCount: z.number().int().nonnegative(),
+}).readonly()
+
+const proactiveDraftSummary = z.object({
+  id: z.string().min(1).max(200),
+  goalId: z.string().max(200),
+  profileId: z.string().max(120).optional(),
+  objective: z.string().max(400).optional(),
+  state: z.string().max(32),
+  reason: z.string().max(200).optional(),
+  decisionState: z.string().max(32).optional(),
+  feedback: z.string().max(32).optional(),
+  updatedAt: z.number().int().nonnegative(),
+  outputPreview: z.string().max(400).optional(),
+  verified: z.boolean(),
+}).readonly()
+
+const attentionQuestionSummary = z.object({
+  questionId: z.string().min(1).max(200),
+  proposalId: z.string().max(200).optional(),
+  cohortLane: z.string().min(1).max(160),
+  cohortSourceId: z.string().min(1).max(160),
+  workspace: z.string().max(4_096).optional(),
+  preset: z.string().max(200).optional(),
+  open: z.boolean().optional(),
+  actionable: z.boolean().optional(),
+  deliveryStatus: z.string().max(32),
+  recordedAt: z.number().int().nonnegative(),
+  questionSummary: z.string().max(400).optional(),
+  replyChoice: z.string().max(64).optional(),
+  repliedAt: z.number().int().nonnegative().optional(),
+}).readonly()
+
+const workItemQueueEntry = z.object({
+  id: z.string().min(1).max(200),
+  entryKind: z.enum(['admission', 'observed', 'outcome']).optional(),
+  source: z.string().max(120).optional(),
+  mode: z.string().max(32).optional(),
+  outcome: z.string().max(64),
+  reasonCode: z.string().max(120).optional(),
+  observeReason: z.string().max(120).optional(),
+  summary: z.string().max(400).optional(),
+  wouldReject: z.array(z.string().max(120)).max(16).readonly().optional(),
+  recordedAt: z.number().int().nonnegative(),
+}).readonly()
+
+const growthProposalSummary = z.object({
+  id: z.string().min(1).max(200),
+  kind: z.string().max(64),
+  state: z.string().max(64),
+  summary: z.string().max(400),
+  recordedAt: z.number().int().nonnegative(),
+}).readonly()
+
+export const OwnerConsoleAssistantOverviewSchema = z.object({
+  resolvedScope: z.object({
+    workspace: z.string().max(4_096),
+    preset: z.string().max(200),
+  }).readonly().optional(),
+  dreaming: z.object({
+    state: subsystemState,
+    health: z.object({
+      enabled: z.boolean(),
+      scheduler: z.enum(['active', 'dormant', 'unavailable']),
+      lastRunAt: z.number().int().nonnegative().optional(),
+      lastRunOutcome: z.string().max(160).optional(),
+      lastSkipReason: z.string().max(160).optional(),
+      runs: z.number().int().nonnegative(),
+      ideas: z.number().int().nonnegative(),
+      recorded: z.number().int().nonnegative(),
+    }).readonly().optional(),
+    ideas: z.array(dreamIdeaSummary).max(20).readonly(),
+    canAcknowledge: z.boolean(),
+    canValidate: z.boolean(),
+    canReject: z.boolean(),
+    canRetire: z.boolean(),
+    missingPrerequisites: z.array(z.string().max(64)).max(16).readonly(),
+    note: z.string().max(400).optional(),
+  }).readonly(),
+  proactive: z.object({
+    state: subsystemState,
+    profileCount: z.number().int().nonnegative(),
+    intakeEvaluation: z.object({
+      enabled: z.boolean(),
+      registered: z.boolean(),
+      callsLastHour: z.number().int().nonnegative(),
+      consecutiveFailures: z.number().int().nonnegative(),
+      degradedReason: z.string().max(240).optional(),
+    }).readonly().optional(),
+    canResolveDraft: z.boolean().optional(),
+    drafts: z.array(proactiveDraftSummary).max(20).readonly(),
+    attentionQuestions: z.array(attentionQuestionSummary).max(20).readonly(),
+    note: z.string().max(400).optional(),
+  }).readonly(),
+  workItems: z.object({
+    state: subsystemState,
+    health: z.object({
+      enabled: z.boolean(),
+      mode: z.string().max(32),
+      openItems: z.number().int().nonnegative(),
+      workerConnected: z.boolean(),
+      ownerRouteValid: z.boolean(),
+      lastAdmitAt: z.number().int().nonnegative().optional(),
+      evaluationPending: z.number().int().nonnegative(),
+      intakeEnabled: z.boolean().optional(),
+      intakeLedgerEnabled: z.boolean().optional(),
+      admitMode: z.string().max(32).optional(),
+      hasAcceptanceObjective: z.boolean().optional(),
+      pendingAdmissions: z.number().int().nonnegative().optional(),
+      intakeEvaluated: z.number().int().nonnegative().optional(),
+    }).readonly().optional(),
+    queue: z.array(workItemQueueEntry).max(20).readonly(),
+    note: z.string().max(400).optional(),
+  }).readonly(),
+  memoryLearning: z.object({
+    state: subsystemState,
+    health: z.object({
+      enabled: z.boolean(),
+      connected: z.boolean(),
+      available: z.boolean(),
+      remainingExtractions: z.number().int().nonnegative(),
+      lastScanAt: z.number().int().nonnegative().optional(),
+      lastError: z.string().max(300).optional(),
+      counts: boundedCountMap,
+    }).readonly().optional(),
+    note: z.string().max(400).optional(),
+  }).readonly(),
+  growthDriver: z.object({
+    state: subsystemState,
+    health: z.object({
+      enabled: z.boolean(),
+      outcome: z.string().max(64),
+      lastWakeAt: z.number().int().nonnegative().optional(),
+      reason: z.string().max(240).optional(),
+      lastRunOutcome: z.string().max(64).optional(),
+      usageEnabled: z.boolean(),
+      usageConnected: z.boolean(),
+      usageLastScanAt: z.number().int().nonnegative().optional(),
+      usageCounts: boundedCountMap,
+      dreamingIntake: z.object({
+        enabled: z.boolean(),
+        considered: z.number().int().nonnegative(),
+        ingested: z.number().int().nonnegative(),
+        rejectedUnvalidated: z.number().int().nonnegative(),
+      }).readonly().optional(),
+    }).readonly().optional(),
+    proposals: z.array(growthProposalSummary).max(20).readonly(),
+    note: z.string().max(400).optional(),
+  }).readonly(),
+}).readonly()
+export type OwnerConsoleAssistantOverview = Readonly<z.infer<typeof OwnerConsoleAssistantOverviewSchema>>
 
 /** `pendingBuilds` names dependency build scripts the Host recorded and a confirmed retry may approve. */
 export const WRITE_RESULT = z.object({
@@ -312,6 +505,94 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 93, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/configureAgy',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'configureAgy',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'enabled', wire: 'enabled', source: 'json', codec: codec('owner-console#agyEnabled', () => z.boolean()) },
+        { name: 'command', wire: 'command', source: 'json', codec: codec('owner-console#agyCommand', () => z.string().max(1_024)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 470, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/probeCodingTool',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'probeCodingTool',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'tool', wire: 'tool', source: 'json', codec: codec('owner-console#codingTool', () => z.enum(['traex', 'agy'])) },
+        { name: 'command', wire: 'command', source: 'json', codec: codec('owner-console#probeCommand', () => z.string().max(1_024)) },
+        { name: 'force', wire: 'force', source: 'json', codec: codec('owner-console#probeForce', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#CodingToolProbe', () => CodingToolProbeSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 480, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/setDefaultModelRoute',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'setDefaultModelRoute',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'provider', wire: 'provider', source: 'json', codec: codec('owner-console#defaultModelProvider', () => z.string().max(200)) },
+        { name: 'model', wire: 'model', source: 'json', codec: codec('owner-console#defaultModelId', () => z.string().max(256)) },
+        { name: 'reasoningEffort', wire: 'reasoningEffort', source: 'json', codec: codec('owner-console#defaultReasoningEffort', () => z.string().max(128)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 492, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/assistantOverview',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'assistantOverview',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#overviewWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#overviewPreset', () => z.string().max(200)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleAssistantOverview', () => OwnerConsoleAssistantOverviewSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 504, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/actDreamingIdea',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'actDreamingIdea',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'ideaId', wire: 'ideaId', source: 'json', codec: codec('owner-console#dreamIdeaId', () => z.string().max(200)) },
+        { name: 'action', wire: 'action', source: 'json',
+          codec: codec('owner-console#dreamAction', () => z.enum(['acknowledge', 'validate', 'reject', 'retire'])) },
+        { name: 'note', wire: 'note', source: 'json', codec: codec('owner-console#dreamNote', () => z.string().max(500)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 515, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/actAttentionQuestion',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'actAttentionQuestion',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#attentionWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#attentionPreset', () => z.string().max(200)) },
+        { name: 'cohortLane', wire: 'cohortLane', source: 'json', codec: codec('owner-console#attentionLane', () => z.string().max(160)) },
+        { name: 'cohortSourceId', wire: 'cohortSourceId', source: 'json', codec: codec('owner-console#attentionSourceId', () => z.string().max(160)) },
+        { name: 'questionId', wire: 'questionId', source: 'json', codec: codec('owner-console#attentionQuestionId', () => z.string().max(200)) },
+        { name: 'choice', wire: 'choice', source: 'json', codec: codec('owner-console#attentionChoice', () => z.enum(['authorize-once', 'decline'])) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 527, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/actProactiveDraft',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'actProactiveDraft',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'id', wire: 'id', source: 'json', codec: codec('owner-console#draftId', () => z.string().max(200)) },
+        { name: 'action', wire: 'action', source: 'json',
+          codec: codec('owner-console#draftAction', () => z.enum(['accept', 'reject', 'cancel'])) },
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#draftWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#draftPreset', () => z.string().max(200)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 541, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

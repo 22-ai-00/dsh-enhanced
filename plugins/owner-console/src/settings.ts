@@ -28,6 +28,29 @@ export const isEntryId = (value: unknown): value is string => typeof value === '
 export const isAppId = (value: unknown): value is string => typeof value === 'string' && APP_ID.test(value)
 export const isEnvName = (value: unknown): value is string => typeof value === 'string' && ENV_NAME.test(value)
 export const isSecretRef = (value: unknown): value is string => typeof value === 'string' && SECRET_REF.test(value)
+export const hasControlChars = (value: string): boolean => /\p{Cc}/u.test(value)
+export const isSingleLineCommand = (value: unknown): value is string =>
+  typeof value === 'string' && value.trim() !== '' && value.length <= 1_024 && !hasControlChars(value)
+
+export interface AgentDefaultSelection {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+export interface AgentDefaultModelService {
+  currentSelection?(): AgentDefaultSelection
+  saveSelection?(next: AgentDefaultSelection): Promise<void>
+}
+
+export interface LlmProviderSummary {
+  readonly id: string
+  readonly name?: string
+}
+
+export interface LlmRuntimeService {
+  listProviders?(): readonly LlmProviderSummary[]
+}
 
 /** One loader row a bundle's patch declares; its row id is the stable patch target. */
 export interface BundleRowLike {

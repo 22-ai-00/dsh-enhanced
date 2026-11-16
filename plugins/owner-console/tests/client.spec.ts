@@ -153,7 +153,7 @@ describe('owner console client', () => {
     expect(larkConnectionLabel('reconnecting', 'rate_limited')).toBe('重连中（最近错误：rate_limited）')
   })
 
-  it('registers the sidebar entry and the keyed main panel, then disposes both', async () => {
+  it('registers the sidebar entry, main panel and upstream DSH settings slots, then disposes all', async () => {
     const registrations: Registration[] = [], disposed: string[] = []
     const { ctx, unmount } = fakeContext(registrations, disposed)
     const release = await apply(ctx)
@@ -162,13 +162,34 @@ describe('owner console client', () => {
       { name: 'main', key: 'owner-console',
         children: { 'owner-console.conversation': { kind: 'single', scope: 'session' } } },
       { name: 'owner-console.conversation' },
+      { name: 'settings.section', id: 'wenyao-assistant', order: 12, label: expect.any(Function) },
+      { name: 'settings.section.icon', id: 'wenyao-assistant' },
+      { name: 'settings.general.item', id: 'wenyao-coding-tool', order: 20 },
+      { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/lark-channel' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-proactive' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-dreaming' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-growth-driver' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-memory-learning' },
     ])
-    expect(typeof registrations[0]!.component).toBe('function')
-    expect(typeof registrations[1]!.component).toBe('function')
-    expect(typeof registrations[2]!.component).toBe('function')
+    for (const reg of registrations) expect(typeof reg.component).toBe('function')
+    expect((registrations[3]!.options['label'] as () => string)()).toBe('文鳐助手')
     await release()
-    expect(disposed).toEqual(['owner-console.conversation', 'owner-console.conversation',
-      'main', 'owner-console', 'sidebar.panellist', 'owner-console'])
+    expect(disposed).toEqual([
+      'plugins.bundle.config', '@dsh-enhanced/assistant-memory-learning',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-growth-driver',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-dreaming',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-proactive',
+      'plugins.bundle.config', '@dsh-enhanced/lark-channel',
+      'plugins.bundle.config', '@dsh-enhanced/traex-acp-provider',
+      'settings.models.footer', 'wenyao-coding-agents',
+      'settings.general.item', 'wenyao-coding-tool',
+      'settings.section.icon', 'wenyao-assistant',
+      'settings.section', 'wenyao-assistant',
+      'owner-console.conversation', 'owner-console.conversation',
+      'main', 'owner-console', 'sidebar.panellist', 'owner-console',
+    ])
     expect(unmount).toHaveBeenCalledOnce()
   })
 

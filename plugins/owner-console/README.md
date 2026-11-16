@@ -13,11 +13,17 @@
   `renderFactorySlot` 渲染在插件自己的 `main` 面板里。消息流、发送、附件、停止、权限 chip、
   模型选择、工具/审批/计划行和空态都来自原生实现；本插件不复制这些组件，也不启动第二个
   Agent loop。右上角「原生会话」把同一条会话切到 DSH 原生会话视图。
-- **设置页**（右上角 ⚙）：保留原有只读状态 + 主人点击的一次性配置与管理动作。配置写入只经
-  Host `settings` 服务合并到指定条目；bundle/条目管理与安装只经 Host `pluginManager`。
-  两类动作都由主人点击触发，不发起模型调用、不创建 Bot、不接受明文 secret、不改动未列出的
-  插件。安装会把 pnpm 子进程和 registry 网络调用委托给 DSH 自身的 plugin manager，不在本插件里
-  实现网络或进程逻辑。
+- **设置页与 DSH 原生设置槽**（右上角 ⚙ 及 DSH 左侧设置弹窗 `wenyao-assistant`）：保留原有只读状态 +
+  主人点击的一次性配置与管理动作，并共用 `src/settings-cards.ts` 卡片实现。除「文鳐」⚙ 设置页外，
+  客户端还向 DSH `0.2.2-rc.3` 注入原生设置扩展槽：左侧栏设置分组 `settings.section` / `settings.section.icon`
+  （「文鳐助手」）、通用设置一行快捷切换 `settings.general.item`（默认编程工具 `TraeX` / `Antigravity` /
+  API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），以及插件管理详情/摘要
+  `plugins.bundle.config`（覆盖 `traex-acp-provider`、`lark-channel`、`assistant-proactive`、`assistant-dreaming`、
+  `assistant-growth-driver`、`assistant-memory-learning` 6 个 `@dsh-enhanced/*` bundle）。
+  配置写入只经 Host `settings` 服务合并到指定条目；bundle/条目管理与安装只经 Host `pluginManager`；
+  本机 CLI 探测只通过无交互只读子进程检查可用性与登录/模型列表。所有动作都由主人点击触发，不发起模型调用、
+  不创建 Bot、不接受明文 secret、不改动未列出的插件。安装会把 pnpm 子进程和 registry 网络调用委托给
+  DSH 自身的 plugin manager，不在本插件里实现网络或进程逻辑。
 
 ## 安装
 
@@ -69,8 +75,11 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
+| 编程工具与默认模型 | `traex-acp-provider` 条目中的 TraeX (`traex-agent`) 与 Antigravity (`agy-agent`) 开关/命令、`agent-default-model` 默认路由切换、无交互本机 CLI 就绪探测与修复提示 | `settings.describe` + `agentDefaultModel` + `llm` + `probeCodingTool` |
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
-| TraeX | `traex-acp-provider` 条目、是否启用、命令 | `settings.describe` |
+| 自主做梦想法（Dreaming） | `assistant-dreaming` 运行健康与额度、想法列表（`recorded` / `acknowledged` / `validated` / `rejected` / `retired`）及主人授权流转（确认 / 验证 / 拒绝 / 休眠） | `assistantDreaming`（结构化读取，可缺省） |
+| 主动准备与工作项 | `assistant-proactive` 未验证草稿（接受 / 拒绝 / 取消）、WP22 主人注意力放宽请求（仅本次授权 / 拒绝）及 `assistant-work-items` `observe` / `would-admit` 观察队列 | `assistantProactive` + `assistantWorkItems`（+ `assistantEvaluation` 回退，可缺省） |
+| 成长与记忆学习 | `assistant-memory-learning` 剩余额度/授权可用性、`assistant-growth-driver` 最近唤醒、`usageHealth` 与 `dreamingIntake` 统计 | `assistantMemoryLearning` + `assistantGrowthDriver`（可缺省） |
 | 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-enhanced/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
@@ -122,11 +131,21 @@ TraeX 卡片同理（安装/启用 traex-acp-provider）。
 
 只有声明了 `.volatile()` 的配置字段才能这样实时改写：`lark-channel` 暴露
 enabled/account/tenant/appId/appSecretEnv/credentialHandle/secretSource，`traex-acp-provider` 暴露
-enabled/command。没有 live 字段的条目不会出现在面板里。
+enabled/command（TraeX）与 agyEnabled/agyCommand（Antigravity），`agent-default-model` 暴露
+provider/model/reasoningEffort。没有 live 字段的条目不会出现在面板里。
 
-### TraeX 与本项目插件
+### 编程工具、自主能力控制与本项目插件
 
-- TraeX 卡片只切换 `traex-acp-provider` 条目的 `enabled`（可选覆盖 `command`），不启动进程。
+- **编程工具与默认模型路由**：保留 `status.traex` 与 `configureTraex(enabled, command)` 向后兼容，同时提供
+  `configureAgy(enabled, command)`、`setDefaultModelRoute(provider, model, reasoningEffort)` 与
+  `probeCodingTool(tool, command, force)`。切换默认工具为 `traex-agent` / `agy-agent` 时若对应 ACP 路由尚未启用，
+  会先通过 `settings.mutate` 启用该路由并重载 `dsh-enhanced-traex-acp-provider`，再写入 `agent-default-model`。
+  CLI 探测严格走只读无交互参数（`traex login status` 与 `agy --version` / `agy models`），仅传入最小环境变量白名单、
+  拒绝含控制字符或换行命令、带有限超时（TraeX 8 秒，`agy --version` 3 秒 / `agy models` 18 秒）与
+  15 秒结果缓存（同工具并发去重）。
+- **自主做梦 / 主动准备 / 成长 / 记忆学习**：通过 `assistantOverview`、`actDreamingIdea`、
+  `actAttentionQuestion`、`actProactiveDraft` 暴露可控开关与主人裁决入口；所有同伴插件缺失或权限门控未满足时
+  均 fail-closed 降级展示，不绕过 owner 授权、预算或评估门控。
 - **Bundle 层**：列出本 profile 里 `@dsh-enhanced/*` bundle 的版本、是否安装、是否启用、是否可移除
   （`not-bundle` 依赖行不显示，避免给出会被 Host 拒绝的启停按钮），
   一键启用/停用；停用只摘除该 bundle 的 patch 层，已安装依赖保留。每行另有「移除」（仅对可移除且非本面板自身的
@@ -181,8 +200,12 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 
 ## 权限与数据边界
 
-- 本插件自身不直接读写文件、不直接联网、不直接起子进程、不读取凭据；需要落盘的动作都委托给
+- 本插件自身不直接读写配置或插件目录文件、不直接联网、不读取凭据；需要落盘的动作都委托给
   Host 的 `settings`（配置）与 `pluginManager`（bundle/条目管理与 pnpm 安装），由后者执行。
+- 本机编程 CLI 就绪探测（`src/probes.ts`）仅在主人显式点击探测按钮或调用 `probeCodingTool` RPC 时执行一次
+  无 shell（`execFile`）的只读探测命令（`traex login status` 或 `agy --version` + `agy models`），单行校验命令名、
+  仅向子进程传递最小环境变量白名单（不透传密钥类变量）、带有限超时（8 秒 / 3 秒 / 18 秒）与 15 秒缓存；
+  绝不触发交互登录、不写凭据、不发起聊天或模型推理。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
   依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 或安装输出中读到的
   精确名称才被批准；确认写入 profile 的 `allowBuilds` 后由服务端重试，不经模型。
@@ -203,10 +226,15 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 ## 测试
 
 `tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
-`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言 sidebar / main /
-session-scoped 子槽三个注册与释放；并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物
-内联 4 个 webp、包含原生对话与设置标记且不含外部图片 URL。因此该测试依赖先运行
-`pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
+`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言全部 13 个客户端槽位
+（`sidebar.panellist`、`main`、`owner-console.conversation`、`settings.section`、`settings.section.icon`、
+`settings.general.item`、`settings.models.footer` 及 6 个 `plugins.bundle.config`）的注册与反向释放；
+并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物内联 4 个 webp、包含原生对话与设置标记且不含外部图片 URL。
+因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
+`tests/coding-tools-service.spec.ts` 与 `tests/autonomy-service.spec.ts` 覆盖 `agy` 配置、默认路由切换、
+无交互 CLI 探测（缓存 / 去重 / 敏感环境变量剥离）以及 Dreaming / Proactive / WP22 / WorkItems / MemoryLearning /
+GrowthDriver 读写入契约与 fail-closed 降级；`tests/settings-slots.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、
+模型页脚与 6 个插件详情槽。
 `tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：降级消息列表与 composer 发送
 (`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、降级窗口语音不可用禁用/
 tooltip、可用时浏览器识别写入草稿、权限投影与 `/permission` 切换、renderer seat 下的原生
@@ -223,9 +251,10 @@ tooltip、可用时浏览器识别写入草稿、权限投影与 `/permission` �
   正文和 composer 由 DSH 原生会话骨架占满剩余高度。原生 composer 自带发送、附件、语音输入、
   权限 chip、模型选择与停止，宽屏居中、窄屏自适应；面板不重复渲染语音/朗读工具行。降级窗口才有
   自己的消息列表、composer 与语音工具行。
-- **设置页**：顶部「← 返回对话」+「设置」；下面是 02 水墨化鹏宽幅主视觉 banner（webp
+- **设置页与 DSH 设置弹窗共用卡片**：顶部「← 返回对话」+「设置」；下面是 02 水墨化鹏宽幅主视觉 banner（webp
   data URI，纯装饰 `alt=""`）、标题与圆形化鹏印章、副标题，以及「开始对话 / 打开插件页」；再往下是
-  配置卡片。
+  配置卡片。同一套 `--dsw-*` 卡片与控制器也复用于 DSH 原生设置的「文鳐助手」分组、`settings.general.item`、
+  `settings.models.footer` 与 6 个 `plugins.bundle.config` 槽位。
 - 两个视图共用同一套背景：02 水墨化鹏宽幅图以低透明度铺在面板表面、内容之下，文字仍落在主题卡片/原生
   会话表面上，明暗主题的对比度不变。
 - 侧栏入口图标与设置页印章都来自 02 水墨化鹏 `icon.png`（方形裁切鱼跃化鹏纹样，可作圆形头像裁切）。

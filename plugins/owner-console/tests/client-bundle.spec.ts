@@ -71,8 +71,19 @@ describe('owner console client bundle', () => {
       { name: 'main', key: 'owner-console',
         children: { 'owner-console.conversation': { kind: 'single', scope: 'session' } } },
       { name: 'owner-console.conversation' },
+      { name: 'settings.section', id: 'wenyao-assistant', order: 12, label: expect.any(Function) },
+      { name: 'settings.section.icon', id: 'wenyao-assistant' },
+      { name: 'settings.general.item', id: 'wenyao-coding-tool', order: 20 },
+      { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/traex-acp-provider' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/lark-channel' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-proactive' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-dreaming' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-growth-driver' },
+      { name: 'plugins.bundle.config', key: '@dsh-enhanced/assistant-memory-learning' },
     ])
     expect((fake.registrations[0]!.options['label'] as () => string)()).toBe('文鳐')
+    expect((fake.registrations[3]!.options['label'] as () => string)()).toBe('文鳐助手')
     // The main slot root fills the fixed-height Host pane; the chat log and the settings view own
     // their own scrolling, so the composer stays anchored and the settings cards stay reachable.
     type Element = { type: (props: unknown) => Element, props: { style?: Record<string, unknown> } & Record<string, unknown> }
@@ -87,6 +98,7 @@ describe('owner console client bundle', () => {
     expect(source).toContain('data-owner-console-chat')
     expect(source).toContain('data-owner-console-chat-log')
     expect(source).toContain('data-owner-console-native-conversation')
+    expect(source).toContain('data-owner-console-settings-section')
     expect(source).toContain('conversation.content')
     expect(source).toContain('owner-console.conversation')
     expect(source).toContain('打开设置')
@@ -94,8 +106,20 @@ describe('owner console client bundle', () => {
     expect(source.match(/data:image\/webp;base64,/g)).toHaveLength(4)
     expect(source).not.toMatch(/https?:\/\/[^\s'"]+\.(?:png|jpe?g|webp|gif|svg)/i)
     await release()
-    expect(fake.disposed).toEqual(['owner-console.conversation', 'owner-console.conversation',
-      'main', 'owner-console', 'sidebar.panellist', 'owner-console'])
+    expect(fake.disposed).toEqual([
+      'plugins.bundle.config', '@dsh-enhanced/assistant-memory-learning',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-growth-driver',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-dreaming',
+      'plugins.bundle.config', '@dsh-enhanced/assistant-proactive',
+      'plugins.bundle.config', '@dsh-enhanced/lark-channel',
+      'plugins.bundle.config', '@dsh-enhanced/traex-acp-provider',
+      'settings.models.footer', 'wenyao-coding-agents',
+      'settings.general.item', 'wenyao-coding-tool',
+      'settings.section.icon', 'wenyao-assistant',
+      'settings.section', 'wenyao-assistant',
+      'owner-console.conversation', 'owner-console.conversation',
+      'main', 'owner-console', 'sidebar.panellist', 'owner-console',
+    ])
     expect(fake.unmount).toHaveBeenCalledOnce()
   })
 })

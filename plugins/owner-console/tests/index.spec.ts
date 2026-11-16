@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(11)
+    expect(asyncMethods).toHaveLength(18)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -92,6 +92,14 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/trendSnapshots')).toEqual(['planId', 'beforeSequence', 'limit'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreement')).toEqual(['workspace', 'preset'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/intakeAgreementHistory')).toEqual(['workspace', 'preset', 'limit'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureAgy')).toEqual(['enabled', 'command'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/probeCodingTool')).toEqual(['tool', 'command', 'force'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/setDefaultModelRoute')).toEqual(['provider', 'model', 'reasoningEffort'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/assistantOverview')).toEqual(['workspace', 'preset'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actDreamingIdea')).toEqual(['ideaId', 'action', 'note'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actAttentionQuestion'))
+      .toEqual(['workspace', 'preset', 'cohortLane', 'cohortSourceId', 'questionId', 'choice'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/actProactiveDraft')).toEqual(['id', 'action', 'workspace', 'preset'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -100,6 +108,9 @@ describe('dsh-enhanced-owner-console', () => {
       const status = await console.status()
       expect(status.feishu).toEqual({ mode: 'env', installed: false, enabled: false, appIdConfigured: false, connected: false, connection: 'absent' })
       expect(status.traex).toEqual({ installed: false, enabled: false, command: '' })
+      expect(status.agy).toEqual({ installed: false, enabled: false, command: '' })
+      expect(status.defaultModel).toEqual({ available: false, provider: '', model: '' })
+      expect(status.llmProviders).toEqual([])
       expect(status.dependencies.map(item => item.name)).toEqual(['assistantPolicy', 'assistantDelivery', 'assistantSkills'])
       expect(status.dependencies.every(item => item.available === false)).toBe(true)
       expect(status.evaluation).toEqual({ intakeAgreement: 'absent' })
