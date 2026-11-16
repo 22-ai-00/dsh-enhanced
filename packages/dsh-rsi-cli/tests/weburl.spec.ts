@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import type { CommandResult, CommandRunner } from '../src/run.ts'
-import { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl } from '../src/weburl.ts'
+import { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from '../src/weburl.ts'
 
 describe('extractWebUrlFromText', () => {
   test('从 dsh web 行提取带 token 的完整 URL', () => {
@@ -54,5 +54,34 @@ describe('resolveManagedWebUrl', () => {
     expect(out).toContain('web：http://127.0.0.1:1/?token=x')
     expect(out).toContain('lark：未运行')
     expect(out).toContain('bad：! boom')
+  })
+
+  test('waitForManagedWebUrl：在等待窗口内轮询直到出现 live URL，并在报错时立即中止', async () => {
+    let calls = 0
+    const ready = await waitForManagedWebUrl('linux', '/h', '/h/.dsh', 'web', {
+      waitMs: 500,
+      pollIntervalMs: 25,
+      sleep: async () => {},
+      resolve: async () => {
+        calls += 1
+        return calls < 3
+          ? { profile: 'web', notice: 'starting', errors: [] }
+          : { profile: 'web', url: 'http://127.0.0.1:3080/?token=ready', source: 'journal', errors: [] }
+      },
+    })
+    expect(calls).toBe(3)
+    expect(ready.url).toBe('http://127.0.0.1:3080/?token=ready')
+
+    let failCalls = 0
+    const failed = await waitForManagedWebUrl('linux', '/h', '/h/.dsh', 'web', {
+      waitMs: 500,
+      sleep: async () => {},
+      resolve: async () => {
+        failCalls += 1
+        return { profile: 'web', errors: ['systemd failed'] }
+      },
+    })
+    expect(failCalls).toBe(1)
+    expect(failed.errors).toEqual(['systemd failed'])
   })
 })

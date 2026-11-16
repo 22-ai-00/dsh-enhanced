@@ -11,7 +11,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(repoRoot, 'scripts', 'install', 'install-local.sh')
 const roots: string[] = []
 const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
-  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli')) && !existsSync(join(directory, 'agy'))).join(':')
 
 async function temporaryHome(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-web-installer-'))
@@ -181,4 +181,63 @@ describe('experimental Web owner installer scenario', () => {
     expect(installed).not.toContain('dump')
     expect(installed).not.toContain('probe')
   }, 30_000)
+
+  test('web scenario includes owner-console and prints dsh-rsi open + 文鳐 hint', async () => {
+    const dshHome = await temporaryHome()
+    const result = run(['--dry-run', '--scenario', 'web'], dshHome)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'owner-console'))
+    expect(result.stdout).toContain('控制台 UI：已安装 @dsh-enhanced/owner-console')
+    expect(result.stdout).toContain('dsh-rsi open --profile web')
+  })
+
+  test('doctor.sh --json inspects live credentials (no secret leakage), traex/agy and host setup', async () => {
+    const root = await temporaryHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'fake-bin')
+    const profileDir = join(dshHome, 'profiles', 'web')
+    await mkdir(fakeBin, { recursive: true })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'owner-console'), { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web' }))
+    await writeFile(join(dshHome, '.credentials.yaml'), 'DEEPSEEK_API_KEY: top-secret-doctor-key\n', { mode: 0o600 })
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.3\\n'; exit 0; fi
+if [[ " $* " == *' --dump-config '* ]]; then
+  printf '%s\\n' '- id: dsh-enhanced-owner-console' '  name: "@dsh-enhanced/owner-console"'
+  exit 0
+fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'agy'), '#!/bin/bash\nif [[ "${1:-}" == "models" ]]; then printf "gemini-3\\n"; exit 0; fi\nexit 1\n')
+
+    const doctorScript = join(repoRoot, 'scripts', 'install', 'doctor.sh')
+    const res = spawnSync('/bin/bash', [doctorScript, '--profile', 'web', '--json'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:${pathWithoutTraex}`,
+        DSH_HOME: dshHome,
+        HOME: root,
+      },
+    })
+    expect(res.status, res.stderr).toBe(0)
+    const report = JSON.parse(res.stdout) as {
+      schemaVersion: number
+      agentTools: { agy: { found: boolean; loginReady: boolean } }
+      credentials: { keyNames: string[] }
+      profiles: { profile: string; capabilities: { ownerConsoleInstalled: boolean } }[]
+    }
+    expect(report.schemaVersion).toBe(1)
+    expect(report.agentTools.agy).toMatchObject({ found: true, loginReady: true })
+    expect(report.credentials.keyNames).toEqual(['DEEPSEEK_API_KEY'])
+    expect(report.profiles[0]?.capabilities.ownerConsoleInstalled).toBe(true)
+    expect(res.stdout).not.toContain('top-secret-doctor-key')
+
+    const conflict = spawnSync('/bin/bash', [doctorScript, '--preflight', '--json'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: pathWithoutTraex, DSH_HOME: dshHome, HOME: root },
+    })
+    expect(conflict.status).toBe(2)
+  })
 })

@@ -87,4 +87,62 @@ describe('parseArgs', () => {
   test('带值选项缺值时报错', () => {
     expect(() => parseArgs(['purge', '--profile'], { HOME: '/h' })).toThrow(/需要一个值/)
   })
+
+  test('open / --wait / --no-browser / --json 解析与范围校验', () => {
+    expect(parseArgs(['open', '--profile', 'web', '--wait', '12', '--no-browser'], { HOME: '/h' })).toMatchObject({
+      command: 'open', profile: 'web', waitSeconds: 12, noBrowser: true,
+    })
+    expect(parseArgs(['web-url', '--wait', '5'], { HOME: '/h' })).toMatchObject({
+      command: 'web-url', waitSeconds: 5,
+    })
+    expect(parseArgs(['doctor', '--json', '--profile', 'web'], { HOME: '/h' })).toMatchObject({
+      command: 'doctor', json: true, profile: 'web',
+    })
+    expect(() => parseArgs(['open', '--wait', '61'], { HOME: '/h' })).toThrow(/0\.\.60/)
+    expect(() => parseArgs(['start', '--json'], { HOME: '/h' })).toThrow(/仅适用于 status 与 doctor/)
+    expect(() => parseArgs(['status', '--no-browser'], { HOME: '/h' })).toThrow(/仅适用于 open/)
+    expect(() => parseArgs(['doctor', '--wait', '5'], { HOME: '/h' })).toThrow(/仅适用于 open 与 web-url/)
+  })
+
+  test('--help 输出无重复 maintenance 行且列出 open 与 --json', async () => {
+    let helpText = ''
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
+      helpText += String(chunk)
+      return true
+    })
+    try {
+      expect(await main(['--help'])).toBe(0)
+      const maintenanceLines = helpText.split('\n').filter(line => line.trimStart().startsWith('maintenance '))
+      expect(maintenanceLines).toHaveLength(1)
+      expect(helpText).toContain('open ')
+      expect(helpText).toContain('--json')
+      expect(helpText).toContain('--wait')
+    } finally {
+      out.mockRestore()
+    }
+  })
+
+  test('status --json 与 doctor --json 返回结构化 JSON', async () => {
+    const capture = async (argv: string[]) => {
+      let stdout = ''
+      const out = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
+        stdout += String(chunk)
+        return true
+      })
+      try {
+        expect(await main(argv, { DSH_HOME: '/does/not/exist-dsh-home' })).toBe(0)
+        return JSON.parse(stdout) as Record<string, unknown>
+      } finally {
+        out.mockRestore()
+      }
+    }
+    const statusJson = await capture(['status', '--json'])
+    expect(statusJson.homeExists).toBe(false)
+    expect(statusJson.dshHome).toBe('/does/not/exist-dsh-home')
+
+    const doctorJson = await capture(['doctor', '--json'])
+    expect(doctorJson.schemaVersion).toBe(1)
+    expect(Array.isArray(doctorJson.checks)).toBe(true)
+    expect(doctorJson.agentTools).toBeTruthy()
+  })
 })

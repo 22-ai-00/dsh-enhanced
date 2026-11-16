@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
-import { open, readdir, stat } from 'node:fs/promises'
+import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { inspectBoundHostRuntime, type BoundHostInspection } from './install-host.ts'
 import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 import {
   listLifecycleResiduals,
@@ -12,6 +13,30 @@ import {
 } from './paths.ts'
 import { scanCredentialLocators } from './secrets.ts'
 import { defaultRunner, type CommandRunner } from './run.ts'
+
+export interface InstallIntentSummary {
+  schemaVersion: number
+  scenario: string
+  learning?: string
+  pluginPreset?: string
+  proactive?: string
+  dreaming?: string
+  growth?: string
+  at?: string
+}
+
+/** Extract top-level YAML mapping key names without reading or exposing values. */
+export function extractYamlTopLevelKeys(source: string): string[] {
+  const keys = new Set<string>()
+  for (const rawLine of source.split(/\r?\n/u)) {
+    if (!rawLine || /^\s/u.test(rawLine)) continue
+    const trimmed = rawLine.trim()
+    if (!trimmed || trimmed.startsWith('#') || trimmed === '---' || trimmed === '...') continue
+    const match = /^(['"]?)([A-Za-z_][A-Za-z0-9_.-]*)\1\s*:/u.exec(trimmed)
+    if (match?.[2]) keys.add(match[2])
+  }
+  return [...keys].sort()
+}
 
 export interface ProfileStatus {
   name: string
@@ -26,8 +51,11 @@ export interface StatusSnapshot {
   homeExists: boolean
   hostVersion?: string
   hostError?: string
+  boundHost?: BoundHostInspection
+  installIntent?: InstallIntentSummary
   profiles: ProfileStatus[]
   credentialCount: number
+  credentialKeys?: string[]
   residuals: string[]
 }
 
@@ -83,14 +111,36 @@ export async function collectStatus(
   const residuals = homeExists
     ? await listLifecycleResiduals(dshHome, parentEntries, tmpEntries)
     : []
+  const boundHost = homeExists
+    ? await inspectBoundHostRuntime(dshHome).catch(() => undefined)
+    : undefined
+  const installIntent = homeExists
+    ? await readFile(join(dshHome, '.dsh-enhanced', 'install-intent.json'), 'utf8')
+        .then(raw => {
+          const parsed = JSON.parse(raw) as Partial<InstallIntentSummary>
+          if (typeof parsed.schemaVersion === 'number' && typeof parsed.scenario === 'string') {
+            return parsed as InstallIntentSummary
+          }
+          return undefined
+        })
+        .catch(() => undefined)
+    : undefined
+  const credentialKeys = homeExists
+    ? await readFile(join(dshHome, '.credentials.yaml'), 'utf8')
+        .then(extractYamlTopLevelKeys)
+        .catch(() => [] as string[])
+    : []
   return {
     dshHome,
     homeExists,
     ...(host.status === 0
       ? { hostVersion: host.stdout.trim() }
       : { hostError: host.stderr.trim() || host.stdout.trim() || '未找到全局 dsh 命令' }),
+    ...(boundHost && boundHost.status !== 'missing' ? { boundHost } : {}),
+    ...(installIntent ? { installIntent } : {}),
     profiles: profileStatus,
     credentialCount: credentials.length,
+    ...(credentialKeys.length > 0 ? { credentialKeys } : {}),
     residuals,
   }
 }
@@ -99,7 +149,25 @@ export function formatStatus(snapshot: StatusSnapshot): string {
   const lines: string[] = []
   lines.push(`DSH home：${snapshot.dshHome}（${snapshot.homeExists ? '存在' : '不存在'}）`)
   lines.push(`全局 host：${snapshot.hostVersion ? `dsh ${snapshot.hostVersion}` : snapshot.hostError ?? '未知'}`)
+  if (snapshot.boundHost) {
+    const detail = snapshot.boundHost.status === 'ready'
+      ? `${snapshot.boundHost.version}（${snapshot.boundHost.dshPath}）`
+      : snapshot.boundHost.error || snapshot.boundHost.issues.join('；') || snapshot.boundHost.status
+    lines.push(`私有 host（.dsh-rsi-host.json）：${detail}`)
+  }
+  if (snapshot.installIntent) {
+    const intent = snapshot.installIntent
+    const extras = [
+      intent.proactive ? `proactive=${intent.proactive}` : undefined,
+      intent.dreaming ? `dreaming=${intent.dreaming}` : undefined,
+      intent.growth ? `growth=${intent.growth}` : undefined,
+    ].filter(Boolean).join(', ')
+    lines.push(`安装意图：scenario=${intent.scenario}${intent.pluginPreset ? `, preset=${intent.pluginPreset}` : ''}${extras ? `, ${extras}` : ''}`)
+  }
   lines.push(`外部凭据条目：${snapshot.credentialCount}`)
+  if (snapshot.credentialKeys && snapshot.credentialKeys.length > 0) {
+    lines.push(`凭据文件键名：${snapshot.credentialKeys.join(', ')}`)
+  }
   if (snapshot.profiles.length === 0) {
     lines.push('profiles：（无）')
   } else {

@@ -119,6 +119,38 @@ export async function resolveManagedWebUrl(
   return result
 }
 
+export interface WaitForWebUrlOptions {
+  waitMs?: number
+  pollIntervalMs?: number
+  runner?: CommandRunner
+  resolve?: typeof resolveManagedWebUrl
+  sleep?: (ms: number) => Promise<void>
+}
+
+/** Poll `resolveManagedWebUrl` up to `waitMs` until a live Web URL appears or a hard error occurs. */
+export async function waitForManagedWebUrl(
+  platform: NodeJS.Platform,
+  home: string,
+  dshHome: string,
+  profile: string,
+  options: WaitForWebUrlOptions = {},
+): Promise<ProfileWebUrl> {
+  const resolveUrl = options.resolve ?? resolveManagedWebUrl
+  const runner = options.runner ?? defaultRunner
+  const waitMs = Math.max(0, options.waitMs ?? 0)
+  const pollIntervalMs = Math.max(25, options.pollIntervalMs ?? 250)
+  const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)))
+  const deadline = Date.now() + waitMs
+  let latest = await resolveUrl(platform, home, dshHome, profile, runner)
+  while (latest.url === undefined && latest.errors.length === 0 && Date.now() < deadline) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await sleep(Math.min(pollIntervalMs, remaining))
+    latest = await resolveUrl(platform, home, dshHome, profile, runner)
+  }
+  return latest
+}
+
 export function formatWebUrlResult(entries: readonly ProfileWebUrl[]): string {
   const lines: string[] = []
   for (const entry of entries) {

@@ -235,6 +235,75 @@ async function readBinding(home: string): Promise<HostBinding | undefined> {
   } finally { await file.close() }
 }
 
+export interface BoundHostInspection {
+  status: 'missing' | 'ready' | 'unready' | 'invalid'
+  bindingPath: string
+  version?: string
+  cacheRoot?: string
+  dshPath?: string
+  binDirectory?: string
+  issues: string[]
+  error?: string
+}
+
+/**
+ * Inspect `.dsh-rsi-host.json` under `dshHome` and verify its bound managed runtime without mutating disk.
+ */
+export async function inspectBoundHostRuntime(
+  dshHome: string,
+  dependencies: { read?: typeof readManagedHostRuntime } = {},
+): Promise<BoundHostInspection> {
+  const home = resolve(dshHome)
+  const bindingPath = join(home, BINDING)
+  let binding: HostBinding | undefined
+  try {
+    binding = await readBinding(home)
+  } catch (error) {
+    return {
+      status: 'invalid',
+      bindingPath,
+      issues: [],
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  if (!binding) {
+    return { status: 'missing', bindingPath, issues: [] }
+  }
+  const issues: string[] = []
+  try {
+    await assertOwnedHome(home)
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error))
+  }
+  try {
+    const runtime = await (dependencies.read ?? readManagedHostRuntime)({
+      root: binding.cacheRoot,
+      version: binding.version,
+    })
+    if (runtime.receiptDigest !== binding.receiptDigest) {
+      issues.push('私有 Host receipt 摘要与 .dsh-rsi-host.json 绑定不一致。')
+    }
+    return {
+      status: issues.length === 0 ? 'ready' : 'unready',
+      bindingPath,
+      version: binding.version,
+      cacheRoot: binding.cacheRoot,
+      dshPath: runtime.dshPath,
+      binDirectory: runtime.binDirectory,
+      issues,
+    }
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error))
+    return {
+      status: 'unready',
+      bindingPath,
+      version: binding.version,
+      cacheRoot: binding.cacheRoot,
+      issues,
+    }
+  }
+}
+
 /** Bind a fresh Home once. Existing unbound installations remain on their
  * current Host until the service-aware Host migration can update the whole Home. */
 export async function prepareInstallHostEnvironment(input: {

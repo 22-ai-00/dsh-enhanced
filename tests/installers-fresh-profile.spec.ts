@@ -12,7 +12,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const localInstaller = join(repoRoot, 'scripts', 'install', 'install-local.sh')
 const temporaryRoots: string[] = []
 const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
-  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli')) && !existsSync(join(directory, 'agy'))).join(':')
 
 async function writeExecutable(path: string, content: string): Promise<void> {
   await writeFile(path, content, 'utf8')

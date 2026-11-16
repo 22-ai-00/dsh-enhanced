@@ -55,6 +55,7 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-recovery'
   'event-triggers'
   'assistant-proactive'
+  'owner-console'
 )
 
 # This is retained only for users deliberately migrating an old all-in-one
@@ -94,7 +95,10 @@ Options:
   --isolation-lease-minutes <n> Autonomy grant lease (default: 60)
   --isolation-runtime-minutes <n> Cumulative reserved runtime budget (default: 10)
   --mode <mode>             standard or supervised-growth (auto resolves by platform; explicit standard opts out)
-  --with <add-on>           Add coding, traex, health, heartbeat, events, or bridge (repeatable)
+  --with <add-on>           Add coding, traex, console, health, heartbeat, events, bridge, proactive, or dreaming (repeatable)
+  --proactive <mode>        auto, on, or off (default: auto; control Proactive reminders & preparation bundles)
+  --dreaming <mode>         auto, on, or off (default: auto; install assistant-dreaming dormant unless prerequisites exist)
+  --growth <mode>           auto, on, or off (default: auto; control ordinary-use growth driver bundles)
   --ack-existing-automations
                             Acknowledge existing active/paused jobs when enabling the RSI scheduler
   --lark <mode>             auto, keep, configure, or skip (default: auto)
@@ -104,7 +108,7 @@ Options:
                             Required together with --permission danger-full-access
   --model-route <mode>      auto, verify, or skip (default: auto; a verify call may incur model cost)
   --model <mode>            auto, configure, or skip (default: auto) — configure the deployment default model
-  --model-provider <route>  Provider route to configure (deepseek-official, a custom gateway name, or traex-agent)
+  --model-provider <route>  Provider route to configure (deepseek-official, a custom gateway name, traex-agent, or agy-agent)
   --model-name <id>         Model id for the selected provider route
   --model-base-url <url>    Custom OpenAI-compatible gateway base URL (custom provider only)
   --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
@@ -162,8 +166,8 @@ Scenarios:
              onboarding and a resident service. Other platforms keep a limited
              core/Lark default without ordinary-use RSI.
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
-  web        Experimental local Web owner: core plus Delivery, Goals, and Web owner setup.
-             It does not configure Lark or a resident service.
+  web        Experimental local Web owner: core plus Delivery, Goals, Web owner setup, and Owner Console (文鳐 Ray).
+             It does not configure Lark or a resident service. Use \`dsh-rsi open --profile web\` to launch.
   autonomy   Explicit offline, finite Web-owner execution setup with event, proactive, and skills bundles. Credentials and external targets remain independently configured.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
@@ -952,7 +956,7 @@ dsh_enhanced_choose_scenario() {
       printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
     fi
     printf '  3) 分级自治成长（完整自迭代，额外消耗有限模型额度；进阶）\n' >&2
-    printf '  4) 实验性本机 Web owner（不配置飞书或常驻服务）\n' >&2
+    printf '  4) 本机 Web + 文鳐控制台（browser + owner-console，不配置飞书或常驻服务）\n' >&2
     printf '请选择 [1]：' >&2
     local choice
     IFS= read -r choice
@@ -972,7 +976,7 @@ dsh_enhanced_choose_scenario() {
     printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
   fi
   printf '  3) 分级自治成长（飞书 + Recovery；低风险自动，高影响 owner 审批）\n' >&2
-  printf '  4) 实验性本机 Web owner（不配置飞书或常驻服务）\n' >&2
+  printf '  4) 本机 Web + 文鳐控制台（browser + owner-console，不配置飞书或常驻服务）\n' >&2
   printf '请选择 [1]：' >&2
   local choice
   IFS= read -r choice
@@ -1062,13 +1066,23 @@ dsh_enhanced_prompt_model_route() {
   local base_url_var="$3"
   local api_var="$4"
   local display_var="$5"
-  local traex_command=''
+  local traex_command='' agy_command='' option_traex='' option_agy=''
   traex_command="$(dsh_enhanced_detect_traex_command || true)"
+  agy_command="$(dsh_enhanced_detect_agy_command || true)"
   printf '\n配置默认模型：\n' >&2
   printf '  1) DeepSeek 官方（deepseek-official，只需 API Key）\n' >&2
   printf '  2) 自定义 OpenAI 兼容网关（provider + base URL + API Key）\n' >&2
-  if [[ -n "$traex_command" ]]; then
+  if [[ -n "$traex_command" && -n "$agy_command" ]]; then
+    option_traex='3'
+    option_agy='4'
     printf '  3) 本机 TraeX（traex-agent，复用已登录的 %s，无需 API Key）\n' "$traex_command" >&2
+    printf '  4) 本机 Antigravity（agy-agent，复用已登录的 %s，无需 API Key）\n' "$agy_command" >&2
+  elif [[ -n "$traex_command" ]]; then
+    option_traex='3'
+    printf '  3) 本机 TraeX（traex-agent，复用已登录的 %s，无需 API Key）\n' "$traex_command" >&2
+  elif [[ -n "$agy_command" ]]; then
+    option_agy='3'
+    printf '  3) 本机 Antigravity（agy-agent，复用已登录的 %s，无需 API Key）\n' "$agy_command" >&2
   fi
   printf '请选择 [1]：' >&2
   local kind
@@ -1093,7 +1107,7 @@ dsh_enhanced_prompt_model_route() {
         return $?
       fi
       if dsh_enhanced_is_agent_route "$provider"; then
-        dsh_enhanced_fail 2 "$provider 是本机 agent route，请在菜单中选择 TraeX 选项，而不是自定义网关。"
+        dsh_enhanced_fail 2 "$provider 是本机 agent route，请在菜单中选择对应的本机编码工具选项，而不是自定义网关。"
         return $?
       fi
       printf -v "$provider_var" '%s' "$provider"
@@ -1125,14 +1139,19 @@ dsh_enhanced_prompt_model_route() {
       IFS= read -r display
       printf -v "$display_var" '%s' "$display"
       ;;
-    '3')
-      if [[ -z "$traex_command" ]]; then
-        dsh_enhanced_fail 2 '本机未检测到 traex/trae-cli，无法选择 TraeX。'
+    '3'|'4')
+      local chosen_agent=''
+      if [[ "$kind" == "$option_traex" && -n "$traex_command" ]]; then
+        chosen_agent='traex-agent'
+      elif [[ "$kind" == "$option_agy" && -n "$agy_command" ]]; then
+        chosen_agent='agy-agent'
+      else
+        dsh_enhanced_fail 2 '本机未检测到对应的 traex/trae-cli 或 agy 可执行文件，无法选择本机 agent route。'
         return $?
       fi
       # An agent route needs no model id, base URL, api, or display name; the
       # coding agent owns its own model catalog and credentials.
-      printf -v "$provider_var" '%s' 'traex-agent'
+      printf -v "$provider_var" '%s' "$chosen_agent"
       printf -v "$model_var" '%s' ''
       printf -v "$base_url_var" '%s' ''
       printf -v "$api_var" '%s' ''
@@ -1146,9 +1165,9 @@ dsh_enhanced_prompt_model_route() {
 
 # Detect an actual executable, not a shell function or alias: the provider later
 # starts this path with shell:false from a potentially different service PATH.
-dsh_enhanced_detect_traex_command() {
+_dsh_enhanced_detect_command() {
   local candidate found directory
-  for candidate in traex trae-cli; do
+  for candidate in "$@"; do
     found="$(type -P "$candidate" 2>/dev/null || true)"
     if [[ -n "$found" && -f "$found" && -x "$found" ]]; then
       directory="$(cd "$(dirname "$found")" && pwd -P)" || return 1
@@ -1157,6 +1176,14 @@ dsh_enhanced_detect_traex_command() {
     fi
   done
   return 1
+}
+
+dsh_enhanced_detect_traex_command() {
+  _dsh_enhanced_detect_command traex trae-cli
+}
+
+dsh_enhanced_detect_agy_command() {
+  _dsh_enhanced_detect_command agy
 }
 
 dsh_enhanced_traex_login_ready() {
@@ -1176,10 +1203,24 @@ if (result.error || result.status !== 0 || result.signal !== null
 NODE
 }
 
-# The agent route (TraeX) is served by a local coding agent, not an API key.
+# Prompt-free Antigravity CLI readiness probe (`agy models`, never `session/prompt`).
+dsh_enhanced_agy_login_ready() {
+  local command="$1"
+  node - "$command" <<'NODE'
+const { spawnSync } = require('node:child_process')
+const result = spawnSync(process.argv[2], ['models'], {
+  stdio: 'ignore', shell: false, timeout: 20000,
+})
+if (result.error || result.status !== 0 || result.signal !== null) {
+  process.exitCode = 1
+}
+NODE
+}
+
+# Agent routes are served by a local coding agent (ACP), not an API key.
 # Mirror model-setup.ts's AGENT_ROUTES so the shell can branch without Node.
 dsh_enhanced_is_agent_route() {
-  [[ "$1" == 'traex-agent' ]]
+  [[ "$1" == 'traex-agent' || "$1" == 'agy-agent' ]]
 }
 
 # npm resolves a dist-tag (including `latest`) independently for every package.
@@ -1310,7 +1351,7 @@ dsh_enhanced_ensure_agent_bundle() {
   else
     target="@dsh-enhanced/$slug@$plugin_version"
   fi
-  printf '\n为 traex-agent 安装 provider bundle：\n'
+  printf '\n为 %s 安装 provider bundle：\n' "$provider"
   if [[ "$source_mode" == 'npm' ]]; then
     dsh_enhanced_prepare_profile_build_policy "$profile" "$dsh_home" "$dry_run" || return $?
     dsh_enhanced_prune_half_installed_bundles "$profile" "$dsh_home" "$dry_run" "$target" || return $?
@@ -1719,12 +1760,21 @@ dsh_enhanced_apply_model() {
   [[ -n "$model" ]] && printf ' model=%s' "$model"
   printf '\n'
 
-  # Agent route (TraeX): no API key.  Write the default selection and flip the
-  # route bundle row to enabled in this profile's patch layer.
+  # Agent route (TraeX / Antigravity): no API key. Write the default selection
+  # and flip the route field in this profile's patch layer.
   if dsh_enhanced_is_agent_route "$provider"; then
+    local detected_agent_cmd=''
+    if [[ "$provider" == 'traex-agent' ]]; then
+      detected_agent_cmd="$(dsh_enhanced_detect_traex_command || true)"
+    elif [[ "$provider" == 'agy-agent' ]]; then
+      detected_agent_cmd="$(dsh_enhanced_detect_agy_command || true)"
+    fi
     args+=(--enable-in-profile "$profile")
+    if [[ -n "$detected_agent_cmd" ]]; then
+      args+=(--agent-command "$detected_agent_cmd")
+    fi
     if [[ "$dry_run" == '1' ]]; then
-      printf '模型配置：将在 profile %s 的 patch 层写入默认模型并启用 traex-acp-provider（无需 API Key）。\n' "$profile"
+      printf '模型配置：将在 profile %s 的 patch 层写入默认模型并启用 %s（traex-acp-provider，无需 API Key）。\n' "$profile" "$provider"
       dsh_enhanced_print_command "$setup_display" "${args[@]}"
       return 0
     fi
@@ -1855,10 +1905,10 @@ dsh_enhanced_guided_model_provider() {
   fi
 }
 
-# Guided onboarding: offer the recommended plugin preset (default yes).
+# Guided onboarding: offer the recommended assistant features (default yes).
 dsh_enhanced_confirm_plugin_preset() {
   [[ -t 0 && -t 1 ]] || return 1
-  printf '\n启用推荐的插件功能？（work-items observe 与 intake 账本、Delivery 超额附加、Evaluation 通知结果、事件轮询；可用 dsh-plugin-setup 随时调整）[Y/n]：' >&2
+  printf '\n开启推荐的多轮工作台辅助功能？（自动追踪待处理任务队列、超额提醒与事件响应，可随时调整）[Y/n]：' >&2
   local answer
   IFS= read -r answer || return 1
   case "$answer" in
@@ -1871,13 +1921,63 @@ dsh_enhanced_confirm_plugin_preset() {
 # Guided onboarding: explicit ordinary-use learning authorization (default yes).
 dsh_enhanced_confirm_ordinary_use_learning() {
   [[ -t 0 && -t 1 ]] || return 1
-  printf '\n启用普通使用学习？（owner 授权后的有限记忆抽取与普通使用经验学习；可随时用安装器 --learning skip 关闭）[Y/n]：' >&2
+  printf '\n启用普通使用学习？（记住你认可的偏好与日常使用经验，仅限授权范围内且受预算限制）[Y/n]：' >&2
   local answer
   IFS= read -r answer || return 1
   case "$answer" in
     ''|y|Y|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Guided plain-language toggles for Proactive / Growth / Dreaming.
+# Usage: <scenario> <proactive_var> <dreaming_var> <growth_var>
+dsh_enhanced_prompt_capability_toggles() {
+  local scenario="$1" proactive_var="$2" dreaming_var="$3" growth_var="$4"
+  local current_p="${!proactive_var:-auto}"
+  local current_d="${!dreaming_var:-auto}"
+  local current_g="${!growth_var:-auto}"
+  [[ -t 0 && -t 1 ]] || return 0
+  local answer
+
+  if [[ "$current_p" == 'auto' ]]; then
+    local p_default='on' p_hint='Y/n'
+    if [[ "$scenario" == 'core' ]]; then p_default='off'; p_hint='y/N'; fi
+    printf '\n开启主动助手提醒（Proactive：任务需跟进或准备就绪时在界面提示，可随时关闭）[%s]：' "$p_hint" >&2
+    if IFS= read -r answer; then
+      case "$answer" in
+        y|Y|yes|YES) printf -v "$proactive_var" '%s' 'on' ;;
+        n|N|no|NO) printf -v "$proactive_var" '%s' 'off' ;;
+        '') printf -v "$proactive_var" '%s' "$p_default" ;;
+        *) return 2 ;;
+      esac
+    fi
+  fi
+
+  if [[ "$current_g" == 'auto' ]]; then
+    local g_default='off' g_hint='y/N'
+    if [[ "$scenario" == 'supervised' ]]; then g_default='on'; g_hint='Y/n'; fi
+    printf '\n开启自主成长能力（Growth：从真实任务中提炼可复现技能与改进提案，需经独立验证）[%s]：' "$g_hint" >&2
+    if IFS= read -r answer; then
+      case "$answer" in
+        y|Y|yes|YES) printf -v "$growth_var" '%s' 'on' ;;
+        n|N|no|NO) printf -v "$growth_var" '%s' 'off' ;;
+        '') printf -v "$growth_var" '%s' "$g_default" ;;
+        *) return 2 ;;
+      esac
+    fi
+  fi
+
+  if [[ "$current_d" == 'auto' ]]; then
+    printf '\n附加实验性后台构想插件（Dreaming：安装后保持安全休眠 enabled=false，需配齐范围/模型/预算后才会唤醒）[y/N]：' >&2
+    if IFS= read -r answer; then
+      case "$answer" in
+        y|Y|yes|YES) printf -v "$dreaming_var" '%s' 'on' ;;
+        ''|n|N|no|NO) printf -v "$dreaming_var" '%s' 'off' ;;
+        *) return 2 ;;
+      esac
+    fi
+  fi
 }
 
 # Resolve the effective learning decision for a managed supervised install.
@@ -1905,8 +2005,8 @@ dsh_enhanced_resolve_learning_decision() {
   printf 'authorize'
 }
 
-# Read the persisted pre-profile install intent. 0 = valid (prints one
-# "scenario learning preset at" line), 1 = absent, 2 = present but invalid.
+# Read the persisted pre-profile install intent. 0 = valid (prints
+# "scenario learning preset at [proactive dreaming growth]"), 1 = absent, 2 = invalid.
 dsh_enhanced_read_install_intent() {
   local dsh_home="$1" file
   file="$dsh_home/.dsh-enhanced/install-intent.json"
@@ -1918,6 +2018,32 @@ dsh_enhanced_read_install_intent() {
   [[ -r "$file" ]] || return 2
   local fields
   fields="$(sed -n -E 's/^\{"schemaVersion":1,"scenario":"(core|web|autonomy|lark|supervised|full)","learning":"(authorize|skip)","pluginPreset":"([a-z][a-z0-9-]*)","at":([0-9]{1,15})\}$/\1 \2 \3 \4/p' "$file" | head -n 1)"
+  if [[ -n "$fields" ]]; then
+    printf '%s\n' "$fields"
+    return 0
+  fi
+  command -v node >/dev/null 2>&1 || return 2
+  fields="$(node - "$file" <<'NODE' 2>/dev/null || true
+const { readFileSync } = require('node:fs')
+const data = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+if (!data || typeof data !== 'object' || Array.isArray(data)) process.exit(2)
+const allowed = new Set(['schemaVersion', 'scenario', 'learning', 'pluginPreset', 'proactive', 'dreaming', 'growth', 'at'])
+for (const key of Object.keys(data)) if (!allowed.has(key)) process.exit(2)
+const scenarios = new Set(['core', 'web', 'autonomy', 'lark', 'supervised', 'full'])
+const learnings = new Set(['authorize', 'skip'])
+const toggles = new Set(['on', 'off'])
+if (data.schemaVersion !== 1 || !scenarios.has(data.scenario) || !learnings.has(data.learning)
+  || typeof data.pluginPreset !== 'string' || !/^[a-z][a-z0-9-]*$/.test(data.pluginPreset)
+  || !Number.isSafeInteger(data.at) || data.at < 0) process.exit(2)
+for (const key of ['proactive', 'dreaming', 'growth']) {
+  if (data[key] !== undefined && !toggles.has(data[key])) process.exit(2)
+}
+const extra = [data.proactive, data.dreaming, data.growth].some(v => v !== undefined)
+  ? ` ${data.proactive ?? '-'} ${data.dreaming ?? '-'} ${data.growth ?? '-'}`
+  : ''
+process.stdout.write(`${data.scenario} ${data.learning} ${data.pluginPreset} ${data.at}${extra}\n`)
+NODE
+  )"
   [[ -n "$fields" ]] || return 2
   printf '%s\n' "$fields"
 }
@@ -1926,6 +2052,7 @@ dsh_enhanced_read_install_intent() {
 # The marker is private (0600 in a 0700 directory) and reused by retries.
 dsh_enhanced_write_install_intent() {
   local dsh_home="$1" scenario="$2" learning="$3" preset="$4"
+  local proactive="${5:-auto}" dreaming="${6:-auto}" growth="${7:-auto}"
   case "$scenario" in core|web|autonomy|lark|supervised|full) ;; *)
     dsh_enhanced_fail 2 "安装意图场景不合法：$scenario"
     return $?
@@ -1940,6 +2067,14 @@ dsh_enhanced_write_install_intent() {
     dsh_enhanced_fail 2 "安装意图插件预设不合法：$preset"
     return $?
   fi
+  local toggle_val
+  for toggle_val in "$proactive" "$dreaming" "$growth"; do
+    case "$toggle_val" in auto|on|off) ;; *)
+      dsh_enhanced_fail 2 "安装意图能力开关不合法：$toggle_val"
+      return $?
+      ;;
+    esac
+  done
   if [[ -L "$dsh_home" || ( -e "$dsh_home" && ! -d "$dsh_home" ) ]]; then
     dsh_enhanced_fail 1 "安装意图 DSH_HOME 不是可信目录：$dsh_home"
     return $?
@@ -1964,8 +2099,12 @@ dsh_enhanced_write_install_intent() {
     dsh_enhanced_fail 1 "无法创建安装意图目录：$directory"
     return $?
   fi
-  if ! ( umask 077; printf '{"schemaVersion":1,"scenario":"%s","learning":"%s","pluginPreset":"%s","at":%s}\n' \
-      "$scenario" "$learning" "$preset" "$(date +%s)" > "$temporary" ); then
+  local extras_json=''
+  [[ "$proactive" == 'on' || "$proactive" == 'off' ]] && extras_json="${extras_json},\"proactive\":\"${proactive}\""
+  [[ "$dreaming" == 'on' || "$dreaming" == 'off' ]] && extras_json="${extras_json},\"dreaming\":\"${dreaming}\""
+  [[ "$growth" == 'on' || "$growth" == 'off' ]] && extras_json="${extras_json},\"growth\":\"${growth}\""
+  if ! ( umask 077; printf '{"schemaVersion":1,"scenario":"%s","learning":"%s","pluginPreset":"%s"%s,"at":%s}\n' \
+      "$scenario" "$learning" "$preset" "$extras_json" "$(date +%s)" > "$temporary" ); then
     rm -f "$temporary" 2>/dev/null || true
     dsh_enhanced_fail 1 "无法写入安装意图：$temporary"
     return $?
@@ -2156,6 +2295,25 @@ dsh_enhanced_verify_agent_login() {
   local provider="$1"
   local dry_run="$2"
   dsh_enhanced_is_agent_route "$provider" || return 0
+  if [[ "$provider" == 'agy-agent' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      printf '模型 route：将确认本机 Antigravity (agy) 登录状态（不启动 ACP、不会消耗模型额度）。\n'
+      dsh_enhanced_print_command agy models
+      return 0
+    fi
+    local agy_command=''
+    agy_command="$(dsh_enhanced_detect_agy_command || true)"
+    if [[ -z "$agy_command" ]]; then
+      dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 agy CLI。'
+      return $?
+    fi
+    if ! dsh_enhanced_agy_login_ready "$agy_command"; then
+      dsh_enhanced_fail 1 "模型 route 验证失败：$agy_command 未确认就绪；请先在同一 OS 用户下登录 Antigravity 并确认 \`$agy_command models\` 返回 0 后重试。"
+      return $?
+    fi
+    printf '模型 route：%s 已确认模型与登录就绪。\n' "$agy_command"
+    return 0
+  fi
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：将确认本机 TraeX 登录状态（不启动 ACP、不会消耗模型额度）。\n'
     dsh_enhanced_print_command traex login status
@@ -2174,10 +2332,10 @@ dsh_enhanced_verify_agent_login() {
   printf '模型 route：%s 已确认登录。\n' "$traex_command"
 }
 
-# Verify an agent route without a model call: the adapter must be registered in
-# the target profile, and (unless it was checked immediately before this call)
-# the backing local agent must report a login.  Neither check spends model
-# quota; both are the real prerequisites for the route.
+# Verify an agent route without a model call: the adapter must be registered and
+# route-enabled (`enabled` for traex-agent, `agyEnabled` for agy-agent) in the
+# target profile, and (unless checked immediately prior) the backing local agent
+# must report ready login.
 dsh_enhanced_verify_agent_route() {
   local provider="$1"
   local profile="$2"
@@ -2190,7 +2348,6 @@ dsh_enhanced_verify_agent_route() {
   fi
   printf '模型 route：agent route %s，改为结构化校验（不消耗模型额度）。\n' "$provider"
 
-  # traex-agent is served by @dsh-enhanced/traex-acp-provider.
   local composed
   if ! composed="$(dsh --profile "$profile" --dump-config 2>&1)"; then
     printf '%s\n' "$composed" >&2
@@ -2198,14 +2355,62 @@ dsh_enhanced_verify_agent_route() {
     return $?
   fi
   if [[ "$composed" != *'@dsh-enhanced/traex-acp-provider'* ]]; then
-    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 未注册 traex-acp-provider 适配器；请先在该 profile 启用 traex-agent（安装器会自动启用，或运行 dsh-model-setup --provider traex-agent --enable-in-profile $profile）。"
+    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 未注册 traex-acp-provider 适配器；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
+    return $?
+  fi
+
+  local expected_key='enabled'
+  [[ "$provider" == 'agy-agent' ]] && expected_key='agyEnabled'
+  if ! NODE_PATH='' NODE_OPTIONS='' node - "$composed" "$expected_key" <<'NODE'
+const [composed, expectedKey] = process.argv.slice(2)
+let inRow = false, inConfig = false, configIndent = -1
+let disabled = false, foundRow = false, enabledVal
+for (const rawLine of composed.split(/\r?\n/)) {
+  const trimmed = rawLine.trim()
+  if (!trimmed || trimmed.startsWith('#') || trimmed === '---' || trimmed === '...') continue
+  const indent = rawLine.length - rawLine.trimStart().length
+  if (/^-\s+/.test(trimmed)) {
+    const rest = trimmed.replace(/^-\s+/, '')
+    inRow = rest === 'id: dsh-enhanced-traex-acp-provider' || rest === "id: 'dsh-enhanced-traex-acp-provider'" || rest === 'id: "dsh-enhanced-traex-acp-provider"'
+    inConfig = false
+    configIndent = -1
+    if (inRow) { foundRow = true; disabled = false; enabledVal = undefined }
+    continue
+  }
+  if (!inRow) continue
+  if (inConfig) {
+    if (configIndent < 0) configIndent = indent
+    if (indent < configIndent) {
+      inConfig = false
+      configIndent = -1
+    } else if (indent === configIndent) {
+      const m = new RegExp(`^${expectedKey}\\s*:\\s*(.+)$`).exec(trimmed)
+      if (m) enabledVal = m[1].trim()
+      continue
+    } else {
+      continue
+    }
+  }
+  if (/^id:\s*['"]?dsh-enhanced-traex-acp-provider['"]?$/.test(trimmed)) {
+    foundRow = true
+  } else if (/^disabled:\s*true$/.test(trimmed)) {
+    disabled = true
+  } else if (/^config:\s*$/.test(trimmed)) {
+    inConfig = true
+    configIndent = -1
+  }
+}
+if (!foundRow || disabled || enabledVal !== 'true') process.exitCode = 1
+NODE
+  then
+    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 的 traex-acp-provider 未开启 $expected_key: true；请运行 dsh-model-setup --provider $provider --enable-in-profile $profile。"
     return $?
   fi
 
   if [[ "$login_verified" != '1' ]]; then
     dsh_enhanced_verify_agent_login "$provider" "$dry_run" || return $?
   fi
-  printf '模型 route 验证通过：traex-acp-provider 已在 profile %s 注册，且本机 TraeX 已登录。\n' "$profile"
+  printf '模型 route 验证通过：%s（traex-acp-provider.%s=true）已在 profile %s 就绪。\n' "$provider" "$expected_key" "$profile"
 }
 
 # Write and structurally verify a new agent-route default as a small file
@@ -2235,7 +2440,7 @@ dsh_enhanced_apply_verified_agent_model() (
 
   local snapshot=''
   if ! snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home")"; then
-    dsh_enhanced_fail 1 '无法创建 TraeX 模型配置回滚点；为避免写入未经验证的全局默认模型，已停止。'
+    dsh_enhanced_fail 1 "无法创建 $provider 模型配置回滚点；为避免写入未经验证的全局默认模型，已停止。"
     return $?
   fi
   local committed='0'
@@ -2243,9 +2448,9 @@ dsh_enhanced_apply_verified_agent_model() (
     status=$?
     if [[ "$committed" != "1" && -n "$snapshot" ]]; then
       if dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home"; then
-        printf "模型配置：TraeX route 未通过验证或安装被中断，已恢复原有 settings/profile patch。\n" >&2
+        printf "模型配置：%s route 未通过验证或安装被中断，已恢复原有 settings/profile patch。\n" "$provider" >&2
       else
-        printf "dsh-enhanced installer: TraeX 模型 route 未通过验证，且无法自动恢复原有 settings/profile patch；请立即检查这两个文件。\n" >&2
+        printf "dsh-enhanced installer: %s 模型 route 未通过验证，且无法自动恢复原有 settings/profile patch；请立即检查这两个文件。\n" "$provider" >&2
       fi
     fi
     exit "$status"
@@ -2263,19 +2468,25 @@ dsh_enhanced_apply_verified_agent_model() (
   trap - EXIT INT TERM
 )
 
-# Auto-discovered TraeX is an optional route in this profile. Its setup must
-# never rewrite an existing global default or another profile's default.
-dsh_enhanced_probe_auto_traex_route() {
-  local profile="$1"
-  local dsh_home="$2"
-  local composed_path="${3:-}"
-  node - "$dsh_home/profiles/$profile" "$composed_path" <<'NODE'
+# Shared probe for auto-discovered ACP coding-agent routes (`traex-agent` / `agy-agent`).
+_dsh_enhanced_probe_auto_agent_route() {
+  local provider="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  local composed_path="${4:-}"
+  node - "$dsh_home/profiles/$profile" "$composed_path" "$provider" <<'NODE'
 const { existsSync, readFileSync, realpathSync } = require('node:fs')
 const { createRequire } = require('node:module')
 const { dirname, join } = require('node:path')
 const { pathToFileURL } = require('node:url')
 const profileDir = process.argv[2]
 const composedPath = process.argv[3]
+const providerRoute = process.argv[4] || 'traex-agent'
+const isAgy = providerRoute === 'agy-agent'
+const label = isAgy ? 'Antigravity' : 'TraeX'
+const enableField = isAgy ? 'agyEnabled' : 'enabled'
+const commandField = isAgy ? 'agyCommand' : 'command'
+
 async function main() {
 try {
   // pnpm may expose Policy only below personal-assistant. Resolve from the
@@ -2307,21 +2518,19 @@ try {
   }
   function routeFrom(path) {
     const route = rowsFrom(path).filter(row => row.get('id') === 'dsh-enhanced-traex-acp-provider').at(-1)
-    if (!route) throw new Error(`TraeX route row missing: ${path}`)
+    if (!route) throw new Error(`${label} route row missing: ${path}`)
     return route
   }
   let defaultCommand
   async function routeCommand(config) {
-    if (config.has('command')) return config.get('command')
+    if (config.has(commandField)) return config.get(commandField)
     if (defaultCommand === undefined) {
       const fromProfile = createRequire(join(profileDir, 'package.json'))
       const providerManifest = realpathSync(fromProfile.resolve('@dsh-enhanced/traex-acp-provider/package.json'))
-      // The public Config module has no Host peer imports. Importing the
-      // plugin entrypoint would activate unrelated Host ABI dependencies.
       const { Config } = await import(pathToFileURL(join(dirname(providerManifest), 'lib', 'config.js')).href)
-      defaultCommand = Config().command
+      defaultCommand = isAgy ? (Config().agyCommand || 'agy') : Config().command
       if (typeof defaultCommand !== 'string' || !defaultCommand.trim()) {
-        throw new Error('installed TraeX provider has no valid default command')
+        throw new Error(`installed ${label} provider has no valid default command (${commandField})`)
       }
     }
     return defaultCommand
@@ -2330,11 +2539,13 @@ try {
   const config = route?.get('config', true)
   const command = isMap(config) ? await routeCommand(config) : undefined
   if (route.get('disabled') !== undefined && route.get('disabled') !== false) {
-    throw new Error('TraeX profile route row is disabled')
+    throw new Error(`${label} profile route row is disabled`)
   }
   if ((route.get('name') !== undefined && route.get('name') !== '@dsh-enhanced/traex-acp-provider')
-    || !isMap(config) || config.get('enabled') !== true || typeof command !== 'string' || !command.trim()) {
-    throw new Error('TraeX route is not enabled with a nonempty command')
+    || !isMap(config) || config.get(enableField) !== true || typeof command !== 'string' || !command.trim()) {
+    throw new Error(isAgy
+      ? `${label} route (${enableField}) is not enabled with a nonempty command`
+      : `${label} route is not enabled with a nonempty command`)
   }
   if (composedPath) {
     const effective = routeFrom(composedPath)
@@ -2342,17 +2553,19 @@ try {
     const effectiveCommand = isMap(effectiveConfig) ? await routeCommand(effectiveConfig) : undefined
     if (effective.get('name') !== '@dsh-enhanced/traex-acp-provider'
       || (effective.get('disabled') !== undefined && effective.get('disabled') !== false)
-      || !isMap(effectiveConfig) || effectiveConfig.get('enabled') !== true
+      || !isMap(effectiveConfig) || effectiveConfig.get(enableField) !== true
       || typeof effectiveCommand !== 'string' || !effectiveCommand.trim()) {
-      throw new Error('composed TraeX route is not active with a nonempty command')
+      throw new Error(isAgy
+        ? `composed ${label} route (${enableField}) is not active with a nonempty command`
+        : `composed ${label} route is not active with a nonempty command`)
     }
     if (effectiveCommand !== command) {
-      throw new Error('composed TraeX command differs from the target profile')
+      throw new Error(`composed ${label} command differs from the target profile`)
     }
   }
   process.stdout.write(command)
 } catch (error) {
-  process.stderr.write(`dsh-enhanced installer: TraeX route postflight: ${error.message}\n`)
+  process.stderr.write(`dsh-enhanced installer: ${label} route postflight: ${error.message}\n`)
   process.exitCode = 1
 }
 }
@@ -2360,12 +2573,31 @@ void main()
 NODE
 }
 
-dsh_enhanced_apply_auto_traex() (
-  local profile="$1"
-  local dsh_home="$2"
-  local traex_command="$3"
-  local default_candidate="$4"
-  local dry_run="$5"
+# Auto-discovered TraeX is an optional route in this profile. Its setup must
+# never rewrite an existing global default or another profile's default.
+dsh_enhanced_probe_auto_traex_route() {
+  local profile="$1" dsh_home="$2" composed_path="${3:-}"
+  _dsh_enhanced_probe_auto_agent_route traex-agent "$profile" "$dsh_home" "$composed_path"
+}
+
+dsh_enhanced_probe_auto_agy_route() {
+  local profile="$1" dsh_home="$2" composed_path="${3:-}"
+  _dsh_enhanced_probe_auto_agent_route agy-agent "$profile" "$dsh_home" "$composed_path"
+}
+
+_dsh_enhanced_apply_auto_agent_route() (
+  local provider="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  local agent_command="$4"
+  local default_candidate="$5"
+  local dry_run="$6"
+  local label='TraeX' login_fn='dsh_enhanced_traex_login_ready' probe_fn='dsh_enhanced_probe_auto_traex_route' login_hint=''
+  if [[ "$provider" == 'agy-agent' ]]; then
+    label='Antigravity (agy)'
+    login_fn='dsh_enhanced_agy_login_ready'
+    probe_fn='dsh_enhanced_probe_auto_agy_route'
+  fi
   local setup_display="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
   local setup_launcher=()
   local logged_in='0'
@@ -2375,29 +2607,29 @@ dsh_enhanced_apply_auto_traex() (
     while IFS= read -r launcher_token; do setup_launcher+=("$launcher_token"); done \
       < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
     if [[ -z "${setup_launcher[0]+set}" ]]; then
-      dsh_enhanced_fail 1 "TraeX 自动启用缺少安装后的 dsh-model-setup：$dsh_home/profiles/$profile"
+      dsh_enhanced_fail 1 "$label 自动启用缺少安装后的 dsh-model-setup：$dsh_home/profiles/$profile"
       return $?
     fi
     setup_display="${setup_launcher[*]}"
   fi
 
-  printf '\nTraeX 自动接入：%s\n' "$traex_command"
+  printf '\n%s 自动接入：%s\n' "$label" "$agent_command"
   if [[ "$dry_run" == '1' ]]; then
-    printf 'TraeX：dry-run 不检查最终命令或登录；执行时仅在最终命令已登录且无显式默认模型时设置此 profile 的默认模型。\n'
-    printf 'TraeX：未登录或显式 --model skip 时仅启用 route：\n'
-    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
-      --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only
+    printf '%s：dry-run 不检查最终命令或登录；执行时仅在最终命令已登录且无显式默认模型时设置此 profile 的默认模型。\n' "$label"
+    printf '%s：未登录或显式 --model skip 时仅启用 route：\n' "$label"
+    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+      --enable-in-profile "$profile" --agent-command "$agent_command" --enable-only
     if [[ "$default_candidate" == '1' ]]; then
-      printf 'TraeX：已登录时由 model-setup 原子确认无显式默认模型：\n'
-      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
-        --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent
+      printf '%s：已登录时由 model-setup 原子确认无显式默认模型：\n' "$label"
+      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+        --enable-in-profile "$profile" --agent-command "$agent_command" --default-if-absent
     fi
     return 0
   fi
 
   local snapshot=''
   snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home" profile-only)" || {
-    dsh_enhanced_fail 1 'TraeX 自动启用无法创建配置回滚点；尚未修改模型配置。'
+    dsh_enhanced_fail 1 "$label 自动启用无法创建配置回滚点；尚未修改模型配置。"
     return $?
   }
   local committed='0'
@@ -2405,48 +2637,102 @@ dsh_enhanced_apply_auto_traex() (
     status=$?
     if [[ "$committed" != "1" && -n "$snapshot" ]]; then
       dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home" \
-        || printf "dsh-enhanced installer: TraeX 自动接入回滚失败；请检查 profile patch。\n" >&2
+        || printf "dsh-enhanced installer: %s 自动接入回滚失败；请检查 profile patch。\n" "$label" >&2
     fi
     exit "$status"
   ' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
-    --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only || return $?
+  dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+    --enable-in-profile "$profile" --agent-command "$agent_command" --enable-only || return $?
   local composed_path="$snapshot/composed.yml"
   if ! dsh --profile "$profile" --dump-config > "$composed_path"; then
-    dsh_enhanced_fail 1 'TraeX 自动启用后 profile 无法组合。'
+    dsh_enhanced_fail 1 "$label 自动启用后 profile 无法组合。"
     return $?
   fi
   local effective_command=''
-  effective_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home" "$composed_path")" || {
-    dsh_enhanced_fail 1 'TraeX 自动启用后 profile/composed route 未确认启用或缺少有效 command；已恢复原配置。'
+  effective_command="$("$probe_fn" "$profile" "$dsh_home" "$composed_path")" || {
+    dsh_enhanced_fail 1 "$label 自动启用后 profile/composed route 未确认启用或缺少有效 command；已恢复原配置。"
     return $?
   }
-  # The operator may have selected a different command in a home/profile
-  # patch. Never infer its login from the executable discovered on PATH.
-  if [[ "$effective_command" == "$traex_command" ]] && dsh_enhanced_traex_login_ready "$effective_command"; then
+  # Never infer login for an explicit user-selected command from PATH discovery alone.
+  if [[ "$effective_command" == "$agent_command" ]] && "$login_fn" "$effective_command"; then
     logged_in='1'
   fi
   if [[ "$default_candidate" == '1' && "$logged_in" == '1' ]]; then
-    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider traex-agent \
-      --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent || return $?
+    dsh_enhanced_run_profile_setup 0 "$dsh_home" "$profile" dsh-model-setup --dsh-home "$dsh_home" --profile "$profile" --provider "$provider" \
+      --enable-in-profile "$profile" --agent-command "$agent_command" --default-if-absent || return $?
     dsh --profile "$profile" --dump-config > "$composed_path" || return $?
-    effective_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home" "$composed_path")" || return $?
-    if [[ "$effective_command" != "$traex_command" ]]; then
-      dsh_enhanced_fail 1 'TraeX 自动设置默认模型期间 route command 已变化；已恢复原配置。'
+    effective_command="$("$probe_fn" "$profile" "$dsh_home" "$composed_path")" || return $?
+    if [[ "$effective_command" != "$agent_command" ]]; then
+      dsh_enhanced_fail 1 "$label 自动设置默认模型期间 route command 已变化；已恢复原配置。"
       return $?
     fi
   fi
   committed='1'
   dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
   if [[ "$logged_in" == '1' ]]; then
-    printf 'TraeX：本机已登录；已启用 profile route。\n'
+    printf '%s：本机已登录；已启用 profile route。\n' "$label"
+  elif [[ "$provider" == 'agy-agent' ]]; then
+    printf '%s：已安装并启用 route，但 %s 尚未确认就绪，默认模型保持原样；请登录 Antigravity 后运行 `%s models`。\n' "$label" "$effective_command" "$effective_command"
   else
-    printf 'TraeX：已安装并启用 route，但最终命令尚未确认登录，默认模型保持原样；请运行：%s login\n' "$effective_command"
+    printf '%s：已安装并启用 route，但最终命令尚未确认登录，默认模型保持原样；请运行：%s login\n' "$label" "$effective_command"
   fi
 )
+
+dsh_enhanced_apply_auto_traex() {
+  _dsh_enhanced_apply_auto_agent_route traex-agent "$1" "$2" "$3" "$4" "$5"
+}
+
+dsh_enhanced_apply_auto_agy() {
+  _dsh_enhanced_apply_auto_agent_route agy-agent "$1" "$2" "$3" "$4" "$5"
+}
+
+# Report whether assistant-dreaming in a composed profile meets fail-closed
+# enablement prerequisites (scope, databasePath, provider/model, finite budget).
+dsh_enhanced_check_dreaming_prerequisites() {
+  local profile="$1" dsh_home="$2"
+  local composed
+  composed="$(DSH_HOME="$dsh_home" dsh --profile "$profile" --dump-config 2>/dev/null)" || return 1
+  NODE_PATH='' NODE_OPTIONS='' node - "$composed" <<'NODE'
+const composed = process.argv[2]
+let inDreaming = false, inConfig = false, configIndent = -1, enabled = 'false'
+const present = new Set()
+for (const rawLine of composed.split(/\r?\n/)) {
+  const trimmed = rawLine.trim()
+  if (!trimmed || trimmed.startsWith('#') || trimmed === '---' || trimmed === '...') continue
+  const indent = rawLine.length - rawLine.trimStart().length
+  if (/^-\s+/.test(trimmed)) {
+    const rest = trimmed.replace(/^-\s+/, '')
+    inDreaming = /^id:\s*['"]?dsh-enhanced-assistant-dreaming['"]?$/.test(rest)
+    inConfig = false
+    configIndent = -1
+    continue
+  }
+  if (!inDreaming) continue
+  if (inConfig) {
+    if (configIndent < 0) configIndent = indent
+    if (indent < configIndent) { inConfig = false; configIndent = -1 }
+    else if (indent === configIndent) {
+      const m = /^([A-Za-z0-9_]+)\s*:\s*(.*)$/.exec(trimmed)
+      if (m) {
+        if (m[1] === 'enabled') enabled = m[2].trim()
+        else if (m[2].trim() !== '' && m[2].trim() !== 'null' && m[2].trim() !== '~') present.add(m[1])
+        else if (m[1] === 'scope') present.add('scope')
+      }
+      continue
+    } else {
+      continue
+    }
+  }
+  if (/^id:\s*['"]?dsh-enhanced-assistant-dreaming['"]?$/.test(trimmed)) inDreaming = true
+  else if (/^config:\s*$/.test(trimmed)) { inConfig = true; configIndent = -1 }
+}
+const missing = ['scope', 'databasePath', 'provider', 'model', 'budgetId', 'budgetAmount'].filter(k => !present.has(k))
+process.stdout.write(`${enabled === 'true' ? 'enabled' : 'dormant'} ${missing.join(',')}\n`)
+NODE
+}
 
 
 dsh_enhanced_check_web_port_available() {
@@ -2980,6 +3266,68 @@ dsh_enhanced_doctor() {
       ;;
   esac
   printf 'doctor：profile、channel 与常驻服务均已通过检查。\n'
+}
+
+# Resolve bound `.dsh-rsi-host.json` binary directory safely onto PATH when present.
+dsh_enhanced_prepend_bound_host_bin() {
+  local dsh_home="$1"
+  local binding="$dsh_home/.dsh-rsi-host.json"
+  [[ -f "$binding" && ! -L "$binding" ]] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  local bin_dir=''
+  bin_dir="$(NODE_PATH='' NODE_OPTIONS='' node - "$binding" <<'NODE' 2>/dev/null || true
+const { constants, lstatSync, readFileSync, accessSync } = require('node:fs')
+const { isAbsolute, join } = require('node:path')
+const bindingPath = process.argv[2]
+const st = lstatSync(bindingPath)
+if (!st.isFile() || st.isSymbolicLink() || st.size > 16384 || (st.mode & 0o077) !== 0) process.exit(1)
+const data = JSON.parse(readFileSync(bindingPath, 'utf8'))
+if (data.schemaVersion !== 1 || typeof data.cacheRoot !== 'string' || !isAbsolute(data.cacheRoot)
+  || typeof data.version !== 'string' || !/^[a-f0-9]{64}$/.test(data.receiptDigest)) process.exit(1)
+const binDir = join(data.cacheRoot, data.version, 'node_modules', '.bin')
+accessSync(join(binDir, 'dsh'), constants.X_OK)
+process.stdout.write(binDir)
+NODE
+  )"
+  if [[ -n "$bin_dir" ]]; then
+    case ":${PATH:-}:" in
+      *":$bin_dir:"*) ;;
+      *) export PATH="$bin_dir${PATH:+:$PATH}" ;;
+    esac
+  fi
+}
+
+# Print read-only live checks for credentials (keys only), traex/agy auth, and autonomy readiness.
+dsh_enhanced_doctor_live_summary() {
+  local profile="$1" dsh_home="$2"
+  local script_dir cli_entry='' cli_lib=''
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 0
+  cli_entry="$script_dir/../../packages/dsh-rsi-cli/bin/dsh-rsi.js"
+  cli_lib="$script_dir/../../packages/dsh-rsi-cli/lib/index.js"
+  if [[ -f "$cli_entry" && -f "$cli_lib" ]] && command -v node >/dev/null 2>&1; then
+    node "$cli_entry" --dsh-home "$dsh_home" doctor --profile "$profile"
+    return $?
+  elif command -v dsh-rsi >/dev/null 2>&1; then
+    dsh-rsi --dsh-home "$dsh_home" doctor --profile "$profile"
+    return $?
+  fi
+  local traex_cmd='' agy_cmd=''
+  traex_cmd="$(dsh_enhanced_detect_traex_command || true)"
+  agy_cmd="$(dsh_enhanced_detect_agy_command || true)"
+  if [[ -n "$traex_cmd" ]]; then
+    if dsh_enhanced_traex_login_ready "$traex_cmd"; then
+      printf 'doctor：TraeX 已登录（%s）\n' "$traex_cmd"
+    else
+      printf 'doctor：TraeX 尚未登录（%s login）\n' "$traex_cmd"
+    fi
+  fi
+  if [[ -n "$agy_cmd" ]]; then
+    if dsh_enhanced_agy_login_ready "$agy_cmd"; then
+      printf 'doctor：Antigravity (agy) 模型探测就绪（%s）\n' "$agy_cmd"
+    else
+      printf 'doctor：Antigravity (agy) 尚未就绪（%s models）\n' "$agy_cmd"
+    fi
+  fi
 }
 
 # Reconcile registration at the end of an authorized installation. On macOS,
@@ -3916,7 +4264,11 @@ dsh_enhanced_install() {
   local model_route_mode='auto'
   local model_mode='auto'
   local auto_traex_command=''
+  local auto_agy_command=''
   local auto_traex_default_candidate='0'
+  local proactive_mode='auto'
+  local dreaming_mode='auto'
+  local growth_mode='auto'
   local model_provider=''
   local model_name=''
   local model_base_url=''
@@ -4010,6 +4362,21 @@ dsh_enhanced_install() {
       --with)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--with 需要一个值。'; return $?; }
         add_ons+=("$2")
+        shift 2
+        ;;
+      --proactive)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--proactive 需要一个值。'; return $?; }
+        proactive_mode="$2"
+        shift 2
+        ;;
+      --dreaming)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--dreaming 需要一个值。'; return $?; }
+        dreaming_mode="$2"
+        shift 2
+        ;;
+      --growth)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--growth 需要一个值。'; return $?; }
+        growth_mode="$2"
         shift 2
         ;;
       --lark)
@@ -4173,6 +4540,18 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--agent-tools 只能是 auto、allow、preserve 或 disable。'
     return $?
   esac
+  case "$proactive_mode" in auto|on|off) ;; *)
+    dsh_enhanced_fail 2 '--proactive 只能是 auto、on 或 off。'
+    return $?
+  esac
+  case "$dreaming_mode" in auto|on|off) ;; *)
+    dsh_enhanced_fail 2 '--dreaming 只能是 auto、on 或 off。'
+    return $?
+  esac
+  case "$growth_mode" in auto|on|off) ;; *)
+    dsh_enhanced_fail 2 '--growth 只能是 auto、on 或 off。'
+    return $?
+  esac
   if [[ "$operation" != 'install' && "$agent_tools_mode" == 'auto' ]]; then
     agent_tools_mode='preserve'
   fi
@@ -4331,8 +4710,8 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 'profile 生命周期事务保留现有 Isolation 配置和预算；不得重新传入 --isolation-*。'
       return $?
     fi
-    if [[ -n "${add_ons[0]+set}" ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with。'
+    if [[ -n "${add_ons[0]+set}" || "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with 或 --proactive/--dreaming/--growth。'
       return $?
     fi
     if [[ "$dsh_version_explicit" == '1' && "${DSH_ENHANCED_HOST_SELECTOR_VALIDATED:-}" != '1' ]]; then
@@ -4620,6 +4999,12 @@ dsh_enhanced_install() {
     plugin_preset='skip'
     if [[ "$guided" == '1' ]]; then
       if dsh_enhanced_confirm_plugin_preset; then plugin_preset='recommended'; else plugin_preset_declined='1'; fi
+      if [[ "$assume_yes" != '1' ]]; then
+        dsh_enhanced_prompt_capability_toggles "$scenario" proactive_mode dreaming_mode growth_mode || {
+          dsh_enhanced_fail 2 '能力开关选项无效。'
+          return $?
+        }
+      fi
     fi
   fi
   # Store the resolved decision, not the request: a guided answer or explicit
@@ -4639,15 +5024,38 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 "--learning $learning_mode 仅适用于 supervised 安装。"
       return $?
     fi
+    if [[ "$operation" == 'install' ]]; then
+      local non_sup_intent_status=0 non_sup_intent=''
+      if non_sup_intent="$(dsh_enhanced_read_install_intent "$dsh_home")"; then
+        local _ns_sc _ns_le _ns_pr _ns_at _ns_p _ns_d _ns_g
+        read -r _ns_sc _ns_le _ns_pr _ns_at _ns_p _ns_d _ns_g <<< "$non_sup_intent"
+        [[ "$proactive_mode" == 'auto' && ( "${_ns_p:-}" == 'on' || "${_ns_p:-}" == 'off' ) ]] && proactive_mode="$_ns_p"
+        [[ "$dreaming_mode" == 'auto' && ( "${_ns_d:-}" == 'on' || "${_ns_d:-}" == 'off' ) ]] && dreaming_mode="$_ns_d"
+        [[ "$growth_mode" == 'auto' && ( "${_ns_g:-}" == 'on' || "${_ns_g:-}" == 'off' ) ]] && growth_mode="$_ns_g"
+      else
+        non_sup_intent_status=$?
+        if [[ "$non_sup_intent_status" -eq 2 ]]; then
+          dsh_enhanced_fail 2 "已存在的 $dsh_home/.dsh-enhanced/install-intent.json 无法通过校验；拒绝在未知安装意图上继续。请检查或移除该文件后重试。"
+          return $?
+        fi
+      fi
+      if [[ "$dry_run" != '1' && ( "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ) ]]; then
+        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" 'skip' "$install_intent_preset" \
+          "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
+      fi
+    fi
   fi
   local learning_decision='preserve'
   local rsi_learning_flag='preserve'
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
     local install_intent_valid='0' intent_record='' intent_status=0 intent_preset_refresh='0'
-    local intent_scenario='' intent_learning='' intent_preset='' intent_at=''
+    local intent_scenario='' intent_learning='' intent_preset='' intent_at='' intent_p='' intent_d='' intent_g=''
     if intent_record="$(dsh_enhanced_read_install_intent "$dsh_home")"; then
       install_intent_valid='1'
-      read -r intent_scenario intent_learning intent_preset intent_at <<< "$intent_record"
+      read -r intent_scenario intent_learning intent_preset intent_at intent_p intent_d intent_g <<< "$intent_record"
+      [[ "$proactive_mode" == 'auto' && ( "${intent_p:-}" == 'on' || "${intent_p:-}" == 'off' ) ]] && proactive_mode="$intent_p"
+      [[ "$dreaming_mode" == 'auto' && ( "${intent_d:-}" == 'on' || "${intent_d:-}" == 'off' ) ]] && dreaming_mode="$intent_d"
+      [[ "$growth_mode" == 'auto' && ( "${intent_g:-}" == 'on' || "${intent_g:-}" == 'off' ) ]] && growth_mode="$intent_g"
       if [[ "$intent_scenario" != 'supervised' ]]; then
         dsh_enhanced_fail 2 "已记录的安装意图场景（${intent_scenario}）与本次 supervised 安装不一致；请检查 $dsh_home/.dsh-enhanced/install-intent.json。"
         return $?
@@ -4728,9 +5136,11 @@ dsh_enhanced_install() {
     # override of a previously implicit marker refreshes the same intent.
     if [[ "$dry_run" != '1' ]]; then
       if [[ "$install_intent_valid" != '1' && ( "$learning_decision" == 'authorize' || "$learning_decision" == 'skip' ) ]]; then
-        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" || return $?
-      elif [[ "$install_intent_valid" == '1' && "$intent_preset_refresh" == '1' ]]; then
-        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" || return $?
+        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
+          "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
+      elif [[ "$install_intent_valid" == '1' && ( "$intent_preset_refresh" == '1' || "$proactive_mode" != "${intent_p:-auto}" || "$dreaming_mode" != "${intent_d:-auto}" || "$growth_mode" != "${intent_g:-auto}" ) ]]; then
+        dsh_enhanced_write_install_intent "$dsh_home" "$scenario" "$learning_decision" "$install_intent_preset" \
+          "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
       fi
     fi
   fi
@@ -4800,10 +5210,11 @@ dsh_enhanced_install() {
   # only after the core profile had already changed.
   if [[ "$operation" == 'install' ]]; then
     auto_traex_command="$(dsh_enhanced_detect_traex_command || true)"
-    if [[ -n "$auto_traex_command" && "$model_mode" == 'auto' && -z "$model_provider" ]]; then
+    auto_agy_command="$(dsh_enhanced_detect_agy_command || true)"
+    if [[ ( -n "$auto_traex_command" || -n "$auto_agy_command" ) && "$model_mode" == 'auto' && -z "$model_provider" ]]; then
       # Auto-discovery is independent of the model menu. An authenticated
-      # TraeX may become this profile's default only when no explicit default
-      # exists; model-setup performs that final YAML check atomically.
+      # local agent route (TraeX / Antigravity) may become this profile's
+      # default only when no explicit default exists; model-setup checks atomically.
       auto_traex_default_candidate='1'
       model_mode='skip'
     fi
@@ -4871,7 +5282,7 @@ dsh_enhanced_install() {
       return $?
     }
   fi
-  if [[ "$model_mode" == 'configure' && "$model_provider" == 'traex-agent' && "$model_route_mode" != 'skip' ]]; then
+  if dsh_enhanced_is_agent_route "$model_provider" && [[ "$model_mode" == 'configure' && "$model_route_mode" != 'skip' ]]; then
     # An explicit global default must not be written after Lark has already
     # restarted with an unauthenticated local agent. Check before service work.
     dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
@@ -4920,10 +5331,10 @@ NODE
     for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
     case "$scenario" in
     web)
-      for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console; do dsh_enhanced_append_slug "$slug"; done
       ;;
     autonomy)
-      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_enhanced_append_slug "$slug"; done
       ;;
     lark)
       for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
@@ -4941,29 +5352,64 @@ NODE
     esac
   fi
   dsh_enhanced_apply_isolation_capability_gate
-  if [[ "$operation" == 'install' && -n "${add_ons[0]+set}" ]]; then
+  if [[ -n "${add_ons[0]+set}" ]]; then
+    if [[ "$operation" == 'install' ]]; then
     for slug in "${add_ons[@]}"; do
       case "$slug" in
         coding) dsh_enhanced_append_slug 'coding-subscription-provider' ;;
         traex) dsh_enhanced_append_slug 'traex-acp-provider' ;;
+        console) dsh_enhanced_append_slug 'owner-console' ;;
         health) dsh_enhanced_append_slug 'assistant-health' ;;
         heartbeat) dsh_enhanced_append_slug 'assistant-heartbeat' ;;
         events) dsh_enhanced_append_slug 'event-triggers' ;;
         bridge) dsh_enhanced_append_slug 'memory-wiki-bridge' ;;
+        proactive)
+          for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_enhanced_append_slug "$dep_slug"; done
+          ;;
+        dreaming)
+          for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_enhanced_append_slug "$dep_slug"; done
+          ;;
         *)
-          dsh_enhanced_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、health、heartbeat、events、bridge。"
+          dsh_enhanced_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、console、health、heartbeat、events、bridge、proactive、dreaming。"
           return $?
           ;;
       esac
     done
+    fi
   fi
-  # Selecting the TraeX agent route as the default model pulls in its provider
-  # bundle so the route can be enabled and resolve in the same run.  Interactive
-  # selection happens after install and is handled on the spot in apply_model.
+  if [[ "$operation" == 'install' ]]; then
+    if [[ "$proactive_mode" == 'on' ]]; then
+      for dep_slug in assistant-delivery event-triggers assistant-proactive; do dsh_enhanced_append_slug "$dep_slug"; done
+    fi
+    if [[ "$growth_mode" == 'on' ]]; then
+      for dep_slug in assistant-delivery assistant-goals assistant-skills assistant-evaluation assistant-growth-driver; do dsh_enhanced_append_slug "$dep_slug"; done
+    fi
+    if [[ "$dreaming_mode" == 'on' ]]; then
+      for dep_slug in assistant-delivery assistant-evaluation assistant-goals assistant-skills assistant-dreaming; do dsh_enhanced_append_slug "$dep_slug"; done
+    fi
+    if [[ "$proactive_mode" == 'off' || "$dreaming_mode" == 'off' || "$growth_mode" == 'off' ]]; then
+      local filtered_slugs=()
+      if [[ -n "${selected_slugs[0]+set}" ]]; then
+        for existing_slug in "${selected_slugs[@]}"; do
+          [[ "$proactive_mode" == 'off' && "$existing_slug" == 'assistant-proactive' ]] && continue
+          [[ "$dreaming_mode" == 'off' && "$existing_slug" == 'assistant-dreaming' ]] && continue
+          [[ "$growth_mode" == 'off' && "$existing_slug" == 'assistant-growth-driver' ]] && continue
+          filtered_slugs+=("$existing_slug")
+        done
+      fi
+      if [[ -n "${filtered_slugs[0]+set}" ]]; then
+        selected_slugs=("${filtered_slugs[@]}")
+      else
+        selected_slugs=()
+      fi
+    fi
+  fi
+  # Selecting a local coding-agent route pulls in its provider bundle so the
+  # route can be enabled and resolve in the same run.
   if [[ "$operation" == 'install' ]] && dsh_enhanced_is_agent_route "$model_provider"; then
     dsh_enhanced_append_slug 'traex-acp-provider'
   fi
-  if [[ "$operation" == 'install' && -n "$auto_traex_command" ]]; then
+  if [[ "$operation" == 'install' && ( -n "$auto_traex_command" || -n "$auto_agy_command" ) ]]; then
     dsh_enhanced_append_slug 'traex-acp-provider'
   fi
 
@@ -5149,25 +5595,36 @@ NODE
   # final paired setup transaction. Fixed Recovery remains an explicit setup;
   # its historical Health incidents must not gate this independent capability.
 
-  if [[ "$operation" == 'install' && -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
-    dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
-      "$auto_traex_default_candidate" "$dry_run" || return $?
-    if [[ "$model_mode" != 'configure' && "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+  if [[ "$operation" == 'install' && ( -n "$auto_traex_command" || -n "$auto_agy_command" ) ]]; then
+    local applied_auto_agent='0'
+    if [[ -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
+      dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
+        "$auto_traex_default_candidate" "$dry_run" || return $?
+      applied_auto_agent='1'
+    fi
+    if [[ -n "$auto_agy_command" && "$model_provider" != 'agy-agent' ]]; then
+      dsh_enhanced_apply_auto_agy "$profile" "$dsh_home" "$auto_agy_command" \
+        "$auto_traex_default_candidate" "$dry_run" || return $?
+      applied_auto_agent='1'
+    fi
+    if [[ "$applied_auto_agent" == '1' && "$model_mode" != 'configure' && "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
       dsh_enhanced_restart_resident_service "$profile" "$dry_run" "$dsh_home" || return $?
     fi
   fi
 
   if [[ "$model_mode" == 'configure' ]]; then
-    # A TraeX provider selected above is already in the preflighted cohort;
-    # keep this idempotent check for a pre-existing installed profile.
+    # An explicit agent provider selected above is already in the preflighted
+    # cohort; keep this idempotent check for a pre-existing installed profile.
     dsh_enhanced_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
       "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
 
     if dsh_enhanced_is_agent_route "$model_provider"; then
       if [[ "$model_route_mode" == 'auto' ]]; then
-        # This verification only checks the local adapter registration and
-        # `traex login status`; it never starts an ACP session or spends quota.
-        printf '模型 route：本轮已配置 TraeX，正在执行免额度的适配器与登录校验。\n'
+        # This verification checks adapter enablement and local login readiness;
+        # it never starts an ACP session/prompt or spends model quota.
+        local agent_route_label="$model_provider"
+        [[ "$model_provider" == 'traex-agent' ]] && agent_route_label='TraeX'
+        printf '模型 route：本轮已配置 %s，正在执行免额度的适配器与登录校验。\n' "$agent_route_label"
         model_route_mode='verify'
       fi
       if [[ "$model_route_mode" == 'verify' ]]; then
@@ -5201,7 +5658,7 @@ NODE
   fi
 
   if [[ "$model_route_mode" == 'auto' ]]; then
-    if [[ -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
+    if [[ ( -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ) || ( -n "$auto_agy_command" && "$model_provider" != 'agy-agent' ) ]]; then
       # The automatic route was verified without a model request above.
       model_route_mode='skip'
     elif [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
@@ -5310,11 +5767,17 @@ NODE
     fi
   fi
 
-  local slug effective_traex_command=''
+  local slug effective_traex_command='' effective_agy_command='' has_owner_console='0' has_dreaming='0'
   for slug in "${selected_slugs[@]}"; do
-    if [[ "$slug" == 'traex-acp-provider' && -n "$auto_traex_command" && "$dry_run" != '1' ]]; then
-      effective_traex_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")" || return $?
-      break
+    [[ "$slug" == 'owner-console' ]] && has_owner_console='1'
+    [[ "$slug" == 'assistant-dreaming' ]] && has_dreaming='1'
+    if [[ "$slug" == 'traex-acp-provider' && "$dry_run" != '1' ]]; then
+      if [[ -n "$auto_traex_command" ]]; then
+        effective_traex_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")" || return $?
+      fi
+      if [[ -n "$auto_agy_command" ]]; then
+        effective_agy_command="$(dsh_enhanced_probe_auto_agy_route "$profile" "$dsh_home")" || return $?
+      fi
     fi
   done
 
@@ -5334,20 +5797,42 @@ NODE
     printf '调整插件：%s（list / enable <插件> / preset recommended；改动后重启该 profile 生效）\n' \
       "$dsh_home/profiles/$profile/node_modules/.bin/dsh-plugin-setup"
   fi
+  if [[ "$has_owner_console" == '1' ]]; then
+    printf '控制台 UI：已安装 @dsh-enhanced/owner-console；打开 Web URL 后可在侧边栏进入「文鳐」或在设置 →「文鳐助手」管理助手与本机编程工具。\n'
+  fi
+  if [[ "$has_dreaming" == '1' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      printf 'Dreaming：将安装 @dsh-enhanced/assistant-dreaming（默认安全休眠 enabled=false）；需配齐独立 scope、databasePath、provider/model 与有限预算后才启用。\n'
+    else
+      local dreaming_check=''
+      dreaming_check="$(dsh_enhanced_check_dreaming_prerequisites "$profile" "$dsh_home" || true)"
+      case "$dreaming_check" in
+        dormant\ *)
+          printf 'Dreaming：已安装 @dsh-enhanced/assistant-dreaming（安全休眠 enabled=false）；缺少唤醒必填项：%s。\n' "${dreaming_check#dormant }"
+          ;;
+        enabled\ )
+          printf 'Dreaming：已安装并满足启用前置条件（scope/模型/有限预算就绪）。\n'
+          ;;
+        enabled\ *)
+          printf '警告（Dreaming）：assistant-dreaming.enabled 为 true 但缺少：%s；建议修正配置。\n' "${dreaming_check#enabled }" >&2
+          ;;
+      esac
+    fi
+  fi
   if [[ "$lark_mode" != 'skip' && ( "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ) ]]; then
     printf '下一步（使用）：在飞书/Lark 私聊 Bot 即可开始；只有已绑定的 owner 可以操作和授权。\n'
   fi
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
-    printf '立即使用：dsh --profile %s\n' "$profile"
-    printf '  该命令会打印一行带 token 的完整 URL（形如 http://127.0.0.1:PORT/?token=...）；\n'
-    printf '  Web 开启了认证，请使用输出中的完整 URL 访问，不要只打开裸地址。\n'
+    printf '立即使用：dsh --profile %s（或运行 dsh-rsi open --profile %s 一键打开）\n' "$profile" "$profile"
+    printf '  `dsh-rsi open` 会读取私有 Host、打印带 token 的完整授权 URL 并自动在浏览器中打开。\n'
   elif [[ "$scenario" == 'lark' || "$scenario" == 'supervised' || "$scenario" == 'full' ]]; then
     if [[ "$lark_mode" == 'skip' ]]; then
-      printf '立即使用：dsh --profile %s\n' "$profile"
-      printf '  （本次跳过了飞书；该命令打印带 token 的完整 URL，请用完整 URL 打开。）\n'
+      printf '立即使用：dsh --profile %s（或运行 dsh-rsi open --profile %s 一键打开）\n' "$profile" "$profile"
+      printf '  （本次跳过了飞书；命令会输出带 token 的完整 URL，请勿打开裸地址。）\n'
     fi
   elif [[ "$scenario" == 'autonomy' ]]; then
     printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
+    printf '打开控制台：dsh-rsi open --profile %s\n' "$profile"
   fi
 
   # Automatic discovery already enabled this profile's route. A manually added
@@ -5360,9 +5845,17 @@ NODE
         else
           printf '\nTraeX route 已接入 profile %s（有效命令：%s）。\n' "$profile" "$effective_traex_command"
         fi
-      else
-        printf '\nTraeX bundle 已安装；未检测到本机可执行文件，route 尚未自动启用。\n'
-        printf '  安装并登录 TraeX 后运行：dsh-model-setup --provider traex-agent --enable-in-profile %s\n' "$profile"
+      fi
+      if [[ -n "$auto_agy_command" ]]; then
+        if [[ "$dry_run" == '1' ]]; then
+          printf '\nAntigravity (agy) route 将自动接入 profile %s（命令：%s）。\n' "$profile" "$auto_agy_command"
+        else
+          printf '\nAntigravity (agy) route 已接入 profile %s（有效命令：%s）。\n' "$profile" "$effective_agy_command"
+        fi
+      fi
+      if [[ -z "$auto_traex_command" && -z "$auto_agy_command" ]]; then
+        printf '\ntraex-acp-provider bundle 已安装；未检测到本机 traex 或 agy 可执行文件，route 尚未自动启用。\n'
+        printf '  安装并登录 TraeX / Antigravity 后运行：dsh-model-setup --provider <traex-agent|agy-agent> --enable-in-profile %s\n' "$profile"
       fi
       break
     fi
@@ -5376,8 +5869,8 @@ NODE
     # 受管服务已在后台运行；用刚装好的 dsh-rsi 解析当前带 token 的 Web URL（不关闭认证）。
     if [[ "$dry_run" != '1' ]] && command -v dsh-rsi >/dev/null 2>&1; then
       printf '\n当前 Web 授权 URL（受管服务；token 随重启变化）：\n'
-      dsh-rsi web-url --profile "$profile" --dsh-home "$dsh_home" || true
-      printf '若服务刚启动尚未打印 URL，稍后重跑：dsh-rsi web-url --profile %s\n' "$profile"
+      dsh-rsi web-url --profile "$profile" --dsh-home "$dsh_home" --wait 8 || true
+      printf '快捷打开浏览器：dsh-rsi open --profile %s\n' "$profile"
     fi
   fi
 }

@@ -41,6 +41,8 @@ const {
   serviceLifecycleBinding,
 } = createInstallerFixtures()
 
+const pathWithoutAgents = pathWithoutTraex.split(':').filter(directory => directory !== '' && !existsSync(join(directory, 'agy'))).join(':')
+
 afterEach(cleanupInstallerFixtures)
 
 const restartScript = join(installDirectory, 'restart.sh')
@@ -1348,7 +1350,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     await mkdir(fakeBin)
     await writeExecutable(join(fakeBin, 'dsh'), '#!/bin/bash\nprintf "0.2.2-rc.3\\n"\n')
     const result = runInstaller(localInstaller, ['--yes'], dshHome, 'Linux', {
-      PATH: `${fakeBin}:${pathWithoutTraex}`,
+      PATH: `${fakeBin}:${pathWithoutAgents}`,
     })
 
     expect(result.status).toBe(1)
@@ -3833,7 +3835,7 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
     const result = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--model-route', 'verify',
-    ], dshHome, undefined, { PATH: `${fakeBin}:${pathWithoutTraex}` })
+    ], dshHome, undefined, { PATH: `${fakeBin}:${pathWithoutAgents}` })
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('agent route traex-agent 不发送模型请求')
@@ -4689,4 +4691,163 @@ describe.skipIf(process.platform !== 'linux')('pre-owner native base entry', () 
     // This is a fixture counter, not acceptance of a real Policy owner ledger.
     expect((await f.primitive.inspectLinuxRsiNativeBaseAt({ logicalHome: f.dshHome, physicalHome: f.dshHome, profile: 'web' })).runtime.sourceCommit).toBe('2'.repeat(40))
   }, 60000)
+
+  test('detects agy CLI prompt-free via `agy models`, exposes Antigravity in prompt menu and verifies agyEnabled', async () => {
+    const dshHome = await temporaryDshHome()
+    const fakeBinAgy = join(dshHome, 'bin-agy')
+    const fakeBinTraex = join(dshHome, 'bin-traex')
+    const logPath = join(dshHome, 'agy-calls.log')
+    await mkdir(fakeBinAgy, { recursive: true })
+    await mkdir(fakeBinTraex, { recursive: true })
+    await writeExecutable(join(fakeBinAgy, 'agy'), `#!/bin/bash
+printf '%s\\n' "$*" >> ${JSON.stringify(logPath)}
+if [[ "\${1:-}" == 'models' ]]; then exit 0; fi
+exit 9
+`)
+    await writeExecutable(join(fakeBinTraex, 'traex'), '#!/bin/bash\nexit 0\n')
+
+    // dsh_enhanced_is_agent_route recognizes both traex-agent and agy-agent.
+    const routeCheck = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_is_agent_route traex-agent && dsh_enhanced_is_agent_route agy-agent && ! dsh_enhanced_is_agent_route deepseek-official',
+      'installer-test',
+      installerLibrary,
+    ], { encoding: 'utf8' })
+    expect(routeCheck.status, routeCheck.stderr).toBe(0)
+
+    // Only `agy models` is run cleanly without session/prompt.
+    const agyProbe = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; cmd="$(dsh_enhanced_detect_agy_command)"; printf "cmd=%s\\n" "$cmd"; dsh_enhanced_agy_login_ready "$cmd"',
+      'installer-test',
+      installerLibrary,
+    ], { encoding: 'utf8', env: { PATH: `${fakeBinAgy}:${pathWithoutAgents}` } })
+    expect(agyProbe.status, agyProbe.stderr).toBe(0)
+    expect(agyProbe.stdout).toContain(`cmd=${join(fakeBinAgy, 'agy')}`)
+    expect((await readFile(logPath, 'utf8')).trim().split('\n')).toEqual(['models'])
+
+    // Menu offers TraeX as 3 and Antigravity as 4 when both exist; choosing 4 picks agy-agent.
+    const bothMenu = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
+      'installer-test',
+      installerLibrary,
+    ], {
+      encoding: 'utf8',
+      input: '4\n',
+      env: { PATH: `${fakeBinTraex}:${fakeBinAgy}:${pathWithoutAgents}` },
+    })
+    expect(bothMenu.status, bothMenu.stderr).toBe(0)
+    expect(bothMenu.stdout).toBe('provider=agy-agent')
+    expect(bothMenu.stderr).toContain('3) 本机 TraeX（traex-agent')
+    expect(bothMenu.stderr).toContain('4) 本机 Antigravity（agy-agent')
+
+    // Menu promotes Antigravity to 3 when only `agy` is installed.
+    const onlyAgyMenu = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"',
+      'installer-test',
+      installerLibrary,
+    ], {
+      encoding: 'utf8',
+      input: '3\n',
+      env: { PATH: `${fakeBinAgy}:${pathWithoutAgents}` },
+    })
+    expect(onlyAgyMenu.status, onlyAgyMenu.stderr).toBe(0)
+    expect(onlyAgyMenu.stdout).toBe('provider=agy-agent')
+
+    // dsh_enhanced_verify_agent_route distinguishes `enabled` (traex-agent) vs `agyEnabled` (agy-agent).
+    const fakeDshBin = join(dshHome, 'fake-dsh')
+    await mkdir(fakeDshBin, { recursive: true })
+    await writeExecutable(join(fakeDshBin, 'dsh'), `#!/bin/bash
+if [[ "$*" == *'--dump-config'* ]]; then
+  printf '%s\\n' \
+    '- id: dsh-enhanced-traex-acp-provider' \
+    '  name: "@dsh-enhanced/traex-acp-provider"' \
+    '  config:' \
+    '    enabled: true' \
+    '    agyEnabled: false'
+  exit 0
+fi
+exit 0
+`)
+    const traexVerify = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_verify_agent_route traex-agent web 0 1',
+      'installer-test',
+      installerLibrary,
+    ], { encoding: 'utf8', env: { PATH: `${fakeDshBin}:${pathWithoutAgents}` } })
+    expect(traexVerify.status, traexVerify.stderr).toBe(0)
+
+    const agyVerifyFail = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_verify_agent_route agy-agent web 0 1',
+      'installer-test',
+      installerLibrary,
+    ], { encoding: 'utf8', env: { PATH: `${fakeDshBin}:${pathWithoutAgents}` } })
+    expect(agyVerifyFail.status).toBe(1)
+    expect(agyVerifyFail.stderr).toContain('agyEnabled: true')
+    expect(agyVerifyFail.stderr).toContain('--provider agy-agent')
+
+    // Dry-run explicit `--model-provider agy-agent` plans traex-acp-provider and `--provider agy-agent`.
+    const dryRunAgy = runInstaller(localInstaller, [
+      '--dry-run', '--scenario', 'core', '--model-provider', 'agy-agent', '--model-route', 'skip',
+    ], dshHome, undefined, { PATH: `${fakeBinAgy}:${pathWithoutAgents}` })
+    expect(dryRunAgy.status, dryRunAgy.stderr).toBe(0)
+    expect(dryRunAgy.stdout).toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
+    expect(dryRunAgy.stdout).toContain('--provider agy-agent')
+    expect(dryRunAgy.stdout).toContain('--enable-in-profile web')
+  })
+
+  test('dsh_enhanced_apply_auto_agy enables agy-agent cleanly and probes agyEnabled without clobbering defaults', async () => {
+    const f = await autoTraexSetupFixture('traex', false)
+    const agyBin = join(f.fakeBin, 'agy')
+    const callsLog = join(f.dshHome, 'agy-setup-calls.log')
+    await writeExecutable(agyBin, '#!/bin/bash\nif [[ "${1:-}" == "models" ]]; then printf "gemini-3\\n"; exit 0; fi\nexit 1\n')
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    await writeFile(patchPath, '[]\n', 'utf8')
+    await writeExecutable(join(f.dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-model-setup'), `#!/bin/bash
+printf '%s\\n' "$*" >> ${JSON.stringify(callsLog)}
+cat > ${JSON.stringify(patchPath)} <<'YAML'
+- id: dsh-enhanced-traex-acp-provider
+  name: '@dsh-enhanced/traex-acp-provider'
+  config:
+    agyEnabled: true
+    agyCommand: ${agyBin}
+YAML
+`)
+    await writeExecutable(join(f.fakeBin, 'dsh'), `#!/bin/bash
+if [[ "$*" == *'--dump-config'* ]]; then
+  cat ${JSON.stringify(patchPath)}
+  exit 0
+fi
+exit 0
+`)
+
+    const applied = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_apply_auto_agy web "$2" "$3" 1 0',
+      'installer-test',
+      installerLibrary,
+      f.dshHome,
+      agyBin,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(applied.status, applied.stderr).toBe(0)
+    expect(applied.stdout).toContain('本机已登录；已启用 profile route')
+
+    const calls = (await readFile(callsLog, 'utf8')).trim().split('\n')
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toContain(`--provider agy-agent --enable-in-profile web --agent-command ${agyBin} --enable-only`)
+    expect(calls[1]).toContain(`--provider agy-agent --enable-in-profile web --agent-command ${agyBin} --default-if-absent`)
+
+    const probed = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_probe_auto_agy_route web "$2"',
+      'installer-test',
+      installerLibrary,
+      f.dshHome,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(probed.status, probed.stderr).toBe(0)
+    expect(probed.stdout).toBe(agyBin)
+  })
 })

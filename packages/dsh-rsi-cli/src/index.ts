@@ -5,13 +5,15 @@ import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
-import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
+import { collectStatus, formatStatus } from './diagnose.ts'
+import { collectLiveDoctorReport, formatLiveDoctorReport } from './doctor-live.ts'
+import { openWebProfile } from './open.ts'
 import { resolveDshHome } from './paths.ts'
 import { hasPendingHostRecovery, runInstall } from './install.ts'
 import { findRunningProfiles } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import { assertFrozenCliUpdateVersion, assertFrozenUpdateArgs, detectFrozenOwner, runFrozenOwnerUpdate } from './program-update.ts'
-import { formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
+import { formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
 import {
   collectLogs,
   controlManagedService,
@@ -34,6 +36,9 @@ import {
 export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
 export { collectStatus, runDoctor, formatStatus, formatFindings } from './diagnose.ts'
+export { collectLiveDoctorReport, formatLiveDoctorReport, redactUrlToken } from './doctor-live.ts'
+export { inspectBoundHostRuntime } from './install-host.ts'
+export { openWebProfile, canOpenBrowser, defaultOpenBrowser } from './open.ts'
 export { formatSelfUpdateReport, runSelfUpdate, RSI_CLI_PACKAGE } from './update.ts'
 export {
   collectLogs,
@@ -45,7 +50,7 @@ export {
   resolveTargetProfiles,
   tailLogFile,
 } from './services.ts'
-export { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
+export { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 
@@ -55,20 +60,21 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   dsh-rsi [全局选项] <命令> [命令参数]
 
 命令：
-  status      列出 DSH home、各 profile 与安装形态（npm/local）、host 版本、
-              受管服务状态、外部凭据条目数、生命周期残留（只读）
-  doctor      status 之外，扫描各 profile 的 host 错误日志，识别已知崩溃模式并给出建议（只读）
+  status      列出 DSH home、私有 Host 绑定、安装意图、各 profile 与安装形态（npm/local）、
+              受管服务状态、凭据键名与生命周期残留（只读；支持 --json）
+  doctor      全面实时诊断：检查 .dsh-rsi-host.json、--dump-config、凭据权限与可用性、
+              traex/agy 登录状态、autonomy readiness、端口与系统前提、崩溃日志（支持 --json）
   start       启动已注册的受管常驻服务（不改动服务定义，未注册时报错并给出指引）
   stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
   restart     重启受管常驻服务（配置/插件变更后生效的常用方式）
   logs        查看各 profile 的受管 stdout/stderr 日志尾部
-  web-url     解析受管服务当前有效的带 token Web 授权 URL（从 journal / host 日志取最新 dsh web 行）
+  web-url     解析受管服务当前有效的带 token Web 授权 URL（支持 --wait <秒>）
+  open        打开 Web UI 与「文鳐」Owner Console（自动读取私有 Host、等待/启动并打开浏览器）
   update      升级全局 dsh-rsi 自身；加 --all 再升级整套插件集合（原地升级，保留数据）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
   maintenance 运维结算：列出并结算死信、列出并暂停系统自有 automation（写 receipt）
-  maintenance 运维结算：列出/结算死信、列出/暂停系统自有 automation（写 receipt）
   version     打印 dsh-rsi 版本
 
 全局选项：
@@ -76,6 +82,11 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   --profile <name>    仅操作单个 profile（purge/reinstall 的 purge 阶段默认全量）
   --dry-run           只打印将执行的动作，不做任何修改
   --yes               purge/reinstall 跳过交互确认（reinstall 时同时透传给安装器）
+  --json              status / doctor 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+
+open / web-url 选项：
+  --wait <秒>         等待受管服务输出 live Web URL 的最长时间（0..60 秒；open 默认 8，web-url 默认 0）
+  --no-browser        open 仅打印授权 URL 与 Owner Console 提示，不自动拉起浏览器
 
 install / reinstall：
   npm 形态（默认）    下载与本 dsh-rsi 同版本（v${VERSION}）的 install-npm.sh 到临时目录执行，
@@ -154,31 +165,49 @@ interface ParsedArgs {
   /** update：dsh-rsi 自身的目标版本或 dist-tag。 */
   targetVersion?: string
   dshVersion?: string
+  /** status / doctor：以 JSON 格式输出诊断结果。 */
+  json: boolean
+  /** open / web-url：等待服务输出 live Web URL 的秒数。 */
+  waitSeconds?: number
+  /** open：不拉起系统浏览器，仅输出授权 URL 与提示。 */
+  noBrowser: boolean
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
 
 const KNOWN_COMMANDS = new Set([
-  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'web-url', 'update',
+  'status', 'doctor', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update',
   'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
+const DIAGNOSE_FLAGS = new Set(['--json'])
+const OPEN_FLAGS = new Set(['--no-browser'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
 const MAX_LOG_LINES = 10_000
 const DEFAULT_LOG_LINES = 200
+const MAX_WAIT_SECONDS = 60
 const PURGE_FLAGS = new Set(['--no-backup', '--keep-keychain', '--remove-host'])
 /** install/reinstall 中由 rsi 自身消费、不透传给安装器的带值选项。 */
 const INSTALL_VALUE_OPTIONS = new Set(['--dsh-home', '--local'])
 
-/** 写入一个带值选项；--lines 需要范围校验，错误值必须报错而不是静默取默认。 */
+/** 写入一个带值选项；--lines 与 --wait 需要范围校验，错误值必须报错而不是静默取默认。 */
 function assignValueOption(result: ParsedArgs, token: string, value: string): void {
   if (token === '--dsh-home') { result.dshHome = value; return }
   if (token === '--profile') { result.profile = value; return }
   if (token === '--version') { result.targetVersion = value; return }
   if (token === '--dsh-version') { result.dshVersion = value; return }
+  if (token === '--wait') {
+    if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--wait 需要一个非负整数秒数，收到：${value}`)
+    const parsedWait = Number(value)
+    if (parsedWait < 0 || parsedWait > MAX_WAIT_SECONDS) {
+      throw new PurgeError(`--wait 需在 0..${MAX_WAIT_SECONDS} 秒之间，收到：${value}`)
+    }
+    result.waitSeconds = parsedWait
+    return
+  }
   // --lines
   if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--lines 需要一个正整数，收到：${value}`)
   const parsed = Number(value)
@@ -201,6 +230,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     lines: DEFAULT_LOG_LINES,
     errorsOnly: false,
     all: false,
+    json: false,
+    noBrowser: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -225,6 +256,14 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       }
       if (UPDATE_FLAGS.has(token)) {
         result.all = true
+        continue
+      }
+      if (DIAGNOSE_FLAGS.has(token)) {
+        result.json = true
+        continue
+      }
+      if (OPEN_FLAGS.has(token)) {
+        result.noBrowser = true
         continue
       }
       if (PURGE_FLAGS.has(token)) {
@@ -272,6 +311,14 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       result.all = true
       continue
     }
+    if (DIAGNOSE_FLAGS.has(token)) {
+      result.json = true
+      continue
+    }
+    if (OPEN_FLAGS.has(token)) {
+      result.noBrowser = true
+      continue
+    }
     if (PURGE_FLAGS.has(token)) {
       if (token === '--no-backup') result.backup = false
       else if (token === '--keep-keychain') result.keepKeychain = true
@@ -279,6 +326,15 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       continue
     }
     throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
+  }
+  if (result.json && result.command !== 'status' && result.command !== 'doctor') {
+    throw new PurgeError(`--json 仅适用于 status 与 doctor 命令（收到：${result.command}）`)
+  }
+  if (result.noBrowser && result.command !== 'open') {
+    throw new PurgeError(`--no-browser 仅适用于 open 命令（收到：${result.command}）`)
+  }
+  if (result.waitSeconds !== undefined && result.command !== 'open' && result.command !== 'web-url') {
+    throw new PurgeError(`--wait 仅适用于 open 与 web-url 命令（收到：${result.command}）`)
   }
   return result
 }
@@ -776,15 +832,36 @@ export async function main(
         process.stdout.write(`${VERSION}\n`)
         return 0
       case 'status': {
-        const snapshot = await collectStatus(args.dshHome, homedir(), process.platform)
-        process.stdout.write(`${formatStatus(snapshot)}\n`)
+        const platform = deps.platform ?? process.platform
+        const snapshot = await collectStatus(args.dshHome, homedir(), platform)
+        process.stdout.write(args.json ? `${JSON.stringify(snapshot, null, 2)}\n` : `${formatStatus(snapshot)}\n`)
         return 0
       }
       case 'doctor': {
-        const snapshot = await collectStatus(args.dshHome, homedir(), process.platform)
-        const findings = await runDoctor(args.dshHome)
-        process.stdout.write(`${formatStatus(snapshot)}\n\n${formatFindings(findings)}\n`)
+        const platform = deps.platform ?? process.platform
+        const report = await collectLiveDoctorReport({
+          dshHome: args.dshHome,
+          home: homedir(),
+          platform,
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          env,
+        })
+        process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatLiveDoctorReport(report)}\n`)
         return 0
+      }
+      case 'open': {
+        const platform = deps.platform ?? process.platform
+        const outcome = await openWebProfile({
+          dshHome: args.dshHome,
+          home: homedir(),
+          platform,
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          ...(args.waitSeconds !== undefined ? { waitSeconds: args.waitSeconds } : {}),
+          noBrowser: args.noBrowser,
+          dryRun: args.dryRun,
+          env,
+        })
+        return outcome.exitCode
       }
       case 'start':
       case 'stop':
@@ -821,9 +898,14 @@ export async function main(
           process.stderr.write(`web-url：${args.dshHome} 下没有任何 profile\n`)
           return 1
         }
+        const waitMs = args.waitSeconds !== undefined ? args.waitSeconds * 1000 : 0
         const entries = []
         for (const profile of profiles) {
-          entries.push(await resolveManagedWebUrl(process.platform, homedir(), args.dshHome, profile))
+          entries.push(
+            waitMs > 0
+              ? await waitForManagedWebUrl(process.platform, homedir(), args.dshHome, profile, { waitMs })
+              : await resolveManagedWebUrl(process.platform, homedir(), args.dshHome, profile),
+          )
         }
         process.stdout.write(`${formatWebUrlResult(entries)}\n`)
         // 任一 profile 解析出错时退出 1，但仍尽量打印成功的 URL。

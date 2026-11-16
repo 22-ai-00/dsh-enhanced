@@ -11,7 +11,7 @@ const common = join(repoRoot, 'scripts/install/common.sh')
 const localInstaller = join(repoRoot, 'scripts/install/install-local.sh')
 const temporaryRoots: string[] = []
 const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
-  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli')) && !existsSync(join(directory, 'agy'))).join(':')
 
 afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 

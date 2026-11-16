@@ -8,15 +8,34 @@ export interface CommandResult {
 
 export type CommandRunner = (command: string, args: readonly string[]) => CommandResult
 
+export interface CommandRunOptions {
+  timeoutMs?: number
+  env?: NodeJS.ProcessEnv
+}
+
+export type DetailedCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options?: CommandRunOptions,
+) => CommandResult
+
 /** 默认命令执行器：直接 spawn，不经 shell（参数数组天然无注入面）。 */
-export const defaultRunner: CommandRunner = (command, args) => {
-  const result: SpawnSyncReturns<Buffer> = spawnSync(command, [...args], { maxBuffer: 16 * 1024 * 1024 })
+export const defaultDetailedRunner: DetailedCommandRunner = (command, args, options = {}) => {
+  const result: SpawnSyncReturns<Buffer> = spawnSync(command, [...args], {
+    maxBuffer: 16 * 1024 * 1024,
+    ...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+    ...(options.env !== undefined ? { env: options.env } : {}),
+  })
+  const error = result.error as NodeJS.ErrnoException | undefined
+  const stderr = result.stderr?.toString() ?? ''
   return {
     status: result.status,
     stdout: result.stdout?.toString() ?? '',
-    stderr: result.stderr?.toString() ?? '',
+    stderr: error && !stderr ? error.message : stderr,
   }
 }
+
+export const defaultRunner: CommandRunner = (command, args) => defaultDetailedRunner(command, args)
 
 export interface RunningProcess {
   pid: number

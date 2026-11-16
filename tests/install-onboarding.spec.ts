@@ -12,7 +12,7 @@ const localInstaller = join(repoRoot, 'scripts', 'install', 'install-local.sh')
 // Same rule as installers.spec.ts: never inherit a developer machine's TraeX,
 // which would switch the model step to the agent route.
 const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
-  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli')) && !existsSync(join(directory, 'agy'))).join(':')
 const temporaryRoots: string[] = []
 
 afterEach(async () => {
@@ -387,5 +387,62 @@ describe('guided onboarding installer dry-run', () => {
       expect(result.status).toBe(2)
       expect(result.stderr).toContain('--owner-wait-seconds 只能是 0 到 3600 的整数。')
     }
+  })
+
+  test('proactive / dreaming / growth flags validate, compose required bundles and keep Dreaming fail-closed dormant', async () => {
+    const invalid = installer(['--dry-run', '--yes', '--scenario', 'core', '--proactive', 'maybe'], await temporaryHome())
+    expect(invalid.status).toBe(2)
+    expect(invalid.stderr).toContain('--proactive 只能是 auto、on 或 off')
+
+    const withDreaming = installer([
+      '--dry-run', '--yes', '--scenario', 'core', '--proactive', 'on', '--growth', 'on', '--dreaming', 'on',
+    ], await temporaryHome())
+    expect(withDreaming.status, withDreaming.stderr).toBe(0)
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-proactive'))
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'event-triggers'))
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-growth-driver'))
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-dreaming'))
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
+    expect(withDreaming.stdout).toContain(join(repoRoot, 'plugins', 'assistant-skills'))
+    expect(withDreaming.stdout).toContain('Dreaming：将安装 @dsh-enhanced/assistant-dreaming（默认安全休眠 enabled=false）')
+    expect(withDreaming.stdout).not.toContain('enabled: true')
+
+    const withAddons = installer([
+      '--dry-run', '--yes', '--scenario', 'core', '--with', 'console', '--with', 'proactive', '--with', 'dreaming',
+    ], await temporaryHome())
+    expect(withAddons.status, withAddons.stderr).toBe(0)
+    expect(withAddons.stdout).toContain(join(repoRoot, 'plugins', 'owner-console'))
+    expect(withAddons.stdout).toContain(join(repoRoot, 'plugins', 'assistant-proactive'))
+    expect(withAddons.stdout).toContain(join(repoRoot, 'plugins', 'assistant-dreaming'))
+
+    const supervisedOptOut = installer([
+      '--dry-run', '--yes', '--scenario', 'supervised', '--lark', 'configure', '--proactive', 'off', '--growth', 'off',
+    ], await temporaryHome())
+    expect(supervisedOptOut.status, supervisedOptOut.stderr).toBe(0)
+    expect(supervisedOptOut.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-proactive'))
+    expect(supervisedOptOut.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-growth-driver'))
+  })
+
+  test('install intent persists optional proactive/dreaming/growth switches backwards-compatibly', async () => {
+    const home = await temporaryHome()
+    const writeExt = library('dsh_enhanced_write_install_intent ' + JSON.stringify(home) + ' web skip auto-skip on off on')
+    expect(writeExt.status, writeExt.stderr).toBe(0)
+    const intent = JSON.parse(await readFile(join(home, '.dsh-enhanced', 'install-intent.json'), 'utf8')) as Record<string, unknown>
+    expect(intent).toMatchObject({
+      schemaVersion: 1,
+      scenario: 'web',
+      learning: 'skip',
+      pluginPreset: 'auto-skip',
+      proactive: 'on',
+      dreaming: 'off',
+      growth: 'on',
+    })
+    const readExt = library('dsh_enhanced_read_install_intent ' + JSON.stringify(home))
+    expect(readExt.status, readExt.stderr).toBe(0)
+    expect(readExt.stdout.trim().split(' ')).toEqual(['web', 'skip', 'auto-skip', String(intent.at), 'on', 'off', 'on'])
+
+    // Unknown extra keys in install-intent.json fail closed.
+    await writeFile(join(home, '.dsh-enhanced', 'install-intent.json'), JSON.stringify({ ...intent, extraKey: 'bad' }) + '\n')
+    expect(library('dsh_enhanced_read_install_intent ' + JSON.stringify(home)).status).toBe(2)
   })
 })
