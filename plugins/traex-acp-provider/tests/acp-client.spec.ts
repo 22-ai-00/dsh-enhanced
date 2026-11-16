@@ -18,6 +18,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ACP_USAGE_DSH_MAPPING_GATE,
+  buildAgyArgs,
   buildTraexEnv,
   discoverTraexAcpModels,
   runTraexAcpText,
@@ -1133,5 +1134,273 @@ describe('TraeX ACP subprocess transport', () => {
     expect(contexts).toHaveLength(1)
     expect(contexts[0]).toMatchObject({ promptSubmissionState: 'submitted', teardownState: 'failed' })
     state.child?.close(0, null)
+  })
+})
+
+function agyHarness(options: {
+  readonly authRequired?: boolean
+  readonly agentName?: string
+  readonly omitThoughtLevelFor?: ReadonlySet<string>
+  readonly includeModeOption?: boolean
+} = {}): { state: FakeState; spawn: SpawnProcess } {
+  const state: FakeState = {
+    initialize: [],
+    sessions: [],
+    prompts: [],
+    modelSelections: [],
+    closedSessions: [],
+    wireMethods: [],
+    wireMessages: [],
+    kills: [],
+  }
+  const spawn: SpawnProcess = (command, args, spawnOptions) => {
+    state.spawn = { command, args: [...args], options: spawnOptions }
+    const child = new FakeProcess(state, true, true)
+    state.child = child
+    queueMicrotask(() => child.emit('spawn'))
+    const stream = ndJsonStream(
+      Writable.toWeb(child.stdout),
+      Readable.toWeb(child.stdin),
+    )
+    state.connection = new AgentSideConnection(connection => {
+      let selectedModel = 'gemini-4-carbon'
+      let selectedThought = 'medium'
+      let selectedMode = 'default'
+      const configOptions = (): SessionConfigOption[] => {
+        const result: SessionConfigOption[] = [{
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: selectedModel,
+          options: [
+            { value: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
+            { value: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
+            { value: 'gemini-pro-orchestrator', name: 'Orchestrator (Carbon)' },
+          ],
+        }]
+        if (!(options.omitThoughtLevelFor?.has(selectedModel) ?? selectedModel === 'gemini-pro-orchestrator')) {
+          const efforts = selectedModel === 'gemini-4-hydrogen'
+            ? ['low', 'medium', 'high', 'xhigh']
+            : ['low', 'medium', 'high']
+          result.push({
+            id: 'thought_level',
+            name: 'Thinking Level',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: efforts.includes(selectedThought) ? selectedThought : 'medium',
+            options: efforts.map(value => ({ value, name: value.charAt(0).toUpperCase() + value.slice(1) })),
+          })
+        }
+        if (options.includeModeOption !== false) {
+          result.push({
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: selectedMode,
+            options: [
+              { value: 'default', name: 'Default' },
+              { value: 'accept-edits', name: 'Accept edits' },
+              { value: 'auto', name: 'Auto' },
+              { value: 'plan', name: 'Plan' },
+            ],
+          })
+        }
+        return result
+      }
+      const agent: Agent = {
+        initialize(request) {
+          state.initialize.push(request)
+          // `agy acp` omits `agentInfo.title` and sends snake_case + camelCase capabilities.
+          return Promise.resolve({
+            protocolVersion: PROTOCOL_VERSION,
+            agentInfo: {
+              name: options.agentName ?? 'Antigravity ACP Server',
+              version: '1.5.9',
+            },
+            agentCapabilities: {
+              loadSession: true,
+              load_session: true,
+              promptCapabilities: { image: true, audio: false, embeddedContext: true },
+              sessionCapabilities: { close: {}, resume: {}, load: {}, list: {}, additionalDirectories: {} },
+              session_capabilities: { close: {}, resume: {}, load: {}, list: {}, additionalDirectories: {} },
+            } as never,
+            authMethods: [
+              { id: 'oauth-personal', name: 'Log in with Google', description: 'Log in with your Google account' },
+              { id: 'oauth-business', name: 'Log in with Gemini Enterprise', description: 'Log in with your Gemini Enterprise account' },
+              { id: 'gemini-api-key', name: 'Gemini API key', description: 'Use an API key with Gemini Developer API' },
+              { id: 'agent-platform', name: 'Gemini Enterprise Agent Platform', description: 'Vertex AI ADC' },
+            ],
+          })
+        },
+        authenticate() {
+          return Promise.reject(new Error('interactive authentication must not be called'))
+        },
+        newSession(request) {
+          state.sessions.push(request)
+          if (options.authRequired) {
+            return Promise.reject(new RequestError(-32000, 'Authentication required'))
+          }
+          return Promise.resolve({
+            sessionId: 'agy-session-1',
+            configOptions: configOptions(),
+          })
+        },
+        async setSessionConfigOption(request) {
+          state.modelSelections.push(request)
+          if (request.configId === 'model') selectedModel = request.value as string
+          if (request.configId === 'thought_level') selectedThought = request.value as string
+          if (request.configId === 'mode') {
+            selectedMode = request.value as string
+            await connection.sessionUpdate({
+              sessionId: request.sessionId,
+              update: { sessionUpdate: 'current_mode_update', currentModeId: selectedMode },
+            })
+          }
+          const updated = configOptions()
+          await connection.sessionUpdate({
+            sessionId: request.sessionId,
+            update: { sessionUpdate: 'config_option_update', configOptions: updated },
+          })
+          return { configOptions: updated }
+        },
+        async prompt(request) {
+          state.prompts.push(request)
+          await connection.sessionUpdate({
+            sessionId: request.sessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'agy-answer' } },
+          })
+          return { stopReason: 'end_turn' }
+        },
+        cancel() {
+          return Promise.resolve()
+        },
+        closeSession(request) {
+          state.closedSessions.push(request.sessionId)
+          return Promise.resolve({})
+        },
+      }
+      return agent
+    }, stream)
+    return child
+  }
+  return { state, spawn }
+}
+
+describe('Antigravity ACP subprocess transport', () => {
+  const agySafeArgs = buildAgyArgs({ includeDefaultCustomizations: false, disableTelemetry: true })
+  const agyInvocation: TraexAcpInvocation = {
+    backend: 'agy',
+    command: 'agy',
+    args: agySafeArgs,
+    cwd: process.cwd(),
+    prompt: 'answer this',
+  }
+
+  it('discovers Antigravity models and per-model thought_level (including xhigh and none) without prompting', async () => {
+    const { state, spawn } = agyHarness()
+    const observation = await discoverTraexAcpModels({
+      backend: 'agy',
+      command: 'agy',
+      args: agySafeArgs,
+      cwd: process.cwd(),
+    }, { spawn })
+
+    expect(observation).toMatchObject({
+      currentValue: 'gemini-4-carbon',
+      modelValues: ['gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-pro-orchestrator'],
+      completeReasoning: true,
+      models: [
+        {
+          id: 'gemini-4-carbon',
+          name: 'Gemini 4 Carbon',
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'medium', name: 'Medium' },
+              { id: 'high', name: 'High' },
+            ],
+            defaultEffort: 'medium',
+          },
+        },
+        {
+          id: 'gemini-4-hydrogen',
+          name: 'Gemini 4 Hydrogen',
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'medium', name: 'Medium' },
+              { id: 'high', name: 'High' },
+              { id: 'xhigh', name: 'Xhigh' },
+            ],
+            defaultEffort: 'medium',
+          },
+        },
+        {
+          id: 'gemini-pro-orchestrator',
+          name: 'Orchestrator (Carbon)',
+        },
+      ],
+    })
+    expect(observation.models[2]).not.toHaveProperty('reasoning')
+    expect(state.prompts).toHaveLength(0)
+    expect(state.closedSessions).toEqual(['agy-session-1'])
+  })
+
+  it('accepts initialize without agentInfo.title, selects model + thought_level + agyMode, and handles session/update notifications', async () => {
+    const { state, spawn } = agyHarness()
+    const output = await collect({
+      ...agyInvocation,
+      model: 'gemini-4-hydrogen',
+      reasoningEffort: 'xhigh',
+      agyMode: 'plan',
+    }, { spawn })
+
+    expect(output).toEqual(['agy-answer'])
+    expect(state.spawn?.args).toEqual([
+      'acp',
+      '--sandbox',
+      '--include-default-customizations=false',
+      '--disable-telemetry',
+      '--stdio',
+    ])
+    expect(state.modelSelections).toEqual([
+      { sessionId: 'agy-session-1', configId: 'model', value: 'gemini-4-hydrogen' },
+      { sessionId: 'agy-session-1', configId: 'thought_level', value: 'xhigh' },
+      { sessionId: 'agy-session-1', configId: 'mode', value: 'plan' },
+    ])
+    expect(state.closedSessions).toEqual(['agy-session-1'])
+  })
+
+  it('maps Antigravity session/new -32000 Authentication required to auth failure', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { state, spawn } = agyHarness({ authRequired: true })
+    await expect(collect(agyInvocation, { spawn })).rejects.toMatchObject({
+      cause: 'auth',
+      message: 'Antigravity ACP requires an existing non-interactive login',
+    })
+    expect(state.prompts).toHaveLength(0)
+  })
+
+  it('rejects impostor agentInfo.name on Antigravity route before session/new', async () => {
+    const { state, spawn } = agyHarness({ agentName: 'traecli-acp' })
+    await expect(collect(agyInvocation, { spawn })).rejects.toMatchObject({ cause: 'protocol' })
+    expect(state.sessions).toHaveLength(0)
+    expect(state.prompts).toHaveLength(0)
+  })
+
+  it.each([
+    ['dangerously-skip-permissions', ['acp', '--sandbox', '--dangerously-skip-permissions', '--stdio']],
+    ['top-level --model flag', ['acp', '--sandbox', '--model', 'gemini-4-carbon', '--stdio']],
+    ['top-level --effort flag', ['acp', '--sandbox', '--effort', 'high', '--stdio']],
+    ['interactive --login flag', ['acp', '--sandbox', '--login', '--stdio']],
+    ['missing --sandbox flag', ['acp', '--stdio']],
+    ['traex serve args', ['--sandbox', 'read-only', '--ask-for-approval', 'never', 'acp', 'serve']],
+  ])('rejects unsafe or invalid Antigravity argv (%s) before spawning', async (_label, badArgs) => {
+    const spawn = vi.fn<SpawnProcess>()
+    await expect(collect({ ...agyInvocation, args: badArgs }, { spawn }))
+      .rejects.toMatchObject({ cause: 'protocol' })
+    expect(spawn).not.toHaveBeenCalled()
   })
 })

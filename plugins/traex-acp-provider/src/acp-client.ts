@@ -28,20 +28,26 @@ import {
   zSessionConfigOption,
   zSetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js'
+import type { AgySessionMode } from './config.js'
 import { version } from './version.js'
 
+export type AcpBackend = 'traex' | 'agy'
+
 export interface TraexAcpInvocation {
+  readonly backend?: AcpBackend
   readonly command: string
   readonly args: readonly string[]
   readonly cwd: string
   readonly prompt: string
   readonly model?: string
   readonly reasoningEffort?: string
+  readonly agyMode?: AgySessionMode
   /** Internal transport mode used by the prompt-free catalog discovery wrapper. */
   readonly operation?: 'prompt' | 'catalog'
 }
 
 export interface TraexAcpCatalogInvocation {
+  readonly backend?: AcpBackend
   readonly command: string
   readonly args: readonly string[]
   readonly cwd: string
@@ -259,7 +265,7 @@ export class TraexAcpError extends Error {
   }
 }
 
-const SAFE_ARGS = [
+export const SAFE_TRAEX_ARGS = [
   '--sandbox',
   'read-only',
   '--ask-for-approval',
@@ -268,9 +274,68 @@ const SAFE_ARGS = [
   'serve',
 ] as const
 
-// Known Trae CLI ACP identities across verified versions. Keep this exact:
-// accepting an arbitrary ACP agent here would grant it the Trae account-backed route.
+export interface BuildAgyArgsOptions {
+  readonly includeDefaultCustomizations?: boolean
+  readonly disableTelemetry?: boolean
+}
+
+/** Build the strict fixed argv allowlist for `agy acp` (never passing `--dangerously-skip-permissions` or top-level-only flags). */
+export function buildAgyArgs(options: BuildAgyArgsOptions = {}): readonly string[] {
+  return [
+    'acp',
+    '--sandbox',
+    ...(options.includeDefaultCustomizations ? [] : ['--include-default-customizations=false']),
+    ...(options.disableTelemetry === false ? [] : ['--disable-telemetry']),
+    '--stdio',
+  ]
+}
+
+// Known CLI ACP identities across verified versions. Keep exact allowlists per backend:
+// accepting an arbitrary ACP agent would grant it the local account-backed route.
 const TRAE_ACP_AGENT_NAMES = new Set(['traex-acp', 'traecli-acp'])
+const AGY_ACP_AGENT_NAMES = new Set(['Antigravity ACP Server'])
+const AGY_AUTH_METHOD_IDS = new Set([
+  'oauth-personal',
+  'oauth-business',
+  'gemini-api-key',
+  'agent-platform',
+])
+
+interface BackendSpec {
+  readonly label: string
+  readonly clientTitle: string
+  readonly agentNames: ReadonlySet<string>
+  readonly isAllowedAuthMethod: (value: unknown) => boolean
+  readonly isSafeArgs: (args: readonly string[]) => boolean
+}
+
+const ALLOWED_AGY_ARGS: readonly (readonly string[])[] = [
+  buildAgyArgs({ includeDefaultCustomizations: false, disableTelemetry: true }),
+  buildAgyArgs({ includeDefaultCustomizations: true, disableTelemetry: true }),
+  buildAgyArgs({ includeDefaultCustomizations: false, disableTelemetry: false }),
+  buildAgyArgs({ includeDefaultCustomizations: true, disableTelemetry: false }),
+]
+
+function exactArgs(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index])
+}
+
+const BACKEND_SPECS: Record<AcpBackend, BackendSpec> = {
+  traex: {
+    label: 'TraeX',
+    clientTitle: 'DSH TraeX ACP Provider',
+    agentNames: TRAE_ACP_AGENT_NAMES,
+    isAllowedAuthMethod: isTraeSsoAuthMethod,
+    isSafeArgs: args => exactArgs(args, SAFE_TRAEX_ARGS),
+  },
+  agy: {
+    label: 'Antigravity',
+    clientTitle: 'DSH Antigravity ACP Provider',
+    agentNames: AGY_ACP_AGENT_NAMES,
+    isAllowedAuthMethod: isAgyAuthMethod,
+    isSafeArgs: args => ALLOWED_AGY_ARGS.some(allowed => exactArgs(args, allowed)),
+  },
+}
 
 const defaults = {
   timeoutMs: 10 * 60_000,
@@ -321,6 +386,9 @@ export async function* runTraexAcpText(
   invocation: TraexAcpInvocation,
   options: RunTraexAcpOptions = {},
 ): AsyncIterable<string> {
+  const backend: AcpBackend = invocation.backend ?? 'traex'
+  const spec = BACKEND_SPECS[backend]
+
   // Pre-spawn failures never handed the prompt to the ACP stream: report not-submitted and stop.
   const reportPreSpawn = (failedPhase: TraexLifecyclePhase): void => {
     if (options.onSettled === undefined) return
@@ -332,14 +400,14 @@ export async function* runTraexAcpText(
   }
   let limits: ValidatedLimits
   try {
-    limits = validate(invocation, options)
+    limits = validate(invocation, options, spec)
   } catch (error) {
     reportPreSpawn('initialize')
     throw error
   }
   if (options.signal?.aborted) {
     reportPreSpawn('initialize')
-    throw new TraexAcpError('abort')
+    throw new TraexAcpError('abort', failureMessage('abort', backend))
   }
 
   let child: SpawnedProcess
@@ -353,11 +421,11 @@ export async function* runTraexAcpText(
     })
   } catch (error) {
     reportPreSpawn('initialize')
-    throw processFailure(error)
+    throw processFailure(error, backend)
   }
 
   const queue = new TextQueue()
-  const rpcGuard = new AcpJsonRpcGuard()
+  const rpcGuard = new AcpJsonRpcGuard(backend)
   let client: ClientSideConnection | undefined
   let sessionId: string | undefined
   let outputBytes = 0
@@ -533,14 +601,14 @@ export async function* runTraexAcpText(
     void shutdown(true)
   }
 
-  child.once('error', error => stop(processFailure(error)))
+  child.once('error', error => stop(processFailure(error, backend)))
   child.once('spawn', () => { childSpawnedAt ??= performance.now() })
   child.once('close', (code, signal) => {
     closeResult = { code, signal }
     resolveClosed?.()
     if (!terminating) {
-      if (code !== 0 || signal !== null) recordFailure(new TraexAcpError('process'))
-      else if (!turnFinished) recordFailure(new TraexAcpError('protocol'))
+      if (code !== 0 || signal !== null) recordFailure(new TraexAcpError('process', failureMessage('process', backend)))
+      else if (!turnFinished) recordFailure(new TraexAcpError('protocol', failureMessage('protocol', backend)))
     }
   })
 
@@ -619,17 +687,17 @@ export async function* runTraexAcpText(
         clientCapabilities: {},
         clientInfo: {
           name: 'dsh-enhanced-traex-acp-provider',
-          title: 'DSH TraeX ACP Provider',
+          title: spec.clientTitle,
           version,
         },
       }))
       throwIfFatal(fatal)
       if (initialized.protocolVersion !== PROTOCOL_VERSION
-        || !TRAE_ACP_AGENT_NAMES.has(initialized.agentInfo?.name ?? '')) {
-        throw new TraexAcpError('protocol')
+        || !spec.agentNames.has(initialized.agentInfo?.name ?? '')) {
+        throw new TraexAcpError('protocol', failureMessage('protocol', backend))
       }
-      if (!initialized.authMethods?.some(isTraeSsoAuthMethod)) {
-        throw new TraexAcpError('auth')
+      if (!initialized.authMethods?.some(spec.isAllowedAuthMethod)) {
+        throw new TraexAcpError('auth', failureMessage('auth', backend))
       }
 
       phase = 'new-session'
@@ -735,6 +803,29 @@ export async function* runTraexAcpText(
         }
       }
 
+      if (backend === 'agy' && invocation.agyMode !== undefined && invocation.agyMode !== 'default') {
+        const modeOption = validateModeCatalog(activeConfigOptions)
+        if (modeOption === undefined || !selectValues(modeOption).includes(invocation.agyMode)) {
+          throw new TraexAcpError('protocol', failureMessage('protocol', backend))
+        }
+        if (modeOption.currentValue !== invocation.agyMode) {
+          const updated = await awaitRpc(client.setSessionConfigOption({
+            sessionId,
+            configId: modeOption.id,
+            value: invocation.agyMode,
+          }))
+          activeModelOption = validateModelCatalog(updated.configOptions)
+          activeConfigOptions = updated.configOptions
+          const selectedMode = validateModeCatalog(activeConfigOptions)
+          if (activeModelOption.currentValue !== (invocation.model ?? initialModelOption.currentValue)
+            || selectedMode?.id !== modeOption.id
+            || selectedMode.currentValue !== invocation.agyMode) {
+            throw new TraexAcpError('protocol', failureMessage('protocol', backend))
+          }
+          throwIfFatal(fatal)
+        }
+      }
+
       const activeReasoning = validateReasoningCatalog(activeConfigOptions)
       observeCatalog(buildCatalogObservation(
         activeModelOption,
@@ -787,7 +878,7 @@ export async function* runTraexAcpText(
       await shutdown(false)
       throwIfFatal(fatal)
     } catch (error) {
-      const normalized = fatal ?? normalizeFailure(error)
+      const normalized = fatal ?? normalizeFailure(error, backend)
       recordFailure(normalized)
       // Teardown still runs to reap the child; `phase` records if close-session was where it failed.
       await shutdown(true)
@@ -810,7 +901,7 @@ export async function* runTraexAcpText(
 
   void operation.then(
     () => queue.close(),
-    error => queue.close(normalizeFailure(error)),
+    error => queue.close(normalizeFailure(error, backend)),
   )
 
   try {
@@ -880,16 +971,17 @@ function sanitizeEnvValue(name: string, value: string): string | undefined {
 function validate(
   invocation: TraexAcpInvocation,
   options: RunTraexAcpOptions,
+  spec: BackendSpec,
 ): ValidatedLimits {
   if (invocation.command.trim().length === 0 || !isAbsolute(invocation.cwd)) {
     throw new TraexAcpError('protocol')
   }
-  if (invocation.args.length !== SAFE_ARGS.length
-    || invocation.args.some((value, index) => value !== SAFE_ARGS[index])) {
+  if (!spec.isSafeArgs(invocation.args)) {
     throw new TraexAcpError('protocol')
   }
   if (invocation.operation === 'catalog'
-    && (invocation.prompt.length !== 0 || invocation.model !== undefined || invocation.reasoningEffort !== undefined)) {
+    && (invocation.prompt.length !== 0 || invocation.model !== undefined
+      || invocation.reasoningEffort !== undefined || invocation.agyMode !== undefined)) {
     throw new TraexAcpError('protocol')
   }
   if (invocation.model !== undefined && invocation.model.length === 0) {
@@ -915,17 +1007,35 @@ function positiveInteger(value: number | undefined, fallback: number): number {
   return value
 }
 
-function validateModelCatalog(
+function validateSelectCatalog(
   options: readonly SessionConfigOption[] | null | undefined,
-): Extract<SessionConfigOption, { type: 'select' }> {
+  predicate: (option: Extract<SessionConfigOption, { type: 'select' }>) => boolean,
+  required: true,
+): Extract<SessionConfigOption, { type: 'select' }>
+function validateSelectCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+  predicate: (option: Extract<SessionConfigOption, { type: 'select' }>) => boolean,
+  required: false,
+): Extract<SessionConfigOption, { type: 'select' }> | undefined
+function validateSelectCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+  predicate: (option: Extract<SessionConfigOption, { type: 'select' }>) => boolean,
+  required: boolean,
+): Extract<SessionConfigOption, { type: 'select' }> | undefined {
   const matches = (options ?? []).filter((option): option is Extract<SessionConfigOption, { type: 'select' }> => (
-    option.type === 'select' && (option.category === 'model' || option.id === 'model')
+    option.type === 'select' && predicate(option)
   ))
+  if (matches.length === 0) {
+    if (required) throw new TraexAcpError('protocol')
+    return undefined
+  }
   if (matches.length !== 1) throw new TraexAcpError('protocol')
   const option = matches[0]!
   const entries = selectEntries(option)
   const values = entries.map(entry => entry.value)
-  if (option.currentValue.length === 0 || entries.length === 0) throw new TraexAcpError('entitlement')
+  if (option.currentValue.length === 0 || entries.length === 0) {
+    throw new TraexAcpError(required ? 'entitlement' : 'protocol')
+  }
   if (!values.includes(option.currentValue) || new Set(values).size !== values.length
     || entries.some(entry => entry.value.length === 0 || entry.name.length === 0)) {
     throw new TraexAcpError('protocol')
@@ -933,23 +1043,26 @@ function validateModelCatalog(
   return option
 }
 
+function validateModelCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+): Extract<SessionConfigOption, { type: 'select' }> {
+  return validateSelectCatalog(options, option => option.category === 'model' || option.id === 'model', true)
+}
+
 function validateReasoningCatalog(
   options: readonly SessionConfigOption[] | null | undefined,
 ): Extract<SessionConfigOption, { type: 'select' }> | undefined {
-  const matches = (options ?? []).filter((option): option is Extract<SessionConfigOption, { type: 'select' }> => (
-    option.type === 'select' && (option.category === 'thought_level' || option.id === 'reasoning_effort')
-  ))
-  if (matches.length === 0) return undefined
-  if (matches.length !== 1) throw new TraexAcpError('protocol')
-  const option = matches[0]!
-  const entries = selectEntries(option)
-  const values = entries.map(entry => entry.value)
-  if (option.currentValue.length === 0 || entries.length === 0
-    || !values.includes(option.currentValue) || new Set(values).size !== values.length
-    || entries.some(entry => entry.value.length === 0 || entry.name.length === 0)) {
-    throw new TraexAcpError('protocol')
-  }
-  return option
+  return validateSelectCatalog(
+    options,
+    option => option.category === 'thought_level' || option.id === 'reasoning_effort',
+    false,
+  )
+}
+
+function validateModeCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+): Extract<SessionConfigOption, { type: 'select' }> | undefined {
+  return validateSelectCatalog(options, option => option.category === 'mode' || option.id === 'mode', false)
 }
 
 function catalogReasoning(
@@ -1034,30 +1147,33 @@ function throwIfFatal(error: TraexAcpError | undefined): void {
   if (error !== undefined) throw error
 }
 
-function normalizeFailure(error: unknown): TraexAcpError {
+function normalizeFailure(error: unknown, backend: AcpBackend = 'traex'): TraexAcpError {
   if (error instanceof TraexAcpError) return error
-  if (error instanceof RequestError && error.code === -32000) return new TraexAcpError('auth')
-  return new TraexAcpError('protocol')
+  if (error instanceof RequestError && error.code === -32000) {
+    return new TraexAcpError('auth', failureMessage('auth', backend))
+  }
+  return new TraexAcpError('protocol', failureMessage('protocol', backend))
 }
 
-function processFailure(error: unknown): TraexAcpError {
+function processFailure(error: unknown, backend: AcpBackend = 'traex'): TraexAcpError {
   const systemCode = error !== null && typeof error === 'object' && 'code' in error
     && typeof error.code === 'string' ? error.code : undefined
-  return new TraexAcpError('process', undefined, systemCode)
+  return new TraexAcpError('process', failureMessage('process', backend), systemCode)
 }
 
-function failureMessage(failure: TraexAcpFailure): string {
+function failureMessage(failure: TraexAcpFailure, backend: AcpBackend = 'traex'): string {
+  const label = backend === 'agy' ? 'Antigravity' : 'TraeX'
   const messages: Record<TraexAcpFailure, string> = {
-    abort: 'TraeX ACP execution was aborted',
-    timeout: 'TraeX ACP execution timed out',
-    protocol: 'TraeX ACP protocol validation failed',
-    auth: 'TraeX ACP requires an existing non-interactive login',
-    entitlement: 'TraeX ACP did not expose an entitled model',
-    model: 'TraeX ACP did not expose the requested model',
-    reasoning: 'TraeX ACP did not expose the requested reasoning effort',
-    refusal: 'TraeX ACP refused the request',
-    process: 'TraeX ACP process failed',
-    'output-limit': 'TraeX ACP output exceeded its configured limit',
+    abort: `${label} ACP execution was aborted`,
+    timeout: `${label} ACP execution timed out`,
+    protocol: `${label} ACP protocol validation failed`,
+    auth: `${label} ACP requires an existing non-interactive login`,
+    entitlement: `${label} ACP did not expose an entitled model`,
+    model: `${label} ACP did not expose the requested model`,
+    reasoning: `${label} ACP did not expose the requested reasoning effort`,
+    refusal: `${label} ACP refused the request`,
+    process: `${label} ACP process failed`,
+    'output-limit': `${label} ACP output exceeded its configured limit`,
   }
   return messages[failure]
 }
@@ -1075,6 +1191,8 @@ const clientRequestMethods = new Set([
 class AcpJsonRpcGuard {
   private readonly pendingClientRequests = new Map<string, string>()
   private readonly pendingAgentRequests = new Map<string, string>()
+
+  constructor(private readonly backend: AcpBackend = 'traex') {}
 
   acceptIncoming(envelope: JsonObject): void {
     if (envelope.jsonrpc !== '2.0') throw new TraexAcpError('protocol')
@@ -1098,7 +1216,7 @@ class AcpJsonRpcGuard {
     const method = this.pendingClientRequests.get(key)
     if (method === undefined) throw new TraexAcpError('protocol')
     if (hasResult) {
-      if (!validClientResponse(method, envelope.result)) throw new TraexAcpError('protocol')
+      if (!validClientResponse(method, envelope.result, this.backend)) throw new TraexAcpError('protocol')
     } else if (!validJsonRpcError(envelope.error)) {
       throw new TraexAcpError('protocol')
     }
@@ -1201,8 +1319,8 @@ function guardOutgoingStream(stream: Stream, guard: AcpJsonRpcGuard): Stream {
   }
 }
 
-function validClientResponse(method: string, result: unknown): boolean {
-  if (method === 'initialize') return validInitializeResponse(result)
+function validClientResponse(method: string, result: unknown, backend: AcpBackend): boolean {
+  if (method === 'initialize') return validInitializeResponse(result, backend)
   if (method === 'session/new') {
     return zNewSessionResponse.safeParse(result).success && validRawConfigOptions(result)
   }
@@ -1231,7 +1349,7 @@ function validPromptResponse(value: unknown): boolean {
 }
 
 /** The SDK's generated initialize schema deliberately skips malformed optional fields. */
-function validInitializeResponse(value: unknown): boolean {
+function validInitializeResponse(value: unknown, backend: AcpBackend): boolean {
   if (!zInitializeResponse.safeParse(value).success) return false
   const response = jsonObject(value)
   if (response === undefined) return false
@@ -1248,22 +1366,43 @@ function validInitializeResponse(value: unknown): boolean {
 
   if (own(response, 'authMethods')) {
     if (!Array.isArray(response.authMethods)) return false
-    const traeMethods = response.authMethods.filter(method => jsonObject(method)?.id === 'trae-sso')
-    if (traeMethods.length > 1 || (traeMethods.length === 1 && !isTraeSsoAuthMethod(traeMethods[0]))) {
-      return false
+    if (backend === 'traex') {
+      const traeMethods = response.authMethods.filter(method => jsonObject(method)?.id === 'trae-sso')
+      if (traeMethods.length > 1 || (traeMethods.length === 1 && !isTraeSsoAuthMethod(traeMethods[0]))) {
+        return false
+      }
+    } else {
+      const seenAgy = new Set<string>()
+      for (const candidate of response.authMethods) {
+        const id = jsonObject(candidate)?.id
+        if (typeof id !== 'string' || !AGY_AUTH_METHOD_IDS.has(id)) continue
+        if (seenAgy.has(id) || !isAgyAuthMethod(candidate)) return false
+        seenAgy.add(id)
+      }
     }
   }
   return true
 }
 
-function isTraeSsoAuthMethod(value: unknown): boolean {
+function isAgentAuthMethod(value: unknown, allowedIds: ReadonlySet<string>): boolean {
   const method = jsonObject(value)
   return method !== undefined
     && !own(method, 'type')
-    && method.id === 'trae-sso'
+    && typeof method.id === 'string'
+    && allowedIds.has(method.id)
     && typeof method.name === 'string'
     && method.name.length > 0
     && zAuthMethodAgent.safeParse(value).success
+}
+
+const TRAE_SSO_IDS = new Set(['trae-sso'])
+
+function isTraeSsoAuthMethod(value: unknown): boolean {
+  return isAgentAuthMethod(value, TRAE_SSO_IDS)
+}
+
+function isAgyAuthMethod(value: unknown): boolean {
+  return isAgentAuthMethod(value, AGY_AUTH_METHOD_IDS)
 }
 
 function validRawConfigOptions(value: unknown): boolean {

@@ -7,6 +7,8 @@ const CODEX_PROVIDER = 'codex-subscription'
 const CODEX_MODEL = 'gpt-5.6-terra'
 const TRAEX_PROVIDER = 'traex-agent'
 const TRAEX_MODEL = 'default'
+const AGY_PROVIDER = 'agy-agent'
+const AGY_MODEL = 'default'
 const PROTOCOLS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages'])
 const ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/u
@@ -212,6 +214,25 @@ export async function prepareRealRoute({ env = { ...process.env }, home, workspa
         appendDefaultModel(patch, provider, model)
       },
       proof: { provider, model, api: 'acp', command: 'traex', cwd },
+    }
+  }
+
+  if (provider === AGY_PROVIDER) {
+    const model = requestedModel || AGY_MODEL
+    if (typeof model !== 'string' || !/\S/u.test(model)) fail('invalid Antigravity model')
+    const cwd = resolve(workspace)
+    return {
+      provider,
+      model,
+      bundles: ['traex-acp-provider'],
+      configurePatch(patch, setConfig) {
+        if (typeof setConfig !== 'function') fail('setConfig must be a function')
+        setConfig(patch, 'dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', {
+          enabled: false, agyEnabled: true, cwd, agyModels: [model],
+        })
+        appendDefaultModel(patch, provider, model)
+      },
+      proof: { provider, model, api: 'acp', command: 'agy', cwd },
     }
   }
 

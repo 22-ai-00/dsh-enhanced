@@ -18,13 +18,15 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  AGY_PROVIDER_ROUTE,
+  probeAcpReadiness,
   probeTraexReadiness,
   redactDiagnostic,
   TraexAcpAdapter as RawTraexAcpAdapter,
   type AdapterDependencies,
   type TraexAcpTextRunner,
 } from '../src/adapter.ts'
-import type { RunTraexAcpOptions, TraexAcpInvocation } from '../src/acp-client.ts'
+import { buildAgyArgs, type RunTraexAcpOptions, type TraexAcpInvocation } from '../src/acp-client.ts'
 import { Config } from '../src/config.ts'
 
 function request(model = 'default', reasoningEffort?: string): GenerateOptions {
@@ -1380,5 +1382,140 @@ describe('TraeX ACP LLM adapter', () => {
     expect(adapter.peekObservedCatalog()).toBeDefined()
     clock = 1_000
     expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
+  it('supports Antigravity (agy-agent) discovery, single-process auth, isolated caches, and delegated tool prefixes', async () => {
+    const traexCatalog = {
+      currentValue: 'default',
+      modelValues: ['default', 'trae-fast'],
+      models: [{ id: 'default', name: 'TraeX default' }, { id: 'trae-fast', name: 'Trae Fast' }],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const agyCatalog = {
+      currentValue: 'gemini-4-carbon',
+      modelValues: ['gemini-4-carbon', 'gemini-4-hydrogen'],
+      models: [
+        { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
+        {
+          id: 'gemini-4-hydrogen',
+          name: 'Gemini 4 Hydrogen',
+          reasoning: {
+            efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'XHigh' }],
+            defaultEffort: 'medium',
+          },
+        },
+      ],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+
+    const discoverModels = vi.fn(async (inv: { backend?: string }) => (
+      inv.backend === 'agy' ? agyCatalog : traexCatalog
+    ))
+    let capturedAgyInvocation: TraexAcpInvocation | undefined
+    const runText: TraexAcpTextRunner = (inv, opts) => {
+      capturedAgyInvocation = inv
+      return (async function* () {
+        yield JSON.stringify({
+          protocol: 'dsh-tool-calls/v1',
+          calls: [{ name: 'read', arguments: { path: 'README.md' } }],
+        })
+        opts?.onStopReason?.('end_turn')
+      })()
+    }
+    const config = Config({
+      enabled: true,
+      agyEnabled: true,
+      agyCommand: '/usr/local/bin/agy',
+      agyMode: 'plan',
+    } as never)
+    const adapter = new TraexAcpAdapter(config, {
+      discoverModels,
+      runText,
+    })
+
+    expect(adapter.providerInfo(AGY_PROVIDER_ROUTE)).toEqual({
+      id: 'agy-agent',
+      name: 'Antigravity Agent (local ACP)',
+    })
+
+    const agyModels = await adapter.listModels(AGY_PROVIDER_ROUTE)
+    expect(agyModels).toEqual([
+      expect.objectContaining({ provider: 'agy-agent', id: 'default', name: 'Antigravity active model (Gemini 4 Carbon)' }),
+      expect.objectContaining({ provider: 'agy-agent', id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' }),
+      expect.objectContaining({ provider: 'agy-agent', id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' }),
+    ])
+    expect(discoverModels).toHaveBeenCalledWith({
+      backend: 'agy',
+      command: '/usr/local/bin/agy',
+      args: buildAgyArgs({ includeDefaultCustomizations: false, disableTelemetry: true }),
+      cwd: process.cwd(),
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+
+    expect(adapter.peekObservedCatalog('agy-agent')?.observation).toEqual(agyCatalog)
+    expect(adapter.peekObservedCatalog('traex-agent')).toBeUndefined()
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-hydrogen')).resolves.toMatchObject({
+      provider: 'agy-agent',
+      id: 'gemini-4-hydrogen',
+      reasoning: {
+        efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'XHigh' }],
+        defaultEffort: 'medium',
+      },
+    })
+
+    const agyRequest: GenerateOptions = {
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'gemini-4-hydrogen',
+      reasoningEffort: ReasoningEffortId('xhigh'),
+      system: 'Be concise.',
+      messages: [createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'read readme' }] })],
+      tools: [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }],
+    }
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream(agyRequest)) chunks.push(chunk)
+    expect(capturedAgyInvocation).toMatchObject({
+      backend: 'agy',
+      command: '/usr/local/bin/agy',
+      model: 'gemini-4-hydrogen',
+      reasoningEffort: 'xhigh',
+      agyMode: 'plan',
+    })
+    expect(capturedAgyInvocation?.prompt).toContain('do not invoke Antigravity-native tools')
+    expect(chunks.find(chunk => chunk.type === 'tool-call-delta')).toMatchObject({
+      id: expect.stringMatching(/^agy-/u),
+      name: 'read',
+    })
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'tool-calls' } })
+
+    await expect(probeAcpReadiness(config, { provider: AGY_PROVIDER_ROUTE }, { discoverModels }))
+      .resolves.toEqual(agyCatalog)
+  })
+
+  it('invalidates the Antigravity catalog observation and returns ACP_AUTH_REQUIRED when ACP reports auth failure', async () => {
+    const adapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      discoverModels: async () => ({
+        currentValue: 'gemini-4-carbon',
+        modelValues: ['gemini-4-carbon'],
+        models: [{ id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' }],
+        completeReasoning: true,
+        observedAt: 1,
+      }),
+      runText: () => failedTextStream('auth'),
+    })
+
+    await adapter.listModels(AGY_PROVIDER_ROUTE)
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeDefined()
+
+    const iterator = adapter.stream({
+      ...request('gemini-4-carbon'),
+      provider: AGY_PROVIDER_ROUTE,
+    })[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: 'ACP_AUTH_REQUIRED',
+      message: expect.stringContaining('Antigravity'),
+    })
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeUndefined()
   })
 })

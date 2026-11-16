@@ -71,14 +71,7 @@ function toolResultImageDescription(block: Extract<ContentBlock, { type: 'image'
   )
 }
 
-function serializeToolResultContent(block: ContentBlock): TranscriptBlock {
-  if (block.type === 'image') {
-    return { type: 'text', text: toolResultImageDescription(block) }
-  }
-  return serializeBlock(block)
-}
-
-function serializeBlock(block: ContentBlock): TranscriptBlock {
+function serializeBlock(block: ContentBlock, agentLabel: string): TranscriptBlock {
   switch (block.type) {
     case 'text':
       return { type: 'text', text: block.text }
@@ -87,32 +80,40 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
     case 'tool-call':
       return { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments }
     case 'image':
-      throw new Error('TraeX ACP provider currently accepts text-only DSH requests')
+      throw new Error(`${agentLabel} ACP provider currently accepts text-only DSH requests`)
     default:
-      throw new Error(`TraeX ACP provider does not support content block type: ${String((block as { type?: unknown }).type)}`)
+      throw new Error(`${agentLabel} ACP provider does not support content block type: ${String((block as { type?: unknown }).type)}`)
   }
 }
 
-function serializeMessage(message: RequestMessage): TranscriptMessage {
+function serializeMessage(message: RequestMessage, agentLabel: string): TranscriptMessage {
   if (message.role === 'tool') return { role: 'tool', content: [{
     type: 'tool-result', toolCallId: message.toolCallId,
     ...(message.isError === undefined ? {} : { isError: message.isError }),
-    content: message.content.map(serializeToolResultContent),
+    content: message.content.map(block => block.type === 'image'
+      ? { type: 'text', text: toolResultImageDescription(block) }
+      : serializeBlock(block, agentLabel)),
   }] }
-  if (message.role === 'user' && message.source?.kind === 'tool') throw new Error('TraeX ACP provider received a tool result in a user message')
-  return { role: message.role, content: message.content.map(serializeBlock) }
+  if (message.role === 'user' && message.source?.kind === 'tool') {
+    throw new Error(`${agentLabel} ACP provider received a tool result in a user message`)
+  }
+  return { role: message.role, content: message.content.map(block => serializeBlock(block, agentLabel)) }
 }
 
-/** Serialize one provider-neutral DSH call into a stateless TraeX ACP turn. */
-export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): string {
+/** Serialize one provider-neutral DSH call into a stateless ACP turn. */
+export function buildPrompt(
+  options: GenerateOptions,
+  maxPromptBytes: number,
+  agentLabel = 'TraeX',
+): string {
   const tools = options.tools ?? []
   const request = {
     protocol: 'dsh-traex-acp-provider/v1',
     instruction: tools.length === 0
-      ? 'Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside TraeX.'
-      : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside TraeX and do not invoke TraeX-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`,
+      ? `Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside ${agentLabel}.`
+      : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside ${agentLabel} and do not invoke ${agentLabel}-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`,
     system: options.system ?? null,
-    conversation: options.messages.map(serializeMessage),
+    conversation: options.messages.map(message => serializeMessage(message, agentLabel)),
     constraints: {
       tools: tools.length === 0
         ? { available: [] }

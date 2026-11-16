@@ -1,12 +1,14 @@
 # @dsh-enhanced/traex-acp-provider
 
-把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：每次模型请求都会在校验 live Agent session 工作区后启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、校验模型/effort，并把握手目录作为非权威展示缓存。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，TraeX 可以返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
+把同一台机器、同一 OS 用户已经登录的 **TraeX / TRAE CLI（`traex-agent`）** 与 **Google Antigravity CLI（`agy-agent`）** 注册为 DeepSeek Harness 的本地 ACP model provider。DSH 在这里是 **ACP client**：每次模型请求都会在校验 live Agent session 工作区后启动新的受限 ACP 子进程（`traex acp serve` 或 `agy acp`）、完成 ACP v1 握手、创建会话、校验模型/effort，并把握手目录作为非权威展示缓存。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，后端返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
 
-启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 发布 `traex-agent` 的 `toolCalls: bridge`，并随 Cordis fiber 撤回。这个字段只描述 adapter 如何把模型输出投影成标准 DSH tool call，不参与 Delivery/Automations 准入，也不改变模型可见的工具或 Skill；真正的工具授权与执行仍由统一的 Agent Loop、Policy、审批和 sandbox 负责。
+启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 为启用的 route（`traex-agent` / `agy-agent`）发布 `toolCalls: bridge`，并随 Cordis fiber 撤回；同时在支持时向 `LlmRuntime` 登记可配置 provider 目录，便于设置界面识别和切换。这个字段只描述 adapter 如何把模型输出投影成标准 DSH tool call，不参与 Delivery/Automations 准入，也不改变模型可见的工具或 Skill；真正的工具授权与执行仍由统一的 Agent Loop、Policy、审批和 sandbox 负责。
 
-这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
+这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX / Antigravity 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
 
 ## 前置条件
+
+### TraeX（`traex-agent`）
 
 需要包含 ACP server 的 TraeX 版本。先在运行 DSH 的同一用户下检查：
 
@@ -21,6 +23,17 @@ traex login status
 一键安装器自动检测 `traex` / `trae-cli` 并补入实际可执行路径；手动安装时可在插件配置中覆盖 `command`。首次登录应在 DSH 外单独完成，例如本机版本提供的 `traex login --sso` 或 `traex login --sso-device`；插件不会启动交互式登录或打开浏览器。
 
 公开的 ByteDance `trae-agent` Python 项目与这里检测到的 TraeX / TRAE CLI 不是同一个运行时。只有 `acp serve` 可用且握手返回 `agentInfo.name = "traex-acp"` 或 `"traecli-acp"` 的实现会被本插件接受；仍要求 ACP protocol v1 与 Trae SSO 认证方法。
+
+### Google Antigravity CLI（`agy-agent`）
+
+需要包含 `acp` 子命令的 Antigravity CLI（已验证基线 `agy 1.5.9`）。在运行 DSH 的同一用户下检查：
+
+```sh
+agy acp --help
+agy models
+```
+
+`agy` 没有 `login status` 子命令，也没有独立 `acp serve` 子命令；未登录时 `agy models` 会以非零退出并提示登录，而 `agy acp` 会在 `session/new` 返回 JSON-RPC `-32000 Authentication required`（映射为 `ACP_AUTH_REQUIRED`）。首次登录请在 DSH 外运行交互式 `agy`（或 `agy acp --login`）完成 Google 账号认证；插件不会启动交互式登录或自动读取 API key 环境变量。只有 `initialize` 返回 ACP protocol v1 且 `agentInfo.name = "Antigravity ACP Server"` 的实现会被接受。
 
 ## 安装
 
@@ -65,8 +78,14 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
     command: traex
     cwd: !!js dshHomePath('assistant-workspace')
     models: [default]
+    agyEnabled: false
+    agyCommand: agy
+    agyModels: [default]
+    agyIncludeDefaultCustomizations: false
+    agyDisableTelemetry: true
+    agyMode: default
     timeoutMs: 600000
-    authProbeTimeoutMs: 10000
+    authProbeTimeoutMs: 30000
     maxAuthProbeBytes: 32768
     killGraceMs: 3000
     maxMessageBytes: 262144
@@ -79,15 +98,17 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
     logDiagnostics: false
 ```
 
-- `enabled` 默认 `false`；只在完成本机兼容性与登录检查后显式开启。
-- `command` 是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
+- `enabled` / `command` / `models` 控制 TraeX route（`traex-agent`），默认 `enabled: false`；`enabled` 与 `command` 均支持 live-editable 设置。
+- `agyEnabled` / `agyCommand` / `agyModels` 控制 Antigravity route（`agy-agent`），默认 `agyEnabled: false`；`agyEnabled` 与 `agyCommand` 均支持 live-editable 设置，可与 TraeX 同时开启并在模型选择器中实时切换。
+- `agyIncludeDefaultCustomizations` 默认 `false`（向 `agy acp` 传 `--include-default-customizations=false`），避免把 Antigravity 内置技能提示注入 DSH 后端上下文；`agyDisableTelemetry` 默认 `true`（传 `--disable-telemetry`）；`agyMode` 可选 `default` 或 `plan`，在 `session/new` 后通过 `session/set_config_option` 切换（`agy acp` 不接受 `--model` / `--effort` / `--mode` / `--disable-slash-commands` CLI flag，参数均通过 ACP `configOptions` 传递）。
+- `command` / `agyCommand` 均是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
 - `cwd` 是 ACP `session/new` 允许使用的工作目录；bundle 默认使用 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析。每个**带 prompt 的普通对话调用**必须是深冻结的 DSH Agent Loop 请求：同模块 marker 可直接验证；包被源码 link 或 DSH 在 adapter 边界复制请求时，则由 Host `agents` 服务核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session 的 header 与 derived messages 重建请求，只容许 `0.1.2-rc.1` `forAdapter()` 删除跨 route `replayState`。随后插件用同一 live Session 的 header cwd，与配置 cwd 分别 `realpath` 后要求完全相等。缺失、过期、伪造、辅助/嵌套调用、请求变形、cwd mismatch 或 symlink escape 都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。Cordis `config` 是整段替换，手工覆盖时不要意外删掉 bundle 的 `cwd`；若改用其他目录，还要把创建该会话的 Delivery `defaultWorkspace` 改为同一 realpath。
 - `listModels` 在缓存为空、过期或只有不完整的普通 stream 观察时，会通过当前 adapter 的 `probeReadiness` 执行 `traex login status` 和无 prompt 的 ACP discovery。它固定使用配置 cwd、read-only sandbox、`ask-for-approval=never`，不携带消息内容，不声明文件/terminal capability，并拒绝 permission request。并发查询 single-flight；完整目录在短 TTL 内复用，过期后刷新。发现失败时 `/model` 不会整体失败，而是安全回退到 `models` 配置别名，并只记录固定、无错误原文的诊断。
 - `resolveModel` 仍然 **不认证、不启动子进程**，只读取配置与当前短 TTL 内存缓存，保证 Agent Loop 的 `prepareCall` 路径 process-free。真实 `stream` 不信任该展示缓存；它继续要求 live session + canonical cwd，并以自己新建 ACP session 的目录重新权威校验模型与 effort。
 - 部署工具仍可在启用 route 前显式调用包导出的 `probeTraexReadiness`，主动验证本机登录和完整目录；调用完成后应 shutdown 临时 adapter。adapter shutdown 会 abort 尚未完成的目录发现、清除 single-flight 引用与缓存。
 - `models` 是实时 ACP 目录以外需要额外展示的非权威别名列表，默认只有 `default`。它不是执行允许列表；每次请求都会在新的 ACP 会话里重新验证具体模型，模型不可用时失败且不会静默换模型。若 DSH 已放行的 effort 在新会话的 selector 中消失，transport 会保留当前模型并使用该会话的默认档位，绝不重放 prompt。
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
-- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次 live-session 调用以及显式 readiness probe 的 `traex login status`；`authProbeTimeoutMs` 同时作为 `listModels` 的 auth + discovery 整体短时限，目录查询不会沿用生成请求默认 10 分钟的 `timeoutMs`。当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。
+- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次 `traex-agent` live-session 调用前的 `traex login status`；`authProbeTimeoutMs`（默认 `30000`）同时作为 `listModels` 的 auth + ACP discovery 整体时限，目录查询不会沿用生成请求默认 10 分钟的 `timeoutMs`。当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。`agy-agent` 不再额外起 `agy models` 进程，直接以同一次 `agy acp` `session/new` 验证登录状态（未登录返回 `-32000 Authentication required` -> `ACP_AUTH_REQUIRED`）。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
 - `maxPromptBytes` 限制序列化后的 DSH 请求，默认 4 MiB。prompt 通过 ACP `session/prompt` 的文本块经 stdin 发送，**不作为 argv 元素**，因此这里不存在操作系统命令行长度限制；该上限只用于约束本机内存与 NDJSON 帧膨胀。真正的上下文边界由 TraeX 侧模型窗口决定。超限时在握手前失败，返回 DSH 标准的 `CONTEXT_WINDOW_EXCEEDED`，prompt 确定未进入 ACP 流；长对话若需要更大值可直接调高本项。
 - `extraEnvNames` 只允许填写要从 DSH 启动环境继承的变量名，配置中不能写变量值或 secret。
@@ -96,15 +117,19 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 
 ## 固定安全策略
 
-插件只接受并启动下面这一组 server 参数：
+插件只接受并启动下面两组受限 server 参数之一：
 
 ```text
+# traex-agent
 traex --sandbox read-only --ask-for-approval never acp serve
+
+# agy-agent
+agy acp --sandbox [--include-default-customizations=false] [--disable-telemetry] --stdio
 ```
 
-不会传 `--yolo`、`bypass_permissions` 或任意用户追加参数。ACP client 不声明文件系统或 terminal capability；TraeX 发起的每个 `session/request_permission` 都返回 `cancelled`。TraeX 子进程自身因此不能通过本插件修改项目或运行命令。模型请求的 DSH tool call 会返回 Harness，由 Harness 既有的工具注册、sandbox、权限和审计链决定是否执行；插件不会替它放行。
+不会传 `--yolo`、`--dangerously-skip-permissions`、`--login`、`--add-dir` 或任意用户追加参数。ACP client 不声明文件系统或 terminal capability；后端发起的每个 `session/request_permission` 都返回 `cancelled`。注意边界差异：`traex` 在 CLI 层同时支持 `--sandbox read-only --ask-for-approval never`；而 `agy acp --sandbox` 仅开启终端沙箱限制且没有 `--ask-for-approval never` 或 `--settings` flag——因此切勿在 `~/.gemini/antigravity-cli/settings.json` 中为不可信仓库开启宽松的自动放行规则，必要时可设 `agyMode: plan` 并始终结合容器/只读挂载隔离不可信工作区。模型请求的 DSH tool call 会返回 Harness，由 Harness 既有的工具注册、sandbox、权限和审计链决定是否执行；插件不会替它放行。
 
-安全仍取决于 TraeX 对其配置和沙箱的正确实现。不要把 prompt 约束当作操作系统隔离；处理不可信仓库时，仍应使用只读挂载、容器或独立 OS 账号。
+安全仍取决于外部 CLI 对其配置和沙箱的正确实现。不要把 prompt 约束当作操作系统隔离；处理不可信仓库时，仍应使用只读挂载、容器或独立 OS 账号。
 
 ## 权限与数据边界
 

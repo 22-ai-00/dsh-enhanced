@@ -9,6 +9,13 @@ describe('configuration', () => {
       command: 'traex',
       cwd: '.',
       models: ['default'],
+      agyEnabled: false,
+      agyCommand: 'agy',
+      agyModels: ['default'],
+      agyIncludeDefaultCustomizations: false,
+      agyDisableTelemetry: true,
+      agyMode: 'default',
+      authProbeTimeoutMs: 30_000,
       extraEnvNames: [],
       logDiagnostics: false,
     })
@@ -18,25 +25,62 @@ describe('configuration', () => {
     expect(config.maxProtocolMessages).toBeGreaterThan(0)
   })
 
-  it('rejects empty models, whitespace commands and invalid environment names', () => {
+  it('rejects empty models, whitespace commands, invalid agyMode and invalid environment names', () => {
     expect(() => Config({ models: [] } as never)).toThrow()
+    expect(() => Config({ agyModels: [] } as never)).toThrow()
     expect(() => Config({ command: ' ' } as never)).toThrow()
+    expect(() => Config({ agyCommand: ' ' } as never)).toThrow()
+    expect(() => Config({ agyMode: 'bypass' } as never)).toThrow()
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 
   it('rejects duplicate model ids during normalization', () => {
     const config = Config()
     config.models = ['default', 'default']
-    expect(() => normalizeConfig(config)).toThrow(/duplicate model id/)
+    expect(() => normalizeConfig(config)).toThrow(/duplicate model id in models/)
+
+    const agyConfig = Config()
+    agyConfig.agyModels = ['gemini-4-carbon', 'gemini-4-carbon']
+    expect(() => normalizeConfig(agyConfig)).toThrow(/duplicate model id in agyModels/)
   })
 })
 
 describe('live-editable provider fields', () => {
-  it('exposes only enabled and command to the Host settings service', () => {
+  it('exposes only route enablement and command fields to the Host settings service', () => {
     const schema = Config as unknown as { dict: Record<string, { meta?: { volatile?: boolean } }> }
     expect(schema.dict['enabled']?.meta?.volatile).toBe(true)
     expect(schema.dict['command']?.meta?.volatile).toBe(true)
+    expect(schema.dict['agyEnabled']?.meta?.volatile).toBe(true)
+    expect(schema.dict['agyCommand']?.meta?.volatile).toBe(true)
     expect(schema.dict['cwd']?.meta?.volatile).toBeFalsy()
-    expect(normalizeConfig({ enabled: true, command: 'traex-next' } as never)).toMatchObject({ enabled: true, command: 'traex-next' })
+    expect(schema.dict['agyMode']?.meta?.volatile).toBeFalsy()
+    expect(schema.dict['agyIncludeDefaultCustomizations']?.meta?.volatile).toBeFalsy()
+    expect(normalizeConfig({
+      enabled: true,
+      command: 'traex-next',
+      agyEnabled: true,
+      agyCommand: '/usr/local/bin/agy',
+    } as never)).toMatchObject({
+      enabled: true,
+      command: 'traex-next',
+      agyEnabled: true,
+      agyCommand: '/usr/local/bin/agy',
+    })
+  })
+
+  it('unwraps volatile getter references for both TraeX and Antigravity live fields', () => {
+    const volatile = <T,>(value: T) => ({ get: () => value })
+    const config = Config({
+      enabled: volatile(false),
+      command: volatile('traex'),
+      agyEnabled: volatile(true),
+      agyCommand: volatile('/opt/agy/bin/agy'),
+    } as never)
+    expect(config).toMatchObject({
+      enabled: false,
+      command: 'traex',
+      agyEnabled: true,
+      agyCommand: '/opt/agy/bin/agy',
+    })
   })
 })

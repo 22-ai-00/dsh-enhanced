@@ -15,8 +15,11 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 import {
+  buildAgyArgs,
   discoverTraexAcpModels,
   runTraexAcpText,
+  SAFE_TRAEX_ARGS,
+  type AcpBackend,
   type CatalogObservation,
   type CatalogModel,
   type ProviderFailureContext,
@@ -33,6 +36,54 @@ import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
 import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
 
 export const TRAEX_PROVIDER_ROUTE = 'traex-agent'
+export const AGY_PROVIDER_ROUTE = 'agy-agent'
+export const ACP_PROVIDER_ROUTES = Object.freeze([TRAEX_PROVIDER_ROUTE, AGY_PROVIDER_ROUTE] as const)
+export type AcpProviderRoute = (typeof ACP_PROVIDER_ROUTES)[number]
+
+interface RouteSpec {
+  readonly route: AcpProviderRoute
+  readonly backend: AcpBackend
+  readonly label: string
+  readonly providerName: string
+  readonly toolCallPrefix: string
+  readonly authCommandRequired: boolean
+  command(config: TraexAcpProviderConfig): string
+  models(config: TraexAcpProviderConfig): readonly string[]
+  args(config: TraexAcpProviderConfig): readonly string[]
+  configRevision(config: TraexAcpProviderConfig): string
+}
+
+const ROUTE_SPECS: Readonly<Record<AcpProviderRoute, RouteSpec>> = {
+  [TRAEX_PROVIDER_ROUTE]: {
+    route: TRAEX_PROVIDER_ROUTE,
+    backend: 'traex',
+    label: 'TraeX',
+    providerName: 'TraeX Agent (local ACP)',
+    toolCallPrefix: 'traex-',
+    authCommandRequired: true,
+    command: config => config.command,
+    models: config => config.models,
+    args: () => [...SAFE_TRAEX_ARGS],
+    configRevision: config => config.models.join(','),
+  },
+  [AGY_PROVIDER_ROUTE]: {
+    route: AGY_PROVIDER_ROUTE,
+    backend: 'agy',
+    label: 'Antigravity',
+    providerName: 'Antigravity Agent (local ACP)',
+    toolCallPrefix: 'agy-',
+    // `agy` has no offline login-status CLI; `agy acp`'s own `session/new` returns `-32000`
+    // when unauthenticated, avoiding a redundant ~11s `agy models` pre-probe.
+    authCommandRequired: false,
+    command: config => config.agyCommand,
+    models: config => config.agyModels,
+    args: config => buildAgyArgs({
+      includeDefaultCustomizations: config.agyIncludeDefaultCustomizations,
+      disableTelemetry: config.agyDisableTelemetry,
+    }),
+    configRevision: config => `${config.agyModels.join(',')};custom=${String(config.agyIncludeDefaultCustomizations)};telemetry=${String(config.agyDisableTelemetry)};mode=${config.agyMode}`,
+  },
+}
 
 export type TraexAcpTextRunner = (
   invocation: TraexAcpInvocation,
@@ -50,6 +101,7 @@ export type TraexAcpCatalogDiscoverer = (
  * Credential-free and internal; it is never attached to the thrown `LlmError`.
  */
 export interface RouteFailureContext extends Partial<Omit<ProviderFailureContext, 'phase'>> {
+  readonly provider?: AcpProviderRoute
   readonly phase: ProviderFailureContext['phase'] | 'auth' | 'preflight'
   readonly assistantTextForwarded: boolean
   /** Stable outcome class for diagnostics/health; `ok` on success. */
@@ -102,30 +154,36 @@ const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
   jitterRatio: 0.1,
 })
 
-const CATALOG_FALLBACK_DIAGNOSTIC = 'TraeX model catalog refresh failed; using configured model aliases'
-const CATALOG_STDERR_DIAGNOSTIC = 'TraeX model catalog discovery wrote to stderr; content withheld'
-
-function ensureProvider(provider: string): void {
-  if (provider !== TRAEX_PROVIDER_ROUTE) {
-    throw LlmError.fromFailure({ message: `unknown TraeX ACP provider: ${provider}`, code: 'INVALID_PROVIDER' })
-  }
+function catalogFallbackDiagnostic(label: string): string {
+  return `${label} model catalog refresh failed; using configured model aliases`
 }
 
-function abortReason(signal: AbortSignal): Error {
+function catalogStderrDiagnostic(label: string): string {
+  return `${label} model catalog discovery wrote to stderr; content withheld`
+}
+
+function ensureProvider(provider: string): RouteSpec {
+  if (provider === TRAEX_PROVIDER_ROUTE || provider === AGY_PROVIDER_ROUTE) {
+    return ROUTE_SPECS[provider]
+  }
+  throw LlmError.fromFailure({ message: `unknown ACP provider: ${provider}`, code: 'INVALID_PROVIDER' })
+}
+
+function abortReason(signal: AbortSignal, label = 'TraeX'): Error {
   if (signal.reason instanceof Error) {
     if (signal.reason.name === 'TimeoutError') {
-      return new Error('TraeX request timed out', { cause: 'timeout' })
+      return new Error(`${label} request timed out`, { cause: 'timeout' })
     }
     if (signal.reason.name !== 'AbortError') return signal.reason
   }
-  return new Error('TraeX request aborted', { cause: 'abort' })
+  return new Error(`${label} request aborted`, { cause: 'abort' })
 }
 
 /** Settle at the adapter boundary even if an injected dependency fails to observe cancellation. */
-function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(abortReason(signal))
+function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal, label = 'TraeX'): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal, label))
   return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => { reject(abortReason(signal)) }
+    const onAbort = (): void => { reject(abortReason(signal, label)) }
     signal.addEventListener('abort', onAbort, { once: true })
     void operation.then(
       value => {
@@ -140,41 +198,41 @@ function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T>
   })
 }
 
-function connectorFailure(command: string, error: unknown): Error {
+function connectorFailure(command: string, error: unknown, label = 'TraeX'): Error {
   if (error instanceof Error && error.cause === 'abort') return error
   if (error instanceof TrustedSessionCwdError) {
-    return LlmError.fromFailure({ message: 'TraeX ACP requires a live loop-owned session whose canonical cwd matches the configured local workspace', code: 'LOCAL_SESSION_CWD_REQUIRED' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP requires a live loop-owned session whose canonical cwd matches the configured local workspace`, code: 'LOCAL_SESSION_CWD_REQUIRED' }, { cause: error })
   }
   const candidate = error as (NodeJS.ErrnoException & { systemCode?: string }) | undefined
   const code = candidate?.systemCode ?? candidate?.code
   if (code === 'ENOENT') {
-    return LlmError.fromFailure({ message: `TraeX executable was not found: ${command}`, code: 'CLI_NOT_FOUND' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} executable was not found: ${command}`, code: 'CLI_NOT_FOUND' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'auth') {
-    return LlmError.fromFailure({ message: 'TraeX ACP requires a local login; authenticate with TraeX before using this provider', code: 'ACP_AUTH_REQUIRED' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP requires a local login; authenticate with ${label} before using this provider`, code: 'ACP_AUTH_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'entitlement') {
-    return LlmError.fromFailure({ message: 'TraeX ACP did not expose any model for the active Trae account', code: 'ACP_ENTITLEMENT_REQUIRED' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP did not expose any model for the active account`, code: 'ACP_ENTITLEMENT_REQUIRED' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'model') {
-    return LlmError.fromFailure({ message: 'TraeX ACP does not provide the requested model', code: 'ACP_MODEL_UNAVAILABLE' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP does not provide the requested model`, code: 'ACP_MODEL_UNAVAILABLE' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'reasoning') {
-    return LlmError.fromFailure({ message: 'TraeX ACP does not provide the requested reasoning effort', code: 'UNSUPPORTED_REASONING_EFFORT' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP does not provide the requested reasoning effort`, code: 'UNSUPPORTED_REASONING_EFFORT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'refusal') {
-    return LlmError.fromFailure({ message: 'TraeX ACP refused the request', code: 'ACP_REFUSAL' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP refused the request`, code: 'ACP_REFUSAL' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'timeout') {
-    return LlmError.fromFailure({ message: 'TraeX ACP prompt timed out', code: 'ACP_TIMEOUT' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP prompt timed out`, code: 'ACP_TIMEOUT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'output-limit') {
-    return LlmError.fromFailure({ message: 'TraeX ACP output exceeded the configured safety limit', code: 'ACP_OUTPUT_LIMIT' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP output exceeded the configured safety limit`, code: 'ACP_OUTPUT_LIMIT' }, { cause: error })
   }
   if (error instanceof Error && error.cause === 'protocol') {
-    return LlmError.fromFailure({ message: 'TraeX ACP returned an invalid or incomplete protocol exchange', code: 'ACP_PROTOCOL_ERROR' }, { cause: error })
+    return LlmError.fromFailure({ message: `${label} ACP returned an invalid or incomplete protocol exchange`, code: 'ACP_PROTOCOL_ERROR' }, { cause: error })
   }
-  return LlmError.fromFailure({ message: 'TraeX ACP process failed', code: 'ACP_PROCESS_FAILED' }, { cause: error })
+  return LlmError.fromFailure({ message: `${label} ACP process failed`, code: 'ACP_PROCESS_FAILED' }, { cause: error })
 }
 
 /**
@@ -182,13 +240,13 @@ function connectorFailure(command: string, error: unknown): Error {
  * canonical DSH context-overflow code so the loop can compact and retry instead of surfacing an
  * unclassified failure; the prompt provably never entered the ACP stream.
  */
-function preflightFailure(error: unknown): Error {
+function preflightFailure(error: unknown, label = 'TraeX'): Error {
   if (error instanceof Error && error.cause === 'prompt-limit') {
     return LlmError.fromFailure({ message: error.message, code: CONTEXT_WINDOW_EXCEEDED_CODE }, { cause: error })
   }
   return error instanceof Error
     ? LlmError.fromFailure({ message: error.message, code: 'ACP_PROMPT_INVALID' }, { cause: error })
-    : LlmError.fromFailure({ message: 'TraeX ACP could not serialize the DSH request', code: 'ACP_PROMPT_INVALID' }, { cause: error })
+    : LlmError.fromFailure({ message: `${label} ACP could not serialize the DSH request`, code: 'ACP_PROMPT_INVALID' }, { cause: error })
 }
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
@@ -225,12 +283,12 @@ function reasoningInfo(model: CatalogModel | undefined): Pick<LlmResolvedModelIn
   }
 }
 
-/** DSH text/tool compatibility facade over a fresh, local TraeX ACP session. */
+/** DSH text/tool compatibility facade over a fresh, local ACP coding-agent session. */
 export class TraexAcpAdapter extends LlmAdapter {
   private readonly cwd: string
   private readonly runText: TraexAcpTextRunner
   private readonly discoverModels: TraexAcpCatalogDiscoverer
-  private readonly verifyAuth: TraexAuthVerifier
+  private readonly verifyAuthOverride: TraexAuthVerifier | undefined
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
@@ -238,7 +296,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly liveSessions: LiveSessionLookup | undefined
   private readonly requestAttestor: AgentLoopRequestAttestor | undefined
   private readonly lifecycle = new AbortController()
-  private catalogRefreshInFlight: Promise<CatalogObservation | undefined> | undefined
+  private readonly catalogRefreshInFlight = new Map<AcpProviderRoute, Promise<CatalogObservation | undefined>>()
 
   constructor(
     private readonly config: TraexAcpProviderConfig,
@@ -248,7 +306,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     this.cwd = resolve(config.cwd)
     this.runText = dependencies.runText ?? runTraexAcpText
     this.discoverModels = dependencies.discoverModels ?? discoverTraexAcpModels
-    this.verifyAuth = dependencies.verifyAuth ?? verifyTraexAuth
+    this.verifyAuthOverride = dependencies.verifyAuth
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
     this.onCatalogObserved = dependencies.onCatalogObserved
@@ -258,6 +316,10 @@ export class TraexAcpAdapter extends LlmAdapter {
     })
     this.liveSessions = dependencies.liveSessions
     this.requestAttestor = dependencies.requestAttestor
+  }
+
+  private authVerifierFor(spec: RouteSpec): TraexAuthVerifier | undefined {
+    return this.verifyAuthOverride ?? (spec.authCommandRequired ? verifyTraexAuth : undefined)
   }
 
   private trustedCwd(request: GenerateOptions): string {
@@ -271,15 +333,14 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   /**
    * Cache key parts built from NON-SENSITIVE identifiers only. The config revision is derived from
-   * the deployer advisory model aliases, never from environment variable values (which are secret
-   * and must not become a correlatable fingerprint).
+   * the deployer advisory model aliases and backend flags, never from environment variable values.
    */
-  private catalogKeyParts(): CatalogCacheKeyParts {
+  private catalogKeyParts(spec: RouteSpec): CatalogCacheKeyParts {
     return {
-      route: TRAEX_PROVIDER_ROUTE,
-      command: this.config.command,
+      route: spec.route,
+      command: spec.command(this.config),
       cwd: this.cwd,
-      configRevision: this.config.models.join(','),
+      configRevision: spec.configRevision(this.config),
     }
   }
 
@@ -287,20 +348,21 @@ export class TraexAcpAdapter extends LlmAdapter {
    * Read the last observed catalog for THIS adapter's route, if still within TTL. Metadata only:
    * the current prompt's `session/new` remains the sole execution authority.
    */
-  peekObservedCatalog(): CachedCatalog | undefined {
-    return this.catalogCache.peek(this.catalogKeyParts())
+  peekObservedCatalog(provider: AcpProviderRoute = TRAEX_PROVIDER_ROUTE): CachedCatalog | undefined {
+    const spec = ensureProvider(provider)
+    return this.catalogCache.peek(this.catalogKeyParts(spec))
   }
 
   /** Record a non-authoritative catalog observation and forward it to any diagnostic sink. */
-  private handleCatalogObserved(observation: CatalogObservation): void {
+  private handleCatalogObserved(spec: RouteSpec, observation: CatalogObservation): void {
     // An ignored/late transport callback must not resurrect state after provider unload.
     if (this.lifecycle.signal.aborted) return
     // A normal stream only observes the active model's reasoning selector. Do not let that partial
     // view downgrade a still-live complete discovery result or renew its TTL. Once the complete
     // entry expires, peek evicts it and a later partial observation may be recorded normally.
-    const existing = this.peekObservedCatalog()?.observation
+    const existing = this.peekObservedCatalog(spec.route)?.observation
     if (existing?.completeReasoning !== true || observation.completeReasoning) {
-      this.catalogCache.record(this.catalogKeyParts(), observation)
+      this.catalogCache.record(this.catalogKeyParts(spec), observation)
     }
     if (this.onCatalogObserved === undefined) return
     try {
@@ -321,10 +383,10 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   /**
    * A cold model picker may issue several list calls at once. Share one prompt-free readiness
-   * probe so those callers do not start duplicate login checks or ACP discovery sessions.
+   * probe per route so callers do not start duplicate login checks or ACP discovery sessions.
    */
-  private refreshCatalogForList(): Promise<CatalogObservation | undefined> {
-    const current = this.catalogRefreshInFlight
+  private refreshCatalogForList(spec: RouteSpec): Promise<CatalogObservation | undefined> {
+    const current = this.catalogRefreshInFlight.get(spec.route)
     if (current !== undefined) return current
 
     // Model pickers must never inherit the generation deadline (10 minutes by default). One short
@@ -332,16 +394,18 @@ export class TraexAcpAdapter extends LlmAdapter {
     // value is also wired into the transport's own timer so cancellation performs normal teardown.
     const deadline = AbortSignal.timeout(this.config.authProbeTimeoutMs)
     const signal = AbortSignal.any([this.lifecycle.signal, deadline])
-    const pending = this.probeReadinessWithin(signal, this.config.authProbeTimeoutMs)
+    const pending = this.probeReadinessWithin(spec, signal, this.config.authProbeTimeoutMs)
       .catch(() => {
         // Never surface local auth/process details through `/model`, and never let a transient
         // discovery failure hide the deployer's configured aliases. Shutdown is intentionally quiet.
-        if (!this.lifecycle.signal.aborted) this.reportDiagnostic(CATALOG_FALLBACK_DIAGNOSTIC)
+        if (!this.lifecycle.signal.aborted) this.reportDiagnostic(catalogFallbackDiagnostic(spec.label))
         return undefined
       })
-    this.catalogRefreshInFlight = pending
+    this.catalogRefreshInFlight.set(spec.route, pending)
     void pending.then(() => {
-      if (this.catalogRefreshInFlight === pending) this.catalogRefreshInFlight = undefined
+      if (this.catalogRefreshInFlight.get(spec.route) === pending) {
+        this.catalogRefreshInFlight.delete(spec.route)
+      }
     })
     return pending
   }
@@ -357,11 +421,13 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   /** Compose the adapter-owned forwarded flag and outcome onto the transport's lifecycle context. */
   private routeFailureFrom(
+    provider: AcpProviderRoute,
     context: ProviderFailureContext | undefined,
     assistantTextForwarded: boolean,
     outcome: RouteOutcome,
   ): RouteFailureContext {
     return {
+      provider,
       phase: context?.phase ?? 'stream',
       promptSubmissionState: context?.promptSubmissionState ?? 'unknown',
       assistantTextObserved: context?.assistantTextObserved ?? assistantTextForwarded,
@@ -378,8 +444,8 @@ export class TraexAcpAdapter extends LlmAdapter {
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
-    ensureProvider(provider)
-    return { id: provider, name: 'TraeX Agent (local ACP)' }
+    const spec = ensureProvider(provider)
+    return { id: provider, name: spec.providerName }
   }
 
   override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
@@ -388,46 +454,50 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   /**
    * Prompt-free readiness boundary used by activation checks and cold/stale model listing.
-   * It is intentionally restricted to login plus a read-only/no-approval ACP discovery session;
+   * It is intentionally restricted to login plus a sandboxed/no-approval ACP discovery session;
    * model resolution remains process-free and real calls still require a loop-owned session.
    */
-  async probeReadiness(signal: AbortSignal = this.lifecycle.signal): Promise<CatalogObservation> {
+  async probeReadiness(
+    signal: AbortSignal = this.lifecycle.signal,
+    provider: AcpProviderRoute = TRAEX_PROVIDER_ROUTE,
+  ): Promise<CatalogObservation> {
+    const spec = ensureProvider(provider)
     const effectiveSignal = signal === this.lifecycle.signal
       ? signal
       : AbortSignal.any([signal, this.lifecycle.signal])
-    return this.probeReadinessWithin(effectiveSignal, this.config.timeoutMs)
+    return this.probeReadinessWithin(spec, effectiveSignal, this.config.timeoutMs)
   }
 
   private async probeReadinessWithin(
+    spec: RouteSpec,
     effectiveSignal: AbortSignal,
     discoveryTimeoutMs: number,
   ): Promise<CatalogObservation> {
-    if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-    const cacheAtStart = this.peekObservedCatalog()
+    if (effectiveSignal.aborted) throw abortReason(effectiveSignal, spec.label)
+    const cacheAtStart = this.peekObservedCatalog(spec.route)
     const cached = cacheAtStart?.observation
     if (cached?.completeReasoning === true) return cached
+    const command = spec.command(this.config)
+    const verifyAuth = this.authVerifierFor(spec)
     try {
-      await waitForAbort(this.verifyAuth({
-        command: this.config.command,
+      if (verifyAuth !== undefined) {
+        await waitForAbort(verifyAuth({
+          command,
+          cwd: this.cwd,
+          timeoutMs: this.config.authProbeTimeoutMs,
+          maxOutputBytes: this.config.maxAuthProbeBytes,
+          extraEnvNames: this.config.extraEnvNames,
+          signal: effectiveSignal,
+        }), effectiveSignal, spec.label)
+      }
+      if (effectiveSignal.aborted) throw abortReason(effectiveSignal, spec.label)
+      const catalogInvocation: TraexAcpCatalogInvocation = {
+        ...(spec.backend === 'traex' ? {} : { backend: spec.backend }),
+        command,
+        args: spec.args(this.config),
         cwd: this.cwd,
-        timeoutMs: this.config.authProbeTimeoutMs,
-        maxOutputBytes: this.config.maxAuthProbeBytes,
-        extraEnvNames: this.config.extraEnvNames,
-        signal: effectiveSignal,
-      }), effectiveSignal)
-      if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-      const catalog = await waitForAbort(this.discoverModels({
-        command: this.config.command,
-        args: [
-          '--sandbox',
-          'read-only',
-          '--ask-for-approval',
-          'never',
-          'acp',
-          'serve',
-        ],
-        cwd: this.cwd,
-      }, {
+      }
+      const catalog = await waitForAbort(this.discoverModels(catalogInvocation, {
         timeoutMs: discoveryTimeoutMs,
         killGraceMs: this.config.killGraceMs,
         maxMessageBytes: this.config.maxMessageBytes,
@@ -439,38 +509,38 @@ export class TraexAcpAdapter extends LlmAdapter {
         // Directory discovery never forwards child stderr, even if bounded. Its contents may
         // include credentials or identity; callers receive only this fixed diagnostic.
         onDiagnostic: () => {
-          if (!effectiveSignal.aborted) this.reportDiagnostic(CATALOG_STDERR_DIAGNOSTIC)
+          if (!effectiveSignal.aborted) this.reportDiagnostic(catalogStderrDiagnostic(spec.label))
         },
         signal: effectiveSignal,
-      }), effectiveSignal)
-      if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-      this.handleCatalogObserved(catalog)
+      }), effectiveSignal, spec.label)
+      if (effectiveSignal.aborted) throw abortReason(effectiveSignal, spec.label)
+      this.handleCatalogObserved(spec, catalog)
       return catalog
     } catch (error: unknown) {
       // Do not let a slower concurrent probe erase a newer successful observation.
-      if (this.peekObservedCatalog() === cacheAtStart) {
-        this.catalogCache.invalidate(this.catalogKeyParts())
+      if (this.peekObservedCatalog(spec.route) === cacheAtStart) {
+        this.catalogCache.invalidate(this.catalogKeyParts(spec))
       }
-      throw connectorFailure(this.config.command, error)
+      throw connectorFailure(command, error, spec.label)
     }
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    ensureProvider(provider)
-    const cached = this.peekObservedCatalog()?.observation
+    const spec = ensureProvider(provider)
+    const cached = this.peekObservedCatalog(spec.route)?.observation
     const catalog = cached?.completeReasoning === true
       ? cached
-      : await this.refreshCatalogForList()
+      : await this.refreshCatalogForList(spec)
     const active = catalog?.models.find(model => model.id === catalog.currentValue)
     const entries = new Map<string, LlmModelInfo>()
-    for (const model of this.config.models) {
+    for (const model of spec.models(this.config)) {
       entries.set(model, {
         provider,
         id: model,
         name: model === 'default'
-          ? `TraeX active model${active === undefined ? '' : ` (${active.name})`}`
+          ? `${spec.label} active model${active === undefined ? '' : ` (${active.name})`}`
           : model,
-        description: 'Experimental text compatibility route backed by a local TraeX ACP agent',
+        description: `Experimental text compatibility route backed by a local ${spec.label} ACP agent`,
         inputModalities: ['text'],
       })
     }
@@ -487,12 +557,12 @@ export class TraexAcpAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    ensureProvider(provider)
+    const spec = ensureProvider(provider)
     const effectiveSignal = signal === undefined
       ? this.lifecycle.signal
       : AbortSignal.any([signal, this.lifecycle.signal])
-    if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-    const catalog = this.peekObservedCatalog()?.observation
+    if (effectiveSignal.aborted) throw abortReason(effectiveSignal, spec.label)
+    const catalog = this.peekObservedCatalog(spec.route)?.observation
     const catalogModel = model === 'default'
       ? catalog?.models.find(entry => entry.id === catalog.currentValue)
       : catalog?.models.find(entry => entry.id === model)
@@ -500,7 +570,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model === 'default'
-        ? `TraeX active model${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
+        ? `${spec.label} active model${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
         : (catalogModel?.name ?? model),
       description: catalogModel?.description ?? 'Experimental local ACP coding-agent delegation',
       inputModalities: ['text'],
@@ -509,7 +579,9 @@ export class TraexAcpAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    ensureProvider(options.provider)
+    const spec = ensureProvider(options.provider)
+    const command = spec.command(this.config)
+    const verifyAuth = this.authVerifierFor(spec)
     const signal = options.signal === undefined
       ? this.lifecycle.signal
       : AbortSignal.any([options.signal, this.lifecycle.signal])
@@ -527,7 +599,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       if (reported) return
       reported = true
       this.reportSettled({
-        ...this.routeFailureFrom(transportContext, assistantTextForwarded, outcome),
+        ...this.routeFailureFrom(spec.route, transportContext, assistantTextForwarded, outcome),
         ...(transportContext === undefined ? {
           phase,
           promptSubmissionState,
@@ -538,35 +610,37 @@ export class TraexAcpAdapter extends LlmAdapter {
     }
 
     try {
-      if (signal.aborted) throw abortReason(signal)
+      if (signal.aborted) throw abortReason(signal, spec.label)
 
       let cwd: string
       try {
         cwd = this.trustedCwd(options)
       } catch (error: unknown) {
         outcome = 'preflight'
-        throw connectorFailure(this.config.command, error)
+        throw connectorFailure(command, error, spec.label)
       }
 
-      const authStartedAt = performance.now()
-      try {
-        await this.verifyAuth({
-          command: this.config.command,
-          cwd,
-          timeoutMs: this.config.authProbeTimeoutMs,
-          maxOutputBytes: this.config.maxAuthProbeBytes,
-          extraEnvNames: this.config.extraEnvNames,
-          signal,
-        })
-      } catch (error: unknown) {
-        // Auth precedes the ACP handshake, so the prompt never entered the stream.
-        // A stale catalog observation must not outlive an auth failure (the account or plan
-        // may have changed), so drop it here regardless of the eventual outcome.
-        this.catalogCache.invalidate(this.catalogKeyParts())
-        outcome = outcomeFor(error)
-        throw connectorFailure(this.config.command, error)
-      } finally {
-        authProbeDurationMs = performance.now() - authStartedAt
+      if (verifyAuth !== undefined) {
+        const authStartedAt = performance.now()
+        try {
+          await verifyAuth({
+            command,
+            cwd,
+            timeoutMs: this.config.authProbeTimeoutMs,
+            maxOutputBytes: this.config.maxAuthProbeBytes,
+            extraEnvNames: this.config.extraEnvNames,
+            signal,
+          })
+        } catch (error: unknown) {
+          // Auth precedes the ACP handshake, so the prompt never entered the stream.
+          // A stale catalog observation must not outlive an auth failure (the account or plan
+          // may have changed), so drop it here regardless of the eventual outcome.
+          this.catalogCache.invalidate(this.catalogKeyParts(spec))
+          outcome = outcomeFor(error)
+          throw connectorFailure(command, error, spec.label)
+        } finally {
+          authProbeDurationMs = performance.now() - authStartedAt
+        }
       }
 
       // Preflight prompt serialization runs before the handshake; a failure here is provably not-submitted.
@@ -574,23 +648,18 @@ export class TraexAcpAdapter extends LlmAdapter {
       let invocation: TraexAcpInvocation
       try {
         invocation = {
-          command: this.config.command,
-          args: [
-            '--sandbox',
-            'read-only',
-            '--ask-for-approval',
-            'never',
-            'acp',
-            'serve',
-          ],
+          ...(spec.backend === 'traex' ? {} : { backend: spec.backend }),
+          command,
+          args: spec.args(this.config),
           cwd,
-          prompt: buildPrompt(options, this.config.maxPromptBytes),
+          prompt: buildPrompt(options, this.config.maxPromptBytes, spec.label),
           ...(options.model === 'default' ? {} : { model: options.model }),
           ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
+          ...(spec.backend === 'agy' ? { agyMode: this.config.agyMode } : {}),
         }
       } catch (error: unknown) {
         outcome = 'preflight'
-        throw preflightFailure(error)
+        throw preflightFailure(error, spec.label)
       }
       let terminal: TraexSuccessfulStopReason | undefined
       const runnerOptions: RunTraexAcpOptions = {
@@ -606,7 +675,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         onDiagnostic: diagnostic => this.reportDiagnostic(redactDiagnostic(diagnostic)),
         onSettled: context => { transportContext = context },
         ...(authProbeDurationMs !== undefined ? { authProbeDurationMs } : {}),
-        onCatalogObserved: observation => this.handleCatalogObserved(observation),
+        onCatalogObserved: observation => this.handleCatalogObserved(spec, observation),
         signal,
       }
 
@@ -635,12 +704,15 @@ export class TraexAcpAdapter extends LlmAdapter {
           }
         }
       } catch (error: unknown) {
+        if (error instanceof Error && error.cause === 'auth') {
+          this.catalogCache.invalidate(this.catalogKeyParts(spec))
+        }
         outcome = outcomeFor(error)
-        throw connectorFailure(this.config.command, error)
+        throw connectorFailure(command, error, spec.label)
       }
       if (terminal === undefined) {
         outcome = 'protocol'
-        throw connectorFailure(this.config.command, new Error('TraeX ACP terminal metadata was missing', { cause: 'protocol' }))
+        throw connectorFailure(command, new Error(`${spec.label} ACP terminal metadata was missing`, { cause: 'protocol' }), spec.label)
       }
       outcome = 'ok'
 
@@ -650,11 +722,11 @@ export class TraexAcpAdapter extends LlmAdapter {
           calls = parseDelegatedToolCalls(text, options.tools ?? [])
         } catch (error: unknown) {
           outcome = 'protocol'
-          throw connectorFailure(this.config.command, error)
+          throw connectorFailure(command, error, spec.label)
         }
         if (calls !== undefined) {
           for (const [index, call] of calls.entries()) {
-            const id = ToolCallId(`traex-${randomUUID()}`)
+            const id = ToolCallId(`${spec.toolCallPrefix}${randomUUID()}`)
             yield { type: 'block-start', index, blockType: 'tool-call' }
             yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
             yield {
@@ -689,9 +761,9 @@ export class TraexAcpAdapter extends LlmAdapter {
     // A reload/unload drops every non-authoritative observation; a later run re-observes from a
     // fresh handshake, which is the only execution authority anyway.
     if (!this.lifecycle.signal.aborted) {
-      this.lifecycle.abort(new Error('TraeX ACP provider unloaded', { cause: 'abort' }))
+      this.lifecycle.abort(new Error('ACP provider unloaded', { cause: 'abort' }))
     }
-    this.catalogRefreshInFlight = undefined
+    this.catalogRefreshInFlight.clear()
     this.catalogCache.clear()
   }
 }
@@ -702,19 +774,26 @@ export interface TraexReadinessProbeOptions {
   readonly signal?: AbortSignal
 }
 
+export interface AcpReadinessProbeOptions extends TraexReadinessProbeOptions {
+  /** Local ACP route to probe (defaults to `traex-agent`). */
+  readonly provider?: AcpProviderRoute
+}
+
 /**
  * Explicit deployment activation probe. Model listing may use this same safe static-cwd,
  * prompt-free boundary to populate its short-lived display cache; model resolution remains
  * process-free and a real model stream must bind to a live loop session.
  */
-export async function probeTraexReadiness(
+export async function probeAcpReadiness(
   config: TraexAcpProviderConfig,
-  options: TraexReadinessProbeOptions = {},
+  options: AcpReadinessProbeOptions = {},
   dependencies: AdapterDependencies = {},
 ): Promise<CatalogObservation> {
+  const provider = options.provider ?? TRAEX_PROVIDER_ROUTE
+  const spec = ensureProvider(provider)
   if (options.timeoutMs !== undefined
-    && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60_000)) {
-    throw new RangeError('TraeX readiness timeoutMs must be an integer from 1 to 60000')
+    && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 120_000)) {
+    throw new RangeError(`${spec.label} readiness timeoutMs must be an integer from 1 to 120000`)
   }
   const timeoutSignal = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs)
   const signal = options.signal === undefined
@@ -722,10 +801,19 @@ export async function probeTraexReadiness(
     : (timeoutSignal === undefined ? options.signal : AbortSignal.any([options.signal, timeoutSignal]))
   const adapter = new TraexAcpAdapter(config, dependencies)
   try {
-    return await adapter.probeReadiness(signal)
+    return await adapter.probeReadiness(signal, provider)
   } finally {
     adapter.shutdown()
   }
+}
+
+/** Backwards-compatible TraeX-specific readiness probe alias. */
+export async function probeTraexReadiness(
+  config: TraexAcpProviderConfig,
+  options: TraexReadinessProbeOptions = {},
+  dependencies: AdapterDependencies = {},
+): Promise<CatalogObservation> {
+  return probeAcpReadiness(config, { ...options, provider: TRAEX_PROVIDER_ROUTE }, dependencies)
 }
 
 export function redactDiagnostic(value: string): string {

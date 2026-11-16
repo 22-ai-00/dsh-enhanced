@@ -1,20 +1,37 @@
 import Schema from '@deepseek-ai/schemastery'
 
+export type AgySessionMode = 'default' | 'plan'
+
 export interface TraexAcpProviderConfig {
-  /** Register the experimental TraeX route after the local runtime is prepared. */
+  /** Register the experimental TraeX route (`traex-agent`) after the local runtime is prepared. */
   enabled: boolean
   /** TraeX executable name or absolute path. No shell parsing is performed. */
   command: string
-  /** Working directory exposed to the TraeX ACP session. */
+  /** Working directory exposed to the local ACP session. */
   cwd: string
   /**
-   * Additional advisory model ids shown beside the live ACP catalog. `default` uses TraeX's active
-   * model. Execution always validates model and reasoning selections against the fresh session.
+   * Additional advisory TraeX model ids shown beside the live ACP catalog. `default` uses
+   * TraeX's active model. Execution always validates model and reasoning selections against the fresh session.
    */
   models: string[]
+  /** Register the Antigravity CLI route (`agy-agent`) over `agy acp`. */
+  agyEnabled: boolean
+  /** Antigravity executable name or absolute path. No shell parsing is performed. */
+  agyCommand: string
+  /**
+   * Additional advisory Antigravity model ids shown beside the live ACP catalog. `default` uses
+   * Antigravity's active model. Execution always validates selections against the fresh session.
+   */
+  agyModels: string[]
+  /** Pass default built-in Antigravity customizations into `agy acp` (disabled by default for clean DSH backend use). */
+  agyIncludeDefaultCustomizations: boolean
+  /** Pass `--disable-telemetry` to `agy acp`. */
+  agyDisableTelemetry: boolean
+  /** Session permission mode selected after `agy acp` `session/new`. */
+  agyMode: AgySessionMode
   /** Whole ACP prompt deadline. */
   timeoutMs: number
-  /** Deadline for the non-model TraeX login-status probe. */
+  /** Deadline for the non-model auth/catalog readiness probe. */
   authProbeTimeoutMs: number
   /** Maximum stdout/stderr bytes captured from the login-status probe. */
   maxAuthProbeBytes: number
@@ -28,18 +45,18 @@ export interface TraexAcpProviderConfig {
   maxProtocolMessages: number
   /** Maximum UTF-8 bytes of assistant text accepted per invocation. */
   maxOutputBytes: number
-  /** Maximum UTF-8 bytes retained from TraeX stderr. */
+  /** Maximum UTF-8 bytes retained from child stderr. */
   maxStderrBytes: number
   /**
    * Maximum UTF-8 bytes in the serialized DSH request. The prompt travels as an ACP
    * `session/prompt` text block over stdin, never as an argv element, so no OS command-line
    * length limit applies here. This bound only guards against unbounded local memory and
-   * NDJSON framing growth; TraeX still enforces its own model context window.
+   * NDJSON framing growth; the coding CLI still enforces its own model context window.
    */
   maxPromptBytes: number
   /** Additional environment variable names inherited by the child process. */
   extraEnvNames: string[]
-  /** Include a redacted tail of TraeX stderr in host logs. */
+  /** Include a redacted tail of child stderr in host logs. */
   logDiagnostics: boolean
 }
 
@@ -60,8 +77,14 @@ const schema = Schema.object({
   command: command.default('traex').volatile(),
   cwd: Schema.string().min(1).default('.'),
   models: Schema.array(modelId).min(1).default(['default']),
+  agyEnabled: Schema.boolean().default(false).volatile(),
+  agyCommand: command.default('agy').volatile(),
+  agyModels: Schema.array(modelId).min(1).default(['default']),
+  agyIncludeDefaultCustomizations: Schema.boolean().default(false),
+  agyDisableTelemetry: Schema.boolean().default(true),
+  agyMode: Schema.union(['default', 'plan'] as const).default('default'),
   timeoutMs: Schema.natural().min(1_000).max(60 * 60_000).default(10 * 60_000),
-  authProbeTimeoutMs: Schema.natural().min(1_000).max(60_000).default(10_000),
+  authProbeTimeoutMs: Schema.natural().min(1_000).max(120_000).default(30_000),
   maxAuthProbeBytes: Schema.natural().min(1_024).max(1024 * 1024).default(32 * 1024),
   killGraceMs: Schema.natural().min(100).max(30_000).default(3_000),
   maxMessageBytes: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(256 * 1024),
@@ -94,6 +117,9 @@ export function normalizeConfig(input?: TraexAcpProviderConfig): TraexAcpProvide
   const config = Config(input)
   if (new Set(config.models).size !== config.models.length) {
     throw new Error('duplicate model id in models')
+  }
+  if (new Set(config.agyModels).size !== config.agyModels.length) {
+    throw new Error('duplicate model id in agyModels')
   }
   return config
 }

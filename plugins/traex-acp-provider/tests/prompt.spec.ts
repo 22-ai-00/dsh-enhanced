@@ -255,4 +255,13 @@ describe('DSH request serialization', () => {
     }]
     expect(() => buildPrompt(options, 100_000)).toThrow(/does not support content block type/)
   })
+
+  it('customizes native-tool prohibition wording for Antigravity while keeping the dsh-traex-acp-provider/v1 envelope', () => {
+    const options = request()
+    options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const prompt = buildPrompt(options, 100_000, 'Antigravity')
+    expect(prompt).toContain('dsh-traex-acp-provider/v1')
+    expect(prompt).toContain('do not invoke Antigravity-native tools')
+    expect(prompt).not.toContain('TraeX-native tools')
+  })
 })

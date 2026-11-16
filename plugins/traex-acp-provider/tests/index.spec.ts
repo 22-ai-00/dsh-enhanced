@@ -12,6 +12,8 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     expect(Plugin.name).toBe('dsh-enhanced-traex-acp-provider')
     expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
     expect(Plugin.probeTraexReadiness).toBeTypeOf('function')
+    expect(Plugin.probeAcpReadiness).toBeTypeOf('function')
+    expect(Plugin.ACP_PROVIDER_ROUTES).toEqual(['traex-agent', 'agy-agent'])
   })
 
   it('declares the verified 0.2 DSH line so the live app can install it', async () => {
@@ -23,7 +25,7 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     }
   })
 
-  it('is disabled by default', async () => {
+  it('is disabled by default while advertising configurable ACP providers', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
@@ -33,7 +35,9 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     await ctx.plugin(AgentRegistry)
     const fiber = await ctx.plugin(Plugin, Plugin.Config())
     expect(ctx.llm.listProviders()).toEqual([])
+    expect(ctx.llm.listConfigurableProviders().map(entry => entry.provider)).toEqual(['traex-agent', 'agy-agent'])
     await fiber.dispose()
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
     await ctx.fiber.dispose()
   })
 
@@ -54,6 +58,41 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     await fiber.dispose()
     expect(ctx.llm.listProviders()).toEqual([])
     expect(resolveLlmRouteCapability(ctx.llm, 'traex-agent', 'default')).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('registers Antigravity alone or alongside TraeX and releases both on dispose', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    ctx.provide('sessionProjections', {
+      register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+    } as never)
+    await ctx.plugin(AgentRegistry)
+
+    const agyOnlyConfig = Plugin.Config()
+    agyOnlyConfig.agyEnabled = true
+    const agyFiber = await ctx.plugin(Plugin, agyOnlyConfig)
+    expect(ctx.llm.listProviders()).toEqual([{ id: 'agy-agent', name: 'Antigravity Agent (local ACP)' }])
+    expect(resolveLlmRouteCapability(ctx.llm, 'agy-agent', 'default'))
+      .toEqual({ provider: 'agy-agent', toolCalls: 'bridge' })
+    await agyFiber.dispose()
+    expect(ctx.llm.listProviders()).toEqual([])
+
+    const bothConfig = Plugin.Config()
+    bothConfig.enabled = true
+    bothConfig.agyEnabled = true
+    const bothFiber = await ctx.plugin(Plugin, bothConfig)
+    expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['traex-agent', 'agy-agent'])
+    expect(resolveLlmRouteCapability(ctx.llm, 'traex-agent', 'default'))
+      .toEqual({ provider: 'traex-agent', toolCalls: 'bridge' })
+    expect(resolveLlmRouteCapability(ctx.llm, 'agy-agent', 'default'))
+      .toEqual({ provider: 'agy-agent', toolCalls: 'bridge' })
+    await bothFiber.dispose()
+    expect(ctx.llm.listProviders()).toEqual([])
+    expect(resolveLlmRouteCapability(ctx.llm, 'traex-agent', 'default')).toBeUndefined()
+    expect(resolveLlmRouteCapability(ctx.llm, 'agy-agent', 'default')).toBeUndefined()
+    expect(ctx.llm.listConfigurableProviders()).toEqual([])
     await ctx.fiber.dispose()
   })
 })
