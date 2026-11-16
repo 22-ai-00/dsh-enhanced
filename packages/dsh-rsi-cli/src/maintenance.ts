@@ -86,11 +86,13 @@ export function automationsLedgerPath(dshHome: string): string {
 export function listDeadLetters(dshHome: string): DeadLetterRow[] {
   const database = openStore(deliveryLedgerPath(dshHome))
   try {
+    // Only rows an operator can still decide: a row that already carries a
+    // receipt for its current attempt is settled even though it stays terminal.
     const inbox = database.prepare(
-      "SELECT id, attempt_count, status, failure_code, updated_at FROM inbox_messages WHERE status = 'dead_letter' ORDER BY updated_at",
+      "SELECT i.id, i.attempt_count, i.status, i.failure_code, i.updated_at FROM inbox_messages i WHERE i.status = 'dead_letter' AND NOT EXISTS (SELECT 1 FROM dead_letter_resolutions r WHERE r.kind = 'inbox' AND r.message_id = i.id AND r.attempt_count = i.attempt_count) ORDER BY i.updated_at",
     ).all() as unknown as { id: string; attempt_count: number; status: string; failure_code: string | null; updated_at: number }[]
     const outbox = database.prepare(
-      "SELECT id, attempt_count, status, failure_code, updated_at FROM outbox_messages WHERE status IN ('dead','unknown_after_send') ORDER BY updated_at",
+      "SELECT o.id, o.attempt_count, o.status, o.failure_code, o.updated_at FROM outbox_messages o WHERE o.status IN ('dead','unknown_after_send') AND NOT EXISTS (SELECT 1 FROM dead_letter_resolutions r WHERE r.kind = 'outbox' AND r.message_id = o.id AND r.attempt_count = o.attempt_count) ORDER BY o.updated_at",
     ).all() as unknown as { id: string; attempt_count: number; status: string; failure_code: string | null; updated_at: number }[]
     return [
       ...inbox.map((row) => ({ kind: 'inbox' as const, id: row.id, attemptCount: row.attempt_count,

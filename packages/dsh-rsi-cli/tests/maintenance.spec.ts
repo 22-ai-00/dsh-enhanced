@@ -110,6 +110,12 @@ describe('dsh-rsi maintenance', () => {
     database.close()
   })
 
+  test('a settled row drops out of the actionable list', () => {
+    resolveDeadLetter({ dshHome, kind: 'inbox', id: 'inbox-1', expectedAttemptCount: 2,
+      resolution: 'cancel', operatorId: 'operator-a' })
+    expect(listDeadLetters(dshHome)).toHaveLength(0)
+  })
+
   test('retry re-queues the row', () => {
     resolveDeadLetter({ dshHome, kind: 'inbox', id: 'inbox-1', expectedAttemptCount: 2,
       resolution: 'retry', operatorId: 'operator-a' })
