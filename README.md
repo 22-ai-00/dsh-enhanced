@@ -24,80 +24,14 @@
 
 ## 架构一览
 
-每个能力都是可独立安装的 Cordis 插件；下图是主要引用关系（箭头表示运行时依赖或数据流向，虚线表示管理/凭据关系）：
+<p align="center"><img src="docs/assets/architecture-overview.jpg" width="880" alt="文鳐 Ray 工作方式与自我成长架构图"></p>
 
-```mermaid
-flowchart TB
-  subgraph ingress["💬 渠道入口"]
-    LK["lark-channel<br/>飞书长连接"]
-    WEB["assistant-web-owner<br/>原生 Web owner"]
-    CON["owner-console<br/>文鳐左栏控制台"]
-  end
-  subgraph core["🔐 持久消息与授权"]
-    DL["assistant-delivery<br/>inbox/outbox · 配对 · 注意力/附件"]
-    POL["assistant-policy<br/>默认拒绝 · 硬预算 · 审批/预设"]
-    AUTO["assistant-automations<br/>冷启动可恢复调度"]
-  end
-  subgraph task["🧩 持久任务与验收"]
-    WI["assistant-work-items<br/>持久工作项 · 跟进 · 准入"]
-    GO["assistant-goals<br/>原生目标 · 事件等待"]
-    VER["assistant-verifier<br/>独立验收 · 证书"]
-  end
-  subgraph learn["🌱 学习与自我成长"]
-    MEM["personal-memory"]
-    ML["assistant-memory-learning"]
-    GR["assistant-growth-driver<br/>技能 / 工作流 / 插件候选"]
-    DR["assistant-dreaming<br/>随机空闲 · 私有 idea (L0)"]
-    CP["plugin-control-plane<br/>隔离验证 · 采用 · 回滚"]
-    ISO["assistant-isolation<br/>Linux/沙箱执行"]
-    SK["assistant-skills"]
-    EV["assistant-evolution"]
-  end
-  subgraph aware["🎯 评测 / 主动 / 事件"]
-    EVA["assistant-evaluation<br/>结果与注意力/吻合度账本"]
-    PRO["assistant-proactive<br/>主动筛选 · 评估与退订"]
-    ET["event-triggers<br/>受控事件源 · intake 桥接"]
-    HB["assistant-heartbeat"]
-  end
-  subgraph ops["🛡 安全与运维"]
-    KC["credentials-keychain"]
-    HEA["assistant-health"]
-    REC["assistant-recovery"]
-  end
+- **随时连接**：通过飞书或本机网页控制台随时对话与调整设置，也可按需接入飞书日历、文件或外部通知提醒。
+- **懂你办事**：自由接入常用大模型或本机 TraeX / Antigravity 编程助手，把复杂工作拆解为可持续推进的长任务，并在合适时机主动提醒。
+- **自我成长闭环**：在日常使用与纠偏中记住你的习惯与经验，空闲时酝酿新技能或改进方案，先在沙箱中独立验收通过后再启用。
+- **本机安全护航**：记忆与凭据默认留在本机，敏感操作与自主权限需经你明确授权，实验改动在原生沙箱中隔离验证，异常时可一键回滚。
 
-  LK --> DL
-  WEB --> DL
-  CON -.-> LK
-  CON -.-> CP
-  DL --> POL
-  DL --> AUTO
-  KC -.-> LK
-  KC -.-> POL
-  AUTO --> WI
-  AUTO --> GO
-  WI --> VER
-  GO --> VER
-  WI --> ML
-  ML --> MEM
-  DL --> GR
-  GR --> CP
-  GR --> SK
-  GR --> EV
-  CP --> ISO
-  CP --> VER
-  DL --> EVA
-  WI --> EVA
-  GO --> EVA
-  EVA --> PRO
-  PRO --> GO
-  ET --> WI
-  ET --> GO
-  HB --> AUTO
-  DR --> AUTO
-  HEA --> REC
-```
-
-完整包清单与各自边界见[插件目录](plugins/README.md)；共享库在 `packages/*`，不自动启用。当前主线另集成三项默认关闭、需显式开启（opt-in）的主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
+开发者可查阅[架构说明](docs/architecture.md)与[插件目录](plugins/README.md)了解完整包清单与各自边界；共享库在 `packages/*`，不自动启用。当前主线另集成三项默认关闭、需显式开启（opt-in）的主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
 
 - **受控事件源与目标退订**：`event-triggers` 5 类 sensor（GitHub 仓库、飞书日历、文件、HTTPS/JSON、Webhook）可按触发器开启 `intake` 适配器桥接至 `assistant-work-items`，并在 `assistant-proactive` / Goal 终态时无轮询自动退订。
 - **超限文本附件与注意力边界**：`assistant-delivery`（`attentionAttachOverCap`）配合 `assistant-web-owner` 与 `lark-channel` 支持把超长后台/owner 通知转为短摘要加 UTF-8 文本附件，同时保持目的审计与可选强制门禁（`attentionEnforce` 默认关闭）。
