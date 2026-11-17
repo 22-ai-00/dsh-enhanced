@@ -6,7 +6,19 @@ import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from 'yaml'
-import { applyAutonomyWizardSetup, canonicalObjectDigest, inspectAutonomyWizardStatus } from '../src/autonomy-setup.js'
+import { ownerRouteAuthorityHash } from '../../assistant-delivery/lib/index.js'
+import { normalizeConfig as validateDreamingConfig } from '../../assistant-dreaming/lib/index.js'
+import { normalizeConfig as validateGrowthConfig } from '../../assistant-growth-driver/lib/index.js'
+import { validateLearningConfig } from '../../assistant-memory-learning/lib/index.js'
+import { AssistantPolicyService } from '../../assistant-policy/lib/index.js'
+import { validateMemoryReviewConfig } from '../../assistant-verifier/lib/index.js'
+import { validateMemoryLearningAdoptionGrant } from '../../personal-memory/lib/index.js'
+import {
+  applyAutonomyWizardSetup,
+  canonicalObjectDigest,
+  inspectAutonomyWizardStatus,
+  ownerRouteAuthorityHashLocal,
+} from '../src/autonomy-setup.js'
 import { OwnerConsoleService } from '../src/service.js'
 import { AUTONOMY_TIER_DEFAULTS, TYPERT } from '../src/typert.js'
 
@@ -456,5 +468,218 @@ describe('autonomy-setup wizard', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  it('matches assistant-delivery ownerRouteAuthorityHash & inspectOwnerRouteState receipt contract and passes real subsystem validators across enable/pause/disable', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+
+    const scrambledRoute = {
+      policyRef: 'owner-dm',
+      minimumGeneration: 1,
+      agentPreset: 'standard',
+      workspace,
+      principal: { user: 'owner-local', tenant: 'local', account: 'web', channel: 'web' },
+      conversation: { chat: 'session-1', kind: 'dm', tenant: 'local', account: 'web', channel: 'web' },
+      id: 'owner-web-route',
+    } as const
+    const expectedHash = ownerRouteAuthorityHash(scrambledRoute)
+    expect(ownerRouteAuthorityHashLocal(scrambledRoute)).toBe(expectedHash)
+
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      '    ownerRoutes:',
+      `      - ${JSON.stringify(scrambledRoute)}`,
+    ].join('\n'), { encoding: 'utf8', mode: 0o600 })
+
+    const inspectSpy = vi.fn((arg: unknown) => {
+      expect(arg).toEqual({
+        authorityId: 'owner-web-route',
+        principalId: 'web/web/local/owner-local',
+        workspace,
+        agentPreset: 'standard',
+      })
+      return {
+        status: 'active',
+        receipt: {
+          authorityHash: expectedHash,
+          principalRecordId: 'principal_receipt_1',
+          principalVersion: 3,
+        },
+      }
+    })
+    const host = {
+      get: (name: string) => {
+        if (name === 'profileContext') return { dir: profileDir, home: dshHome, name: 'web' }
+        if (name === 'assistantDelivery') return { inspectOwnerRouteState: inspectSpy }
+        if (name === 'pluginManager') {
+          return {
+            listBundles: async () => [
+              '@dsh-enhanced/assistant-delivery',
+              '@dsh-enhanced/personal-assistant',
+              '@dsh-enhanced/assistant-verifier',
+              '@dsh-enhanced/assistant-memory-learning',
+              '@dsh-enhanced/assistant-dreaming',
+              '@dsh-enhanced/assistant-growth-driver',
+              '@dsh-enhanced/traex-acp-provider',
+            ].map(pkg => ({ name: pkg, installed: true, enabled: true })),
+          }
+        }
+        if (name === 'settings') {
+          return {
+            describe: () => [
+              { ns: 'dsh-enhanced-traex-acp-provider', revision: 1, value: { enabled: true } },
+              { ns: 'dsh-deepseek-agent-default-model', revision: 1, value: { provider: 'traex-agent', model: 'default' } },
+              {
+                ns: 'dsh-enhanced-personal-assistant',
+                revision: 1,
+                value: {
+                  assistantPolicy: {
+                    rules: [{ id: 'existing-descriptor-rule', effect: 'allow', actions: ['read'], resource: { kind: 'filesystem', id: '*' } }],
+                  },
+                },
+              },
+            ],
+            mutate: vi.fn(async () => {}),
+          }
+        }
+        return undefined
+      },
+    }
+
+    const status = await inspectAutonomyWizardStatus(host)
+    expect(inspectSpy).toHaveBeenCalledTimes(1)
+    expect(status.ownerRoute.active).toBe(true)
+
+    const enableRes = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'custom',
+      provider: 'traex-agent',
+      model: 'default',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: true,
+      enableGrowth: true,
+      workItemExperiences: true,
+      customBudget: {
+        dailyMemoryExtractions: 120,
+        dailyMemoryScans: 60,
+        dailyDreams: 12,
+        maxIdeasPerWake: 3,
+        dailyGrowthReviews: 24,
+        dailyGrowthDiscoveryScans: 12,
+        grantLeaseDays: 90,
+      },
+    })
+    expect(enableRes.applied).toBe(true)
+
+    const rows = parse(readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{
+      id: string
+      disabled?: boolean
+      config?: Record<string, any>
+    }>
+    const learningCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    const verifierCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
+    const paCfg = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const dreamCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!
+    const growthCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!
+
+    const validatedLearning = validateLearningConfig(learningCfg)
+    const validatedReviews = validateMemoryReviewConfig(verifierCfg['memoryReviews'])
+    const validatedAdoption = validateMemoryLearningAdoptionGrant(paCfg['personalMemory']['automaticLearning'])
+    expect(validatedLearning.maxExtractions).toBe(10_000)
+    expect(validatedReviews.maxReviews).toBe(10_000)
+    expect(validatedAdoption.maxMutations).toBe(1_000)
+    expect(validateDreamingConfig(dreamCfg).enabled).toBe(true)
+    expect(validateGrowthConfig(growthCfg).usageLearning.enabled).toBe(true)
+
+    // Descriptor rules were preserved alongside wizard budgets/rules.
+    const ruleIds = (paCfg['assistantPolicy']['rules'] as Array<{ id: string }>).map(r => r.id)
+    expect(ruleIds).toContain('existing-descriptor-rule')
+
+    // Policy service evaluates growth usage reconciler, usage job execution, growth tools, and verified-workflows.
+    const ctx = new Context()
+    try {
+      const policy = new AssistantPolicyService(ctx, {
+        databasePath: join(root, 'policy-check.sqlite'),
+        rules: paCfg['assistantPolicy']['rules'],
+        budgets: paCfg['assistantPolicy']['budgets'],
+      })
+      const principalId = 'web/web/local/owner-local'
+      expect(policy.evaluate({
+        subject: { kind: 'background', id: 'assistant-growth-usage', workspace, principal: principalId },
+        action: 'reconcile',
+        resource: { kind: 'automation', id: 'usage-scan-owner-1' },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+      expect(policy.evaluate({
+        subject: { kind: 'background', id: 'usage-work-item-42', workspace, principal: principalId },
+        action: 'execute',
+        resource: { kind: 'automation', id: 'usage-work-item-42' },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+      expect(policy.evaluate({
+        subject: { kind: 'agent', id: 'standard', workspace, principal: principalId },
+        action: 'execute',
+        resource: { kind: 'tool', id: 'growth_inspect' },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+      expect(policy.evaluate({
+        subject: { kind: 'agent', id: 'standard', workspace, principal: principalId },
+        action: 'draft',
+        resource: { kind: 'evolution', id: 'verified-workflows' },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+
+    // Pausing dreaming + growth must still validate cleanly without normalizeConfig throwing.
+    const pauseRes = await applyAutonomyWizardSetup(host, {
+      action: 'pause',
+      tier: 'conservative',
+      provider: 'traex-agent',
+      model: 'default',
+      reasoningEffort: '',
+      enableMemoryLearning: false,
+      enableDreaming: true,
+      enableGrowth: true,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+    })
+    expect(pauseRes.applied).toBe(true)
+    const pausedRows = parse(readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{
+      id: string
+      config?: Record<string, any>
+    }>
+    expect(validateDreamingConfig(pausedRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!).retired).toBe(true)
+    expect(validateGrowthConfig(pausedRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!).enabled).toBe(false)
+
+    // Disabling all modules sets `disabled: true` while keeping configs structurally valid.
+    const disableRes = await applyAutonomyWizardSetup(host, {
+      action: 'disable',
+      tier: 'conservative',
+      provider: 'traex-agent',
+      model: 'default',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: true,
+      enableGrowth: true,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+    })
+    expect(disableRes.applied).toBe(true)
+    const disabledRows = parse(readFileSync(join(profileDir, 'cordis.patch.yml'), 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{
+      id: string
+      disabled?: boolean
+      config?: Record<string, any>
+    }>
+    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(true)
+    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')?.disabled).toBe(true)
+    expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')?.disabled).toBe(true)
+    expect(validateDreamingConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!).enabled).toBe(false)
+    expect(validateGrowthConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!).enabled).toBe(false)
   })
 })

@@ -200,6 +200,30 @@ describe('web-owner RSI autonomy grants', () => {
       resource: { kind: 'evolution', id: 'assistant-dreaming:idea:123' },
       context: { initiator: 'foreground' },
     }).effect).toBe('allow')
+    expect(policyService.evaluate({
+      subject: { kind: 'background', id: 'assistant-growth-usage', workspace: f.workspace, principal: result.owner.principalId },
+      action: 'reconcile',
+      resource: { kind: 'automation', id: 'usage-scan-web' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(policyService.evaluate({
+      subject: { kind: 'background', id: 'usage-work-item-1', workspace: f.workspace, principal: result.owner.principalId },
+      action: 'execute',
+      resource: { kind: 'automation', id: 'usage-work-item-1' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(policyService.evaluate({
+      subject: { kind: 'agent', id: 'standard', workspace: f.workspace, principal: result.owner.principalId },
+      action: 'execute',
+      resource: { kind: 'tool', id: 'growth_inspect' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(policyService.evaluate({
+      subject: { kind: 'agent', id: 'standard', workspace: f.workspace, principal: result.owner.principalId },
+      action: 'draft',
+      resource: { kind: 'evolution', id: 'verified-workflows' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
     expect(policyService.getBudgetConfig('web-memory-learning-web')?.limit).toBe(7)
     expect(policyService.getBudgetConfig('web-dreaming-web')?.limit).toBe(7)
     expect(policyService.getBudgetConfig('web-growth-reviews-web')?.limit).toBe(7)
@@ -399,5 +423,58 @@ describe('web-owner RSI autonomy grants', () => {
       if (prevEffective === undefined) delete process.env.TEST_WEB_EFFECTIVE
       else process.env.TEST_WEB_EFFECTIVE = prevEffective
     }
+  })
+
+  test('applies memory-learning grants without requiring absent optional dreaming/growth plugins', async () => {
+    const dshHome = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-mem-only-')))
+    roots.push(dshHome)
+    const workspace = join(dshHome, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+    const memoryOnlyEffective = await buildEffectiveSource([
+      'personal-assistant',
+      'assistant-delivery',
+      'assistant-goals',
+      'assistant-web-owner',
+      'assistant-verifier',
+      'assistant-memory-learning',
+    ])
+    const initial = prepareWebOwnerProfile({ dshHome, profile: 'web', workspace, preset: 'standard' }, '[]', memoryOnlyEffective)
+    const patchPath = join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    await writeFile(patchPath, initial.patch, { mode: 0o600 })
+    const delivery = new DeliveryStore({ path: initial.databasePath })
+    delivery.ensureOwner(initial.principal)
+    delivery.createBinding({
+      conversation: { channel: 'web', account: 'web', tenant: 'local', kind: 'dm', chat: 'session-primary' },
+      principal: initial.principal,
+      workspace,
+      agentPreset: 'standard',
+      sessionId: 'session-primary',
+      policyRef: 'owner-dm',
+    })
+    delivery.close()
+    await writeFile(join(dshHome, 'settings.yaml'), 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-chat\n', { mode: 0o600 })
+
+    const res = await applyWebOwnerAutonomySetup(
+      {
+        dshHome,
+        profile: 'web',
+        memoryLearning: true,
+        dailyBudget: 5,
+      },
+      { readEffectiveSource: () => memoryOnlyEffective },
+    )
+    expect(res.ok).toBe(true)
+    expect(res.enabled).toEqual({
+      memoryLearning: true,
+      dreaming: 'disabled',
+      growth: false,
+      usageLearning: false,
+      workItemExperiences: false,
+    })
+    const saved = await readFile(patchPath, 'utf8')
+    const parsedRows = parseDocument(saved).toJS() as Array<{ id: string }>
+    expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-dreaming')).toBe(false)
+    expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-growth-driver')).toBe(false)
   })
 })

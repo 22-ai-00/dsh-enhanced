@@ -105,9 +105,53 @@ function canonicalJson(value: unknown): string {
   throw new Error(`unsupported value type in canonical JSON: ${typeof value}`)
 }
 
-/** Match `packages/assistant-growth-contract` `growthObjectDigest` / `ownerRouteAuthorityHash`. */
+/** Match sorted-key canonical SHA-256 digests (`assistant-verifier`, `personal-memory`). */
 export function canonicalObjectDigest(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex')
+}
+
+/** Match `@dsh-enhanced/assistant-delivery` `ownerRouteAuthorityHash` insertion-order SHA-256 digest. */
+export function ownerRouteAuthorityHashLocal(route: Readonly<Record<string, unknown>>, defaults?: Readonly<{ workspace: string; agentPreset: string }>): string | null {
+  const id = strOrNull(route['id'])
+  if (id === null) return null
+  const rawConv = asPlainRecord(route['conversation'])
+  const kind = rawConv['kind']
+  const canonicalConv = (kind === 'dm' || kind === 'group')
+    && typeof rawConv['channel'] === 'string'
+    && typeof rawConv['account'] === 'string'
+    && typeof rawConv['tenant'] === 'string'
+    && typeof rawConv['chat'] === 'string'
+    ? {
+        channel: rawConv['channel'],
+        account: rawConv['account'],
+        tenant: rawConv['tenant'],
+        kind,
+        chat: rawConv['chat'],
+        ...(rawConv['thread'] !== undefined ? { thread: rawConv['thread'] } : {}),
+      }
+    : route['conversation']
+  const rawPrincipal = asPlainRecord(route['principal'])
+  const canonicalPrincipal = typeof rawPrincipal['channel'] === 'string'
+    && typeof rawPrincipal['account'] === 'string'
+    && typeof rawPrincipal['tenant'] === 'string'
+    && typeof rawPrincipal['user'] === 'string'
+    ? {
+        channel: rawPrincipal['channel'],
+        account: rawPrincipal['account'],
+        tenant: rawPrincipal['tenant'],
+        user: rawPrincipal['user'],
+      }
+    : route['principal']
+  const canonicalAuthority = {
+    id,
+    conversation: canonicalConv,
+    principal: canonicalPrincipal,
+    workspace: typeof route['workspace'] === 'string' ? route['workspace'] : (defaults?.workspace ?? ''),
+    agentPreset: strOrNull(route['agentPreset']) ?? (defaults?.agentPreset ?? ''),
+    policyRef: route['policyRef'],
+    minimumGeneration: typeof route['minimumGeneration'] === 'number' ? route['minimumGeneration'] : 1,
+  }
+  return createHash('sha256').update(JSON.stringify(canonicalAuthority), 'utf8').digest('hex')
 }
 
 function externalPrincipalId(principal: Readonly<Record<string, unknown>>): string | null {
@@ -406,25 +450,26 @@ function inspectOwnerRoute(
   const sqliteOwner = deliveryDbPath !== null ? queryActiveOwnerFromSqlite(deliveryDbPath, expectedPrincipal) : null
 
   const deliveryService = host.get('assistantDelivery') as Readonly<{
-    inspectOwnerRouteState?: (route: unknown) => { status?: string; owner?: { id?: string; version?: number } }
+    inspectOwnerRouteState?: (input: {
+      authorityId: string
+      principalId: string
+      workspace: string
+      agentPreset: string
+    }) => {
+      status?: string
+      receipt?: {
+        authorityHash?: string
+        principalRecordId?: string
+        principalVersion?: number
+      }
+      owner?: { id?: string; version?: number }
+    }
   }> | undefined
 
   let principalRecordId = sqliteOwner?.principalRecordId ?? null
   let principalVersion = sqliteOwner?.principalVersion ?? null
   let routeActiveFromService = false
-
-  if (preferredRoute !== undefined && typeof deliveryService?.inspectOwnerRouteState === 'function') {
-    try {
-      const inspected = deliveryService.inspectOwnerRouteState(preferredRoute)
-      if (inspected?.status === 'active') {
-        routeActiveFromService = true
-        if (typeof inspected.owner?.id === 'string') principalRecordId = inspected.owner.id
-        if (typeof inspected.owner?.version === 'number') principalVersion = inspected.owner.version
-      }
-    } catch {
-      // Fall back cleanly to SQLite inspection.
-    }
-  }
+  let serviceAuthorityHash: string | null = null
 
   if (preferredRoute !== undefined) {
     const principalObj = asPlainRecord(preferredRoute['principal'])
@@ -433,17 +478,32 @@ function inspectOwnerRoute(
     const authorityId = strOrNull(preferredRoute['id'])
     const workspace = typeof preferredRoute['workspace'] === 'string' ? preferredRoute['workspace'] : defaultWorkspace
     const preset = strOrNull(preferredRoute['agentPreset']) ?? defaultPreset
-    const canonicalAuthority = {
-      id: authorityId,
-      conversation: preferredRoute['conversation'],
-      principal: preferredRoute['principal'],
-      workspace,
-      agentPreset: preset,
-      policyRef: preferredRoute['policyRef'],
-      minimumGeneration: typeof preferredRoute['minimumGeneration'] === 'number' ? preferredRoute['minimumGeneration'] : 1,
-    }
-    const authorityHash = authorityId !== null ? canonicalObjectDigest(canonicalAuthority) : null
     const principalId = externalPrincipalId(principalObj)
+
+    if (authorityId !== null && principalId !== null && typeof deliveryService?.inspectOwnerRouteState === 'function') {
+      try {
+        const inspected = deliveryService.inspectOwnerRouteState({
+          authorityId,
+          principalId,
+          workspace,
+          agentPreset: preset,
+        })
+        if (inspected?.status === 'active') {
+          routeActiveFromService = true
+          if (typeof inspected.receipt?.principalRecordId === 'string') principalRecordId = inspected.receipt.principalRecordId
+          else if (typeof inspected.owner?.id === 'string') principalRecordId = inspected.owner.id
+          if (typeof inspected.receipt?.principalVersion === 'number') principalVersion = inspected.receipt.principalVersion
+          else if (typeof inspected.owner?.version === 'number') principalVersion = inspected.owner.version
+          if (typeof inspected.receipt?.authorityHash === 'string' && /^[0-9a-f]{64}$/u.test(inspected.receipt.authorityHash)) {
+            serviceAuthorityHash = inspected.receipt.authorityHash
+          }
+        }
+      } catch {
+        // Fall back cleanly to SQLite inspection.
+      }
+    }
+
+    const authorityHash = serviceAuthorityHash ?? ownerRouteAuthorityHashLocal(preferredRoute, { workspace, agentPreset: preset })
     const active = (routeActiveFromService || (principalRecordId !== null && principalVersion !== null)) && authorityHash !== null && principalId !== null
     return {
       configured: true,
@@ -580,7 +640,8 @@ function getPersonalAndPolicyConfigs(
 }> {
   const hasSplitPolicy = seq !== undefined && findPatchRow(seq, 'dsh-enhanced-assistant-policy') !== undefined
   const paPatch = seq ? getPatchRowConfig(seq, 'dsh-enhanced-personal-assistant') : {}
-  const paCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-personal-assistant', paPatch)
+  const descPa = findEntry(descriptors, candidate => candidate === 'dsh-enhanced-personal-assistant')
+  const runtimePaCfg = descPa ? boundedConfig(descPa.value) : {}
 
   if (hasSplitPolicy && findPatchRow(seq!, 'dsh-enhanced-personal-assistant') === undefined) {
     const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-policy', getPatchRowConfig(seq!, 'dsh-enhanced-assistant-policy'))
@@ -597,9 +658,9 @@ function getPersonalAndPolicyConfigs(
 
   return {
     layout: 'personal-assistant',
-    policyCfg: asPlainRecord(paCfg['assistantPolicy']),
-    automationsCfg: asPlainRecord(paCfg['assistantAutomations']),
-    personalMemoryCfg: asPlainRecord(paCfg['personalMemory']),
+    policyCfg: { ...asPlainRecord(runtimePaCfg['assistantPolicy']), ...asPlainRecord(paPatch['assistantPolicy']) },
+    automationsCfg: { ...asPlainRecord(runtimePaCfg['assistantAutomations']), ...asPlainRecord(paPatch['assistantAutomations']) },
+    personalMemoryCfg: { ...asPlainRecord(runtimePaCfg['personalMemory']), ...asPlainRecord(paPatch['personalMemory']) },
     policyRow: seq ? findPatchRow(seq, 'dsh-enhanced-personal-assistant') : undefined,
   }
 }
@@ -1050,7 +1111,13 @@ export async function applyAutonomyWizardSetup(
       const row = findPatchRow(seq, 'dsh-enhanced-assistant-growth-driver')
       if (row !== undefined) {
         const cfg = readConfigMap(row, 'config')
-        if (cfg !== undefined) cfg.set('enabled', false)
+        if (cfg !== undefined) {
+          cfg.set('enabled', false)
+          for (const subKey of ['workflowOwnerAnchored', 'dreamingIdeas', 'usageLearning', 'pluginSourceProposals'] as const) {
+            const subMap = readConfigMap(cfg, subKey)
+            if (subMap !== undefined) subMap.set('enabled', false)
+          }
+        }
         if (input.action === 'disable') row.set('disabled', true)
         affected.push('技能演化')
       }
@@ -1188,7 +1255,7 @@ export async function applyAutonomyWizardSetup(
       authorityId: reviewAuthId,
       owner: learningOwner,
       expiresAt,
-      maxReviews: Math.max(100, budgets.dailyMemoryExtractions * budgets.grantLeaseDays),
+      maxReviews: Math.min(10_000, Math.max(100, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
       policy: 'Independently verify exact owner statements for facts and preferences and trusted owner objectives with canonical outcomes for experiences.',
       maxInputBytes: 65_536,
       maxOutputTokens: 2048,
@@ -1218,7 +1285,7 @@ export async function applyAutonomyWizardSetup(
       authorityId: extractAuthId,
       owner: learningOwner,
       expiresAt,
-      maxExtractions: Math.max(20, budgets.dailyMemoryExtractions * budgets.grantLeaseDays),
+      maxExtractions: Math.min(10_000, Math.max(20, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
       maxPending: 64,
       lookbackMs: 7 * DAY_MS,
       policy: 'Extract only explicit owner facts, preferences or grounded work-item experiences. Prefer noop when evidence is insufficient.',

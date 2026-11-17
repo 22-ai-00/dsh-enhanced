@@ -12,6 +12,8 @@ import {
   buildWebOwnerMemoryPolicyGrants,
   mergeAssistantPolicyGrants,
   webOwnerBudgetIds,
+  webOwnerGrowthRuleIds,
+  webOwnerGrowthUsageRuleIds,
 } from '../src/index.ts'
 
 const roots: string[] = []
@@ -45,6 +47,7 @@ describe('web-owner autonomy policy grant helpers', () => {
     })
     const growth = buildWebOwnerGrowthPolicyGrants({
       ...scope,
+      preset: 'standard',
       growthBudgetId: ids.growthReviews,
       dailyGrowthBudget: 5,
       usageLearning: true,
@@ -56,6 +59,39 @@ describe('web-owner autonomy policy grant helpers', () => {
       budgets: [...memory.budgets, ...dreaming.budgets, ...growth.budgets],
     })
     const compiled = compilePolicy(merged.rules)
+
+    // UsageLearningRuntime reconciles as OWNER='assistant-growth-usage' and executes usage-scan-* / usage-* jobs.
+    expect(evaluatePolicy(compiled, {
+      subject: { kind: 'background', id: 'assistant-growth-usage', workspace: scope.workspace, principal: scope.principalId },
+      action: 'reconcile',
+      resource: { kind: 'automation', id: 'usage-scan-abcd1234' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(evaluatePolicy(compiled, {
+      subject: { kind: 'background', id: 'assistant-growth-usage', workspace: scope.workspace, principal: scope.principalId },
+      action: 'reconcile',
+      resource: { kind: 'automation', id: 'usage-deadbeef' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(evaluatePolicy(compiled, {
+      subject: { kind: 'background', id: 'usage-deadbeef', workspace: scope.workspace, principal: scope.principalId },
+      action: 'execute',
+      resource: { kind: 'automation', id: 'usage-deadbeef' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(evaluatePolicy(compiled, {
+      subject: { kind: 'agent', id: 'standard', workspace: scope.workspace, principal: scope.principalId },
+      action: 'draft',
+      resource: { kind: 'evolution', id: 'verified-workflows' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(evaluatePolicy(compiled, {
+      subject: { kind: 'agent', id: 'standard', workspace: scope.workspace, principal: scope.principalId },
+      action: 'execute',
+      resource: { kind: 'tool', id: 'growth_propose_skill_candidate' },
+      context: { initiator: 'background' },
+    }).effect).toBe('allow')
+    expect(webOwnerGrowthRuleIds('web').length).toBeGreaterThan(webOwnerGrowthUsageRuleIds('web').length)
 
     // Memory actions require exact background subject + workspace + principal + authorityId resource.
     expect(evaluatePolicy(compiled, {

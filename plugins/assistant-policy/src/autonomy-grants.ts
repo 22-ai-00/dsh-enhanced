@@ -67,6 +67,7 @@ export interface WebOwnerDreamingPolicyGrantInput extends WebOwnerPolicyScope {
 }
 
 export interface WebOwnerGrowthPolicyGrantInput extends WebOwnerPolicyScope {
+  readonly preset?: string
   readonly growthBudgetId: string
   readonly dailyGrowthBudget: number
   readonly usageLearning?: boolean
@@ -154,13 +155,22 @@ export function webOwnerDreamingRuleIds(profile: string): readonly string[] {
   ])
 }
 
-export function webOwnerGrowthRuleIds(profile: string): readonly string[] {
+export function webOwnerGrowthUsageRuleIds(profile: string): readonly string[] {
   const prefix = webOwnerPolicyPrefix(profile)
   return Object.freeze([
     `${prefix}growth-usage-scan-reconcile`,
     `${prefix}growth-usage-scan-execute`,
     `${prefix}growth-job-reconcile`,
     `${prefix}growth-job-execute`,
+  ])
+}
+
+export function webOwnerGrowthRuleIds(profile: string): readonly string[] {
+  const prefix = webOwnerPolicyPrefix(profile)
+  return Object.freeze([
+    `${prefix}growth-draft`,
+    `${prefix}growth-tool-execute`,
+    ...webOwnerGrowthUsageRuleIds(profile),
   ])
 }
 
@@ -259,16 +269,26 @@ export function buildWebOwnerDreamingPolicyGrants(input: WebOwnerDreamingPolicyG
 }
 
 /**
- * Compile bounded assistantPolicy budgets (and optional usage-scan rules) for
- * Web-owner assistant-growth-driver intake.
+ * Compile bounded assistantPolicy budgets (and growth agent + optional usage-learning
+ * automation rules) for Web-owner assistant-growth-driver intake.
  */
 export function buildWebOwnerGrowthPolicyGrants(input: WebOwnerGrowthPolicyGrantInput): PolicyGrantBundle {
   const scope = assertScope(input)
   const growthBudgetId = assertIdentifier('growthBudgetId', input.growthBudgetId)
   const dailyGrowthBudget = assertPositiveInt('dailyGrowthBudget', input.dailyGrowthBudget)
   const usageLearning = input.usageLearning === true
+  const preset = input.preset === undefined ? undefined : assertIdentifier('preset', input.preset, 128)
+  const prefix = webOwnerPolicyPrefix(scope.profile)
+  const bgContext = { initiators: ['background' as const] }
 
   const rules: PolicyRule[] = []
+  if (preset !== undefined) {
+    const agentSubject = { kind: 'agent' as const, id: preset, workspace: scope.workspace, principal: scope.principalId }
+    rules.push(
+      { id: `${prefix}growth-draft`, effect: 'allow', subject: agentSubject, actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: bgContext },
+      { id: `${prefix}growth-tool-execute`, effect: 'allow', subject: agentSubject, actions: ['execute'], resource: { kind: 'tool', id: 'growth_*' }, context: bgContext },
+    )
+  }
   const budgets: PolicyBudgetConfig[] = [
     { id: growthBudgetId, metric: 'automation-runs', limit: dailyGrowthBudget, periodMs: AUTONOMY_DAILY_PERIOD_MS, scope: 'workspace' },
   ]
@@ -279,14 +299,15 @@ export function buildWebOwnerGrowthPolicyGrants(input: WebOwnerGrowthPolicyGrant
       throw new Error('assistant-policy: growthBudgetId and scanBudgetId must be distinct')
     }
     const dailyScanBudget = assertPositiveInt('dailyScanBudget', input.dailyScanBudget ?? AUTONOMY_BUDGET_TIERS.conservative.scanDailyBudget)
-    const ruleIds = webOwnerGrowthRuleIds(scope.profile)
+    const usageRuleIds = webOwnerGrowthUsageRuleIds(scope.profile)
     const background = (id: string) => ({ kind: 'background' as const, id, workspace: scope.workspace, principal: scope.principalId })
-    const bgContext = { initiators: ['background' as const] }
+    // UsageLearningRuntime uses OWNER = 'assistant-growth-usage', scanId = 'usage-scan-<lane>',
+    // and review job ids 'usage-<digest>' / 'usage-work-item-<digest>'.
     rules.push(
-      { id: ruleIds[0]!, effect: 'allow', subject: background('assistant-growth-driver'), actions: ['reconcile'], resource: { kind: 'automation', id: 'usage-scan-*' }, context: bgContext },
-      { id: ruleIds[1]!, effect: 'allow', subject: background('usage-scan-*'), actions: ['execute'], resource: { kind: 'automation', id: 'usage-scan-*' }, context: bgContext },
-      { id: ruleIds[2]!, effect: 'allow', subject: background('assistant-growth-driver'), actions: ['reconcile'], resource: { kind: 'automation', id: 'source-growth:*' }, context: bgContext },
-      { id: ruleIds[3]!, effect: 'allow', subject: background('source-growth:*'), actions: ['execute'], resource: { kind: 'automation', id: 'source-growth:*' }, context: bgContext },
+      { id: usageRuleIds[0]!, effect: 'allow', subject: background('assistant-growth-usage'), actions: ['reconcile'], resource: { kind: 'automation', id: 'usage-scan-*' }, context: bgContext },
+      { id: usageRuleIds[1]!, effect: 'allow', subject: background('usage-scan-*'), actions: ['execute'], resource: { kind: 'automation', id: 'usage-scan-*' }, context: bgContext },
+      { id: usageRuleIds[2]!, effect: 'allow', subject: background('assistant-growth-usage'), actions: ['reconcile'], resource: { kind: 'automation', id: 'usage-*' }, context: bgContext },
+      { id: usageRuleIds[3]!, effect: 'allow', subject: background('usage-*'), actions: ['execute'], resource: { kind: 'automation', id: 'usage-*' }, context: bgContext },
     )
     budgets.push({ id: scanBudgetId, metric: 'automation-runs', limit: dailyScanBudget, periodMs: AUTONOMY_DAILY_PERIOD_MS, scope: 'subject' })
   }
