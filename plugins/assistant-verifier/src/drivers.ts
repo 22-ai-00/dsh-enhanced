@@ -105,7 +105,7 @@ export interface IsolatedRunnerAuthorityTerms {
 export interface NativeIsolatedRunnerAuthorityInput extends IsolatedRunnerAuthorityTerms {
   readonly backend: 'linux-native'
   readonly runtime: LinuxRuntime
-  readonly cgroupRoots: Extract<LinuxCgroupRoots, { mode: 'v1' }>
+  readonly cgroupRoots: LinuxCgroupRoots
 }
 export type IsolatedRunnerAuthorityInput = NativeIsolatedRunnerAuthorityInput
 
@@ -366,12 +366,12 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
         let runtime: LinuxRuntime, roots: LinuxCgroupRoots
         try { runtime = validateLinuxRuntime(runtimeInput); roots = validateLinuxCgroupRoots(item.cgroupRoots) }
         catch { return fail('invalid isolated native runtime or cgroup roots') }
-        if (roots.mode !== 'v1') fail('isolated native verification requires cgroup v1')
         const stateRoot = canonicalDirectory(item.stateRoot, 'isolated runner stateRoot')
         if (/[\p{Cc}\\]/u.test(stateRoot)) fail('isolated native stateRoot is unsafe')
         if ([runtime.root.path, runtime.nodePath, runtime.pnpmPath, runtime.nativePnpmRoot, runtime.nativePnpmPath,
           runtime.modulesPath, runtime.storePath, runtime.cachePath].some(path => /[\p{Cc}\\]/u.test(path))) fail('native runtime path is unsafe')
-        const paths = [stateRoot, runtime.root.path, roots.cpu, roots.memory, roots.pids, roots.freezer]
+        const cgroupPaths = roots.mode === 'v1' ? [roots.cpu, roots.memory, roots.pids, roots.freezer] : [roots.unified]
+        const paths = [stateRoot, runtime.root.path, ...cgroupPaths]
         for (let left = 0; left < paths.length; left++) for (let right = left + 1; right < paths.length; right++) {
           if (paths[left] === paths[right] || paths[left]!.startsWith(paths[right]! + '/')
             || paths[right]!.startsWith(paths[left]! + '/')) fail('isolated native authority paths overlap')

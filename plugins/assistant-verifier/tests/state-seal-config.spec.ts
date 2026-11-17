@@ -99,3 +99,29 @@ test('keeps macOS behavior configurations closed to Linux state seals', () => {
   expect(() => validatePluginBehaviorRunnerConfig({ ...common, dockerPath: '/usr/bin/docker',
     image: 'sha256:' + 'a'.repeat(64) })).toThrow('backend')
 })
+
+test('accepts delegated Linux cgroup v2 roots and rejects malformed or accessor-shaped v2 cgroups', () => {
+  const v2 = { mode: 'v2' as const, unified: '/sys/fs/cgroup/dsh-native/uid-1000' }
+  const runnerConfig = { ...linux(), cgroupRoots: v2 }
+  expect(validatePluginBehaviorRunnerConfig(runnerConfig)).toEqual(runnerConfig)
+  const { authorityDigest: _authorityDigest, ...deployment } = runnerConfig
+  expect(validateCreationBehaviorDeploymentConfig(deployment)).toEqual(deployment)
+
+  for (const badRoots of [
+    { mode: 'v2', unified: '/sys/fs/cgroup/dsh' },
+    { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-0' },
+    { mode: 'v2', unified: '/sys/fs/cgroup/cpu/dsh-native/uid-1000' },
+    { mode: 'v2', unified: 'sys/fs/cgroup/dsh-native/uid-1000' },
+    { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-1000' },
+    { mode: 'v2' },
+  ]) {
+    expect(() => validatePluginBehaviorRunnerConfig({ ...linux(), cgroupRoots: badRoots })).toThrow('cgroup roots')
+    const { authorityDigest: _d, ...badDeploy } = { ...linux(), cgroupRoots: badRoots }
+    expect(() => validateCreationBehaviorDeploymentConfig(badDeploy)).toThrow('cgroup roots')
+  }
+
+  let accessed = 0
+  const accessorRoots = { mode: 'v2', get unified() { accessed++; return '/sys/fs/cgroup/dsh-native/uid-1000' } }
+  expect(() => validatePluginBehaviorRunnerConfig({ ...linux(), cgroupRoots: accessorRoots })).toThrow('cgroup roots')
+  expect(accessed).toBe(0)
+})

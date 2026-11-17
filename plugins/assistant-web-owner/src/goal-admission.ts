@@ -264,7 +264,6 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   const principalId = `web/${input.profile}/local/operator`
   const profile = inspectAutonomyProfile(target.document.toString(), input.profile, input.dshHome)
   const nativeRoots = profile.linux.cgroupRoots
-  if (nativeRoots.mode === 'v2') fail('native Goal verification requires frozen cgroup v1 roots')
   const { binding, owner } = snapshot
   if (profile.grant.workspace !== input.workspace || profile.grant.agentPreset !== input.preset || binding.workspace !== input.workspace || binding.agentPreset !== input.preset
     || !isDeepStrictEqual(binding.principal, profile.principal) || owner.id !== profile.grant.principalRecordId || owner.version !== profile.grant.principalVersion

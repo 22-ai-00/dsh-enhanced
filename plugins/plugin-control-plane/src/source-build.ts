@@ -580,6 +580,31 @@ if (process.env.DSH_SOURCE_CAPTURE_PACK === 'true') process.stdout.write('DSH_PR
 DSH_SOURCE_PACK_VERIFY
 `
 
+function validLinuxCgroupRootsShape(roots: unknown, uid: number | undefined): boolean {
+  if (!roots || typeof roots !== 'object' || Array.isArray(roots) || Object.getPrototypeOf(roots) !== Object.prototype
+    || uid === undefined || !Number.isSafeInteger(uid) || uid <= 0) {
+    return false
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(roots)
+  if (Reflect.ownKeys(roots).length !== Object.keys(descriptors).length
+    || !Object.values(descriptors).every(entry => entry.enumerable && 'value' in entry)) {
+    return false
+  }
+  const value = roots as Record<string, unknown>
+  if (value.mode === 'v1') {
+    if (Object.keys(value).sort().join() !== 'cpu,freezer,memory,mode,pids') return false
+    const paths = [value.cpu, value.memory, value.pids, value.freezer]
+    const pattern = new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${uid}$`, 'u')
+    return new Set(paths).size === 4 && paths.every(root => typeof root === 'string' && pattern.test(root))
+  }
+  if (value.mode === 'v2') {
+    return Object.keys(value).sort().join() === 'mode,unified'
+      && typeof value.unified === 'string'
+      && new RegExp(`^/sys/fs/cgroup/dsh-native/uid-${uid}$`, 'u').test(value.unified)
+  }
+  return false
+}
+
 export function validateSourceBuildConfig(config: SourceBuildConfig): void {
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source build configuration is invalid')
@@ -609,11 +634,7 @@ export function validateSourceBuildConfig(config: SourceBuildConfig): void {
         || !integer(config.memoryMiB, 128, 16384) || !Number.isFinite(config.cpus) || config.cpus < 0.25 || config.cpus > 16
         || !integer(config.pidsLimit, 16, 1024) || !integer(config.workspaceMiB, 64, 8192)
         || !integer(config.temporaryMiB, 32, 4096) || !integer(config.workspaceInodes, 16, 1_000_000)
-        || !integer(config.temporaryInodes, 16, 1_000_000) || !roots || roots.mode !== 'v1'
-        || Object.keys(roots).sort().join() !== 'cpu,freezer,memory,mode,pids'
-        || new Set([roots.cpu, roots.memory, roots.pids, roots.freezer]).size !== 4
-        || [roots.cpu, roots.memory, roots.pids, roots.freezer].some(root => typeof root !== 'string'
-          || !new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${process.getuid?.()}$`, 'u').test(root))
+        || !integer(config.temporaryInodes, 16, 1_000_000) || !validLinuxCgroupRootsShape(roots, process.getuid?.())
         || !validLinuxRepositoryIdentity(config)
         || Object.hasOwn(config, 'stateSeal') && !validLinuxStateSeal(config.stateSeal, config.stateRoot)) {
         throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Linux source build configuration is invalid')

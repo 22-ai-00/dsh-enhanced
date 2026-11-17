@@ -61,6 +61,9 @@ it('accepts only a private Linux runner config and keeps deployment reviews clos
   expect(checked).not.toBe(authority)
   const { authorityDigest: _digest, ...deployment } = authority
   expect(() => validatePluginBehaviorDeploymentConfig(deployment)).toThrow('invalid plugin behavior deployment config')
+  const v2Authority = { ...authority, cgroupRoots: { mode: 'v2' as const, unified: '/sys/fs/cgroup/dsh-native/uid-1000' } }
+  expect(validatePluginBehaviorRunnerConfig(v2Authority)).toEqual(v2Authority)
+  expect(() => validatePluginBehaviorDeploymentConfig({ ...deployment, cgroupRoots: v2Authority.cgroupRoots })).toThrow('invalid plugin behavior deployment config')
   expect(seam.configs).toEqual([])
   expect(seam.verify).not.toHaveBeenCalled()
 })
@@ -74,7 +77,8 @@ it.each([
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, maxOutputBytes: 65_535 }),
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, stateRoot: '/' }),
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, maxDurationMs: value.maxTotalDurationMs + 1 }),
-  (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' } }),
+  (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh' } }),
+  (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-0' } }),
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, cgroupRoots: { ...value.cgroupRoots, extra: true } }),
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, runtime: { ...value.runtime, extra: true } }),
   (value: LinuxPluginBehaviorRunnerConfig) => ({ ...value, runtime: { ...value.runtime, observer: { ...value.runtime.observer, workerSha256: 'bad' } } }),

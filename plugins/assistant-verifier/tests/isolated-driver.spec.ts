@@ -137,11 +137,23 @@ it('binds every native runtime identity, cgroup root and finite limit in authori
   ]) { const input = nativeInputFixture(); change(input); expect(compileNative(input).digest).not.toBe(original.digest) }
 })
 
-it('rejects unknown backends, cgroup v2, malformed paths/overlap and accessor-shaped runtime', () => {
+it('compiles native cgroup v2 authority cleanly and binds unified root in digest', () => {
+  const input = { ...nativeInputFixture(), cgroupRoots: { mode: 'v2' as const, unified: '/sys/fs/cgroup/dsh-native/uid-1000' } }
+  const compiled = compileNative(input)
+  expect(compiled.cgroupRoots).toEqual({ mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' })
+  expect(Object.isFrozen(compiled.cgroupRoots)).toBe(true)
+  const altered = compileNative({ ...input, cgroupRoots: { mode: 'v2' as const, unified: '/sys/fs/cgroup/dsh-native/uid-1001' } })
+  expect(altered.digest).not.toBe(compiled.digest)
+})
+
+it('rejects unknown backends, malformed cgroup v2, paths/overlap and accessor-shaped runtime', () => {
   const base = nativeInputFixture()
   for (const input of [
     { ...base, backend: 'future' },
-    { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' } },
+    { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh' } },
+    { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-0' } },
+    { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000', extra: true } },
+    { ...base, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' }, stateRoot: '/sys/fs/cgroup/dsh-native/uid-1000' },
     { ...base, stateRoot: base.runtime.root.path }, { ...base, stateRoot: `${base.runtime.root.path}/state` },
     { ...base, stateRoot: '/private' }, { ...base, stateRoot: base.cgroupRoots.cpu },
     { ...base, stateRoot: '/private/state\nunsafe' }, { ...base, stateRoot: '/private/state\\unsafe' },

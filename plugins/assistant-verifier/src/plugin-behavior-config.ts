@@ -26,12 +26,18 @@ function plainData(value: unknown): boolean {
     && Object.values(Object.getOwnPropertyDescriptors(value)).every(item => item.enumerable && 'value' in item && plainData(item.value))
 }
 function linuxCgroups(value: unknown): void {
-  if (!exactKeys(value, ['mode', 'cpu', 'memory', 'pids', 'freezer']) || value.mode !== 'v1')
-    throw new Error('invalid plugin behavior Linux cgroup roots')
-  const roots = [value.cpu, value.memory, value.pids, value.freezer]
-  if (new Set(roots).size !== roots.length || roots.some(root => !absolute(root)
-    || !/^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u.test(root)))
-    throw new Error('invalid plugin behavior Linux cgroup roots')
+  if (exactKeys(value, ['mode', 'cpu', 'memory', 'pids', 'freezer']) && value.mode === 'v1') {
+    const roots = [value.cpu, value.memory, value.pids, value.freezer]
+    if (new Set(roots).size !== roots.length || roots.some(root => !absolute(root)
+      || !/^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u.test(root)))
+      throw new Error('invalid plugin behavior Linux cgroup roots')
+    return
+  }
+  if (exactKeys(value, ['mode', 'unified']) && value.mode === 'v2'
+    && absolute(value.unified) && /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u.test(value.unified)) {
+    return
+  }
+  throw new Error('invalid plugin behavior Linux cgroup roots')
 }
 // Keep deployment validation pure and independent of Isolation's runtime import.
 // The private runner additionally checks the descriptor with the runtime module.

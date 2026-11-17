@@ -60,11 +60,21 @@ afterEach(async () => { preparationGate.fifo = ''; preparationGate.calls = []; a
 test('validates Linux, Mac and Docker configurations independently without a runtime value dependency', async () => {
   const valid = linuxSourceConfig()
   expect(() => validateSourceBuildConfig(valid)).not.toThrow()
+  const uid = process.getuid?.() ?? 1000
+  expect(() => validateSourceBuildConfig({
+    ...valid,
+    cgroupRoots: { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` },
+  })).not.toThrow()
   expect(() => validateSourceBuildConfig({ ...valid, timeoutMs: 1800000, maxTotalDurationMs: 1800000, memoryMiB: 16384, cpus: 16,
     pidsLimit: 1024, workspaceMiB: 8192, temporaryMiB: 4096, workspaceInodes: 1000000, temporaryInodes: 1000000 })).not.toThrow()
   for (const patch of [{ backend: 'unknown' }, { timeoutMs: 59999 }, { timeoutMs: 1800001 }, { memoryMiB: 127 },
     { cpus: 16.1 }, { pidsLimit: 1025 }, { workspaceMiB: 8193 }, { temporaryMiB: 4097 }, { workspaceInodes: 15 },
-    { temporaryInodes: 1000001 }, { cgroupRoots: { ...valid.cgroupRoots, cpu: `/sys/fs/cgroup/memory/dsh-native/uid-${process.getuid?.()}` } }, { outputBytes: 1048577 }, { maxRuns: 0 }, { maxTotalDurationMs: 86400001 },
+    { temporaryInodes: 1000001 },
+    { cgroupRoots: { ...valid.cgroupRoots, cpu: `/sys/fs/cgroup/memory/dsh-native/uid-${uid}` } },
+    { cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh' } },
+    { cgroupRoots: { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid + 1}` } },
+    { cgroupRoots: { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}`, extra: true } },
+    { outputBytes: 1048577 }, { maxRuns: 0 }, { maxTotalDurationMs: 86400001 },
     { stateRoot: '/unsafe\0state' }, { runtime: { ...valid.runtime, nodePath: '/other/node' } },
     { runtime: { ...valid.runtime, unexpected: true } }, { dockerPath: '/usr/bin/docker' }]) {
     expect(() => validateSourceBuildConfig({ ...valid, ...patch } as LinuxSourceBuildConfig)).toThrow()

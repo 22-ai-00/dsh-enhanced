@@ -283,4 +283,41 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     expect(dreamCheck?.summary).toContain('scope')
     expect(dreamCheck?.summary).toContain('budgetId')
   })
+
+  test('纯 cgroup v2 已完成 dsh-native/uid-<uid> 委派时返回 ok，冻结或缺少控制器时保持 warn', async () => {
+    const root = await makeTempDir('dsh-live-cgroup-v2-')
+    const dshHome = join(root, 'dsh')
+    const cgroupRoot = join(root, 'sys-fs-cgroup')
+    const leaf = join(cgroupRoot, 'dsh-native', 'uid-1000')
+    await mkdir(leaf, { recursive: true })
+    await writeFile(join(cgroupRoot, 'cgroup.controllers'), 'cpu memory pids\n')
+    await writeFile(join(leaf, 'cgroup.controllers'), 'cpu memory pids\n')
+    await writeFile(join(leaf, 'cgroup.subtree_control'), 'cpu memory pids\n')
+    await writeFile(join(leaf, 'cgroup.freeze'), '0\n')
+
+    const okReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'linux',
+      env: { PATH: '' },
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      linuxPaths: { cgroupRoot, uid: 1000 },
+    })
+    const okCheck = okReport.checks.find(c => c.id === 'platform.cgroup')
+    expect(okCheck?.status).toBe('ok')
+    expect(okCheck?.summary).toContain('dsh-native/uid-1000')
+
+    await writeFile(join(leaf, 'cgroup.freeze'), '1\n')
+    const frozenReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'linux',
+      env: { PATH: '' },
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      linuxPaths: { cgroupRoot, uid: 1000 },
+    })
+    const frozenCheck = frozenReport.checks.find(c => c.id === 'platform.cgroup')
+    expect(frozenCheck?.status).toBe('warn')
+    expect(frozenCheck?.summary).toContain('cgroup v2')
+  })
 })

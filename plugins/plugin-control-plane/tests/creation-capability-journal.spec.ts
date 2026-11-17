@@ -224,6 +224,10 @@ test.skipIf(process.platform !== 'linux')('Linux adoption preflight keeps exact 
   const runner = f.config.runner
   expect('backend' in runner && runner.backend).toBe('linux-native')
   if (!('backend' in runner) || runner.backend !== 'linux-native') throw new Error('fixture backend')
+  validateCreationCapabilityConfig({
+    ...f.config,
+    runner: { ...runner, cgroupRoots: { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-1000' } },
+  })
   for (const bad of [
     { ...runner, image: `runner@sha256:${d('a')}` }, { ...runner, dockerPath: '/usr/bin/docker' },
     { ...runner, socketPath: '/var/run/docker.sock' }, { ...runner, extra: true },

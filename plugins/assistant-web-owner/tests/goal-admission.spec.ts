@@ -24,7 +24,7 @@ import { prepareWebOwnerProfile, runWebOwnerSetup, type WebOwnerSetupInput } fro
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(now = Date.now()) {
+async function fixture(now = Date.now(), mode: 'v1' | 'v2' = 'v1') {
   const dshHome = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-goal-admission-'))); roots.push(dshHome)
   const input: WebOwnerSetupInput = { dshHome, profile: 'web', workspace: join(dshHome, 'workspace'), preset: 'standard' }
   const slugs = ['event-triggers', 'personal-assistant', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-verifier', 'assistant-deepseek-budget']
@@ -49,7 +49,9 @@ async function fixture(now = Date.now()) {
     nodePath:join(root,'bin/node'),nodeSha256:'d'.repeat(64),pnpmPath:join(root,'pnpm/bin/pnpm.mjs'),nativePnpmRoot:join(root,'pnpm-native'),nativePnpmPath:join(root,'pnpm-native/pnpm'),modulesPath:join(root,'node_modules'),storePath:join(root,'store'),cachePath:join(root,'cache'),
     versions:{node:'v22.23.2',pnpm:'11.7.0',typescript:'5.9.3',cordis:'4.0.5',tools:'0.2.1-rc.2',systemPrompt:'0.2.1-rc.2'}}
   const uid = process.getuid?.() || 1000
-  const cgroupRoots = {mode:'v1' as const,cpu:`/sys/fs/cgroup/cpu/dsh-native/uid-${uid}`,memory:`/sys/fs/cgroup/memory/dsh-native/uid-${uid}`,pids:`/sys/fs/cgroup/pids/dsh-native/uid-${uid}`,freezer:`/sys/fs/cgroup/freezer/dsh-native/uid-${uid}`}
+  const cgroupRoots = mode === 'v2'
+    ? { mode: 'v2' as const, unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
+    : { mode: 'v1' as const, cpu: `/sys/fs/cgroup/cpu/dsh-native/uid-${uid}`, memory: `/sys/fs/cgroup/memory/dsh-native/uid-${uid}`, pids: `/sys/fs/cgroup/pids/dsh-native/uid-${uid}`, freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${uid}` }
   const finite = {maxRuns:20,leaseMs:3600000,maxTotalDurationMs:600000}
   const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: {...finite,backend:'linux-native',linux:{runtime,cgroupRoots}} }, initial.patch, effective, realOwner, now) }
   const profile = inspectAutonomyProfile(prepared.patch, input.profile, input.dshHome)
@@ -688,5 +690,21 @@ llm-pi-ai:
       expect.objectContaining({ validityMs: 210_000, bounds: { maxDurationMs: 40_000, maxEvidenceBytes: 8192 } }),
       expect.objectContaining({ validityMs: 210_000, bounds: { maxDurationMs: 40_000, maxEvidenceBytes: 8192 } }),
     ]))
+  })
+
+  test('admits delegated cgroup v2 autonomy roots into verifier authority and detects unified root drift', async () => {
+    const f = await fixture(Date.now(), 'v2')
+    const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot)
+    const verifierConfig = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    expect(verifierConfig.authorities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `${plan.admissionId}-verify`, cgroupRoots: f.cgroupRoots }),
+    ]))
+
+    const drifted = parseDocument(plan.patch)
+    const contents = drifted.contents
+    if (!isSeq(contents)) throw new Error('expected YAML sequence')
+    const isolateIndex = contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')
+    drifted.setIn([isolateIndex, 'config', 'linux', 'cgroupRoots', 'unified'], '/sys/fs/cgroup/dsh-native/uid-99999')
+    expect(() => prepareGoalAdmission(f.input, drifted.toString(), drifted.toString(), task(), f.snapshot)).toThrow()
   })
 })

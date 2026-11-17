@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
 import { access, readFile, stat } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { userInfo } from 'node:os'
@@ -122,6 +122,7 @@ export interface LiveDoctorOptions {
   linuxPaths?: {
     cgroupRoot?: string
     lingerFile?: string
+    uid?: number
   }
 }
 
@@ -382,7 +383,7 @@ function probePlatformPrerequisites(
   runner: DetailedCommandRunner,
   findExec: (names: readonly string[], env: NodeJS.ProcessEnv, explicit?: string) => string | undefined,
   fileExists: (path: string) => boolean,
-  linuxPaths: { cgroupRoot?: string; lingerFile?: string },
+  linuxPaths: { cgroupRoot?: string; lingerFile?: string; uid?: number },
 ): DoctorCheck[] {
   const checks: DoctorCheck[] = []
   if (platform === 'darwin') {
@@ -463,13 +464,38 @@ function probePlatformPrerequisites(
         summary: 'Linux cgroup v1（freezer + pids）控制器可用',
       })
     } else if (isV2) {
-      checks.push({
-        id: 'platform.cgroup',
-        category: 'platform',
-        status: 'warn',
-        summary: '检测到纯 cgroup v2 宿主（缺少 cgroup v1 freezer + pids）',
-        advice: '当前 Linux native isolation（autonomy）要求 cgroup v1 freezer + pids；纯 cgroup v2 下常驻 web/lark 仍可用，但 autonomy 隔离会被 fail-closed 拒绝。',
-      })
+      const rawUid = linuxPaths.uid ?? process.getuid?.()
+      const uid = typeof rawUid === 'number' && Number.isSafeInteger(rawUid) && rawUid > 0 ? rawUid : undefined
+      const delegatedLeaf = uid !== undefined ? join(cgroupRoot, 'dsh-native', `uid-${uid}`) : undefined
+      const readText = (target: string): string | undefined => {
+        if (!fileExists(target)) return undefined
+        try { return readFileSync(target, 'utf8') } catch { return undefined }
+      }
+      const tokens = (text: string | undefined) => new Set((text ?? '').trim().split(/\s+/u).filter(Boolean))
+      const leafControllers = delegatedLeaf ? tokens(readText(join(delegatedLeaf, 'cgroup.controllers'))) : new Set<string>()
+      const leafSubtree = delegatedLeaf ? tokens(readText(join(delegatedLeaf, 'cgroup.subtree_control'))) : new Set<string>()
+      const leafFreeze = delegatedLeaf ? readText(join(delegatedLeaf, 'cgroup.freeze'))?.trim() : undefined
+      const requiredV2 = ['cpu', 'memory', 'pids'] as const
+      const v2Delegated = delegatedLeaf !== undefined
+        && requiredV2.every(ctrl => leafControllers.has(ctrl) && leafSubtree.has(ctrl))
+        && leafFreeze === '0'
+      if (v2Delegated) {
+        checks.push({
+          id: 'platform.cgroup',
+          category: 'platform',
+          status: 'ok',
+          summary: `Linux cgroup v2 委派子树（dsh-native/uid-${uid}：cpu + memory + pids + freeze）已就绪`,
+          detail: '已完成 cgroup v2 委派与配置/authority 对齐；assistant-isolation 实际运行时进程迁入仍保持 fail-closed，待 Linux cgroup v2 真机实测。',
+        })
+      } else {
+        checks.push({
+          id: 'platform.cgroup',
+          category: 'platform',
+          status: 'warn',
+          summary: '检测到纯 cgroup v2 宿主（缺少 cgroup v1 freezer + pids，且尚未完成 dsh-native cgroup v2 委派）',
+          advice: `当前 cgroup v2 未检测到完整的 dsh-native/uid-${uid ?? '<uid>'}（cpu/memory/pids + cgroup.freeze=0）委派。常驻 web/lark 仍可用；如需准备 v2 委派请以 root 执行：node scripts/isolation/prepare-linux-cgroups.mjs --uid ${uid ?? '<uid>'} --auto（注：assistant-isolation 运行时进程迁入在 v2 真机实测前仍 fail-closed）。`,
+        })
+      }
     } else {
       checks.push({
         id: 'platform.cgroup',
