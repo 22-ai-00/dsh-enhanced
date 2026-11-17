@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/traex-acp-provider",
-  "version": "0.1.75",
+  "version": "0.1.76",
   "description": "Use local TraeX and Antigravity (agy) coding agents as DeepSeek Harness model providers over ACP.",
   "license": "MIT",
   "type": "module",
