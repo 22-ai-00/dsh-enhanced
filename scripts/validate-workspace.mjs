@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { access, readFile, readdir } from 'node:fs/promises'
+import { builtinModules } from 'node:module'
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -30,6 +31,470 @@ function includesFile(files, expected) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+const builtinSpecifiers = new Set(
+  builtinModules.flatMap(name => (name.startsWith('node:') ? [name] : [name, `node:${name}`])),
+)
+const sourceExtensions = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs'])
+const regexBeforeKeywords = new Set([
+  'return', 'throw', 'case', 'default', 'else', 'do', 'yield', 'await',
+  'typeof', 'void', 'delete', 'in', 'instanceof', 'new', 'of', 'export', 'extends',
+])
+
+async function collectSourceFiles(directory) {
+  if (!await exists(directory)) return []
+  const files = []
+  const dirEntries = (await readdir(directory, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  for (const dirEntry of dirEntries) {
+    const fullPath = join(directory, dirEntry.name)
+    if (dirEntry.isDirectory()) {
+      files.push(...await collectSourceFiles(fullPath))
+      continue
+    }
+    if (!dirEntry.isFile()) continue
+    if (dirEntry.name.endsWith('.d.ts') || dirEntry.name.endsWith('.d.mts') || dirEntry.name.endsWith('.d.cts')) {
+      continue
+    }
+    const dotIndex = dirEntry.name.lastIndexOf('.')
+    const ext = dotIndex >= 0 ? dirEntry.name.slice(dotIndex) : ''
+    if (sourceExtensions.has(ext)) files.push(fullPath)
+  }
+  return files
+}
+
+function scanQuotedLiteral(source, startIndex) {
+  const quote = source[startIndex]
+  let index = startIndex + 1
+  let value = ''
+  while (index < source.length) {
+    const ch = source[index]
+    if (ch === '\\') {
+      if (index + 1 < source.length) value += source[index + 1]
+      index += 2
+      continue
+    }
+    if (ch === quote) {
+      return { raw: source.slice(startIndex, index + 1), value, nextIndex: index + 1 }
+    }
+    value += ch
+    index += 1
+  }
+  return { raw: source.slice(startIndex), value, nextIndex: source.length }
+}
+
+function scanRegexLiteral(source, startIndex) {
+  let index = startIndex + 1
+  let inClass = false
+  while (index < source.length) {
+    const ch = source[index]
+    if (ch === '\\') {
+      index += 2
+      continue
+    }
+    if (ch === '[') {
+      inClass = true
+      index += 1
+      continue
+    }
+    if (ch === ']') {
+      inClass = false
+      index += 1
+      continue
+    }
+    if (ch === '/' && !inClass) {
+      index += 1
+      while (index < source.length && /[a-z]/i.test(source[index])) index += 1
+      break
+    }
+    if (ch === '\n' || ch === '\r') break
+    index += 1
+  }
+  return { raw: source.slice(startIndex, index), nextIndex: index }
+}
+
+function isIdentStart(ch) {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch === '_' || ch === '$'
+}
+
+function isIdentPart(ch) {
+  return isIdentStart(ch) || (ch >= '0' && ch <= '9')
+}
+
+function stripComments(source) {
+  const chunks = []
+  let index = 0
+  if (source.startsWith('#!')) {
+    while (index < source.length && source[index] !== '\n') index += 1
+  }
+
+  function scanTemplate(startIndex) {
+    chunks.push('`')
+    let cursor = startIndex + 1
+    while (cursor < source.length) {
+      const ch = source[cursor]
+      if (ch === '\\') {
+        chunks.push(source.slice(cursor, cursor + 2))
+        cursor += 2
+        continue
+      }
+      if (ch === '`') {
+        chunks.push('`')
+        return cursor + 1
+      }
+      if (ch === '$' && source[cursor + 1] === '{') {
+        chunks.push('${')
+        cursor = scanNormal(cursor + 2, true)
+        if (cursor < source.length && source[cursor] === '}') {
+          chunks.push('}')
+          cursor += 1
+        }
+        continue
+      }
+      chunks.push(ch)
+      cursor += 1
+    }
+    return cursor
+  }
+
+  function scanNormal(startIndex, stopAtBrace) {
+    let cursor = startIndex
+    let canStartRegex = true
+    let braceDepth = 0
+    while (cursor < source.length) {
+      const ch = source[cursor]
+      if (stopAtBrace && ch === '}' && braceDepth === 0) return cursor
+      if (ch === '/' && source[cursor + 1] === '/') {
+        cursor += 2
+        while (cursor < source.length && source[cursor] !== '\n') cursor += 1
+        chunks.push(' ')
+        continue
+      }
+      if (ch === '/' && source[cursor + 1] === '*') {
+        cursor += 2
+        let hadNewline = false
+        while (cursor < source.length && !(source[cursor] === '*' && source[cursor + 1] === '/')) {
+          if (source[cursor] === '\n') {
+            chunks.push('\n')
+            hadNewline = true
+          }
+          cursor += 1
+        }
+        if (cursor < source.length) cursor += 2
+        if (!hadNewline) chunks.push(' ')
+        continue
+      }
+      if (ch === '/' && canStartRegex) {
+        const regex = scanRegexLiteral(source, cursor)
+        chunks.push(regex.raw)
+        cursor = regex.nextIndex
+        canStartRegex = false
+        continue
+      }
+      if (ch === '\'' || ch === '"') {
+        const quoted = scanQuotedLiteral(source, cursor)
+        chunks.push(quoted.raw)
+        cursor = quoted.nextIndex
+        canStartRegex = false
+        continue
+      }
+      if (ch === '`') {
+        cursor = scanTemplate(cursor)
+        canStartRegex = false
+        continue
+      }
+      if (isIdentStart(ch)) {
+        const start = cursor
+        cursor += 1
+        while (cursor < source.length && isIdentPart(source[cursor])) cursor += 1
+        const word = source.slice(start, cursor)
+        chunks.push(word)
+        canStartRegex = regexBeforeKeywords.has(word)
+        continue
+      }
+      if (ch >= '0' && ch <= '9') {
+        const start = cursor
+        cursor += 1
+        while (cursor < source.length && (isIdentPart(source[cursor]) || source[cursor] === '.')) cursor += 1
+        chunks.push(source.slice(start, cursor))
+        canStartRegex = false
+        continue
+      }
+      if (/\s/.test(ch)) {
+        chunks.push(ch)
+        cursor += 1
+        continue
+      }
+      if (ch === '{') braceDepth += 1
+      else if (ch === '}' && braceDepth > 0) braceDepth -= 1
+      if ((ch === '+' || ch === '-') && source[cursor + 1] === ch) {
+        chunks.push(ch + ch)
+        cursor += 2
+        canStartRegex = false
+        continue
+      }
+      chunks.push(ch)
+      cursor += 1
+      canStartRegex = ch !== ')' && ch !== ']'
+    }
+    return cursor
+  }
+
+  scanNormal(index, false)
+  return chunks.join('')
+}
+
+function tokenizeModule(source) {
+  const tokens = []
+
+  function scanTemplateTokens(startIndex) {
+    let cursor = startIndex + 1
+    let staticValue = ''
+    let hasInterpolation = false
+    while (cursor < source.length) {
+      const ch = source[cursor]
+      if (ch === '\\') {
+        if (cursor + 1 < source.length) staticValue += source[cursor + 1]
+        cursor += 2
+        continue
+      }
+      if (ch === '`') {
+        if (!hasInterpolation) tokens.push({ type: 'str', value: staticValue })
+        else tokens.push({ type: 'tpl-end', value: '`' })
+        return cursor + 1
+      }
+      if (ch === '$' && source[cursor + 1] === '{') {
+        if (!hasInterpolation) {
+          hasInterpolation = true
+          tokens.push({ type: 'tpl-start', value: '`' })
+        }
+        cursor = scanNormalTokens(cursor + 2, true)
+        if (cursor < source.length && source[cursor] === '}') cursor += 1
+        continue
+      }
+      staticValue += ch
+      cursor += 1
+    }
+    return cursor
+  }
+
+  function scanNormalTokens(startIndex, stopAtBrace) {
+    let cursor = startIndex
+    let canStartRegex = true
+    let braceDepth = 0
+    while (cursor < source.length) {
+      const ch = source[cursor]
+      if (stopAtBrace && ch === '}' && braceDepth === 0) return cursor
+      if (/\s/.test(ch)) {
+        cursor += 1
+        continue
+      }
+      if (ch === '/' && canStartRegex) {
+        const regex = scanRegexLiteral(source, cursor)
+        tokens.push({ type: 'regex', value: regex.raw })
+        cursor = regex.nextIndex
+        canStartRegex = false
+        continue
+      }
+      if (ch === '\'' || ch === '"') {
+        const quoted = scanQuotedLiteral(source, cursor)
+        tokens.push({ type: 'str', value: quoted.value })
+        cursor = quoted.nextIndex
+        canStartRegex = false
+        continue
+      }
+      if (ch === '`') {
+        cursor = scanTemplateTokens(cursor)
+        canStartRegex = false
+        continue
+      }
+      if (isIdentStart(ch)) {
+        const start = cursor
+        cursor += 1
+        while (cursor < source.length && isIdentPart(source[cursor])) cursor += 1
+        const word = source.slice(start, cursor)
+        tokens.push({ type: 'id', value: word })
+        canStartRegex = regexBeforeKeywords.has(word)
+        continue
+      }
+      if (ch >= '0' && ch <= '9') {
+        const start = cursor
+        cursor += 1
+        while (cursor < source.length && (isIdentPart(source[cursor]) || source[cursor] === '.')) cursor += 1
+        tokens.push({ type: 'num', value: source.slice(start, cursor) })
+        canStartRegex = false
+        continue
+      }
+      if (ch === '?' && source[cursor + 1] === '.') {
+        tokens.push({ type: 'punct', value: '?.' })
+        cursor += 2
+        canStartRegex = true
+        continue
+      }
+      if (ch === '.' && source[cursor + 1] === '.' && source[cursor + 2] === '.') {
+        tokens.push({ type: 'punct', value: '...' })
+        cursor += 3
+        canStartRegex = true
+        continue
+      }
+      if (ch === '{') braceDepth += 1
+      else if (ch === '}' && braceDepth > 0) braceDepth -= 1
+      if ((ch === '+' || ch === '-') && source[cursor + 1] === ch) {
+        tokens.push({ type: 'punct', value: ch + ch })
+        cursor += 2
+        canStartRegex = false
+        continue
+      }
+      tokens.push({ type: 'punct', value: ch })
+      cursor += 1
+      canStartRegex = ch !== ')' && ch !== ']'
+    }
+    return cursor
+  }
+
+  scanNormalTokens(0, false)
+  return tokens
+}
+
+function findMatchingBrace(tokens, openIndex) {
+  let depth = 0
+  for (let index = openIndex; index < tokens.length; index += 1) {
+    if (tokens[index].type === 'punct' && tokens[index].value === '{') depth += 1
+    else if (tokens[index].type === 'punct' && tokens[index].value === '}') {
+      depth -= 1
+      if (depth === 0) return index
+    }
+  }
+  return -1
+}
+
+function hasRuntimeNamedSpecifier(tokens, start, end) {
+  let itemStart = start
+  let itemCount = 0
+  for (let index = start; index <= end; index += 1) {
+    const isEnd = index === end || (tokens[index].type === 'punct' && tokens[index].value === ',')
+    if (!isEnd) continue
+    if (index > itemStart) {
+      itemCount += 1
+      const first = tokens[itemStart]
+      const second = itemStart + 1 < index ? tokens[itemStart + 1] : undefined
+      const isTypeOnlyItem = first.type === 'id'
+        && first.value === 'type'
+        && second !== undefined
+        && !(second.type === 'id' && second.value === 'as')
+      if (!isTypeOnlyItem) return true
+    }
+    itemStart = index + 1
+  }
+  return itemCount === 0
+}
+
+function extractRuntimeImportSpecifiers(source) {
+  const tokens = tokenizeModule(stripComments(source))
+  const specifiers = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    const prev = index > 0 ? tokens[index - 1] : undefined
+    const isMemberAccess = prev?.type === 'punct' && (prev.value === '.' || prev.value === '?.')
+    if (isMemberAccess || token.type !== 'id') continue
+
+    if (token.value === 'import') {
+      const next = tokens[index + 1]
+      if (next?.type === 'punct' && next.value === '(') {
+        const arg = tokens[index + 2]
+        const afterArg = tokens[index + 3]
+        if (arg?.type === 'str' && afterArg?.type === 'punct' && (afterArg.value === ')' || afterArg.value === ',')) {
+          specifiers.push(arg.value)
+          index += 2
+        }
+        continue
+      }
+      if (next?.type === 'str') {
+        specifiers.push(next.value)
+        index += 1
+        continue
+      }
+      let cursor = index + 1
+      const afterType = tokens[cursor + 1]
+      const isLeadingTypeOnly = next?.type === 'id'
+        && next.value === 'type'
+        && afterType !== undefined
+        && (
+          afterType.value === '{'
+          || afterType.value === '*'
+          || (afterType.type === 'id' && afterType.value !== 'from')
+        )
+      if (isLeadingTypeOnly) continue
+
+      let hasRuntimeBinding = false
+      let namedRange = null
+      if (tokens[cursor]?.type === 'id' && tokens[cursor].value !== 'from') {
+        hasRuntimeBinding = true
+        cursor += 1
+        if (tokens[cursor]?.type === 'punct' && tokens[cursor].value === ',') cursor += 1
+      }
+      if (tokens[cursor]?.type === 'punct' && tokens[cursor].value === '*') {
+        if (tokens[cursor + 1]?.type === 'id' && tokens[cursor + 1].value === 'as' && tokens[cursor + 2]?.type === 'id') {
+          hasRuntimeBinding = true
+          cursor += 3
+        }
+      } else if (tokens[cursor]?.type === 'punct' && tokens[cursor].value === '{') {
+        const closeBrace = findMatchingBrace(tokens, cursor)
+        if (closeBrace < 0) continue
+        namedRange = [cursor + 1, closeBrace]
+        cursor = closeBrace + 1
+      }
+      if (tokens[cursor]?.type === 'id' && tokens[cursor].value === 'from' && tokens[cursor + 1]?.type === 'str') {
+        const isRuntime = hasRuntimeBinding
+          || (namedRange !== null && hasRuntimeNamedSpecifier(tokens, namedRange[0], namedRange[1]))
+        if (isRuntime) specifiers.push(tokens[cursor + 1].value)
+        index = cursor + 1
+      }
+      continue
+    }
+
+    if (token.value === 'export') {
+      const next = tokens[index + 1]
+      if (next?.type === 'id' && next.value === 'type') continue
+      if (next?.type === 'punct' && next.value === '*') {
+        let cursor = index + 2
+        if (tokens[cursor]?.type === 'id' && tokens[cursor].value === 'as' && tokens[cursor + 1]?.type === 'id') {
+          cursor += 2
+        }
+        if (tokens[cursor]?.type === 'id' && tokens[cursor].value === 'from' && tokens[cursor + 1]?.type === 'str') {
+          specifiers.push(tokens[cursor + 1].value)
+          index = cursor + 1
+        }
+        continue
+      }
+      if (next?.type === 'punct' && next.value === '{') {
+        const closeBrace = findMatchingBrace(tokens, index + 1)
+        if (closeBrace < 0) continue
+        if (tokens[closeBrace + 1]?.type === 'id' && tokens[closeBrace + 1].value === 'from' && tokens[closeBrace + 2]?.type === 'str') {
+          if (hasRuntimeNamedSpecifier(tokens, index + 2, closeBrace)) {
+            specifiers.push(tokens[closeBrace + 2].value)
+          }
+          index = closeBrace + 2
+        }
+      }
+    }
+  }
+  return specifiers
+}
+
+function resolvePackageName(specifier) {
+  if (specifier.startsWith('./') || specifier.startsWith('../') || specifier.startsWith('/')) {
+    return null
+  }
+  if (builtinSpecifiers.has(specifier)) {
+    return null
+  }
+  const parts = specifier.split('/')
+  if (specifier.startsWith('@')) {
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : specifier
+  }
+  return parts[0]
 }
 
 const catalogPath = join(pluginsRoot, 'README.md')
@@ -218,6 +683,28 @@ for (const entry of packageEntries) {
     const versionSource = await readFile(versionPath, 'utf8')
     const runtimeVersion = versionSource.match(/export const version = ['"]([^'"]+)['"]/)?.[1]
     if (runtimeVersion !== manifest.version) report(versionPath, `runtime version must equal ${manifest.version}`)
+  }
+
+  const declaredPackages = new Set([
+    ...(typeof manifest.name === 'string' ? [manifest.name] : []),
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.peerDependencies ?? {}),
+  ])
+  for (const subdir of ['src', 'bin']) {
+    const sourceFiles = await collectSourceFiles(join(packageRoot, subdir))
+    for (const filePath of sourceFiles) {
+      const source = await readFile(filePath, 'utf8')
+      for (const specifier of extractRuntimeImportSpecifiers(source)) {
+        const importedPkg = resolvePackageName(specifier)
+        if (importedPkg === null) continue
+        if (!declaredPackages.has(importedPkg)) {
+          report(
+            filePath,
+            `runtime import "${specifier}" resolves to package "${importedPkg}", which is missing from dependencies or peerDependencies`,
+          )
+        }
+      }
+    }
   }
 }
 

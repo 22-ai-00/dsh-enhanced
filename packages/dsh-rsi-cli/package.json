@@ -52,5 +52,8 @@
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
   }
 }

@@ -472,6 +472,10 @@ importers:
         version: 4.1.8(@types/node@22.20.0)(jsdom@29.1.1)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
 
   packages/dsh-rsi-cli:
+    dependencies:
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

@@ -1,3 +1,9 @@
+import { execFileSync } from 'node:child_process'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, test, vi } from 'vitest'
 import { main, parseArgs, version } from '../src/index.ts'
 
@@ -144,5 +150,65 @@ describe('parseArgs', () => {
     expect(doctorJson.schemaVersion).toBe(1)
     expect(Array.isArray(doctorJson.checks)).toBe(true)
     expect(doctorJson.agentTools).toBeTruthy()
+  })
+})
+
+describe('standalone installation smoke test', () => {
+  test('仅链接 manifest.dependencies 后可在仓库外独立运行 upgrade --help 与 --capabilities', () => {
+    const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    const manifest = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>
+    }
+    const deps = Object.keys(manifest.dependencies ?? {})
+    expect(deps).toContain('yaml')
+    expect(existsSync(join(pkgRoot, 'lib', 'index.js'))).toBe(true)
+
+    const requireFromTest = createRequire(import.meta.url)
+    const resolveDepRoot = (dep: string): string => {
+      try {
+        return dirname(requireFromTest.resolve(`${dep}/package.json`))
+      } catch {
+        let dir = dirname(requireFromTest.resolve(dep))
+        while (true) {
+          const candidate = join(dir, 'package.json')
+          if (existsSync(candidate)) {
+            const pkg = JSON.parse(readFileSync(candidate, 'utf8')) as { name?: string }
+            if (pkg.name === dep) return dir
+          }
+          const parent = dirname(dir)
+          if (parent === dir) throw new Error(`Unable to resolve dependency root for ${dep}`)
+          dir = parent
+        }
+      }
+    }
+
+    const tmp = mkdtempSync(join(tmpdir(), 'dsh-rsi-standalone-'))
+    try {
+      cpSync(join(pkgRoot, 'package.json'), join(tmp, 'package.json'))
+      cpSync(join(pkgRoot, 'bin'), join(tmp, 'bin'), { recursive: true })
+      cpSync(join(pkgRoot, 'lib'), join(tmp, 'lib'), { recursive: true })
+      for (const dep of deps) {
+        const targetLink = join(tmp, 'node_modules', dep)
+        mkdirSync(dirname(targetLink), { recursive: true })
+        symlinkSync(resolveDepRoot(dep), targetLink, 'dir')
+      }
+
+      const upgradeHelpOut = execFileSync(
+        process.execPath,
+        [join(tmp, 'bin', 'dsh-rsi.js'), 'upgrade', '--help'],
+        { cwd: tmp, encoding: 'utf8' },
+      )
+      expect(upgradeHelpOut).toContain('dsh-rsi — DSH enhanced')
+      expect(upgradeHelpOut).toContain('upgrade ')
+
+      const capabilitiesOut = execFileSync(
+        process.execPath,
+        [join(tmp, 'bin', 'dsh-rsi.js'), '--capabilities'],
+        { cwd: tmp, encoding: 'utf8' },
+      )
+      expect(capabilitiesOut).toBe('{"capabilities":["macos-launchd-ownership-v1"]}\n')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
   })
 })
