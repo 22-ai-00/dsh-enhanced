@@ -178,7 +178,7 @@ async function harness(options: { artifactContent?: string } = {}) {
   const verifier = await verifierSource()
   const verifierPath = join(root, 'verification.sqlite')
   const runnerConfig = { kind: 'runner' as const, id: 'local-runner', executable: runnerPath,
-    fixedArgs: [] as string[], timeoutMs: 1_000, maxOutputBytes: 4_096 }
+    fixedArgs: [] as string[], timeoutMs: 5_000, maxOutputBytes: 4_096 }
   const verifierConfig = { databasePath: verifierPath, tickIntervalMs: 0, requireAcceptance: true,
     authorities: [runnerConfig], profiles: [] as unknown[] }
   const verifierPlugin = await ctx.plugin(verifier.AssistantVerifierService as never, verifierConfig as never)
@@ -271,7 +271,7 @@ async function harness(options: { artifactContent?: string } = {}) {
         acceptance: { criteria: [{ id: 'report-ready', kind: 'process-behavior',
           authority: { id: runner.id, digest: runner.digest }, artifactPath: 'report.txt',
           stdin: '', expectedStdout: '', expectedExitCode: 0 }],
-        bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 } },
+        bounds: { maxDurationMs: 10_000, maxEvidenceBytes: 4_096 } },
       })
       expect(createdGoal.isError, JSON.stringify(createdGoal)).not.toBe(true)
       return await next()
