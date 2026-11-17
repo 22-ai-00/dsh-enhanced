@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-17（npm `0.1.74` 基线，`origin/dev` 在 `fc917aa1` 已完成 Stage 1/2 集成，当前分支正在合入 Stage 3 事件源 intake 桥接、WP19 超限附件投递与 WP20/WP22 规则预设及吻合度闭环）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-17（npm `0.1.74` 已发版基线，已完成 Stage 1–3 工程整合：渠道无关自主授权、原生隔离与热重载，以及事件源 intake 桥接、WP19 超限附件投递与 WP20/WP22 规则预设及吻合度闭环）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -21,9 +21,9 @@
 ## 阻塞项与下一步验收
 
 - **当前阻塞**：无工程构建阻塞；待完成事项为真实宿主普通使用纵向观测（`agy`/`traex`、Web Settings UI 与自助升级实机链路、WP16 生产热重载收益、多源事件/WP19 附件打扰/WP20–WP22 放宽长期效果）、Linux cgroup v2 内核运行时迁入实测，以及 WP04–WP13、WP18、WP21 的剩余端到端验收（见[验收合同](rsi-acceptance.md)）。
-- **下一步验收**：完成 Stage 3 跨切片整合全量 `pnpm check` 与独立 `gate-verifier-3` 复核并合入 `dev`，随后推进远程 Linux Cold Gate 与真实 Host 长期普通使用观测。
+- **下一步验收**：推进远程 Linux Cold Gate / CI 核验与真实 Host 长期普通使用观测（涵盖多源事件、WP19 附件打扰与 WP20–WP22 有界调优效果）。
 
 ## 最新验证
 
-- **已发布 `0.1.74` 与 Stage 2 `dev` 基线（`fc917aa1`）**：`39` 个 npm 包已发版（`DSH 0.2.2-rc.3`）；Stage 1（`d26bcf0b`）与 Stage 2（`fc917aa1`）均已通过预推全量 `pnpm check` 并合入 `dev`。
-- **Stage 3 当前验证**：核心提交 `e6859689`（`event-triggers` + `assistant-proactive`）与 `b9a80cda`（`assistant-work-items` + `assistant-evaluation` schema 19）已通过所属包构建/类型检查/定向单测与 lint；文档切片已通过相对链接检查（`BROKEN_LINKS=0`）、全仓 `pnpm run lint` 与 `pnpm release:status`（`0.1.74`，`pending: none`）；Stage 3 全仓 `pnpm check` 待全部切片合入后由整合分支与独立复核者执行。
+- **已发布 `0.1.74` 与前置基线**：`39` 个 npm 包已发版（`DSH 0.2.2-rc.3`）；Stage 1（`d26bcf0b`）与 Stage 2（`fc917aa1` + `b7015b57` Linux cgroup v2 测试计数修复）已并入基线。
+- **Stage 3 整合**：已完成事件源 `registerIntakeObserver` 桥接与 WP11 终态退订、WP19 Web/Lark 超限文本附件（`attentionAttachOverCap`）、WP20 opt-in 规则预设（`conservative` / `balanced`）与 `listIntakeEvaluationFeed` → WP22 schema 19 `IntakeEvaluationAgreementLedger` 集成；全仓 `pnpm check`、相对链接检查（`BROKEN_LINKS=0`）与独立复核覆盖本次整合，真实宿主长期效果与 Linux 实机运行待继续观测。
