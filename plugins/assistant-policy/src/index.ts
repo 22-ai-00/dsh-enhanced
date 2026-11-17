@@ -48,6 +48,30 @@ export type {
   ApprovalProposalSnapshot,
   EmergencyStopState,
 } from './ledger.js'
+export {
+  AUTONOMY_BUDGET_TIERS,
+  AUTONOMY_DAILY_PERIOD_MS,
+  MAX_AUTONOMY_DAILY_BUDGET,
+  WEB_OWNER_POLICY_ID_PREFIX,
+  buildWebOwnerDreamingPolicyGrants,
+  buildWebOwnerGrowthPolicyGrants,
+  buildWebOwnerMemoryPolicyGrants,
+  mergeAssistantPolicyGrants,
+  webOwnerBudgetIds,
+  webOwnerDreamingRuleIds,
+  webOwnerGrowthRuleIds,
+  webOwnerMemoryRuleIds,
+  webOwnerPolicyPrefix,
+  type AutonomyBudgetTier,
+  type AutonomyBudgetTierDefaults,
+  type MergeAssistantPolicyGrantsInput,
+  type MergedAssistantPolicyGrants,
+  type PolicyGrantBundle,
+  type WebOwnerDreamingPolicyGrantInput,
+  type WebOwnerGrowthPolicyGrantInput,
+  type WebOwnerMemoryPolicyGrantInput,
+  type WebOwnerPolicyScope,
+} from './autonomy-grants.js'
 export * from './types.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {

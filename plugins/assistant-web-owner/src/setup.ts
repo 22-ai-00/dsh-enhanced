@@ -266,9 +266,17 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
   } finally { await rm(temporary, { force: true }); await rm(lock, { recursive: true, force: true }) }
 }
 
+import {
+  applyWebOwnerAutonomySetup,
+  type AutonomyBudgetTier,
+  type AutonomyReasoningEffort,
+  type DreamingMode,
+  type WebOwnerAutonomySetupInput,
+} from './autonomy-grants.js'
+
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-backend linux-native] [--isolation-source-repository <absolute-committed-repository>] [--isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nRepair setup: --repair-admission <private-absolute-json> installs preconfigured finite repair profiles after checking the current owner scope, owner route, Goals execution budget, exact model routes, Skills holdouts and Verifier profiles. It creates no Goal, Session, credential, grant, or unlimited authority.\nIsolation is linux-native only; Docker isolation was removed. Initializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-backend linux-native] [--isolation-source-repository <absolute-committed-repository>] [--isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nAutonomy setup: [--autonomy-setup] [--enable-memory-learning|--disable-memory-learning] [--enable-dreaming|--pause-dreaming|--retire-dreaming|--disable-dreaming] [--enable-growth|--disable-growth] [--work-item-experiences|--no-work-item-experiences] [--usage-learning] [--model-provider <provider> --model-id <model> [--reasoning-effort <level>]] [--budget-tier <conservative|balanced>] [--daily-budget <n>] [--max-extractions <n>] [--lease-days <1..365>] [--session-id <id>] [--dry-run] [--json]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nRepair setup: --repair-admission <private-absolute-json> installs preconfigured finite repair profiles after checking the current owner scope, owner route, Goals execution budget, exact model routes, Skills holdouts and Verifier profiles. It creates no Goal, Session, credential, grant, or unlimited authority.\nIsolation is linux-native only; Docker isolation was removed. Initializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
@@ -276,21 +284,111 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   let isolationBackend: string | undefined; let isolationRepository: string | undefined
   let isolated = false
   let goalAdmission: string | undefined; let repairAdmission: string | undefined; let sessionId: string | undefined; let listGoalSessions = false
+  let explicitAutonomyFlag = false
+  let autonomyJson = false
+  let autonomyDryRun = false
+  let autonomyMemoryLearning: boolean | undefined
+  let autonomyDreaming: DreamingMode | undefined
+  let autonomyGrowth: boolean | undefined
+  let autonomyUsageLearning: boolean | undefined
+  let autonomyWorkItemExperiences: boolean | undefined
+  let autonomyModelProvider: string | undefined
+  let autonomyModelId: string | undefined
+  let autonomyReasoningEffort: AutonomyReasoningEffort | undefined
+  let autonomyBudgetTier: AutonomyBudgetTier | undefined
+  let autonomyDailyBudget: number | undefined
+  let autonomyMaxExtractions: number | undefined
+  let autonomyLeaseDays: number | undefined
+
   const numeric = { '--isolation-max-runs': 'maxRuns', '--isolation-lease-ms': 'leaseMs', '--isolation-runtime-ms': 'maxTotalDurationMs' } as const
   const fields = { '--dsh-home': 'dshHome', '--profile': 'profile', '--workspace': 'workspace', '--preset': 'preset' } as const
+  const autonomyValueFlags = new Set(['--model-provider', '--model-id', '--reasoning-effort', '--budget-tier', '--daily-budget', '--max-extractions', '--lease-days'])
+  const jsonRequestedEarly = argv.includes('--json')
+  function failSetup(message: string, code = 1): never {
+    if (jsonRequestedEarly) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: message })}\n`)
+      process.exitCode = code
+    }
+    fail(message)
+  }
+
   for (let index = 0; index < argv.length; index++) {
     const option = argv[index]!
     if (option === '--list-goal-sessions') { listGoalSessions = true; continue }
-    if (!(option in fields) && !['--isolation-backend', '--isolation-source-repository', '--goal-admission', '--repair-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
+    if (option === '--autonomy-setup') { explicitAutonomyFlag = true; continue }
+    if (option === '--json') { autonomyJson = true; explicitAutonomyFlag = true; continue }
+    if (option === '--dry-run') { autonomyDryRun = true; explicitAutonomyFlag = true; continue }
+    if (option === '--enable-memory-learning') {
+      if (autonomyMemoryLearning === false) failSetup('cannot combine --enable-memory-learning and --disable-memory-learning', 2)
+      autonomyMemoryLearning = true; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--disable-memory-learning') {
+      if (autonomyMemoryLearning === true) failSetup('cannot combine --enable-memory-learning and --disable-memory-learning', 2)
+      autonomyMemoryLearning = false; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--enable-dreaming') {
+      if (autonomyDreaming && autonomyDreaming !== 'enabled') failSetup('conflicting dreaming mode flags', 2)
+      autonomyDreaming = 'enabled'; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--pause-dreaming' || option === '--retire-dreaming') {
+      if (autonomyDreaming && autonomyDreaming !== 'paused') failSetup('conflicting dreaming mode flags', 2)
+      autonomyDreaming = 'paused'; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--disable-dreaming') {
+      if (autonomyDreaming && autonomyDreaming !== 'disabled') failSetup('conflicting dreaming mode flags', 2)
+      autonomyDreaming = 'disabled'; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--enable-growth') {
+      if (autonomyGrowth === false) failSetup('cannot combine --enable-growth and --disable-growth', 2)
+      autonomyGrowth = true; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--disable-growth') {
+      if (autonomyGrowth === true) failSetup('cannot combine --enable-growth and --disable-growth', 2)
+      autonomyGrowth = false; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--usage-learning') { autonomyUsageLearning = true; explicitAutonomyFlag = true; continue }
+    if (option === '--work-item-experiences') {
+      if (autonomyWorkItemExperiences === false) failSetup('cannot combine --work-item-experiences and --no-work-item-experiences', 2)
+      autonomyWorkItemExperiences = true; explicitAutonomyFlag = true; continue
+    }
+    if (option === '--no-work-item-experiences') {
+      if (autonomyWorkItemExperiences === true) failSetup('cannot combine --work-item-experiences and --no-work-item-experiences', 2)
+      autonomyWorkItemExperiences = false; explicitAutonomyFlag = true; continue
+    }
+    if (!(option in fields) && !['--isolation-backend', '--isolation-source-repository', '--goal-admission', '--repair-admission', '--session-id'].includes(option) && !(option in numeric) && !autonomyValueFlags.has(option)) {
+      failSetup(`unknown option ${option}`, 2)
+    }
     const value = argv[++index]
-    if (value === undefined || value.startsWith('--')) fail(`${option} requires a value`)
+    if (value === undefined || value.startsWith('--')) failSetup(`${option} requires a value`, 2)
     if (option === '--goal-admission') goalAdmission = value
     else if (option === '--repair-admission') repairAdmission = value
     else if (option === '--session-id') sessionId = value
+    else if (option === '--model-provider') { autonomyModelProvider = value; explicitAutonomyFlag = true }
+    else if (option === '--model-id') { autonomyModelId = value; explicitAutonomyFlag = true }
+    else if (option === '--reasoning-effort') {
+      if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)) failSetup(`invalid --reasoning-effort '${value}'`, 2)
+      autonomyReasoningEffort = value as AutonomyReasoningEffort; explicitAutonomyFlag = true
+    }
+    else if (option === '--budget-tier') {
+      if (value !== 'conservative' && value !== 'balanced') failSetup(`--budget-tier must be conservative or balanced`, 2)
+      autonomyBudgetTier = value; explicitAutonomyFlag = true
+    }
+    else if (option === '--daily-budget') {
+      if (!/^[1-9][0-9]*$/.test(value)) failSetup('--daily-budget requires a positive integer', 2)
+      autonomyDailyBudget = Number(value); explicitAutonomyFlag = true
+    }
+    else if (option === '--max-extractions') {
+      if (!/^[1-9][0-9]*$/.test(value)) failSetup('--max-extractions requires a positive integer', 2)
+      autonomyMaxExtractions = Number(value); explicitAutonomyFlag = true
+    }
+    else if (option === '--lease-days') {
+      if (!/^[1-9][0-9]*$/.test(value) || Number(value) > 365) failSetup('--lease-days requires an integer between 1 and 365', 2)
+      autonomyLeaseDays = Number(value); explicitAutonomyFlag = true
+    }
     else if (option === '--isolation-backend') { isolationBackend = value; isolated = true }
     else if (option === '--isolation-source-repository') { isolationRepository = value; isolated = true }
     else if (option in numeric) {
-      if (!/^[1-9][0-9]*$/.test(value)) fail(`${option} requires a positive integer`)
+      if (!/^[1-9][0-9]*$/.test(value)) failSetup(`${option} requires a positive integer`, 2)
       limits[numeric[option as keyof typeof numeric]] = Number(value); isolated = true
     } else input[fields[option as keyof typeof fields]] = value
   }
@@ -299,12 +397,23 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
     // explicit backend other than linux-native fails rather than silently
     // selecting a different execution boundary.
     const backend = isolationBackend ?? 'linux-native'
-    if (backend !== 'linux-native') fail('invalid isolation backend; Docker isolation was removed')
-    input.isolation = { ...limits, backend, ...(isolationRepository === undefined ? {} : { source: { kind: 'local-head' as const, repository: isolationRepository } }) }
+    if (backend !== 'linux-native') failSetup('invalid isolation backend; Docker isolation was removed', 2)
+    input.isolation = { ...limits, backend: 'linux-native', ...(isolationRepository === undefined ? {} : { source: { kind: 'local-head' as const, repository: isolationRepository } }) }
   }
-  validate(input)
+  const autonomyMode = explicitAutonomyFlag
+  if (autonomyMode && (listGoalSessions || goalAdmission !== undefined || repairAdmission !== undefined)) {
+    failSetup('--autonomy-setup cannot be combined with goal admission, repair admission, or --list-goal-sessions', 2)
+  }
+  if (autonomyMode) {
+    if (!key.test(input.profile) || !/^[a-z0-9][a-z0-9-]*$/u.test(input.preset)) failSetup('invalid profile or preset', 2)
+    if (!isAbsolute(input.dshHome) || input.dshHome.includes('\0') || input.dshHome.includes('*')) failSetup('home must be a literal absolute path', 2)
+    if (input.workspace !== '') validate(input)
+    else if (input.isolation) failSetup('--isolated requires --workspace', 2)
+  } else {
+    validate(input)
+  }
   if (listGoalSessions && (goalAdmission !== undefined || repairAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, repair admission, or isolation options')
-  if (sessionId !== undefined && goalAdmission === undefined) fail('--session-id requires --goal-admission')
+  if (sessionId !== undefined && goalAdmission === undefined && !autonomyMode) fail('--session-id requires --goal-admission')
   if (repairAdmission !== undefined && (goalAdmission !== undefined || sessionId !== undefined || isolated)) fail('--repair-admission cannot be combined with goal admission, session selection, or isolation options')
   const readEffectiveSource = () => dumpEffectiveProfile(
     input.dshHome,
@@ -312,6 +421,78 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
     fail,
     'could not read the effective DSH profile; check installed bundles and dsh --dump-config',
   )
+  if (autonomyMode) {
+    try {
+      let basePath: string | undefined
+      if (input.workspace !== '') {
+        if (autonomyDryRun) failSetup('--dry-run cannot be combined with --workspace initial setup', 2)
+        const effective = await readEffectiveSource()
+        basePath = await configureWebOwner(input, effective)
+      }
+      const autonomyInput: WebOwnerAutonomySetupInput = {
+        dshHome: input.dshHome,
+        profile: input.profile,
+        ...(input.workspace !== '' ? { workspace: input.workspace, preset: input.preset } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(autonomyMemoryLearning !== undefined ? { memoryLearning: autonomyMemoryLearning } : {}),
+        ...(autonomyDreaming !== undefined ? { dreaming: autonomyDreaming } : {}),
+        ...(autonomyGrowth !== undefined ? { growth: autonomyGrowth } : {}),
+        ...(autonomyUsageLearning !== undefined ? { usageLearning: autonomyUsageLearning } : {}),
+        ...(autonomyWorkItemExperiences !== undefined ? { workItemExperiences: autonomyWorkItemExperiences } : {}),
+        ...(autonomyModelProvider !== undefined ? { modelProvider: autonomyModelProvider } : {}),
+        ...(autonomyModelId !== undefined ? { modelId: autonomyModelId } : {}),
+        ...(autonomyReasoningEffort !== undefined ? { reasoningEffort: autonomyReasoningEffort } : {}),
+        ...(autonomyBudgetTier !== undefined ? { budgetTier: autonomyBudgetTier } : {}),
+        ...(autonomyDailyBudget !== undefined ? { dailyBudget: autonomyDailyBudget } : {}),
+        ...(autonomyMaxExtractions !== undefined ? { memoryMaxExtractions: autonomyMaxExtractions } : {}),
+        ...(autonomyLeaseDays !== undefined ? { leaseDays: autonomyLeaseDays } : {}),
+        dryRun: autonomyDryRun,
+      }
+      const result = await applyWebOwnerAutonomySetup(autonomyInput, {
+        readEffectiveSource: (home, prof) => dumpEffectiveProfile(
+          home,
+          prof,
+          (msg) => { throw new Error(`assistant-web-owner setup: ${msg}`) },
+          'could not read the effective DSH profile; check installed bundles and dsh --dump-config',
+        ),
+      })
+      if (autonomyJson) {
+        const jsonPayload = {
+          ok: result.ok,
+          dshHome: result.dshHome,
+          profile: result.profile,
+          dryRun: result.dryRun,
+          applied: result.applied,
+          patchPath: result.patchPath,
+          ...(basePath ? { baseSetupPath: basePath } : {}),
+          owner: result.owner,
+          modelRoute: result.modelRoute,
+          budgetTier: result.budgetTier,
+          leaseDays: result.leaseDays,
+          expiresAt: result.expiresAt,
+          enabled: result.enabled,
+          policyIds: result.policyIds,
+          prerequisites: result.prerequisites,
+        }
+        process.stdout.write(`${JSON.stringify(jsonPayload)}\n`)
+        return
+      }
+      process.stdout.write(
+        `Web owner RSI autonomy ${result.dryRun ? 'previewed (dry-run)' : 'configured'} for ${result.profile}: ${result.patchPath}\n`
+        + `Owner route: ${result.owner.authorityId} (${result.owner.principalId}); model: ${result.modelRoute.provider}/${result.modelRoute.model}; tier: ${result.budgetTier}; lease: ${result.leaseDays}d.\n`
+        + `Enabled: memoryLearning=${result.enabled.memoryLearning}, dreaming=${result.enabled.dreaming}, growth=${result.enabled.growth}, usageLearning=${result.enabled.usageLearning}, workItemExperiences=${result.enabled.workItemExperiences}.\n`,
+      )
+      return
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (autonomyJson) {
+        process.stdout.write(`${JSON.stringify({ ok: false, error: message })}\n`)
+        process.exitCode = 1
+        return
+      }
+      throw error
+    }
+  }
   const effective = await readEffectiveSource()
   if (listGoalSessions) {
     const { listGoalAdmissionSessions } = await import('./goal-setup.js')

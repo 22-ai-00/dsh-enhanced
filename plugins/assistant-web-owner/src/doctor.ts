@@ -480,6 +480,16 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
   const dreamingBudgetAmount = readinessValue(rows, 'assistant-dreaming', 'budgetAmount')
   const dreamingBudgetValid = routeText(readinessValue(rows, 'assistant-dreaming', 'budgetId')) !== null
     && typeof dreamingBudgetAmount === 'number' && Number.isSafeInteger(dreamingBudgetAmount) && dreamingBudgetAmount >= 1
+  const combinedPolicyRules = [
+    readinessValue(rows, 'personal-assistant', 'assistantPolicy.rules'),
+    readinessValue(rows, 'assistant-policy', 'rules'),
+  ].flatMap(entry => Array.isArray(entry) ? entry : [])
+  const dreamOwnerTransitionRulesConfigured = ['dream.acknowledge', 'dream.validate', 'dream.reject', 'dream.retire']
+    .every(action => combinedPolicyRules.some(rule =>
+      rule !== null && typeof rule === 'object' && !Array.isArray(rule)
+      && (rule as Record<string, unknown>).effect === 'allow'
+      && Array.isArray((rule as Record<string, unknown>).actions)
+      && ((rule as Record<string, unknown>).actions as unknown[]).includes(action)))
   const dreamingReasons: AutonomyReadinessReason[] = []
   if (dreamingLoaded === true) {
     if (!dreamingDbScope.scoped) {
@@ -520,6 +530,7 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
       modelConfigured: dreamingModelValid,
       budgetConfigured: dreamingBudgetValid,
       notifyOwner: readinessValue(rows, 'assistant-dreaming', 'notifyOwner') === true,
+      dreamOwnerTransitionRulesConfigured,
     },
   })
 
@@ -587,6 +598,14 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
   if (!workItemsDbScope.scoped) subsystemReasons.push({ code: 'work-items-database-not-scoped', message: 'assistant-work-items.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
   if (!memoryDbScope.scoped) subsystemReasons.push({ code: 'memory-learning-database-not-scoped', message: 'assistant-memory-learning.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
   if (!growthUsageDbScope.scoped) subsystemReasons.push({ code: 'growth-usage-database-not-scoped', message: 'assistant-growth-driver.usageLearning.databasePath leaks outside $DSH_HOME or uses global ~/.dsh' })
+  const memoryAuthorities = [
+    routeText(readinessValue(rows, 'assistant-memory-learning', 'owner.authorityId')),
+    routeText(readinessValue(rows, 'assistant-memory-learning', 'authorityId')),
+    routeText(readinessValue(rows, 'assistant-verifier', 'memoryReviews.authorityId')),
+    routeText(readinessValue(rows, 'personal-assistant', 'personalMemory.automaticLearning.authorityId')),
+  ]
+  const memoryAuthoritiesDistinct = memoryAuthorities.every(item => item !== null)
+    && new Set(memoryAuthorities).size === 4
   checks.push({
     id: 'autonomy-subsystems', required: false,
     status: subsystemReasons.length === 0 ? 'ready' : 'not-ready',
@@ -601,6 +620,9 @@ export function inspectAutonomyReadiness(source: string, profile: string, dshHom
       workItemsDatabaseScoped: workItemsDbScope.scoped,
       memoryLearningDatabaseConfigured: memoryDbScope.configured,
       memoryLearningDatabaseScoped: memoryDbScope.scoped,
+      memoryAuthoritiesDistinct,
+      growthDreamingIdeasEnabled: readinessValue(rows, 'assistant-growth-driver', 'dreamingIdeas.enabled') === true,
+      dreamOwnerTransitionRulesConfigured,
       growthUsageLearningEnabled: readinessValue(rows, 'assistant-growth-driver', 'usageLearning.enabled') === true,
       growthUsageDatabaseConfigured: growthUsageDbScope.configured,
       growthUsageDatabaseScoped: growthUsageDbScope.scoped,

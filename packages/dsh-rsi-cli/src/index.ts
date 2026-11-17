@@ -8,6 +8,7 @@ import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus } from './diagnose.ts'
 import { collectLiveDoctorReport, formatLiveDoctorReport } from './doctor-live.ts'
 import { openWebProfile } from './open.ts'
+import { formatUpgradeReport, runUpgrade, validateRegistryUrl, type UpgradeAction, type UpgradeDeps } from './upgrade.ts'
 import { resolveDshHome } from './paths.ts'
 import { hasPendingHostRecovery, runInstall } from './install.ts'
 import { findRunningProfiles } from './run.ts'
@@ -51,6 +52,19 @@ export {
   tailLogFile,
 } from './services.ts'
 export { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
+export {
+  runUpgrade,
+  formatUpgradeReport,
+  validateRegistryUrl,
+  compareSemver,
+  type UpgradeAction,
+  type UpgradeMode,
+  type LedgerStatus,
+  type BoundHostStatus,
+  type UpgradeReport,
+  type UpgradeOptions,
+  type UpgradeDeps,
+} from './upgrade.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 
@@ -71,6 +85,7 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   web-url     解析受管服务当前有效的带 token Web 授权 URL（支持 --wait <秒>）
   open        打开 Web UI 与「文鳐」Owner Console（自动读取私有 Host、等待/启动并打开浏览器）
   update      升级全局 dsh-rsi 自身；加 --all 再升级整套插件集合（原地升级，保留数据）
+  upgrade     检查版本/ledger 迁移就绪（--check）、预览（--dry-run）或事务化升级（--yes，支持失败自动回滚）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
@@ -171,18 +186,25 @@ interface ParsedArgs {
   waitSeconds?: number
   /** open：不拉起系统浏览器，仅输出授权 URL 与提示。 */
   noBrowser: boolean
+  /** upgrade：只读版本与账本就绪检查。 */
+  check: boolean
+  /** upgrade：显式指定 npm registry URL。 */
+  registry?: string
+  /** upgrade：调用方确认目标 DSH_HOME 已停服。 */
+  confirmDshHomeStopped: boolean
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
 
 const KNOWN_COMMANDS = new Set([
-  'status', 'doctor', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update',
+  'status', 'doctor', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
   'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait', '--registry'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
+const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped'])
 const DIAGNOSE_FLAGS = new Set(['--json'])
 const OPEN_FLAGS = new Set(['--no-browser'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
@@ -199,6 +221,7 @@ function assignValueOption(result: ParsedArgs, token: string, value: string): vo
   if (token === '--profile') { result.profile = value; return }
   if (token === '--version') { result.targetVersion = value; return }
   if (token === '--dsh-version') { result.dshVersion = value; return }
+  if (token === '--registry') { result.registry = value; return }
   if (token === '--wait') {
     if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--wait 需要一个非负整数秒数，收到：${value}`)
     const parsedWait = Number(value)
@@ -232,6 +255,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     all: false,
     json: false,
     noBrowser: false,
+    check: false,
+    confirmDshHomeStopped: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -256,6 +281,11 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       }
       if (UPDATE_FLAGS.has(token)) {
         result.all = true
+        continue
+      }
+      if (UPGRADE_FLAGS.has(token)) {
+        if (token === '--check') result.check = true
+        else result.confirmDshHomeStopped = true
         continue
       }
       if (DIAGNOSE_FLAGS.has(token)) {
@@ -311,6 +341,11 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       result.all = true
       continue
     }
+    if (UPGRADE_FLAGS.has(token)) {
+      if (token === '--check') result.check = true
+      else result.confirmDshHomeStopped = true
+      continue
+    }
     if (DIAGNOSE_FLAGS.has(token)) {
       result.json = true
       continue
@@ -327,8 +362,30 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
   }
-  if (result.json && result.command !== 'status' && result.command !== 'doctor') {
-    throw new PurgeError(`--json 仅适用于 status 与 doctor 命令（收到：${result.command}）`)
+  if (result.json && result.command !== 'status' && result.command !== 'doctor' && result.command !== 'upgrade') {
+    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade 命令（收到：${result.command}）`)
+  }
+  if (result.check && result.command !== 'upgrade') {
+    throw new PurgeError(`--check 仅适用于 upgrade 命令（收到：${result.command}）`)
+  }
+  if (result.registry !== undefined && result.command !== 'upgrade') {
+    throw new PurgeError(`--registry 仅适用于 upgrade 命令（收到：${result.command}）`)
+  }
+  if (result.confirmDshHomeStopped && result.command !== 'upgrade') {
+    throw new PurgeError(`--confirm-dsh-home-stopped 仅适用于 upgrade 命令（收到：${result.command}）`)
+  }
+  if (result.check && result.yes) {
+    throw new PurgeError('--check 与 --yes 不能同时使用')
+  }
+  if (result.check && result.dryRun) {
+    throw new PurgeError('--check 与 --dry-run 不能同时使用')
+  }
+  if (result.registry !== undefined) {
+    try {
+      result.registry = validateRegistryUrl(result.registry)
+    } catch (error) {
+      throw new PurgeError((error as Error).message)
+    }
   }
   if (result.noBrowser && result.command !== 'open') {
     throw new PurgeError(`--no-browser 仅适用于 open 命令（收到：${result.command}）`)
@@ -796,6 +853,7 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   deps: MainDeps & { platform?: NodeJS.Platform; macHostProcessesStopped?: typeof assertMacHostProcessesStopped;
     detectFrozenOwner?: typeof detectFrozenOwner; frozenUpdate?: typeof runFrozenOwnerUpdate;
+    upgrade?: typeof runUpgrade; upgradeDeps?: UpgradeDeps;
     freshExec?: (bin: string, argv: readonly string[], env: NodeJS.ProcessEnv) => number } = {},
 ): Promise<number> {
   // Rescue scripts probe this before delegating destructive work to an installed CLI.
@@ -910,6 +968,26 @@ export async function main(
         process.stdout.write(`${formatWebUrlResult(entries)}\n`)
         // 任一 profile 解析出错时退出 1，但仍尽量打印成功的 URL。
         return entries.some(entry => entry.errors.length > 0) ? 1 : 0
+      }
+      case 'upgrade': {
+        const platform = deps.platform ?? process.platform
+        const action: UpgradeAction = args.dryRun ? 'dry-run' : args.check ? 'check' : args.yes ? 'apply' : 'check'
+        const { report, exitCode } = await (deps.upgrade ?? runUpgrade)(
+          {
+            dshHome: args.dshHome,
+            ...(args.profile !== undefined ? { profile: args.profile } : {}),
+            action,
+            ...(args.registry !== undefined ? { registryUrl: args.registry } : {}),
+            ...(args.dshVersion !== undefined ? { dshVersion: args.dshVersion } : {}),
+            ...(args.targetVersion !== undefined ? { targetVersion: args.targetVersion } : {}),
+            confirmDshHomeStopped: args.confirmDshHomeStopped,
+            platform,
+            env,
+          },
+          deps.upgradeDeps,
+        )
+        process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : formatUpgradeReport(report))
+        return exitCode
       }
       case 'update': {
         const platform = deps.platform ?? process.platform

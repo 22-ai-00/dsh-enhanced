@@ -314,3 +314,22 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     }
   } })
 }
+
+export {
+  applyWebOwnerAutonomySetup,
+  compileWebOwnerAutonomyGrants,
+  inspectWebOwnerAutonomyPrerequisites,
+  resolveAutonomyValidators,
+  type ApplyWebOwnerAutonomyDependencies,
+  type AutonomyBudgetTier,
+  type AutonomyReasoningEffort,
+  type CompiledWebOwnerAutonomyGrants,
+  type DreamingMode,
+  type MemoryLearningOwnerShape,
+  type WebOwnerAutonomyModelRoute,
+  type WebOwnerAutonomyPrerequisites,
+  type WebOwnerAutonomySetupInput,
+  type WebOwnerAutonomySetupResult,
+  type WebOwnerAutonomyValidators,
+  type WebOwnerRouteEntry,
+} from './autonomy-grants.js'
