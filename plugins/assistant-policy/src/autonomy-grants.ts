@@ -1,4 +1,10 @@
 import { compilePolicy } from './evaluator.js'
+import {
+  INTAKE_PRESET_RULE_IDS,
+  INTAKE_RULE_PRESETS,
+  resolveIntakeEvaluationPresetRules,
+  type IntakeEvaluationRuleSpec,
+} from './intake-presets.js'
 import { AssistantPolicyService, type PolicyBudgetConfig } from './service.js'
 import type { PolicyRule } from './types.js'
 
@@ -36,6 +42,31 @@ export const AUTONOMY_BUDGET_TIERS: Readonly<Record<AutonomyBudgetTier, Autonomy
     scanDailyBudget: 1_440,
   }),
 })
+
+/** Opt-in built-in inferred intake evaluation rule presets keyed by autonomy budget tier. */
+export const AUTONOMY_INTAKE_RULE_PRESETS: Readonly<Record<AutonomyBudgetTier, readonly IntakeEvaluationRuleSpec[]>> =
+  INTAKE_RULE_PRESETS
+
+export interface WebOwnerIntakeEvaluationPresetInput {
+  readonly enabled?: boolean
+  readonly tier?: AutonomyBudgetTier
+  readonly provider?: string
+  readonly model?: string
+  readonly rules?: readonly IntakeEvaluationRuleSpec[]
+  readonly maxCallsPerHour?: number
+  readonly timeoutMs?: number
+  readonly maxConsecutiveFailures?: number
+}
+
+export interface WebOwnerIntakeEvaluationConfig {
+  readonly enabled: true
+  readonly rules: readonly IntakeEvaluationRuleSpec[]
+  readonly provider: string
+  readonly model: string
+  readonly maxCallsPerHour?: number
+  readonly timeoutMs?: number
+  readonly maxConsecutiveFailures?: number
+}
 
 export interface WebOwnerPolicyScope {
   readonly profile: string
@@ -89,6 +120,8 @@ export type MergedAssistantPolicyGrants = {
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const CONTROL_CHAR_RE = /[\p{Cc}]/u
+const ROUTE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+~-]*$/u
+const MAX_ROUTE_ID_CHARS = 200
 
 function assertIdentifier(label: string, value: unknown, maxLength = 256): string {
   if (typeof value !== 'string') {
@@ -102,9 +135,20 @@ function assertIdentifier(label: string, value: unknown, maxLength = 256): strin
   return trimmed
 }
 
+function assertIntRange(label: string, value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`assistant-policy: ${label} must be an integer between ${min} and ${max}`)
+  }
+  return value
+}
+
 function assertPositiveInt(label: string, value: unknown, max = MAX_AUTONOMY_DAILY_BUDGET): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > max) {
-    throw new Error(`assistant-policy: ${label} must be an integer between 1 and ${max}`)
+  return assertIntRange(label, value, 1, max)
+}
+
+function assertRouteId(label: string, value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ROUTE_ID_CHARS || !ROUTE_ID_RE.test(value)) {
+    throw new Error(`assistant-policy: ${label} must be a configured provider/model id of at most ${MAX_ROUTE_ID_CHARS} characters`)
   }
   return value
 }
@@ -172,6 +216,11 @@ export function webOwnerGrowthRuleIds(profile: string): readonly string[] {
     `${prefix}growth-tool-execute`,
     ...webOwnerGrowthUsageRuleIds(profile),
   ])
+}
+
+/** Canonical deterministic rule ids for opt-in inferred intake evaluation presets. */
+export function webOwnerIntakeRuleIds(): readonly string[] {
+  return INTAKE_PRESET_RULE_IDS
 }
 
 export function webOwnerBudgetIds(profile: string): {
@@ -313,6 +362,55 @@ export function buildWebOwnerGrowthPolicyGrants(input: WebOwnerGrowthPolicyGrant
   }
 
   return freezeBundle(rules, budgets)
+}
+
+/**
+ * Compile an opt-in `assistant-proactive.intakeEvaluation` config from a built-in
+ * preset tier and/or explicit rules. Returns `undefined` unless `enabled === true`
+ * so default deployments never activate intake model evaluation silently.
+ */
+export function buildWebOwnerIntakeEvaluationConfig(
+  input: WebOwnerIntakeEvaluationPresetInput,
+): WebOwnerIntakeEvaluationConfig | undefined {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) {
+    throw new Error('assistant-policy: intakeEvaluation setup input must be a plain object')
+  }
+  const enabled = input.enabled ?? false
+  if (typeof enabled !== 'boolean') {
+    throw new Error('assistant-policy: intakeEvaluation.enabled must be a boolean')
+  }
+  if (!enabled) return undefined
+
+  const provider = assertRouteId('intakeEvaluation.provider', input.provider)
+  const model = assertRouteId('intakeEvaluation.model', input.model)
+  const rules = resolveIntakeEvaluationPresetRules({
+    ...(input.tier === undefined ? {} : { preset: input.tier }),
+    ...(input.rules === undefined ? {} : { rules: input.rules }),
+  })
+  if (rules === undefined) {
+    throw new Error('assistant-policy: intake evaluation requires an explicit tier or at least one rule')
+  }
+
+  const maxCallsPerHour = input.maxCallsPerHour === undefined
+    ? undefined
+    : assertIntRange('intakeEvaluation.maxCallsPerHour', input.maxCallsPerHour, 1, 1_000)
+  const timeoutMs = input.timeoutMs === undefined
+    ? undefined
+    : assertIntRange('intakeEvaluation.timeoutMs', input.timeoutMs, 1_000, 600_000)
+  const maxConsecutiveFailures = input.maxConsecutiveFailures === undefined
+    ? undefined
+    : assertIntRange('intakeEvaluation.maxConsecutiveFailures', input.maxConsecutiveFailures, 1, 10)
+
+  return Object.freeze({
+    enabled: true as const,
+    rules,
+    provider,
+    model,
+    ...(maxCallsPerHour === undefined ? {} : { maxCallsPerHour }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(maxConsecutiveFailures === undefined ? {} : { maxConsecutiveFailures }),
+  })
 }
 
 function asConfigArray(value: unknown, field: 'rules' | 'budgets'): unknown[] {

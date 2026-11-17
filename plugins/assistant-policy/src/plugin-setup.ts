@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, normalize, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { type Document, isMap, isScalar, isSeq, parseDocument, Scalar, stringify, YAMLMap, YAMLSeq } from 'yaml'
+import { INTAKE_RULE_PRESET_TIERS } from './intake-presets.js'
 import { type EffectiveProfileDumpReader, findRow, readEffectiveProfileDump } from './profile-setup.js'
 
 /**
@@ -54,6 +55,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
   ['dsh-enhanced-assistant-proactive', new Map<string, KnownType>([
     ['databasePath', 'path'],
     ['intakeEvaluation.enabled', 'boolean'],
+    ['intakeEvaluation.preset', INTAKE_RULE_PRESET_TIERS],
     ['intakeEvaluation.provider', 'string'],
     ['intakeEvaluation.model', 'string'],
     ['intakeEvaluation.maxCallsPerHour', 'number'],
