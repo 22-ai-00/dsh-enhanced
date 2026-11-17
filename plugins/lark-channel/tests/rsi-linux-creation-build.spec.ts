@@ -288,7 +288,8 @@ test.runIf(process.platform === 'linux')('prepares and replays delegated cgroup 
   const replayed = await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
   expect(replayed).toEqual(env)
   expect(await readLinuxRsiCreationBuildEnvironment(ctx.input)).toEqual(env)
-  expect(mocks.deployment).toHaveBeenCalledTimes(1)
+  expect(mocks.prepareBehavior).toHaveBeenCalledTimes(1)
+  expect(mocks.deployment).toHaveBeenCalledTimes(3)
 
   mocks.cgroup.mockResolvedValueOnce({ mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${process.getuid!() + 1}` })
   await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toThrow('Linux creation receipt differs')
