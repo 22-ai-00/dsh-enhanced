@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { reminderContentDigest, type ReminderContent } from './reminder.js'
 import { attentionOverlay, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
+import type { ProactiveGoalLifecycleReason, ProactiveGoalSourceLink } from './goal-lifecycle.js'
 import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, OpportunityProfile, OpportunityScope, ProactiveOpportunityFilter } from './types.js'
 
 const max = 1_000_000_000
@@ -219,6 +220,40 @@ export class OpportunityEngine {
       this.#db.exec('COMMIT')
     } catch (error) { this.#db.exec('ROLLBACK'); throw error }
   }
+  sourcesForWait(waitId: string, scopeInput: OpportunityScope): readonly ProactiveGoalSourceLink[] {
+    if (!text(waitId)) fail()
+    return collectSourceLinks(this.list(scopeInput).filter(decision => decision.waitId === waitId))
+  }
+  sourcesForGoal(scopeInput: OpportunityScope, goalId: string): readonly ProactiveGoalSourceLink[] {
+    if (!text(goalId)) fail()
+    return collectSourceLinks(this.list(scopeInput, goalId))
+  }
+  listByNativeGoal(nativeGoalId: string, sessionId?: string): readonly OpportunityDecision[] {
+    if (!text(nativeGoalId)) fail()
+    if (sessionId !== undefined && !text(sessionId)) fail()
+    const sql = sessionId === undefined
+      ? "SELECT payload_json FROM proactive_decisions WHERE json_extract(payload_json, '$.nativeGoalId') = ? ORDER BY json_extract(payload_json, '$.updatedAt') DESC, rowid DESC LIMIT 64"
+      : "SELECT payload_json FROM proactive_decisions WHERE json_extract(payload_json, '$.nativeGoalId') = ? AND json_extract(payload_json, '$.sessionId') = ? ORDER BY json_extract(payload_json, '$.updatedAt') DESC, rowid DESC LIMIT 64"
+    const rows = (sessionId === undefined
+      ? this.#db.prepare(sql).all(nativeGoalId)
+      : this.#db.prepare(sql).all(nativeGoalId, sessionId)) as Array<{ payload_json: string }>
+    return freeze(rows.map(row => this.#parse(row.payload_json))) as readonly OpportunityDecision[]
+  }
+  closeGoal(scopeInput: OpportunityScope, goalId: string, reason: ProactiveGoalLifecycleReason): readonly OpportunityDecision[] {
+    if (!text(goalId) || !['completed', 'cancelled', 'expired', 'retired'].includes(reason)) fail()
+    const terminalReason = reason === 'expired' ? 'expired' : 'cancelled'
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const closed: OpportunityDecision[] = []
+      for (const decision of this.list(scopeInput, goalId)) {
+        if (decision.state === 'pending') {
+          closed.push(this.#terminal(decision, 'consume', 'suppress', terminalReason, this.#now()).decision)
+        }
+      }
+      this.#db.exec('COMMIT')
+      return freeze(closed) as readonly OpportunityDecision[]
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error }
+  }
   /** Delivery accepted (queued) this decision's reminder; a later replay past its send window keeps the dedupe. */
   confirmReminder(decision: Readonly<Pick<OpportunityDecision, 'id' | 'scope' | 'goalId' | 'sourceId'>>): void {
     this.#db.prepare('UPDATE proactive_reminders SET queued = 1 WHERE scope_json = ? AND goal_id = ? AND source_id = ? AND decision_id = ?').run(scopeKey(decision.scope), decision.goalId, decision.sourceId, decision.id)
@@ -314,3 +349,23 @@ export class OpportunityEngine {
   #sameIdentity(value: OpportunityDecision, input: OpportunityInput): boolean { return value.waitId === input.waitId && value.sessionId === input.sessionId && value.nativeGoalId === input.nativeGoalId && value.nativeRevision === input.nativeRevision && value.ownerRouteId === input.ownerRouteId && value.sourceId === input.sourceId && value.sourceDigest === input.sourceDigest && value.definitionDigest === input.definitionDigest && value.objective === input.objective && value.expiresAt === input.expiresAt && value.goalId === input.goalId && sameScope(value.scope, input.scope) }
 }
 function sameScope(left: OpportunityScope, right: OpportunityScope): boolean { return scopeKey(left) === scopeKey(right) }
+function collectSourceLinks(decisions: readonly OpportunityDecision[]): readonly ProactiveGoalSourceLink[] {
+  const links: ProactiveGoalSourceLink[] = []
+  const seen = new Set<string>()
+  for (const decision of decisions) {
+    const key = `${decision.goalId}\0${decision.sourceId}\0${decision.sourceDigest}\0${decision.definitionDigest}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    links.push({
+      scope: decision.scope,
+      goalId: decision.goalId,
+      waitId: decision.waitId,
+      sourceId: decision.sourceId,
+      sourceDigest: decision.sourceDigest,
+      definitionDigest: decision.definitionDigest,
+      nativeGoalId: decision.nativeGoalId,
+      nativeRevision: decision.nativeRevision,
+    })
+  }
+  return freeze(links) as readonly ProactiveGoalSourceLink[]
+}

@@ -27,10 +27,11 @@ import {
   type PinnedFileRoot,
   type SensorObservation,
 } from './sensors.js'
-import { EventTriggerStore } from './store.js'
+import { EventTriggerStore, type GoalSourceClaim, type TriggerOutboxEvent } from './store.js'
 import type { EventSourceReader, EventSourceSnapshot, SourceEvent } from './source.js'
 import { version } from './version.js'
-import { EventSourceObservers } from './observer.js'
+import { EventSourceObservers, type GoalSourceDetachEvent, type GoalSourceUnsubscribeHook, type GoalSourceUnsubscribeInput } from './observer.js'
+import { EventIntakeAdapter, buildEventIntakeObservation, type EventIntakeObserver } from './intake.js'
 import { readGitHubRepositoryObservation } from './github-sensor.js'
 import { readLarkCalendarObservation, type LarkCalendarPageReader } from './lark-calendar-sensor.js'
 import type { RepositoryEventObservationPort } from './actions-port.js'
@@ -60,6 +61,18 @@ export interface EventTriggersServiceOptions {
   lookup?: Lookup
   fileObserver?: typeof readFileObservation
   larkCalendarReader?: LarkCalendarPageReader
+  intakeObserver?: EventIntakeObserver
+}
+
+function isTerminalGoalChangedPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return true
+  const change = (payload as { change?: unknown }).change
+  if (!change || typeof change !== 'object') return true
+  const operation = (change as { operation?: unknown }).operation
+  const phase = ((change as { goal?: unknown }).goal as { phase?: unknown } | undefined)?.phase
+  if (operation === 'complete' || operation === 'clear' || operation === 'block') return true
+  if (phase === 'complete' || phase === 'cleared' || phase === 'blocked') return true
+  return operation === undefined && phase === undefined
 }
 
 interface LarkChannelCalendarService extends LarkCalendarPageReader {}
@@ -105,7 +118,10 @@ export class EventTriggersService extends Service implements EventSourceReader {
   private readonly inFlight = new Set<Promise<unknown>>()
   private readonly pendingObservations = new Map<string, PendingObservation>()
   private readonly sourceChangeListeners = new Set<() => void>()
+  private readonly scopedSourceListeners = new Map<() => void, Readonly<{ triggerId?: string; goalId?: string }>>()
+  private readonly intakeAdapter: EventIntakeAdapter
   private readonly observers: EventSourceObservers
+  private goalReconcileQueued = false
   private active = true
 
   constructor(ctx: Context, input: Config, options: EventTriggersServiceOptions = {}) {
@@ -136,7 +152,29 @@ export class EventTriggersService extends Service implements EventSourceReader {
       ? pinFileRoots(this.config.allowedFileRoots)
       : []
     this.store = new EventTriggerStore({ path: this.config.databasePath, now: this.now })
-    this.observers = new EventSourceObservers(ctx, this.config.triggers.filter(trigger => trigger.observer !== undefined).map(trigger => ({ triggerId: trigger.id, automationId: trigger.automationId, configDigest: this.triggerConfigDigest(trigger), owner: trigger.observer!, lifetime: trigger.observerLifetime })), this.store)
+    this.intakeAdapter = new EventIntakeAdapter(ctx, options.intakeObserver)
+    this.observers = new EventSourceObservers(
+      ctx,
+      this.config.triggers.filter(trigger => trigger.observer !== undefined).map(trigger => ({
+        triggerId: trigger.id,
+        automationId: trigger.automationId,
+        configDigest: this.triggerConfigDigest(trigger),
+        owner: trigger.observer!,
+        lifetime: trigger.observerLifetime,
+      })),
+      this.store,
+      { onSourceDetached: event => this.handleSourceDetached(event) },
+    )
+    const unsubGoalChanged = (ctx as unknown as {
+      on?: (event: string, listener: (payload?: unknown) => void) => (() => void) | undefined
+    }).on?.('goal/changed', payload => {
+      if (!this.active || !isTerminalGoalChangedPayload(payload) || this.goalReconcileQueued) return
+      this.goalReconcileQueued = true
+      queueMicrotask(() => {
+        this.goalReconcileQueued = false
+        if (this.active) this.observers.reconcileGoalSources()
+      })
+    })
     this.flushTimer = setInterval(() => void this.flushPending().catch(() => {}), this.config.pollIntervalMs)
     this.flushTimer.unref?.()
     void this.flushPending().catch(() => {})
@@ -147,10 +185,13 @@ export class EventTriggersService extends Service implements EventSourceReader {
     }
     ctx.effect(() => async () => {
       this.active = false
+      unsubGoalChanged?.()
       if (this.pollTimer !== undefined) clearInterval(this.pollTimer)
       if (this.flushTimer !== undefined) clearInterval(this.flushTimer)
       this.shutdown.abort(new EventTriggersError('disposed', 'event-triggers service is disposed'))
       await Promise.allSettled(this.inFlight)
+      this.intakeAdapter.dispose()
+      this.scopedSourceListeners.clear()
       this.sourceChangeListeners.clear()
       this.store.close()
     }, 'event-triggers.runtime')
@@ -252,7 +293,10 @@ export class EventTriggersService extends Service implements EventSourceReader {
         revision, timeBasis: 'observed', method: trigger.kind === 'file' ? 'local-observation' : 'https-observation',
       }),
     })
-    if (produced.length > 0) this.notifySourceChanges()
+    if (produced.length > 0) {
+      this.emitIntakeForOutbox(trigger, produced)
+      this.notifySourceChanges()
+    }
     this.store.markTriggerSuccess(trigger.id, occurredAt)
   }
 
@@ -510,6 +554,12 @@ export class EventTriggersService extends Service implements EventSourceReader {
       resource: { kind: 'automation', id: trigger.automationId }, context: { initiator: 'external' },
     }, { idempotencyKey: `event-webhook:${trigger.id}:${input.nonce}` })
     if (decision.effect !== 'allow') throw new EventTriggersError('policy-denied', 'event-triggers policy denied webhook')
+    if (trigger.observer !== undefined) {
+      if (this.observers.isRetiredGoalSource(trigger.id)) {
+        throw new EventTriggersError('source-changed', 'event-triggers: observer goal source is retired')
+      }
+      this.observers.assertCurrent(trigger.id)
+    }
     const accepted = this.store.acceptWebhook({
       triggerId: trigger.id, eventId: input.nonce, occurredAt: timestamp, acceptedAt: receivedAt,
       cooldownMs: trigger.cooldownMs, maxFires: trigger.maxFires,
@@ -522,6 +572,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
     if (!accepted.accepted) {
       throw new EventTriggersError(accepted.reason, `event-triggers: webhook event was rejected by ${accepted.reason}`)
     }
+    this.emitIntakeForOutbox(trigger, [accepted.event])
     this.notifySourceChanges()
     await this.startFlush()
     return { accepted: true, eventId: accepted.event.eventId }
@@ -591,23 +642,96 @@ export class EventTriggersService extends Service implements EventSourceReader {
     }
   }
 
-  subscribeSourceChanges(listener: () => void): () => void {
+  subscribeSourceChanges(listener: () => void, options?: { triggerId?: string; goalId?: string }): () => void {
     this.assertActive()
+    if (options?.triggerId !== undefined && this.observers.isRetiredGoalSource(options.triggerId)) {
+      return () => {}
+    }
     this.sourceChangeListeners.add(listener)
+    if (options !== undefined && (options.triggerId !== undefined || options.goalId !== undefined)) {
+      this.scopedSourceListeners.set(listener, Object.freeze({
+        ...(options.triggerId === undefined ? {} : { triggerId: options.triggerId }),
+        ...(options.goalId === undefined ? {} : { goalId: options.goalId }),
+      }))
+    }
     let subscribed = true
     return () => {
       if (!subscribed) return
       subscribed = false
       this.sourceChangeListeners.delete(listener)
+      this.scopedSourceListeners.delete(listener)
     }
   }
 
-  claimGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => this.observers.claimGoalSource(input)
-  retireGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => this.observers.retireGoalSource(input)
-  canSettleGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => {
+  registerIntakeObserver = (observer: EventIntakeObserver): (() => void) => {
+    this.assertActive()
+    return this.intakeAdapter.registerObserver(observer)
+  }
+
+  registerUnsubscribeHook = (hook: GoalSourceUnsubscribeHook): (() => void) => {
+    this.assertActive()
+    return this.observers.registerUnsubscribeHook(hook)
+  }
+
+  unsubscribeGoalSources = (input: GoalSourceUnsubscribeInput): readonly string[] => {
+    this.assertActive()
+    return this.observers.unsubscribeGoalSources(input)
+  }
+
+  claimGoalSource = (input: GoalSourceClaim): boolean => this.observers.claimGoalSource(input)
+  retireGoalSource = (input: GoalSourceClaim): boolean => this.observers.retireGoalSource(input)
+  isRetiredGoalSource = (triggerId: string): boolean => {
+    this.assertActive()
+    return this.observers.isRetiredGoalSource(triggerId)
+  }
+  canSettleGoalSource = (input: GoalSourceClaim): boolean => {
     this.assertActive()
     const trigger = this.triggers.get(input.triggerId)
     return trigger !== undefined && trigger.enabled && this.observers.canSettleGoalSource(input)
+  }
+
+  private handleSourceDetached(event: Readonly<GoalSourceDetachEvent>): void {
+    const pending = this.pendingObservations.get(event.triggerId)
+    if (pending !== undefined) {
+      pending.controller.abort(new EventTriggersError('source-changed', `event-triggers: source ${event.triggerId} detached (${event.reason})`))
+    }
+    for (const [listener, meta] of this.scopedSourceListeners.entries()) {
+      const triggerMatch = meta.triggerId === undefined || meta.triggerId === event.triggerId
+      const goalMatch = meta.goalId === undefined || (event.goalId !== undefined && meta.goalId === event.goalId)
+      if (triggerMatch && goalMatch && (meta.triggerId !== undefined || meta.goalId !== undefined)) {
+        this.scopedSourceListeners.delete(listener)
+        this.sourceChangeListeners.delete(listener)
+      }
+    }
+  }
+
+  private emitIntakeForOutbox(trigger: NormalizedTrigger, items: readonly TriggerOutboxEvent[]): void {
+    if (!this.active || trigger.intake?.enabled !== true || items.length === 0) return
+    if (this.observers.isRetiredGoalSource(trigger.id)) return
+    let receipt
+    try {
+      receipt = this.observers.attestedRouteReceipt(trigger.id)
+    } catch {
+      return
+    }
+    if (receipt === undefined) return
+    for (const item of items) {
+      if (item.envelope === undefined) continue
+      try {
+        const envelope = parseExternalEventEnvelope(JSON.parse(item.envelope.canonical))
+        if (externalEventDigest(envelope) !== item.envelope.digest) continue
+        const observation = buildEventIntakeObservation({
+          trigger,
+          receipt,
+          sequence: item.sequence,
+          envelope,
+          envelopeDigest: item.envelope.digest,
+        })
+        this.intakeAdapter.emit(observation)
+      } catch {
+        // Best-effort intake adapter emission never breaks outbox/sensor flow.
+      }
+    }
   }
 
   private sourceTrigger(triggerId: string): NormalizedTrigger {
@@ -687,12 +811,18 @@ export class EventTriggersService extends Service implements EventSourceReader {
   }
 
   private triggerConfigDigest(trigger: NormalizedTrigger): string {
-    const { observerLifetime, deliveryMode, ...legacy } = trigger as NormalizedTrigger & { deliveryMode?: 'commit' | 'pull-request' }
-    // A missing deliveryMode is the persisted legacy PR contract.  Excluding
-    // its absent property keeps prior source claims and envelopes valid.
-    const value = deliveryMode === undefined
-      ? (observerLifetime === 'shared' ? legacy : { ...legacy, observerLifetime })
-      : (observerLifetime === 'shared' ? { ...legacy, deliveryMode } : trigger)
+    const { observerLifetime, deliveryMode, intake, ...legacy } = trigger as NormalizedTrigger & {
+      deliveryMode?: 'commit' | 'pull-request'
+      intake?: import('./config.js').NormalizedTriggerIntake
+    }
+    // Absent deliveryMode, default shared observerLifetime, and omitted/disabled
+    // intake are excluded so prior source claims and envelopes keep exact digests.
+    const value = {
+      ...legacy,
+      ...(observerLifetime === 'shared' ? {} : { observerLifetime }),
+      ...(deliveryMode === undefined ? {} : { deliveryMode }),
+      ...(intake === undefined ? {} : { intake }),
+    }
     return createHash('sha256').update(stableJson(value)).digest('hex')
   }
 

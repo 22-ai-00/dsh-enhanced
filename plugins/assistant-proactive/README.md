@@ -84,6 +84,11 @@ intakeEvaluation:
 - 只读评估：本插件只提供判断者，不写 intake 工作项账本、不准入、不派发、不投递。WorkItems 仍按自身配置处于 observe；把 accept 结果准入为工作项需要 WorkItems 自己的 `intakeLedger.evaluation.admit` 显式授权。审计证据在 WorkItems 数据库：`work_item_intake_evaluation` 行只含等级、原因与引文的 UTF-16 偏移，不含正文。
 - 只读健康：`assistantProactive.intakeEvaluationHealth()` 返回 `{ enabled, registered, policyVersion, lastError, readiness: disabled|unavailable|registered|degraded, provider, model, consecutiveFailures, callsInWindow, budgetExhausted }`，供 doctor/运维展示；不授予任何权限，组合展示时还可读 `assistantWorkItems.intakeEvaluationHealth()`。
 
+### 目标生命周期清理与 intake 路由辅助（无轮询定时器）
+
+- **目标退役自动退订（WP11 / WP19）**：暴露 Host 接口 `registerGoalUnsubscribeHook(hook)` 与 `retireGoalSources(input)`，并在 `closeWait(waitId, scope, reason)` 与 Cordis `goal/changed`（仅 `complete` / `clear` 终态，基于事件 + microtask，不新增 `setInterval`）时关闭关联的待决机会、取消排队准备任务，并在可选 peer `@dsh-enhanced/event-triggers` 存在时调用 `unsubscribeGoalSources` 触发对应目标来源的有界退订；多轮等待仍处于 `paused` 阶段的目标不会因单轮 `cancelled` 而被误退订。
+- **确定性 intake 路由辅助（WP20 / WP12）**：导出纯函数 `planProactiveIntakeRoute()` / `toWorkItemIntakePayload()` 与 Host 方法 `routeIntakeObservation()`，结合当前 `intakeEvaluationHealth()` 将标准事件观测或 `WorkItemIntakeInput` 归类为 `explicit` / `inferred` / `ignore` 及 `admit-explicit` / `evaluate-inferred` / `observe-only` / `filtered`（bot 上限降为 `inferred`，文本需匹配 `observationDigest`），不调用模型、不写账本且不授予执行权。
+
 对话示例：`为当前目标等待 report-file 触发器，使用 useful-report 机会策略，截止时间为一小时后。` 模型在当前主人请求中调用 `goal_wait_event`，显式提供 `opportunity_profile: useful-report`，以及实际目标 ID、native revision、触发器 ID 和毫秒时间戳。未知策略在暂停前被拒绝；省略策略保留 Goals 原有行为。
 
 启用 Goals 事件等待后，主人目标上下文会列出当前可用策略的 ID、模式和每目标上限，供选择 `opportunity_profile`；不展示准备模型、供应商或预算标识。空策略配置不提供主动动作。列表只读且不授予等待、提醒、模型或执行权限；目标首次使用策略时仍按原逻辑冻结，执行时再次核验主人及权限。已认证主人可用 `proactive_status` 只读查看决定，无需对每次合法查询重复工具审批；`proactive_feedback` 仍需当前主人回合及原有审批。

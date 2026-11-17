@@ -9,6 +9,7 @@ export * from './config.js'
 export * from './service.js'
 export * from './source.js'
 export * from './observer.js'
+export * from './intake.js'
 export * from './lark-calendar-sensor.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {

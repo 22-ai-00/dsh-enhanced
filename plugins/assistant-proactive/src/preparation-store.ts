@@ -104,6 +104,14 @@ export class PreparationStore {
       if (value.decision.waitId === waitId) this.#write({ ...value, state: 'cancelled', reason: 'wait-ended', updatedAt: Date.now() }, value.state)
     }
   }
+  cancelGoal(goalId: string, scope: OpportunityScope, reason = 'goal-ended'): number {
+    let cancelled = 0
+    for (const row of this.#db.prepare("SELECT payload_json FROM proactive_preparations WHERE scope_key=? AND goal_id=? AND state IN ('queued','running')").all(acceptanceDigest(scope), goalId) as { payload_json: string }[]) {
+      const value = JSON.parse(row.payload_json) as PreparationRecord
+      if (this.#write({ ...value, state: 'cancelled', reason, updatedAt: Date.now() }, value.state)) cancelled += 1
+    }
+    return cancelled
+  }
   #write(value: PreparationRecord, expected: PreparationRecord['state'], token?: string): boolean {
     return this.#db.prepare(`UPDATE proactive_preparations SET state=?,token=?,payload_json=? WHERE id=? AND state=?${token === undefined ? '' : ' AND token=?'}`)
       .run(value.state, value.token ?? null, JSON.stringify(value), value.id, expected, ...(token === undefined ? [] : [token])).changes === 1

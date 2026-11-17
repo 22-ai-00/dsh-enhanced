@@ -6,6 +6,21 @@ export type FireWhen = 'changed' | 'truthy'
 export type Ipv6Mode = 'deny' | 'native-only'
 export type ObserverLifetime = 'shared' | 'goal'
 
+export interface EventTriggerIntakeConfig {
+  /** Explicit per-source owner opt-in; defaults to false (off). */
+  enabled?: boolean
+  /** Whether this trigger represents an active subscription (default true when enabled). */
+  subscribed?: boolean
+  /** Optional bounded metadata-only label included in normalized intake summaries. */
+  summaryLabel?: string
+}
+
+export interface NormalizedTriggerIntake {
+  readonly enabled: true
+  readonly subscribed: boolean
+  readonly summaryLabel?: string
+}
+
 interface TriggerBase {
   id: string
   automationId: string
@@ -16,6 +31,8 @@ interface TriggerBase {
   observer?: EventObserverConfig
   /** A goal lifetime is claimed by the first exact owner-authorized event wait. */
   observerLifetime?: ObserverLifetime
+  /** Explicit per-source owner opt-in for normalized WP20 intake observations (default off). */
+  intake?: EventTriggerIntakeConfig
 }
 
 export interface FileTriggerConfig extends TriggerBase {
@@ -97,11 +114,11 @@ export interface Config {
 }
 
 export type NormalizedTrigger =
-  | (Required<Omit<FileTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
-  | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
-  | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
-  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs' | 'credentialHandle' | 'externalGrant' | 'deliveryMode'>> & { ttlMs?: number; credentialHandle?: string; externalGrant?: Readonly<{ id: string; revision: number; digest: string }>; deliveryMode?: 'commit' | 'pull-request' })
-  | (Required<Omit<LarkCalendarTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
+  | (Required<Omit<FileTriggerConfig, 'ttlMs' | 'observer' | 'intake'>> & { ttlMs?: number; observer?: EventObserverConfig; intake?: NormalizedTriggerIntake })
+  | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer' | 'intake'>> & { ttlMs?: number; observer?: EventObserverConfig; intake?: NormalizedTriggerIntake })
+  | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer' | 'intake'>> & { ttlMs?: number; observer?: EventObserverConfig; intake?: NormalizedTriggerIntake })
+  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs' | 'credentialHandle' | 'externalGrant' | 'deliveryMode' | 'intake'>> & { ttlMs?: number; credentialHandle?: string; externalGrant?: Readonly<{ id: string; revision: number; digest: string }>; deliveryMode?: 'commit' | 'pull-request'; intake?: NormalizedTriggerIntake })
+  | (Required<Omit<LarkCalendarTriggerConfig, 'ttlMs' | 'intake'>> & { ttlMs?: number; intake?: NormalizedTriggerIntake })
 
 export interface NormalizedConfig {
   databasePath: string
@@ -132,6 +149,7 @@ const base = {
   ttlMs: Schema.number().step(1).min(1_000).max(31_536_000_000),
   observer: Schema.any(),
   observerLifetime: Schema.union(['shared', 'goal'] as const).default('shared'),
+  intake: Schema.any(),
 }
 
 const triggerSchema = Schema.union([
@@ -197,6 +215,36 @@ function contained(path: string, roots: readonly string[]): boolean {
   })
 }
 
+function normalizeTriggerIntake(raw: unknown): NormalizedTriggerIntake | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
+    || (Object.getPrototypeOf(raw) !== Object.prototype && Object.getPrototypeOf(raw) !== null)) {
+    throw new Error('event-triggers: intake configuration must be a plain object')
+  }
+  const value = raw as Record<string, unknown>
+  for (const key of Object.keys(value)) {
+    if (!['enabled', 'subscribed', 'summaryLabel'].includes(key)) {
+      throw new Error(`event-triggers: invalid intake configuration field ${key}`)
+    }
+  }
+  const enabled = value['enabled'] ?? false
+  if (typeof enabled !== 'boolean') throw new Error('event-triggers: intake.enabled must be a boolean')
+  const subscribed = value['subscribed'] ?? true
+  if (typeof subscribed !== 'boolean') throw new Error('event-triggers: intake.subscribed must be a boolean')
+  const rawLabel = value['summaryLabel']
+  let summaryLabel: string | undefined
+  if (rawLabel !== undefined) {
+    if (typeof rawLabel !== 'string') throw new Error('event-triggers: intake.summaryLabel must be a string')
+    const normalized = rawLabel.normalize('NFC')
+    if (normalized.length === 0 || normalized.length > 160 || normalized.trim() !== normalized || /[\p{Cc}]/u.test(normalized)) {
+      throw new Error('event-triggers: intake.summaryLabel must be 1-160 trimmed non-control characters')
+    }
+    summaryLabel = normalized
+  }
+  if (!enabled) return undefined
+  return Object.freeze({ enabled: true as const, subscribed, ...(summaryLabel === undefined ? {} : { summaryLabel }) })
+}
+
 function httpOrigin(value: string): string {
   let url: URL
   try { url = new URL(value.normalize('NFC').trim()) } catch { throw new Error('event-triggers: invalid HTTP origin') }
@@ -251,6 +299,15 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
     }
     if (trigger.observerLifetime === 'goal' && trigger.observer === undefined) {
       throw new Error('event-triggers: goal observer lifetime requires an observer owner')
+    }
+    const intake = normalizeTriggerIntake(trigger.intake)
+    if (intake !== undefined) {
+      if (trigger.observer === undefined) {
+        throw new Error('event-triggers: intake observation requires an observer owner')
+      }
+      trigger.intake = intake
+    } else {
+      delete trigger.intake
     }
     if (trigger.kind === 'github-repository') {
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)

@@ -29,6 +29,34 @@ const RUNBOOK_ID = 'observe-persisted-event-source' as const
 const RUNBOOK_VERSION = 1 as const
 const SYSTEM_OWNER = EVENT_OBSERVER_EXECUTOR
 const FUTURE_AT = '2099-01-01T00:00:00.000Z'
+const MAX_UNSUBSCRIBE_HOOKS = 64
+
+export type GoalSourceUnsubscribeReason = 'completed' | 'expired' | 'cancelled' | 'retired'
+
+export interface GoalSourceUnsubscribeInput {
+  readonly scope: GoalSourceClaim['scope']
+  readonly goalId: string
+  readonly reason: GoalSourceUnsubscribeReason
+  readonly triggerId?: string
+  readonly sourceId?: string
+  readonly sourceDigest?: string
+  readonly definitionDigest?: string
+}
+
+export interface GoalSourceDetachEvent {
+  readonly triggerId: string
+  readonly automationId: string
+  readonly reason: GoalSourceUnsubscribeReason
+  readonly goalId?: string
+  readonly scope?: GoalSourceClaim['scope']
+  readonly detachedAt: number
+}
+
+export type GoalSourceUnsubscribeHook = (event: Readonly<GoalSourceDetachEvent>) => void
+
+export interface EventSourceObserversOptions {
+  readonly onSourceDetached?: GoalSourceUnsubscribeHook
+}
 
 type Binding = Readonly<{
   triggerId: string
@@ -72,6 +100,9 @@ export class EventSourceObservers {
   private readonly bindings = new Map<string, Binding>()
   private readonly receipts = new Map<string, Readonly<OwnerRouteValidationReceipt>>()
   private readonly definitionHashes = new Map<string, string>()
+  private readonly unsubscribeHooks = new Set<GoalSourceUnsubscribeHook>()
+  private readonly detachedKeys = new Set<string>()
+  private readonly onSourceDetached: GoalSourceUnsubscribeHook | undefined
   private automations: AssistantAutomationsService | undefined
   private policy: AssistantPolicyService | undefined
   private delivery: AssistantDeliveryService | undefined
@@ -79,7 +110,13 @@ export class EventSourceObservers {
   private injection: { dispose(): Promise<void> } | undefined
   private active = true
 
-  constructor(private readonly ctx: Context, bindings: readonly Binding[], private readonly store: EventTriggerStore) {
+  constructor(
+    private readonly ctx: Context,
+    bindings: readonly Binding[],
+    private readonly store: EventTriggerStore,
+    options: EventSourceObserversOptions = {},
+  ) {
+    this.onSourceDetached = options.onSourceDetached
     const automationIds = new Set<string>()
     for (const binding of bindings) {
       if (this.bindings.has(binding.triggerId)) throw new Error(`event-triggers: duplicate observer trigger ${binding.triggerId}`)
@@ -112,6 +149,8 @@ export class EventSourceObservers {
       this.active = false
       this.unregister?.()
       this.unregister = undefined
+      this.unsubscribeHooks.clear()
+      this.detachedKeys.clear()
       void this.injection?.dispose()
     }, 'event-triggers.observer')
   }
@@ -121,12 +160,39 @@ export class EventSourceObservers {
     if (binding === undefined) return
     if (!this.assertGoalClaimCurrent(binding)) throw new Error('event-triggers: observer goal binding is retired or changed')
     const receipt = this.assertBinding(binding), automations = this.requireAutomations()
+    this.receipts.set(triggerId, receipt)
     const activation = automations.inspectSystemOwnedActivation({ owner: SYSTEM_OWNER, automationId: binding.automationId })
     const current = automations.inspectSystemOwned({ owner: SYSTEM_OWNER, automationId: binding.automationId })
     if (!activation || current.automationStatus !== 'active' || activation.definitionHash !== this.definitionHashes.get(triggerId)
       || activation.activationNonce !== this.activationNonce(binding, receipt) || activation.ownerRouteId !== binding.owner.ownerRouteId) {
       this.pauseCurrent(binding.automationId, 'source-changed')
       throw new Error('event-triggers: observer source is paused or changed')
+    }
+  }
+
+  /** Returns the currently attested owner route receipt for an active bound trigger. */
+  attestedRouteReceipt(triggerId: string): Readonly<OwnerRouteValidationReceipt> | undefined {
+    const binding = this.bindings.get(triggerId)
+    if (binding === undefined) return undefined
+    const cached = this.receipts.get(triggerId)
+    if (cached !== undefined) return cached
+    const receipt = this.assertBinding(binding)
+    this.receipts.set(triggerId, receipt)
+    return receipt
+  }
+
+  registerUnsubscribeHook(hook: GoalSourceUnsubscribeHook): () => void {
+    if (!this.active) throw new Error('event-triggers: observer disposed')
+    if (typeof hook !== 'function') throw new Error('event-triggers: invalid unsubscribe hook')
+    if (this.unsubscribeHooks.size >= MAX_UNSUBSCRIBE_HOOKS && !this.unsubscribeHooks.has(hook)) {
+      throw new Error('event-triggers: maximum unsubscribe hooks registered')
+    }
+    this.unsubscribeHooks.add(hook)
+    let live = true
+    return () => {
+      if (!live) return
+      live = false
+      this.unsubscribeHooks.delete(hook)
     }
   }
 
@@ -153,7 +219,114 @@ export class EventSourceObservers {
     if (!this.claimMatches(binding, input) || !this.trustedComplete(input)) throw new Error('event-triggers: observer goal completion is not trusted')
     this.store.retireGoalSource(input)
     this.pauseCurrent(binding.automationId, 'goal-complete')
+    this.notifyDetached(binding, 'completed', input.goalId, input.scope)
     return true
+  }
+
+  /**
+   * Host cleanup hook: detaches/retires goal-scoped sources whose linked Goal
+   * has completed, expired, cancelled/cleared, or retired. Shared sources are
+   * never stopped.
+   */
+  unsubscribeGoalSources(input: GoalSourceUnsubscribeInput): readonly string[] {
+    if (!this.active) return Object.freeze([])
+    if (!input || typeof input !== 'object' || typeof input.goalId !== 'string' || input.goalId.length === 0
+      || !['completed', 'expired', 'cancelled', 'retired'].includes(input.reason)
+      || !this.validScope(input.scope)) {
+      throw new Error('event-triggers: invalid goal source unsubscribe input')
+    }
+    let targetTriggerId = input.triggerId
+    if (targetTriggerId === undefined && input.sourceId !== undefined) {
+      const prefix = 'event-triggers:'
+      if (!input.sourceId.startsWith(prefix) || input.sourceId.length <= prefix.length) return Object.freeze([])
+      targetTriggerId = input.sourceId.slice(prefix.length)
+    }
+    const detached: string[] = []
+    for (const binding of this.bindings.values()) {
+      if (binding.lifetime !== 'goal') continue
+      if (targetTriggerId !== undefined && binding.triggerId !== targetTriggerId) continue
+      if (!this.ownerMatchesScope(binding.owner, input.scope)) continue
+      if (input.sourceDigest !== undefined && binding.configDigest !== input.sourceDigest) continue
+      const claim = this.store.goalSourceClaim(binding.triggerId)
+      if (claim !== undefined) {
+        if (claim.goalId !== input.goalId || !sameScope(claim.scope, input.scope)) continue
+        if (input.definitionDigest !== undefined && claim.definition.digest !== input.definitionDigest) continue
+        if (claim.retiredAt !== undefined) {
+          this.pauseCurrent(binding.automationId, 'goal-retired')
+          this.notifyDetached(binding, input.reason, claim.goalId, claim.scope)
+          detached.push(binding.triggerId)
+          continue
+        }
+        const expired = Date.now() >= binding.owner.expiresAt
+        if (input.reason === 'completed') {
+          if (!this.trustedComplete(claim)) continue
+          this.store.retireGoalSource(claim)
+          this.pauseCurrent(binding.automationId, 'goal-complete')
+          this.notifyDetached(binding, 'completed', claim.goalId, claim.scope)
+          detached.push(binding.triggerId)
+          continue
+        }
+        if (expired) {
+          this.store.retireGoalSource(claim)
+          this.pauseCurrent(binding.automationId, 'expired')
+          this.notifyDetached(binding, 'expired', claim.goalId, claim.scope)
+          detached.push(binding.triggerId)
+          continue
+        }
+        const goalReader = this.goalReader()
+        if (goalReader !== undefined) {
+          const goal = goalReader.inspectGoalLifecycle({ scope: claim.scope, goalId: claim.goalId })
+          if (goal !== undefined && (goal.native.phase === 'active' || goal.native.phase === 'paused')) continue
+          if (goal !== undefined && goal.native.phase === 'complete') {
+            this.store.retireGoalSource(claim)
+            this.pauseCurrent(binding.automationId, 'goal-complete')
+            this.notifyDetached(binding, 'completed', claim.goalId, claim.scope)
+            detached.push(binding.triggerId)
+            continue
+          }
+          if (goal !== undefined && (goal.native.phase === 'cleared' || goal.native.phase === 'blocked')) {
+            this.store.retireGoalSource(claim)
+            this.pauseCurrent(binding.automationId, input.reason === 'cancelled' ? 'goal-cancelled' : 'goal-retired')
+            this.notifyDetached(binding, input.reason, claim.goalId, claim.scope)
+            detached.push(binding.triggerId)
+            continue
+          }
+        }
+        // Without a Goals lifecycle reader (or when goal record was already removed),
+        // pause and detach in-memory subscriptions without forging durable completion.
+        this.pauseCurrent(binding.automationId, input.reason === 'cancelled' ? 'goal-cancelled' : 'goal-retired')
+        this.notifyDetached(binding, input.reason, claim.goalId, claim.scope)
+        detached.push(binding.triggerId)
+      } else if (Date.now() >= binding.owner.expiresAt || input.reason === 'expired' || input.reason === 'cancelled' || input.reason === 'retired') {
+        if (Date.now() >= binding.owner.expiresAt) this.pauseCurrent(binding.automationId, 'expired')
+        this.notifyDetached(binding, Date.now() >= binding.owner.expiresAt ? 'expired' : input.reason, input.goalId, input.scope)
+        detached.push(binding.triggerId)
+      }
+    }
+    return Object.freeze(detached)
+  }
+
+  /** Reconciles goal-scoped bindings reactively against Goal lifecycle & expiry (no polling timer). */
+  reconcileGoalSources(): readonly string[] {
+    if (!this.active) return Object.freeze([])
+    const detached: string[] = []
+    const readerAvailable = this.goalReader() !== undefined
+    for (const binding of this.bindings.values()) {
+      if (binding.lifetime !== 'goal') continue
+      const claim = this.store.goalSourceClaim(binding.triggerId)
+      if (claim !== undefined) {
+        if (claim.retiredAt !== undefined || (readerAvailable && this.claimMatches(binding, claim))) {
+          if (!this.assertGoalClaimCurrent(binding)) {
+            detached.push(binding.triggerId)
+            continue
+          }
+        }
+      }
+      if (Date.now() >= binding.owner.expiresAt) {
+        try { this.assertBinding(binding) } catch { detached.push(binding.triggerId) }
+      }
+    }
+    return Object.freeze(detached)
   }
 
   /** Read-only terminal settlement guard for an already retired dedicated source. */
@@ -270,6 +443,15 @@ export class EventSourceObservers {
     if (!this.active) throw new Error('event-triggers: observer disposed')
     if (Date.now() >= binding.owner.expiresAt) {
       this.pauseCurrent(binding.automationId, 'expired')
+      if (binding.lifetime === 'goal') {
+        const claim = this.store.goalSourceClaim(binding.triggerId)
+        if (claim !== undefined && claim.retiredAt === undefined && this.claimMatches(binding, claim)) {
+          this.store.retireGoalSource(claim)
+          this.notifyDetached(binding, 'expired', claim.goalId, claim.scope)
+        } else {
+          this.notifyDetached(binding, 'expired', claim?.goalId, claim?.scope)
+        }
+      }
       throw new Error('event-triggers: observer authorization expired')
     }
     const receipt = this.routeReceipt(binding)
@@ -321,14 +503,74 @@ export class EventSourceObservers {
     if (binding.lifetime === 'shared') return true
     const claim = this.store.goalSourceClaim(binding.triggerId)
     if (!claim) return true
-    if (claim.retiredAt !== undefined || !this.claimMatches(binding, claim)) { this.pauseCurrent(binding.automationId, 'goal-binding-changed'); return false }
+    if (claim.retiredAt !== undefined || !this.claimMatches(binding, claim)) {
+      this.pauseCurrent(binding.automationId, 'goal-binding-changed')
+      if (claim.retiredAt !== undefined) this.notifyDetached(binding, 'retired', claim.goalId, claim.scope)
+      return false
+    }
     const goal = this.goalReader()?.inspectGoalLifecycle({ scope: claim.scope, goalId: claim.goalId })
     if (!goal || !sameScope(goal.scope, claim.scope) || goal.id !== claim.goalId
       || goal.definition.version !== claim.definition.version || goal.definition.digest !== claim.definition.digest
       || goal.native.sessionId !== claim.native.sessionId || goal.native.goalId !== claim.native.goalId
       || goal.native.revision < claim.native.revision) { this.pauseCurrent(binding.automationId, 'goal-binding-changed'); return false }
-    if (goal.native.phase === 'complete') { this.store.retireGoalSource(claim); this.pauseCurrent(binding.automationId, 'goal-complete'); return false }
+    if (goal.native.phase === 'complete') {
+      this.store.retireGoalSource(claim)
+      this.pauseCurrent(binding.automationId, 'goal-complete')
+      this.notifyDetached(binding, 'completed', claim.goalId, claim.scope)
+      return false
+    }
+    if (goal.native.phase === 'cleared') {
+      this.store.retireGoalSource(claim)
+      this.pauseCurrent(binding.automationId, 'goal-cancelled')
+      this.notifyDetached(binding, 'cancelled', claim.goalId, claim.scope)
+      return false
+    }
     return true
+  }
+
+  private validScope(scope: unknown): scope is GoalSourceClaim['scope'] {
+    if (!scope || typeof scope !== 'object') return false
+    const value = scope as Partial<GoalSourceClaim['scope']>
+    return typeof value.principalId === 'string' && value.principalId.length > 0
+      && typeof value.principalRecordId === 'string' && value.principalRecordId.length > 0
+      && typeof value.principalVersion === 'number' && Number.isSafeInteger(value.principalVersion) && value.principalVersion > 0
+      && typeof value.workspace === 'string' && value.workspace.length > 0
+      && typeof value.preset === 'string' && value.preset.length > 0
+  }
+
+  private ownerMatchesScope(owner: EventObserverConfig, scope: GoalSourceClaim['scope']): boolean {
+    return owner.principalId === scope.principalId
+      && owner.principalRecordId === scope.principalRecordId
+      && owner.principalVersion === scope.principalVersion
+      && resolve(owner.workspace) === resolve(scope.workspace)
+      && owner.preset === scope.preset
+  }
+
+  private notifyDetached(
+    binding: Binding,
+    reason: GoalSourceUnsubscribeReason,
+    goalId: string | undefined,
+    scope: GoalSourceClaim['scope'] | undefined,
+  ): void {
+    const dedupeKey = `${binding.triggerId}\0${reason}\0${goalId ?? ''}`
+    if (this.detachedKeys.has(dedupeKey)) return
+    this.detachedKeys.add(dedupeKey)
+    if (this.detachedKeys.size > 4_096) {
+      const oldest = this.detachedKeys.values().next().value
+      if (oldest !== undefined) this.detachedKeys.delete(oldest)
+    }
+    const event: Readonly<GoalSourceDetachEvent> = Object.freeze({
+      triggerId: binding.triggerId,
+      automationId: binding.automationId,
+      reason,
+      ...(goalId === undefined ? {} : { goalId }),
+      ...(scope === undefined ? {} : { scope: Object.freeze({ ...scope }) }),
+      detachedAt: Date.now(),
+    })
+    try { this.onSourceDetached?.(event) } catch {}
+    for (const hook of Array.from(this.unsubscribeHooks)) {
+      try { hook(event) } catch {}
+    }
   }
 
   private goalReader(): GoalLifecycleReader | undefined {

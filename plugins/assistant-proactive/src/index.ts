@@ -20,9 +20,30 @@ import {
   DISABLED_INTAKE_EVALUATION_HEALTH, IntakeEvaluationProducer, normalizeIntakeEvaluation,
   type IntakeEvaluationConfig, type IntakeWorkItemsRegistration, type ProactiveIntakeEvaluationHealth,
 } from './intake-evaluation.js'
+import {
+  parseTerminalGoalChanged,
+  type EventTriggersUnsubscribePort,
+  type GoalLifecycleInspectPort,
+  type ProactiveGoalLifecycleReason,
+  type ProactiveGoalRetireInput,
+  type ProactiveGoalSourceLink,
+  type ProactiveGoalUnsubscribeEvent,
+  type ProactiveGoalUnsubscribeHook,
+  type ProactiveGoalUnsubscribeResult,
+  type TerminalGoalChangeSignal,
+} from './goal-lifecycle.js'
+import {
+  planProactiveIntakeRoute,
+  type ProactiveIntakeObservationInput,
+  type ProactiveIntakeRoutePlan,
+} from './intake-routing.js'
 import { PreparationRuntime } from './preparation.js'
 import { PreparationStore } from './preparation-store.js'
 import { version } from './version.js'
+
+const MAX_GOAL_UNSUBSCRIBE_HOOKS = 64
+const MAX_REMEMBERED_GOAL_UNSUBSCRIBES = 4_096
+const MAX_PENDING_GOAL_CHANGE_SIGNALS = 256
 
 export const name = 'dsh-enhanced-assistant-proactive'
 export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProfile, proactiveAttentionCohort }
@@ -38,6 +59,8 @@ export type {
   ProactiveIntakeEvaluationReadiness,
 } from './intake-evaluation.js'
 export type { AttentionOverlay }
+export * from './goal-lifecycle.js'
+export * from './intake-routing.js'
 export type * from './types.js'
 /** `attention` is ignored by Delivery releases before the WP19 audit; it never changes how the notice is sent. */
 interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number; attention: { purpose: 'result' } }): unknown }
@@ -109,6 +132,10 @@ export class AssistantProactiveService extends Service {
   readonly #profiles = new Map<string, OpportunityProfile>()
   /** Present only when intakeEvaluation is explicitly enabled; otherwise the plugin is byte-identical to before. */
   readonly #intakeEvaluation: IntakeEvaluationProducer | undefined
+  readonly #goalUnsubscribeHooks = new Set<ProactiveGoalUnsubscribeHook>()
+  readonly #emittedGoalUnsubscribes = new Set<string>()
+  readonly #pendingGoalChanges = new Map<string, TerminalGoalChangeSignal>()
+  #goalChangeMicrotaskQueued = false
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantProactive')
@@ -121,7 +148,19 @@ export class AssistantProactiveService extends Service {
       this.#profiles.set(profile.id, profile)
     }
     this.#engine = new OpportunityEngine(config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite'), [...this.#profiles.values()])
-    ctx.effect(() => () => { this.#active = false; this.#engine.close() }, 'assistant-proactive.store')
+    const unsubGoalChanged = (ctx as unknown as {
+      on?: (event: string, listener: (payload?: unknown) => void) => (() => void) | undefined
+    }).on?.('goal/changed', payload => { this.#onGoalChanged(payload) })
+    ctx.effect(() => () => {
+      this.#active = false
+      if (typeof unsubGoalChanged === 'function') {
+        try { unsubGoalChanged() } catch {}
+      }
+      this.#pendingGoalChanges.clear()
+      this.#goalUnsubscribeHooks.clear()
+      this.#emittedGoalUnsubscribes.clear()
+      this.#engine.close()
+    }, 'assistant-proactive.store')
     const preparationPath = config.databasePath === ':memory:' ? ':memory:' : `${config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite')}.preparations`
     const hasPrepareProfiles = [...this.#profiles.values()].some(profile => profile.mode === 'prepare' && profile.preparation !== undefined)
     this.#preparations = new PreparationRuntime(ctx, new PreparationStore(preparationPath), { active: hasPrepareProfiles })
@@ -250,8 +289,267 @@ export class AssistantProactiveService extends Service {
   }
   closeWait = (waitId: string, scope: OpportunityScope, reason: 'expired' | 'cancelled'): void => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
+    const links = this.#engine.sourcesForWait(waitId, scope)
     this.#engine.closeWait(waitId, scope, reason)
     this.#preparations.store.cancelWait(waitId, scope)
+    this.#cleanupClosedWaitLinks(links, scope, reason)
+  }
+  /** Host-only hook notified when a linked proactive goal finishes, cancels, expires, or retires. */
+  registerGoalUnsubscribeHook = (hook: ProactiveGoalUnsubscribeHook): (() => void) => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    if (typeof hook !== 'function') throw new Error('assistant-proactive: invalid goal unsubscribe hook')
+    if (!this.#goalUnsubscribeHooks.has(hook) && this.#goalUnsubscribeHooks.size >= MAX_GOAL_UNSUBSCRIBE_HOOKS) {
+      throw new Error('assistant-proactive: goal unsubscribe hook limit reached')
+    }
+    this.#goalUnsubscribeHooks.add(hook)
+    return () => { this.#goalUnsubscribeHooks.delete(hook) }
+  }
+  /** Host-only bounded cleanup that retires proactive goal opportunities and unsubscribes linked EventTriggers sources. */
+  retireGoalSources = (input: ProactiveGoalRetireInput): readonly Readonly<ProactiveGoalUnsubscribeResult>[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    if (!input || typeof input !== 'object'
+      || (input.waitId !== undefined && (typeof input.waitId !== 'string' || input.waitId.trim().length === 0))
+      || (input.sourceId !== undefined && (typeof input.sourceId !== 'string' || input.sourceId.trim().length === 0))) {
+      throw new Error('assistant-proactive: invalid goal retire input')
+    }
+    const rawLinks = input.waitId !== undefined
+      ? this.#engine.sourcesForWait(input.waitId, input.scope)
+      : this.#engine.sourcesForGoal(input.scope, input.goalId)
+    const links = input.sourceId === undefined
+      ? rawLinks
+      : rawLinks.filter(link => link.sourceId === input.sourceId)
+    if (input.sourceId === undefined && input.waitId === undefined) {
+      this.#engine.closeGoal(input.scope, input.goalId, input.reason)
+      this.#preparations.store.cancelGoal(input.goalId, input.scope, `goal-${input.reason}`)
+    } else if (input.waitId !== undefined) {
+      this.#engine.closeWait(input.waitId, input.scope, input.reason === 'expired' ? 'expired' : 'cancelled')
+      this.#preparations.store.cancelWait(input.waitId, input.scope)
+    }
+    const decidedAt = Date.now()
+    if (links.length === 0) {
+      const detached = this.#callEventTriggersUnsubscribe({
+        scope: input.scope,
+        goalId: input.goalId,
+        reason: input.reason,
+        ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      })
+      if (input.sourceId === undefined && detached.length === 0) return Object.freeze([])
+      const resolvedSourceId = input.sourceId ?? detached[0]!
+      const hooksNotified = this.#notifyUnsubscribeHooks({
+        scope: input.scope,
+        goalId: input.goalId,
+        ...(input.waitId === undefined ? {} : { waitId: input.waitId }),
+        sourceId: resolvedSourceId,
+        reason: input.reason,
+        decidedAt,
+      })
+      return Object.freeze([Object.freeze({
+        scope: input.scope,
+        goalId: input.goalId,
+        sourceId: resolvedSourceId,
+        reason: input.reason,
+        detachedTriggers: detached,
+        hooksNotified,
+      })])
+    }
+    return Object.freeze(links.map(link => this.#retireLink(link, input.reason, decidedAt)))
+  }
+  /** Host-only deterministic WP20/WP12 intake routing helper (no model calls, no ledger writes). */
+  routeIntakeObservation = (
+    input: ProactiveIntakeObservationInput,
+    options: Readonly<{ sourcePolicy?: { readonly unaddressedGroupMessages?: boolean; readonly unsubscribedEvents?: boolean } }> = {},
+  ): Readonly<ProactiveIntakeRoutePlan> => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return planProactiveIntakeRoute(input, {
+      evaluationHealth: this.intakeEvaluationHealth(),
+      ...(options.sourcePolicy === undefined ? {} : { sourcePolicy: options.sourcePolicy }),
+    })
+  }
+  #onGoalChanged(payload: unknown): void {
+    if (!this.#active) return
+    const signal = parseTerminalGoalChanged(payload)
+    if (!signal || !signal.nativeGoalId) return
+    const key = `${signal.sessionId ?? ''}\0${signal.nativeGoalId}\0${signal.reason}`
+    if (this.#pendingGoalChanges.size < MAX_PENDING_GOAL_CHANGE_SIGNALS) {
+      this.#pendingGoalChanges.set(key, signal)
+    }
+    if (this.#goalChangeMicrotaskQueued) return
+    this.#goalChangeMicrotaskQueued = true
+    queueMicrotask(() => {
+      this.#goalChangeMicrotaskQueued = false
+      if (!this.#active) {
+        this.#pendingGoalChanges.clear()
+        return
+      }
+      const batch = Array.from(this.#pendingGoalChanges.values())
+      this.#pendingGoalChanges.clear()
+      for (const item of batch) this.#reconcileTerminalGoalSignal(item)
+    })
+  }
+  #reconcileTerminalGoalSignal(signal: TerminalGoalChangeSignal): void {
+    if (!this.#active || !signal.nativeGoalId) return
+    let decisions: readonly OpportunityDecision[]
+    try {
+      decisions = this.#engine.listByNativeGoal(signal.nativeGoalId, signal.sessionId)
+    } catch {
+      return
+    }
+    if (decisions.length === 0) return
+    const assistantGoals = this.ctx.get('assistantGoals' as never) as unknown as GoalLifecycleInspectPort | undefined
+    const seenGoals = new Map<string, { scope: OpportunityScope; goalId: string; nativeGoalId: string; sessionId: string }>()
+    for (const decision of decisions) {
+      if (signal.workspace !== undefined && decision.scope.workspace !== signal.workspace) continue
+      if (signal.preset !== undefined && decision.scope.preset !== signal.preset) continue
+      const goalKey = `${acceptanceDigest(decision.scope)}\0${decision.goalId}`
+      if (!seenGoals.has(goalKey)) {
+        seenGoals.set(goalKey, {
+          scope: decision.scope,
+          goalId: decision.goalId,
+          nativeGoalId: decision.nativeGoalId,
+          sessionId: decision.sessionId,
+        })
+      }
+    }
+    for (const entry of seenGoals.values()) {
+      let effectiveReason: ProactiveGoalLifecycleReason = signal.reason
+      if (typeof assistantGoals?.inspectGoalLifecycle === 'function') {
+        try {
+          const current = assistantGoals.inspectGoalLifecycle({ scope: entry.scope, goalId: entry.goalId })
+          if (current && current.native.goalId === entry.nativeGoalId && current.native.sessionId === entry.sessionId) {
+            if (current.native.phase === 'complete') effectiveReason = 'completed'
+            else if (current.native.phase === 'cleared' || current.native.phase === 'blocked') effectiveReason = 'cancelled'
+            else continue
+          }
+        } catch {
+          // Proceed with the event-borne terminal signal when inspect is unavailable.
+        }
+      }
+      try {
+        this.retireGoalSources({ scope: entry.scope, goalId: entry.goalId, reason: effectiveReason })
+      } catch {
+        // Bounded best-effort reconciliation must not crash the microtask turn.
+      }
+    }
+  }
+  #cleanupClosedWaitLinks(
+    links: readonly ProactiveGoalSourceLink[],
+    scope: OpportunityScope,
+    waitReason: 'expired' | 'cancelled',
+  ): void {
+    if (links.length === 0) return
+    const assistantGoals = this.ctx.get('assistantGoals' as never) as unknown as GoalLifecycleInspectPort | undefined
+    const reasonByGoal = new Map<string, ProactiveGoalLifecycleReason | undefined>()
+    const decidedAt = Date.now()
+    for (const link of links) {
+      let effectiveReason = reasonByGoal.get(link.goalId)
+      if (!reasonByGoal.has(link.goalId)) {
+        effectiveReason = waitReason
+        if (typeof assistantGoals?.inspectGoalLifecycle === 'function') {
+          try {
+            const goal = assistantGoals.inspectGoalLifecycle({ scope, goalId: link.goalId })
+            if (goal?.native.phase === 'complete') {
+              effectiveReason = 'completed'
+            } else if (goal?.native.phase === 'cleared' || goal?.native.phase === 'blocked') {
+              effectiveReason = 'cancelled'
+            } else if (goal?.native.phase === 'paused' || goal?.native.phase === 'active') {
+              effectiveReason = waitReason === 'expired' ? 'expired' : undefined
+            }
+          } catch {
+            effectiveReason = waitReason
+          }
+        }
+        reasonByGoal.set(link.goalId, effectiveReason)
+      }
+      if (effectiveReason === undefined) continue
+      if (effectiveReason !== waitReason || waitReason === 'expired') {
+        try {
+          this.#preparations.store.cancelGoal(link.goalId, scope, `goal-${effectiveReason}`)
+        } catch {
+          // Non-fatal if wait cancellation already updated matching preparations.
+        }
+      }
+      this.#retireLink(link, effectiveReason, decidedAt)
+    }
+  }
+  #retireLink(
+    link: Readonly<ProactiveGoalSourceLink>,
+    reason: ProactiveGoalLifecycleReason,
+    decidedAt: number,
+  ): ProactiveGoalUnsubscribeResult {
+    const detachedTriggers = this.#callEventTriggersUnsubscribe({
+      scope: link.scope,
+      goalId: link.goalId,
+      reason,
+      sourceId: link.sourceId,
+      ...(link.sourceDigest === undefined ? {} : { sourceDigest: link.sourceDigest }),
+      ...(link.definitionDigest === undefined ? {} : { definitionDigest: link.definitionDigest }),
+    })
+    const hooksNotified = this.#notifyUnsubscribeHooks({ ...link, reason, decidedAt })
+    return Object.freeze({
+      scope: link.scope,
+      goalId: link.goalId,
+      sourceId: link.sourceId,
+      reason,
+      detachedTriggers,
+      hooksNotified,
+    })
+  }
+  #callEventTriggersUnsubscribe(input: {
+    scope: OpportunityScope
+    goalId: string
+    reason: ProactiveGoalLifecycleReason
+    sourceId?: string
+    sourceDigest?: string
+    definitionDigest?: string
+  }): readonly string[] {
+    const eventTriggers = this.ctx.get('eventTriggers' as never) as unknown as EventTriggersUnsubscribePort | undefined
+    if (typeof eventTriggers?.unsubscribeGoalSources !== 'function') return Object.freeze([])
+    try {
+      const detached = eventTriggers.unsubscribeGoalSources(input)
+      const unique: string[] = []
+      const seen = new Set<string>()
+      for (const triggerId of detached) {
+        if (typeof triggerId === 'string' && triggerId.length > 0 && !seen.has(triggerId) && unique.length < 64) {
+          seen.add(triggerId)
+          unique.push(triggerId)
+        }
+      }
+      return Object.freeze(unique)
+    } catch {
+      return Object.freeze([])
+    }
+  }
+  #notifyUnsubscribeHooks(event: Readonly<ProactiveGoalUnsubscribeEvent>): number {
+    const dedupeKey = [
+      acceptanceDigest(event.scope),
+      event.goalId,
+      event.waitId ?? '',
+      event.sourceId,
+      event.sourceDigest ?? '',
+      event.definitionDigest ?? '',
+      event.reason,
+    ].join('\0')
+    if (this.#emittedGoalUnsubscribes.has(dedupeKey)) return 0
+    this.#rememberGoalUnsubscribe(dedupeKey)
+    const frozen = Object.freeze({ ...event })
+    let notified = 0
+    for (const hook of Array.from(this.#goalUnsubscribeHooks)) {
+      try {
+        hook(frozen)
+        notified += 1
+      } catch {
+        // Hook errors must never prevent subsequent cleanup listeners.
+      }
+    }
+    return notified
+  }
+  #rememberGoalUnsubscribe(key: string): void {
+    if (this.#emittedGoalUnsubscribes.has(key)) return
+    if (this.#emittedGoalUnsubscribes.size >= MAX_REMEMBERED_GOAL_UNSUBSCRIBES) {
+      const oldest = this.#emittedGoalUnsubscribes.values().next().value
+      if (oldest !== undefined) this.#emittedGoalUnsubscribes.delete(oldest)
+    }
+    this.#emittedGoalUnsubscribes.add(key)
   }
   #scope(agent: Agent | undefined, feedback: boolean, consume = true): OpportunityScope {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
