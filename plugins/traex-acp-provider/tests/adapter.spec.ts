@@ -200,7 +200,7 @@ describe('TraeX ACP LLM adapter', () => {
       for (const invalid of invalidCases) {
         const verifyAuth = vi.fn(async () => {})
         const runText = vi.fn(() => (async function* () { yield 'never' })())
-        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace } as never), {
+        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace, cwdMode: 'exact' } as never), {
           verifyAuth,
           runText,
           liveSessions: { get: invalid.get } as never,
@@ -232,7 +232,7 @@ describe('TraeX ACP LLM adapter', () => {
           observedAt: 1,
         }))
         const runText = vi.fn(() => (async function* () { yield 'never' })())
-        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace } as never), {
+        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace, cwdMode: 'exact' } as never), {
           verifyAuth,
           discoverModels,
           runText,
@@ -266,6 +266,139 @@ describe('TraeX ACP LLM adapter', () => {
       }
     },
   )
+
+  it('binds default cwdMode session to another live session workspace while rejecting invalid or missing session cwds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-session-cwd-mode-'))
+    try {
+      const missingConfigured = join(root, 'assistant-workspace')
+      const other = join(root, 'other-repo')
+      const alias = join(root, 'other-alias')
+      await mkdir(other)
+      await symlink(other, alias)
+
+      const capturedAuthCwds: string[] = []
+      const capturedRunCwds: string[] = []
+      const verifyAuth = vi.fn(async (input: { cwd: string }) => {
+        capturedAuthCwds.push(input.cwd)
+      })
+      const runText = vi.fn((invocation: TraexAcpInvocation, options?: RunTraexAcpOptions) => {
+        capturedRunCwds.push(invocation.cwd)
+        return (async function* () {
+          yield 'ok-from-session-cwd'
+          options?.onStopReason?.('end_turn')
+        })()
+      })
+      const adapter = new RawTraexAcpAdapter(Config({ cwd: missingConfigured } as never), {
+        verifyAuth,
+        runText,
+        liveSessions: {
+          get(sessionId) {
+            if (sessionId === TEST_SESSION_ID) return { id: TEST_SESSION_ID, header: { cwd: alias } }
+            if (sessionId === 'session-missing-dir') {
+              return { id: 'session-missing-dir' as never, header: { cwd: join(root, 'absent-dir') } }
+            }
+            if (sessionId === 'session-forged') return { id: 'session-different' as never, header: { cwd: other } }
+            return undefined
+          },
+        },
+      })
+
+      const chunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(loopOwnedRequest(request()))) chunks.push(chunk)
+      expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      expect(capturedAuthCwds).toEqual([realpathSync.native(other)])
+      expect(capturedRunCwds).toEqual([realpathSync.native(other)])
+
+      const badCases = [
+        deepFreeze({ ...request(), sessionId: TEST_SESSION_ID }),
+        markAgentLoopRequest(deepFreeze({ ...request(), sessionId: 'session-stale' as never })),
+        markAgentLoopRequest(deepFreeze({ ...request(), sessionId: 'session-forged' as never })),
+        markAgentLoopRequest(deepFreeze({ ...request(), sessionId: 'session-missing-dir' as never })),
+      ]
+      for (const bad of badCases) {
+        await expect(adapter.stream(bad)[Symbol.asyncIterator]().next())
+          .rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to tmpdir during probeReadiness and listModels when configured cwd does not exist', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-discovery-cwd-'))
+    try {
+      const missingConfigured = join(root, 'absent-assistant-workspace')
+      const authCwds: string[] = []
+      const discoveryCwds: string[] = []
+      const verifyAuth = vi.fn(async (input: { cwd: string }) => { authCwds.push(input.cwd) })
+      const discoverModels = vi.fn(async (invocation: { cwd: string }) => {
+        discoveryCwds.push(invocation.cwd)
+        return {
+          currentValue: 'default',
+          modelValues: ['default'],
+          models: [{ id: 'default', name: 'TraeX default' }],
+          completeReasoning: true,
+          observedAt: 1,
+        }
+      })
+
+      const config = Config({ cwd: missingConfigured, enabled: true, agyEnabled: true } as never)
+      const adapter = new RawTraexAcpAdapter(config, { verifyAuth, discoverModels })
+      await expect(adapter.probeReadiness()).resolves.toMatchObject({ currentValue: 'default' })
+      await expect(adapter.listModels(AGY_PROVIDER_ROUTE)).resolves.toMatchObject([{ id: 'default' }])
+      expect(authCwds).toEqual([tmpdir(), tmpdir()])
+      expect(discoveryCwds).toEqual([tmpdir(), tmpdir()])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts an attested compaction turn on cwdMode session and emits normal text without tool calls', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-compaction-cwd-'))
+    try {
+      const project = join(root, 'project')
+      await mkdir(project)
+      const verifyAuth = vi.fn(async () => {})
+      let capturedInvocation: TraexAcpInvocation | undefined
+      const adapter = new RawTraexAcpAdapter(Config({ cwd: join(root, 'absent-workspace') } as never), {
+        verifyAuth,
+        liveSessions: {
+          get: sessionId => sessionId === TEST_SESSION_ID ? { id: TEST_SESSION_ID, header: { cwd: project } } : undefined,
+        },
+        requestAttestor: {
+          claim: () => false,
+          claimCompaction: () => true,
+        },
+        runText: (invocation, options) => {
+          capturedInvocation = invocation
+          return (async function* () {
+            yield 'checkpoint summary'
+            options?.onStopReason?.('end_turn')
+          })()
+        },
+      })
+
+      const compaction = deepFreeze({
+        ...request(),
+        sessionId: TEST_SESSION_ID,
+        purpose: 'compaction' as never,
+        tools: [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }],
+      } as GenerateOptions)
+
+      const chunks: StreamChunk[] = []
+      for await (const chunk of adapter.stream(compaction)) chunks.push(chunk)
+      expect(capturedInvocation?.cwd).toBe(realpathSync.native(project))
+      expect(capturedInvocation?.prompt).toContain('Produce only the requested compaction checkpoint')
+      expect(chunks).toEqual([
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text: 'checkpoint summary' },
+        { type: 'block-end', index: 0, block: { type: 'text', text: 'checkpoint summary' } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 
   it('passes the canonical live-session cwd to both auth and the ACP runner', async () => {
     const root = await mkdtemp(join(tmpdir(), 'traex-adapter-cwd-'))

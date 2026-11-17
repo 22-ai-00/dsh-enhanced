@@ -14,7 +14,7 @@ import {
   type TraexReadinessProbeOptions,
 } from './adapter.js'
 import { buildAgyArgs, SAFE_TRAEX_ARGS, type AcpBackend } from './acp-client.js'
-import { Config, normalizeConfig, type AgySessionMode, type TraexAcpProviderConfig } from './config.js'
+import { Config, normalizeConfig, type AcpCwdMode, type AgySessionMode, type TraexAcpProviderConfig } from './config.js'
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
@@ -37,7 +37,7 @@ export {
 export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'
-export type { AcpBackend, AcpProviderRoute, AcpReadinessProbeOptions, AgySessionMode, TraexReadinessProbeOptions, TraexAcpProviderConfig }
+export type { AcpBackend, AcpCwdMode, AcpProviderRoute, AcpReadinessProbeOptions, AgySessionMode, TraexReadinessProbeOptions, TraexAcpProviderConfig }
 
 function registerConfigurableRoutes(ctx: Context, llm: LlmRuntime): (() => void) | undefined {
   const register = (llm as { registerConfigurableProviders?: (entries: readonly LlmConfigurableProvider[]) => () => void })

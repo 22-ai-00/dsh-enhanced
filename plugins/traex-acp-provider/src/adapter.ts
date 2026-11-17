@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   ToolCallId,
@@ -327,6 +329,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       request,
       configuredCwd: this.cwd,
       sessions: this.liveSessions,
+      cwdMode: this.config.cwdMode,
       ...(this.requestAttestor === undefined ? {} : { attestor: this.requestAttestor }),
     })
   }
@@ -479,11 +482,12 @@ export class TraexAcpAdapter extends LlmAdapter {
     if (cached?.completeReasoning === true) return cached
     const command = spec.command(this.config)
     const verifyAuth = this.authVerifierFor(spec)
+    const discoveryCwd = existsSync(this.cwd) ? this.cwd : tmpdir()
     try {
       if (verifyAuth !== undefined) {
         await waitForAbort(verifyAuth({
           command,
-          cwd: this.cwd,
+          cwd: discoveryCwd,
           timeoutMs: this.config.authProbeTimeoutMs,
           maxOutputBytes: this.config.maxAuthProbeBytes,
           extraEnvNames: this.config.extraEnvNames,
@@ -495,7 +499,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         ...(spec.backend === 'traex' ? {} : { backend: spec.backend }),
         command,
         args: spec.args(this.config),
-        cwd: this.cwd,
+        cwd: discoveryCwd,
       }
       const catalog = await waitForAbort(this.discoverModels(catalogInvocation, {
         timeoutMs: discoveryTimeoutMs,
@@ -684,7 +688,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       // reports it via onSettled; if it never reports (early return mid-stream) we say unknown.
       phase = 'stream'
       let text = ''
-      const bufferForToolDelegation = (options.tools?.length ?? 0) > 0
+      const bufferForToolDelegation = options.purpose !== 'compaction' && (options.tools?.length ?? 0) > 0
       const textDeltas: string[] = []
       if (!bufferForToolDelegation) yield { type: 'block-start', index: 0, blockType: 'text' }
       try {

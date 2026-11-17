@@ -1,14 +1,17 @@
 import Schema from '@deepseek-ai/schemastery'
 
 export type AgySessionMode = 'default' | 'plan'
+export type AcpCwdMode = 'session' | 'exact'
 
 export interface TraexAcpProviderConfig {
   /** Register the experimental TraeX route (`traex-agent`) after the local runtime is prepared. */
   enabled: boolean
   /** TraeX executable name or absolute path. No shell parsing is performed. */
   command: string
-  /** Working directory exposed to the local ACP session. */
+  /** Fallback/pinned working directory exposed to the local ACP session. */
   cwd: string
+  /** Whether a stream runs in each live DSH session workspace (`session`) or pins strictly to `cwd` (`exact`). */
+  cwdMode: AcpCwdMode
   /**
    * Additional advisory TraeX model ids shown beside the live ACP catalog. `default` uses
    * TraeX's active model. Execution always validates model and reasoning selections against the fresh session.
@@ -76,6 +79,7 @@ const schema = Schema.object({
   enabled: Schema.boolean().default(false).volatile(),
   command: command.default('traex').volatile(),
   cwd: Schema.string().min(1).default('.'),
+  cwdMode: Schema.union(['session', 'exact'] as const).default('session').volatile(),
   models: Schema.array(modelId).min(1).default(['default']),
   agyEnabled: Schema.boolean().default(false).volatile(),
   agyCommand: command.default('agy').volatile(),

@@ -157,4 +157,101 @@ describe('TraeX live session cwd binding', () => {
       sessions: sessions({ 'session-live': { id: 'session-live', cwd: escape } }),
     })).toThrow(/cwd/i)
   })
+
+  it('binds cwdMode session to the live canonical session cwd even when configuredCwd differs or is absent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    const project = join(root, 'project')
+    const projectAlias = join(root, 'project-alias')
+    const absentConfigured = join(root, 'assistant-workspace')
+    await mkdir(project)
+    await symlink(project, projectAlias)
+
+    expect(resolveTrustedSessionCwd({
+      request: loopRequest('session-live'),
+      configuredCwd: absentConfigured,
+      cwdMode: 'session',
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: projectAlias } }),
+    })).toBe(realpathSync.native(project))
+
+    await expect(() => resolveTrustedSessionCwd({
+      request: loopRequest('session-live'),
+      configuredCwd: absentConfigured,
+      cwdMode: 'session',
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: join(root, 'missing-session-cwd') } }),
+    })).toThrow(/cwd/i)
+  })
+
+  it('accepts compaction only through the explicit claim that seals its envelope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    const live = { id: 'session-live', cwd: root }
+    const compaction = deepFreeze({
+      ...request('session-live'),
+      purpose: 'compaction' as never,
+    } as GenerateOptions)
+
+    expect(resolveTrustedSessionCwd({
+      request: compaction,
+      configuredCwd: join(root, 'absent-workspace'),
+      cwdMode: 'session',
+      sessions: sessions({ 'session-live': live }),
+      attestor: {
+        claim: () => false,
+        claimCompaction(observed, session) {
+          expect(observed).toBe(compaction)
+          expect(session).toMatchObject({ id: live.id, header: { cwd: live.cwd } })
+          return true
+        },
+      },
+    })).toBe(realpathSync.native(root))
+
+    await expect(() => resolveTrustedSessionCwd({
+      request: compaction,
+      configuredCwd: root,
+      cwdMode: 'session',
+      sessions: sessions({ 'session-live': live }),
+      attestor: { claim: () => true },
+    })).toThrow(/live loop session/i)
+
+    const unfrozenCompaction = {
+      ...request('session-live'),
+      purpose: 'compaction' as never,
+    } as GenerateOptions
+    await expect(() => resolveTrustedSessionCwd({
+      request: unfrozenCompaction,
+      configuredCwd: root,
+      cwdMode: 'session',
+      sessions: sessions({ 'session-live': live }),
+      attestor: { claim: () => false, claimCompaction: () => true },
+    })).toThrow(/live loop session/i)
+  })
+
+  it('rejects getter accessors and malformed sessionId fields on request envelopes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    const getterPurpose = markAgentLoopRequest(Object.freeze(Object.defineProperty(
+      { ...request('session-live') },
+      'purpose',
+      { enumerable: true, get: () => undefined },
+    ) as unknown as GenerateOptions))
+    await expect(() => resolveTrustedSessionCwd({
+      request: getterPurpose,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+    })).toThrow(/live loop session/i)
+
+    await expect(() => resolveTrustedSessionCwd({
+      request: loopRequest(''),
+      configuredCwd: root,
+      sessions: sessions({ '': { id: '', cwd: root } }),
+    })).toThrow(/live loop session/i)
+
+    const tooLong = 's'.repeat(513)
+    await expect(() => resolveTrustedSessionCwd({
+      request: loopRequest(tooLong),
+      configuredCwd: root,
+      sessions: sessions({ [tooLong]: { id: tooLong, cwd: root } }),
+    })).toThrow(/live loop session/i)
+  })
 })

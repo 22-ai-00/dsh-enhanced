@@ -264,4 +264,22 @@ describe('DSH request serialization', () => {
     expect(prompt).toContain('do not invoke Antigravity-native tools')
     expect(prompt).not.toContain('TraeX-native tools')
   })
+
+  it('keeps schemas but forbids tool delegation during an attested compaction request', () => {
+    const options = request()
+    options.purpose = 'compaction' as never
+    options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const prompt = buildPrompt(options, 100_000, 'Antigravity')
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      instruction: string
+      constraints: { purpose: string; tools: { available: unknown[] } }
+    }
+    expect(payload.instruction).toContain('Produce only the requested compaction checkpoint')
+    expect(payload.instruction).toContain('Do not request or invoke any tool')
+    expect(payload.instruction).toContain('do not emit a DSH tool-call JSON envelope')
+    expect(payload.constraints).toMatchObject({
+      purpose: 'compaction',
+      tools: { available: [{ name: 'read' }] },
+    })
+  })
 })

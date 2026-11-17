@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
+import type { AcpCwdMode } from './config.js'
 
 export interface LiveSessionCwd {
   readonly id: NonNullable<GenerateOptions['sessionId']>
@@ -27,6 +28,13 @@ function canonicalDirectory(path: string): string {
   }
 }
 
+function ownEnumerableDataField(value: object, key: string): PropertyDescriptor | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  if (descriptor === undefined) return undefined
+  if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) throw new TrustedSessionCwdError()
+  return descriptor
+}
+
 /**
  * Resolves the only cwd a local ACP process may receive for this request.
  * A same-module marker or the Host-owned exact live-agent proof is mandatory;
@@ -37,19 +45,29 @@ export function resolveTrustedSessionCwd(input: {
   configuredCwd: string
   sessions: LiveSessionLookup | undefined
   attestor?: AgentLoopRequestAttestor
+  cwdMode?: AcpCwdMode
 }): string {
-  const sessionId = input.request.sessionId
-  if (sessionId === undefined || Object.hasOwn(input.request, 'purpose') || !Object.isFrozen(input.request)) {
+  const sessionId = ownEnumerableDataField(input.request, 'sessionId')?.value as GenerateOptions['sessionId']
+  if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 512) {
     throw new TrustedSessionCwdError()
   }
   const session = input.sessions?.get(sessionId)
   if (session === undefined || session.id !== sessionId || typeof session.header.cwd !== 'string') {
     throw new TrustedSessionCwdError()
   }
-  const loopOwned = isAgentLoopRequest(input.request) || input.attestor?.claim(input.request, session) === true
+  const purpose = ownEnumerableDataField(input.request, 'purpose')
+  const hasPurpose = purpose !== undefined
+  const loopOwned = hasPurpose
+    ? purpose.value === 'compaction'
+      && input.attestor?.claimCompaction?.(input.request, session) === true
+      && Object.isFrozen(input.request)
+    : Object.isFrozen(input.request)
+      && (isAgentLoopRequest(input.request) || input.attestor?.claim(input.request, session) === true)
   if (!loopOwned) throw new TrustedSessionCwdError()
-  const configuredCwd = canonicalDirectory(input.configuredCwd)
   const sessionCwd = canonicalDirectory(session.header.cwd)
-  if (configuredCwd !== sessionCwd) throw new TrustedSessionCwdError()
+  if ((input.cwdMode ?? 'exact') === 'exact') {
+    const configuredCwd = canonicalDirectory(input.configuredCwd)
+    if (configuredCwd !== sessionCwd) throw new TrustedSessionCwdError()
+  }
   return sessionCwd
 }

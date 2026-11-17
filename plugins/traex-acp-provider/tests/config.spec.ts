@@ -8,6 +8,7 @@ describe('configuration', () => {
       enabled: false,
       command: 'traex',
       cwd: '.',
+      cwdMode: 'session',
       models: ['default'],
       agyEnabled: false,
       agyCommand: 'agy',
@@ -31,6 +32,7 @@ describe('configuration', () => {
     expect(() => Config({ command: ' ' } as never)).toThrow()
     expect(() => Config({ agyCommand: ' ' } as never)).toThrow()
     expect(() => Config({ agyMode: 'bypass' } as never)).toThrow()
+    expect(() => Config({ cwdMode: 'anywhere' } as never)).toThrow()
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 
@@ -52,17 +54,20 @@ describe('live-editable provider fields', () => {
     expect(schema.dict['command']?.meta?.volatile).toBe(true)
     expect(schema.dict['agyEnabled']?.meta?.volatile).toBe(true)
     expect(schema.dict['agyCommand']?.meta?.volatile).toBe(true)
+    expect(schema.dict['cwdMode']?.meta?.volatile).toBe(true)
     expect(schema.dict['cwd']?.meta?.volatile).toBeFalsy()
     expect(schema.dict['agyMode']?.meta?.volatile).toBeFalsy()
     expect(schema.dict['agyIncludeDefaultCustomizations']?.meta?.volatile).toBeFalsy()
     expect(normalizeConfig({
       enabled: true,
       command: 'traex-next',
+      cwdMode: 'exact',
       agyEnabled: true,
       agyCommand: '/usr/local/bin/agy',
     } as never)).toMatchObject({
       enabled: true,
       command: 'traex-next',
+      cwdMode: 'exact',
       agyEnabled: true,
       agyCommand: '/usr/local/bin/agy',
     })
@@ -73,12 +78,14 @@ describe('live-editable provider fields', () => {
     const config = Config({
       enabled: volatile(false),
       command: volatile('traex'),
+      cwdMode: volatile('exact'),
       agyEnabled: volatile(true),
       agyCommand: volatile('/opt/agy/bin/agy'),
     } as never)
     expect(config).toMatchObject({
       enabled: false,
       command: 'traex',
+      cwdMode: 'exact',
       agyEnabled: true,
       agyCommand: '/opt/agy/bin/agy',
     })
