@@ -584,6 +584,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 - 结果写入 schema 12 的 `work_item_intake_admission`（STRICT，触发器禁止改写/删除），每个评估键一行；`intakeAdmissions(source, eventId)` 读取。Host-only 只读 `inspectIntakeProvenance(itemId)` 反查准入某工作项的 intake 判断（`work-items/intake-provenance/v1`：source/eventId、rule、policy 版本、mode、level、`wouldAccept`、准入时间，不含正文），并带该项 owner scope，供 Evaluation 的 intake 与注意力结果吻合度使用；`admitted` 与崩溃恢复的 `replayed` 都算 intake 准入；项不存在或非 intake 准入时返回 `undefined`，intake ledger 关闭时抛 `disabled`（不把"无法判断"当成"非 intake"）；schema 13 起由部分索引 `work_item_intake_admission_item_idx`（`item_id IS NOT NULL`）按 item_id 查找，不再全表扫描。
 - 升级：schema 11 自动升级到 12（仅新增表、索引与触发器）；更新的 schema 或结构漂移 fail closed。
 - 升级：schema 12 自动升级到 13（仅新增准入表的 item_id 部分索引，不改写行）；12 及以下已存在同名索引、13 时索引缺失或定义不符均 fail closed。
+- 只读评估反馈 feed（WP22）：Host 可调用只读 `listIntakeEvaluationFeed({ afterSeq?, afterRecordedAt?, afterId?, limit?, workspace?, preset?, onlyWithOutcome? })`（`work-items/intake-evaluation-feed/v1`），在不修改 schema 13 DDL 的前提下按 `(recordedAt, id)` / `seq` 严格单调分页关联 WP20 `wouldAccept` 判断、准入决定、已结算工作项 outcome/acceptanceVerdict 与主人撤回修正（仅返回元数据、摘要与状态，绝不泄露原文正文或 brief/title）。
 
 ## 配置
 

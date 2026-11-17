@@ -97,6 +97,8 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `attentionOwnerQuestionDeliveryEnabled` | `false` | WP22 切片 4/5：最新 owner 问题经 Delivery 至多投递一次，并注册回复消费者把 exact 回复应用到授权/提议；要求 `attentionLooseningEnabled` 与 `attentionOwnerQuestionOwner`。 |
 | `attentionOwnerQuestionOwner` | 无 | 问题投递使用的 owner 路由 id 与外部 principal id。 |
 | `attentionOwnerQuestionNoticeTtlMs` | 1 天 | 未投递问题的过期时间、通知有效期，也是授权回复创建的一次性授权有效期。 |
+| `intakeEvaluationAgreementEnabled` | `false` | WP22（schema 19）：在同步 tick 上按持久游标从 WorkItems `listIntakeEvaluationFeed` 增量同步 WP20 `wouldAccept` 判断、与通知/主人反馈及撤回关联记录到 canonical 状态，并向 `intake` cohort 的密封留出重放与有界放宽供数。默认关闭、零跨插件读取与写表。 |
+| `intakeEvaluationFeedBatchSize` | `100` | 每次同步从 WorkItems `listIntakeEvaluationFeed` 拉取的页大小上限（1–500）。 |
 
 ## 权限与数据边界
 
@@ -169,6 +171,12 @@ Delivery 事实可带 `route: { kind: 'linked', originBindingId }`（经 owner l
 开启闭环时，超出授权范围的问题不再写切片 3/4 的终态 `owner-question` 决定：提议保持未决（deferred），问题开放期间阻止新的放宽提议，但下一次既有同步 tick 仍会先独立重算留出成员、重放父/候选、核对父版本与授权，只有全部通过才采用并写入唯一 `adopted` 决定；因此 owner 回复本身不等于采用，仍受独立验收。`decline`、通知 TTL 到期或授权不再可用分别以 `owner-declined`、`owner-question-expired`、`owner-authorization-unusable` 关闭提议；没有新的定时器或循环，全部复用既有同步 tick。TTL 之前回复到达但下一次 tick 已过问题 TTL 时，以回复时刻创建的一次性授权仍可在其有效期内采用（到期字段独立于问题时间戳）。
 
 限制：切片 4 之前已记录的实施问题已有不可改的终态决定，开启闭环后对其 `authorize-once` 回复只返回 `applied + adoption: 'proposal-terminal'`，记录回复但不创建授权、不采用；重新请求可产生新的提议。一次性授权绑定精确的父/候选参数（而非提议 id），若该提议因留出漂移被拒，未使用的授权在到期前仍可能覆盖一个父/候选完全相同的新提议——这与 owner 批准的那次变化一致，但不等同于对任意后续提议的授权。回复正文只在 Delivery 回调期间传给本服务，不入库；发给模型的普通回复路径、发送权限、Evolution/Growth 均不受影响。
+
+## WP20 `would-accept` 吻合度同步与放宽集成（schema 19，默认关）
+
+开启 `intakeEvaluationAgreementEnabled`（默认 `false`）后，既有同步 tick 与 `reconcileIntakeEvaluationAgreement()` 仅经结构化的 `assistantWorkItems.listIntakeEvaluationFeed(...)` 只读拉取无正文元数据/摘要/结果，在 schema 19 新增的 `evaluation_intake_evaluation_sync_cursor`（单调推进游标）、`evaluation_intake_evaluation_heads`（按 `(source, sourceEventId, ruleId, policyVersion)` 记录 `true-positive` / `false-positive` / `false-negative` / `true-negative` / `pending`）与 `evaluation_intake_evaluation_revisions`（不可改审计历史）中持久关联 WP20 `wouldAccept` 与后续通知反应、verifier 回执、工作项撤回及可信主人反馈（支持 `intakeEvaluationAgreementSummary`、`listIntakeEvaluationAgreements`、`inspectIntakeEvaluationAgreement`、`intakeEvaluationFeedCursor`）。
+
+开启后，`AttentionTuningLedger` 对 `lane: 'intake'` cohort（如 `{ lane: 'intake', sourceId: 'lark-channel' }`）使用同样的 1/4 `attentionHoldoutMember(evalId)` 哈希密封留出划分与固定单步边界：`false-positive` 驱动有界收紧与观察期回归回退；`false-negative` / `true-negative` 对照样本进入密封留出重放比较净收益与额外打扰，绝不绕过单步上下界、留出划分检验或一次性 owner 预授权（无有效授权或超界时生成结构化 owner 问题，绝不自动采用）。默认关闭时与此前行为保持等价：不读 WorkItems feed，不写入 schema 19 状态。
 
 ## 限制
 

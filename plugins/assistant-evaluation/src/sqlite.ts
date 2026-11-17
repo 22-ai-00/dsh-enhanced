@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 18
+export const evaluationSchemaVersion = 19
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new' | 'schema-drift'
 
@@ -615,78 +615,193 @@ const attentionOwnerQuestionDeliveryTables = Object.freeze([
   'evaluation_attention_owner_question_replies',
 ])
 
+const intakeAttentionAgreementTables = Object.freeze(['evaluation_intake_attention_agreement'])
+
+/**
+ * WP22 (schema 19): durable WP20 `would-accept` intake evaluation agreement
+ * heads, append-only revision history, and strictly monotonic incremental
+ * sync cursor for `assistantWorkItems.listIntakeEvaluationFeed`.
+ */
+const intakeEvaluationAgreementSchema = `
+  CREATE TABLE evaluation_intake_evaluation_sync_cursor (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    after_seq INTEGER NOT NULL CHECK (after_seq >= 0),
+    after_recorded_at INTEGER NOT NULL CHECK (after_recorded_at >= 0),
+    after_id TEXT NOT NULL CHECK (length(after_id) <= 256),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+  ) STRICT;
+  CREATE TRIGGER evaluation_intake_evaluation_sync_cursor_monotonic
+    BEFORE UPDATE ON evaluation_intake_evaluation_sync_cursor
+    WHEN NEW.id IS NOT OLD.id
+      OR NEW.after_recorded_at < OLD.after_recorded_at
+      OR (NEW.after_recorded_at = OLD.after_recorded_at AND NEW.after_id < OLD.after_id)
+      OR (NEW.after_recorded_at = OLD.after_recorded_at AND NEW.after_id = OLD.after_id AND NEW.after_seq <= OLD.after_seq)
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation sync cursor must advance'); END;
+  CREATE TRIGGER evaluation_intake_evaluation_sync_cursor_no_delete
+    BEFORE DELETE ON evaluation_intake_evaluation_sync_cursor
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation sync cursor is durable'); END;
+  CREATE TABLE evaluation_intake_evaluation_heads (
+    eval_id TEXT PRIMARY KEY CHECK (length(eval_id) = 64),
+    source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 64),
+    source_event_id TEXT NOT NULL CHECK (length(source_event_id) BETWEEN 1 AND 256),
+    rule_id TEXT NOT NULL CHECK (length(rule_id) BETWEEN 1 AND 256),
+    policy_version TEXT NOT NULL CHECK (length(policy_version) BETWEEN 1 AND 256),
+    scope_key TEXT,
+    workspace TEXT,
+    preset TEXT,
+    item_id TEXT,
+    would_accept INTEGER NOT NULL CHECK (would_accept IN (0, 1)),
+    evaluation_level TEXT NOT NULL CHECK (evaluation_level IN ('ignore', 'digest', 'notify', 'accept')),
+    mode TEXT NOT NULL CHECK (mode IN ('observe', 'auto')),
+    outcome_kind TEXT NOT NULL CHECK (outcome_kind IN ('agreed', 'disagreed', 'pending')),
+    agreement_status TEXT NOT NULL CHECK (agreement_status IN (
+      'true-positive', 'false-positive', 'false-negative', 'true-negative', 'pending'
+    )),
+    outcome_source TEXT NOT NULL CHECK (outcome_source IN (
+      'none', 'work-item-outcome', 'work-item-verdict', 'notification-outcome', 'owner-feedback', 'owner-withdrawal'
+    )),
+    evaluated_at INTEGER NOT NULL CHECK (evaluated_at >= 0),
+    feed_recorded_at INTEGER NOT NULL CHECK (feed_recorded_at >= 0),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    latest_digest TEXT NOT NULL CHECK (length(latest_digest) = 64),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    UNIQUE (source, source_event_id, rule_id, policy_version)
+  ) STRICT;
+  CREATE INDEX evaluation_intake_evaluation_heads_scope_time
+    ON evaluation_intake_evaluation_heads(scope_key, evaluated_at, eval_id);
+  CREATE INDEX evaluation_intake_evaluation_heads_source_time
+    ON evaluation_intake_evaluation_heads(source, rule_id, evaluated_at, eval_id);
+  CREATE INDEX evaluation_intake_evaluation_heads_item_idx
+    ON evaluation_intake_evaluation_heads(item_id) WHERE item_id IS NOT NULL;
+  CREATE TRIGGER evaluation_intake_evaluation_heads_monotonic
+    BEFORE UPDATE ON evaluation_intake_evaluation_heads
+    WHEN NEW.eval_id IS NOT OLD.eval_id
+      OR NEW.source IS NOT OLD.source
+      OR NEW.source_event_id IS NOT OLD.source_event_id
+      OR NEW.rule_id IS NOT OLD.rule_id
+      OR NEW.policy_version IS NOT OLD.policy_version
+      OR NEW.would_accept IS NOT OLD.would_accept
+      OR NEW.evaluation_level IS NOT OLD.evaluation_level
+      OR NEW.evaluated_at IS NOT OLD.evaluated_at
+      OR NEW.version <= OLD.version
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation head revision must advance'); END;
+  CREATE TRIGGER evaluation_intake_evaluation_heads_no_delete
+    BEFORE DELETE ON evaluation_intake_evaluation_heads
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation heads are durable'); END;
+  CREATE TABLE evaluation_intake_evaluation_revisions (
+    eval_id TEXT NOT NULL REFERENCES evaluation_intake_evaluation_heads(eval_id) ON DELETE RESTRICT,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    outcome_kind TEXT NOT NULL CHECK (outcome_kind IN ('agreed', 'disagreed', 'pending')),
+    agreement_status TEXT NOT NULL CHECK (agreement_status IN (
+      'true-positive', 'false-positive', 'false-negative', 'true-negative', 'pending'
+    )),
+    outcome_source TEXT NOT NULL CHECK (outcome_source IN (
+      'none', 'work-item-outcome', 'work-item-verdict', 'notification-outcome', 'owner-feedback', 'owner-withdrawal'
+    )),
+    record_digest TEXT NOT NULL CHECK (length(record_digest) = 64),
+    record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+    recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
+    PRIMARY KEY (eval_id, version)
+  ) STRICT;
+  CREATE TRIGGER evaluation_intake_evaluation_revisions_immutable
+    BEFORE UPDATE ON evaluation_intake_evaluation_revisions
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation revisions are immutable'); END;
+  CREATE TRIGGER evaluation_intake_evaluation_revisions_no_delete
+    BEFORE DELETE ON evaluation_intake_evaluation_revisions
+    BEGIN SELECT RAISE(ABORT, 'intake evaluation revisions are durable'); END;
+`
+
+const intakeEvaluationAgreementTables = Object.freeze([
+  'evaluation_intake_evaluation_sync_cursor',
+  'evaluation_intake_evaluation_heads',
+  'evaluation_intake_evaluation_revisions',
+])
+
 interface SchemaObject { readonly type: string; readonly name: string; readonly tbl_name: string; readonly sql: string | null }
 
-function ownerQuestionSchemaObjects(database: DatabaseSync): string[] {
-  const placeholders = attentionOwnerQuestionDeliveryTables.map(() => '?').join(',')
+function schemaObjectsFor(database: DatabaseSync, tables: readonly string[]): string[] {
+  const placeholders = tables.map(() => '?').join(',')
   const rows = database.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_schema
     WHERE tbl_name IN (${placeholders}) OR name IN (${placeholders})`)
-    .all(...attentionOwnerQuestionDeliveryTables, ...attentionOwnerQuestionDeliveryTables) as unknown as SchemaObject[]
+    .all(...tables, ...tables) as unknown as SchemaObject[]
   return rows.map(row => JSON.stringify([row.type, row.name, row.tbl_name, row.sql?.replace(/\s+/g, ' ').trim() ?? null])).sort()
 }
 
-let expectedOwnerQuestionSchema: readonly string[] | undefined
-
-function expectedOwnerQuestionSchemaObjects(): readonly string[] {
-  if (expectedOwnerQuestionSchema === undefined) {
-    const reference = new DatabaseSync(':memory:')
-    try {
-      reference.exec(attentionOwnerQuestionDeliverySchema)
-      expectedOwnerQuestionSchema = Object.freeze(ownerQuestionSchemaObjects(reference))
-    } finally {
-      reference.close()
-    }
+function expectedObjectsFor(tables: readonly string[], ddl: string): readonly string[] {
+  const reference = new DatabaseSync(':memory:')
+  try {
+    reference.exec(ddl)
+    return Object.freeze(schemaObjectsFor(reference, tables))
+  } finally {
+    reference.close()
   }
-  return expectedOwnerQuestionSchema
 }
+
+function assertExpectedSchemaObjects(database: DatabaseSync, tables: readonly string[], expected: readonly string[], message: string): void {
+  const actual = schemaObjectsFor(database, tables)
+  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) {
+    throw new EvaluationDatabaseError('schema-drift', message)
+  }
+}
+
+function ownerQuestionSchemaObjects(database: DatabaseSync): string[] {
+  return schemaObjectsFor(database, attentionOwnerQuestionDeliveryTables)
+}
+
+let expectedOwnerQuestionSchema: readonly string[] | undefined
 
 /**
  * Fail closed unless the schema-17 owner-question tables, their indexes and
  * their immutability triggers are exactly the ones the migration creates.
  */
 function assertOwnerQuestionSchema(database: DatabaseSync): void {
-  const actual = ownerQuestionSchemaObjects(database)
-  const expected = expectedOwnerQuestionSchemaObjects()
-  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) {
-    throw new EvaluationDatabaseError('schema-drift', 'evaluation owner-question delivery schema does not match schema 17')
-  }
+  expectedOwnerQuestionSchema ??= expectedObjectsFor(attentionOwnerQuestionDeliveryTables, attentionOwnerQuestionDeliverySchema)
+  assertExpectedSchemaObjects(
+    database,
+    attentionOwnerQuestionDeliveryTables,
+    expectedOwnerQuestionSchema,
+    'evaluation owner-question delivery schema does not match schema 17',
+  )
 }
 
-const intakeAttentionAgreementTables = Object.freeze(['evaluation_intake_attention_agreement'])
-
 function intakeAttentionAgreementSchemaObjects(database: DatabaseSync): string[] {
-  const placeholders = intakeAttentionAgreementTables.map(() => '?').join(',')
-  const rows = database.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_schema
-    WHERE tbl_name IN (${placeholders}) OR name IN (${placeholders})`)
-    .all(...intakeAttentionAgreementTables, ...intakeAttentionAgreementTables) as unknown as SchemaObject[]
-  return rows.map(row => JSON.stringify([row.type, row.name, row.tbl_name, row.sql?.replace(/\s+/g, ' ').trim() ?? null])).sort()
+  return schemaObjectsFor(database, intakeAttentionAgreementTables)
 }
 
 let expectedIntakeAttentionAgreementSchema: readonly string[] | undefined
-
-function expectedIntakeAttentionAgreementSchemaObjects(): readonly string[] {
-  if (expectedIntakeAttentionAgreementSchema === undefined) {
-    const reference = new DatabaseSync(':memory:')
-    try {
-      reference.exec(intakeAttentionAgreementSchema)
-      expectedIntakeAttentionAgreementSchema = Object.freeze(intakeAttentionAgreementSchemaObjects(reference))
-    } finally {
-      reference.close()
-    }
-  }
-  return expectedIntakeAttentionAgreementSchema
-}
 
 /**
  * Fail closed unless the schema-18 agreement table, its index and its
  * immutability triggers are exactly the ones the migration creates.
  */
 function assertIntakeAttentionAgreementSchema(database: DatabaseSync): void {
-  const actual = intakeAttentionAgreementSchemaObjects(database)
-  const expected = expectedIntakeAttentionAgreementSchemaObjects()
-  if (actual.length !== expected.length || actual.some((entry, index) => entry !== expected[index])) {
-    throw new EvaluationDatabaseError('schema-drift', 'evaluation intake attention agreement schema does not match schema 18')
-  }
+  expectedIntakeAttentionAgreementSchema ??= expectedObjectsFor(intakeAttentionAgreementTables, intakeAttentionAgreementSchema)
+  assertExpectedSchemaObjects(
+    database,
+    intakeAttentionAgreementTables,
+    expectedIntakeAttentionAgreementSchema,
+    'evaluation intake attention agreement schema does not match schema 18',
+  )
+}
+
+function intakeEvaluationAgreementSchemaObjects(database: DatabaseSync): string[] {
+  return schemaObjectsFor(database, intakeEvaluationAgreementTables)
+}
+
+let expectedIntakeEvaluationAgreementSchema: readonly string[] | undefined
+
+/**
+ * Fail closed unless the schema-19 intake evaluation agreement tables, indexes
+ * and immutability/monotonic triggers are exactly those created by migration.
+ */
+function assertIntakeEvaluationAgreementSchema(database: DatabaseSync): void {
+  expectedIntakeEvaluationAgreementSchema ??= expectedObjectsFor(intakeEvaluationAgreementTables, intakeEvaluationAgreementSchema)
+  assertExpectedSchemaObjects(
+    database,
+    intakeEvaluationAgreementTables,
+    expectedIntakeEvaluationAgreementSchema,
+    'evaluation intake evaluation agreement schema does not match schema 19',
+  )
 }
 
 function migrate(database: DatabaseSync): void {
@@ -712,6 +827,7 @@ export function migrateEvaluationDatabase(database: DatabaseSync, target: number
   if (initial >= target) {
     if (initial >= 17) assertOwnerQuestionSchema(database)
     if (initial >= 18) assertIntakeAttentionAgreementSchema(database)
+    if (initial >= 19) assertIntakeEvaluationAgreementSchema(database)
     return
   }
 
@@ -1119,11 +1235,26 @@ export function migrateEvaluationDatabase(database: DatabaseSync, target: number
         PRAGMA user_version = 18;
       `)
     }
+    if (schemaVersion(database) === 18 && target > 18) {
+      // A test/rollback fixture can leave the exact schema-19 objects behind
+      // while rewinding only the version. Reuse them after an exact drift
+      // check; anything else at schema 18 is genuine drift and fails closed.
+      if (intakeEvaluationAgreementSchemaObjects(database).length > 0) {
+        assertIntakeEvaluationAgreementSchema(database)
+      } else {
+        database.exec(intakeEvaluationAgreementSchema)
+      }
+      database.exec(`
+        UPDATE evaluation_schema_meta SET value = '19' WHERE key = 'schema-version';
+        PRAGMA user_version = 19;
+      `)
+    }
     if (schemaVersion(database) !== target) {
       throw new Error('evaluation migration did not reach the current schema')
     }
     if (target >= 17) assertOwnerQuestionSchema(database)
     if (target >= 18) assertIntakeAttentionAgreementSchema(database)
+    if (target >= 19) assertIntakeEvaluationAgreementSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     database.exec('ROLLBACK')

@@ -6,6 +6,8 @@ import type {
   WorkItemDispatchRecord,
   WorkItemDeliveryState,
   WorkItemEventRecord,
+  WorkItemIntakeEvaluationFeedOptions,
+  WorkItemIntakeEvaluationFeedPage,
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
@@ -188,6 +190,11 @@ export class WorkItemLedger {
 
   list(states?: readonly WorkItemState[], limit?: number): readonly WorkItemRecord[] {
     return this.#store.listItems({ ...(states === undefined ? {} : { states }), ...(limit === undefined ? {} : { limit }) })
+  }
+
+  /** Read-only, cursor-paginated WP20/WP22 evaluation agreement feed (metadata/digests/outcomes only). */
+  listIntakeEvaluationFeed(options: WorkItemIntakeEvaluationFeedOptions = {}): WorkItemIntakeEvaluationFeedPage {
+    return this.#store.listIntakeEvaluationFeed(options)
   }
 
   claimedRun(itemId: string, runId: string): WorkItemClaimRecord | undefined {

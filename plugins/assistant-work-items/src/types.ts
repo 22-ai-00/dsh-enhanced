@@ -959,3 +959,93 @@ export interface WorkItemIntakeQueueStatus {
   readonly lastAdmissionError: string | null
   readonly recent: readonly WorkItemIntakeAdmissionInspection[]
 }
+
+export const WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL = 'work-items/intake-evaluation-feed/v1' as const
+
+export interface WorkItemIntakeEvaluationFeedOptions {
+  readonly afterSeq?: number
+  readonly afterRecordedAt?: number
+  readonly afterId?: string
+  readonly limit?: number
+  readonly workspace?: string
+  readonly preset?: string
+  readonly onlyWithOutcome?: boolean
+}
+
+export interface WorkItemIntakeEvaluationFeedCursor {
+  readonly afterSeq: number
+  readonly afterRecordedAt: number
+  readonly afterId: string
+}
+
+/**
+ * Bounded, read-only evaluation correlation row linking WP20 intake judgment
+ * with admitted work-item outcomes and owner withdrawals. Metadata, digests
+ * and outcome states only; message bodies and raw briefs never appear here.
+ */
+export interface WorkItemIntakeEvaluationFeedItem {
+  readonly seq: number
+  readonly id: string
+  readonly recordedAt: number
+  readonly evaluatedAt: number
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly intakeKind: 'message' | 'event'
+  readonly intakeStrength: 'explicit' | 'inferred' | 'ignore'
+  readonly contentDigest: string | null
+  readonly metadataDigest: string
+  readonly sourceDigest: string
+  readonly occurredAt: number
+  readonly mode: 'observe' | 'auto'
+  readonly status: 'decided' | 'unavailable'
+  readonly evaluationLevel: 'ignore' | 'digest' | 'notify' | 'accept'
+  readonly proposedLevel: 'ignore' | 'digest' | 'notify' | 'accept' | null
+  readonly ceiling: 'ignore' | 'digest' | 'notify' | 'accept'
+  readonly wouldAccept: boolean
+  readonly evaluationReasons: readonly string[]
+  readonly admission: Readonly<{
+    mode: 'observe' | 'auto'
+    outcome: 'would-admit' | 'admitted' | 'replayed' | 'refused'
+    reasonCode: string | null
+    decisionId: string
+    itemId: string | null
+    recordedAt: number
+  }> | null
+  readonly itemId: string | null
+  readonly scope: Readonly<{ workspace: string; preset: string }> | null
+  readonly itemState: WorkItemState | null
+  readonly itemStateReason: string | null
+  readonly itemObserved: boolean | null
+  readonly outcome: Readonly<{
+    revision: number
+    settledBy: WorkItemOutcomeSettledBy
+    executionStatus: WorkItemExecutionStatus
+    objectiveStatus: WorkItemObjectiveStatus
+    trust: WorkItemOutcomeTrust
+    evidenceState: WorkItemOutcomeEvidenceState
+    evidenceReason: WorkItemOutcomeEvidenceReason | null
+    settledAt: number
+    recordedAt: number
+    ownerWithdrawn: boolean
+  }> | null
+  readonly acceptanceVerdict: Readonly<{
+    objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'
+    receiptDigest: string
+    completedAt: number
+    recordedAt: number
+  }> | null
+  readonly ownerCorrection: Readonly<{
+    kind: 'withdrawn'
+    stateReason: string | null
+    recordedAt: number
+  }> | null
+}
+
+export interface WorkItemIntakeEvaluationFeedPage {
+  readonly protocol: typeof WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL
+  readonly items: readonly WorkItemIntakeEvaluationFeedItem[]
+  readonly hasMore: boolean
+  readonly nextCursor: WorkItemIntakeEvaluationFeedCursor | null
+}

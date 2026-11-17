@@ -570,3 +570,12 @@ export interface WorkItemIntakeEvaluationRecord {
   readonly decidedAt: number
   readonly recordedAt: number
 }
+
+/** Deterministic canonical row identity for the WP22 read-only evaluation feed. */
+export function intakeEvaluationFeedIdFor(
+  key: Pick<WorkItemIntakeEvaluationRecord, 'source' | 'sourceEventId' | 'ruleId' | 'policyVersion'>,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([key.source, key.sourceEventId, key.ruleId, key.policyVersion]), 'utf8')
+    .digest('hex')
+}

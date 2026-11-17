@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { AttentionTuningLedger } from './attention-tuning.js'
 import { AttentionOwnerQuestionLedger } from './attention-owner-questions.js'
 import { IntakeAttentionAgreementLedger } from './intake-attention-agreement-store.js'
+import { IntakeEvaluationAgreementLedger } from './intake-evaluation-agreement.js'
 import { NotificationOutcomeLedger } from './notification-outcomes.js'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
@@ -585,6 +586,8 @@ export class EvaluationStore {
   readonly attentionQuestions: AttentionOwnerQuestionLedger
   /** WP22 E1 append-only intake/attention agreement snapshots (default off). */
   readonly intakeAttentionAgreement: IntakeAttentionAgreementLedger
+  /** WP22 WP20 `would-accept` evaluation feed cursor and canonical correlation ledger. */
+  readonly intakeEvaluations: IntakeEvaluationAgreementLedger
 
   constructor(options: EvaluationStoreOptions) {
     this.#database = openEvaluationDatabase(options.path)
@@ -592,6 +595,7 @@ export class EvaluationStore {
     this.notifications = new NotificationOutcomeLedger(this.#database, this.#now)
     this.attentionQuestions = new AttentionOwnerQuestionLedger(this.#database, this.#now)
     this.intakeAttentionAgreement = new IntakeAttentionAgreementLedger(this.#database)
+    this.intakeEvaluations = new IntakeEvaluationAgreementLedger(this.#database, this.#now)
     // The tuning ledger reads replies and records them atomically with a grant
     // or a proposal decision (slice 5); all ledgers share one database handle.
     this.attention = new AttentionTuningLedger(this.#database, this.#now, this.attentionQuestions)
@@ -1693,6 +1697,7 @@ export class EvaluationStore {
       projectionAttempts: projectionRow.attempts,
       notificationOutcomes: notifications.notifications,
       notificationOutcomeRevisions: notifications.revisions,
+      intakeEvaluations: this.intakeEvaluations.count(),
       ...(projectionRow.oldest === null ? {} : { oldestPendingProjectionAt: projectionRow.oldest }),
       ...(row.latest === null ? {} : { latestOccurredAt: row.latest }),
     })

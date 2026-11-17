@@ -581,6 +581,8 @@ export interface EvaluationHealth {
   /** WP22 notification heads and their append-only revisions. */
   notificationOutcomes: number
   notificationOutcomeRevisions: number
+  /** WP22 synced WP20 `would-accept` intake evaluation heads. */
+  intakeEvaluations: number
   oldestPendingProjectionAt?: number
   latestOccurredAt?: number
 }

@@ -25,7 +25,7 @@ import type {
 import { settleOutcomes as runSettlement, type SettlementResult, type ThreadResolution } from './settlement.js'
 import { WorkItemOwnerRecall, type OwnerWorkItemExecution, type OwnerWorkItemListInput, type OwnerWorkItemRecallInput } from './owner-recall.js'
 export type { OwnerWorkItemExecution, OwnerWorkItemListInput, OwnerWorkItemRecallInput, OwnerWorkItemSummary } from './owner-recall.js'
-import { MALFORMED_ACCEPTANCE_BINDING, WorkItemStore, type WorkItemFollowUpCursor, type WorkItemLateAcceptanceCandidate } from './store.js'
+import { MALFORMED_ACCEPTANCE_BINDING, normalizeIntakeEvaluationFeedOptions, WorkItemStore, type WorkItemFollowUpCursor, type WorkItemLateAcceptanceCandidate } from './store.js'
 import { normalizeFollowUp, normalizePolicyChange, noticePolicyChange } from './policy-notice.js'
 import { parseStoredContinuationPlan } from './reply-contract.js'
 import { hasFreshAcceptanceReceipt, resolveAcceptanceBinding, settleAcceptance, workerRunTaskRef } from './acceptance-binding.js'
@@ -68,8 +68,10 @@ import type {
   WorkItemIntakeAdmissionInspection,
   WorkItemIntakeQueueStatus,
   WorkItemObservedItemInspection,
+  WorkItemIntakeEvaluationFeedOptions,
+  WorkItemIntakeEvaluationFeedPage,
 } from './types.js'
-import { TERMINAL_STATES, WorkItemError } from './types.js'
+import { TERMINAL_STATES, WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL, WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
 import { WorkItemDiagnosis, persistedDiagnosisIntervention, type DiagnosisSourcePage } from './diagnosis.js'
 import type { WorkItemDiagnosisPlan } from './diagnosis-contract.js'
@@ -1577,6 +1579,24 @@ export class AssistantWorkItemsService extends Service {
         occurredAt: entry.occurredAt,
       })
     }))
+  }
+
+  /**
+   * Read-only, cursor-paginated WP22 evaluation agreement feed linking WP20
+   * `would-accept` intake evaluations with admitted work-item outcomes and
+   * subsequent owner withdrawals. Exposes metadata/digests/outcomes only.
+   */
+  listIntakeEvaluationFeed(options: WorkItemIntakeEvaluationFeedOptions = {}): WorkItemIntakeEvaluationFeedPage {
+    normalizeIntakeEvaluationFeedOptions(options)
+    if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
+      return Object.freeze({
+        protocol: WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL,
+        items: Object.freeze([]),
+        hasMore: false,
+        nextCursor: null,
+      })
+    }
+    return this.workItemsAvailable().store.listIntakeEvaluationFeed(options)
   }
 
   intakeEvaluationHealth(): WorkItemIntakeEvaluationHealth | undefined {

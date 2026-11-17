@@ -250,6 +250,8 @@ export interface AttentionLooseningOptions {
    * can close it. Absent keeps the slice-3/4 terminal owner-question decision.
    */
   readonly ownerQuestionReplyLoop?: Readonly<{ noticeTtlMs: number }>
+  /** Opt-in: include canonical WP20 `would-accept` intake evaluation agreements in replay & loosening. */
+  readonly includeIntakeEvaluations?: boolean
 }
 
 /**
@@ -647,19 +649,60 @@ export class AttentionTuningLedger {
   }
 
   /** Current-head (id, outcome, notifiedAt) rows for one cohort, notified in [from, to), in id order. */
-  #records(scopeKey: string, cohort: AttentionCohort, fromNotifiedAt: number, toNotifiedAt: number): readonly { notification_id: string; outcome: NotificationOutcome; occurred_at: number }[] {
-    return this.#database.prepare(`SELECT h.notification_id AS notification_id, h.outcome AS outcome, h.occurred_at AS occurred_at
+  #records(
+    scopeKey: string,
+    cohort: AttentionCohort,
+    fromNotifiedAt: number,
+    toNotifiedAt: number,
+    includeIntake = false,
+  ): readonly { notification_id: string; outcome: NotificationOutcome; occurred_at: number; counterfactual: boolean }[] {
+    if (cohort.lane === 'intake' && includeIntake) {
+      const rows = this.#database.prepare(`
+        SELECT eval_id, would_accept, outcome_kind, agreement_status, evaluated_at
+        FROM evaluation_intake_evaluation_heads
+        WHERE scope_key=? AND (source=? OR (source || ':' || rule_id)=?) AND evaluated_at>=? AND evaluated_at<?
+        ORDER BY eval_id
+      `).all(scopeKey, cohort.sourceId, cohort.sourceId, fromNotifiedAt, toNotifiedAt) as Array<{
+        eval_id: string
+        would_accept: 0 | 1
+        outcome_kind: 'agreed' | 'disagreed' | 'pending'
+        agreement_status: 'true-positive' | 'false-positive' | 'false-negative' | 'true-negative' | 'pending'
+        evaluated_at: number
+      }>
+      return rows.map(row => ({
+        notification_id: row.eval_id,
+        outcome: row.outcome_kind === 'pending'
+          ? 'delivered'
+          : row.agreement_status === 'true-positive' || row.agreement_status === 'false-negative'
+            ? 'accepted'
+            : 'rejected',
+        occurred_at: row.evaluated_at,
+        counterfactual: row.would_accept === 0,
+      }))
+    }
+    const rows = this.#database.prepare(`SELECT h.notification_id AS notification_id, h.outcome AS outcome, h.occurred_at AS occurred_at
       FROM evaluation_notification_outcome_heads h
       JOIN evaluation_notification_outcome_revisions r ON r.notification_id=h.notification_id AND r.version=h.version
       WHERE h.scope_key=? AND h.occurred_at>=? AND h.occurred_at<?
         AND json_extract(r.record_json, '$.lane')=? AND json_extract(r.record_json, '$.sourceId')=?
         AND ${originRoute}
-      ORDER BY h.notification_id`).all(scopeKey, fromNotifiedAt, toNotifiedAt, cohort.lane, cohort.sourceId) as unknown as { notification_id: string; outcome: NotificationOutcome; occurred_at: number }[]
+      ORDER BY h.notification_id`).all(scopeKey, fromNotifiedAt, toNotifiedAt, cohort.lane, cohort.sourceId) as unknown as {
+      notification_id: string; outcome: NotificationOutcome; occurred_at: number
+    }[]
+    return rows.map(row => ({ ...row, counterfactual: false }))
   }
 
   /** Holdout membership for a window: ids only. Outcomes are deliberately not part of the seal. */
-  #holdout(scopeKey: string, cohort: AttentionCohort, fromNotifiedAt: number, toNotifiedAt: number): Readonly<{ ids: readonly string[]; seal: AttentionHoldoutSeal }> {
-    const ids = this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt).map(row => row.notification_id).filter(attentionHoldoutMember)
+  #holdout(
+    scopeKey: string,
+    cohort: AttentionCohort,
+    fromNotifiedAt: number,
+    toNotifiedAt: number,
+    includeIntake = false,
+  ): Readonly<{ ids: readonly string[]; seal: AttentionHoldoutSeal }> {
+    const ids = this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt, includeIntake)
+      .map(row => row.notification_id)
+      .filter(attentionHoldoutMember)
     const digest = sha256({ protocol: ATTENTION_HOLDOUT_PROTOCOL, modulus: attentionHoldoutModulus, scopeKey, cohort: { lane: cohort.lane, sourceId: cohort.sourceId },
       fromNotifiedAt, toNotifiedAt, ids })
     return deepFreeze({ ids, seal: { protocol: ATTENTION_HOLDOUT_PROTOCOL, modulus: attentionHoldoutModulus, count: ids.length, digest } })
@@ -670,11 +713,22 @@ export class AttentionTuningLedger {
    * `training` excludes the sealed holdout partition; every proposer uses it
    * once the slice-3 opt-in is on, so no proposal is fitted to holdout data.
    */
-  stats(scopeKey: string, cohort: AttentionCohort, fromNotifiedAt: number, toNotifiedAt: number, partition: 'all' | 'training' = 'all'): AttentionCohortStats {
-    if (partition === 'training') {
+  stats(
+    scopeKey: string,
+    cohort: AttentionCohort,
+    fromNotifiedAt: number,
+    toNotifiedAt: number,
+    partition: 'all' | 'training' = 'all',
+    options: Readonly<{ includeIntake?: boolean; includeCounterfactual?: boolean }> = {},
+  ): AttentionCohortStats {
+    const includeIntake = options.includeIntake ?? false
+    const includeCounterfactual = options.includeCounterfactual ?? false
+    if (partition === 'training' || (cohort.lane === 'intake' && includeIntake)) {
       const counts = new Map<NotificationOutcome, number>()
-      for (const row of this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt)) {
-        if (!attentionHoldoutMember(row.notification_id)) counts.set(row.outcome, (counts.get(row.outcome) ?? 0) + 1)
+      for (const row of this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt, includeIntake)) {
+        if (partition === 'training' && attentionHoldoutMember(row.notification_id)) continue
+        if (row.counterfactual && !includeCounterfactual) continue
+        counts.set(row.outcome, (counts.get(row.outcome) ?? 0) + 1)
       }
       return this.#summarize(fromNotifiedAt, toNotifiedAt, [...counts].map(([outcome, count]) => ({ outcome, count })))
     }
@@ -703,8 +757,17 @@ export class AttentionTuningLedger {
     })
   }
 
-  /** Scopes that have at least one notification in the cohort, plus scopes with a tuning head. */
-  scopes(cohort: AttentionCohort): readonly EvaluationScope[] {
+  /** Scopes that have at least one notification (or synced intake evaluation) in the cohort, plus scopes with a tuning head. */
+  scopes(cohort: AttentionCohort, includeIntake = false): readonly EvaluationScope[] {
+    if (cohort.lane === 'intake' && includeIntake) {
+      const rows = this.#database.prepare(`SELECT DISTINCT workspace, preset
+        FROM evaluation_intake_evaluation_heads
+        WHERE scope_key IS NOT NULL AND workspace IS NOT NULL AND preset IS NOT NULL
+          AND (source=? OR (source || ':' || rule_id)=?)
+        UNION SELECT workspace, preset FROM evaluation_attention_tuning_heads WHERE lane=? AND source_id=?
+        ORDER BY workspace, preset`).all(cohort.sourceId, cohort.sourceId, cohort.lane, cohort.sourceId) as { workspace: string; preset: string }[]
+      return Object.freeze(rows.map(row => Object.freeze({ workspace: row.workspace, preset: row.preset })))
+    }
     const rows = this.#database.prepare(`SELECT DISTINCT json_extract(r.record_json, '$.scope.workspace') AS workspace,
         json_extract(r.record_json, '$.scope.preset') AS preset
       FROM evaluation_notification_outcome_heads h
@@ -713,6 +776,18 @@ export class AttentionTuningLedger {
       UNION SELECT workspace, preset FROM evaluation_attention_tuning_heads WHERE lane=? AND source_id=?
       ORDER BY workspace, preset`).all(cohort.lane, cohort.sourceId, cohort.lane, cohort.sourceId) as { workspace: string; preset: string }[]
     return Object.freeze(rows.map(row => Object.freeze({ workspace: row.workspace, preset: row.preset })))
+  }
+
+  /** Known `intake` cohorts from synced WP20 evaluations or existing tuning/loosening state. */
+  intakeCohorts(): readonly AttentionCohort[] {
+    const rows = this.#database.prepare(`
+      SELECT source AS source_id FROM evaluation_intake_evaluation_heads WHERE scope_key IS NOT NULL
+      UNION SELECT source_id FROM evaluation_attention_tuning_heads WHERE lane='intake'
+      UNION SELECT source_id FROM evaluation_attention_loosening_proposals WHERE lane='intake'
+      UNION SELECT source_id FROM evaluation_attention_loosening_grants WHERE lane='intake'
+      ORDER BY source_id
+    `).all() as { source_id: string }[]
+    return Object.freeze(rows.map(row => Object.freeze({ lane: 'intake', sourceId: row.source_id })))
   }
 
   #scopeWatermark(scopeKey: string): number {
@@ -861,16 +936,17 @@ export class AttentionTuningLedger {
    * when idle propose and adopt a single bounded tightening step.
    */
   tick(scopeInput: EvaluationScope, cohortInput: AttentionCohort, policy: AttentionTuningPolicy,
-    options: Readonly<{ observationMs: number; evaluationWindowMs: number; loosening?: AttentionLooseningOptions }>): AttentionTuningTickAction {
+    options: Readonly<{ observationMs: number; evaluationWindowMs: number; loosening?: AttentionLooseningOptions; includeIntakeEvaluations?: boolean }>): AttentionTuningTickAction {
     const { scope, scopeKey } = canonicalEvaluationScope(scopeInput)
     const cohort = normalizeAttentionCohort(cohortInput)
+    const includeIntake = options.includeIntakeEvaluations ?? options.loosening?.includeIntakeEvaluations ?? false
     return this.#transaction(() => {
       const now = this.#now()
       const head = this.#head(scopeKey, cohort)
       if (head?.state === 'observing') {
         const observed = head.observing_version!
         const version = this.#verified(scopeKey, cohort, observed)
-        const post = this.stats(scopeKey, cohort, head.observe_from!, now + 1)
+        const post = this.stats(scopeKey, cohort, head.observe_from!, now + 1, 'all', { includeIntake })
         // An unverifiable observing version is reverted exactly like a regression.
         if (version === undefined || attentionRegressed(version.basis.stats, post, policy)) {
           const parent = (this.#database.prepare('SELECT parent_version FROM evaluation_attention_tuning_versions WHERE scope_key=? AND lane=? AND source_id=? AND version=?')
@@ -896,13 +972,13 @@ export class AttentionTuningLedger {
         // A sealed loosening proposal is judged before any new tightening so
         // its parent cannot move underneath it.
         const pending = this.#pendingProposal(scopeKey, cohort)
-        if (pending !== undefined) return this.#decideLoosening(scope, scopeKey, cohort, head, pending, policy, options.loosening, options.observationMs, now)
+        if (pending !== undefined) return this.#decideLoosening(scope, scopeKey, cohort, head, pending, policy, options.loosening, options.observationMs, now, includeIntake)
       }
       const current = this.#current(scopeKey, cohort)
       // Evidence is only counted since the last change, so an adopted or
       // rolled-back version is never re-judged on its predecessor's sample.
       const from = Math.max(0, head?.changed_at ?? 0, now - options.evaluationWindowMs)
-      const stats = this.stats(scopeKey, cohort, from, now + 1, options.loosening === undefined ? 'all' : 'training')
+      const stats = this.stats(scopeKey, cohort, from, now + 1, options.loosening === undefined ? 'all' : 'training', { includeIntake })
       const proposal = proposeAttentionTuning(current.parameters, stats, policy)
       if (proposal.kind === 'no-op') return Object.freeze({ action: 'no-op' as const, reason: proposal.reason })
       const version = this.#adopt(scope, scopeKey, cohort, head, current, proposal, stats, 'auto', options.observationMs, now)
@@ -916,16 +992,17 @@ export class AttentionTuningLedger {
    * A single in-bounds tightening step is adopted with an observation window.
    */
   request(scopeInput: EvaluationScope, cohortInput: AttentionCohort, parametersInput: unknown,
-    options: Readonly<{ enabled: boolean; observationMs: number; evaluationWindowMs: number; loosening?: AttentionLooseningOptions }>): AttentionTuningRequestResult {
+    options: Readonly<{ enabled: boolean; observationMs: number; evaluationWindowMs: number; loosening?: AttentionLooseningOptions; includeIntakeEvaluations?: boolean }>): AttentionTuningRequestResult {
     const { scope, scopeKey } = canonicalEvaluationScope(scopeInput)
     const cohort = normalizeAttentionCohort(cohortInput)
     const requested = normalizeAttentionTuningParameters(parametersInput)
+    const includeIntake = options.includeIntakeEvaluations ?? options.loosening?.includeIntakeEvaluations ?? false
     return this.#transaction(() => {
       const now = this.#now()
       const head = this.#head(scopeKey, cohort)
       const current = this.#current(scopeKey, cohort)
       if (options.loosening !== undefined && isAttentionLoosening(current.parameters, requested)) {
-        return this.#proposeLoosening(scopeKey, cohort, head, current, requested, options.enabled, options.loosening, now)
+        return this.#proposeLoosening(scopeKey, cohort, head, current, requested, options.enabled, options.loosening, now, includeIntake)
       }
       const change = singleStep(current.parameters, requested)
       const reason: AttentionTuningRequestRejection | undefined = isAttentionLoosening(current.parameters, requested) ? 'loosening-requires-holdout'
@@ -942,7 +1019,7 @@ export class AttentionTuningLedger {
         return Object.freeze({ status: 'rejected' as const, reason: code })
       }
       const stats = this.stats(scopeKey, cohort, Math.max(0, head?.changed_at ?? 0, now - options.evaluationWindowMs), now + 1,
-        options.loosening === undefined ? 'all' : 'training')
+        options.loosening === undefined ? 'all' : 'training', { includeIntake })
       const version = this.#adopt(scope, scopeKey, cohort, head, current, { change, parameters: requested }, stats,
         'request', options.observationMs, now)
       return deepFreeze({ status: 'adopted' as const, version, change })
@@ -955,7 +1032,7 @@ export class AttentionTuningLedger {
    * replays the holdout independently and checks the owner grant.
    */
   #proposeLoosening(scopeKey: string, cohort: AttentionCohort, head: HeadRow | undefined, current: AttentionTuningCurrent,
-    requested: AttentionTuningParameters, enabled: boolean, loosening: AttentionLooseningOptions, now: number): AttentionTuningRequestResult {
+    requested: AttentionTuningParameters, enabled: boolean, loosening: AttentionLooseningOptions, now: number, includeIntake = false): AttentionTuningRequestResult {
     const change = attentionLooseningChange(current.parameters, requested)
     const reason: AttentionTuningRequestRejection | undefined = !withinAttentionTuningBounds(requested) ? 'out-of-bounds'
       : change === undefined ? 'not-single-parameter'
@@ -971,7 +1048,7 @@ export class AttentionTuningLedger {
       return Object.freeze({ status: 'rejected' as const, reason: code })
     }
     const window = { fromNotifiedAt: Math.max(0, now - loosening.replayWindowMs), toNotifiedAt: now + 1 }
-    const holdout = this.#holdout(scopeKey, cohort, window.fromNotifiedAt, window.toNotifiedAt)
+    const holdout = this.#holdout(scopeKey, cohort, window.fromNotifiedAt, window.toNotifiedAt, includeIntake)
     const body: AttentionLooseningProposal = {
       protocol: ATTENTION_LOOSENING_PROTOCOL, scopeKey, cohort: { lane: cohort.lane, sourceId: cohort.sourceId },
       ordinal: (this.#database.prepare(`SELECT COUNT(*) AS count FROM evaluation_attention_loosening_proposals
@@ -979,7 +1056,13 @@ export class AttentionTuningLedger {
       parentVersion: current.version, parentDigest: current.digest, parent: { ...current.parameters }, candidate: { ...requested },
       change: { parameter: change.parameter, from: change.from, to: change.to }, steps: change.steps, window,
       holdout: holdout.seal,
-      basis: { stats: this.stats(scopeKey, cohort, window.fromNotifiedAt, window.toNotifiedAt, 'training'), scopeWatermark: this.#scopeWatermark(scopeKey) },
+      basis: {
+        stats: this.stats(scopeKey, cohort, window.fromNotifiedAt, window.toNotifiedAt, 'training', {
+          includeIntake,
+          includeCounterfactual: cohort.lane === 'intake' && includeIntake,
+        }),
+        scopeWatermark: this.#scopeWatermark(scopeKey),
+      },
       createdAt: now,
     }
     const proposalId = sha256(body)
@@ -1196,7 +1279,7 @@ export class AttentionTuningLedger {
    * is one immutable decision row plus a schema-15 tuning event.
    */
   #decideLoosening(scope: EvaluationScope, scopeKey: string, cohort: AttentionCohort, head: HeadRow | undefined, row: ProposalRow,
-    policy: AttentionTuningPolicy, loosening: AttentionLooseningOptions, observationMs: number, now: number): AttentionTuningTickAction {
+    policy: AttentionTuningPolicy, loosening: AttentionLooseningOptions, observationMs: number, now: number, includeIntake = false): AttentionTuningTickAction {
     const proposalId = row.proposal_id
     const current = this.#current(scopeKey, cohort)
     const reject = (reason: AttentionLooseningRejection, replay: AttentionReplaySummary | null): AttentionTuningTickAction => {
@@ -1211,16 +1294,19 @@ export class AttentionTuningLedger {
       || stable(current.parameters) !== stable(proposal.parent)) return reject('stale-parent', null)
     if (proposal.basis.stats.decided < policy.minSample) return reject('insufficient-basis', null)
     const { fromNotifiedAt, toNotifiedAt } = proposal.window
-    const holdout = this.#holdout(scopeKey, cohort, fromNotifiedAt, toNotifiedAt)
+    const holdout = this.#holdout(scopeKey, cohort, fromNotifiedAt, toNotifiedAt, includeIntake)
     if (holdout.seal.digest !== proposal.holdout.digest) return reject('holdout-drifted', null)
     const members = new Set(holdout.ids)
     const era = this.#eraResolver(scopeKey, cohort)
     const records: AttentionReplayRecord[] = []
-    for (const record of this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt)) {
+    for (const record of this.#records(scopeKey, cohort, fromNotifiedAt, toNotifiedAt, includeIntake)) {
       if (!members.has(record.notification_id)) continue
       const parameters = era(record.occurred_at)
       if (parameters === undefined) return reject('era-unverifiable', null)
-      records.push({ era: parameters, outcome: record.outcome })
+      const effectiveParameters = record.counterfactual && attentionTighterOrEqual(parameters, proposal.parent)
+        ? proposal.candidate
+        : parameters
+      records.push({ era: effectiveParameters, outcome: record.outcome })
     }
     const replay = replayAttentionLoosening(records, proposal.parent, proposal.candidate, policy)
     if (replay.verdict === 'fail') return reject('holdout-failed', replay)

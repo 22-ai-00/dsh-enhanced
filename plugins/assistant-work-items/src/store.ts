@@ -57,10 +57,14 @@ import type {
   WorkItemState,
   WorkItemThreadClosure,
   WorkItemThreadOutcome,
+  WorkItemIntakeEvaluationFeedItem,
+  WorkItemIntakeEvaluationFeedOptions,
+  WorkItemIntakeEvaluationFeedPage,
 } from './types.ts'
-import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, TERMINAL_STATES, WorkItemError } from './types.ts'
+import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, TERMINAL_STATES, WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL, WorkItemError } from './types.ts'
 import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
 import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
+import { intakeEvaluationFeedIdFor } from './intake-evaluation.ts'
 import type { WorkItemIntakeAdmissionRecord } from './intake-admission.ts'
 
 const SCHEMA_VERSION = 13
@@ -763,6 +767,272 @@ function eventDetail(value: unknown): Record<string, unknown> | null {
   }
 }
 
+const INTAKE_EVAL_FEED_DEFAULT_LIMIT = 50
+const INTAKE_EVAL_FEED_MAX_LIMIT = 500
+const INTAKE_EVAL_FEED_OPTION_KEYS = ['afterSeq', 'afterRecordedAt', 'afterId', 'limit', 'workspace', 'preset', 'onlyWithOutcome'] as const
+const ACCEPTANCE_VERIFIED_EVENT_KIND = 'acceptance-verified'
+
+const INTAKE_EVAL_FEED_CTE = `WITH feed_base AS (
+  SELECT
+    e.source AS source,
+    e.source_event_id AS source_event_id,
+    e.rule_id AS rule_id,
+    e.policy_version AS policy_version,
+    e.source_digest AS source_digest,
+    e.mode AS eval_mode,
+    e.status AS eval_status,
+    e.level AS eval_level,
+    e.proposed_level AS eval_proposed_level,
+    e.ceiling AS eval_ceiling,
+    e.reasons AS eval_reasons,
+    e.would_accept AS eval_would_accept,
+    e.recorded_at AS evaluated_at,
+    i.kind AS intake_kind,
+    i.strength AS intake_strength,
+    i.content_digest AS content_digest,
+    i.metadata_digest AS metadata_digest,
+    i.occurred_at AS occurred_at,
+    a.mode AS admit_mode,
+    a.outcome AS admit_outcome,
+    a.reason_code AS admit_reason_code,
+    a.decision_id AS admit_decision_id,
+    a.item_id AS admit_item_id,
+    a.recorded_at AS admit_recorded_at,
+    w.workspace AS workspace,
+    w.agent_preset AS preset,
+    w.state AS item_state,
+    w.state_reason AS item_state_reason,
+    w.observed AS item_observed,
+    o.revision AS outcome_revision,
+    o.settled_by AS outcome_settled_by,
+    o.execution_status AS outcome_execution_status,
+    o.objective_status AS outcome_objective_status,
+    o.trust AS outcome_trust,
+    o.evidence_state AS outcome_evidence_state,
+    o.evidence_reason AS outcome_evidence_reason,
+    o.settled_at AS outcome_settled_at,
+    o.recorded_at AS outcome_recorded_at,
+    av.detail AS verdict_detail,
+    av.recorded_at AS verdict_recorded_at,
+    max(
+      e.recorded_at,
+      coalesce(a.recorded_at, 0),
+      coalesce(o.recorded_at, 0),
+      coalesce(av.recorded_at, 0)
+    ) AS effective_recorded_at
+  FROM work_item_intake_evaluation e
+  JOIN work_item_intake i
+    ON i.source = e.source AND i.source_event_id = e.source_event_id
+  LEFT JOIN work_item_intake_admission a
+    ON a.source = e.source AND a.source_event_id = e.source_event_id
+    AND a.rule_id = e.rule_id AND a.policy_version = e.policy_version
+  LEFT JOIN work_item w ON w.id = a.item_id
+  LEFT JOIN work_item_outcome o
+    ON o.item_id = w.id AND o.revision = (
+      SELECT MAX(o2.revision) FROM work_item_outcome o2 WHERE o2.item_id = w.id
+    )
+  LEFT JOIN work_item_event av
+    ON av.item_id = w.id AND av.sequence = (
+      SELECT MIN(ev2.sequence) FROM work_item_event ev2
+      WHERE ev2.item_id = w.id AND ev2.kind = '${ACCEPTANCE_VERIFIED_EVENT_KIND}'
+    )
+)`
+
+const INTAKE_EVAL_FEED_BEFORE_LT = `${INTAKE_EVAL_FEED_CTE} SELECT COUNT(*) AS count FROM feed_base WHERE effective_recorded_at < ?`
+const INTAKE_EVAL_FEED_BEFORE_LE = `${INTAKE_EVAL_FEED_CTE} SELECT COUNT(*) AS count FROM feed_base WHERE effective_recorded_at <= ?`
+const INTAKE_EVAL_FEED_SCAN_GE = `${INTAKE_EVAL_FEED_CTE} SELECT * FROM feed_base WHERE effective_recorded_at >= ? ORDER BY effective_recorded_at ASC`
+const INTAKE_EVAL_FEED_SCAN_GT = `${INTAKE_EVAL_FEED_CTE} SELECT * FROM feed_base WHERE effective_recorded_at > ? ORDER BY effective_recorded_at ASC`
+
+export interface NormalizedIntakeEvaluationFeedOptions {
+  readonly afterSeq: number | undefined
+  readonly afterRecordedAt: number | undefined
+  readonly afterId: string | undefined
+  readonly limit: number
+  readonly workspace: string | undefined
+  readonly preset: string | undefined
+  readonly onlyWithOutcome: boolean
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) return true
+  }
+  return false
+}
+
+function feedTextFilter(value: unknown, label: string, maxLength: number): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength
+    || value !== value.trim() || hasControlCharacter(value)) {
+    fail('invalid-input', `intake evaluation feed ${label} is invalid`)
+  }
+  return value
+}
+
+/** Validate and normalize `listIntakeEvaluationFeed` options deterministically. */
+export function normalizeIntakeEvaluationFeedOptions(raw: WorkItemIntakeEvaluationFeedOptions = {}): NormalizedIntakeEvaluationFeedOptions {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(raw))) {
+    fail('invalid-input', 'intake evaluation feed options must be a plain object')
+  }
+  const input = raw as Record<string, unknown>
+  for (const key of Object.keys(input)) {
+    if (!(INTAKE_EVAL_FEED_OPTION_KEYS as readonly string[]).includes(key)) {
+      fail('invalid-input', `unknown intake evaluation feed option: ${key}`)
+    }
+  }
+  const afterSeq = input['afterSeq']
+  if (afterSeq !== undefined && (typeof afterSeq !== 'number' || !Number.isSafeInteger(afterSeq) || afterSeq < 0)) {
+    fail('invalid-input', 'intake evaluation feed afterSeq must be a non-negative integer')
+  }
+  const afterRecordedAt = input['afterRecordedAt']
+  if (afterRecordedAt !== undefined && (typeof afterRecordedAt !== 'number' || !Number.isSafeInteger(afterRecordedAt) || afterRecordedAt < 0)) {
+    fail('invalid-input', 'intake evaluation feed afterRecordedAt must be a non-negative integer')
+  }
+  const afterId = input['afterId']
+  if (afterId !== undefined) {
+    if (typeof afterId !== 'string' || afterId.length === 0 || afterId.length > 256
+      || hasControlCharacter(afterId) || /\s/u.test(afterId)) {
+      fail('invalid-input', 'intake evaluation feed afterId is invalid')
+    }
+    if (afterRecordedAt === undefined) {
+      fail('invalid-input', 'intake evaluation feed afterId requires afterRecordedAt')
+    }
+  }
+  const limitRaw = input['limit']
+  if (limitRaw !== undefined && (typeof limitRaw !== 'number' || !Number.isSafeInteger(limitRaw) || limitRaw < 1)) {
+    fail('invalid-input', 'intake evaluation feed limit must be a positive integer')
+  }
+  const limit = limitRaw === undefined ? INTAKE_EVAL_FEED_DEFAULT_LIMIT : Math.min(limitRaw, INTAKE_EVAL_FEED_MAX_LIMIT)
+  const workspace = feedTextFilter(input['workspace'], 'workspace', 512)
+  const preset = feedTextFilter(input['preset'], 'preset', 256)
+  const onlyWithOutcome = input['onlyWithOutcome']
+  if (onlyWithOutcome !== undefined && typeof onlyWithOutcome !== 'boolean') {
+    fail('invalid-input', 'intake evaluation feed onlyWithOutcome must be a boolean')
+  }
+  return Object.freeze({
+    afterSeq,
+    afterRecordedAt,
+    afterId,
+    limit,
+    workspace,
+    preset,
+    onlyWithOutcome: onlyWithOutcome ?? false,
+  })
+}
+
+function matchesIntakeFeedFilters(
+  row: Row,
+  workspace: string | undefined,
+  preset: string | undefined,
+  onlyWithOutcome: boolean,
+): boolean {
+  if (workspace !== undefined && optString(row['workspace']) !== workspace) return false
+  if (preset !== undefined && optString(row['preset']) !== preset) return false
+  if (onlyWithOutcome && optNumber(row['outcome_revision']) === null && row['verdict_detail'] == null) return false
+  return true
+}
+
+function parseAcceptanceVerdictForFeed(detailRaw: unknown, recordedAtRaw: unknown): WorkItemIntakeEvaluationFeedItem['acceptanceVerdict'] {
+  if (detailRaw === null || detailRaw === undefined) return null
+  const detail = eventDetail(detailRaw)
+  const status = detail?.['objectiveStatus']
+  const recordedAt = optNumber(recordedAtRaw)
+  if (detail === null || detail['verifier'] !== 'assistant-verifier'
+    || (status !== 'achieved' && status !== 'not-achieved' && status !== 'unknown')
+    || typeof detail['receiptDigest'] !== 'string'
+    || typeof detail['completedAt'] !== 'number' || !Number.isSafeInteger(detail['completedAt'])
+    || recordedAt === null) {
+    fail('storage', 'recorded acceptance verdict is malformed')
+  }
+  return Object.freeze({
+    objectiveStatus: status,
+    receiptDigest: detail['receiptDigest'],
+    completedAt: detail['completedAt'],
+    recordedAt,
+  })
+}
+
+function buildIntakeEvaluationFeedItem(seq: number, id: string, recordedAt: number, row: Row): WorkItemIntakeEvaluationFeedItem {
+  const reasonsRaw = JSON.parse(String(row['eval_reasons'])) as unknown
+  const evaluationReasons = Object.freeze(Array.isArray(reasonsRaw) ? reasonsRaw.map(item => String(item)) : [])
+  const admitOutcome = optString(row['admit_outcome'])
+  const admitItemId = optString(row['admit_item_id'])
+  const admission = admitOutcome === null
+    ? null
+    : Object.freeze({
+      mode: String(row['admit_mode']) as 'observe' | 'auto',
+      outcome: admitOutcome as 'would-admit' | 'admitted' | 'replayed' | 'refused',
+      reasonCode: optString(row['admit_reason_code']),
+      decisionId: String(row['admit_decision_id']),
+      itemId: admitItemId,
+      recordedAt: Number(row['admit_recorded_at']),
+    })
+  const workspace = optString(row['workspace'])
+  const preset = optString(row['preset'])
+  const scope = workspace !== null && preset !== null ? Object.freeze({ workspace, preset }) : null
+  const outcomeRevision = optNumber(row['outcome_revision'])
+  const outcomeSettledBy = optString(row['outcome_settled_by']) as WorkItemIntakeEvaluationFeedItem['outcome'] extends infer O
+    ? O extends { settledBy: infer S } ? S : never : never
+  const ownerWithdrawn = outcomeSettledBy === 'withdrawn'
+  const outcome = outcomeRevision === null
+    ? null
+    : Object.freeze({
+      revision: outcomeRevision,
+      settledBy: String(row['outcome_settled_by']) as WorkItemOutcomeSettledBy,
+      executionStatus: String(row['outcome_execution_status']) as WorkItemExecutionStatus,
+      objectiveStatus: String(row['outcome_objective_status']) as WorkItemObjectiveStatus,
+      trust: String(row['outcome_trust']) as WorkItemOutcomeTrust,
+      evidenceState: String(row['outcome_evidence_state']) as WorkItemOutcomeEvidenceState,
+      evidenceReason: optString(row['outcome_evidence_reason']) as WorkItemOutcomeEvidenceReason | null,
+      settledAt: Number(row['outcome_settled_at']),
+      recordedAt: Number(row['outcome_recorded_at']),
+      ownerWithdrawn,
+    })
+  const acceptanceVerdict = parseAcceptanceVerdictForFeed(row['verdict_detail'], row['verdict_recorded_at'])
+  const ownerCorrection = ownerWithdrawn && outcome !== null
+    ? Object.freeze({
+      kind: 'withdrawn' as const,
+      stateReason: optString(row['item_state_reason']),
+      recordedAt: outcome.recordedAt,
+    })
+    : null
+  const itemObservedRaw = optNumber(row['item_observed'])
+  return Object.freeze({
+    seq,
+    id,
+    recordedAt,
+    evaluatedAt: Number(row['evaluated_at']),
+    source: String(row['source']),
+    sourceEventId: String(row['source_event_id']),
+    ruleId: String(row['rule_id']),
+    policyVersion: String(row['policy_version']),
+    intakeKind: String(row['intake_kind']) as 'message' | 'event',
+    intakeStrength: String(row['intake_strength']) as 'explicit' | 'inferred' | 'ignore',
+    contentDigest: optString(row['content_digest']),
+    metadataDigest: String(row['metadata_digest']),
+    sourceDigest: String(row['source_digest']),
+    occurredAt: Number(row['occurred_at']),
+    mode: String(row['eval_mode']) as 'observe' | 'auto',
+    status: String(row['eval_status']) as 'decided' | 'unavailable',
+    evaluationLevel: String(row['eval_level']) as 'ignore' | 'digest' | 'notify' | 'accept',
+    proposedLevel: optString(row['eval_proposed_level']) as 'ignore' | 'digest' | 'notify' | 'accept' | null,
+    ceiling: String(row['eval_ceiling']) as 'ignore' | 'digest' | 'notify' | 'accept',
+    wouldAccept: Number(row['eval_would_accept']) === 1,
+    evaluationReasons,
+    admission,
+    itemId: admitItemId,
+    scope,
+    itemState: optString(row['item_state']) as WorkItemState | null,
+    itemStateReason: optString(row['item_state_reason']),
+    itemObserved: itemObservedRaw === null ? null : itemObservedRaw === 1,
+    outcome,
+    acceptanceVerdict,
+    ownerCorrection,
+  })
+}
+
 /**
  * Decode the persisted advisory basis.
  *
@@ -1336,6 +1606,78 @@ export class WorkItemStore {
         ? null : Number(row['eval_would_accept']) === 1,
       occurredAt: optNumber(row['intake_occurred_at']),
     })))
+  }
+
+  /**
+   * Cursor-paginated, deterministic, body-free WP20/WP22 evaluation agreement feed.
+   * Rows are ordered globally by `(effectiveRecordedAt ASC, id ASC)` with a
+   * matching monotonic 1-based `seq` over the current snapshot, so late outcome
+   * revisions and withdrawals advance `recordedAt` without modifying SQLite DDL.
+   */
+  listIntakeEvaluationFeed(options: WorkItemIntakeEvaluationFeedOptions = {}): WorkItemIntakeEvaluationFeedPage {
+    const normalized = normalizeIntakeEvaluationFeedOptions(options)
+    const { afterSeq, afterRecordedAt, afterId, limit, workspace, preset, onlyWithOutcome } = normalized
+    const useKeyset = afterRecordedAt !== undefined
+    const scanFloor = !useKeyset ? 0 : afterRecordedAt
+    let seq = !useKeyset ? 0 : afterId === undefined
+      ? Number((this.#statement(INTAKE_EVAL_FEED_BEFORE_LE).get(afterRecordedAt) as Row)['count'])
+      : Number((this.#statement(INTAKE_EVAL_FEED_BEFORE_LT).get(afterRecordedAt) as Row)['count'])
+    const sql = !useKeyset || afterId !== undefined ? INTAKE_EVAL_FEED_SCAN_GE : INTAKE_EVAL_FEED_SCAN_GT
+    const collected: WorkItemIntakeEvaluationFeedItem[] = []
+    const iterator = this.#statement(sql).iterate(scanFloor) as IterableIterator<Row>
+    let bucketTs: number | undefined
+    let bucket: { readonly id: string; readonly row: Row }[] = []
+
+    const flushBucket = (): boolean => {
+      if (bucket.length === 0) return false
+      const entries = bucket
+      bucket = []
+      entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      for (const entry of entries) {
+        seq += 1
+        const recordedAt = bucketTs!
+        if (useKeyset) {
+          if (recordedAt === afterRecordedAt && (afterId === undefined || entry.id <= afterId)) continue
+        } else if (afterSeq !== undefined && seq <= afterSeq) {
+          continue
+        }
+        if (!matchesIntakeFeedFilters(entry.row, workspace, preset, onlyWithOutcome)) continue
+        collected.push(buildIntakeEvaluationFeedItem(seq, entry.id, recordedAt, entry.row))
+        if (collected.length > limit) return true
+      }
+      return false
+    }
+
+    for (const row of iterator) {
+      const ts = Number(row['effective_recorded_at'])
+      if (bucketTs !== undefined && ts !== bucketTs) {
+        if (flushBucket()) break
+      }
+      bucketTs = ts
+      bucket.push({
+        id: intakeEvaluationFeedIdFor({
+          source: String(row['source']),
+          sourceEventId: String(row['source_event_id']),
+          ruleId: String(row['rule_id']),
+          policyVersion: String(row['policy_version']),
+        }),
+        row,
+      })
+    }
+    if (collected.length <= limit) flushBucket()
+
+    const hasMore = collected.length > limit
+    const items = Object.freeze(collected.slice(0, limit))
+    const last = items.at(-1)
+    const nextCursor = last === undefined
+      ? null
+      : Object.freeze({ afterSeq: last.seq, afterRecordedAt: last.recordedAt, afterId: last.id })
+    return Object.freeze({
+      protocol: WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL,
+      items,
+      hasMore,
+      nextCursor,
+    })
   }
 
   /** Outcome counts over the admission table; read-only. */

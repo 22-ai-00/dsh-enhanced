@@ -46,6 +46,16 @@ import {
   type IntakeAttentionAgreementHistory,
   type IntakeAttentionAgreementSnapshot,
 } from './intake-attention-agreement.js'
+import {
+  isIntakeEvaluationFeedSource,
+  normalizeFeedPage,
+  type IntakeEvaluationAgreementHistory,
+  type IntakeEvaluationAgreementStatus,
+  type IntakeEvaluationAgreementSummary,
+  type IntakeEvaluationFeedCursor,
+  type IntakeEvaluationSyncResult,
+  type StoredIntakeEvaluationAgreement,
+} from './intake-evaluation-agreement.js'
 import type {
   EvaluationHealth,
   EvaluationCanonicalLearningEvidenceTuple,
@@ -184,6 +194,15 @@ export interface Config {
   attentionOwnerQuestionOwner?: { ownerRouteId: string; principalId: string }
   /** A question not queued within this long after it was recorded expires unsent; also the notice expiry. */
   attentionOwnerQuestionNoticeTtlMs?: number
+  /**
+   * WP22: ingest WP20 `would-accept` intake evaluations and outcomes from
+   * WorkItems' `listIntakeEvaluationFeed` during sync ticks, correlate against
+   * owner outcomes/withdrawals, and feed sealed holdout replay & bounded
+   * loosening. Off by default; zero WorkItems reads or state writes when off.
+   */
+  intakeEvaluationAgreementEnabled?: boolean
+  /** Bounded page size per sync tick when polling `listIntakeEvaluationFeed`. */
+  intakeEvaluationFeedBatchSize?: number
 }
 
 export type IntakeAttentionAgreementPersistReason =
@@ -336,6 +355,8 @@ const configSchema = Schema.object({
     principalId: Schema.string().required(),
   })]),
   attentionOwnerQuestionNoticeTtlMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
+  intakeEvaluationAgreementEnabled: Schema.boolean().default(false),
+  intakeEvaluationFeedBatchSize: Schema.number().step(1).min(1).max(500).default(100),
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -813,9 +834,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (this.config.projectionIntervalMs > 0) {
       this.projectionTimer = setInterval(() => {
         const now = this.now()
-        if (this.config.notificationOutcomesEnabled && now - this.lastNotificationSyncAt >= this.config.notificationSyncIntervalMs) {
+        if ((this.config.notificationOutcomesEnabled || this.config.intakeEvaluationAgreementEnabled)
+          && now - this.lastNotificationSyncAt >= this.config.notificationSyncIntervalMs) {
           this.lastNotificationSyncAt = now
           try { this.reconcileNotificationOutcomes() } catch { /* isolated from projection; retried on a later tick */ }
+          try { this.reconcileIntakeEvaluationAgreement() } catch { /* isolated; retried on a later tick */ }
           try { this.reconcileAttentionTuning() } catch { /* retried on a later sync */ }
           try { this.reconcileAttentionOwnerQuestions() } catch { /* retried on a later sync */ }
           const agreementInterval = this.config.intakeAttentionAgreementPersistIntervalMs
@@ -1495,6 +1518,180 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       scope: Object.freeze({ workspace: scope.workspace, preset: scope.preset }), snapshots: Object.freeze(snapshots) })
   }
 
+  /**
+   * WP22: pull one bounded page from `assistantWorkItems.listIntakeEvaluationFeed`
+   * using the durable incremental cursor, record `would-accept` vs owner
+   * outcome agreement in canonical state, and re-correlate existing heads against
+   * local notification/owner-feedback updates. Zero work when disabled.
+   */
+  reconcileIntakeEvaluationAgreement(): IntakeEvaluationSyncResult {
+    this.assertActive()
+    const ledger = this.store.intakeEvaluations
+    if (!this.config.intakeEvaluationAgreementEnabled) {
+      return Object.freeze({
+        enabled: false,
+        available: false,
+        ingested: 0,
+        correlated: 0,
+        revised: 0,
+        invalid: 0,
+        cursor: ledger.syncCursor(),
+      })
+    }
+    const workItems = this.ctx.get('assistantWorkItems' as never) as unknown
+    const feedSource = isIntakeEvaluationFeedSource(workItems) ? workItems : undefined
+    let available = feedSource !== undefined
+    let ingested = 0
+    let revised = 0
+    let invalid = 0
+    if (feedSource !== undefined) {
+      const cursor = ledger.syncCursor()
+      let rawPage: unknown
+      try {
+        rawPage = feedSource.listIntakeEvaluationFeed(
+          cursor.afterId === ''
+            ? { afterSeq: 0, limit: this.config.intakeEvaluationFeedBatchSize }
+            : {
+              afterSeq: cursor.afterSeq,
+              afterRecordedAt: cursor.afterRecordedAt,
+              afterId: cursor.afterId,
+              limit: this.config.intakeEvaluationFeedBatchSize,
+            },
+        )
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code
+        if (code === 'disabled' || code === 'disposed' || (error instanceof Error && /disabled|disposed/i.test(error.message))) {
+          available = false
+        } else {
+          throw error
+        }
+      }
+      if (available) {
+        let page: ReturnType<typeof normalizeFeedPage> | undefined
+        try {
+          page = normalizeFeedPage(rawPage)
+        } catch (error) {
+          if (error instanceof EvaluationStoreError && error.code === 'invalid-input') {
+            invalid += 1
+          } else {
+            throw error
+          }
+        }
+        if (page !== undefined) {
+          for (const rawItem of page.items) {
+            try {
+              if (ledger.applyFeedItem(rawItem).revised) revised += 1
+              ingested += 1
+            } catch (error) {
+              if (error instanceof EvaluationStoreError && (error.code === 'invalid-input' || error.code === 'version-conflict')) {
+                invalid += 1
+              } else {
+                throw error
+              }
+            }
+          }
+          if (page.nextCursor !== null) ledger.advanceSyncCursor(page.nextCursor)
+        }
+      }
+    }
+    const local = ledger.reconcileLocalCorrelations(this.config.intakeEvaluationFeedBatchSize)
+    return Object.freeze({
+      enabled: true,
+      available,
+      ingested,
+      correlated: local.checked,
+      revised: revised + local.revised,
+      invalid,
+      cursor: ledger.syncCursor(),
+    })
+  }
+
+  /** Read-only inspect of the durable WP20 feed sync cursor. */
+  intakeEvaluationFeedCursor(): IntakeEvaluationFeedCursor {
+    this.assertActive()
+    return this.store.intakeEvaluations.syncCursor()
+  }
+
+  /** Read-only head and revision history for one synced WP20 intake evaluation. */
+  inspectIntakeEvaluationAgreement(input: {
+    evalId?: string
+    source?: string
+    sourceEventId?: string
+    ruleId?: string
+    policyVersion?: string
+  }): IntakeEvaluationAgreementHistory | undefined {
+    this.assertActive()
+    if (!this.config.intakeEvaluationAgreementEnabled) return undefined
+    try {
+      return this.store.intakeEvaluations.history(input)
+    } catch (error) {
+      if (error instanceof EvaluationStoreError && error.code === 'invalid-input') {
+        throw new AssistantEvaluationError('invalid-input', error.message)
+      }
+      throw error
+    }
+  }
+
+  /** Read-only WP20 `would-accept` vs owner outcome agreement counts; undefined when disabled. */
+  intakeEvaluationAgreementSummary(input: {
+    scope?: EvaluationScope
+    source?: string
+    ruleId?: string
+    fromEvaluatedAt?: number
+    toEvaluatedAt?: number
+  } = {}): IntakeEvaluationAgreementSummary | undefined {
+    this.assertActive()
+    if (!this.config.intakeEvaluationAgreementEnabled) return undefined
+    const to = input.toEvaluatedAt ?? this.now() + 1
+    const from = input.fromEvaluatedAt ?? Math.max(0, to - this.config.defaultSummaryWindowMs)
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) {
+      throw new AssistantEvaluationError('invalid-input', 'intake evaluation agreement window is invalid')
+    }
+    try {
+      return this.store.intakeEvaluations.summary({
+        ...(input.scope === undefined ? {} : { scope: input.scope }),
+        ...(input.source === undefined ? {} : { source: input.source }),
+        ...(input.ruleId === undefined ? {} : { ruleId: input.ruleId }),
+        fromEvaluatedAt: from,
+        toEvaluatedAt: to,
+      })
+    } catch (error) {
+      if (error instanceof EvaluationStoreError && error.code === 'invalid-input') {
+        throw new AssistantEvaluationError('invalid-input', error.message)
+      }
+      throw error
+    }
+  }
+
+  /** Read-only paginated canonical `would-accept` correlation rows; empty when disabled. */
+  listIntakeEvaluationAgreements(input: {
+    scope?: EvaluationScope
+    source?: string
+    ruleId?: string
+    agreementStatus?: IntakeEvaluationAgreementStatus
+    afterEvaluatedAt?: number
+    afterEvalId?: string
+    limit?: number
+  } = {}): Readonly<{
+    enabled: boolean
+    items: readonly StoredIntakeEvaluationAgreement[]
+    hasMore: boolean
+    nextCursor: Readonly<{ afterEvaluatedAt: number; afterEvalId: string }> | null
+  }> {
+    this.assertActive()
+    if (!this.config.intakeEvaluationAgreementEnabled) {
+      return Object.freeze({ enabled: false, items: Object.freeze([]), hasMore: false, nextCursor: null })
+    }
+    try {
+      return Object.freeze({ enabled: true, ...this.store.intakeEvaluations.list(input) })
+    } catch (error) {
+      if (error instanceof EvaluationStoreError && error.code === 'invalid-input') {
+        throw new AssistantEvaluationError('invalid-input', error.message)
+      }
+      throw error
+    }
+  }
+
   #attentionPolicy(): AttentionTuningPolicy {
     return Object.freeze({
       minSample: this.config.attentionTuningMinSample,
@@ -1508,6 +1705,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (!this.config.attentionLooseningEnabled) return undefined
     return Object.freeze({
       replayWindowMs: this.config.attentionLooseningReplayWindowMs,
+      ...(this.config.intakeEvaluationAgreementEnabled ? { includeIntakeEvaluations: true } : {}),
       ...(this.config.attentionOwnerQuestionDeliveryEnabled
         ? { ownerQuestionReplyLoop: Object.freeze({ noticeTtlMs: this.config.attentionOwnerQuestionNoticeTtlMs }) }
         : {}),
@@ -1521,10 +1719,22 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     } catch {
       throw new AssistantEvaluationError('invalid-input', 'attention cohort is invalid')
     }
-    if (!this.attentionCohorts.some(item => item.lane === cohort.lane && item.sourceId === cohort.sourceId)) {
+    const intakeCohortAllowed = this.config.intakeEvaluationAgreementEnabled && cohort.lane === 'intake'
+    if (!intakeCohortAllowed && !this.attentionCohorts.some(item => item.lane === cohort.lane && item.sourceId === cohort.sourceId)) {
       throw new AssistantEvaluationError('not-found', 'attention cohort is not configured')
     }
     return cohort
+  }
+
+  #tuningCohorts(): readonly AttentionCohort[] {
+    if (!this.config.intakeEvaluationAgreementEnabled) return this.attentionCohorts
+    const merged = [...this.attentionCohorts]
+    for (const candidate of this.store.attention.intakeCohorts()) {
+      if (!merged.some(existing => existing.lane === candidate.lane && existing.sourceId === candidate.sourceId)) {
+        merged.push(candidate)
+      }
+    }
+    return Object.freeze(merged)
   }
 
   /**
@@ -1540,13 +1750,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (!this.config.attentionTuningAutoAdopt) return Object.freeze([])
     const policy = this.#attentionPolicy()
     const loosening = this.#looseningOptions()
+    const includeIntake = this.config.intakeEvaluationAgreementEnabled
     const options = {
       observationMs: this.config.attentionTuningObservationMs, evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
+      ...(includeIntake ? { includeIntakeEvaluations: true } : {}),
       ...(loosening === undefined ? {} : { loosening }),
     }
     const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }[] = []
-    for (const cohort of this.attentionCohorts) {
-      for (const scope of this.store.attention.scopes(cohort)) {
+    for (const cohort of this.#tuningCohorts()) {
+      for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         let scopeKey: string
         try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
         results.push({ scopeKey, cohort, result: this.store.attention.tick(scope, cohort, policy, options) })
@@ -1579,10 +1791,12 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    */
   requestAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort; parameters: AttentionTuningParameters }): AttentionTuningRequestResult {
     this.assertActive()
+    const includeIntake = this.config.intakeEvaluationAgreementEnabled
     return this.store.attention.request(input.scope, this.#attentionCohort(input.cohort), input.parameters, {
       enabled: this.config.attentionTuningAutoAdopt,
       observationMs: this.config.attentionTuningObservationMs,
       evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
+      ...(includeIntake ? { includeIntakeEvaluations: true } : {}),
       ...(this.#looseningOptions() === undefined ? {} : { loosening: this.#looseningOptions()! }),
     })
   }
@@ -1713,8 +1927,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const choice = parseAttentionOwnerQuestionChoice(input.text)
     if (choice === undefined || questionId.length === 0) return 'ignored'
     try {
-      for (const cohort of this.attentionCohorts) {
-        for (const scope of this.store.attention.scopes(cohort)) {
+      const includeIntake = this.config.intakeEvaluationAgreementEnabled
+      for (const cohort of this.#tuningCohorts()) {
+        for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
           const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
           if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
           this.applyAttentionOwnerQuestionReply({ scope, cohort, questionId, choice })
@@ -1742,8 +1957,9 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const prefix = attentionOwnerQuestionIdempotencyKey('')
     if (typeof idempotencyKey !== 'string' || !idempotencyKey.startsWith(prefix)) return true
     const questionId = idempotencyKey.slice(prefix.length)
-    for (const cohort of this.attentionCohorts) {
-      for (const scope of this.store.attention.scopes(cohort)) {
+    const includeIntake = this.config.intakeEvaluationAgreementEnabled
+    for (const cohort of this.#tuningCohorts()) {
+      for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
         if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
         const delivery = this.store.attentionQuestions.delivery(questionId)
@@ -1774,9 +1990,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze([])
     const owner = this.config.attentionOwnerQuestionOwner
     const ttl = this.config.attentionOwnerQuestionNoticeTtlMs
+    const includeIntake = this.config.intakeEvaluationAgreementEnabled
     const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }[] = []
-    for (const cohort of this.attentionCohorts) {
-      for (const scope of this.store.attention.scopes(cohort)) {
+    for (const cohort of this.#tuningCohorts()) {
+      for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         let scopeKey: string
         try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
         const push = (result: AttentionOwnerQuestionTickAction) => { results.push({ scopeKey, cohort, result: Object.freeze(result) }) }
