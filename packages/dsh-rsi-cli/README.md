@@ -32,6 +32,7 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制�
 | `logs` | 查看各 profile 的 Host 日志尾部；`--lines <n>` 设置每份日志行数（1–10000，默认 200），`--errors-only` 只看错误日志。 |
 | `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL（支持 `--wait <0..60>`，默认 `0`）；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
 | `start` / `stop` / `restart` | 只切换**已注册**常驻服务的运行状态，保留服务定义和数据；未注册时会报错，需通过 `install` 注册。 |
+| `upgrade` | 检查最新包/Host 版本并安全执行就地升级：`--check`（仅检查状态）、`--dry-run`（输出只读升级计划）、`--yes`（执行备份、升级、`doctor` 核验与失败自动回滚）；支持 `--json`、`--registry`、`--version`、`--dsh-version`、`--confirm-dsh-home-stopped`。 |
 | `maintenance` | 运维结算两个没有模型入口的台账：`dead-letters` / `resolve` 结算 Delivery 死信，`system-automations` / `pause-system` 暂停卡在未授权恢复重试上的系统自有 automation。写操作会先在同一事务里落不可变 receipt，再做精确状态与版本的 CAS 更新；重复提交同一决定会重放，换操作者或相反决定会冲突。 |
 | `version` | 打印 CLI 版本。 |
 
@@ -40,6 +41,9 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制�
 ## 升级与重装
 
 ```sh
+dsh-rsi upgrade --check --json          # 仅检查当前/最新包与 Host 版本及前置就绪状态
+dsh-rsi upgrade --dry-run --json        # 只读预演升级步骤，不修改 Home 或重启服务
+dsh-rsi upgrade --yes                   # 备份后就地升级、运行 doctor 核验并在失败时自动回滚
 dsh-rsi update --dry-run                # 预览 CLI 自身升级
 dsh-rsi update                          # 只升级全局 dsh-rsi
 dsh-rsi update --all --dry-run --yes    # Linux：先看整套升级计划
@@ -47,6 +51,8 @@ dsh-rsi update --all --yes              # Linux：升级支持的现有 Home
 dsh-rsi reinstall --dry-run             # 预览清理与重新安装两阶段
 dsh-rsi reinstall                       # 备份、删除、重新安装并重做 onboarding
 ```
+
+`dsh-rsi upgrade` 面向普通日常用户的可审计自助升级：先通过有界超时的 npm registry 查询与只读 `.dsh-rsi-host.json` 对比当前与最新版本（网络不可用或超时干净回退为离线报告，不崩进程），并在 `--dry-run` / `--yes` 前做 fail-closed 就绪检查（损坏或符号链接绑定、非空 `creation-review`/`revision-review`/`revision-regression`/`creation-adoptions` 台账等直接阻断）。在 Linux 受控 systemd 冻结部署上会委托 `scripts/install/upgrade-program.mjs` 并维持锁定 Host 基线（如 `0.2.2-rc.3`）；在 macOS / 非受控本地 profile 上会要求先停止同 Home 进程或显式 `--confirm-dsh-home-stopped`，升级前生成 `0600` 备份、升级后执行 `doctor` 复验，若关键检查失败自动字节级回滚恢复原状态。升级成功只证明包版本与静态就绪检查通过，不自动替代真实模型可用性或长期普通任务效果评估。
 
 `update --all` 先升级 CLI，再按原场景升级插件。对于保留的**原 Docker 后端 Linux 冻结 owner/cohort Home**，`dsh-rsi update --all --yes` 仅在全部前置成立时执行一次性 docker→native 升级（将候选固定更新至 `0.2.2-rc.3`，保留原 owner 绑定、期限、已用额度、凭据、模型、Session、Goal 与历史）：绑定官方仓库 `dev`/`main` 可干净快进（detached HEAD 须在本机记录的 `origin/dev` 或 `origin/main` 历史内）、原 Host 属于支持基线（`0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3`）、owner 授权未过期且 target/coordinator 双服务均活动、无已采用源码或未结 activation，以及已配置的 `creation-review` / `revision-review` / `revision-regression` / `creation-adoptions` 业务记录均为空（不存在的库不算空库）。已有 owner 的 native→native 程序升级、非空创建历史迁移与完整 live Docker→native 切换均不支持/未验收。
 

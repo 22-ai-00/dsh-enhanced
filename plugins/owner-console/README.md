@@ -69,12 +69,14 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
   文本消息/工具行/错误，用 `SessionFace.prompt` 发送，用 `fileUpload` 上传附件。它是诚实的
   最小可用面，不是完整原生渲染；真实 DSH Web 走上面的原生工厂路径。
 
-### 设置页（⚙）
+### 设置页（⚙）与左侧栏「文鳐助手」设置分组
 
-设置页保留以下配置卡片：
+设置页与 DSH 原生设置的「文鳐助手」分组共用以下配置卡片：
 
 | 卡片 | 内容 | 数据来源 |
 | --- | --- | --- |
+| 自主能力一键开启向导（`AutonomyWizardCard`） | 基于当前激活的 Web 或飞书 owner 路由，一键授权、切换档位（`conservative` / `balanced` / `custom`）、选择默认模型或 `traex-agent` / `agy-agent` 路由并生成三权分立授权，或执行安全暂停（做梦保持 `enabled: true` + `retired: true`，成长安全关闭含子开关）与停用 | `autonomySetupStatus` + `configureAutonomySetup`（读只读 SQLite 与原子备份写 `cordis.patch.yml`） |
+| 版本与自助升级（`SelfUpgradeCard`） | 检查当前包与 Host 版本及在线/离线最新可用版，预览升级计划（`--dry-run`），在受控 Linux systemd 下阻断应用内热改并给出 CLI 命令，在本地/macOS 二次确认后以后台无 shell 进程启动 `dsh-rsi upgrade --yes` | `checkSelfUpgrade` + `dryRunSelfUpgrade` + `runSelfUpgrade`（`src/upgrade-probe.ts`） |
 | 编程工具与默认模型 | `traex-acp-provider` 条目中的 TraeX (`traex-agent`) 与 Antigravity (`agy-agent`) 开关/命令、`agent-default-model` 默认路由切换、无交互本机 CLI 就绪探测与修复提示 | `settings.describe` + `agentDefaultModel` + `llm` + `probeCodingTool` |
 | 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
 | 自主做梦想法（Dreaming） | `assistant-dreaming` 运行健康与额度、想法列表（`recorded` / `acknowledged` / `validated` / `rejected` / `retired`）及主人授权流转（确认 / 验证 / 拒绝 / 休眠） | `assistantDreaming`（结构化读取，可缺省） |

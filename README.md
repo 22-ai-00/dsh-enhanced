@@ -135,7 +135,7 @@ dsh-rsi install
 dsh-rsi open --profile web
 ```
 
-`dsh-rsi open` 会读取受管服务地址（或前台拉起轻量场景）并在桌面环境自动打开浏览器（含 `--wait`、`--no-browser`）。进入后可在左侧栏打开 **文鳐** 面板或 **Settings → 文鳐助手**（`owner-console`）：查看飞书连接、一键检测/切换 `traex` 与 `agy`，并管理 Proactive、Dreaming、WorkItems、Memory Learning 与 Growth 等自主模块。仅需打印受管地址时改用 `dsh-rsi web-url --profile web`。地址包含登录令牌，请勿公开分享；模型配置见[添加与切换模型](docs/models.md)。
+`dsh-rsi open` 会读取受管服务地址（或前台拉起轻量场景）并在桌面环境自动打开浏览器（含 `--wait`、`--no-browser`）。进入后可在左侧栏打开 **文鳐** 面板或 **Settings → 文鳐助手**（`owner-console`）：使用 **自主能力一键开启向导**（基于已激活 owner 路由生成三权分立授权或安全暂停/停用）、**版本与自助升级卡片**（版本检查、预演及本地二次确认升级；受控 Linux systemd 会提示带外终端升级命令），以及查看飞书连接、一键检测/切换 `traex` 与 `agy`，并管理 Proactive、Dreaming、WorkItems、Memory Learning 与 Growth 等自主模块。不打开 UI 时也可通过 `dsh-web-owner-setup --autonomy-setup` 在 CLI 完成 Web-owner 自主授权；仅需打印受管地址时改用 `dsh-rsi web-url --profile web`。地址包含登录令牌，请勿公开分享；模型配置见[添加与切换模型](docs/models.md)。
 
 ## 日常使用
 
@@ -144,13 +144,15 @@ dsh-rsi open --profile web
 | 想做什么 | 命令 |
 | --- | --- |
 | 打开 Web 与文鳐控制台 | `dsh-rsi open --profile web` |
+| 检查或执行自助升级 | `dsh-rsi upgrade --check` / `dsh-rsi upgrade --dry-run` / `dsh-rsi upgrade --yes` |
+| 一键配置 Web-owner 自主授权 | `dsh-web-owner-setup --profile web --autonomy-setup --enable-memory-learning --enable-dreaming --enable-growth --dry-run` |
 | 查看运行状态（含 JSON） | `dsh-rsi status [--json]` |
 | 只读体检（含 `traex`/`agy` 与前提） | `dsh-rsi doctor [--profile web] [--json]` |
 | 仅获取已运行 Web 地址 | `dsh-rsi web-url --profile web` |
 | 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
 | 重启服务 | `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。日常常用命令：`dsh-rsi open --profile web`（直接打开本地 Web 与「文鳐」控制台）、`dsh-rsi status --json`（查看状态与 `.dsh-rsi-host.json` 绑定）及 `dsh-rsi doctor --json`（只读诊断 `traex`/`agy` 登录、配置与运行前提）。只升级命令本身用 `dsh-rsi update`；普通升级、Docker 迁移边界与 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](scripts/install/maintenance.md)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+浏览器关闭后，默认安装的服务仍会在后台运行。日常常用命令：`dsh-rsi open --profile web`（直接打开本地 Web 与「文鳐」控制台）、`dsh-rsi upgrade --dry-run`（预演用户向就地升级与自动回滚保护）、`dsh-rsi status --json`（查看状态与 `.dsh-rsi-host.json` 绑定）及 `dsh-rsi doctor --json`（只读诊断 `traex`/`agy` 登录、配置与运行前提）。注意安装或向导授权成功不代表真实宿主上的长期普通任务效果已通过验收（见[当前状态](docs/rsi-status.md)）。只升级 CLI 命令本身用 `dsh-rsi update`；Docker 迁移边界与 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](scripts/install/maintenance.md)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
 
 ## 按需阅读
 

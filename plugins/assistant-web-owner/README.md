@@ -36,6 +36,22 @@ Web principal 必须是 `channel: web`，其 account、tenant、user 由可信�
 
 Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以及该 principal、workspace、preset 下需要的 Agent `reply`、工具执行和 Goals/Memory 操作。配对不会自动放宽 Policy。
 
+### 渠道无关 Web-owner 自主授权（`--autonomy-setup`）
+
+完成 Web owner 配对并启动一次会话认领 owner 身份后，停止目标 Host，可直接通过 CLI 或在「文鳐」控制台向导一键生成与渠道解耦的有限自主授权（也可以只传任意自主子模块开关，会自动触发 `--autonomy-setup`）：
+
+```sh
+dsh-web-owner-setup --dsh-home "$DSH_HOME" --profile web \
+  --autonomy-setup --enable-memory-learning --enable-dreaming --enable-growth \
+  --usage-learning --work-item-experiences --budget-tier conservative --dry-run --json
+```
+
+常用参数与安全边界：
+
+- **模块开关**：`--enable-memory-learning` / `--disable-memory-learning`、`--enable-dreaming` / `--pause-dreaming`（保持 `enabled: true, retired: true` 安全休眠并保留 owner 想法流转权限）/ `--retire-dreaming` / `--disable-dreaming`、`--enable-growth` / `--disable-growth`、`--usage-learning`、`--work-item-experiences` / `--no-work-item-experiences`。
+- **模型与预算档位**：`--model-provider`、`--model-id`、`--reasoning-effort`（缺省回退至 `agent-default-model`，缺失模型路由或 ACP provider 未启用时 fail-closed 拒绝）；`--budget-tier <conservative|balanced>`（默认 `conservative`：`10/2/5/1440`；`balanced`：`25/6/15/1440`）、`--daily-budget <n>`（正整数覆盖）与 `--lease-days <1..365>`（默认 `30`），可选 `--dry-run`、`--json`。
+- **三权分立与不变量**：`compileWebOwnerAutonomyGrants` / `applyWebOwnerAutonomySetup` 绑定当前激活的 Web `ownerRoutes` 权威收据（`ownerRouteAuthorityHash`），分别签发相互独立的提取（`assistant-memory-learning`）、复核（`assistant-verifier`）与采用（`personal-memory`）三权 `authorityId` 及精确加密摘要，并将 `assistantPolicy` 规则（含 `assistant-growth-usage`、`usage-*`、`growth_*`、`verified-workflows` 与 dreaming owner 动作）按 `id` 幂等合并；完整保留既有自定义策略、`!!js` 表达式与 `allowUnbudgetedExecution: false`，拒绝未限定至 `$DSH_HOME` 的数据库路径。按需仅加载所启用且在目标 profile 存在的子系统配置，不强依赖未安装的可选插件，也绝不将配置授权成功等同于真实模型质量或长期普通使用效果达标。
+
 ## 当前行为与限制
 
 - 启动时在 owner 已证明后解析或注册配置 workspace；配置路径必须是实际路径（`realpath`），避免 Delivery scope key 漂移。原生界面使用该 workspaceId，Controller 保留工作区与会话关联；直接调用可省略位置或提供相同 cwd。其他 workspaceId、不同 cwd/preset 或外部 Session ID 均拒绝。同一请求不能同时提供 cwd 和 workspaceId。
