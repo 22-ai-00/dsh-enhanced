@@ -2014,7 +2014,8 @@ export function readOwnerHostAttestationContext(database: DatabaseSync, operatio
     UNION ALL SELECT max(w.last_host_generation) AS generation FROM activation_watch w JOIN activation_plans p ON p.id=w.plan_id WHERE p.installation_id=?)`)
     .get(plan.installationId, plan.installationId) as {generation:number|null}
   const latest = latestRow.generation ?? 0
-  if ((operation.phase === 'reload' && (request.predecessor !== null || request.requirements.kind !== 'reload'
+  if ((operation.phase === 'reload' && (request.predecessor !== null
+      || (request.requirements.kind !== 'reload' && request.requirements.kind !== 'in-process-reload')
       || request.requirements.previousHostGeneration !== latest))
     || (rollback && (request.requirements.kind !== 'rollback' || request.requirements.previousHostGeneration !== latest))) {
     throw new ControlPlaneStoreError('conflict', 'Host authority generation changed after operation reservation')
@@ -4905,13 +4906,17 @@ export class ControlPlaneStore {
         if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.expectedFence) {
           throw new ControlPlaneStoreError('conflict', 'Host attestation operation targets a stale activation revision/fence')
         }
-        if (input.requirements.kind !== expected.phase) throw new ControlPlaneStoreError('invalid-input', 'Host attestation requirements do not match the awaited phase')
+        if (input.requirements.kind !== expected.phase
+          && !(expected.phase === 'reload' && input.requirements.kind === 'in-process-reload')) {
+          throw new ControlPlaneStoreError('invalid-input', 'Host attestation requirements do not match the awaited phase')
+        }
         if (!Number.isSafeInteger(input.receiptTtlMs) || input.receiptTtlMs < 1_000 || input.receiptTtlMs > 300_000) {
           throw new ControlPlaneStoreError('invalid-input', 'Host attestation receipt TTL is invalid')
         }
         if (expected.phase === 'reload') {
           const previous = this.latestHostGeneration(plan.installationId)
-          if (input.requirements.kind !== 'reload' || input.requirements.previousHostGeneration !== previous) {
+          if ((input.requirements.kind !== 'reload' && input.requirements.kind !== 'in-process-reload')
+            || input.requirements.previousHostGeneration !== previous) {
             throw new ControlPlaneStoreError('conflict', 'reload operation does not bind the durable prior Host generation')
           }
         }
@@ -5395,7 +5400,8 @@ export class ControlPlaneStore {
     }
     const latest = this.latestHostGeneration(plan.installationId)
     if (operation.phase === 'reload') {
-      if (request.predecessor !== null || request.requirements.kind !== 'reload'
+      if (request.predecessor !== null
+        || (request.requirements.kind !== 'reload' && request.requirements.kind !== 'in-process-reload')
         || request.requirements.previousHostGeneration !== latest) {
         throw new ControlPlaneStoreError('conflict', 'reload Host generation advanced after request reservation')
       }

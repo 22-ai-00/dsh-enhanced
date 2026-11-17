@@ -166,18 +166,18 @@ phase operation 和派发 claim 在子进程启动前持久化。外部执行期
 
 任一有效签名 receipt 返回 `outcome: failed` 时，计划进入 fenced `rollback-pending` 并自动恢复原 profile；一旦进入过 `awaiting-reload`，恢复文件后仍保持 pending，必须由绑定原始 baseline 的 `rollback` 签名回执证明旧 Host 就绪或原本不存在的 profile 已停服，才能结束回退。只有七个部署 phase 全部通过、保存已安装 profile 的核心文件摘要并完成终态 CAS 后才是 `activated`；上一版 backup 保留供使用后回退。格式错误、错误 key/digest/phase/evidence、过期 receipt 或未配置 attestor 都保持当前 awaiting 状态。
 
-## 同进程重载切片（config/patch）
+## 同进程重载（config/patch 与不可变 artifact 替换）
 
-宿主更新插件当前只能走进程重启。此切片在既有 `reload` phase 下新增 requirement/evidence kind `in-process-reload`，把“同一 Host 进程内重读 profile 的 Cordis Include 配置”作为一条受证明的路径；不新增 phase、不改 ledger schema，输入缺省时旧行为逐字节不变。
+此能力在既有 `reload` phase 下使用独立的 `in-process-reload` requirement/evidence kind，把同一 Host 进程内的受控插件 config/patch 原地重启，以及对非 denylist 插件的不可变 `<version>-<artifactDigest>` 校验替换纳入同一条受证明路径；不新增 phase、不改 ledger schema，未显式启用时默认 `--dump-config` 与旧行为逐字节不变。
 
-范围被刻意收窄：只重载 config/patch。pinned Loader 对 ESM import 不做 cache-busting，变更后的 `lib/` 模块代码无法在进程内重新导入，因此 artifact 摘要变化仍必须走既有进程重启 `reload` 合同。artifact 摘要必须与当前挂载一致，否则拒绝。
+范围受 mode 与签名摘要严格约束：默认 `config-only` 模式只重载 config/patch 且拒绝 `artifactDigest` 变化；显式启用 `artifact-replace` 模式并随 warrant 绑定 `artifact` 描述符后，可由 Host 侧 `inProcessReload` 服务校验 SHA-256 `artifactDigest`/`patchDigest` 并在卸载旧 Fiber（`state === DISPOSED`、`fibersDisposed >= 1`）后加载新不可变入口。
 
 - 进入：plan 必须处于 `awaiting-reload`，activation id/fence、plan id/digest、request digest 全部匹配；`artifactDigest`/`patchDigest` 均为 64 位小写 hex；目标不得 `changesProcessSubtree`，不得持有未被证明的进程/cgroup 权限。
-- 应用：Host **进程**代次不变（`currentHostGeneration === previousHostGeneration`，且等于 request 绑定代次）；adapter 自己维护单调 `inProcessGeneration`（从 1 开始，每次完成的挂载尝试 +1，探针失败和 rollback 也计入）。唯一成功条件是真实探针：profile 文件摘要变化、同一 Fiber 原地重启（uid 不变、store 重建、状态 active）、已加载模块实例未被替换、pid/InvocationID 未变、失败数为 0。任何探测失败、无法解析挂载、超时、`reloaded:false` 都只落入 `rollback-pending`，不声称成功。
+- 应用：Host **进程**代次不变（`currentHostGeneration === previousHostGeneration`，且等于 request 绑定代次）；adapter 自己维护单调 `inProcessGeneration`（从 1 开始，每次完成的挂载尝试 +1，探针失败和 rollback 也计入）。唯一成功条件是真实探针：失败数为 0、`reloaded:true`、pid/InvocationID/Host 代次未变；其中 `config-only` 须同 `uid` 原地重启且模块未换，`artifact-replace` 须观察到旧 Fiber `DISPOSED`（`fibersDisposed >= 1`）、新 `ACTIVE` Fiber、重建 `committed` 与更新 `moduleNamespace` 且无关插件保持不受影响。任何 disposer、缺失 inject、启动异常或探针失败均触发自动回退并保持 `rollback-pending` / `rolled-back`，绝不声称成功。
 - 回执隔离：`in-process-reload` 证据永不满足进程重启 `{kind:'reload'}` 的通过规则（后者仍须 Host generation 推进）。`systemd-host-authority` 明确拒绝该 kind，不会重启 unit 或伪造见证。
-- 拒绝：状态/fence/plan 不匹配、digest 不匹配、artifact 变化、越界 scope 都返回各自独立的 typed refusal（`InProcessReloadRefusal.reason`），不会触碰 Include 树。
+- 拒绝：状态/fence/plan 不匹配、digest 不匹配、未授权的 artifact 变化、越界 scope 都返回各自独立的 typed refusal（`InProcessReloadRefusal.reason`），不会触碰 Include 树。
 - 永不同进程热重载：control plane 自身、assistant-delivery、assistant-isolation、lark-channel、会改变依赖子树的插件，以及持有没有被证明的进程/cgroup 权限的插件。
-- 未接线：当前没有 store dispatch 构造该 kind 的 requirement，也没有 CLI `reload` verb、systemd unit 变更或自动调用；Host 侧 adapter 工厂未被 `apply()` 注册，默认行为与 `--dump-config` 保持字节不变。adapter 见 [assistant-delivery 的同进程重载 adapter](../assistant-delivery/README.md#同进程重载-adapter未接线)。
+- Host 接线：`PluginControlPlaneService.reloadInProcess()` 与 `coordinateAdoptionHandoff()` 的可选 `inProcessReload` hook 消费 `assistant-delivery` 仅在显式配置 `inProcessReload` 时注册的 Cordis `inProcessReload` 服务，并在失败时自动驱动 `rollbackInProcessReload`。adapter 见 [assistant-delivery 的同进程重载 adapter](../assistant-delivery/README.md#同进程重载-adapter)。
 
 ## 人工 Host attestation
 

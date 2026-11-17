@@ -80,7 +80,7 @@ export function apply(ctx: Context, config: Config): void {
 export default PluginControlPlaneService
 
 export type { AdoptionHandoffTerms, AdoptionHandoffRecord } from './adoption-handoff.js'
-export type { AdoptionCoordinatorConfig } from './adoption-coordinator.js'
+export type { AdoptionCoordinatorConfig, AdoptionInProcessReloadHook } from './adoption-coordinator.js'
 
 export { validateLiveQualificationAuthorityConfig } from './live-qualification-authority.js'
 export type { LiveQualificationAuthorityConfig } from './live-qualification-authority.js'

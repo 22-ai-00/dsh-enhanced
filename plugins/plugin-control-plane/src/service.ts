@@ -1,6 +1,13 @@
 import { cleanedLinuxSourceBuildFailure, cleanedLinuxSourcePreflight, consumeCleanedLinuxSourceBuildFailure, consumeCleanedLinuxSourcePreflight,
   consumeLinuxSourceBuildFailed, consumeLinuxSourceNotStarted, isLinuxSourceBuildFailed } from './linux-source-preflight.js'
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
+import {
+  InProcessReloadRefusal,
+  executeInProcessReloadHandoff,
+  type InProcessReloadHandoffResult,
+  type InProcessReloadHostPort,
+  type InProcessReloadSnapshot,
+} from './in-process-reload.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { RevisionCapabilityJournal, revisionCapabilityAuthorityDigest, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
@@ -1180,6 +1187,31 @@ export class PluginControlPlaneService extends Service {
   health(): PluginControlPlaneHealth { return this.store.health() }
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
   canEnqueueSource(): boolean { return this.sourceRuntime?.available() === true && !this.abort.signal.aborted }
+  canInProcessReload(): boolean { return !this.abort.signal.aborted && this.ctx.get('inProcessReload' as never) !== undefined }
+
+  /** Dispatch a prepared in-process reload warrant through the mounted Host adapter with automatic rollback. */
+  async reloadInProcess(input: {
+    snapshot: InProcessReloadSnapshot
+    requestedAt?: number
+    ttlMs?: number
+    now?: number
+    autoRollback?: boolean
+    port?: InProcessReloadHostPort
+  }): Promise<InProcessReloadHandoffResult> {
+    this.abort.signal.throwIfAborted()
+    const port = input.port ?? (this.ctx.get('inProcessReload' as never) as InProcessReloadHostPort | undefined)
+    if (port === undefined) {
+      throw new InProcessReloadRefusal('loader-unavailable', 'inProcessReload Host runtime is not registered')
+    }
+    return await executeInProcessReloadHandoff({
+      snapshot: input.snapshot,
+      port,
+      ...(input.requestedAt === undefined ? {} : { requestedAt: input.requestedAt }),
+      ...(input.ttlMs === undefined ? {} : { ttlMs: input.ttlMs }),
+      ...(input.now === undefined ? {} : { now: input.now }),
+      ...(input.autoRollback === undefined ? {} : { autoRollback: input.autoRollback }),
+    })
+  }
 
   /** Host-only durable Usage reader; the caller's binding is always an expectation. */
   registerSourceGrowthRunProducer = (producer: SourceGrowthRunProducer): (() => Promise<void>) => {

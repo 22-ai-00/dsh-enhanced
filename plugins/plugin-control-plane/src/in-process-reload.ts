@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { HostAttestationEvidence, HostAttestationRequirements } from './types.js'
 import { ControlPlaneStoreError } from './store.js'
 
 /**
@@ -92,6 +93,14 @@ function textOf(value: unknown, label: string, pattern = ID): string {
   return value
 }
 
+function pathText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096
+    || value.includes('\0') || value.includes('\r') || value.includes('\n')) {
+    throw new InProcessReloadRefusal('invalid-target', `${label} is invalid`)
+  }
+  return value
+}
+
 function digestField(value: unknown, label: string): string {
   if (typeof value !== 'string' || !DIGEST.test(value)) throw new InProcessReloadRefusal('invalid-target', `${label} must be a SHA-256 digest`)
   return value
@@ -104,11 +113,31 @@ function integerOf(value: unknown, label: string, minimum = 1): number {
   return value
 }
 
+function artifactEqual(left: InProcessReloadArtifactSpec | undefined, right: InProcessReloadArtifactSpec | undefined): boolean {
+  if (left === undefined && right === undefined) return true
+  if (left === undefined || right === undefined) return false
+  return digestOf(left) === digestOf(right)
+}
+
 function sameTarget(left: InProcessReloadTarget, right: InProcessReloadTarget): boolean {
   return left.package === right.package && left.version === right.version
     && left.artifactDigest === right.artifactDigest && left.patchDigest === right.patchDigest
     && left.changesProcessSubtree === right.changesProcessSubtree
     && left.holdsUnprovenProcessAuthority === right.holdsUnprovenProcessAuthority
+    && left.entryId === right.entryId
+    && artifactEqual(left.artifact, right.artifact)
+}
+
+export type InProcessReloadMode = 'config-only' | 'artifact-replace'
+
+export interface InProcessReloadArtifactSpec {
+  sourceDir?: string
+  entryPath?: string
+  entrySpecifier?: string
+  config?: Record<string, unknown>
+  patchPath?: string
+  patchContent?: string
+  inject?: Record<string, unknown>
 }
 
 export interface InProcessReloadTarget {
@@ -123,6 +152,10 @@ export interface InProcessReloadTarget {
   changesProcessSubtree: boolean
   /** True when the candidate would hold process/cgroup authority that this Host has not proven. */
   holdsUnprovenProcessAuthority: boolean
+  /** Optional Include entry identifier override for dynamic artifact replacement. */
+  entryId?: string
+  /** Candidate artifact descriptor when performing immutable digest-verified replacement. */
+  artifact?: InProcessReloadArtifactSpec
 }
 
 /**
@@ -143,6 +176,8 @@ export interface InProcessReloadSnapshot {
   /** Identity of the tree that is currently mounted in this Host process. */
   running: { artifactDigest: string; patchDigest: string }
   target: InProcessReloadTarget
+  /** Default `'config-only'`; set `'artifact-replace'` (or pass `target.artifact`) for immutable code replacement. */
+  mode?: InProcessReloadMode
 }
 
 /** JSON-safe, signed-input shaped probe produced by the Host adapter. */
@@ -164,6 +199,7 @@ export interface InProcessReloadHostActivationInput {
   target: InProcessReloadTarget
   previousHostGeneration: number
   previousInProcessGeneration: number
+  mode?: InProcessReloadMode
 }
 
 export interface InProcessReloadHostActivationResult {
@@ -211,12 +247,37 @@ export interface InProcessReloadWarrant {
   previousInProcessGeneration: number
   requestedAt: number
   expiresAt: number
+  mode?: InProcessReloadMode
   digest: string
 }
 
 export type InProcessReloadWarrantBody = Omit<InProcessReloadWarrant, 'digest'>
 
 export function inProcessReloadWarrantDigest(warrant: InProcessReloadWarrantBody): string { return digestOf(warrant) }
+
+function assertPlainRecord(value: unknown, label: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new InProcessReloadRefusal('invalid-target', `${label} must be a plain object`)
+  }
+}
+
+function cloneTarget(target: InProcessReloadTarget): InProcessReloadTarget {
+  return {
+    ...target,
+    ...(target.artifact === undefined ? {} : {
+      artifact: {
+        ...target.artifact,
+        ...(target.artifact.config === undefined ? {} : { config: { ...target.artifact.config } }),
+        ...(target.artifact.inject === undefined ? {} : { inject: { ...target.artifact.inject } }),
+      },
+    }),
+  }
+}
+
+function resolveMode(snapshot: Pick<InProcessReloadSnapshot, 'mode' | 'target'>): InProcessReloadMode {
+  if (snapshot.mode === 'artifact-replace' || snapshot.target.artifact !== undefined) return 'artifact-replace'
+  return 'config-only'
+}
 
 function assertTarget(target: InProcessReloadTarget): void {
   textOf(target.package, 'target package', PACKAGE)
@@ -225,6 +286,23 @@ function assertTarget(target: InProcessReloadTarget): void {
   digestField(target.patchDigest, 'target patchDigest')
   if (typeof target.changesProcessSubtree !== 'boolean') throw new InProcessReloadRefusal('invalid-target', 'target changesProcessSubtree must be boolean')
   if (typeof target.holdsUnprovenProcessAuthority !== 'boolean') throw new InProcessReloadRefusal('invalid-target', 'target holdsUnprovenProcessAuthority must be boolean')
+  if (target.entryId !== undefined) textOf(target.entryId, 'target entryId')
+  if (target.artifact !== undefined) {
+    assertPlainRecord(target.artifact, 'target artifact')
+    const { sourceDir, entryPath, entrySpecifier, patchPath, patchContent, config, inject } = target.artifact
+    if (sourceDir === undefined && entryPath === undefined) {
+      throw new InProcessReloadRefusal('invalid-target', 'target artifact requires sourceDir or entryPath')
+    }
+    if (sourceDir !== undefined) pathText(sourceDir, 'target artifact sourceDir')
+    if (entryPath !== undefined) pathText(entryPath, 'target artifact entryPath')
+    if (entrySpecifier !== undefined) pathText(entrySpecifier, 'target artifact entrySpecifier')
+    if (patchPath !== undefined) pathText(patchPath, 'target artifact patchPath')
+    if (patchContent !== undefined && typeof patchContent !== 'string') {
+      throw new InProcessReloadRefusal('invalid-target', 'target artifact patchContent must be a string')
+    }
+    if (config !== undefined) assertPlainRecord(config, 'target artifact config')
+    if (inject !== undefined) assertPlainRecord(inject, 'target artifact inject')
+  }
 }
 
 function assertReloadable(target: InProcessReloadTarget): void {
@@ -240,17 +318,27 @@ function assertReloadable(target: InProcessReloadTarget): void {
 }
 
 /**
- * An in-process reload can only replace the running *configuration/patch* of an
- * already-mounted artifact. Replacing the installed artifact code would need a
- * module re-import that the pinned Loader does not perform (ESM import caching),
- * so it stays a process-restart obligation.
+ * Config-only reloads refuse differing artifact digests and unchanged patches.
+ * Artifact-replacement reloads (`mode: 'artifact-replace'` or `target.artifact`)
+ * permit digest-verified immutable artifact replacement inside the running Host.
  */
 function assertInProcessScope(snapshot: InProcessReloadSnapshot): void {
-  if (snapshot.running.artifactDigest !== snapshot.target.artifactDigest) {
-    throw new InProcessReloadRefusal('artifact-digest-mismatch', 'in-process reload cannot replace the installed artifact; the artifact change requires a process restart')
+  const mode = resolveMode(snapshot)
+  if (mode === 'config-only') {
+    if (snapshot.running.artifactDigest !== snapshot.target.artifactDigest) {
+      throw new InProcessReloadRefusal('artifact-digest-mismatch', 'in-process reload cannot replace the installed artifact; the artifact change requires a process restart')
+    }
+    if (snapshot.running.patchDigest === snapshot.target.patchDigest) {
+      throw new InProcessReloadRefusal('patch-digest-mismatch', 'in-process reload requires a changed profile patch')
+    }
+    return
   }
-  if (snapshot.running.patchDigest === snapshot.target.patchDigest) {
-    throw new InProcessReloadRefusal('patch-digest-mismatch', 'in-process reload requires a changed profile patch')
+  if (snapshot.target.artifact === undefined) {
+    throw new InProcessReloadRefusal('invalid-target', 'artifact-replace in-process reload requires a target artifact descriptor')
+  }
+  if (snapshot.running.artifactDigest === snapshot.target.artifactDigest
+    && snapshot.running.patchDigest === snapshot.target.patchDigest) {
+    throw new InProcessReloadRefusal('patch-digest-mismatch', 'in-process reload requires a changed artifact or profile patch')
   }
 }
 
@@ -263,6 +351,9 @@ function assertSnapshot(snapshot: InProcessReloadSnapshot): void {
   integerOf(snapshot.inProcessGeneration, 'snapshot inProcessGeneration')
   digestField(snapshot.running.artifactDigest, 'snapshot running artifactDigest')
   digestField(snapshot.running.patchDigest, 'snapshot running patchDigest')
+  if (snapshot.mode !== undefined && snapshot.mode !== 'config-only' && snapshot.mode !== 'artifact-replace') {
+    throw new InProcessReloadRefusal('invalid-target', `snapshot mode is invalid: ${String(snapshot.mode)}`)
+  }
   assertTarget(snapshot.target)
 }
 
@@ -286,6 +377,7 @@ export function prepareInProcessReload(input: PrepareInProcessReloadInput): InPr
   assertInProcessScope(snapshot)
   integerOf(requestedAt, 'requestedAt', 0)
   integerOf(ttlMs, 'ttlMs')
+  const mode = resolveMode(snapshot)
   const body: InProcessReloadWarrantBody = {
     schemaVersion: 1,
     kind: 'dsh-in-process-reload-warrant',
@@ -293,11 +385,12 @@ export function prepareInProcessReload(input: PrepareInProcessReloadInput): InPr
     planDigest: snapshot.planDigest,
     activationId: snapshot.activation.id,
     fence: snapshot.activation.fence,
-    target: { ...snapshot.target },
+    target: cloneTarget(snapshot.target),
     previousHostGeneration: snapshot.hostGeneration,
     previousInProcessGeneration: snapshot.inProcessGeneration,
     requestedAt,
     expiresAt: requestedAt + ttlMs,
+    ...(mode === 'artifact-replace' ? { mode } : {}),
   }
   return Object.freeze({ ...body, digest: inProcessReloadWarrantDigest(body) })
 }
@@ -395,13 +488,18 @@ export async function applyInProcessReload(input: {
   }
   assertReloadable(snapshot.target)
   assertInProcessScope(snapshot)
+  const mode = resolveMode(snapshot)
+  if ((warrant.mode ?? 'config-only') !== mode) {
+    throw new InProcessReloadRefusal('artifact-digest-mismatch', 'in-process reload warrant mode does not match the plan snapshot')
+  }
   let result: InProcessReloadHostActivationResult
   try {
     result = await port.activate({
       warrantDigest: warrant.digest,
-      target: { ...warrant.target },
+      target: cloneTarget(warrant.target),
       previousHostGeneration: warrant.previousHostGeneration,
       previousInProcessGeneration: warrant.previousInProcessGeneration,
+      ...(mode === 'artifact-replace' ? { mode } : {}),
     })
   } catch (error) {
     return failure(`Host activation failed: ${error instanceof Error ? error.message : String(error)}`, 'host-activation-failed', warrant.digest)
@@ -417,6 +515,10 @@ export async function applyInProcessReload(input: {
   if (!probed(result.probe)) return failure('Host probe is missing or malformed', 'probe-failed', warrant.digest)
   if (result.probe.failures !== 0) return failure(`Host probe reported ${result.probe.failures} failure(s)`, 'probe-failed', warrant.digest)
   if (!result.probe.reloaded) return failure('Host probe did not observe replaced fibers', 'unproven-reload', warrant.digest)
+  if (mode === 'artifact-replace' && snapshot.running.artifactDigest !== snapshot.target.artifactDigest
+    && result.probe.fibersDisposed < 1) {
+    return failure('Host probe did not observe disposal of the replaced fiber', 'probe-failed', warrant.digest)
+  }
   return {
     status: 'reloaded',
     reloaded: true,
@@ -463,7 +565,7 @@ export async function rollbackInProcessReload(input: {
   try {
     result = await port.rollback({
       warrantDigest: warrant.digest,
-      target: { ...warrant.target },
+      target: cloneTarget(warrant.target),
       reloadedInProcessGeneration: snapshot.inProcessGeneration,
     })
   } catch (error) {
@@ -484,5 +586,88 @@ export async function rollbackInProcessReload(input: {
     inProcessGeneration: result.inProcessGeneration,
     probeDigest: result.probe.probeDigest,
     warrantDigest: warrant.digest,
+  }
+}
+
+export interface InProcessReloadHandoffInput {
+  snapshot: InProcessReloadSnapshot
+  port: InProcessReloadHostPort
+  requestedAt?: number
+  ttlMs?: number
+  now?: number
+  /** Automatically drive `rollbackInProcessReload` when activation returns `rollback-pending` (default true). */
+  autoRollback?: boolean
+}
+
+export type InProcessReloadHandoffResult =
+  | { status: 'reloaded'; warrant: InProcessReloadWarrant; apply: InProcessReloadApplied }
+  | { status: 'rolled-back'; warrant: InProcessReloadWarrant; apply: InProcessReloadRollbackPending; rollback: InProcessReloadRolledBack }
+  | { status: 'rollback-pending'; warrant: InProcessReloadWarrant; apply: InProcessReloadRollbackPending; rollback?: InProcessReloadRollbackPending }
+
+/**
+ * Prepare a digest-bound reload warrant, execute the Host reload, and automatically
+ * hand off to `rollbackInProcessReload` if the Host activation leaves `rollback-pending`.
+ */
+export async function executeInProcessReloadHandoff(input: InProcessReloadHandoffInput): Promise<InProcessReloadHandoffResult> {
+  const now = input.now ?? Date.now()
+  const requestedAt = input.requestedAt ?? now
+  const ttlMs = input.ttlMs ?? 30_000
+  const warrant = prepareInProcessReload({ snapshot: input.snapshot, requestedAt, ttlMs })
+  const applied = await applyInProcessReload({ warrant, snapshot: input.snapshot, port: input.port, now })
+  if (applied.status === 'reloaded') {
+    return { status: 'reloaded', warrant, apply: applied }
+  }
+  if (input.autoRollback === false) {
+    return { status: 'rollback-pending', warrant, apply: applied }
+  }
+  const rollbackSnapshot: InProcessReloadSnapshot = {
+    ...input.snapshot,
+    status: 'rollback-pending',
+  }
+  const rolledBack = await rollbackInProcessReload({
+    warrant,
+    snapshot: rollbackSnapshot,
+    port: input.port,
+    now,
+  })
+  if (rolledBack.status === 'rolled-back') {
+    return { status: 'rolled-back', warrant, apply: applied, rollback: rolledBack }
+  }
+  return { status: 'rollback-pending', warrant, apply: applied, rollback: rolledBack }
+}
+
+export function buildInProcessReloadRequirements(input: {
+  previousHostGeneration: number
+  previousInProcessGeneration: number
+  artifactDigest: string
+  patchDigest: string
+  minimumChecks?: number
+}): HostAttestationRequirements {
+  return {
+    kind: 'in-process-reload',
+    previousHostGeneration: input.previousHostGeneration,
+    previousInProcessGeneration: input.previousInProcessGeneration,
+    artifactDigest: input.artifactDigest,
+    patchDigest: input.patchDigest,
+    minimumChecks: input.minimumChecks ?? 1,
+  }
+}
+
+export function buildInProcessReloadEvidence(input: {
+  applied: InProcessReloadApplied
+  checks?: number
+}): HostAttestationEvidence {
+  const { applied } = input
+  return {
+    kind: 'in-process-reload',
+    reloaded: true,
+    previousHostGeneration: applied.previousHostGeneration,
+    currentHostGeneration: applied.currentHostGeneration,
+    previousInProcessGeneration: applied.previousInProcessGeneration,
+    currentInProcessGeneration: applied.currentInProcessGeneration,
+    fibersDisposed: applied.fibersDisposed,
+    checks: input.checks ?? 1,
+    failures: 0,
+    probeDigest: applied.probeDigest,
   }
 }

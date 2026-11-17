@@ -31,13 +31,21 @@ export * from './learning-command.js'
 export { externalPrincipalId, ownerRouteAuthorityHash } from './canonical.js'
 export { deliverySchemaVersion } from './sqlite.js'
 export {
+  IN_PROCESS_RELOAD_DENYLIST,
+  computeInProcessArtifactDigest,
+  computeInProcessPatchDigest,
   createInProcessReloadRuntime,
+  stageInProcessArtifact,
 } from './in-process-reload-runtime.js'
 export type {
+  InProcessReloadArtifactSpec,
+  InProcessReloadMode,
   InProcessReloadRuntime, InProcessReloadRuntimeActivationInput, InProcessReloadRuntimeActivationResult,
   InProcessReloadRuntimeOptions, InProcessReloadRuntimeProbe, InProcessReloadRuntimeRollbackInput,
   InProcessReloadRuntimeRollbackResult, InProcessReloadRuntimeTarget,
+  StageInProcessArtifactResult,
 } from './in-process-reload-runtime.js'
+export type { InProcessReloadServiceConfig } from './service.js'
 export {
   ActiveLarkOwnerBindingsSnapshotError, activeLarkOwnerBindingsSnapshotProtocol,
   inspectActiveLarkOwnerBindingsLocally, inspectActiveWebOwnerBindingLocally,

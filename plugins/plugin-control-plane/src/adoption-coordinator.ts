@@ -46,8 +46,17 @@ export function validateAdoptionCoordinatorConfig(value: unknown): asserts value
 function terminal(plan: PluginActivationPlan): boolean { return plan.status === 'activated' || plan.status === 'rolled-back' }
 function exposed(plan: PluginActivationPlan): boolean { return plan.status === 'staging' || plan.status === 'commit-pending' || plan.status === 'awaiting-live-tasks' || AWAITING.has(plan.status) }
 
+export interface AdoptionInProcessReloadHook {
+  canHandle(plan: PluginActivationPlan): boolean
+  execute(plan: PluginActivationPlan): Promise<
+    | { status: 'reloaded'; plan: PluginActivationPlan }
+    | { status: 'rolled-back' | 'rollback-pending'; plan?: PluginActivationPlan; failureCode?: string }
+  >
+}
+
 /**
- * Advance an already signed source handoff only through Host attestation.
+ * Advance an already signed source handoff only through Host attestation (or an
+ * explicit in-process reload hook when the deployment is eligible).
  * This Host deliberately leaves `commit-pending` for the target Host.
  */
 export async function coordinateAdoptionHandoff(options: {
@@ -56,6 +65,7 @@ export async function coordinateAdoptionHandoff(options: {
   planId: string
   signal?: AbortSignal
   assertCurrent?: () => void | Promise<void>
+  inProcessReload?: AdoptionInProcessReloadHook
 }): Promise<PluginActivationPlan> {
   const current = async (): Promise<void> => {
     options.signal?.throwIfAborted()
@@ -115,8 +125,19 @@ export async function coordinateAdoptionHandoff(options: {
     } else if (AWAITING.has(plan.status)) {
       if (plan.activation === undefined) throw new Error('plugin-control-plane: adoption plan awaiting Host attestation has no fence')
       options.store.assertAdoptionHandoff(plan.id)
-      plan = await probePluginPlan({ store: options.store, trust: options.trust, planId: plan.id,
-        expectedRevision: plan.revision, expectedFence: plan.activation.fence, deferCommit: true, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      if (plan.status === 'awaiting-reload' && options.inProcessReload?.canHandle(plan)) {
+        const outcome = await options.inProcessReload.execute(plan)
+        if (outcome.status === 'reloaded') {
+          plan = outcome.plan
+        } else if (outcome.status === 'rolled-back' && outcome.plan !== undefined) {
+          return outcome.plan
+        } else {
+          return recoverExpired(outcome.plan ?? plan, outcome.failureCode ?? 'in-process-reload-failed')
+        }
+      } else {
+        plan = await probePluginPlan({ store: options.store, trust: options.trust, planId: plan.id,
+          expectedRevision: plan.revision, expectedFence: plan.activation.fence, deferCommit: true, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      }
     } else if (plan.status === 'commit-pending') {
       return plan
     } else return plan

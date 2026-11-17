@@ -83,6 +83,11 @@ import {
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, ForegroundExecution, TaskAcceptanceRegistration } from './acceptance.js'
+import {
+  IN_PROCESS_RELOAD_DENYLIST,
+  createInProcessReloadRuntime,
+  type InProcessReloadRuntime,
+} from './in-process-reload-runtime.js'
 import type { ForegroundTerminationObservation } from './foreground-termination.js'
 import { isSynchronousForegroundObservationHandle, validForegroundObservationRegistration,
   type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration,
@@ -557,6 +562,11 @@ export interface Config {
    */
   naturalFeedback?: { coverage?: boolean; mixedIntent?: boolean }
   /**
+   * Opt-in Host-side Cordis in-process reload runtime registration.
+   * When omitted, no `inProcessReload` service is registered and `--dump-config` is unchanged.
+   */
+  inProcessReload?: InProcessReloadServiceConfig
+  /**
    * Opt-in peer-agent allowlist (default empty). A group message whose provider
    * envelope carries `senderIsBot=true` and whose exact principal tuple is
    * listed here is admitted into its own linked-principal lane. The peer keeps a
@@ -564,6 +574,15 @@ export interface Config {
    * feedback or continuation lanes. No peer is trusted by default.
    */
   peerAgents?: readonly PeerAgentAuthority[]
+}
+
+export interface InProcessReloadServiceConfig {
+  profilePath: string
+  entryId?: string
+  package?: string
+  stagingDir?: string
+  hostGeneration?: number
+  timeoutMs?: number
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -821,6 +840,14 @@ function isOwnerGoalSnapshotLocator(value: unknown): value is OwnerGoalExecution
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
   spoolPath: Schema.string().required(),
+  inProcessReload: Schema.union([Schema.object({
+    profilePath: Schema.string().min(1).required(),
+    entryId: Schema.string().min(1),
+    package: Schema.string().min(1),
+    stagingDir: Schema.string().min(1),
+    hostGeneration: Schema.number().step(1).min(1),
+    timeoutMs: Schema.number().step(1).min(1_000).max(120_000),
+  })]),
   restart: Schema.union([Schema.object({
     databasePath: Schema.string().required(),
     ownerRouteId: Schema.string().min(1).required(),
@@ -891,6 +918,7 @@ const configSchema = Schema.object({
 declare module '@deepseek-ai/cordis' {
   interface Context {
     assistantDelivery: AssistantDeliveryService
+    inProcessReload?: InProcessReloadRuntime
   }
 }
 
@@ -1459,6 +1487,25 @@ export class AssistantDeliveryService extends Service {
     if (config.restart !== undefined && (!isAbsolute(config.restart.databasePath)
       || config.restart.databasePath === config.databasePath || !this.ownerRoutes.has(config.restart.ownerRouteId))) {
       throw new Error('assistant-delivery: restart requires a separate absolute journal and an exact configured owner route')
+    }
+    if (config.inProcessReload !== undefined) {
+      const reloadConfig = config.inProcessReload
+      if (!isAbsolute(reloadConfig.profilePath)
+        || (reloadConfig.stagingDir !== undefined && !isAbsolute(reloadConfig.stagingDir))) {
+        throw new Error('assistant-delivery: inProcessReload requires absolute profilePath and stagingDir paths')
+      }
+      if (reloadConfig.package !== undefined && IN_PROCESS_RELOAD_DENYLIST.includes(reloadConfig.package)) {
+        throw new Error(`assistant-delivery: inProcessReload package ${reloadConfig.package} is denied`)
+      }
+      const runtime = createInProcessReloadRuntime(ctx, {
+        profilePath: reloadConfig.profilePath,
+        ...(reloadConfig.entryId === undefined ? {} : { entryId: reloadConfig.entryId }),
+        ...(reloadConfig.package === undefined ? {} : { package: reloadConfig.package }),
+        ...(reloadConfig.stagingDir === undefined ? {} : { stagingDir: reloadConfig.stagingDir }),
+        hostGeneration: () => reloadConfig.hostGeneration ?? 1,
+        ...(reloadConfig.timeoutMs === undefined ? {} : { timeoutMs: reloadConfig.timeoutMs }),
+      })
+      ctx.reflect.provide('inProcessReload', runtime, () => this.active)
     }
     try { this.restartStore = config.restart === undefined ? undefined : new RestartStore({ path: config.restart.databasePath }) }
     catch (error) {
