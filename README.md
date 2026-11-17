@@ -34,8 +34,8 @@ flowchart TB
     CON["owner-console<br/>文鳐左栏控制台"]
   end
   subgraph core["🔐 持久消息与授权"]
-    DL["assistant-delivery<br/>inbox/outbox · 配对 · 重试"]
-    POL["assistant-policy<br/>默认拒绝 · 硬预算 · 审批"]
+    DL["assistant-delivery<br/>inbox/outbox · 配对 · 注意力/附件"]
+    POL["assistant-policy<br/>默认拒绝 · 硬预算 · 审批/预设"]
     AUTO["assistant-automations<br/>冷启动可恢复调度"]
   end
   subgraph task["🧩 持久任务与验收"]
@@ -54,9 +54,9 @@ flowchart TB
     EV["assistant-evolution"]
   end
   subgraph aware["🎯 评测 / 主动 / 事件"]
-    EVA["assistant-evaluation<br/>结果与注意力账本"]
-    PRO["assistant-proactive"]
-    ET["event-triggers"]
+    EVA["assistant-evaluation<br/>结果与注意力/吻合度账本"]
+    PRO["assistant-proactive<br/>主动筛选 · 评估与退订"]
+    ET["event-triggers<br/>受控事件源 · intake 桥接"]
     HB["assistant-heartbeat"]
   end
   subgraph ops["🛡 安全与运维"]
@@ -97,7 +97,11 @@ flowchart TB
   HEA --> REC
 ```
 
-完整包清单与各自边界见[插件目录](plugins/README.md)；共享库在 `packages/*`，不自动启用。
+完整包清单与各自边界见[插件目录](plugins/README.md)；共享库在 `packages/*`，不自动启用。当前主线另集成三项默认关闭、需显式开启（opt-in）的主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
+
+- **受控事件源与目标退订**：`event-triggers` 5 类 sensor（GitHub 仓库、飞书日历、文件、HTTPS/JSON、Webhook）可按触发器开启 `intake` 适配器桥接至 `assistant-work-items`，并在 `assistant-proactive` / Goal 终态时无轮询自动退订。
+- **超限文本附件与注意力边界**：`assistant-delivery`（`attentionAttachOverCap`）配合 `assistant-web-owner` 与 `lark-channel` 支持把超长后台/owner 通知转为短摘要加 UTF-8 文本附件，同时保持目的审计与可选强制门禁（`attentionEnforce` 默认关闭）。
+- **Inferred 规则预设与吻合度闭环**：`assistant-policy`（`conservative` / `balanced`）与 `assistant-proactive` 提供 opt-in `inferred` intake 规则预设；`assistant-work-items` 只读 `listIntakeEvaluationFeed` 供 `assistant-evaluation` 记录 `would-accept` 吻合度，用于密封留出重放与一次性授权内的有界调优。
 
 ## 开始使用
 
