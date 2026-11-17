@@ -45,6 +45,8 @@ export interface RsiInstallInput { dshHome: string; profile: string; sourceRepos
   enableOrdinaryUseLearning?: boolean | undefined
   /** Fresh-install-only skip decision; a retry preserves the stored (missing) memory-learning chain. */
   skipMemoryLearning?: boolean | undefined
+  /** Fresh-install-only plugin revision opt-in/opt-out (used by macOS native owner setup; defaults to true). */
+  enableRevision?: boolean | undefined
   /** Explicit evaluator route when the composition has no Delivery agentProvider/agentModel. */
   intakeProvider?: string | undefined
   intakeModel?: string | undefined }
@@ -393,10 +395,22 @@ export async function preflightRsiOwnerReadiness(value: RsiOwnerPreflightInput):
   // complete, and each root must be a readable/searchable directory on the host.
   await preflightStage('cgroup', async () => {
     const roots = prepared.build.sourceBuild.cgroupRoots
-    const control = roots.mode === 'v1' ? [roots.cpu, roots.memory, roots.pids, roots.freezer] : []
-    if (roots.mode !== 'v1' || control.length !== 4 || new Set(control).size !== 4
-      || control.some(path => !isAbsolute(path) || resolve(path) !== path)) {
-      throw new Error('delegated cgroup v1 roots are incomplete')
+    const raw = roots as unknown as Record<string, unknown> | null | undefined
+    const keys = raw && typeof raw === 'object' ? Object.keys(raw).sort().join(',') : ''
+    let control: string[]
+    if (roots?.mode === 'v1' && keys === 'cpu,freezer,memory,mode,pids') {
+      control = [roots.cpu, roots.memory, roots.pids, roots.freezer]
+      if (control.some(path => typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path)
+        || new Set(control).size !== 4) {
+        throw new Error('delegated cgroup v1 roots are incomplete')
+      }
+    } else if (roots?.mode === 'v2' && keys === 'mode,unified') {
+      if (typeof roots.unified !== 'string' || !isAbsolute(roots.unified) || resolve(roots.unified) !== roots.unified) {
+        throw new Error('delegated cgroup v2 root is invalid')
+      }
+      control = [roots.unified]
+    } else {
+      throw new Error('delegated cgroup roots are incomplete')
     }
     const probe = value.cgroupRootsProbe ?? (async (path: string, probeSignal: AbortSignal) => {
       probeSignal.throwIfAborted()

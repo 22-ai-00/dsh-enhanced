@@ -200,3 +200,97 @@ describe('native RSI installation transaction', () => {
     expect(f.state.registered).toBe(false)
   })
 })
+
+describe('native pluginRevision transaction and runner directory preparation', () => {
+  test('defaults enableRevision to true, honors opt-out, preserves plan across retries, and rejects incompatible toggles', async () => {
+    const withWrappedCompile = (f: Awaited<ReturnType<typeof fixture>>) => {
+      const baseCompile = f.ports.compile
+      const calls: boolean[] = []
+      f.ports.compile = vi.fn(value => {
+        const enabled = value.enableRevision !== false
+        calls.push(enabled)
+        const base = baseCompile(value)
+        if (!enabled) return base
+        return {
+          ...base,
+          manifest: {
+            ...base.manifest,
+            pluginRevision: {
+              revision: {}, reviews: {}, regressions: {}, verifications: {}, regressionVerifications: {},
+            },
+          },
+        } as unknown as ReturnType<NativeRsiInstallPorts['compile']>
+      })
+      return calls
+    }
+
+    const f = await fixture()
+    const calls = withWrappedCompile(f)
+    await expect(installNativeRsiOwnerDeployment(f.input, f.ports)).resolves.toMatchObject({ mode: 'ready' })
+    expect(calls).toEqual([true])
+    // Idempotent retry preserves stored pluginRevision and rejects opt-out downgrade.
+    await expect(installNativeRsiOwnerDeployment(f.input, f.ports)).resolves.toMatchObject({ mode: 'ready' })
+    expect(calls).toEqual([true, true])
+    await expect(installNativeRsiOwnerDeployment({ ...f.input, enableRevision: false }, f.ports))
+      .rejects.toThrow('cannot drop plugin revision')
+    await expect(installNativeRsiOwnerDeployment({ ...f.input, enableRevision: 'bad' as unknown as boolean }, f.ports))
+      .rejects.toThrow('invalid native revision opt-in')
+
+    // Separate fresh profile with explicit enableRevision: false opt-out.
+    const fOptOut = await fixture()
+    const optOutCalls = withWrappedCompile(fOptOut)
+    await expect(installNativeRsiOwnerDeployment({ ...fOptOut.input, enableRevision: false }, fOptOut.ports))
+      .resolves.toMatchObject({ mode: 'ready' })
+    expect(optOutCalls).toEqual([false])
+    await expect(installNativeRsiOwnerDeployment(fOptOut.input, fOptOut.ports)).resolves.toMatchObject({ mode: 'ready' })
+    expect(optOutCalls).toEqual([false, false])
+    await expect(installNativeRsiOwnerDeployment({ ...fOptOut.input, enableRevision: true }, fOptOut.ports))
+      .rejects.toThrow('cannot be expanded with plugin revision')
+  })
+
+  test('prepare prepares 0700 revision-review-runner and revision-regression-runner dirs unless enableRevision is false', async () => {
+    const f = await fixture()
+    const { lstat } = await import('node:fs/promises')
+    const prepared = await f.ports.prepare(f.input, new AbortController().signal)
+    vi.resetModules()
+    vi.doMock('../src/rsi-source.js', () => ({ prepareRsiSourceWorkspace: async () => ({ schemaVersion: 1, sourceCommit: 'a'.repeat(40), repository: '/tmp/repo', baseline: {} }) }))
+    vi.doMock('../src/rsi-authority-resources.js', () => ({ prepareRsiAuthorityResources: async (input: { profile: string }) => ({ stateRoot: join(f.input.dshHome, 'rsi-authorities', input.profile, 'state'), configRoot: prepared.resources.configRoot }) }))
+    vi.doMock('../src/rsi-native-runtime-bootstrap.js', () => ({
+      prepareNativeRsiRuntime: async () => ({ schemaVersion: 2, sourceCommit: 'a'.repeat(40), runtime: {}, sourceBuild: {} }),
+      nativeRsiCreationBuild: (build: { sourceCommit: string; runtime: unknown }) => ({ schemaVersion: 2, backend: 'macos-seatbelt', sourceCommit: build.sourceCommit, runtime: build.runtime }),
+    }))
+    vi.doMock('../src/rsi-install-inputs.js', async importOriginal => ({
+      ...await importOriginal<typeof import('../src/rsi-install-inputs.js')>(),
+      resolveInstalledRsiDsh: async () => ({ version: '1.0.0', path: process.execPath, pin: { sha256: 'b'.repeat(64) } }),
+    }))
+
+    try {
+      const mod = await import('../src/rsi-native-install.js')
+      const defaultStateRoot = join(f.input.dshHome, 'rsi-authorities', f.input.profile, 'state')
+      await mod.nativeRsiInstallPorts.prepare(f.input, new AbortController().signal)
+      for (const name of ['creation-review-runner', 'creation-adoption-runner', 'revision-review-runner', 'revision-regression-runner']) {
+        const info = await lstat(join(defaultStateRoot, name))
+        expect(info.isDirectory()).toBe(true)
+        expect(info.mode & 0o777).toBe(0o700)
+      }
+
+      const optOutProfile = `${f.input.profile}-optout`
+      const optOutStateRoot = join(f.input.dshHome, 'rsi-authorities', optOutProfile, 'state')
+      await mkdir(optOutStateRoot, { recursive: true, mode: 0o700 })
+      await mod.nativeRsiInstallPorts.prepare({ ...f.input, profile: optOutProfile, enableRevision: false }, new AbortController().signal)
+      for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
+        const info = await lstat(join(optOutStateRoot, name))
+        expect(info.isDirectory()).toBe(true)
+        expect(info.mode & 0o777).toBe(0o700)
+      }
+      await expect(lstat(join(optOutStateRoot, 'revision-review-runner'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(join(optOutStateRoot, 'revision-regression-runner'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      vi.doUnmock('../src/rsi-source.js')
+      vi.doUnmock('../src/rsi-authority-resources.js')
+      vi.doUnmock('../src/rsi-native-runtime-bootstrap.js')
+      vi.doUnmock('../src/rsi-install-inputs.js')
+      vi.resetModules()
+    }
+  })
+})

@@ -1,3 +1,10 @@
 /** Compatibility adapter; discovery is independent of RSI preparation. */
-export { discoverLinuxCgroupRoots, parseLinuxV1ControllerMounts,
-  RsiLinuxCgroupUnavailableError, type LinuxV1CgroupRoots } from '@dsh-enhanced/assistant-isolation/native-resources'
+export {
+  discoverLinuxCgroupRoots,
+  parseLinuxV1ControllerMounts,
+  parseLinuxV2UnifiedMount,
+  RsiLinuxCgroupUnavailableError,
+  type LinuxCgroupRoots,
+  type LinuxV1CgroupRoots,
+  type LinuxV2CgroupRoots,
+} from '@dsh-enhanced/assistant-isolation/native-resources'

@@ -158,6 +158,15 @@ describe('owner readiness preflight', () => {
     await expect(preflightRsiOwnerReadiness({ ...f.value,
       prepared: { ...f.value.prepared, build: { sourceBuild: { cgroupRoots: { ...f.value.prepared.build.sourceBuild.cgroupRoots, mode: 'v2' } } } } } as never))
       .rejects.toMatchObject({ stage: 'cgroup' })
+    await expect(preflightRsiOwnerReadiness({ ...f.value,
+      prepared: { ...f.value.prepared, build: { sourceBuild: { cgroupRoots: { mode: 'v2', unified: f.roots.cpu } } } } } as never))
+      .resolves.toBeUndefined()
+    await expect(preflightRsiOwnerReadiness({ ...f.value,
+      prepared: { ...f.value.prepared, build: { sourceBuild: { cgroupRoots: { mode: 'v2', unified: 'relative/uid-1000' } } } } } as never))
+      .rejects.toMatchObject({ stage: 'cgroup' })
+    await expect(preflightRsiOwnerReadiness({ ...f.value,
+      prepared: { ...f.value.prepared, build: { sourceBuild: { cgroupRoots: { mode: 'v2', unified: join(f.root, 'missing-v2-root') } } } } } as never))
+      .rejects.toMatchObject({ stage: 'cgroup' })
     await expect(preflightRsiOwnerReadiness({ ...f.value, manifest: { ...f.value.manifest,
       controlPlane: { runtimeObserver: { ...f.value.manifest.controlPlane.runtimeObserver,
         socketPath: join(f.root, 'nested', 'x'.repeat(120), 'observer.sock') } } } } as never))

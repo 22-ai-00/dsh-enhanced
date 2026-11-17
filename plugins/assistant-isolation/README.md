@@ -473,8 +473,8 @@ receipt location `rsi-linux-runtimes/<profile>`, exact receipt field order/diges
 archive pins and whole-tree/inode validation. The path name is compatibility
 storage, not a requirement for an RSI source workspace.
 
-`discoverLinuxCgroupRoots({signal?})` independently reads existing delegated v1
-roots. It never prepares or grants a cgroup and is deliberately not a prerequisite
+`discoverLinuxCgroupRoots({signal?})` independently reads existing delegated v1 or
+unified v2 roots. It never prepares or grants a cgroup and is deliberately not a prerequisite
 of the base resource builder. `probeLinuxIsolationRuntime` is re-exported unchanged:
 calling it explicitly performs the existing finite isolation probe. Resources do
 not start Host services, configure owners/grants, renew budgets or run sudo. Linux

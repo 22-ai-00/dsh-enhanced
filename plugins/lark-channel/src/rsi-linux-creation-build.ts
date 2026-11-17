@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { linuxRuntimeDigest, type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
 import { rsiBuildResources as io } from './rsi-build.js'
-import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError, type LinuxV1CgroupRoots } from './rsi-linux-cgroup-roots.js'
+import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError, type LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import { prepareLinuxRsiRepositoryRuntime, readLinuxRsiRepositoryRuntime,
   type LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
 import { LinuxRsiRuntimeUnavailableError, type LinuxRsiBootstrapInput } from './rsi-linux-runtime-bootstrap.js'
@@ -18,7 +18,7 @@ export interface LinuxRsiCreationBuildEnvironment {
   backend: 'linux-native'
   sourceCommit: string
   behavior: LinuxPluginBehaviorRuntime
-  cgroupRoots: LinuxV1CgroupRoots
+  cgroupRoots: LinuxCgroupRoots
   /** Original schema4 base, already verified against the behavior preparation.
    * The installer requires this binding; generic legacy setup callers may omit it. */
   buildRuntimeDigest?: string
@@ -129,7 +129,7 @@ async function validateIdentity(input: LinuxRsiCreationPrepareInput): Promise<vo
 }
 
 async function replayExisting(input: LinuxRsiCreationPrepareInput, final: string,
-  repository: LinuxRsiRepositoryBuildEnvironment, cgroupRoots: LinuxV1CgroupRoots,
+  repository: LinuxRsiRepositoryBuildEnvironment, cgroupRoots: LinuxCgroupRoots,
   peer: LinuxBehaviorPeer, signal: AbortSignal): Promise<LinuxRsiCreationBuildEnvironment> {
   await io.directory(final)
   if (!isDeepStrictEqual(await readdir(final), ['bootstrap.json'])) fail('behavior workspace incomplete or unexpected')

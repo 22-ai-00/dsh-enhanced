@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { discoverLinuxCgroupRoots, parseLinuxV1ControllerMounts,
-  RsiLinuxCgroupUnavailableError } from '../src/rsi-linux-cgroup-roots.js'
+import {
+  discoverLinuxCgroupRoots,
+  parseLinuxV1ControllerMounts,
+  parseLinuxV2UnifiedMount,
+  RsiLinuxCgroupUnavailableError,
+} from '../src/rsi-linux-cgroup-roots.js'
 
 const line = (mount: string, options: string, type = 'cgroup'): string =>
   `30 29 0:31 / ${mount} rw,nosuid,nodev,noexec,relatime shared:16 - ${type} ${type} rw,${options}`
@@ -61,19 +65,55 @@ describe('discoverLinuxCgroupRoots', () => {
     expect(discoverLinuxCgroupRoots()).rejects.toThrow('never root')
   })
 
-  it.runIf(process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch))('returns a strict v1 root set or a not-ready environment error, never a fallback', async () => {
+  it.runIf(process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch))('returns a strict v1 or v2 root set or a not-ready environment error, never a fallback', async () => {
     try {
       const roots = await discoverLinuxCgroupRoots()
-      expect(roots.mode).toBe('v1')
-      expect(Object.keys(roots).sort()).toEqual(['cpu', 'freezer', 'memory', 'mode', 'pids'])
       const owner = process.getuid!()
-      const leaf = new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${owner}$`, 'u')
-      for (const path of [roots.cpu, roots.memory, roots.pids, roots.freezer]) expect(path).toMatch(leaf)
-      expect(new Set([roots.cpu, roots.memory, roots.pids, roots.freezer]).size).toBe(4)
+      if (roots.mode === 'v1') {
+        expect(Object.keys(roots).sort()).toEqual(['cpu', 'freezer', 'memory', 'mode', 'pids'])
+        const leaf = new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${owner}$`, 'u')
+        for (const path of [roots.cpu, roots.memory, roots.pids, roots.freezer]) expect(path).toMatch(leaf)
+        expect(new Set([roots.cpu, roots.memory, roots.pids, roots.freezer]).size).toBe(4)
+      } else {
+        expect(roots.mode).toBe('v2')
+        expect(Object.keys(roots).sort()).toEqual(['mode', 'unified'])
+        expect(roots.unified).toBe(`/sys/fs/cgroup/dsh-native/uid-${owner}`)
+      }
     } catch (error) {
       // On hosts without the root-run delegation (CI workstations) discovery is
       // not-ready; any other error class would mean probing created or guessed.
       expect(error).toBeInstanceOf(RsiLinuxCgroupUnavailableError)
     }
+  })
+})
+
+describe('parseLinuxV2UnifiedMount', () => {
+  const pureV2 = [
+    '22 1 8:1 / / rw,relatime - ext4 /dev/root rw',
+    '29 22 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate',
+  ]
+
+  it('resolves a pure unified cgroup2 mount at /sys/fs/cgroup', () => {
+    expect(parseLinuxV2UnifiedMount(pureV2)).toBe('/sys/fs/cgroup')
+  })
+
+  it('fails closed on hybrid, missing, non-canonical, and ambiguous cgroup2 mounts', () => {
+    expect(() => parseLinuxV2UnifiedMount([
+      ...validMountinfo(),
+      '30 25 0:28 / /sys/fs/cgroup/unified rw,nosuid,nodev,noexec - cgroup2 cgroup2 rw',
+    ])).toThrow(RsiLinuxCgroupUnavailableError)
+    expect(() => parseLinuxV2UnifiedMount([
+      ...pureV2,
+      '30 29 0:27 / /sys/fs/cgroup/systemd rw - cgroup cgroup rw,name=systemd',
+    ])).toThrow(/hybrid/u)
+    expect(() => parseLinuxV2UnifiedMount(validMountinfo())).toThrow(RsiLinuxCgroupUnavailableError)
+    expect(() => parseLinuxV2UnifiedMount([])).toThrow(/missing/u)
+    expect(() => parseLinuxV2UnifiedMount([
+      '29 22 0:26 / /sys/fs/cgroup/unified rw - cgroup2 cgroup2 rw',
+    ])).toThrow(/unexpected cgroup v2 mount/u)
+    expect(() => parseLinuxV2UnifiedMount([
+      ...pureV2,
+      '31 29 0:29 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw',
+    ])).toThrow(/multiple cgroup v2 mounts/u)
   })
 })

@@ -282,3 +282,14 @@ describe('rsi Linux native materialize', () => {
       new RegExp(`^${PREFIX}unsafe creation receipt: `, 'u'))
   })
 })
+
+describe('Linux-native materialization with cgroup v2', () => {
+  linux('materializes sourceBuild with delegated cgroup v2 unified roots intact', async () => {
+    const ctx = await fixture('v2')
+    const output = await materializeLinuxRsiNativeInStage(input(ctx))
+    expect(output.sourceBuild.cgroupRoots).toEqual({
+      mode: 'v2',
+      unified: `/sys/fs/cgroup/dsh-native/uid-${process.getuid!()}`,
+    })
+  })
+})

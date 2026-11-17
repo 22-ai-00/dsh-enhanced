@@ -189,7 +189,7 @@ async function releaseTrees(profileRoot: string): Promise<{ toolchain: string; s
 }
 
 /** Build the five receipt-bound families a prepared Linux-native Home carries. */
-export async function fixture(): Promise<Fixture> {
+export async function fixture(cgroupMode: 'v1' | 'v2' = 'v1'): Promise<Fixture> {
   const parent = await mkdtemp(join(await realpath(tmpdir()), 'dsh-linux-relocation-test-'))
   directories.push(parent)
   const sourceHome = join(parent, 'source-home')
@@ -277,13 +277,16 @@ export async function fixture(): Promise<Fixture> {
   })
   await writeReceipt(join(behaviorFamily, 'behavior.json'), behaviorReceipt, 0o444)
 
-  const cgroupRoots = {
-    mode: 'v1',
-    cpu: `/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-${process.getuid!()}`,
-    memory: `/sys/fs/cgroup/memory/dsh-native/uid-${process.getuid!()}`,
-    pids: `/sys/fs/cgroup/pids/dsh-native/uid-${process.getuid!()}`,
-    freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${process.getuid!()}`,
-  }
+  const uid = process.getuid!()
+  const cgroupRoots = cgroupMode === 'v2'
+    ? { mode: 'v2' as const, unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
+    : {
+      mode: 'v1' as const,
+      cpu: `/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-${uid}`,
+      memory: `/sys/fs/cgroup/memory/dsh-native/uid-${uid}`,
+      pids: `/sys/fs/cgroup/pids/dsh-native/uid-${uid}`,
+      freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${uid}`,
+    }
   await writeReceipt(join(creationFamily, 'bootstrap.json'), seal({
     schemaVersion: 3,
     backend: 'linux-native',

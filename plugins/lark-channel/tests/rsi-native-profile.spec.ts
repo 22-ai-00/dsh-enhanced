@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
@@ -24,7 +24,9 @@ async function fixture(): Promise<NativeRsiProfileInput> {
   const home = join(root, 'h'), workspace = join(root, 'w'), sourceRoot = join(root, 's'), release = join(root, 'r')
   for (const path of [home, workspace, sourceRoot, release, join(home, 'profiles', 'web')]) await mkdir(path, { recursive: true })
   const resources = await prepareRsiAuthorityResources({ dshHome: home, profile: 'web' })
-  for (const name of ['creation-review-runner', 'creation-adoption-runner']) await mkdir(join(resources.stateRoot, name), { mode: 0o700 })
+  for (const name of ['creation-review-runner', 'creation-adoption-runner', 'revision-review-runner', 'revision-regression-runner']) {
+    await mkdir(join(resources.stateRoot, name), { mode: 0o700 })
+  }
   const observer = { socketPath: join(resources.stateRoot, 'observer.sock'), keyPath: join(resources.configRoot, 'observer.key') }
   await writeFile(observer.keyPath, Buffer.alloc(32, 9), { mode: 0o600 })
   const principal = { channel: 'lark' as const, account: 'account', tenant: 'tenant', user: 'owner' }
@@ -119,7 +121,7 @@ describe('native owner learning profile', () => {
       runtime: { ...runtime, nodeSha256: 'c'.repeat(64) } } })).toThrow('native creation runtime differs')
   })
 
-  test('compiles finite memory and creation grants, final observation digests, and create-only Host authority', async () => {
+  test('compiles finite memory, creation, and default revision grants, final observation digests, and Host authority', async () => {
     const input = await fixture()
     const first = compileNativeRsiProfile(input)
     const rows = parse(first.targetPatch) as Array<{ id: string; config: any }>
@@ -127,13 +129,36 @@ describe('native owner learning profile', () => {
     const get = (name: string) => (rows.find(row => row.id === `dsh-enhanced-${name}`)
       ?? effectiveRows.find(row => row.id === `dsh-enhanced-${name}`))!.config
     expect(first.manifest).toMatchObject({ schemaVersion: 1, kind: 'native-plugin-learning', now: input.now, expiresAt: input.expiresAt })
-    expect(first.manifest.growthDriver.pluginSourceProposals).toMatchObject({ allowModification: false, allowCreation: true, allowRevision: false })
+    expect(first.manifest.growthDriver.pluginSourceProposals).toMatchObject({ allowModification: false, allowCreation: true, allowRevision: true })
     expect(get('assistant-growth-driver')).toMatchObject({ provider: 'owner-provider', model: 'owner-model' })
-    expect(get('plugin-control-plane').sourceJobs.allowedModes).toEqual(['create'])
+    expect(get('plugin-control-plane').sourceJobs.allowedModes).toEqual(['create', 'revise-created'])
+    expect(first.manifest.pluginRevision).toBeDefined()
+    expect(get('plugin-control-plane').sourceJobs.revision).toEqual(first.manifest.pluginRevision!.revision)
+    expect(get('plugin-control-plane').revisionVerifications).toEqual(first.manifest.pluginRevision!.verifications)
+    expect(get('plugin-control-plane').revisionRegressions).toEqual(first.manifest.pluginRevision!.regressionVerifications)
+    expect(new Set([
+      first.manifest.owner.authorityId,
+      first.manifest.pluginCreation.reviews.authorityId,
+      first.manifest.pluginCreation.capabilities.authorityId,
+      first.manifest.pluginRevision!.reviews.authorityId,
+      first.manifest.pluginRevision!.regressions.authorityId,
+    ]).size).toBe(5)
+    expect(first.manifest.pluginRevision!.reviews.runner).toMatchObject({
+      backend: 'macos-seatbelt',
+      runtime: input.creationBuild.runtime,
+      stateRoot: join(input.resources.stateRoot, 'revision-review-runner'),
+    })
+    expect(first.manifest.pluginRevision!.regressions.runner).toMatchObject({
+      backend: 'macos-seatbelt',
+      runtime: input.creationBuild.runtime,
+      stateRoot: join(input.resources.stateRoot, 'revision-regression-runner'),
+    })
     expect(get('plugin-control-plane')).not.toHaveProperty('sourceApprovals')
     expect(get('plugin-control-plane')).not.toHaveProperty('sourceReleases')
     expect(get('plugin-control-plane')).not.toHaveProperty('sourceAdoptions')
     expect(get('assistant-verifier').creationReviews.owner).toEqual(first.manifest.owner)
+    expect(get('assistant-verifier').revisionReviews).toEqual(first.manifest.pluginRevision!.reviews)
+    expect(get('assistant-verifier').revisionRegressions).toEqual(first.manifest.pluginRevision!.regressions)
     expect(get('assistant-verifier').memoryReviews.owner).toEqual(first.manifest.owner)
     expect(get('personal-assistant').personalMemory.automaticLearning.owner).toEqual(first.manifest.owner)
     expect(() => PolicyConfig(get('personal-assistant').assistantPolicy)).not.toThrow()
@@ -154,6 +179,45 @@ describe('native owner learning profile', () => {
     expect(targets.find(target => target.entryId === 'dsh-enhanced-personal-assistant')?.services).toContain('assistantAutomations')
     for (const target of targets) expect(target.configDigest).toBe(runtimeConfigDigest(get(target.entryId.slice('dsh-enhanced-'.length))))
     expect(compileNativeRsiProfile({ ...input, targetPatch: first.targetPatch }).targetPatch).toBe(first.targetPatch)
+  })
+
+  test('supports backwards-compatible explicit enableRevision opt-out and fails closed on conflicting revision grants', async () => {
+    const input = await fixture()
+    const optedOut = compileNativeRsiProfile({ ...input, enableRevision: false })
+    const rows = parse(optedOut.targetPatch) as Array<{ id: string; config: any }>
+    const effectiveRows = parse(input.targetEffective) as Array<{ id: string; config: any }>
+    const get = (name: string) => (rows.find(row => row.id === `dsh-enhanced-${name}`)
+      ?? effectiveRows.find(row => row.id === `dsh-enhanced-${name}`))!.config
+    expect(optedOut.manifest.pluginRevision).toBeUndefined()
+    expect(optedOut.manifest.growthDriver.pluginSourceProposals?.allowRevision).toBe(false)
+    expect(get('plugin-control-plane').sourceJobs.allowedModes).toEqual(['create'])
+    expect(get('plugin-control-plane').sourceJobs).not.toHaveProperty('revision')
+    expect(get('plugin-control-plane')).not.toHaveProperty('revisionVerifications')
+    expect(get('plugin-control-plane')).not.toHaveProperty('revisionRegressions')
+    expect(get('assistant-verifier')).not.toHaveProperty('revisionReviews')
+    expect(get('assistant-verifier')).not.toHaveProperty('revisionRegressions')
+    expect(() => normalizeControlPlaneConfig(get('plugin-control-plane'))).not.toThrow()
+
+    // Explicit opt-out refuses an existing profile that already granted revision authority.
+    const withRevision = compileNativeRsiProfile(input)
+    const patchMap = new Map((parse(withRevision.targetPatch) as Array<{ id: string; config?: Record<string, unknown> }>).map(row => [row.id, row.config]))
+    const mergedEffective = stringify((parse(input.targetEffective) as Array<{ id: string; config?: Record<string, unknown> }>).map(row => {
+      const patched = patchMap.get(row.id)
+      return patched ? { ...row, config: { ...row.config, ...patched } } : row
+    }))
+    expect(() => compileNativeRsiProfile({
+      ...input,
+      targetPatch: withRevision.targetPatch,
+      targetEffective: mergedEffective,
+      enableRevision: false,
+    })).toThrow(/existing revision.*differs/u)
+
+    // World-readable or missing revision runner directory fails when revision is active.
+    await chmod(join(input.resources.stateRoot, 'revision-regression-runner'), 0o755)
+    expect(() => compileNativeRsiProfile(input)).toThrow(/private directory/u)
+    await chmod(join(input.resources.stateRoot, 'revision-regression-runner'), 0o700)
+    await rm(join(input.resources.stateRoot, 'revision-review-runner'), { recursive: true, force: true })
+    expect(() => compileNativeRsiProfile(input)).toThrow(/ENOENT/u)
   })
 
   test('compiles the fresh ordinary-use evaluator, flagged memory grants and final observation digests', async () => {

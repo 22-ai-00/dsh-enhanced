@@ -2,7 +2,7 @@ import { join, isAbsolute, resolve } from 'node:path'
 import { controlPlaneDigest, validateSourceBuildConfig,
   type Config as ControlPlaneConfig, type CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
-import type { LinuxV1CgroupRoots } from './rsi-linux-cgroup-roots.js'
+import type { LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import type { LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
@@ -11,7 +11,7 @@ import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
 export interface RsiLinuxSourceBuildPreparation {
   backend: 'linux-native'
   repository: LinuxRsiRepositoryBuildEnvironment
-  cgroupRoots: LinuxV1CgroupRoots
+  cgroupRoots: LinuxCgroupRoots
 }
 
 type LinuxSourceBuild = Extract<NonNullable<ControlPlaneConfig['sourceBuild']>, { backend: 'linux-native' }>

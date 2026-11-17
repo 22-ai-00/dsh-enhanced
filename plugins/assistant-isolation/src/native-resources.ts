@@ -12,7 +12,14 @@ export { probeLinuxIsolationRuntime, type LinuxIsolationProbeConfig } from './pr
 export { validateLinuxRuntime, type LinuxRuntime } from './linux-runtime.js'
 export { validateLinuxCgroupRoots } from './linux-execution-contract.js'
 export type { LinuxCgroupRoots } from './linux-cgroups.js'
-export { discoverLinuxCgroupRoots, parseLinuxV1ControllerMounts, RsiLinuxCgroupUnavailableError, type LinuxV1CgroupRoots } from './native-cgroup-roots.js'
+export {
+  discoverLinuxCgroupRoots,
+  parseLinuxV1ControllerMounts,
+  parseLinuxV2UnifiedMount,
+  RsiLinuxCgroupUnavailableError,
+  type LinuxV1CgroupRoots,
+  type LinuxV2CgroupRoots,
+} from './native-cgroup-roots.js'
 
 export const NODE_VERSION = 'v22.23.2'
 const PNPM_VERSION = '11.7.0'

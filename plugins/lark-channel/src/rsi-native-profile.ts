@@ -12,6 +12,7 @@ import { createRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi
 import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { createRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi-plugin-creation.js'
+import { createRsiPluginRevisionSetup, type RsiPluginRevisionSetup } from './rsi-plugin-revision.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
 
@@ -34,6 +35,8 @@ export interface NativeRsiProfileInput {
   observer: { socketPath: string; keyPath: string }
   /** Fresh-install-only opt-in for the no-signing-key ordinary-use learning rings. */
   enableOrdinaryUseLearning?: boolean
+  /** Defaults to true when creationBuild is present; pass false to explicitly opt out. */
+  enableRevision?: boolean
   /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
   intakeProvider?: string
   intakeModel?: string
@@ -44,6 +47,7 @@ export interface NativeRsiSetupManifest {
     principalVersion: number; workspace: string; agentPreset: string }
   now: number; expiresAt: number; controlPlane: ControlPlaneConfig; growthDriver: AssistantGrowthDriverConfig
   memoryLearning: RsiMemoryLearningSetup; pluginCreation: RsiPluginCreationSetup
+  pluginRevision?: RsiPluginRevisionSetup
   /** Fresh-install ordinary-use rings that need no new signing-key material. */
   ordinaryUseLearning?: RsiOrdinaryUseLearningSetup
   limits: { periodMs: number; reviews: number; discovery: number; source: number; memoryExtractions: number; memoryScans: number }
@@ -205,7 +209,14 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   if (ordinary === undefined && (input.intakeProvider !== undefined || input.intakeModel !== undefined)) {
     fail('an explicit intake route requires enableOrdinaryUseLearning')
   }
+  if (input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean') {
+    fail('invalid native revision opt-in')
+  }
+  const enableRevision = input.enableRevision ?? (input.creationBuild !== undefined)
   const creation = createRsiPluginCreationSetup({ resources, build: input.creationBuild, owner, now: input.now, expiresAt: input.expiresAt })
+  const revision = enableRevision
+    ? createRsiPluginRevisionSetup({ resources, build: input.creationBuild, owner, now: input.now, expiresAt: input.expiresAt })
+    : undefined
   const memory = createRsiMemoryLearningSetup({ installationId: installation, stateRoot: resources.stateRoot,
     owner, now: input.now, expiresAt: input.expiresAt, workItemExperiences: ordinary !== undefined })
   const currentLearner = effectiveRow(effective.byId, 'memory', true)
@@ -215,7 +226,7 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     budgetId: `rsi-reviews-${installation}`, budgetAmount: 1, ...chooseModel(growthCurrent.has('config') ? options(growthCurrent, 'growth') : mapping(out.document.createNode({}), 'growth')),
     scope, workflowOwnerAnchored: { enabled: true },
     usageLearning: { enabled: true, databasePath: join(resources.stateRoot, 'growth.sqlite'), scanBudgetId: `rsi-discovery-${installation}`, scanBudgetAmount: 1 },
-    pluginSourceProposals: { enabled: true, allowModification: false, allowCreation: true, allowRevision: false,
+    pluginSourceProposals: { enabled: true, allowModification: false, allowCreation: true, allowRevision: enableRevision,
       preparationMode: 'durable', repository: input.source.repository, maxPlansPerWake: 1, offline: true, planTtlMs: day } }
   normalizeConfig(growth)
   const sourceBuildForControl: NonNullable<ControlPlaneConfig['sourceBuild']> =
@@ -226,9 +237,12 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   const control: ControlPlaneConfig = { catalogPath: resources.catalog.path, statePath: join(resources.stateRoot, 'control-plane'),
     trustPath: join(resources.configRoot, 'native-trust.json'), sourceBuild: sourceBuildForControl,
     sourceJobs: { authorityId: `source-jobs-${installation}`, expiresAt: input.expiresAt, maxSubmissions: 1000,
-      allowedModes: ['create'], repository: input.source.repository, baseline: { ...input.source.baseline }, creation: creation.creation,
+      allowedModes: enableRevision ? ['create', 'revise-created'] : ['create'], repository: input.source.repository,
+      baseline: { ...input.source.baseline }, creation: creation.creation,
+      ...(revision ? { revision: revision.revision } : {}),
       ...scope, budgetId: `rsi-source-${installation}`, budgetAmount: 1 },
     creationVerifications: creation.verifications, creationCapabilities: creation.capabilities,
+    ...(revision ? { revisionVerifications: revision.verifications, revisionRegressions: revision.regressionVerifications } : {}),
     runtimeObserver: { socketPath: input.observer.socketPath, keyPath: input.observer.keyPath,
       profilePath: join(input.dshHome, 'profiles', input.targetProfile), targets: [] } }
   // The observer pins the final Loader options after all mutations below.
@@ -281,6 +295,12 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   const verifier = copyConfig(out, effective, 'verifier')
   setExact(out.document, verifier, 'memoryReviews', memory.reviews, 'memory review')
   setExact(out.document, verifier, 'creationReviews', creation.reviews, 'creation review')
+  if (revision) {
+    setExact(out.document, verifier, 'revisionReviews', revision.reviews, 'revision review')
+    setExact(out.document, verifier, 'revisionRegressions', revision.regressions, 'revision regression')
+  } else if (verifier.has('revisionReviews') || verifier.has('revisionRegressions')) {
+    fail('existing revision review grant differs')
+  }
   const learner = out.byId.get(ids.memory) ?? mapping(out.document.createNode({ id: ids.memory }), 'learner patch')
   if (!out.byId.has(ids.memory)) { out.rows.add(learner); out.byId.set(ids.memory, learner) }
   if (learner.get('name') !== undefined && learner.get('name') !== managed.memory) fail('learner patch package differs')
@@ -290,7 +310,8 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   if (growthRow.has('pluginSourceProposals') && !isDeepStrictEqual((growthRow.get('pluginSourceProposals', true) as Node).toJSON(), growth.pluginSourceProposals)) fail('existing source proposal grant differs')
   out.byId.get(ids.growth)!.set('config', out.document.createNode(growth))
   const controlRow = copyConfig(out, effective, 'control')
-  for (const key of ['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceAdoptions', 'creationVerifications', 'creationCapabilities'] as const) {
+  for (const key of ['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceAdoptions', 'creationVerifications',
+    'creationCapabilities', 'revisionVerifications', 'revisionRegressions'] as const) {
     if (controlRow.has(key) && !isDeepStrictEqual((controlRow.get(key, true) as Node).toJSON(), control[key as keyof ControlPlaneConfig])) fail(`existing ${key} grant differs`)
   }
   out.byId.get(ids.control)!.set('config', out.document.createNode(control))
@@ -345,6 +366,7 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
       publicKeyPem: resources.identities.host.publicKeyPem }] } as unknown as PluginControlTrustConfig
   const manifest: NativeRsiSetupManifest = { schemaVersion: 1, kind: 'native-plugin-learning', targetProfile: input.targetProfile,
     owner, now: input.now, expiresAt: input.expiresAt, controlPlane: control, growthDriver: growth, memoryLearning: memory,
-    pluginCreation: creation, limits, ...(ordinary !== undefined ? { ordinaryUseLearning: ordinary } : {}) }
+    pluginCreation: creation, ...(revision ? { pluginRevision: revision } : {}),
+    limits, ...(ordinary !== undefined ? { ordinaryUseLearning: ordinary } : {}) }
   return { manifest, targetPatch: final.document.toString({ lineWidth: 0 }), trust }
 }

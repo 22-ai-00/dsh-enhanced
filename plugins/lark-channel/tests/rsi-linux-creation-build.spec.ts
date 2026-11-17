@@ -275,3 +275,21 @@ test.runIf(process.platform === 'linux')('a missing behavior peer is a fatal opt
       .rejects.not.toBeInstanceOf(RsiLinuxCreationBuildUnavailableError)
   } finally { vi.doUnmock('node:module'); vi.resetModules() }
 })
+
+test.runIf(process.platform === 'linux')('prepares and replays delegated cgroup v2 unified receipts and detects unified root drift', async () => {
+  const ctx = await fixture()
+  const v2Roots = { mode: 'v2' as const, unified: `/sys/fs/cgroup/dsh-native/uid-${process.getuid!()}` }
+  mocks.repository.mockResolvedValue(ctx.repository)
+  mocks.cgroup.mockResolvedValue(v2Roots)
+
+  const env = await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
+  expect(env.cgroupRoots).toEqual(v2Roots)
+
+  const replayed = await prepareLinuxRsiCreationBuildEnvironment(ctx.input)
+  expect(replayed).toEqual(env)
+  expect(await readLinuxRsiCreationBuildEnvironment(ctx.input)).toEqual(env)
+  expect(mocks.deployment).toHaveBeenCalledTimes(1)
+
+  mocks.cgroup.mockResolvedValueOnce({ mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${process.getuid!() + 1}` })
+  await expect(readLinuxRsiCreationBuildEnvironment(ctx.input)).rejects.toThrow('Linux creation receipt differs')
+})

@@ -146,7 +146,11 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('complete 
       input => { nativeCreation(input).behavior.runtime.lockSha256 = '9'.repeat(64) },
       input => { nativeCreation(input).buildRuntimeDigest = '9'.repeat(64) },
       input => { delete nativeCreation(input).buildRuntimeDigest },
-      input => { nativeCreation(input).cgroupRoots.pids = `/sys/fs/cgroup/pids,x/dsh-native/uid-${process.getuid!()}` },
+      input => {
+        const roots = nativeCreation(input).cgroupRoots
+        if (roots.mode !== 'v1') throw new Error('expected cgroup v1 fixture')
+        roots.pids = `/sys/fs/cgroup/pids,x/dsh-native/uid-${process.getuid!()}`
+      },
       input => { nativeCreation(input).behavior.runtime.root.path += '-moved' },
       input => { input.sourceBuild.repository.runtime.root.ino += 1 },
     ]

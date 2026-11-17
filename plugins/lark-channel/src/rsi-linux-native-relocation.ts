@@ -11,7 +11,7 @@ import {
   type LinuxRuntime, type LinuxSystemSnapshot, type LinuxUserNamespaceMapping,
 } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
-import type { LinuxV1CgroupRoots } from './rsi-linux-cgroup-roots.js'
+import type { LinuxCgroupRoots } from './rsi-linux-cgroup-roots.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import type { LinuxRsiRepositoryBuildEnvironment } from './rsi-linux-repository-bootstrap.js'
 import type { LinuxRsiBuildEnvironment } from './rsi-linux-runtime-bootstrap.js'
@@ -197,17 +197,34 @@ function validateSnapshot(value: unknown): JsonObject {
 
 function validateCgroupRoots(value: unknown, home: string): JsonObject {
   const roots = object(value, 'invalid cgroup roots')
-  exactKeys(roots, ['cpu', 'freezer', 'memory', 'mode', 'pids'], 'invalid cgroup roots')
-  if (roots.mode !== 'v1') fail('invalid cgroup roots')
   const owner = process.getuid?.()
-  const seen = new Set<string>()
-  for (const name of ['cpu', 'freezer', 'memory', 'pids'] as const) {
-    const path = stringField(roots, name, 'invalid cgroup roots')
-    if (!canonical(path) || !path.startsWith('/sys/fs/cgroup/') || within(path, home) || seen.has(path)
-      || owner !== undefined && !path.endsWith(`/dsh-native/uid-${owner}`)) fail('invalid cgroup roots')
-    seen.add(path)
+  const isDelegatedLeaf = (path: string, prefix: string): boolean => canonical(path)
+    && path.startsWith(prefix) && !within(path, home)
+    && (owner === undefined || path.endsWith(`/dsh-native/uid-${owner}`))
+  if (roots.mode === 'v1') {
+    exactKeys(roots, ['cpu', 'freezer', 'memory', 'mode', 'pids'], 'invalid cgroup roots')
+    const seen = new Set<string>()
+    for (const name of ['cpu', 'freezer', 'memory', 'pids'] as const) {
+      const path = stringField(roots, name, 'invalid cgroup roots')
+      if (!isDelegatedLeaf(path, '/sys/fs/cgroup/') || seen.has(path)) fail('invalid cgroup roots')
+      seen.add(path)
+    }
+    return roots
   }
-  return roots
+  if (roots.mode === 'v2') {
+    exactKeys(roots, ['mode', 'unified'], 'invalid cgroup roots')
+    const unified = stringField(roots, 'unified', 'invalid cgroup roots')
+    if (!/^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u.test(unified)
+      || !isDelegatedLeaf(unified, '/sys/fs/cgroup/dsh-native/')) fail('invalid cgroup roots')
+    return roots
+  }
+  fail('invalid cgroup roots')
+}
+
+/** Pure cgroup-roots contract validator shared by creation receipt verification
+ * and portable unit tests. */
+export function validateLinuxRelocationCgroupRoots(value: unknown, home: string): LinuxCgroupRoots {
+  return validateCgroupRoots(value, home) as unknown as LinuxCgroupRoots
 }
 
 function validateUserNamespace(value: unknown): JsonObject {
@@ -1338,7 +1355,7 @@ function relocatedFamily(family: PhysicalFamily, logicalHome: string): LinuxRsiN
       backend: 'linux-native',
       sourceCommit,
       behavior,
-      cgroupRoots: cgroupRoots as unknown as LinuxV1CgroupRoots,
+      cgroupRoots: cgroupRoots as unknown as LinuxCgroupRoots,
       buildRuntimeDigest: hexField(creationReceipt, 'buildRuntimeDigest', message),
     },
     release: {

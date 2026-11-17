@@ -11,6 +11,7 @@ import type { LinuxRunnerStateSeal } from '@dsh-enhanced/assistant-isolation'
 import type { Config as ControlPlaneConfig, CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import { rsiAuthorityRoles, type RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
+import type { NativeRsiCreationBuildEnvironment } from './rsi-native-runtime-bootstrap.js'
 
 export type SourceRevisionGrant = NonNullable<NonNullable<ControlPlaneConfig['sourceJobs']>['revision']>
 export interface RsiPluginRevisionSetup {
@@ -136,9 +137,13 @@ export function validateRsiPluginRevisionSetup(input: unknown, expectedOwner: Cr
       || runner.maxTotalDurationMs !== runs * limits.runnerDurationMs || runner.maxOutputBytes !== limits.outputBytes) fail('revision runner limits differ')
   }
   const reviewRunner = reviews.runner, regressionRunner = regressions.runner
-  if (!('backend' in reviewRunner) || reviewRunner.backend !== 'linux-native'
-    || !('backend' in regressionRunner) || regressionRunner.backend !== 'linux-native'
-    || !isDeepStrictEqual(reviewRunner.runtime, regressionRunner.runtime)
+  const macosPair = 'backend' in reviewRunner && reviewRunner.backend === 'macos-seatbelt'
+    && 'backend' in regressionRunner && regressionRunner.backend === 'macos-seatbelt'
+  const linuxPair = 'backend' in reviewRunner && reviewRunner.backend === 'linux-native'
+    && 'backend' in regressionRunner && regressionRunner.backend === 'linux-native'
+  if (macosPair) {
+    if (!isDeepStrictEqual(reviewRunner.runtime, regressionRunner.runtime)) fail('revision runners must share the macOS native family')
+  } else if (!linuxPair || !isDeepStrictEqual(reviewRunner.runtime, regressionRunner.runtime)
     || !isDeepStrictEqual(reviewRunner.cgroupRoots, regressionRunner.cgroupRoots)) fail('revision runners must share the Linux native family')
   if (!exact(setup.verifications, ['authority', 'publicKey']) || !exact(setup.regressionVerifications, ['authority', 'publicKey'])) fail('invalid revision verification fields')
   validateRevisionAcceptanceAuthorityRef(setup.verifications.authority)
@@ -152,22 +157,37 @@ export function validateRsiPluginRevisionSetup(input: unknown, expectedOwner: Cr
 }
 
 /** This produces a candidate grant; installation decides whether new revision authority is authorized. */
+export type RsiPluginRevisionBuild = LinuxRsiCreationBuildEnvironment | NativeRsiCreationBuildEnvironment
+
+/** Synthesize and verify the private authority and runner pair for plugin revision. */
 export function createRsiPluginRevisionSetup(input: {
-  resources: RsiAuthorityResources; build: LinuxRsiCreationBuildEnvironment; owner: CreationCapabilityOwner; now: number; expiresAt: number
+  resources: RsiAuthorityResources; build: RsiPluginRevisionBuild; owner: CreationCapabilityOwner; now: number; expiresAt: number
   stateSeals?: { review: LinuxRunnerStateSeal; regression: LinuxRunnerStateSeal }
 }): RsiPluginRevisionSetup {
   const { resources, build, owner, now, expiresAt } = input
-  if (input.stateSeals && !exact(input.stateSeals, ['review', 'regression'])) fail('incomplete revision state seals')
+  if (input.stateSeals && (build?.schemaVersion !== 3 || !exact(input.stateSeals, ['review', 'regression']))) fail('incomplete revision state seals')
   preparedIdentities(resources)
-  const hasBuildDigest = !!build && typeof build === 'object' && Object.hasOwn(build, 'buildRuntimeDigest')
-  const buildDigest = hasBuildDigest ? Object.getOwnPropertyDescriptor(build, 'buildRuntimeDigest')?.value : undefined
-  if (!exact(build, ['schemaVersion', 'backend', 'sourceCommit', 'behavior', 'cgroupRoots', ...(hasBuildDigest ? ['buildRuntimeDigest'] : [])])
-    || build.schemaVersion !== 3 || build.backend !== 'linux-native' || !/^[a-f0-9]{40}$/u.test(build.sourceCommit)
-    || hasBuildDigest && (typeof buildDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(buildDigest))
-    || !Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(now) || now < 0 || expiresAt <= now) fail('invalid native build or expiry')
+  if (!Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(now) || now < 0 || expiresAt <= now) fail('invalid native build or expiry')
+  let runnerBackend:
+    | { backend: 'macos-seatbelt'; runtime: NativeRsiCreationBuildEnvironment['runtime'] }
+    | { backend: 'linux-native'; runtime: LinuxRsiCreationBuildEnvironment['behavior']; cgroupRoots: LinuxRsiCreationBuildEnvironment['cgroupRoots'] }
+  let buildCommit: string
+  if (build && typeof build === 'object' && build.schemaVersion === 2) {
+    if (!exact(build, ['schemaVersion', 'backend', 'sourceCommit', 'runtime'])
+      || build.backend !== 'macos-seatbelt' || !/^[a-f0-9]{40}$/u.test(build.sourceCommit)) fail('invalid native build or expiry')
+    buildCommit = build.sourceCommit
+    runnerBackend = { backend: 'macos-seatbelt' as const, runtime: build.runtime }
+  } else {
+    const hasBuildDigest = !!build && typeof build === 'object' && Object.hasOwn(build, 'buildRuntimeDigest')
+    const buildDigest = hasBuildDigest ? Object.getOwnPropertyDescriptor(build, 'buildRuntimeDigest')?.value : undefined
+    if (!exact(build, ['schemaVersion', 'backend', 'sourceCommit', 'behavior', 'cgroupRoots', ...(hasBuildDigest ? ['buildRuntimeDigest'] : [])])
+      || build.schemaVersion !== 3 || build.backend !== 'linux-native' || !/^[a-f0-9]{40}$/u.test(build.sourceCommit)
+      || hasBuildDigest && (typeof buildDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(buildDigest))) fail('invalid native build or expiry')
+    buildCommit = build.sourceCommit
+    runnerBackend = { backend: 'linux-native' as const, runtime: build.behavior, cgroupRoots: build.cgroupRoots }
+  }
   const installation = resources.installationId, namePrefix = `owner-${installation.slice(0, 8)}-`
-  const runner = { backend: 'linux-native' as const, runtime: build.behavior, cgroupRoots: build.cgroupRoots,
-    expiresAt, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: limits.outputBytes }
+  const runner = { ...runnerBackend, expiresAt, maxDurationMs: limits.runnerDurationMs, maxOutputBytes: limits.outputBytes }
   const reviews: RevisionReviewConfig = { authorityId: `revision-review-${installation}`, owner, namePrefix,
     keyId: `revision-review-${installation}-key`, keyPath: resources.identities.review.keyPath, expiresAt,
     maxVerifications: limits.verifications, runner: { ...runner, stateRoot: join(resources.stateRoot, 'revision-review-runner'),
@@ -187,7 +207,12 @@ export function createRsiPluginRevisionSetup(input: {
     verifications: { authority: reviewed.authority, publicKey: reviewed.publicKey },
     regressionVerifications: { authority: regressed.authority, publicKey: regressed.publicKey } }, owner, now)
   const native = setup.reviews.runner
-  if (!('backend' in native) || native.backend !== 'linux-native' || native.runtime.runtime.sourceCommit !== build.sourceCommit
-    || setup.verifications.publicKey !== resources.identities.review.publicKeyPem) fail('prepared revision build or signing identity differs')
+  const runtimeMatches = 'backend' in native && (
+    (native.backend === 'macos-seatbelt' && build.schemaVersion === 2 && isDeepStrictEqual(native.runtime, build.runtime))
+    || (native.backend === 'linux-native' && build.schemaVersion === 3 && native.runtime.runtime.sourceCommit === buildCommit)
+  )
+  if (!runtimeMatches || setup.verifications.publicKey !== resources.identities.review.publicKeyPem) {
+    fail('prepared revision build or signing identity differs')
+  }
   return setup
 }

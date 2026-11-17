@@ -204,8 +204,10 @@ export async function assertRsiPreOwnerInstallation(input: AssertRsiPreOwnerInst
     for (const name of ['config', 'state', 'registry']) {
       const directory = join(authority, name); await io.directory(directory)
       const entries = (await readdir(directory)).sort()
-      if (name === 'state' && marker && isDeepStrictEqual(entries,
-        ['creation-adoption-runner', 'creation-review-runner'])) {
+      if (name === 'state' && marker && (isDeepStrictEqual(entries,
+        ['creation-adoption-runner', 'creation-review-runner'])
+        || isDeepStrictEqual(entries,
+          ['creation-adoption-runner', 'creation-review-runner', 'revision-regression-runner', 'revision-review-runner']))) {
         for (const entry of entries) {
           const child = join(directory, entry)
           await io.directory(child)

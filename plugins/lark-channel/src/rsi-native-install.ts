@@ -50,7 +50,9 @@ async function prepare(input: RsiInstallInput, signal: AbortSignal) {
   const resources = await prepareRsiAuthorityResources({ ...input, signal })
   const build = await prepareNativeRsiRuntime({ dshHome: input.dshHome, profile: input.profile, source, signal })
   const creationBuild = nativeRsiCreationBuild(build)
-  for (const name of ['creation-review-runner', 'creation-adoption-runner']) await privateDirectory(join(resources.stateRoot, name))
+  const directories = ['creation-review-runner', 'creation-adoption-runner',
+    ...(input.enableRevision !== false ? ['revision-review-runner', 'revision-regression-runner'] : [])]
+  for (const name of directories) await privateDirectory(join(resources.stateRoot, name))
   const dsh = await resolveInstalledRsiDsh()
   return { source, resources, build, creationBuild,
     executor: { id: 'dsh', version: dsh.version, path: dsh.path, sha256: dsh.pin.sha256, environmentAllowlist: [] } }
@@ -96,6 +98,7 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
   ports: NativeRsiInstallPorts = nativeRsiInstallPorts): Promise<RsiInstallResult> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile) || input.profile === 'desktop'
     || await realpath(input.dshHome) !== input.dshHome) fail('invalid native installation identity')
+  if (input.enableRevision !== undefined && typeof input.enableRevision !== 'boolean') fail('invalid native revision opt-in')
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(2_400_000)])
   return withDshHomeLifecycleLock(input.dshHome, () => withLaunchAgentTargetLock(input, async () => {
     let prepared: Awaited<ReturnType<typeof prepare>>
@@ -141,14 +144,22 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
     if (old && input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
       fail('frozen native installation cannot be expanded with ordinary-use learning; install a fresh profile instead')
     }
+    const storedRevision = old?.compiled.manifest.pluginRevision
+    if (old && input.enableRevision === true && storedRevision === undefined) {
+      fail('frozen native installation cannot be expanded with plugin revision; install a fresh profile instead')
+    }
+    if (old && input.enableRevision === false && storedRevision !== undefined) {
+      fail('frozen native installation cannot drop plugin revision; install a fresh profile instead')
+    }
     // A retry preserves exactly the frozen opt-in and evaluator route.
     const enableOrdinaryUseLearning = old ? storedOrdinary !== undefined : input.enableOrdinaryUseLearning === true
+    const enableRevision = old ? storedRevision !== undefined : (input.enableRevision ?? true)
     const intakeProvider = storedOrdinary?.provider ?? input.intakeProvider
     const intakeModel = storedOrdinary?.model ?? input.intakeModel
     const compiled = ports.compile({ dshHome: input.dshHome, targetProfile: input.profile,
       targetPatch: old?.beforePatch ?? targetPatch, targetEffective: old?.beforeEffective ?? effective,
       owner, resources, source, sourceBuild: build.sourceBuild, creationBuild, executor, now, expiresAt, observer,
-      enableOrdinaryUseLearning,
+      enableOrdinaryUseLearning, enableRevision,
       ...(intakeProvider !== undefined ? { intakeProvider } : {}),
       ...(intakeModel !== undefined ? { intakeModel } : {}) })
     if (old && !isDeepStrictEqual(old.compiled, compiled)) fail('native compiled grant differs from the frozen plan')

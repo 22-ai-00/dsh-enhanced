@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { hashLinuxRuntimeTree, linuxRuntimeDigest, verifyLinuxRuntime,
   type LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
-import { relocateLinuxRsiNativeFamily, verifyLinuxRsiNativeRelocation,
+import { openLinuxRsiNativeRelocatedFamily, relocateLinuxRsiNativeFamily, verifyLinuxRsiNativeRelocation,
   type LinuxRsiNativeRelocationElement, type LinuxRsiNativeRelocationProof } from '../src/rsi-linux-native-relocation.js'
 import { readRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
 import { elementMap, fixture, hex, homePath, privateDirectory, PROFILE, readJson, receiptDigest, relocate,
@@ -442,4 +442,49 @@ describe('rsi Linux native relocation', () => {
       await expectFailure(verifyLinuxRsiNativeRelocation(proof), 'verification requires Linux')
     })
   }
+})
+
+describe('Linux cgroup v1/v2 relocation receipt validation and v2 relocation', () => {
+  test('validateLinuxRelocationCgroupRoots accepts valid v1 & v2 roots and rejects malformed/drifted shapes', async () => {
+    const { validateLinuxRelocationCgroupRoots } = await import('../src/rsi-linux-native-relocation.js')
+    const uid = process.getuid!()
+    const home = '/tmp/dsh-relocation-unit-home'
+    const v2 = { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
+    expect(validateLinuxRelocationCgroupRoots(v2, home)).toEqual(v2)
+    const v1 = {
+      mode: 'v1',
+      cpu: `/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-${uid}`,
+      memory: `/sys/fs/cgroup/memory/dsh-native/uid-${uid}`,
+      pids: `/sys/fs/cgroup/pids/dsh-native/uid-${uid}`,
+      freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${uid}`,
+    }
+    expect(validateLinuxRelocationCgroupRoots(v1, home)).toEqual(v1)
+
+    for (const invalid of [
+      { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-0' },
+      { mode: 'v2', unified: `/sys/fs/cgroup/other/dsh-native/uid-${uid}` },
+      { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid + 1}` },
+      { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/../dsh-native/uid-${uid}` },
+      { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}`, cpu: v1.cpu },
+      { mode: 'v3', unified: v2.unified },
+      { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` },
+    ]) {
+      if (invalid.mode === 'v2' && invalid.unified === v2.unified && Object.keys(invalid).length === 2) {
+        // Test rejection when unified falls within home.
+        expect(() => validateLinuxRelocationCgroupRoots(invalid, '/sys/fs/cgroup')).toThrow('invalid cgroup roots')
+      } else {
+        expect(() => validateLinuxRelocationCgroupRoots(invalid, home)).toThrow('invalid cgroup roots')
+      }
+    }
+  })
+
+  linux('relocates a cgroup v2 creation receipt cleanly into the staged Home', async () => {
+    const ctx = await fixture('v2')
+    const proof = await relocate(ctx)
+    const opened = await openLinuxRsiNativeRelocatedFamily(proof)
+    expect(opened.creationBuild.cgroupRoots).toEqual({
+      mode: 'v2',
+      unified: `/sys/fs/cgroup/dsh-native/uid-${process.getuid!()}`,
+    })
+  })
 })

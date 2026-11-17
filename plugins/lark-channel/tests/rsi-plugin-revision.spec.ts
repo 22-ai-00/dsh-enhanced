@@ -8,6 +8,7 @@ import { compileRevisionReviewConfig, compileRevisionRegressionReviewConfig } fr
 import type { CreationCapabilityOwner } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
 import type { LinuxRsiCreationBuildEnvironment } from '../src/rsi-linux-creation-build.js'
+import type { NativeRsiCreationBuildEnvironment } from '../src/rsi-native-runtime-bootstrap.js'
 import { createRsiPluginRevisionSetup, validateRsiPluginRevisionSetup, type RsiPluginRevisionSetup } from '../src/rsi-plugin-revision.js'
 
 const roots: string[] = []
@@ -222,5 +223,73 @@ describe.runIf(process.platform === 'linux' && process.getuid!() > 0)('finite Li
       const missing = await import('../src/rsi-plugin-revision.js')
       expect(() => missing.createRsiPluginRevisionSetup(f)).toThrow('installed revision validators are unavailable')
     } finally { vi.doUnmock('node:module'); vi.resetModules() }
+  })
+})
+
+describe('macOS seatbelt plugin revision setup', () => {
+  async function macFixture() {
+    const f = await fixture()
+    const runtimeRoot = join(f.root, 'rsi-native-runtimes', 'primary', 'runtime')
+    const runtime: NativeRsiCreationBuildEnvironment['runtime'] = {
+      schemaVersion: 1,
+      platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+      nodePath: join(runtimeRoot, 'bin', 'node'),
+      nodeSha256: 'a'.repeat(64),
+      roots: [{ path: runtimeRoot, dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
+      modulesPath: join(runtimeRoot, 'node_modules'),
+      versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '3.0.0', tools: '1.0.0', systemPrompt: '1.0.0' },
+    }
+    const build: NativeRsiCreationBuildEnvironment = {
+      schemaVersion: 2,
+      backend: 'macos-seatbelt',
+      sourceCommit: 'a'.repeat(40),
+      runtime,
+    }
+    return { ...f, build }
+  }
+
+  test('compiles independent revision review & regression authorities on macos-seatbelt with finite budgets', async () => {
+    const f = await macFixture()
+    const setup = createRsiPluginRevisionSetup(f)
+    expect(setup.revision.maxRevisions).toBe(32)
+    expect(setup.reviews.maxVerifications).toBe(32)
+    expect(setup.regressions.maxVerifications).toBe(32)
+    expect(setup.reviews.maxCases).toBe(4)
+    expect(setup.regressions.maxCases).toBe(4)
+    expect(setup.reviews.runner.maxRuns).toBe(160)
+    expect(setup.regressions.runner.maxRuns).toBe(320)
+    expect(setup.reviews.runner).toMatchObject({ backend: 'macos-seatbelt', runtime: f.build.runtime })
+    expect(setup.regressions.runner).toMatchObject({ backend: 'macos-seatbelt', runtime: f.build.runtime })
+    expect(setup.reviews.authorityId).not.toBe(setup.regressions.authorityId)
+    expect(setup.reviews.keyPath).toBe(f.resources.identities.review.keyPath)
+    expect(setup.regressions.keyPath).toBe(f.resources.identities.review.keyPath)
+    expect(setup.reviews.keyPath).not.toBe(f.resources.identities.adoption.keyPath)
+    expect(setup.verifications.authority.authorityDigest).not.toBe(setup.regressionVerifications.authority.authorityDigest)
+    expect(compileRevisionReviewConfig(setup.reviews).authority).toEqual(setup.verifications.authority)
+    expect(compileRevisionRegressionReviewConfig(setup.regressions).authority).toEqual(setup.regressionVerifications.authority)
+    expect(validateRsiPluginRevisionSetup(structuredClone(setup), f.owner, f.now)).toEqual(setup)
+  })
+
+  test('rejects drifted macOS runtime, mixed runners, and Linux state seals on macos-seatbelt', async () => {
+    const f = await macFixture()
+    const setup = createRsiPluginRevisionSetup(f)
+
+    const drifted = structuredClone(setup)
+    if (!('backend' in drifted.regressions.runner) || drifted.regressions.runner.backend !== 'macos-seatbelt') {
+      throw new Error('expected macos-seatbelt runner')
+    }
+    drifted.regressions.runner.runtime.nodeSha256 = 'c'.repeat(64)
+    expect(() => validateRsiPluginRevisionSetup(drifted, f.owner, f.now)).toThrow('macOS native family')
+
+    const linuxBase = await fixture()
+    const linuxSetup = createRsiPluginRevisionSetup(linuxBase)
+    const mixed = structuredClone(setup)
+    mixed.regressions.runner = { ...linuxSetup.regressions.runner, stateRoot: setup.regressions.runner.stateRoot }
+    expect(() => validateRsiPluginRevisionSetup(mixed, f.owner, f.now)).toThrow('Linux native family')
+
+    expect(() => createRsiPluginRevisionSetup({
+      ...f,
+      stateSeals: { review: { path: '/tmp/a', sha256: 'a'.repeat(64) }, regression: { path: '/tmp/b', sha256: 'b'.repeat(64) } },
+    })).toThrow('incomplete revision state seals')
   })
 })
