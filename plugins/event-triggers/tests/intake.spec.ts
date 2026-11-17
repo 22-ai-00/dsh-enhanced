@@ -767,4 +767,54 @@ describe('event-triggers normalized intake adapter & WP11 unsubscribe lifecycle'
     expect(() => service.registerIntakeObserver({ protocol: 1, observe: () => {} })).toThrow(/disposed/i)
     expect(() => service.registerUnsubscribeHook(() => {})).toThrow(/disposed/i)
   })
+
+  it('bridges when EventTriggers starts before AssistantWorkItems and detaches cleanly when WorkItems stops', async () => {
+    const env = await createBaseEnv()
+    const watched = join(env.root, 'reverse-order.txt')
+    await writeFile(watched, 'v1')
+
+    let service!: EventTriggersService
+    const eventFiber = await env.ctx.plugin({
+      name: 'dsh-enhanced-event-triggers',
+      apply(runtime: Context) {
+        service = new EventTriggersService(runtime, {
+          databasePath: join(env.root, 'events.sqlite'),
+          allowedFileRoots: [env.root],
+          pollerEnabled: false,
+          triggers: [{
+            id: 'file-opt-in',
+            kind: 'file',
+            automationId: 'auto-file-opt-in',
+            path: watched,
+            debounceMs: 0,
+            cooldownMs: 0,
+            observer: env.owner,
+            intake: { enabled: true, summaryLabel: 'reverse-order' },
+          }],
+        })
+      },
+    })
+    extraFibers.push(eventFiber)
+
+    const workItemsModule = await import(workItemsSource) as WorkItemsModule
+    const wiFiber = env.ctx.plugin(workItemsModule.AssistantWorkItemsService as never, {
+      enabled: true,
+      mode: 'observe',
+      databasePath: join(env.root, 'work-items.sqlite'),
+      workRoot: join(env.root, 'work-root'),
+      intakeLedger: { enabled: true },
+    } as never)
+    await wiFiber
+    extraFibers.push(wiFiber)
+
+    await service.pollOnce()
+    await writeFile(watched, 'v2')
+    await service.pollOnce()
+    expect(readWorkItemIntakeState(env.root).ledger).toHaveLength(1)
+
+    await wiFiber.dispose()
+    await writeFile(watched, 'v3')
+    await service.pollOnce()
+    expect(readWorkItemIntakeState(env.root).ledger).toHaveLength(1)
+  })
 })

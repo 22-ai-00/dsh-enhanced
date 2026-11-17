@@ -61,6 +61,8 @@ profiles:
 # 不能上调的上限。显式开启前本插件不读取 llm/WorkItems 服务。
 intakeEvaluation:
   enabled: true
+  # 可选预设：'conservative'（全部上限 notify/digest）或 'balanced'（仅 github mention/review 允许 accept），也可再写 rules 覆盖或追加
+  preset: conservative
   rules:
     - ruleId: triage
       ceiling: digest
@@ -77,7 +79,7 @@ intakeEvaluation:
 
 本插件可以为 `assistant-work-items` 的 inferred intake 评估提供生产模型判断者。默认关闭：不配置（或 `enabled: false`）时不读取 `llm`/`assistantWorkItems` 服务、不注册、不新增任何行为。显式开启后，只有本插件、`llm` 服务和已启用 `intakeLedger.evaluation` 的 `assistant-work-items` 同时就绪时才注册；任一缺失时插件照常加载、保持不注册，并由 `intakeEvaluationHealth()` 报出原因。
 
-- 配置即授权：`rules[]` 的 `ruleId` 与 `ceiling`（`ignore | digest | notify | accept`，work-items 协议 1 的枚举）固定在这里；模型只能把等级下调到 ceiling 或更低，不能上调。`provider`/`model` 在运行期冻结。`maxCallsPerHour`、`timeoutMs`、`maxConsecutiveFailures` 约束本地产者：预算耗尽、连续失败断路和超时都会失败关闭（抛错），由 WorkItems 记录 `unavailable` 并按其自身退避/上限重试。
+- 配置即授权：`rules[]` 的 `ruleId` 与 `ceiling`（`ignore | digest | notify | accept`，work-items 协议 1 的枚举）固定在这里；也可设置可选 `preset: 'conservative' | 'balanced'`（不设 `preset` 时完全保持既有行为与政策摘要），自动展开四条对应 Policy 模板的有限规则（`dsh-intake-github-mention-or-review`：`conservative` 上限 `notify` / `balanced` 上限 `accept`；`dsh-intake-calendar-imminent` 与 `dsh-intake-webhook-priority`：上限 `notify`；`dsh-intake-file-watch-change`：上限 `digest`），并支持与显式 `rules[]` 合并覆盖（总数 ≤ 16）。模型只能把等级下调到 ceiling 或更低，不能上调。`provider`/`model` 在运行期冻结。`maxCallsPerHour`、`timeoutMs`、`maxConsecutiveFailures` 约束本地产者：预算耗尽、连续失败断路和超时都会失败关闭（抛错），由 WorkItems 记录 `unavailable` 并按其自身退避/上限重试。
 - 输入输出契约：一次调用只携带一个规则的 `ruleId`、其 ceiling 与已认证的入站正文；`tools: []`、输出 token 与流字节有界，模型只能返回 `{"ruleId","level","quotes"}`。规则 `ruleId` 必须与请求一致，`quotes` 必须是正文的精确子串（最多 4 段、每段最多 280 个 UTF-16 单元）；非严格 JSON、额外字段、非子串引文、非 ignore 却无引文都会抛错，WorkItems 队列还会再校验一次引文与 ceiling。
 - 生命周期：注册随 `llm`/`assistantWorkItems` 服务代次绑定，服务替换会注销并重新注册，插件卸载时释放；不新增 Loop 或 timer，评估只由 WorkItems 的入站路径与原生 scheduler wake 驱动。
 - 版本与重排：`policy().version` 是规范化规则加 provider/model 的 SHA-256（`v1-…`），仅调整规则顺序不改变版本；规则或 provider/model 改变必然换版本，使 WorkItems 按新版本重排已持有的文本并追加新结果行（旧行只追加、不覆盖）。

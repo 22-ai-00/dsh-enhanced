@@ -233,7 +233,7 @@ export function toWorkItemIntakeInput(observation: Readonly<EventIntakeObservati
 
 /**
  * Deduplicated, best-effort emission bridge from opted-in `event-triggers`
- * observers to `assistantWorkItems.recordIntake(...)` and Host observers.
+ * sensors to registered Cordis/Host intake observers.
  */
 export class EventIntakeAdapter {
   private readonly observers = new Set<EventIntakeObserver>()
@@ -274,22 +274,10 @@ export class EventIntakeAdapter {
     for (const observer of Array.from(this.observers)) {
       try {
         observer.observe(observation)
-      } catch {
+      } catch (error) {
         // Intake observation is best-effort and never breaks sensor admission.
+        this.ctx.logger?.debug?.(`event-triggers: intake observer failed: ${String(error)}`)
       }
-    }
-    try {
-      const workItems = this.ctx.get('assistantWorkItems' as never, false) as WorkItemsIntakePort | undefined
-      if (typeof workItems?.recordIntake === 'function') {
-        const input = toWorkItemIntakeInput(observation)
-        const sourceText = observation.text !== undefined && authenticatesText(observation.text, observation.observationDigest)
-          ? observation.text
-          : undefined
-        if (sourceText === undefined) workItems.recordIntake(input)
-        else workItems.recordIntake(input, sourceText)
-      }
-    } catch (error) {
-      this.ctx.logger?.debug?.(`event-triggers: intake observation dropped: ${String(error)}`)
     }
     return true
   }

@@ -82,7 +82,7 @@ sha256=HMAC_SHA256(secret, timestamp + "\n" + nonce + "\n" + rawBody)
 
 可信 Host 可调用 `sourceSnapshot(triggerId)` 冻结来源标识、配置摘要、automation target 和 `highWaterSequence`，再以 `firstEventAfter(snapshot, sequence, deadlineAt)` 读取快照后的首个匹配事件。返回值包含持久序号及不含正文的 envelope；来源禁用或配置改变会拒绝旧快照。`subscribeSourceChanges(listener, options?)` 返回 disposer，支持按 `triggerId` / `goalId` 绑定并在目标来源退役或分离时自动取消订阅；通知只提示重新扫描，不携带执行权限。可选的 [assistant-goals](../assistant-goals/README.md) 使用此接口等待事件后恢复 owner 授权的原目标。
 
-各触发器支持显式按来源开启可选的 `intake: { enabled: true, subscribed?, summaryLabel? }`（默认关闭且需配置 `observer`；关闭或省略时保持原有 `configDigest` 不变）。启用后，已认证、去重、仅含元数据与有界摘要的事件观测会发送给 `registerIntakeObserver()` 与可选 peer `assistantWorkItems.recordIntake()`（仅投影至闭集 `WorkItemIntakeInput` 字段，不含 secrets/原始正文，不自动创建工作项）。针对 `observerLifetime: goal` 的绑定，Host 可调用 `unsubscribeGoalSources(input)` / `registerUnsubscribeHook(hook)`，且服务会在 `goal/changed`（完成或清除）事件、绑定过期及显式退役时持久暂停对应 observer 并中止在途观测；共享来源不会受单目标完成影响。
+各触发器支持显式按来源开启可选的 `intake: { enabled: true, subscribed?, summaryLabel? }`（默认关闭且需配置 `observer`；关闭或省略时保持原有 `configDigest` 不变）。启用后，已认证、去重、仅含元数据与有界摘要的事件观测只发送给通过 `registerIntakeObserver()` 注册的 Cordis/Host intake 观察者（可选 peer `assistant-work-items` 在开启 `intakeLedger` 时通过 `ctx.inject(['eventTriggers'], ...)` 自行订阅并用 `ctx.effect` 注销，再投影至闭集 `WorkItemIntakeInput` 字段；不含 secrets/原始正文，不自动创建工作项，`event-triggers` 不直接读取 `assistantWorkItems`）。针对 `observerLifetime: goal` 的绑定，Host 可调用 `unsubscribeGoalSources(input)` / `registerUnsubscribeHook(hook)`，且服务会在 `goal/changed`（完成或清除）事件、绑定过期及显式退役时持久暂停对应 observer 并中止在途观测；共享来源不会受单目标完成影响。
 
 SQLite schema v4 为 outbox 增加持久单调序号，从 v3 原位迁移并保留已投递的 provenance 日志。序号高水位不因删除最高事件或 VACUUM 回退；没有来源证明的旧行不参与匹配。读取事件不消费、重定向或禁用已有 automation 投递。进程重启后的消费者从已保存快照扫描，不能仅依靠内存通知。
 

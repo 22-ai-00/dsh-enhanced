@@ -315,4 +315,45 @@ describe('intake evaluation production wiring', () => {
       status: 'unavailable', level: 'ignore', reasons: ['consecutive-failures'],
     })
   })
+
+  it('registers balanced preset rules without explicit rules array and enforces per-rule ceilings', async () => {
+    const ctx = new Context(); contexts.push(ctx)
+    const delivery = deliveryPeer()
+    ctx.provide('assistantDelivery' as never, delivery.peer as never)
+    const { llm } = scriptedLlm(call => {
+      // Echo back level 'accept' on every rule so WorkItems + producer ceiling enforcement is verified.
+      const ruleOrder = [
+        'dsh-intake-calendar-imminent',
+        'dsh-intake-file-watch-change',
+        'dsh-intake-github-mention-or-review',
+        'dsh-intake-webhook-priority',
+      ]
+      const ruleId = ruleOrder[(call - 1) % ruleOrder.length]!
+      const ceiling = ruleId === 'dsh-intake-github-mention-or-review'
+        ? 'accept'
+        : ruleId === 'dsh-intake-file-watch-change'
+          ? 'digest'
+          : 'notify'
+      return jsonOutput({ ruleId, level: ceiling, quotes: ['build is red'] })
+    })
+    ctx.provide('llm' as never, llm as never)
+    const workItems = await mountWorkItems(ctx, { enabled: true, timeoutMs: 5_000, maxConsecutiveFailures: 3, maxPerRun: 5, maxCallsPerHour: 20 })
+    const { service } = await mountProactive(ctx, {
+      enabled: true,
+      preset: 'balanced',
+      provider: 'local-script',
+      model: 'scripted-evaluator',
+    })
+
+    await vi.waitFor(() => expect(service.intakeEvaluationHealth().readiness).toBe('registered'))
+    delivery.deliver(inbound())
+    await vi.waitFor(() => expect(workItems.intakeEvaluations('lark-channel', 'om_1')).toHaveLength(4))
+    const byRule = Object.fromEntries(
+      workItems.intakeEvaluations('lark-channel', 'om_1').map(row => [String(row['ruleId']), row]),
+    )
+    expect(byRule['dsh-intake-github-mention-or-review']).toMatchObject({ ceiling: 'accept', level: 'accept', wouldAccept: true })
+    expect(byRule['dsh-intake-calendar-imminent']).toMatchObject({ ceiling: 'notify', level: 'notify', wouldAccept: false })
+    expect(byRule['dsh-intake-webhook-priority']).toMatchObject({ ceiling: 'notify', level: 'notify', wouldAccept: false })
+    expect(byRule['dsh-intake-file-watch-change']).toMatchObject({ ceiling: 'digest', level: 'digest', wouldAccept: false })
+  })
 })

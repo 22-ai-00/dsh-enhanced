@@ -1,8 +1,9 @@
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  Config, IntakeEvaluationError, IntakeEvaluationProducer, INTAKE_EVALUATION_LEVELS, MAX_INTAKE_EVALUATION_QUOTE_CHARS,
-  intakeEvaluationPolicy, normalizeIntakeEvaluation, type IntakeEvaluationConfig, type IntakeModelRequest,
+  Config, IntakeEvaluationError, IntakeEvaluationProducer, INTAKE_EVALUATION_LEVELS, INTAKE_EVALUATION_PRESETS,
+  MAX_INTAKE_EVALUATION_QUOTE_CHARS, intakeEvaluationPolicy, normalizeIntakeEvaluation,
+  resolveIntakeEvaluationPresetRules, type IntakeEvaluationConfig, type IntakeModelRequest,
 } from '../src/index.ts'
 
 // WP20 stage 3 producer contract: every LLM below is a scripted in-process
@@ -274,5 +275,90 @@ describe('assistant-proactive intake evaluation health', () => {
     producer.markUnavailable(new Error('intake evaluation is disabled'))
     expect(producer.health()).toMatchObject({ registered: false, readiness: 'unavailable', lastError: expect.stringContaining('intake evaluation is disabled') })
     expect(Object.isFrozen(producer.health())).toBe(true)
+  })
+})
+
+describe('assistant-proactive intake evaluation presets', () => {
+  it('expands conservative and balanced presets identically to explicit canonical rules', () => {
+    expect(INTAKE_EVALUATION_PRESETS).toEqual(['conservative', 'balanced'])
+    expect(resolveIntakeEvaluationPresetRules('conservative')).toEqual([
+      { ruleId: 'dsh-intake-calendar-imminent', ceiling: 'notify' },
+      { ruleId: 'dsh-intake-file-watch-change', ceiling: 'digest' },
+      { ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'notify' },
+      { ruleId: 'dsh-intake-webhook-priority', ceiling: 'notify' },
+    ])
+    expect(resolveIntakeEvaluationPresetRules('balanced')).toEqual([
+      { ruleId: 'dsh-intake-calendar-imminent', ceiling: 'notify' },
+      { ruleId: 'dsh-intake-file-watch-change', ceiling: 'digest' },
+      { ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'accept' },
+      { ruleId: 'dsh-intake-webhook-priority', ceiling: 'notify' },
+    ])
+
+    const fromPreset = normalizeIntakeEvaluation({
+      enabled: true,
+      preset: 'balanced',
+      provider: 'p',
+      model: 'm',
+    })!
+    const fromExplicit = normalizeIntakeEvaluation({
+      enabled: true,
+      provider: 'p',
+      model: 'm',
+      rules: [...resolveIntakeEvaluationPresetRules('balanced')],
+    })!
+    expect(fromPreset.preset).toBe('balanced')
+    expect(fromPreset.rules).toEqual(fromExplicit.rules)
+    expect(intakeEvaluationPolicy(fromPreset).version).toBe(intakeEvaluationPolicy(fromExplicit).version)
+  })
+
+  it('allows explicit rule overrides and custom rules on top of a preset while validating bounds', () => {
+    const merged = normalizeIntakeEvaluation({
+      enabled: true,
+      preset: 'conservative',
+      provider: 'p',
+      model: 'm',
+      rules: [
+        { ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'accept' },
+        { ruleId: 'custom-escalation', ceiling: 'notify' },
+      ],
+    })!
+    expect(merged.rules).toEqual([
+      { ruleId: 'custom-escalation', ceiling: 'notify' },
+      { ruleId: 'dsh-intake-calendar-imminent', ceiling: 'notify' },
+      { ruleId: 'dsh-intake-file-watch-change', ceiling: 'digest' },
+      { ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'accept' },
+      { ruleId: 'dsh-intake-webhook-priority', ceiling: 'notify' },
+    ])
+
+    expect(() => normalizeIntakeEvaluation({ enabled: true, preset: 'aggressive' as never, provider: 'p', model: 'm' })).toThrow(/preset/)
+    expect(() => resolveIntakeEvaluationPresetRules('aggressive' as never)).toThrow(/preset/)
+    expect(() => normalizeIntakeEvaluation({
+      enabled: true,
+      preset: 'conservative',
+      provider: 'p',
+      model: 'm',
+      rules: [
+        { ruleId: 'dup', ceiling: 'digest' },
+        { ruleId: 'dup', ceiling: 'notify' },
+      ],
+    })).toThrow(/repeats/)
+    expect(() => normalizeIntakeEvaluation({
+      enabled: true,
+      preset: 'conservative',
+      provider: 'p',
+      model: 'm',
+      rules: Array.from({ length: 13 }, (_, idx) => ({ ruleId: `extra-${idx}`, ceiling: 'ignore' as const })),
+    })).toThrow(/16/)
+  })
+
+  it('accepts optional preset in Loader Config schema without altering omitted defaults', () => {
+    const defaults = Config({})
+    expect(defaults.intakeEvaluation).toEqual({ enabled: false, rules: [] })
+    const configured = Config({
+      intakeEvaluation: { enabled: true, preset: 'conservative', provider: 'p', model: 'm' },
+    })
+    expect(configured.intakeEvaluation).toMatchObject({ enabled: true, preset: 'conservative', provider: 'p', model: 'm', rules: [] })
+    expect(normalizeIntakeEvaluation(configured.intakeEvaluation)?.rules).toEqual(resolveIntakeEvaluationPresetRules('conservative'))
+    expect(() => Config({ intakeEvaluation: { enabled: true, preset: 'invalid', provider: 'p', model: 'm' } } as never)).toThrow()
   })
 })

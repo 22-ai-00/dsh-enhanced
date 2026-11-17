@@ -48,15 +48,16 @@ const MAX_PENDING_GOAL_CHANGE_SIGNALS = 256
 export const name = 'dsh-enhanced-assistant-proactive'
 export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProfile, proactiveAttentionCohort }
 export {
-  DISABLED_INTAKE_EVALUATION_HEALTH, INTAKE_EVALUATION_LEVELS, IntakeEvaluationError, IntakeEvaluationProducer,
-  intakeEvaluationPolicy, MAX_INTAKE_EVALUATION_QUOTES, MAX_INTAKE_EVALUATION_RULES, MAX_INTAKE_EVALUATION_QUOTE_CHARS,
-  MAX_INTAKE_SOURCE_TEXT, normalizeIntakeEvaluation,
+  DISABLED_INTAKE_EVALUATION_HEALTH, INTAKE_EVALUATION_LEVELS, INTAKE_EVALUATION_PRESETS,
+  IntakeEvaluationError, IntakeEvaluationProducer, intakeEvaluationPolicy, MAX_INTAKE_EVALUATION_QUOTES,
+  MAX_INTAKE_EVALUATION_RULES, MAX_INTAKE_EVALUATION_QUOTE_CHARS, MAX_INTAKE_SOURCE_TEXT,
+  normalizeIntakeEvaluation, resolveIntakeEvaluationPresetRules,
 } from './intake-evaluation.js'
 export type {
   IntakeEvaluationConfig, IntakeEvaluationErrorCode, IntakeEvaluationLevel, IntakeEvaluationPolicy,
-  IntakeEvaluationRule, IntakeEvaluationRuleConfig, IntakeEvaluationVerdict, IntakeModelRequest,
-  IntakeWorkItemsRegistration, NormalizedIntakeEvaluation, ProactiveIntakeEvaluationHealth,
-  ProactiveIntakeEvaluationReadiness,
+  IntakeEvaluationPreset, IntakeEvaluationRule, IntakeEvaluationRuleConfig, IntakeEvaluationVerdict,
+  IntakeModelRequest, IntakeWorkItemsRegistration, NormalizedIntakeEvaluation,
+  ProactiveIntakeEvaluationHealth, ProactiveIntakeEvaluationReadiness,
 } from './intake-evaluation.js'
 export type { AttentionOverlay }
 export * from './goal-lifecycle.js'
@@ -102,6 +103,7 @@ export const Config: Schema<Config> = Schema.object({
   // its own intakeLedger.evaluation for the registration to be accepted.
   intakeEvaluation: Schema.object({
     enabled: Schema.boolean().default(false),
+    preset: Schema.union(['conservative', 'balanced']),
     rules: Schema.array(Schema.object({
       ruleId: Schema.string().required(),
       ceiling: Schema.union(['ignore', 'digest', 'notify', 'accept']).required(),

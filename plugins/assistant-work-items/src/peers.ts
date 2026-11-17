@@ -316,6 +316,30 @@ export interface PeerAutomationsService {
   }): { readonly id: string; readonly automationId: string }
 }
 
+/** Structural copy of `event-triggers` intake observation bridge; never imported at runtime. */
+export interface PeerEventTriggersIntakeObservation {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly kind: 'event'
+  readonly senderIsBot: boolean
+  readonly explicitlyAddressed: boolean
+  readonly allowlistedSender: boolean
+  readonly allowlistedFollowUp: boolean
+  readonly subscribed: boolean
+  readonly observationDigest: string
+  readonly occurredAt: number
+  readonly text?: string
+}
+
+export interface PeerEventTriggersIntakeObserver {
+  readonly protocol: 1
+  readonly observe: (observation: Readonly<PeerEventTriggersIntakeObservation>) => void
+}
+
+export interface PeerEventTriggersIntakeService {
+  registerIntakeObserver?(observer: PeerEventTriggersIntakeObserver): () => void
+}
+
 /**
  * `assistant-verifier` read-only inspection of one accepted task (WP21 slice 4).
  *

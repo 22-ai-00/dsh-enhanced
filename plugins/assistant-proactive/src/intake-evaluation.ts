@@ -30,6 +30,9 @@ declare module '@deepseek-ai/dsh-llm' {
 /** Ordered weakest → strongest; mirrors assistant-work-items' protocol-1 levels. */
 export const INTAKE_EVALUATION_LEVELS = ['ignore', 'digest', 'notify', 'accept'] as const
 export type IntakeEvaluationLevel = typeof INTAKE_EVALUATION_LEVELS[number]
+/** Built-in bounded rule presets aligned with Policy Stage 3 template IDs. */
+export const INTAKE_EVALUATION_PRESETS = ['conservative', 'balanced'] as const
+export type IntakeEvaluationPreset = typeof INTAKE_EVALUATION_PRESETS[number]
 
 /**
  * Raw operator config as the Loader's Standard-Schema shape delivers it; the
@@ -43,6 +46,7 @@ export interface IntakeEvaluationRuleConfig {
 export interface IntakeEvaluationConfig {
   /** Off by default: an absent/disabled section registers nothing and changes nothing. */
   enabled?: boolean | null
+  preset?: IntakeEvaluationPreset | null
   rules?: IntakeEvaluationRuleConfig[] | null
   provider?: string | null
   model?: string | null
@@ -66,6 +70,7 @@ export interface IntakeEvaluationPolicy {
 /** Fully validated producer configuration; present only when explicitly enabled. */
 export interface NormalizedIntakeEvaluation {
   readonly enabled: true
+  readonly preset?: IntakeEvaluationPreset
   readonly rules: readonly IntakeEvaluationRule[]
   readonly provider: string
   readonly model: string
@@ -151,9 +156,29 @@ const CALL_WINDOW_MS = 3_600_000
 const CIRCUIT_COOLDOWN_MS = 60_000
 const POLICY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 const ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+~-]*$/u
-const CONFIG_KEYS = ['enabled', 'rules', 'provider', 'model', 'maxCallsPerHour', 'timeoutMs', 'maxConsecutiveFailures'] as const
+const CONFIG_KEYS = ['enabled', 'preset', 'rules', 'provider', 'model', 'maxCallsPerHour', 'timeoutMs', 'maxConsecutiveFailures'] as const
 const RULE_KEYS = ['ruleId', 'ceiling'] as const
 const REQUEST_KEYS = ['candidateId', 'ruleId', 'policyVersion', 'sourceText', 'ceiling', 'signal'] as const
+const PRESET_RULES: Record<IntakeEvaluationPreset, readonly IntakeEvaluationRule[]> = Object.freeze({
+  conservative: Object.freeze([
+    Object.freeze({ ruleId: 'dsh-intake-calendar-imminent', ceiling: 'notify' }),
+    Object.freeze({ ruleId: 'dsh-intake-file-watch-change', ceiling: 'digest' }),
+    Object.freeze({ ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'notify' }),
+    Object.freeze({ ruleId: 'dsh-intake-webhook-priority', ceiling: 'notify' }),
+  ]),
+  balanced: Object.freeze([
+    Object.freeze({ ruleId: 'dsh-intake-calendar-imminent', ceiling: 'notify' }),
+    Object.freeze({ ruleId: 'dsh-intake-file-watch-change', ceiling: 'digest' }),
+    Object.freeze({ ruleId: 'dsh-intake-github-mention-or-review', ceiling: 'accept' }),
+    Object.freeze({ ruleId: 'dsh-intake-webhook-priority', ceiling: 'notify' }),
+  ]),
+})
+export function resolveIntakeEvaluationPresetRules(preset: IntakeEvaluationPreset): readonly IntakeEvaluationRule[] {
+  if (preset !== 'conservative' && preset !== 'balanced') {
+    fail(`intakeEvaluation.preset must be one of ${INTAKE_EVALUATION_PRESETS.join(', ')}`)
+  }
+  return PRESET_RULES[preset]
+}
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 const isLevel = (value: unknown): value is IntakeEvaluationLevel =>
   typeof value === 'string' && (INTAKE_EVALUATION_LEVELS as readonly string[]).includes(value)
@@ -208,27 +233,50 @@ export function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluat
   if (!enabled) return undefined
   const provider = routeId(value['provider'], 'intakeEvaluation.provider')
   const model = routeId(value['model'], 'intakeEvaluation.model')
-  const rawRules = value['rules']
-  if (!Array.isArray(rawRules) || rawRules.length === 0 || rawRules.length > MAX_INTAKE_EVALUATION_RULES) {
-    fail(`intakeEvaluation.rules must list 1 to ${MAX_INTAKE_EVALUATION_RULES} rules when enabled`)
+  const rawPreset = value['preset']
+  let preset: IntakeEvaluationPreset | undefined
+  if (rawPreset !== undefined && rawPreset !== null) {
+    if (typeof rawPreset !== 'string' || !(INTAKE_EVALUATION_PRESETS as readonly string[]).includes(rawPreset)) {
+      fail(`intakeEvaluation.preset must be one of ${INTAKE_EVALUATION_PRESETS.join(', ')}`)
+    }
+    preset = rawPreset as IntakeEvaluationPreset
   }
-  const seen = new Set<string>()
-  const rules: IntakeEvaluationRule[] = []
-  for (const entry of rawRules) {
+  const rawRules = value['rules']
+  if (preset === undefined) {
+    if (!Array.isArray(rawRules) || rawRules.length === 0 || rawRules.length > MAX_INTAKE_EVALUATION_RULES) {
+      fail(`intakeEvaluation.rules must list 1 to ${MAX_INTAKE_EVALUATION_RULES} rules when enabled`)
+    }
+  } else if (rawRules !== undefined && rawRules !== null && !Array.isArray(rawRules)) {
+    fail(`intakeEvaluation.rules must be an array of up to ${MAX_INTAKE_EVALUATION_RULES} rules`)
+  }
+  const merged = new Map<string, IntakeEvaluationLevel>()
+  if (preset !== undefined) {
+    for (const entry of resolveIntakeEvaluationPresetRules(preset)) {
+      merged.set(entry.ruleId, entry.ceiling)
+    }
+  }
+  const explicitSeen = new Set<string>()
+  for (const entry of Array.isArray(rawRules) ? rawRules : []) {
     const rule = plainObject(entry, 'intakeEvaluation.rules[]')
     rejectUnknown(rule, RULE_KEYS, 'intakeEvaluation.rules[]')
     const ruleId = rule['ruleId']
     if (typeof ruleId !== 'string' || !POLICY_ID.test(ruleId)) fail('intakeEvaluation.rules[].ruleId has an invalid shape')
-    if (seen.has(ruleId)) fail(`intakeEvaluation.rules repeats ruleId ${ruleId}`)
+    if (explicitSeen.has(ruleId)) fail(`intakeEvaluation.rules repeats ruleId ${ruleId}`)
     const ceiling = rule['ceiling']
     if (!isLevel(ceiling)) fail(`intakeEvaluation.rules[] ceiling must be one of ${INTAKE_EVALUATION_LEVELS.join(', ')}`)
-    seen.add(ruleId)
-    rules.push(Object.freeze({ ruleId, ceiling }))
+    explicitSeen.add(ruleId)
+    merged.set(ruleId, ceiling)
   }
+  if (merged.size === 0 || merged.size > MAX_INTAKE_EVALUATION_RULES) {
+    fail(`intakeEvaluation.rules must list 1 to ${MAX_INTAKE_EVALUATION_RULES} rules when enabled`)
+  }
+  const rules: IntakeEvaluationRule[] = [...merged.entries()]
+    .map(([ruleId, ceiling]) => Object.freeze({ ruleId, ceiling }))
   // Canonical order: the digest must not move when a deployment reorders the same rules.
   rules.sort((left, right) => left.ruleId < right.ruleId ? -1 : left.ruleId > right.ruleId ? 1 : 0)
   return Object.freeze({
     enabled: true as const,
+    ...(preset === undefined ? {} : { preset }),
     rules: Object.freeze(rules),
     provider,
     model,

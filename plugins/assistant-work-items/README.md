@@ -533,12 +533,16 @@ const { record, replayed } = ctx.assistantWorkItems.recordIntake({
 
 ### 入站接线（WP20 第 2 阶段）
 
-启用 `intakeLedger` 时，WorkItems 向 `assistant-delivery` 注册唯一的 intake observer（冻结对象 `{ protocol: 1, observe }`，以当前 WorkItems 所有权栅栏校验，dispose 时注销）。入站 adapter（目前为 `lark-channel`）对每条已规范化、未过期、非问题/审批答复的消息调用 `context.observe(...)`，只传事件 ID、时间、发送者、会话类型、是否寄址、可选回复目标与正文 SHA-256；Delivery 据此计算：
+启用 `intakeLedger` 时，WorkItems 会同时通过 Cordis `ctx.inject` 订阅可选 peer 的只读入站观察（仍使用结构化契约、无运行时依赖，并在 `ctx.effect` 销毁时自动注销）：
+
+1. 向 `assistant-delivery` 注册唯一的 intake observer（冻结对象 `{ protocol: 1, observe }`，以当前 WorkItems 所有权栅栏校验，dispose 时注销）。入站 adapter（目前为 `lark-channel`）对每条已规范化、未过期、非问题/审批答复的消息调用 `context.observe(...)`，只传事件 ID、时间、发送者、会话类型、是否寄址、可选回复目标与正文 SHA-256；Delivery 据此计算：
 
 - `source` = `<channel>-channel`，`sourceEventId` = `<account>/<eventId>`；
 - `senderAllowlisted` = 发送者当前为已配对且未撤销的主人主体；
 - `threadFollowUp` 只在白名单发送者于同一会话回复已投递（accepted/delivered/read）的 WorkItems 报告时为真；非白名单发送者的回复永远不是跟进；
 - `groupMessage` 来自会话类型。
+
+2. 若可选 peer `eventTriggers`（`assistant-event-triggers`）提供 `registerIntakeObserver`，WorkItems 会注册冻结协议-1 观察者，将已去重、仅含元数据/摘要的事件观测映射为闭集 10 字段 `WorkItemIntakeInput` 并写入 `recordIntake`；仅当 `intakeLedger.evaluation` 开启且 `sha256(observation.text) === observationDigest` 时才会以 transient `sourceText` 参与评估（评估关闭或不匹配时直接忽略文本），绝不落盘原文正文。
 
 observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 原有的接收与门控，不准入、不派发、不通知；observer 异常或校验失败只记 debug 日志并丢弃。默认关闭时不注册 observer，不写任何行。
 
@@ -595,7 +599,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
 | `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
 | `ownerReportFeedback` | `false` | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
-| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；仅 Host 调用 `recordIntake`，并经 Delivery 接收入站 adapter 的元数据/摘要观察，observe 可用，无外部副作用 |
+| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；接受 Host 调用 `recordIntake`，并经 `assistantDelivery.registerInboundIntakeObserver` 与可选 `eventTriggers.registerIntakeObserver` 接入元数据观察（observe 可用，无外部副作用） |
 | `intakeLedger.sources.<id>.unaddressedGroupMessages` | `false` | 该来源未寄址群消息以元数据进入账本（否则 filtered）；最多 32 个来源 |
 | `intakeLedger.sources.<id>.unsubscribedEvents` | `false` | 该来源未订阅事件以元数据进入账本（否则 filtered） |
 | `intakeLedger.evaluation.enabled` | `false` | inferred 候选的模型评估（仅 observe，需 Host 注册评估器）；关闭时不接收正文、不写评估行 |

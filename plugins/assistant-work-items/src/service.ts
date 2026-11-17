@@ -19,6 +19,9 @@ import { normalizeWorkItemReportSummary, WorkItemLedger } from './ledger.js'
 import type {
   PeerAutomationsService,
   PeerDeliveryService,
+  PeerEventTriggersIntakeObservation,
+  PeerEventTriggersIntakeObserver,
+  PeerEventTriggersIntakeService,
   PeerOwnerRouteReceipt,
   PeerPolicyService,
 } from './peers.js'
@@ -270,6 +273,7 @@ export class AssistantWorkItemsService extends Service {
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
   private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void; acceptsSourceText?: true }> | undefined
+  private workItemsEventIntakeObserver: PeerEventTriggersIntakeObserver | undefined
   /** Present only when `intakeLedger.evaluation` is enabled. */
   private readonly workItemsIntakeEvaluation: WorkItemIntakeEvaluationRuntime | undefined
   /** Present only when `intakeLedger.evaluation.admit` is enabled. */
@@ -421,6 +425,33 @@ export class AssistantWorkItemsService extends Service {
           unregister()
           if (this.workItemsIntakeObserver === observer) this.workItemsIntakeObserver = undefined
         }, 'assistant-work-items.intake-observer')
+      })
+      ctx.inject(['eventTriggers'], eventCtx => {
+        if (this.workItemsClosed) return
+        const peer = eventCtx.get('eventTriggers' as never) as PeerEventTriggersIntakeService | undefined
+        if (typeof peer?.registerIntakeObserver !== 'function') {
+          eventCtx.logger.debug('assistant-work-items: Event Triggers intake observation is unavailable')
+          return
+        }
+        const observer: PeerEventTriggersIntakeObserver = Object.freeze({
+          protocol: 1 as const,
+          observe: (observation: Readonly<PeerEventTriggersIntakeObservation>): void => {
+            if (this.workItemsClosed || this.workItemsEventIntakeObserver !== observer) return
+            this.recordEventTriggerIntake(observation, eventCtx)
+          },
+        })
+        this.workItemsEventIntakeObserver = observer
+        let unregister: () => void
+        try { unregister = peer.registerIntakeObserver(observer) }
+        catch (error) {
+          this.workItemsEventIntakeObserver = undefined
+          eventCtx.logger.warn(`assistant-work-items: event-triggers intake observer unavailable: ${describe(error)}`)
+          return
+        }
+        eventCtx.effect(() => () => {
+          unregister()
+          if (this.workItemsEventIntakeObserver === observer) this.workItemsEventIntakeObserver = undefined
+        }, 'assistant-work-items.event-triggers-intake-observer')
       })
     }
     if (this.workItemsConfig.enabled && this.workItemsConfig.follows?.eventTriggers === true) {
@@ -1374,6 +1405,32 @@ export class AssistantWorkItemsService extends Service {
     // evaluation off it is ignored, with it on it is held in memory only.
     if (sourceText !== undefined) this.workItemsIntakeEvaluation?.observe(result.record, sourceText)
     return result
+  }
+
+  private recordEventTriggerIntake(observation: Readonly<PeerEventTriggersIntakeObservation>, eventCtx: Context): void {
+    try {
+      const input: WorkItemIntakeInput = {
+        source: observation.source,
+        sourceEventId: observation.sourceEventId,
+        kind: observation.kind,
+        senderAllowlisted: observation.allowlistedSender,
+        addressed: observation.explicitlyAddressed,
+        threadFollowUp: observation.allowlistedFollowUp,
+        senderIsBot: observation.senderIsBot,
+        subscribed: observation.subscribed,
+        contentDigest: observation.observationDigest,
+        occurredAt: observation.occurredAt,
+      }
+      const sourceText = this.workItemsIntakeEvaluation !== undefined
+        && typeof observation.text === 'string'
+        && authenticatesIntakeText(observation.text, observation.observationDigest)
+        ? observation.text
+        : undefined
+      if (sourceText === undefined) this.recordIntake(input)
+      else this.recordIntake(input, sourceText)
+    } catch (error) {
+      eventCtx.logger.debug(`assistant-work-items: event-triggers intake observation not recorded: ${describe(error)}`)
+    }
   }
 
   private intakeHintKey(source: string, sourceEventId: string): string {
