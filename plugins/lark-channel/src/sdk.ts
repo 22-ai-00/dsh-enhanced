@@ -27,6 +27,7 @@ import {
   type LarkSendInput,
   type LarkSendOptions,
   type LarkSendResult,
+  type LarkTextFileUploadInput,
   type LarkTransport,
   type LarkTransportErrorCode,
   type LarkTransportHandlers,
@@ -38,8 +39,13 @@ import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
 const LARK_MESSAGE_RESOURCE_API = '/open-apis/im/v1/messages'
 const LARK_MESSAGE_API = '/open-apis/im/v1/messages'
+const LARK_FILE_API = '/open-apis/im/v1/files'
 const LARK_ERROR_BODY_MAX_BYTES = 16 * 1_024
+export const LARK_TEXT_FILE_MAX_BYTES = 1_048_576
+const LARK_FILE_UPLOAD_RESPONSE_MAX_BYTES = 65_536
+const LARK_FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES = 4_096
 const larkResourceIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
+const larkTextFileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u
 const LARK_READ_RECEIPT_ID_LIMIT = 100
 const LARK_READ_TIME = /^[0-9]{1,15}$/u
 
@@ -422,7 +428,8 @@ function providerFailureCode(code: unknown): LarkTransportErrorCode | undefined 
   if (code === 99991400 || code === 230020) return 'rate_limited'
   if (code === 230027 || code === 234009 || code === 99991663
     || code === 99991672 || code === 99991676 || code === 99991679) return 'permission_denied'
-  if (code === 200530) return 'format_error'
+  if (code === 200530 || code === 234001 || code === 234006
+    || code === 234007 || code === 234008 || code === 234011) return 'format_error'
   return undefined
 }
 
@@ -574,12 +581,57 @@ export function writeLarkProgressRequest(
   }
 }
 
+export function createLarkTextFileUploadRequest(
+  input: Readonly<{
+    name: string
+    mediaType: 'text/plain' | 'text/markdown'
+    text: string
+    timeoutMs: number
+    maxBytes?: number
+    signal: AbortSignal
+  }>,
+) {
+  const maxBytes = input.maxBytes ?? LARK_TEXT_FILE_MAX_BYTES
+  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1
+    || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > LARK_TEXT_FILE_MAX_BYTES) {
+    throw new LarkTransportError('format_error', 'lark-channel: invalid text file upload limits')
+  }
+  if (typeof input.name !== 'string' || !larkTextFileName.test(input.name) || input.name.includes('..')) {
+    throw new LarkTransportError('format_error', 'lark-channel: invalid text file attachment name')
+  }
+  if (input.mediaType !== 'text/plain' && input.mediaType !== 'text/markdown') {
+    throw new LarkTransportError('format_error', 'lark-channel: unsupported text file attachment media type')
+  }
+  if (typeof input.text !== 'string' || input.text.length === 0) {
+    throw new LarkTransportError('format_error', 'lark-channel: text file attachment must be non-empty')
+  }
+  const file = Buffer.from(input.text, 'utf8')
+  if (file.byteLength === 0 || file.byteLength > maxBytes) {
+    throw new LarkTransportError('format_error', 'lark-channel: text file attachment exceeds byte limit')
+  }
+  return {
+    method: 'POST' as const,
+    url: LARK_FILE_API,
+    headers: { 'Content-Type': 'multipart/form-data' },
+    data: {
+      file_type: 'stream' as const,
+      file_name: input.name,
+      file,
+    },
+    timeout: input.timeoutMs,
+    signal: input.signal,
+    maxRedirects: 0,
+    maxContentLength: LARK_FILE_UPLOAD_RESPONSE_MAX_BYTES,
+    maxBodyLength: file.byteLength + LARK_FILE_UPLOAD_MULTIPART_OVERHEAD_BYTES,
+  }
+}
+
 function createLarkMessageSendRequest(
   chatId: string,
   rendered: ReturnType<typeof renderLarkMessage>,
   uuid: string,
   options: LarkSendOptions,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ) {
   if (options.replyTo === undefined) {
     return {
@@ -587,7 +639,7 @@ function createLarkMessageSendRequest(
       url: LARK_MESSAGE_API,
       params: { receive_id_type: 'chat_id' },
       data: { receive_id: chatId, msg_type: rendered.msgType, content: rendered.content, uuid },
-      signal,
+      ...(signal === undefined ? {} : { signal }),
     }
   }
   const replyTo = assertResourceIdentifier(options.replyTo, 'reply message')
@@ -600,8 +652,19 @@ function createLarkMessageSendRequest(
       uuid,
       ...(options.replyInThread === undefined ? {} : { reply_in_thread: options.replyInThread }),
     },
-    signal,
+    ...(signal === undefined ? {} : { signal }),
   }
+}
+
+export function createLarkFileMessageRequest(
+  chatId: string,
+  fileKey: string,
+  options: LarkSendOptions = {},
+  signal?: AbortSignal,
+) {
+  const rendered = renderLarkMessage({ fileKey })
+  const uuid = larkRequestUuid(options.requestKey ?? `${chatId}:${rendered.content}`)
+  return createLarkMessageSendRequest(chatId, rendered, uuid, options, signal ?? options.signal)
 }
 
 function createLarkReactionRequest(messageId: string, emojiType: string, signal: AbortSignal) {
@@ -641,8 +704,14 @@ export const LARK_PERMISSION_PICKER_CONTROLS = Object.freeze({
   full: 'permission_full',
 })
 
-export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive' | 'text'; content: string } {
+export function renderLarkMessage(input: LarkSendInput): { msgType: 'file' | 'interactive' | 'text'; content: string } {
   if ('text' in input) return { msgType: 'text', content: JSON.stringify({ text: input.text }) }
+  if ('fileKey' in input) {
+    if (typeof input.fileKey !== 'string' || !larkResourceIdentifier.test(input.fileKey)) {
+      throw new LarkTransportError('format_error', 'lark-channel: invalid file identifier')
+    }
+    return { msgType: 'file', content: JSON.stringify({ file_key: input.fileKey }) }
+  }
   if ('userQuestion' in input) {
     const question = input.userQuestion
     const optionButton = (option: LarkUserQuestionOption, index: number) => {
@@ -1264,16 +1333,28 @@ export function toSafeLarkMessage(message: NormalizedMessage, senderIsBot = fals
   }
 }
 
-function providerError(result: { code: number | undefined; msg: string | undefined }): LarkTransportError {
+function providerError(
+  result: { code: number | undefined; msg: string | undefined },
+  kind: 'message' | 'upload' = 'message',
+): LarkTransportError {
   const classified = providerFailureCode(result.code)
   if (classified === 'permission_denied') {
     return new LarkTransportError('permission_denied', 'Lark rejected the application credential or permission')
   }
   if (classified === 'rate_limited' || /rate|frequency|too many/iu.test(result.msg ?? '')) {
-    return new LarkTransportError('rate_limited', 'Lark rate limited the message')
+    return new LarkTransportError(
+      'rate_limited',
+      kind === 'upload' ? 'Lark rate limited the file upload' : 'Lark rate limited the message',
+    )
   }
   if (classified === 'format_error') {
-    return new LarkTransportError('format_error', 'Lark rejected the message card format')
+    return new LarkTransportError(
+      'format_error',
+      kind === 'upload' ? 'Lark rejected the file upload format' : 'Lark rejected the message card format',
+    )
+  }
+  if (kind === 'upload') {
+    return new LarkTransportError('upload_failed', `Lark rejected the file upload with code ${String(result.code ?? 'missing')}`)
   }
   return new LarkTransportError('unknown', `Lark rejected the message with code ${String(result.code ?? 'missing')}`)
 }
@@ -1618,7 +1699,57 @@ export class OfficialLarkTransport implements LarkTransport {
     }, 'Lark card update', signal)
   }
 
+  async uploadTextFile(input: LarkTextFileUploadInput): Promise<string> {
+    if (input.signal.aborted || this.lifecycleController.signal.aborted) {
+      throw new LarkTransportError('not_connected', 'Lark file upload was cancelled')
+    }
+    const maxBytes = input.maxBytes ?? LARK_TEXT_FILE_MAX_BYTES
+    // Validate input bounds and build the payload once before entering boundedSdkRequest / acquiring token.
+    const baseRequest = createLarkTextFileUploadRequest({
+      name: input.name,
+      mediaType: input.mediaType,
+      text: input.text,
+      timeoutMs: this.requestTimeoutMs,
+      maxBytes,
+      signal: input.signal,
+    })
+    try {
+      return await this.boundedSdkRequest(async deadlineSignal => {
+        const response = await this.client.request<{
+          code?: number
+          msg?: string
+          data?: { file_key?: string }
+        }>({ ...baseRequest, signal: deadlineSignal })
+        if (response === null || typeof response !== 'object') {
+          throw new LarkTransportError('upload_failed', 'Lark file upload response was invalid')
+        }
+        if (response.code !== undefined && response.code !== 0) {
+          throw providerError({ code: response.code, msg: response.msg }, 'upload')
+        }
+        const fileKey = response.data?.file_key
+        if (typeof fileKey !== 'string' || !larkResourceIdentifier.test(fileKey)) {
+          throw new LarkTransportError('upload_failed', 'Lark file upload response omitted valid file identity')
+        }
+        return fileKey
+      }, 'Lark file upload', input.signal)
+    } catch (error) {
+      if (input.signal.aborted || this.lifecycleController.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark file upload was cancelled')
+      }
+      if (error instanceof LarkTransportError) {
+        if (error.code === 'unknown') {
+          throw new LarkTransportError('upload_failed', 'Lark file upload failed')
+        }
+        throw error
+      }
+      throw new LarkTransportError('upload_failed', 'Lark file upload failed')
+    }
+  }
+
   async send(chatId: string, input: LarkSendInput, options: LarkSendOptions = {}): Promise<LarkSendResult> {
+    if (options.signal?.aborted || this.lifecycleController.signal.aborted) {
+      throw new LarkTransportError('not_connected', 'Lark SDK request was cancelled')
+    }
     const rendered = renderLarkMessage(input)
     const uuid = larkRequestUuid(options.requestKey ?? `${chatId}:${rendered.content}`)
     return await this.boundedSdkRequest(async deadlineSignal => {
@@ -1631,7 +1762,7 @@ export class OfficialLarkTransport implements LarkTransport {
       const messageId = response.data?.message_id
       if (messageId === undefined) throw new LarkTransportError('unknown', 'Lark accepted response omitted message identity')
       return { messageId }
-    }, 'Lark SDK request')
+    }, 'Lark SDK request', options.signal)
   }
 
   private async fetchBotIdentity(): Promise<BotIdentity> {

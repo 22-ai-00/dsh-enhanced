@@ -187,6 +187,7 @@ export type LarkSendInput =
   | { approvalApplication: LarkApprovalApplicationCard }
   | { approvalResult: LarkApprovalResultCard }
   | { automationIncident: LarkAutomationIncidentCard }
+  | { fileKey: string }
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
   | { modelSelectionResult: LarkModelSelectionResultCard }
@@ -201,6 +202,15 @@ export interface LarkSendOptions {
   replyTo?: string
   replyInThread?: boolean
   requestKey?: string
+  signal?: AbortSignal
+}
+
+export interface LarkTextFileUploadInput {
+  readonly name: string
+  readonly mediaType: 'text/plain' | 'text/markdown'
+  readonly text: string
+  readonly maxBytes?: number
+  readonly signal: AbortSignal
 }
 
 export interface LarkSendResult {
@@ -304,6 +314,7 @@ export interface LarkTransport {
   readCalendarEventPage?(
     input: Readonly<{ calendarId: string; startTime: number; endTime: number; pageSize: number; pageToken?: string; signal: AbortSignal }>,
   ): Promise<unknown>
+  uploadTextFile?(input: LarkTextFileUploadInput): Promise<string>
   send(chatId: string, input: LarkSendInput, options?: LarkSendOptions): Promise<LarkSendResult>
 }
 

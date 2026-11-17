@@ -107,7 +107,7 @@ Calendar v4 读取默认关闭；每页响应上限为 1 MiB，超限请求失�
 
 `userQuestionTtlMs` 默认 24 小时，范围为 1 分钟至 7 天；它限制当前进程内等待飞书回答的时长。过期、取消、Host 已在其他端结算或 adapter 注销都会撤销这次即时等待，不会把后到消息变成新的问题回答；短暂 WebSocket 重连不会主动丢弃仍有效的卡片。
 
-飞书应用至少需要机器人身份读取、单聊/群内 @ 消息接收、机器人发消息、`im.message.receive_v1`；`Get`/`DONE` 需要 `im:message.reactions:write_only`，图片需要 `im:resource`，审批、模型选择和用户问题卡片需要 `card.action.trigger`。事件与回调使用 WebSocket 长连接，不需要公网 callback URL。
+飞书应用至少需要机器人身份读取、单聊/群内 @ 消息接收、机器人发消息、`im.message.receive_v1`；`Get`/`DONE` 需要 `im:message.reactions:write_only`，图片读取与超长文本附件上传需要 `im:resource`，审批、模型选择和用户问题卡片需要 `card.action.trigger`。事件与回调使用 WebSocket 长连接，不需要公网 callback URL。
 
 ## `ask_user_question` 交互
 
@@ -186,8 +186,8 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 - Linux 原生准备已接入 `--prepare-build`、本地更新候选构建和全新 `--install-owner` 配置事务。已有 Docker owner 的程序升级已接入空业务历史检查与停服采用授权 CAS：停服前、资源迁移前及 finalizer 重查，签名 overlay 绑定迁移计划、证明和文件身份，两个启动前验收点显式复核空表；后续正常就绪检查允许新的业务记录。配置启用但库缺失、非空 review/采用历史、sidecar、native→native 或授权不匹配会拒绝；不删库、不刷新额度和期限。完整临时 Home 升级、双服务就绪及回滚仍待实机验收，现有生产 Home 尚未迁移。旧 Docker 安装不能以重复安装续跑；迁移须显式进行，且不会借此扩大授权。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
 
-- v0.1 支持文本、受限图片描述符、文本/Markdown-card 出站、durable proposal、owner-DM 一次性工具审批、模型/权限卡片、reaction 和原生进度；模型不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
-- 只有图片资源具备受限下载能力，且依赖 AttachmentStore 与模型图片能力；文件、音频、视频和 sticker 只进入 metadata quarantine。没有病毒扫描、附件上传或消息编辑。
+- v0.1 支持文本、受限图片描述符、文本/Markdown-card 出站、WP19 `plain` 超长通知的 UTF-8 `text/plain` / `text/markdown` 附件上传与摘要并发（`capabilities.textAttachments: true`）、durable proposal、owner-DM 一次性工具审批、模型/权限卡片、reaction 和原生进度；模型不能提交任意 card JSON 或任意上传文件路径，也不能直接控制 reaction 或进度载荷。出站文本附件在发送前强校验 SHA-256 摘要及 `maxTextBytes` / 1 MiB 上限，经 `/open-apis/im/v1/files` 上传后再发送 `msg_type: 'file'` 消息和行内摘要；任一步失败均按可重试/不可重试语义 fail closed，绝不会只发截断摘要而丢弃附件。
+- 入站只有图片资源具备受限下载能力，且依赖 AttachmentStore 与模型图片能力；入站文件、音频、视频和 sticker 只进入 metadata quarantine。没有病毒扫描、任意入站文件下载、任意二进制上传或消息编辑（仅 CardKit 卡片支持通过 `updatePresentation` 原位替换）。
 - 单应用长连接是集群竞争消费，不提供广播、多节点 exactly-once 或断线历史补拉；目标部署是受 supervisor 管理的单机进程。
 - setup wizard 正式支持 macOS 与 Linux；Windows 为 best-effort。企业管理员审批和应用可用范围仍由飞书控制。
 - `message_cot` 与 reaction 都可能因租户、应用类型或接口能力而降级；它们失败不会重跑任务，也不会阻断最终回复。

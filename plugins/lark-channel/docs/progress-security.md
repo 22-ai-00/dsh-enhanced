@@ -119,8 +119,7 @@ durable proposal 卡和 open-turn 工具审批卡是两个独立协议。具体�
 
 ## 当前边界
 
-- v0.1 自动处理文本和图片描述符入站、文本/Markdown-card 出站、durable proposal、owner-DM one-shot tool approval、model/permission picker、`Get`/`DONE` 与脱敏原生进度。模型不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
-- 只有图片资源具备受限下载能力，而且只有 Delivery 图片桥、AttachmentStore 与目标模型图片能力全部存在时启用。文件、音频、视频和 sticker 仍只进入 durable metadata quarantine；本插件不做病毒扫描或附件出站上传。
-- 消息编辑和上传尚未实现；未来也必须先创建 Delivery 持久 operation，不能让模型直接调用 SDK。
+- v0.1 自动处理文本和图片描述符入站、文本/Markdown-card 出站、WP19 `plain` 超长通知的受限 UTF-8 文本附件上传与摘要并发（`capabilities.textAttachments: true`）、durable proposal、owner-DM one-shot tool approval、model/permission picker、`Get`/`DONE` 与脱敏原生进度。模型不能提交任意 card JSON 或任意上传路径，也不能直接控制 reaction 或进度载荷。出站文本附件须经 Delivery 转换并以 SHA-256 摘要与 `maxTextBytes` / 1 MiB 边界校验后通过 `/open-apis/im/v1/files` 上传、发送 `msg_type: 'file'` 与行内摘要，失败按确定性可重试/不可重试分类 fail closed，不丢弃附件单独发摘要。
+- 入站只有图片资源具备受限下载能力，而且只有 Delivery 图片桥、AttachmentStore 与目标模型图片能力全部存在时启用。入站文件、音频、视频和 sticker 仍只进入 durable metadata quarantine；本插件不做病毒扫描、任意二进制上传或任意消息编辑。
 - 单应用长连接是集群竞争消费，不提供广播或多节点 exactly-once。当前 suite 的可靠性目标是由 supervisor 管理的单机进程。
 - setup wizard 正式支持 macOS 与 Linux，Windows 为 best-effort；需要交互式终端和一次 owner 私聊，不接受 `--app-secret` 参数。一键模式在扫码确认后通过官方流程选择或创建应用；企业管理员审批等租户控制面仍由飞书强制执行。

@@ -18,6 +18,7 @@ import type {
   LarkSendInput,
   LarkSendOptions,
   LarkReadReceipt,
+  LarkTextFileUploadInput,
   LarkTransport,
   LarkTransportHandlers,
 } from '../src/types.ts'
@@ -26,6 +27,7 @@ class FakeTransport implements LarkTransport {
   handlers: LarkTransportHandlers | undefined
   readonly connect = vi.fn(async () => {})
   readonly disconnect = vi.fn(async () => {})
+  readonly uploadTextFile = vi.fn(async (_input: LarkTextFileUploadInput) => 'file_v2_uploaded')
   readonly send = vi.fn(async (_chatId: string, _input: LarkSendInput, _options?: LarkSendOptions) => ({ messageId: 'om_sent' }))
   readonly addReaction = vi.fn(async (_messageId: string, _emojiType: string) => 'reaction-1')
   readonly createProgress = vi.fn(async (_chatId: string, _options: { replyTo: string; hidden: boolean }) => ({
@@ -149,7 +151,7 @@ describe('Lark delivery adapter', () => {
   test('declares read receipts and forwards normalized DM read facts to Delivery', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
-    expect(f.adapter.capabilities).toMatchObject({ receipts: ['read'], readReceipts: 'best-effort' })
+    expect(f.adapter.capabilities).toMatchObject({ receipts: ['read'], readReceipts: 'best-effort', textAttachments: true })
     f.transport.emitRead({ messageIds: ['om_a', 'om_b', 'om_a'], readAt: 1_700_000_000_123, readerOpenId: 'ou_owner' })
     await vi.waitFor(() => expect(f.context.receipt).toHaveBeenCalledTimes(2))
     expect(f.context.receipt).toHaveBeenNthCalledWith(1, { channel: 'lark', account: 'primary-bot',

@@ -4,9 +4,12 @@ import { describe, expect, test, vi } from 'vitest'
 import {
   classifyLarkSdkFailure,
   classifyLarkImageSdkFailure,
+  createLarkFileMessageRequest,
   createLarkRawCardUpdateRequest,
   createLarkImageResourceRequest,
   createLarkProgressRequest,
+  createLarkTextFileUploadRequest,
+  LARK_TEXT_FILE_MAX_BYTES,
   larkRequestUuid,
   OfficialLarkTransport,
   rawSenderIsBot,
@@ -1384,5 +1387,231 @@ describe('tool approval terminal card rendering', () => {
     expect(rendered.content).not.toContain('"tag":"button"')
     expect(rendered.content).not.toContain('"behaviors"')
     expect(rendered.content).not.toContain('执行成功')
+  })
+})
+
+describe('Lark text attachment upload and file message SDK boundary', () => {
+  test('builds bounded UTF-8 multipart upload requests and rejects malformed inputs', () => {
+    const signal = new AbortController().signal
+    const request = createLarkTextFileUploadRequest({
+      name: 'notice-abcdef123456.md',
+      mediaType: 'text/markdown',
+      text: '# 通知\n\n完整正文 UTF-8',
+      timeoutMs: 12_000,
+      maxBytes: 1_024,
+      signal,
+    })
+    expect(request).toEqual({
+      method: 'POST',
+      url: '/open-apis/im/v1/files',
+      headers: { 'Content-Type': 'multipart/form-data' },
+      data: {
+        file_type: 'stream',
+        file_name: 'notice-abcdef123456.md',
+        file: Buffer.from('# 通知\n\n完整正文 UTF-8', 'utf8'),
+      },
+      timeout: 12_000,
+      signal,
+      maxRedirects: 0,
+      maxContentLength: 65_536,
+      maxBodyLength: Buffer.byteLength('# 通知\n\n完整正文 UTF-8', 'utf8') + 4_096,
+    })
+
+    for (const invalid of [
+      { name: '../secret.txt', mediaType: 'text/plain' as const, text: 'ok' },
+      { name: 'dir/file.txt', mediaType: 'text/plain' as const, text: 'ok' },
+      { name: 'bad..txt', mediaType: 'text/plain' as const, text: 'ok' },
+      { name: '.hidden', mediaType: 'text/plain' as const, text: 'ok' },
+      { name: 'empty.txt', mediaType: 'text/plain' as const, text: '' },
+      { name: 'big.txt', mediaType: 'text/plain' as const, text: '你'.repeat(350), maxBytes: 1_024 },
+      { name: 'bad-limits.txt', mediaType: 'text/plain' as const, text: 'ok', maxBytes: LARK_TEXT_FILE_MAX_BYTES + 1 },
+      { name: 'bad-mime.txt', mediaType: 'application/octet-stream' as unknown as 'text/plain', text: 'ok' },
+    ]) {
+      expect(() => createLarkTextFileUploadRequest({
+        timeoutMs: 5_000,
+        signal,
+        ...invalid,
+      })).toThrow(/format_error|invalid|unsupported|non-empty|exceeds/u)
+    }
+  })
+
+  test('renders msg_type file messages and rejects invalid file keys', () => {
+    expect(renderLarkMessage({ fileKey: 'file_v2_abc-123' })).toEqual({
+      msgType: 'file',
+      content: JSON.stringify({ file_key: 'file_v2_abc-123' }),
+    })
+    expect(() => renderLarkMessage({ fileKey: '../etc/passwd' })).toThrow(/file identifier/u)
+    expect(() => renderLarkMessage({ fileKey: '' })).toThrow(/file identifier/u)
+
+    const signal = new AbortController().signal
+    expect(createLarkFileMessageRequest('oc_chat', 'file_v2_abc', {
+      replyTo: 'om_parent',
+      replyInThread: true,
+      requestKey: 'key-1:attachment',
+      signal,
+    })).toEqual({
+      method: 'POST',
+      url: '/open-apis/im/v1/messages/om_parent/reply',
+      data: {
+        msg_type: 'file',
+        content: JSON.stringify({ file_key: 'file_v2_abc' }),
+        uuid: larkRequestUuid('key-1:attachment'),
+        reply_in_thread: true,
+      },
+      signal,
+    })
+  })
+
+  test('uploads UTF-8 text files and sends file messages through bounded OfficialLarkTransport', async () => {
+    const request = vi.spyOn(Client.prototype, 'request')
+      .mockResolvedValueOnce({ code: 0, data: { file_key: 'file_v2_ok' } })
+      .mockResolvedValueOnce({ code: 0, data: { message_id: 'om_file_1' } })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    const signal = new AbortController().signal
+    try {
+      const fileKey = await transport.uploadTextFile!({
+        name: 'notice-123.txt',
+        mediaType: 'text/plain',
+        text: 'hello 世界',
+        signal,
+      })
+      expect(fileKey).toBe('file_v2_ok')
+      expect(request.mock.calls[0]?.[0]).toMatchObject({
+        method: 'POST',
+        url: '/open-apis/im/v1/files',
+        headers: { 'Content-Type': 'multipart/form-data' },
+        data: {
+          file_type: 'stream',
+          file_name: 'notice-123.txt',
+          file: Buffer.from('hello 世界', 'utf8'),
+        },
+        maxRedirects: 0,
+      })
+
+      await expect(transport.send('oc_chat', { fileKey }, {
+        requestKey: 'reply-1:attachment',
+        replyTo: 'om_in',
+        signal,
+      })).resolves.toEqual({ messageId: 'om_file_1' })
+      expect(request.mock.calls[1]?.[0]).toMatchObject({
+        method: 'POST',
+        url: '/open-apis/im/v1/messages/om_in/reply',
+        data: {
+          msg_type: 'file',
+          content: JSON.stringify({ file_key: 'file_v2_ok' }),
+          uuid: larkRequestUuid('reply-1:attachment'),
+        },
+      })
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('classifies file upload failures, timeouts, and cancellations without leaking secrets', async () => {
+    const secret = 'secret-upload-token-must-not-leak'
+    const request = vi.spyOn(Client.prototype, 'request')
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: secret, domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 20, imageDownloadTimeoutMs: 1_000,
+    })
+    const signal = new AbortController().signal
+    try {
+      request.mockResolvedValueOnce({ code: 234006, msg: `file too big ${secret}` })
+      await expect(transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal,
+      })).rejects.toMatchObject({ code: 'format_error' })
+
+      request.mockResolvedValueOnce({ code: 0, data: {} })
+      await expect(transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal,
+      })).rejects.toMatchObject({ code: 'upload_failed' })
+
+      request.mockRejectedValueOnce({ response: { status: 429, headers: { 'retry-after': '3' } } })
+      await expect(transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal,
+      })).rejects.toMatchObject({ code: 'rate_limited', retryAfterMs: 3_000 })
+
+      request.mockRejectedValueOnce({ response: { status: 502, data: { msg: secret } } })
+      const serverFailure = await transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal,
+      }).then(() => undefined, (error: unknown) => error)
+      expect(serverFailure).toMatchObject({ code: 'upload_failed' })
+      expect(String(serverFailure)).not.toContain(secret)
+
+      request.mockImplementationOnce(async () => await new Promise<never>(() => {}))
+      await expect(settleBeforeTestDeadline(transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal,
+      }))).rejects.toMatchObject({ code: 'send_timeout' })
+
+      const aborted = new AbortController()
+      aborted.abort(new Error(`cancelled with ${secret}`))
+      const callsBeforePreAbort = request.mock.calls.length
+      await expect(transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal: aborted.signal,
+      })).rejects.toMatchObject({ code: 'not_connected' })
+      await expect(transport.send('oc_chat', { fileKey: 'file_v2_1' }, { signal: aborted.signal }))
+        .rejects.toMatchObject({ code: 'not_connected' })
+      expect(request.mock.calls.length).toBe(callsBeforePreAbort)
+
+      const uploadAbort = new AbortController()
+      request.mockImplementationOnce(async () => await new Promise<never>(() => {}))
+      const pendingUpload = transport.uploadTextFile!({
+        name: 'notice.txt', mediaType: 'text/plain', text: 'abc', signal: uploadAbort.signal,
+      })
+      await vi.waitFor(() => expect(request.mock.calls.length).toBe(callsBeforePreAbort + 1))
+      uploadAbort.abort(new Error('caller cancelled upload'))
+      await expect(settleBeforeTestDeadline(pendingUpload)).rejects.toMatchObject({ code: 'not_connected' })
+
+      const sendAbort = new AbortController()
+      request.mockImplementationOnce(async () => await new Promise<never>(() => {}))
+      const pendingSend = transport.send('oc_chat', { fileKey: 'file_v2_1' }, { signal: sendAbort.signal })
+      await vi.waitFor(() => expect(request.mock.calls.length).toBe(callsBeforePreAbort + 2))
+      sendAbort.abort(new Error('caller cancelled send'))
+      await expect(settleBeforeTestDeadline(pendingSend)).rejects.toMatchObject({ code: 'unknown' })
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('bounds multipart upload request with Axios httpInstance and real FormData serialization', async () => {
+    type AxiosConfig = { url?: string; headers?: { toJSON?: () => Record<string, unknown> } | Record<string, unknown>; data?: unknown }
+    const http = defaultHttpInstance as unknown as {
+      defaults: { adapter: unknown }
+      post(url: string, data?: unknown, options?: { signal?: AbortSignal }): Promise<unknown>
+    }
+    const originalAdapter = http.defaults.adapter
+    const seen: AxiosConfig[] = []
+    http.defaults.adapter = async (config: AxiosConfig) => {
+      seen.push(config)
+      return { data: { code: 0, data: { file_key: 'file_v2_axios' } }, status: 200, statusText: 'OK', headers: {}, config }
+    }
+    const tokenPost = vi.spyOn(http, 'post').mockResolvedValue({
+      code: 0, tenant_access_token: 'tenant-token', expire: 7_200,
+    })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_upload_axios', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      const fileKey = await transport.uploadTextFile!({
+        name: 'notice-123.txt',
+        mediaType: 'text/plain',
+        text: 'hello multipart',
+        signal: new AbortController().signal,
+      })
+      expect(fileKey).toBe('file_v2_axios')
+      expect(seen).toHaveLength(1)
+      expect(String(seen[0]?.url)).toContain('/open-apis/im/v1/files')
+      expect(seen[0]?.data?.constructor?.name).toBe('FormData')
+    } finally {
+      await transport.disconnect()
+      tokenPost.mockRestore()
+      http.defaults.adapter = originalAdapter
+    }
   })
 })

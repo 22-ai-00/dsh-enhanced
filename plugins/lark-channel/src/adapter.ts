@@ -44,7 +44,7 @@ import {
   type LarkPermissionPickerActionPayload,
 } from './permission-picker.js'
 import { LarkProgressPresenter } from './progress.js'
-import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from './sdk.js'
+import { LARK_APPROVAL_CARD_MAX_BYTES, LARK_TEXT_FILE_MAX_BYTES, renderLarkMessage } from './sdk.js'
 import {
   LarkToolApprovalError,
   signLarkToolApprovalAction,
@@ -181,6 +181,9 @@ const LARK_USER_QUESTION_MAX_OPTIONS = 20
 const LARK_USER_QUESTION_MAX_TEXT_BYTES = 16 * 1_024
 const larkCallbackIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u
 const larkProviderMessageIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+const larkResourceIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
+const larkTextAttachmentName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u
+const LARK_PENDING_ATTACHMENT_SEND_LIMIT = 256
 
 function hasUsableApprovalSecret(secret: string | undefined): secret is string {
   return secret !== undefined && Buffer.byteLength(secret, 'utf8') >= 16
@@ -330,7 +333,7 @@ function permissionPickerCard(
   }
 }
 
-function sendFailure(error: unknown): AdapterSendResult {
+function sendFailure(error: unknown): Exclude<AdapterSendResult, { outcome: 'accepted' }> {
   if (!(error instanceof LarkTransportError)) {
     return { outcome: 'unknown', failureCode: 'lark-unknown' }
   }
@@ -338,6 +341,58 @@ function sendFailure(error: unknown): AdapterSendResult {
     return { outcome: 'unknown', failureCode: failureCode(error.code) }
   }
   const retryable = error.code === 'rate_limited' || error.code === 'not_connected'
+  return {
+    outcome: 'not-sent',
+    failureCode: failureCode(error.code),
+    retryable,
+    ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+  }
+}
+
+function validateOutboundTextAttachment(
+  intent: Readonly<OutboundIntent>,
+  maxBytes: number,
+):
+  | { ok: true; attachment: NonNullable<OutboundIntent['attachment']> }
+  | { ok: false; failure: Extract<AdapterSendResult, { outcome: 'not-sent' }> } {
+  if ((intent.format ?? 'plain') !== 'plain') {
+    return {
+      ok: false,
+      failure: { outcome: 'not-sent', failureCode: 'lark-attachment-unsupported-format', retryable: false },
+    }
+  }
+  const attachment = intent.attachment
+  if (attachment === undefined || attachment === null || typeof attachment !== 'object'
+    || attachment.kind !== 'text'
+    || typeof attachment.name !== 'string'
+    || !larkTextAttachmentName.test(attachment.name)
+    || attachment.name.includes('..')
+    || (attachment.mediaType !== 'text/plain' && attachment.mediaType !== 'text/markdown')
+    || typeof attachment.text !== 'string'
+    || attachment.text.length === 0) {
+    return { ok: false, failure: { outcome: 'not-sent', failureCode: 'lark-attachment-invalid', retryable: false } }
+  }
+  if (Buffer.byteLength(attachment.text, 'utf8') > maxBytes) {
+    return { ok: false, failure: { outcome: 'not-sent', failureCode: 'lark-attachment-too-large', retryable: false } }
+  }
+  const expectedDigest = createHash('sha256').update(attachment.text, 'utf8').digest('hex')
+  if (typeof attachment.sha256 !== 'string' || attachment.sha256 !== expectedDigest) {
+    return {
+      ok: false,
+      failure: { outcome: 'not-sent', failureCode: 'lark-attachment-digest-mismatch', retryable: false },
+    }
+  }
+  return { ok: true, attachment }
+}
+
+function uploadFailure(error: unknown): Extract<AdapterSendResult, { outcome: 'not-sent' }> {
+  if (!(error instanceof LarkTransportError)) {
+    return { outcome: 'not-sent', failureCode: 'lark-upload-failed', retryable: true }
+  }
+  const retryable = error.code !== 'format_error'
+    && error.code !== 'permission_denied'
+    && error.code !== 'target_revoked'
+    && error.code !== 'ssrf_blocked'
   return {
     outcome: 'not-sent',
     failureCode: failureCode(error.code),
@@ -543,6 +598,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private deliveryContext: DeliveryAdapterContext | undefined
   private presentationGeneration = 0
   private readonly modelSelectionUpdates = new Map<string, PendingModelSelectionUpdate>()
+  private readonly pendingAttachmentSends = new Map<string, string>()
   private state: LarkChannelHealth['state'] = 'disconnected'
   private gapGeneration = 0
   private lastErrorCode: LarkChannelHealth['lastErrorCode']
@@ -567,6 +623,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       inboundImages: typeof transport.downloadMessageImage === 'function',
       toolApprovals: hasUsableApprovalSecret(options.approvalSecret),
       userQuestions: hasUsableApprovalSecret(options.approvalSecret),
+      textAttachments: true,
     })
     this.now = options.now ?? Date.now
     this.onConnected = options.onConnected
@@ -694,6 +751,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
+      this.pendingAttachmentSends.clear()
       if (this.deliveryContext === context) this.deliveryContext = undefined
       this.closing = true
       await this.drainToolApprovalUpdates()
@@ -1086,6 +1144,22 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       return { outcome: 'not-sent', failureCode: 'lark-route-mismatch', retryable: false }
     }
     if (signal.aborted) return { outcome: 'not-sent', failureCode: 'lark-aborted', retryable: true }
+    const syntheticTopLevelGroup = conversation.kind === 'group'
+      && isLarkTopLevelSenderThread(conversation.thread)
+    const topicGroup = conversation.kind === 'group' && isLarkTopicThread(conversation.thread)
+    const providerReplyTarget = topicGroup
+      ? intent.replyToEventId
+      : syntheticTopLevelGroup
+        ? undefined
+        : (intent.replyToEventId
+          ?? (conversation.kind === 'group' ? conversation.thread : undefined))
+    const baseOptions: LarkSendOptions = {
+      ...(providerReplyTarget === undefined ? {} : { replyTo: providerReplyTarget }),
+      ...(conversation.kind === 'group' && providerReplyTarget !== undefined ? { replyInThread: true } : {}),
+    }
+    if (intent.attachment !== undefined) {
+      return await this.sendWithAttachment(intent, baseOptions, signal)
+    }
     const useMarkdownCard = intent.format === 'markdown'
     let input: import('./types.js').LarkSendInput
     if (intent.format === 'approval') {
@@ -1163,24 +1237,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     } else {
       input = useMarkdownCard ? { markdown: intent.text } : { text: intent.text }
     }
-    // A synthetic lane represents all standalone group messages from one
-    // sender. Replying to the inbound event would make Lark create a provider
-    // thread; the user's next reply would then carry a real rootId and be
-    // normalized into a different Delivery conversation/session. Keep this
-    // lane top-level so later standalone messages retain the same context.
-    const syntheticTopLevelGroup = conversation.kind === 'group'
-      && isLarkTopLevelSenderThread(conversation.thread)
-    const topicGroup = conversation.kind === 'group' && isLarkTopicThread(conversation.thread)
-    const providerReplyTarget = topicGroup
-      ? intent.replyToEventId
-      : syntheticTopLevelGroup
-        ? undefined
-        : (intent.replyToEventId
-          ?? (conversation.kind === 'group' ? conversation.thread : undefined))
     const options: LarkSendOptions = {
       requestKey: intent.idempotencyKey,
-      ...(providerReplyTarget === undefined ? {} : { replyTo: providerReplyTarget }),
-      ...(conversation.kind === 'group' && providerReplyTarget !== undefined ? { replyInThread: true } : {}),
+      ...baseOptions,
     }
     let result: Awaited<ReturnType<LarkTransport['send']>>
     try {
@@ -1209,9 +1268,23 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         return sendFailure(fallbackError)
       }
     }
-    if (!/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u.test(result.messageId)) {
+    if (!larkProviderMessageIdentifier.test(result.messageId)) {
       return { outcome: 'unknown', failureCode: 'invalid-provider-result' }
     }
+    this.markSentReaction(intent)
+    return { outcome: 'accepted', providerMessageId: result.messageId }
+  }
+
+  private rememberAttachmentFileMessage(key: string, messageId: string): void {
+    if (!this.pendingAttachmentSends.has(key)
+      && this.pendingAttachmentSends.size >= LARK_PENDING_ATTACHMENT_SEND_LIMIT) {
+      const oldest = this.pendingAttachmentSends.keys().next().value
+      if (oldest !== undefined) this.pendingAttachmentSends.delete(oldest)
+    }
+    this.pendingAttachmentSends.set(key, messageId)
+  }
+
+  private markSentReaction(intent: Readonly<OutboundIntent>): void {
     // Delivery's durable interruption receipt acknowledges an unknown task outcome,
     // not a completed task. Keep the original request free of a misleading DONE.
     const interrupted = intent.idempotencyKey.startsWith('inbound:')
@@ -1220,7 +1293,99 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     if (this.statusReactions && intent.replyToEventId !== undefined && !interrupted) {
       void this.addReaction(intent.replyToEventId, 'DONE')
     }
-    return { outcome: 'accepted', providerMessageId: result.messageId }
+  }
+
+  private async sendWithAttachment(
+    intent: Readonly<OutboundIntent>,
+    baseOptions: LarkSendOptions,
+    signal: AbortSignal,
+  ): Promise<AdapterSendResult> {
+    const maxBytes = Math.min(this.config.maxTextBytes, LARK_TEXT_FILE_MAX_BYTES)
+    const validated = validateOutboundTextAttachment(intent, maxBytes)
+    if (!validated.ok) return validated.failure
+    const { attachment } = validated
+    const uploadTextFile = this.transport.uploadTextFile
+    if (typeof uploadTextFile !== 'function') {
+      return { outcome: 'not-sent', failureCode: 'lark-attachment-upload-unavailable', retryable: false }
+    }
+    const conversation = intent.target.conversation
+    const summaryDigest = createHash('sha256').update(intent.text, 'utf8').digest('hex')
+    const attachmentSendKey = JSON.stringify([
+      intent.idempotencyKey,
+      conversation.channel,
+      conversation.account,
+      conversation.tenant,
+      conversation.kind,
+      conversation.chat,
+      conversation.thread ?? '',
+      intent.replyToEventId ?? '',
+      summaryDigest,
+      attachment.sha256,
+    ])
+    let fileMessageId = this.pendingAttachmentSends.get(attachmentSendKey)
+    if (fileMessageId === undefined) {
+      let fileKey: string
+      try {
+        fileKey = await uploadTextFile.call(this.transport, {
+          name: attachment.name,
+          mediaType: attachment.mediaType,
+          text: attachment.text,
+          maxBytes,
+          signal,
+        })
+      } catch (error) {
+        if (signal.aborted) return { outcome: 'not-sent', failureCode: 'lark-aborted', retryable: true }
+        return uploadFailure(error)
+      }
+      if (signal.aborted) return { outcome: 'not-sent', failureCode: 'lark-aborted', retryable: true }
+      if (typeof fileKey !== 'string' || !larkResourceIdentifier.test(fileKey)) {
+        return { outcome: 'not-sent', failureCode: 'lark-upload-failed', retryable: true }
+      }
+      let fileResult: Awaited<ReturnType<LarkTransport['send']>>
+      try {
+        // Send the attachment file before the inline summary so a truncated notice body can never be left without its file.
+        fileResult = await this.transport.send(conversation.chat, { fileKey }, {
+          ...baseOptions,
+          requestKey: `${intent.idempotencyKey}:attachment`,
+          signal,
+        })
+      } catch (error) {
+        return sendFailure(error)
+      }
+      if (!larkProviderMessageIdentifier.test(fileResult.messageId)) {
+        return { outcome: 'unknown', failureCode: 'invalid-provider-result' }
+      }
+      fileMessageId = fileResult.messageId
+      this.rememberAttachmentFileMessage(attachmentSendKey, fileMessageId)
+    }
+    if (signal.aborted) {
+      return { outcome: 'unknown', failureCode: 'lark-aborted', providerMessageId: fileMessageId }
+    }
+    let summaryResult: Awaited<ReturnType<LarkTransport['send']>>
+    try {
+      summaryResult = await this.transport.send(conversation.chat, { text: intent.text }, {
+        ...baseOptions,
+        requestKey: intent.idempotencyKey,
+        signal,
+      })
+    } catch (error) {
+      if (signal.aborted) {
+        return { outcome: 'unknown', failureCode: 'lark-aborted', providerMessageId: fileMessageId }
+      }
+      const failure = sendFailure(error)
+      if (failure.outcome === 'not-sent' && failure.retryable) return failure
+      return {
+        outcome: 'unknown',
+        failureCode: failure.failureCode,
+        providerMessageId: fileMessageId,
+      }
+    }
+    if (!larkProviderMessageIdentifier.test(summaryResult.messageId)) {
+      return { outcome: 'unknown', failureCode: 'invalid-provider-result', providerMessageId: fileMessageId }
+    }
+    this.pendingAttachmentSends.delete(attachmentSendKey)
+    this.markSentReaction(intent)
+    return { outcome: 'accepted', providerMessageId: summaryResult.messageId }
   }
 
   async updatePresentation(
