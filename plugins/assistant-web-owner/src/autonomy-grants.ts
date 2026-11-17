@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap } from 'yaml'
-import { parseSettingsDefaultModelRoute } from './goal-admission.js'
+import { parseSettingsDefaultModelRoute } from './settings-route.js'
 import { dumpEffectiveProfile, globalDshDatabasePath, withinDshHome } from './host-dsh.js'
 
 const DAY_MS = 86_400_000

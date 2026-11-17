@@ -111,15 +111,43 @@ function scenarioClosure(topSlugs: readonly string[], packages: Map<string, Pack
   return installed
 }
 
-const STATIC_IMPORT_PATTERN = /(?<![\w.])import\s+(?:type\s+)?[^'";]+?\s+from\s+['"](?<specifier>[^'"]+)['"]|(?<![\w.])import\s+['"](?<sideEffect>[^'"]+)['"]/gu
+const IMPORT_PATTERN = /(?<![\w.])import\s+(?:type\s+)?(?<clause>[^'";(]+?)\s+from\s+['"](?<specifier>[^'"]+)['"]|(?<![\w.])import\s+['"](?<sideEffect>[^'"]+)['"]/gsu
+const EXPORT_FROM_PATTERN = /(?<![\w.])export\s+(?:type\s+)?(?<clause>\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[^}]*\})\s+from\s+['"](?<specifier>[^'"]+)['"]/gsu
 
-/**
- * 主入口（src/index.ts）沿相对 import 可达的全部生产模块。
- * 仅独立 bin（如 lark-channel 的 dsh-rsi-setup）可达的模块不约束：
- * bin 是独立可执行体，有权要求其专属 peer 存在。
- */
-function mainEntryReach(manifest: PackageManifest): Set<string> | undefined {
-  const entry = join(manifest.directory, 'src', 'index.ts')
+/** 判断 import/export 子句是否完全 type-only（`import type` / `export type` 已在外层排除，这里处理混合大括号）。 */
+function clauseIsTypeOnly(clause: string): boolean {
+  const braceMatch = /^\{(?<members>[\s\S]*)\}$/u.exec(clause.trim())
+  if (!braceMatch) return false // 默认导入或命名空间导入必为值
+  return braceMatch.groups!.members!.split(',')
+    .map(member => member.trim())
+    .filter(member => member.length > 0)
+    .every(member => member.startsWith('type '))
+}
+
+function extractStaticValueImports(source: string): Array<{ specifier: string; line: number }> {
+  const results: Array<{ specifier: string; line: number }> = []
+  const lineOf = (index: number) => source.slice(0, index).split('\n').length
+  for (const match of source.matchAll(IMPORT_PATTERN)) {
+    const specifier = match.groups!.specifier ?? match.groups!.sideEffect
+    if (specifier === undefined) continue
+    if (/^import\s+type\s+/u.test(match[0])) continue
+    if (match.groups!.sideEffect !== undefined || !clauseIsTypeOnly(match.groups!.clause ?? '')) {
+      results.push({ specifier, line: lineOf(match.index) })
+    }
+  }
+  for (const match of source.matchAll(EXPORT_FROM_PATTERN)) {
+    const specifier = match.groups!.specifier
+    if (specifier === undefined) continue
+    if (/^export\s+type\s+/u.test(match[0])) continue
+    const clause = match.groups!.clause ?? ''
+    if (clause.startsWith('*') || !clauseIsTypeOnly(clause)) {
+      results.push({ specifier, line: lineOf(match.index) })
+    }
+  }
+  return results
+}
+
+function entryReach(entry: string): Set<string> | undefined {
   if (!existsSync(entry)) return undefined
   const reached = new Set<string>()
   const queue = [entry]
@@ -128,8 +156,7 @@ function mainEntryReach(manifest: PackageManifest): Set<string> | undefined {
     if (reached.has(file)) continue
     reached.add(file)
     const source = readFileSync(file, 'utf8')
-    for (const match of source.matchAll(STATIC_IMPORT_PATTERN)) {
-      const specifier = match.groups!.specifier ?? match.groups!.sideEffect!
+    for (const { specifier } of extractStaticValueImports(source)) {
       if (!specifier.startsWith('.') && !specifier.startsWith('/')) continue
       const resolved = resolveRelativeTypeScript(file, specifier)
       if (resolved !== undefined && !reached.has(resolved)) queue.push(resolved)
@@ -138,22 +165,47 @@ function mainEntryReach(manifest: PackageManifest): Set<string> | undefined {
   return reached
 }
 
+/**
+ * 主入口（src/index.ts）沿静态值 import/export 可达的全部生产模块。
+ * 仅独立 bin（如 lark-channel 的 dsh-rsi-setup）可达的模块不约束：
+ * bin 是独立可执行体，有权要求其专属 peer 存在；installer setup 入口
+ * 由下方的 INSTALLER_SETUP_ENTRYPOINTS 按各自运行场景独立守卫。
+ */
+function mainEntryReach(manifest: PackageManifest): Set<string> | undefined {
+  return entryReach(join(manifest.directory, 'src', 'index.ts'))
+}
+
 function resolveRelativeTypeScript(fromFile: string, specifier: string): string | undefined {
   const base = join(join(fromFile, '..'), specifier.replace(/\.js$/u, '.ts'))
   const candidates = [base, join(base, 'index.ts')]
   return candidates.find(candidate => existsSync(candidate))
 }
 
-const IMPORT_PATTERN = /(?<![\w.])import\s+(?:type\s+)?(?<clause>[^'";]+?)\s+from\s+['"](?<specifier>[^'"]+)['"]|(?<![\w.])import\s+['"](?<sideEffect>[^'"]+)['"]/gsu
+function specifierPackageName(specifier: string): string {
+  const parts = specifier.split('/')
+  return specifier.startsWith('@') && parts.length >= 2 ? `${parts[0]}/${parts[1]}` : parts[0]!
+}
 
-/** 判断 import 子句是否完全 type-only（`import type` 已在外层排除，这里处理混合大括号）。 */
-function clauseIsTypeOnly(clause: string): boolean {
-  const braceMatch = /^\{(?<members>[\s\S]*)\}$/u.exec(clause.trim())
-  if (!braceMatch) return false // 默认导入或命名空间导入必为值
-  return braceMatch.groups!.members!.split(',')
-    .map(member => member.trim())
-    .filter(member => member.length > 0)
-    .every(member => member.startsWith('type '))
+const INSTALLER_SETUP_ENTRYPOINTS: ReadonlyArray<{
+  packageSlug: string
+  relativeEntry: string
+  scenarios: readonly string[]
+}> = [
+  { packageSlug: 'assistant-policy', relativeEntry: 'src/model-setup.ts', scenarios: ['core', 'web', 'autonomy', 'lark', 'supervised', 'full'] },
+  { packageSlug: 'assistant-policy', relativeEntry: 'src/permission-setup.ts', scenarios: ['core', 'web', 'autonomy', 'lark', 'supervised', 'full'] },
+  { packageSlug: 'assistant-policy', relativeEntry: 'src/plugin-setup.ts', scenarios: ['core', 'web', 'autonomy', 'lark', 'supervised', 'full'] },
+  { packageSlug: 'assistant-web-owner', relativeEntry: 'src/setup.ts', scenarios: ['web', 'autonomy'] },
+  { packageSlug: 'assistant-web-owner', relativeEntry: 'src/doctor.ts', scenarios: ['autonomy'] },
+  { packageSlug: 'lark-channel', relativeEntry: 'src/setup.ts', scenarios: ['lark', 'supervised', 'full'] },
+  { packageSlug: 'lark-channel', relativeEntry: 'src/launchd-control.ts', scenarios: ['lark', 'supervised', 'full'] },
+  { packageSlug: 'lark-channel', relativeEntry: 'src/rsi-setup.ts', scenarios: ['supervised'] },
+]
+
+function loadInstallerSetupModules(): Array<{ packageSlug: string; relativeEntry: string }> {
+  const source = readFileSync(installerLibrary, 'utf8')
+  const block = source.match(/const modules = \{(?<body>[\s\S]*?)\n\}/u)?.groups?.body ?? ''
+  return [...block.matchAll(/:\s*\['(?<slug>[a-z0-9-]+)',\s*'(?<moduleName>[a-z0-9-]+)'/gu)]
+    .map(match => ({ packageSlug: match.groups!.slug!, relativeEntry: `src/${match.groups!.moduleName!}.ts` }))
 }
 
 describe('optional peer 静态导入守卫（按安装器场景闭包）', () => {
@@ -228,15 +280,43 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
         const violations: string[] = []
         for (const file of reach) {
           const source = readFileSync(file, 'utf8')
-          for (const match of source.matchAll(IMPORT_PATTERN)) {
-            const specifier = match.groups!.specifier ?? match.groups!.sideEffect
-            if (specifier === undefined) continue
+          for (const { specifier, line } of extractStaticValueImports(source)) {
             // 子路径导入（如 assistant-evaluation/benchmark）同属一个包。
             if (specifier !== peer && !specifier.startsWith(`${peer}/`)) continue
-            if (/^import\s+type\s+/u.test(match[0])) continue
-            if (match.groups!.sideEffect !== undefined || !clauseIsTypeOnly(match.groups!.clause ?? '')) {
-              const line = source.slice(0, match.index).split('\n').length
-              violations.push(`${file.replace(`${workspaceRoot}/`, '')}:${line}`)
+            violations.push(`${file.replace(workspaceRoot, '')}:${line}`)
+          }
+        }
+        expect(violations).toEqual([])
+      })
+    }
+  }
+
+  test('installer setup entrypoints match scripts/install/common.sh dispatch table', () => {
+    const dispatched = loadInstallerSetupModules()
+    expect(dispatched.length).toBeGreaterThan(0)
+    const guarded = new Set(INSTALLER_SETUP_ENTRYPOINTS.map(entry => `${entry.packageSlug}/${entry.relativeEntry}`))
+    for (const entry of dispatched) {
+      expect(guarded.has(`${entry.packageSlug}/${entry.relativeEntry}`), `未守卫安装器入口 plugins/${entry.packageSlug}/${entry.relativeEntry}`).toBe(true)
+    }
+  })
+
+  for (const entry of INSTALLER_SETUP_ENTRYPOINTS) {
+    const entryFile = join(workspaceRoot, 'plugins', entry.packageSlug, entry.relativeEntry)
+    const reach = entryReach(entryFile)
+    for (const scenarioName of entry.scenarios) {
+      test(`setup 入口 plugins/${entry.packageSlug}/${entry.relativeEntry} 在 ${scenarioName} 场景不静态值导入未安装 @dsh-enhanced/* 包`, () => {
+        expect(reach, `缺少 setup 入口 plugins/${entry.packageSlug}/${entry.relativeEntry}`).toBeDefined()
+        const closure = closures.get(scenarioName)
+        expect(closure, `未知安装器场景 ${scenarioName}`).toBeDefined()
+        expect(closure!.has(`@dsh-enhanced/${entry.packageSlug}`), `${scenarioName} 场景闭包缺少 @dsh-enhanced/${entry.packageSlug}`).toBe(true)
+        const violations: string[] = []
+        for (const file of reach!) {
+          const source = readFileSync(file, 'utf8')
+          for (const { specifier, line } of extractStaticValueImports(source)) {
+            if (!specifier.startsWith('@dsh-enhanced/')) continue
+            const importedPackage = specifierPackageName(specifier)
+            if (!closure!.has(importedPackage)) {
+              violations.push(`${file.replace(workspaceRoot, '')}:${line} -> ${importedPackage}`)
             }
           }
         }

@@ -1,6 +1,10 @@
+import { execFileSync } from 'node:child_process'
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
@@ -161,6 +165,30 @@ describe('local Web owner profile setup', () => {
     } finally {
       if (savedHome === undefined) delete process.env.HOME
       else process.env.HOME = savedHome
+    }
+  })
+
+  test('dsh-web-owner-setup --help links cleanly with only web-scenario dependencies', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'web-owner-setup-web-only-'))
+    try {
+      const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+      cpSync(join(packageRoot, 'package.json'), join(tmp, 'package.json'))
+      cpSync(join(packageRoot, 'bin'), join(tmp, 'bin'), { recursive: true })
+      cpSync(join(packageRoot, 'lib'), join(tmp, 'lib'), { recursive: true })
+      const require = createRequire(join(packageRoot, 'package.json'))
+      const nodeModules = join(tmp, 'node_modules')
+      mkdirSync(join(nodeModules, '@deepseek-ai'), { recursive: true })
+      mkdirSync(join(nodeModules, '@dsh-enhanced'), { recursive: true })
+      for (const pkg of ['yaml', 'zod', '@deepseek-ai/schemastery', '@dsh-enhanced/assistant-delivery']) {
+        symlinkSync(realpathSync(dirname(require.resolve(`${pkg}/package.json`))), join(nodeModules, pkg))
+      }
+      const stdout = execFileSync(process.execPath, [join(tmp, 'bin', 'dsh-web-owner-setup.js'), '--help'], {
+        encoding: 'utf8',
+        env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' },
+      })
+      expect(stdout).toContain('Usage: dsh-web-owner-setup')
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
     }
   })
 })

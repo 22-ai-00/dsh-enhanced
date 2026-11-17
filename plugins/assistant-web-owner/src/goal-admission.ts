@@ -9,6 +9,9 @@ import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-deli
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
 import * as Actions from '@dsh-enhanced/assistant-actions'
 import { literalPath } from './setup.js'
+import { parseSettingsDefaultModelRoute, type ConfiguredDefaultModelRoute } from './settings-route.js'
+
+export { parseSettingsDefaultModelRoute, type ConfiguredDefaultModelRoute }
 
 type RepositoryOutcome = (Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> & { mode?: 'pull-request' })
   | (Pick<RepositoryCommitReadbackAuthorityInput, 'requiredChecks' | 'timeoutMs' | 'freshnessMs'> & { mode: 'commit' })
@@ -47,7 +50,6 @@ export interface GoalAdmissionTaskV2 extends GoalAdmissionTaskBase {
 }
 export type GoalAdmissionTask = GoalAdmissionTaskV1 | GoalAdmissionTaskV2
 export interface GoalAdmissionInput { dshHome: string; profile: string; workspace: string; preset: string }
-export interface ConfiguredDefaultModelRoute { provider: string; model: string }
 function fail(reason: string): never { throw new Error(`goal setup: ${reason}`) }
 function shape(value: unknown, required: string[], optional: string[] = []): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
@@ -62,23 +64,6 @@ function route(value: unknown): asserts value is ConfiguredDefaultModelRoute {
     const item = value[field]
     if (typeof item !== 'string' || item.length === 0 || item.length > 200 || item.trim() !== item || /[\p{Cc}]/u.test(item)) fail('invalid model route')
   }
-}
-/** Read only the public, effective default-route fields from DSH's user settings layer. */
-export function parseSettingsDefaultModelRoute(source: string): ConfiguredDefaultModelRoute | undefined {
-  if (Buffer.byteLength(source, 'utf8') > 1024 * 1024) fail('settings.yaml exceeds 1 MiB')
-  const document = parseDocument(source)
-  if (document.errors.length > 0 || !isMap(document.contents) || document.contents.tag !== undefined) fail('settings.yaml must be an untagged YAML mapping')
-  const selected = document.contents.get('agent-default-model', true)
-  if (selected === undefined) return undefined
-  if (!isMap(selected) || selected.tag !== undefined) fail('settings.agent-default-model must be an untagged YAML mapping')
-  const fields: Record<string, unknown> = {}
-  for (const key of ['provider', 'model']) {
-    const value = selected.get(key, true)
-    if (!isScalar(value) || value.tag !== undefined || typeof value.value !== 'string') fail('settings.agent-default-model must contain public provider and model strings')
-    fields[key] = value.value
-  }
-  route(fields)
-  return fields
 }
 /** Parse bounded local operator data. No tagged YAML, scripts, credentials, or arbitrary model routes. */
 export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {

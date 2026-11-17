@@ -441,7 +441,7 @@ dsh_enhanced_resolve_latest_host_version() {
     || ! dsh_enhanced_is_host_version "$version" \
     || ! dsh_enhanced_is_supported_host_channel "$version" \
     || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    dsh_enhanced_fail 2 "npm registry 的 DSH latest 不是此安装器支持的精确版本（支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}，仅 stable/rc）；尚未修改全局 DSH。"
+    dsh_enhanced_fail 2 "npm registry 的 DSH latest 不是此安装器支持的精确版本（支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}，仅 stable/rc；可传 --dsh-version ${DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION} 安装已验证版本）；尚未修改全局 DSH。"
     return $?
   fi
   printf '%s\n' "$version"

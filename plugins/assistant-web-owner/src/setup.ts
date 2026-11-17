@@ -266,12 +266,11 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
   } finally { await rm(temporary, { force: true }); await rm(lock, { recursive: true, force: true }) }
 }
 
-import {
-  applyWebOwnerAutonomySetup,
-  type AutonomyBudgetTier,
-  type AutonomyReasoningEffort,
-  type DreamingMode,
-  type WebOwnerAutonomySetupInput,
+import type {
+  AutonomyBudgetTier,
+  AutonomyReasoningEffort,
+  DreamingMode,
+  WebOwnerAutonomySetupInput,
 } from './autonomy-grants.js'
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
@@ -448,6 +447,7 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
         ...(autonomyLeaseDays !== undefined ? { leaseDays: autonomyLeaseDays } : {}),
         dryRun: autonomyDryRun,
       }
+      const { applyWebOwnerAutonomySetup } = await import('./autonomy-grants.js')
       const result = await applyWebOwnerAutonomySetup(autonomyInput, {
         readEffectiveSource: (home, prof) => dumpEffectiveProfile(
           home,
