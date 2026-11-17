@@ -520,7 +520,7 @@ Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始
 
 `enqueueOwnerNotification` 为可信 Host 插件提供限定主人路由、原会话、身份版本和有效期的提醒入队接口。普通 `enqueueBackground` 不能写入保留的 `dsh.native-notice*` 元数据。投递前重查当前主人、绑定版本与代次、路由、期限及背景 `send` Policy；过期、撤权或换代的队列不会发送。
 
-原生 Web 使用本地适配器将通知标为可读取，并由 `assistant-web-owner` 的会话输入区展示。通知不写入 Session 历史，不触发模型，也不表示目标已完成；`accepted` 不表示用户已阅读。读取沿用固定 Web 主人能力，并再次核验上述边界；不另设消息 `read` Policy。其他渠道复用已有适配器。对于已发生但结果未知的外部发送，重启恢复仅通过适配器查询结果；查到过去已发送不表示再次发送，也不会为重发授予权限。
+原生 Web 使用本地适配器将通知标为可读取，并由 `assistant-web-owner` 的会话输入区展示；带超长转附件的通知会经 `NativeWebOwnerAccess.notifications` 透传只读 `attachment`（无附件时保持原有字段集合不变）。通知不写入 Session 历史，不触发模型，也不表示目标已完成；`accepted` 不表示用户已阅读。读取沿用固定 Web 主人能力，并再次核验上述边界；不另设消息 `read` Policy。其他渠道复用已有适配器。对于已发生但结果未知的外部发送，重启恢复仅通过适配器查询结果；查到过去已发送不表示再次发送，也不会为重发授予权限。
 
 ### 主人通知回复消费者（opt-in，默认无注册）
 
@@ -563,7 +563,7 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 配置 `attentionAttachOverCap: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（及走同一后台通道的 WorkItem 报告）在入队前处理；默认关闭时行为与第 1 阶段完全一致。typed Automation/Goal 结果通道不转换，只审计。
 
 - 超出所属目的字数或字素上限的通知改为一条消息：短正文（最多 60 词、360 非空白字素的整单元前缀，URL 与 Markdown 链接整体保留或整体移出，绝不截断）加固定说明 `（全文较长，共 N 词，已转为附件 notice-<sha256 前 12 位>.txt|md）`，format 为 `plain`；原文完整放入 `intent.attachment`（`kind: 'text'`、`mediaType` 随原 format、`sha256` 绑定原文）。转换为纯函数 `convertOverCapAttention`，同一原文逐字节相同；同一幂等键重放返回原记录。链接文字与 URL 计入上限。
-- 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。仓库内现有适配器（飞书、web）均未声明该能力。
+- 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。`bindNativeWebOwner` 注册的原生 Web 通知适配器现已声明 `textAttachments: true`（并继续保留 `dsh.native-notice` 校验与 `NativeWebOwnerAccess.notifications` 对可选只读 `OutboundTextAttachment` 的透传）；其他未声明该能力的适配器继续拒绝附件发送。
 - 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。窗口按审计行持久化的 `recorded_at` 与 Delivery Store 时钟比较，重启不会重置。判断依赖尽力而为的审计行，审计写入失败的通知不计入（可由 `processLocalWriteFailures` 发现）。关闭开关后，新通知按第 1 阶段原样入队，已转换的幂等键重放仍返回原记录。
 - Store 校验附件：仅 `plain` intent，键集固定，名称 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，正文非空且不超过 `maxTextBytes`，`sha256` 与正文一致。附件存于 `intent_json`，不改 schema（仍为 31）。审计按附件原文计词，因此转换后的行仍记 `would-attach`。
 

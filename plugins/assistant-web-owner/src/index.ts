@@ -19,12 +19,20 @@ export const inject = [...BundledSessionController.inject, 'assistantDelivery', 
 
 export type DeliveryNoticeStatus = 'accepted' | 'delivered'
 export type DeliveryNoticeAckStatus = 'delivered' | 'read'
+export interface DeliveryNoticeAttachment {
+  readonly kind: 'text'
+  readonly name: string
+  readonly mediaType: 'text/plain' | 'text/markdown'
+  readonly text: string
+  readonly sha256: string
+}
 export interface DeliveryNotice {
   readonly id: string
   readonly text: string
   readonly createdAt: number
   /** Delivery outbox status; absent only for older structural fixtures. */
   readonly status?: DeliveryNoticeStatus
+  readonly attachment?: DeliveryNoticeAttachment
 }
 
 export interface Config {

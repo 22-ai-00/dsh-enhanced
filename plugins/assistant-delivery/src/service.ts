@@ -1208,6 +1208,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+const nativeNoticeAttachmentKeys = new Set(['kind', 'name', 'mediaType', 'text', 'sha256'])
+function validNativeNoticeAttachment(attachment: unknown, format: OutboundIntent['format']): boolean {
+  if ((format ?? 'plain') !== 'plain' || !isRecord(attachment)) return false
+  const keys = Object.keys(attachment)
+  if (keys.length !== 5 || keys.some(key => !nativeNoticeAttachmentKeys.has(key))) return false
+  return attachment.kind === 'text'
+    && typeof attachment.name === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(attachment.name)
+    && (attachment.mediaType === 'text/plain' || attachment.mediaType === 'text/markdown')
+    && typeof attachment.text === 'string' && attachment.text.length > 0
+    && Buffer.byteLength(attachment.text, 'utf8') <= 16 * 1024 * 1024
+    && typeof attachment.sha256 === 'string'
+    && attachment.sha256 === createHash('sha256').update(attachment.text).digest('hex')
+}
+
 function validUserQuestionAnswer(
   questions: AskUserQuestionRequest['questions'],
   value: unknown,
@@ -1365,6 +1379,7 @@ export class AssistantDeliveryService extends Service {
   private readonly ownerRouteGuard: Readonly<OwnerRouteDispatchGuard>
   private nativeWebBound = false
   private nativeWebOwner: NativeWebOwnerAccess | undefined
+  private nativeWebNoticeAdapter: DeliveryAdapter | undefined
   private nativeWebRuntime: { ctx: Context; leases: DeliverySessionLeases } | undefined
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
@@ -2814,7 +2829,7 @@ export class AssistantDeliveryService extends Service {
         this.assertActive()
         if (this.nativeWebRuntime !== runtime) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime changed')
       },
-      released: () => { if (this.nativeWebOwner === access) { this.nativeWebOwner = undefined; this.nativeWebBound = false } },
+      released: () => { if (this.nativeWebOwner === access) { this.nativeWebOwner = undefined; this.nativeWebNoticeAdapter = undefined; this.nativeWebBound = false } },
       policyRef: this.config.policyRef,
       leaseMs: this.config.leaseMs,
       prepare: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
@@ -2828,8 +2843,21 @@ export class AssistantDeliveryService extends Service {
         (record.status === 'accepted' || record.status === 'delivered')
         // Acknowledged notices stay listed until read; withdrawal only gates the send attempt.
         && record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record, { withdrawal: false }) === undefined)
-        .map(record => ({ id: record.id, text: record.intent.text, createdAt: record.createdAt,
-          status: record.status === 'delivered' ? 'delivered' as const : 'accepted' as const })),
+        .map(record => ({
+          id: record.id,
+          text: record.intent.text,
+          createdAt: record.createdAt,
+          status: record.status === 'delivered' ? 'delivered' as const : 'accepted' as const,
+          ...(record.intent.attachment === undefined ? {} : {
+            attachment: Object.freeze({
+              kind: record.intent.attachment.kind,
+              name: record.intent.attachment.name,
+              mediaType: record.intent.attachment.mediaType,
+              text: record.intent.attachment.text,
+              sha256: record.intent.attachment.sha256,
+            }),
+          }),
+        })),
       acknowledgeNotices: (binding, ids, status) => {
         // Validate the whole batch against this binding and the exact send-path
         // guard before writing anything: one foreign/forged/expired id, drifted
@@ -2873,7 +2901,7 @@ export class AssistantDeliveryService extends Service {
     this.nativeWebBound = true
     const noticeAdapter: DeliveryAdapter = {
       channel: 'web', account: config.principal.account,
-      capabilities: Object.freeze({ reconcileUnknownSend: true, receipts: [], formats: ['plain'] as const }),
+      capabilities: Object.freeze({ reconcileUnknownSend: true, receipts: [], formats: ['plain'] as const, textAttachments: true }),
       async start() {},
       send: async (intent) => {
         // Pass the guard verdict through: a withdrawal-unavailable hold must stay retryable.
@@ -2887,9 +2915,17 @@ export class AssistantDeliveryService extends Service {
       },
     }
     ctx.effect(() => {
+      const canTrackPending = !this.registry.isStopped()
+        && this.registry.get(noticeAdapter.channel, noticeAdapter.account) === undefined
+        && !this.registry.isStarting(noticeAdapter.channel, noticeAdapter.account)
+      if (canTrackPending) this.nativeWebNoticeAdapter = noticeAdapter
       const registration = this.registry.register(noticeAdapter)
-      void registration.catch(() => { ctx.logger.warn('assistant-delivery: native Web notification adapter registration failed') })
+      void registration.catch(() => {
+        if (this.nativeWebNoticeAdapter === noticeAdapter) this.nativeWebNoticeAdapter = undefined
+        ctx.logger.warn('assistant-delivery: native Web notification adapter registration failed')
+      })
       return async () => {
+        if (this.nativeWebNoticeAdapter === noticeAdapter) this.nativeWebNoticeAdapter = undefined
         try { const remove = await registration; await remove() } catch { /* Registration failure is already reported; there is no adapter to remove. */ }
       }
     }, 'assistant-delivery.native-web-notices')
@@ -6103,7 +6139,17 @@ export class AssistantDeliveryService extends Service {
     }
     let delivered: { text: string; format: 'markdown' | 'plain'; attachment?: NonNullable<OutboundIntent['attachment']> } = unchanged
     if (attach && attentionOverCap(input.text, purpose)) {
-      const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
+      const registered = this.registry.get(binding.conversation.channel, binding.conversation.account)
+      const pendingWeb = this.nativeWebNoticeAdapter
+      const adapter = registered ?? (
+        !this.registry.isStopped()
+        && pendingWeb !== undefined
+        && binding.conversation.channel === pendingWeb.channel
+        && binding.conversation.account === pendingWeb.account
+        && this.registry.isStarting(pendingWeb.channel, pendingWeb.account)
+          ? pendingWeb
+          : undefined
+      )
       if (adapter === undefined) {
         throw new AssistantDeliveryError('runtime-unavailable', 'over-cap notice needs its channel adapter to attach the full text')
       }
@@ -6373,6 +6419,9 @@ export class AssistantDeliveryService extends Service {
     const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
     if (nativeKeys.length === 0 || containsReservedLearningMetadata(metadata)) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
     if (metadata?.['dsh.native-notice'] !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+    if (intent.attachment !== undefined && !validNativeNoticeAttachment(intent.attachment, intent.format ?? 'plain')) {
+      return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+    }
     const expiresAt = Number(metadata['dsh.native-notice.expiresAt']); const binding = this.deliveryStore.getBinding(intent.bindingId)
     const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
     if (!Number.isSafeInteger(expiresAt) || Date.now() >= expiresAt || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'

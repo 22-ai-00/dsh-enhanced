@@ -9,7 +9,7 @@ import { observeNativeTermination, type NativeTerminationCause } from './native-
 import { externalPrincipalId, canonicalPrincipal } from './canonical.js'
 import type { DeliveryStore } from './store.js'
 import { DeliverySessionLeases, SessionLeaseUnavailable, type SessionExecutionLease, type CompatibleAgentSetup } from './session-lease-runtime.js'
-import type { ConversationBinding, DeliveryOwnerLineage, ExternalPrincipalKey, InboundEnvelope } from './types.js'
+import type { ConversationBinding, DeliveryOwnerLineage, ExternalPrincipalKey, InboundEnvelope, OutboundTextAttachment } from './types.js'
 
 export interface NativeWebOwnerConfig {
   principal: ExternalPrincipalKey
@@ -19,6 +19,13 @@ export interface NativeWebOwnerConfig {
 }
 export type NativeWebNoticeStatus = 'accepted' | 'delivered'
 export type NativeWebNoticeAckStatus = 'delivered' | 'read'
+export interface NativeWebNotice {
+  readonly id: string
+  readonly text: string
+  readonly createdAt: number
+  readonly status?: NativeWebNoticeStatus
+  readonly attachment?: Readonly<OutboundTextAttachment>
+}
 export interface NativeWebOwnerAccess {
   create(options: CreateAgentOptions): Promise<AgentHandle>
   resume(options: ResumeAgentOptions): Promise<AgentHandle>
@@ -27,7 +34,7 @@ export interface NativeWebOwnerAccess {
   ownsSession(sessionId: string): boolean
   prompt<T>(input: { sessionId: string; requestId: string; text: string; content: readonly unknown[] },
     invoke: () => Promise<T>, signal: AbortSignal): Promise<T>
-  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }>
+  notifications(sessionId: string): readonly NativeWebNotice[]
   /** Acknowledge only visible native notices of this exact owner session/binding. */
   acknowledgeNotices(sessionId: string, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }>
   dispose(): Promise<void>
@@ -43,7 +50,7 @@ interface OwnerPort {
   recordExecutionModelSelection(inboxId: string, input: { provider: string; model: string; reasoningEffort?: string }): void
   claimed(agent: Agent, envelope: InboundEnvelope, turn: number): void
   released(): void
-  notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }>
+  notifications(binding: ConversationBinding): readonly NativeWebNotice[]
   acknowledgeNotices(binding: ConversationBinding, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }>
 }
 interface Execution {
@@ -150,7 +157,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   }
   assertSession(sessionId: string): void { this.#binding(sessionId) }
   ownsSession(sessionId: string): boolean { try { this.assertSession(sessionId); return true } catch { return false } }
-  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number; status?: NativeWebNoticeStatus }> {
+  notifications(sessionId: string): readonly NativeWebNotice[] {
     return this.port.notifications(this.#binding(sessionId))
   }
   acknowledgeNotices(sessionId: string, ids: readonly string[], status: NativeWebNoticeAckStatus): Readonly<{ acknowledged: number }> {

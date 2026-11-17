@@ -5,11 +5,19 @@ const sessionId = z.string().min(1)
 const noticeIds = z.array(z.string().min(1).max(256)).min(1).max(100).readonly()
 const noticeAckStatus = z.enum(['delivered', 'read'])
 const noticeAckResult = z.object({ acknowledged: z.number().int().min(0).max(100) }).readonly()
+const noticeAttachment = z.object({
+  kind: z.literal('text'),
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+  mediaType: z.enum(['text/plain', 'text/markdown']),
+  text: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+}).readonly()
 const notice = z.object({
   id: z.string().min(1),
   text: z.string(),
   createdAt: z.number().finite(),
   status: z.enum(['accepted', 'delivered']).optional(),
+  attachment: noticeAttachment.optional(),
 }).readonly()
 
 /** Strict Host and client descriptor for owner-scoped accepted reminders. */

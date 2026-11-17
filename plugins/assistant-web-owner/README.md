@@ -63,9 +63,9 @@ dsh-web-owner-setup --dsh-home "$DSH_HOME" --profile web \
 
 Web Session Controller 的 Host 与 browser 两半都从当前 DSH 安装解析。本包通过只含一个精确源码入口的内存 Loader 子树，将原生包的 client 元数据与已有 owner-scoped Host 包装绑定：浏览器加载该 Host 自带的 Session client，而非构建时复制的旧版本。子树不启动未过滤的上游 Host Controller，不写 profile 或 node_modules，随 owner Fiber 卸载；无法解析当前 Host 的公开 Loader/Controller 契约时拒绝启动，不回退到旧客户端。本包自己的 browser 产物只实现主动提醒，不再复制 Session RPC、提交队列或 UI 状态。
 
-当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。提醒保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
+当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。当提醒因 Delivery `attentionAttachOverCap` 转为纯文本附件时，`DeliveryNotice.attachment` 会经严格 schema 透传只读 UTF-8 附件（`kind: 'text'`、`name`、`mediaType: 'text/plain' | 'text/markdown'`、`text`、`sha256`），前端仅以纯文本 `<pre>` 有界预览（至多 16,384 字符，不解释 HTML）或安全文件名 `Blob` 下载完整 UTF-8 原文。提醒与附件均保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
 
-E3a-W 增加了严格 Typert `deliveryNotices.ack(sessionId, ids, status)`：列表成功渲染后对未 ack 的提醒写 `delivered`，点击提醒时写 `read`。Host 重新校验绑定 Session、owner/route/Policy/期限、native-notice metadata 和 outbox 归属，整批校验后才写 receipt；foreign session、非 notice、越界/畸形 id、过期、撤权漂移或 withdrawn notice 整批拒绝且零写入。
+E3a-W 增加了严格 Typert `deliveryNotices.ack(sessionId, ids, status)`：列表成功渲染后对未 ack 的提醒写 `delivered`，点击提醒摘要时写 `read`（展开/下载附件操作本身不会误触发 `read` ack）。Host 重新校验绑定 Session、owner/route/Policy/期限、native-notice metadata、附件摘要与 outbox 归属，整批校验后才写 receipt；foreign session、非 notice、越界/畸形 id、过期、撤权漂移、附件摘要失效或 withdrawn notice 整批拒绝且零写入。
 
 ### notice ack 已知边界（E3a-W）
 

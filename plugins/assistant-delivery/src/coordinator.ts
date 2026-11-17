@@ -205,6 +205,14 @@ export class DeliveryAdapterRegistry {
     return this.adapters.get(adapterKey(channel, account))?.adapter
   }
 
+  isStarting(channel: string, account: string): boolean {
+    return this.starting.has(adapterKey(channel, account))
+  }
+
+  isStopped(): boolean {
+    return this.stopped
+  }
+
   reconcilableUnknownRoutes(): ReadonlyArray<{ channel: string; account: string }> {
     const routes: Array<{ channel: string; account: string }> = []
     for (const { adapter } of this.adapters.values()) {
