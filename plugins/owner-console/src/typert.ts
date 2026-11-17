@@ -269,6 +269,161 @@ export const WRITE_RESULT = z.object({
 }).readonly()
 export type OwnerConsoleWriteResult = Readonly<z.infer<typeof WRITE_RESULT>>
 
+export const AUTONOMY_BUDGET_TIERS = ['conservative', 'balanced', 'custom'] as const
+export type AutonomyBudgetTier = typeof AUTONOMY_BUDGET_TIERS[number]
+
+export const AUTONOMY_SETUP_ACTIONS = ['enable', 'pause', 'disable'] as const
+export type AutonomySetupAction = typeof AUTONOMY_SETUP_ACTIONS[number]
+
+export const AutonomyBudgetLimitsSchema = z.object({
+  dailyMemoryExtractions: z.number().int().min(1).max(10_000),
+  dailyMemoryScans: z.number().int().min(1).max(10_000),
+  dailyDreams: z.number().int().min(1).max(24),
+  dailyGrowthReviews: z.number().int().min(1).max(1_000),
+  dailyGrowthDiscoveryScans: z.number().int().min(1).max(10_000),
+  maxIdeasPerWake: z.number().int().min(1).max(5),
+  grantLeaseDays: z.number().int().min(1).max(365),
+}).readonly()
+export type AutonomyBudgetLimits = Readonly<z.infer<typeof AutonomyBudgetLimitsSchema>>
+
+export const AUTONOMY_TIER_DEFAULTS: Readonly<Record<Exclude<AutonomyBudgetTier, 'custom'>, AutonomyBudgetLimits>> = Object.freeze({
+  conservative: Object.freeze({
+    dailyMemoryExtractions: 10,
+    dailyMemoryScans: 1440,
+    dailyDreams: 2,
+    dailyGrowthReviews: 5,
+    dailyGrowthDiscoveryScans: 1440,
+    maxIdeasPerWake: 3,
+    grantLeaseDays: 30,
+  }),
+  balanced: Object.freeze({
+    dailyMemoryExtractions: 25,
+    dailyMemoryScans: 1440,
+    dailyDreams: 6,
+    dailyGrowthReviews: 15,
+    dailyGrowthDiscoveryScans: 1440,
+    maxIdeasPerWake: 3,
+    grantLeaseDays: 30,
+  }),
+})
+
+export const AutonomySetupStatusSchema = z.object({
+  profile: z.object({
+    dshHome: z.string().max(4_096).nullable(),
+    profileName: z.string().max(200),
+    patchPath: z.string().max(4_096).nullable(),
+    patchExists: z.boolean(),
+    writable: z.boolean(),
+    dbPathsScoped: z.boolean(),
+    unscopedDbPaths: z.array(z.string().max(4_096)).max(16).readonly(),
+    restartCommand: z.string().max(500).nullable(),
+  }).readonly(),
+  ownerRoute: z.object({
+    configured: z.boolean(),
+    active: z.boolean(),
+    channel: z.enum(['web', 'lark', 'other', 'absent']),
+    authorityId: z.string().max(200).nullable(),
+    principalId: z.string().max(200).nullable(),
+    workspace: z.string().max(4_096),
+    preset: z.string().max(200),
+    webGrantReady: z.boolean(),
+    missingReason: z.string().max(500).nullable(),
+  }).readonly(),
+  modelRoute: z.object({
+    provider: z.string().max(200).nullable(),
+    model: z.string().max(256).nullable(),
+    reasoningEffort: z.string().max(128).nullable(),
+    routeKind: z.enum(['traex-agent', 'agy-agent', 'api', 'unconfigured']),
+    traexInstalled: z.boolean(),
+    traexEnabled: z.boolean(),
+    agyEnabled: z.boolean(),
+    apiProviders: z.array(z.object({
+      id: z.string().max(200),
+      name: z.string().max(200),
+    }).readonly()).max(64).readonly(),
+    ready: z.boolean(),
+    missingReason: z.string().max(500).nullable(),
+  }).readonly(),
+  grants: z.object({
+    memoryLearning: z.object({
+      installed: z.boolean(),
+      configured: z.boolean(),
+      enabled: z.boolean(),
+      threeAuthoritiesIndependent: z.boolean(),
+      expiresAt: z.number().int().nonnegative().nullable(),
+      expired: z.boolean(),
+      workItemExperiences: z.boolean(),
+      databasePath: z.string().max(4_096).nullable(),
+    }).readonly(),
+    dreaming: z.object({
+      installed: z.boolean(),
+      configured: z.boolean(),
+      enabled: z.boolean(),
+      retired: z.boolean(),
+      maxDreamsPerDay: z.number().int().nonnegative().nullable(),
+      maxIdeasPerWake: z.number().int().nonnegative().nullable(),
+      databasePath: z.string().max(4_096).nullable(),
+    }).readonly(),
+    growthDriver: z.object({
+      installed: z.boolean(),
+      configured: z.boolean(),
+      enabled: z.boolean(),
+      usageEnabled: z.boolean(),
+      dreamingIdeasEnabled: z.boolean(),
+      databasePath: z.string().max(4_096).nullable(),
+    }).readonly(),
+    assistantPolicy: z.object({
+      installed: z.boolean(),
+      schedulerEnabled: z.boolean(),
+      allowUnbudgetedExecution: z.boolean(),
+      rulesCount: z.number().int().nonnegative(),
+      budgetsCount: z.number().int().nonnegative(),
+      ready: z.boolean(),
+    }).readonly(),
+  }).readonly(),
+  activeTier: z.enum(AUTONOMY_BUDGET_TIERS),
+  activeBudgets: AutonomyBudgetLimitsSchema,
+  overallReady: z.boolean(),
+  blockingReasons: z.array(z.string().max(500)).max(32).readonly(),
+}).readonly()
+export type AutonomySetupStatus = Readonly<z.infer<typeof AutonomySetupStatusSchema>>
+
+export const SelfUpgradeStatusSchema = z.object({
+  currentEnhancedVersion: z.string().max(128),
+  latestEnhancedVersion: z.string().max(128).nullable(),
+  enhancedUpdateAvailable: z.boolean(),
+  boundHostVersion: z.string().max(128).nullable(),
+  installedHostVersion: z.string().max(128).nullable(),
+  targetHostVersion: z.string().max(128).nullable(),
+  hostUpdateAvailable: z.boolean(),
+  frozenSystemdProfile: z.boolean(),
+  profileName: z.string().max(200),
+  dshHome: z.string().max(4_096).nullable(),
+  canTriggerDetached: z.boolean(),
+  upgradeCommand: z.string().max(1_024),
+  checkedAt: z.number().int().nonnegative(),
+  cached: z.boolean(),
+  offline: z.boolean(),
+  checkSource: z.enum(['dsh-rsi', 'npm-registry', 'offline']),
+  note: z.string().max(500),
+}).readonly()
+export type SelfUpgradeStatus = Readonly<z.infer<typeof SelfUpgradeStatusSchema>>
+
+export const SelfUpgradePreviewSchema = z.object({
+  supported: z.boolean(),
+  frozenSystemdProfile: z.boolean(),
+  requiresOutOfBandCli: z.boolean(),
+  command: z.string().max(1_024),
+  currentEnhancedVersion: z.string().max(128),
+  targetEnhancedVersion: z.string().max(128).nullable(),
+  boundHostVersion: z.string().max(128).nullable(),
+  targetHostVersion: z.string().max(128).nullable(),
+  backupRequired: z.boolean(),
+  warnings: z.array(z.string().max(500)).max(32).readonly(),
+  summary: z.string().max(1_000),
+}).readonly()
+export type SelfUpgradePreview = Readonly<z.infer<typeof SelfUpgradePreviewSchema>>
+
 /** Bounds of the read-only trend snapshot page; the control plane enforces the same page limit. */
 export const TREND_SNAPSHOT_PAGE_MAX = 100
 const DIGEST = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -593,6 +748,61 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 541, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/autonomySetupStatus',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'autonomySetupStatus',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-enhanced/owner-console#AutonomySetupStatus', () => AutonomySetupStatusSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 735, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/configureAutonomySetup',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'configureAutonomySetup',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'action', wire: 'action', source: 'json', codec: codec('owner-console#autonomySetupAction', () => z.enum(AUTONOMY_SETUP_ACTIONS)) },
+        { name: 'tier', wire: 'tier', source: 'json', codec: codec('owner-console#autonomyBudgetTier', () => z.enum(AUTONOMY_BUDGET_TIERS)) },
+        { name: 'provider', wire: 'provider', source: 'json', codec: codec('owner-console#autonomyProvider', () => z.string().max(200)) },
+        { name: 'model', wire: 'model', source: 'json', codec: codec('owner-console#autonomyModel', () => z.string().max(256)) },
+        { name: 'reasoningEffort', wire: 'reasoningEffort', source: 'json', codec: codec('owner-console#autonomyReasoningEffort', () => z.string().max(128)) },
+        { name: 'enableMemoryLearning', wire: 'enableMemoryLearning', source: 'json', codec: codec('owner-console#autonomyEnableMemoryLearning', () => z.boolean()) },
+        { name: 'enableDreaming', wire: 'enableDreaming', source: 'json', codec: codec('owner-console#autonomyEnableDreaming', () => z.boolean()) },
+        { name: 'enableGrowth', wire: 'enableGrowth', source: 'json', codec: codec('owner-console#autonomyEnableGrowth', () => z.boolean()) },
+        { name: 'workItemExperiences', wire: 'workItemExperiences', source: 'json', codec: codec('owner-console#autonomyWorkItemExperiences', () => z.boolean()) },
+        { name: 'customBudget', wire: 'customBudget', source: 'json', codec: codec('owner-console#AutonomyBudgetLimits', () => AutonomyBudgetLimitsSchema) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 743, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/checkSelfUpgrade',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'checkSelfUpgrade',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'force', wire: 'force', source: 'json', codec: codec('owner-console#upgradeForce', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#SelfUpgradeStatus', () => SelfUpgradeStatusSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 763, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/dryRunSelfUpgrade',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'dryRunSelfUpgrade',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-enhanced/owner-console#SelfUpgradePreview', () => SelfUpgradePreviewSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 773, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/runSelfUpgrade',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'runSelfUpgrade',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'confirmed', wire: 'confirmed', source: 'json', codec: codec('owner-console#upgradeConfirmed', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 781, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

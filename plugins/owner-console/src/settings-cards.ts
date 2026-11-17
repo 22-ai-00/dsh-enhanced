@@ -3,10 +3,13 @@ import { jsx } from 'react/jsx-runtime'
 import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
-import type {
-  CodingToolProbe, IntakeAgreementAvailability, OwnerConsoleAssistantOverview, OwnerConsoleIntakeAgreement,
-  OwnerConsoleIntakeAgreementHistory, OwnerConsoleStatus, OwnerConsoleTrendSnapshotItem, OwnerConsoleTrendSnapshots,
-  OwnerConsoleWriteResult,
+import {
+  AUTONOMY_TIER_DEFAULTS,
+  type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction, type AutonomySetupStatus,
+  type CodingToolProbe, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
+  type OwnerConsoleIntakeAgreement, type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleStatus,
+  type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
+  type SelfUpgradePreview, type SelfUpgradeStatus,
 } from './typert.js'
 import {
   accent, actionsStyle, border, buttonStyle, caption, card, danger, dangerButtonStyle, el, field, gridStyle,
@@ -135,6 +138,22 @@ export type ConsoleRemote = Readonly<{
   actAttentionQuestion?(workspace: string, preset: string, cohortLane: string, cohortSourceId: string,
     questionId: string, choice: 'authorize-once' | 'decline'): Promise<RemoteResult<OwnerConsoleWriteResult>>
   actProactiveDraft?(id: string, action: 'accept' | 'reject' | 'cancel', workspace: string, preset: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  autonomySetupStatus?(): Promise<RemoteResult<AutonomySetupStatus>>
+  configureAutonomySetup?(
+    action: AutonomySetupAction,
+    tier: AutonomyBudgetTier,
+    provider: string,
+    model: string,
+    reasoningEffort: string,
+    enableMemoryLearning: boolean,
+    enableDreaming: boolean,
+    enableGrowth: boolean,
+    workItemExperiences: boolean,
+    customBudget: AutonomyBudgetLimits,
+  ): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  checkSelfUpgrade?(force: boolean): Promise<RemoteResult<SelfUpgradeStatus>>
+  dryRunSelfUpgrade?(): Promise<RemoteResult<SelfUpgradePreview>>
+  runSelfUpgrade?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -164,9 +183,14 @@ export interface ConsoleController {
   readonly navigation: OwnerConsoleNavigation
   readonly status: OwnerConsoleStatus | undefined
   readonly overview: OwnerConsoleAssistantOverview | undefined
+  readonly autonomySetup: AutonomySetupStatus | undefined
+  readonly upgradeStatus: SelfUpgradeStatus | undefined
+  readonly upgradePreview: SelfUpgradePreview | undefined
   readonly traexProbe: CodingToolProbe | undefined
   readonly agyProbe: CodingToolProbe | undefined
   readonly probingTool: 'traex' | 'agy' | undefined
+  readonly checkingUpgrade: boolean
+  readonly previewingUpgrade: boolean
   readonly busy: boolean
   readonly error: string
   readonly notice: string
@@ -174,6 +198,8 @@ export interface ConsoleController {
   setNotice(value: string): void
   refresh(): Promise<void>
   probeTool(tool: 'traex' | 'agy', command: string, force?: boolean): Promise<void>
+  checkUpgrade(force?: boolean): Promise<void>
+  previewUpgrade(): Promise<void>
   run(action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>): Promise<void>
   runInstall(spec: string): Promise<void>
   confirmOwner(message: string): boolean
@@ -186,9 +212,14 @@ export function useConsoleActions(
   setStatus: (next: OwnerConsoleStatus | undefined) => void,
 ): ConsoleController {
   const [overview, setOverview] = useState<OwnerConsoleAssistantOverview>()
+  const [autonomySetup, setAutonomySetup] = useState<AutonomySetupStatus>()
+  const [upgradeStatus, setUpgradeStatus] = useState<SelfUpgradeStatus>()
+  const [upgradePreview, setUpgradePreview] = useState<SelfUpgradePreview>()
   const [traexProbe, setTraexProbe] = useState<CodingToolProbe>()
   const [agyProbe, setAgyProbe] = useState<CodingToolProbe>()
   const [probingTool, setProbingTool] = useState<'traex' | 'agy'>()
+  const [checkingUpgrade, setCheckingUpgrade] = useState(false)
+  const [previewingUpgrade, setPreviewingUpgrade] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -204,6 +235,10 @@ export function useConsoleActions(
       const statusPromise = typeof remote.status === 'function' ? remote.status() : undefined
       const overviewPromise = typeof remote.assistantOverview === 'function'
         ? remote.assistantOverview('', '') : undefined
+      const autonomyPromise = typeof remote.autonomySetupStatus === 'function'
+        ? remote.autonomySetupStatus() : undefined
+      const upgradePromise = typeof remote.checkSelfUpgrade === 'function'
+        ? remote.checkSelfUpgrade(false) : undefined
       if (statusPromise !== undefined) {
         const result = await statusPromise
         if (!mounted.current) return
@@ -213,6 +248,14 @@ export function useConsoleActions(
       if (overviewPromise !== undefined) {
         const ov = await overviewPromise
         if (mounted.current && ov.ok) setOverview(ov.value)
+      }
+      if (autonomyPromise !== undefined) {
+        const setup = await autonomyPromise
+        if (mounted.current && setup.ok) setAutonomySetup(setup.value)
+      }
+      if (upgradePromise !== undefined) {
+        const upg = await upgradePromise
+        if (mounted.current && upg.ok) setUpgradeStatus(upg.value)
       }
     } catch (cause) {
       if (mounted.current) {
@@ -249,6 +292,50 @@ export function useConsoleActions(
     }
   }
 
+  const checkUpgrade = async (force = true) => {
+    if (typeof remote.checkSelfUpgrade !== 'function') {
+      setError('当前 Host 版本暂未暴露版本检查接口')
+      return
+    }
+    setCheckingUpgrade(true); setError(''); setNotice('')
+    try {
+      const result = await remote.checkSelfUpgrade(force)
+      if (!mounted.current) return
+      if (!result.ok) {
+        setError(`版本检查失败（${remoteFailureText(result.error)}）`)
+        return
+      }
+      setUpgradeStatus(result.value)
+      setNotice(result.value.note)
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : '版本检查失败')
+    } finally {
+      if (mounted.current) setCheckingUpgrade(false)
+    }
+  }
+
+  const previewUpgrade = async () => {
+    if (typeof remote.dryRunSelfUpgrade !== 'function') {
+      setError('当前 Host 版本暂未暴露升级预演接口')
+      return
+    }
+    setPreviewingUpgrade(true); setError(''); setNotice('')
+    try {
+      const result = await remote.dryRunSelfUpgrade()
+      if (!mounted.current) return
+      if (!result.ok) {
+        setError(`升级预演失败（${remoteFailureText(result.error)}）`)
+        return
+      }
+      setUpgradePreview(result.value)
+      setNotice(result.value.summary)
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : '升级预演失败')
+    } finally {
+      if (mounted.current) setPreviewingUpgrade(false)
+    }
+  }
+
   const run = async (action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>) => {
     setBusy(true); setError(''); setNotice('')
     try {
@@ -280,8 +367,10 @@ export function useConsoleActions(
   const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, confirmOwner))
 
   return {
-    remote, navigation, status, overview, traexProbe, agyProbe, probingTool,
-    busy, error, notice, setError, setNotice, refresh, probeTool, run, runInstall, confirmOwner,
+    remote, navigation, status, overview, autonomySetup, upgradeStatus, upgradePreview,
+    traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade,
+    busy, error, notice, setError, setNotice, refresh, probeTool, checkUpgrade, previewUpgrade,
+    run, runInstall, confirmOwner,
   }
 }
 
@@ -1076,6 +1165,283 @@ export function WenyaoSectionIcon(props: Readonly<{ size?: number; active?: bool
   }))
 }
 
+function detailRow(label: string, value: unknown, hint?: string) {
+  return row(label, hint !== undefined && hint !== ''
+    ? el('div', { style: { display: 'grid', gap: 2 } }, value, el('div', { style: { fontSize: 11, color: muted } }, hint))
+    : value)
+}
+
+function controlField(label: string, control: unknown) {
+  return el('label', { style: { display: 'grid', gap: 6 } },
+    el('span', { style: { fontSize: 12, color: muted } }, label),
+    control)
+}
+
+export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
+  const { remote, status, autonomySetup, busy } = ctrl
+  const initialProvider = autonomySetup?.modelRoute.provider ?? status?.defaultModel?.provider ?? 'traex-agent'
+  const [tier, setTier] = useState<AutonomyBudgetTier>(autonomySetup?.activeTier ?? 'conservative')
+  const [provider, setProvider] = useState<string>(initialProvider)
+  const [model, setModel] = useState<string>(autonomySetup?.modelRoute.model ?? status?.defaultModel?.model ?? 'default')
+  const [effort, setEffort] = useState<string>(autonomySetup?.modelRoute.reasoningEffort ?? status?.defaultModel?.reasoningEffort ?? '')
+  const [enableMemory, setEnableMemory] = useState<boolean>(autonomySetup?.grants.memoryLearning.enabled ?? true)
+  const [enableDreaming, setEnableDreaming] = useState<boolean>(autonomySetup?.grants.dreaming.enabled ?? true)
+  const [enableGrowth, setEnableGrowth] = useState<boolean>(autonomySetup?.grants.growthDriver.enabled ?? true)
+  const [workItemExp, setWorkItemExp] = useState<boolean>(autonomySetup?.grants.memoryLearning.workItemExperiences ?? false)
+  const [customBudget, setCustomBudget] = useState<AutonomyBudgetLimits>(
+    autonomySetup?.activeBudgets ?? AUTONOMY_TIER_DEFAULTS.conservative,
+  )
+  const syncedRef = useRef(false)
+
+  useEffect(() => {
+    if (autonomySetup === undefined || syncedRef.current) return
+    syncedRef.current = true
+    setTier(autonomySetup.activeTier)
+    if (autonomySetup.modelRoute.provider) setProvider(autonomySetup.modelRoute.provider)
+    if (autonomySetup.modelRoute.model) setModel(autonomySetup.modelRoute.model)
+    setEffort(autonomySetup.modelRoute.reasoningEffort ?? '')
+    setCustomBudget(autonomySetup.activeBudgets)
+    if (autonomySetup.grants.memoryLearning.configured || autonomySetup.grants.dreaming.configured || autonomySetup.grants.growthDriver.configured) {
+      setEnableMemory(autonomySetup.grants.memoryLearning.enabled || !autonomySetup.grants.memoryLearning.configured)
+      setEnableDreaming(autonomySetup.grants.dreaming.enabled || !autonomySetup.grants.dreaming.configured)
+      setEnableGrowth(autonomySetup.grants.growthDriver.enabled || !autonomySetup.grants.growthDriver.configured)
+    }
+    setWorkItemExp(autonomySetup.grants.memoryLearning.workItemExperiences)
+  }, [autonomySetup])
+
+  const apiProviders = autonomySetup?.modelRoute.apiProviders ?? (status?.llmProviders ?? []).filter(p => p.id !== 'traex-agent' && p.id !== 'agy-agent')
+  const canSubmitRpc = typeof remote.configureAutonomySetup === 'function'
+  const effectiveBudgets = tier === 'custom' ? customBudget : AUTONOMY_TIER_DEFAULTS[tier]
+  const isAcpRoute = provider === 'traex-agent' || provider === 'agy-agent'
+  const effectiveModel = isAcpRoute && model.trim() === '' ? 'default' : model.trim()
+
+  const applyTier = (nextTier: AutonomyBudgetTier) => {
+    setTier(nextTier)
+    if (nextTier !== 'custom') setCustomBudget(AUTONOMY_TIER_DEFAULTS[nextTier])
+  }
+
+  const updateBudgetNum = (key: keyof AutonomyBudgetLimits, raw: string, min: number, max: number) => {
+    const parsed = Number.parseInt(raw, 10)
+    if (!Number.isFinite(parsed)) return
+    setTier('custom')
+    setCustomBudget(prev => ({ ...prev, [key]: Math.min(max, Math.max(min, parsed)) }))
+  }
+
+  const invokeSetup = (action: AutonomySetupAction) => {
+    if (!canSubmitRpc) return
+    void ctrl.run(() => remote.configureAutonomySetup!(
+      action, tier, provider.trim(), effectiveModel, effort.trim(),
+      enableMemory, enableDreaming, enableGrowth, workItemExp, effectiveBudgets,
+    ))
+  }
+
+  const ownerTone: StatusTone = autonomySetup?.ownerRoute.active ? 'ok' : autonomySetup?.ownerRoute.configured ? 'warn' : 'error'
+  const modelTone: StatusTone = autonomySetup?.modelRoute.ready ? 'ok' : 'warn'
+  const scopeTone: StatusTone = autonomySetup?.profile.dbPathsScoped === false ? 'error' : 'ok'
+  const policyTone: StatusTone = autonomySetup?.grants.assistantPolicy.ready ? 'ok' : 'warn'
+
+  const grantLine = (label: string, ready: boolean, detail: string) => el('div', {
+    style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, border: `1px solid ${hairline}` },
+  },
+  el('span', { style: { fontWeight: 500 } }, label),
+  el('span', { style: { fontSize: 12, color: muted } }, `${ready ? '已授权' : '未就绪'} · ${detail}`))
+
+  const checkboxRow = (label: string, checked: boolean, onChange: (v: boolean) => void, note: string) => el('label', {
+    style: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, border: `1px solid ${hairline}`, cursor: 'pointer' },
+  },
+  el('input', { type: 'checkbox', checked, onChange: (e: { target: { checked: boolean } }) => onChange(e.target.checked) }),
+  el('span', { style: { fontWeight: 500 } }, label),
+  el('span', { style: { fontSize: 11, color: muted } }, note))
+
+  const hasSetupBlockers = autonomySetup !== undefined && (!autonomySetup.ownerRoute.active || !autonomySetup.profile.dbPathsScoped)
+
+  return card(
+    '自主能力、记忆学习与做梦一键授权向导',
+    '先检查 owner 路由、模型路线、$DSH_HOME 隔离与有限预算门禁，再一次完成三权分立授权；也可随时安全暂停并保留既有账本',
+    el('div', { 'data-owner-console-card': 'autonomy-wizard', style: listStyle },
+      el('div', { style: actionsStyle },
+        pill(autonomySetup?.ownerRoute.active ? `Owner 路由已激活 (${autonomySetup.ownerRoute.channel})` : autonomySetup?.ownerRoute.configured ? 'Owner 路由待认领' : 'Owner 路由缺失', ownerTone),
+        pill(autonomySetup?.modelRoute.ready ? `模型路线 ${autonomySetup.modelRoute.provider}` : '模型路线待配置', modelTone),
+        pill(autonomySetup?.profile.dbPathsScoped === false ? 'DB 路径未隔离' : '$DSH_HOME 隔离正常', scopeTone),
+        pill(autonomySetup?.grants.assistantPolicy.ready ? `Policy 就绪 · ${autonomySetup.grants.assistantPolicy.rulesCount} 规则` : 'Policy 待写入', policyTone)),
+      autonomySetup === undefined
+        ? placeholder('正在检测当前 $DSH_HOME profile 与授权状态（或当前 Host 未暴露一键向导 RPC）…')
+        : el('div', { style: listStyle },
+          detailRow('Profile / $DSH_HOME',
+            el('div', { style: monoMuted }, `${autonomySetup.profile.profileName} · ${autonomySetup.profile.dshHome ?? '未检测到 DSH_HOME'}`),
+            autonomySetup.profile.patchPath ?? undefined),
+          detailRow('Active Owner 路由',
+            el('div', { style: monoMuted }, autonomySetup.ownerRoute.authorityId
+              ? `${autonomySetup.ownerRoute.authorityId} · ${autonomySetup.ownerRoute.principalId ?? ''}`
+              : '未绑定激活的 Owner 路由'),
+            autonomySetup.ownerRoute.missingReason ?? undefined),
+          autonomySetup.blockingReasons.length > 0
+            ? el('div', { style: bannerStyle(danger) }, `前置阻塞：${autonomySetup.blockingReasons.join('；')}`)
+            : null,
+          el('div', { style: gridStyle },
+            grantLine('记忆自学习（三权分立）',
+              autonomySetup.grants.memoryLearning.enabled && autonomySetup.grants.memoryLearning.threeAuthoritiesIndependent,
+              autonomySetup.grants.memoryLearning.expired
+                ? '租约已过期'
+                : autonomySetup.grants.memoryLearning.threeAuthoritiesIndependent
+                  ? 'extract / review / adopt 独立'
+                  : '尚未签发三权分立授权'),
+            grantLine('自主做梦灵感',
+              autonomySetup.grants.dreaming.enabled,
+              autonomySetup.grants.dreaming.retired
+                ? '已安全暂停（retired）'
+                : autonomySetup.grants.dreaming.maxDreamsPerDay !== null
+                  ? `上限 ${autonomySetup.grants.dreaming.maxDreamsPerDay}/日`
+                  : '未配置'),
+            grantLine('技能与工作流演化',
+              autonomySetup.grants.growthDriver.enabled,
+              autonomySetup.grants.growthDriver.usageEnabled ? '已含 usageLearning' : '未启用')),
+          el('div', { style: gridStyle },
+            controlField('模型 / 编程工具路由',
+              el('select', {
+                value: provider,
+                style: inputStyle,
+                onChange: (e: { target: { value: string } }) => {
+                  const next = e.target.value
+                  setProvider(next)
+                  if ((next === 'traex-agent' || next === 'agy-agent') && model.trim() === '') setModel('default')
+                },
+              },
+              el('option', { value: 'traex-agent' }, 'TraeX ACP (traex-agent)'),
+              el('option', { value: 'agy-agent' }, 'Antigravity ACP (agy-agent)'),
+              ...apiProviders.map(p => el('option', { key: p.id, value: p.id }, `API: ${p.name} (${p.id})`)),
+              provider !== '' && provider !== 'traex-agent' && provider !== 'agy-agent' && !apiProviders.some(p => p.id === provider)
+                ? el('option', { value: provider }, `自定义 API: ${provider}`)
+                : null)),
+            controlField('模型 ID / Effort（可选）',
+              el('div', { style: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 6 } },
+                el('input', {
+                  type: 'text',
+                  value: model,
+                  placeholder: isAcpRoute ? 'default' : '例如 deepseek-chat',
+                  style: inputStyle,
+                  onChange: (e: { target: { value: string } }) => setModel(e.target.value),
+                }),
+                el('input', {
+                  type: 'text',
+                  value: effort,
+                  placeholder: 'effort (low/medium/high)',
+                  style: inputStyle,
+                  onChange: (e: { target: { value: string } }) => setEffort(e.target.value),
+                })))),
+          el('div', { style: actionsStyle },
+            el('span', { style: { fontSize: 12, color: muted } }, '有限预算档位：'),
+            el('button', { type: 'button', style: tier === 'conservative' ? primaryButtonStyle : buttonStyle, onClick: () => applyTier('conservative') }, '保守 (10/2/5 日配额)'),
+            el('button', { type: 'button', style: tier === 'balanced' ? primaryButtonStyle : buttonStyle, onClick: () => applyTier('balanced') }, '均衡 (25/6/15 日配额)'),
+            el('button', { type: 'button', style: tier === 'custom' ? primaryButtonStyle : buttonStyle, onClick: () => applyTier('custom') }, '自定义有限配额')),
+          tier === 'custom'
+            ? el('div', { style: gridStyle },
+              controlField('每日记忆提取 (1-10000)', el('input', { type: 'number', value: customBudget.dailyMemoryExtractions, style: inputStyle, onChange: (e: { target: { value: string } }) => updateBudgetNum('dailyMemoryExtractions', e.target.value, 1, 10_000) })),
+              controlField('每日做梦上限 (1-24)', el('input', { type: 'number', value: customBudget.dailyDreams, style: inputStyle, onChange: (e: { target: { value: string } }) => updateBudgetNum('dailyDreams', e.target.value, 1, 24) })),
+              controlField('每日演化评审 (1-1000)', el('input', { type: 'number', value: customBudget.dailyGrowthReviews, style: inputStyle, onChange: (e: { target: { value: string } }) => updateBudgetNum('dailyGrowthReviews', e.target.value, 1, 1_000) })),
+              controlField('授权租期天数 (1-365)', el('input', { type: 'number', value: customBudget.grantLeaseDays, style: inputStyle, onChange: (e: { target: { value: string } }) => updateBudgetNum('grantLeaseDays', e.target.value, 1, 365) })))
+            : el('div', { style: hintStyle },
+              `当前配额：每日记忆提取 ${effectiveBudgets.dailyMemoryExtractions} / 每日扫描 ${effectiveBudgets.dailyMemoryScans} / 每日做梦 ${effectiveBudgets.dailyDreams} / 每日演化评审 ${effectiveBudgets.dailyGrowthReviews} / 租期 ${effectiveBudgets.grantLeaseDays} 天`),
+          el('div', { style: gridStyle },
+            checkboxRow('记忆自学习', enableMemory, setEnableMemory, 'extract + independent review + adopt'),
+            checkboxRow('做梦灵感', enableDreaming, setEnableDreaming, '受控后台灵感与 owner 处置'),
+            checkboxRow('技能演化', enableGrowth, setEnableGrowth, 'workflow + usageLearning'),
+            checkboxRow('收录工单经验', workItemExp, setWorkItemExp, '默认关闭；三权配置同步写入')),
+          el('div', { style: actionsStyle },
+            el('button', {
+              type: 'button',
+              style: idle(primaryButtonStyle, busy || !canSubmitRpc || hasSetupBlockers),
+              disabled: busy || !canSubmitRpc || hasSetupBlockers,
+              onClick: () => invokeSetup('enable'),
+            }, '授权开启记忆自学习 / 做梦 / 技能演化'),
+            el('button', {
+              type: 'button',
+              style: idle(buttonStyle, busy || !canSubmitRpc),
+              disabled: busy || !canSubmitRpc,
+              onClick: () => invokeSetup('pause'),
+            }, '安全暂停（保留账本）'),
+            el('button', {
+              type: 'button',
+              style: idle(dangerButtonStyle, busy || !canSubmitRpc),
+              disabled: busy || !canSubmitRpc,
+              onClick: () => invokeSetup('disable'),
+            }, '安全停用')))))
+}
+
+export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
+  const { remote, upgradeStatus, upgradePreview, checkingUpgrade, previewingUpgrade, busy } = ctrl
+  const [upgradeArmed, setUpgradeArmed] = useState(false)
+  const canCheck = typeof remote.checkSelfUpgrade === 'function'
+  const canDryRun = typeof remote.dryRunSelfUpgrade === 'function'
+  const canTrigger = typeof remote.runSelfUpgrade === 'function'
+
+  const triggerConfirmedUpgrade = () => {
+    if (!canTrigger) return
+    setUpgradeArmed(false)
+    void ctrl.run(() => remote.runSelfUpgrade!(true))
+  }
+
+  return card(
+    '版本检查与自助升级',
+    '只读核验当前 @dsh-enhanced 版本、绑定 Host (@deepseek-ai/dsh) 与 npm 最新版本；支持安全预演与明确确认后的带外后台升级',
+    el('div', { 'data-owner-console-card': 'self-upgrade', style: listStyle },
+      el('div', { style: actionsStyle },
+        pill(upgradeStatus?.enhancedUpdateAvailable ? `发现新版本 ${upgradeStatus.latestEnhancedVersion}` : '已检查版本',
+          upgradeStatus?.enhancedUpdateAvailable ? 'warn' : upgradeStatus?.offline ? 'neutral' : 'ok'),
+        pill(upgradeStatus?.frozenSystemdProfile ? '受控 Linux systemd（仅终端升级）' : '本地 / macOS profile',
+          upgradeStatus?.frozenSystemdProfile ? 'warn' : 'ok'),
+        upgradeStatus?.offline ? pill('离线回退', 'warn') : null),
+      upgradeStatus === undefined
+        ? placeholder('尚未获取版本与 Host 绑定状态，点击下方「检查最新版本」可进行有界超时检查。')
+        : el('div', { style: listStyle },
+          detailRow('@dsh-enhanced 当前 / 最新',
+            el('div', { style: monoMuted }, `${upgradeStatus.currentEnhancedVersion} -> ${upgradeStatus.latestEnhancedVersion ?? '离线未知'}`),
+            `来源：${upgradeStatus.checkSource}${upgradeStatus.cached ? '（TTL 缓存）' : ''}`),
+          detailRow('绑定 Host (@deepseek-ai/dsh)',
+            el('div', { style: monoMuted }, `绑定 ${upgradeStatus.boundHostVersion ?? '未绑定 (.dsh-rsi-host.json)'} · 运行时 ${upgradeStatus.installedHostVersion ?? '未知'}${upgradeStatus.targetHostVersion ? ` -> ${upgradeStatus.targetHostVersion}` : ''}`),
+            upgradeStatus.note),
+          upgradeStatus.frozenSystemdProfile
+            ? el('div', { style: bannerStyle(muted) }, `受控 Linux systemd profile 引导：${upgradeStatus.upgradeCommand}`)
+            : null),
+      upgradePreview === undefined
+        ? null
+        : el('div', { style: { padding: '8px 10px', borderRadius: 8, border: `1px solid ${hairline}`, display: 'grid', gap: 4 } },
+          el('div', { style: { fontWeight: 500 } }, `预演结果：${upgradePreview.summary}`),
+          upgradePreview.warnings.length > 0
+            ? el('div', { style: { fontSize: 12, color: danger } }, `提示 / 阻塞：${upgradePreview.warnings.join('；')}`)
+            : null,
+          el('div', { style: monoMuted }, `命令：${upgradePreview.command}`)),
+      upgradeArmed && upgradeStatus !== undefined && !upgradeStatus.frozenSystemdProfile
+        ? el('div', { style: bannerStyle(danger) },
+          el('div', { style: { display: 'grid', gap: 8 } },
+            el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus.upgradeCommand}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
+            el('div', { style: actionsStyle },
+              el('button', { type: 'button', style: idle(dangerButtonStyle, busy || !canTrigger), disabled: busy || !canTrigger, onClick: triggerConfirmedUpgrade }, '确认并启动后台升级'),
+              el('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: () => setUpgradeArmed(false) }, '取消'))))
+        : null,
+      el('div', { style: actionsStyle },
+        el('button', {
+          type: 'button',
+          style: idle(buttonStyle, checkingUpgrade || !canCheck),
+          disabled: checkingUpgrade || !canCheck,
+          onClick: () => void ctrl.checkUpgrade(true),
+        }, checkingUpgrade ? '检查中…' : '检查最新版本'),
+        el('button', {
+          type: 'button',
+          style: idle(buttonStyle, previewingUpgrade || !canDryRun),
+          disabled: previewingUpgrade || !canDryRun,
+          onClick: () => void ctrl.previewUpgrade(),
+        }, previewingUpgrade ? '预演中…' : '升级预演'),
+        upgradeStatus?.frozenSystemdProfile
+          ? null
+          : el('button', {
+            type: 'button',
+            style: idle(primaryButtonStyle, busy || !canTrigger || !upgradeStatus?.canTriggerDetached),
+            disabled: busy || !canTrigger || !upgradeStatus?.canTriggerDetached,
+            onClick: () => setUpgradeArmed(true),
+          }, '准备自助升级'))))
+}
+
 export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
   remote: ConsoleRemote
   navigation: OwnerConsoleNavigation
@@ -1109,6 +1475,8 @@ export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
     el('button', { style: buttonStyle, onClick: leaveThen(navigation.openPlugins) }, '插件页'),
     el('button', { style: buttonStyle, disabled: ctrl.busy, onClick: () => void ctrl.refresh() }, '刷新'))),
   jsx(StatusBanners, { ctrl }),
+  jsx(AutonomyWizardCard, { ctrl }),
+  jsx(SelfUpgradeCard, { ctrl }),
   jsx(CodingToolsCard, { ctrl }),
   jsx(DreamingCard, { ctrl }),
   jsx(ProactiveWorkItemsCard, { ctrl }),

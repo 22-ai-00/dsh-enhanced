@@ -200,12 +200,22 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 
 ## 权限与数据边界
 
-- 本插件自身不直接读写配置或插件目录文件、不直接联网、不读取凭据；需要落盘的动作都委托给
-  Host 的 `settings`（配置）与 `pluginManager`（bundle/条目管理与 pnpm 安装），由后者执行。
-- 本机编程 CLI 就绪探测（`src/probes.ts`）仅在主人显式点击探测按钮或调用 `probeCodingTool` RPC 时执行一次
-  无 shell（`execFile`）的只读探测命令（`traex login status` 或 `agy --version` + `agy models`），单行校验命令名、
-  仅向子进程传递最小环境变量白名单（不透传密钥类变量）、带有限超时（8 秒 / 3 秒 / 18 秒）与 15 秒缓存；
-  绝不触发交互登录、不写凭据、不发起聊天或模型推理。
+- **文件与配置边界**：常规插件字段写入仍委托给 Host `settings.mutate`（仅易失字段）与
+  `pluginManager`；**自主能力一键授权向导**（`autonomySetupStatus` / `configureAutonomySetup` /
+  `src/autonomy-setup.ts`）在主人显式点击授权或安全暂停/停用后，仅读取当前 `$DSH_HOME` 下激活的
+  `assistant-delivery` 只读 SQLite（`delivery_principals` / `conversation_bindings`）与目标 profile 的
+  `cordis.patch.yml`，按 `0o600` 权限创建时间戳备份并以临时文件+原子重命名更新 `cordis.patch.yml`
+  （保留无关配置与 `!!js` 表达式；拒绝符号链接、拒绝 `~/.dsh` 越界数据库路径，绝不绕过
+  `assistantPolicy` 有限预算与三权分立）。
+- **子进程、网络与版本检查边界**（`src/probes.ts`、`src/upgrade-probe.ts`）：
+  - 本机编程 CLI 就绪探测仅在主人显式触发时执行无 shell（`execFile`）只读命令（`traex login status`
+    或 `agy --version` + `agy models`），传递最小环境变量白名单、有限超时与 15 秒缓存；绝不触发模型推理。
+  - **版本检查与自助升级**（`checkSelfUpgrade` / `dryRunSelfUpgrade` / `runSelfUpgrade`）：严格只读读取
+    `$DSH_HOME/.dsh-rsi-host.json`（`O_NOFOLLOW` / `0o600`）与运行时包版本；通过有界超时的
+    `dsh-rsi upgrade --check/--dry-run --json` 或 `https://registry.npmjs.org/@dsh-enhanced%2Fowner-console/latest`
+    获取最新版本（带 60 秒 TTL 缓存与离线回退）。在非受控本地 / macOS profile 且主人完成预演与明确二次确认后，
+    以无 shell 独立后台进程启动 `dsh-rsi upgrade --yes`（日志写入 `$DSH_HOME/logs/`）；在受控 Linux systemd
+    profile 上拒绝进程内自升级并仅展示带外终端升级命令。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
   依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 或安装输出中读到的
   精确名称才被批准；确认写入 profile 的 `allowBuilds` 后由服务端重试，不经模型。

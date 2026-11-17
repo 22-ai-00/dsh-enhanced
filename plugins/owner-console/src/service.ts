@@ -17,6 +17,12 @@ import {
 import { componentState, missingRemedy, repairPatch } from './state.js'
 import { persistAllowedBuilds } from './build-approvals.js'
 import { CodingToolProber, type CodingToolId } from './probes.js'
+import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus } from './autonomy-setup.js'
+import { SelfUpgradeProber } from './upgrade-probe.js'
+import type {
+  AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
+  AutonomySetupStatus, SelfUpgradePreview, SelfUpgradeStatus,
+} from './typert.js'
 import {
   executeAttentionQuestionReply, executeDreamingIdeaAction, executeProactiveDraftAction,
   readAssistantOverview, type DreamingIdeaAction,
@@ -37,11 +43,18 @@ const ACCOUNT = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 export class OwnerConsoleService extends TypertRemoteService {
   private readonly host: Context
   private readonly prober: CodingToolProber
+  private readonly upgradeProber: SelfUpgradeProber
 
-  constructor(ctx: Context, private readonly config: OwnerConsoleConfig, prober: CodingToolProber = new CodingToolProber()) {
+  constructor(
+    ctx: Context,
+    private readonly config: OwnerConsoleConfig,
+    prober: CodingToolProber = new CodingToolProber(),
+    upgradeProber: SelfUpgradeProber = new SelfUpgradeProber(),
+  ) {
     super(ctx, 'ownerConsole')
     this.host = ctx
     this.prober = prober
+    this.upgradeProber = upgradeProber
   }
 
   private settings(): SettingsService {
@@ -633,6 +646,54 @@ export class OwnerConsoleService extends TypertRemoteService {
   async actProactiveDraft(id: string, action: 'accept' | 'reject' | 'cancel',
     workspace: string, preset: string): Promise<OwnerConsoleWriteResult> {
     return executeProactiveDraftAction(this.host, id, action, workspace, preset)
+  }
+
+  /** Inspect owner route, model route, $DSH_HOME scoping, and current autonomy grants. */
+  async autonomySetupStatus(): Promise<AutonomySetupStatus> {
+    return inspectAutonomyWizardStatus(this.host)
+  }
+
+  /** Apply validated autonomy authorization, finite budgets, or safe pause/disable. */
+  async configureAutonomySetup(
+    action: AutonomySetupAction,
+    tier: AutonomyBudgetTier,
+    provider: string,
+    model: string,
+    reasoningEffort: string,
+    enableMemoryLearning: boolean,
+    enableDreaming: boolean,
+    enableGrowth: boolean,
+    workItemExperiences: boolean,
+    customBudget: AutonomyBudgetLimits,
+  ): Promise<OwnerConsoleWriteResult> {
+    return applyAutonomyWizardSetup(this.host, {
+      action,
+      tier,
+      provider,
+      model,
+      reasoningEffort,
+      enableMemoryLearning,
+      enableDreaming,
+      enableGrowth,
+      workItemExperiences,
+      customBudget,
+      reloadEntry: entryId => this.reload(entryId),
+    })
+  }
+
+  /** Check current @dsh-enhanced / bound Host versions and latest npm release safely with TTL cache. */
+  async checkSelfUpgrade(force: boolean): Promise<SelfUpgradeStatus> {
+    return this.upgradeProber.check(this.host, force)
+  }
+
+  /** Preview an upgrade plan without mutating files or running detached upgraders. */
+  async dryRunSelfUpgrade(): Promise<SelfUpgradePreview> {
+    return this.upgradeProber.dryRun(this.host)
+  }
+
+  /** Explicitly trigger detached local/macOS upgrade (or return out-of-band CLI guidance on frozen systemd). */
+  async runSelfUpgrade(confirmed: boolean): Promise<OwnerConsoleWriteResult> {
+    return this.upgradeProber.trigger(this.host, confirmed)
   }
 }
 

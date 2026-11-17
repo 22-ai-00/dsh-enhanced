@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(18)
+    expect(asyncMethods).toHaveLength(23)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -100,6 +100,15 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/actAttentionQuestion'))
       .toEqual(['workspace', 'preset', 'cohortLane', 'cohortSourceId', 'questionId', 'choice'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/actProactiveDraft')).toEqual(['id', 'action', 'workspace', 'preset'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/autonomySetupStatus')).toEqual([])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureAutonomySetup'))
+      .toEqual([
+        'action', 'tier', 'provider', 'model', 'reasoningEffort',
+        'enableMemoryLearning', 'enableDreaming', 'enableGrowth', 'workItemExperiences', 'customBudget',
+      ])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/checkSelfUpgrade')).toEqual(['force'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/dryRunSelfUpgrade')).toEqual([])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/runSelfUpgrade')).toEqual(['confirmed'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
