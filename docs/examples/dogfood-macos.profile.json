@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "name": "dogfood-macos-memory-lane",
+  "description": "macOS daily ordinary-use dogfood profile: memory-learning + preference-learning T1 overlays + evaluation outcome/agreement recording active; proactive and work-items strictly pinned to observe mode; attention loosening and engineering auto-adoption disabled.",
+  "platform": "darwin",
+  "preset": "dogfood",
+  "installedCohort": [
+    "personal-assistant",
+    "plugin-control-plane",
+    "assistant-delivery",
+    "assistant-goals",
+    "assistant-web-owner",
+    "owner-console",
+    "preference-learning",
+    "assistant-evaluation",
+    "assistant-verifier",
+    "assistant-memory-learning",
+    "assistant-work-items"
+  ],
+  "applyCommands": [
+    "dsh-rsi install --profile web --scenario web --workspace <absolute-workspace-path> --plugin-preset dogfood --yes",
+    "dsh-rsi open --profile web   # open Web UI and create/open one chat session to bind the idle owner Session, then stop Host (Ctrl-C)",
+    "\"${DSH_HOME:-$HOME/.dsh}/profiles/web/node_modules/.bin/dsh-web-owner-setup\" --profile web --workspace <absolute-workspace-path> --autonomy-setup --budget-tier conservative --enable-memory-learning --work-item-experiences",
+    "\"${DSH_HOME:-$HOME/.dsh}/profiles/web/node_modules/.bin/dsh-plugin-setup\" preset dogfood --profile web --yes",
+    "dsh-rsi open --profile web   # restart Host for daily dogfood use with memory-learning and T1 preference overlays active"
+  ],
+  "localCheckoutInstallCommand": "dsh-rsi install --local <absolute-repo-root> --profile web --scenario web --workspace <absolute-workspace-path> --plugin-preset dogfood --yes",
+  "ownerConsoleAlternative": "During step 2 (`dsh-rsi open --profile web`), after creating a chat session, you may instead complete three-way memory-learning authorization inside Settings -> 文鳐助手 -> 自主学习与三权授权向导 (Conservative tier + Memory Learning), then restart the Host once (`Ctrl-C` followed by `dsh-rsi open --profile web`) so non-volatile `cordis.patch.yml` grants activate.",
+  "inspectionCommand": "dsh-rsi growth-report --profile web --since 14d",
+  "preRegisteredAcceptance": {
+    "lane": "memory",
+    "windowDays": 14,
+    "minAuthenticatedCorrections": 10,
+    "minSourcedMemories": 5,
+    "minPromptExposures": 5,
+    "requirePostExposureOrSecondHalfCorrectionRateDrop": true,
+    "maxUnpropagatedWithdrawals": 0
+  },
+  "proactiveLooseningDecisionGate": {
+    "mode": "observe-only",
+    "minHoldoutDecidedSamples": 20,
+    "rule": "Keep attentionLooseningEnabled=false and intakeLedger.evaluation.admit.enabled=false until growth-report shows >= 20 decided holdout samples without rising negative rate."
+  }
+}

@@ -189,7 +189,14 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
   ])],
   ['dsh-enhanced-assistant-delivery', new Map<string, KnownType>([
     ['attentionAttachOverCap', 'boolean'],
+    ['naturalFeedback.coverage', 'boolean'],
+    ['naturalFeedback.mixedIntent', 'boolean'],
     ['ownerReportRouting.orderAcrossLanes', 'boolean'],
+  ])],
+  ['dsh-enhanced-preference-learning', new Map<string, KnownType>([
+    ['enabled', 'boolean'],
+    ['autonomousT1Enabled', 'boolean'],
+    ['databasePath', 'path'],
   ])],
   ['dsh-enhanced-assistant-evaluation', new Map<string, KnownType>([
     ['notificationOutcomesEnabled', 'boolean'],
@@ -197,6 +204,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['attentionTuningAutoAdopt', 'boolean'],
     ['intakeAttentionAgreementEnabled', 'boolean'],
     ['intakeAttentionAgreementPersistIntervalMs', 'number'],
+    ['intakeEvaluationAgreementEnabled', 'boolean'],
     ['attentionLooseningEnabled', 'boolean'],
     ['attentionLooseningReplayWindowMs', 'number'],
     ['attentionOwnerQuestionDeliveryEnabled', 'boolean'],
@@ -1065,7 +1073,119 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
   },
 ])
 
-export const pluginPresets: ReadonlyMap<string, readonly PresetItem[]> = new Map([['recommended', recommendedPluginPreset]])
+/**
+ * Dogfood profile preset for daily ordinary-use validation of the memory /
+ * preference lane on macOS (or Linux):
+ * - Turns on preference-learning T1 overlay + Delivery natural owner feedback +
+ *   Evaluation outcome & intake agreement recording (for `dsh-rsi growth-report`).
+ * - Keeps proactive / work-items strictly in `observe` mode (no auto-admit, no
+ *   attention parameter auto-adoption or loosening) until scorecard sample size
+ *   and memory-lane acceptance pass.
+ */
+export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
+  {
+    id: 'dsh-enhanced-preference-learning',
+    purpose: 'enable authenticated preference learning and T1 prompt overlays for daily memory/preference dogfooding',
+    whenInstalled: true,
+    set: [['enabled', true], ['autonomousT1Enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-delivery',
+    purpose: 'capture natural owner corrections/withdrawals and over-cap text attachments',
+    set: [['attentionAttachOverCap', true], ['naturalFeedback.coverage', true], ['naturalFeedback.mixedIntent', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-evaluation',
+    purpose: 'record notification outcomes and intake agreement while keeping attention auto-adopt and loosening strictly off',
+    set: [
+      ['notificationOutcomesEnabled', true],
+      ['intakeAttentionAgreementEnabled', true],
+      ['intakeEvaluationAgreementEnabled', true],
+      ['attentionTuningAutoAdopt', false],
+      ['attentionLooseningEnabled', false],
+      ['attentionOwnerQuestionDeliveryEnabled', false],
+    ],
+  },
+  {
+    id: 'dsh-enhanced-assistant-work-items',
+    purpose: 'pin work-items and intake ledger strictly to observe mode (admit disabled) during memory-lane validation',
+    whenInstalled: true,
+    set: [['enabled', true], ['mode', 'observe'], ['intakeLedger.enabled', true], ['intakeLedger.evaluation.admit.enabled', false]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-work-items',
+    purpose: 'enable inferred intake evaluation in observe mode when owner rules and model route are already configured',
+    whenInstalled: true,
+    requires: intakeEvaluationAuthorization,
+    set: [['intakeLedger.evaluation.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-proactive',
+    purpose: 'scope assistant-proactive databasePath to $DSH_HOME',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-proactive',
+      subdir: 'assistant-proactive',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-proactive.sqlite'),
+      companion: true,
+    }),
+  },
+  {
+    id: 'dsh-enhanced-assistant-proactive',
+    purpose: 'enable observe-only intake evaluation when owner rules and model route are already configured',
+    whenInstalled: true,
+    requires: intakeEvaluationAuthorization,
+    set: [['intakeEvaluation.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-goals',
+    purpose: 'scope assistant-goals databasePath to $DSH_HOME',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-goals',
+      subdir: 'assistant-goals',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-goals.sqlite'),
+    }),
+  },
+  {
+    id: 'dsh-enhanced-assistant-dreaming',
+    purpose: 'scope assistant-dreaming databasePath to $DSH_HOME while keeping dreaming dormant during memory-lane validation',
+    whenInstalled: true,
+    set: [],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-dreaming',
+      subdir: 'assistant-dreaming',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-dreaming.sqlite'),
+      setWhenMissing: true,
+    }),
+  },
+  {
+    id: 'dsh-enhanced-event-triggers',
+    purpose: 'keep event-triggers poller off during memory-lane validation so proactive stays strictly observational',
+    whenInstalled: true,
+    set: [['pollerEnabled', false]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-memory-learning',
+    purpose: 'enable work-item experience extraction when owner review and adoption grants already carry workItemExperiences',
+    requires: [
+      { plugin: 'dsh-enhanced-assistant-verifier', key: 'memoryReviews.workItemExperiences', equals: true,
+        reason: 'assistant-verifier.memoryReviews.workItemExperiences is not enabled; run dsh-web-owner-setup --autonomy-setup or owner RSI setup for background work-item experiences (foreground memory learning remains active once authorized)' },
+      { plugin: 'dsh-enhanced-personal-assistant', key: 'personalMemory.automaticLearning.workItemExperiences', equals: true,
+        reason: 'personal-assistant.personalMemory.automaticLearning.workItemExperiences is not enabled; foreground memory learning remains active once authorized' },
+      { plugin: 'dsh-enhanced-assistant-memory-learning', key: 'databasePath',
+        reason: 'assistant-memory-learning has no finite owner learning configuration; run dsh-web-owner-setup --autonomy-setup or owner RSI setup first' },
+    ],
+    set: [['workItemExperiences', true]],
+  },
+])
+
+export const pluginPresets: ReadonlyMap<string, readonly PresetItem[]> = new Map([
+  ['recommended', recommendedPluginPreset],
+  ['dogfood', dogfoodPluginPreset],
+])
 
 function addPresetSkip(skipped: PluginSkip[], id: string, reason: string): void {
   if (!skipped.some(skip => skip.id === id && skip.reason === reason)) skipped.push({ id, reason })
@@ -1156,6 +1276,11 @@ export async function applyPluginPreset(
 export function applyRecommendedPluginPreset(target: PluginSetupTarget, options: PluginSetupOptions = {}): Promise<PluginWriteResult> {
   return applyPluginPreset({ ...target, preset: 'recommended' }, options)
 }
+
+/** Daily validation entry point: apply the `dogfood` plugin preset (memory/preference active, proactive pinned to observe). */
+export function applyDogfoodPluginPreset(target: PluginSetupTarget, options: PluginSetupOptions = {}): Promise<PluginWriteResult> {
+  return applyPluginPreset({ ...target, preset: 'dogfood' }, options)
+}
 // ---------------------------------------------------------------------------
 // CLI
 
@@ -1233,7 +1358,8 @@ export function pluginSetupUsage(): string {
     '  set <plugin> <key> [<value>]   set one config key (dotted, e.g. intakeLedger.enabled);',
     '                                 the value is checked against the current type; prompts if omitted',
     '  unset <plugin> <key>           drop one key from the profile override (plugin default applies)',
-    '  preset [recommended]           turn on the recommended opt-in features of installed plugins;',
+    '  preset [recommended|dogfood]   turn on a named preset (`recommended` or `dogfood` for daily',
+    '                                 memory/preference validation with proactive pinned to observe);',
     '                                 scopes profile DBs under $DSH_HOME and keeps assistant-dreaming',
     '                                 dormant unless owner scope/model/budget are explicitly provided;',
     '                                 owner-generated routes, rules, pins and keys are never guessed',

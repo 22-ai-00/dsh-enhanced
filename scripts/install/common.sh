@@ -122,10 +122,11 @@ Options:
   --customize               Interactive: show every itemized menu (scenario, model, Lark, route check)
   --owner-wait-seconds <n>  Supervised first install: wait up to n seconds (default 600; 0 disables)
                             for the owner's first Lark DM before owner learning setup
-  --plugin-preset <name>    Install: apply a dsh-plugin-setup preset (e.g. recommended) as the
-                            last configuration step; \`skip\` never applies one. Guided installs
-                            offer \`recommended\` (default yes); a fresh supervised install also
-                            applies it after the owner RSI setup; other runs skip unless set
+  --plugin-preset <name>    Install: apply a dsh-plugin-setup preset (e.g. recommended or dogfood)
+                            as the last configuration step; \`skip\` never applies one. Guided installs
+                            offer \`recommended\` (default yes); \`dogfood\` on \`--scenario web\` also
+                            installs the memory/preference/evaluation/observe-intake cohort; a fresh
+                            supervised install also applies \`recommended\` after owner RSI setup
   --learning <decision>     Install: authorize or skip ordinary-use and memory learning.
                             Default: authorize only for a fresh supervised install; another
                             existing profile preserves its recorded decision. An explicit or
@@ -5032,6 +5033,12 @@ dsh_enhanced_install() {
         [[ "$proactive_mode" == 'auto' && ( "${_ns_p:-}" == 'on' || "${_ns_p:-}" == 'off' ) ]] && proactive_mode="$_ns_p"
         [[ "$dreaming_mode" == 'auto' && ( "${_ns_d:-}" == 'on' || "${_ns_d:-}" == 'off' ) ]] && dreaming_mode="$_ns_d"
         [[ "$growth_mode" == 'auto' && ( "${_ns_g:-}" == 'on' || "${_ns_g:-}" == 'off' ) ]] && growth_mode="$_ns_g"
+        if [[ "$plugin_preset_requested" == 'auto' && -n "${_ns_pr:-}" && "$_ns_pr" != 'auto' && "$_ns_pr" != 'auto-skip' ]]; then
+          plugin_preset="$_ns_pr"
+          install_intent_preset="$_ns_pr"
+          plugin_preset_explicit='1'
+          [[ "$plugin_preset" == 'skip' ]] && plugin_preset_declined='1'
+        fi
       else
         non_sup_intent_status=$?
         if [[ "$non_sup_intent_status" -eq 2 ]]; then
@@ -5039,7 +5046,7 @@ dsh_enhanced_install() {
           return $?
         fi
       fi
-      if [[ "$dry_run" != '1' && ( "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ) ]]; then
+      if [[ "$dry_run" != '1' && ( "$plugin_preset_requested" != 'auto' || "$proactive_mode" != 'auto' || "$dreaming_mode" != 'auto' || "$growth_mode" != 'auto' ) ]]; then
         dsh_enhanced_write_install_intent "$dsh_home" "$scenario" 'skip' "$install_intent_preset" \
           "$proactive_mode" "$dreaming_mode" "$growth_mode" || return $?
       fi
@@ -5350,6 +5357,11 @@ NODE
       for slug in "${DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
       ;;
     esac
+    if [[ "$plugin_preset" == 'dogfood' ]]; then
+      for slug in preference-learning assistant-evaluation assistant-verifier assistant-memory-learning assistant-work-items; do
+        dsh_enhanced_append_slug "$slug"
+      done
+    fi
   fi
   dsh_enhanced_apply_isolation_capability_gate
   if [[ -n "${add_ons[0]+set}" ]]; then

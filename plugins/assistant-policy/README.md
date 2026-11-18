@@ -194,6 +194,8 @@ $bin set work-items intakeLedger.enabled true
 $bin unset delivery maxAttempts        # 回到包默认值
 $bin preset recommended --dry-run      # 先看计划
 $bin preset recommended --yes
+$bin preset dogfood --dry-run          # macOS 记忆/偏好通道日常自用预设（主动通道仅 observe）
+$bin preset dogfood --yes
 ```
 
 插件可写短名（`work-items`）、包名或行 id。只有一个 profile 时自动选中，否则需 `--profile`（或 `DSH_PROFILE`）；`--dsh-home` 默认 `DSH_HOME` / `~/.dsh`。`--json` 输出结构化结果，`--dry-run` 不写文件。改动在下次 `dsh-rsi restart --profile <p>` 后生效。
@@ -235,6 +237,14 @@ const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun
 ```
 
 安装脚本可用 `scripts/install/common.sh` 中的 `dsh_enhanced_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`。全新 managed supervised 安装会在 owner 学习配置生成后隐式再应用一次 `recommended`（幂等；显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式配置优先），其他场景不隐式调用。
+
+### dogfood 预设（记忆与偏好通道日常自用）
+
+`preset dogfood`（编程入口 `applyDogfoodPluginPreset(target, options)` / `applyPluginPreset({ ...target, preset: 'dogfood' }, options)`，完整安装与授权闭环见 [`docs/examples/dogfood-macos.profile.json`](../../docs/examples/dogfood-macos.profile.json)）面向日常对话纵向验收记忆与偏好进化通道。在 `--scenario web` 下传入 `--plugin-preset dogfood` 时，安装器会自动补齐 `preference-learning`、`assistant-evaluation`、`assistant-verifier`、`assistant-memory-learning` 与 `assistant-work-items` 顶层包；运行 `dsh-rsi open --profile web` 打开并新建一次会话建立首个真实 owner 会话绑定后，可在「文鳐」控制台向导签发三权记忆授权并重启一次 Host，或停机运行 profile 内的 `dsh-web-owner-setup --autonomy-setup --enable-memory-learning --work-item-experiences` + `$bin preset dogfood --profile web --yes` 后再 `dsh-rsi open --profile web` 启动：
+
+- 打开 `preference-learning`、`assistant-delivery` 自然反馈（`naturalFeedback.coverage` / `mixedIntent` 与 `attentionAttachOverCap`）及 `assistant-evaluation` 结果与吻合度记录（`notificationOutcomesEnabled`、`intakeAttentionAgreementEnabled`、`intakeEvaluationAgreementEnabled`，固定 `attentionTuningAutoAdopt: false`、`attentionLooseningEnabled: false`）；
+- 在 owner 已有签名学习授权与 `workItemExperiences` 许可时打开 `assistant-memory-learning` 的 `workItemExperiences: true`（前台对话记忆学习在授权后已默认运行）；
+- 强制把主动通道固定在只观察模式：`assistant-work-items` 固定 `mode: 'observe'`、`intakeLedger.enabled: true`、`intakeLedger.evaluation.admit.enabled: false`，`assistant-proactive` 在已有规则与路由时开启 `intakeEvaluation.enabled: true`（不开启自动准入或注意力放宽），`event-triggers.pollerEnabled: false`。预登记 14 天验收口径见[当前状态](../../docs/rsi-status.md)。
 
 ## WP20 可选 `inferred` intake 规则预设
 

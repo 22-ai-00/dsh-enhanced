@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { isMap, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 import {
+  applyDogfoodPluginPreset,
   applyRecommendedPluginPreset,
   coerceConfigValue,
   isSecretConfigKey,
@@ -662,5 +663,38 @@ describe('plugin setup: CLI', () => {
         to: join(homePreset, 'assistant-goals', 'web.sqlite'),
       })
     }
+
+    // Verify `preset dogfood` and `applyDogfoodPluginPreset` enable preference/evaluation observation and pin proactive/work-items/event-triggers strictly to observe mode.
+    const homeDogfood = await temporaryHome()
+    const dogfoodBundles = `${assemblyBundles.replace('    mode: observe\n', '    mode: active\n    enabled: true\n').replace('    enabled: false\n    mode: active', '    mode: active').replace('    pollerEnabled: false\n', '    pollerEnabled: true\n')}
+- id: dsh-enhanced-preference-learning
+  name: '@dsh-enhanced/preference-learning'
+  config:
+    enabled: false
+    autonomousT1Enabled: false
+`
+    const dogfoodIo = memoryIo([], false)
+    await runPluginSetup(['preset', 'dogfood', '--yes', '--dsh-home', homeDogfood, '--profile', 'web'], dogfoodIo, {
+      readDump: dumpFixture(dogfoodBundles),
+    })
+    expect(dogfoodIo.output).toContain('dsh-enhanced-preference-learning.enabled: false -> true')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.intakeEvaluationAgreementEnabled: (unset) -> true')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.attentionLooseningEnabled: (unset) -> false')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.mode: "active" -> "observe"')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.intakeLedger.evaluation.admit.enabled: (unset) -> false')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-event-triggers.pollerEnabled: true -> false')
+
+    const homeDogfoodApi = await temporaryHome()
+    const apiResult = await applyDogfoodPluginPreset(
+      { dshHome: homeDogfoodApi, profile: 'web' },
+      { readDump: dumpFixture(dogfoodBundles) },
+    )
+    expect(apiResult.changed).toBe(true)
+    expect(apiResult.changes).toContainEqual({
+      id: 'dsh-enhanced-event-triggers',
+      key: 'pollerEnabled',
+      from: true,
+      to: false,
+    })
   })
 })
