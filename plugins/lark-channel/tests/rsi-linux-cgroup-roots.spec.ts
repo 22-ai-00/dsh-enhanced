@@ -77,7 +77,10 @@ describe('discoverLinuxCgroupRoots', () => {
       } else {
         expect(roots.mode).toBe('v2')
         expect(Object.keys(roots).sort()).toEqual(['mode', 'unified'])
-        expect(roots.unified).toBe(`/sys/fs/cgroup/dsh-native/uid-${owner}`)
+        expect([
+          `/sys/fs/cgroup/dsh-native/uid-${owner}`,
+          `/sys/fs/cgroup/user.slice/user-${owner}.slice/user@${owner}.service/dsh-native/uid-${owner}`,
+        ]).toContain(roots.unified)
       }
     } catch (error) {
       // On hosts without the root-run delegation (CI workstations) discovery is

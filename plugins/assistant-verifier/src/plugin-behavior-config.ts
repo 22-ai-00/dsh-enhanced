@@ -34,7 +34,8 @@ function linuxCgroups(value: unknown): void {
     return
   }
   if (exactKeys(value, ['mode', 'unified']) && value.mode === 'v2'
-    && absolute(value.unified) && /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u.test(value.unified)) {
+    && absolute(value.unified)
+    && /^\/sys\/fs\/cgroup(?:\/user\.slice\/user-([1-9][0-9]*)\.slice\/user@\1\.service\/dsh-native\/uid-\1|\/dsh-native\/uid-[1-9][0-9]*)$/u.test(value.unified)) {
     return
   }
   throw new Error('invalid plugin behavior Linux cgroup roots')

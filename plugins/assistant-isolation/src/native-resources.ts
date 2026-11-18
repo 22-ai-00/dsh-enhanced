@@ -15,7 +15,10 @@ export type { LinuxCgroupRoots } from './linux-cgroups.js'
 export {
   discoverLinuxCgroupRoots,
   parseLinuxV1ControllerMounts,
+  parseLinuxV2ProcessCgroup,
   parseLinuxV2UnifiedMount,
+  resolveLinuxV2CommonAncestor,
+  verifyLinuxV2SystemdUserScopeBridge,
   RsiLinuxCgroupUnavailableError,
   type LinuxV1CgroupRoots,
   type LinuxV2CgroupRoots,

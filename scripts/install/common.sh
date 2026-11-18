@@ -533,11 +533,40 @@ dsh_enhanced_prepare_isolation_capability() {
   local missing_bwrap=0 userns_off=0 roots_missing=0
   command -v bwrap >/dev/null 2>&1 || missing_bwrap=1
   if [[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || printf '0')" == '0' ]]; then userns_off=1; fi
-  local controller root
-  for controller in memory pids cpu,cpuacct freezer; do
-    root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
-    if [[ ! -d "$root" ]]; then roots_missing=1; fi
-  done
+  local controller root is_v2=0
+  if [[ -f /sys/fs/cgroup/cgroup.controllers && ! -d /sys/fs/cgroup/memory && ! -d /sys/fs/cgroup/freezer ]]; then
+    is_v2=1
+    local v2_leaf v2_ok=0 v2_self_cg
+    v2_self_cg="$(grep '^0::' /proc/self/cgroup 2>/dev/null || true)"
+    local -a v2_candidates=("/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/dsh-native/uid-${uid}")
+    if [[ "$v2_self_cg" == "0::/dsh-native/uid-${uid}" || "$v2_self_cg" == "0::/dsh-native/uid-${uid}/"* || -w /sys/fs/cgroup/cgroup.procs ]]; then
+      v2_candidates+=("/sys/fs/cgroup/dsh-native/uid-${uid}")
+    fi
+    for v2_leaf in "${v2_candidates[@]}"; do
+      if [[ -d "$v2_leaf" && -f "$v2_leaf/cgroup.controllers" && -f "$v2_leaf/cgroup.subtree_control" && -f "$v2_leaf/cgroup.freeze" && -f "$v2_leaf/cgroup.kill" ]]; then
+        local v2_ctrl v2_sub v2_frz
+        v2_ctrl=" $(cat "$v2_leaf/cgroup.controllers" 2>/dev/null || true) "
+        v2_sub=" $(cat "$v2_leaf/cgroup.subtree_control" 2>/dev/null || true) "
+        v2_frz="$(tr -d '[:space:]' < "$v2_leaf/cgroup.freeze" 2>/dev/null || true)"
+        if [[ "$v2_ctrl" == *' cpu '* && "$v2_ctrl" == *' memory '* && "$v2_ctrl" == *' pids '* \
+          && "$v2_sub" == *' cpu '* && "$v2_sub" == *' memory '* && "$v2_sub" == *' pids '* \
+          && "$v2_frz" == '0' ]]; then
+          v2_ok=1
+          break
+        fi
+      fi
+    done
+    if [[ "$v2_ok" != '1' ]]; then roots_missing=1; fi
+  else
+    for controller in memory pids cpu,cpuacct freezer; do
+      root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
+      if [[ ! -d "$root" ]]; then roots_missing=1; fi
+    done
+  fi
+  local prepare_script=''
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/../isolation/prepare-linux-cgroups.mjs" ]]; then
+    prepare_script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../isolation" && pwd -P)/prepare-linux-cgroups.mjs"
+  fi
   printf '\n自演化需要原生隔离，本机还缺：%s\n' "$DSH_ENHANCED_ISOLATION_REASON"
   local manager='' install_command=''
   for candidate in apt-get dnf yum pacman zypper; do
@@ -554,7 +583,13 @@ dsh_enhanced_prepare_isolation_capability() {
   if [[ "$dry_run" == '1' ]]; then
     if [[ -n "$install_command" ]]; then printf '将执行（需管理员）：sudo %s\n' "$install_command"; fi
     if [[ "$userns_off" == '1' ]]; then printf '将执行（需管理员）：sudo sysctl -w user.max_user_namespaces=15000\n'; fi
-    if [[ "$roots_missing" == '1' ]]; then printf '将创建委派 cgroup v1 根：/sys/fs/cgroup/<controller>/dsh-native/uid-%s\n' "$uid"; fi
+    if [[ "$roots_missing" == '1' ]]; then
+      if [[ "$is_v2" == '1' ]]; then
+        printf '将创建并委派 cgroup v2 根（cpu/memory/pids + freeze）：dsh-native/uid-%s\n' "$uid"
+      else
+        printf '将创建委派 cgroup v1 根：/sys/fs/cgroup/<controller>/dsh-native/uid-%s\n' "$uid"
+      fi
+    fi
     return 0
   fi
   local sudo_path=''
@@ -563,7 +598,11 @@ dsh_enhanced_prepare_isolation_capability() {
     printf '未找到受信任的 sudo；请手工准备隔离后重装：\n' >&2
     if [[ -n "$install_command" ]]; then printf '  sudo %s\n' "$install_command" >&2; fi
     printf '  sudo sysctl -w user.max_user_namespaces=15000\n' >&2
-    for controller in memory pids cpu,cpuacct freezer; do printf '  sudo mkdir -p /sys/fs/cgroup/%s/dsh-native/uid-%s && sudo chown %s:%s /sys/fs/cgroup/%s/dsh-native/uid-%s\n' "$controller" "$uid" "$uid" "$gid" "$controller" "$uid" >&2; done
+    if [[ "$is_v2" == '1' ]]; then
+      printf '  sudo node scripts/isolation/prepare-linux-cgroups.mjs --uid %s --auto\n' "$uid" >&2
+    else
+      for controller in memory pids cpu,cpuacct freezer; do printf '  sudo mkdir -p /sys/fs/cgroup/%s/dsh-native/uid-%s && sudo chown %s:%s /sys/fs/cgroup/%s/dsh-native/uid-%s\n' "$controller" "$uid" "$uid" "$gid" "$controller" "$uid" >&2; done
+    fi
     return 0
   fi
   local accepted=0
@@ -571,7 +610,13 @@ dsh_enhanced_prepare_isolation_capability() {
     printf '\n可以自动准备这些能力（需要一次管理员授权）：\n' >&2
     if [[ -n "$install_command" ]]; then printf '  sudo %s\n' "$install_command" >&2; fi
     if [[ "$userns_off" == '1' ]]; then printf '  sudo sysctl -w user.max_user_namespaces=15000\n' >&2; fi
-    if [[ "$roots_missing" == '1' ]]; then printf '  创建并授权 /sys/fs/cgroup/<controller>/dsh-native/uid-%s 委派根\n' "$uid" >&2; fi
+    if [[ "$roots_missing" == '1' ]]; then
+      if [[ "$is_v2" == '1' ]]; then
+        printf '  创建并委派统一 cgroup v2 子树 dsh-native/uid-%s（cpu/memory/pids + freeze）\n' "$uid" >&2
+      else
+        printf '  创建并授权 /sys/fs/cgroup/<controller>/dsh-native/uid-%s 委派根\n' "$uid" >&2
+      fi
+    fi
     printf '现在自动准备？[Y/n] ' >&2
     local choice=''
     if IFS= read -r choice; then
@@ -595,16 +640,60 @@ dsh_enhanced_prepare_isolation_capability() {
     fi
   fi
   if [[ "$roots_missing" == '1' ]]; then
-    printf '正在准备委派 cgroup v1 根…\n' >&2
-    for controller in memory pids cpu,cpuacct freezer; do
-      root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
-      "$sudo_path" mkdir -p "$root" >/dev/null 2>&1 || true
-      "$sudo_path" chown "$uid:$gid" "$root" >/dev/null 2>&1 || true
-      "$sudo_path" chown "$uid:$gid" "$root/cgroup.procs" >/dev/null 2>&1 || true
-      if [[ -f "/sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" ]]; then
-        "$sudo_path" sh -c "printf 1 > /sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" >/dev/null 2>&1 || true
+    if [[ "$is_v2" == '1' ]]; then
+      printf '正在准备委派 cgroup v2 根…\n' >&2
+      local node_bin=''
+      node_bin="$(command -v node 2>/dev/null || true)"
+      if [[ -n "$prepare_script" && -n "$node_bin" ]]; then
+        "$sudo_path" "$node_bin" "$prepare_script" --uid "$uid" --auto >/dev/null 2>&1 || true
+      else
+        "$sudo_path" sh -c "
+          set -e
+          printf '+cpu +memory +pids\n' > /sys/fs/cgroup/cgroup.subtree_control
+          mkdir -p /sys/fs/cgroup/dsh-native
+          chown 0:0 /sys/fs/cgroup/dsh-native && chmod 0755 /sys/fs/cgroup/dsh-native
+          printf '+cpu +memory +pids\n' > /sys/fs/cgroup/dsh-native/cgroup.subtree_control
+          mkdir -p /sys/fs/cgroup/dsh-native/uid-$uid /sys/fs/cgroup/dsh-native/uid-$uid/host
+          printf '+cpu +memory +pids\n' > /sys/fs/cgroup/dsh-native/uid-$uid/cgroup.subtree_control
+          chown $uid:$gid /sys/fs/cgroup/dsh-native/uid-$uid /sys/fs/cgroup/dsh-native/uid-$uid/host
+          chmod 0700 /sys/fs/cgroup/dsh-native/uid-$uid /sys/fs/cgroup/dsh-native/uid-$uid/host
+          for f in cgroup.procs cgroup.threads cgroup.subtree_control cgroup.kill; do
+            [ -e /sys/fs/cgroup/dsh-native/uid-$uid/\$f ] && chown $uid:$gid /sys/fs/cgroup/dsh-native/uid-$uid/\$f || true
+          done
+          for f in cgroup.procs cgroup.threads cgroup.kill; do
+            [ -e /sys/fs/cgroup/dsh-native/uid-$uid/host/\$f ] && chown $uid:$gid /sys/fs/cgroup/dsh-native/uid-$uid/host/\$f || true
+          done
+          if [ -d /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service ]; then
+            printf '+cpu +memory +pids\n' > /sys/fs/cgroup/user.slice/cgroup.subtree_control
+            printf '+cpu +memory +pids\n' > /sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.subtree_control
+            [ -e /sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.procs ] && chown $uid:$gid /sys/fs/cgroup/user.slice/user-$uid.slice/cgroup.procs || true
+            printf '+cpu +memory +pids\n' > /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.subtree_control
+            mkdir -p /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native
+            chown 0:0 /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native
+            chmod 0755 /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native
+            printf '+cpu +memory +pids\n' > /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/cgroup.subtree_control
+            mkdir -p /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid
+            printf '+cpu +memory +pids\n' > /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid/cgroup.subtree_control
+            chown $uid:$gid /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid
+            chmod 0700 /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid
+            for f in cgroup.procs cgroup.threads cgroup.subtree_control cgroup.kill; do
+              [ -e /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid/\$f ] && chown $uid:$gid /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/dsh-native/uid-$uid/\$f || true
+            done
+          fi
+        " >/dev/null 2>&1 || true
       fi
-    done
+    else
+      printf '正在准备委派 cgroup v1 根…\n' >&2
+      for controller in memory pids cpu,cpuacct freezer; do
+        root="/sys/fs/cgroup/$controller/dsh-native/uid-$uid"
+        "$sudo_path" mkdir -p "$root" >/dev/null 2>&1 || true
+        "$sudo_path" chown "$uid:$gid" "$root" >/dev/null 2>&1 || true
+        "$sudo_path" chown "$uid:$gid" "$root/cgroup.procs" >/dev/null 2>&1 || true
+        if [[ -f "/sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" ]]; then
+          "$sudo_path" sh -c "printf 1 > /sys/fs/cgroup/$controller/dsh-native/cgroup.clone_children" >/dev/null 2>&1 || true
+        fi
+      done
+    fi
   fi
   dsh_enhanced_detect_isolation_capability
   if [[ "$DSH_ENHANCED_ISOLATION_CAPABILITY" == 'none' ]]; then
@@ -634,13 +723,41 @@ dsh_enhanced_detect_isolation_capability() {
         DSH_ENHANCED_ISOLATION_REASON='缺少 bubblewrap (bwrap)，无法提供 linux-native 隔离'
         return 0
       fi
-      local roots=0 controller
+      local roots=0 controller uid_num v2_leaf
+      uid_num="$(id -u)"
       for controller in memory pids 'cpu,cpuacct' freezer; do
-        if [[ -d "/sys/fs/cgroup/$controller/dsh-native/uid-$(id -u)" ]]; then roots=$((roots + 1)); fi
+        if [[ -d "/sys/fs/cgroup/$controller/dsh-native/uid-$uid_num" ]]; then roots=$((roots + 1)); fi
       done
-      if [[ $roots -lt 4 ]]; then
+      local v2_ready=0
+      if [[ $roots -eq 0 && -f /sys/fs/cgroup/cgroup.controllers ]]; then
+        local v2_self_cg
+        v2_self_cg="$(grep '^0::' /proc/self/cgroup 2>/dev/null || true)"
+        local -a v2_detect_candidates=("/sys/fs/cgroup/user.slice/user-${uid_num}.slice/user@${uid_num}.service/dsh-native/uid-${uid_num}")
+        if [[ "$v2_self_cg" == "0::/dsh-native/uid-${uid_num}" || "$v2_self_cg" == "0::/dsh-native/uid-${uid_num}/"* || -w /sys/fs/cgroup/cgroup.procs ]]; then
+          v2_detect_candidates+=("/sys/fs/cgroup/dsh-native/uid-${uid_num}")
+        fi
+        for v2_leaf in "${v2_detect_candidates[@]}"; do
+          if [[ -d "$v2_leaf" && -f "$v2_leaf/cgroup.controllers" && -f "$v2_leaf/cgroup.subtree_control" && -f "$v2_leaf/cgroup.freeze" && -f "$v2_leaf/cgroup.kill" ]]; then
+            local v2_ctrl v2_sub v2_frz
+            v2_ctrl=" $(cat "$v2_leaf/cgroup.controllers" 2>/dev/null || true) "
+            v2_sub=" $(cat "$v2_leaf/cgroup.subtree_control" 2>/dev/null || true) "
+            v2_frz="$(tr -d '[:space:]' < "$v2_leaf/cgroup.freeze" 2>/dev/null || true)"
+            if [[ "$v2_ctrl" == *' cpu '* && "$v2_ctrl" == *' memory '* && "$v2_ctrl" == *' pids '* \
+              && "$v2_sub" == *' cpu '* && "$v2_sub" == *' memory '* && "$v2_sub" == *' pids '* \
+              && "$v2_frz" == '0' ]]; then
+              v2_ready=1
+              break
+            fi
+          fi
+        done
+      fi
+      if [[ $roots -lt 4 && $v2_ready -eq 0 ]]; then
         DSH_ENHANCED_ISOLATION_CAPABILITY='none'
-        DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v1 隔离根（need memory/pids/cpu,cpuacct/freezer 下的 dsh-native）"
+        if [[ -f /sys/fs/cgroup/cgroup.controllers && $roots -eq 0 ]]; then
+          DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v2 隔离根（请以 root 执行 prepare-linux-cgroups.mjs --uid $uid_num --auto）"
+        else
+          DSH_ENHANCED_ISOLATION_REASON="宿主没有为当前用户委派 cgroup v1 隔离根（need memory/pids/cpu,cpuacct/freezer 下的 dsh-native）"
+        fi
         return 0
       fi
       if [[ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" == '0' ]]; then
@@ -649,7 +766,11 @@ dsh_enhanced_detect_isolation_capability() {
         return 0
       fi
       DSH_ENHANCED_ISOLATION_CAPABILITY='linux-native'
-      DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v1 + user namespace)'
+      if [[ $v2_ready -eq 1 ]]; then
+        DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v2 + user namespace)'
+      else
+        DSH_ENHANCED_ISOLATION_REASON='linux-native (bwrap + 委派 cgroup v1 + user namespace)'
+      fi
       return 0 ;;
     *)
       DSH_ENHANCED_ISOLATION_CAPABILITY='none'

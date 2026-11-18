@@ -123,6 +123,7 @@ export interface LiveDoctorOptions {
     cgroupRoot?: string
     lingerFile?: string
     uid?: number
+    procSelfCgroup?: string
   }
 }
 
@@ -383,7 +384,7 @@ function probePlatformPrerequisites(
   runner: DetailedCommandRunner,
   findExec: (names: readonly string[], env: NodeJS.ProcessEnv, explicit?: string) => string | undefined,
   fileExists: (path: string) => boolean,
-  linuxPaths: { cgroupRoot?: string; lingerFile?: string; uid?: number },
+  linuxPaths: NonNullable<LiveDoctorOptions['linuxPaths']>,
 ): DoctorCheck[] {
   const checks: DoctorCheck[] = []
   if (platform === 'darwin') {
@@ -466,26 +467,54 @@ function probePlatformPrerequisites(
     } else if (isV2) {
       const rawUid = linuxPaths.uid ?? process.getuid?.()
       const uid = typeof rawUid === 'number' && Number.isSafeInteger(rawUid) && rawUid > 0 ? rawUid : undefined
-      const delegatedLeaf = uid !== undefined ? join(cgroupRoot, 'dsh-native', `uid-${uid}`) : undefined
       const readText = (target: string): string | undefined => {
         if (!fileExists(target)) return undefined
         try { return readFileSync(target, 'utf8') } catch { return undefined }
       }
+      const procSelfCgroup = linuxPaths.procSelfCgroup ?? readText('/proc/self/cgroup')
+      const unifiedCallerRel = procSelfCgroup
+        ?.split('\n')
+        .map(line => line.trim())
+        .find(line => line.startsWith('0::'))
+        ?.slice(3)
+      const standalonePrefix = uid !== undefined ? `/dsh-native/uid-${uid}` : undefined
+      const standaloneReachable = unifiedCallerRel === undefined
+        || unifiedCallerRel === '/'
+        || (standalonePrefix !== undefined
+          && (unifiedCallerRel === standalonePrefix || unifiedCallerRel.startsWith(`${standalonePrefix}/`)))
+      const systemdLeaf = uid !== undefined
+        ? join(cgroupRoot, 'user.slice', `user-${uid}.slice`, `user@${uid}.service`, 'dsh-native', `uid-${uid}`)
+        : undefined
+      const standaloneLeaf = uid !== undefined ? join(cgroupRoot, 'dsh-native', `uid-${uid}`) : undefined
       const tokens = (text: string | undefined) => new Set((text ?? '').trim().split(/\s+/u).filter(Boolean))
-      const leafControllers = delegatedLeaf ? tokens(readText(join(delegatedLeaf, 'cgroup.controllers'))) : new Set<string>()
-      const leafSubtree = delegatedLeaf ? tokens(readText(join(delegatedLeaf, 'cgroup.subtree_control'))) : new Set<string>()
-      const leafFreeze = delegatedLeaf ? readText(join(delegatedLeaf, 'cgroup.freeze'))?.trim() : undefined
       const requiredV2 = ['cpu', 'memory', 'pids'] as const
-      const v2Delegated = delegatedLeaf !== undefined
-        && requiredV2.every(ctrl => leafControllers.has(ctrl) && leafSubtree.has(ctrl))
-        && leafFreeze === '0'
-      if (v2Delegated) {
+      const isLeafReady = (leaf: string | undefined): leaf is string => {
+        if (!leaf) return false
+        const leafControllers = tokens(readText(join(leaf, 'cgroup.controllers')))
+        const leafSubtree = tokens(readText(join(leaf, 'cgroup.subtree_control')))
+        const leafFreeze = readText(join(leaf, 'cgroup.freeze'))?.trim()
+        return requiredV2.every(ctrl => leafControllers.has(ctrl) && leafSubtree.has(ctrl)) && leafFreeze === '0'
+      }
+      const delegatedLeaf = isLeafReady(systemdLeaf)
+        ? systemdLeaf
+        : standaloneReachable && isLeafReady(standaloneLeaf)
+          ? standaloneLeaf
+          : undefined
+      if (delegatedLeaf !== undefined) {
         checks.push({
           id: 'platform.cgroup',
           category: 'platform',
           status: 'ok',
           summary: `Linux cgroup v2 委派子树（dsh-native/uid-${uid}：cpu + memory + pids + freeze）已就绪`,
-          detail: '已完成 cgroup v2 委派与配置/authority 对齐；assistant-isolation 实际运行时进程迁入仍保持 fail-closed，待 Linux cgroup v2 真机实测。',
+          detail: `检测到已就绪的 cgroup v2 委派根 ${delegatedLeaf}，assistant-isolation 原生运行时进程迁入可用。`,
+        })
+      } else if (!standaloneReachable && isLeafReady(standaloneLeaf)) {
+        checks.push({
+          id: 'platform.cgroup',
+          category: 'platform',
+          status: 'warn',
+          summary: `检测到根级 dsh-native/uid-${uid}，但当前会话（0::${unifiedCallerRel}）缺少 user@${uid}.service/dsh-native/uid-${uid} 委派`,
+          advice: `非 root 进程无法从 0::${unifiedCallerRel} 直接迁入根级 /sys/fs/cgroup/dsh-native/uid-${uid}；请在 user@${uid}.service 激活后以 root 重新执行：node scripts/isolation/prepare-linux-cgroups.mjs --uid ${uid} --auto。`,
         })
       } else {
         checks.push({
@@ -493,7 +522,7 @@ function probePlatformPrerequisites(
           category: 'platform',
           status: 'warn',
           summary: '检测到纯 cgroup v2 宿主（缺少 cgroup v1 freezer + pids，且尚未完成 dsh-native cgroup v2 委派）',
-          advice: `当前 cgroup v2 未检测到完整的 dsh-native/uid-${uid ?? '<uid>'}（cpu/memory/pids + cgroup.freeze=0）委派。常驻 web/lark 仍可用；如需准备 v2 委派请以 root 执行：node scripts/isolation/prepare-linux-cgroups.mjs --uid ${uid ?? '<uid>'} --auto（注：assistant-isolation 运行时进程迁入在 v2 真机实测前仍 fail-closed）。`,
+          advice: `当前 cgroup v2 未检测到完整的 dsh-native/uid-${uid ?? '<uid>'}（cpu/memory/pids + cgroup.freeze=0）委派。常驻 web/lark 仍可用；如需启用原生隔离请以 root 执行：node scripts/isolation/prepare-linux-cgroups.mjs --uid ${uid ?? '<uid>'} --auto。`,
         })
       }
     } else {

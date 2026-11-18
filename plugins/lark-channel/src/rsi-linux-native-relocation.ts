@@ -214,8 +214,8 @@ function validateCgroupRoots(value: unknown, home: string): JsonObject {
   if (roots.mode === 'v2') {
     exactKeys(roots, ['mode', 'unified'], 'invalid cgroup roots')
     const unified = stringField(roots, 'unified', 'invalid cgroup roots')
-    if (!/^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u.test(unified)
-      || !isDelegatedLeaf(unified, '/sys/fs/cgroup/dsh-native/')) fail('invalid cgroup roots')
+    if (!/^\/sys\/fs\/cgroup(?:\/user\.slice\/user-([1-9][0-9]*)\.slice\/user@\1\.service\/dsh-native\/uid-\1|\/dsh-native\/uid-[1-9][0-9]*)$/u.test(unified)
+      || !isDelegatedLeaf(unified, '/sys/fs/cgroup/')) fail('invalid cgroup roots')
     return roots
   }
   fail('invalid cgroup roots')

@@ -385,7 +385,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 新安装 `supervised` 时还会自动调用 `dsh-rsi-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。
 
-Linux 默认从固定官方归档和冻结 manifests/lockfile 准备 schema 3 原生工具链、离线依赖及发布资源，无需 Docker CLI、daemon、socket 或镜像。工具链准备检查 user/mount/pid namespace、bubblewrap 和有界 tmpfs；owner 安装及实际运行另外要求委派给当前非 root 用户的四个 cgroup v1 控制器。完整仓库执行还需受信任的 subordinate UID/GID 映射与 `newuidmap`/`newgidmap`，creation 构建需系统编译器。安装器不会自动提权或补建 cgroup 委派，不满足前提时报未就绪。Linux x64/cgroup v1 已有实机证据，cgroup v2 不支持，arm64 尚未实机验收。
+Linux 默认从固定官方归档和冻结 manifests/lockfile 准备 schema 3 原生工具链、离线依赖及发布资源，无需 Docker CLI、daemon、socket 或镜像。工具链准备检查 user/mount/pid namespace、bubblewrap 和有界 tmpfs；owner 安装及实际运行另外要求委派给当前非 root 用户的四个 cgroup v1 控制器或统一 cgroup v2 子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 或 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`）。完整仓库执行还需受信任的 subordinate UID/GID 映射与 `newuidmap`/`newgidmap`，creation 构建需系统编译器。安装器不会自动提权或补建 cgroup 委派，不满足前提时报未就绪。Linux x64/cgroup v1 已有实机证据，cgroup v2 实机冷安装→学习验证与 arm64 尚未实机验收。
 
 Linux 同时准备私有授权工具、签名身份、registry/catalog 和状态目录。重复执行核对原收据、来源及 runtime 身份，保留授权与发布进展；旧 Docker 部署须走独立迁移，不能靠重装或覆盖 runtime 描述符切换。底层 `dsh-rsi-setup --prepare-build --docker-path <absolute>` 保留旧镜像准备入口，不代表新 owner 安装会自动接纳旧 backend。
 
@@ -412,11 +412,11 @@ Linux 新安装默认使用 native；源码安装可显式固定当前仓库的�
   --isolation-runtime-minutes 10 --yes
 ```
 
-省略 source repository 时只取已安装包版本的官方 tag，缺失不会换用其他版本。native 要求非 root Linux、bubblewrap、namespace/tmpfs 支持及已委派的 cgroup v1；资源准备只读取固定 Git manifests/lockfile，下载校验官方工具链并准备离线依赖，不创建 RSI owner、协调器或服务。setup 在创建 Web owner/grant 前使用真实原生执行器探测非 root、只读根目录及 artifact 导出，之后重新核对 runtime 收据。缺少 cgroup 委派时拒绝，不自动提权。
+省略 source repository 时只取已安装包版本的官方 tag，缺失不会换用其他版本。native 要求非 root Linux、bubblewrap、namespace/tmpfs 支持及已委派的 cgroup v1 或统一 cgroup v2 子树；资源准备只读取固定 Git manifests/lockfile，下载校验官方工具链并准备离线依赖，不创建 RSI owner、协调器或服务。setup 在创建 Web owner/grant 前使用真实原生执行器探测非 root、只读根目录及 artifact 导出，之后重新核对 runtime 收据。缺少 cgroup 委派时拒绝，不自动提权。
 
 Docker 后端已从产品移除：新安装与新配置只接受 linux-native（Linux）或 macOS seatbelt，安装器不再接受 `--isolation-backend docker` / `--isolation-image`，传入即 fail-closed，也不再拉取镜像、安装或重启 Docker。仍保留 Docker 的原安装只能在满足严格前提（创建/修订审查、修订回归与采用业务记录为空）时执行一次性 docker→native 迁移，详见 [dockerless 运行时](../../docs/dockerless-runtime.md)；Docker 时代的配置与收据仅作只读迁移证据，不会再拉起容器。清理状态未知时保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
 
-普通 Goal admission 的独立 `isolated-runner` 验收现在只支持 linux-native（Linux）/ seatbelt（macOS）后端；Docker 时代的 isolated-runner 配置仅保留只读解码，不能再执行。native 复用持久 runtime 与 cgroup v1 描述符，不另行准备或续权；cgroup v2 明确拒绝。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
+普通 Goal admission 的独立 `isolated-runner` 验收现在只支持 linux-native（Linux）/ seatbelt（macOS）后端；Docker 时代的 isolated-runner 配置仅保留只读解码，不能再执行。native 复用持久 runtime 与已委派 cgroup v1/v2 描述符，不另行准备或续权。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
 
 首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、backend、镜像、native runtime 描述符或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
 

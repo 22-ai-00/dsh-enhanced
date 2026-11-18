@@ -41,7 +41,19 @@ describe.skipIf(process.platform !== 'linux' || uid === 0)('public Linux configu
     expect(synchronous(input).issues).toBeUndefined()
   })
 
-  test.each(['missing', 'runtime-drift', 'v2', 'other-uid', 'overlap'] as const)('Loader rejects %s synchronously', mode => {
+  test('admits current-user cgroup v2 unified roots (standalone and systemd user service)', () => {
+    for (const unified of [
+      `/sys/fs/cgroup/dsh-native/uid-${uid}`,
+      `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/dsh-native/uid-${uid}`,
+    ]) {
+      const input = native()
+      input.linux.cgroupRoots = { mode: 'v2', unified }
+      expect(synchronous(input).issues).toBeUndefined()
+      expect(validateConfig(input).linux.cgroupRoots).toEqual({ mode: 'v2', unified })
+    }
+  })
+
+  test.each(['missing', 'runtime-drift', 'v2-other-uid', 'other-uid', 'overlap'] as const)('Loader rejects %s synchronously', mode => {
     const input = native()
     if (mode === 'missing') {
       const { linux: _linux, ...withoutLinux } = input
@@ -49,7 +61,7 @@ describe.skipIf(process.platform !== 'linux' || uid === 0)('public Linux configu
       return
     }
     if (mode === 'runtime-drift') input.linux.runtime.nodePath = '/usr/bin/node'
-    if (mode === 'v2') input.linux.cgroupRoots = { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` }
+    if (mode === 'v2-other-uid') input.linux.cgroupRoots = { mode: 'v2', unified: '/sys/fs/cgroup/dsh-native/uid-99999' }
     if (mode === 'other-uid') input.linux.cgroupRoots = { mode: 'v1', cpu: '/sys/fs/cgroup/cpu/dsh-native/uid-99999',
       memory: '/sys/fs/cgroup/memory/dsh-native/uid-99999', pids: '/sys/fs/cgroup/pids/dsh-native/uid-99999', freezer: '/sys/fs/cgroup/freezer/dsh-native/uid-99999' }
     if (mode === 'overlap') input.stateRoot = input.linux.runtime.root.path + '/state'

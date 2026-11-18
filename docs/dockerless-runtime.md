@@ -24,7 +24,7 @@ Linux user/mount/PID/network namespaces 与 bubblewrap 负责文件、进程和�
 
 CPU、内存（含 swap）、PID 数使用实际内核 cgroup 限额，配置后读回验证。执行前须已为当前 UID 委派专属资源根；资源准备不自动创建委派或提权，普通任务不执行通用 root 命令。候选的门控进程在获执行权前进入所有所需控制器。可信 keeper 不在候选组内，整组停止不能杀掉结果保管者。
 
-当前只支持 cgroup v1，使用 freezer 与 pidfd，在冻结、终止、重新观察及删除全部资源组后证明清理；cgroup v2 会明确拒绝。未来若支持 v2，须另行实现并验证适当委派、domain 组、`cgroup.kill` 和递归 populated 证据，这些是未来验收要求，不是当前能力。不存在控制器、迁入失败、资源身份变化或无法证明空组时报告未就绪或 unknown，禁止退回仅 rlimit、主 PID kill 或无界宿主执行。
+支持已委派 cgroup v1（使用 freezer 与 pidfd）与统一 cgroup v2 子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 或 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`，校验共同祖先 `cgroup.procs` 写权限、domain 无内部进程规则，并用 `cgroup.freeze`、UID/成员复核、`cgroup.kill` 与 `cgroup.events` 空组检查证明清理；Linux x64/v1 已实机验证，v2 实机冷安装→学习运行待跑）。不存在控制器、迁入失败、资源身份变化或无法证明空组时报告未就绪或 unknown，禁止退回仅 rlimit、主 PID kill 或无界宿主执行。
 
 普通 shell、行为验收和整仓构建使用不同的沙箱策略。整仓测试需要嵌套 bubblewrap；行为验收继续保留父/候选双进程的 syscall 和描述符保护。允许嵌套 namespace 的构建策略不得隐式用于行为验收。
 
@@ -73,12 +73,11 @@ Linux x64/cgroup v1 的资源原语、普通执行、整仓源码 prepare、创�
 | 平台 | 检测到的后端 | 自演化能力 |
 | --- | --- | --- |
 | macOS | `macos-seatbelt` | 安装 |
-| Linux（bwrap + 委派 cgroup v1 根 + user namespace 齐全） | `linux-native` | 安装 |
+| Linux（bwrap + 委派 cgroup v1 或统一 cgroup v2 根 + user namespace 齐全） | `linux-native` | 安装 |
 | Linux（缺上述任一前置） | 检测为 `none`，随后尝试自动准备 | 准备成功后安装 |
 | 其他平台 | 无原生后端 | 不安装，并说明原因 |
 
-自动准备只在 Linux 上发生，按宿主包管理器安装 `bubblewrap`、打开 user namespace、为当前 uid 创建并授权
-`/sys/fs/cgroup/<controller>/dsh-native/uid-<uid>` 委派根。所有提权动作先以固定命令显示，交互式安装需显式确认；
+自动准备只在 Linux 上发生，按宿主包管理器安装 `bubblewrap`、打开 user namespace，并按宿主挂载形态准备委派根（cgroup v1 下创建并授权 `/sys/fs/cgroup/<controller>/dsh-native/uid-<uid>`；纯 cgroup v2 下执行 `scripts/isolation/prepare-linux-cgroups.mjs --uid <uid> --auto` 启用 `cpu/memory/pids` 与 `cgroup.freeze` 委派子树）。所有提权动作先以固定命令显示，交互式安装需显式确认；
 非交互安装仅在 passwordless sudo 可用时自动执行，否则打印可手工执行的命令并继续安装（此时不包含自演化能力）。
 提权只使用受信任的 `/usr/bin`、`/bin` 可执行文件，不接受 PATH 解析结果。
 

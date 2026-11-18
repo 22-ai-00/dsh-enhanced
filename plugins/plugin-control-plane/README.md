@@ -264,7 +264,7 @@ Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核�
 
 ### Linux 原生完整源码准备
 
-显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。修改准备、创建准备、已有工具的修订 v2 及配对回归均已接通；修改计划的源码审批、发布与源码发布采用在同一 linux-native 边界接通（见下节）。`sourceBuild` 与 `creationCapabilities` 配置校验同时接受已委派的 `v1` 与统一 `v2` `cgroupRoots`，实际运行时 `assistant-isolation` 进程迁入当前仍需 `v1`（对 `v2` fail-closed，待真机实测）；Linux 全新安装默认使用这条原生链路，重复安装读取既有后端与回执，不把重跑安装当作迁移。已有 owner 的升级与迁移须遵守各自独立合同和验收边界。
+显式配置 `sourceBuild.backend: linux-native` 使用 `assistant-isolation` 的固定工具链、namespace/seccomp 与独立 worker/keeper cgroup，不调用 Docker。必须同时配置持久 `sourceJobs`；构建器与持久任务格式支持修改、创建及修订，并保留原有 owner、scope、基线、版本策略和次数预算。修改准备、创建准备、已有工具的修订 v2 及配对回归均已接通；修改计划的源码审批、发布与源码发布采用在同一 linux-native 边界接通（见下节）。`sourceBuild`、`creationCapabilities` 与 `assistant-isolation` 运行时均支持已委派的 `v1` 四控制器与统一 `v2` `cgroupRoots`（Linux x64/v1 已实机验证，v2 实机冷安装→学习运行待跑）；Linux 全新安装默认使用这条原生链路，重复安装读取既有后端与回执，不把重跑安装当作迁移。已有 owner 的升级与迁移须遵守各自独立合同和验收边界。
 
 原生配置固定 `runtime`、`cgroupRoots`、私有 `stateRoot`、`authorityDigest`、`expiresAt`、`maxRuns` 和 `maxTotalDurationMs`。另需明确 `timeoutMs`、`outputBytes`、`memoryMiB`、`cpus`、`pidsLimit`、`workspaceMiB`、`temporaryMiB`、`workspaceInodes` 与 `temporaryInodes`；最大允许 30 分钟、16 GiB 内存、16 CPU、1024 PID、8 GiB workspace 和 4 GiB 临时目录。每次请求取调用方与配置 timeout 的较小值，不能扩大授权。
 

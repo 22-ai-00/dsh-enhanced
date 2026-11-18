@@ -344,7 +344,7 @@ CI artifacts. The repository keeps concise outcomes and limits in
 [RSI current status](../../docs/rsi-status.md); historical navigation failures
 and later successful runs must not be presented as one unqualified command pass.
 
-DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5-rc.1`，可设置 `DSH_E2E_HOST_VERSION=0.1.2-rc.1` 或同一 0.1 次版本的精确 RC 来验证另一 Host。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行 format 3 审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。
+DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认读取 `release-manifest.json` 的 `pinnedHostVersion`（当前 `0.2.2-rc.3`）并使用 `linux-native` 原生隔离验证专用沙箱仓库（勿对本仓库 `dev`/`main` 执行），可设置 `DSH_E2E_HOST_VERSION` 指向兼容基线内的精确版本。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。
 
 ## Source proposal native boundary
 

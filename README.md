@@ -42,7 +42,7 @@
 准备好 [Node.js 24 LTS](https://nodejs.org/en/download)、飞书账号，以及一个可用模型（已登录的 TraeX 或模型服务的 API Key）。也支持 Node.js 22.19 及以上的 22.x，以及 24 以上版本。
 
 - **macOS**：原生运行，无需 Docker；已在 Apple Silicon Mac 验证，Intel Mac 尚未实机验收。
-- **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派给当前用户的 cgroup v1 资源；当前拒绝 cgroup v2。详见[安装准备](scripts/install/README.md)。
+- **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派给当前用户的 cgroup v1 四控制器或统一 cgroup v2 子树（Linux x64/v1 已实机验证，v2 实机冷安装→学习验证待跑）。详见[安装准备](scripts/install/README.md)。
 
 暂不接飞书、只想先体验聊天与本地控制台，可直接看[只用本机 Web](scripts/install/README.md#只用本机-web)。
 

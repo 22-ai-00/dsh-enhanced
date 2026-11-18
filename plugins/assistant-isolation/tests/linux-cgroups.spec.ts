@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rmdir, writeFile } from 'node:fs/promises'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { setTimeout as pause } from 'node:timers/promises'
 import { describe, expect, it, vi } from 'vitest'
-import { LinuxCgroupLease, type LinuxCgroupRoots } from '../src/linux-cgroups.js'
+import { LinuxCgroupLease, V2_NAMESPACE_VERIFY, type LinuxCgroupRoots } from '../src/linux-cgroups.js'
 
 // Delay one real controller read so cancellation interleavings are repeatable.
 // All filesystem operations still go to the actual kernel cgroup mounts.
@@ -61,13 +62,136 @@ describe('Linux cgroup boundary', () => {
   it.runIf(!supported)('rejects unsupported hosts before accessing controller files', async () => {
     await expect(create()).rejects.toThrow('non-root Linux x64/arm64 is required')
   })
+
+  it.runIf(existsSync('/usr/bin/python3'))('enforces payload size, inventory caps, cgroup suffix, and 4-tuple Uid/Gid bounds in V2_NAMESPACE_VERIFY', () => {
+    const harness = String.raw`import builtins, io, json, os, select, sys
+script = sys.argv[1]
+mode = sys.argv[2]
+raw_in = sys.stdin.buffer.read()
+sys.stdin = io.TextIOWrapper(io.BytesIO(raw_in), encoding='utf-8')
+uid = os.getuid()
+gid = os.getgid()
+
+class FakePoll:
+ def register(self, fd, mask): pass
+ def poll(self, timeout): return []
+
+select.poll = FakePoll
+os.pidfd_open = lambda pid, flags: 100
+os.close = lambda fd: None
+os.open = lambda path, flags: 200 if path == '/proc/self/ns/user' else 201
+class FakeStat:
+ def __init__(self, ino):
+  self.st_dev = 1
+  self.st_ino = ino
+os.fstat = lambda fd: FakeStat(10 if fd == 200 else 20)
+
+status_text = f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
+if mode == 'empty-uid':
+ status_text = f"Uid:\t\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
+elif mode == 'short-gid':
+ status_text = f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\n"
+elif mode == 'extra-uid':
+ status_text = f"Uid:\t{uid}\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
+
+files = {
+ '/proc/sys/kernel/random/boot_id': '00000000-0000-0000-0000-000000000001\n',
+ '/sys/fs/cgroup/dsh-native/uid-1000/job-1/cgroup.events': 'populated 1\nfrozen 1\n',
+ '/proc/4242/stat': '4242 (node) S ' + ' '.join(['1']*18) + ' 98765 0 0\n',
+ '/proc/4242/status': status_text,
+ '/proc/4242/cgroup': '0::/dsh-native/uid-1000/job-1\n',
+}
+orig_open = builtins.open
+def fake_open(path, *a, **kw):
+ if path in files: return io.StringIO(files[path])
+ return orig_open(path, *a, **kw)
+builtins.open = fake_open
+exec(compile(script, '<V2_NAMESPACE_VERIFY>', 'exec'), {'__name__': '__main__'})
+`
+    const baseReq = {
+      witness: {
+        bootId: '00000000-0000-0000-0000-000000000001',
+        ownerUid: process.getuid?.() ?? 1000,
+        namespace: { dev: 1, ino: 20 },
+        parent: { dev: 1, ino: 10 },
+        mapping: {
+          ownerUid: process.getuid?.() ?? 1000,
+          ownerGid: process.getgid?.() ?? 1000,
+          candidateUid: 65534,
+          candidateGid: 65534,
+          hostNamespace: { dev: 1, ino: 10 },
+        },
+      },
+      outsideGates: [],
+      cgroupPath: '/sys/fs/cgroup/dsh-native/uid-1000/job-1',
+      cgroup: ['', '/dsh-native/uid-1000/job-1'],
+      processes: [[4242, '98765']],
+    }
+    const runVerify = (payload: Buffer | string, mode = 'normal') => spawnSync(
+      '/usr/bin/python3',
+      ['-I', '-S', '-c', harness, V2_NAMESPACE_VERIFY, mode],
+      { input: payload, encoding: 'utf8', timeout: 5_000 },
+    )
+
+    // 1. Oversized stdin (> 1 MiB) rejected immediately
+    const oversized = Buffer.alloc(1_048_600, ' ')
+    const rOversized = runVerify(oversized)
+    expect(rOversized.status).not.toBe(0)
+    expect(rOversized.stderr).toContain('request exceeds bound')
+
+    // 2. processes > 16384 or outsideGates > 1 rejected
+    const rTooManyProcs = runVerify(JSON.stringify({ ...baseReq, processes: Array.from({ length: 16_385 }, (_, i) => [i + 1, '1']) }))
+    expect(rTooManyProcs.status).not.toBe(0)
+    expect(rTooManyProcs.stderr).toContain('process inventory exceeds bound')
+
+    const rTooManyGates = runVerify(JSON.stringify({
+      ...baseReq,
+      outsideGates: [{ pid: 1, startTicks: '1' }, { pid: 2, startTicks: '2' }],
+    }))
+    expect(rTooManyGates.status).not.toBe(0)
+    expect(rTooManyGates.stderr).toContain('process inventory exceeds bound')
+
+    // 3. Mismatched cgroupPath vs expected cgroup tuple (including extra prefix before expected[1]) rejected
+    const rBadCgroup = runVerify(JSON.stringify({ ...baseReq, cgroup: ['', '/dsh-native/uid-1000/job-other'] }))
+    expect(rBadCgroup.status).not.toBe(0)
+    expect(rBadCgroup.stderr).toContain('cgroup v2 identity differs')
+
+    const rExtraPrefix = runVerify(JSON.stringify({ ...baseReq, cgroupPath: '/sys/fs/cgroup/nested/dsh-native/uid-1000/job-1' }))
+    expect(rExtraPrefix.status).not.toBe(0)
+    expect(rExtraPrefix.stderr).toContain('cgroup v2 identity differs')
+
+    // 4. Empty, 3-tuple, and 5-tuple Uid/Gid in /proc/<pid>/status rejected instead of vacuous pass
+    for (const badMode of ['empty-uid', 'short-gid', 'extra-uid']) {
+      const rBadIds = runVerify(JSON.stringify(baseReq), badMode)
+      expect(rBadIds.status).not.toBe(0)
+      expect(rBadIds.stderr).toContain('incomplete process identity')
+    }
+  })
   it.runIf(supported)('rejects malformed and expired job authority before touching controllers', async () => {
     await expect(create({ jobId: 'not-a-uuid' })).rejects.toThrow('invalid job identity')
     await expect(create({ deadline: Date.now() - 1 })).rejects.toThrow('invalid job identity')
     await expect(create({ roots: { ...roots, cpu: '/sys/fs/cgroup/pids/dsh-native/uid-1' } })).rejects.toThrow('delegated root')
     await expect(create({ limits: { memoryMiB: 0, pidsLimit: 32, cpus: 1 } })).rejects.toThrow('invalid resource limits')
-    await expect(create({ roots: { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${owner}` } })).rejects.toThrow('v2 process placement is not yet verified')
+    await expect(create({ roots: { mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${owner + 1}` } })).rejects.toThrow('delegated root')
   })
+
+  it.runIf(process.env.DSH_NATIVE_CGROUP_V2_REAL === '1')('creates, admits, freezes, kills and removes a unified cgroup v2 job lease', async () => {
+    const v2Unified = process.env.DSH_NATIVE_CGROUP_V2_UNIFIED ?? `/sys/fs/cgroup/dsh-native/uid-${owner}`
+    const lease = await create({ roots: { mode: 'v2', unified: v2Unified } })
+    const child = blockedChild()
+    try {
+      const childIdentity = await identity(lease, child)
+      await lease.admit(childIdentity)
+      expect((await lease.observe()).processes.unified).toEqual([child.pid])
+      expect(await lease.terminateAndProve(5_000)).toBe(true)
+      expect((await lease.observe()).quiescent).toBe(true)
+      expect(await lease.removeWhenEmpty()).toBe(true)
+    } finally {
+      child.kill('SIGKILL')
+      await lease.terminateAndProve(5_000).catch(() => {})
+      await lease.removeWhenEmpty().catch(() => {})
+    }
+  }, 15_000)
 
   it.runIf(process.env.DSH_NATIVE_CGROUP_REAL === '1')('consumes one admission attempt before any asynchronous verification', async () => {
     const lease = await create(), first = blockedChild(), second = blockedChild()

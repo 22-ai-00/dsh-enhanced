@@ -67,9 +67,9 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 `isolated-process-behavior` 只用于 `goal-step` / `goal-outcome`，使用 `task-acceptance/v4` 与 `task-verification/v4`。条件包含 `id`、`authority: { id, digest }`、`artifactPath`、`testSetId`；不允许与旧 criterion 混用。v1/v2/v3 的原有格式和摘要保持兼容。
 
-对应 Host authority 保持 `isolated-runner`，固定要求 `backend: 'linux-native'`：只提供已准备的 `runtime: LinuxRuntime` 和当前 UID 已委派的 `cgroupRoots`（仅 v1），不能混入镜像或 Docker 字段；缺失 `backend` 或提供 `backend: 'docker'` 一律拒绝。固定 `stateRoot`、`command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]` 保持不变。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在原生隔离环境运行复制产物。
+对应 Host authority 保持 `isolated-runner`，固定要求 `backend: 'linux-native'`：只提供已准备的 `runtime: LinuxRuntime` 和当前 UID 已委派的 `cgroupRoots`（已委派 cgroup v1 或统一 cgroup v2 子树），不能混入镜像或 Docker 字段；缺失 `backend` 或提供 `backend: 'docker'` 一律拒绝。固定 `stateRoot`、`command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]` 保持不变。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在原生隔离环境运行复制产物。
 
-原生配置编译从非激活的 `@dsh-enhanced/assistant-isolation/native-resources` 复用纯运行时和 cgroup 路径校验，深冻结副本；此时不创建目录、进程、cgroup 或授权，也不准备运行时。拒绝未知后端、v2 cgroup、路径别名形状及 state/runtime/cgroup 路径重叠。实际目录、文件内容、委派身份与当前隔离能力由既有 `IsolatedVerifierRunner` → `LinuxVerifierRunner` 在执行时再次核验；静态编译成功不证明 Linux 环境就绪。
+原生配置编译从非激活的 `@dsh-enhanced/assistant-isolation/native-resources` 复用纯运行时和 cgroup 路径校验，深冻结副本；此时不创建目录、进程、cgroup 或授权，也不准备运行时。拒绝未知后端、非法或跨 UID cgroup 路径、路径别名形状及 state/runtime/cgroup 路径重叠。实际目录、文件内容、委派身份与当前隔离能力由既有 `IsolatedVerifierRunner` → `LinuxVerifierRunner` 在执行时再次核验；静态编译成功不证明 Linux 环境就绪。
 
 authority 摘要覆盖整个运行时描述、cgroup 根、全部有限条款与私有测试向量；验收 profile 必须引用编译后的精确摘要。服务保留按摘要缓存和 Cordis disposer，复用现有 runner/账本，不重置额度、期限或未知历史。Goals 的可信 producer、owner/Session/定义、接受的产物、静止状态、执行 fence 与派发后产物重读保持原边界。不能把模型生成的测试向量或原始工具退出码当作独立验收条件。单元里的录制 runner 仅证明分派合同，不代替 Linux 实机证据。
 

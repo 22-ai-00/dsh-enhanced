@@ -16,9 +16,10 @@ import { prepareExternalRepositoryFixture } from './repo-external-delivery-fixtu
 import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live-input.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const hostVersion = process.env.DSH_E2E_HOST_VERSION ?? '0.1.5-rc.1'
-if (!/^0\.1\.\d+(?:-rc\.\d+)?$/.test(hostVersion)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
-const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
+const releaseManifest = JSON.parse(readFileSync(resolve(root, 'release-manifest.json'), 'utf8'))
+const defaultHostVersion = releaseManifest?.pending?.pinnedHostVersion ?? releaseManifest?.current?.pinnedHostVersion ?? '0.2.2-rc.3'
+const hostVersion = process.env.DSH_E2E_HOST_VERSION ?? defaultHostVersion
+if (!/^0\.(?:1|2)\.\d+(?:-rc\.\d+)?$/u.test(hostVersion)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
 const directFixture = verifiedDelivery && process.env.DSH_REPO_DELIVERY_MODE === 'commit'
 const externalBrokerFixture = process.env.DSH_REPO_EXTERNAL_BROKER === 'fixture'
@@ -38,13 +39,28 @@ const cases = [
   { stdin: '[]\n', expectedStdout: '{}\n', expectedExitCode: 0 },
 ]
 const buggySource = "process.stdin.on('data', value => console.log(JSON.stringify(JSON.parse(value))))"
-const verificationCommand = '/bin/busybox cp /workspace/artifact /workspace/program.mjs && node /workspace/program.mjs < /workspace/input'
+const verificationCommand = 'PATH=/runtime/0/bin:/usr/bin:/bin /bin/cp /workspace/artifact /workspace/program.mjs && /runtime/0/bin/node /workspace/program.mjs < /workspace/input'
 
 async function checkVerificationCommand(home, temp) {
+  const patchDoc = parseDocument(await readFile(join(home, 'profiles/web/cordis.patch.yml'), 'utf8'))
+  const isolationConfig = patchRow(patchDoc, 'dsh-enhanced-assistant-isolation').get('config', true)?.toJSON?.()
+  if (isolationConfig?.backend !== 'linux-native' || !isolationConfig?.linux?.runtime || !isolationConfig?.linux?.cgroupRoots) {
+    throw new Error('installed assistant-isolation row did not materialize linux-native runtime and delegated cgroupRoots')
+  }
   const { IsolatedVerifierRunner } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-isolation/lib/index.js')).href)
-  const runner = new IsolatedVerifierRunner({ stateRoot: join(temp, 'fixture-control'), image, dockerPath: '/usr/bin/docker',
-    authorityDigest: createHash('sha256').update(verificationCommand).digest('hex'), command: verificationCommand,
-    expiresAt: Date.now() + 60_000, maxRuns: 2, maxTotalDurationMs: 10_000, maxDurationMs: 5_000, maxOutputBytes: 4096 })
+  const runner = new IsolatedVerifierRunner({
+    backend: 'linux-native',
+    stateRoot: join(temp, 'fixture-control'),
+    runtime: isolationConfig.linux.runtime,
+    cgroupRoots: isolationConfig.linux.cgroupRoots,
+    authorityDigest: createHash('sha256').update(verificationCommand).digest('hex'),
+    command: verificationCommand,
+    expiresAt: Date.now() + 60_000,
+    maxRuns: 2,
+    maxTotalDurationMs: 10_000,
+    maxDurationMs: 5_000,
+    maxOutputBytes: 4096,
+  })
   try {
     const positive = await runner.run('stdin-control', "import { readFileSync } from 'node:fs'; process.stdout.write(readFileSync(0, 'utf8'))", 'fixture input\n', new AbortController().signal)
     expect(positive).toMatchObject({ status: 'succeeded', quiescent: true, exitCode: 0, stdout: 'fixture input\n' })
@@ -319,7 +335,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       throw new Error(`unsupported real-route bundle ${bundle}`)
     })
     const install = await run('bash', [resolve(root, 'scripts/install/install-local.sh'), '--scenario', 'autonomy', '--workspace', workspace,
-      '--isolation-image', image, '--isolation-max-runs', '12', '--isolation-lease-minutes', '10', '--isolation-runtime-minutes', '5', '--model', 'skip', '--model-route', 'skip',
+      '--isolation-max-runs', '12', '--isolation-lease-minutes', '10', '--isolation-runtime-minutes', '5', '--model', 'skip', '--model-route', 'skip',
       ...addOns, '--no-service', '--yes'], env, 180_000)
     await writeFile(testInfo.outputPath('install.log'), sanitize(install), { mode: 0o600 })
     await writeFile(testInfo.outputPath('verifier-controls.json'), JSON.stringify(await checkVerificationCommand(home, temp), null, 2), { mode: 0o600 })

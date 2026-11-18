@@ -4,8 +4,12 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   discoverLinuxCgroupRoots,
   parseLinuxV1ControllerMounts,
+  parseLinuxV2ProcessCgroup,
   parseLinuxV2UnifiedMount,
+  resolveLinuxV2CommonAncestor,
+  verifyLinuxV2SystemdUserScopeBridge,
   RsiLinuxCgroupUnavailableError,
+  validateLinuxCgroupRoots,
   type LinuxCgroupRoots,
   type LinuxV1CgroupRoots,
   type LinuxV2CgroupRoots,
@@ -138,6 +142,69 @@ describe('Linux cgroup v2 mount parsing and backwards-compatible v1 discovery', 
     expect(() => helper.missingSubtreeControllers('cpu memory\n', 'cpu\n')).toThrow(/pids is unavailable/u)
   })
 
+  test('parseLinuxV2ProcessCgroup and resolveLinuxV2CommonAncestor enforce kernel v2 migration containment', () => {
+    expect(parseLinuxV2ProcessCgroup('0::/dsh-native/uid-1000/host\n')).toBe('/sys/fs/cgroup/dsh-native/uid-1000/host')
+    expect(parseLinuxV2ProcessCgroup('0::/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-profile-web.service\n'))
+      .toBe('/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-profile-web.service')
+    expect(parseLinuxV2ProcessCgroup('0::/\n')).toBe('/sys/fs/cgroup')
+
+    // Reject hybrid memberships, malformed lines, duplicate 0::, and path traversal
+    expect(() => parseLinuxV2ProcessCgroup('4:memory:/user.slice\n0::/user.slice\n')).toThrow(/hybrid/u)
+    expect(() => parseLinuxV2ProcessCgroup('0:cpu:/user.slice\n')).toThrow(/unexpected controller/u)
+    expect(() => parseLinuxV2ProcessCgroup('0::/a\n0::/b\n')).toThrow(/multiple 0::/u)
+    expect(() => parseLinuxV2ProcessCgroup('0::/a/../b\n')).toThrow(/noncanonical/u)
+    expect(() => parseLinuxV2ProcessCgroup('')).toThrow(/missing unified 0::/u)
+
+    // Standalone host leaf shares delegated root as common ancestor
+    expect(resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/dsh-native/uid-1000/host',
+      '/sys/fs/cgroup/dsh-native/uid-1000',
+    )).toBe('/sys/fs/cgroup/dsh-native/uid-1000')
+
+    // systemd --user unit shares user@<uid>.service as delegated common ancestor
+    const systemdRoot = '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/dsh-native/uid-1000'
+    expect(validateLinuxCgroupRoots({ mode: 'v2', unified: systemdRoot })).toEqual({ mode: 'v2', unified: systemdRoot })
+    expect(() => validateLinuxCgroupRoots({
+      mode: 'v2',
+      unified: '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/dsh-native/uid-1001',
+    })).toThrow()
+    expect(resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/dsh-profile-lark.service',
+      systemdRoot,
+    )).toBe('/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service')
+
+    // Unrelated login scope targeting standalone /sys/fs/cgroup/dsh-native/uid-1000 resolves to root /sys/fs/cgroup (which fails W_OK at kernel check)
+    expect(resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/user.slice/user-1000.slice/session-1.scope',
+      '/sys/fs/cgroup/dsh-native/uid-1000',
+    )).toBe('/sys/fs/cgroup')
+
+    // SSH login scope targeting systemdRoot resolves to user-1000.slice, whereas a keeper placed in user@1000.service via systemd-run --user --scope shares user@1000.service!
+    expect(resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/user.slice/user-1000.slice/session-42.scope',
+      systemdRoot,
+    )).toBe('/sys/fs/cgroup/user.slice/user-1000.slice')
+    expect(resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/run-r9876.scope',
+      systemdRoot,
+    )).toBe('/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service')
+
+    // Reject no-internal-processes violation (caller directly in non-leaf root) and inside-job caller
+    expect(() => resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/dsh-native/uid-1000',
+      '/sys/fs/cgroup/dsh-native/uid-1000',
+    )).toThrow(/non-leaf/u)
+    expect(() => resolveLinuxV2CommonAncestor(
+      '/sys/fs/cgroup/dsh-native/uid-1000/job-abc',
+      '/sys/fs/cgroup/dsh-native/uid-1000',
+    )).toThrow(/isolated job cgroup/u)
+  })
+
+  test('verifyLinuxV2SystemdUserScopeBridge fails closed with RsiLinuxCgroupUnavailableError on invalid uid or missing runtime bridge', async () => {
+    await expect(verifyLinuxV2SystemdUserScopeBridge(0)).rejects.toThrow(RsiLinuxCgroupUnavailableError)
+    await expect(verifyLinuxV2SystemdUserScopeBridge(999_999_999)).rejects.toThrow(RsiLinuxCgroupUnavailableError)
+  })
+
   test.runIf(process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch))(
     'discoverLinuxCgroupRoots validates real Linux v1/v2 delegation or reports RsiLinuxCgroupUnavailableError',
     async () => {
@@ -149,7 +216,10 @@ describe('Linux cgroup v2 mount parsing and backwards-compatible v1 discovery', 
         const roots = await discoverLinuxCgroupRoots()
         const uid = process.getuid!()
         if (roots.mode === 'v2') {
-          expect(roots).toEqual({ mode: 'v2', unified: `/sys/fs/cgroup/dsh-native/uid-${uid}` })
+          expect([
+            `/sys/fs/cgroup/dsh-native/uid-${uid}`,
+            `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/dsh-native/uid-${uid}`,
+          ]).toContain(roots.unified)
         } else {
           expect(roots.mode).toBe('v1')
           expect(Object.keys(roots).sort()).toEqual(['cpu', 'freezer', 'memory', 'mode', 'pids'])

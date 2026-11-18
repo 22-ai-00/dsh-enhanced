@@ -69,8 +69,8 @@ export function validateConfig(input: Config): ValidatedConfig {
     || stateRoot.startsWith(runtime.root.path + sep)) throw new Error('assistant-isolation: state overlaps Linux runtime')
   const contract = validateLinuxExecutionContract({ schemaVersion: 1, backend, runtimeDigest: linuxRuntimeDigest(runtime),
     profile: 'ordinary', limits, keeperLimits: { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 }, cgroupRoots: input.linux.cgroupRoots })
-  if (contract.cgroupRoots.mode !== 'v1' || Object.entries(contract.cgroupRoots).some(([key, value]) => key !== 'mode'
-    && !value.endsWith(`/uid-${process.getuid!()}`))) throw new Error('assistant-isolation: Linux native requires current-user cgroup v1 roots')
+  if (Object.entries(contract.cgroupRoots).some(([key, value]) => key !== 'mode'
+    && !value.endsWith(`/uid-${process.getuid!()}`))) throw new Error('assistant-isolation: Linux native requires current-user cgroup v1 or v2 roots')
   const linux = { runtime, cgroupRoots: contract.cgroupRoots }
   const reservation = linuxJobResourceReservation(contract)
   const requiredMemory = reservation.memoryMiB

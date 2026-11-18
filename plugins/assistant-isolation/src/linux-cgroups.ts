@@ -1,8 +1,15 @@
 import { spawn } from 'node:child_process'
-import { readFile, lstat, mkdir, readdir, realpath, rmdir, statfs, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, readFile, lstat, mkdir, readdir, realpath, rmdir, statfs, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as pause } from 'node:timers/promises'
+import { V2_UNIFIED_ROOT_PATTERN } from './linux-execution-contract.js'
 import { linuxUserNamespaceProof, validateLinuxUserNamespaceWitness, type LinuxUserNamespaceWitness } from './linux-user-namespace.js'
+import {
+  parseLinuxV2ProcessCgroup,
+  resolveLinuxV2CommonAncestor,
+  verifyLinuxV2SystemdUserScopeBridge,
+} from './native-cgroup-roots.js'
 
 /** A resource boundary only. The caller must still isolate files, network and credentials. */
 export type LinuxCgroupRoots = { mode: 'v1'; cpu: string; memory: string; pids: string; freezer: string }
@@ -62,9 +69,8 @@ function rootEntries(value: LinuxCgroupRoots, owner: number): Array<[string, str
     ? CONTROLLERS.map(controller => [controller, value[controller]]) : [['unified', value.unified]]
   if (new Set(roots.map(([, root]) => root)).size !== roots.length) fail('duplicate controller root')
   for (const [controller, root] of roots) {
-    const expected = value.mode === 'v2' ? `/sys/fs/cgroup/dsh-native/uid-${owner}` : undefined
     if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root
-      || value.mode === 'v2' && root !== expected
+      || value.mode === 'v2' && (!V2_UNIFIED_ROOT_PATTERN.test(root) || !root.endsWith(`/uid-${owner}`))
       || value.mode === 'v1' && !new RegExp(`^/sys/fs/cgroup/[A-Za-z0-9_,]+/dsh-native/uid-${owner}$`, 'u').test(root)
       || controller.length === 0) fail('unexpected delegated root')
   }
@@ -84,6 +90,9 @@ async function root(path: string, owner: number, mode: LinuxCgroupRoots['mode'],
   if ((await statfs(path)).type !== (mode === 'v1' ? V1_MAGIC : V2_MAGIC)) fail('delegated root filesystem differs')
   const mount = mode === 'v1' ? path.split('/').slice(0, 5).join('/') : '/sys/fs/cgroup'
   const lines = (await readFile('/proc/self/mountinfo', 'utf8')).split('\n')
+  if (mode === 'v2' && lines.some(line => line.split(' - ')[1]?.split(' ')[0] === 'cgroup')) {
+    fail('hybrid cgroup hierarchy is unsupported')
+  }
   const matching = lines.filter(line => {
     const [before, after] = line.split(' - ')
     const fields = before?.split(' '), fs = after?.split(' ')
@@ -91,6 +100,88 @@ async function root(path: string, owner: number, mode: LinuxCgroupRoots['mode'],
       && (mode === 'v2' || fs?.[2]?.split(',').includes(controller))
   })
   if (matching.length !== 1) fail('controller mount identity differs')
+  if (mode === 'v2') {
+    const [controllersRaw, subtreeRaw] = await Promise.all([
+      readFile(join(path, 'cgroup.controllers'), 'utf8'),
+      readFile(join(path, 'cgroup.subtree_control'), 'utf8'),
+    ])
+    const available = new Set(controllersRaw.trim().split(/\s+/u).filter(Boolean))
+    const enabled = new Set(subtreeRaw.trim().split(/\s+/u).filter(Boolean))
+    for (const required of ['cpu', 'memory', 'pids']) {
+      if (!available.has(required) || !enabled.has(required)) fail('delegated cgroup v2 subtree controllers differ')
+    }
+    const [freezeInfo, killInfo] = await Promise.all([lstat(join(path, 'cgroup.freeze')), lstat(join(path, 'cgroup.kill'))])
+    if (!freezeInfo.isFile() || freezeInfo.isSymbolicLink() || !killInfo.isFile() || killInfo.isSymbolicLink()) {
+      fail('delegated cgroup v2 freeze or kill interface is unavailable')
+    }
+  }
+}
+
+export interface LinuxV2MigrationAuthority {
+  mode: 'direct' | 'systemd-user-scope'
+  ancestor: string
+}
+
+async function checkWritableV2Procs(dirPath: string): Promise<boolean> {
+  if (resolve(dirPath) !== dirPath || await realpath(dirPath).catch(() => '') !== dirPath) return false
+  if ((await statfs(dirPath).catch(() => ({ type: 0 }))).type !== V2_MAGIC) return false
+  const procsPath = join(dirPath, 'cgroup.procs')
+  const procsInfo = await lstat(procsPath).catch(() => undefined)
+  if (!procsInfo || !procsInfo.isFile() || procsInfo.isSymbolicLink()) return false
+  try {
+    await access(procsPath, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function verifyLinuxV2CallerMigrationAuthority(unifiedRoot: string): Promise<LinuxV2MigrationAuthority> {
+  const owner = uid()
+  let callerCgroup = ''
+  let ancestor: string
+  try {
+    callerCgroup = parseLinuxV2ProcessCgroup(await readFile('/proc/self/cgroup', 'utf8'))
+    ancestor = resolveLinuxV2CommonAncestor(callerCgroup, unifiedRoot)
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
+  if (resolve(ancestor) !== ancestor || await realpath(ancestor) !== ancestor) fail('cgroup v2 common ancestor is not canonical')
+  if ((await statfs(ancestor)).type !== V2_MAGIC) fail('cgroup v2 common ancestor filesystem differs')
+  const procsPath = join(ancestor, 'cgroup.procs')
+  const procsInfo = await lstat(procsPath)
+  if (!procsInfo.isFile() || procsInfo.isSymbolicLink()) fail('cgroup v2 common ancestor cgroup.procs is invalid')
+  try {
+    await access(procsPath, constants.W_OK)
+    return { mode: 'direct', ancestor }
+  } catch {
+    const userServiceDir = `/sys/fs/cgroup/user.slice/user-${owner}.slice/user@${owner}.service`
+    const systemdRoot = `${userServiceDir}/dsh-native/uid-${owner}`
+    if (unifiedRoot === systemdRoot && await checkWritableV2Procs(userServiceDir)) {
+      try {
+        await verifyLinuxV2SystemdUserScopeBridge(owner)
+        return { mode: 'systemd-user-scope', ancestor: userServiceDir }
+      } catch {
+        // Fall through to detailed EACCES diagnostic below.
+      }
+    }
+    fail(`cgroup v2 common ancestor ${procsPath} is not writable for process migration (caller ${callerCgroup} -> ${unifiedRoot}; run under systemd --user / systemd-run --user --scope or place caller in ${unifiedRoot}/host)`)
+  }
+}
+
+async function verifyLinuxV2TargetMigrationAuthority(pid: number, unifiedRoot: string): Promise<string> {
+  let targetCgroup = ''
+  let ancestor: string
+  try {
+    targetCgroup = parseLinuxV2ProcessCgroup(await readFile(`/proc/${pid}/cgroup`, 'utf8'))
+    ancestor = resolveLinuxV2CommonAncestor(targetCgroup, unifiedRoot)
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
+  if (!await checkWritableV2Procs(ancestor)) {
+    fail(`cgroup v2 common ancestor ${ancestor}/cgroup.procs is not writable for migrating pid ${pid} (${targetCgroup} -> ${unifiedRoot})`)
+  }
+  return ancestor
 }
 
 async function directory(path: string, expected: LinuxCgroupDirectory, owner: number, mode: LinuxCgroupRoots['mode']): Promise<void> {
@@ -183,6 +274,109 @@ try:
 finally: os.close(fd)
 `
 
+// Verify pidfd identity, frozen cgroup v2 membership AND user-namespace ancestry
+// (`NS_GET_PARENT` + `NS_GET_OWNER_UID` + uid/gid maps) before `cgroup.kill`,
+// preserving `runtime/linux-userns-proof.py`'s pinned SHA-256 unchanged.
+export const V2_NAMESPACE_VERIFY = String.raw`import array,fcntl,json,os,select,sys
+NS_GET_PARENT=0xB702; NS_GET_OWNER_UID=0xB704
+raw=sys.stdin.buffer.read(1048577)
+if len(raw)>1048576: raise RuntimeError('request exceeds bound')
+req=json.loads(raw)
+if not isinstance(req,dict) or not isinstance(req.get('processes'),list) or len(req['processes'])>16384 or not isinstance(req.get('outsideGates'),list) or len(req['outsideGates'])>1:
+ raise RuntimeError('process inventory exceeds bound')
+witness=req['witness']; mapping=witness['mapping']
+def read(p,maximum=65536):
+ with open(p,encoding='ascii') as f: v=f.read(maximum+1)
+ if len(v)>maximum: raise RuntimeError('kernel observation exceeds bound')
+ return v
+def ids(st,kind):
+ vals=[int(x) for x in st.get(kind,'').split()]
+ if len(vals)!=4: raise RuntimeError('incomplete process identity')
+ return vals
+def ident(fd): s=os.fstat(fd); return {'dev':s.st_dev,'ino':s.st_ino}
+def owner(fd): a=array.array('I',[0]); fcntl.ioctl(fd,NS_GET_OWNER_UID,a,True); return a[0]
+def frozen(p): return any(l.strip()=='frozen 1' for l in read(p+'/cgroup.events').splitlines())
+if os.getuid()!=mapping['ownerUid'] or os.getgid()!=mapping['ownerGid']: raise RuntimeError('Host owner differs')
+hfd=os.open('/proc/self/ns/user',os.O_RDONLY)
+try:
+ if ident(hfd)!=mapping['hostNamespace']: raise RuntimeError('Host namespace differs')
+finally: os.close(hfd)
+if read('/proc/sys/kernel/random/boot_id').strip().lower()!=witness['bootId']: raise RuntimeError('boot changed')
+cpath=req['cgroupPath']; expected=req['cgroup']
+if not isinstance(expected,list) or len(expected)!=2 or expected[0]!='' or not isinstance(expected[1],str) or not expected[1].startswith('/') or not isinstance(cpath,str) or cpath!='/sys/fs/cgroup'+expected[1]:
+ raise RuntimeError('cgroup v2 identity differs')
+if not frozen(cpath): raise RuntimeError('job group is not frozen')
+held=[]; ns=[]
+try:
+ for item in req['processes']:
+  if not isinstance(item,list) or len(item)!=2: raise RuntimeError('invalid process entry')
+  pid,expected_ticks=item
+  try: pfd=os.pidfd_open(pid,0)
+  except ProcessLookupError: continue
+  held.append(pfd)
+  poll=select.poll(); poll.register(pfd,select.POLLIN)
+  if poll.poll(0): continue
+  raw_stat=read('/proc/%d/stat'%pid); fields=raw_stat[raw_stat.rfind(') ')+2:].split()
+  if len(fields)<20 or not fields[19].isdigit() or fields[19]!=expected_ticks: raise RuntimeError('process identity changed')
+  st={}
+  for line in read('/proc/%d/status'%pid).splitlines():
+   k,sep,v=line.partition(':')
+   if sep: st[k]=v.strip()
+  memberships=[line.split(':',2)[1:] for line in read('/proc/%d/cgroup'%pid).splitlines()]
+  if expected not in memberships: raise RuntimeError('process escaped frozen cgroup v2 group')
+  nfd=os.open('/proc/%d/ns/user'%pid,os.O_RDONLY); ns.append(nfd)
+  uids=ids(st,'Uid'); gids=ids(st,'Gid')
+  outside=any(e['pid']==pid and e['startTicks']==expected_ticks for e in req['outsideGates'])
+  if outside and ident(nfd)==mapping['hostNamespace']:
+   if uids!=[mapping['ownerUid']]*4 or gids!=[mapping['ownerGid']]*4: raise RuntimeError('original keeper gate changed identity')
+  else:
+   if any(v not in (mapping['ownerUid'],mapping['candidateUid']) for v in uids): raise RuntimeError('foreign UID in job group')
+   if any(v not in (mapping['ownerGid'],mapping['candidateGid']) for v in gids): raise RuntimeError('foreign GID in job group')
+   cur=nfd; matched=False
+   for _ in range(33):
+    if ident(cur)==witness['namespace']:
+     if owner(cur)!=witness['ownerUid']: raise RuntimeError('namespace anchor differs')
+     up=fcntl.ioctl(cur,NS_GET_PARENT)
+     try:
+      if ident(up)!=witness['parent'] or witness['parent']!=mapping['hostNamespace']: raise RuntimeError('namespace parent differs')
+     finally: os.close(up)
+     matched=True; break
+    cur=fcntl.ioctl(cur,NS_GET_PARENT); ns.append(cur)
+   if not matched: raise RuntimeError('namespace ancestry exceeds bound')
+   if ident(nfd)==witness['namespace']:
+    for kind,suf in (('uid','Uid'),('gid','Gid')):
+     rows=[[int(x) for x in l.split()] for l in read('/proc/%d/%s_map'%(pid,kind)).splitlines()]
+     if rows!=[[0,mapping['owner'+suf],1],[65534,mapping['candidate'+suf],1]]: raise RuntimeError('kernel mapping differs')
+  cur2=os.open('/proc/%d/ns/user'%pid,os.O_RDONLY)
+  try:
+   if ident(cur2)!=ident(nfd): raise RuntimeError('process user namespace changed')
+  finally: os.close(cur2)
+  raw_stat2=read('/proc/%d/stat'%pid); fields2=raw_stat2[raw_stat2.rfind(') ')+2:].split()
+  if not poll.poll(0) and (len(fields2)<20 or not fields2[19].isdigit() or fields2[19]!=expected_ticks): raise RuntimeError('process identity changed')
+ if not frozen(cpath): raise RuntimeError('cgroup v2 freeze barrier changed')
+finally:
+ for fd in ns: os.close(fd)
+ for fd in held: os.close(fd)
+`
+
+async function fixedPythonStdin(source: string, data: object): Promise<void> {
+  const payload = JSON.stringify(data)
+  if (Buffer.byteLength(payload) > 1_048_576) fail('namespace verification payload exceeds bound')
+  const output = await new Promise<{ code: number | null; stderr: string }>((resolvePromise, reject) => {
+    const child = spawn('/usr/bin/python3', ['-I', '-S', '-c', source],
+      { stdio: ['pipe', 'ignore', 'pipe'], env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, shell: false })
+    let stderr = ''
+    const timer = setTimeout(() => child.kill('SIGKILL'), 3_000)
+    child.stdin.on('error', () => { child.kill('SIGKILL') })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-4096) })
+    child.once('error', error => { clearTimeout(timer); reject(error) })
+    child.once('close', code => { clearTimeout(timer); resolvePromise({ code, stderr }) })
+    child.stdin.end(payload)
+  })
+  if (output.code !== 0) fail(`v2 namespace verification was unproven: ${output.stderr.slice(-200)}`)
+}
+
 async function fixedPython(source: string, data: object): Promise<void> {
   const output = await new Promise<{ code: number | null; stderr: string }>((resolvePromise, reject) => {
     const child = spawn('/usr/bin/python3', ['-I', '-S', '-c', source, JSON.stringify(data)],
@@ -237,11 +431,9 @@ export class LinuxCgroupLease {
   static async create(input: { roots: LinuxCgroupRoots; jobId: string; nonce: string; limits: LinuxCgroupLimits; deadline: number }): Promise<LinuxCgroupLease> {
     const owner = uid(), roots = rootEntries(input.roots, owner), limits = validateLimits(input.limits)
     if (!UUID.test(input.jobId) || !HEX.test(input.nonce) || !positive(input.deadline) || input.deadline <= Date.now()) fail('invalid job identity or deadline')
-    // Root directory ownership alone cannot authorize migration from an
-    // unrelated v2 subtree. Do not advertise an unverified placement fallback.
-    if (input.roots.mode === 'v2') fail('cgroup v2 process placement is not yet verified')
     const initialBoot = await bootId()
     for (const [controller, path] of roots) await root(path, owner, input.roots.mode, controller)
+    if (input.roots.mode === 'v2') await verifyLinuxV2CallerMigrationAuthority(input.roots.unified)
     const directories: Record<string, LinuxCgroupDirectory> = {}
     try {
       for (const [key, parent] of roots) {
@@ -305,7 +497,7 @@ export class LinuxCgroupLease {
   bindUserNamespace(value: LinuxCgroupNamespaceTermination): void {
     if (!value || !keys(value, value.outsideGate ? ['witness', 'outsideGate'] : ['witness'])) fail('invalid namespace termination binding')
     const witness = validateLinuxUserNamespaceWitness(value.witness)
-    if (this.snapshot.mode !== 'v1' || witness.bootId !== this.snapshot.bootId || witness.ownerUid !== this.snapshot.uid) fail('namespace termination owner differs')
+    if (!['v1', 'v2'].includes(this.snapshot.mode) || witness.bootId !== this.snapshot.bootId || witness.ownerUid !== this.snapshot.uid) fail('namespace termination owner differs')
     const gate = value.outsideGate
     if (gate && (!keys(gate, ['pid', 'startTicks', 'bootId', 'uid']) || !positive(gate.pid) || !TICKS.test(gate.startTicks)
       || gate.bootId !== this.snapshot.bootId || gate.uid !== this.snapshot.uid)) fail('invalid original keeper gate')
@@ -360,6 +552,11 @@ export class LinuxCgroupLease {
         const current = await processIdentity(identity.pid)
         this.#assertAdmissionOpen()
         if (!current || current.uid !== this.snapshot.uid || current.startTicks !== identity.startTicks || current.state === 'Z') fail('process identity differs')
+        if (this.snapshot.mode === 'v2') {
+          const unifiedParent = this.snapshot.directories.unified!.path.split('/').slice(0, -1).join('/')
+          await verifyLinuxV2TargetMigrationAuthority(identity.pid, unifiedParent)
+          this.#assertAdmissionOpen()
+        }
         // The trusted supervisor stays behind its start gate until this promise
         // resolves. pidfd detects death/reuse; cgroup.procs still accepts a PID,
         // so the caller must retain and reap that blocked trusted process.
@@ -414,11 +611,43 @@ export class LinuxCgroupLease {
     if (this.snapshot.mode === 'v2') {
       const path = this.snapshot.directories.unified!.path
       if (!(await exists(path))) return false
+      const isFrozen = async (): Promise<boolean> => /^frozen 1$/mu.test(await readFile(join(path, 'cgroup.events'), 'utf8'))
       await writeFile(join(path, 'cgroup.freeze'), '1\n')
-      while (Date.now() < deadline && !(await readFile(join(path, 'cgroup.events'), 'utf8')).includes('frozen 1')) await pause(20)
-      if (!(await readFile(join(path, 'cgroup.events'), 'utf8')).includes('frozen 1')) return false
-      await writeFile(join(path, 'cgroup.kill'), '1\n')
-      await writeFile(join(path, 'cgroup.freeze'), '0\n')
+      while (Date.now() < deadline && !(await isFrozen())) await pause(20)
+      if (!(await isFrozen())) return false
+      try {
+        const relative = path.slice('/sys/fs/cgroup/'.length)
+        const allowedUids = this.#namespaceTermination
+          ? new Set([this.snapshot.uid, this.#namespaceTermination.witness.mapping.candidateUid])
+          : new Set([this.snapshot.uid])
+        const processes: Array<[number, string]> = []
+        for (const pid of await readProcesses(path)) {
+          const current = await processIdentity(pid)
+          if (!current) continue
+          if (current.state === 'Z' || !allowedUids.has(current.uid)) fail('cgroup contains an unexpected process')
+          const cgroupLines = await readFile(`/proc/${pid}/cgroup`, 'utf8').catch(error => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+            throw error
+          })
+          if (cgroupLines !== undefined && !cgroupLines.split('\n').some(line => line.trim() === `0::/${relative}`)) {
+            fail('process escaped frozen cgroup v2 group')
+          }
+          processes.push([pid, current.startTicks])
+        }
+        if (this.#namespaceTermination && processes.length > 0) {
+          await fixedPythonStdin(V2_NAMESPACE_VERIFY, {
+            witness: this.#namespaceTermination.witness,
+            outsideGates: this.#namespaceTermination.outsideGate ? [this.#namespaceTermination.outsideGate] : [],
+            cgroupPath: path,
+            cgroup: ['', `/${relative}`],
+            processes,
+          })
+        }
+        if (!(await isFrozen())) fail('cgroup v2 freeze barrier changed')
+        await writeFile(join(path, 'cgroup.kill'), '1\n')
+      } finally {
+        await writeFile(join(path, 'cgroup.freeze'), '0\n')
+      }
     } else {
       const freezer = this.snapshot.directories.freezer!.path
       // A missing freezer with live processes elsewhere is ambiguous. Never

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, statfs, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { LinuxCgroupLease, type LinuxCgroupDirectory, type LinuxCgroupIdentity, type LinuxCgroupSnapshot } from './linux-cgroups.js'
+import { LinuxCgroupLease, verifyLinuxV2CallerMigrationAuthority, type LinuxCgroupDirectory, type LinuxCgroupIdentity, type LinuxCgroupSnapshot } from './linux-cgroups.js'
 import { linuxExecutionContractDigest, linuxExecutionIntentDigest, linuxExecutionResourcesDigest,
   linuxExecutionPartialCleanupProofDigest, validateLinuxExecutionPartialCleanupProof,
   validateLinuxExecutionContract, validateLinuxExecutionIntent, validateLinuxExecutionResources,
@@ -177,9 +177,40 @@ function validateIdentity(value: unknown, intent: LinuxExecutionIntent): asserts
     || value.uid !== intent.uid || value.bootId !== intent.bootId) fail('journal process identity differs')
 }
 async function rootsIdentity(contract: LinuxExecutionContract, expected?: LinuxExecutionIntent): Promise<Record<string, LinuxCgroupDirectory>> {
-  if (contract.cgroupRoots.mode !== 'v1') fail('cgroup v2 process placement is not yet verified')
   const entries: Record<string, LinuxCgroupDirectory> = {}
   const mountinfo = (await readFile('/proc/self/mountinfo', 'utf8')).split('\n')
+  if (contract.cgroupRoots.mode === 'v2') {
+    const path = contract.cgroupRoots.unified
+    let info
+    try {
+      info = await lstat(path)
+    } catch {
+      fail('delegated cgroup v2 root identity differs')
+    }
+    if (await realpath(path).catch(() => '') !== path || !info.isDirectory() || info.isSymbolicLink()
+      || info.uid !== platform() || (info.mode & 0o022) !== 0
+      || (await statfs(path).catch(() => ({ type: 0 }))).type !== 0x63677270
+      || mountinfo.some(line => line.split(' - ')[1]?.split(' ')[0] === 'cgroup')
+      || mountinfo.filter(line => {
+        const [before, after] = line.split(' - '), fields = before?.split(' '), fs = after?.split(' ')
+        return fields?.[4] === '/sys/fs/cgroup' && fs?.[0] === 'cgroup2'
+      }).length !== 1) fail('delegated cgroup v2 root identity differs')
+    const [controllersRaw, subtreeRaw, freezeOk, killOk] = await Promise.all([
+      readFile(join(path, 'cgroup.controllers'), 'utf8').catch(() => ''),
+      readFile(join(path, 'cgroup.subtree_control'), 'utf8').catch(() => ''),
+      lstat(join(path, 'cgroup.freeze')).then(st => st.isFile() && !st.isSymbolicLink(), () => false),
+      lstat(join(path, 'cgroup.kill')).then(st => st.isFile() && !st.isSymbolicLink(), () => false),
+    ])
+    const available = new Set(controllersRaw.trim().split(/\s+/u).filter(Boolean))
+    const enabled = new Set(subtreeRaw.trim().split(/\s+/u).filter(Boolean))
+    if (!freezeOk || !killOk || ['cpu', 'memory', 'pids'].some(key => !available.has(key) || !enabled.has(key))) {
+      fail('delegated cgroup v2 root identity differs')
+    }
+    if (!expected) await verifyLinuxV2CallerMigrationAuthority(path)
+    entries.unified = { path, dev: info.dev, ino: info.ino }
+    if (expected && canonical(entries.unified) !== canonical(expected.roots.unified)) fail('delegated root changed')
+    return entries
+  }
   for (const key of controllers) {
     const path = contract.cgroupRoots[key], info = await lstat(path)
     const mount = path.split('/').slice(0, 5).join('/')
@@ -207,10 +238,11 @@ function validateSnapshot(value: unknown, kind: 'worker' | 'keeper', ctx: Contex
   keys(value, ['schemaVersion', 'mode', 'bootId', 'jobId', 'nonce', 'uid', 'deadline', 'limits', 'directories'])
   const expectedLimits = kind === 'worker' ? { memoryMiB: ctx.contract.limits.memoryMiB, pidsLimit: ctx.contract.limits.pidsLimit, cpus: ctx.contract.limits.cpus } : ctx.contract.keeperLimits
   const nonce = kind === 'worker' ? ctx.intent.workerNonce : ctx.intent.keeperNonce
-  if (value.schemaVersion !== 1 || value.mode !== 'v1' || value.bootId !== ctx.intent.bootId || value.jobId !== ctx.intent.jobId
+  if (value.schemaVersion !== 1 || value.mode !== ctx.contract.cgroupRoots.mode || value.bootId !== ctx.intent.bootId || value.jobId !== ctx.intent.jobId
     || value.nonce !== nonce || value.uid !== ctx.intent.uid || value.deadline !== ctx.intent.deadline || canonical(value.limits) !== canonical(expectedLimits)) fail('snapshot binding differs')
-  keys(value.directories, controllers)
-  for (const key of controllers) {
+  const expectedControllers = value.mode === 'v1' ? controllers : (['unified'] as const)
+  keys(value.directories, expectedControllers)
+  for (const key of expectedControllers) {
     const item = value.directories[key], parent = ctx.intent.roots[key]!
     keys(item, ['path', 'dev', 'ino'])
     if (item.path !== join(parent.path, `job-${ctx.intent.jobId}-${nonce}`) || item.dev !== parent.dev || !positive(item.ino) || item.ino === parent.ino) fail('snapshot directory differs')
@@ -345,7 +377,6 @@ export async function prepareLinuxExecutionIntent(input: PrepareInput): Promise<
 }
 async function prepareIntent(input: PrepareInput, repository?: LinuxRepositoryExecutionIntent['repository']): Promise<LinuxExecutionIntent> {
   const uid = platform(), contract = validateLinuxExecutionContract(input.contract)
-  if (contract.cgroupRoots.mode !== 'v1') fail('cgroup v2 process placement is not yet verified')
   if (input.job.deadline <= Date.now() || !positive(input.job.deadline) || contract.limits.workspaceMiB > (contract.schemaVersion !== 1 ? 8192 : 4096) || contract.limits.maxDurationMs > 1_800_000) fail('invalid execution deadline or namespace limits')
   const intent = validateLinuxExecutionIntent({ schemaVersion: contract.schemaVersion, ...(repository ? { repository } : {}), jobId: input.job.id, requestDigest: input.job.requestDigest,
     nativeResourceId: input.job.nativeResourceId, nativeNonce: input.job.nativeNonce,
@@ -380,7 +411,8 @@ async function removeUnrecorded(ctx: Context, nonce: string): Promise<void> {
     if (!(await exists(path))) continue
     const info = await lstat(path)
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== ctx.intent.uid || info.dev !== root.dev
-      || (info.mode & 0o022) !== 0 || await realpath(path) !== path || (await statfs(path)).type !== 0x27e0eb) fail('unrecorded cgroup identity differs')
+      || (info.mode & 0o022) !== 0 || await realpath(path) !== path
+      || (await statfs(path)).type !== (ctx.contract.cgroupRoots.mode === 'v1' ? 0x27e0eb : 0x63677270)) fail('unrecorded cgroup identity differs')
     const entries = await readdir(path, { withFileTypes: true })
     if (entries.some(entry => entry.isDirectory() || entry.isSymbolicLink()) || (await readFile(join(path, 'cgroup.procs'), 'utf8')).trim() !== '') fail('unrecorded cgroup is not provably empty')
     const after = await lstat(path)
@@ -648,6 +680,9 @@ async function runExecution(input: RunInput, archive?: { bytes: Buffer; sha256: 
         await verifyLinuxSystemSnapshot(ctx.contract.systemSnapshot)
       }
       await checkLive(ctx, input.signal)
+      const v2Authority = ctx.contract.cgroupRoots.mode === 'v2'
+        ? await verifyLinuxV2CallerMigrationAuthority(ctx.contract.cgroupRoots.unified)
+        : undefined
       journal.phase = 'creating-worker'; await writeRecord(key, journal)
       await checkLive(ctx, input.signal)
       worker = await LinuxCgroupLease.create({ roots: ctx.contract.cgroupRoots, jobId: ctx.intent.jobId, nonce: ctx.intent.workerNonce,
@@ -749,6 +784,7 @@ async function runExecution(input: RunInput, archive?: { bytes: Buffer; sha256: 
         tmpInodes: ctx.contract.schemaVersion !== 1 ? ctx.contract.limits.tmpInodes : ctx.contract.limits.workspaceInodes,
         timeoutMs: Math.max(1, executionDeadline - Date.now()),
         maxOutputBytes: ctx.contract.limits.maxOutputBytes, maxArtifactBytes: ctx.contract.limits.maxArtifactBytes,
+        ...(v2Authority?.mode === 'systemd-user-scope' ? { systemdUserScope: true } : {}),
         signal: input.signal, beforeKeeperStart: (identity: LinuxCandidateIdentity) => trackedAdmit('keeper', identity),
         beforeStart: (identity: LinuxCandidateIdentity) => trackedAdmit('worker', identity), afterExit: async () => { await cleanLease(worker!, ctx) }, onStop: stopGroups }
       const raw = archive ? await runLinuxRepositoryNamespace({ ...namespaceInput, ...mapped, archive })

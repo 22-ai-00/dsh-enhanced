@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { setTimeout as pause } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import type { LinuxUserNamespaceMapping } from './linux-user-namespace.js'
 import type { LinuxSystemSnapshot } from './linux-system-snapshot.js'
@@ -40,6 +42,8 @@ export interface LinuxNamespaceInput {
   maxArtifactBytes?: number
   /** Repository checks must retain nested bwrap; other tasks forbid it. */
   profile: 'ordinary' | 'repository'
+  /** Launch the keeper gate via `systemd-run --user --scope` when the caller sits in an SSH login scope outside `user@<uid>.service`. */
+  systemdUserScope?: boolean
   signal: AbortSignal
   /** Admit the fixed keeper gate PID before unshare, mounts, or staging. */
   beforeKeeperStart: (identity: LinuxCandidateIdentity) => Promise<void> | void
@@ -224,17 +228,72 @@ async function runNamespace(input: LinuxNamespaceInput & Partial<Pick<LinuxRepos
     await rm(jobPath, { recursive: true, force: true })
     fail('request exceeds bound')
   }
+  const useSystemdScope = input.systemdUserScope === true
+  const ownerUid = process.getuid?.() ?? 0
+  let hasUserBusSocket = false
+  if (useSystemdScope) {
+    if (!ownerUid) fail('systemd --user scope requires non-root owner')
+    for (const bin of ['/usr/bin/systemd-run', '/usr/bin/env']) {
+      if (await realpath(bin) !== bin) fail('systemd scope helper is not canonical')
+      const info = await lstat(bin)
+      if (!info.isFile() || info.isSymbolicLink()) fail('systemd scope helper is invalid')
+      await access(bin, constants.X_OK)
+    }
+    const runtimeDir = `/run/user/${ownerUid}`
+    if (await realpath(runtimeDir) !== runtimeDir) fail('owner runtime directory is not canonical')
+    const dirInfo = await lstat(runtimeDir)
+    if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink() || dirInfo.uid !== ownerUid || (dirInfo.mode & 0o077) !== 0) {
+      fail('owner runtime directory must be owner-private')
+    }
+    let hasPrivateSocket = false
+    for (const [sockPath, isBus] of [[`${runtimeDir}/bus`, true], [`${runtimeDir}/systemd/private`, false]] as const) {
+      try {
+        const sockInfo = await lstat(sockPath)
+        if (sockInfo.isSocket() && !sockInfo.isSymbolicLink() && sockInfo.uid === ownerUid) {
+          if (isBus) hasUserBusSocket = true
+          else hasPrivateSocket = true
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    if (!hasUserBusSocket && !hasPrivateSocket) {
+      fail('systemd --user socket unavailable under owner runtime directory')
+    }
+  }
+  const keeperGateArgs = [
+    '-c',
+    'IFS= read -r gate <&3 || exit 125; [ "$gate" = START ] || exit 125; exec 3<&-; exec "$@"',
+    'dsh-keeper-gate',
+    ...(dual
+      ? ['/usr/bin/python3', '-I', '-S', USERNS_LAUNCHER, JSON.stringify(input.userNamespace), String(deadline), process.execPath, WORKER]
+      : ['/usr/bin/unshare', '--user', '--map-root-user', '--mount', '--fork', '--kill-child=SIGKILL', '--net', '--ipc', '--uts', process.execPath, WORKER]),
+  ]
   // The fixed shell owns this PID until exec. No namespace or worker exists
   // until the caller durably admits its exact host identity through fd 3.
-  const child = spawn('/bin/sh', ['-c',
-    'IFS= read -r gate <&3 || exit 125; [ "$gate" = START ] || exit 125; exec 3<&-; exec "$@"',
-    'dsh-keeper-gate', ...(dual ? ['/usr/bin/python3', '-I', '-S', USERNS_LAUNCHER,
-      JSON.stringify(input.userNamespace), String(deadline), process.execPath, WORKER]
-      : ['/usr/bin/unshare', '--user', '--map-root-user', '--mount', '--fork',
-        '--kill-child=SIGKILL', '--net', '--ipc', '--uts', process.execPath, WORKER])], {
-    stdio: archive ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'], shell: false, detached: true,
-    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-  })
+  const child = useSystemdScope
+    ? spawn('/usr/bin/systemd-run', [
+        '--user', '--scope', '--quiet', '--collect', '--',
+        '/usr/bin/env', '-i', 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+        '/bin/sh', ...keeperGateArgs,
+      ], {
+        stdio: archive ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'],
+        shell: false,
+        detached: true,
+        env: {
+          PATH: '/usr/bin:/bin',
+          LANG: 'C',
+          LC_ALL: 'C',
+          XDG_RUNTIME_DIR: `/run/user/${ownerUid}`,
+          ...(hasUserBusSocket ? { DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${ownerUid}/bus` } : {}),
+        },
+      })
+    : spawn('/bin/sh', keeperGateArgs, {
+        stdio: archive ? ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe', 'pipe'],
+        shell: false,
+        detached: true,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      })
   const messages: Message[] = []
   const waiters: Array<(message: Message) => void> = []
   let raw = ''; let totalBytes = 0; let diagnostic = ''; let stopped = false; let completed = false
@@ -340,6 +399,32 @@ async function runNamespace(input: LinuxNamespaceInput & Partial<Pick<LinuxRepos
   try {
     send(encoded)
     if (!child.pid) fail('keeper gate did not start')
+    if (useSystemdScope) {
+      const scopeDeadline = Math.min(deadline, Date.now() + 5_000)
+      const expectedPrefix = `0::/user.slice/user-${ownerUid}.slice/user@${ownerUid}.service/`
+      const waitScopeReady = async (): Promise<void> => {
+        while (Date.now() < scopeDeadline) {
+          assertLive()
+          const [cgroupRaw, cmdlineRaw] = await Promise.all([
+            readFile(`/proc/${child.pid}/cgroup`, 'utf8').catch(() => ''),
+            readFile(`/proc/${child.pid}/cmdline`, 'utf8').catch(() => ''),
+          ])
+          const cmdParts = cmdlineRaw.split('\0')
+          if (cgroupRaw.split('\n').some(line => line.trim().startsWith(expectedPrefix))
+            && cmdParts[0] === '/bin/sh'
+            && cmdParts.includes('dsh-keeper-gate')) {
+            return
+          }
+          await pause(10)
+        }
+        fail('systemd --user scope did not enter user@<uid>.service keeper gate before deadline')
+      }
+      await Promise.race([
+        waitScopeReady(),
+        closed.then(() => fail(`systemd-run keeper gate exited early: ${diagnostic || 'unknown'}`)),
+        interrupted(),
+      ])
+    }
     const stat = await readFile(`/proc/${child.pid}/stat`, 'utf8')
     const keeper = identity({ type: 'KEEPER', pid: child.pid,
       startTicks: Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(' ')[19]) })

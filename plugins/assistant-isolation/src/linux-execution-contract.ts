@@ -96,6 +96,7 @@ const HEX = /^[a-f0-9]{64}$/u
 const NONCE = /^[a-f0-9]{32}$/u
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u
 const controllers = ['cpu', 'memory', 'pids', 'freezer'] as const
+export const V2_UNIFIED_ROOT_PATTERN = /^\/sys\/fs\/cgroup(?:\/user\.slice\/user-([1-9][0-9]*)\.slice\/user@\1\.service\/dsh-native\/uid-\1|\/dsh-native\/uid-[1-9][0-9]*)$/u
 function fail(): never { throw new Error('invalid Linux execution contract or binding') }
 const positive = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0
 const natural = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
@@ -151,7 +152,7 @@ export function validateLinuxCgroupRoots(value: unknown): LinuxCgroupRoots {
   if (new Set(entries.map(([, root]) => root)).size !== entries.length) fail()
   for (const [, root] of entries) if (!path(root) || !(roots.mode === 'v1'
     ? /^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u
-    : /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u).test(root)) fail()
+    : V2_UNIFIED_ROOT_PATTERN).test(root)) fail()
   return clone(roots)
 }
 export function validateLinuxExecutionContract(value: unknown): LinuxExecutionContract {
@@ -207,7 +208,7 @@ function intentValue(value: unknown): LinuxExecutionIntent {
     if (!entry || typeof entry !== 'object') fail()
     const root = (entry as Record<string, unknown>).path
     if (!path(root) || !(key === 'unified'
-      ? /^\/sys\/fs\/cgroup\/dsh-native\/uid-[1-9][0-9]*$/u
+      ? V2_UNIFIED_ROOT_PATTERN
       : /^\/sys\/fs\/cgroup\/[A-Za-z0-9_,]+\/dsh-native\/uid-[1-9][0-9]*$/u).test(root)
       || !root.endsWith(`/uid-${value.uid}`)) fail()
     directory(entry, root)

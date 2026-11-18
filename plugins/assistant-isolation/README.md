@@ -41,12 +41,8 @@ revokes work on Host disconnect or deadline. `namespaceExited` only proves that
 keeper's close; it is not a durable resource-cleanup or task-success receipt.
 
 `LinuxCgroupLease` configures and reads back CPU, memory including swap, and PID
-limits in pre-delegated v1 controllers. Admission is one-shot; shutdown fences
-late admission and uses freezer/pidfd checks before proving all groups empty.
-Recovery checks boot, owner and directory identities. V2 admission is currently
-rejected because its process-placement path has not been verified. The caller
-still owns pre-creation durable intent, controller exclusivity, orphan recovery,
-keeper resource reservations, authorization and budgets. The repository's
+limits in pre-delegated v1 controllers or delegated unified v2 subtrees (`/sys/fs/cgroup/dsh-native/uid-<uid>` or `systemd --user` `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/dsh-native/uid-<uid>`). Admission is one-shot; on v2, both `prepare` and `create` enforce the Linux kernel migration containment rule (`cgroup.procs` writable at the common ancestor of caller and target leaf, plus the no-internal-processes domain rule). Shutdown fences late admission and uses freezer/pidfd checks on v1 or `cgroup.freeze` + UID/membership re-verification + atomic `cgroup.kill` + `cgroup.events` emptiness checks on v2 before proving all groups empty.
+Recovery checks boot, owner and directory identities without requiring caller migration authority. The repository's
 one-time delegation script is an operator provisioning aid, not a privileged
 runtime broker or a sudo rule for a writable checkout.
 
@@ -62,7 +58,7 @@ for remaining integration and acceptance.
 Configure `backend: 'linux-native'` and `linux: { runtime, cgroupRoots }` alongside
 the existing `stateRoot`, finite `grants`, limits and storage policy. `runtime`
 is the digest-pinned `LinuxRuntime` prepared by the native toolchain bootstrap;
-`cgroupRoots` identifies the current user's verified v1 controller delegation (or delegated unified v2 root for discovery/config/authority parity; runtime execution placement currently stays v1-only and fails closed on v2 until verified on a Linux v2 host).
+`cgroupRoots` identifies the current user's verified v1 controller delegation or delegated unified v2 root (`/sys/fs/cgroup/dsh-native/uid-<uid>` with caller placed in a sibling leaf such as `.../host`, or `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`).
 The synchronous Cordis Config rejects invalid bindings and insufficient pools;
 service readiness and every newly admitted request recheck the runtime tree.
 This branch does not require an image, a Docker socket or a container daemon.
@@ -146,9 +142,9 @@ signal an unidentified process. Proven cleanup releases active capacity while
 preserving an existing unknown result and its consumed run/duration budget.
 Historical rows opened from a pre-native ledger retain their original backend identity; the API cannot create them and does not reset their grants.
 
-These APIs still require non-root Linux with verified v1 delegation and the
+These APIs require non-root Linux with verified v1 or unified v2 delegation and the
 fixed namespace dependencies. Installer migration, behavior certificates and
-release/adoption remain separate integration steps. V2, arm64 execution and a reboot with changed kernel
+release/adoption remain separate integration steps. Linux x64/v1 has live machine evidence; live Linux v2 cold-install→learning verification, arm64 execution and a reboot with changed kernel
 resource identity remain outside the current live acceptance.
 
 ### Durable repository execution
@@ -299,7 +295,7 @@ dsh plugin --profile <profile> add @dsh-enhanced/assistant-isolation
 
 Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. The plugin downloads no image and contacts no container daemon.
 
-Linux runtime isolation currently requires a non-root Linux Host with verified v1 cgroup delegation (while `discoverLinuxCgroupRoots`, `scripts/isolation/prepare-linux-cgroups.mjs --auto`, and execution contracts support both v1 and delegated unified v2 roots, runtime process placement fails closed on v2 until Linux v2 host verification) and the fixed namespace dependencies (unshare, bubblewrap, Python/libseccomp). macOS exposes only the `macos-seatbelt` verifier primitive; `isolation_run` is Linux-only.
+Linux runtime isolation requires a non-root Linux Host with verified cgroup v1 or unified cgroup v2 delegation (`discoverLinuxCgroupRoots` and `scripts/isolation/prepare-linux-cgroups.mjs --auto` support both standalone `/sys/fs/cgroup/dsh-native/uid-<uid>` and `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`) and the fixed namespace dependencies (unshare, bubblewrap, Python/libseccomp). macOS exposes only the `macos-seatbelt` verifier primitive; `isolation_run` is Linux-only.
 
 ## Configuration
 
@@ -308,7 +304,7 @@ backend: linux-native
 stateRoot: /absolute/private/assistant-isolation
 linux:
   runtime: <digest-pinned LinuxRuntime from the native toolchain bootstrap>
-  cgroupRoots: <current-user delegated v1 or unified v2 cgroup roots (runtime execution requires v1)>
+  cgroupRoots: <current-user delegated v1 or unified v2 cgroup roots>
 maxConcurrentJobs: 2
 maxReservedMemoryMiB: 2048
 maxReservedWorkspaceInodes: 32768
@@ -427,7 +423,7 @@ The default export is the Cordis plugin object with stable name, Config and appl
 
 schema v6 新增可空的 artifact admission 绑定，v1–v5 行迁移后保留且不会被追认为目标产物。Host 在真实 Goals native round 内，于隔离任务派发前固定 step acceptance ID/digest、run、turn 与声明输出路径；相同幂等键不会重新绑定。运行中若原 admission 改变则取消。私有 `readAcceptedArtifact` 只读取同一 v4 step scope/owner/Session 的成功、已静止、有效期内且正文未清理的产物；较新的同路径失败尝试禁止回退旧结果。
 
-Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，要求显式 `backend: 'linux-native'` 配置（已验证 `LinuxRuntime` 与受委派 `cgroupRoots`；authority 契约接受 v1 或已对齐的 v2，实际 Linux 运行时迁入当前仍只开放 v1、对 v2 保持 fail-closed），固定 authority/命令、次数、累计预留时长及期限，复用原生执行资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。
+Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，要求显式 `backend: 'linux-native'` 配置（已验证 `LinuxRuntime` 与受委派 `cgroup v1` 或统一 `cgroup v2` `cgroupRoots`），固定 authority/命令、次数、累计预留时长及期限，复用原生执行资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。
 
 The read-only `isolation_grants` tool exposes usable grant IDs and remaining limits only for the current authenticated owner and workspace/preset. It applies live Policy, principal lineage, expiry and revocation checks; it cannot create or extend grants and returns no credentials or Host paths. When Policy allows discovery and at least one grant remains usable for that exact owner, the Host registers its exact tool definition for finite preauthorization so this read-only query skips the redundant native risk prompt. Revocation, expiry, owner/scope mismatch, Policy denial, tool replacement, or bundle unload removes that preauthorization. Use a returned ID with `isolation_run`.
 

@@ -169,14 +169,7 @@ function verifyFreezeSupport(leaf) {
   if (readFileSync(freezePath, 'utf8').trim() !== '0') fail('delegated cgroup.freeze is unavailable or frozen')
 }
 
-function prepareV2(uid, unifiedMount) {
-  if (unifiedMount !== V2_ROOT || realpathSync(V2_ROOT) !== V2_ROOT) fail('noncanonical cgroup v2 root')
-  const rootInfo = lstatSync(V2_ROOT)
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || statfsSync(V2_ROOT).type !== V2_MAGIC) {
-    fail('cgroup v2 root filesystem differs')
-  }
-  ensureSubtreeControllers(V2_ROOT, V2_CONTROLLERS)
-  const parent = `${V2_ROOT}/dsh-native`
+function prepareV2DelegatedLeaf(parent, uid) {
   ensureSafeDirectory(parent, 0, 0o755, V2_MAGIC, 'parent')
   ensureSubtreeControllers(parent, V2_CONTROLLERS)
 
@@ -192,7 +185,48 @@ function prepareV2(uid, unifiedMount) {
     const target = `${leaf}/${controlFile}`
     if (existsSync(target)) chownSync(target, uid, uid)
   }
-  return { schemaVersion: 1, mode: 'v2', uid, roots: { unified: leaf } }
+  return leaf
+}
+
+function prepareV2(uid, unifiedMount) {
+  if (unifiedMount !== V2_ROOT || realpathSync(V2_ROOT) !== V2_ROOT) fail('noncanonical cgroup v2 root')
+  const rootInfo = lstatSync(V2_ROOT)
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || statfsSync(V2_ROOT).type !== V2_MAGIC) {
+    fail('cgroup v2 root filesystem differs')
+  }
+  ensureSubtreeControllers(V2_ROOT, V2_CONTROLLERS)
+  const leaf = prepareV2DelegatedLeaf(`${V2_ROOT}/dsh-native`, uid)
+  // Standalone non-systemd callers can migrate into `${leaf}/host` (a leaf
+  // without subtree_control) so `leaf` is the writable common ancestor for
+  // sibling `job-*` cgroups without violating the v2 no-internal-processes rule.
+  const hostLeaf = `${leaf}/host`
+  ensureSafeDirectory(hostLeaf, uid, 0o700, V2_MAGIC, 'leaf')
+  for (const controlFile of ['cgroup.procs', 'cgroup.threads', 'cgroup.kill']) {
+    const target = `${hostLeaf}/${controlFile}`
+    if (existsSync(target)) chownSync(target, uid, uid)
+  }
+
+  // When systemd's user manager slice is active (`user@<uid>.service`), also
+  // delegate `dsh-native/uid-<uid>` inside `user@<uid>.service` so user-unit
+  // Hosts share `user@<uid>.service` as a uid-writable common ancestor.
+  const userSlice = `${V2_ROOT}/user.slice`
+  const uidSlice = `${userSlice}/user-${uid}.slice`
+  const userService = `${uidSlice}/user@${uid}.service`
+  let systemdUnified
+  if (existsSync(userService) && lstatSync(userService).isDirectory() && !lstatSync(userService).isSymbolicLink()) {
+    ensureSubtreeControllers(userSlice, V2_CONTROLLERS)
+    ensureSubtreeControllers(uidSlice, V2_CONTROLLERS)
+    if (existsSync(`${uidSlice}/cgroup.procs`)) chownSync(`${uidSlice}/cgroup.procs`, uid, uid)
+    ensureSubtreeControllers(userService, V2_CONTROLLERS)
+    systemdUnified = prepareV2DelegatedLeaf(`${userService}/dsh-native`, uid)
+  }
+  return {
+    schemaVersion: 1,
+    mode: 'v2',
+    uid,
+    roots: { unified: systemdUnified ?? leaf },
+    ...(systemdUnified ? { rootUnified: leaf, hostLeaf } : { hostLeaf }),
+  }
 }
 
 export function runPrepareLinuxCgroups(argv = process.argv.slice(2)) {

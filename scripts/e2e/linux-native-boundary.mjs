@@ -6,7 +6,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { LinuxCgroupLease } from '../../plugins/assistant-isolation/lib/linux-cgroups.js'
+import { LinuxCgroupLease, verifyLinuxV2CallerMigrationAuthority } from '../../plugins/assistant-isolation/lib/linux-cgroups.js'
 import { runLinuxNamespace } from '../../plugins/assistant-isolation/lib/linux-namespace.js'
 
 const owner = process.getuid?.()
@@ -52,6 +52,9 @@ async function run(name, script, options = {}) {
   try {
     // The keeper must be bounded before unshare, Node, mounts or input staging.
     // Candidate admission moves its gate into a distinct independently bounded group.
+    const v2Authority = roots.mode === 'v2'
+      ? await verifyLinuxV2CallerMigrationAuthority(roots.unified)
+      : undefined
     const keeper = await create('keeper', { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 })
     const candidate = await create('candidate', { memoryMiB: 128, pidsLimit: 32, cpus: 0.5 })
     const namespaceId = `${randomUUID()}-${randomBytes(16).toString('hex')}`
@@ -65,6 +68,7 @@ async function run(name, script, options = {}) {
       files: [{ path: 'input.txt', content: 'native-input' }], artifacts: [], readOnlyRoots: [],
       workspaceBytes: 4 * 1024 * 1024, workspaceInodes: 64, tmpBytes: 1024 * 1024, tmpInodes: 32,
       timeoutMs: 10_000, maxOutputBytes: 16_384, profile: 'ordinary', signal: new AbortController().signal,
+      ...(v2Authority?.mode === 'systemd-user-scope' ? { systemdUserScope: true } : {}),
       ...options,
       beforeKeeperStart: identity => admit('keeper', keeper, identity),
       beforeStart: identity => admit('candidate', candidate, identity),

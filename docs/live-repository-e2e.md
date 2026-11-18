@@ -1,13 +1,8 @@
 # Live GitHub repository E2E
 
-> **Migration pending:** the repository-autonomy E2E still creates a
-> Docker-era verifier configuration. The current Host accepts Linux-native
-> verification, so this Playwright scenario (including setup-only mode) is not
-> a runnable validation path yet. The contract below is retained for migration.
-> Migrate the scenario and preserve its repository, task, restart, and
-> readback checks before restoring a runnable command.
+The `scripts/e2e/repo-autonomy-real.spec.mjs` Playwright harness validates the WP18 engineering lane against a **dedicated sandbox repository** (never run against this repository's `dev`/`main` branches). It defaults to the locked `pinnedHostVersion` in [release-manifest](../release-manifest.json) (`0.2.2-rc.3`) and uses the `linux-native` `IsolatedVerifierRunner` (delegated `cgroup v1` or unified `cgroup v2` roots + pinned `LinuxRuntime`), with no Docker image or daemon dependency.
 
-The historical repository Playwright scenario was designed to use the production Actions and
+The repository Playwright scenario uses the production Actions and
 EventTriggers GitHub transports when `DSH_REPO_LIVE_INPUT` names a private JSON
 descriptor. The v3 commit mode creates a direct commit on an already-existing,
 isolated test branch in the named repository. It does not create a branch. Do
@@ -61,17 +56,7 @@ successful, error-free health row; a missing handle, wrong consumer/purpose,
 unusable credential, or inaccessible repository/branch stops there before any
 remote write.
 
-The JSON example above is retained as the historical v3 input contract. Its
-scenario is not executable while the native migration above is pending.
-
-The intended test rejects a missing, non-private, expired, broad, malformed, or
-fixture-mixed descriptor before installation or model work. It is not part of
-this repository's normal test suite because it commits to the explicitly bounded
-existing test branch. Its intended post-delivery checks wait for the real event
-snapshot, a successful wake, the existing repository-readback outcome receipt,
-source retirement, and a final restart that produces no new source event.
-
-The migrated scenario must retain the `summarize.mjs`-only repair scope, matching the production admission contract and its independent verification artifact. Its fresh descriptor must preserve the original timing constraint: at goal setup, its fixed deadline must still be more than six minutes away. Installation and linux-native runtime prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The repo-autonomy harness itself still constructs Docker-era runner config and is fail-closed pending the native migration tracked in [RSI status](rsi-status.md). The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
+The scenario retains the `summarize.mjs`-only repair scope, matching the production admission contract and its independent verification artifact. Its fresh descriptor must preserve the original timing constraint: at goal setup, its fixed deadline must still be more than six minutes away. Installation and linux-native runtime prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt. Current scheduling and longitudinal gate status are tracked in [RSI status](rsi-status.md).
 
 Observation starts during preflight, so its poll budget must cover setup, model execution, and CI latency as well as event waiting. The example permits 180 polls at two-second intervals; it does not reserve all polls until the commit exists.
 

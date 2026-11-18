@@ -600,7 +600,7 @@ function validLinuxCgroupRootsShape(roots: unknown, uid: number | undefined): bo
   if (value.mode === 'v2') {
     return Object.keys(value).sort().join() === 'mode,unified'
       && typeof value.unified === 'string'
-      && new RegExp(`^/sys/fs/cgroup/dsh-native/uid-${uid}$`, 'u').test(value.unified)
+      && new RegExp(`^/sys/fs/cgroup(?:/user\\.slice/user-${uid}\\.slice/user@${uid}\\.service)?/dsh-native/uid-${uid}$`, 'u').test(value.unified)
   }
   return false
 }
