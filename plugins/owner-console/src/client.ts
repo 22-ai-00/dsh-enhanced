@@ -18,14 +18,15 @@ import {
 } from './ui.js'
 import {
   AutonomyWizardCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DREAMING_PACKAGE, DreamingCard,
-  FeishuCard, GeneralCodingToolItem, GROWTH_PACKAGE, GrowthMemoryCard, IntakeAgreementCard, LARK_PACKAGE,
+  FeishuCard, GeneralCodingToolItem, GROWTH_PACKAGE, GrowthMemoryCard, GrowthReportCard, IntakeAgreementCard, LARK_PACKAGE,
   MEMORY_LEARNING_PACKAGE, ModelsCodingAgentsFooter, PROACTIVE_PACKAGE, ProactiveWorkItemsCard,
   SelfUpgradeCard, StatusBanners, TRAEX_PACKAGE, TrendSnapshotsCard, useConsoleActions, WenyaoSectionIcon,
   WenyaoSettingsSection, type ConsoleRemote, type OwnerConsoleNavigation,
 } from './settings-cards.js'
 
 export {
-  askOwner, AutonomyWizardCard, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, installWithApproval,
+  askOwner, AutonomyWizardCard, boundedLine, confirmationNotice, feishuSecretRefs, fiberState, growthDataStatePill,
+  GrowthReportCard, installWithApproval,
   installWithCompanions, intakeAgreementHistoryView, intakeAgreementView, intakeAvailabilityPill,
   IntakeAgreementCard, larkConnectionLabel, larkConnectionTone, remoteFailureText, SelfUpgradeCard, trendSnapshotsView,
   TrendSnapshotsCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DreamingCard, FeishuCard,
@@ -114,6 +115,7 @@ export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readon
         el('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, color: muted } }, '设置')),
         header(navigation),
         jsx(StatusBanners, { ctrl }),
+        jsx(GrowthReportCard, { remote }),
         jsx(AutonomyWizardCard, { ctrl }),
         jsx(SelfUpgradeCard, { ctrl }),
         jsx(FeishuCard, { ctrl }),

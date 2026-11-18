@@ -82,6 +82,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 自主做梦想法（Dreaming） | `assistant-dreaming` 运行健康与额度、想法列表（`recorded` / `acknowledged` / `validated` / `rejected` / `retired`）及主人授权流转（确认 / 验证 / 拒绝 / 休眠） | `assistantDreaming`（结构化读取，可缺省） |
 | 主动准备与工作项 | `assistant-proactive` 未验证草稿（接受 / 拒绝 / 取消）、WP22 主人注意力放宽请求（仅本次授权 / 拒绝）及 `assistant-work-items` `observe` / `would-admit` 观察队列 | `assistantProactive` + `assistantWorkItems`（+ `assistantEvaluation` 回退，可缺省） |
 | 成长与记忆学习 | `assistant-memory-learning` 剩余额度/授权可用性、`assistant-growth-driver` 最近唤醒、`usageHealth` 与 `dreamingIntake` 统计 | `assistantMemoryLearning` + `assistantGrowthDriver`（可缺省） |
+| 成长计分卡（只读）（`GrowthReportCard`） | 支持切换 `7 天 / 14 天 / 30 天` 窗口，只读汇总五组闭环指标（任务与纠正/重做/撤回率及趋势、新增与有来源记忆/提示词暴露/同类纠正变化、候选生成/验收通过与失败/采用/回退、通知送达/反应/忽略与 `would-accept` 吻合度及 1/4 留出已决样本数、按冻结模型分层的成本与延迟均值/P50/P95）以及记忆通道 14 天预登记口径与主动放宽 20 样本门控，严格区分「无数据（`no-data`）」与「窗口内为 0（`zero`）」 | `growthReport`（复用 `assistantEvaluation` / `pluginControlPlane` / `assistantWorkItems` 只读接口与可选只读 SQLite，零 schema 变更） |
 | 本项目插件管理 | 本项目的 bundle 层（已安装/已启用/已加载、停用/启用、移除）、已加载条目（按 fiber 阶段的启用/禁用/诊断）、安装 `@dsh-enhanced/*`，以及对 live 字段的合并配置 | `pluginManager`（bundle/entry/安装）+ `settings.describe` / `settings.mutate`（live 字段） |
 | 趋势快照（只读） | 已封存的普通使用趋势快照：序号、计划、窗口边界、会话数、flags、按冻结模型分层的 DiD 与平行趋势、digest 前缀；每页 10 条，可翻到更早一页 | `pluginControlPlane.inspectCreatedCapabilityOrdinaryUseTrendSnapshots`（结构化读取，可缺省） |
 | intake 吻合度（只读） | 填写 Evaluation 作用域（workspace + preset）后读取：窗口、扫描通知数（是否截断）、intake 准入合计与按 level 的吻合 / 不吻合计数与比例、非 intake / 无法判断 / 他 scope 计数；只有计数，不含工作项 id 或正文 | `assistantEvaluation.inspectIntakeAttentionAgreement`（结构化读取，可缺省；开关关闭时显示未启用）+ `loader` 条目配置（只读开关，无需作用域） |
@@ -175,6 +176,8 @@ provider/model/reasoningEffort。没有 live 字段的条目不会出现在面�
 编辑或删除入口，封存由 Host 侧 owner 调用 Control Plane 完成。结果固定 `causal: false`，不作为采用、晋升或撤权依据。
 没有 Control Plane 显示未加载；查询被拒、已封存行未通过 digest 校验或返回值不合模式时显示「未通过校验」，不修复也不改写。
 
+成长计分卡卡片（`GrowthReportCard`）只读：提供 `7 天 / 14 天 / 30 天` 窗口切换与刷新按钮，经 `growthReport` invocation 聚合现有只读服务与账本快照，不新增或迁移任何表结构，也不发起模型调用或修改配置。任一数据源未加载、未配置或账本不存在时显式标为 `no-data`（「无数据（未启用或账本不存在）」），账本已就绪且窗口内事件数为 `0` 时显式标为 `zero`，绝不将缺失数据混作 0 发生率。
+
 intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation 作用域，唯一的「读取」按钮只调用 `intakeAgreement`，
 按 Evaluation 的默认摘要窗口读取；面板不写入、不采用、不发送。没有 Evaluation 显示未加载；Evaluation 未开启
 `intakeAttentionAgreementEnabled`（默认关，需同时开启 `notificationOutcomesEnabled`）时显示「未启用」；作用域为空、
@@ -208,7 +211,7 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   `assistant-delivery` 只读 SQLite（`delivery_principals` / `conversation_bindings`）与目标 profile 的
   `cordis.patch.yml`，按 `0o600` 权限创建时间戳备份并以临时文件+原子重命名更新 `cordis.patch.yml`
   （保留无关配置与 `!!js` 表达式；拒绝符号链接、拒绝 `~/.dsh` 越界数据库路径，绝不绕过
-  `assistantPolicy` 有限预算与三权分立）。
+  `assistantPolicy` 有限预算与三权分立）。**只读成长计分卡**（`growthReport` / `src/growth-report.ts`）仅调用宿主只读检查方法并在存在 `$DSH_HOME` 内已配置的 `personal-memory` / `preference-learning` SQLite 文件时以 `readOnly: true`（拒绝符号链接与越界路径）统计记忆与偏好暴露计数，不创建数据库、不写 WAL 且不改变任何 schema。
 - **子进程、网络与版本检查边界**（`src/probes.ts`、`src/upgrade-probe.ts`）：
   - 本机编程 CLI 就绪探测仅在主人显式触发时执行无 shell（`execFile`）只读命令（`traex login status`
     或 `agy --version` + `agy models`），传递最小环境变量白名单、有限超时与 15 秒缓存；绝不触发模型推理。
@@ -245,7 +248,7 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
 `tests/coding-tools-service.spec.ts` 与 `tests/autonomy-service.spec.ts` 覆盖 `agy` 配置、默认路由切换、
 无交互 CLI 探测（缓存 / 去重 / 敏感环境变量剥离）以及 Dreaming / Proactive / WP22 / WorkItems / MemoryLearning /
-GrowthDriver 读写入契约与 fail-closed 降级；`tests/settings-slots.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、
+GrowthDriver 读写入契约与 fail-closed 降级；`tests/growth-report.spec.ts` 覆盖只读成长计分卡在 `no-data`、`zero` 与真实窗口样本下的聚合及口径门控；`tests/settings-slots.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、
 模型页脚与 6 个插件详情槽。
 `tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：降级消息列表与 composer 发送
 (`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、降级窗口语音不可用禁用/

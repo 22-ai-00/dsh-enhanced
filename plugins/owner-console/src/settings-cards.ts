@@ -6,8 +6,8 @@ import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type Co
 import {
   AUTONOMY_TIER_DEFAULTS,
   type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction, type AutonomySetupStatus,
-  type CodingToolProbe, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
-  type OwnerConsoleIntakeAgreement, type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleStatus,
+  type CodingToolProbe, type GrowthDataState, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
+  type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement, type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus,
 } from './typert.js'
@@ -154,6 +154,7 @@ export type ConsoleRemote = Readonly<{
   checkSelfUpgrade?(force: boolean): Promise<RemoteResult<SelfUpgradeStatus>>
   dryRunSelfUpgrade?(): Promise<RemoteResult<SelfUpgradePreview>>
   runSelfUpgrade?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  growthReport?(workspace: string, preset: string, sinceDays: number): Promise<RemoteResult<OwnerConsoleGrowthReport>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -1442,6 +1443,117 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
           }, '准备自助升级'))))
 }
 
+export function growthDataStatePill(state: GrowthDataState): Readonly<{ label: string; tone: StatusTone }> {
+  if (state === 'data') return { label: '有数据', tone: 'ok' }
+  if (state === 'zero') return { label: '0（账本就绪，窗口内无记录）', tone: 'neutral' }
+  return { label: '无数据（未启用/无账本）', tone: 'warn' }
+}
+
+function formatGrowthPct(ratePpm: number | null): string {
+  return ratePpm === null ? '—' : `${(ratePpm / 10_000).toFixed(1)}%`
+}
+
+function formatGrowthSuppliers(suppliers: OwnerConsoleGrowthReport['suppliers']): string {
+  const cost = (suppliers.totalCostUsdMicros / 1_000_000).toFixed(6)
+  if (suppliers.suppliers.length === 0) return `运行 ${suppliers.totalRuns} 次 · $${cost}`
+  const detail = suppliers.suppliers
+    .map(s => `${s.supplier}(${s.runs}次${s.p50LatencyMs === null ? '' : `,p50=${s.p50LatencyMs}ms`})`)
+    .join('、')
+  return `运行 ${suppliers.totalRuns} 次 · $${cost} · ${detail}`
+}
+
+export function GrowthReportCard({ remote }: Readonly<{ remote: ConsoleRemote }>) {
+  const [sinceDays, setSinceDays] = useState<7 | 14 | 30>(7)
+  const [report, setReport] = useState<OwnerConsoleGrowthReport>()
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState('')
+  const request = useRef(0)
+
+  const load = (days: 7 | 14 | 30) => {
+    if (typeof remote.growthReport !== 'function') return
+    const id = ++request.current
+    setBusy(true)
+    setFailed('')
+    void remote.growthReport('', '', days).then(res => {
+      if (id !== request.current) return
+      setBusy(false)
+      if (res.ok) setReport(res.value)
+      else setFailed(remoteFailureText(res.error))
+    }, cause => {
+      if (id !== request.current) return
+      setBusy(false)
+      setFailed(cause instanceof Error ? cause.message : String(cause))
+    })
+  }
+
+  useEffect(() => {
+    load(sinceDays)
+    return subscribeConsoleRefresh(remote, () => load(sinceDays))
+  }, [remote, sinceDays])
+
+  const stateBadge = (state: GrowthDataState) => {
+    const info = growthDataStatePill(state)
+    return pill(info.label, info.tone)
+  }
+
+  const windowButton = (days: 7 | 14 | 30, label: string) => el('button', {
+    type: 'button',
+    style: idle(sinceDays === days ? primaryButtonStyle : buttonStyle, busy),
+    disabled: busy,
+    onClick: () => setSinceDays(days),
+  }, label)
+
+  return el('div', { 'data-owner-console-growth-report': '' },
+    card('成长计分卡（只读）',
+      el('p', { style: hintStyle }, '只汇总既有只读账本，不修改存储结构；明确区分「无数据（未启用/无账本）」与「数据为 0（窗口内无记录）」。'),
+      el('div', { style: actionsStyle },
+        windowButton(7, '最近 7 天'),
+        windowButton(14, '最近 14 天（验收窗口）'),
+        windowButton(30, '最近 30 天'),
+        typeof remote.growthReport === 'function' ? el('button', {
+          type: 'button',
+          style: idle(buttonStyle, busy),
+          disabled: busy,
+          onClick: () => load(sinceDays),
+        }, busy ? '读取中…' : '刷新读数') : null),
+      failed !== '' ? el('p', { role: 'alert', style: { margin: 0, fontSize: 12, color: danger } }, `读取计分卡失败：${failed}`) : null,
+      typeof remote.growthReport !== 'function'
+        ? placeholder('当前 Host 尚未暴露只读成长计分卡接口；可在终端运行 dsh-rsi growth-report --since 7d。')
+        : report === undefined
+          ? placeholder(busy ? '正在汇总跨账本成长指标…' : '点击“刷新读数”加载最近窗口的成长指标。')
+          : el('div', { style: gridStyle },
+            el('div', { style: listStyle },
+              row('总体数据状态', stateBadge(report.overallState)),
+              row('1. 任务与主人反馈', el('span', { style: actionsStyle },
+                stateBadge(report.tasks.state),
+                report.tasks.state === 'no-data' ? null : el('span', { style: monoMuted },
+                  `任务 ${report.tasks.totalTasks} · 纠正率 ${formatGrowthPct(report.tasks.correctionRatePpm)}（${report.tasks.ownerCorrections}） · 重做率 ${formatGrowthPct(report.tasks.reworkRatePpm)} · 撤回率 ${formatGrowthPct(report.tasks.withdrawalRatePpm)} · 趋势 ${report.tasks.trend === 'improving' ? '改善' : report.tasks.trend === 'regressing' ? '退化' : report.tasks.trend === 'flat' ? '持平' : '样本不足'}`))),
+              row('2. 记忆与提示词暴露', el('span', { style: actionsStyle },
+                stateBadge(report.memory.state),
+                report.memory.state === 'no-data' ? null : el('span', { style: monoMuted },
+                  `新增 ${report.memory.newMemories}（有来源 ${report.memory.sourcedMemories} / 撤回 ${report.memory.withdrawnOrRemovedMemories}） · 暴露 ${report.memory.promptExposures} 次 · 暴露后同类纠正 ${report.memory.postExposureSameClassCorrections}（${report.memory.sameClassCorrectionTrend === 'reduced' ? '已减少' : report.memory.sameClassCorrectionTrend === 'unchanged' ? '持平' : report.memory.sameClassCorrectionTrend === 'increased' ? '上升' : '样本不足'}）`))),
+              row('3. 候选生成与采用', el('span', { style: actionsStyle },
+                stateBadge(report.candidates.state),
+                report.candidates.state === 'no-data' ? null : el('span', { style: monoMuted },
+                  `候选 ${report.candidates.generated} · 通过 ${report.candidates.verificationPassed} · 失败 ${report.candidates.verificationFailed} · 采用 ${report.candidates.adopted} · 回滚 ${report.candidates.rolledBack}`))),
+              row('4. 通知与 would-accept 吻合度', el('span', { style: actionsStyle },
+                stateBadge(report.notifications.state),
+                report.notifications.state === 'no-data' ? null : el('span', { style: monoMuted },
+                  `送达 ${report.notifications.delivered}/${report.notifications.total} · 反应 ${report.notifications.reacted + report.notifications.accepted} · 忽略 ${report.notifications.ignoredOrExpired} · 吻合率 ${formatGrowthPct(report.notifications.agreementPpm)}（留出样本 ${report.notifications.holdoutDecidedSamples}/${report.notifications.looseningMinHoldoutSamples}）`))),
+              row('5. 成本与延迟（按冻结 Supplier）', el('span', { style: actionsStyle },
+                stateBadge(report.suppliers.state),
+                report.suppliers.state === 'no-data' ? null : el('span', { style: monoMuted },
+                  formatGrowthSuppliers(report.suppliers)))),
+              row('记忆通道预登记门控（14d）', pill(
+                report.memoryLaneGate.status === 'passed' ? '已达标'
+                  : report.memoryLaneGate.status === 'attention-needed' ? '存在冲突待排查'
+                    : report.memoryLaneGate.status === 'collecting' ? `采集中（纠正 ${report.memoryLaneGate.authenticatedCorrections}/${report.memoryLaneGate.minAuthenticatedCorrections} · 记忆 ${report.memoryLaneGate.sourcedMemories}/${report.memoryLaneGate.minSourcedMemories} · 暴露 ${report.memoryLaneGate.promptExposures}/${report.memoryLaneGate.minPromptExposures}）`
+                      : '尚无账本数据',
+                report.memoryLaneGate.status === 'passed' ? 'ok' : report.memoryLaneGate.status === 'attention-needed' ? 'error' : 'neutral',
+              ))),
+            el('p', { style: { ...hintStyle, fontFamily: monoFont } }, `终端复现命令：${report.cliCommand}`))))
+}
+
 export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
   remote: ConsoleRemote
   navigation: OwnerConsoleNavigation
@@ -1475,6 +1587,7 @@ export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
     el('button', { style: buttonStyle, onClick: leaveThen(navigation.openPlugins) }, '插件页'),
     el('button', { style: buttonStyle, disabled: ctrl.busy, onClick: () => void ctrl.refresh() }, '刷新'))),
   jsx(StatusBanners, { ctrl }),
+  jsx(GrowthReportCard, { remote }),
   jsx(AutonomyWizardCard, { ctrl }),
   jsx(SelfUpgradeCard, { ctrl }),
   jsx(CodingToolsCard, { ctrl }),

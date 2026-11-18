@@ -7,6 +7,12 @@ import { createInterface } from 'node:readline/promises'
 import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus } from './diagnose.ts'
 import { collectLiveDoctorReport, formatLiveDoctorReport } from './doctor-live.ts'
+import {
+  collectGrowthReport,
+  formatGrowthReport,
+  parseGrowthNow,
+  parseGrowthSince,
+} from './growth-report.ts'
 import { openWebProfile } from './open.ts'
 import { formatUpgradeReport, runUpgrade, validateRegistryUrl, type UpgradeAction, type UpgradeDeps } from './upgrade.ts'
 import { resolveDshHome } from './paths.ts'
@@ -38,6 +44,15 @@ export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
 export { collectStatus, runDoctor, formatStatus, formatFindings } from './diagnose.ts'
 export { collectLiveDoctorReport, formatLiveDoctorReport, redactUrlToken } from './doctor-live.ts'
+export {
+  collectGrowthReport,
+  formatGrowthReport,
+  parseGrowthNow,
+  parseGrowthSince,
+  type GrowthReport,
+  type GrowthReportOptions,
+  type GrowthDataState,
+} from './growth-report.ts'
 export { inspectBoundHostRuntime } from './install-host.ts'
 export { openWebProfile, canOpenBrowser, defaultOpenBrowser } from './open.ts'
 export { formatSelfUpdateReport, runSelfUpdate, RSI_CLI_PACKAGE } from './update.ts'
@@ -78,6 +93,8 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
               受管服务状态、凭据键名与生命周期残留（只读；支持 --json）
   doctor      全面实时诊断：检查 .dsh-rsi-host.json、--dump-config、凭据权限与可用性、
               traex/agy 登录状态、autonomy readiness、端口与系统前提、崩溃日志（支持 --json）
+  growth-report 只读成长计分卡：汇总任务纠正率与趋势、记忆写入与提示词暴露、候选验收与采用、
+              通知反馈与 would-accept 吻合度样本、按冻结 supplier 的成本与延迟（支持 --since 7d --json）
   start       启动已注册的受管常驻服务（不改动服务定义，未注册时报错并给出指引）
   stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
   restart     重启受管常驻服务（配置/插件变更后生效的常用方式）
@@ -97,7 +114,11 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   --profile <name>    仅操作单个 profile（purge/reinstall 的 purge 阶段默认全量）
   --dry-run           只打印将执行的动作，不做任何修改
   --yes               purge/reinstall 跳过交互确认（reinstall 时同时透传给安装器）
-  --json              status / doctor 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+  --json              status / doctor / upgrade / growth-report 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+
+growth-report 选项：
+  --since <时长>      统计窗口（如 24h、7d、14d、30d、2w；默认 7d，范围 1h..365d）
+  --now <时间>        可选参考时间（毫秒时间戳或 ISO-8601），用于确定性复现读数
 
 open / web-url 选项：
   --wait <秒>         等待受管服务输出 live Web URL 的最长时间（0..60 秒；open 默认 8，web-url 默认 0）
@@ -192,16 +213,20 @@ interface ParsedArgs {
   registry?: string
   /** upgrade：调用方确认目标 DSH_HOME 已停服。 */
   confirmDshHomeStopped: boolean
+  /** growth-report：窗口规格（如 7d、14d）。 */
+  since?: string
+  /** growth-report：显式参考时钟毫秒时间戳。 */
+  nowMs?: number
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
 
 const KNOWN_COMMANDS = new Set([
-  'status', 'doctor', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
+  'status', 'doctor', 'growth-report', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
   'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait', '--registry'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait', '--registry', '--since', '--now'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
 const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped'])
@@ -222,6 +247,8 @@ function assignValueOption(result: ParsedArgs, token: string, value: string): vo
   if (token === '--version') { result.targetVersion = value; return }
   if (token === '--dsh-version') { result.dshVersion = value; return }
   if (token === '--registry') { result.registry = value; return }
+  if (token === '--since') { result.since = parseGrowthSince(value).spec; return }
+  if (token === '--now') { result.nowMs = parseGrowthNow(value); return }
   if (token === '--wait') {
     if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--wait 需要一个非负整数秒数，收到：${value}`)
     const parsedWait = Number(value)
@@ -362,8 +389,11 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
   }
-  if (result.json && result.command !== 'status' && result.command !== 'doctor' && result.command !== 'upgrade') {
-    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade 命令（收到：${result.command}）`)
+  if (result.json && result.command !== 'status' && result.command !== 'doctor' && result.command !== 'upgrade' && result.command !== 'growth-report') {
+    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report 命令（收到：${result.command}）`)
+  }
+  if ((result.since !== undefined || result.nowMs !== undefined) && result.command !== 'growth-report') {
+    throw new PurgeError(`--since 与 --now 仅适用于 growth-report 命令（收到：${result.command}）`)
   }
   if (result.check && result.command !== 'upgrade') {
     throw new PurgeError(`--check 仅适用于 upgrade 命令（收到：${result.command}）`)
@@ -905,6 +935,16 @@ export async function main(
           env,
         })
         process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatLiveDoctorReport(report)}\n`)
+        return 0
+      }
+      case 'growth-report': {
+        const report = await collectGrowthReport({
+          dshHome: args.dshHome,
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+          ...(args.since !== undefined ? { since: args.since } : {}),
+          ...(args.nowMs !== undefined ? { now: args.nowMs } : {}),
+        })
+        process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatGrowthReport(report)}\n`)
         return 0
       }
       case 'open': {

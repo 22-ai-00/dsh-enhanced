@@ -13,6 +13,7 @@ dsh-rsi install                     # 交互式安装，默认 supervised 场景
 dsh-rsi open --profile web          # 打开本地 Web UI 与「文鳐」控制台
 dsh-rsi status --json               # 结构化查看 Home、.dsh-rsi-host.json 绑定与服务状态
 dsh-rsi doctor --json               # 只读实时体检（配置、traex/agy 登录、autonomy、OS 前提）
+dsh-rsi growth-report --since 7d    # 只读成长计分卡（纠正率、记忆召回、候选验收、通知与成本）
 dsh-rsi logs --profile web            # 查看日志尾部
 dsh-rsi web-url --profile web         # 仅读取受管服务最近的 Web 授权 URL
 dsh-rsi restart --profile web         # 重启已注册的常驻服务
@@ -20,7 +21,7 @@ dsh-rsi restart --profile web         # 重启已注册的常驻服务
 
 首次 `supervised` 安装需要在交互式终端完成飞书 owner 配对和模型配置；未完成配对时，`--yes` 不会跳过 onboarding。新会话默认 Full access，可访问任意文件和网络，不逐次审批；按需收紧权限见[安装指南](../../scripts/install/README.md)。完整安装参数用 `dsh-rsi install --help` 查看。若只需轻量场景，可运行 `dsh-rsi install --scenario core --yes`；本地 checkout 用 `dsh-rsi install --local <checkout目录>`。
 
-Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制器；当前拒绝 cgroup v2，不会自动委派或提权。完整准备条件见[安装指南](../../scripts/install/README.md)。
+Linux native 安装及运行要求已委派给当前用户的 cgroup v1 四控制器或统一 cgroup v2 子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 或 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`），不会自动委派或提权。完整准备条件见[安装指南](../../scripts/install/README.md)。
 
 ## 常用命令
 
@@ -28,6 +29,7 @@ Linux native 安装及运行要求已委派给当前用户的 cgroup v1 控制�
 | --- | --- |
 | `status`（省略命令时默认） | 只读查看 DSH Home、`.dsh-rsi-host.json` 私有 Host 绑定、`.dsh-enhanced/install-intent.json`、profile、安装形态（npm/local）、受管服务、`.credentials.yaml` 键名（不含密钥值）及生命周期残留；支持 `--json`。 |
 | `doctor` | 全面实时只读诊断：检查 `.dsh-rsi-host.json` 绑定 Host、`--dump-config` 组合（含 `traex`/`agy`、`dreaming` 前置）、凭据权限与环境变量、`traex login status` 与无交互 `agy models`、`dsh-autonomy-doctor --readiness`、回环监听与脱敏 Web URL、OS 前提及错误日志；支持 `--json`（隐藏 token 与密钥）。 |
+| `growth-report` | 只读成长计分卡（零 schema 变更）：汇总窗口（`--since <7d\|14d\|24h\|...>`，默认 `7d`；可选 `--now <ms\|iso>` 固定重放时刻）内的任务与纠正/重做/撤回率及趋势、新增与有来源记忆及提示词暴露次数、候选生成/验收通过与失败/采用/回退、通知送达/反应/忽略与 `would-accept` 吻合度及 1/4 留出已决样本数、按冻结模型分层的成本与延迟分布，并核对记忆通道 14 天预登记口径与主动放宽 20 样本门控；严格区分 `no-data` 与 `zero`，支持 `--json`。 |
 | `open` | 读取 `.dsh-rsi-host.json` 绑定 Host 打开 Web UI 与「文鳐」Owner Console：受管服务等待 URL 最多 `--wait` 秒（默认 `8`），未注册服务的轻量场景（`core`/`web`/`autonomy`）在前台启动并捕获地址；桌面上自动拉起浏览器（可用 `--no-browser` 跳过，按凭据保护带 token URL）。 |
 | `logs` | 查看各 profile 的 Host 日志尾部；`--lines <n>` 设置每份日志行数（1–10000，默认 200），`--errors-only` 只看错误日志。 |
 | `web-url` | 从受管服务日志取最近的、带 token 的 Web 授权 URL（支持 `--wait <0..60>`，默认 `0`）；请按凭据保护该 URL。服务未运行时先 `start`，旧 URL 重启后可能失效。 |
@@ -79,7 +81,7 @@ dsh-rsi purge --yes --keep-keychain      # 保留外部凭据
 
 ## 选项与退出码
 
-用法：`dsh-rsi [全局选项] <命令> [命令参数]`。`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--json` 让 `status` / `doctor` 输出结构化 JSON；`--wait <0..60>` 与 `--no-browser` 控制 `open` / `web-url` 行为；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
+用法：`dsh-rsi [全局选项] <命令> [命令参数]`。`--dsh-home <path>` 选择 Home（默认 `$DSH_HOME`，否则 `~/.dsh`）；`--profile <name>` 选择 profile；`--json` 让 `status` / `doctor` / `upgrade` / `growth-report` 输出结构化 JSON；`--since` 与 `--now` 控制 `growth-report` 统计窗口；`--wait <0..60>` 与 `--no-browser` 控制 `open` / `web-url` 行为；`--dry-run` 预览操作；`--yes` 适用于清理确认并在安装时透传。`-h` / `--help` 查看 CLI 帮助，`install --help` 查看安装器帮助。`--capabilities` 是供救机脚本使用的只读 JSON 探测接口。
 
 | 退出码 | 含义 |
 | --- | --- |

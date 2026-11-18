@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(23)
+    expect(asyncMethods).toHaveLength(24)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -106,6 +106,8 @@ describe('dsh-enhanced-owner-console', () => {
         'action', 'tier', 'provider', 'model', 'reasoningEffort',
         'enableMemoryLearning', 'enableDreaming', 'enableGrowth', 'workItemExperiences', 'customBudget',
       ])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/growthReport'))
+      .toEqual(['workspace', 'preset', 'sinceDays'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/checkSelfUpgrade')).toEqual(['force'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/dryRunSelfUpgrade')).toEqual([])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/runSelfUpgrade')).toEqual(['confirmed'])

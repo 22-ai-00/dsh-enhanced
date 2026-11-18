@@ -424,6 +424,114 @@ export const SelfUpgradePreviewSchema = z.object({
 }).readonly()
 export type SelfUpgradePreview = Readonly<z.infer<typeof SelfUpgradePreviewSchema>>
 
+export const GROWTH_DATA_STATES = ['no-data', 'zero', 'data'] as const
+export type GrowthDataState = typeof GROWTH_DATA_STATES[number]
+const growthDataState = z.enum(GROWTH_DATA_STATES)
+const nullablePpm = z.number().int().min(0).max(1_000_000).nullable()
+
+export const OwnerConsoleGrowthSupplierSchema = z.object({
+  supplier: z.string().min(1).max(256),
+  runs: z.number().int().nonnegative(),
+  costUsdMicros: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative(),
+  latencySamples: z.number().int().nonnegative(),
+  avgLatencyMs: z.number().int().nonnegative().nullable(),
+  p50LatencyMs: z.number().int().nonnegative().nullable(),
+  p95LatencyMs: z.number().int().nonnegative().nullable(),
+}).readonly()
+export type OwnerConsoleGrowthSupplier = Readonly<z.infer<typeof OwnerConsoleGrowthSupplierSchema>>
+
+export const OwnerConsoleGrowthReportSchema = z.object({
+  protocol: z.literal('owner-console/growth-report/v1'),
+  sinceDays: z.number().int().min(1).max(365),
+  fromAt: z.number().int().nonnegative(),
+  toAt: z.number().int().nonnegative(),
+  resolvedScope: z.object({
+    workspace: z.string().max(4_096),
+    preset: z.string().max(200),
+  }).readonly().optional(),
+  overallState: growthDataState,
+  cliCommand: z.string().max(256),
+  tasks: z.object({
+    state: growthDataState,
+    totalTasks: z.number().int().nonnegative(),
+    achieved: z.number().int().nonnegative(),
+    partial: z.number().int().nonnegative(),
+    notAchieved: z.number().int().nonnegative(),
+    conflicted: z.number().int().nonnegative(),
+    ownerCorrections: z.number().int().nonnegative(),
+    ownerWithdrawals: z.number().int().nonnegative(),
+    reworkTasks: z.number().int().nonnegative(),
+    correctionRatePpm: nullablePpm,
+    reworkRatePpm: nullablePpm,
+    withdrawalRatePpm: nullablePpm,
+    previousTotalTasks: z.number().int().nonnegative(),
+    previousCorrectionRatePpm: nullablePpm,
+    correctionRateDeltaPpm: z.number().int().min(-1_000_000).max(1_000_000).nullable(),
+    trend: z.enum(['improving', 'regressing', 'flat', 'insufficient-data']),
+  }).readonly(),
+  memory: z.object({
+    state: growthDataState,
+    activeMemoriesTotal: z.number().int().nonnegative(),
+    newMemories: z.number().int().nonnegative(),
+    sourcedMemories: z.number().int().nonnegative(),
+    withdrawnOrRemovedMemories: z.number().int().nonnegative(),
+    activePreferenceOverlays: z.number().int().nonnegative(),
+    promptExposures: z.number().int().nonnegative(),
+    postExposureSameClassCorrections: z.number().int().nonnegative(),
+    postExposureCorrectionRatePpm: nullablePpm,
+    sameClassCorrectionTrend: z.enum(['reduced', 'unchanged', 'increased', 'insufficient-data']),
+  }).readonly(),
+  candidates: z.object({
+    state: growthDataState,
+    generated: z.number().int().nonnegative(),
+    verificationPassed: z.number().int().nonnegative(),
+    verificationFailed: z.number().int().nonnegative(),
+    adopted: z.number().int().nonnegative(),
+    rolledBack: z.number().int().nonnegative(),
+  }).readonly(),
+  notifications: z.object({
+    state: growthDataState,
+    total: z.number().int().nonnegative(),
+    delivered: z.number().int().nonnegative(),
+    reacted: z.number().int().nonnegative(),
+    accepted: z.number().int().nonnegative(),
+    rejected: z.number().int().nonnegative(),
+    ignoredOrExpired: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    wouldAcceptTotal: z.number().int().nonnegative(),
+    agreementDecided: z.number().int().nonnegative(),
+    agreementAgreed: z.number().int().nonnegative(),
+    agreementDisagreed: z.number().int().nonnegative(),
+    agreementPpm: nullablePpm,
+    holdoutDecidedSamples: z.number().int().nonnegative(),
+    looseningMinHoldoutSamples: z.number().int().positive(),
+    looseningGateStatus: z.enum(['insufficient-samples', 'ready-for-review']),
+  }).readonly(),
+  suppliers: z.object({
+    state: growthDataState,
+    totalRuns: z.number().int().nonnegative(),
+    totalCostUsdMicros: z.number().int().nonnegative(),
+    suppliers: z.array(OwnerConsoleGrowthSupplierSchema).max(32).readonly(),
+  }).readonly(),
+  memoryLaneGate: z.object({
+    targetWindowDays: z.number().int().positive(),
+    windowSatisfied: z.boolean(),
+    authenticatedCorrections: z.number().int().nonnegative(),
+    minAuthenticatedCorrections: z.number().int().positive(),
+    sourcedMemories: z.number().int().nonnegative(),
+    minSourcedMemories: z.number().int().positive(),
+    promptExposures: z.number().int().nonnegative(),
+    minPromptExposures: z.number().int().positive(),
+    correctionRateDropped: z.boolean(),
+    conflictedTasks: z.number().int().nonnegative(),
+    status: z.enum(['no-data', 'collecting', 'passed', 'attention-needed']),
+  }).readonly(),
+}).readonly()
+export type OwnerConsoleGrowthReport = Readonly<z.infer<typeof OwnerConsoleGrowthReportSchema>>
+
 /** Bounds of the read-only trend snapshot page; the control plane enforces the same page limit. */
 export const TREND_SNAPSHOT_PAGE_MAX = 100
 const DIGEST = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -803,6 +911,18 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 781, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/growthReport',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'growthReport',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'workspace', wire: 'workspace', source: 'json', codec: codec('owner-console#growthWorkspace', () => z.string().max(4_096)) },
+        { name: 'preset', wire: 'preset', source: 'json', codec: codec('owner-console#growthPreset', () => z.string().max(200)) },
+        { name: 'sinceDays', wire: 'sinceDays', source: 'json', codec: codec('owner-console#growthSinceDays', () => z.number().int().min(1).max(365)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleGrowthReport', () => OwnerConsoleGrowthReportSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 912, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

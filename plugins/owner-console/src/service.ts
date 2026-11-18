@@ -21,8 +21,9 @@ import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus } from './autonom
 import { SelfUpgradeProber } from './upgrade-probe.js'
 import type {
   AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
-  AutonomySetupStatus, SelfUpgradePreview, SelfUpgradeStatus,
+  AutonomySetupStatus, OwnerConsoleGrowthReport, SelfUpgradePreview, SelfUpgradeStatus,
 } from './typert.js'
+import { readOwnerConsoleGrowthReport } from './growth-report.js'
 import {
   executeAttentionQuestionReply, executeDreamingIdeaAction, executeProactiveDraftAction,
   readAssistantOverview, type DreamingIdeaAction,
@@ -694,6 +695,11 @@ export class OwnerConsoleService extends TypertRemoteService {
   /** Explicitly trigger detached local/macOS upgrade (or return out-of-band CLI guidance on frozen systemd). */
   async runSelfUpgrade(confirmed: boolean): Promise<OwnerConsoleWriteResult> {
     return this.upgradeProber.trigger(this.host, confirmed)
+  }
+
+  /** Read-only cross-ledger growth scorecard (tasks/corrections, memory/exposure, candidates, notifications, suppliers). */
+  async growthReport(workspace: string, preset: string, sinceDays: number): Promise<OwnerConsoleGrowthReport> {
+    return readOwnerConsoleGrowthReport(this.host, workspace, preset, sinceDays)
   }
 }
 
