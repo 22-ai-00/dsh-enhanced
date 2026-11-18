@@ -9,12 +9,12 @@ import {
   type CodingToolProbe, type GrowthDataState, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
   type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement, type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
-  type SelfUpgradePreview, type SelfUpgradeStatus,
+  type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
 } from './typert.js'
 import {
   accent, actionsStyle, border, buttonStyle, caption, card, danger, dangerButtonStyle, el, field, gridStyle,
   hairline, hintStyle, idle, ink, inputStyle, listStyle, monoFont, monoMuted, muted, pill, placeholder,
-  primaryButtonStyle, row, subheadStyle, surface, tint, type StatusTone,
+  primaryButtonStyle, row, subheadStyle, sunken, surface, tint, type StatusTone,
 } from './ui.js'
 
 export function feishuSecretRefs(source: 'env' | 'handle', env: string,
@@ -155,6 +155,9 @@ export type ConsoleRemote = Readonly<{
   dryRunSelfUpgrade?(): Promise<RemoteResult<SelfUpgradePreview>>
   runSelfUpgrade?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   growthReport?(workspace: string, preset: string, sinceDays: number): Promise<RemoteResult<OwnerConsoleGrowthReport>>
+  setupDoctor?(): Promise<RemoteResult<SetupDoctorReport>>
+  applyDoctorRepair?(issueIds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  configureFeishuEasy?(appId: string, appSecret: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -187,6 +190,8 @@ export interface ConsoleController {
   readonly autonomySetup: AutonomySetupStatus | undefined
   readonly upgradeStatus: SelfUpgradeStatus | undefined
   readonly upgradePreview: SelfUpgradePreview | undefined
+  readonly doctorReport: SetupDoctorReport | undefined
+  readonly checkingDoctor: boolean
   readonly traexProbe: CodingToolProbe | undefined
   readonly agyProbe: CodingToolProbe | undefined
   readonly probingTool: 'traex' | 'agy' | undefined
@@ -198,7 +203,8 @@ export interface ConsoleController {
   setError(value: string): void
   setNotice(value: string): void
   refresh(): Promise<void>
-  probeTool(tool: 'traex' | 'agy', command: string, force?: boolean): Promise<void>
+  checkDoctor(): Promise<void>
+  probeTool(tool: 'traex' | 'agy', command: string, force?: boolean, announce?: boolean): Promise<void>
   checkUpgrade(force?: boolean): Promise<void>
   previewUpgrade(): Promise<void>
   run(action: () => Promise<RemoteResult<OwnerConsoleWriteResult>>): Promise<void>
@@ -216,6 +222,8 @@ export function useConsoleActions(
   const [autonomySetup, setAutonomySetup] = useState<AutonomySetupStatus>()
   const [upgradeStatus, setUpgradeStatus] = useState<SelfUpgradeStatus>()
   const [upgradePreview, setUpgradePreview] = useState<SelfUpgradePreview>()
+  const [doctorReport, setDoctorReport] = useState<SetupDoctorReport>()
+  const [checkingDoctor, setCheckingDoctor] = useState(false)
   const [traexProbe, setTraexProbe] = useState<CodingToolProbe>()
   const [agyProbe, setAgyProbe] = useState<CodingToolProbe>()
   const [probingTool, setProbingTool] = useState<'traex' | 'agy'>()
@@ -240,6 +248,8 @@ export function useConsoleActions(
         ? remote.autonomySetupStatus() : undefined
       const upgradePromise = typeof remote.checkSelfUpgrade === 'function'
         ? remote.checkSelfUpgrade(false) : undefined
+      const doctorPromise = typeof remote.setupDoctor === 'function'
+        ? remote.setupDoctor() : undefined
       if (statusPromise !== undefined) {
         const result = await statusPromise
         if (!mounted.current) return
@@ -258,6 +268,10 @@ export function useConsoleActions(
         const upg = await upgradePromise
         if (mounted.current && upg.ok) setUpgradeStatus(upg.value)
       }
+      if (doctorPromise !== undefined) {
+        const doc = await doctorPromise
+        if (mounted.current && doc.ok) setDoctorReport(doc.value)
+      }
     } catch (cause) {
       if (mounted.current) {
         setError(cause instanceof Error ? `暂时无法读取状态：${cause.message}` : '暂时无法读取状态，稍后重试。')
@@ -270,24 +284,40 @@ export function useConsoleActions(
     return subscribeConsoleRefresh(remote, () => { void refresh().catch(() => undefined) })
   }, [remote])
 
-  const probeTool = async (tool: 'traex' | 'agy', command: string, force = true) => {
+  const checkDoctor = async () => {
+    if (typeof remote.setupDoctor !== 'function') return
+    setCheckingDoctor(true)
+    try {
+      const result = await remote.setupDoctor()
+      if (!mounted.current) return
+      if (result.ok) setDoctorReport(result.value)
+      else setError(`系统体检失败（${remoteFailureText(result.error)}）`)
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : '系统体检失败')
+    } finally {
+      if (mounted.current) setCheckingDoctor(false)
+    }
+  }
+
+  const probeTool = async (tool: 'traex' | 'agy', command: string, force = true, announce = force) => {
     if (typeof remote.probeCodingTool !== 'function') {
-      setError('当前 Host 版本暂未暴露编程工具实时探测接口')
+      if (announce) setError('当前 Host 版本暂未暴露编程工具实时探测接口')
       return
     }
-    setProbingTool(tool); setError(''); setNotice('')
+    setProbingTool(tool)
+    if (announce) { setError(''); setNotice('') }
     try {
       const result = await remote.probeCodingTool(tool, command, force)
       if (!mounted.current) return
       if (!result.ok) {
-        setError(`探测失败（${remoteFailureText(result.error)}）`)
+        if (announce) setError(`探测失败（${remoteFailureText(result.error)}）`)
         return
       }
       if (tool === 'traex') setTraexProbe(result.value)
       else setAgyProbe(result.value)
-      setNotice(result.value.summary)
+      if (announce) setNotice(result.value.summary)
     } catch (cause) {
-      if (mounted.current) setError(cause instanceof Error ? cause.message : '探测失败')
+      if (mounted.current && announce) setError(cause instanceof Error ? cause.message : '探测失败')
     } finally {
       if (mounted.current) setProbingTool(undefined)
     }
@@ -369,8 +399,9 @@ export function useConsoleActions(
 
   return {
     remote, navigation, status, overview, autonomySetup, upgradeStatus, upgradePreview,
+    doctorReport, checkingDoctor,
     traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade,
-    busy, error, notice, setError, setNotice, refresh, probeTool, checkUpgrade, previewUpgrade,
+    busy, error, notice, setError, setNotice, refresh, checkDoctor, probeTool, checkUpgrade, previewUpgrade,
     run, runInstall, confirmOwner,
   }
 }
@@ -588,15 +619,40 @@ export function IntakeAgreementCard({ remote, availability }: Readonly<{ remote:
     intakeAgreementHistoryView(history, historyFailed))
 }
 
+function copyCommandToClipboard(command: string, ctrl: Pick<ConsoleController, 'setNotice'>): void {
+  const nav = (globalThis as unknown as { navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } } }).navigator
+  if (typeof nav?.clipboard?.writeText === 'function') {
+    void nav.clipboard.writeText(command).then(
+      () => { ctrl.setNotice(`已复制命令，请粘贴到本机终端执行：${command}`) },
+      () => { ctrl.setNotice(`请在本机终端执行：${command}`) },
+    )
+    return
+  }
+  ctrl.setNotice(`请在本机终端执行：${command}`)
+}
+
+function commandCopyRow(command: string, ctrl: Pick<ConsoleController, 'setNotice'>, busy: boolean, onRecheck?: () => void) {
+  return el('div', { style: { ...actionsStyle, padding: '6px 10px', borderRadius: 8, background: tint(accent, 6), border: `1px solid ${tint(accent, 28)}` } },
+    el('code', { style: { fontFamily: monoFont, fontSize: 12, color: ink } }, command),
+    el('button', { type: 'button', style: buttonStyle, disabled: busy,
+      onClick: () => copyCommandToClipboard(command, ctrl) }, '复制登录命令'),
+    onRecheck === undefined ? null : el('button', { type: 'button', style: primaryButtonStyle, disabled: busy,
+      onClick: onRecheck }, '我已登录，重新探测'))
+}
+
 function repairSection(ctrl: ConsoleController, state: ComponentState, packageName: string) {
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, ctrl.busy)
   return el('div', { style: { display: 'grid', gap: 8 } },
     el('p', { style: hintStyle }, state.stalled
       ? `条目加载后配置表单才会出现。${missingRemedy(state) === '' ? '' : `${missingRemedy(state)}。`}修复依赖后重启 profile。`
       : `该条目当前不可写：${state.label}。`),
-    state.missing.length === 0 ? null : el('div', { style: actionsStyle },
+    state.missing.length === 0 && typeof ctrl.remote.applyDoctorRepair !== 'function' ? null : el('div', { style: actionsStyle },
       ...state.missing.map(item => el('button', { key: item.bundle, style: btn(buttonStyle), disabled: ctrl.busy,
-        onClick: () => void ctrl.runInstall(item.bundle) }, `安装 ${item.bundle}`))),
+        onClick: () => void ctrl.runInstall(item.bundle) }, `安装 ${item.bundle}`)),
+      typeof ctrl.remote.applyDoctorRepair === 'function' && (state.stalled || state.kind === 'errored')
+        ? el('button', { type: 'button', style: btn(primaryButtonStyle), disabled: ctrl.busy,
+          onClick: () => void ctrl.run(() => ctrl.remote.applyDoctorRepair!([])) }, '一键自动诊断与修复')
+        : null),
     state.stalled || state.kind === 'errored'
       ? el('textarea', { readOnly: true, rows: 4, 'aria-label': `${packageName} 最小修复 patch`, value: repairPatch(state, packageName),
         style: { ...inputStyle, fontFamily: monoFont, fontSize: 11, resize: 'vertical' } })
@@ -616,11 +672,19 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
   const [agyCommand, setAgyCommand] = useState('')
   const [customProvider, setCustomProvider] = useState('')
   const [customModel, setCustomModel] = useState('')
+  const autoProbedRef = useRef(false)
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const traexState = componentState(status, TRAEX_PACKAGE)
   const acpEntryReady = status !== undefined && status.traex.entry !== undefined
   const acpRepair = !acpEntryReady && (traexState.stalled || traexState.missing.length > 0 || traexState.kind === 'errored')
     ? repairSection(ctrl, traexState, TRAEX_PACKAGE) : null
+
+  useEffect(() => {
+    if (!acpEntryReady || autoProbedRef.current || typeof ctrl.remote.probeCodingTool !== 'function') return
+    autoProbedRef.current = true
+    void ctrl.probeTool('traex', status?.traex.command ?? '', false, false)
+    void ctrl.probeTool('agy', status?.agy?.command ?? '', false, false)
+  }, [acpEntryReady])
 
   const defaultModel = status?.defaultModel
   const activeProvider = defaultModel?.provider ?? ''
@@ -638,7 +702,7 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
     el('button', {
       style: btn(),
       disabled: busy || probingTool !== undefined,
-      onClick: () => void ctrl.probeTool(tool, cmd, true),
+      onClick: () => void ctrl.probeTool(tool, cmd, true, true),
     }, probingTool === tool ? '探测中…' : '探测状态')
 
   const defaultSwitchAction = (provider: 'traex-agent' | 'agy-agent', label: string) =>
@@ -660,16 +724,26 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
             pill(traexEnabled ? '路由已启用' : '路由未启用', traexEnabled ? 'ok' : 'neutral'),
             isTraexDefault ? pill('默认工具', 'ok') : null,
             traexProbe ? pill(traexProbe.state, probeTone(traexProbe)) : null)),
+        traexProbe?.discoveredPath && (traexProbe.needsPathPin || !traexEnabled)
+          ? el('div', { style: bannerStyle(accent) },
+            el('div', { style: { ...actionsStyle, justifyContent: 'space-between' } },
+              el('span', {}, `自动检测到本机 TraeX：${traexProbe.discoveredPath}${traexProbe.needsPathPin ? '（建议固定绝对路径，防止桌面端找不到命令）' : ''}`),
+              el('button', { type: 'button', style: btn(primaryButtonStyle), disabled: busy,
+                onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexProbe.discoveredPath!)) }, '一键绑定本机路径并启用')))
+          : null,
         el('div', { style: { ...actionsStyle, alignItems: 'end' } },
-          field('TraeX 命令（可选）', traexCommand, setTraexCommand, status?.traex.command || 'traex'),
+          field('TraeX 命令（可选）', traexCommand, setTraexCommand, traexProbe?.discoveredPath || status?.traex.command || 'traex'),
           el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexCommand)) }, '启用'),
+            onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexCommand || traexProbe?.discoveredPath || '')) }, '启用'),
           el('button', { style: btn(), disabled: busy,
             onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(false, '')) }, '停用'),
           defaultSwitchAction('traex-agent', 'TraeX'),
           probeButton('traex', traexCommand || status?.traex.command || '')),
         traexProbe === undefined ? null : el('p', { style: hintStyle },
-          `${traexProbe.summary}${traexProbe.remediation ? ` · ${traexProbe.remediation}` : ''}`)),
+          `${traexProbe.summary}${traexProbe.remediation ? ` · ${traexProbe.remediation}` : ''}`),
+        traexProbe?.state === 'auth-required' && traexProbe.loginCommand
+          ? commandCopyRow(traexProbe.loginCommand, ctrl, busy, () => void ctrl.probeTool('traex', traexCommand || status?.traex.command || '', true, true))
+          : null),
       // Antigravity (agy) sub-block
       el('div', { style: { display: 'grid', gap: 8, paddingTop: 10, borderTop: `1px solid ${hairline}` } },
         el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
@@ -678,18 +752,28 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
             pill(agyEnabled ? '路由已启用' : '路由未启用', agyEnabled ? 'ok' : 'neutral'),
             isAgyDefault ? pill('默认工具', 'ok') : null,
             agyProbe ? pill(agyProbe.state, probeTone(agyProbe)) : null)),
+        agyProbe?.discoveredPath && (agyProbe.needsPathPin || !agyEnabled) && typeof ctrl.remote.configureAgy === 'function'
+          ? el('div', { style: bannerStyle(accent) },
+            el('div', { style: { ...actionsStyle, justifyContent: 'space-between' } },
+              el('span', {}, `自动检测到本机 Antigravity：${agyProbe.discoveredPath}${agyProbe.needsPathPin ? '（建议固定绝对路径，防止桌面端找不到命令）' : ''}`),
+              el('button', { type: 'button', style: btn(primaryButtonStyle), disabled: busy,
+                onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(true, agyProbe.discoveredPath!)) }, '一键绑定本机路径并启用')))
+          : null,
         typeof ctrl.remote.configureAgy !== 'function'
           ? el('p', { style: hintStyle }, '当前 Host 暂未提供 Antigravity 配置接口，请升级插件并重启 profile。')
           : el('div', { style: { ...actionsStyle, alignItems: 'end' } },
-            field('agy 命令（可选）', agyCommand, setAgyCommand, status?.agy?.command || 'agy'),
+            field('agy 命令（可选）', agyCommand, setAgyCommand, agyProbe?.discoveredPath || status?.agy?.command || 'agy'),
             el('button', { style: btn(primaryButtonStyle), disabled: busy,
-              onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(true, agyCommand)) }, '启用'),
+              onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(true, agyCommand || agyProbe?.discoveredPath || '')) }, '启用'),
             el('button', { style: btn(), disabled: busy,
               onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(false, '')) }, '停用'),
             defaultSwitchAction('agy-agent', 'Antigravity'),
             probeButton('agy', agyCommand || status?.agy?.command || '')),
         agyProbe === undefined ? null : el('p', { style: hintStyle },
-          `${agyProbe.summary}${agyProbe.remediation ? ` · ${agyProbe.remediation}` : ''}`)))
+          `${agyProbe.summary}${agyProbe.remediation ? ` · ${agyProbe.remediation}` : ''}`),
+        agyProbe?.state === 'auth-required' && agyProbe.loginCommand
+          ? commandCopyRow(agyProbe.loginCommand, ctrl, busy, () => void ctrl.probeTool('agy', agyCommand || status?.agy?.command || '', true, true))
+          : null))
     : status === undefined
       ? placeholder('正在读取…')
       : el('div', { style: { display: 'grid', gap: 10 } },
@@ -749,7 +833,8 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
 export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { status, busy, remote } = ctrl
   const [appId, setAppId] = useState('')
-  const [secretSource, setSecretSource] = useState<'env' | 'handle'>('env')
+  const [secretSource, setSecretSource] = useState<'easy' | 'env' | 'handle'>('easy')
+  const [appSecret, setAppSecret] = useState('')
   const [secretEnv, setSecretEnv] = useState('LARK_APP_SECRET')
   const [secretHandle, setSecretHandle] = useState('')
   const [account, setAccount] = useState('')
@@ -788,40 +873,80 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
         larkConnectionTone(status.feishu.connection, status.feishu.lastErrorCode))),
       row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
 
+  const canEasyFeishu = typeof remote.configureFeishuEasy === 'function'
   const feishuActions = !larkReady && !installLark && !enableLark && larkRepair === null
     ? null
     : el('div', { style: { display: 'grid', gap: 12 } },
       installLark === null && enableLark === null ? null : el('div', { style: actionsStyle }, installLark, enableLark),
       larkRepair,
       ...(larkReady ? [
-        el('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
-          el('span', { style: subheadStyle }, 'secret 引用'),
+        el('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
+          el('span', { style: subheadStyle }, '配置方式'),
+          el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+            el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'easy', style: { accentColor: accent, margin: 0 },
+              onChange: () => setSecretSource('easy') }), '极简一键接入（推荐）'),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
             el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'env', style: { accentColor: accent, margin: 0 },
               onChange: () => setSecretSource('env') }), '环境变量'),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
             el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'handle', style: { accentColor: accent, margin: 0 },
               onChange: () => setSecretSource('handle') }), 'keychain handle')),
-        el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
-          field('appId', appId, setAppId, 'cli_0123456789abcdef'),
-          secretSource === 'env'
-            ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
-            : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
-          field('account', account, setAccount, '保留当前 owner'),
-          field('tenant', tenant, setTenant, '保留当前 owner')),
-        el('div', { style: actionsStyle },
-          el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => {
-              const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
-              void ctrl.run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
-            } }, '应用配置'),
-          el('button', { style: btn(), disabled: busy,
-            onClick: () => {
-              const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
-              void ctrl.run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
-            } }, '一键配置（从 Host 环境探测 appId）')),
-        el('p', { style: hintStyle },
-          '这里配置的是 lark-channel 通道；secret 只接受环境变量名或 keychain handle，明文不入配置。')] : []))
+        secretSource === 'easy'
+          ? el('div', { style: { display: 'grid', gap: 10 } },
+            el('p', { style: hintStyle },
+              '只需填入飞书开放平台应用的 App ID 与 App Secret，系统将自动加密存入本机凭据库（macOS 钥匙串 / Linux 受保护文件）、签发访问策略并建立长连接，配置文件绝不存明文。'),
+            el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
+              field('App ID', appId, setAppId, 'cli_0123456789abcdef'),
+              el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, 'App Secret（仅存系统凭据库）',
+                el('input', {
+                  type: 'password',
+                  value: appSecret,
+                  placeholder: '粘贴飞书 App Secret',
+                  autoComplete: 'off',
+                  style: inputStyle,
+                  onChange: (event: { target: { value: string } }) => setAppSecret(event.target.value),
+                }))),
+            el('details', {},
+              el('summary', { style: { fontSize: 12, color: muted, cursor: 'pointer' } }, '高级身份标识（默认留空自动沿用或使用 primary / personal）'),
+              el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 8 } },
+                field('account', account, setAccount, 'primary（或留空沿用当前 owner）'),
+                field('tenant', tenant, setTenant, 'personal（或留空沿用当前 owner）'))),
+            el('div', { style: actionsStyle },
+              el('button', {
+                type: 'button',
+                style: idle(primaryButtonStyle, busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === ''),
+                disabled: busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === '',
+                onClick: () => {
+                  const submittedSecret = appSecret
+                  void ctrl.run(async () => {
+                    const res = await remote.configureFeishuEasy!(appId, submittedSecret, account, tenant)
+                    if (res.ok && res.value.applied) setAppSecret('')
+                    return res
+                  })
+                },
+              }, '一键安全存入凭据并启用飞书'),
+              !canEasyFeishu ? el('span', { style: hintStyle }, '当前 Host 未暴露一键接入接口，请切换环境变量或 Handle 模式。') : null))
+          : el('div', { style: { display: 'grid', gap: 10 } },
+            el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
+              field('appId', appId, setAppId, 'cli_0123456789abcdef'),
+              secretSource === 'env'
+                ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
+                : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
+              field('account', account, setAccount, '保留当前 owner'),
+              field('tenant', tenant, setTenant, '保留当前 owner')),
+            el('div', { style: actionsStyle },
+              el('button', { style: btn(primaryButtonStyle), disabled: busy,
+                onClick: () => {
+                  const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                  void ctrl.run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
+                } }, '应用配置'),
+              el('button', { style: btn(), disabled: busy,
+                onClick: () => {
+                  const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                  void ctrl.run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
+                } }, '一键配置（从 Host 环境探测 appId）')),
+            el('p', { style: hintStyle },
+              '这里配置的是 lark-channel 通道；secret 引用模式下明文不入配置。'))] : []))
 
   return card('远程接入（飞书）', feishuRows, feishuActions)
 }
@@ -1277,7 +1402,18 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
               : '未绑定激活的 Owner 路由'),
             autonomySetup.ownerRoute.missingReason ?? undefined),
           autonomySetup.blockingReasons.length > 0
-            ? el('div', { style: bannerStyle(danger) }, `前置阻塞：${autonomySetup.blockingReasons.join('；')}`)
+            ? el('div', { style: bannerStyle(danger) },
+              el('div', { style: { display: 'grid', gap: 8 } },
+                el('span', {}, `前置阻塞：${autonomySetup.blockingReasons.join('；')}`),
+                typeof remote.applyDoctorRepair === 'function'
+                  ? el('div', { style: actionsStyle },
+                    el('button', {
+                      type: 'button',
+                      style: idle(primaryButtonStyle, busy),
+                      disabled: busy,
+                      onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([])),
+                    }, '一键初始化/修复前置项'))
+                  : null))
             : null,
           el('div', { style: gridStyle },
             grantLine('记忆自学习（三权分立）',
@@ -1587,6 +1723,7 @@ export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
     el('button', { style: buttonStyle, onClick: leaveThen(navigation.openPlugins) }, '插件页'),
     el('button', { style: buttonStyle, disabled: ctrl.busy, onClick: () => void ctrl.refresh() }, '刷新'))),
   jsx(StatusBanners, { ctrl }),
+  jsx(DoctorRepairCard, { ctrl }),
   jsx(GrowthReportCard, { remote }),
   jsx(AutonomyWizardCard, { ctrl }),
   jsx(SelfUpgradeCard, { ctrl }),
@@ -1741,4 +1878,160 @@ function BundleConfigPageBody({ packageName, remote, navigation }: Readonly<{
         : packageName === DREAMING_PACKAGE ? jsx(DreamingCard, { ctrl })
           : packageName === PROACTIVE_PACKAGE ? jsx(ProactiveWorkItemsCard, { ctrl })
             : jsx(GrowthMemoryCard, { ctrl }))
+}
+
+function doctorSeverityPill(severity: SetupDoctorIssue['severity']) {
+  if (severity === 'error') return pill('严重异常', 'error')
+  if (severity === 'warn') return pill('建议修复', 'warn')
+  return pill('提示', 'neutral')
+}
+
+export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
+  const { remote, doctorReport, checkingDoctor, busy } = ctrl
+  const canDoctor = typeof remote.setupDoctor === 'function'
+  const canRepair = typeof remote.applyDoctorRepair === 'function'
+  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy || checkingDoctor)
+
+  const headerPills = doctorReport === undefined
+    ? null
+    : el('div', { style: actionsStyle },
+      pill(
+        doctorReport.healthy ? '体检通过 · 配置与插件健康' : `发现 ${doctorReport.issues.length} 项可关注状态`,
+        doctorReport.healthy ? 'ok' : doctorReport.issues.some(i => i.severity === 'error') ? 'error' : 'warn',
+      ),
+      doctorReport.autoFixableCount > 0 ? pill(`支持一键修复 ${doctorReport.autoFixableCount} 项`, 'warn') : null,
+      doctorReport.frozenSystemdProfile ? pill('Linux 受控保护实例', 'neutral') : null)
+
+  const summaryActions = !canDoctor ? null : el('div', { style: actionsStyle },
+    doctorReport !== undefined && doctorReport.autoFixableCount > 0 && canRepair
+      ? el('button', {
+        type: 'button',
+        style: idle(primaryButtonStyle, busy || checkingDoctor),
+        disabled: busy || checkingDoctor,
+        onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([])),
+      }, `一键全部自动修复（${doctorReport.autoFixableCount} 项）`)
+      : null,
+    el('button', {
+      type: 'button',
+      style: btn(),
+      disabled: busy || checkingDoctor,
+      onClick: () => void ctrl.checkDoctor(),
+    }, checkingDoctor ? '体检中…' : '立即体检'))
+
+  const body = !canDoctor
+    ? el('p', { style: hintStyle }, '当前 Host 尚未暴露系统自动体检接口（请升级插件并重启 profile）。')
+    : doctorReport === undefined
+      ? placeholder('正在扫描插件冲突、Owner 路由与本机 CLI…')
+      : doctorReport.issues.length === 0
+        ? el('p', { style: hintStyle }, `当前 Profile（${doctorReport.profileName || 'default'}）插件兼容性、数据库隔离与本地路由均正常。`)
+        : el('div', { style: { display: 'grid', gap: 10 } },
+          ...doctorReport.issues.map(issue => el('div', {
+            key: issue.id,
+            'data-doctor-issue': issue.id,
+            style: { display: 'grid', gap: 6, padding: '10px 12px', borderRadius: 10, border: `1px solid ${border}`, background: sunken },
+          },
+          el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+            el('div', { style: actionsStyle },
+              doctorSeverityPill(issue.severity),
+              el('span', { style: { fontWeight: 600, color: ink } }, issue.title)),
+            issue.autoFixable && canRepair
+              ? el('button', {
+                type: 'button',
+                style: btn(primaryButtonStyle),
+                disabled: busy || checkingDoctor,
+                onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([issue.id])),
+              }, issue.fixLabel)
+              : null),
+          el('p', { style: hintStyle }, issue.detail),
+          issue.copyCommand ? commandCopyRow(issue.copyCommand, ctrl, busy || checkingDoctor) : null)))
+
+  return card('系统体检与一键自动修复',
+    el('div', { 'data-owner-console-card': 'doctor-repair', style: { display: 'grid', gap: 10 } },
+      headerPills,
+      summaryActions,
+      body))
+}
+
+export function ModelsProviderSetupCard({ provider, configured, keyConfigured, remote, navigation }: Readonly<{
+  provider?: Readonly<{ id?: string; name?: string; settingsNs?: string }>
+  configured?: boolean
+  keyConfigured?: boolean
+  remote: ConsoleRemote
+  navigation: OwnerConsoleNavigation
+}>) {
+  const ctrl = useStandaloneConsoleController(remote, navigation)
+  const { status, busy, probingTool, traexProbe, agyProbe } = ctrl
+  const autoProbedRef = useRef(false)
+  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
+
+  const focusId = provider?.id
+  const showTraex = focusId === undefined || focusId === '' || focusId === 'traex-agent'
+  const showAgy = focusId === undefined || focusId === '' || focusId === 'agy-agent'
+
+  useEffect(() => {
+    if (status === undefined || autoProbedRef.current || typeof remote.probeCodingTool !== 'function') return
+    autoProbedRef.current = true
+    if (showTraex) void ctrl.probeTool('traex', status.traex.command, false, false)
+    if (showAgy) void ctrl.probeTool('agy', status.agy?.command ?? '', false, false)
+  }, [status === undefined])
+
+  const renderTool = (tool: 'traex' | 'agy', routeId: 'traex-agent' | 'agy-agent', label: string, enabled: boolean, command: string, probe: CodingToolProbe | undefined) => {
+    const isDefault = status?.defaultModel?.provider === routeId
+    const resolvedCmd = probe?.discoveredPath ?? command
+    const configureFn = tool === 'traex' ? remote.configureTraex : remote.configureAgy
+    return el('div', {
+      key: routeId,
+      'data-models-provider-tool': tool,
+      style: { display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 10, border: `1px solid ${border}`, background: sunken },
+    },
+    el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+      el('span', { style: { fontWeight: 600, color: ink } }, label),
+      el('div', { style: actionsStyle },
+        pill(enabled ? '路由已启用' : '未启用', enabled ? 'ok' : 'warn'),
+        isDefault ? pill('默认模型', 'ok') : null,
+        probe ? pill(probe.state, probeTone(probe)) : null)),
+    el('p', { style: hintStyle },
+      probe !== undefined
+        ? `${probe.summary}${probe.discoveredPath ? ` · 路径：${probe.discoveredPath}` : ''}`
+        : `当前配置命令：${command || tool}${configured === true ? '（条目已配置）' : ''}${keyConfigured === true ? '（Host 标记已就绪）' : ''}`),
+    el('div', { style: actionsStyle },
+      typeof configureFn === 'function' && (!enabled || probe?.needsPathPin)
+        ? el('button', {
+          type: 'button',
+          style: btn(primaryButtonStyle),
+          disabled: busy,
+          onClick: () => void ctrl.run(() => configureFn(true, resolvedCmd || tool)),
+        }, probe?.discoveredPath ? `一键绑定路径并启用 (${tool})` : `启用 ${tool}`)
+        : null,
+      typeof remote.setDefaultModelRoute === 'function'
+        ? el('button', {
+          type: 'button',
+          style: btn(isDefault ? buttonStyle : primaryButtonStyle),
+          disabled: busy,
+          onClick: () => void ctrl.run(() => remote.setDefaultModelRoute!(routeId, 'default', '')),
+        }, isDefault ? '当前已是默认' : `设为默认模型 (${routeId})`)
+        : null,
+      typeof remote.probeCodingTool === 'function'
+        ? el('button', {
+          type: 'button',
+          style: btn(),
+          disabled: busy || probingTool !== undefined,
+          onClick: () => void ctrl.probeTool(tool, command, true, true),
+        }, probingTool === tool ? '探测中…' : '重新探测')
+        : null),
+    probe?.state === 'auth-required' && probe.loginCommand
+      ? commandCopyRow(probe.loginCommand, ctrl, busy, () => void ctrl.probeTool(tool, command, true, true))
+      : null)
+  }
+
+  return el('div', {
+    'data-owner-console-models-provider-card': focusId || 'dsh-enhanced-traex-acp-provider',
+    style: { display: 'grid', gap: 10, paddingTop: 6, color: ink, fontSize: 13 },
+  },
+  jsx(StatusBanners, { ctrl }),
+  status === undefined
+    ? placeholder('正在探测本地 TraeX / Antigravity ACP 状态…')
+    : el('div', { style: { display: 'grid', gap: 10 } },
+      showTraex ? renderTool('traex', 'traex-agent', 'TraeX Agent (local ACP)', status.traex.enabled, status.traex.command, traexProbe) : null,
+      showAgy ? renderTool('agy', 'agy-agent', 'Antigravity Agent (local ACP)', status.agy?.enabled === true, status.agy?.command ?? '', agyProbe) : null))
 }

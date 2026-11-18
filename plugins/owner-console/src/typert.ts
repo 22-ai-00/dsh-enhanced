@@ -91,11 +91,42 @@ export const CodingToolProbeSchema = z.object({
   state: z.enum(CODING_TOOL_PROBE_STATES),
   summary: z.string().max(1_024),
   remediation: z.string().max(1_024).optional(),
+  discoveredPath: z.string().max(1_024).optional(),
+  needsPathPin: z.boolean().optional(),
+  loginCommand: z.string().max(1_024).optional(),
   modelCount: z.number().int().nonnegative().optional(),
   checkedAt: z.number().int().nonnegative(),
   cached: z.boolean(),
 }).readonly()
 export type CodingToolProbe = Readonly<z.infer<typeof CodingToolProbeSchema>>
+
+export const SETUP_DOCTOR_SEVERITIES = ['error', 'warn', 'info'] as const
+export const SETUP_DOCTOR_CATEGORIES = ['plugins', 'acp', 'autonomy', 'config'] as const
+export const SetupDoctorIssueSchema = z.object({
+  id: z.string().min(1).max(200),
+  severity: z.enum(SETUP_DOCTOR_SEVERITIES),
+  category: z.enum(SETUP_DOCTOR_CATEGORIES).optional(),
+  title: z.string().min(1).max(300),
+  detail: z.string().min(1).max(1_024),
+  autoFixable: z.boolean(),
+  fixLabel: z.string().min(1).max(120),
+  copyCommand: z.string().max(500).optional(),
+}).readonly()
+export type SetupDoctorIssue = Readonly<z.infer<typeof SetupDoctorIssueSchema>>
+
+export const SetupDoctorReportSchema = z.object({
+  protocol: z.literal('owner-console/setup-doctor/v1'),
+  checkedAt: z.number().int().nonnegative(),
+  profileName: z.string().max(200),
+  dshHome: z.string().max(4_096).nullable(),
+  frozenSystemdProfile: z.boolean(),
+  writable: z.boolean(),
+  healthy: z.boolean(),
+  autoFixableCount: z.number().int().nonnegative(),
+  restartRequiredHint: z.boolean(),
+  issues: z.array(SetupDoctorIssueSchema).max(64).readonly(),
+}).readonly()
+export type SetupDoctorReport = Readonly<z.infer<typeof SetupDoctorReportSchema>>
 
 const subsystemState = z.enum(['absent', 'disabled', 'ok', 'error'])
 const boundedCountMap = z.record(z.string(), z.number().int().nonnegative())
@@ -923,6 +954,37 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#OwnerConsoleGrowthReport', () => OwnerConsoleGrowthReportSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 912, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/setupDoctor',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'setupDoctor',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-enhanced/owner-console#SetupDoctorReport', () => SetupDoctorReportSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 945, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/applyDoctorRepair',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'applyDoctorRepair',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'issueIds', wire: 'issueIds', source: 'json', codec: codec('owner-console#doctorIssueIds', () => z.array(z.string().min(1).max(200)).max(64)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 954, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/configureFeishuEasy',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'configureFeishuEasy',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'appId', wire: 'appId', source: 'json', codec: codec('owner-console#easyAppId', () => z.string().max(128)) },
+        { name: 'appSecret', wire: 'appSecret', source: 'json', codec: codec('owner-console#easyAppSecret', () => z.string().max(512)) },
+        { name: 'account', wire: 'account', source: 'json', codec: codec('owner-console#easyAccount', () => z.string().max(512)) },
+        { name: 'tenant', wire: 'tenant', source: 'json', codec: codec('owner-console#easyTenant', () => z.string().max(512)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 966, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

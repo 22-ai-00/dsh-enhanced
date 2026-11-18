@@ -17,11 +17,11 @@ import {
   ink, muted, primaryButtonStyle, surface,
 } from './ui.js'
 import {
-  AutonomyWizardCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DREAMING_PACKAGE, DreamingCard,
-  FeishuCard, GeneralCodingToolItem, GROWTH_PACKAGE, GrowthMemoryCard, GrowthReportCard, IntakeAgreementCard, LARK_PACKAGE,
-  MEMORY_LEARNING_PACKAGE, ModelsCodingAgentsFooter, PROACTIVE_PACKAGE, ProactiveWorkItemsCard,
-  SelfUpgradeCard, StatusBanners, TRAEX_PACKAGE, TrendSnapshotsCard, useConsoleActions, WenyaoSectionIcon,
-  WenyaoSettingsSection, type ConsoleRemote, type OwnerConsoleNavigation,
+  AutonomyWizardCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DREAMING_PACKAGE, DoctorRepairCard,
+  DreamingCard, FeishuCard, GeneralCodingToolItem, GROWTH_PACKAGE, GrowthMemoryCard, GrowthReportCard,
+  IntakeAgreementCard, LARK_PACKAGE, MEMORY_LEARNING_PACKAGE, ModelsCodingAgentsFooter, ModelsProviderSetupCard,
+  PROACTIVE_PACKAGE, ProactiveWorkItemsCard, SelfUpgradeCard, StatusBanners, TRAEX_PACKAGE, TrendSnapshotsCard,
+  useConsoleActions, WenyaoSectionIcon, WenyaoSettingsSection, type ConsoleRemote, type OwnerConsoleNavigation,
 } from './settings-cards.js'
 
 export {
@@ -29,8 +29,8 @@ export {
   GrowthReportCard, installWithApproval,
   installWithCompanions, intakeAgreementHistoryView, intakeAgreementView, intakeAvailabilityPill,
   IntakeAgreementCard, larkConnectionLabel, larkConnectionTone, remoteFailureText, SelfUpgradeCard, trendSnapshotsView,
-  TrendSnapshotsCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DreamingCard, FeishuCard,
-  GeneralCodingToolItem, GrowthMemoryCard, ModelsCodingAgentsFooter, ProactiveWorkItemsCard,
+  TrendSnapshotsCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DoctorRepairCard, DreamingCard, FeishuCard,
+  GeneralCodingToolItem, GrowthMemoryCard, ModelsCodingAgentsFooter, ModelsProviderSetupCard, ProactiveWorkItemsCard,
   WenyaoSectionIcon, WenyaoSettingsSection,
 } from './settings-cards.js'
 export type { ConsoleRemote, OwnerConsoleNavigation } from './settings-cards.js'
@@ -115,6 +115,7 @@ export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readon
         el('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, color: muted } }, '设置')),
         header(navigation),
         jsx(StatusBanners, { ctrl }),
+        jsx(DoctorRepairCard, { ctrl }),
         jsx(GrowthReportCard, { remote }),
         jsx(AutonomyWizardCard, { ctrl }),
         jsx(SelfUpgradeCard, { ctrl }),
@@ -275,6 +276,19 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           { name: 'settings.general.item', id: 'wenyao-coding-tool', order: 20 }, generalCodingTool)),
         runtime.slots.inject('settings.models.footer', () => runtime.slots.register(
           { name: 'settings.models.footer', id: 'wenyao-coding-agents', order: 20 }, modelsFooter)),
+        runtime.slots.inject('settings.models.provider-card', () => runtime.slots.register(
+          { name: 'settings.models.provider-card', key: 'dsh-enhanced-traex-acp-provider' },
+          (props: Readonly<{
+            provider?: Readonly<{ id?: string; name?: string; settingsNs?: string }>
+            configured?: boolean
+            keyConfigured?: boolean
+          }>) => jsx(ModelsProviderSetupCard, {
+            provider: props?.provider,
+            configured: props?.configured,
+            keyConfigured: props?.keyConfigured,
+            remote,
+            navigation,
+          }))),
         ...BUNDLE_CONFIG_SLUGS.map(packageName => runtime.slots.inject('plugins.bundle.config', () => runtime.slots.register(
           { name: 'plugins.bundle.config', key: packageName },
           (props: Readonly<{ view?: 'summary' | 'page' }>) =>

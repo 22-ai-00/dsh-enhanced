@@ -16,14 +16,15 @@ import {
 } from './typert.js'
 import { componentState, missingRemedy, repairPatch } from './state.js'
 import { persistAllowedBuilds } from './build-approvals.js'
-import { CodingToolProber, type CodingToolId } from './probes.js'
-import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus } from './autonomy-setup.js'
+import { CodingToolProber, discoverCodingToolBinary, type CodingToolId } from './probes.js'
+import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus, resolveProfilePaths } from './autonomy-setup.js'
 import { SelfUpgradeProber } from './upgrade-probe.js'
 import type {
   AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
-  AutonomySetupStatus, OwnerConsoleGrowthReport, SelfUpgradePreview, SelfUpgradeStatus,
+  AutonomySetupStatus, OwnerConsoleGrowthReport, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
+import { applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor } from './doctor-repair.js'
 import {
   executeAttentionQuestionReply, executeDreamingIdeaAction, executeProactiveDraftAction,
   readAssistantOverview, type DreamingIdeaAction,
@@ -539,15 +540,17 @@ export class OwnerConsoleService extends TypertRemoteService {
     const current = tool === 'traex' ? snapshot.traex : snapshot.agy
     const effectiveCommand = command.trim() !== '' ? command.trim() : current.command
     const routeRegistered = snapshot.llmProviders.some(provider => provider.id === routeId)
+    const { dshHome } = resolveProfilePaths(this.host, process.env)
     return this.prober.probe(tool, {
       command: effectiveCommand,
       installed: current.installed,
       enabled: current.enabled,
       routeRegistered,
+      dshHome,
     }, force)
   }
 
-  /** Switch `agent-default-model`; when choosing an ACP coding route, enable it first if inactive. */
+  /** Switch `agent-default-model`; when choosing an ACP coding route, enable and pin discovered path if inactive/unpinned. */
   async setDefaultModelRoute(provider: string, model: string, reasoningEffort: string): Promise<OwnerConsoleWriteResult> {
     const cleanProvider = provider.trim()
     const cleanModel = model.trim() === '' ? 'default' : model.trim()
@@ -570,13 +573,25 @@ export class OwnerConsoleService extends TypertRemoteService {
         return await this.targetRefusal('dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', 'traex-acp-provider')
       }
       const facts = configFacts(traex.value)
-      const enableKey = cleanProvider === 'traex-agent' ? 'enabled' : 'agyEnabled'
-      if (facts[enableKey] !== true) {
+      const tool: CodingToolId = cleanProvider === 'traex-agent' ? 'traex' : 'agy'
+      const enableKey = tool === 'traex' ? 'enabled' : 'agyEnabled'
+      const cmdKey = tool === 'traex' ? 'command' : 'agyCommand'
+      const ops: SettingsPathOp[] = []
+      if (facts[enableKey] !== true) ops.push({ op: 'set', path: [enableKey], value: true })
+      const rawCmd = typeof facts[cmdKey] === 'string' ? (facts[cmdKey] as string).trim() : ''
+      if (rawCmd === '' || rawCmd === tool) {
+        const { dshHome } = resolveProfilePaths(this.host, process.env)
+        const discovered = discoverCodingToolBinary(tool, { dshHome })
+        if (discovered !== undefined && discovered !== rawCmd) {
+          ops.push({ op: 'set', path: [cmdKey], value: discovered })
+        }
+      }
+      if (ops.length > 0) {
         const settings = this.settings()
         try {
-          await settings.mutate(traex.ns, [{ op: 'set', path: [enableKey], value: true }], traex.revision)
+          await settings.mutate(traex.ns, ops, traex.revision)
           const reloaded = await this.reload(traex.ns)
-          extraNote = `（已同步启用 ${cleanProvider}${reloaded}）`
+          extraNote = `（已同步启用并绑定 ${cleanProvider}${reloaded}）`
         } catch (cause) {
           return writeFailure(traex.ns, cause)
         }
@@ -700,6 +715,44 @@ export class OwnerConsoleService extends TypertRemoteService {
   /** Read-only cross-ledger growth scorecard (tasks/corrections, memory/exposure, candidates, notifications, suppliers). */
   async growthReport(workspace: string, preset: string, sinceDays: number): Promise<OwnerConsoleGrowthReport> {
     return readOwnerConsoleGrowthReport(this.host, workspace, preset, sinceDays)
+  }
+
+  /** Run self-healing setup doctor inspecting plugins, conflicts, owner routes, DB paths, and ACP CLIs. */
+  async setupDoctor(): Promise<SetupDoctorReport> {
+    return inspectSetupDoctor({
+      host: this.host,
+      status: await this.status(),
+      descriptors: this.descriptors(),
+      prober: this.prober,
+    })
+  }
+
+  /** Automatically repair selected (or all auto-fixable) setup doctor issues safely and atomically. */
+  async applyDoctorRepair(issueIds: readonly string[]): Promise<OwnerConsoleWriteResult> {
+    return applyDoctorRepair({
+      host: this.host,
+      status: await this.status(),
+      descriptors: this.descriptors(),
+      settings: this.host.get('settings' as never) as SettingsService | undefined,
+      manager: this.host.get('pluginManager' as never) as PluginManagerService | undefined,
+      prober: this.prober,
+      reloadEntry: entryId => this.reload(entryId),
+      issueIds,
+    })
+  }
+
+  /** Store Feishu App Secret in OS credential vault and configure handle + policy rule without plaintext in YAML. */
+  async configureFeishuEasy(appId: string, appSecret: string, account: string, tenant: string): Promise<OwnerConsoleWriteResult> {
+    return configureFeishuEasy({
+      host: this.host,
+      descriptors: this.descriptors(),
+      settings: this.host.get('settings' as never) as SettingsService | undefined,
+      reloadEntry: entryId => this.reload(entryId),
+      appId,
+      appSecret,
+      account,
+      tenant,
+    })
   }
 }
 

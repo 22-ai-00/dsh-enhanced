@@ -49,7 +49,7 @@ export interface ConfigureAutonomySetupInput {
   readonly reloadEntry?: (entryId: string) => Promise<string>
 }
 
-interface ProfilePaths {
+export interface ProfilePaths {
   readonly dshHome: string | null
   readonly canonicalHome: string | null
   readonly profileName: string
@@ -79,11 +79,11 @@ function failResult(entry: string, note: string): OwnerConsoleWriteResult {
   return Object.freeze({ applied: false, entry, note })
 }
 
-function strOrNull(value: unknown): string | null {
+export function strOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' && !hasControlChars(value.trim()) ? value.trim() : null
 }
 
-function asPlainRecord(value: unknown): Record<string, unknown> {
+export function asPlainRecord(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
   return { ...value as Record<string, unknown> }
 }
@@ -154,7 +154,7 @@ export function ownerRouteAuthorityHashLocal(route: Readonly<Record<string, unkn
   return createHash('sha256').update(JSON.stringify(canonicalAuthority), 'utf8').digest('hex')
 }
 
-function externalPrincipalId(principal: Readonly<Record<string, unknown>>): string | null {
+export function externalPrincipalId(principal: Readonly<Record<string, unknown>>): string | null {
   const channel = strOrNull(principal['channel'])
   const account = strOrNull(principal['account'])
   const tenant = strOrNull(principal['tenant'])
@@ -182,12 +182,12 @@ function canonicalPathAllowMissingLeaf(targetPath: string): string | null {
   return join(canonicalParent, basename(resolved))
 }
 
-function insideDirectory(root: string, candidate: string): boolean {
+export function insideDirectory(root: string, candidate: string): boolean {
   const rel = relative(root, candidate)
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
 }
 
-function checkScopedDbPath(
+export function checkScopedDbPath(
   rawNode: unknown,
   canonicalHome: string | null,
 ): Readonly<{ display: string | null; resolved: string | null; scoped: boolean }> {
@@ -228,7 +228,7 @@ function checkScopedDbPath(
   }
 }
 
-function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.ProcessEnv): ProfilePaths {
+export function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.ProcessEnv): ProfilePaths {
   const profileContext = host.get('profileContext') as Readonly<{ dir?: unknown; home?: unknown; name?: unknown }> | undefined
   const settings = host.get('settings') as (SettingsService & { documentPath?: unknown }) | undefined
   const docPath = typeof settings?.documentPath === 'string' && settings.documentPath.trim() !== ''
@@ -275,7 +275,7 @@ function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.ProcessEnv):
   return { dshHome, canonicalHome, profileName, profileDir, patchPath, patchExists, writable }
 }
 
-function readPatchDocument(patchPath: string | null): Document {
+export function readPatchDocument(patchPath: string | null): Document {
   if (patchPath === null || !existsSync(patchPath)) {
     const doc = parseDocument('[]', { customTags: [CUSTOM_JS_TAG] })
     if (isSeq(doc.contents)) doc.contents.flow = false
@@ -297,7 +297,7 @@ function readPatchDocument(patchPath: string | null): Document {
   return doc
 }
 
-function findPatchRow(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
+export function findPatchRow(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
   for (const item of seq.items) {
     if (isMap(item) && item.get('id') === rowId) return item
     if (isMap(item)) {
@@ -312,12 +312,12 @@ function findPatchRow(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
   return undefined
 }
 
-function readConfigMap(parent: YAMLMap, key: string): YAMLMap | undefined {
+export function readConfigMap(parent: YAMLMap, key: string): YAMLMap | undefined {
   const value: unknown = parent.get(key, true)
   return isMap(value) ? value : undefined
 }
 
-function ensureConfigMap(doc: Document, parent: YAMLMap, key: string): YAMLMap {
+export function ensureConfigMap(doc: Document, parent: YAMLMap, key: string): YAMLMap {
   const existing = readConfigMap(parent, key)
   if (existing !== undefined) return existing
   const created = doc.createNode({}) as unknown as YAMLMap
@@ -325,7 +325,7 @@ function ensureConfigMap(doc: Document, parent: YAMLMap, key: string): YAMLMap {
   return created
 }
 
-function ensurePatchRow(doc: Document, seq: YAMLSeq, rowId: string, packageName: string): YAMLMap {
+export function ensurePatchRow(doc: Document, seq: YAMLSeq, rowId: string, packageName: string): YAMLMap {
   const existing = findPatchRow(seq, rowId)
   if (existing !== undefined) return existing
   const created = doc.createNode({ id: rowId, name: packageName, config: {} }) as unknown as YAMLMap
@@ -333,26 +333,26 @@ function ensurePatchRow(doc: Document, seq: YAMLSeq, rowId: string, packageName:
   return created
 }
 
-function getPatchRowConfig(seq: YAMLSeq, rowId: string): Record<string, unknown> {
+export function getPatchRowConfig(seq: YAMLSeq, rowId: string): Record<string, unknown> {
   const row = findPatchRow(seq, rowId)
   if (row === undefined) return {}
   const cfg = readConfigMap(row, 'config')
   return cfg !== undefined ? asPlainRecord(cfg.toJSON()) : {}
 }
 
-function getPatchRowConfigNode(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
+export function getPatchRowConfigNode(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
   const row = findPatchRow(seq, rowId)
   if (row === undefined) return undefined
   return readConfigMap(row, 'config')
 }
 
-function mergeDescriptorConfig(descriptors: readonly SettingsDescriptor[], ns: string, patchConfig: Record<string, unknown>): Record<string, unknown> {
+export function mergeDescriptorConfig(descriptors: readonly SettingsDescriptor[], ns: string, patchConfig: Record<string, unknown>): Record<string, unknown> {
   const desc = findEntry(descriptors, candidate => candidate === ns)
   const runtimeCfg = desc ? boundedConfig(desc.value) : {}
   return { ...runtimeCfg, ...patchConfig }
 }
 
-function queryActiveOwnerFromSqlite(
+export function queryActiveOwnerFromSqlite(
   dbPath: string,
   expectedPrincipal: Record<string, unknown> | undefined,
 ): Readonly<{ principalRecordId: string; principalVersion: number; principal: Record<string, unknown>; workspace?: string; preset?: string }> | null {
@@ -396,13 +396,11 @@ function queryActiveOwnerFromSqlite(
     let preset: string | undefined
     try {
       const principalKey = externalPrincipalId(matched.principal)
-      if (principalKey !== null) {
-        const binding = db.prepare(
-          `SELECT workspace, agent_preset FROM conversation_bindings WHERE principal_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1`,
-        ).get(principalKey) as { workspace?: unknown; agent_preset?: unknown } | undefined
-        if (typeof binding?.workspace === 'string') workspace = binding.workspace
-        if (typeof binding?.agent_preset === 'string') preset = binding.agent_preset
-      }
+      const binding = db.prepare(
+        `SELECT workspace, agent_preset FROM conversation_bindings WHERE (principal_id = ? OR principal_id = ?) AND status = 'active' ORDER BY updated_at DESC LIMIT 1`,
+      ).get(matched.id, principalKey ?? matched.id) as { workspace?: unknown; agent_preset?: unknown } | undefined
+      if (typeof binding?.workspace === 'string') workspace = binding.workspace
+      if (typeof binding?.agent_preset === 'string') preset = binding.agent_preset
     } catch {
       // Optional binding hint.
     }
@@ -420,7 +418,7 @@ function queryActiveOwnerFromSqlite(
   }
 }
 
-function inspectOwnerRoute(
+export function inspectOwnerRoute(
   host: AutonomyHostContext,
   paths: ProfilePaths,
   seq: YAMLSeq | undefined,
@@ -628,7 +626,7 @@ function inspectModelRoute(
   })
 }
 
-function getPersonalAndPolicyConfigs(
+export function getPersonalAndPolicyConfigs(
   seq: YAMLSeq | undefined,
   descriptors: readonly SettingsDescriptor[],
 ): Readonly<{
@@ -913,7 +911,7 @@ export async function inspectAutonomyWizardStatus(
   })
 }
 
-function upsertById(existing: unknown, items: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+export function upsertById(existing: unknown, items: readonly Record<string, unknown>[]): Record<string, unknown>[] {
   const list = Array.isArray(existing) ? existing.map(asPlainRecord) : []
   const byId = new Map<string, number>()
   list.forEach((item, index) => {
@@ -945,7 +943,7 @@ function findReusableWorkspaceOrGlobalBudgetId(
   return typeof existing?.['id'] === 'string' && existing['id'] !== '' ? existing['id'] : preferredId
 }
 
-function resolveScopedDbTarget(
+export function resolveScopedDbTarget(
   canonicalHome: string,
   subdir: string,
   filename: string,
@@ -962,7 +960,7 @@ function resolveScopedDbTarget(
   return target
 }
 
-function atomicWritePatchWithBackup(patchPath: string, serialized: string, now: number): Readonly<{ backupPath: string | null }> {
+export function atomicWritePatchWithBackup(patchPath: string, serialized: string, now: number): Readonly<{ backupPath: string | null }> {
   const dir = dirname(patchPath)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   let backupPath: string | null = null
@@ -1015,7 +1013,7 @@ function applyPatchTraexRoute(doc: Document, seq: YAMLSeq, targetProvider: strin
   }
 }
 
-async function applyLiveModelRouteSettings(
+export async function applyLiveModelRouteSettings(
   host: AutonomyHostContext,
   settings: SettingsService | undefined,
   descriptors: readonly SettingsDescriptor[],

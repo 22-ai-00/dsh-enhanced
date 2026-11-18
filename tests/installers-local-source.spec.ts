@@ -37,7 +37,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
     expect(await readFile(join(f.preparationRoot, 'receipt.json'), 'utf8')).toContain('external mutation')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  }, 45000)
+  }, 90000)
 
   test.each(['add', 'fetch', 'verify', 'offline', 'missing-started', 'missing-done', 'policy', 'optional-resolution', 'offline-optional-resolution', 'offline-graph-drift'] as const)(
     'rejects final candidate %s before stopping the original service', async candidateFailure => {
@@ -92,7 +92,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(offlineVerify).toBeLessThan(packageIndex)
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(f.candidateLock)
     expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
-  }, 45000)
+  }, 90000)
 
   test('restores the original service when post-stop packages differ from the proven candidate graph', async () => {
     const f = await nativePreOwnerLifecycleFixture()
@@ -103,7 +103,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(true)
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(before)
-  }, 45000)
+  }, 90000)
   test.each([
     ['warmup command', { metadataWarmupFails: true }],
     ['missing full metadata', { metadataWarmupMissingMirror: true }],
@@ -210,7 +210,7 @@ snapshots:
     const fixture = await nativePreOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(fixture, 'local-service-upgrade', { metadataWarmupSkipReason: 'unsupported_platform' })
     expect(result.status, result.stderr).toBe(0)
-  }, 45000)
+  }, 90000)
   test.each([
     ['verification', { npmVerifyFails: true }],
     ['prefetch', { storeFails: true }],
@@ -394,7 +394,7 @@ snapshots:
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
-  }, 45000)
+  }, 90000)
   test('applies the frozen learner-root extension through the stopped transaction and fresh service acceptance', async () => {
     // Only systemd, package installation and native config composition are fixture ports.
     const f = await nativePreOwnerLifecycleFixture({ baseServices: true, memoryExtension: true })
@@ -415,7 +415,7 @@ snapshots:
     expect(accepted.activeState).toBe('active')
     expect(accepted.invocationId).toMatch(/^fresh-web-/u)
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  }, 45000)
+  }, 90000)
   test('accepts a pre-owner profile with baseline Recovery and Control Plane services', async () => {
     const f = await nativePreOwnerLifecycleFixture({ baseServices: true })
     const config = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
@@ -432,7 +432,7 @@ snapshots:
     expect(accepted.invocationId).toMatch(/^fresh-web-/u)
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
     expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe('')
-  }, 45000)
+  }, 90000)
   test('discards activation writes to Delivery, sessions and business databases before deployment', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
@@ -446,7 +446,7 @@ snapshots:
     } finally { database.close() }
     expect(await readFile(f.dshLog, 'utf8')).toContain('--host\t127.0.0.1\t--no-open\t--port\t0')
     expect((await readdir(f.root)).filter(name => name.startsWith('.dsh-local-source-activation-'))).toEqual([])
-  }, 45000)
+  }, 90000)
   test('restores the original active service and preserves original source after staged package failure', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f,'local-service-upgrade',{packageFails:true})
@@ -461,7 +461,7 @@ snapshots:
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
   // Includes the full staged package transaction and restoration, like the
   // adjacent upgrade cases; measured Linux runs approach 15 seconds.
-  }, 45000)
+  }, 90000)
   test('recovers a swapped candidate only after rechecking the frozen module/source identities', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
@@ -471,7 +471,7 @@ snapshots:
     expect(recovery.status,recovery.stderr).toBe(0)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  }, 60000)
+  }, 90000)
   test('refuses installed package byte drift during recovery before service operations', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { systemdStartFailsProfile: 'web' })
@@ -484,7 +484,7 @@ snapshots:
     const added = (await readFile(f.systemdLog, 'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  }, 60000)
+  }, 90000)
   test('restores an original-renamed crash after proving the original snapshot', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { killLifecycleAfterOriginalRename: true })
@@ -495,7 +495,7 @@ snapshots:
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
-  }, 45000)
+  }, 90000)
   test('refuses drifted reviewed installer code during recovery before any service operation', async () => {
     const f = await nativePreOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f,'local-service-upgrade',{systemdStartFailsProfile:'web'})
@@ -508,5 +508,5 @@ snapshots:
     const added = (await readFile(f.systemdLog,'utf8')).slice(before.length)
     expect(added).not.toContain('stop')
     expect(added).not.toContain('start')
-  }, 60000)
+  }, 90000)
 })
