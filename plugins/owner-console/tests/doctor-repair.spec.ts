@@ -363,6 +363,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       account: '',
       tenant: '',
       platform: 'darwin',
+      env: {},
       now: 100,
       storeSecretFn: async (locator, secret) => { stored.push({ locator, secret }) },
     })
@@ -391,7 +392,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       { op: 'set', path: ['credentialHandle'], value: 'lark-desktop-primary' },
     ]), 2)
 
-    // Verify default Linux 0600 file creation cleanly
+    // Verify default Linux 0600 file creation cleanly (isolated from runner INVOCATION_ID)
     const resLinux = await configureFeishuEasy({
       host,
       descriptors: [larkDesc],
@@ -401,6 +402,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       account: 'primary',
       tenant: 'personal',
       platform: 'linux',
+      env: {},
       now: 101,
     })
     expect(resLinux.applied).toBe(true)
@@ -410,5 +412,22 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(existsSync(linuxHandle.path!)).toBe(true)
     expect(readFileSync(linuxHandle.path!, 'utf8')).toBe('linux-secret-123')
     expect(statSync(linuxHandle.path!).mode & 0o777).toBe(0o600)
+
+    // Verify frozen Linux cohort refuses easy Feishu mutation
+    mkdirSync(join(dshHome, 'rsi-local-cohorts', 'desktop'), { recursive: true })
+    writeFileSync(join(dshHome, 'rsi-local-cohorts', 'desktop', 'receipt.json'), '{}')
+    const refusedEasy = await configureFeishuEasy({
+      host,
+      descriptors: [larkDesc],
+      settings: { describe: () => [larkDesc], mutate },
+      appId: 'cli_0123456789abcdef',
+      appSecret: 'linux-secret-456',
+      account: 'primary',
+      tenant: 'personal',
+      platform: 'linux',
+      env: {},
+      now: 102,
+    })
+    expect(refusedEasy.applied).toBe(false)
   })
 })
