@@ -36,7 +36,7 @@ env:
 
 jobs:
   linux-packages:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
 
     steps:
@@ -194,7 +194,7 @@ jobs:
   # puts 1,938s of work in one shard and 523s in the other for
   # plugin-control-plane.
   linux-slow-package-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -328,7 +328,7 @@ jobs:
           retention-days: 7
 
   linux-root-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -488,7 +488,7 @@ jobs:
   verify:
     needs: [linux-packages, linux-slow-package-tests, linux-root-tests, macos-verify, windows-acp-smoke]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
