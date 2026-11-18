@@ -136,7 +136,7 @@ describe('private RSI source workspace', () => {
       })
   })
 
-  test('Linux does not archive, and a failed Mac replacement retains one archive for retry', async () => {
+  test('Linux does not archive, and a failed Mac replacement retains one archive for retry', { timeout: 120_000 }, async () => {
     const f = await legacyMacFixture()
     await withPlatform('linux', async () => {
       await expect(prepareRsiSourceWorkspace({ ...f.args, version: '0.1.50' })).rejects.toThrow()

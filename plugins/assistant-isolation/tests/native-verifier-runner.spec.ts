@@ -188,9 +188,13 @@ mac('native persistent verifier', () => {
     let running = false
     while (Date.now() < until) {
       if (existsSync(join(stateRoot, 'ledger.sqlite'))) {
-        const db = new DatabaseSync(join(stateRoot, 'ledger.sqlite'), { readOnly: true })
-        try { running = (db.prepare("SELECT status FROM isolation_jobs WHERE idempotency_key='crash-key'").get() as { status?: string } | undefined)?.status === 'running' }
-        finally { db.close() }
+        try {
+          const db = new DatabaseSync(join(stateRoot, 'ledger.sqlite'), { readOnly: true })
+          try { running = (db.prepare("SELECT status FROM isolation_jobs WHERE idempotency_key='crash-key'").get() as { status?: string } | undefined)?.status === 'running' }
+          finally { db.close() }
+        } catch (error) {
+          if (!/no such table|locked|busy/iu.test(String(error))) throw error
+        }
       }
       if (running) break
       await new Promise(resolve => setTimeout(resolve, 100))

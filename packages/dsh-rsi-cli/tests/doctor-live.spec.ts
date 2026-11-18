@@ -307,6 +307,18 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     expect(okCheck?.status).toBe('ok')
     expect(okCheck?.summary).toContain('dsh-native/uid-1000')
 
+    const explicitHostLeafReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'linux',
+      env: { PATH: '' },
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      linuxPaths: { cgroupRoot, uid: 1000, procSelfCgroup: '0::/dsh-native/uid-1000/host\n' },
+    })
+    const explicitHostLeafCheck = explicitHostLeafReport.checks.find(c => c.id === 'platform.cgroup')
+    expect(explicitHostLeafCheck?.status).toBe('ok')
+    expect(explicitHostLeafCheck?.summary).toContain('dsh-native/uid-1000')
+
     // When caller sits in an SSH session scope (`0::/user.slice/user-1000.slice/session-7.scope`) and only root-level standalone leaf exists without user@1000.service/dsh-native/uid-1000, warn honestly
     const sshStandaloneOnlyReport = await collectLiveDoctorReport({
       dshHome,

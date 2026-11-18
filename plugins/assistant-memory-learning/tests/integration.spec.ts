@@ -193,7 +193,8 @@ test.each([
   { timing: 'across a minute boundary without idle cron scan', unit: 60_000, offset: 59_800, scanRuns: 0 },
   { timing: 'across an hour boundary', unit: 3_600_000, offset: 3_599_800, scanRuns: 1 },
 ])('ordinary source flows through native Automations and independent review ledger into later Memory prompt $timing', async ({ unit, offset, scanRuns }) => {
-  const windowStart = Math.floor(Date.now() / unit) * unit
+  const hourStart = Math.floor(Date.now() / 3_600_000) * 3_600_000
+  const windowStart = unit === 60_000 ? hourStart + 60_000 : hourStart
   let now = windowStart + offset
   vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture()

@@ -471,7 +471,10 @@ function probePlatformPrerequisites(
         if (!fileExists(target)) return undefined
         try { return readFileSync(target, 'utf8') } catch { return undefined }
       }
-      const procSelfCgroup = linuxPaths.procSelfCgroup ?? readText('/proc/self/cgroup')
+      const procSelfCgroup = linuxPaths.procSelfCgroup
+        ?? (linuxPaths.cgroupRoot === undefined || linuxPaths.cgroupRoot === '/sys/fs/cgroup'
+          ? readText('/proc/self/cgroup')
+          : undefined)
       const unifiedCallerRel = procSelfCgroup
         ?.split('\n')
         .map(line => line.trim())
