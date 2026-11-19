@@ -6,23 +6,17 @@
 注意力是预算，只在被请求或书面规则允许时行动；只说需要人行动的话；一次一个问题；概念和设置尽量少；
 面板只展示需要人处理的事。
 
-当前切片：**专属对话窗口 + 设置页**。
+当前切片：**文鳐专属个人助手对话窗口 + 分类优化设置页**。
 
-- **对话窗口**（左侧栏「文鳐」的默认视图）：正文和 composer 复用 DSH 自己的
-  `conversation.content` 组件工厂，通过 renderer 注入的 `SessionProvider` / `renderSlot` /
-  `renderFactorySlot` 渲染在插件自己的 `main` 面板里。消息流、发送、附件、停止、权限 chip、
-  模型选择、工具/审批/计划行和空态都来自原生实现；本插件不复制这些组件，也不启动第二个
-  Agent loop。右上角「原生会话」把同一条会话切到 DSH 原生会话视图。
-- **设置页与 DSH 原生设置槽**（右上角 ⚙ 及 DSH 左侧设置弹窗 `wenyao-assistant`）：保留原有只读状态 +
-  主人点击的一次性配置与管理动作，并共用 `src/settings-cards.ts` 卡片实现。除「文鳐」⚙ 设置页外，
+- **文鳐专属对话窗口**（左侧栏「文鳐」的默认视图）：独立于 DSH 原生编码界面的 `conversation.content`，由 `src/chat-view.ts` 提供专属个人助手体验：顶部显示文鳐身份徽章、助手工作区与已加载能力胶囊（记忆 / Wiki / 飞书）、支持一键开启「新对话」与打开 ⚙ 设置；内置同 `/model` 的级联模型与 Effort 下拉切换条、权限预设开关、推荐开场白、Markdown 代码块渲染与复制、流式预览、附件上传及浏览器语音转写/朗读。底层仍直接复用 DSH 宿主 `sessions` 持久事件日志与 agent loop（不自建第二套 loop），且仅对文鳐助手注册表记录的会话在 `$DSH_HOME/assistant-workspace` 中注入 `owner-console:wenyao-persona` 身份提示，零干扰 DSH 原生编程对话。
+- **设置页与 DSH 原生设置槽**（右上角 ⚙ 及 DSH 左侧设置弹窗 `wenyao-assistant`）：按「全部 / 体检自愈 / 模型与工具 / 自主与成长 / 飞书与插件 / 只读诊断」分组浏览 `src/settings-cards.ts` 卡片，提供一键体检自愈、`/model` 级联模型/Effort 与 CLI 路径下拉选择器、自主能力一键授权向导与飞书极简安全接入。除「文鳐」⚙ 设置页外，
   客户端还向 DSH `0.2.2-rc.3` 注入原生设置扩展槽：左侧栏设置分组 `settings.section` / `settings.section.icon`
   （「文鳐助手」）、通用设置一行快捷切换 `settings.general.item`（默认编程工具 `TraeX` / `Antigravity` /
-  API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），以及插件管理详情/摘要
+  API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），`settings.models.provider-card`（`dsh-enhanced-traex-acp-provider` 的模型/Effort/CLI 一键绑定），以及插件管理详情/摘要
   `plugins.bundle.config`（覆盖 `traex-acp-provider`、`lark-channel`、`assistant-proactive`、`assistant-dreaming`、
   `assistant-growth-driver`、`assistant-memory-learning` 6 个 `@dsh-enhanced/*` bundle）。
   配置写入只经 Host `settings` 服务合并到指定条目；bundle/条目管理与安装只经 Host `pluginManager`；
-  本机 CLI 探测只通过无交互只读子进程检查可用性与登录/模型列表。所有动作都由主人点击触发，不发起模型调用、
-  不创建 Bot、不接受明文 secret、不改动未列出的插件。安装会把 pnpm 子进程和 registry 网络调用委托给
+  本机 CLI 探测与 `/model` 目录聚合（`modelCatalog`）均只读无交互、不发起付费推理，受每 provider 6 秒超时与 30 秒 TTL 缓存保护。安装会把 pnpm 子进程和 registry 网络调用委托给
   DSH 自身的 plugin manager，不在本插件里实现网络或进程逻辑。
 
 ## 安装
@@ -40,34 +34,11 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 
 ### 对话窗口的实现边界
 
-- **会话生命周期**：客户端只调用 Host 注入的 `sessions` / `uiWorkspace` / `conversation` 服务。
-  首次打开用 `workspaces.initializeDefault()` 解析默认工作区，再用 `uiWorkspace.connectWorkspace()`
-  创建/复用会话（不可用时退回 `sessions.create()`）；随后 `sessions.retain(id,
-  {source: 'ownerConsoleChat'})` 取得 `SessionBinding`，面板卸载时 `release()`。会话 id 存在
-  `localStorage['dsh.owner-console.chat-session']`，过期或打不开时清除并重新创建。
-- **原生正文**：主入口声明一个 session-scoped 子槽；renderer 因此注入 `SessionProvider` 与
-  `renderSlot`。子槽按原生 `conversationPhase` 同样的规则计算 `phase`，然后
-  `renderFactorySlot('conversation.content', {variant: 'embedded', phase, hero: false}, …)`。
-  `hero: false` 关掉工作区选择器和 agent preset 座；面板不会渲染目录清单。
-- **语音**：原生对话直接使用 Host composer 自带的语音输入，面板不再重复渲染工具行。
-  仅降级窗口（没有 renderer seats 时）显示「语音对话」/「朗读」：前者用浏览器 `SpeechRecognition`
-  （`webkitSpeechRecognition` 回退）识别，通过 `conversation.input.for(actx).setDraft()` + `focus()`
-  写入**原生 composer 草稿**；后者用浏览器 `SpeechSynthesis`。浏览器没有对应 API 时按钮禁用并在
-  tooltip 中说明。语音识别/合成由浏览器（或其服务商）完成，不是 DSH 模型；插件不录音、不保存音频。
-  **隐私边界**：常见浏览器会把麦克风音频或待朗读文本发送给浏览器厂商自己的语音服务，
-  这段链路不经过 DSH 的权限模型、策略与审计，也不受本插件控制。
-- **权限**：当前值读会话 `permissions` projection，可选目录读
-  `ctx.get('remote.permissionPresets').catalog()`；切换只提交原生 `/permission <preset>` 命令，
-  不直接写会话状态、不绕过 Policy。原生 composer 的权限 chip 在可用时是主入口；本插件自己的
-  权限行只在原生 chip 不可用（或没有 renderer 的降级窗口）时显示。高风险预设仍走原生/面板的
-  显式确认。
-- **附件**：原生 composer 的附件按钮与上传/回执路径原样可用。降级窗口（没有 renderer seats 的
-  嵌入）用 `fileUpload.upload` / `uploadImage` 取得 receipt，再以 `{type: 'file', receiptId}`
-  交给 `SessionFace.prompt`；服务缺失时只显示可见限制，不伪造附件。
-- **降级窗口**：当 renderer 没有注入 `SessionProvider` / `renderSlot` / `renderFactorySlot`
-  （非 Web renderer 的嵌入或旧 Host）时，面板退回自包含实现：从 `binding.eventSource` 折叠
-  文本消息/工具行/错误，用 `SessionFace.prompt` 发送，用 `fileUpload` 上传附件。它是诚实的
-  最小可用面，不是完整原生渲染；真实 DSH Web 走上面的原生工厂路径。
+- **会话生命周期与工作区隔离**：客户端调用 `ownerConsole.assistantChatContext()` 解析专属工作区（优先已配置的 owner 工作区，默认 `$DSH_HOME/assistant-workspace`，绝不借用软件安装/profile 配置目录或混入用户的开发仓库），调用 `sessions.create({ cwd })` 创建会话后经 `ownerConsole.registerAssistantSession(sessionId, true)` 绑定登记，再 `sessions.retain(id, { source: 'ownerConsoleChat' })` 取得持久流；浏览器侧 id 存放在 `localStorage['dsh.owner-console.assistant-chat-session.v2']`。Host 侧由 `systemPrompt.section('owner-console:wenyao-persona')` 按 session id 严格作用域注入文鳐身份，非注册编码会话返回空串 `''`，对普通编程对话零影响。
+- **专属正文与工具栏**：`OwnerConsoleChat` 自包含渲染独立助手消息流（`renderChatMarkdown` 纯 React XSS 安全渲染）、代码片段复制、工具状态徽章、流式回复预览、模型与 Effort 级联 `<select>`（通过 `remote.session.selectModel` 热切，若目标 ACP 路由尚未开启则在保存默认路由后重试）与权限 `/permission <preset>` 命令切换；`OwnerConsoleConversation` 仍保留导出以维持历史子槽合约兼容。
+- **语音与附件**：浏览器 `SpeechRecognition` / `webkitSpeechRecognition` 识别文本写入文鳐输入框，`SpeechSynthesis` 用于可选朗读；附件通过 `fileUpload.upload` / `uploadImage` 上传至当前会话后以 `{ type: 'file', receiptId }` 发送，服务缺失时显式告知限制。
+- **权限目录**：可选权限预设读取 `remote.permissionPresets.catalog()`；高风险权限（`danger-full-access` / `auto`）仍需面板内二次确认后下发 `/permission`。
+- **助手会话登记文件安全**：`$DSH_HOME/owner-console/assistant-sessions.json` 按 `0o600` 原子写入且拒绝符号链接（最多保留最近 32 条会话 id），仅用于隔离 `wenyao-persona` 注入作用域与续聊默认打开，不含消息正文或秘密凭据。
 
 ### 设置页（⚙）与左侧栏「文鳐助手」设置分组
 
@@ -227,13 +198,12 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 - 配置写入只经 Host `settings.mutate`，且限定到单个已安装条目；bundle/entry 管理只经 Host
   `pluginManager` 且限定 `@dsh-enhanced/*`；授权来源是主人自己在面板上的点击，不是模型工具调用，
   也不存在后台自动写配置。
-- 对话窗口只读取当前 retained Session 自己的 `eventSource` / snapshot / `permissions`
-  projection，用来显示状态、降级文本和朗读；不读取其它会话、报告或记忆，也不上报内容。
+- 对话窗口只读取当前 retained Session 自己的 `eventSource` / snapshot / `permissions` / `modelSelection`
+  projection，用来显示消息流、模型选择和朗读；不读取其它会话、报告或记忆，也不上报内容。
   client bundle 只依赖宿主提供的 `react`（以及 `react/jsx-runtime`）与 Host 注入的客户端服务，
-  不 import 其它 DSH 组件包；原生正文由 renderer 的 factory seat 渲染。
-- 降级窗口的语音识别/合成由浏览器完成，音频或文本可能发送给浏览器厂商的语音服务（不经过 DSH
-  权限模型与审计）；插件不录音、不保存音频，只把最终转写写进当前会话的原生草稿。原生对话不渲染
-  这些控件，语音入口直接来自 Host composer。
+  不 import 其它 DSH 组件包；专属对话流由 `OwnerConsoleChat` 与 `chat-markdown.ts` 独立渲染。
+- 语音识别/合成由浏览器完成，音频或文本可能发送给浏览器厂商的语音服务（不经过 DSH
+  权限模型与审计）；插件不录音、不保存音频，只把识别结果填入当前对话框草稿。
 - 安装/移除仅由主人点击触发，走 DSH 官方安装路径；移除只对 Host 标记为 `removable` 且非本面板自身的
   bundle 显示，并需浏览器确认（无确认通道时给出可见提示并停止）；不改动未列出的条目；
   secret 明文不接受、不存储、不回显。
@@ -241,41 +211,22 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 ## 测试
 
 `tests/client-bundle.spec.ts` 用 Web 外壳的 `__ModuleLoader__` 契约加载实际构建产物
-`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言全部 13 个客户端槽位
+`lib/client.js`，以真实 `react`/`react/jsx-runtime` 执行 factory，断言全部客户端槽位
 （`sidebar.panellist`、`main`、`owner-console.conversation`、`settings.section`、`settings.section.icon`、
-`settings.general.item`、`settings.models.footer` 及 6 个 `plugins.bundle.config`）的注册与反向释放；
-并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物内联 4 个 webp、包含原生对话与设置标记且不含外部图片 URL。
+`settings.general.item`、`settings.models.footer`、`settings.models.provider-card` 及 6 个 `plugins.bundle.config`）的注册与反向释放；
+并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物内联 4 个 webp、包含专属控制条与 `/model` 下拉标识且不含外部图片 URL。
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
-`tests/coding-tools-service.spec.ts` 与 `tests/autonomy-service.spec.ts` 覆盖 `agy` 配置、默认路由切换、
-无交互 CLI 探测（缓存 / 去重 / 敏感环境变量剥离）以及 Dreaming / Proactive / WP22 / WorkItems / MemoryLearning /
-GrowthDriver 读写入契约与 fail-closed 降级；`tests/growth-report.spec.ts` 覆盖只读成长计分卡在 `no-data`、`zero` 与真实窗口样本下的聚合及口径门控；`tests/settings-slots.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、
-模型页脚与 6 个插件详情槽。
-`tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：降级消息列表与 composer 发送
-(`SessionFace.prompt`)、附件上传 receipt、上传服务缺失时的可见限制、降级窗口语音不可用禁用/
-tooltip、可用时浏览器识别写入草稿、权限投影与 `/permission` 切换、renderer seat 下的原生
-`SessionProvider`/子槽渲染、原生 phase 计算、原生对话不再重复渲染语音工具行、齿轮打开设置页并
-保留全部卡片、返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等
-纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
+`tests/coding-tools-service.spec.ts`、`tests/autonomy-service.spec.ts` 与 `tests/model-catalog.spec.ts` 覆盖 `agy` 配置、`/model` 目录聚合（超时隔离/休眠回退/写后缓存失效）、文鳐会话严格作用域系统提示隔离、级联下拉筛选、默认路由切换、无交互 CLI 探测以及 Dreaming / Proactive / WP22 / WorkItems / MemoryLearning / GrowthDriver 读写入契约与 fail-closed 降级；`tests/growth-report.spec.ts` 覆盖只读成长计分卡；`tests/settings-slots.spec.ts` 与 `tests/doctor-ui.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、模型设置卡片与 6 个插件详情槽。
+`tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：专属助手对话窗口（Markdown 渲染、工作区/能力胶囊、新对话、模型切换、`SessionFace.prompt` 发送、附件上传、语音识别/权限切换）、`OwnerConsoleConversation` 子槽相位计算以及齿轮打开设置页/返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
 `tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开设置页元素树，断言页头品牌、
 02 水墨化鹏主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字
 标签与空状态文案。
 
 ## 界面布局
 
-- **对话窗口**：紧凑页头（圆形化鹏标、标题「文鳐 Ray」、状态胶囊、副标题、右上角「原生会话」与 ⚙），
-  正文和 composer 由 DSH 原生会话骨架占满剩余高度。原生 composer 自带发送、附件、语音输入、
-  权限 chip、模型选择与停止，宽屏居中、窄屏自适应；面板不重复渲染语音/朗读工具行。降级窗口才有
-  自己的消息列表、composer 与语音工具行。
-- **设置页与 DSH 设置弹窗共用卡片**：顶部「← 返回对话」+「设置」；下面是 02 水墨化鹏宽幅主视觉 banner（webp
-  data URI，纯装饰 `alt=""`）、标题与圆形化鹏印章、副标题，以及「开始对话 / 打开插件页」；再往下是
-  配置卡片。同一套 `--dsw-*` 卡片与控制器也复用于 DSH 原生设置的「文鳐助手」分组、`settings.general.item`、
-  `settings.models.footer` 与 6 个 `plugins.bundle.config` 槽位。
-- 两个视图共用同一套背景：02 水墨化鹏宽幅图以低透明度铺在面板表面、内容之下，文字仍落在主题卡片/原生
-  会话表面上，明暗主题的对比度不变。
-- 侧栏入口图标与设置页印章都来自 02 水墨化鹏 `icon.png`（方形裁切鱼跃化鹏纹样，可作圆形头像裁切）。
-- 卡片：统一圆角与边框，标题前一枚小云纹；状态用「圆点 + 文字」胶囊（ok/warn/error），不只靠颜色。
-- 颜色只取宿主 `--dsw-*` 变量并带回退值，明暗主题通用；不引入外部 CSS、字体或网络资源。
-  装饰 SVG 见 `src/art.ts`。
+- **文鳐专属对话窗口**：顶部栏（圆形化鹏标、标题「文鳐 Ray」、会话状态与工作区/记忆/Wiki/飞书胶囊、「新对话」与 ⚙）、控制栏（同 `/model` 级联模型与 Effort 选择、权限切换）、主对话流（欢迎卡片 + 推荐开场白、Markdown 气泡 + 复制按钮、工具胶囊）与底部 composer（附件、语音、朗读、停止、发送）。
+- **设置页与 DSH 设置弹窗共用分类卡片组（`SettingsCardsDeck`）**：支持「全部 / 体检自愈 / 模型与工具 / 自主与成长 / 飞书与插件 / 只读诊断」分组切换；共用 `--dsw-*` 样式与 `ModelRouteSelects`、CLI 路径下拉选择器。
+- 两个视图共用同一套背景：02 水墨化鹏宽幅图以低透明度铺在面板表面、内容之下，明暗主题对比度不变；颜色只取宿主 `--dsw-*` 变量并带回退值。
 
 ### 主视觉与图标资产
 

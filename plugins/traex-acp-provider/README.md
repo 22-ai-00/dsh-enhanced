@@ -86,6 +86,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
     agyDisableTelemetry: true
     agyMode: default
     timeoutMs: 600000
+    contextWindow: 200000
     authProbeTimeoutMs: 30000
     maxAuthProbeBytes: 32768
     killGraceMs: 3000
@@ -109,6 +110,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 - 部署工具仍可在启用 route 前显式调用包导出的 `probeTraexReadiness`，主动验证本机登录和完整目录；调用完成后应 shutdown 临时 adapter。adapter shutdown 会 abort 尚未完成的目录发现、清除 single-flight 引用与缓存。
 - `models` 是实时 ACP 目录以外需要额外展示的非权威别名列表，默认只有 `default`。它不是执行允许列表；每次请求都会在新的 ACP 会话里重新验证具体模型，模型不可用时失败且不会静默换模型。若 DSH 已放行的 effort 在新会话的 selector 中消失，transport 会保留当前模型并使用该会话的默认档位，绝不重放 prompt。
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
+- `contextWindow`（默认 `200000`）向 DSH 上报模型上下文窗口大小供会话压缩与模型切换校验；DSH 默认 `compaction-basic` 的 `headroomTokens` 为 `65536`，自定义该值时需保持 `contextWindow >= 80000`，否则切换模型会触发 `MODEL_SWITCH_COMPACTION_FAILED`。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次 `traex-agent` live-session 调用前的 `traex login status`；`authProbeTimeoutMs`（默认 `30000`）同时作为 `listModels` 的 auth + ACP discovery 整体时限，目录查询不会沿用生成请求默认 10 分钟的 `timeoutMs`。当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。`agy-agent` 不再额外起 `agy models` 进程，直接以同一次 `agy acp` `session/new` 验证登录状态（未登录返回 `-32000 Authentication required` -> `ACP_AUTH_REQUIRED`）。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
 - `maxPromptBytes` 限制序列化后的 DSH 请求，默认 4 MiB。prompt 通过 ACP `session/prompt` 的文本块经 stdin 发送，**不作为 argv 元素**，因此这里不存在操作系统命令行长度限制；该上限只用于约束本机内存与 NDJSON 帧膨胀。真正的上下文边界由 TraeX 侧模型窗口决定。超限时在握手前失败，返回 DSH 标准的 `CONTEXT_WINDOW_EXCEEDED`，prompt 确定未进入 ACP 流；长对话若需要更大值可直接调高本项。

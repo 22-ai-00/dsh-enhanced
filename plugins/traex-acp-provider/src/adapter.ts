@@ -577,6 +577,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         ? `${spec.label} active model${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
         : (catalogModel?.name ?? model),
       description: catalogModel?.description ?? 'Experimental local ACP coding-agent delegation',
+      context: { contextWindow: this.config.contextWindow },
       inputModalities: ['text'],
       ...reasoningInfo(catalogModel),
     }

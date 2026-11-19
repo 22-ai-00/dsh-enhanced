@@ -597,6 +597,7 @@ describe('TraeX ACP LLM adapter', () => {
 
     await expect(adapter.resolveModel('traex-agent', 'trae-pro')).resolves.toMatchObject({
       id: 'trae-pro',
+      context: { contextWindow: 200_000 },
       reasoning: {
         efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
         defaultEffort: 'low',
@@ -1591,10 +1592,18 @@ describe('TraeX ACP LLM adapter', () => {
     await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-hydrogen')).resolves.toMatchObject({
       provider: 'agy-agent',
       id: 'gemini-4-hydrogen',
+      context: { contextWindow: 200_000 },
       reasoning: {
         efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'XHigh' }],
         defaultEffort: 'medium',
       },
+    })
+
+    const customContextAdapter = new TraexAcpAdapter(Config({ contextWindow: 128_000 } as never))
+    await expect(customContextAdapter.resolveModel(AGY_PROVIDER_ROUTE, 'claude-sonnet-5-5')).resolves.toMatchObject({
+      provider: 'agy-agent',
+      id: 'claude-sonnet-5-5',
+      context: { contextWindow: 128_000 },
     })
 
     const agyRequest: GenerateOptions = {

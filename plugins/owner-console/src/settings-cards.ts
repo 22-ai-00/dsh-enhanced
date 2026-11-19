@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
+import { CUSTOM_MODEL_OPTION, ModelRouteSelects, resolveEffectiveModelCatalog, resolveEffortOptions, cascadeModelChange } from './model-route-ui.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
 import {
   AUTONOMY_TIER_DEFAULTS,
-  type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction, type AutonomySetupStatus,
-  type CodingToolProbe, type GrowthDataState, type IntakeAgreementAvailability, type OwnerConsoleAssistantOverview,
-  type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement, type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleStatus,
+  type AssistantChatContext, type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction,
+  type AutonomySetupStatus, type CodingToolProbe, type GrowthDataState, type IntakeAgreementAvailability,
+  type OwnerConsoleAssistantOverview, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
+  type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
 } from './typert.js'
@@ -158,6 +160,9 @@ export type ConsoleRemote = Readonly<{
   setupDoctor?(): Promise<RemoteResult<SetupDoctorReport>>
   applyDoctorRepair?(issueIds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureFeishuEasy?(appId: string, appSecret: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
+  assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
+  registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
 }>
 
 export type OwnerConsoleNavigation = Readonly<{ openConversation(): void; openPlugins(): void }>
@@ -188,6 +193,8 @@ export interface ConsoleController {
   readonly status: OwnerConsoleStatus | undefined
   readonly overview: OwnerConsoleAssistantOverview | undefined
   readonly autonomySetup: AutonomySetupStatus | undefined
+  readonly modelCatalog: OwnerConsoleModelCatalog | undefined
+  readonly loadingModelCatalog: boolean
   readonly upgradeStatus: SelfUpgradeStatus | undefined
   readonly upgradePreview: SelfUpgradePreview | undefined
   readonly doctorReport: SetupDoctorReport | undefined
@@ -203,6 +210,7 @@ export interface ConsoleController {
   setError(value: string): void
   setNotice(value: string): void
   refresh(): Promise<void>
+  refreshModelCatalog(force?: boolean): Promise<void>
   checkDoctor(): Promise<void>
   probeTool(tool: 'traex' | 'agy', command: string, force?: boolean, announce?: boolean): Promise<void>
   checkUpgrade(force?: boolean): Promise<void>
@@ -220,6 +228,8 @@ export function useConsoleActions(
 ): ConsoleController {
   const [overview, setOverview] = useState<OwnerConsoleAssistantOverview>()
   const [autonomySetup, setAutonomySetup] = useState<AutonomySetupStatus>()
+  const [modelCatalog, setModelCatalog] = useState<OwnerConsoleModelCatalog>()
+  const [loadingModelCatalog, setLoadingModelCatalog] = useState(false)
   const [upgradeStatus, setUpgradeStatus] = useState<SelfUpgradeStatus>()
   const [upgradePreview, setUpgradePreview] = useState<SelfUpgradePreview>()
   const [doctorReport, setDoctorReport] = useState<SetupDoctorReport>()
@@ -239,6 +249,19 @@ export function useConsoleActions(
     return () => { mounted.current = false }
   }, [])
 
+  const refreshModelCatalog = async (force = false) => {
+    if (typeof remote.modelCatalog !== 'function') return
+    setLoadingModelCatalog(true)
+    try {
+      const cat = await remote.modelCatalog(force)
+      if (mounted.current && cat.ok) setModelCatalog(cat.value)
+    } catch {
+      // Optional model catalog failure stays non-fatal; fallback catalog still works.
+    } finally {
+      if (mounted.current) setLoadingModelCatalog(false)
+    }
+  }
+
   const refresh = async () => {
     try {
       const statusPromise = typeof remote.status === 'function' ? remote.status() : undefined
@@ -250,6 +273,7 @@ export function useConsoleActions(
         ? remote.checkSelfUpgrade(false) : undefined
       const doctorPromise = typeof remote.setupDoctor === 'function'
         ? remote.setupDoctor() : undefined
+      void refreshModelCatalog(false)
       if (statusPromise !== undefined) {
         const result = await statusPromise
         if (!mounted.current) return
@@ -398,10 +422,10 @@ export function useConsoleActions(
   const runInstall = (spec: string) => run(() => installWithApproval(remote, spec, confirmOwner))
 
   return {
-    remote, navigation, status, overview, autonomySetup, upgradeStatus, upgradePreview,
+    remote, navigation, status, overview, autonomySetup, modelCatalog, loadingModelCatalog, upgradeStatus, upgradePreview,
     doctorReport, checkingDoctor,
     traexProbe, agyProbe, probingTool, checkingUpgrade, previewingUpgrade,
-    busy, error, notice, setError, setNotice, refresh, checkDoctor, probeTool, checkUpgrade, previewUpgrade,
+    busy, error, notice, setError, setNotice, refresh, refreshModelCatalog, checkDoctor, probeTool, checkUpgrade, previewUpgrade,
     run, runInstall, confirmOwner,
   }
 }
@@ -666,36 +690,130 @@ function probeTone(probe: CodingToolProbe | undefined): StatusTone {
   return 'error'
 }
 
+function CommandPathControl({
+  label,
+  defaultBin,
+  configured,
+  discoveredPath,
+  value,
+  onChange,
+  disabled,
+}: Readonly<{
+  label: string
+  defaultBin: string
+  configured: string
+  discoveredPath?: string | undefined
+  value: string
+  onChange: (next: string) => void
+  disabled: boolean
+}>) {
+  const [customMode, setCustomMode] = useState(false)
+  const options: Array<{ value: string; label: string }> = []
+  const seen = new Set<string>()
+  const pushOpt = (optValue: string, optLabel: string) => {
+    if (optValue === '' || seen.has(optValue)) return
+    seen.add(optValue)
+    options.push({ value: optValue, label: optLabel })
+  }
+  if (configured !== '') {
+    pushOpt(configured, configured === discoveredPath
+      ? `当前配置（已探测）: ${configured}`
+      : `当前配置: ${configured}`)
+  }
+  if (discoveredPath !== undefined && discoveredPath !== '') {
+    pushOpt(discoveredPath, `自动探测路径: ${discoveredPath}`)
+  }
+  pushOpt(defaultBin, `系统 PATH 默认 (${defaultBin})`)
+  const currentValue = value !== '' ? value : (configured || discoveredPath || defaultBin)
+  if (!seen.has(currentValue)) {
+    pushOpt(currentValue, `自定义: ${currentValue}`)
+  }
+
+  return el('div', { style: { display: 'grid', gap: 4, minWidth: 220, flex: '1 1 260px' } },
+    el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, label,
+      el('select', {
+        'aria-label': label,
+        'data-command-path-select': defaultBin,
+        value: customMode ? CUSTOM_MODEL_OPTION : currentValue,
+        disabled,
+        style: inputStyle,
+        onChange: (event: { target: { value: string } }) => {
+          const picked = event.target.value
+          if (picked === CUSTOM_MODEL_OPTION) {
+            setCustomMode(true)
+            return
+          }
+          setCustomMode(false)
+          onChange(picked)
+        },
+      },
+      ...options.map(opt => el('option', { key: opt.value, value: opt.value }, opt.label)),
+      el('option', { value: CUSTOM_MODEL_OPTION }, '自定义路径…'))),
+    !customMode ? null : el('input', {
+      type: 'text',
+      'aria-label': `${label}自定义路径`,
+      value,
+      disabled,
+      placeholder: configured || discoveredPath || defaultBin,
+      style: inputStyle,
+      onChange: (event: { target: { value: string } }) => onChange(event.target.value),
+    }))
+}
+
 export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
-  const { status, busy, probingTool, traexProbe, agyProbe } = ctrl
+  const { status, modelCatalog, autonomySetup, loadingModelCatalog, busy, probingTool, traexProbe, agyProbe } = ctrl
   const [traexCommand, setTraexCommand] = useState('')
   const [agyCommand, setAgyCommand] = useState('')
-  const [customProvider, setCustomProvider] = useState('')
-  const [customModel, setCustomModel] = useState('')
+  const [routeProvider, setRouteProvider] = useState('')
+  const [routeModel, setRouteModel] = useState('default')
+  const [routeEffort, setRouteEffort] = useState('')
+  const userEditedRouteRef = useRef(false)
   const autoProbedRef = useRef(false)
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const traexState = componentState(status, TRAEX_PACKAGE)
-  const acpEntryReady = status !== undefined && status.traex.entry !== undefined
+  const acpEntryReady = status !== undefined && status.traex?.entry !== undefined
   const acpRepair = !acpEntryReady && (traexState.stalled || traexState.missing.length > 0 || traexState.kind === 'errored')
     ? repairSection(ctrl, traexState, TRAEX_PACKAGE) : null
 
   useEffect(() => {
     if (!acpEntryReady || autoProbedRef.current || typeof ctrl.remote.probeCodingTool !== 'function') return
     autoProbedRef.current = true
-    void ctrl.probeTool('traex', status?.traex.command ?? '', false, false)
+    void ctrl.probeTool('traex', status?.traex?.command ?? '', false, false)
     void ctrl.probeTool('agy', status?.agy?.command ?? '', false, false)
   }, [acpEntryReady])
 
+  const effectiveCatalog = resolveEffectiveModelCatalog({ modelCatalog, status, autonomySetup })
   const defaultModel = status?.defaultModel
   const activeProvider = defaultModel?.provider ?? ''
   const activeModel = defaultModel?.model ?? ''
+  const activeEffort = defaultModel?.reasoningEffort ?? ''
   const isTraexDefault = activeProvider === 'traex-agent'
   const isAgyDefault = activeProvider === 'agy-agent'
-  const llmProviders = status?.llmProviders ?? []
 
-  const traexEnabled = status?.traex.enabled === true
+  useEffect(() => {
+    if (userEditedRouteRef.current) return
+    const defProv = effectiveCatalog.defaultSelection.provider
+    const nextProv = defProv || effectiveCatalog.providers[0]?.id || ''
+    if (nextProv === '') return
+    const provEntry = effectiveCatalog.providers.find(p => p.id === nextProv)
+    const isAcp = nextProv === 'traex-agent' || nextProv === 'agy-agent'
+    const nextMod = (defProv === nextProv ? effectiveCatalog.defaultSelection.model : '')
+      || provEntry?.models[0]?.id
+      || (isAcp ? 'default' : '')
+    const nextEff = defProv === nextProv ? (effectiveCatalog.defaultSelection.reasoningEffort ?? '') : ''
+    setRouteProvider(nextProv)
+    setRouteModel(nextMod)
+    setRouteEffort(nextEff)
+  }, [
+    effectiveCatalog.defaultSelection.provider,
+    effectiveCatalog.defaultSelection.model,
+    effectiveCatalog.defaultSelection.reasoningEffort,
+    effectiveCatalog.providers.length,
+  ])
+
+  const traexEnabled = status?.traex?.enabled === true
   const agyEnabled = status?.agy?.enabled === true
-  const traexCmdDisplay = status === undefined || status.traex.command === '' ? 'traex（默认）' : status.traex.command
+  const traexCmdDisplay = status === undefined || status.traex?.command === '' ? 'traex（默认）' : status.traex.command
   const agyCmdDisplay = status === undefined || !status.agy || status.agy.command === '' ? 'agy（默认）' : status.agy.command
 
   const probeButton = (tool: 'traex' | 'agy', cmd: string) => typeof ctrl.remote.probeCodingTool !== 'function' ? null :
@@ -710,7 +828,10 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
       el('button', {
         style: btn((isTraexDefault && provider === 'traex-agent') || (isAgyDefault && provider === 'agy-agent') ? buttonStyle : primaryButtonStyle),
         disabled: busy,
-        onClick: () => void ctrl.run(() => ctrl.remote.setDefaultModelRoute!(provider, 'default', '')),
+        onClick: () => {
+          userEditedRouteRef.current = false
+          void ctrl.run(() => ctrl.remote.setDefaultModelRoute!(provider, 'default', ''))
+        },
       }, (provider === 'traex-agent' && isTraexDefault) || (provider === 'agy-agent' && isAgyDefault)
         ? `当前默认（${label}）` : `启用并设为默认`)
 
@@ -732,17 +853,25 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
                 onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexProbe.discoveredPath!)) }, '一键绑定本机路径并启用')))
           : null,
         el('div', { style: { ...actionsStyle, alignItems: 'end' } },
-          field('TraeX 命令（可选）', traexCommand, setTraexCommand, traexProbe?.discoveredPath || status?.traex.command || 'traex'),
+          jsx(CommandPathControl, {
+            label: 'TraeX CLI 路径（可选）',
+            defaultBin: 'traex',
+            configured: status?.traex?.command ?? '',
+            discoveredPath: traexProbe?.discoveredPath,
+            value: traexCommand,
+            onChange: setTraexCommand,
+            disabled: busy,
+          }),
           el('button', { style: btn(primaryButtonStyle), disabled: busy,
-            onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexCommand || traexProbe?.discoveredPath || '')) }, '启用'),
+            onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(true, traexCommand || status?.traex?.command || traexProbe?.discoveredPath || '')) }, '启用'),
           el('button', { style: btn(), disabled: busy,
             onClick: () => void ctrl.run(() => ctrl.remote.configureTraex(false, '')) }, '停用'),
           defaultSwitchAction('traex-agent', 'TraeX'),
-          probeButton('traex', traexCommand || status?.traex.command || '')),
+          probeButton('traex', traexCommand || status?.traex?.command || '')),
         traexProbe === undefined ? null : el('p', { style: hintStyle },
           `${traexProbe.summary}${traexProbe.remediation ? ` · ${traexProbe.remediation}` : ''}`),
         traexProbe?.state === 'auth-required' && traexProbe.loginCommand
-          ? commandCopyRow(traexProbe.loginCommand, ctrl, busy, () => void ctrl.probeTool('traex', traexCommand || status?.traex.command || '', true, true))
+          ? commandCopyRow(traexProbe.loginCommand, ctrl, busy, () => void ctrl.probeTool('traex', traexCommand || status?.traex?.command || '', true, true))
           : null),
       // Antigravity (agy) sub-block
       el('div', { style: { display: 'grid', gap: 8, paddingTop: 10, borderTop: `1px solid ${hairline}` } },
@@ -762,9 +891,17 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
         typeof ctrl.remote.configureAgy !== 'function'
           ? el('p', { style: hintStyle }, '当前 Host 暂未提供 Antigravity 配置接口，请升级插件并重启 profile。')
           : el('div', { style: { ...actionsStyle, alignItems: 'end' } },
-            field('agy 命令（可选）', agyCommand, setAgyCommand, agyProbe?.discoveredPath || status?.agy?.command || 'agy'),
+            jsx(CommandPathControl, {
+              label: 'agy CLI 路径（可选）',
+              defaultBin: 'agy',
+              configured: status?.agy?.command ?? '',
+              discoveredPath: agyProbe?.discoveredPath,
+              value: agyCommand,
+              onChange: setAgyCommand,
+              disabled: busy,
+            }),
             el('button', { style: btn(primaryButtonStyle), disabled: busy,
-              onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(true, agyCommand || agyProbe?.discoveredPath || '')) }, '启用'),
+              onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(true, agyCommand || status?.agy?.command || agyProbe?.discoveredPath || '')) }, '启用'),
             el('button', { style: btn(), disabled: busy,
               onClick: () => void ctrl.run(() => ctrl.remote.configureAgy!(false, '')) }, '停用'),
             defaultSwitchAction('agy-agent', 'Antigravity'),
@@ -788,34 +925,55 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
             : null),
         acpRepair)
 
-  const apiProviders = llmProviders.filter(p => p.id !== 'traex-agent' && p.id !== 'agy-agent')
+  const trimmedRouteProvider = routeProvider.trim()
+  const isAcpSelected = trimmedRouteProvider === 'traex-agent' || trimmedRouteProvider === 'agy-agent'
+  const trimmedRouteModel = routeModel.trim()
+  const defaultSubmitDisabled = busy || trimmedRouteProvider === '' || (!isAcpSelected && trimmedRouteModel === '')
+
   const defaultSwitcher = typeof ctrl.remote.setDefaultModelRoute !== 'function' || status === undefined ? null
-    : el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
-      el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } },
-        `默认模型路由详情：${activeProvider || '未设置'}${activeModel ? ` / ${activeModel}` : ''}`),
-      el('div', { style: { display: 'grid', gap: 10, marginTop: 10 } },
-        apiProviders.length === 0 ? null : el('div', { style: actionsStyle },
-          ...apiProviders.map(provider => el('button', {
-            key: provider.id,
-            style: btn(activeProvider === provider.id ? primaryButtonStyle : buttonStyle),
-            disabled: busy,
-            onClick: () => void ctrl.run(() => ctrl.remote.setDefaultModelRoute!(provider.id, customModel.trim() || 'default', '')),
-          }, `切到 ${provider.name || provider.id}`))),
-        el('div', { style: { ...actionsStyle, alignItems: 'end' } },
-          field('自定义 provider', customProvider, setCustomProvider, 'deepseek-official / traex-agent / agy-agent'),
-          field('默认模型 ID', customModel, setCustomModel, 'default'),
-          el('button', {
+    : el('div', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 12, display: 'grid', gap: 10 } },
+      el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+        el('span', { style: { fontSize: 12, fontWeight: 600, color: ink } }, '默认模型与推理强度（同 /model）'),
+        typeof ctrl.remote.modelCatalog === 'function'
+          ? el('button', {
+            type: 'button',
             style: btn(),
-            disabled: busy || customProvider.trim() === '',
-            onClick: () => void ctrl.run(() => ctrl.remote.setDefaultModelRoute!(customProvider, customModel || 'default', '')),
-          }, '应用默认模型'))))
+            disabled: busy || loadingModelCatalog,
+            onClick: () => void ctrl.refreshModelCatalog(true),
+          }, loadingModelCatalog ? '刷新中…' : '刷新模型列表')
+          : null),
+      jsx(ModelRouteSelects, {
+        catalog: effectiveCatalog,
+        provider: routeProvider,
+        model: routeModel,
+        reasoningEffort: routeEffort,
+        disabled: busy,
+        onChange: (next: Readonly<{ provider: string; model: string; reasoningEffort: string }>) => {
+          userEditedRouteRef.current = true
+          setRouteProvider(next.provider)
+          setRouteModel(next.model)
+          setRouteEffort(next.reasoningEffort)
+        },
+      }),
+      el('div', { style: actionsStyle },
+        el('button', {
+          type: 'button',
+          style: idle(primaryButtonStyle, defaultSubmitDisabled),
+          disabled: defaultSubmitDisabled,
+          onClick: () => {
+            if (defaultSubmitDisabled) return
+            userEditedRouteRef.current = false
+            const resolvedModel = isAcpSelected ? (trimmedRouteModel || 'default') : trimmedRouteModel
+            void ctrl.run(() => ctrl.remote.setDefaultModelRoute!(trimmedRouteProvider, resolvedModel, routeEffort.trim()))
+          },
+        }, '设为默认模型')))
 
   return card('编程工具与默认模型（TraeX / Antigravity）',
     el('p', { style: hintStyle }, '本机 ACP 编程代理与默认模型路由管理；探测仅检查本机安装与登录，不触发付费对话调用。'),
     el('div', { style: listStyle },
       row('入口', el('span', { style: actionsStyle },
         pill(traexState.label, traexState.tone),
-        status?.traex.entry === undefined ? null : el('span', { style: monoMuted }, status.traex.entry))),
+        status?.traex?.entry === undefined ? null : el('span', { style: monoMuted }, status.traex.entry))),
       ...(traexState.entry?.diagnostic === undefined ? [] : [row('诊断', boundedLine(traexState.entry.diagnostic))]),
       ...(traexState.error === undefined ? [] : [row('错误', `${traexState.error.code}${traexState.error.diagnostic === undefined ? '' : `：${boundedLine(traexState.error.diagnostic)}`}`)]),
       ...(traexState.missing.length === 0 ? [] : [row('缺少服务', missingRemedy(traexState))]),
@@ -823,7 +981,7 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
       row('Antigravity 命令', agyCmdDisplay),
       row('当前默认路由', defaultModel?.available
         ? el('span', { style: actionsStyle },
-          pill(activeProvider === '' ? '未配置' : `${activeProvider} / ${activeModel || 'default'}`,
+          pill(activeProvider === '' ? '未配置' : `${activeProvider} / ${activeModel || 'default'}${activeEffort ? ` · ${activeEffort}` : ''}`,
             activeProvider === '' ? 'warn' : 'ok'))
         : pill('agent-default-model 未加载', 'neutral'))),
     providerControlRows,
@@ -1171,11 +1329,13 @@ export function GrowthMemoryCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>
 export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { status, busy, remote } = ctrl
   const [bundleEntry, setBundleEntry] = useState('')
+  const [customEntryMode, setCustomEntryMode] = useState(false)
   const [bundleJson, setBundleJson] = useState('{}')
   const [installSpec, setInstallSpec] = useState('@dsh-enhanced/')
   const pending = status === undefined
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const itemStyle = { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'center', padding: '10px 0', borderTop: `1px solid ${hairline}` }
+  const pluginEntries = status?.plugins ?? []
 
   const bundleRows = pending
     ? placeholder('正在读取…')
@@ -1235,7 +1395,29 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
       el('details', { style: { marginTop: 4, borderTop: `1px solid ${hairline}`, paddingTop: 10 } },
         el('summary', { style: { fontSize: 12, fontWeight: 500, color: muted, cursor: 'pointer' } }, '高级：合并配置（只对声明了 live 字段的条目生效）'),
         el('div', { style: { display: 'grid', gap: 8, marginTop: 10 } },
-          field('entry', bundleEntry, setBundleEntry, 'dsh-enhanced-...'),
+          el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, '选择插件条目 (entry)',
+            el('select', {
+              'aria-label': '选择插件条目',
+              value: customEntryMode || pluginEntries.length === 0 ? CUSTOM_MODEL_OPTION : bundleEntry,
+              disabled: busy,
+              style: inputStyle,
+              onChange: (event: { target: { value: string } }) => {
+                const picked = event.target.value
+                if (picked === CUSTOM_MODEL_OPTION) {
+                  setCustomEntryMode(true)
+                  return
+                }
+                setCustomEntryMode(false)
+                setBundleEntry(picked)
+              },
+            },
+            el('option', { value: '' }, '选择已加载条目…'),
+            ...pluginEntries.map(plugin => el('option', { key: plugin.entryId, value: plugin.entryId },
+              `${plugin.entryId} (${plugin.moduleName})`)),
+            el('option', { value: CUSTOM_MODEL_OPTION }, '手动输入 entry ID…'))),
+          customEntryMode || pluginEntries.length === 0
+            ? field('entry', bundleEntry, setBundleEntry, 'dsh-enhanced-...')
+            : null,
           el('textarea', { value: bundleJson, rows: 4, 'aria-label': '合并配置 JSON',
             style: { ...inputStyle, fontFamily: monoFont, fontSize: 12, resize: 'vertical' },
             onChange: (event: { target: { value: string } }) => setBundleJson(event.target.value) }),
@@ -1304,28 +1486,39 @@ function controlField(label: string, control: unknown) {
 }
 
 export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
-  const { remote, status, autonomySetup, busy } = ctrl
-  const initialProvider = autonomySetup?.modelRoute.provider ?? status?.defaultModel?.provider ?? 'traex-agent'
+  const { remote, status, autonomySetup, modelCatalog, loadingModelCatalog, busy } = ctrl
+  const initialRoute = autonomySetup?.modelRoute.provider
+    ? autonomySetup.modelRoute
+    : status?.defaultModel?.provider
+      ? status.defaultModel
+      : undefined
+  const initialProvider = initialRoute?.provider ?? ''
   const [tier, setTier] = useState<AutonomyBudgetTier>(autonomySetup?.activeTier ?? 'conservative')
   const [provider, setProvider] = useState<string>(initialProvider)
-  const [model, setModel] = useState<string>(autonomySetup?.modelRoute.model ?? status?.defaultModel?.model ?? 'default')
-  const [effort, setEffort] = useState<string>(autonomySetup?.modelRoute.reasoningEffort ?? status?.defaultModel?.reasoningEffort ?? '')
-  const [enableMemory, setEnableMemory] = useState<boolean>(autonomySetup?.grants.memoryLearning.enabled ?? true)
-  const [enableDreaming, setEnableDreaming] = useState<boolean>(autonomySetup?.grants.dreaming.enabled ?? true)
-  const [enableGrowth, setEnableGrowth] = useState<boolean>(autonomySetup?.grants.growthDriver.enabled ?? true)
+  const [model, setModel] = useState<string>(
+    initialRoute?.model || (initialProvider === 'traex-agent' || initialProvider === 'agy-agent' ? 'default' : ''),
+  )
+  const [effort, setEffort] = useState<string>(initialRoute?.reasoningEffort ?? '')
+  const [enableMemory, setEnableMemory] = useState<boolean>(
+    autonomySetup?.grants.memoryLearning.configured ? autonomySetup.grants.memoryLearning.enabled : true,
+  )
+  const [enableDreaming, setEnableDreaming] = useState<boolean>(
+    autonomySetup?.grants.dreaming.configured ? autonomySetup.grants.dreaming.enabled : true,
+  )
+  const [enableGrowth, setEnableGrowth] = useState<boolean>(
+    autonomySetup?.grants.growthDriver.configured ? autonomySetup.grants.growthDriver.enabled : true,
+  )
   const [workItemExp, setWorkItemExp] = useState<boolean>(autonomySetup?.grants.memoryLearning.workItemExperiences ?? false)
   const [customBudget, setCustomBudget] = useState<AutonomyBudgetLimits>(
     autonomySetup?.activeBudgets ?? AUTONOMY_TIER_DEFAULTS.conservative,
   )
   const syncedRef = useRef(false)
+  const userEditedRouteRef = useRef(false)
 
   useEffect(() => {
     if (autonomySetup === undefined || syncedRef.current) return
     syncedRef.current = true
     setTier(autonomySetup.activeTier)
-    if (autonomySetup.modelRoute.provider) setProvider(autonomySetup.modelRoute.provider)
-    if (autonomySetup.modelRoute.model) setModel(autonomySetup.modelRoute.model)
-    setEffort(autonomySetup.modelRoute.reasoningEffort ?? '')
     setCustomBudget(autonomySetup.activeBudgets)
     if (autonomySetup.grants.memoryLearning.configured || autonomySetup.grants.dreaming.configured || autonomySetup.grants.growthDriver.configured) {
       setEnableMemory(autonomySetup.grants.memoryLearning.enabled || !autonomySetup.grants.memoryLearning.configured)
@@ -1335,7 +1528,25 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
     setWorkItemExp(autonomySetup.grants.memoryLearning.workItemExperiences)
   }, [autonomySetup])
 
-  const apiProviders = autonomySetup?.modelRoute.apiProviders ?? (status?.llmProviders ?? []).filter(p => p.id !== 'traex-agent' && p.id !== 'agy-agent')
+  useEffect(() => {
+    if (userEditedRouteRef.current) return
+    const nextProvider = status?.defaultModel?.provider?.trim() ?? ''
+    if (nextProvider === '') return
+    setProvider(nextProvider)
+    setModel(status?.defaultModel?.model?.trim() || (nextProvider === 'traex-agent' || nextProvider === 'agy-agent' ? 'default' : ''))
+    setEffort(status?.defaultModel?.reasoningEffort?.trim() ?? '')
+  }, [status?.defaultModel?.provider, status?.defaultModel?.model, status?.defaultModel?.reasoningEffort])
+
+  useEffect(() => {
+    if (userEditedRouteRef.current) return
+    const nextProvider = autonomySetup?.modelRoute.provider?.trim() ?? ''
+    if (nextProvider === '') return
+    setProvider(nextProvider)
+    setModel(autonomySetup?.modelRoute.model?.trim() || (nextProvider === 'traex-agent' || nextProvider === 'agy-agent' ? 'default' : ''))
+    setEffort(autonomySetup?.modelRoute.reasoningEffort?.trim() ?? '')
+  }, [autonomySetup?.modelRoute.provider, autonomySetup?.modelRoute.model, autonomySetup?.modelRoute.reasoningEffort])
+
+  const effectiveCatalog = resolveEffectiveModelCatalog({ modelCatalog, status, autonomySetup })
   const canSubmitRpc = typeof remote.configureAutonomySetup === 'function'
   const effectiveBudgets = tier === 'custom' ? customBudget : AUTONOMY_TIER_DEFAULTS[tier]
   const isAcpRoute = provider === 'traex-agent' || provider === 'agy-agent'
@@ -1355,10 +1566,14 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
 
   const invokeSetup = (action: AutonomySetupAction) => {
     if (!canSubmitRpc) return
-    void ctrl.run(() => remote.configureAutonomySetup!(
-      action, tier, provider.trim(), effectiveModel, effort.trim(),
-      enableMemory, enableDreaming, enableGrowth, workItemExp, effectiveBudgets,
-    ))
+    void ctrl.run(async () => {
+      const res = await remote.configureAutonomySetup!(
+        action, tier, provider.trim(), effectiveModel, effort.trim(),
+        enableMemory, enableDreaming, enableGrowth, workItemExp, effectiveBudgets,
+      )
+      if (res.ok && res.value.applied) userEditedRouteRef.current = false
+      return res
+    })
   }
 
   const ownerTone: StatusTone = autonomySetup?.ownerRoute.active ? 'ok' : autonomySetup?.ownerRoute.configured ? 'warn' : 'error'
@@ -1433,39 +1648,30 @@ export function AutonomyWizardCard({ ctrl }: Readonly<{ ctrl: ConsoleController 
             grantLine('技能与工作流演化',
               autonomySetup.grants.growthDriver.enabled,
               autonomySetup.grants.growthDriver.usageEnabled ? '已含 usageLearning' : '未启用')),
-          el('div', { style: gridStyle },
-            controlField('模型 / 编程工具路由',
-              el('select', {
-                value: provider,
-                style: inputStyle,
-                onChange: (e: { target: { value: string } }) => {
-                  const next = e.target.value
-                  setProvider(next)
-                  if ((next === 'traex-agent' || next === 'agy-agent') && model.trim() === '') setModel('default')
-                },
+          el('div', { style: { display: 'grid', gap: 8 } },
+            typeof remote.modelCatalog === 'function'
+              ? el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                el('span', { style: { fontSize: 12, color: muted } }, '选择默认模型、编程工具与推理强度（同 /model）'),
+                el('button', {
+                  type: 'button',
+                  style: idle(buttonStyle, busy || loadingModelCatalog),
+                  disabled: busy || loadingModelCatalog,
+                  onClick: () => void ctrl.refreshModelCatalog(true),
+                }, loadingModelCatalog ? '刷新中…' : '刷新模型列表'))
+              : null,
+            jsx(ModelRouteSelects, {
+              catalog: effectiveCatalog,
+              provider,
+              model,
+              reasoningEffort: effort,
+              disabled: busy,
+              onChange: (next: Readonly<{ provider: string; model: string; reasoningEffort: string }>) => {
+                userEditedRouteRef.current = true
+                setProvider(next.provider)
+                setModel(next.model)
+                setEffort(next.reasoningEffort)
               },
-              el('option', { value: 'traex-agent' }, 'TraeX ACP (traex-agent)'),
-              el('option', { value: 'agy-agent' }, 'Antigravity ACP (agy-agent)'),
-              ...apiProviders.map(p => el('option', { key: p.id, value: p.id }, `API: ${p.name} (${p.id})`)),
-              provider !== '' && provider !== 'traex-agent' && provider !== 'agy-agent' && !apiProviders.some(p => p.id === provider)
-                ? el('option', { value: provider }, `自定义 API: ${provider}`)
-                : null)),
-            controlField('模型 ID / Effort（可选）',
-              el('div', { style: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 6 } },
-                el('input', {
-                  type: 'text',
-                  value: model,
-                  placeholder: isAcpRoute ? 'default' : '例如 deepseek-chat',
-                  style: inputStyle,
-                  onChange: (e: { target: { value: string } }) => setModel(e.target.value),
-                }),
-                el('input', {
-                  type: 'text',
-                  value: effort,
-                  placeholder: 'effort (low/medium/high)',
-                  style: inputStyle,
-                  onChange: (e: { target: { value: string } }) => setEffort(e.target.value),
-                })))),
+            })),
           el('div', { style: actionsStyle },
             el('span', { style: { fontSize: 12, color: muted } }, '有限预算档位：'),
             el('button', { type: 'button', style: tier === 'conservative' ? primaryButtonStyle : buttonStyle, onClick: () => applyTier('conservative') }, '保守 (10/2/5 日配额)'),
@@ -1690,6 +1896,54 @@ export function GrowthReportCard({ remote }: Readonly<{ remote: ConsoleRemote }>
             el('p', { style: { ...hintStyle, fontFamily: monoFont } }, `终端复现命令：${report.cliCommand}`))))
 }
 
+export type SettingsCategory = 'all' | 'doctor' | 'models' | 'autonomy' | 'channels' | 'diagnostics'
+
+const SETTINGS_CATEGORIES: readonly Readonly<{ id: SettingsCategory; label: string }>[] = Object.freeze([
+  Object.freeze({ id: 'all', label: '全部' }),
+  Object.freeze({ id: 'doctor', label: '体检自愈' }),
+  Object.freeze({ id: 'models', label: '模型与工具' }),
+  Object.freeze({ id: 'autonomy', label: '自主与成长' }),
+  Object.freeze({ id: 'channels', label: '飞书与插件' }),
+  Object.freeze({ id: 'diagnostics', label: '只读诊断' }),
+])
+
+/** Categorized, prioritized card deck shared by `WenyaoSettingsSection` and `OwnerConsoleSettingsPanel`. */
+export function SettingsCardsDeck({ ctrl, remote }: Readonly<{ ctrl: ConsoleController; remote: ConsoleRemote }>) {
+  const [category, setCategory] = useState<SettingsCategory>('all')
+  const show = (target: Exclude<SettingsCategory, 'all'>) => category === 'all' || category === target
+
+  return el('div', { 'data-owner-console-deck': category, style: { display: 'grid', gap: 16 } },
+    el('nav', {
+      'aria-label': '设置分组筛选',
+      'data-owner-console-categories': '',
+      style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
+    },
+    ...SETTINGS_CATEGORIES.map(item => el('button', {
+      key: item.id,
+      type: 'button',
+      'data-owner-console-category': item.id,
+      'aria-pressed': category === item.id,
+      style: {
+        ...(category === item.id ? primaryButtonStyle : buttonStyle),
+        padding: '4px 10px',
+        fontSize: 12,
+      },
+      onClick: () => setCategory(item.id),
+    }, item.label))),
+    show('doctor') ? jsx(DoctorRepairCard, { ctrl }) : null,
+    show('models') ? jsx(CodingToolsCard, { ctrl }) : null,
+    show('autonomy') ? jsx(AutonomyWizardCard, { ctrl }) : null,
+    show('channels') ? jsx(FeishuCard, { ctrl }) : null,
+    show('autonomy') ? jsx(GrowthReportCard, { remote }) : null,
+    show('doctor') ? jsx(SelfUpgradeCard, { ctrl }) : null,
+    show('autonomy') ? jsx(DreamingCard, { ctrl }) : null,
+    show('autonomy') ? jsx(ProactiveWorkItemsCard, { ctrl }) : null,
+    show('autonomy') ? jsx(GrowthMemoryCard, { ctrl }) : null,
+    show('channels') ? jsx(BundlesCard, { ctrl }) : null,
+    show('diagnostics') ? jsx(TrendSnapshotsCard, { remote }) : null,
+    show('diagnostics') ? jsx(IntakeAgreementCard, { remote, availability: ctrl.status?.evaluation.intakeAgreement }) : null)
+}
+
 export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
   remote: ConsoleRemote
   navigation: OwnerConsoleNavigation
@@ -1717,24 +1971,13 @@ export function WenyaoSettingsSection({ remote, navigation, close }: Readonly<{
     }),
     el('div', { style: { display: 'grid', gap: 2 } },
       el('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600 } }, '文鳐 Ray 助手设置'),
-      el('p', { style: { margin: 0, fontSize: 12, color: muted, fontFamily: KAI_FONT } }, '小鳐小鳐，游而化飞 · 编程工具、自主做梦与成长配置'))),
+      el('p', { style: { margin: 0, fontSize: 12, color: muted, fontFamily: KAI_FONT } }, '小鳐小鳐，游而化飞 · 体检修复、模型路由与自主配置'))),
   el('div', { style: actionsStyle },
     el('button', { style: primaryButtonStyle, onClick: leaveThen(navigation.openConversation) }, '开始对话'),
     el('button', { style: buttonStyle, onClick: leaveThen(navigation.openPlugins) }, '插件页'),
     el('button', { style: buttonStyle, disabled: ctrl.busy, onClick: () => void ctrl.refresh() }, '刷新'))),
   jsx(StatusBanners, { ctrl }),
-  jsx(DoctorRepairCard, { ctrl }),
-  jsx(GrowthReportCard, { remote }),
-  jsx(AutonomyWizardCard, { ctrl }),
-  jsx(SelfUpgradeCard, { ctrl }),
-  jsx(CodingToolsCard, { ctrl }),
-  jsx(DreamingCard, { ctrl }),
-  jsx(ProactiveWorkItemsCard, { ctrl }),
-  jsx(GrowthMemoryCard, { ctrl }),
-  jsx(FeishuCard, { ctrl }),
-  jsx(BundlesCard, { ctrl }),
-  jsx(TrendSnapshotsCard, { remote }),
-  jsx(IntakeAgreementCard, { remote, availability: ctrl.status?.evaluation.intakeAgreement }))
+  jsx(SettingsCardsDeck, { ctrl, remote }))
 }
 
 export function GeneralCodingToolItem({ remote, navigation }: Readonly<{
@@ -1742,10 +1985,16 @@ export function GeneralCodingToolItem({ remote, navigation }: Readonly<{
   navigation: OwnerConsoleNavigation
 }>) {
   const ctrl = useStandaloneConsoleController(remote, navigation)
-  const { status, busy, probingTool, traexProbe, agyProbe } = ctrl
+  const { status, modelCatalog, busy, probingTool, traexProbe, agyProbe } = ctrl
   const activeProvider = status?.defaultModel?.provider ?? ''
   const activeModel = status?.defaultModel?.model ?? ''
+  const effectiveCatalog = resolveEffectiveModelCatalog({ modelCatalog, status })
   const apiFallback = (status?.llmProviders ?? []).find(p => p.id !== 'traex-agent' && p.id !== 'agy-agent')
+  const apiFallbackModel = apiFallback === undefined
+    ? 'default'
+    : (activeProvider === apiFallback.id && activeModel !== ''
+      ? activeModel
+      : (effectiveCatalog.providers.find(p => p.id === apiFallback.id)?.models[0]?.id ?? 'default'))
   const switchBtn = (provider: 'traex-agent' | 'agy-agent', label: string, enabled: boolean) => {
     const selected = activeProvider === provider
     return el('button', {
@@ -1779,7 +2028,7 @@ export function GeneralCodingToolItem({ remote, navigation }: Readonly<{
       type: 'button',
       style: idle(activeProvider === apiFallback.id ? primaryButtonStyle : buttonStyle, busy),
       disabled: busy,
-      onClick: () => void ctrl.run(() => remote.setDefaultModelRoute!(apiFallback.id, 'default', '')),
+      onClick: () => void ctrl.run(() => remote.setDefaultModelRoute!(apiFallback.id, apiFallbackModel, '')),
     }, apiFallback.name || apiFallback.id),
     typeof remote.probeCodingTool !== 'function' ? null : el('button', {
       type: 'button',
@@ -1953,20 +2202,44 @@ export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>
 }
 
 export function ModelsProviderSetupCard({ provider, configured, keyConfigured, remote, navigation }: Readonly<{
-  provider?: Readonly<{ id?: string; name?: string; settingsNs?: string }>
-  configured?: boolean
-  keyConfigured?: boolean
+  provider?: Readonly<{
+    id?: string | undefined
+    provider?: string | undefined
+    name?: string | undefined
+    displayName?: string | undefined
+    settingsNs?: string | undefined
+  }> | undefined
+  configured?: boolean | undefined
+  keyConfigured?: boolean | undefined
   remote: ConsoleRemote
   navigation: OwnerConsoleNavigation
 }>) {
   const ctrl = useStandaloneConsoleController(remote, navigation)
-  const { status, busy, probingTool, traexProbe, agyProbe } = ctrl
+  const { status, modelCatalog, busy, probingTool, traexProbe, agyProbe } = ctrl
+  const [traexModel, setTraexModel] = useState('default')
+  const [traexEffort, setTraexEffort] = useState('')
+  const [agyModel, setAgyModel] = useState('default')
+  const [agyEffort, setAgyEffort] = useState('')
+  const editedToolsRef = useRef<{ traex: boolean; agy: boolean }>({ traex: false, agy: false })
   const autoProbedRef = useRef(false)
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
 
-  const focusId = provider?.id
-  const showTraex = focusId === undefined || focusId === '' || focusId === 'traex-agent'
-  const showAgy = focusId === undefined || focusId === '' || focusId === 'agy-agent'
+  const focusId = (provider?.provider?.trim() || provider?.id?.trim()) || undefined
+  const showTraex = focusId === undefined || focusId === 'traex-agent'
+  const showAgy = focusId === undefined || focusId === 'agy-agent'
+  const effectiveCatalog = resolveEffectiveModelCatalog({ modelCatalog, status })
+
+  useEffect(() => {
+    if (status === undefined) return
+    if (!editedToolsRef.current.traex && status.defaultModel?.provider === 'traex-agent') {
+      setTraexModel(status.defaultModel.model || 'default')
+      setTraexEffort(status.defaultModel.reasoningEffort ?? '')
+    }
+    if (!editedToolsRef.current.agy && status.defaultModel?.provider === 'agy-agent') {
+      setAgyModel(status.defaultModel.model || 'default')
+      setAgyEffort(status.defaultModel.reasoningEffort ?? '')
+    }
+  }, [status?.defaultModel?.provider, status?.defaultModel?.model, status?.defaultModel?.reasoningEffort])
 
   useEffect(() => {
     if (status === undefined || autoProbedRef.current || typeof remote.probeCodingTool !== 'function') return
@@ -1979,6 +2252,25 @@ export function ModelsProviderSetupCard({ provider, configured, keyConfigured, r
     const isDefault = status?.defaultModel?.provider === routeId
     const resolvedCmd = probe?.discoveredPath ?? command
     const configureFn = tool === 'traex' ? remote.configureTraex : remote.configureAgy
+    const selectedModel = tool === 'traex' ? traexModel : agyModel
+    const selectedEffort = tool === 'traex' ? traexEffort : agyEffort
+    const setModel = tool === 'traex' ? setTraexModel : setAgyModel
+    const setEffort = tool === 'traex' ? setTraexEffort : setAgyEffort
+    const isExactDefault = isDefault
+      && (selectedModel || 'default') === (status?.defaultModel?.model || 'default')
+      && selectedEffort === (status?.defaultModel?.reasoningEffort ?? '')
+
+    const catalogProvider = effectiveCatalog.providers.find(p => p.id === routeId)
+    const modelOptions = [...(catalogProvider?.models ?? [])]
+    if (!modelOptions.some(m => m.id === 'default')) {
+      modelOptions.unshift({ id: 'default', name: `${tool === 'agy' ? 'Antigravity' : 'TraeX'} 默认模型 (default)`, efforts: [] })
+    }
+    if (selectedModel !== '' && !modelOptions.some(m => m.id === selectedModel)) {
+      modelOptions.push({ id: selectedModel, name: `${selectedModel}（当前值）`, efforts: [] })
+    }
+    const effortInfo = resolveEffortOptions(effectiveCatalog, routeId, selectedModel, selectedEffort)
+    const compactSelectStyle = { ...inputStyle, padding: '4px 8px', fontSize: 12, width: 'auto', minWidth: 130 }
+
     return el('div', {
       key: routeId,
       'data-models-provider-tool': tool,
@@ -1994,6 +2286,34 @@ export function ModelsProviderSetupCard({ provider, configured, keyConfigured, r
       probe !== undefined
         ? `${probe.summary}${probe.discoveredPath ? ` · 路径：${probe.discoveredPath}` : ''}`
         : `当前配置命令：${command || tool}${configured === true ? '（条目已配置）' : ''}${keyConfigured === true ? '（Host 标记已就绪）' : ''}`),
+    typeof remote.setDefaultModelRoute !== 'function' ? null : el('div', { style: { ...actionsStyle, alignItems: 'center' } },
+      el('select', {
+        'aria-label': `${label} 模型选择`,
+        'data-model-route-select': 'model',
+        value: selectedModel,
+        disabled: busy,
+        style: compactSelectStyle,
+        onChange: (event: { target: { value: string } }) => {
+          editedToolsRef.current[tool] = true
+          const next = cascadeModelChange(effectiveCatalog, routeId, event.target.value, selectedEffort)
+          setModel(next.model)
+          setEffort(next.reasoningEffort)
+        },
+      }, ...modelOptions.map(opt => el('option', { key: opt.id, value: opt.id },
+        opt.name !== opt.id ? `${opt.name} (${opt.id})` : opt.id))),
+      el('select', {
+        'aria-label': `${label} 推理强度`,
+        'data-model-route-select': 'effort',
+        value: selectedEffort,
+        disabled: busy,
+        style: compactSelectStyle,
+        onChange: (event: { target: { value: string } }) => {
+          editedToolsRef.current[tool] = true
+          setEffort(event.target.value)
+        },
+      },
+      el('option', { value: '' }, effortInfo.defaultLabel),
+      ...effortInfo.options.map(opt => el('option', { key: opt.value, value: opt.value }, opt.label)))),
     el('div', { style: actionsStyle },
       typeof configureFn === 'function' && (!enabled || probe?.needsPathPin)
         ? el('button', {
@@ -2006,10 +2326,13 @@ export function ModelsProviderSetupCard({ provider, configured, keyConfigured, r
       typeof remote.setDefaultModelRoute === 'function'
         ? el('button', {
           type: 'button',
-          style: btn(isDefault ? buttonStyle : primaryButtonStyle),
+          style: btn(isExactDefault ? buttonStyle : primaryButtonStyle),
           disabled: busy,
-          onClick: () => void ctrl.run(() => remote.setDefaultModelRoute!(routeId, 'default', '')),
-        }, isDefault ? '当前已是默认' : `设为默认模型 (${routeId})`)
+          onClick: () => {
+            editedToolsRef.current[tool] = false
+            void ctrl.run(() => remote.setDefaultModelRoute!(routeId, selectedModel || 'default', selectedEffort))
+          },
+        }, isExactDefault ? '当前已是默认' : isDefault ? '更新默认模型' : `设为默认模型 (${routeId})`)
         : null,
       typeof remote.probeCodingTool === 'function'
         ? el('button', {

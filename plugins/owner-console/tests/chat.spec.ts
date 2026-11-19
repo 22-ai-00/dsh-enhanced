@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  boundedText, CHAT_SESSION_KEY, chatMessages, messageText, openDedicatedChatSession, permissionLabel,
-  permissionOptions, permissionValue, remoteFailureSummary, requiresPermissionConfirmation, sendChatMessage,
-  storedChatSession, streamingAssistantText,
+  boundedText, CHAT_SESSION_KEY, chatMessages, messageText, modelSelectionFromProjection, openDedicatedChatSession,
+  permissionLabel, permissionOptions, permissionValue, remoteFailureSummary, requiresPermissionConfirmation,
+  sendChatMessage, storedChatSession, streamingAssistantText,
   type ChatBinding, type ChatEntry, type ChatReference, type ChatSessions, type ChatUploads, type PermissionCatalog,
 } from '../src/chat.ts'
 
@@ -275,5 +275,31 @@ describe('owner console chat sending and permissions', () => {
     expect(boundedText('abcdefghijk', 4)).toBe('abcd…')
     expect(remoteFailureSummary({ code: 'code', message: 'why' })).toBe('code：why')
     expect(remoteFailureSummary(undefined)).toContain('未说明')
+  })
+
+  it('reads modelSelectionFromProjection preferring DSH 0.2.2 next over pending and lastUsed', () => {
+    expect(modelSelectionFromProjection({
+      lastUsed: { provider: 'llmgw', model: 'old-model', reasoningEffort: 'low' },
+      next: { provider: 'agy-agent', model: 'claude-sonnet-5-5', reasoningEffort: 'high' },
+    })).toEqual({ provider: 'agy-agent', model: 'claude-sonnet-5-5', reasoningEffort: 'high' })
+
+    expect(modelSelectionFromProjection({
+      lastUsed: null,
+      next: { provider: ' traex-agent ', model: ' default ' },
+    })).toEqual({ provider: 'traex-agent', model: 'default' })
+
+    expect(modelSelectionFromProjection({
+      pending: { provider: 'llmgw', model: 'seed-2.0-pro', reasoningEffort: 'medium' },
+      lastUsed: { provider: 'llmgw', model: 'old-model' },
+    })).toEqual({ provider: 'llmgw', model: 'seed-2.0-pro', reasoningEffort: 'medium' })
+
+    expect(modelSelectionFromProjection({
+      next: null,
+      pending: null,
+      lastUsed: { provider: 'llmgw', model: 'deepseek-v4', reasoningEffort: '   ' },
+    })).toEqual({ provider: 'llmgw', model: 'deepseek-v4' })
+
+    expect(modelSelectionFromProjection(null)).toBeUndefined()
+    expect(modelSelectionFromProjection({ next: { provider: '', model: 'm' } })).toBeUndefined()
   })
 })

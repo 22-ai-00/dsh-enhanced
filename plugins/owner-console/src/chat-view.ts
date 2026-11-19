@@ -1,21 +1,24 @@
 /**
- * 文鳐's dedicated chat window. It is a real native Session surface, not a second agent:
- * messages come from the retained Session's durable event window, sending goes through
- * `SessionFace.prompt`, attachments through the staged `fileUpload` service, permission
- * changes through the Host `/permission` command, and stop through `SessionFace.cancel`.
- * A client bundle may only import `react` at runtime, so all Host services arrive through
- * the injected {@link ChatRuntime}.
+ * Dedicated 文鳐 Ray assistant dialog.
+ * Runs as an independent assistant-first conversation UI backed directly by DSH Host
+ * `sessions` (`create({ cwd: assistantWorkspace })` + `retain` + `prompt`/`cancel`/projections),
+ * completely decoupled from the native `conversation.content` coding layout while sharing the
+ * Host's durable session log, permission presets, and `/model` catalog.
  */
 import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { QUIET_PHRASE } from './art.js'
-import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_ICON_DATA_URI } from './artwork.js'
+import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
+import { renderChatMarkdown } from './chat-markdown.js'
 import {
-  boundedText, chatMessages, openDedicatedChatSession, permissionLabel, permissionOptions, permissionValue,
-  remoteFailureSummary, requiresPermissionConfirmation, sendChatMessage, streamingAssistantText,
+  boundedText, chatMessages, forgetChatSession, modelSelectionFromProjection, openDedicatedChatSession,
+  permissionLabel, permissionOptions, permissionValue, remoteFailureSummary, requiresPermissionConfirmation,
+  sendChatMessage, streamingAssistantText,
   type ChatBinding, type ChatEventWindow, type ChatMessage, type ChatReference, type ChatRuntime,
   type ChatSessionSnapshot, type PermissionCatalog, type SpeechRecognitionLike,
 } from './chat.js'
+import { ModelRouteSelects, resolveEffectiveModelCatalog } from './model-route-ui.js'
+import type { AssistantChatContext, OwnerConsoleModelCatalog } from './typert.js'
 import {
   accent, actionsStyle, backdropImageStyle, backdropStyle, border, borderStrong, buttonStyle, caption, danger,
   el, hairline, hintStyle, idle, ink, muted, pill, placeholder, primaryButtonStyle, subheadStyle, sunken,
@@ -36,7 +39,7 @@ export type FactoryRenderSlotSeat = (name: string, props: Readonly<Record<string
 export type RenderSlotSeat = (name: string, props: Readonly<Record<string, unknown>>,
   options?: Readonly<{ fallback?: unknown }>) => unknown
 export type SessionProviderSeat = (props: Readonly<{ session: ChatReference, children?: unknown }>) => unknown
-/** Props every renderer-created component receives; only some are needed by this surface. */
+/** Props every renderer-created component receives; kept for structural host compatibility. */
 export type OwnerConsoleRendererSeat = Readonly<{
   renderFactorySlot?: FactoryRenderSlotSeat
   renderSlot?: RenderSlotSeat
@@ -58,23 +61,34 @@ type CatalogState =
   | Readonly<{ phase: 'failed'; error: string }>
   | Readonly<{ phase: 'ok'; catalog: PermissionCatalog }>
 
+const STARTER_PROMPTS: readonly string[] = [
+  '介绍一下你自己和当前能力',
+  '帮我检查本机插件、模型和飞书健康',
+  '帮我记一条长期偏好',
+  '查看近期自主做梦灵感与待办',
+]
+
 const chatRootStyle = { position: 'relative', isolation: 'isolate', height: '100%', minHeight: 0, display: 'flex',
   flexDirection: 'column', overflow: 'hidden', color: ink, fontSize: 13, lineHeight: 1.5 } as const
-const chatColumnStyle = { position: 'relative', zIndex: 1, height: '100%', minHeight: 0, width: '100%', maxWidth: 840,
-  margin: '0 auto', padding: '16px 18px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 10 } as const
+const chatColumnStyle = { position: 'relative', zIndex: 1, height: '100%', minHeight: 0, width: '100%', maxWidth: 880,
+  margin: '0 auto', padding: '14px 18px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 10 } as const
 const headerStyle = { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px',
   border: `1px solid ${border}`, borderRadius: 14, background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)' } as const
+const controlBarStyle = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap',
+  padding: '8px 12px', border: `1px solid ${border}`, borderRadius: 12, background: surface } as const
 const logStyle = { flex: '1 1 auto', minHeight: 96, overflowY: 'auto', overscrollBehavior: 'contain', display: 'grid',
-  alignContent: 'start', gap: 10, padding: '12px 12px 14px', border: `1px solid ${border}`, borderRadius: 12,
+  alignContent: 'start', gap: 12, padding: '14px 14px 16px', border: `1px solid ${border}`, borderRadius: 14,
   background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)' } as const
 const composerStyle = { display: 'grid', gap: 8, padding: '12px 14px', border: `1px solid ${border}`, borderRadius: 14,
   background: surface, boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)' } as const
-const bubbleStyle = { maxWidth: '86%', padding: '9px 12px', borderRadius: 12, fontSize: 13, lineHeight: 1.55,
-  whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const
+const bubbleStyle = { maxWidth: '88%', padding: '10px 14px', borderRadius: 14, fontSize: 13, lineHeight: 1.6,
+  overflowWrap: 'anywhere' } as const
 const assistantBubbleStyle = { ...bubbleStyle, justifySelf: 'start', background: sunken, border: `1px solid ${border}`, color: ink } as const
-const userBubbleStyle = { ...bubbleStyle, justifySelf: 'end', background: tint(accent, 12), border: `1px solid ${tint(accent, 28)}`, color: ink } as const
-const toolRowStyle = { justifySelf: 'start', display: 'inline-flex', alignItems: 'center', gap: 8, padding: '2px 8px',
-  borderRadius: 999, border: `1px solid ${hairline}`, color: caption, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 } as const
+const userBubbleStyle = { ...bubbleStyle, justifySelf: 'end', whiteSpace: 'pre-wrap',
+  background: tint(accent, 12), border: `1px solid ${tint(accent, 28)}`, color: ink } as const
+const toolRowStyle = { justifySelf: 'start', display: 'inline-flex', alignItems: 'center', gap: 8, padding: '3px 10px',
+  borderRadius: 999, border: `1px solid ${hairline}`, background: surface, color: caption,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 } as const
 const errorRowStyle = { padding: '8px 12px', borderRadius: 10, fontSize: 12, color: ink, background: tint(danger, 10),
   border: `1px solid ${tint(danger, 32)}` } as const
 const smallButtonStyle = { ...buttonStyle, padding: '4px 10px', fontSize: 12 } as const
@@ -88,7 +102,25 @@ const TOOL_STATUS_LABELS: Readonly<Record<'running' | 'ok' | 'error', string>> =
   running: '运行中', ok: '完成', error: '失败',
 }
 
-/** The factory-local view selection: the native Chat view, exactly as the shipped Conversation uses it. */
+function copyTextToClipboard(value: string, setNotice: (next: ChatNotice) => void): void {
+  const nav = (globalThis as unknown as { navigator?: { clipboard?: { writeText?: (text: string) => Promise<void> } } }).navigator
+  if (typeof nav?.clipboard?.writeText === 'function') {
+    void nav.clipboard.writeText(value).then(
+      () => setNotice({ tone: 'info', text: '已复制到剪贴板' }),
+      () => setNotice({ tone: 'info', text: '当前环境限制自动复制，请手动选择复制' }),
+    )
+    return
+  }
+  setNotice({ tone: 'info', text: '当前环境不支持剪贴板 API' })
+}
+
+function pathBasename(pathValue: string): string {
+  const clean = pathValue.replace(/\/+$/u, '')
+  const at = clean.lastIndexOf('/')
+  return at >= 0 ? clean.slice(at + 1) : clean
+}
+
+/** The factory-local view selection kept for standalone slot compatibility. */
 function ChatConversationView({ renderSlot }: Readonly<{ renderSlot?: RenderSlotSeat }>) {
   return renderSlot?.('conversation.session', { view: 'chat' }) ?? null
 }
@@ -102,13 +134,10 @@ export interface OwnerConsoleConversationSeat {
 }
 
 /**
- * Child slot body rendered under the injected SessionProvider. It computes the native
- * Conversation phase from the Session's own snapshots and renders the shipped
- * `conversation.content` factory with `hero:false` so no workspace picker or catalog appears.
+ * Retained for host-slot contract compatibility; computes the native phase when embedded directly.
  */
 export function OwnerConsoleConversation({ sessionId, renderFactorySlot, useSession, useConversation,
   useSessions }: OwnerConsoleConversationSeat) {
-  // Hooks are called unconditionally so the fallback functions cannot change hook order.
   const session = (useSession ?? readEmptySession)(value => value) as ChatSessionSnapshot
   const conversation = (useConversation ?? readEmptyConversation)(value => value) as ConversationSnapshotLike
   const summaryBlank = (useSessions ?? readEmptySessionList)(state => state.byId[sessionId ?? '']?.blank)
@@ -119,10 +148,8 @@ export function OwnerConsoleConversation({ sessionId, renderFactorySlot, useSess
   const shellPhase = active ? 'active' : session.promptAttempted === true ? 'engaging' : 'blank'
   const settling = shellPhase === 'blank' && session.openState === 'loading' && summaryBlank !== true
   const hero = shellPhase === 'blank' && (session.openState === 'open' || summaryBlank === true)
-  const phase = settling ? 'settling' : hero ? 'hero' : 'active'
-  // The hero layout is deliberately suppressed here; the sticky active composer layout is what
-  // remains usable without the workspace picker, so never hand the native surface a hero phase.
-  return renderFactorySlot('conversation.content', { variant: 'embedded', phase: hero ? 'active' : phase, hero: false }, {
+  const phase = settling ? 'settling' : hero ? 'active' : 'active'
+  return renderFactorySlot('conversation.content', { variant: 'embedded', phase, hero: false }, {
     slots: { views: ChatConversationView },
     fallback: placeholder('原生对话组件未加载，可用右上角「原生会话」进入完整会话。'),
   })
@@ -135,8 +162,8 @@ function ChatMark() {
     style: { display: 'block', width: 34, height: 34, borderRadius: '50%', objectFit: 'cover', flex: 'none' } })
 }
 
-/** One compact transcript row; every visual state also carries a text label. */
-function ChatMessageRow({ message }: Readonly<{ message: ChatMessage }>) {
+/** Compact Markdown transcript row for 文鳐 assistant dialog. */
+function ChatMessageRow({ message, onCopy }: Readonly<{ message: ChatMessage; onCopy: (text: string) => void }>) {
   if (message.kind === 'tool') {
     return el('div', { 'data-chat-message-kind': 'tool', style: toolRowStyle, role: 'status',
       'aria-label': `工具 ${message.name}：${TOOL_STATUS_LABELS[message.status]}` },
@@ -147,9 +174,21 @@ function ChatMessageRow({ message }: Readonly<{ message: ChatMessage }>) {
   if (message.kind === 'error') {
     return el('div', { 'data-chat-message-kind': 'error', role: 'alert', style: errorRowStyle }, message.text)
   }
-  return el('div', { 'data-chat-message-kind': message.kind, style: message.kind === 'user' ? userBubbleStyle : assistantBubbleStyle },
-    el('span', { style: { display: 'block', fontSize: 11, color: caption, marginBottom: 3 } }, message.kind === 'user' ? '你' : '文鳐'),
-    message.text)
+  if (message.kind === 'user') {
+    return el('div', { 'data-chat-message-kind': 'user', style: userBubbleStyle },
+      el('span', { style: { display: 'block', fontSize: 11, color: caption, marginBottom: 3 } }, '你'),
+      message.text)
+  }
+  return el('div', { 'data-chat-message-kind': 'assistant', style: assistantBubbleStyle },
+    el('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 } },
+      el('span', { style: { fontSize: 11, color: caption, fontWeight: 500 } }, '文鳐 Ray'),
+      el('button', {
+        type: 'button',
+        'aria-label': '复制回复',
+        style: { ...ghostButtonStyle, padding: '1px 6px', fontSize: 11 },
+        onClick: () => onCopy(message.text),
+      }, '复制')),
+    renderChatMarkdown(message.text, onCopy))
 }
 
 /** Session lifecycle as a text pill; absence means the chat is still preparing. */
@@ -157,7 +196,7 @@ function sessionPill(snapshot: ChatSessionSnapshot, ready: boolean) {
   if (!ready) return pill('准备中', 'neutral')
   if (snapshot.openState === 'error') return pill('会话不可用', 'error')
   if (snapshot.removed === true) return pill('会话已移除', 'error')
-  if (snapshot.running === true) return pill('回复中', 'warn')
+  if (snapshot.running === true) return pill('思考回复中', 'warn')
   if (snapshot.openState === 'loading' || snapshot.openState === 'cold') return pill('连接中', 'neutral')
   return pill('就绪', 'ok')
 }
@@ -184,30 +223,23 @@ interface PermissionBarProps {
 
 /** Current permission plus the catalog selector; every write goes through the native command. */
 function PermissionBar({ session, permission, catalog, switching, pending, notice, request, confirm, cancel }: PermissionBarProps) {
-  // Keep the selector mounted while a switch is in flight (disabled), so a rerender cannot
-  // replace the user's focused control with the notice line.
   const selectable = session !== undefined && permission !== undefined && catalog.phase === 'ok'
   const options = catalog.phase === 'ok' ? permissionOptions(catalog.catalog, permission) : []
-  return el('div', { 'data-owner-console-permissions': '', style: { display: 'flex', alignItems: 'center', gap: 8,
-    flexWrap: 'wrap', padding: '0 2px', minHeight: 26 } },
+  return el('div', { 'data-owner-console-permissions': '', style: { display: 'flex', alignItems: 'center', gap: 6,
+    flexWrap: 'wrap', minHeight: 26 } },
   el('span', { style: subheadStyle }, '权限'),
   permission === undefined ? pill('权限不可用', 'neutral') : pill(permissionLabel(permission, catalog.phase === 'ok' ? catalog.catalog : undefined), permissionTone(permission)),
   selectable
     ? el('select', { 'aria-label': '切换权限预设', title: '切换通过 Host 的 /permission 命令完成，权限策略仍然生效',
       value: permission, disabled: switching, onChange: (event: { target: { value: string } }) => request(event.target.value),
       style: { padding: '4px 8px', borderRadius: 8, border: `1px solid ${borderStrong}`, background: 'transparent',
-        color: 'inherit', fontSize: 12, maxWidth: 260 } },
+        color: 'inherit', fontSize: 12, maxWidth: 220 } },
     ...options.map(option => el('option', { key: option.value, value: option.value }, `${option.name}（${option.value}）`)))
     : catalog.phase === 'loading'
-      ? el('span', { style: hintStyle }, '正在读取权限目录…')
+      ? el('span', { style: hintStyle }, '读取权限…')
       : catalog.phase === 'failed'
-        ? el('span', { style: hintStyle }, `权限目录读取失败：${boundedText(catalog.error, 120)}；只能显示当前值。`)
-        : permission === undefined
-          ? el('span', { style: hintStyle }, '未加载权限服务；这里不会绕过 Host 策略。')
-          : null,
-  catalog.phase === 'ok' && catalog.catalog.defaultPreset !== undefined
-    ? el('span', { style: { fontSize: 11, color: caption } }, `新会话默认：${permissionLabel(catalog.catalog.defaultPreset, catalog.catalog)}`)
-    : null,
+        ? el('span', { style: hintStyle }, `权限读取失败：${boundedText(catalog.error, 80)}`)
+        : null,
   pending === undefined ? null : el('div', { role: 'alertdialog', 'aria-label': '确认切换权限',
     style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '4px 10px', borderRadius: 10,
       fontSize: 12, background: tint(danger, 10), border: `1px solid ${tint(danger, 32)}` } },
@@ -263,7 +295,7 @@ function Composer(props: ComposerProps) {
   el('textarea', { value: props.draft, rows: 3, 'aria-label': '给文鳐的消息', placeholder: '对文鳐说点什么…（Enter 发送，Shift+Enter 换行）',
     disabled: props.disabled || props.sending, onChange: (event: { target: { value: string } }) => props.onDraft(event.target.value),
     onKeyDown: props.onKeyDown,
-    style: { ...buttonlessInputStyle, resize: 'vertical', minHeight: 72 } }),
+    style: { ...buttonlessInputStyle, resize: 'vertical', minHeight: 68 } }),
   el('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
     el('input', { ref: input, type: 'file', multiple: true, 'aria-label': '选择附件', tabIndex: -1,
       style: { display: 'none' }, onChange: (event: { target: { files?: ArrayLike<Blob> | null; value?: string } }) => {
@@ -291,7 +323,7 @@ function Composer(props: ComposerProps) {
     el('button', { type: 'submit', style: idle(primaryButtonStyle, blocked), disabled: blocked,
       'aria-label': props.sending ? '正在发送消息' : '发送消息' }, props.sending ? '发送中…' : '发送')),
   el('p', { style: { ...hintStyle, fontSize: 11 } },
-    '消息经由 DSH 会话发送；附件先上传到本会话。语音输入与朗读由浏览器提供，音频或文本可能发送给浏览器厂商的语音服务，不是 DSH 模型功能。'))
+    '独立文鳐助手会话（不混入普通编程对话）；附件先上传到本会话，语音输入/朗读由浏览器提供（不是 DSH 模型功能）。'))
 }
 
 /** One-line textarea style: same input shell without the single-line padding assumptions. */
@@ -302,17 +334,21 @@ const buttonlessInputStyle = { padding: '8px 10px', borderRadius: 10, border: `1
 export interface OwnerConsoleChatProps {
   readonly runtime: ChatRuntime
   readonly onOpenSettings: () => void
-  /** Renderer-injected seats from the Host; absence selects the self-contained compact fallback. */
   readonly renderer?: OwnerConsoleRendererSeat
 }
 
-/** The sidebar's 文鳐 panel: a native-Session chat window with a settings gear. */
-export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerConsoleChatProps) {
+/** The sidebar's 文鳐 panel: dedicated personal-assistant dialog decoupled from native coding conversation. */
+export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatProps) {
   const [state, setState] = useState<SessionState>({ phase: 'preparing' })
   const [attempt, setAttempt] = useState(0)
+  const [assistantCtx, setAssistantCtx] = useState<AssistantChatContext>()
+  const [modelCatalog, setModelCatalog] = useState<OwnerConsoleModelCatalog>()
+  const [modelSwitching, setModelSwitching] = useState(false)
+  const [localSelection, setLocalSelection] = useState<{ provider: string; model: string; reasoningEffort: string }>()
   const [snapshot, setSnapshot] = useState<ChatSessionSnapshot>({})
   const [window, setWindow] = useState<ChatEventWindow>({})
   const [permission, setPermission] = useState<string>()
+  const [sessionModelSel, setSessionModelSel] = useState<Readonly<{ provider: string; model: string; reasoningEffort?: string }>>()
   const [catalog, setCatalog] = useState<CatalogState>({ phase: 'loading' })
   const [pendingPermission, setPendingPermission] = useState<string>()
   const [switching, setSwitching] = useState(false)
@@ -321,20 +357,25 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
   const [files, setFiles] = useState<readonly Blob[]>([])
   const [sending, setSending] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [notice, setNotice] = useState<ChatNotice>()
   const [listening, setListening] = useState(false)
+  const forceNewRef = useRef(false)
+  const activeSessionIdRef = useRef<string | undefined>(undefined)
   const recognition = useRef<SpeechRecognitionLike | null>(null)
   const log = useRef<HTMLDivElement | null>(null)
   const stick = useRef(true)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
 
-  // Acquire one retained native Session; release it exactly when the chat surface unmounts.
+  // Acquire one dedicated assistant Session bound on Host so systemPrompt stays strictly scoped to 文鳐.
   useEffect(() => {
     alive.current = true
     let disposed = false
     let reference: ChatReference | undefined
     const controller = new AbortController()
+    const forceNew = forceNewRef.current
+    forceNewRef.current = false
     const sessions = runtime.sessions()
     if (sessions === undefined) {
       setState({ phase: 'unavailable' })
@@ -343,7 +384,33 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     setState({ phase: 'preparing' })
     void (async () => {
       try {
-        reference = await openDedicatedChatSession(sessions, runtime.storage(), undefined, runtime.createSession, controller.signal)
+        let preferredSessionId: string | null = null
+        if (typeof runtime.assistantChatContext === 'function') {
+          try {
+            const ctxResult = await runtime.assistantChatContext()
+            if (disposed) return
+            if (ctxResult.ok) {
+              setAssistantCtx(ctxResult.value)
+              preferredSessionId = ctxResult.value.activeSessionId
+            }
+          } catch {
+            // Proceed cleanly even if Host hasn't exposed assistantChatContext yet.
+          }
+        }
+        reference = await openDedicatedChatSession(
+          sessions,
+          runtime.storage(),
+          undefined,
+          runtime.createSession,
+          controller.signal,
+          {
+            forceNew,
+            preferredSessionId,
+            onSessionReady: async (sid) => {
+              await runtime.registerAssistantSession?.(sid, true)
+            },
+          },
+        )
         if (disposed) {
           reference.release()
           return
@@ -356,49 +423,81 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     })()
     return () => {
       disposed = true
-      // Cancelling the acquisition stops the Host waiting on a hung open, so this panel
-      // cannot leak its retention after unmount.
       controller.abort()
       reference?.release()
     }
   }, [runtime, attempt])
 
-  const binding = state.phase === 'ready' ? state.binding : undefined
-  const reference = state.phase === 'ready' ? state.reference : undefined
-  const nativeSurface = reference !== undefined && renderer?.SessionProvider !== undefined && renderer.renderSlot !== undefined
-    ? { reference, provider: renderer.SessionProvider, renderSlot: renderer.renderSlot }
-    : undefined
-  const native = nativeSurface !== undefined
-
-  // Session lifecycle and durable transcript subscriptions.
+  // Load `/model`-aligned catalog on mount and re-fetch catalog + assistant context on cross-surface settings changes.
   useEffect(() => {
+    let disposed = false
+    let catalogSeq = 0
+    let ctxSeq = 0
+    const fetchCatalog = () => {
+      if (typeof runtime.modelCatalog !== 'function') return
+      const seq = ++catalogSeq
+      void runtime.modelCatalog(false).then(res => {
+        if (!disposed && seq === catalogSeq && res.ok) setModelCatalog(res.value)
+      }, () => undefined)
+    }
+    const fetchContext = () => {
+      if (typeof runtime.assistantChatContext !== 'function') return
+      const seq = ++ctxSeq
+      void runtime.assistantChatContext().then(res => {
+        if (!disposed && seq === ctxSeq && res.ok) setAssistantCtx(res.value)
+      }, () => undefined)
+    }
+    fetchCatalog()
+    const unsubscribe = runtime.subscribeRefresh?.(() => {
+      fetchCatalog()
+      fetchContext()
+    })
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }, [runtime])
+
+  const binding = state.phase === 'ready' ? state.binding : undefined
+  activeSessionIdRef.current = binding?.sessionId
+
+  // Session lifecycle, durable transcript, permissions, and modelSelection subscriptions.
+  useEffect(() => {
+    setPendingPermission(undefined)
+    setPermissionNotice('')
+    setLocalSelection(undefined)
+    setModelSwitching(false)
+    setLoadingOlder(false)
     if (binding === undefined) {
       setSnapshot({})
       setWindow({})
+      setPermission(undefined)
+      setSessionModelSel(undefined)
       return
     }
     const syncSession = () => setSnapshot(binding.session.getSnapshot())
     const syncEvents = () => setWindow(binding.eventSource.getSnapshot())
+    const permFace = binding.session.projections.faceOf('permissions')
+    const syncPerm = () => setPermission(permissionValue(permFace.getSnapshot()))
+    const modelFace = binding.session.projections.faceOf('modelSelection')
+    const syncModel = () => {
+      setSessionModelSel(modelSelectionFromProjection(modelFace.getSnapshot()))
+      setLocalSelection(undefined)
+    }
+
     syncSession()
     syncEvents()
+    syncPerm()
+    syncModel()
+
     const stopSession = binding.session.subscribe(syncSession)
     const stopEvents = binding.eventSource.subscribe(syncEvents)
-    return () => { stopSession(); stopEvents() }
+    const stopPerm = permFace.subscribe(syncPerm)
+    const stopModel = modelFace.subscribe(syncModel)
+    return () => { stopSession(); stopEvents(); stopPerm(); stopModel() }
   }, [binding])
 
-  // Current permission comes from the native Session projection, never from a local guess.
-  useEffect(() => {
-    if (binding === undefined) {
-      setPermission(undefined)
-      return
-    }
-    const face = binding.session.projections.faceOf('permissions')
-    const sync = () => setPermission(permissionValue(face.getSnapshot()))
-    sync()
-    return face.subscribe(sync)
-  }, [binding])
-
-  // Selectable presets come from the Host's process catalog Remote.
+  // Selectable permission presets come from the Host's process catalog Remote.
   useEffect(() => {
     let disposed = false
     let pending: ReturnType<ChatRuntime['permissionCatalog']>
@@ -428,15 +527,12 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
   const lastAssistant = [...messages].reverse().find(message => message.kind === 'assistant')
   const voiceAvailable = runtime.voiceAvailable()
   const speakAvailable = runtime.speakAvailable()
-  // The native composer already owns the canonical permission chip. Show our own bar only when
-  // that native seat is unavailable (no renderer surface, or no permission-preset remote).
-  const showPermissionBar = !native || catalog.phase === 'absent' || catalog.phase === 'failed'
 
   // Follow new output only while the reader is already at the bottom.
   useEffect(() => {
     const node = log.current
     if (node !== null && stick.current) node.scrollTop = node.scrollHeight
-  }, [messages, streaming, binding])
+  }, [messages, streaming, snapshot.running, binding])
 
   useEffect(() => () => {
     const active = recognition.current
@@ -444,27 +540,36 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     try { active?.stop() } catch { /* a browser may already have ended it */ }
   }, [])
 
-  const submit = () => {
+  const submitPayload = (textValue: string, filesValue: readonly Blob[], clearDraftOnSuccess: boolean) => {
     if (binding === undefined || sending) return
-    if (draft.trim() === '' && files.length === 0) return
+    if (textValue.trim() === '' && filesValue.length === 0) return
     setSending(true)
     setNotice(undefined)
-    void sendChatMessage({ sessionId: binding.sessionId, session: binding.session, uploads: runtime.fileUploads(),
-      text: draft, files }).then(outcome => {
+    void sendChatMessage({
+      sessionId: binding.sessionId,
+      session: binding.session,
+      uploads: runtime.fileUploads(),
+      text: textValue,
+      files: filesValue,
+    }).then(outcome => {
       if (!alive.current) return
       setSending(false)
       if (!outcome.ok) {
         setNotice({ tone: 'error', text: outcome.error })
         return
       }
-      setDraft('')
-      setFiles([])
+      if (clearDraftOnSuccess) {
+        setDraft('')
+        setFiles([])
+      }
     }, (error: unknown) => {
       if (!alive.current) return
       setSending(false)
       setNotice({ tone: 'error', text: error instanceof Error ? error.message : '消息未发送，稍后重试。' })
     })
   }
+
+  const submit = () => submitPayload(draft, files, true)
 
   const stop = () => {
     if (binding === undefined || cancelling) return
@@ -497,7 +602,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
         setPermissionNotice('Host 没有提供 /permission 命令，权限未改变。')
         return
       }
-      setPermissionNotice(`已请求切换到「${permissionLabel(value, catalog.phase === 'ok' ? catalog.catalog : undefined)}」；以会话权限投影为准。`)
+      setPermissionNotice(`已请求切换到「${permissionLabel(value, catalog.phase === 'ok' ? catalog.catalog : undefined)}」`)
     }, (error: unknown) => {
       if (!alive.current) return
       setSwitching(false)
@@ -512,6 +617,72 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
       return
     }
     applyPermission(value)
+  }
+
+  const startFreshChat = () => {
+    if (sending || modelSwitching) return
+    setNotice(undefined)
+    setLocalSelection(undefined)
+    forgetChatSession(runtime.storage())
+    forceNewRef.current = true
+    setAttempt(v => v + 1)
+  }
+
+  const handleModelRouteChange = (next: Readonly<{ provider: string; model: string; reasoningEffort: string }>) => {
+    const provider = next.provider.trim()
+    const model = next.model.trim()
+    const reasoningEffort = next.reasoningEffort.trim()
+    setLocalSelection({ provider, model, reasoningEffort })
+    if (provider === '' || model === '') return
+    if (binding === undefined || typeof runtime.selectSessionModel !== 'function') return
+    const targetSessionId = binding.sessionId
+    const modelFace = binding.session.projections.faceOf('modelSelection')
+    setModelSwitching(true)
+    setNotice(undefined)
+    void runtime.selectSessionModel(targetSessionId, provider, model, reasoningEffort).then(res => {
+      if (!alive.current || activeSessionIdRef.current !== targetSessionId) return
+      setModelSwitching(false)
+      if (!res.ok) {
+        setLocalSelection(undefined)
+        setNotice({ tone: 'error', text: `切换模型失败（${remoteFailureSummary(res.error)}）` })
+        return
+      }
+      const projected = modelSelectionFromProjection(modelFace.getSnapshot())
+      if (projected !== undefined
+        && projected.provider === provider
+        && projected.model === model
+        && (projected.reasoningEffort ?? '') === reasoningEffort) {
+        setSessionModelSel(projected)
+        setLocalSelection(undefined)
+      }
+      setNotice({
+        tone: 'info',
+        text: `已切换模型：${provider} / ${model}${reasoningEffort ? `（${reasoningEffort}）` : ''}`,
+      })
+    }, (cause: unknown) => {
+      if (!alive.current || activeSessionIdRef.current !== targetSessionId) return
+      setModelSwitching(false)
+      setLocalSelection(undefined)
+      setNotice({ tone: 'error', text: cause instanceof Error ? boundedText(cause.message) : '切换模型失败。' })
+    })
+  }
+
+  const loadOlder = () => {
+    if (binding === undefined || loadingOlder) return
+    const targetSessionId = binding.sessionId
+    setLoadingOlder(true)
+    setNotice(undefined)
+    void binding.session.loadOlder().then(() => {
+      if (!alive.current || activeSessionIdRef.current !== targetSessionId) return
+      setLoadingOlder(false)
+    }, (cause: unknown) => {
+      if (!alive.current || activeSessionIdRef.current !== targetSessionId) return
+      setLoadingOlder(false)
+      setNotice({
+        tone: 'error',
+        text: `载入更早的消息失败（${cause instanceof Error ? boundedText(cause.message) : '请稍后重试'}）`,
+      })
+    })
   }
 
   const toggleVoice = () => {
@@ -531,7 +702,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     created.interimResults = true
     created.continuous = false
     created.onresult = event => {
-      // A late result from a stopped/replaced recognizer (or after unmount) must not touch the draft.
       if (!alive.current || recognition.current !== created) return
       let finalText = ''
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
@@ -539,13 +709,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
         if (result?.isFinal === true) finalText += result[0]?.transcript ?? ''
       }
       if (finalText === '') return
-      if (native && reference !== undefined) {
-        const inserted = runtime.insertDraft?.(reference, finalText) ?? false
-        if (!inserted) {
-          setNotice({ tone: 'error', text: '当前界面未提供原生草稿写入接口（conversation.input 未加载），语音文字未写入。' })
-        }
-        return
-      }
       setDraft(previous => previous === '' ? finalText : `${previous} ${finalText}`)
     }
     created.onerror = event => {
@@ -555,7 +718,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
       setNotice({ tone: 'error', text: `语音识别失败：${event.error ?? '未知错误'}。语音识别由浏览器提供，不是 DSH 模型功能。` })
     }
     created.onend = () => {
-      // A stopped/replaced recognizer must not clear the instance that replaced it.
       if (!alive.current || recognition.current !== created) return
       recognition.current = null
       setListening(false)
@@ -594,11 +756,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     setFiles(next.slice(0, 10))
   }
 
-  const openNative = () => {
-    if (binding !== undefined && runtime.openNativeSession(binding.sessionId)) return
-    setNotice({ tone: 'error', text: '当前界面未提供原生会话视图（uiWorkspace 未加载）；文鳐仍在这个窗口中对话。' })
-  }
-
   const keyDown = (event: KeyboardEventLike) => {
     if (event.key !== 'Enter' || event.shiftKey === true || event.nativeEvent?.isComposing === true) return
     event.preventDefault()
@@ -611,8 +768,22 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     stick.current = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight < 48
   }
 
+  const effectiveCatalog = resolveEffectiveModelCatalog({ modelCatalog })
+  const defaultSelection = modelCatalog !== undefined && modelCatalog.defaultSelection.provider.trim() !== ''
+    ? modelCatalog.defaultSelection
+    : undefined
+  const sourceSelection = localSelection ?? sessionModelSel ?? defaultSelection
+  const activeModelProvider = sourceSelection?.provider ?? effectiveCatalog.providers[0]?.id ?? ''
+  const activeModelId = sourceSelection !== undefined
+    ? sourceSelection.model
+    : (effectiveCatalog.providers.find(p => p.id === activeModelProvider)?.models[0]?.id ?? '')
+  const activeModelEffort = sourceSelection?.reasoningEffort ?? ''
+
+  const caps = assistantCtx?.capabilities
+  const workspaceName = assistantCtx?.workspace ? pathBasename(assistantCtx.workspace) : ''
+
   let transcript: unknown
-  if (state.phase === 'preparing') transcript = placeholder('正在准备对话…')
+  if (state.phase === 'preparing') transcript = placeholder('正在准备文鳐专属助手会话…')
   else if (state.phase === 'unavailable') {
     transcript = el('div', { style: { display: 'grid', gap: 10, justifyItems: 'start' } },
       placeholder('当前界面未提供会话服务（sessions 未加载），无法在这里对话。可以进入原生会话界面继续。'),
@@ -621,16 +792,53 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     transcript = el('div', { style: { display: 'grid', gap: 10, justifyItems: 'start' } },
       el('p', { role: 'alert', style: { ...hintStyle, color: danger } }, `无法打开对话：${state.error}`),
       el('button', { type: 'button', style: primaryButtonStyle, onClick: () => setAttempt(value => value + 1) }, '重试'))
-  } else if (messages.length === 0 && streaming === '') {
-    transcript = placeholder('和文鳐说点什么吧。', QUIET_PHRASE)
+  } else if (messages.length === 0 && streaming === '' && snapshot.running !== true) {
+    transcript = el('div', {
+      'data-owner-console-welcome': '',
+      style: { display: 'grid', gap: 12, justifyItems: 'center', padding: '18px 12px', textAlign: 'center' },
+    },
+    el('img', {
+      src: WENYAO_SEAL_DATA_URI, alt: '', 'aria-hidden': 'true', draggable: false,
+      width: 44, height: 44, style: { width: 44, height: 44, borderRadius: '50%', objectFit: 'cover' },
+    }),
+    el('div', { style: { display: 'grid', gap: 4 } },
+      el('p', { style: { margin: 0, fontWeight: 600, fontSize: 15 } }, '你好，我是文鳐 Ray（小鳐）'),
+      el('p', { style: { margin: 0, fontFamily: "'STKaiti', 'KaiTi', 'Songti SC', 'STSong', serif", fontSize: 13, color: muted } },
+        `${QUIET_PHRASE}${assistantCtx?.workspace ? ` · 专属工作区 ${workspaceName}` : ''}`)),
+    el('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 640 } },
+      ...STARTER_PROMPTS.map(textPrompt => el('button', {
+        key: textPrompt,
+        type: 'button',
+        style: idle(smallButtonStyle, !ready || sending),
+        disabled: !ready || sending,
+        onClick: () => submitPayload(textPrompt, [], false),
+      }, textPrompt))))
   } else {
     transcript = [
-      window.hasMore === true ? el('button', { key: 'older', type: 'button', style: smallButtonStyle,
-        onClick: () => { void state.binding.session.loadOlder() } }, '载入更早的消息') : null,
-      ...messages.map(message => jsx(ChatMessageRow, { message }, message.key)),
-      streaming === '' ? null : el('div', { key: 'streaming', 'data-chat-message-kind': 'streaming', style: assistantBubbleStyle, 'aria-live': 'polite' },
-        el('span', { style: { display: 'block', fontSize: 11, color: caption, marginBottom: 3 } }, '文鳐正在回复…'),
-        streaming),
+      window.hasMore === true ? el('button', {
+        key: 'older',
+        type: 'button',
+        style: idle(smallButtonStyle, loadingOlder),
+        disabled: loadingOlder,
+        onClick: loadOlder,
+      }, loadingOlder ? '正在载入更早的消息…' : '载入更早的消息') : null,
+      ...messages.map(message => jsx(ChatMessageRow, {
+        message,
+        onCopy: (value: string) => copyTextToClipboard(value, setNotice),
+      }, message.key)),
+      streaming !== ''
+        ? el('div', { key: 'streaming', 'data-chat-message-kind': 'streaming', style: assistantBubbleStyle, 'aria-live': 'polite' },
+          el('span', { style: { display: 'block', fontSize: 11, color: caption, marginBottom: 4 } }, '文鳐正在回复…'),
+          renderChatMarkdown(streaming))
+        : snapshot.running === true
+          ? el('div', {
+            key: 'thinking',
+            'data-chat-message-kind': 'thinking',
+            role: 'status',
+            'aria-live': 'polite',
+            style: { ...assistantBubbleStyle, color: muted, padding: '8px 12px', fontSize: 12 },
+          }, '文鳐正在思考…')
+          : null,
     ]
   }
 
@@ -642,41 +850,67 @@ export function OwnerConsoleChat({ runtime, onOpenSettings, renderer }: OwnerCon
     el('div', { style: chatColumnStyle },
       el('header', { 'data-owner-console-chat-header': '', style: headerStyle },
         jsx(ChatMark, {}),
-        el('div', { style: { display: 'grid', gap: 2, minWidth: 0, flex: '1 1 220px' } },
+        el('div', { style: { display: 'grid', gap: 3, minWidth: 0, flex: '1 1 240px' } },
           el('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
             el('h2', { style: { margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '0.02em' } }, '文鳐 Ray'),
-            sessionPill(snapshot, ready)),
+            sessionPill(snapshot, ready),
+            workspaceName !== '' ? pill(`工作区: ${workspaceName}`, 'neutral') : null,
+            caps?.memory ? pill('记忆', 'ok') : null,
+            caps?.wiki ? pill('Wiki', 'ok') : null,
+            caps?.feishuConnected ? pill('飞书在线', 'ok') : null),
           el('p', { style: { margin: 0, fontSize: 12, color: muted, fontFamily: "'STKaiti', 'KaiTi', 'Songti SC', 'STSong', serif", letterSpacing: '0.04em' } },
             '你的个人助手小鳐 · 小鳐小鳐，游而化飞')),
         el('div', { style: { ...actionsStyle, marginLeft: 'auto' } },
-          el('button', { type: 'button', style: smallButtonStyle, onClick: openNative, 'aria-label': '在原生会话中打开' }, '原生会话'),
+          el('button', { type: 'button', style: idle(smallButtonStyle, sending || modelSwitching),
+            disabled: sending || modelSwitching, onClick: startFreshChat, 'aria-label': '新对话',
+            title: '开启全新的文鳐助手对话（不影响原生编码会话）' }, '新对话'),
           el('button', { type: 'button', style: gearButtonStyle, onClick: onOpenSettings, 'aria-label': '打开设置',
-            title: '配置、飞书 / TraeX 与插件管理' }, el('span', { 'aria-hidden': true }, '⚙')))),
-      showPermissionBar
-        ? jsx(PermissionBar, { session: binding?.session, permission, catalog, switching, pending: pendingPermission,
-          notice: permissionNotice, request: requestPermission, confirm: applyPermission, cancel: () => setPendingPermission(undefined) })
-        : null,
+            title: '配置、模型工具与自愈设置' }, el('span', { 'aria-hidden': true }, '⚙')))),
+      el('div', { 'data-owner-console-chat-controls': '', style: controlBarStyle },
+        el('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          el('span', { style: subheadStyle }, '模型'),
+          jsx(ModelRouteSelects, {
+            catalog: effectiveCatalog,
+            provider: activeModelProvider,
+            model: activeModelId,
+            reasoningEffort: activeModelEffort,
+            compact: true,
+            disabled: !ready || modelSwitching || typeof runtime.selectSessionModel !== 'function',
+            onChange: handleModelRouteChange,
+          })),
+        jsx(PermissionBar, {
+          session: binding?.session,
+          permission,
+          catalog,
+          switching,
+          pending: pendingPermission,
+          notice: permissionNotice,
+          request: requestPermission,
+          confirm: applyPermission,
+          cancel: () => setPendingPermission(undefined),
+        })),
       notice === undefined ? null : el('p', { role: notice.tone === 'error' ? 'alert' : 'status', style: noticeStyle(notice.tone) },
         notice.text),
-      ...(nativeSurface === undefined
-        ? [
-            el('div', { ref: log, 'data-owner-console-chat-log': '', role: 'log', 'aria-label': '对话消息',
-              'aria-live': 'polite', style: logStyle, onScroll: scroll }, transcript),
-            jsx(Composer, { disabled, sending, draft, files, running: snapshot.running === true, cancelling,
-              voiceAvailable, listening, speakAvailable, speakReady: lastAssistant !== undefined,
-              onDraft: setDraft, onSubmit: (event: { preventDefault(): void }) => { event.preventDefault(); submit() },
-              onKeyDown: keyDown, onFiles: addFiles,
-              onRemoveFile: (index: number) => setFiles(files.filter((_file, at) => at !== index)),
-              onVoice: toggleVoice, onSpeak: speak, onStop: stop }),
-          ]
-        : [
-            el('div', { 'data-owner-console-native-conversation': '',
-              style: { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' } },
-            jsx(nativeSurface.provider as never, {
-              session: nativeSurface.reference,
-              children: nativeSurface.renderSlot('owner-console.conversation',
-                { sessionId: nativeSurface.reference.binding.sessionId },
-                { fallback: placeholder('正在载入原生对话…') }),
-            } as never)),
-          ])))
+      el('div', { ref: log, 'data-owner-console-chat-log': '', role: 'log', 'aria-label': '对话消息',
+        'aria-live': 'polite', style: logStyle, onScroll: scroll }, transcript),
+      jsx(Composer, {
+        disabled,
+        sending,
+        draft,
+        files,
+        running: snapshot.running === true,
+        cancelling,
+        voiceAvailable,
+        listening,
+        speakAvailable,
+        speakReady: lastAssistant !== undefined,
+        onDraft: setDraft,
+        onSubmit: (event: { preventDefault(): void }) => { event.preventDefault(); submit() },
+        onKeyDown: keyDown,
+        onFiles: addFiles,
+        onRemoveFile: (index: number) => setFiles(files.filter((_file, at) => at !== index)),
+        onVoice: toggleVoice,
+        onSpeak: speak,
+        onStop: stop,
+      })))
 }

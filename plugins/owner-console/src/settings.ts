@@ -48,8 +48,36 @@ export interface LlmProviderSummary {
   readonly name?: string
 }
 
+export interface LlmReasoningEffortSummary {
+  readonly id: string
+  readonly name?: string
+  readonly description?: string
+}
+
+export interface LlmModelSummary {
+  readonly id: string
+  readonly name?: string
+  readonly description?: string
+}
+
+export interface LlmResolvedModelSummary {
+  readonly reasoning?: Readonly<{
+    readonly efforts?: readonly LlmReasoningEffortSummary[]
+    readonly defaultEffort?: string
+  }>
+}
+
+export interface LlmConfigurableProviderSummary {
+  readonly provider: string
+  readonly displayName?: string
+  readonly settingsNs?: string
+}
+
 export interface LlmRuntimeService {
   listProviders?(): readonly LlmProviderSummary[]
+  listConfigurableProviders?(): readonly LlmConfigurableProviderSummary[]
+  listModels?(provider: string): Promise<readonly LlmModelSummary[]>
+  resolveModelInfo?(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelSummary>
 }
 
 /** One loader row a bundle's patch declares; its row id is the stable patch target. */

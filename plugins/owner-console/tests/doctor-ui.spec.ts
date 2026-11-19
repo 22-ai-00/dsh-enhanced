@@ -195,4 +195,90 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     await act(async () => { await Promise.resolve() })
     expect(configureFeishuEasy).toHaveBeenCalledWith('cli_aabbccddeeff0011', 'sec_top_secret_123', '', '')
   })
+
+  it('scopes ModelsProviderSetupCard using live DSH { provider, displayName } without .id and flips default button to 更新默认模型 on model/effort edits', async () => {
+    const base = makeRemote()
+    const status: OwnerConsoleStatus = {
+      ...makeStatus(),
+      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/traex' },
+      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: '/Users/owner/.local/bin/agy' },
+      defaultModel: { entry: 'agent-default-model', available: true, provider: 'traex-agent', model: 'default', reasoningEffort: '' },
+    }
+    const remote: ConsoleRemote = {
+      ...base.remote,
+      status: vi.fn(async () => ({ ok: true as const, value: status })),
+      modelCatalog: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          protocol: 'owner-console/model-catalog/v1' as const,
+          fetchedAt: 1_000,
+          defaultSelection: { provider: 'traex-agent', model: 'default' },
+          providers: [
+            {
+              id: 'traex-agent',
+              name: 'TraeX ACP',
+              kind: 'acp' as const,
+              active: true,
+              models: [
+                { id: 'default', name: 'TraeX 默认模型', efforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }] },
+                { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', efforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }] },
+              ],
+            },
+            {
+              id: 'agy-agent',
+              name: 'Antigravity ACP',
+              kind: 'acp' as const,
+              active: true,
+              models: [{ id: 'default', name: 'Antigravity 默认模型', efforts: [] }],
+            },
+          ],
+        },
+      })),
+    }
+    const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
+
+    await act(async () => {
+      root.render(createElement(ModelsProviderSetupCard, {
+        provider: { provider: 'traex-agent', displayName: 'TraeX' },
+        configured: true,
+        keyConfigured: true,
+        remote,
+        navigation,
+      }))
+    })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
+
+    expect(container.querySelector('[data-owner-console-models-provider-card="traex-agent"]')).not.toBeNull()
+    expect(container.querySelector('[data-models-provider-tool="traex"]')).not.toBeNull()
+    expect(container.querySelector('[data-models-provider-tool="agy"]')).toBeNull()
+
+    const findButton = (text: string) => [...container.querySelectorAll('button')].find(b => b.textContent === text)
+    expect(findButton('当前已是默认')).toBeDefined()
+    expect(findButton('更新默认模型')).toBeUndefined()
+
+    const modelSel = container.querySelector('[data-model-route-select="model"]') as HTMLSelectElement
+    await act(async () => {
+      modelSel.value = 'claude-sonnet-5-5'
+      modelSel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(findButton('更新默认模型')).toBeDefined()
+    expect(findButton('当前已是默认')).toBeUndefined()
+
+    await act(async () => {
+      modelSel.value = 'default'
+      modelSel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(findButton('当前已是默认')).toBeDefined()
+
+    const effortSel = container.querySelector('[data-model-route-select="effort"]') as HTMLSelectElement
+    await act(async () => {
+      effortSel.value = 'high'
+      effortSel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const updateBtn = findButton('更新默认模型')
+    expect(updateBtn).toBeDefined()
+    await act(async () => { updateBtn!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(base.setDefaultModelRoute).toHaveBeenCalledWith('traex-agent', 'default', 'high')
+  })
 })

@@ -20,11 +20,17 @@ import { CodingToolProber, discoverCodingToolBinary, type CodingToolId } from '.
 import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus, resolveProfilePaths } from './autonomy-setup.js'
 import { SelfUpgradeProber } from './upgrade-probe.js'
 import type {
-  AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
-  AutonomySetupStatus, OwnerConsoleGrowthReport, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
+  AssistantChatContext, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
+  AutonomySetupStatus, OwnerConsoleGrowthReport, OwnerConsoleModelCatalog,
+  SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
 import { applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor } from './doctor-repair.js'
+import { ModelCatalogReader } from './model-catalog.js'
+import {
+  AssistantChatRegistry, buildWenyaoIdentityContext, buildWenyaoSystemPrompt, readAssistantChatCapabilities,
+  resolveAssistantChatContext, resolveAssistantWorkspace,
+} from './assistant-chat.js'
 import {
   executeAttentionQuestionReply, executeDreamingIdeaAction, executeProactiveDraftAction,
   readAssistantOverview, type DreamingIdeaAction,
@@ -46,17 +52,130 @@ export class OwnerConsoleService extends TypertRemoteService {
   private readonly host: Context
   private readonly prober: CodingToolProber
   private readonly upgradeProber: SelfUpgradeProber
+  private readonly catalogReader: ModelCatalogReader
+  private readonly assistantChat: AssistantChatRegistry
 
   constructor(
     ctx: Context,
     private readonly config: OwnerConsoleConfig,
     prober: CodingToolProber = new CodingToolProber(),
     upgradeProber: SelfUpgradeProber = new SelfUpgradeProber(),
+    catalogReader: ModelCatalogReader = new ModelCatalogReader(),
+    assistantChat: AssistantChatRegistry = new AssistantChatRegistry(ctx),
   ) {
     super(ctx, 'ownerConsole')
     this.host = ctx
     this.prober = prober
     this.upgradeProber = upgradeProber
+    this.catalogReader = catalogReader
+    this.assistantChat = assistantChat
+    this.installAssistantPromptScope()
+    this.installModelCatalogInvalidation()
+  }
+
+  private installModelCatalogInvalidation(): void {
+    try {
+      if (typeof (this.host as { on?: unknown }).on !== 'function') return
+      const invalidate = () => {
+        this.catalogReader.invalidate()
+      }
+      this.host.on('llm/adapters-updated' as never, invalidate as never)
+      this.host.on('llm/models-updated' as never, invalidate as never)
+    } catch {
+      // Ignore if test Context stub lacks on(); Host runtime always supplies it.
+    }
+  }
+
+  private installAssistantPromptScope(): void {
+    try {
+      this.host.inject(['systemPrompt' as never], (promptCtx: unknown) => {
+        const sp = (promptCtx as {
+          systemPrompt?: {
+            section?: (def: unknown) => () => void
+            context?: (def: unknown) => () => void
+          }
+        }).systemPrompt
+        const text = (arg: unknown) => {
+          const agent = arg !== null && typeof arg === 'object' ? (arg as { agent?: unknown }).agent : undefined
+          return this.wenyaoPromptForAgent(agent)
+        }
+        const contextText = (arg: unknown) => {
+          const agent = arg !== null && typeof arg === 'object' ? (arg as { agent?: unknown }).agent : undefined
+          return this.wenyaoIdentityContextForAgent(agent)
+        }
+        const disposers: Array<() => void> = []
+        const disposeAll = () => {
+          for (const dispose of disposers.splice(0).reverse()) {
+            try {
+              dispose()
+            } catch {
+              // Best-effort cleanup of prompt registrations.
+            }
+          }
+        }
+        if (sp === undefined) return disposeAll
+        const hasSection = typeof sp.section === 'function'
+        try {
+          if (typeof sp.section === 'function') {
+            const dispose = sp.section({
+              name: 'owner-console:wenyao-persona',
+              order: 10,
+              interpolate: false,
+              text,
+            })
+            if (typeof dispose === 'function') disposers.push(dispose)
+          }
+          if (typeof sp.context === 'function') {
+            const dispose = sp.context(hasSection
+              ? {
+                name: 'owner-console:wenyao-identity-context',
+                order: 130,
+                interpolate: false,
+                required: true,
+                text: contextText,
+              }
+              : {
+                name: 'owner-console:wenyao-persona',
+                order: 130,
+                interpolate: false,
+                required: true,
+                text,
+              })
+            if (typeof dispose === 'function') disposers.push(dispose)
+          }
+        } catch (error: unknown) {
+          disposeAll()
+          throw error
+        }
+        return disposeAll
+      })
+    } catch {
+      // Ignore if test Context stub lacks inject(); Host runtime always supplies it.
+    }
+  }
+
+  private resolveWenyaoSessionId(agent: unknown): string {
+    if (agent === null || typeof agent !== 'object') return ''
+    const rec = agent as { id?: unknown; session?: { id?: unknown } }
+    const sessionId = typeof rec.session?.id === 'string' && rec.session.id !== ''
+      ? rec.session.id
+      : typeof rec.id === 'string' && rec.id !== ''
+        ? rec.id
+        : ''
+    if (sessionId === '' || !this.assistantChat.hasSession(sessionId)) return ''
+    return sessionId
+  }
+
+  private wenyaoPromptForAgent(agent: unknown): string {
+    if (this.resolveWenyaoSessionId(agent) === '') return ''
+    const { workspace } = resolveAssistantWorkspace(this.host)
+    return buildWenyaoSystemPrompt(workspace, readAssistantChatCapabilities(this.host))
+  }
+
+  private wenyaoIdentityContextForAgent(agent: unknown): string {
+    if (this.resolveWenyaoSessionId(agent) === '') return ''
+    const { workspace } = resolveAssistantWorkspace(this.host)
+    return buildWenyaoIdentityContext(workspace)
   }
 
   private settings(): SettingsService {
@@ -337,7 +456,9 @@ export class OwnerConsoleService extends TypertRemoteService {
   async setBundleEnabled(name: string, enabled: boolean): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
     const manager = this.manager()
-    return applyChange(await manager.setBundleEnabled(name, enabled))
+    const result = applyChange(await manager.setBundleEnabled(name, enabled))
+    if (result.applied) this.catalogReader.invalidate()
+    return result
   }
 
   /** Enable or disable one loaded entry of a project bundle. */
@@ -347,14 +468,18 @@ export class OwnerConsoleService extends TypertRemoteService {
     const inventory = await this.inventory()
     const entry = inventory.plugins.find(plugin => plugin.entryId === entryId)
     if (entry === undefined) return refuse(entryId, '该条目不属于本项目的插件，或尚未安装')
-    return applyChange(await manager.setPluginEnabled(entryId, enabled))
+    const result = applyChange(await manager.setPluginEnabled(entryId, enabled))
+    if (result.applied) this.catalogReader.invalidate()
+    return result
   }
 
   /** Remove one project bundle layer after the owner confirms the destructive step. */
   async removeProjectBundle(name: string): Promise<OwnerConsoleWriteResult> {
     if (!isProjectPackage(name)) return refuse('', '只允许移除本项目的 @dsh-enhanced/* bundle')
     const manager = this.manager()
-    return applyChange(await manager.removeBundle(name))
+    const result = applyChange(await manager.removeBundle(name))
+    if (result.applied) this.catalogReader.invalidate()
+    return result
   }
 
   /** Install one project bundle with its declared dependencies, then activate it.
@@ -375,7 +500,9 @@ export class OwnerConsoleService extends TypertRemoteService {
     }
     const manager = this.manager()
     if (approvals.length === 0) {
-      return applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
+      const result = applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
+      if (result.applied) this.catalogReader.invalidate()
+      return result
     }
     const dir = this.profileDirectory()
     if (dir === undefined) return rejectStaleApproval(trimmed, approvals)
@@ -384,7 +511,9 @@ export class OwnerConsoleService extends TypertRemoteService {
     } catch (cause) {
       return refuse(trimmed, `写入 allowBuilds 失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-    return applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
+    const result = applyInstall(await manager.installBundle(trimmed, { enabled: true, saveExact: true }))
+    if (result.applied) this.catalogReader.invalidate()
+    return result
   }
 
   /** Feishu: one owner click, two ways to pair the bot. No plaintext secret is ever accepted. */
@@ -474,6 +603,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       return writeFailure(traex.ns, cause)
     }
     const reloaded = await this.reload(traex.ns)
+    this.catalogReader.invalidate()
     return Object.freeze({ applied: true, entry: traex.ns, note: (enabled ? 'TraeX 行已启用' : 'TraeX 行已停用') + reloaded })
   }
 
@@ -504,6 +634,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       return writeFailure(entry, cause)
     }
     const reloaded = await this.reload(entry)
+    this.catalogReader.invalidate()
     return Object.freeze({ applied: true, entry, note: '已合并写入' + reloaded })
   }
 
@@ -526,6 +657,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       return writeFailure(traex.ns, cause)
     }
     const reloaded = await this.reload(traex.ns)
+    this.catalogReader.invalidate()
     return Object.freeze({
       applied: true,
       entry: traex.ns,
@@ -615,6 +747,7 @@ export class OwnerConsoleService extends TypertRemoteService {
       } catch (cause) {
         return writeFailure(target.ns, cause)
       }
+      this.catalogReader.invalidate()
       return Object.freeze({
         applied: true,
         entry: target.ns,
@@ -628,6 +761,7 @@ export class OwnerConsoleService extends TypertRemoteService {
           model: cleanModel,
           ...(cleanEffort === '' ? {} : { reasoningEffort: cleanEffort }),
         })
+        this.catalogReader.invalidate()
         return Object.freeze({
           applied: true,
           entry: 'agent-default-model',
@@ -682,7 +816,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     workItemExperiences: boolean,
     customBudget: AutonomyBudgetLimits,
   ): Promise<OwnerConsoleWriteResult> {
-    return applyAutonomyWizardSetup(this.host, {
+    const result = await applyAutonomyWizardSetup(this.host, {
       action,
       tier,
       provider,
@@ -695,6 +829,37 @@ export class OwnerConsoleService extends TypertRemoteService {
       customBudget,
       reloadEntry: entryId => this.reload(entryId),
     })
+    if (result.applied) {
+      this.catalogReader.invalidate()
+      if (action === 'enable') {
+        await this.ensureAuthorizedAutonomyBundlesEnabled(enableMemoryLearning, enableDreaming, enableGrowth)
+      }
+    }
+    return result
+  }
+
+  private async ensureAuthorizedAutonomyBundlesEnabled(
+    enableMemoryLearning: boolean,
+    enableDreaming: boolean,
+    enableGrowth: boolean,
+  ): Promise<void> {
+    const manager = this.host.get('pluginManager' as never) as PluginManagerService | undefined
+    if (manager === undefined) return
+    try {
+      const bundles = await manager.listBundles()
+      const targets: string[] = []
+      if (enableMemoryLearning) targets.push('@dsh-enhanced/assistant-memory-learning')
+      if (enableDreaming) targets.push('@dsh-enhanced/assistant-dreaming')
+      if (enableGrowth) targets.push('@dsh-enhanced/assistant-growth-driver')
+      for (const pkg of targets) {
+        const entry = bundles.find(b => b.name === pkg)
+        if (entry?.installed === true && !entry.enabled) {
+          await manager.setBundleEnabled(pkg, true)
+        }
+      }
+    } catch {
+      // Best-effort bundle activation; persisted cordis.patch.yml already grants autonomy setup.
+    }
   }
 
   /** Check current @dsh-enhanced / bound Host versions and latest npm release safely with TTL cache. */
@@ -729,7 +894,7 @@ export class OwnerConsoleService extends TypertRemoteService {
 
   /** Automatically repair selected (or all auto-fixable) setup doctor issues safely and atomically. */
   async applyDoctorRepair(issueIds: readonly string[]): Promise<OwnerConsoleWriteResult> {
-    return applyDoctorRepair({
+    const result = await applyDoctorRepair({
       host: this.host,
       status: await this.status(),
       descriptors: this.descriptors(),
@@ -739,6 +904,8 @@ export class OwnerConsoleService extends TypertRemoteService {
       reloadEntry: entryId => this.reload(entryId),
       issueIds,
     })
+    if (result.applied) this.catalogReader.invalidate()
+    return result
   }
 
   /** Store Feishu App Secret in OS credential vault and configure handle + policy rule without plaintext in YAML. */
@@ -753,6 +920,36 @@ export class OwnerConsoleService extends TypertRemoteService {
       account,
       tenant,
     })
+  }
+
+  /** List registered and dormant providers, advertised models, and reasoning efforts (for /model-style selectors). */
+  async modelCatalog(force: boolean): Promise<OwnerConsoleModelCatalog> {
+    return this.catalogReader.read(this.host, await this.status(), force)
+  }
+
+  /** Resolve dedicated 文鳐 workspace, preset, known sessions, and live Host capabilities. */
+  async assistantChatContext(): Promise<AssistantChatContext> {
+    return resolveAssistantChatContext(this.host, this.assistantChat)
+  }
+
+  /** Bind a Session ID to the dedicated 文鳐 persona so Host injects assistant prompt only for it. */
+  async registerAssistantSession(sessionId: string, makeActive: boolean): Promise<OwnerConsoleWriteResult> {
+    const clean = sessionId.trim()
+    if (clean === '' || clean.length > 200 || hasControlChars(clean)) {
+      return refuse('owner-console', '会话 ID 无效')
+    }
+    try {
+      const saved = this.assistantChat.registerSession(clean, makeActive)
+      return Object.freeze({
+        applied: true,
+        entry: 'owner-console',
+        note: saved.persisted
+          ? `已将对话 ${clean} 绑定至文鳐助手上下文`
+          : `已记录文鳐助手会话 ${clean}（当前未检测到可写 $DSH_HOME，仅本进程有效）`,
+      })
+    } catch (cause) {
+      return refuse('owner-console', cause instanceof Error ? cause.message : '注册助手会话失败')
+    }
   }
 }
 

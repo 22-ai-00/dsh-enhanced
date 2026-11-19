@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react'
+import { act, createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { renderChatMarkdown } from '../src/chat-markdown.ts'
 import { OwnerConsoleChat, OwnerConsoleConversation } from '../src/chat-view.ts'
 import { OwnerConsolePanel } from '../src/client.ts'
+import { CUSTOM_MODEL_OPTION } from '../src/model-route-ui.ts'
 import type {
   ChatBinding, ChatEntry, ChatEventWindow, ChatRuntime, ChatSessionFace, ChatSessionSnapshot, ChatUploads,
   PermissionCatalog, SpeechRecognitionEventLike, SpeechRecognitionLike,
@@ -284,27 +286,96 @@ describe('文鳐 settings entry', () => {
   })
 })
 
-describe('文鳐 native Conversation embedding', () => {
-  it('uses the renderer-injected SessionProvider and child slot instead of the fallback transcript', async () => {
-    const fake = harness()
+describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
+  it('always renders 文鳐 own dedicated dialog instead of delegating to native conversation.content', async () => {
+    let createdCount = 0
+    const selectSessionModel = vi.fn(async () => ({ ok: true as const, value: { applied: true } }))
+    const registerAssistantSession = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'owner-console', note: 'ok' } }))
     const SessionProvider = vi.fn((props: { session?: unknown, children?: unknown }) => props.children)
     const renderSlot = vi.fn(() => createElement('div', { 'data-native-conversation-slot': '' }, 'native conversation'))
-    const runtime = { ...fake.runtime }
+    const fake = harness({
+      createSession: vi.fn(async () => `s-new-${++createdCount}`),
+      assistantChatContext: async () => ({
+        ok: true,
+        value: {
+          protocol: 'owner-console/assistant-chat/v1',
+          workspace: '/Users/owner/.dsh/assistant-workspace',
+          activeSessionId: 's1',
+          knownSessionIds: ['s1'],
+          capabilities: { memory: true, wiki: true, dreaming: true, proactive: false, growth: false, feishuConnected: true },
+        },
+      }),
+      registerAssistantSession,
+      modelCatalog: async () => ({
+        ok: true,
+        value: {
+          protocol: 'owner-console/model-catalog/v1',
+          fetchedAt: 1_000,
+          defaultSelection: { provider: 'llmgw', model: 'seed-2.0-pro', reasoningEffort: 'medium' },
+          providers: [
+            {
+              id: 'llmgw',
+              name: 'LLMBox Seed',
+              kind: 'api',
+              active: true,
+              models: [
+                {
+                  id: 'seed-2.0-pro',
+                  name: 'Seed 2.0 Pro',
+                  efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }],
+                  defaultEffort: 'medium',
+                },
+              ],
+            },
+            {
+              id: 'agy-agent',
+              name: 'Antigravity ACP',
+              kind: 'acp',
+              active: true,
+              models: [
+                { id: 'default', name: 'Antigravity default', efforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }] },
+                { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', efforts: [{ id: 'high', name: 'High' }] },
+              ],
+            },
+          ],
+        },
+      }),
+      selectSessionModel,
+    }, [
+      user(1, '介绍一下你自己'),
+      assistant(2, '# 你好\n我是 **文鳐** (`assistant-workspace`)。'),
+    ])
+
     await render(createElement(OwnerConsoleChat, {
-      runtime,
+      runtime: fake.runtime,
       onOpenSettings: vi.fn(),
       renderer: { SessionProvider, renderSlot },
     }))
-    expect(container.querySelector('[data-owner-console-native-conversation]')).not.toBeNull()
-    expect(container.querySelector('[data-native-conversation-slot]')).not.toBeNull()
-    expect(container.querySelector('[data-owner-console-chat-log]')).toBeNull()
-    expect(container.querySelector('textarea[aria-label="给文鳐的消息"]')).toBeNull()
-    expect(SessionProvider).toHaveBeenCalled()
-    expect(SessionProvider.mock.calls.at(-1)?.[0].session).toBeDefined()
-    expect(renderSlot).toHaveBeenCalledWith('owner-console.conversation', { sessionId: 's1' },
-      { fallback: expect.anything() })
-    // The native composer owns voice input through its Host slot; no duplicate toolbar.
-    expect(container.querySelector('[data-owner-console-voice-toolbar]')).toBeNull()
+
+    // Native conversation embedding is bypassed; dedicated dialog renders cleanly with Markdown & workspace pill.
+    expect(container.querySelector('[data-owner-console-chat-log]')).not.toBeNull()
+    expect(container.querySelector('textarea[aria-label="给文鳐的消息"]')).not.toBeNull()
+    expect(container.querySelector('[data-native-conversation-slot]')).toBeNull()
+    expect(SessionProvider).not.toHaveBeenCalled()
+    expect(renderSlot).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('工作区: assistant-workspace')
+    expect(container.textContent).toContain('飞书在线')
+    expect(container.querySelector('strong')?.textContent).toBe('文鳐')
+    expect(container.querySelector('code')?.textContent).toBe('assistant-workspace')
+    expect(registerAssistantSession).toHaveBeenCalledWith('s1', true)
+
+    // In-dialog /model cascading selector switches session model immediately.
+    const providerSelect = container.querySelector('[data-model-route-select="provider"]') as HTMLSelectElement
+    expect(providerSelect.value).toBe('llmgw')
+    providerSelect.value = 'agy-agent'
+    await act(async () => { providerSelect.dispatchEvent(new Event('change', { bubbles: true })) })
+    await settle()
+    expect(selectSessionModel).toHaveBeenCalledWith('s1', 'agy-agent', 'default', 'medium')
+
+    // 新对话 creates a dedicated session cleanly.
+    const newChatBtn = byLabel('新对话')
+    await click(newChatBtn)
+    expect(fake.runtime.createSession).toHaveBeenCalledOnce()
   })
 
   it('computes the native phase from Session snapshots and selects the Chat view', async () => {
@@ -336,5 +407,132 @@ describe('文鳐 native Conversation embedding', () => {
     await render(createElement(OwnerConsoleConversation as never, seat({ blank: true, openState: 'loading' }, undefined)))
     expect(renderFactorySlot).toHaveBeenLastCalledWith('conversation.content',
       { variant: 'embedded', phase: 'settling', hero: false }, expect.anything())
+  })
+
+  it('renders unclosed streaming fenced code blocks without headings and trims Chinese punctuation outside bare URL links', async () => {
+    const markdown = [
+      '先看代码：',
+      '```python  ',
+      '# not a heading',
+      'print("ok")',
+    ].join('\n')
+    await render(createElement('div', {}, renderChatMarkdown(markdown) as ReactNode))
+    const code = container.querySelector('code')
+    expect(code).not.toBeNull()
+    expect(code!.textContent).toBe('# not a heading\nprint("ok")')
+    expect(container.textContent).not.toContain('```')
+    // Ensure "# not a heading" stayed inside <code> rather than rendering as a heading block.
+    const headingDivs = [...container.querySelectorAll('div')].filter(
+      el => el.style.fontWeight === '600' && el.textContent?.includes('not a heading'),
+    )
+    expect(headingDivs).toHaveLength(0)
+
+    const urlMarkdown = '请查看 https://example.com/a。以及 https://example.com/b，结束'
+    await render(createElement('div', {}, renderChatMarkdown(urlMarkdown) as ReactNode))
+    const links = [...container.querySelectorAll('a')]
+    expect(links).toHaveLength(2)
+    expect(links[0]!.href).toBe('https://example.com/a')
+    expect(links[0]!.textContent).toBe('https://example.com/a')
+    expect(links[1]!.href).toBe('https://example.com/b')
+    expect(links[1]!.textContent).toBe('https://example.com/b')
+    expect(container.textContent).toBe('请查看 https://example.com/a。以及 https://example.com/b，结束')
+  })
+
+  it('shows thinking indicator while snapshot.running is true with empty streaming text and hides it once streaming begins', async () => {
+    const fake = harness({}, [])
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+    expect(container.querySelector('[data-owner-console-welcome]')).not.toBeNull()
+    expect(container.querySelector('[data-chat-message-kind="thinking"]')).toBeNull()
+
+    await act(async () => { fake.setSnapshot({ openState: 'open', running: true }) })
+    await settle()
+    expect(container.querySelector('[data-owner-console-welcome]')).toBeNull()
+    const thinking = container.querySelector('[data-chat-message-kind="thinking"]')
+    expect(thinking).not.toBeNull()
+    expect(thinking!.textContent).toContain('文鳐正在思考…')
+
+    await act(async () => {
+      fake.setEntries([
+        { type: 'transient', event: { seq: 1, data: { attemptId: 'a1', chunk: { type: 'text-delta', text: '正在整理答案' } } } },
+      ])
+    })
+    await settle()
+    expect(container.querySelector('[data-chat-message-kind="thinking"]')).toBeNull()
+    expect(container.querySelector('[data-chat-message-kind="streaming"]')?.textContent).toContain('正在整理答案')
+  })
+
+  it('buffers compact custom model input keystrokes and calls selectSessionModel only on 应用 click or Enter without injecting uninstalled ACP providers', async () => {
+    const selectSessionModel = vi.fn(async () => ({ ok: true as const, value: { applied: true } }))
+    const fake = harness({
+      selectSessionModel,
+      modelCatalog: async () => ({
+        ok: true,
+        value: {
+          protocol: 'owner-console/model-catalog/v1',
+          fetchedAt: 2_000,
+          defaultSelection: { provider: 'llmgw', model: 'seed-2.0-pro', reasoningEffort: 'medium' },
+          providers: [
+            {
+              id: 'llmgw',
+              name: 'LLMBox Seed',
+              kind: 'api',
+              active: true,
+              models: [
+                {
+                  id: 'seed-2.0-pro',
+                  name: 'Seed 2.0 Pro',
+                  efforts: [{ id: 'medium', name: 'Medium' }],
+                  defaultEffort: 'medium',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    }, [user(1, 'hi')])
+
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+
+    const providerSelect = container.querySelector('[data-model-route-select="provider"]') as HTMLSelectElement
+    expect([...providerSelect.options].map(o => o.value)).toEqual(['llmgw'])
+
+    const modelSelect = container.querySelector('[data-model-route-select="model"]') as HTMLSelectElement
+    modelSelect.value = CUSTOM_MODEL_OPTION
+    await act(async () => { modelSelect.dispatchEvent(new Event('change', { bubbles: true })) })
+    await settle()
+
+    const customInput = container.querySelector('[data-model-route-custom-model]') as HTMLInputElement
+    const applyBtn = container.querySelector('[data-model-route-custom-apply]') as HTMLButtonElement
+    expect(customInput).not.toBeNull()
+    expect(applyBtn).not.toBeNull()
+    expect(applyBtn.textContent).toBe('应用')
+
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    for (const partial of ['d', 'de', 'deepseek-v4-custom']) {
+      setInputValue.call(customInput, partial)
+      await act(async () => { customInput.dispatchEvent(new Event('input', { bubbles: true })) })
+    }
+    expect(selectSessionModel).not.toHaveBeenCalled()
+
+    await click(applyBtn)
+    expect(selectSessionModel).toHaveBeenCalledTimes(1)
+    expect(selectSessionModel).toHaveBeenLastCalledWith('s1', 'llmgw', 'deepseek-v4-custom', '')
+
+    // Re-enter custom mode and commit via Enter key.
+    modelSelect.value = CUSTOM_MODEL_OPTION
+    await act(async () => { modelSelect.dispatchEvent(new Event('change', { bubbles: true })) })
+    await settle()
+
+    const customInputAgain = container.querySelector('[data-model-route-custom-model]') as HTMLInputElement
+    setInputValue.call(customInputAgain, 'deepseek-r2')
+    await act(async () => { customInputAgain.dispatchEvent(new Event('input', { bubbles: true })) })
+    expect(selectSessionModel).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      customInputAgain.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    })
+    await settle()
+    expect(selectSessionModel).toHaveBeenCalledTimes(2)
+    expect(selectSessionModel).toHaveBeenLastCalledWith('s1', 'llmgw', 'deepseek-r2', '')
   })
 })

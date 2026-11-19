@@ -34,6 +34,8 @@ export interface TraexAcpProviderConfig {
   agyMode: AgySessionMode
   /** Whole ACP prompt deadline. */
   timeoutMs: number
+  /** Advertised context capacity (tokens) reported to DSH compaction checks. */
+  contextWindow: number
   /** Deadline for the non-model auth/catalog readiness probe. */
   authProbeTimeoutMs: number
   /** Maximum stdout/stderr bytes captured from the login-status probe. */
@@ -88,6 +90,7 @@ const schema = Schema.object({
   agyDisableTelemetry: Schema.boolean().default(true),
   agyMode: Schema.union(['default', 'plan'] as const).default('default'),
   timeoutMs: Schema.natural().min(1_000).max(60 * 60_000).default(10 * 60_000),
+  contextWindow: Schema.natural().min(4_096).max(10_000_000).default(200_000),
   authProbeTimeoutMs: Schema.natural().min(1_000).max(120_000).default(30_000),
   maxAuthProbeBytes: Schema.natural().min(1_024).max(1024 * 1024).default(32 * 1024),
   killGraceMs: Schema.natural().min(100).max(30_000).default(3_000),

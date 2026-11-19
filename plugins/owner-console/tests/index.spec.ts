@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(27)
+    expect(asyncMethods).toHaveLength(30)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -114,6 +114,9 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/setupDoctor')).toEqual([])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/applyDoctorRepair')).toEqual(['issueIds'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/configureFeishuEasy')).toEqual(['appId', 'appSecret', 'account', 'tenant'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/modelCatalog')).toEqual(['force'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/assistantChatContext')).toEqual([])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/registerAssistantSession')).toEqual(['sessionId', 'makeActive'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {

@@ -128,6 +128,64 @@ export const SetupDoctorReportSchema = z.object({
 }).readonly()
 export type SetupDoctorReport = Readonly<z.infer<typeof SetupDoctorReportSchema>>
 
+export const ModelReasoningEffortOptionSchema = z.object({
+  id: z.string().min(1).max(128),
+  name: z.string().min(1).max(160),
+  description: z.string().max(300).optional(),
+}).readonly()
+export type ModelReasoningEffortOption = Readonly<z.infer<typeof ModelReasoningEffortOptionSchema>>
+
+export const ModelCatalogItemSchema = z.object({
+  id: z.string().min(1).max(256),
+  name: z.string().min(1).max(256),
+  description: z.string().max(400).optional(),
+  efforts: z.array(ModelReasoningEffortOptionSchema).max(16).readonly(),
+  defaultEffort: z.string().min(1).max(128).optional(),
+}).readonly()
+export type ModelCatalogItem = Readonly<z.infer<typeof ModelCatalogItemSchema>>
+
+export const ModelCatalogProviderSchema = z.object({
+  id: z.string().min(1).max(200),
+  name: z.string().min(1).max(200),
+  kind: z.enum(['acp', 'api']),
+  active: z.boolean(),
+  models: z.array(ModelCatalogItemSchema).max(200).readonly(),
+  diagnostic: z.string().max(400).optional(),
+}).readonly()
+export type ModelCatalogProvider = Readonly<z.infer<typeof ModelCatalogProviderSchema>>
+
+export const OwnerConsoleModelCatalogSchema = z.object({
+  protocol: z.literal('owner-console/model-catalog/v1'),
+  fetchedAt: z.number().int().nonnegative(),
+  defaultSelection: z.object({
+    provider: z.string().max(200),
+    model: z.string().max(256),
+    reasoningEffort: z.string().max(128).optional(),
+  }).readonly(),
+  providers: z.array(ModelCatalogProviderSchema).max(64).readonly(),
+}).readonly()
+export type OwnerConsoleModelCatalog = Readonly<z.infer<typeof OwnerConsoleModelCatalogSchema>>
+
+export const AssistantChatCapabilitiesSchema = z.object({
+  memory: z.boolean(),
+  wiki: z.boolean(),
+  dreaming: z.boolean(),
+  proactive: z.boolean(),
+  growth: z.boolean(),
+  feishuConnected: z.boolean(),
+}).readonly()
+export type AssistantChatCapabilities = Readonly<z.infer<typeof AssistantChatCapabilitiesSchema>>
+
+export const AssistantChatContextSchema = z.object({
+  protocol: z.literal('owner-console/assistant-chat/v1'),
+  workspace: z.string().max(4_096),
+  agentPreset: z.string().min(1).max(200).optional(),
+  activeSessionId: z.string().max(200).nullable(),
+  knownSessionIds: z.array(z.string().min(1).max(200)).max(32).readonly(),
+  capabilities: AssistantChatCapabilitiesSchema,
+}).readonly()
+export type AssistantChatContext = Readonly<z.infer<typeof AssistantChatContextSchema>>
+
 const subsystemState = z.enum(['absent', 'disabled', 'ok', 'error'])
 const boundedCountMap = z.record(z.string(), z.number().int().nonnegative())
 
@@ -985,6 +1043,35 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 966, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/modelCatalog',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'modelCatalog',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'force', wire: 'force', source: 'json', codec: codec('owner-console#modelCatalogForce', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleModelCatalog', () => OwnerConsoleModelCatalogSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1005, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/assistantChatContext',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'assistantChatContext',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-enhanced/owner-console#AssistantChatContext', () => AssistantChatContextSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1030, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/registerAssistantSession',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'registerAssistantSession',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'sessionId', wire: 'sessionId', source: 'json', codec: codec('owner-console#assistantSessionId', () => z.string().min(1).max(200)) },
+        { name: 'makeActive', wire: 'makeActive', source: 'json', codec: codec('owner-console#assistantMakeActive', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1040, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

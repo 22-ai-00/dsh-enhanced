@@ -16,6 +16,7 @@ describe('configuration', () => {
       agyIncludeDefaultCustomizations: false,
       agyDisableTelemetry: true,
       agyMode: 'default',
+      contextWindow: 200_000,
       authProbeTimeoutMs: 30_000,
       extraEnvNames: [],
       logDiagnostics: false,
@@ -33,6 +34,7 @@ describe('configuration', () => {
     expect(() => Config({ agyCommand: ' ' } as never)).toThrow()
     expect(() => Config({ agyMode: 'bypass' } as never)).toThrow()
     expect(() => Config({ cwdMode: 'anywhere' } as never)).toThrow()
+    expect(() => Config({ contextWindow: 1024 } as never)).toThrow()
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 

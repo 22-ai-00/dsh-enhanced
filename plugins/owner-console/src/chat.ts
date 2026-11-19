@@ -9,6 +9,8 @@
  * so the Host service shapes are declared locally and resolved through `ctx.get()`.
  */
 
+import type { AssistantChatContext, OwnerConsoleModelCatalog, OwnerConsoleWriteResult } from './typert.js'
+
 /** One Host snapshot/read face (`getSnapshot` + `subscribe`). */
 export type Observable<T> = Readonly<{
   getSnapshot(): T
@@ -193,15 +195,19 @@ export type ChatRuntime = Readonly<{
    */
   insertDraft?(reference: ChatReference, text: string): boolean
   /**
-   * Create the dedicated chat Session. The Host adapter resolves the default Workspace first so
-   * the Session is grouped and can be opened natively; absence falls back to `sessions.create()`
-   * with the Host default cwd (an ungrouped Session).
+   * Create the dedicated chat Session. The Host adapter resolves the assistant workspace and
+   * registers the session id on Host before use so systemPrompt stays scoped to 文鳐 only.
    */
   createSession?(): Promise<string>
+  assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
+  registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
+  selectSessionModel?(sessionId: string, provider: string, model: string, reasoningEffort: string): Promise<RemoteResult<unknown>>
+  subscribeRefresh?(listener: () => void): () => void
 }>
 
 /** localStorage key for the panel's dedicated chat Session (browser-local only). */
-export const CHAT_SESSION_KEY = 'dsh.owner-console.chat-session'
+export const CHAT_SESSION_KEY = 'dsh.owner-console.assistant-chat-session.v2'
 
 /** Consumer label for the retained reference; a Session value survives page reloads. */
 export const CHAT_REFERENCE_SOURCE = 'ownerConsoleChat'
@@ -376,13 +382,19 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
+export interface OpenDedicatedChatOptions {
+  readonly forceNew?: boolean
+  readonly preferredSessionId?: string | null
+  readonly onSessionReady?: (sessionId: string) => Promise<void> | void
+}
+
 /**
- * Open the dedicated chat Session: reuse the stored one when it is still openable, otherwise
- * create one through the native Session controller and remember it. `ready` resolves even when
- * the Host failed to open the retained history (`openState: 'error'`), so the snapshot decides.
- * `signal` cancels the acquisition itself (the Host also stops waiting through `retain`), so an
- * unmounted chat surface cannot keep a hung open retained. The caller owns the returned reference
- * and must release it when the chat surface unmounts.
+ * Open the dedicated chat Session: reuse the stored/preferred one when it is still openable (unless
+ * `forceNew` is set), otherwise create one through the native Session controller and remember it.
+ * `ready` resolves even when the Host failed to open the retained history (`openState: 'error'`), so
+ * the snapshot decides. `signal` cancels the acquisition itself (the Host also stops waiting through
+ * `retain`), so an unmounted chat surface cannot keep a hung open retained. The caller owns the
+ * returned reference and must release it when the chat surface unmounts.
  */
 export async function openDedicatedChatSession(
   sessions: ChatSessions,
@@ -390,19 +402,26 @@ export async function openDedicatedChatSession(
   source: string = CHAT_REFERENCE_SOURCE,
   create: (() => Promise<string>) | undefined = undefined,
   signal?: AbortSignal,
+  extra: OpenDedicatedChatOptions = {},
 ): Promise<ChatReference> {
-  const stored = storedChatSession(storage)
-  if (stored !== undefined) {
+  const candidates = extra.forceNew
+    ? []
+    : [...new Set([storedChatSession(storage), extra.preferredSessionId?.trim()]
+      .filter((id): id is string => typeof id === 'string' && id !== ''))]
+
+  for (const candidateId of candidates) {
     let reference: ChatReference | undefined
     try {
-      reference = sessions.retain(stored, { source, signal })
+      reference = sessions.retain(candidateId, { source, signal })
       await reference.ready
       if (!chatOpenFailed(reference)) {
         if (isAborted(signal)) throw abortReason(signal)
+        rememberChatSession(storage, candidateId)
+        try { await extra.onSessionReady?.(candidateId) } catch { /* non-fatal */ }
         return reference
       }
     } catch {
-      // A stale generation or a failed open both fall through to a fresh Session.
+      // A stale generation or a failed open both fall through to the next candidate or a fresh Session.
     }
     if (isAborted(signal)) {
       // Cancellation is not a stale generation: keep the stored id for the next attempt.
@@ -410,8 +429,9 @@ export async function openDedicatedChatSession(
       throw abortReason(signal)
     }
     reference?.release()
-    forgetChatSession(storage)
+    if (candidateId === storedChatSession(storage)) forgetChatSession(storage)
   }
+
   const sessionId = create === undefined ? await sessions.create() : await create()
   if (isAborted(signal)) throw abortReason(signal)
   const reference = sessions.retain(sessionId, { source, signal })
@@ -433,6 +453,7 @@ export async function openDedicatedChatSession(
     throw new Error('新建的会话无法打开，请重试。')
   }
   rememberChatSession(storage, sessionId)
+  try { await extra.onSessionReady?.(sessionId) } catch { /* non-fatal */ }
   return reference
 }
 
@@ -547,6 +568,26 @@ readonly Readonly<{ value: string; name: string }>[] {
     return [...options, { value: current, name: permissionLabel(current) }]
   }
   return options
+}
+
+/** Current value of the Session `modelSelection` projection (`next`/`pending` override `lastUsed`). */
+export function modelSelectionFromProjection(snapshot: unknown): Readonly<{ provider: string; model: string; reasoningEffort?: string }> | undefined {
+  if (snapshot === null || typeof snapshot !== 'object') return undefined
+  const record = snapshot as { next?: unknown; pending?: unknown; lastUsed?: unknown }
+  const pick = (candidate: unknown) => {
+    if (candidate === null || typeof candidate !== 'object') return undefined
+    const sel = candidate as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+    if (typeof sel.provider !== 'string' || sel.provider.trim() === '' || typeof sel.model !== 'string' || sel.model.trim() === '') {
+      return undefined
+    }
+    const effort = typeof sel.reasoningEffort === 'string' && sel.reasoningEffort.trim() !== '' ? sel.reasoningEffort.trim() : undefined
+    return {
+      provider: sel.provider.trim(),
+      model: sel.model.trim(),
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    }
+  }
+  return pick(record.next) ?? pick(record.pending) ?? pick(record.lastUsed)
 }
 
 /** Browser localStorage when the embedding actually provides a usable one. */

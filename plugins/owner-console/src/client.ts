@@ -10,18 +10,17 @@ import type { OwnerConsoleStatus } from './typert.js'
 import { OwnerConsoleChat, OwnerConsoleConversation, type OwnerConsoleRendererSeat } from './chat-view.js'
 import {
   browserLang, browserSpeechRecognition, browserSpeechSynthesisAvailable, browserStorage, speakInBrowser,
-  type ChatRuntime, type ChatSessions, type ChatUploads, type PermissionCatalog,
+  type ChatRuntime, type ChatSessions, type ChatUploads, type PermissionCatalog, type RemoteResult,
 } from './chat.js'
 import {
   actionsStyle, backdropImageStyle, backdropStyle, border, buttonStyle, caption, el, hairline,
   ink, muted, primaryButtonStyle, surface,
 } from './ui.js'
 import {
-  AutonomyWizardCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DREAMING_PACKAGE, DoctorRepairCard,
-  DreamingCard, FeishuCard, GeneralCodingToolItem, GROWTH_PACKAGE, GrowthMemoryCard, GrowthReportCard,
-  IntakeAgreementCard, LARK_PACKAGE, MEMORY_LEARNING_PACKAGE, ModelsCodingAgentsFooter, ModelsProviderSetupCard,
-  PROACTIVE_PACKAGE, ProactiveWorkItemsCard, SelfUpgradeCard, StatusBanners, TRAEX_PACKAGE, TrendSnapshotsCard,
-  useConsoleActions, WenyaoSectionIcon, WenyaoSettingsSection, type ConsoleRemote, type OwnerConsoleNavigation,
+  DREAMING_PACKAGE, GROWTH_PACKAGE, LARK_PACKAGE, MEMORY_LEARNING_PACKAGE, PROACTIVE_PACKAGE,
+  TRAEX_PACKAGE, BundleConfigSlotView, GeneralCodingToolItem, ModelsCodingAgentsFooter, ModelsProviderSetupCard,
+  SettingsCardsDeck, StatusBanners, WenyaoSectionIcon, WenyaoSettingsSection,
+  notifyConsoleRefresh, subscribeConsoleRefresh, useConsoleActions, type ConsoleRemote, type OwnerConsoleNavigation,
 } from './settings-cards.js'
 
 export {
@@ -31,9 +30,10 @@ export {
   IntakeAgreementCard, larkConnectionLabel, larkConnectionTone, remoteFailureText, SelfUpgradeCard, trendSnapshotsView,
   TrendSnapshotsCard, BundleConfigSlotView, BundlesCard, CodingToolsCard, DoctorRepairCard, DreamingCard, FeishuCard,
   GeneralCodingToolItem, GrowthMemoryCard, ModelsCodingAgentsFooter, ModelsProviderSetupCard, ProactiveWorkItemsCard,
-  WenyaoSectionIcon, WenyaoSettingsSection,
+  SettingsCardsDeck, WenyaoSectionIcon, WenyaoSettingsSection,
 } from './settings-cards.js'
-export type { ConsoleRemote, OwnerConsoleNavigation } from './settings-cards.js'
+export type { ConsoleRemote, OwnerConsoleNavigation, SettingsCategory } from './settings-cards.js'
+export { ModelRouteSelects } from './model-route-ui.js'
 export type { StatusTone } from './ui.js'
 
 const BUNDLE_CONFIG_SLUGS = [
@@ -87,9 +87,16 @@ export type OwnerConsolePanelProps = OwnerConsoleRendererSeat & Readonly<{
 
 export function OwnerConsolePanel({ remote, navigation, runtime, ...renderer }: OwnerConsolePanelProps) {
   const [view, setView] = useState<'chat' | 'settings'>('chat')
+  const settingsNavigation: OwnerConsoleNavigation = {
+    openConversation: () => {
+      setView('chat')
+      navigation.openConversation()
+    },
+    openPlugins: navigation.openPlugins,
+  }
   return view === 'chat'
     ? jsx(OwnerConsoleChat, { runtime, onOpenSettings: () => setView('settings'), renderer })
-    : jsx(OwnerConsoleSettingsPanel, { remote, navigation, onBack: () => setView('chat') })
+    : jsx(OwnerConsoleSettingsPanel, { remote, navigation: settingsNavigation, onBack: () => setView('chat') })
 }
 
 /** The existing configuration console, unified with DSH left-sidebar settings via `settings-cards.ts`. */
@@ -115,18 +122,7 @@ export function OwnerConsoleSettingsPanel({ remote, navigation, onBack }: Readon
         el('h2', { style: { margin: 0, fontSize: 13, fontWeight: 600, color: muted } }, '设置')),
         header(navigation),
         jsx(StatusBanners, { ctrl }),
-        jsx(DoctorRepairCard, { ctrl }),
-        jsx(GrowthReportCard, { remote }),
-        jsx(AutonomyWizardCard, { ctrl }),
-        jsx(SelfUpgradeCard, { ctrl }),
-        jsx(FeishuCard, { ctrl }),
-        jsx(CodingToolsCard, { ctrl }),
-        jsx(DreamingCard, { ctrl }),
-        jsx(ProactiveWorkItemsCard, { ctrl }),
-        jsx(GrowthMemoryCard, { ctrl }),
-        jsx(BundlesCard, { ctrl }),
-        jsx(TrendSnapshotsCard, { remote }),
-        jsx(IntakeAgreementCard, { remote, availability: status?.evaluation.intakeAgreement }))))
+        jsx(SettingsCardsDeck, { ctrl, remote }))))
 }
 
 function header(navigation: OwnerConsoleNavigation) {
@@ -162,8 +158,13 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
       const navigation = {
         openConversation: () => {
           try {
-            ctx.get<{ startSession(): void }>('uiWorkspace')?.startSession()
-          } catch { /* native shell only; a missing workspace is not an error here */ }
+            const layout = ctx.get<{ selectPanel?(panelId: string): void }>('layout')
+            if (typeof layout?.selectPanel === 'function') {
+              layout.selectPanel('owner-console')
+              return
+            }
+            ctx.get<{ startSession?(): void }>('uiWorkspace')?.startSession?.()
+          } catch { /* native shell only; a missing layout/workspace is not an error here */ }
         },
         openPlugins: () => {
           try {
@@ -193,7 +194,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
             return false
           }
         },
-        startConversation: () => navigation.openConversation(),
+        startConversation: () => {
+          try {
+            ctx.get<{ startSession?(): void }>('uiWorkspace')?.startSession?.()
+          } catch { /* native shell only; a missing workspace is not an error here */ }
+        },
         storage: () => browserStorage(),
         voiceAvailable: () => browserSpeechRecognition() !== undefined,
         createRecognition: () => {
@@ -203,26 +208,154 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         recognitionLang: () => browserLang(),
         speakAvailable: () => browserSpeechSynthesisAvailable(),
         speak: text => speakInBrowser(text),
+        assistantChatContext: () => typeof remote.assistantChatContext === 'function'
+          ? remote.assistantChatContext()
+          : Promise.resolve({ ok: false as const }),
+        registerAssistantSession: (sessionId, makeActive) => typeof remote.registerAssistantSession === 'function'
+          ? remote.registerAssistantSession(sessionId, makeActive)
+          : Promise.resolve({ ok: false as const }),
+        modelCatalog: force => typeof remote.modelCatalog === 'function'
+          ? remote.modelCatalog(force)
+          : Promise.resolve({ ok: false as const }),
+        subscribeRefresh: listener => subscribeConsoleRefresh(remote, listener),
+        selectSessionModel: async (sessionId, provider, model, reasoningEffort) => {
+          const sessionRemote = (() => {
+            try {
+              return ctx.get<{
+                selectModel?(req: Readonly<{ sessionId: string; provider: string; model: string; reasoningEffort?: string }>): Promise<RemoteResult<unknown>>
+              }>('remote.session')
+            } catch {
+              return undefined
+            }
+          })()
+          const payload: Readonly<{ sessionId: string; provider: string; model: string; reasoningEffort?: string }> = {
+            sessionId,
+            provider,
+            model,
+            ...(reasoningEffort !== '' ? { reasoningEffort } : {}),
+          }
+          if (typeof sessionRemote?.selectModel === 'function') {
+            let firstError: RemoteResult<unknown>
+            try {
+              const first = await sessionRemote.selectModel(payload)
+              if (first.ok) {
+                notifyConsoleRefresh(remote)
+                return first
+              }
+              firstError = first
+            } catch (cause) {
+              firstError = {
+                ok: false,
+                error: { code: 'select-failed', message: cause instanceof Error ? cause.message : String(cause) },
+              }
+            }
+            // Only attempt ACP activation if the target local ACP route is currently disabled; never mutate global default model on rejection.
+            if (provider === 'traex-agent' || provider === 'agy-agent') {
+              let isDisabled = false
+              if (typeof remote.status === 'function') {
+                try {
+                  const statusRes = await remote.status()
+                  if (statusRes.ok) {
+                    const toolState = provider === 'traex-agent' ? statusRes.value.traex : statusRes.value.agy
+                    isDisabled = toolState?.installed === true && toolState.enabled !== true
+                  }
+                } catch {
+                  // Status unreadable; avoid mutating settings blindly.
+                }
+              }
+              if (isDisabled) {
+                const activate = provider === 'traex-agent'
+                  ? (typeof remote.configureTraex === 'function' ? () => remote.configureTraex(true, '') : undefined)
+                  : (typeof remote.configureAgy === 'function' ? () => remote.configureAgy!(true, '') : undefined)
+                if (activate !== undefined) {
+                  try {
+                    const activated = await activate()
+                    if (activated.ok && activated.value.applied) {
+                      notifyConsoleRefresh(remote)
+                      try {
+                        const retried = await sessionRemote.selectModel(payload)
+                        if (retried.ok) notifyConsoleRefresh(remote)
+                        return retried
+                      } catch (cause) {
+                        return {
+                          ok: false,
+                          error: { code: 'select-failed', message: cause instanceof Error ? cause.message : String(cause) },
+                        }
+                      }
+                    }
+                    return {
+                      ok: false,
+                      error: {
+                        code: 'acp-activate-refused',
+                        message: activated.ok ? activated.value.note : (activated.error?.message ?? 'ACP 路由启用失败'),
+                      },
+                    }
+                  } catch (cause) {
+                    return {
+                      ok: false,
+                      error: { code: 'acp-activate-failed', message: cause instanceof Error ? cause.message : String(cause) },
+                    }
+                  }
+                }
+              }
+            }
+            return firstError
+          }
+          if (typeof remote.setDefaultModelRoute === 'function') {
+            const saved = await remote.setDefaultModelRoute(provider, model, reasoningEffort)
+            if (saved.ok && saved.value.applied) {
+              notifyConsoleRefresh(remote)
+              return saved
+            }
+            return {
+              ok: false,
+              error: {
+                code: 'route-refused',
+                message: saved.ok ? saved.value.note : (saved.error?.message ?? '默认模型路由保存失败'),
+              },
+            }
+          }
+          return { ok: false, error: { code: 'unavailable', message: 'Host session.selectModel 不可用' } }
+        },
         createSession: async () => {
           const sessions = ctx.get<ChatSessions>('sessions')
           if (sessions === undefined) throw new Error('会话服务不可用')
-          let workspaceId: string | undefined
-          try {
-            const workspaces = ctx.get<{
-              initializeDefault(signal?: AbortSignal): Promise<Readonly<{ workspaceId?: string }> | undefined>
-            }>('workspaces')
-            workspaceId = (await workspaces?.initializeDefault())?.workspaceId
-          } catch {
-            // The default Workspace is optional; fall through to the Host default cwd.
+          let workspace = ''
+          let agentPreset = ''
+          if (typeof remote.assistantChatContext === 'function') {
+            try {
+              const ctxRes = await remote.assistantChatContext()
+              if (ctxRes.ok) {
+                workspace = ctxRes.value.workspace.trim()
+                agentPreset = ctxRes.value.agentPreset?.trim() ?? ''
+              }
+            } catch {
+              // Fall back cleanly if Host assistantChatContext is unavailable.
+            }
           }
-          if (workspaceId === undefined || workspaceId === '') return await sessions.create()
-          try {
-            const workspace = ctx.get<{ connectWorkspace?(id: string): Promise<string> }>('uiWorkspace')
-            if (typeof workspace?.connectWorkspace === 'function') return await workspace.connectWorkspace(workspaceId)
-          } catch {
-            // Unknown workspace or absent seat: create the grouped Session directly.
+          const baseOptions = workspace !== '' ? { cwd: workspace } : undefined
+          let sessionId: string
+          if (agentPreset !== '') {
+            try {
+              sessionId = await sessions.create({
+                ...(workspace !== '' ? { cwd: workspace } : {}),
+                agentPreset,
+              })
+            } catch {
+              // Retry cleanly without agentPreset when the requested preset is unavailable (e.g., agent-preset/not-found).
+              sessionId = await sessions.create(baseOptions)
+            }
+          } else {
+            sessionId = await sessions.create(baseOptions)
           }
-          return await sessions.create({ workspaceId })
+          if (typeof remote.registerAssistantSession === 'function') {
+            try {
+              await remote.registerAssistantSession(sessionId, true)
+            } catch {
+              // openDedicatedChatSession also retries registration via onSessionReady.
+            }
+          }
+          return sessionId
         },
         insertDraft: (reference, text) => {
           if (reference.binding.ctx === undefined) return false
@@ -279,13 +412,13 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
         runtime.slots.inject('settings.models.provider-card', () => runtime.slots.register(
           { name: 'settings.models.provider-card', key: 'dsh-enhanced-traex-acp-provider' },
           (props: Readonly<{
-            provider?: Readonly<{ id?: string; name?: string; settingsNs?: string }>
+            provider?: Readonly<{ id?: string; provider?: string; name?: string; displayName?: string; settingsNs?: string }>
             configured?: boolean
             keyConfigured?: boolean
           }>) => jsx(ModelsProviderSetupCard, {
-            provider: props?.provider,
-            configured: props?.configured,
-            keyConfigured: props?.keyConfigured,
+            ...(props?.provider === undefined ? {} : { provider: props.provider }),
+            ...(props?.configured === undefined ? {} : { configured: props.configured }),
+            ...(props?.keyConfigured === undefined ? {} : { keyConfigured: props.keyConfigured }),
             remote,
             navigation,
           }))),
