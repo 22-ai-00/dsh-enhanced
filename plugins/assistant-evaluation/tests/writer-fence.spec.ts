@@ -340,4 +340,105 @@ describe('cross-ledger learning writer fence', () => {
     expect(callback).not.toHaveBeenCalled()
     target.close()
   })
+
+  test('resolves learning projections and writer fence via subject_key primary key index', () => {
+    const database = databasePath()
+    const target = new EvaluationStore({ path: database, now: () => 5_000 })
+    const autoOutcome = target.append(outcome({
+      idempotencyKey: 'pk-auto',
+      objectiveStatus: 'achieved',
+      evidence: [{ kind: 'automation-run', ref: 'pk-run-1' }],
+    }))
+    const fgOutcome = target.append(outcome({
+      idempotencyKey: 'pk-fg',
+      objectiveStatus: 'achieved',
+      source: { kind: 'evaluator', id: 'fixture-verifier' },
+      evaluator: { id: 'fixture-verifier', version: '1' },
+      evidence: [{ kind: 'foreground-turn', ref: 'pk-fg-1' }],
+    }))
+    const wiOutcome = target.append(outcome({
+      idempotencyKey: 'pk-wi',
+      objectiveStatus: 'not-achieved',
+      source: { kind: 'system', id: 'assistant-work-items-owner-proof' },
+      evaluator: { id: 'assistant-work-items-owner-proof', version: '1' },
+      evidence: [{ kind: 'work-item-owner-result', ref: 'pk-wi-1' }],
+    }))
+    const goalOutcome = target.append(outcome({
+      idempotencyKey: 'pk-goal',
+      objectiveStatus: 'achieved',
+      source: { kind: 'evaluator', id: 'assistant-verifier' },
+      evaluator: { id: 'assistant-verifier', version: '1' },
+      evidence: [{ kind: 'goal-outcome', ref: 'pk-goal-1' }],
+    }))
+
+    const autoReceipt = target.getAutomationRunLearningProjection(scope, 'pk-run-1')
+    const fgReceipt = target.getForegroundLearningProjection(scope, 'pk-fg-1')
+    const wiReceipt = target.getWorkItemLearningProjection(scope, 'pk-wi-1')
+    const goalReceipt = target.getGoalOutcomeLearningProjection(scope, 'pk-goal-1')
+    expect(autoReceipt?.triggerOutcomeId).toBe(autoOutcome.id)
+    expect(fgReceipt?.triggerOutcomeId).toBe(fgOutcome.id)
+    expect(wiReceipt?.triggerOutcomeId).toBe(wiOutcome.id)
+    expect(goalReceipt?.triggerOutcomeId).toBe(goalOutcome.id)
+
+    expect(target.getAutomationRunLearningProjection(scope, 'missing-run')).toBeUndefined()
+    expect(target.getForegroundLearningProjection(scope, 'missing-fg')).toBeUndefined()
+    expect(target.getWorkItemLearningProjection(scope, 'missing-wi')).toBeUndefined()
+    expect(target.getGoalOutcomeLearningProjection(scope, 'missing-goal')).toBeUndefined()
+
+    const foreignScope: EvaluationScope = { workspace: '/work/beta', preset: 'primary' }
+    expect(target.getAutomationRunLearningProjection(foreignScope, 'pk-run-1')).toBeUndefined()
+
+    const latestWatermark = goalReceipt!.scopeWatermark
+    const allReceipts = [autoReceipt!, fgReceipt!, wiReceipt!, goalReceipt!]
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: latestWatermark,
+      evidence: allReceipts.map(receipt => ({
+        subjectKind: receipt.projection.subjectKind,
+        subjectRef: receipt.projection.subjectRef,
+        version: receipt.projection.version,
+        digest: receipt.projection.digest,
+        disposition: receipt.projection.disposition,
+      })),
+    }, () => 'all-matched')).toEqual({ matched: true, value: 'all-matched' })
+
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: latestWatermark,
+      evidence: [{
+        subjectKind: autoReceipt!.projection.subjectKind,
+        subjectRef: 'pk-run-missing',
+        version: autoReceipt!.projection.version,
+        digest: autoReceipt!.projection.digest,
+        disposition: autoReceipt!.projection.disposition,
+      }],
+    }, () => 'should-not-run')).toEqual({ matched: false, reason: 'evidence-changed' })
+
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: latestWatermark,
+      evidence: [{
+        subjectKind: 'foreground-turn',
+        subjectRef: 'pk-run-1',
+        version: autoReceipt!.projection.version,
+        digest: autoReceipt!.projection.digest,
+        disposition: autoReceipt!.projection.disposition,
+      }],
+    }, () => 'should-not-run')).toEqual({ matched: false, reason: 'evidence-changed' })
+
+    target.close()
+
+    const probe = new DatabaseSync(database, { readOnly: true })
+    try {
+      const plan = probe.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT learning_version AS version, learning_digest AS digest,
+          learning_disposition AS disposition
+        FROM evaluation_task_projections
+        WHERE subject_key = ? AND scope_key = ? AND subject_kind = ? AND subject_ref = ?
+      `).all('k', 's', 'automation-run', 'r') as Array<{ detail: string }>
+      const details = plan.map(row => row.detail).join(' | ')
+      expect(details).toContain('sqlite_autoindex_evaluation_task_projections_1 (subject_key=?)')
+      expect(details).not.toContain('evaluation_task_projections_scope_time')
+    } finally {
+      probe.close()
+    }
+  })
 })

@@ -433,6 +433,10 @@ interface TaskSubject {
   ref: string
 }
 
+function taskSubjectKey(scopeKey: string, kind: TaskSubject['kind'], ref: string): string {
+  return JSON.stringify([scopeKey, kind, ref])
+}
+
 function taskSubject(
   scopeKey: string,
   outcomeId: string,
@@ -448,7 +452,7 @@ function taskSubject(
     const targets = references.filter(item => item.kind === 'work-item-owner-result')
     if (targets.length === 1 && !references.some(item => ['automation-run','foreground-turn','goal-step','goal-outcome'].includes(item.kind))) {
       const ref = targets[0]!.ref
-      return Object.freeze({ key: JSON.stringify([scopeKey, 'work-item', ref]), kind: 'work-item', ref })
+      return Object.freeze({ key: taskSubjectKey(scopeKey, 'work-item', ref), kind: 'work-item', ref })
     }
   }
   const typed: Array<{ kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome'; ref: string }> = references.flatMap(reference => (
@@ -463,13 +467,13 @@ function taskSubject(
   if (identities.size === 1) {
     const { kind, ref } = [...identities.values()][0]!
     return Object.freeze({
-      key: JSON.stringify([scopeKey, kind, ref]),
+      key: taskSubjectKey(scopeKey, kind, ref),
       kind,
       ref,
     })
   }
   return Object.freeze({
-    key: JSON.stringify([scopeKey, 'outcome', outcomeId]),
+    key: taskSubjectKey(scopeKey, 'outcome', outcomeId),
     kind: 'outcome' as const,
     ref: outcomeId,
   })
@@ -1163,9 +1167,9 @@ export class EvaluationStore {
     const runId = boundedText(runIdInput, 'runId', 200)
     const row = this.#database.prepare(`
       SELECT task.* FROM evaluation_task_projection_view task
-      WHERE task.scope_key = ? AND task.task_subject_kind = 'automation-run'
+      WHERE task.task_subject_key = ? AND task.scope_key = ? AND task.task_subject_kind = 'automation-run'
         AND task.task_subject_ref = ?
-    `).get(scopeKey, runId) as unknown as ProjectedOutcomeRow | undefined
+    `).get(taskSubjectKey(scopeKey, 'automation-run', runId), scopeKey, runId) as unknown as ProjectedOutcomeRow | undefined
     if (row === undefined) return undefined
     const task = projected(row)
     if (task.projection.status !== 'ready') return undefined
@@ -1184,10 +1188,10 @@ export class EvaluationStore {
       JOIN evaluation_outcomes audit ON audit.task_subject_key = task.task_subject_key
         AND audit.scope_key = task.scope_key
       JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
-      WHERE task.scope_key = ? AND task.task_subject_kind = 'foreground-turn'
+      WHERE task.task_subject_key = ? AND task.scope_key = ? AND task.task_subject_kind = 'foreground-turn'
         AND task.task_subject_ref = ? AND audit.trust = 'trusted'
       ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1`)
-      .get(scopeKey, inboxId) as { evaluation_id: string } | undefined
+      .get(taskSubjectKey(scopeKey, 'foreground-turn', inboxId), scopeKey, inboxId) as { evaluation_id: string } | undefined
     if (row === undefined) return undefined
     return this.getTaskLearningProjection(scopeInput, row.evaluation_id)
   }
@@ -1200,8 +1204,9 @@ export class EvaluationStore {
       FROM evaluation_task_projection_view task
       JOIN evaluation_outcomes audit ON audit.task_subject_key = task.task_subject_key AND audit.scope_key = task.scope_key
       JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
-      WHERE task.scope_key = ? AND task.task_subject_kind = 'work-item' AND task.task_subject_ref = ? AND audit.trust = 'trusted'
-      ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1`).get(scopeKey, itemId) as { evaluation_id: string } | undefined
+      WHERE task.task_subject_key = ? AND task.scope_key = ? AND task.task_subject_kind = 'work-item' AND task.task_subject_ref = ? AND audit.trust = 'trusted'
+      ORDER BY audit.recorded_at DESC, audit.rowid DESC LIMIT 1`)
+      .get(taskSubjectKey(scopeKey, 'work-item', itemId), scopeKey, itemId) as { evaluation_id: string } | undefined
     return row === undefined ? undefined : this.getTaskLearningProjection(scopeInput, row.evaluation_id)
   }
 
@@ -1214,9 +1219,9 @@ export class EvaluationStore {
     const assessmentId = boundedText(assessmentIdInput, 'assessmentId', 1_000)
     const row = this.#database.prepare(`
       SELECT task.* FROM evaluation_task_projection_view task
-      WHERE task.scope_key = ? AND task.task_subject_kind = 'goal-outcome'
+      WHERE task.task_subject_key = ? AND task.scope_key = ? AND task.task_subject_kind = 'goal-outcome'
         AND task.task_subject_ref = ?
-    `).get(scopeKey, assessmentId) as unknown as ProjectedOutcomeRow | undefined
+    `).get(taskSubjectKey(scopeKey, 'goal-outcome', assessmentId), scopeKey, assessmentId) as unknown as ProjectedOutcomeRow | undefined
     if (row === undefined) return undefined
     const task = projected(row)
     return this.getTaskLearningProjection(scopeInput, task.projection.primaryOutcomeId)
@@ -1469,10 +1474,11 @@ export class EvaluationStore {
         SELECT learning_version AS version, learning_digest AS digest,
           learning_disposition AS disposition
         FROM evaluation_task_projections
-        WHERE scope_key = ? AND subject_kind = ? AND subject_ref = ?
+        WHERE subject_key = ? AND scope_key = ? AND subject_kind = ? AND subject_ref = ?
       `)
       for (const evidence of fence.evidence) {
         const current = statement.get(
+          taskSubjectKey(scopeKey, evidence.subjectKind, evidence.subjectRef),
           scopeKey,
           evidence.subjectKind,
           evidence.subjectRef,
