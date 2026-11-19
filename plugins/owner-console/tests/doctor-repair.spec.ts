@@ -1,12 +1,19 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import { CodingToolProber, discoverCodingToolBinary } from '../src/probes.ts'
-import { applyDoctorRepair, applyFeishuVaultConfig, configureFeishuEasy, inspectSetupDoctor, type EasySecretLocator } from '../src/doctor-repair.ts'
-import type { AutonomyHostContext } from '../src/autonomy-setup.ts'
+import {
+  applyDoctorRepair, applyFeishuVaultConfig, configureFeishuEasy, inspectProfileRestartSupport,
+  inspectSetupDoctor, promoteLarkOwnerInProfile, triggerProfileRestart, type EasySecretLocator,
+} from '../src/doctor-repair.ts'
+import { resolveAssistantWorkspace } from '../src/assistant-chat.ts'
+import {
+  inspectAutonomyWizardStatus, inspectOwnerRoute, readPatchDocument, resolveProfilePaths,
+  type AutonomyHostContext,
+} from '../src/autonomy-setup.ts'
 import type { PluginManagerService, SettingsDescriptor, SettingsService } from '../src/settings.ts'
 import type { OwnerConsoleStatus } from '../src/typert.ts'
 
@@ -855,5 +862,585 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(resTooLong.applied).toBe(false)
     expect(resTooLong.note).toContain('128')
     expect(storeShouldNotRun).not.toHaveBeenCalled()
+  })
+
+  it('detects and repairs missing assistant-verifier databasePath, alias-corrupted policy rules, and YAML aliases cleanly', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    // Simulate a profile hit by the real-world bug: verifier row lacking databasePath + alias-mangled policy rules
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules:',
+      '        - id: wizard-lark-mem-extract-desktop',
+      '          effect: allow',
+      '          subject:',
+      '            kind: background',
+      '            id: assistant-memory-learning',
+      `            workspace: ${join(dshHome, 'assistant-workspace')}`,
+      '            principal: lark/primary/personal/ou_owner_a',
+      '          actions: [extract]',
+      '          resource: { kind: memory, id: learning:lark-memory-extract-desktop }',
+      '          context: { initiators: [background] }',
+      '        - id: wizard-lark-mem-review-desktop',
+      '          effect: allow',
+      '          subject:',
+      '            source: a1',
+      '          actions: [review]',
+      '          resource: { kind: memory, id: learning:lark-memory-review-desktop }',
+      '          context:',
+      '            source: a2',
+      '        - id: wizard-lark-growth-tools-desktop',
+      '          effect: allow',
+      '          subject:',
+      '            kind: agent',
+      '            id: standard',
+      `            workspace: ${join(dshHome, 'assistant-workspace')}`,
+      '            principal: lark/primary/personal/ou_owner_a',
+      '          actions: [execute]',
+      '          resource: { kind: tool, id: growth_* }',
+      '          context:',
+      '            source: a3',
+      '        - id: wizard-lark-verified-workflows-desktop',
+      '          effect: allow',
+      '          subject:',
+      '            source: a4',
+      '          actions: [draft]',
+      '          resource: { kind: evolution, id: verified-workflows }',
+      '          context:',
+      '            source: a3',
+      '        - id: unrecoverable-custom-rule',
+      '          effect: allow',
+      '          subject:',
+      '            source: a9',
+      '          actions: [execute]',
+      '          resource: { kind: tool, id: "*" }',
+      '          context: { initiators: [external] }',
+      '- id: dsh-enhanced-assistant-verifier',
+      '  name: "@dsh-enhanced/assistant-verifier"',
+      '  config:',
+      '    memoryReviews:',
+      '      authorityId: lark-memory-review-desktop',
+      '      maxReviews: 300',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
+      ],
+      plugins: [
+        {
+          entryId: 'include:dsh-enhanced-assistant-verifier',
+          moduleName: '@dsh-enhanced/assistant-verifier',
+          enabled: true,
+          fiberPhase: 'failed',
+          diagnostic: 'invalid config: - $.databasePath missing required value (at databasePath)',
+        },
+      ],
+    })
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+
+    const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 500 })
+    const ids = report.issues.map(i => i.id)
+    expect(ids).toContain('missing-verifier-database-path')
+    expect(ids).toContain('corrupted-policy-alias-rules')
+    // Must NOT fall through to generic stalled-bundle disable for assistant-verifier
+    expect(ids).not.toContain('stalled-bundle:@dsh-enhanced/assistant-verifier')
+
+    const repaired = await applyDoctorRepair({
+      host,
+      status,
+      descriptors: [],
+      settings: undefined,
+      manager: undefined,
+      prober,
+      issueIds: ['missing-verifier-database-path', 'corrupted-policy-alias-rules'],
+      platform: 'darwin',
+      env: {},
+      now: 501,
+    })
+    expect(repaired.applied).toBe(true)
+
+    const repairedRaw = readFileSync(patchPath, 'utf8')
+    expect(repairedRaw).toContain("databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')")
+    expect(repairedRaw).not.toMatch(/&a\d+|\*a\d+/u)
+    const repairedDoc = parseDocument(repairedRaw, JS_PARSE_TAG)
+    const rows = repairedDoc.toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    const verifier = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!
+    expect(verifier.disabled).toBeUndefined()
+    expect(verifier.config?.['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
+    expect(verifier.config?.['memoryReviews']).toEqual({ authorityId: 'lark-memory-review-desktop', maxReviews: 300 })
+
+    const pa = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    const paPolicy = pa.config!['assistantPolicy'] as Record<string, unknown>
+    const rules = paPolicy['rules'] as Array<Record<string, unknown>>
+    expect(rules.find(r => r['id'] === 'wizard-lark-mem-review-desktop')?.['subject']).toMatchObject({
+      kind: 'background',
+      id: 'assistant-memory-learning',
+    })
+    expect(rules.find(r => r['id'] === 'wizard-lark-mem-review-desktop')?.['context']).toEqual({ initiators: ['background'] })
+    expect(rules.find(r => r['id'] === 'wizard-lark-verified-workflows-desktop')?.['subject']).toMatchObject({
+      kind: 'agent',
+      id: 'standard',
+    })
+    expect(rules.some(r => r['id'] === 'unrecoverable-custom-rule')).toBe(false)
+
+    // Verify applyFeishuVaultConfig resolves legacy YAML anchors (&a1/*a1) instead of turning them into { source: 'a1' }
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules:',
+      '        - id: rule-anchor',
+      '          effect: allow',
+      '          subject: &a1',
+      '            kind: background',
+      '            id: assistant-memory-learning',
+      '          actions: [extract]',
+      '          resource: { kind: memory, id: "*" }',
+      '          context: &a2',
+      '            initiators: [background]',
+      '        - id: rule-alias',
+      '          effect: allow',
+      '          subject: *a1',
+      '          actions: [review]',
+      '          resource: { kind: memory, id: "*" }',
+      '          context: *a2',
+      '',
+    ].join('\n'), 'utf8')
+    const vaultRes = await applyFeishuVaultConfig({
+      host,
+      descriptors: [],
+      appId: 'cli_0123456789abcdef',
+      appSecret: 'sec_alias_test',
+      account: 'primary',
+      tenant: 'personal',
+      ownerOpenId: 'ou_alias_user',
+      platform: 'darwin',
+      env: {},
+      now: 502,
+      storeSecretFn: async () => {},
+    })
+    expect(vaultRes.applied).toBe(true)
+    const afterVaultRaw = readFileSync(patchPath, 'utf8')
+    expect(afterVaultRaw).not.toContain('source: a1')
+    expect(afterVaultRaw).not.toContain('source: a2')
+    expect(afterVaultRaw).not.toMatch(/&a\d+|\*a\d+/u)
+    const afterVaultRows = parseDocument(afterVaultRaw, JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, unknown> }>
+    const afterRules = ((afterVaultRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy'] as Record<string, unknown>)['rules'] as Array<Record<string, unknown>>)
+    expect(afterRules.find(r => r['id'] === 'rule-alias')?.['subject']).toEqual({ kind: 'background', id: 'assistant-memory-learning' })
+    expect(afterRules.find(r => r['id'] === 'rule-alias')?.['context']).toEqual({ initiators: ['background'] })
+  })
+
+  it('promotes a scanned linked Lark principal to primary owner atomically and honors confirmation and frozen-profile fences', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const deliveryDbPath = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(deliveryDbPath, true)
+    // Add pairing_challenges & delivery_preference_projection_outbox plus a linked scanned user
+    const seedDb = new DatabaseSync(deliveryDbPath)
+    try {
+      seedDb.exec(`
+        CREATE TABLE pairing_challenges (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE delivery_preference_projection_outbox (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          terminal_at INTEGER,
+          failure_code TEXT,
+          next_attempt_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          lane_kind TEXT,
+          lane_principal_record_id TEXT,
+          lane_principal_version INTEGER
+        );
+      `)
+      seedDb.prepare(`INSERT INTO pairing_challenges VALUES ('ch-1', 'active', 1)`).run()
+      seedDb.prepare(`INSERT INTO delivery_preference_projection_outbox VALUES ('ob-1', 'pending', NULL, NULL, 100, 1, 'exact', 'principal_lark_1', 1)`).run()
+    } finally {
+      seedDb.close()
+    }
+
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
+      '    defaultAgentPreset: standard',
+      '- id: dsh-enhanced-assistant-dreaming',
+      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '  config:',
+      '    enabled: true',
+      '    retired: false',
+      '    scope:',
+      '      principalId: lark/primary/personal/ou_owner1',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+
+    // First scan creates linked identity because ou_owner1 is active owner
+    const scanned = await applyFeishuVaultConfig({
+      host,
+      descriptors: [],
+      appId: 'cli_aabbccddeeff0011',
+      appSecret: 'sec_promote_test',
+      account: 'primary',
+      tenant: 'personal',
+      ownerOpenId: 'ou_new_scanned',
+      platform: 'darwin',
+      env: {},
+      now: 600,
+      storeSecretFn: async () => {},
+    })
+    expect(scanned.applied).toBe(true)
+    expect(scanned.ownerBinding).toBe('linked-to-owner')
+    expect(scanned.existingAutonomyAnchored).toBe(true)
+
+    // Unconfirmed promotion must refuse
+    const unconfirmed = await promoteLarkOwnerInProfile({
+      host,
+      descriptors: [],
+      openId: 'ou_new_scanned',
+      account: 'primary',
+      tenant: 'personal',
+      confirmed: false,
+      platform: 'darwin',
+      env: {},
+      now: 601,
+    })
+    expect(unconfirmed.applied).toBe(false)
+    expect(unconfirmed.errorCode).toBe('confirmation-required')
+
+    // Confirmed promotion hands off owner atomically
+    const promoted = await promoteLarkOwnerInProfile({
+      host,
+      descriptors: [],
+      openId: 'ou_new_scanned',
+      account: 'primary',
+      tenant: 'personal',
+      confirmed: true,
+      platform: 'darwin',
+      env: {},
+      now: 602,
+    })
+    expect(promoted.applied).toBe(true)
+    expect(promoted.ownerBinding).toBe('bound-owner')
+    expect(promoted.existingAutonomyAnchored).toBe(true)
+
+    const verifyDb = new DatabaseSync(deliveryDbPath, { readOnly: true })
+    try {
+      const principals = verifyDb.prepare(`SELECT principal_json, role, status, linked_to_id, version FROM delivery_principals ORDER BY principal_json`).all() as Array<{
+        principal_json: string; role: string; status: string; linked_to_id: string | null; version: number
+      }>
+      const oldOwner = principals.find(p => p.principal_json.includes('ou_owner123'))!
+      const newOwner = principals.find(p => p.principal_json.includes('ou_new_scanned'))!
+      expect(oldOwner.status).toBe('revoked')
+      expect(newOwner.role).toBe('owner')
+      expect(newOwner.status).toBe('active')
+      expect(newOwner.linked_to_id).toBeNull()
+      expect(newOwner.version).toBe(2)
+
+      const binding = verifyDb.prepare(`SELECT status FROM conversation_bindings WHERE id = 'binding_1'`).get() as { status: string }
+      expect(binding.status).toBe('revoked')
+
+      const challenge = verifyDb.prepare(`SELECT status FROM pairing_challenges WHERE id = 'ch-1'`).get() as { status: string }
+      expect(challenge.status).toBe('expired')
+
+      const outbox = verifyDb.prepare(`SELECT failure_code FROM delivery_preference_projection_outbox WHERE id = 'ob-1'`).get() as { failure_code: string }
+      expect(outbox.failure_code).toBe('owner-lineage-retired')
+    } finally {
+      verifyDb.close()
+    }
+  })
+
+  it('detects managed-service, macOS desktop-app, manual, and frozen-systemd restart support and spawns detached restart safely', async () => {
+    const { dshHome, profileDir } = makeTempHome()
+    const fakeHome = join(dshHome, 'fake-home')
+    mkdirSync(join(fakeHome, 'Library', 'LaunchAgents'), { recursive: true })
+    const host = makeHost(dshHome, profileDir, 'desktop')
+
+    // 1) macOS LaunchAgent managed-service
+    const plistPath = join(fakeHome, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.desktop.plist')
+    writeFileSync(plistPath, '<plist><string>ai.deepseek.dsh.profile.desktop</string></plist>', 'utf8')
+    const launchdSupport = inspectProfileRestartSupport({ host, platform: 'darwin', env: {}, home: fakeHome, execPath: '/usr/local/bin/node', argv: [] })
+    expect(launchdSupport).toMatchObject({ supported: true, mode: 'managed-service', targetLabel: 'ai.deepseek.dsh.profile.desktop' })
+
+    const spawnedCalls: Array<{ cmd: string; args: readonly string[]; env: NodeJS.ProcessEnv; shell: boolean; detached: boolean }> = []
+    const fakeSpawn = vi.fn((cmd: string, args: readonly string[], opts: { env: NodeJS.ProcessEnv; detached: boolean; stdio: 'ignore'; shell: boolean }) => {
+      spawnedCalls.push({ cmd, args, env: opts.env, shell: opts.shell, detached: opts.detached })
+      return { pid: 43210, unref: vi.fn() }
+    })
+
+    // Unconfirmed must refuse
+    expect((await triggerProfileRestart({ host, confirmed: false, platform: 'darwin', env: {}, home: fakeHome, spawnFn: fakeSpawn })).applied).toBe(false)
+    expect(fakeSpawn).not.toHaveBeenCalled()
+
+    // Confirmed LaunchAgent restart
+    const launchdRes = await triggerProfileRestart({
+      host, confirmed: true, platform: 'darwin', env: {}, home: fakeHome, execPath: '/usr/local/bin/node', argv: [], uid: 501, spawnFn: fakeSpawn,
+    })
+    expect(launchdRes.applied).toBe(true)
+    expect(spawnedCalls[0]!.shell).toBe(false)
+    expect(spawnedCalls[0]!.detached).toBe(true)
+    expect(spawnedCalls[0]!.env['ELECTRON_RUN_AS_NODE']).toBe('1')
+    expect(spawnedCalls[0]!.args).toContain('/bin/launchctl')
+    expect(spawnedCalls[0]!.args).toContain('gui/501/ai.deepseek.dsh.profile.desktop')
+
+    // 2) macOS DeepSeek Harness.app desktop mode (no LaunchAgent plist)
+    rmSync(plistPath)
+    const desktopSupport = inspectProfileRestartSupport({
+      host,
+      platform: 'darwin',
+      env: {},
+      home: fakeHome,
+      execPath: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+      argv: [],
+    })
+    expect(desktopSupport).toMatchObject({ supported: true, mode: 'desktop-app', appPath: '/Applications/DeepSeek Harness.app' })
+    const desktopRes = await triggerProfileRestart({
+      host,
+      confirmed: true,
+      platform: 'darwin',
+      env: {},
+      home: fakeHome,
+      execPath: '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness',
+      argv: [],
+      pid: 9876,
+      ppid: 9800,
+      spawnFn: fakeSpawn,
+    })
+    expect(desktopRes.applied).toBe(true)
+    expect(spawnedCalls[1]!.args).toContain('9876')
+    expect(spawnedCalls[1]!.args).toContain('9800')
+    expect(spawnedCalls[1]!.args).toContain('com.deepseek.dsh')
+    expect(spawnedCalls[1]!.args[1]).toContain('lsappinfo')
+    expect(spawnedCalls[1]!.args[1]).toContain('SIGTERM')
+    expect(spawnedCalls[1]!.env['ELECTRON_RUN_AS_NODE']).toBe('1')
+
+    // 3) Frozen Linux systemd profile refuses automatic restart
+    const cohortDir = join(dshHome, 'rsi-local-cohorts', 'desktop')
+    mkdirSync(cohortDir, { recursive: true })
+    writeFileSync(join(cohortDir, 'receipt.json'), '{}', 'utf8')
+    const frozenSupport = inspectProfileRestartSupport({
+      host,
+      platform: 'linux',
+      env: {},
+      home: fakeHome,
+      execPath: '/usr/bin/node',
+      argv: [],
+    })
+    expect(frozenSupport.supported).toBe(false)
+    expect(frozenSupport.mode).toBe('manual')
+    const frozenRes = await triggerProfileRestart({
+      host,
+      confirmed: true,
+      platform: 'linux',
+      env: {},
+      home: fakeHome,
+      execPath: '/usr/bin/node',
+      argv: [],
+      spawnFn: fakeSpawn,
+    })
+    expect(frozenRes.applied).toBe(false)
+    expect(frozenRes.note).toContain('冻结')
+    rmSync(cohortDir, { recursive: true, force: true })
+
+    // 4) Non-frozen Linux managed systemd user unit
+    mkdirSync(join(fakeHome, '.config', 'systemd', 'user'), { recursive: true })
+    writeFileSync(join(fakeHome, '.config', 'systemd', 'user', 'dsh-profile-desktop.service'), '# DeepSeek Harness profile\n', 'utf8')
+    const linuxRes = await triggerProfileRestart({
+      host, confirmed: true, platform: 'linux', env: {}, home: fakeHome, execPath: '/usr/bin/node', argv: [], spawnFn: fakeSpawn,
+    })
+    expect(linuxRes.applied).toBe(true)
+    expect(spawnedCalls[2]!.args[3]).toMatch(/^\/(?:usr\/)?bin\/systemctl$/u)
+    expect(spawnedCalls[2]!.args).toContain('dsh-profile-desktop.service')
+  })
+
+  it('deterministically resolves the default assistant-workspace even when an unconfigured SQLite binding points to a coding repo or patch uses !!js', () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const deliveryDbPath = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    mkdirSync(join(dshHome, 'assistant-delivery'), { recursive: true })
+    const db = new DatabaseSync(deliveryDbPath)
+    try {
+      db.exec(`
+        CREATE TABLE delivery_principals (id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, principal_json TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, linked_to_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, version INTEGER NOT NULL);
+        CREATE TABLE conversation_bindings (id TEXT PRIMARY KEY, conversation_json TEXT NOT NULL, principal_id TEXT NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, policy_ref TEXT NOT NULL, generation INTEGER NOT NULL, status TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      `)
+      db.prepare(`INSERT INTO delivery_principals VALUES ('p-web', 'h1', '{"channel":"web","account":"desktop","tenant":"local","user":"operator"}', 'owner', 'active', NULL, 1, 1, 1)`).run()
+      db.prepare(`INSERT INTO conversation_bindings VALUES ('b-code', '{"channel":"web"}', 'p-web', '/tmp/some-coding-repo', 'standard', 'owner-dm', 1, 'active', 1)`).run()
+    } finally {
+      db.close()
+    }
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
+      '',
+    ].join('\n'), 'utf8')
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const resolved = resolveAssistantWorkspace(host as never, {})
+    expect(resolved.workspace).toBe(join(realpathSync(dshHome), 'assistant-workspace'))
+    expect(resolved.workspace).not.toContain('dshHomePath(')
+    expect(resolved.workspace).not.toContain('some-coding-repo')
+  })
+
+  it('never leaks literal dshHomePath strings in missing-local-owner-route repair or inspectOwnerRoute', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const workDir = join(dshHome, 'isolated-cwd')
+    mkdirSync(workDir, { recursive: true })
+    writeFileSync(patchPath, '[]\n', 'utf8')
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+      ],
+    })
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+
+    const origCwd = process.cwd()
+    process.chdir(workDir)
+    try {
+      const res = await applyDoctorRepair({
+        host,
+        status,
+        descriptors: [],
+        settings: undefined,
+        manager: undefined,
+        prober,
+        issueIds: ['missing-local-owner-route'],
+        platform: 'darwin',
+        env: {},
+        now: 700,
+      })
+      expect(res.applied).toBe(true)
+      expect(existsSync(join(workDir, "dshHomePath('assistant-workspace')"))).toBe(false)
+    } finally {
+      process.chdir(origCwd)
+    }
+
+    const expectedWs = join(realpathSync(dshHome), 'assistant-workspace')
+    const rawPatch = readFileSync(patchPath, 'utf8')
+    expect(rawPatch).not.toContain("workspace: dshHomePath('assistant-workspace')")
+    expect(rawPatch).toContain(`workspace: ${expectedWs}`)
+
+    // Even if an ownerRoute explicitly uses !!js dshHomePath(...), inspectOwnerRoute must evaluate it to a real path
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-desktop',
+      '        conversation: { channel: web, account: desktop, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: desktop, tenant: local, user: operator }',
+      "        workspace: !!js dshHomePath('assistant-workspace')",
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+    const paths = resolveProfilePaths(host, {})
+    const doc = readPatchDocument(paths.patchPath)
+    const inspected = inspectOwnerRoute(host, paths, doc.contents as never, [])
+    expect(inspected.workspace).toBe(expectedWs)
+    expect(inspected.workspace).not.toContain('dshHomePath(')
+  })
+
+  it('guides and unblocks AutonomyWizard after owner handoff when old ownerRoutes existed and syncs ownerRoutes immediately when DM binding already exists', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const deliveryDbPath = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(deliveryDbPath, true)
+    const ws = join(realpathSync(dshHome), 'assistant-workspace')
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      "    spoolPath: !!js dshHomePath('assistant-delivery/spool')",
+      `    defaultWorkspace: ${ws}`,
+      '    defaultAgentPreset: standard',
+      '    ownerRoutes:',
+      '      - id: owner-lark-primary',
+      '        conversation: { channel: lark, account: primary, tenant: personal, kind: dm, chat: oc_old }',
+      '        principal: { channel: lark, account: primary, tenant: personal, user: ou_owner123 }',
+      `        workspace: ${ws}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '- id: dsh-enhanced-assistant-dreaming',
+      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '  config:',
+      `    databasePath: ${join(dshHome, 'assistant-dreaming', 'desktop.sqlite')}`,
+      '    enabled: true',
+      '    retired: false',
+      `    scope: { workspace: ${ws}, preset: standard, principalId: lark/primary/personal/ou_owner123, ownerRouteId: owner-lark-primary }`,
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    // Promote new owner before it has a DM conversation binding
+    const promoted = await promoteLarkOwnerInProfile({
+      host, descriptors: [], openId: 'ou_new_owner', account: 'primary', tenant: 'personal', confirmed: true, platform: 'darwin', env: {}, now: 800,
+    })
+    expect(promoted.applied).toBe(true)
+    expect(promoted.existingAutonomyAnchored).toBe(true)
+    expect(promoted.note).toContain('一键初始化/修复前置项')
+
+    // Before first DM, inspectAutonomyWizardStatus tells user to send first DM and sync owner route
+    const beforeDm = await inspectAutonomyWizardStatus(host, { env: {} })
+    expect(beforeDm.ownerRoute.active).toBe(false)
+    expect(beforeDm.ownerRoute.missingReason).toContain('ou_new_owner')
+    expect(beforeDm.ownerRoute.missingReason).toContain('发送一条私聊消息')
+
+    // Simulate user sending first DM from ou_new_owner after restart
+    const db = new DatabaseSync(deliveryDbPath)
+    try {
+      const row = db.prepare(`SELECT id, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active'`).get() as { id: string; principal_json: string }
+      db.prepare(`INSERT INTO conversation_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run('b_new', 'chash_new', JSON.stringify({ channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'oc_new_dm' }), row.id, row.principal_json, ws, 'standard', 'sess_new', 1, 'owner-dm', 'active', 900, 900, 1)
+    } finally {
+      db.close()
+    }
+
+    // After DM, inspectAutonomyWizardStatus explicitly instructs clicking 一键初始化/修复前置项
+    const afterDm = await inspectAutonomyWizardStatus(host, { env: {} })
+    expect(afterDm.ownerRoute.active).toBe(false)
+    expect(afterDm.ownerRoute.missingReason).toContain('ou_new_owner')
+    expect(afterDm.ownerRoute.missingReason).toContain('一键初始化/修复前置项')
+
+    // Running Doctor repair immediately updates owner-lark-primary to ou_new_owner and unlocks AutonomyWizard
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+      ],
+    })
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const synced = await applyDoctorRepair({
+      host, status, descriptors: [], settings: undefined, manager: undefined, prober, issueIds: ['missing-local-owner-route'], platform: 'darwin', env: {}, now: 901,
+    })
+    expect(synced.applied).toBe(true)
+
+    const unlocked = await inspectAutonomyWizardStatus(host, { env: {} })
+    expect(unlocked.ownerRoute.active).toBe(true)
+    expect(unlocked.ownerRoute.principalId).toBe('lark/primary/personal/ou_new_owner')
+
+    // And if promoteLarkOwnerInProfile runs when DM binding ALREADY exists, it syncs ownerRoutes directly in one step
+    const rePromoted = await promoteLarkOwnerInProfile({
+      host, descriptors: [], openId: 'ou_new_owner', account: 'primary', tenant: 'personal', confirmed: true, platform: 'darwin', env: {}, now: 902,
+    })
+    expect(rePromoted.applied).toBe(true)
+    expect(rePromoted.note).toContain('已同步更新 ownerRoutes')
   })
 })

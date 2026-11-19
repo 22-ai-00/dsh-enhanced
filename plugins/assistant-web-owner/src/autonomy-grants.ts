@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap } from 'yaml'
+import { isMap, isScalar, isSeq, parseDocument, Scalar, type Document, type YAMLMap } from 'yaml'
 import { parseSettingsDefaultModelRoute } from './settings-route.js'
 import { dumpEffectiveProfile, globalDshDatabasePath, withinDshHome } from './host-dsh.js'
 
@@ -1343,17 +1343,50 @@ export function compileWebOwnerAutonomyGrants(
     removeBudgetIds.push(budgetIds.growthReviews, budgetIds.growthScan)
   }
 
-  // Update assistant-delivery ownerRoutes in-place preserving existing tags and unrelated routes.
+  const plainNode = (value: unknown) => patchDoc.createNode(value, { aliasDuplicateObjects: false })
+  const jsHomeScalar = (relPath: string): Scalar => {
+    const node = new Scalar(`dshHomePath('${relPath}')`)
+    node.tag = 'tag:yaml.org,2002:js'
+    return node
+  }
+
+  // Update assistant-delivery ownerRoutes in-place preserving existing tags and unrelated routes,
+  // while restating required paths so Cordis whole-value replacement never drops them on minimal patches.
   const deliveryRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery')
   deliveryRow.delete('disabled')
   const deliveryCfgMap = ensureChildMap(patchDoc, deliveryRow, 'config')
   const mergedDeliveryCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-delivery').config
+  if (!deliveryCfgMap.has('databasePath')) {
+    const effectiveDeliveryDb = typeof mergedDeliveryCfg.databasePath === 'string' && isAbsolute(mergedDeliveryCfg.databasePath.trim())
+      ? mergedDeliveryCfg.databasePath.trim()
+      : null
+    deliveryCfgMap.set('databasePath', effectiveDeliveryDb !== null ? plainNode(effectiveDeliveryDb) : jsHomeScalar('assistant-delivery/state.sqlite'))
+  }
+  if (!deliveryCfgMap.has('spoolPath')) {
+    const effectiveSpool = typeof mergedDeliveryCfg.spoolPath === 'string' && isAbsolute(mergedDeliveryCfg.spoolPath.trim())
+      ? mergedDeliveryCfg.spoolPath.trim()
+      : null
+    deliveryCfgMap.set('spoolPath', effectiveSpool !== null ? plainNode(effectiveSpool) : jsHomeScalar('assistant-delivery/spool'))
+  }
+  if (!deliveryCfgMap.has('defaultWorkspace')) {
+    const effectiveWs = typeof mergedDeliveryCfg.defaultWorkspace === 'string' && isAbsolute(mergedDeliveryCfg.defaultWorkspace.trim())
+      ? mergedDeliveryCfg.defaultWorkspace.trim()
+      : ownerCheck.workspace
+    deliveryCfgMap.set('defaultWorkspace', plainNode(effectiveWs))
+  }
+  if (!deliveryCfgMap.has('defaultAgentPreset')) {
+    const effectivePreset = typeof mergedDeliveryCfg.defaultAgentPreset === 'string' && mergedDeliveryCfg.defaultAgentPreset.trim() !== ''
+      ? mergedDeliveryCfg.defaultAgentPreset.trim()
+      : ownerCheck.preset
+    deliveryCfgMap.set('defaultAgentPreset', plainNode(effectivePreset))
+  }
   const currentRoutes = Array.isArray(mergedDeliveryCfg.ownerRoutes) ? [...mergedDeliveryCfg.ownerRoutes] : []
   const nextRoutes = currentRoutes.filter(item => asPlainObject(item)?.id !== ownerCheck.ownerRoute.id)
   nextRoutes.push(ownerCheck.ownerRoute)
-  deliveryCfgMap.set('ownerRoutes', patchDoc.createNode(nextRoutes))
+  deliveryCfgMap.set('ownerRoutes', plainNode(nextRoutes))
 
-  // Update personal-assistant policy, automaticLearning, and automations scheduler in-place preserving !!js tags.
+  // Update personal-assistant policy, automaticLearning, and automations scheduler in-place preserving !!js tags
+  // and restating all 4 required sub-configs (`assistantPolicy`, `personalMemory`, `personalWiki`, `assistantAutomations`).
   const personalRow = ensureRowMap(patchDoc, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
   personalRow.delete('disabled')
   const personalCfgMap = ensureChildMap(patchDoc, personalRow, 'config')
@@ -1366,33 +1399,63 @@ export function compileWebOwnerAutonomyGrants(
     removeBudgetIds,
   })
   const policyMap = ensureChildMap(patchDoc, personalCfgMap, 'assistantPolicy')
-  policyMap.set('rules', patchDoc.createNode(mergedPolicy.rules))
-  policyMap.set('budgets', patchDoc.createNode(mergedPolicy.budgets))
+  if (!policyMap.has('databasePath')) policyMap.set('databasePath', jsHomeScalar('assistant-policy/policy.sqlite'))
+  policyMap.set('rules', plainNode(mergedPolicy.rules))
+  policyMap.set('budgets', plainNode(mergedPolicy.budgets))
 
+  const memoryMap = ensureChildMap(patchDoc, personalCfgMap, 'personalMemory')
+  if (!memoryMap.has('databasePath')) memoryMap.set('databasePath', jsHomeScalar('personal-memory/memory.sqlite'))
   if (compiledAdoption) {
-    const memoryMap = ensureChildMap(patchDoc, personalCfgMap, 'personalMemory')
-    memoryMap.set('automaticLearning', patchDoc.createNode(compiledAdoption))
+    memoryMap.set('automaticLearning', plainNode(compiledAdoption))
   } else if (input.memoryLearning === false) {
-    const existingMemoryMap = personalCfgMap.get('personalMemory', true)
-    if (isMap(existingMemoryMap)) {
-      existingMemoryMap.delete('automaticLearning')
-    }
+    memoryMap.delete('automaticLearning')
   }
+
+  const wikiMap = ensureChildMap(patchDoc, personalCfgMap, 'personalWiki')
+  if (!wikiMap.has('vaultRoot')) wikiMap.set('vaultRoot', jsHomeScalar('personal-wiki/vault'))
+  if (!wikiMap.has('databasePath')) wikiMap.set('databasePath', jsHomeScalar('personal-wiki/state.sqlite'))
 
   const anyBackgroundAutonomy = memoryLearning || dreaming !== 'disabled' || growth
   const existingAutomations = asPlainObject(mergedPersonalCfg.assistantAutomations) ?? {}
   const schedulerEnabled = anyBackgroundAutonomy ? true : (existingAutomations.schedulerEnabled === true)
   const automationsMap = ensureChildMap(patchDoc, personalCfgMap, 'assistantAutomations')
+  if (!automationsMap.has('databasePath')) automationsMap.set('databasePath', jsHomeScalar('assistant-automations/state.sqlite'))
+  if (!automationsMap.has('runsPath')) automationsMap.set('runsPath', jsHomeScalar('assistant-automations/runs'))
   automationsMap.set('schedulerEnabled', schedulerEnabled)
   automationsMap.set('allowUnbudgetedExecution', false)
 
   if (compiledReviews || input.memoryLearning === false || patchState.byId.has('dsh-enhanced-assistant-verifier')) {
-    // Update assistant-verifier.memoryReviews in-place.
+    // Update assistant-verifier.memoryReviews in-place while restating required databasePath & surviving keys
+    // (Cordis patch config is a whole-value replacement).
     const verifierRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
     verifierRow.delete('disabled')
     const verifierCfgMap = ensureChildMap(patchDoc, verifierRow, 'config')
+    const mergedVerifierCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-verifier').config
+    if (!verifierCfgMap.has('databasePath')) {
+      const effectiveDb = typeof mergedVerifierCfg.databasePath === 'string' && isAbsolute(mergedVerifierCfg.databasePath.trim())
+        ? mergedVerifierCfg.databasePath.trim()
+        : null
+      verifierCfgMap.set('databasePath', effectiveDb !== null ? plainNode(effectiveDb) : jsHomeScalar('assistant-verifier/verification.sqlite'))
+    }
+    for (const key of ['sourceReviews', 'creationReviews', 'revisionReviews', 'revisionRegressions'] as const) {
+      if (!verifierCfgMap.has(key) && mergedVerifierCfg[key] !== undefined) {
+        verifierCfgMap.set(key, plainNode(mergedVerifierCfg[key]))
+      }
+    }
+    if (!verifierCfgMap.has('tickIntervalMs')) {
+      verifierCfgMap.set('tickIntervalMs', plainNode(typeof mergedVerifierCfg.tickIntervalMs === 'number' ? mergedVerifierCfg.tickIntervalMs : 5_000))
+    }
+    if (!verifierCfgMap.has('authorities')) {
+      verifierCfgMap.set('authorities', plainNode(Array.isArray(mergedVerifierCfg.authorities) ? mergedVerifierCfg.authorities : []))
+    }
+    if (!verifierCfgMap.has('profiles')) {
+      verifierCfgMap.set('profiles', plainNode(Array.isArray(mergedVerifierCfg.profiles) ? mergedVerifierCfg.profiles : []))
+    }
+    if (!verifierCfgMap.has('requireAcceptance')) {
+      verifierCfgMap.set('requireAcceptance', plainNode(typeof mergedVerifierCfg.requireAcceptance === 'boolean' ? mergedVerifierCfg.requireAcceptance : false))
+    }
     if (compiledReviews) {
-      verifierCfgMap.set('memoryReviews', patchDoc.createNode(compiledReviews))
+      verifierCfgMap.set('memoryReviews', plainNode(compiledReviews))
     } else if (input.memoryLearning === false) {
       verifierCfgMap.delete('memoryReviews')
     }
@@ -1403,11 +1466,11 @@ export function compileWebOwnerAutonomyGrants(
     const memoryRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
     if (compiledLearning) {
       memoryRow.set('disabled', false)
-      memoryRow.set('config', patchDoc.createNode(compiledLearning))
+      memoryRow.set('config', plainNode(compiledLearning))
     } else {
       memoryRow.set('disabled', true)
       if (!memoryRow.has('config')) {
-        memoryRow.set('config', patchDoc.createNode({ databasePath: memoryDbPath }))
+        memoryRow.set('config', plainNode({ databasePath: memoryDbPath }))
       }
     }
   }
@@ -1416,14 +1479,14 @@ export function compileWebOwnerAutonomyGrants(
   if (manageDreamingRow) {
     const dreamingRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-dreaming', '@dsh-enhanced/assistant-dreaming')
     dreamingRow.delete('disabled')
-    dreamingRow.set('config', patchDoc.createNode(dreamingYamlConfig))
+    dreamingRow.set('config', plainNode(dreamingYamlConfig))
   }
 
   // Update assistant-growth-driver row when enabled or present in the profile.
   if (manageGrowthRow) {
     const growthRow = ensureRowMap(patchDoc, 'dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver')
     growthRow.delete('disabled')
-    growthRow.set('config', patchDoc.createNode(growthYamlConfig))
+    growthRow.set('config', plainNode(growthYamlConfig))
   }
 
   return {

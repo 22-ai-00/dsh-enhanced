@@ -141,11 +141,14 @@ describe('web-owner RSI autonomy grants', () => {
     const savedPatch = await readFile(f.patchPath, 'utf8')
     const patchStat = await stat(f.patchPath)
     expect(patchStat.mode & 0o777).toBe(0o600)
+    expect(savedPatch).not.toMatch(/&a\d+|\*a\d+/u)
 
     const learningRow = findRow(savedPatch, 'dsh-enhanced-assistant-memory-learning')
     expect(learningRow.disabled).toBe(false)
     const validatedLearning = validateLearningConfig(learningRow.config)
-    const validatedReviews = validateMemoryReviewConfig(rowConfig(savedPatch, 'dsh-enhanced-assistant-verifier').memoryReviews)
+    const verifierCfg = rowConfig(savedPatch, 'dsh-enhanced-assistant-verifier')
+    expect(typeof verifierCfg.databasePath === 'string' && verifierCfg.databasePath.length > 0).toBe(true)
+    const validatedReviews = validateMemoryReviewConfig(verifierCfg.memoryReviews)
     const validatedAdoption = validateMemoryLearningAdoptionGrant(rowConfig(savedPatch, 'dsh-enhanced-personal-assistant').personalMemory.automaticLearning)
     const validatedDreaming = validateDreamingConfig(rowConfig(savedPatch, 'dsh-enhanced-assistant-dreaming'))
     const validatedGrowth = validateGrowthConfig(rowConfig(savedPatch, 'dsh-enhanced-assistant-growth-driver'))
@@ -476,5 +479,42 @@ describe('web-owner RSI autonomy grants', () => {
     const parsedRows = parseDocument(saved).toJS() as Array<{ id: string }>
     expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-dreaming')).toBe(false)
     expect(parsedRows.some(r => r.id === 'dsh-enhanced-assistant-growth-driver')).toBe(false)
+  })
+
+  test('restates required personal-assistant (personalWiki/personalMemory) and assistant-delivery paths on minimal patch even with memoryLearning disabled', async () => {
+    const f = await createWebAutonomyFixture()
+    const minimalPatch = [
+      '- id: dsh-enhanced-assistant-web-owner',
+      '  name: "@dsh-enhanced/assistant-web-owner"',
+      '  config:',
+      '    principal: { account: web, tenant: local, user: operator }',
+      `    workspace: ${f.workspace}`,
+      '    preset: standard',
+      '',
+    ].join('\n')
+    const compiled = compileWebOwnerAutonomyGrants(
+      {
+        dshHome: f.dshHome,
+        profile: 'web',
+        memoryLearning: false,
+        dreaming: 'enabled',
+        growth: false,
+        dailyBudget: 4,
+      },
+      minimalPatch,
+      f.effective,
+    )
+    const paCfg = rowConfig(compiled.patch, 'dsh-enhanced-personal-assistant')
+    expect(paCfg.assistantPolicy?.databasePath).toBeTruthy()
+    expect(paCfg.personalMemory?.databasePath).toBeTruthy()
+    expect(paCfg.personalWiki?.vaultRoot).toBeTruthy()
+    expect(paCfg.personalWiki?.databasePath).toBeTruthy()
+    expect(paCfg.assistantAutomations?.databasePath).toBeTruthy()
+    expect(paCfg.assistantAutomations?.runsPath).toBeTruthy()
+
+    const deliveryCfg = rowConfig(compiled.patch, 'dsh-enhanced-assistant-delivery')
+    expect(deliveryCfg.databasePath).toBeTruthy()
+    expect(deliveryCfg.spoolPath).toBeTruthy()
+    expect(Array.isArray(deliveryCfg.ownerRoutes) && deliveryCfg.ownerRoutes.length > 0).toBe(true)
   })
 })

@@ -6,7 +6,7 @@ import {
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Document, isMap, isScalar, isSeq, parseDocument, YAMLMap, YAMLSeq } from 'yaml'
+import { Document, isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, YAMLMap, YAMLSeq } from 'yaml'
 import {
   boundedConfig, findEntry, hasControlChars,
   type AgentDefaultModelService, type LoaderService, type LlmRuntimeService,
@@ -275,10 +275,111 @@ export function resolveProfilePaths(host: AutonomyHostContext, env: NodeJS.Proce
   return { dshHome, canonicalHome, profileName, profileDir, patchPath, patchExists, writable }
 }
 
+const DOC_BY_SEQ = new WeakMap<YAMLSeq, Document>()
+
+export function createPlainNode(doc: Document, value: unknown) {
+  return doc.createNode(value, { aliasDuplicateObjects: false })
+}
+
+export function yamlNodeToJs(node: unknown, doc?: Document): unknown {
+  if (isMap(node) || isSeq(node) || isAlias(node)) {
+    if (doc !== undefined) return node.toJS(doc)
+    return isAlias(node) ? undefined : node.toJSON()
+  }
+  if (isScalar(node)) return node.value
+  return node
+}
+
+export function jsDshHomeScalar(relPath: string): Scalar {
+  const node = new Scalar(`dshHomePath('${relPath}')`)
+  node.tag = 'tag:yaml.org,2002:js'
+  return node
+}
+
+export function resolveScopedWorkspacePath(
+  rawNode: unknown,
+  runtimeValue: unknown,
+  canonicalHome: string | null,
+): string {
+  const tryJsExpr = (raw: string): string | null => {
+    const match = DSH_HOME_CALL.exec(raw.trim())
+    if (match === null || canonicalHome === null) return null
+    const rel = match[2]!
+    if (rel.startsWith('/') || rel.split('/').some(part => part === '' || part === '.' || part === '..')) return null
+    return join(canonicalHome, rel)
+  }
+  if (isScalar(rawNode) && rawNode.tag === 'tag:yaml.org,2002:js' && typeof rawNode.value === 'string') {
+    const resolved = tryJsExpr(rawNode.value)
+    if (resolved !== null) return resolved
+  }
+  const patchStr = isScalar(rawNode) ? strOrNull(rawNode.value) : strOrNull(rawNode)
+  if (patchStr !== null) {
+    const resolved = tryJsExpr(patchStr)
+    if (resolved !== null) return resolved
+    if (isAbsolute(patchStr)) return patchStr
+  }
+  const runtimeStr = strOrNull(runtimeValue)
+  if (runtimeStr !== null && isAbsolute(runtimeStr)) return runtimeStr
+  return ''
+}
+
+export function ensureVerifierDefaults(
+  doc: Document,
+  verifierCfgNode: YAMLMap,
+  runtimeVerifierCfg?: Readonly<Record<string, unknown>>,
+): void {
+  const existingDb: unknown = verifierCfgNode.get('databasePath', true)
+  const existingDbInvalid = existingDb === undefined
+    || !isScalar(existingDb)
+    || (existingDb.tag !== 'tag:yaml.org,2002:js' && strOrNull(existingDb.value) === null)
+  if (existingDbInvalid) {
+    const runtimeDb = strOrNull(runtimeVerifierCfg?.['databasePath'])
+    if (runtimeDb !== null && isAbsolute(runtimeDb)) {
+      verifierCfgNode.set('databasePath', createPlainNode(doc, runtimeDb))
+    } else {
+      verifierCfgNode.set('databasePath', jsDshHomeScalar('assistant-verifier/verification.sqlite'))
+    }
+  }
+  const survivingOptionalKeys = [
+    'sourceReviews',
+    'creationReviews',
+    'revisionReviews',
+    'revisionRegressions',
+  ] as const
+  for (const key of survivingOptionalKeys) {
+    if (!verifierCfgNode.has(key) && runtimeVerifierCfg?.[key] !== undefined) {
+      verifierCfgNode.set(key, createPlainNode(doc, runtimeVerifierCfg[key]))
+    }
+  }
+  if (!verifierCfgNode.has('tickIntervalMs')) {
+    const tick = typeof runtimeVerifierCfg?.['tickIntervalMs'] === 'number'
+      ? runtimeVerifierCfg['tickIntervalMs']
+      : 5_000
+    verifierCfgNode.set('tickIntervalMs', createPlainNode(doc, tick))
+  }
+  if (!verifierCfgNode.has('authorities')) {
+    const authorities = Array.isArray(runtimeVerifierCfg?.['authorities']) ? runtimeVerifierCfg['authorities'] : []
+    verifierCfgNode.set('authorities', createPlainNode(doc, authorities))
+  }
+  if (!verifierCfgNode.has('profiles')) {
+    const profiles = Array.isArray(runtimeVerifierCfg?.['profiles']) ? runtimeVerifierCfg['profiles'] : []
+    verifierCfgNode.set('profiles', createPlainNode(doc, profiles))
+  }
+  if (!verifierCfgNode.has('requireAcceptance')) {
+    const req = typeof runtimeVerifierCfg?.['requireAcceptance'] === 'boolean'
+      ? runtimeVerifierCfg['requireAcceptance']
+      : false
+    verifierCfgNode.set('requireAcceptance', createPlainNode(doc, req))
+  }
+}
+
 export function readPatchDocument(patchPath: string | null): Document {
   if (patchPath === null || !existsSync(patchPath)) {
     const doc = parseDocument('[]', { customTags: [CUSTOM_JS_TAG] })
-    if (isSeq(doc.contents)) doc.contents.flow = false
+    if (isSeq(doc.contents)) {
+      doc.contents.flow = false
+      DOC_BY_SEQ.set(doc.contents, doc)
+    }
     return doc
   }
   const st = lstatSync(patchPath)
@@ -294,6 +395,7 @@ export function readPatchDocument(patchPath: string | null): Document {
     throw new Error('cordis.patch.yml 顶层必须是 YAML 列表（sequence）')
   }
   if (doc.contents.flow) doc.contents.flow = false
+  DOC_BY_SEQ.set(doc.contents, doc)
   return doc
 }
 
@@ -333,11 +435,11 @@ export function ensurePatchRow(doc: Document, seq: YAMLSeq, rowId: string, packa
   return created
 }
 
-export function getPatchRowConfig(seq: YAMLSeq, rowId: string): Record<string, unknown> {
+export function getPatchRowConfig(seq: YAMLSeq, rowId: string, doc?: Document): Record<string, unknown> {
   const row = findPatchRow(seq, rowId)
   if (row === undefined) return {}
   const cfg = readConfigMap(row, 'config')
-  return cfg !== undefined ? asPlainRecord(cfg.toJSON()) : {}
+  return cfg !== undefined ? asPlainRecord(yamlNodeToJs(cfg, doc ?? DOC_BY_SEQ.get(seq))) : {}
 }
 
 export function getPatchRowConfigNode(seq: YAMLSeq, rowId: string): YAMLMap | undefined {
@@ -355,7 +457,7 @@ export function mergeDescriptorConfig(descriptors: readonly SettingsDescriptor[]
 export function queryActiveOwnerFromSqlite(
   dbPath: string,
   expectedPrincipal: Record<string, unknown> | undefined,
-): Readonly<{ principalRecordId: string; principalVersion: number; principal: Record<string, unknown>; workspace?: string; preset?: string }> | null {
+): Readonly<{ principalRecordId: string; principalVersion: number; principal: Record<string, unknown>; workspace?: string; preset?: string; hasConversation: boolean }> | null {
   if (!existsSync(dbPath)) return null
   const st = lstatSync(dbPath)
   if (st.isSymbolicLink() || !st.isFile()) return null
@@ -394,11 +496,22 @@ export function queryActiveOwnerFromSqlite(
 
     let workspace: string | undefined
     let preset: string | undefined
+    let hasConversation = false
     try {
       const principalKey = externalPrincipalId(matched.principal)
       const binding = db.prepare(
-        `SELECT workspace, agent_preset FROM conversation_bindings WHERE (principal_id = ? OR principal_id = ?) AND status = 'active' ORDER BY updated_at DESC LIMIT 1`,
-      ).get(matched.id, principalKey ?? matched.id) as { workspace?: unknown; agent_preset?: unknown } | undefined
+        `SELECT conversation_json, workspace, agent_preset FROM conversation_bindings WHERE (principal_id = ? OR principal_id = ?) AND status = 'active' ORDER BY updated_at DESC LIMIT 1`,
+      ).get(matched.id, principalKey ?? matched.id) as { conversation_json?: unknown; workspace?: unknown; agent_preset?: unknown } | undefined
+      if (typeof binding?.conversation_json === 'string') {
+        try {
+          const parsedConv = asPlainRecord(JSON.parse(binding.conversation_json))
+          if (typeof parsedConv['channel'] === 'string' && typeof parsedConv['chat'] === 'string') {
+            hasConversation = true
+          }
+        } catch {
+          // Ignore malformed conversation JSON.
+        }
+      }
       if (typeof binding?.workspace === 'string') workspace = binding.workspace
       if (typeof binding?.agent_preset === 'string') preset = binding.agent_preset
     } catch {
@@ -408,6 +521,7 @@ export function queryActiveOwnerFromSqlite(
       principalRecordId: matched.id,
       principalVersion: matched.version,
       principal: matched.principal,
+      hasConversation,
       ...(workspace !== undefined ? { workspace } : {}),
       ...(preset !== undefined ? { preset } : {}),
     }
@@ -432,10 +546,15 @@ export function inspectOwnerRoute(
     .filter(r => typeof r['id'] === 'string' && r['id'].trim() !== '' && typeof r['workspace'] === 'string' && typeof r['agentPreset'] === 'string')
 
   const preferredRoute = validRoutes.find(r => asPlainRecord(r['principal'])['channel'] === 'web') ?? validRoutes[0]
-  const defaultWorkspace = strOrNull(deliveryCfg['defaultWorkspace']) ?? ''
+  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery') : undefined
+  const fallbackWorkspace = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-workspace') : ''
+  const defaultWorkspace = resolveScopedWorkspacePath(
+    deliveryNode?.get('defaultWorkspace', true),
+    deliveryCfg['defaultWorkspace'],
+    paths.canonicalHome,
+  ) || fallbackWorkspace
   const defaultPreset = strOrNull(deliveryCfg['defaultAgentPreset']) ?? 'standard'
 
-  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery') : undefined
   const dbPathNode = deliveryNode?.get('databasePath', true) ?? deliveryCfg['databasePath']
   const scopedDeliveryDb = checkScopedDbPath(
     dbPathNode,
@@ -474,7 +593,7 @@ export function inspectOwnerRoute(
     const rawChannel = strOrNull(principalObj['channel'])
     const channel: 'web' | 'lark' | 'other' = rawChannel === 'web' ? 'web' : rawChannel === 'lark' ? 'lark' : 'other'
     const authorityId = strOrNull(preferredRoute['id'])
-    const workspace = typeof preferredRoute['workspace'] === 'string' ? preferredRoute['workspace'] : defaultWorkspace
+    const workspace = resolveScopedWorkspacePath(preferredRoute['workspace'], undefined, paths.canonicalHome) || defaultWorkspace
     const preset = strOrNull(preferredRoute['agentPreset']) ?? defaultPreset
     const principalId = externalPrincipalId(principalObj)
 
@@ -503,6 +622,19 @@ export function inspectOwnerRoute(
 
     const authorityHash = serviceAuthorityHash ?? ownerRouteAuthorityHashLocal(preferredRoute, { workspace, agentPreset: preset })
     const active = (routeActiveFromService || (principalRecordId !== null && principalVersion !== null)) && authorityHash !== null && principalId !== null
+    let missingReason: string | null = null
+    if (!active) {
+      const otherActiveOwner = deliveryDbPath !== null ? queryActiveOwnerFromSqlite(deliveryDbPath, undefined) : null
+      const otherPrincipalId = otherActiveOwner !== null ? externalPrincipalId(otherActiveOwner.principal) : null
+      if (otherActiveOwner !== null && otherPrincipalId !== null && otherPrincipalId !== principalId) {
+        const otherChannel = strOrNull(otherActiveOwner.principal['channel'])
+        missingReason = otherActiveOwner.hasConversation || otherChannel === 'web'
+          ? `主主人已切换为 ${otherPrincipalId}，但 ownerRoutes 仍指向旧主主人（${principalId ?? authorityId ?? 'unknown'}）；请点击「一键初始化/修复前置项」同步主主人路由后即可继续`
+          : `主主人已切换为 ${otherPrincipalId}，请先重启 profile 并在飞书给机器人发送一条私聊消息建立会话，再点击「一键初始化/修复前置项」同步主主人路由`
+      } else {
+        missingReason = 'owner 路由已写入配置，但 Delivery 尚未记录已认领的激活 owner 主体（请先在 Web 对话或飞书发送首条 owner 消息，或运行 dsh-web-owner-setup）'
+      }
+    }
     return {
       configured: true,
       active,
@@ -515,14 +647,16 @@ export function inspectOwnerRoute(
       workspace,
       preset,
       webGrantReady: channel === 'web' && active,
-      missingReason: active ? null : 'owner 路由已写入配置，但 Delivery 尚未记录已认领的激活 owner 主体（请先在 Web 对话或飞书发送首条 owner 消息，或运行 dsh-web-owner-setup）',
+      missingReason,
       routeObject: preferredRoute,
     }
   }
 
   if (sqliteOwner !== null && sqliteOwner.principal['channel'] === 'web') {
     const principalId = externalPrincipalId(sqliteOwner.principal)
-    const workspace = sqliteOwner.workspace ?? defaultWorkspace
+    const workspace = sqliteOwner.workspace !== undefined && isAbsolute(sqliteOwner.workspace)
+      ? sqliteOwner.workspace
+      : defaultWorkspace
     const preset = sqliteOwner.preset ?? defaultPreset
     return {
       configured: false,
@@ -1305,37 +1439,46 @@ export async function applyAutonomyWizardSetup(
     const verifierRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
     verifierRow.delete('disabled')
     const verifierCfgNode = ensureConfigMap(doc, verifierRow, 'config')
-    verifierCfgNode.set('memoryReviews', doc.createNode(reviewConfig))
+    const runtimeVerifierDesc = findEntry(descriptors, candidate => candidate === 'dsh-enhanced-assistant-verifier')
+    ensureVerifierDefaults(doc, verifierCfgNode, runtimeVerifierDesc ? boundedConfig(runtimeVerifierDesc.value) : undefined)
+    verifierCfgNode.set('memoryReviews', createPlainNode(doc, reviewConfig))
 
     const learnerRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
     learnerRow.set('disabled', false)
-    learnerRow.set('config', doc.createNode(learningConfig))
+    learnerRow.set('config', createPlainNode(doc, learningConfig))
 
     if (pp.layout === 'split') {
       const pmRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-memory', '@dsh-enhanced/personal-memory')
       const pmCfgNode = ensureConfigMap(doc, pmRow, 'config')
-      pmCfgNode.set('automaticLearning', doc.createNode(adoptionConfig))
+      if (!pmCfgNode.has('databasePath')) {
+        const runtimePmDb = strOrNull(pp.personalMemoryCfg['databasePath'])
+        pmCfgNode.set('databasePath', runtimePmDb !== null && isAbsolute(runtimePmDb)
+          ? createPlainNode(doc, runtimePmDb)
+          : jsDshHomeScalar('personal-memory/memory.sqlite'))
+      }
+      pmCfgNode.set('automaticLearning', createPlainNode(doc, adoptionConfig))
     } else {
       const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
       const paCfgNode = ensureConfigMap(doc, paRow, 'config')
       const pmNode = ensureConfigMap(doc, paCfgNode, 'personalMemory')
-      pmNode.set('automaticLearning', doc.createNode(adoptionConfig))
+      if (!pmNode.has('databasePath')) pmNode.set('databasePath', jsDshHomeScalar('personal-memory/memory.sqlite'))
+      pmNode.set('automaticLearning', createPlainNode(doc, adoptionConfig))
     }
 
     newBudgets.push(
       { id: memoryBudgetId, metric: 'automation-runs', limit: budgets.dailyMemoryExtractions, periodMs: DAY_MS, scope: 'workspace' },
       { id: memoryScanBudgetId, metric: 'automation-runs', limit: budgets.dailyMemoryScans, periodMs: DAY_MS, scope: 'subject' },
     )
-    const memSubject = { kind: 'background', id: 'assistant-memory-learning', workspace: owner.workspace, principal: owner.principalId }
-    const memCtx = { initiators: ['background'] }
+    const makeMemSubject = () => ({ kind: 'background', id: 'assistant-memory-learning', workspace: owner.workspace, principal: owner.principalId })
+    const makeMemCtx = () => ({ initiators: ['background'] })
     newRules.push(
-      { id: `wizard-${prefix}-mem-extract-${profileSlug}`, effect: 'allow', subject: memSubject, actions: ['extract'], resource: { kind: 'memory', id: `learning:${extractAuthId}` }, context: memCtx },
-      { id: `wizard-${prefix}-mem-review-${profileSlug}`, effect: 'allow', subject: memSubject, actions: ['review'], resource: { kind: 'memory', id: `learning:${reviewAuthId}` }, context: memCtx },
-      { id: `wizard-${prefix}-mem-adopt-${profileSlug}`, effect: 'allow', subject: memSubject, actions: ['adopt'], resource: { kind: 'memory', id: `learning:${adoptAuthId}` }, context: memCtx },
-      { id: `wizard-${prefix}-mem-scan-reconcile-${profileSlug}`, effect: 'allow', subject: memSubject, actions: ['reconcile'], resource: { kind: 'automation', id: 'memory-scan-*' }, context: memCtx },
-      { id: `wizard-${prefix}-mem-scan-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'memory-scan-*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'memory-scan-*' }, context: memCtx },
-      { id: `wizard-${prefix}-mem-job-reconcile-${profileSlug}`, effect: 'allow', subject: memSubject, actions: ['reconcile'], resource: { kind: 'automation', id: 'memory-learning:*' }, context: memCtx },
-      { id: `wizard-${prefix}-mem-job-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'memory-learning:*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'memory-learning:*' }, context: memCtx },
+      { id: `wizard-${prefix}-mem-extract-${profileSlug}`, effect: 'allow', subject: makeMemSubject(), actions: ['extract'], resource: { kind: 'memory', id: `learning:${extractAuthId}` }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-review-${profileSlug}`, effect: 'allow', subject: makeMemSubject(), actions: ['review'], resource: { kind: 'memory', id: `learning:${reviewAuthId}` }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-adopt-${profileSlug}`, effect: 'allow', subject: makeMemSubject(), actions: ['adopt'], resource: { kind: 'memory', id: `learning:${adoptAuthId}` }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-scan-reconcile-${profileSlug}`, effect: 'allow', subject: makeMemSubject(), actions: ['reconcile'], resource: { kind: 'automation', id: 'memory-scan-*' }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-scan-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'memory-scan-*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'memory-scan-*' }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-job-reconcile-${profileSlug}`, effect: 'allow', subject: makeMemSubject(), actions: ['reconcile'], resource: { kind: 'automation', id: 'memory-learning:*' }, context: makeMemCtx() },
+      { id: `wizard-${prefix}-mem-job-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'memory-learning:*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'memory-learning:*' }, context: makeMemCtx() },
     )
     enabledNames.push('记忆自学习')
   }
@@ -1358,7 +1501,7 @@ export async function applyAutonomyWizardSetup(
       ...existingDreamCfg,
       enabled: true,
       retired: false,
-      scope: dreamGrowthScope,
+      scope: { ...dreamGrowthScope },
       databasePath: dreamingDbPath,
       provider: reqProvider,
       model: reqModel,
@@ -1373,7 +1516,7 @@ export async function applyAutonomyWizardSetup(
 
     const dreamRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-dreaming', '@dsh-enhanced/assistant-dreaming')
     dreamRow.delete('disabled')
-    dreamRow.set('config', doc.createNode(dreamConfig))
+    dreamRow.set('config', createPlainNode(doc, dreamConfig))
 
     newBudgets.push({ id: dreamingBudgetId, metric: 'automation-runs', limit: budgets.dailyDreams, periodMs: DAY_MS, scope: 'subject' })
     newRules.push(
@@ -1403,7 +1546,7 @@ export async function applyAutonomyWizardSetup(
       ...existingGrowthCfg,
       enabled: true,
       intervalMs: typeof existingGrowthCfg['intervalMs'] === 'number' ? existingGrowthCfg['intervalMs'] : 0,
-      scope: dreamGrowthScope,
+      scope: { ...dreamGrowthScope },
       provider: reqProvider,
       model: reqModel,
       ...(reqEffort !== '' ? { reasoningEffort: reqEffort } : {}),
@@ -1432,19 +1575,19 @@ export async function applyAutonomyWizardSetup(
 
     const growthRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver')
     growthRow.delete('disabled')
-    growthRow.set('config', doc.createNode(growthConfig))
+    growthRow.set('config', createPlainNode(doc, growthConfig))
 
     newBudgets.push(
       { id: growthBudgetId, metric: 'automation-runs', limit: budgets.dailyGrowthReviews, periodMs: DAY_MS, scope: 'global' },
       { id: growthScanBudgetId, metric: 'automation-runs', limit: budgets.dailyGrowthDiscoveryScans, periodMs: DAY_MS, scope: 'subject' },
     )
-    const agentSubject = { kind: 'agent', id: owner.preset, workspace: owner.workspace, principal: owner.principalId }
-    const bgCtx = { initiators: ['background'] }
+    const makeAgentSubject = () => ({ kind: 'agent', id: owner.preset, workspace: owner.workspace, principal: owner.principalId })
+    const makeBgCtx = () => ({ initiators: ['background'] })
     newRules.push(
-      { id: `wizard-${prefix}-usage-reconcile-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'assistant-growth-usage', workspace: owner.workspace, principal: owner.principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: 'usage-*' }, context: bgCtx },
-      { id: `wizard-${prefix}-usage-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'usage-*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'usage-*' }, context: bgCtx },
-      { id: `wizard-${prefix}-growth-tools-${profileSlug}`, effect: 'allow', subject: agentSubject, actions: ['execute'], resource: { kind: 'tool', id: 'growth_*' }, context: bgCtx },
-      { id: `wizard-${prefix}-verified-workflows-${profileSlug}`, effect: 'allow', subject: agentSubject, actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: bgCtx },
+      { id: `wizard-${prefix}-usage-reconcile-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'assistant-growth-usage', workspace: owner.workspace, principal: owner.principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: 'usage-*' }, context: makeBgCtx() },
+      { id: `wizard-${prefix}-usage-exec-${profileSlug}`, effect: 'allow', subject: { kind: 'background', id: 'usage-*', workspace: owner.workspace, principal: owner.principalId }, actions: ['execute'], resource: { kind: 'automation', id: 'usage-*' }, context: makeBgCtx() },
+      { id: `wizard-${prefix}-growth-tools-${profileSlug}`, effect: 'allow', subject: makeAgentSubject(), actions: ['execute'], resource: { kind: 'tool', id: 'growth_*' }, context: makeBgCtx() },
+      { id: `wizard-${prefix}-verified-workflows-${profileSlug}`, effect: 'allow', subject: makeAgentSubject(), actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: makeBgCtx() },
     )
     enabledNames.push('技能演化')
   }
@@ -1455,21 +1598,37 @@ export async function applyAutonomyWizardSetup(
   if (pp.layout === 'split') {
     const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
     const pCfg = ensureConfigMap(doc, policyRow, 'config')
-    pCfg.set('budgets', doc.createNode(mergedBudgets))
-    pCfg.set('rules', doc.createNode(mergedRules))
+    if (!pCfg.has('databasePath')) pCfg.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
+    for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
+      if (!pCfg.has(key) && pp.policyCfg[key] !== undefined) pCfg.set(key, createPlainNode(doc, pp.policyCfg[key]))
+    }
+    pCfg.set('budgets', createPlainNode(doc, mergedBudgets))
+    pCfg.set('rules', createPlainNode(doc, mergedRules))
 
     const autoRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-automations', '@dsh-enhanced/assistant-automations')
     const aCfg = ensureConfigMap(doc, autoRow, 'config')
+    if (!aCfg.has('databasePath')) aCfg.set('databasePath', jsDshHomeScalar('assistant-automations/state.sqlite'))
+    if (!aCfg.has('runsPath')) aCfg.set('runsPath', jsDshHomeScalar('assistant-automations/runs'))
     aCfg.set('schedulerEnabled', true)
     aCfg.set('allowUnbudgetedExecution', false)
   } else {
     const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
     const paCfg = ensureConfigMap(doc, paRow, 'config')
     const polNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-    polNode.set('budgets', doc.createNode(mergedBudgets))
-    polNode.set('rules', doc.createNode(mergedRules))
+    if (!polNode.has('databasePath')) polNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
+    polNode.set('budgets', createPlainNode(doc, mergedBudgets))
+    polNode.set('rules', createPlainNode(doc, mergedRules))
+
+    const pmNode = ensureConfigMap(doc, paCfg, 'personalMemory')
+    if (!pmNode.has('databasePath')) pmNode.set('databasePath', jsDshHomeScalar('personal-memory/memory.sqlite'))
+
+    const wikiNode = ensureConfigMap(doc, paCfg, 'personalWiki')
+    if (!wikiNode.has('vaultRoot')) wikiNode.set('vaultRoot', jsDshHomeScalar('personal-wiki/vault'))
+    if (!wikiNode.has('databasePath')) wikiNode.set('databasePath', jsDshHomeScalar('personal-wiki/state.sqlite'))
 
     const autoNode = ensureConfigMap(doc, paCfg, 'assistantAutomations')
+    if (!autoNode.has('databasePath')) autoNode.set('databasePath', jsDshHomeScalar('assistant-automations/state.sqlite'))
+    if (!autoNode.has('runsPath')) autoNode.set('runsPath', jsDshHomeScalar('assistant-automations/runs'))
     autoNode.set('schedulerEnabled', true)
     autoNode.set('allowUnbudgetedExecution', false)
   }

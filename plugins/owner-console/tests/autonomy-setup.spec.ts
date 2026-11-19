@@ -11,7 +11,7 @@ import { normalizeConfig as validateDreamingConfig } from '../../assistant-dream
 import { normalizeConfig as validateGrowthConfig } from '../../assistant-growth-driver/lib/index.js'
 import { validateLearningConfig } from '../../assistant-memory-learning/lib/index.js'
 import { AssistantPolicyService } from '../../assistant-policy/lib/index.js'
-import { validateMemoryReviewConfig } from '../../assistant-verifier/lib/index.js'
+import { Config as AssistantVerifierConfig, validateMemoryReviewConfig } from '../../assistant-verifier/lib/index.js'
 import { validateMemoryLearningAdoptionGrant } from '../../personal-memory/lib/index.js'
 import {
   applyAutonomyWizardSetup,
@@ -19,6 +19,7 @@ import {
   inspectAutonomyWizardStatus,
   ownerRouteAuthorityHashLocal,
 } from '../src/autonomy-setup.js'
+import { applyFeishuVaultConfig } from '../src/doctor-repair.js'
 import { OwnerConsoleService } from '../src/service.js'
 import { AUTONOMY_TIER_DEFAULTS, TYPERT } from '../src/typert.js'
 
@@ -291,10 +292,12 @@ describe('autonomy-setup wizard', () => {
       { op: 'set', path: ['reasoningEffort'], value: 'medium' },
     ], 4)
 
-    // Existing !!js scalars preserved verbatim
+    // Existing !!js scalars preserved verbatim, verifier databasePath restated, and zero YAML anchors/aliases emitted
     const updatedRaw = readFileSync(patchPath, 'utf8')
     expect(updatedRaw).toContain("!!js dshHomePath('assistant-delivery/state.sqlite')")
+    expect(updatedRaw).toContain("!!js dshHomePath('assistant-verifier/verification.sqlite')")
     expect(updatedRaw).toContain('!!js process.env.LARK_APP_SECRET')
+    expect(updatedRaw).not.toMatch(/&a\d+|\*a\d+/u)
 
     const parsedRows = parse(updatedRaw, { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; disabled?: boolean; config: Record<string, unknown> }>
     const byId = new Map(parsedRows.map(r => [r.id, r]))
@@ -306,6 +309,14 @@ describe('autonomy-setup wizard', () => {
     const growthRow = byId.get('dsh-enhanced-assistant-growth-driver')!
 
     expect(memRow.disabled).toBe(false)
+    // Validate full AssistantVerifier Config schema (Cordis patch config is whole-value replacement; databasePath is required).
+    const parsedVerifier = AssistantVerifierConfig({
+      ...verifierRow.config,
+      databasePath: join(dshHome, 'assistant-verifier', 'verification.sqlite'),
+    } as never)
+    expect(verifierRow.config['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
+    expect(parsedVerifier.tickIntervalMs).toBe(5000)
+    expect(parsedVerifier.requireAcceptance).toBe(false)
     const reviewCfg = verifierRow.config['memoryReviews'] as Record<string, unknown>
     const adoptCfg = (paRow.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
     const learnCfg = memRow.config
@@ -681,5 +692,96 @@ describe('autonomy-setup wizard', () => {
     expect(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')?.disabled).toBe(true)
     expect(validateDreamingConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-dreaming')!.config!).enabled).toBe(false)
     expect(validateGrowthConfig(disabledRows.find(r => r.id === 'dsh-enhanced-assistant-growth-driver')!.config!).enabled).toBe(false)
+  })
+
+  it('preserves valid policy rules and verifier databasePath across autonomy setup followed by Feishu vault setup (zero YAML alias corruption)', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    seedDeliveryOwnerSqlite(join(dshHome, 'assistant-delivery', 'state.sqlite'), 'web', 'principal_roundtrip', 1)
+
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      "    defaultWorkspace: !!js dshHomePath('assistant-workspace')",
+      '    ownerRoutes:',
+      `      - ${JSON.stringify(makeWebOwnerRoute('web', workspace))}`,
+      '',
+    ].join('\n'), { encoding: 'utf8', mode: 0o600 })
+
+    const { host } = createHostContext({
+      dshHome,
+      profileDir,
+      descriptors: [{ ns: 'dsh-deepseek-agent-default-model', value: { provider: 'traex-agent', model: 'default' } }],
+    })
+
+    const autoRes = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'traex-agent',
+      model: 'default',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: true,
+      enableGrowth: true,
+      workItemExperiences: false,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: 1_760_000_001_000,
+    })
+    expect(autoRes.applied).toBe(true)
+
+    const feishuRes = await applyFeishuVaultConfig({
+      host,
+      descriptors: [],
+      appId: 'cli_1122334455667788',
+      appSecret: 'roundtrip_secret_xyz',
+      account: 'primary',
+      tenant: 'personal',
+      ownerOpenId: 'ou_roundtrip_1',
+      platform: 'darwin',
+      env: {},
+      now: 1_760_000_002_000,
+      storeSecretFn: async () => {},
+    })
+    expect(feishuRes.applied).toBe(true)
+
+    const finalYaml = readFileSync(patchPath, 'utf8')
+    expect(finalYaml).not.toContain('source: a1')
+    expect(finalYaml).not.toMatch(/&a\d+|\*a\d+/u)
+    const rows = parse(finalYaml, { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
+    const verifierCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
+    expect(verifierCfg['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
+    expect(() => AssistantVerifierConfig({
+      ...verifierCfg,
+      databasePath: join(dshHome, 'assistant-verifier', 'verification.sqlite'),
+    } as never)).not.toThrow()
+
+    const paCfg = rows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const adoptAuthorityId = (paCfg['personalMemory']['automaticLearning'] as { authorityId: string }).authorityId
+    const ctx = new Context()
+    try {
+      const policy = new AssistantPolicyService(ctx, {
+        databasePath: join(root, 'roundtrip-policy.sqlite'),
+        rules: paCfg['assistantPolicy']['rules'],
+        budgets: paCfg['assistantPolicy']['budgets'],
+      })
+      // Specifically test rules that previously got mangled by YAML *a1/*a2 aliases (mem-adopt & mem-scan-reconcile).
+      expect(policy.evaluate({
+        subject: { kind: 'background', id: 'assistant-memory-learning', workspace, principal: 'web/web/local/operator' },
+        action: 'adopt',
+        resource: { kind: 'memory', id: `learning:${adoptAuthorityId}` },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+      expect(policy.evaluate({
+        subject: { kind: 'background', id: 'assistant-memory-learning', workspace, principal: 'web/web/local/operator' },
+        action: 'reconcile',
+        resource: { kind: 'automation', id: 'memory-scan-1' },
+        context: { initiator: 'background' },
+      }).effect).toBe('allow')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 })

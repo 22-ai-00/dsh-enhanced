@@ -27,6 +27,26 @@ export type ChatPromptPart =
   /** A staged file/image receipt; the Host resolves it inside this Session's Agent scope. */
   | Readonly<{ type: 'file'; receiptId: string }>
 
+/** One attachment preview carried by a native local submission echo. */
+export type ChatPendingAttachment =
+  | Readonly<{ type: 'image'; value: Readonly<{ previewUrl: string; name?: string }> }>
+  | Readonly<{ type: 'file'; value: Readonly<{ attachmentId: string; name: string; bytes: number }> }>
+
+/** Native `SessionSnapshot.pendingSubmissions` entry while a prompt awaits durable admission. */
+export type ChatPendingSubmission = Readonly<{
+  requestId: string
+  placement?: 'transcript' | 'queued' | 'steering'
+  time?: number
+  text: string
+  attachments?: readonly ChatPendingAttachment[]
+}>
+
+/** Handle returned by native `SessionFace.beginSubmission`. */
+export type ChatSubmissionHandle = Readonly<{
+  requestId: string
+  abandon(): void
+}>
+
 /** Session lifecycle fields the chat header and composer read. */
 export type ChatSessionSnapshot = Readonly<{
   running?: boolean
@@ -37,11 +57,22 @@ export type ChatSessionSnapshot = Readonly<{
   promptAttempted?: boolean
   awaitingFirstTurn?: boolean
   lastAgentError?: string | null
+  pendingSubmissions?: readonly ChatPendingSubmission[]
 }>
 
 /** Native `SessionFace` surface used by the panel. */
 export type ChatSessionFace = Observable<ChatSessionSnapshot> & Readonly<{
-  prompt(content: readonly ChatPromptPart[], mode: 'queue' | 'steer', signal?: AbortSignal): Promise<RemoteResult<Readonly<{ accepted?: boolean }>>>
+  beginSubmission?(input: Readonly<{
+    mode: 'queue' | 'steer'
+    text: string
+    attachments: readonly ChatPendingAttachment[]
+  }>): ChatSubmissionHandle
+  prompt(
+    content: readonly ChatPromptPart[],
+    mode: 'queue' | 'steer',
+    signal?: AbortSignal,
+    requestId?: string,
+  ): Promise<RemoteResult<Readonly<{ accepted?: boolean }>>>
   command(line: string): Promise<RemoteResult<Readonly<{ matched?: boolean }>>>
   cancel(): Promise<RemoteResult<Readonly<{ accepted?: boolean }>>>
   loadOlder(): Promise<void>
@@ -59,22 +90,41 @@ export type ChatContentBlock = Readonly<{
   attachment?: Readonly<{ name?: string }>
 }>
 
+export type ChatMessagePayload = Readonly<{
+  id?: string
+  role?: string
+  content?: readonly ChatContentBlock[]
+  /** Tool results carry their paired call id here (`source.callId`); user RPC prompts carry `rpcId`. */
+  source?: Readonly<{ kind?: string; callId?: string; rpcId?: string }>
+  /** Provider-issued tool-call id on a `tool/result` message, mirroring `source.callId`. */
+  toolCallId?: string
+  isError?: boolean
+}>
+
+export type ChatSurfaceOp = 'append' | Readonly<{ op: string; startSeq?: number; endSeq?: number }>
+
 export type DurableChatEvent = Readonly<{
   type: string
   seq: number
   time?: number
+  /** Canonical DSH surface operation (`'append'` for transcript-origin events; replacements are model-only). */
+  surfaceOp?: ChatSurfaceOp
   data?: Readonly<{
     turn?: number
     step?: number
-    message?: Readonly<{
-      role?: string
-      content?: readonly ChatContentBlock[]
-      /** Tool results carry their paired call id here (`source.callId`); calls use `data.callId`. */
-      source?: Readonly<{ kind?: string; callId?: string }>
-      /** Provider-issued tool-call id on a `tool/result` message, mirroring `source.callId`. */
-      toolCallId?: string
-      isError?: boolean
-    }>
+    /** Direct `UserMessage` fields on `user/message` (`SessionEvent<'user/message'>.data` IS `UserMessage`). */
+    id?: string
+    role?: string
+    content?: readonly ChatContentBlock[]
+    source?: Readonly<{ kind?: string; callId?: string; rpcId?: string }>
+    /** Wrapped message payload on `assistant/message` and `tool/result` (`data.message`). */
+    message?: ChatMessagePayload
+    /** `agent/inbox/spliced` fields tracking pending/claimed human prompts until `user/message` lands. */
+    target?: 'next-turn' | 'next-step'
+    start?: number
+    removedCount?: number
+    inserted?: readonly ChatMessagePayload[]
+    outcome?: string
     callId?: string
     name?: string
     /** Raw JSON argument string on `tool/call`. */
@@ -87,6 +137,8 @@ export type TransientChatEvent = Readonly<{
   seq?: number
   data?: Readonly<{
     attemptId?: string
+    turn?: number
+    step?: number
     chunk?: Readonly<{ type?: string; text?: string }>
   }>
 }>
@@ -102,6 +154,19 @@ export type ChatMessage =
   | Readonly<{ kind: 'assistant'; key: string; seq: number; text: string }>
   | Readonly<{ kind: 'tool'; key: string; seq: number; name: string; status: 'running' | 'ok' | 'error' }>
   | Readonly<{ kind: 'error'; key: string; seq: number; text: string }>
+
+/** Pending/queued human prompt not yet committed as a durable `user/message` event. */
+export type PendingChatUserMessage = Readonly<{
+  key: string
+  text: string
+  queued: boolean
+}>
+
+/** Split pending user prompts by turn placement so idle sends stay above thinking/streaming and follow-ups stay below. */
+export type PendingChatUserMessages = Readonly<{
+  transcript: readonly PendingChatUserMessage[]
+  queued: readonly PendingChatUserMessage[]
+}>
 
 /** One retained Session generation and the release path that ends this panel's use. */
 export type ChatReference = Readonly<{
@@ -231,7 +296,10 @@ export function messageText(message: Readonly<{ content?: readonly ChatContentBl
       continue
     }
     if (block.type === 'image') parts.push('[图片]')
-    else if (block.type === 'file') parts.push(block.attachment?.name === undefined ? '[文件]' : `[文件：${block.attachment.name}]`)
+    else if (block.type === 'file') {
+      const name = typeof block.attachment?.name === 'string' ? block.attachment.name.trim() : ''
+      parts.push(name === '' ? '[文件]' : `[文件：${name}]`)
+    }
   }
   return parts.join('\n').trim()
 }
@@ -251,10 +319,18 @@ export function boundedText(text: string, limit = 600): string {
   return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized
 }
 
+/** Append-origin surface events belong to the human transcript; replacement copies stay model-only. */
+const isAppendOrigin = (event: DurableChatEvent): boolean =>
+  event.surfaceOp === undefined || event.surfaceOp === 'append'
+
+const nonEmptyId = (value: unknown): string | undefined =>
+  typeof value === 'string' && value !== '' ? value : undefined
+
 /**
- * Project the durable event window into chat rows. Only human prompts become user
- * bubbles; injected `agent.inject()` context is not a human message and stays out of
- * this compact transcript. Assistant text, tool activity, and turn errors remain.
+ * Project the durable event window into chat rows. Only append-origin human prompts
+ * (`event.data` is `UserMessage` directly on `user/message` in DSH) become user bubbles;
+ * injected `agent.inject()` / `runtime-context` messages and surface replacement copies
+ * stay out of this compact transcript. Assistant text, tool activity, and turn errors remain.
  */
 export function chatMessages(entries: readonly ChatEntry[] | undefined): readonly ChatMessage[] {
   if (entries === undefined) return []
@@ -266,12 +342,15 @@ export function chatMessages(entries: readonly ChatEntry[] | undefined): readonl
     const seq = Number.isFinite(event.seq) ? event.seq : messages.length
     switch (event.type) {
       case 'user/message': {
-        if (event.data?.message?.source?.kind !== 'user') break
-        const text = messageText(event.data.message)
+        if (!isAppendOrigin(event)) break
+        const message = event.data
+        if (message?.source?.kind !== 'user') break
+        const text = messageText(message)
         if (text !== '') messages.push({ kind: 'user', key: `user:${seq}`, seq, text })
         break
       }
       case 'assistant/message': {
+        if (!isAppendOrigin(event)) break
         const text = messageText(event.data?.message)
         if (text !== '') messages.push({ kind: 'assistant', key: `assistant:${seq}`, seq, text })
         break
@@ -285,6 +364,7 @@ export function chatMessages(entries: readonly ChatEntry[] | undefined): readonl
         break
       }
       case 'tool/result': {
+        if (!isAppendOrigin(event)) break
         // The result event's own data has no call id or name: the identity lives on the
         // model-facing message (`source.callId`, and `toolCallId` for the same value).
         const message = event.data?.message
@@ -315,17 +395,263 @@ export function chatMessages(entries: readonly ChatEntry[] | undefined): readonl
   return messages.length <= CHAT_MESSAGE_LIMIT ? messages : messages.slice(-CHAT_MESSAGE_LIMIT)
 }
 
+function pendingSubmissionText(submission: ChatPendingSubmission): string {
+  const parts: string[] = []
+  if (submission.text.trim() !== '') parts.push(submission.text)
+  for (const attachment of submission.attachments ?? []) {
+    if (attachment.type === 'image') parts.push('[图片]')
+    else if (attachment.type === 'file') {
+      const name = attachment.value.name.trim()
+      parts.push(name === '' ? '[文件]' : `[文件：${name}]`)
+    }
+  }
+  return parts.join('\n').trim()
+}
+
+type InboxTarget = 'next-turn' | 'next-step'
+
+type TrackedInboxEntry = {
+  readonly key: string
+  readonly target: InboxTarget
+  index: number
+  readonly message: ChatMessagePayload
+}
+
+type ClaimedInboxEntry = {
+  readonly key: string
+  readonly claimedAtSeq: number
+  readonly message: ChatMessagePayload
+}
+
+/**
+ * Events proving a step/turn moved past `user/message` admission (or closed/forked),
+ * expiring any earlier claimed inbox item that was rewritten or dropped before admission.
+ * Note: `assistant/message` only counts when append-origin (compaction replacement copies
+ * can run inside `pre-step` before the claimed prompt's `user/message` is appended).
+ */
+const CLAIM_EXPIRY_EVENT_TYPES = new Set([
+  'request/header',
+  'request/context',
+  'assistant/message',
+  'assistant/attempt',
+  'step/end',
+  'turn/end',
+  'session/end-seed',
+])
+
+/**
+ * Reconcile accepted local submission echoes (`snapshot.pendingSubmissions`), claimed-but-not-yet-admitted
+ * durable `agent/inbox/spliced` prompts, and the Host's durable `inbox` projection against already-admitted
+ * durable `user/message` events. Guarantees immediate display upon send, zero disappearance during `preStep` /
+ * `prepareRequest` (including queued follow-ups after `ClientSession` retires their local echo, remounts, or
+ * reloads), and seamless zero-duplicate handoff once durable `user/message` arrives on `eventSource`.
+ */
+export function pendingUserMessages(
+  entries: readonly ChatEntry[] | undefined,
+  pendingSubmissions: readonly ChatPendingSubmission[] | undefined,
+  inboxSnapshot: unknown,
+  running = false,
+): PendingChatUserMessages {
+  const admittedRpcIds = new Set<string>()
+  const admittedMessageIds = new Set<string>()
+  const trackedInbox = new Map<string, TrackedInboxEntry>()
+  const claimedInFlight = new Map<string, ClaimedInboxEntry>()
+  const canceledByTarget: Record<InboxTarget, { ids: Set<string>; rpcIds: Set<string> }> = {
+    'next-step': { ids: new Set(), rpcIds: new Set() },
+    'next-turn': { ids: new Set(), rpcIds: new Set() },
+  }
+  let syntheticSeq = 0
+
+  for (const entry of entries ?? []) {
+    if (entry.type !== 'event') continue
+    const { event } = entry
+    const seq = Number.isFinite(event.seq) ? event.seq : syntheticSeq++
+
+    if (event.type === 'user/message' && isAppendOrigin(event) && event.data?.source?.kind === 'user') {
+      const rpcId = nonEmptyId(event.data.source.rpcId)
+      const id = nonEmptyId(event.data.id)
+      if (rpcId !== undefined) admittedRpcIds.add(rpcId)
+      if (id !== undefined) admittedMessageIds.add(id)
+      for (const [key, claimed] of claimedInFlight) {
+        const claimedId = nonEmptyId(claimed.message.id)
+        const claimedRpcId = nonEmptyId(claimed.message.source?.rpcId)
+        if ((id !== undefined && claimedId === id) || (rpcId !== undefined && claimedRpcId === rpcId)) {
+          claimedInFlight.delete(key)
+        }
+      }
+      continue
+    }
+
+    if (event.type === 'agent/inbox/spliced') {
+      const data = event.data
+      const target = data?.target
+      if (target !== 'next-turn' && target !== 'next-step') continue
+      const start = data?.start
+      const removedCount = data?.removedCount ?? 0
+      const inserted = Array.isArray(data?.inserted) ? data.inserted : []
+      if (typeof start !== 'number' || !Number.isInteger(start) || start < 0) continue
+      if (typeof removedCount !== 'number' || !Number.isInteger(removedCount) || removedCount < 0) continue
+      const canceled = data?.outcome === 'canceled'
+      const removedEntries: TrackedInboxEntry[] = []
+
+      for (const [key, tracked] of trackedInbox) {
+        if (tracked.target !== target) continue
+        if (tracked.index >= start && tracked.index < start + removedCount) {
+          trackedInbox.delete(key)
+          removedEntries.push(tracked)
+        } else if (tracked.index >= start + removedCount) {
+          tracked.index += inserted.length - removedCount
+        }
+      }
+      removedEntries.sort((left, right) => left.index - right.index)
+      for (const removed of removedEntries) {
+        const id = nonEmptyId(removed.message.id)
+        const rpcId = nonEmptyId(removed.message.source?.rpcId)
+        if (canceled) {
+          if (id !== undefined) canceledByTarget[target].ids.add(id)
+          if (rpcId !== undefined) canceledByTarget[target].rpcIds.add(rpcId)
+          claimedInFlight.delete(removed.key)
+        } else {
+          claimedInFlight.set(removed.key, { key: removed.key, claimedAtSeq: seq, message: removed.message })
+        }
+      }
+
+      for (const [offset, raw] of inserted.entries()) {
+        if (raw === null || typeof raw !== 'object') continue
+        const message = raw as ChatMessagePayload
+        if (message.source?.kind !== 'user') continue
+        const id = nonEmptyId(message.id)
+        const rpcId = nonEmptyId(message.source.rpcId)
+        if (id !== undefined) canceledByTarget[target].ids.delete(id)
+        if (rpcId !== undefined) canceledByTarget[target].rpcIds.delete(rpcId)
+        const key = id ?? rpcId ?? `splice:${seq}:${offset}`
+        claimedInFlight.delete(key)
+        trackedInbox.set(key, { key, target, index: start + offset, message })
+      }
+      continue
+    }
+
+    if (CLAIM_EXPIRY_EVENT_TYPES.has(event.type) && (event.type !== 'assistant/message' || isAppendOrigin(event))) {
+      for (const [key, claimed] of claimedInFlight) {
+        if (claimed.claimedAtSeq < seq) claimedInFlight.delete(key)
+      }
+    }
+  }
+
+  const transcript: PendingChatUserMessage[] = []
+  const queued: PendingChatUserMessage[] = []
+  const transcriptMessageIds = new Set<string>()
+  const transcriptRpcIds = new Set<string>()
+  const queuedRpcIds = new Set<string>()
+  const seenMessageIds = new Set<string>()
+
+  // 1a. Durable prompts already claimed from the Host inbox by the active turn/step,
+  //     awaiting `user/message` admission after `preStep` / `prepareRequest`.
+  for (const claimed of claimedInFlight.values()) {
+    const id = nonEmptyId(claimed.message.id)
+    const rpcId = nonEmptyId(claimed.message.source?.rpcId)
+    if (id !== undefined && (admittedMessageIds.has(id) || transcriptMessageIds.has(id))) continue
+    if (rpcId !== undefined && (admittedRpcIds.has(rpcId) || transcriptRpcIds.has(rpcId))) continue
+    const text = messageText(claimed.message)
+    if (text === '') continue
+    if (id !== undefined) transcriptMessageIds.add(id)
+    if (rpcId !== undefined) transcriptRpcIds.add(rpcId)
+    transcript.push({ key: `claimed:${id ?? rpcId ?? claimed.key}`, text, queued: false })
+  }
+
+  // 1b. Transcript-placed local echoes started an idle turn; keep them above thinking/streaming
+  //     even if the Host's inbox projection momentarily still holds the same rpcId.
+  for (const submission of pendingSubmissions ?? []) {
+    if (submission.placement !== undefined && submission.placement !== 'transcript') continue
+    const requestId = nonEmptyId(submission.requestId)
+    if (requestId === undefined
+      || admittedRpcIds.has(requestId)
+      || transcriptRpcIds.has(requestId)
+      || canceledByTarget['next-turn'].rpcIds.has(requestId)) {
+      continue
+    }
+    const text = pendingSubmissionText(submission)
+    if (text === '') continue
+    transcriptRpcIds.add(requestId)
+    transcript.push({ key: `pending:${requestId}`, text, queued: false })
+  }
+
+  // 2. Host-owned durable inbox projection (`next-step` steering before `next-turn` queued).
+  if (inboxSnapshot !== null && typeof inboxSnapshot === 'object') {
+    const record = inboxSnapshot as Record<string, unknown>
+    for (const bucket of ['next-step', 'next-turn'] as const) {
+      const items = record[bucket]
+      if (!Array.isArray(items)) continue
+      const canceledBucket = canceledByTarget[bucket]
+      for (const [index, raw] of items.entries()) {
+        if (raw === null || typeof raw !== 'object') continue
+        const message = raw as ChatMessagePayload
+        if (message.source?.kind !== 'user') continue
+        const id = nonEmptyId(message.id)
+        const rpcId = nonEmptyId(message.source.rpcId)
+        if (id !== undefined && (admittedMessageIds.has(id) || transcriptMessageIds.has(id) || seenMessageIds.has(id) || canceledBucket.ids.has(id))) {
+          continue
+        }
+        if (rpcId !== undefined && (admittedRpcIds.has(rpcId) || transcriptRpcIds.has(rpcId) || queuedRpcIds.has(rpcId) || canceledBucket.rpcIds.has(rpcId))) {
+          continue
+        }
+        const text = messageText(message)
+        if (text === '') continue
+        if (id !== undefined) seenMessageIds.add(id)
+        if (rpcId !== undefined) queuedRpcIds.add(rpcId)
+        const key = id !== undefined ? `inbox:${id}` : rpcId !== undefined ? `inbox:${rpcId}` : `inbox:${bucket}:${index}`
+        if (running) queued.push({ key, text, queued: true })
+        else transcript.push({ key, text, queued: false })
+      }
+    }
+  }
+
+  // 3. Queued/steering local echoes that have not yet appeared in the Host inbox projection.
+  for (const submission of pendingSubmissions ?? []) {
+    if (submission.placement === undefined || submission.placement === 'transcript') continue
+    const requestId = nonEmptyId(submission.requestId)
+    if (requestId === undefined || admittedRpcIds.has(requestId) || transcriptRpcIds.has(requestId) || queuedRpcIds.has(requestId)) {
+      continue
+    }
+    const target: InboxTarget = submission.placement === 'steering' ? 'next-step' : 'next-turn'
+    if (canceledByTarget[target].rpcIds.has(requestId)) continue
+    const text = pendingSubmissionText(submission)
+    if (text === '') continue
+    queuedRpcIds.add(requestId)
+    if (running) queued.push({ key: `pending:${requestId}`, text, queued: true })
+    else transcript.push({ key: `pending:${requestId}`, text, queued: false })
+  }
+
+  return { transcript, queued }
+}
+
 /** Text streamed by the open Assistant attempt, before its durable message settles. */
 export function streamingAssistantText(entries: readonly ChatEntry[] | undefined): string {
   if (entries === undefined) return ''
+  // ClientAssistantStream retains a successful attempt's transient rows until `step/end` (after tool calls);
+  // suppress those chunks once the durable append-origin `assistant/message` for that `(turn, step)` is present.
+  const settledSteps = new Set<string>()
+  for (const entry of entries) {
+    if (entry.type !== 'event') continue
+    const { event } = entry
+    if (event.type !== 'assistant/message' || !isAppendOrigin(event)) continue
+    if (typeof event.data?.turn === 'number' && typeof event.data?.step === 'number') {
+      settledSteps.add(`${event.data.turn}:${event.data.step}`)
+    }
+  }
   const attempts = new Map<string, string>()
   let last: string | undefined
   for (const entry of entries) {
     if (entry.type !== 'transient') continue
-    const attempt = entry.event.data?.attemptId
+    const data = entry.event.data
+    const attempt = data?.attemptId
     if (attempt === undefined) continue
+    if (typeof data?.turn === 'number' && typeof data?.step === 'number'
+      && settledSteps.has(`${data.turn}:${data.step}`)) {
+      continue
+    }
     if (!attempts.has(attempt)) attempts.set(attempt, '')
-    const chunk = entry.event.data?.chunk
+    const chunk = data?.chunk
     if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string') continue
     attempts.set(attempt, (attempts.get(attempt) ?? '') + chunk.text)
     last = attempt
@@ -503,7 +829,7 @@ export type ChatSendOutcome = Readonly<{ ok: true }> | Readonly<{ ok: false; err
  */
 export async function sendChatMessage(input: Readonly<{
   sessionId: string
-  session: Pick<ChatSessionFace, 'prompt'>
+  session: Pick<ChatSessionFace, 'prompt' | 'beginSubmission'>
   uploads?: ChatUploads | undefined
   text: string
   files?: readonly Blob[] | undefined
@@ -512,21 +838,44 @@ export async function sendChatMessage(input: Readonly<{
   if (input.text.trim() === '' && (input.files === undefined || input.files.length === 0)) {
     return { ok: false, error: '消息不能为空。' }
   }
+  let submission: ChatSubmissionHandle | undefined
   try {
     const fileParts: ChatPromptPart[] = []
+    const pendingAttachments: ChatPendingAttachment[] = []
     for (const file of input.files ?? []) {
       if (input.uploads === undefined) {
         return { ok: false, error: '当前界面未提供附件上传服务（fileUpload 未加载），无法上传附件。' }
       }
       fileParts.push(await stagedPart(input.uploads, input.sessionId, file))
+      const name = nameOf(file)
+      const mediaType = mediaTypeOf(file)
+      if (mediaType !== undefined && PROMPT_IMAGE_TYPES.has(mediaType) && input.uploads.uploadImage !== undefined) {
+        pendingAttachments.push({ type: 'image', value: { previewUrl: '', ...(name === undefined ? {} : { name }) } })
+      } else {
+        pendingAttachments.push({
+          type: 'file',
+          value: { attachmentId: '', name: name ?? '', bytes: typeof file.size === 'number' ? file.size : 0 },
+        })
+      }
     }
     const content: ChatPromptPart[] = input.text.trim() === ''
       ? fileParts
       : [{ type: 'text', text: input.text }, ...fileParts]
-    const result = await input.session.prompt(content, 'queue', input.signal)
-    if (!result.ok) return { ok: false, error: `消息未发送（${failureText(result.error)}）` }
+    submission = input.session.beginSubmission?.({
+      mode: 'queue',
+      text: input.text.trim() === '' ? '' : input.text,
+      attachments: pendingAttachments,
+    })
+    const result = submission === undefined
+      ? await input.session.prompt(content, 'queue', input.signal)
+      : await input.session.prompt(content, 'queue', input.signal, submission.requestId)
+    if (!result.ok) {
+      submission?.abandon()
+      return { ok: false, error: `消息未发送（${failureText(result.error)}）` }
+    }
     return { ok: true }
   } catch (error) {
+    submission?.abandon()
     return { ok: false, error: error instanceof Error ? boundedText(error.message) : '消息未发送，稍后重试。' }
   }
 }

@@ -1,25 +1,26 @@
-import { execFile as nodeExecFile } from 'node:child_process'
+import { execFile as nodeExecFile, spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Document, isMap, isScalar, isSeq, Scalar, YAMLMap, YAMLSeq } from 'yaml'
+import { Document, isMap, isScalar, isSeq, YAMLMap, YAMLSeq } from 'yaml'
 import {
   findEntry, hasControlChars, isAppId,
   type PluginManagerService, type SettingsDescriptor, type SettingsService,
 } from './settings.js'
 import { type CodingToolId, type CodingToolProber } from './probes.js'
 import type {
-  FeishuQrOwnerBinding, OwnerConsoleStatus, OwnerConsoleWriteResult, SetupDoctorIssue, SetupDoctorReport,
+  FeishuQrOwnerBinding, OwnerConsoleStatus, OwnerConsoleWriteResult, ProfileRestartMode, SetupDoctorIssue, SetupDoctorReport,
 } from './typert.js'
 import { detectFrozenSystemdProfile } from './upgrade-probe.js'
 import {
-  asPlainRecord, atomicWritePatchWithBackup, checkScopedDbPath, ensureConfigMap, ensurePatchRow,
-  externalPrincipalId, findPatchRow, getPatchRowConfig, getPatchRowConfigNode,
-  getPersonalAndPolicyConfigs, inspectOwnerRoute, mergeDescriptorConfig,
-  readConfigMap, readPatchDocument, resolveProfilePaths, strOrNull, upsertById,
+  asPlainRecord, atomicWritePatchWithBackup, checkScopedDbPath, createPlainNode, ensureConfigMap, ensurePatchRow,
+  ensureVerifierDefaults, externalPrincipalId, findPatchRow, getPatchRowConfig, getPatchRowConfigNode,
+  getPersonalAndPolicyConfigs, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
+  readConfigMap, readPatchDocument, resolveProfilePaths, strOrNull, upsertById, yamlNodeToJs,
   type AutonomyHostContext, type ProfilePaths,
 } from './autonomy-setup.js'
 
@@ -157,10 +158,101 @@ const LARK_APPROVAL_SOURCES = [
   'dsh-enhanced-assistant-evolution',
 ] as const
 
-function jsDshHomeScalar(relPath: string): Scalar {
-  const node = new Scalar(`dshHomePath('${relPath}')`)
-  node.tag = 'tag:yaml.org,2002:js'
-  return node
+function isAliasMangledObject(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const rec = value as Record<string, unknown>
+  const keys = Object.keys(rec)
+  return keys.length === 1 && typeof rec['source'] === 'string' && /^a\d+$/u.test(rec['source'])
+}
+
+export function hasAliasMangledPolicyRules(rules: unknown): boolean {
+  if (!Array.isArray(rules)) return false
+  return rules.some(item => {
+    const rec = asPlainRecord(item)
+    return isAliasMangledObject(rec['subject']) || isAliasMangledObject(rec['context'])
+  })
+}
+
+export function repairAliasMangledPolicyRules(rules: unknown): Readonly<{
+  rules: readonly Record<string, unknown>[]
+  repairedCount: number
+  removedCount: number
+}> {
+  if (!Array.isArray(rules)) return { rules: [], repairedCount: 0, removedCount: 0 }
+  const list = rules.map(asPlainRecord)
+  const memExtractRule = list.find(r =>
+    typeof r['id'] === 'string' && /^wizard-[^-]+-mem-extract-/u.test(r['id']) && !isAliasMangledObject(r['subject']))
+  const memSubjectTemplate = memExtractRule !== undefined ? asPlainRecord(memExtractRule['subject']) : null
+  const growthToolRule = list.find(r =>
+    typeof r['id'] === 'string' && /^wizard-[^-]+-growth-tools-/u.test(r['id']) && !isAliasMangledObject(r['subject']))
+  const agentSubjectTemplate = growthToolRule !== undefined ? asPlainRecord(growthToolRule['subject']) : null
+
+  const out: Record<string, unknown>[] = []
+  let repairedCount = 0
+  let removedCount = 0
+
+  for (const raw of list) {
+    const rule = { ...raw }
+    const id = typeof rule['id'] === 'string' ? rule['id'] : ''
+    let subjectBroken = isAliasMangledObject(rule['subject'])
+    let contextBroken = isAliasMangledObject(rule['context'])
+    if (!subjectBroken && !contextBroken) {
+      out.push(rule)
+      continue
+    }
+
+    if (contextBroken && /^wizard-[^-]+-(?:mem|usage|growth-tools|verified-workflows)-/u.test(id)) {
+      rule['context'] = { initiators: ['background'] }
+      contextBroken = false
+    }
+    if (subjectBroken && /^wizard-[^-]+-mem-(?:review|adopt|scan-reconcile|job-reconcile)-/u.test(id) && memSubjectTemplate !== null && typeof memSubjectTemplate['kind'] === 'string') {
+      rule['subject'] = { ...memSubjectTemplate }
+      subjectBroken = false
+    } else if (subjectBroken && /^wizard-[^-]+-verified-workflows-/u.test(id) && agentSubjectTemplate !== null && typeof agentSubjectTemplate['kind'] === 'string') {
+      rule['subject'] = { ...agentSubjectTemplate }
+      subjectBroken = false
+    }
+
+    if (subjectBroken || contextBroken) {
+      removedCount += 1
+      continue
+    }
+    repairedCount += 1
+    out.push(rule)
+  }
+
+  return { rules: out, repairedCount, removedCount }
+}
+
+export function hasAutonomyGrantsForOtherPrincipal(
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+  targetPrincipalId: string | undefined,
+): boolean {
+  if (targetPrincipalId === undefined || targetPrincipalId === '') return false
+  const readCfg = (rowId: string) => mergeDescriptorConfig(
+    descriptors,
+    rowId,
+    seq ? getPatchRowConfig(seq, rowId) : {},
+  )
+  const candidates: unknown[] = []
+  const memCfg = readCfg('dsh-enhanced-assistant-memory-learning')
+  candidates.push(asPlainRecord(memCfg['owner'])['principalId'])
+  const verifierCfg = readCfg('dsh-enhanced-assistant-verifier')
+  candidates.push(asPlainRecord(asPlainRecord(verifierCfg['memoryReviews'])['owner'])['principalId'])
+  const dreamCfg = readCfg('dsh-enhanced-assistant-dreaming')
+  if (dreamCfg['enabled'] === true && dreamCfg['retired'] !== true) {
+    candidates.push(asPlainRecord(dreamCfg['scope'])['principalId'])
+  }
+  const growthCfg = readCfg('dsh-enhanced-assistant-growth-driver')
+  if (growthCfg['enabled'] === true) {
+    candidates.push(asPlainRecord(growthCfg['scope'])['principalId'])
+  }
+  const layout = getPersonalAndPolicyConfigs(seq, descriptors)
+  const adoptCfg = asPlainRecord(layout.personalMemoryCfg['automaticLearning'])
+  candidates.push(asPlainRecord(adoptCfg['owner'])['principalId'])
+
+  return candidates.some(value => typeof value === 'string' && value.trim() !== '' && value.trim() !== targetPrincipalId)
 }
 
 function setMissingMapDefaults(doc: Document, target: YAMLMap, defaults: Readonly<Record<string, unknown>>): void {
@@ -176,7 +268,7 @@ function setMissingMapDefaults(doc: Document, target: YAMLMap, defaults: Readonl
       continue
     }
     if (existing === undefined) {
-      target.set(key, doc.createNode(val, { aliasDuplicateObjects: false }))
+      target.set(key, createPlainNode(doc, val))
     }
   }
 }
@@ -527,6 +619,51 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     })
   }
 
+  const verifierEnabled = isBundleEnabled(
+    '@dsh-enhanced/assistant-verifier',
+    'dsh-enhanced-assistant-verifier',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  if (verifierEnabled) {
+    const verifierPlugin = input.status.plugins.find(p => p.moduleName === '@dsh-enhanced/assistant-verifier')
+    const verifierBundle = input.status.bundles.find(b => b.name === '@dsh-enhanced/assistant-verifier')
+    const verifierPatchNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-verifier') : undefined
+    const verifierDiag = `${verifierPlugin?.diagnostic ?? ''} ${verifierBundle?.error?.diagnostic ?? ''}`
+    const verifierDbMissingInPatch = verifierPatchNode !== undefined
+      && checkScopedDbPath(verifierPatchNode.get('databasePath', true), paths.canonicalHome).display === null
+    const verifierMissingDbCrash = (verifierPlugin?.fiberPhase === 'failed' || verifierBundle?.error?.code === 'CONFIG_ERROR')
+      && /databasePath/iu.test(verifierDiag)
+    if (verifierDbMissingInPatch || verifierMissingDbCrash) {
+      coveredPackages.add('@dsh-enhanced/assistant-verifier')
+      issues.push({
+        id: 'missing-verifier-database-path',
+        severity: 'error',
+        category: 'config',
+        title: 'assistant-verifier 缺少必填 databasePath 配置',
+        detail: 'cordis.patch.yml 中的 assistant-verifier 覆盖行未保留 databasePath，导致插件加载失败（invalid config: $.databasePath missing required value）。自动修复会补齐默认 databasePath 并完整保留 memoryReviews 等评审配置，无需停用插件。',
+        autoFixable: mutatable,
+        fixLabel: '一键补齐 verifier 数据库路径',
+      })
+    }
+  }
+
+  if (seq !== undefined) {
+    const policyLayout = getPersonalAndPolicyConfigs(seq, input.descriptors)
+    if (hasAliasMangledPolicyRules(policyLayout.policyCfg['rules'])) {
+      issues.push({
+        id: 'corrupted-policy-alias-rules',
+        severity: 'error',
+        category: 'config',
+        title: 'assistantPolicy 存在损坏的 YAML 别名规则',
+        detail: '检测到 cordis.patch.yml 中部分策略规则的 subject/context 被序列化为 { source: a1 }，可能导致重启后策略校验失败。自动修复会将这些规则还原为标准平铺结构。',
+        autoFixable: mutatable,
+        fixLabel: '一键修复损坏的策略规则',
+      })
+    }
+  }
+
   const memLearningEnabled = isBundleEnabled(
     '@dsh-enhanced/assistant-memory-learning',
     'dsh-enhanced-assistant-memory-learning',
@@ -740,24 +877,24 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
 
 function mergePolicyIntoTarget(doc: Document, targetPolicy: YAMLMap, source: Readonly<Record<string, unknown>>): void {
   for (const key of ['toolDefaultEffect', 'autoReview']) {
-    if (source[key] !== undefined) targetPolicy.set(key, doc.createNode(source[key]))
+    if (source[key] !== undefined) targetPolicy.set(key, createPlainNode(doc, source[key]))
   }
   const srcRules = Array.isArray(source['rules']) ? source['rules'].map(asPlainRecord) : []
   if (srcRules.length > 0) {
     const existing = targetPolicy.get('rules', true)
-    const existingList = isSeq(existing) ? existing.toJSON() : []
-    targetPolicy.set('rules', doc.createNode(upsertById(existingList, srcRules)))
+    const existingList = isSeq(existing) ? yamlNodeToJs(existing, doc) : []
+    targetPolicy.set('rules', createPlainNode(doc, upsertById(existingList, srcRules)))
   }
   const srcBudgets = Array.isArray(source['budgets']) ? source['budgets'].map(asPlainRecord) : []
   if (srcBudgets.length > 0) {
     const existing = targetPolicy.get('budgets', true)
-    const existingList = isSeq(existing) ? existing.toJSON() : []
-    targetPolicy.set('budgets', doc.createNode(upsertById(existingList, srcBudgets)))
+    const existingList = isSeq(existing) ? yamlNodeToJs(existing, doc) : []
+    targetPolicy.set('budgets', createPlainNode(doc, upsertById(existingList, srcBudgets)))
   }
   const known = new Set(['databasePath', 'rules', 'budgets', 'toolDefaultEffect', 'autoReview'])
   for (const [k, v] of Object.entries(source)) {
     if (!known.has(k) && v !== undefined && !targetPolicy.has(k)) {
-      targetPolicy.set(k, doc.createNode(v))
+      targetPolicy.set(k, createPlainNode(doc, v))
     }
   }
 }
@@ -839,6 +976,40 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       await disableBundle('@dsh-enhanced/assistant-isolation', 'dsh-enhanced-assistant-isolation', '@dsh-enhanced/assistant-isolation')
       continue
     }
+    if (issue.id === 'missing-verifier-database-path') {
+      const verifierRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
+      verifierRow.delete('disabled')
+      const verifierCfg = ensureConfigMap(doc, verifierRow, 'config')
+      const runtimeVerifierDesc = findEntry(input.descriptors, candidate => candidate === 'dsh-enhanced-assistant-verifier')
+      ensureVerifierDefaults(doc, verifierCfg, runtimeVerifierDesc ? asPlainRecord(runtimeVerifierDesc.value) : undefined)
+      patchDirty = true
+      notes.push('已补齐 assistant-verifier 缺失的 databasePath 与默认配置')
+      needsRestart = true
+      continue
+    }
+    if (issue.id === 'corrupted-policy-alias-rules') {
+      const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
+      let policyConfigNode: YAMLMap
+      if (layoutInfo.layout === 'split') {
+        const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+        policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
+        if (!policyConfigNode.has('databasePath')) policyConfigNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
+      } else {
+        const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+        const paCfg = ensureConfigMap(doc, paRow, 'config')
+        setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
+        policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
+      }
+      const rawRules = isSeq(policyConfigNode.get('rules', true))
+        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
+        : layoutInfo.policyCfg['rules']
+      const repaired = repairAliasMangledPolicyRules(rawRules)
+      policyConfigNode.set('rules', createPlainNode(doc, repaired.rules))
+      patchDirty = true
+      notes.push(`已修复 ${repaired.repairedCount} 条损坏的策略规则${repaired.removedCount > 0 ? `并清理 ${repaired.removedCount} 条不可恢复条目` : ''}`)
+      needsRestart = true
+      continue
+    }
     if (issue.id === 'unconfigured-memory-learning-crash') {
       await disableBundle('@dsh-enhanced/assistant-memory-learning', 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
       continue
@@ -864,7 +1035,7 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
           mergePolicyIntoTarget(doc, sectionMap, mergedSplit)
         } else {
           for (const [k, v] of Object.entries(patchSplit)) {
-            if (v !== undefined) sectionMap.set(k, doc.createNode(v))
+            if (v !== undefined) sectionMap.set(k, createPlainNode(doc, v))
           }
         }
         bundleUpdates[spec.pkg] = false
@@ -904,7 +1075,11 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       const mergedDelivery = mergeDescriptorConfig(input.descriptors, 'dsh-enhanced-assistant-delivery', getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery'))
       const scopedDb = checkScopedDbPath(deliveryCfgMap.get('databasePath', true) ?? mergedDelivery['databasePath'], paths.canonicalHome)
       const deliveryDbPath = scopedDb.resolved ?? join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite')
-      const defaultWorkspace = strOrNull(mergedDelivery['defaultWorkspace']) ?? join(paths.canonicalHome, 'assistant-workspace')
+      const defaultWorkspace = resolveDeliveryWorkspacePath(
+        deliveryCfgMap.get('defaultWorkspace', true),
+        mergedDelivery['defaultWorkspace'],
+        paths.canonicalHome,
+      )
       const defaultPreset = strOrNull(mergedDelivery['defaultAgentPreset']) ?? 'standard'
       mkdirSync(defaultWorkspace, { recursive: true, mode: 0o755 })
 
@@ -941,7 +1116,7 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
         } else if (ch === 'web') {
           ownerConversation = { channel: 'web', account: acc, tenant: ten, kind: 'dm', chat: 'owner-primary' }
         }
-        routeWorkspace = active.workspace ?? defaultWorkspace
+        routeWorkspace = active.workspace !== null && isAbsolute(active.workspace) ? active.workspace : defaultWorkspace
         routePreset = active.preset ?? defaultPreset
         routePolicyRef = active.policyRef ?? 'owner-dm'
         routeGeneration = active.generation
@@ -959,16 +1134,17 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
         policyRef: routePolicyRef,
         minimumGeneration: routeGeneration,
       }
-      const existingRoutes = isSeq(deliveryCfgMap.get('ownerRoutes', true)) ? deliveryCfgMap.get('ownerRoutes', true)!.toJSON() : []
-      deliveryCfgMap.set('ownerRoutes', doc.createNode(upsertById(existingRoutes, [ownerRoute])))
-      deliveryCfgMap.set('defaultWorkspace', doc.createNode(routeWorkspace))
-      deliveryCfgMap.set('defaultAgentPreset', doc.createNode(routePreset))
+      const existingRoutes = isSeq(deliveryCfgMap.get('ownerRoutes', true)) ? yamlNodeToJs(deliveryCfgMap.get('ownerRoutes', true), doc) : []
+      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, upsertById(existingRoutes, [ownerRoute])))
+      deliveryCfgMap.set('defaultWorkspace', createPlainNode(doc, routeWorkspace))
+      deliveryCfgMap.set('defaultAgentPreset', createPlainNode(doc, routePreset))
 
       const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
       let policyConfigNode: YAMLMap
       if (layoutInfo.layout === 'split') {
         const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
         policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
+        if (!policyConfigNode.has('databasePath')) policyConfigNode.set('databasePath', jsDshHomeScalar('assistant-policy/policy.sqlite'))
       } else {
         const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
         const paCfg = ensureConfigMap(doc, paRow, 'config')
@@ -1006,21 +1182,21 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
           },
         )
       }
-      const existingRules = isSeq(policyConfigNode.get('rules', true)) ? policyConfigNode.get('rules', true)!.toJSON() : layoutInfo.policyCfg['rules']
-      policyConfigNode.set('rules', doc.createNode(upsertById(existingRules, requiredRules)))
+      const existingRules = isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : layoutInfo.policyCfg['rules']
+      policyConfigNode.set('rules', createPlainNode(doc, upsertById(existingRules, requiredRules)))
 
       const manifestBundles = readProfileManifestBundles(paths.profileDir)
       if (routeChannel === 'web' && isBundleInstalled('@dsh-enhanced/assistant-web-owner', 'dsh-enhanced-assistant-web-owner', manifestBundles, input.status.bundles, seq)) {
         const webRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner')
         const webCfg = ensureConfigMap(doc, webRow, 'config')
-        webCfg.set('principal', doc.createNode({
+        webCfg.set('principal', createPlainNode(doc, {
           account: strOrNull(ownerPrincipal['account']) ?? paths.profileName,
           tenant: strOrNull(ownerPrincipal['tenant']) ?? 'local',
           user: strOrNull(ownerPrincipal['user']) ?? 'operator',
         }))
-        webCfg.set('workspace', doc.createNode(routeWorkspace))
-        webCfg.set('preset', doc.createNode(routePreset))
-        if (!webCfg.has('maxExecutionMs')) webCfg.set('maxExecutionMs', doc.createNode(300_000))
+        webCfg.set('workspace', createPlainNode(doc, routeWorkspace))
+        webCfg.set('preset', createPlainNode(doc, routePreset))
+        if (!webCfg.has('maxExecutionMs')) webCfg.set('maxExecutionMs', createPlainNode(doc, 300_000))
       }
 
       patchDirty = true
@@ -1256,6 +1432,9 @@ export interface ConfigureFeishuEasyInput {
 export interface ApplyFeishuVaultResult extends OwnerConsoleWriteResult {
   readonly ownerBinding: FeishuQrOwnerBinding
   readonly domain: 'feishu' | 'lark'
+  readonly account?: string
+  readonly tenant?: string
+  readonly existingAutonomyAnchored?: boolean
 }
 
 function authorizeLarkPrincipalInDeliverySqlite(
@@ -1661,6 +1840,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
   const handleId = `lark-app-secret-${resolvedAccount}`
   let deliveryDbPath: string | undefined
   let validOpenId: string | undefined
+  let existingAutonomyAnchored = false
   try {
     const handleEntry = {
       id: handleId,
@@ -1681,10 +1861,10 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       ? asPlainRecord(kcDesc?.value)['handles']
       : []
     const existingHandles = isSeq(kcCfg.get('handles', true))
-      ? kcCfg.get('handles', true)!.toJSON()
+      ? yamlNodeToJs(kcCfg.get('handles', true), doc)
       : runtimeKcHandles
     setMissingMapDefaults(doc, kcCfg, CREDENTIALS_KEYCHAIN_DEFAULTS)
-    kcCfg.set('handles', doc.createNode(upsertById(existingHandles, [handleEntry]), { aliasDuplicateObjects: false }))
+    kcCfg.set('handles', createPlainNode(doc, upsertById(existingHandles, [handleEntry])))
 
     const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
     const hasPaRowOrDesc = findPatchRow(seq, 'dsh-enhanced-personal-assistant') !== undefined
@@ -1692,7 +1872,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
     const splitPolicyDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-policy')
     const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitPolicyDesc !== undefined)
     const effectivePolicyCfg = useSplitPolicy
-      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-policy') }
+      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-policy', doc) }
       : layoutInfo.policyCfg
 
     let policyConfigNode: YAMLMap
@@ -1701,7 +1881,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
       policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
       existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
-        ? policyConfigNode.get('rules', true)!.toJSON()
+        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
         : effectivePolicyCfg['rules']
       // Cordis patch config is a whole-value replacement: restate required databasePath and surviving split-policy keys.
       const splitPolicyDefaults: Record<string, unknown> = {
@@ -1717,7 +1897,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       const paCfg = ensureConfigMap(doc, paRow, 'config')
       const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
       existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
-        ? existingPolicyNode!.get('rules', true)!.toJSON()
+        ? yamlNodeToJs(existingPolicyNode!.get('rules', true), doc)
         : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
             ? effectivePolicyCfg['rules']
             : undefined)
@@ -1726,7 +1906,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
     }
 
     const existingRules = existingRulesBeforeDefaults
-      ?? (isSeq(policyConfigNode.get('rules', true)) ? policyConfigNode.get('rules', true)!.toJSON() : effectivePolicyCfg['rules'])
+      ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
 
     const rawOpenId = input.ownerOpenId?.trim() ?? ''
     validOpenId = rawOpenId !== '' && LARK_OPEN_ID_TOKEN.test(rawOpenId) ? rawOpenId : undefined
@@ -1741,12 +1921,13 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       },
     ]
 
+    let resolvedPrincipalKey: string | undefined
     if (validOpenId !== undefined) {
       const deliveryDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-delivery')
       const runtimeDelivery = asPlainRecord(deliveryDesc?.value)
       const mergedDelivery = {
         ...runtimeDelivery,
-        ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery'),
+        ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery', doc),
       }
       const deliveryPatchCfg = findPatchRow(seq, 'dsh-enhanced-assistant-delivery')
       const deliveryCfgNode = deliveryPatchCfg ? readConfigMap(deliveryPatchCfg, 'config') : undefined
@@ -1771,6 +1952,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
         user: validOpenId,
       })
       if (principalKey !== null) {
+        resolvedPrincipalKey = principalKey
         policyRulesToUpsert.push(...buildLarkOwnerPolicyRules({
           account: resolvedAccount,
           principalId: principalKey,
@@ -1781,25 +1963,26 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       }
     }
 
-    policyConfigNode.set('rules', doc.createNode(upsertById(existingRules, policyRulesToUpsert), { aliasDuplicateObjects: false }))
+    policyConfigNode.set('rules', createPlainNode(doc, upsertById(existingRules, policyRulesToUpsert)))
 
     const larkRow = ensurePatchRow(doc, seq, 'dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel')
     if (larkRow.get('disabled') === true) larkRow.delete('disabled')
     const larkCfg = ensureConfigMap(doc, larkRow, 'config')
-    larkCfg.set('enabled', doc.createNode(true))
-    larkCfg.set('appId', doc.createNode(resolvedAppId))
-    larkCfg.set('account', doc.createNode(resolvedAccount))
-    larkCfg.set('tenant', doc.createNode(resolvedTenant))
-    larkCfg.set('secretSource', doc.createNode('handle'))
-    larkCfg.set('credentialHandle', doc.createNode(handleId))
-    larkCfg.set('credentialPurpose', doc.createNode('connect'))
-    larkCfg.set('credentialLeaseMs', doc.createNode(86_400_000))
+    larkCfg.set('enabled', createPlainNode(doc, true))
+    larkCfg.set('appId', createPlainNode(doc, resolvedAppId))
+    larkCfg.set('account', createPlainNode(doc, resolvedAccount))
+    larkCfg.set('tenant', createPlainNode(doc, resolvedTenant))
+    larkCfg.set('secretSource', createPlainNode(doc, 'handle'))
+    larkCfg.set('credentialHandle', createPlainNode(doc, handleId))
+    larkCfg.set('credentialPurpose', createPlainNode(doc, 'connect'))
+    larkCfg.set('credentialLeaseMs', createPlainNode(doc, 86_400_000))
     if (input.domain !== undefined || !larkCfg.has('domain')) {
-      larkCfg.set('domain', doc.createNode(effectiveDomain))
+      larkCfg.set('domain', createPlainNode(doc, effectiveDomain))
     }
     larkCfg.delete('appSecretEnv')
 
     atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), now)
+    existingAutonomyAnchored = hasAutonomyGrantsForOtherPrincipal(seq, input.descriptors, resolvedPrincipalKey)
   } catch (error: unknown) {
     let rollbackFailed = false
     if (deleteFn !== undefined) {
@@ -1819,6 +2002,8 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       applied: false,
       entry: larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
       domain: effectiveDomain,
+      account: resolvedAccount,
+      tenant: resolvedTenant,
       ownerBinding: 'unmodified' as const,
       note: `写入 profile 配置（cordis.patch.yml）失败：${safeDetail}${cleanupNote}。`,
     })
@@ -1840,7 +2025,10 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
     applied: true,
     entry: larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
     domain: effectiveDomain,
+    account: resolvedAccount,
+    tenant: resolvedTenant,
     ownerBinding,
+    existingAutonomyAnchored,
     note: `已将 App Secret 安全存入系统凭据库（句柄 ${handleId}，配置文件零明文），并写入通道与凭据/消息策略配置${bindingSummary === '' ? '' : `；${bindingSummary}`}；请重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）以加载新凭据句柄与策略并建立飞书长连接。`,
   })
 }
@@ -1851,5 +2039,746 @@ export async function configureFeishuEasy(input: ConfigureFeishuEasyInput): Prom
     applied: result.applied,
     entry: result.entry,
     note: result.note,
+  })
+}
+
+export interface PromoteLarkOwnerInput {
+  readonly host: AutonomyHostContext
+  readonly descriptors: readonly SettingsDescriptor[]
+  readonly openId: string
+  readonly account: string
+  readonly tenant: string
+  readonly confirmed: boolean
+  readonly platform?: NodeJS.Platform
+  readonly env?: NodeJS.ProcessEnv
+  readonly now?: number
+}
+
+export interface PromoteLarkOwnerResult {
+  readonly applied: boolean
+  readonly ownerBinding: FeishuQrOwnerBinding
+  readonly existingAutonomyAnchored: boolean
+  readonly errorCode?: string
+  readonly note: string
+}
+
+/**
+ * Atomic trusted local owner handoff matching `@dsh-enhanced/assistant-delivery` `DeliveryStore.handoffOwner`:
+ * promotes the scanned Lark principal to the sole active `owner`, retires previous active owners and
+ * unrelated linked identities + their conversation bindings, expires active pairing challenges, and retires
+ * stale preference projection outbox rows so old owner lineage cannot resurface.
+ */
+function handoffLarkOwnerInDeliverySqlite(
+  dbPath: string,
+  principal: Readonly<{ channel: 'lark'; account: string; tenant: string; user: string }>,
+  now: number,
+): Readonly<{ ok: true; reused: boolean } | { ok: false; code: string; reason: string }> {
+  if (!existsSync(dbPath)) {
+    return { ok: false, code: 'delivery-db-missing', reason: 'Delivery 身份数据库尚未初始化，请先重启一次 profile 待数据库创建后再切换主主人。' }
+  }
+  let rwDb: DatabaseSync | undefined
+  let inTx = false
+  try {
+    const st = lstatSync(dbPath)
+    if (st.isSymbolicLink() || !st.isFile()) {
+      return { ok: false, code: 'delivery-db-unsafe', reason: 'Delivery 数据库路径不是受控普通文件，拒绝改写主主人身份。' }
+    }
+    const json = JSON.stringify({
+      channel: principal.channel,
+      account: principal.account,
+      tenant: principal.tenant,
+      user: principal.user,
+    })
+    const hash = createHash('sha256').update(json, 'utf8').digest('hex')
+    const ts = Math.max(0, Math.trunc(now))
+
+    rwDb = new DatabaseSync(dbPath)
+    rwDb.exec('PRAGMA busy_timeout = 5000;')
+    rwDb.exec('PRAGMA foreign_keys = ON;')
+    const hasTable = (name: string): boolean => {
+      const row = rwDb!.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name) as { name?: unknown } | undefined
+      return row?.name === name
+    }
+    if (!hasTable('delivery_principals')) {
+      return { ok: false, code: 'delivery-schema-missing', reason: 'Delivery 身份表尚未初始化，请先重启一次 profile 后再重试。' }
+    }
+    const hasBindings = hasTable('conversation_bindings')
+    const hasChallenges = hasTable('pairing_challenges')
+    const hasOutbox = hasTable('delivery_preference_projection_outbox')
+
+    rwDb.exec('BEGIN IMMEDIATE;')
+    inTx = true
+
+    const existing = rwDb.prepare(
+      `SELECT id, role, status, linked_to_id, version, principal_json FROM delivery_principals WHERE key_hash = ? AND principal_json = ?`,
+    ).get(hash, json) as Readonly<{
+      id?: unknown
+      role?: unknown
+      status?: unknown
+      linked_to_id?: unknown
+      version?: unknown
+      principal_json?: unknown
+    }> | undefined
+    const activeOwners = rwDb.prepare(
+      `SELECT id FROM delivery_principals WHERE role = 'owner' AND status = 'active'`,
+    ).all() as ReadonlyArray<{ id?: unknown }>
+
+    let replacementId: string
+    let reused = false
+    if (existing === undefined || typeof existing.id !== 'string') {
+      replacementId = `principal_${randomUUID()}`
+      rwDb.prepare(
+        `INSERT INTO delivery_principals (id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version)
+         VALUES (?, ?, ?, 'owner', 'active', NULL, ?, ?, 1)`,
+      ).run(replacementId, hash, json, ts, ts)
+    } else {
+      replacementId = existing.id
+      if (existing.role === 'owner' && existing.status === 'active' && existing.linked_to_id === null && activeOwners.length === 1) {
+        reused = true
+      } else {
+        rwDb.prepare(
+          `UPDATE delivery_principals SET role = 'owner', status = 'active', linked_to_id = NULL, updated_at = ?, version = version + 1 WHERE id = ?`,
+        ).run(ts, replacementId)
+      }
+    }
+
+    if (hasBindings) {
+      rwDb.prepare(
+        `UPDATE conversation_bindings
+         SET status = 'revoked', updated_at = ?, version = version + 1
+         WHERE status = 'active' AND principal_id IN (
+           SELECT id FROM delivery_principals
+           WHERE role = 'linked' AND status = 'active' AND id <> ?
+             AND (linked_to_id IS NULL OR linked_to_id <> ?)
+         )`,
+      ).run(ts, replacementId, replacementId)
+    }
+    rwDb.prepare(
+      `UPDATE delivery_principals
+       SET status = 'revoked', updated_at = ?, version = version + 1
+       WHERE role = 'linked' AND status = 'active' AND id <> ?
+         AND (linked_to_id IS NULL OR linked_to_id <> ?)`,
+    ).run(ts, replacementId, replacementId)
+
+    for (const owner of activeOwners) {
+      if (typeof owner.id !== 'string' || owner.id === replacementId) continue
+      rwDb.prepare(
+        `UPDATE delivery_principals SET status = 'revoked', updated_at = ?, version = version + 1 WHERE id = ? AND role = 'owner' AND status = 'active'`,
+      ).run(ts, owner.id)
+      if (hasBindings) {
+        rwDb.prepare(
+          `UPDATE conversation_bindings SET status = 'revoked', updated_at = ?, version = version + 1 WHERE principal_id = ? AND status = 'active'`,
+        ).run(ts, owner.id)
+      }
+    }
+
+    if (hasChallenges) {
+      rwDb.prepare(`UPDATE pairing_challenges SET status = 'expired', updated_at = ? WHERE status = 'active'`).run(ts)
+    }
+
+    const finalRow = rwDb.prepare(`SELECT id, version FROM delivery_principals WHERE id = ?`).get(replacementId) as { id?: unknown; version?: unknown } | undefined
+    if (hasOutbox && typeof finalRow?.id === 'string' && typeof finalRow?.version === 'number') {
+      rwDb.prepare(
+        `UPDATE delivery_preference_projection_outbox
+         SET terminal_at = ?, failure_code = 'owner-lineage-retired',
+           next_attempt_at = 9007199254740991, updated_at = ?
+         WHERE terminal_at IS NULL AND status IN ('pending', 'retry_wait')
+           AND NOT (
+             lane_kind = 'exact'
+             AND lane_principal_record_id = ?
+             AND lane_principal_version = ?
+           )`,
+      ).run(ts, ts, finalRow.id, finalRow.version)
+    }
+
+    rwDb.exec('COMMIT;')
+    inTx = false
+    return { ok: true, reused }
+  } catch (error: unknown) {
+    if (rwDb !== undefined && inTx) {
+      try { rwDb.exec('ROLLBACK;') } catch { /* ignore rollback error */ }
+    }
+    return {
+      ok: false,
+      code: 'delivery-handoff-failed',
+      reason: `更新 Delivery 主主人身份失败：${error instanceof Error ? error.message : String(error)}`,
+    }
+  } finally {
+    rwDb?.close()
+  }
+}
+
+/** Explicit owner-confirmed promotion of the scanned Feishu/Lark account to primary owner. */
+export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): Promise<PromoteLarkOwnerResult> {
+  const platform = input.platform ?? process.platform
+  const env = input.env ?? process.env
+  const now = input.now ?? Date.now()
+  if (input.confirmed !== true) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'confirmation-required',
+      note: '切换飞书主主人需要明确确认后才能执行。',
+    })
+  }
+  const paths = resolveProfilePaths(input.host, env)
+  if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, platform, env)) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'frozen-profile',
+      note: '当前为受控 Linux systemd 冻结实例，拒绝在线切换主主人身份。',
+    })
+  }
+  if (!paths.writable || paths.patchPath === null || paths.canonicalHome === null) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'unwritable-profile',
+      note: '当前 profile 不可写入，无法切换飞书主主人身份。',
+    })
+  }
+  const cleanOpenId = input.openId.trim()
+  const cleanAccount = input.account.trim() || 'primary'
+  const cleanTenant = input.tenant.trim() || 'personal'
+  if (cleanOpenId === '' || !LARK_OPEN_ID_TOKEN.test(cleanOpenId)) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'not-returned',
+      existingAutonomyAnchored: false,
+      errorCode: 'invalid-open-id',
+      note: '缺少有效的飞书扫码账号 open_id，无法一键设为主主人。',
+    })
+  }
+  if (!SETUP_KEY_TOKEN.test(cleanAccount) || cleanAccount.includes('-legacy-') || !SETUP_KEY_TOKEN.test(cleanTenant)) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'invalid-identity-scope',
+      note: '飞书 account/tenant 格式无效，拒绝切换主主人身份。',
+    })
+  }
+
+  let doc: Document
+  try {
+    doc = readPatchDocument(paths.patchPath)
+  } catch (error: unknown) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'patch-read-failed',
+      note: `读取 cordis.patch.yml 失败：${error instanceof Error ? error.message : String(error)}`,
+    })
+  }
+  const seq = doc.contents as YAMLSeq
+  const deliveryDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-delivery')
+  const runtimeDelivery = asPlainRecord(deliveryDesc?.value)
+  const mergedDelivery = {
+    ...runtimeDelivery,
+    ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery', doc),
+  }
+  const deliveryPatchRow = findPatchRow(seq, 'dsh-enhanced-assistant-delivery')
+  const deliveryCfgNode = deliveryPatchRow ? readConfigMap(deliveryPatchRow, 'config') : undefined
+  const scopedDb = checkScopedDbPath(
+    deliveryCfgNode?.get('databasePath', true) ?? mergedDelivery['databasePath'],
+    paths.canonicalHome,
+  )
+  const deliveryDbPath = scopedDb.scoped && scopedDb.resolved !== null
+    ? scopedDb.resolved
+    : join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite')
+  const defaultWorkspace = resolveDeliveryWorkspacePath(
+    deliveryCfgNode?.get('defaultWorkspace', true),
+    runtimeDelivery['defaultWorkspace'],
+    paths.canonicalHome,
+  )
+  const rawPreset = strOrNull(mergedDelivery['defaultAgentPreset'])
+  const defaultPreset = rawPreset !== null && PRESET_ID_TOKEN.test(rawPreset) ? rawPreset : 'standard'
+
+  const principalKey = externalPrincipalId({
+    channel: 'lark',
+    account: cleanAccount,
+    tenant: cleanTenant,
+    user: cleanOpenId,
+  })
+  if (principalKey === null) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: false,
+      errorCode: 'invalid-principal',
+      note: '无法构造有效的飞书主身份标识。',
+    })
+  }
+
+  const handoff = handoffLarkOwnerInDeliverySqlite(deliveryDbPath, {
+    channel: 'lark',
+    account: cleanAccount,
+    tenant: cleanTenant,
+    user: cleanOpenId,
+  }, now)
+  if (!handoff.ok) {
+    return Object.freeze({
+      applied: false,
+      ownerBinding: 'unmodified',
+      existingAutonomyAnchored: hasAutonomyGrantsForOtherPrincipal(seq, input.descriptors, principalKey),
+      errorCode: handoff.code,
+      note: handoff.reason,
+    })
+  }
+
+  // Ensure policy rules exist for the newly promoted primary owner without disturbing existing custom rules.
+  // If the promoted owner already has an active DM binding in SQLite, also synchronize `ownerRoutes` now.
+  let ownerRouteSynced = false
+  let hasStaleOwnerRoute = false
+  try {
+    const sqliteAfterHandoff = readDeliverySqliteSnapshot(deliveryDbPath)
+    const promotedActive = sqliteAfterHandoff.activeOwner !== null
+      && sqliteAfterHandoff.activeOwner.principalKey === principalKey
+      ? sqliteAfterHandoff.activeOwner
+      : null
+    const routeId = `owner-lark-${cleanAccount}`
+    const extraPolicyRules: Record<string, unknown>[] = []
+
+    const existingRoutesRaw = Array.isArray(mergedDelivery['ownerRoutes']) ? mergedDelivery['ownerRoutes'] : []
+    hasStaleOwnerRoute = existingRoutesRaw.some(item => {
+      const rec = asPlainRecord(item)
+      const pKey = externalPrincipalId(asPlainRecord(rec['principal']))
+      return pKey !== null && pKey !== principalKey
+    })
+
+    if (promotedActive?.conversation !== null && promotedActive?.conversation !== undefined) {
+      const deliveryRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery')
+      const deliveryCfgMap = ensureConfigMap(doc, deliveryRow, 'config')
+      setMissingMapDefaults(doc, deliveryCfgMap, ASSISTANT_DELIVERY_DEFAULTS)
+      const routeWorkspace = promotedActive.workspace !== null && isAbsolute(promotedActive.workspace)
+        ? promotedActive.workspace
+        : defaultWorkspace
+      const routePreset = promotedActive.preset ?? defaultPreset
+      const ownerRoute = {
+        id: routeId,
+        conversation: promotedActive.conversation,
+        principal: { channel: 'lark', account: cleanAccount, tenant: cleanTenant, user: cleanOpenId },
+        workspace: routeWorkspace,
+        agentPreset: routePreset,
+        policyRef: promotedActive.policyRef ?? 'owner-dm',
+        minimumGeneration: promotedActive.generation,
+      }
+      const existingRoutes = isSeq(deliveryCfgMap.get('ownerRoutes', true))
+        ? yamlNodeToJs(deliveryCfgMap.get('ownerRoutes', true), doc)
+        : existingRoutesRaw
+      deliveryCfgMap.set('ownerRoutes', createPlainNode(doc, upsertById(existingRoutes, [ownerRoute])))
+      extraPolicyRules.push({
+        id: `dsh-enhanced-owner-route-${routeId}`,
+        effect: 'allow',
+        subject: { kind: 'background', id: '*', workspace: routeWorkspace, principal: principalKey },
+        actions: ['send'],
+        resource: { kind: 'message', id: `route:${routeId}` },
+        context: { initiators: ['background'] },
+      })
+      ownerRouteSynced = true
+      hasStaleOwnerRoute = false
+    }
+
+    const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
+    const hasPaRowOrDesc = findPatchRow(seq, 'dsh-enhanced-personal-assistant') !== undefined
+      || findEntry(input.descriptors, ns => ns === 'dsh-enhanced-personal-assistant') !== undefined
+    const splitPolicyDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-policy')
+    const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitPolicyDesc !== undefined)
+    const effectivePolicyCfg = useSplitPolicy
+      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-policy', doc) }
+      : layoutInfo.policyCfg
+
+    let policyConfigNode: YAMLMap
+    let existingRulesBeforeDefaults: unknown
+    if (useSplitPolicy) {
+      const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+      policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
+      existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
+        ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
+        : effectivePolicyCfg['rules']
+      const splitPolicyDefaults: Record<string, unknown> = {
+        databasePath: jsRef('assistant-policy/policy.sqlite'),
+        budgets: Array.isArray(effectivePolicyCfg['budgets']) ? effectivePolicyCfg['budgets'] : [],
+      }
+      for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
+        if (effectivePolicyCfg[key] !== undefined) splitPolicyDefaults[key] = effectivePolicyCfg[key]
+      }
+      setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
+    } else {
+      const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+      const paCfg = ensureConfigMap(doc, paRow, 'config')
+      const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
+      existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
+        ? yamlNodeToJs(existingPolicyNode!.get('rules', true), doc)
+        : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
+            ? effectivePolicyCfg['rules']
+            : undefined)
+      setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
+      policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
+    }
+
+    const existingRules = existingRulesBeforeDefaults
+      ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
+    const ownerRules = [
+      ...buildLarkOwnerPolicyRules({
+        account: cleanAccount,
+        principalId: principalKey,
+        workspace: defaultWorkspace,
+        preset: defaultPreset,
+        existingRules,
+      }),
+      ...extraPolicyRules,
+    ]
+    policyConfigNode.set('rules', createPlainNode(doc, upsertById(existingRules, ownerRules)))
+    atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), now)
+  } catch (error: unknown) {
+    return Object.freeze({
+      applied: true,
+      ownerBinding: handoff.reused ? 'reused-owner' : 'bound-owner',
+      existingAutonomyAnchored: hasAutonomyGrantsForOtherPrincipal(seq, input.descriptors, principalKey),
+      note: `已在 Delivery 中将 ${cleanOpenId} 设为飞书主主人，但同步策略文件失败（${error instanceof Error ? error.message : String(error)}）；请检查 cordis.patch.yml 并重启 profile。`,
+    })
+  }
+
+  const autonomyAnchoredElsewhere = hasAutonomyGrantsForOtherPrincipal(seq, input.descriptors, principalKey)
+  const autonomyNote = autonomyAnchoredElsewhere
+    ? (ownerRouteSynced
+        ? '；已同步更新 ownerRoutes，检测到既有自主授权仍锚定旧主人，重启后在「自主能力向导」重新保存一次即可更新锚定'
+        : '；检测到既有自主授权仍锚定旧主人，重启并在飞书给机器人发一句「你好」建立私聊会话后，在「自主能力向导」先点「一键初始化/修复前置项」同步路由再重新保存即可更新锚定')
+    : hasStaleOwnerRoute
+      ? '；重启并在飞书给机器人发一句「你好」后，如需主动汇报可在「系统体检」点击「一键绑定现有 Owner 主路由」'
+      : ''
+  return Object.freeze({
+    applied: true,
+    ownerBinding: handoff.reused ? 'reused-owner' : 'bound-owner',
+    existingAutonomyAnchored: autonomyAnchoredElsewhere,
+    note: `已将飞书账号 ${cleanOpenId} 设为本 profile 主主人（支持 /permission、/model 与审批卡片）${autonomyNote}；下一步请重启 profile 生效。`,
+  })
+}
+
+export interface ProfileRestartSupport {
+  readonly supported: boolean
+  readonly mode: ProfileRestartMode
+  readonly command: string
+  readonly targetLabel?: string
+  readonly appPath?: string
+}
+
+export interface InspectProfileRestartInput {
+  readonly host: AutonomyHostContext
+  readonly platform?: NodeJS.Platform
+  readonly env?: NodeJS.ProcessEnv
+  readonly home?: string
+  readonly execPath?: string
+  readonly argv?: readonly string[]
+}
+
+const MACOS_DESKTOP_BUNDLE_ID = 'com.deepseek.dsh'
+
+function findMacosDesktopAppPath(home: string, execPath: string, argv: readonly string[]): string | undefined {
+  for (const candidate of [execPath, ...argv]) {
+    const idx = candidate.indexOf('/DeepSeek Harness.app/')
+    if (idx >= 0) {
+      const appPath = candidate.slice(0, idx + '/DeepSeek Harness.app'.length)
+      if (isAbsolute(appPath)) return appPath
+    }
+  }
+  for (const appPath of ['/Applications/DeepSeek Harness.app', join(home, 'Applications', 'DeepSeek Harness.app')]) {
+    try {
+      const st = lstatSync(appPath)
+      if (st.isDirectory() && !st.isSymbolicLink()) return appPath
+    } catch {
+      // Not installed in this location.
+    }
+  }
+  return undefined
+}
+
+export function inspectProfileRestartSupport(input: InspectProfileRestartInput): ProfileRestartSupport {
+  const platform = input.platform ?? process.platform
+  const env = input.env ?? process.env
+  const home = input.home ?? homedir()
+  const execPath = input.execPath ?? process.execPath
+  const argv = input.argv ?? process.argv
+  const paths = resolveProfilePaths(input.host, env)
+  const manualCommand = paths.dshHome !== null
+    ? `DSH_HOME=${JSON.stringify(paths.dshHome)} dsh --profile ${paths.profileName}`
+    : `dsh --profile ${paths.profileName}`
+
+  if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, platform, env)) {
+    const unit = `dsh-profile-${paths.profileName}.service`
+    return Object.freeze({
+      supported: false,
+      mode: 'manual',
+      command: `systemctl --user restart ${unit}`,
+    })
+  }
+
+  if (SETUP_KEY_TOKEN.test(paths.profileName)) {
+    if (platform === 'darwin') {
+      const label = `ai.deepseek.dsh.profile.${paths.profileName}`
+      const plistPath = join(home, 'Library', 'LaunchAgents', `${label}.plist`)
+      try {
+        const st = lstatSync(plistPath)
+        if (st.isFile() && !st.isSymbolicLink()) {
+          const content = readFileSync(plistPath, 'utf8')
+          if (content.includes(label)) {
+            return Object.freeze({
+              supported: true,
+              mode: 'managed-service',
+              command: `dsh-rsi restart --profile ${paths.profileName}`,
+              targetLabel: label,
+            })
+          }
+        }
+      } catch {
+        // No managed LaunchAgent for this profile.
+      }
+    } else if (platform === 'linux') {
+      const unit = `dsh-profile-${paths.profileName}.service`
+      const unitPath = join(home, '.config', 'systemd', 'user', unit)
+      try {
+        const st = lstatSync(unitPath)
+        if (st.isFile() && !st.isSymbolicLink()) {
+          const content = readFileSync(unitPath, 'utf8')
+          if (content.includes('DeepSeek Harness profile')) {
+            return Object.freeze({
+              supported: true,
+              mode: 'managed-service',
+              command: `dsh-rsi restart --profile ${paths.profileName}`,
+              targetLabel: unit,
+            })
+          }
+        }
+      } catch {
+        // No managed systemd user unit for this profile.
+      }
+    }
+  }
+
+  if (platform === 'darwin') {
+    const runningInsideApp = [execPath, ...argv].some(entry => entry.includes('/DeepSeek Harness.app/'))
+    const appPath = findMacosDesktopAppPath(home, execPath, argv)
+    if (runningInsideApp || (paths.profileName === 'desktop' && appPath !== undefined)) {
+      return Object.freeze({
+        supported: true,
+        mode: 'desktop-app',
+        command: '重启 DeepSeek Harness.app',
+        ...(appPath === undefined ? {} : { appPath }),
+      })
+    }
+  }
+
+  return Object.freeze({
+    supported: false,
+    mode: 'manual',
+    command: manualCommand,
+  })
+}
+
+export type RestartSpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: Readonly<{
+    env: NodeJS.ProcessEnv
+    detached: boolean
+    stdio: 'ignore'
+    shell: boolean
+  }>,
+) => Pick<ChildProcess, 'pid' | 'unref'>
+
+export interface TriggerProfileRestartInput extends InspectProfileRestartInput {
+  readonly confirmed: boolean
+  readonly pid?: number
+  readonly ppid?: number
+  readonly uid?: number
+  readonly spawnFn?: RestartSpawnFn
+}
+
+const MANAGED_SERVICE_RESTART_HELPER = [
+  'const { execFileSync } = require("node:child_process");',
+  'const delayMs = Math.max(0, Number(process.argv[1]) || 500);',
+  'const cmd = process.argv[2];',
+  'const args = process.argv.slice(3);',
+  'setTimeout(() => { try { execFileSync(cmd, args, { stdio: "ignore", timeout: 15000 }); } catch {} }, delayMs);',
+].join(' ')
+
+const MACOS_DESKTOP_RESTART_HELPER = [
+  'const { execFileSync } = require("node:child_process");',
+  'const delayMs = Math.max(0, Number(process.argv[1]) || 500);',
+  'const hostPid = Number(process.argv[2]) || 0;',
+  'const bundleId = process.argv[3] || "com.deepseek.dsh";',
+  'const appPath = process.argv[4] || "";',
+  'const parentPid = Number(process.argv[5]) || 0;',
+  'const alive = (pid) => { if (pid <= 1) return false; try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === "EPERM"; } };',
+  'const appStillRegistered = () => {',
+  '  try {',
+  '    const out = execFileSync("/usr/bin/lsappinfo", ["find", `bundleid=${bundleId}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });',
+  '    return out.trim().length > 0;',
+  '  } catch { return false; }',
+  '};',
+  'const relaunch = () => {',
+  '  try { execFileSync("/usr/bin/open", ["-b", bundleId], { stdio: "ignore", timeout: 10000 }); return; } catch {}',
+  '  if (appPath) { try { execFileSync("/usr/bin/open", ["-a", appPath], { stdio: "ignore", timeout: 10000 }); } catch {} }',
+  '};',
+  'setTimeout(() => {',
+  '  let quitSent = false;',
+  '  try { execFileSync("/usr/bin/osascript", ["-e", `tell application id "${bundleId}" to quit`], { stdio: "ignore", timeout: 5000 }); quitSent = true; } catch {}',
+  '  if (!quitSent && parentPid > 1 && alive(parentPid)) {',
+  '    try { process.kill(parentPid, "SIGTERM"); } catch {}',
+  '  }',
+  '  const deadline = Date.now() + 15000;',
+  '  const poll = () => {',
+  '    if (!alive(hostPid) && !alive(parentPid) && !appStillRegistered()) { setTimeout(relaunch, 400); return; }',
+  '    if (Date.now() < deadline) setTimeout(poll, 250);',
+  '  };',
+  '  setTimeout(poll, 350);',
+  '}, delayMs);',
+].join(' ')
+
+function resolveSystemctlPath(): string {
+  for (const candidate of ['/usr/bin/systemctl', '/bin/systemctl']) {
+    try {
+      const st = lstatSync(candidate)
+      if (st.isFile() || st.isSymbolicLink()) return candidate
+    } catch {
+      // Try next standard path.
+    }
+  }
+  return '/usr/bin/systemctl'
+}
+
+function defaultRestartSpawn(
+  command: string,
+  args: readonly string[],
+  options: Readonly<{ env: NodeJS.ProcessEnv; detached: boolean; stdio: 'ignore'; shell: boolean }>,
+): Pick<ChildProcess, 'pid' | 'unref'> {
+  return nodeSpawn(command, [...args], {
+    env: options.env,
+    detached: options.detached,
+    stdio: options.stdio,
+    shell: options.shell,
+    windowsHide: true,
+  })
+}
+
+/** Spawn an isolated detached helper to cleanly restart the Desktop app or managed resident service after RPC return. */
+export async function triggerProfileRestart(input: TriggerProfileRestartInput): Promise<OwnerConsoleWriteResult> {
+  if (input.confirmed !== true) {
+    return Object.freeze({
+      applied: false,
+      entry: 'profile-restart',
+      note: '重启 profile 需要明确确认后执行。',
+    })
+  }
+  const platform = input.platform ?? process.platform
+  const env = input.env ?? process.env
+  const execPath = input.execPath ?? process.execPath
+  const argv = input.argv ?? process.argv
+  const hostPid = input.pid ?? process.pid
+  const runningInsideApp = [execPath, ...argv].some(entry => entry.includes('/DeepSeek Harness.app/'))
+  const rawPpid = input.ppid ?? process.ppid
+  const parentPid = runningInsideApp && Number.isSafeInteger(rawPpid) && rawPpid > 1 ? rawPpid : 0
+  const uid = input.uid ?? (typeof process.getuid === 'function' ? process.getuid() : undefined)
+  const paths = resolveProfilePaths(input.host, env)
+  if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, platform, env)) {
+    return Object.freeze({
+      applied: false,
+      entry: 'profile-restart',
+      note: '当前为受控 Linux systemd 冻结实例，拒绝在线触发重启；请在终端通过受控运维命令重启服务。',
+    })
+  }
+
+  const support = inspectProfileRestartSupport(input)
+  if (!support.supported) {
+    return Object.freeze({
+      applied: false,
+      entry: 'profile-restart',
+      note: `当前运行模式不支持自动重启；请手动重启 profile（可运行：${support.command}）。`,
+    })
+  }
+
+  const spawnFn = input.spawnFn ?? defaultRestartSpawn
+  const helperEnv: NodeJS.ProcessEnv = {
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+    ...(env['HOME'] !== undefined ? { HOME: env['HOME'] } : {}),
+    ...(env['XDG_RUNTIME_DIR'] !== undefined ? { XDG_RUNTIME_DIR: env['XDG_RUNTIME_DIR'] } : {}),
+    ...(env['DBUS_SESSION_BUS_ADDRESS'] !== undefined ? { DBUS_SESSION_BUS_ADDRESS: env['DBUS_SESSION_BUS_ADDRESS'] } : {}),
+    ELECTRON_RUN_AS_NODE: '1',
+  }
+
+  try {
+    if (support.mode === 'managed-service' && support.targetLabel !== undefined) {
+      let args: string[]
+      if (platform === 'darwin') {
+        if (uid === undefined || !Number.isSafeInteger(uid) || uid < 0) {
+          return Object.freeze({
+            applied: false,
+            entry: 'profile-restart',
+            note: `无法获取当前用户 UID；请在终端运行：${support.command}`,
+          })
+        }
+        args = ['-e', MANAGED_SERVICE_RESTART_HELPER, '500', '/bin/launchctl', 'kickstart', '-k', `gui/${uid}/${support.targetLabel}`]
+      } else {
+        args = ['-e', MANAGED_SERVICE_RESTART_HELPER, '500', resolveSystemctlPath(), '--user', 'restart', support.targetLabel]
+      }
+      const child = spawnFn(execPath, args, { env: helperEnv, detached: true, stdio: 'ignore', shell: false })
+      child.unref()
+      if (child.pid === undefined || child.pid <= 0) {
+        return Object.freeze({
+          applied: false,
+          entry: 'profile-restart',
+          note: `未能拉起受管服务重启任务；请在终端运行：${support.command}`,
+        })
+      }
+      return Object.freeze({
+        applied: true,
+        entry: 'profile-restart',
+        note: `已触发受管常驻服务重启（${support.targetLabel}），约 3–8 秒后新凭据与飞书长连接将自动上线，届时刷新页面即可。`,
+      })
+    }
+
+    if (support.mode === 'desktop-app') {
+      const args = [
+        '-e',
+        MACOS_DESKTOP_RESTART_HELPER,
+        '500',
+        String(hostPid),
+        MACOS_DESKTOP_BUNDLE_ID,
+        support.appPath ?? '/Applications/DeepSeek Harness.app',
+        String(parentPid),
+      ]
+      const child = spawnFn(execPath, args, { env: helperEnv, detached: true, stdio: 'ignore', shell: false })
+      child.unref()
+      if (child.pid === undefined || child.pid <= 0) {
+        return Object.freeze({
+          applied: false,
+          entry: 'profile-restart',
+          note: '未能拉起 DeepSeek Harness 重启任务；请按 Cmd+Q 退出并重新打开 DeepSeek Harness.app。',
+        })
+      }
+      return Object.freeze({
+        applied: true,
+        entry: 'profile-restart',
+        note: '正在自动退出并重新打开 DeepSeek Harness.app（通常 3–8 秒）；如系统未自动拉起，请手动打开应用即可加载新飞书连接。',
+      })
+    }
+  } catch (error: unknown) {
+    return Object.freeze({
+      applied: false,
+      entry: 'profile-restart',
+      note: `触发自动重启失败（${error instanceof Error ? error.message : String(error)}）；请手动重启 profile（${support.command}）。`,
+    })
+  }
+
+  return Object.freeze({
+    applied: false,
+    entry: 'profile-restart',
+    note: `当前运行模式不支持自动重启；请手动重启 profile（${support.command}）。`,
   })
 }

@@ -1138,4 +1138,184 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(rbDone.note).toContain('已自动清理本次新建的系统凭据项')
     expect(rbDone.note).not.toContain('QR_ROLLBACK_SECRET_XYZ')
   })
+
+  it('populates post-scan guided metadata and supports confirmed one-click owner promotion & profile restart via OwnerConsoleService', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempProfile('desktop')
+    const dbPath = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(dbPath, [{
+      id: 'principal_web_existing',
+      principal: { channel: 'web', account: 'desktop', tenant: 'local', user: 'operator' },
+      role: 'owner',
+      status: 'active',
+    }])
+    // Add extra tables matching real @dsh-enhanced/assistant-delivery schema
+    const initDb = new DatabaseSync(dbPath)
+    try {
+      initDb.exec(`
+        CREATE TABLE conversation_bindings (
+          id TEXT PRIMARY KEY,
+          principal_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1
+        );
+      `)
+    } finally {
+      initDb.close()
+    }
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-dreaming',
+      '  name: "@dsh-enhanced/assistant-dreaming"',
+      '  config:',
+      '    enabled: true',
+      '    retired: false',
+      '    scope:',
+      '      principalId: web/desktop/local/operator',
+      '',
+    ].join('\n'), 'utf8')
+
+    const appId = fixtureAppId('abcdef0123456789')
+    const qrMgr = new FeishuQrOnboardingManager({
+      fetchFn: async (_url, init) => {
+        const body = Object.fromEntries(new URLSearchParams(init.body).entries())
+        if (body['action'] === 'begin') {
+          return jsonResp(200, { device_code: 'd_guide', verification_uri_complete: 'https://open.feishu.cn/page/launcher?g=1', expires_in: 300, interval: 2 })
+        }
+        return jsonResp(200, {
+          client_id: appId,
+          client_secret: 'guided_secret_value',
+          user_info: { open_id: 'ou_guided_owner_42', tenant_brand: 'feishu' },
+        })
+      },
+      renderQrFn: async () => 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      storeSecretFn: async () => {},
+      inspectRestartFn: () => ({
+        supported: true,
+        mode: 'desktop-app',
+        command: '重启 DeepSeek Harness.app',
+        appPath: '/Applications/DeepSeek Harness.app',
+      }),
+      now: () => 1_700_000_000_000,
+      sleep: async () => {},
+      platform: 'darwin',
+      env: {},
+    })
+
+    const ctx = new Context()
+    ctx.provide('profileContext' as never, { dir: profileDir, name: 'desktop' } as never)
+    ctx.provide('homePaths' as never, { dshHome } as never)
+    const restartMock = vi.fn(async (input: { confirmed: boolean }) => ({
+      applied: input.confirmed,
+      entry: 'profile-restart',
+      note: input.confirmed ? '正在重启 DeepSeek Harness.app' : '需要确认',
+    }))
+    const svc = new OwnerConsoleService(ctx, { feishuAppId: '' }, undefined, undefined, undefined, undefined, qrMgr, restartMock)
+    try {
+      const started = await svc.startFeishuQrOnboarding('feishu', '文鳐专属', '', '', '', false, true)
+      const done = await waitUntilTerminal(qrMgr, started.sessionId)
+      expect(() => FeishuQrOnboardingSnapshotSchema.parse(done)).not.toThrow()
+      expect(done.state).toBe('completed')
+      expect(done.appName).toBe('文鳐专属')
+      expect(done.account).toBe('primary')
+      expect(done.tenant).toBe('personal')
+      expect(done.ownerBinding).toBe('linked-to-owner')
+      expect(done.existingAutonomyAnchored).toBe(true)
+      expect(done.restartSupported).toBe(true)
+      expect(done.restartMode).toBe('desktop-app')
+      expect(done.restartCommand).toBe('重启 DeepSeek Harness.app')
+      expect(done.openPlatformUrl).toBe(`https://open.feishu.cn/app/${appId}`)
+      expect(done.businessToolsRequested).toBe(true)
+      expect(done.businessCliCommand).toBe(`dsh-lark-setup --profile desktop --app-id ${appId}`)
+
+      // Unconfirmed promotion refuses while keeping completed snapshot intact
+      const unconfirmed = await svc.promoteFeishuQrOwner(done.sessionId, false)
+      expect(unconfirmed.state).toBe('completed')
+      expect(unconfirmed.errorCode).toBe('confirmation-required')
+      expect(unconfirmed.ownerBinding).toBe('linked-to-owner')
+
+      // Wrong sessionId returns idle without disturbing current session
+      const wrongSession = await svc.promoteFeishuQrOwner('wrong-session-id', true)
+      expect(wrongSession.state).toBe('idle')
+      expect(qrMgr.status(done.sessionId).state).toBe('completed')
+
+      // Confirmed promotion hands off owner cleanly
+      const promoted = await svc.promoteFeishuQrOwner(done.sessionId, true)
+      expect(() => FeishuQrOnboardingSnapshotSchema.parse(promoted)).not.toThrow()
+      expect(promoted.state).toBe('completed')
+      expect(promoted.ownerBinding).toBe('bound-owner')
+      expect(promoted.ownerPromoted).toBe(true)
+      expect(promoted.errorCode).toBeUndefined()
+      expect(promoted.existingAutonomyAnchored).toBe(true)
+      expect(promoted.restartRecommended).toBe(true)
+
+      // Restart RPC forwards confirmation flag
+      const restartDenied = await svc.restartProfile(false)
+      expect(restartDenied.applied).toBe(false)
+      const restartOk = await svc.restartProfile(true)
+      expect(restartOk.applied).toBe(true)
+      expect(restartMock).toHaveBeenCalledTimes(2)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+
+    // Missing open_id and throwing promoteOwnerFn must keep completed state rather than clobbering it
+    const noOpenIdMgr = new FeishuQrOnboardingManager({
+      fetchFn: async (_url, init) => {
+        const body = Object.fromEntries(new URLSearchParams(init.body).entries())
+        if (body['action'] === 'begin') {
+          return jsonResp(200, { device_code: 'd_noop', verification_uri_complete: 'https://open.feishu.cn/page/launcher', expires_in: 300, interval: 2 })
+        }
+        return jsonResp(200, { client_id: appId, client_secret: 'sec_no_open_id' })
+      },
+      renderQrFn: async () => 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      storeSecretFn: async () => {},
+      now: () => 1_700_000_000_000,
+      sleep: async () => {},
+      platform: 'darwin',
+      env: {},
+    })
+    const noOpenStart = await noOpenIdMgr.start({
+      host: makeHost(dshHome, profileDir, 'desktop'),
+      getDescriptors: () => [],
+    }, { domain: 'feishu', appName: '文鳐', existingAppId: '', account: '', tenant: '', calendarReadonly: false, businessTools: false })
+    const noOpenDone = await waitUntilTerminal(noOpenIdMgr, noOpenStart.sessionId)
+    expect(noOpenDone.ownerBinding).toBe('not-returned')
+    expect(noOpenDone.businessToolsRequested).toBe(false)
+    expect(noOpenDone.businessCliCommand).toBeUndefined()
+    const missingOpenRes = await noOpenIdMgr.promoteOwner({
+      host: makeHost(dshHome, profileDir, 'desktop'),
+      getDescriptors: () => [],
+    }, noOpenDone.sessionId, true)
+    expect(missingOpenRes.state).toBe('completed')
+    expect(missingOpenRes.errorCode).toBe('missing-open-id')
+
+    const errPromoteMgr = new FeishuQrOnboardingManager({
+      fetchFn: async (_url, init) => {
+        const body = Object.fromEntries(new URLSearchParams(init.body).entries())
+        if (body['action'] === 'begin') {
+          return jsonResp(200, { device_code: 'd_errp', verification_uri_complete: 'https://open.feishu.cn/page/launcher', expires_in: 300, interval: 2 })
+        }
+        return jsonResp(200, { client_id: appId, client_secret: 'sec_err_p', user_info: { open_id: 'ou_err_1' } })
+      },
+      renderQrFn: async () => 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      storeSecretFn: async () => {},
+      promoteOwnerFn: async () => { throw new Error('sqlite busy') },
+      now: () => 1_700_000_000_000,
+      sleep: async () => {},
+      platform: 'darwin',
+      env: {},
+    })
+    const errStart = await errPromoteMgr.start({
+      host: makeHost(dshHome, profileDir, 'desktop'),
+      getDescriptors: () => [],
+    }, { domain: 'feishu', appName: '文鳐', existingAppId: '', account: '', tenant: '', calendarReadonly: false, businessTools: false })
+    const errDone = await waitUntilTerminal(errPromoteMgr, errStart.sessionId)
+    const errPromo = await errPromoteMgr.promoteOwner({
+      host: makeHost(dshHome, profileDir, 'desktop'),
+      getDescriptors: () => [],
+    }, errDone.sessionId, true)
+    expect(errPromo.state).toBe('completed')
+    expect(errPromo.errorCode).toBe('promote-failed')
+    expect(errPromo.note).toContain('sqlite busy')
+  })
 })

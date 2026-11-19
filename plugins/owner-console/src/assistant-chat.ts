@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import type { YAMLSeq } from 'yaml'
 import { inspectOwnerRoute, readPatchDocument, resolveProfilePaths } from './autonomy-setup.js'
 import { hasControlChars, type SettingsDescriptor, type SettingsService } from './settings.js'
@@ -248,7 +248,8 @@ export function resolveAssistantWorkspace(host: Context, env: NodeJS.ProcessEnv 
   }
   const owner = inspectOwnerRoute(host, paths, seq, descriptors)
   const fallbackWs = paths.canonicalHome !== null ? join(paths.canonicalHome, 'assistant-workspace') : ''
-  const workspace = owner.workspace !== '' ? owner.workspace : fallbackWs
+  const configuredWs = owner.configured && isAbsolute(owner.workspace) ? owner.workspace : ''
+  const workspace = configuredWs !== '' ? configuredWs : fallbackWs
   if (workspace !== '' && paths.canonicalHome !== null && (workspace === join(paths.canonicalHome, 'assistant-workspace') || owner.configured)) {
     safeEnsureDir(workspace)
   }

@@ -172,6 +172,8 @@ export type ConsoleRemote = Readonly<{
   ): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   feishuQrOnboardingStatus?(sessionId: string): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   cancelFeishuQrOnboarding?(sessionId: string): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
+  promoteFeishuQrOwner?(sessionId: string, confirmed: boolean): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
+  restartProfile?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
   registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -1031,10 +1033,10 @@ function feishuQrOwnerBindingText(binding: FeishuQrOwnerBinding | undefined): st
 
 function feishuQrOwnerBindingHint(binding: FeishuQrOwnerBinding | undefined): string | undefined {
   if (binding === 'linked-to-owner' || binding === 'reused-linked') {
-    return '普通飞书私聊在重启 profile 后即可正常使用；主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人。如需切换主主人，或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup。'
+    return '普通飞书私聊在重启 profile 后即可正常使用；主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人。点击下方「一键设为飞书主主人」或「一键设为主主人并重启生效」即可直接完成切换（也可使用终端向导 dsh-lark-setup）。'
   }
   if (binding === 'not-returned' || binding === 'unmodified') {
-    return '当前未自动绑定为飞书主主人；请重启 profile 后确认身份状态，如需绑定/切换主主人或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup。'
+    return '当前未自动绑定为飞书主主人；请先重启 profile 后确认身份状态，再按需一键切换主主人或使用终端向导 dsh-lark-setup。'
   }
   return undefined
 }
@@ -1081,7 +1083,12 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const [qrCalendarReadonly, setQrCalendarReadonly] = useState(false)
   const [qrSession, setQrSession] = useState<FeishuQrOnboardingSnapshot | undefined>(undefined)
   const [qrLoading, setQrLoading] = useState(false)
+  const [activeQrAction, setActiveQrAction] = useState<null | 'promote' | 'restart' | 'promote-and-restart'>(null)
+  const [qrRestarted, setQrRestarted] = useState(false)
+  const [pendingQrAction, setPendingQrAction] = useState<null | 'promote' | 'restart' | 'promote-and-restart'>(null)
+  const qrActionBusy = activeQrAction !== null
   const [qrCopied, setQrCopied] = useState(false)
+  const [copiedCmd, setCopiedCmd] = useState<'' | 'restart' | 'business'>('')
   const [qrNowMs, setQrNowMs] = useState(0)
   const completedSessionRef = useRef('')
   const qrActionSeqRef = useRef(0)
@@ -1162,7 +1169,10 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
     qrInFlightRef.current = true
     qrActionSeqRef.current += 1
     setQrLoading(true)
+    setQrRestarted(false)
+    setPendingQrAction(null)
     setQrCopied(false)
+    setCopiedCmd('')
     ctrl.setError('')
     try {
       const res = await remote.startFeishuQrOnboarding!(
@@ -1222,6 +1232,12 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
     return () => clearTimeout(timer)
   }, [qrCopied])
 
+  useEffect(() => {
+    if (copiedCmd === '') return
+    const timer = setTimeout(() => setCopiedCmd(''), 2_000)
+    return () => clearTimeout(timer)
+  }, [copiedCmd])
+
   const copyQrLink = async (url: string) => {
     try {
       if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
@@ -1234,6 +1250,88 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
       // Fall through to manual guidance.
     }
     ctrl.setNotice('当前环境未开放剪贴板写入，请直接点击「打开飞书授权页」或用飞书扫码。')
+  }
+
+  const copyPostScanCommand = async (kind: 'restart' | 'business', command: string) => {
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+        await navigator.clipboard.writeText(command)
+        setCopiedCmd(kind)
+        ctrl.setNotice(kind === 'restart'
+          ? '已复制重启命令，粘贴到终端运行即可生效。'
+          : '已复制业务工具授权命令，粘贴到终端运行即可完成个人云文档/表格/邮件授权。')
+        return
+      }
+    } catch {
+      // Fall through to manual guidance.
+    }
+    ctrl.setNotice(`当前环境未开放剪贴板写入，请手动复制命令：${command}`)
+  }
+
+  const executePendingQrAction = async () => {
+    const action = pendingQrAction
+    if (action === null || qrActionBusy) return
+    setPendingQrAction(null)
+    if (action === 'restart') {
+      if (typeof remote.restartProfile !== 'function') return
+      setActiveQrAction('restart')
+      ctrl.setError('')
+      try {
+        const res = await remote.restartProfile(true)
+        if (!res.ok) {
+          ctrl.setError(remoteFailureText(res.error))
+          return
+        }
+        if (!res.value.applied) {
+          ctrl.setError(res.value.note)
+          return
+        }
+        setQrRestarted(true)
+        ctrl.setNotice(res.value.note)
+      } catch (cause) {
+        ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+      } finally {
+        setActiveQrAction(null)
+      }
+      return
+    }
+    if (typeof remote.promoteFeishuQrOwner !== 'function' || qrSession === undefined) return
+    const alsoRestart = action === 'promote-and-restart'
+    setActiveQrAction(action)
+    ctrl.setError('')
+    try {
+      const res = await remote.promoteFeishuQrOwner(qrSession.sessionId, true)
+      if (!res.ok) {
+        ctrl.setError(remoteFailureText(res.error))
+        return
+      }
+      setQrSession(res.value)
+      const promotedPrimary = res.value.ownerBinding === 'bound-owner' || res.value.ownerBinding === 'reused-owner'
+      if (res.value.errorCode !== undefined || res.value.state !== 'completed' || !promotedPrimary) {
+        ctrl.setError(res.value.note)
+        return
+      }
+      ctrl.setNotice(res.value.note)
+      notifyConsoleRefresh(remote)
+      void ctrl.refresh()
+      if (alsoRestart && typeof remote.restartProfile === 'function' && res.value.restartSupported === true) {
+        const restartRes = await remote.restartProfile(true)
+        if (!restartRes.ok) {
+          ctrl.setError(remoteFailureText(restartRes.error))
+          return
+        }
+        if (!restartRes.value.applied) {
+          ctrl.setError(restartRes.value.note)
+          return
+        }
+        setQrRestarted(true)
+        ctrl.setNotice(`${res.value.note} ${restartRes.value.note}`)
+      }
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setActiveQrAction(null)
+    }
   }
 
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
@@ -1273,7 +1371,9 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
       ...(larkState.missing.length === 0 ? [] : [row('缺少服务', missingRemedy(larkState))]),
       row('连接', pill(larkConnectionLabel(status.feishu.connection, status.feishu.lastErrorCode),
         larkConnectionTone(status.feishu.connection, status.feishu.lastErrorCode))),
-      row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
+      row('appId', el('span', { style: actionsStyle },
+        pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn'),
+        status.feishu.appId === undefined ? null : el('span', { style: monoMuted }, status.feishu.appId))))
 
   const safeQrDataUrl = qrSession?.qrCodeDataUrl !== undefined
     && qrSession.qrCodeDataUrl.startsWith('data:image/svg+xml;base64,')
@@ -1283,22 +1383,50 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
     && isTrustedFeishuUrl(qrSession.verificationUrl)
     ? qrSession.verificationUrl
     : undefined
+  const safeOpenPlatformUrl = qrSession?.openPlatformUrl !== undefined
+    ? (isTrustedFeishuUrl(qrSession.openPlatformUrl) ? qrSession.openPlatformUrl : undefined)
+    : (qrSession?.appId !== undefined && /^cli_[0-9a-fA-F]{16}$/u.test(qrSession.appId)
+        ? `https://${qrSession.domain === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn'}/app/${qrSession.appId}`
+        : undefined)
+  const ownerIsPrimary = qrSession?.ownerBinding === 'bound-owner' || qrSession?.ownerBinding === 'reused-owner'
+  const canPromoteOwner = typeof remote.promoteFeishuQrOwner === 'function'
+    && qrSession?.state === 'completed'
+    && !ownerIsPrimary
+    && qrSession.openId !== undefined
+    && qrSession.openId !== ''
+    && qrSession.ownerBinding !== 'not-returned'
+  const canOneClickRestart = typeof remote.restartProfile === 'function'
+    && qrSession?.state === 'completed'
+    && qrSession.restartSupported === true
+  const restartBtnLabel = qrSession?.restartMode === 'desktop-app'
+    ? '一键重启 DeepSeek Harness 生效'
+    : '一键重启常驻服务生效'
+  const stepBoxStyle = {
+    display: 'grid',
+    gap: 6,
+    padding: '10px 12px',
+    borderRadius: 10,
+    border: `1px solid ${border}`,
+    background: sunken,
+  } as const
   const qrStateMeta = qrSession === undefined ? undefined : feishuQrStateMeta(qrSession.state)
   const countdownText = qrSession?.state === 'awaiting-scan'
     ? formatCountdown(qrSession.expiresAt, qrNowMs > 0 ? qrNowMs : (qrSession.startedAt ?? Date.now()))
     : ''
 
   const qrOnboardingPanel = el('div', { 'data-feishu-qr-panel': '', style: { display: 'grid', gap: 12 } },
-    el('div', {
-      style: {
-        display: 'grid', gap: 6, padding: '10px 12px', borderRadius: 10,
-        border: `1px solid ${border}`, background: sunken, fontSize: 12, color: muted, lineHeight: 1.6,
+    qrSession?.state === 'completed'
+      ? null
+      : el('div', {
+        style: {
+          display: 'grid', gap: 6, padding: '10px 12px', borderRadius: 10,
+          border: `1px solid ${border}`, background: sunken, fontSize: 12, color: muted, lineHeight: 1.6,
+        },
       },
-    },
-    el('div', { style: { fontWeight: 600, color: ink } }, '飞书官方一键扫码授权（与安装向导 dsh-lark-setup 相同协议）'),
-    el('div', {}, '1. 点击下方按钮向飞书开放平台申请官方设备授权二维码与链接；'),
-    el('div', {}, '2. 用飞书扫码（或直接打开授权页），选择已有应用或一键创建新机器人并确认所需权限；'),
-    el('div', {}, '3. 确认后 App Secret 仅在 Host 内存加密存入系统凭据库（配置文件零明文），自动写入通道、收发策略与扫码账号绑定；保存后重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）即可建立新长连接。')),
+      el('div', { style: { fontWeight: 600, color: ink } }, '飞书官方一键扫码授权（与安装向导 dsh-lark-setup 相同协议）'),
+      el('div', {}, '1. 点击下方按钮向飞书开放平台申请官方设备授权二维码与链接；'),
+      el('div', {}, '2. 用飞书扫码（或直接打开授权页），选择已有应用或一键创建新机器人并确认所需权限；'),
+      el('div', {}, '3. 确认后 App Secret 仅在 Host 内存加密存入系统凭据库（配置文件零明文），自动写入通道、收发策略与扫码账号绑定；完成后可直接在面板一键切换主主人并重启生效。')),
     qrSession !== undefined && qrSession.state !== 'idle'
       ? el('div', {
         'data-feishu-qr-state': qrSession.state,
@@ -1364,7 +1492,7 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
                 }, '取消扫码')
                 : null)))
         : qrSession.state === 'completed'
-          ? el('div', { style: { display: 'grid', gap: 8 } },
+          ? el('div', { style: { display: 'grid', gap: 10 } },
             el('p', { style: { margin: 0, fontSize: 13, color: ink, lineHeight: 1.55 } }, qrSession.note),
             el('div', { style: listStyle },
               qrSession.appId !== undefined ? row('App ID', el('span', { style: monoMuted }, qrSession.appId)) : null,
@@ -1386,19 +1514,166 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
             feishuQrOwnerBindingHint(qrSession.ownerBinding) !== undefined
               ? el('p', { 'data-feishu-qr-owner-hint': '', style: hintStyle }, feishuQrOwnerBindingHint(qrSession.ownerBinding))
               : null,
-            el('div', { style: actionsStyle },
-              el('button', {
-                type: 'button',
-                style: btn(primaryButtonStyle),
-                disabled: busy,
-                onClick: () => void ctrl.refresh(),
-              }, '刷新连接状态'),
-              el('button', {
-                type: 'button',
-                style: idle(buttonStyle, busy || qrLoading),
-                disabled: busy || qrLoading,
-                onClick: () => void startQrOnboarding(),
-              }, '重新扫码 / 更换应用')))
+            el('div', { 'data-feishu-qr-next-steps': '', style: { display: 'grid', gap: 8 } },
+              el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+                el('span', { style: { fontSize: 12.5, fontWeight: 600, color: ink } }, '后续完成指引（按顺序一键搞定）'),
+                canPromoteOwner && canOneClickRestart && !qrRestarted
+                  ? el('button', {
+                    type: 'button',
+                    'data-feishu-qr-finish-all': '',
+                    style: idle(primaryButtonStyle, busy || qrActionBusy),
+                    disabled: busy || qrActionBusy,
+                    onClick: () => setPendingQrAction('promote-and-restart'),
+                  }, activeQrAction === 'promote-and-restart' ? '正在切换并重启…' : '一键设为主主人并重启生效')
+                  : null),
+              pendingQrAction !== null
+                ? el('div', {
+                  role: 'alertdialog',
+                  'data-feishu-qr-confirm': pendingQrAction,
+                  style: {
+                    display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 10,
+                    border: `1px solid ${tint(accent, 34)}`, background: tint(accent, 9), fontSize: 12, color: ink, lineHeight: 1.55,
+                  },
+                },
+                el('div', {},
+                  pendingQrAction === 'restart'
+                    ? `确认立即${qrSession.restartMode === 'desktop-app' ? '退出并重新打开 DeepSeek Harness.app' : '重启当前受管常驻服务'}，以加载新飞书凭据句柄与长连接（约 3–8 秒）？`
+                    : pendingQrAction === 'promote-and-restart'
+                      ? `确认将扫码账号 ${qrSession.openId ?? ''} 设为本 profile 主主人（将替换旧主主人身份，并解锁 /permission、/model 与审批卡片）后立即重启生效？${qrSession.existingAutonomyAnchored === true ? '（提示：旧主主人仍有自主授权配置，重启并在飞书发一条消息后，可在自主能力向导点击「一键初始化/修复前置项」并重新保存以更新锚定。）' : ''}`
+                      : `确认将扫码账号 ${qrSession.openId ?? ''} 设为本 profile 主主人（将替换旧主主人身份，并解锁 /permission、/model 与审批卡片）？${qrSession.existingAutonomyAnchored === true ? '（提示：旧主主人仍有自主授权配置，重启并在飞书发一条消息后，可在自主能力向导点击「一键初始化/修复前置项」并重新保存以更新锚定。）' : ''}`),
+                el('div', { style: actionsStyle },
+                  el('button', {
+                    type: 'button',
+                    'data-feishu-qr-confirm-yes': '',
+                    style: idle(primaryButtonStyle, qrActionBusy),
+                    disabled: qrActionBusy,
+                    onClick: () => void executePendingQrAction(),
+                  }, pendingQrAction === 'restart' ? '确认立即重启' : pendingQrAction === 'promote-and-restart' ? '确认切换并重启' : '确认设为主主人'),
+                  el('button', {
+                    type: 'button',
+                    'data-feishu-qr-confirm-no': '',
+                    style: buttonStyle,
+                    disabled: qrActionBusy,
+                    onClick: () => setPendingQrAction(null),
+                  }, '取消')))
+                : null,
+              // Step 1: Owner identity binding
+              el('div', { 'data-feishu-qr-step': 'owner', style: stepBoxStyle },
+                el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 } },
+                  el('span', { style: { fontSize: 12.5, fontWeight: 600, color: ink } }, '第 1 步 · 确认主主人身份'),
+                  ownerIsPrimary
+                    ? pill('已完成', 'ok')
+                    : pill(canPromoteOwner ? '可一键切换' : '待确认', 'warn')),
+                ownerIsPrimary
+                  ? el('p', { style: { margin: 0, fontSize: 12, color: muted, lineHeight: 1.55 } },
+                    qrSession.existingAutonomyAnchored === true
+                      ? '已绑定为本 profile 飞书主主人（支持 /permission、/model 与审批卡片）。提示：旧主主人仍有自主授权配置，重启并在飞书给机器人发消息后，到「自主能力向导」先点「一键初始化/修复前置项」同步路由再重新保存即可更新锚定。'
+                      : '已绑定为本 profile 飞书主主人，重启后即可直接使用 /permission、/model、审批卡片与自主授权。')
+                  : el('p', { style: { margin: 0, fontSize: 12, color: muted, lineHeight: 1.55 } },
+                    canPromoteOwner
+                      ? '检测到该 profile 已有其他主主人（如桌面端 Web 主主人，或更换飞书应用前旧应用的 open_id），当前账号默认先以「关联身份」接入。点击下方按钮即可将其一键设为飞书主主人。'
+                      : '当前未能自动绑定为主主人；可先重启 profile，再按需在终端运行 dsh-lark-setup 完成绑定。'),
+                canPromoteOwner
+                  ? el('div', { style: actionsStyle },
+                    el('button', {
+                      type: 'button',
+                      'data-feishu-qr-promote-owner': '',
+                      style: idle(canOneClickRestart ? buttonStyle : primaryButtonStyle, busy || qrActionBusy),
+                      disabled: busy || qrActionBusy,
+                      onClick: () => setPendingQrAction('promote'),
+                    }, activeQrAction === 'promote' ? '正在切换主主人…' : '一键设为飞书主主人'))
+                  : null),
+              // Step 2: Apply / Restart profile
+              el('div', { 'data-feishu-qr-step': 'restart', style: stepBoxStyle },
+                el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 } },
+                  el('span', { style: { fontSize: 12.5, fontWeight: 600, color: ink } }, '第 2 步 · 重启 Profile 使新凭据与长连接生效'),
+                  qrRestarted ? pill('正在重启…', 'ok') : pill('下一步', 'warn')),
+                qrRestarted
+                  ? el('p', { style: { margin: 0, fontSize: 12, color: ink, lineHeight: 1.55 } },
+                    '已触发重启（通常 3–8 秒）；应用重新打开或服务重连后，顶部连接状态将自动切换为新应用。若系统未自动拉起，请手动重新打开 DeepSeek Harness。')
+                  : canOneClickRestart
+                    ? el('div', { style: { display: 'grid', gap: 8 } },
+                      el('p', { style: { margin: 0, fontSize: 12, color: muted, lineHeight: 1.55 } },
+                        qrSession.restartMode === 'desktop-app'
+                          ? '新凭据句柄与策略已安全落盘，需重启一次 DeepSeek Harness.app 才会建立新应用的飞书长连接。'
+                          : '新凭据句柄与策略已安全落盘，需重启一次受管常驻服务才会建立新应用的飞书长连接。'),
+                      el('div', { style: actionsStyle },
+                        el('button', {
+                          type: 'button',
+                          'data-feishu-qr-restart': '',
+                          style: idle(canPromoteOwner ? buttonStyle : primaryButtonStyle, busy || qrActionBusy),
+                          disabled: busy || qrActionBusy,
+                          onClick: () => setPendingQrAction('restart'),
+                        }, activeQrAction === 'restart' ? '正在触发重启…' : restartBtnLabel)))
+                    : el('div', { style: { display: 'grid', gap: 8 } },
+                      el('p', { style: { margin: 0, fontSize: 12, color: muted, lineHeight: 1.55 } },
+                        '新凭据句柄与策略已写入 cordis.patch.yml；请重启当前 profile（如重启 DeepSeek Harness.app 或运行下方命令）使新长连接生效。'),
+                      qrSession.restartCommand !== undefined && qrSession.restartCommand !== ''
+                        ? el('div', { style: actionsStyle },
+                          el('code', {
+                            style: {
+                              fontFamily: monoFont, fontSize: 11.5, padding: '4px 8px', borderRadius: 6,
+                              background: surface, border: `1px solid ${border}`, color: ink, wordBreak: 'break-all',
+                            },
+                          }, qrSession.restartCommand),
+                          el('button', {
+                            type: 'button',
+                            'data-feishu-qr-copy-restart': '',
+                            style: buttonStyle,
+                            onClick: () => void copyPostScanCommand('restart', qrSession.restartCommand!),
+                          }, copiedCmd === 'restart' ? '已复制命令' : '复制重启命令'))
+                        : null)),
+              // Step 3: Verify in Feishu & Open Platform
+              el('div', { 'data-feishu-qr-step': 'verify', style: stepBoxStyle },
+                el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 } },
+                  el('span', { style: { fontSize: 12.5, fontWeight: 600, color: ink } }, '第 3 步 · 在飞书私聊机器人完成验证'),
+                  pill('重启后验证', 'neutral')),
+                el('p', { style: { margin: 0, fontSize: 12, color: muted, lineHeight: 1.55 } },
+                  `重启完成后，打开飞书搜索机器人「${qrSession.appName ?? '文鳐助手'}」发送一句「你好」测试回复；若在飞书中搜不到机器人或收不到回复，请点击下方打开飞书开放平台确认「版本管理与发布」已发布生效。`),
+                el('div', { style: actionsStyle },
+                  safeOpenPlatformUrl !== undefined
+                    ? el('a', {
+                      href: safeOpenPlatformUrl,
+                      target: '_blank',
+                      rel: 'noopener noreferrer',
+                      'data-feishu-qr-open-platform': '',
+                      style: { ...buttonStyle, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' },
+                    }, '打开飞书开放平台')
+                    : null,
+                  el('button', {
+                    type: 'button',
+                    style: btn(canOneClickRestart || canPromoteOwner ? buttonStyle : primaryButtonStyle),
+                    disabled: busy,
+                    onClick: () => void ctrl.refresh(),
+                  }, '刷新连接状态'),
+                  el('button', {
+                    type: 'button',
+                    style: idle(buttonStyle, busy || qrLoading || qrActionBusy),
+                    disabled: busy || qrLoading || qrActionBusy,
+                    onClick: () => void startQrOnboarding(),
+                  }, '重新扫码 / 更换应用')),
+                qrSession.businessToolsRequested === true && qrSession.businessCliCommand !== undefined
+                  ? el('div', {
+                    style: {
+                      marginTop: 4, paddingTop: 8, borderTop: `1px solid ${hairline}`,
+                      display: 'grid', gap: 6, fontSize: 11.5, color: muted,
+                    },
+                  },
+                  el('span', {}, '可选：如需以个人身份读写飞书云文档 / 多维表格 / 邮件（lark-cli 用户 OAuth），可在终端运行一次：'),
+                  el('div', { style: actionsStyle },
+                    el('code', {
+                      style: {
+                        fontFamily: monoFont, fontSize: 11, padding: '3px 7px', borderRadius: 6,
+                        background: surface, border: `1px solid ${border}`, color: ink, wordBreak: 'break-all',
+                      },
+                    }, qrSession.businessCliCommand),
+                    el('button', {
+                      type: 'button',
+                      'data-feishu-qr-copy-business': '',
+                      style: buttonStyle,
+                      onClick: () => void copyPostScanCommand('business', qrSession.businessCliCommand!),
+                    }, copiedCmd === 'business' ? '已复制命令' : '复制授权命令')))
+                  : null)))
           : el('div', { style: { display: 'grid', gap: 8 } },
             el('p', { style: { margin: 0, fontSize: 13, color: qrSession.state === 'failed' ? danger : ink, lineHeight: 1.55 } }, qrSession.note),
             qrSession.state !== 'applying'
@@ -2572,9 +2847,47 @@ function doctorSeverityPill(severity: SetupDoctorIssue['severity']) {
 
 export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { remote, doctorReport, checkingDoctor, busy } = ctrl
+  const [repairPendingRestart, setRepairPendingRestart] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const canDoctor = typeof remote.setupDoctor === 'function'
   const canRepair = typeof remote.applyDoctorRepair === 'function'
-  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy || checkingDoctor)
+  const canRestart = typeof remote.restartProfile === 'function' && doctorReport?.frozenSystemdProfile !== true
+  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy || checkingDoctor || restarting)
+
+  const runDoctorRepair = (issueIds: readonly string[]) => {
+    void ctrl.run(async () => {
+      const res = await remote.applyDoctorRepair!(issueIds)
+      if (res.ok && res.value.applied && res.value.note.includes('重启')) {
+        setRepairPendingRestart(true)
+      }
+      return res
+    })
+  }
+
+  const triggerDoctorRestart = async () => {
+    if (!canRestart || restarting) return
+    setConfirmRestart(false)
+    setRestarting(true)
+    ctrl.setError('')
+    try {
+      const res = await remote.restartProfile!(true)
+      if (!res.ok) {
+        ctrl.setError(remoteFailureText(res.error))
+        return
+      }
+      if (!res.value.applied) {
+        ctrl.setError(res.value.note)
+        return
+      }
+      setRepairPendingRestart(false)
+      ctrl.setNotice(res.value.note)
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setRestarting(false)
+    }
+  }
 
   const headerPills = doctorReport === undefined
     ? null
@@ -2590,17 +2903,53 @@ export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>
     doctorReport !== undefined && doctorReport.autoFixableCount > 0 && canRepair
       ? el('button', {
         type: 'button',
-        style: idle(primaryButtonStyle, busy || checkingDoctor),
-        disabled: busy || checkingDoctor,
-        onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([])),
+        style: idle(primaryButtonStyle, busy || checkingDoctor || restarting),
+        disabled: busy || checkingDoctor || restarting,
+        onClick: () => runDoctorRepair([]),
       }, `一键全部自动修复（${doctorReport.autoFixableCount} 项）`)
+      : null,
+    repairPendingRestart && canRestart
+      ? el('button', {
+        type: 'button',
+        'data-doctor-restart': '',
+        style: idle(primaryButtonStyle, busy || checkingDoctor || restarting),
+        disabled: busy || checkingDoctor || restarting,
+        onClick: () => setConfirmRestart(true),
+      }, restarting ? '正在重启生效…' : '一键重启生效')
       : null,
     el('button', {
       type: 'button',
       style: btn(),
-      disabled: busy || checkingDoctor,
+      disabled: busy || checkingDoctor || restarting,
       onClick: () => void ctrl.checkDoctor(),
     }, checkingDoctor ? '体检中…' : '立即体检'))
+
+  const restartConfirmBanner = !confirmRestart
+    ? null
+    : el('div', {
+      role: 'alertdialog',
+      'data-doctor-restart-confirm': '',
+      style: {
+        display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 10,
+        border: `1px solid ${tint(accent, 34)}`, background: tint(accent, 9), fontSize: 12, color: ink, lineHeight: 1.55,
+      },
+    },
+    el('div', {}, '确认立即重启当前 profile（桌面端将退出并重新打开 DeepSeek Harness.app，约 3–8 秒）以激活已修复的插件？'),
+    el('div', { style: actionsStyle },
+      el('button', {
+        type: 'button',
+        'data-doctor-restart-confirm-yes': '',
+        style: idle(primaryButtonStyle, restarting),
+        disabled: restarting,
+        onClick: () => void triggerDoctorRestart(),
+      }, '确认立即重启'),
+      el('button', {
+        type: 'button',
+        'data-doctor-restart-confirm-no': '',
+        style: buttonStyle,
+        disabled: restarting,
+        onClick: () => setConfirmRestart(false),
+      }, '取消')))
 
   const body = !canDoctor
     ? el('p', { style: hintStyle }, '当前 Host 尚未暴露系统自动体检接口（请升级插件并重启 profile）。')
@@ -2622,8 +2971,8 @@ export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>
               ? el('button', {
                 type: 'button',
                 style: btn(primaryButtonStyle),
-                disabled: busy || checkingDoctor,
-                onClick: () => void ctrl.run(() => remote.applyDoctorRepair!([issue.id])),
+                disabled: busy || checkingDoctor || restarting,
+                onClick: () => runDoctorRepair([issue.id]),
               }, issue.fixLabel)
               : null),
           el('p', { style: hintStyle }, issue.detail),
@@ -2633,6 +2982,7 @@ export function DoctorRepairCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>
     el('div', { 'data-owner-console-card': 'doctor-repair', style: { display: 'grid', gap: 10 } },
       headerPills,
       summaryActions,
+      restartConfirmBanner,
       body))
 }
 

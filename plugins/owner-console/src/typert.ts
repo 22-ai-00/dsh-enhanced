@@ -54,6 +54,7 @@ export const OwnerConsoleStatusSchema = z.object({
     installed: z.boolean(),
     enabled: z.boolean(),
     appIdConfigured: z.boolean(),
+    appId: z.string().max(64).optional(),
     connected: z.boolean(),
     connection: z.enum(LARK_CONNECTIONS),
     lastErrorCode: z.enum(LARK_ERROR_CODES).optional(),
@@ -208,6 +209,9 @@ export const FEISHU_QR_OWNER_BINDINGS = [
 ] as const
 export type FeishuQrOwnerBinding = typeof FEISHU_QR_OWNER_BINDINGS[number]
 
+export const PROFILE_RESTART_MODES = ['desktop-app', 'managed-service', 'manual'] as const
+export type ProfileRestartMode = typeof PROFILE_RESTART_MODES[number]
+
 /** Strict wire snapshot for official Feishu/Lark OAuth 2.0 Device Authorization onboarding.
  * Never carries `device_code` or `client_secret` across the Host/Web boundary. */
 export const FeishuQrOnboardingSnapshotSchema = z.object({
@@ -221,12 +225,23 @@ export const FeishuQrOnboardingSnapshotSchema = z.object({
   startedAt: z.number().int().nonnegative().optional(),
   expiresAt: z.number().int().nonnegative().optional(),
   pollIntervalMs: z.number().int().positive().max(120_000).optional(),
+  appName: z.string().max(64).optional(),
   appId: z.string().max(64).optional(),
+  account: z.string().max(64).optional(),
+  tenant: z.string().max(64).optional(),
   openId: z.string().max(256).optional(),
   ownerBinding: z.enum(FEISHU_QR_OWNER_BINDINGS).optional(),
+  ownerPromoted: z.boolean().optional(),
+  existingAutonomyAnchored: z.boolean().optional(),
   applied: z.boolean().optional(),
   connected: z.boolean().optional(),
   restartRecommended: z.boolean().optional(),
+  restartSupported: z.boolean().optional(),
+  restartMode: z.enum(PROFILE_RESTART_MODES).optional(),
+  restartCommand: z.string().max(500).optional(),
+  openPlatformUrl: z.string().max(256).optional(),
+  businessToolsRequested: z.boolean().optional(),
+  businessCliCommand: z.string().max(500).optional(),
   note: z.string().max(2_048),
   errorCode: z.string().max(128).optional(),
 }).readonly()
@@ -1154,6 +1169,27 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#FeishuQrOnboardingSnapshot', () => FeishuQrOnboardingSnapshotSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1108, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/promoteFeishuQrOwner',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'promoteFeishuQrOwner',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'sessionId', wire: 'sessionId', source: 'json', codec: codec('owner-console#feishuQrPromoteSessionId', () => z.string().max(128)) },
+        { name: 'confirmed', wire: 'confirmed', source: 'json', codec: codec('owner-console#feishuQrPromoteConfirmed', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#FeishuQrOnboardingSnapshot', () => FeishuQrOnboardingSnapshotSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1165, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/restartProfile',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'restartProfile',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'confirmed', wire: 'confirmed', source: 'json', codec: codec('owner-console#restartProfileConfirmed', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1178, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

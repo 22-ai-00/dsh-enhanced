@@ -51,9 +51,12 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     startSnap?: FeishuQrOnboardingSnapshot
     pollSnaps?: readonly FeishuQrOnboardingSnapshot[]
     cancelSnap?: FeishuQrOnboardingSnapshot
+    promoteSnap?: FeishuQrOnboardingSnapshot
+    restartResult?: { applied: boolean; entry: string; note: string }
+    statusOverrides?: Partial<OwnerConsoleStatus['feishu']>
   }> = {}) {
     let pollIdx = 0
-    const statusMock = vi.fn(async () => ({ ok: true as const, value: makeStatus() }))
+    const statusMock = vi.fn(async () => ({ ok: true as const, value: makeStatus(options.statusOverrides) }))
     const startFeishuQrOnboarding = vi.fn(async () => ({
       ok: true as const,
       value: options.startSnap ?? {
@@ -114,6 +117,37 @@ describe('FeishuCard one-click QR onboarding UI', () => {
         note: '已取消本次飞书扫码授权。',
       },
     }))
+    const promoteFeishuQrOwner = vi.fn(async (sessionId: string, _confirmed: boolean) => ({
+      ok: true as const,
+      value: options.promoteSnap ?? {
+        protocol: 'owner-console/feishu-qr-onboarding/v1' as const,
+        sessionId,
+        state: 'completed' as const,
+        domain: 'feishu' as const,
+        domainSwitched: false,
+        appName: '文鳐助手',
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'bound-owner' as const,
+        ownerPromoted: true,
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'desktop-app' as const,
+        restartCommand: '重启 DeepSeek Harness.app',
+        openPlatformUrl: 'https://open.feishu.cn/app/cli_aabbccddeeff0011',
+        note: '已将飞书账号 ou_linked_user 设为本 profile 主主人。',
+      },
+    }))
+    const restartProfile = vi.fn(async (_confirmed: boolean) => ({
+      ok: true as const,
+      value: options.restartResult ?? {
+        applied: true,
+        entry: 'profile-restart',
+        note: '正在自动退出并重新打开 DeepSeek Harness.app（通常 3–8 秒）。',
+      },
+    }))
 
     const remote: ConsoleRemote = {
       status: statusMock,
@@ -131,8 +165,18 @@ describe('FeishuCard one-click QR onboarding UI', () => {
       startFeishuQrOnboarding,
       feishuQrOnboardingStatus,
       cancelFeishuQrOnboarding,
+      promoteFeishuQrOwner,
+      restartProfile,
     }
-    return { remote, statusMock, startFeishuQrOnboarding, feishuQrOnboardingStatus, cancelFeishuQrOnboarding }
+    return {
+      remote,
+      statusMock,
+      startFeishuQrOnboarding,
+      feishuQrOnboardingStatus,
+      cancelFeishuQrOnboarding,
+      promoteFeishuQrOwner,
+      restartProfile,
+    }
   }
 
   it('defaults to QR onboarding mode, displays SVG QR + link, polls to completion, and refreshes status', async () => {
@@ -579,5 +623,257 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     expect(installPresent.mock.calls).toEqual([
       ['@dsh-enhanced/lark-channel', []],
     ])
+  })
+
+  it('guides post-scan completion with one-click promote+restart inline confirmation, guards failed promotion, and enforces trusted openPlatformUrl', async () => {
+    const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
+    const { remote, promoteFeishuQrOwner, restartProfile } = makeQrRemote({
+      statusOverrides: { appIdConfigured: true, appId: 'cli_aabbccddeeff0011' },
+      initialStatus: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-guided-1',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appName: '文鳐助手',
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        existingAutonomyAnchored: true,
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'desktop-app',
+        restartCommand: '重启 DeepSeek Harness.app',
+        openPlatformUrl: 'https://open.feishu.cn/app/cli_aabbccddeeff0011',
+        businessToolsRequested: true,
+        businessCliCommand: 'dsh-lark-setup --profile desktop --app-id cli_aabbccddeeff0011',
+        note: '飞书一键扫码接入配置已保存。',
+      },
+    })
+
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'guided-all',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    expect(container.querySelector('[data-feishu-qr-next-steps]')).not.toBeNull()
+    expect(container.querySelector('[data-feishu-qr-step="owner"]')).not.toBeNull()
+    expect(container.querySelector('[data-feishu-qr-step="restart"]')).not.toBeNull()
+    expect(container.querySelector('[data-feishu-qr-step="verify"]')).not.toBeNull()
+    const openPlatformLink = container.querySelector('a[data-feishu-qr-open-platform]') as HTMLAnchorElement | null
+    expect(openPlatformLink?.getAttribute('href')).toBe('https://open.feishu.cn/app/cli_aabbccddeeff0011')
+    expect(container.querySelector('button[data-feishu-qr-copy-business]')).not.toBeNull()
+
+    // Combined one-click CTA opens inline confirmation first
+    const finishAllBtn = container.querySelector('button[data-feishu-qr-finish-all]') as HTMLButtonElement | null
+    expect(finishAllBtn).not.toBeNull()
+    await act(async () => { finishAllBtn!.click() })
+    expect(container.querySelector('[data-feishu-qr-confirm="promote-and-restart"]')).not.toBeNull()
+
+    // Cancel must not call promote or restart
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-no]') as HTMLButtonElement).click() })
+    expect(container.querySelector('[data-feishu-qr-confirm]')).toBeNull()
+    expect(promoteFeishuQrOwner).not.toHaveBeenCalled()
+    expect(restartProfile).not.toHaveBeenCalled()
+
+    // Approve executes promoteFeishuQrOwner then restartProfile
+    await act(async () => { finishAllBtn!.click() })
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(promoteFeishuQrOwner).toHaveBeenCalledWith('feishu-qr-guided-1', true)
+    expect(restartProfile).toHaveBeenCalledWith(true)
+    expect(container.querySelector('[data-feishu-qr-owner-binding="bound-owner"]')).not.toBeNull()
+    expect(container.querySelector('[data-feishu-qr-step="restart"]')?.textContent).toContain('正在重启')
+
+    // Failed promotion must NOT trigger restartProfile
+    const { remote: failPromoRemote, promoteFeishuQrOwner: failPromote, restartProfile: skippedRestart } = makeQrRemote({
+      initialStatus: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-fail-promo',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'managed-service',
+        openPlatformUrl: 'https://evil.example.com/phish/cli_aabbccddeeff0011',
+        note: '配置已保存。',
+      },
+      promoteSnap: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-fail-promo',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        errorCode: 'promote-refused',
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'managed-service',
+        note: 'SQLite 被锁定，切换主主人被拒绝。',
+      },
+    })
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'guided-fail-promo',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: failPromoRemote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    // Untrusted openPlatformUrl must NOT render anchor link
+    expect(container.querySelector('a[data-feishu-qr-open-platform]')).toBeNull()
+
+    await act(async () => { (container.querySelector('button[data-feishu-qr-finish-all]') as HTMLButtonElement).click() })
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(failPromote).toHaveBeenCalledWith('feishu-qr-fail-promo', true)
+    expect(skippedRestart).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('SQLite 被锁定，切换主主人被拒绝。')
+
+    // Manual restart mode renders copyable restart command and standalone promote button
+    const { remote: manualRemote, promoteFeishuQrOwner: standalonePromote } = makeQrRemote({
+      initialStatus: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-manual',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: false,
+        restartMode: 'manual',
+        restartCommand: 'systemctl --user restart dsh-profile-web.service',
+        note: '配置已保存。',
+      },
+    })
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'guided-manual',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: manualRemote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    expect(container.querySelector('button[data-feishu-qr-finish-all]')).toBeNull()
+    expect(container.querySelector('button[data-feishu-qr-restart]')).toBeNull()
+    expect(container.querySelector('button[data-feishu-qr-copy-restart]')).not.toBeNull()
+    expect(container.textContent).toContain('systemctl --user restart dsh-profile-web.service')
+    await act(async () => { (container.querySelector('button[data-feishu-qr-promote-owner]') as HTMLButtonElement).click() })
+    expect(container.querySelector('[data-feishu-qr-confirm="promote"]')).not.toBeNull()
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(standalonePromote).toHaveBeenCalledWith('feishu-qr-manual', true)
+
+    // Partial failure in promote-and-restart: promotion succeeds, restart fails -> owner badge updates to bound-owner while surfacing restart error
+    const { remote: partialFailRemote, promoteFeishuQrOwner: okPromote, restartProfile: failRestart } = makeQrRemote({
+      initialStatus: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-partial',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'desktop-app',
+        note: '配置已保存。',
+      },
+      restartResult: { applied: false, entry: 'profile-restart', note: '自动重启被系统拒绝，请手动 Cmd+Q 重开。' },
+    })
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'guided-partial-fail',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: partialFailRemote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    // Pre-scan intro box is hidden on completed state so next-steps checklist stays compact
+    expect(container.textContent).not.toContain('点击下方按钮向飞书开放平台申请官方设备授权二维码与链接')
+    await act(async () => { (container.querySelector('button[data-feishu-qr-finish-all]') as HTMLButtonElement).click() })
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(okPromote).toHaveBeenCalledWith('feishu-qr-partial', true)
+    expect(failRestart).toHaveBeenCalledWith(true)
+    expect(container.querySelector('[data-feishu-qr-owner-binding="bound-owner"]')).not.toBeNull()
+    expect(container.querySelector('button[data-feishu-qr-promote-owner]')).toBeNull()
+    expect(container.textContent).toContain('自动重启被系统拒绝，请手动 Cmd+Q 重开。')
+
+    // Non-completed refusal without errorCode (e.g. session mismatch returning idle) must surface error and NOT call restartProfile
+    const { remote: mismatchRemote, restartProfile: blockedRestart } = makeQrRemote({
+      initialStatus: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: 'feishu-qr-stale',
+        state: 'completed',
+        domain: 'feishu',
+        domainSwitched: false,
+        appId: 'cli_aabbccddeeff0011',
+        openId: 'ou_linked_user',
+        ownerBinding: 'linked-to-owner',
+        applied: true,
+        connected: false,
+        restartRecommended: true,
+        restartSupported: true,
+        restartMode: 'desktop-app',
+        note: '配置已保存。',
+      },
+      promoteSnap: {
+        protocol: 'owner-console/feishu-qr-onboarding/v1',
+        sessionId: '',
+        state: 'idle',
+        domain: 'feishu',
+        domainSwitched: false,
+        note: '未找到该扫码授权会话，无法切换主主人。',
+      },
+    })
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'guided-mismatch',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: mismatchRemote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { (container.querySelector('button[data-feishu-qr-finish-all]') as HTMLButtonElement).click() })
+    await act(async () => { (container.querySelector('button[data-feishu-qr-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(blockedRestart).not.toHaveBeenCalled()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('未找到该扫码授权会话')
   })
 })

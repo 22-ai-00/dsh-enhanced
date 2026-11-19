@@ -25,7 +25,10 @@ import type {
   SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
-import { applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor, PLACEHOLDER_LARK_APP_ID } from './doctor-repair.js'
+import {
+  applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor, PLACEHOLDER_LARK_APP_ID, triggerProfileRestart,
+  type TriggerProfileRestartInput,
+} from './doctor-repair.js'
 import { FeishuQrOnboardingManager } from './feishu-qr-onboarding.js'
 import { ModelCatalogReader } from './model-catalog.js'
 import {
@@ -56,6 +59,7 @@ export class OwnerConsoleService extends TypertRemoteService {
   private readonly catalogReader: ModelCatalogReader
   private readonly assistantChat: AssistantChatRegistry
   private readonly feishuQr: FeishuQrOnboardingManager
+  private readonly restartProfileFn: (input: TriggerProfileRestartInput) => Promise<OwnerConsoleWriteResult>
 
   constructor(
     ctx: Context,
@@ -65,6 +69,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     catalogReader: ModelCatalogReader = new ModelCatalogReader(),
     assistantChat: AssistantChatRegistry = new AssistantChatRegistry(ctx),
     feishuQr: FeishuQrOnboardingManager = new FeishuQrOnboardingManager(),
+    restartProfileFn: (input: TriggerProfileRestartInput) => Promise<OwnerConsoleWriteResult> = triggerProfileRestart,
   ) {
     super(ctx, 'ownerConsole')
     this.host = ctx
@@ -73,6 +78,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     this.catalogReader = catalogReader
     this.assistantChat = assistantChat
     this.feishuQr = feishuQr
+    this.restartProfileFn = restartProfileFn
     this.installAssistantPromptScope()
     this.installModelCatalogInvalidation()
     this.installFeishuQrDisposal()
@@ -379,13 +385,17 @@ export class OwnerConsoleService extends TypertRemoteService {
       && inventory.bundles.some(bundle => bundle.name === name && bundle.installed)
     const larkHealth = readLarkHealth(this.host.get('larkChannel' as never))
     const traexInstalled = installed('@dsh-enhanced/traex-acp-provider')
+    const activeLarkAppId = isAppId(larkValue['appId']) && larkValue['appId'] !== PLACEHOLDER_LARK_APP_ID
+      ? (larkValue['appId'] as string)
+      : undefined
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
         mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'handle' : 'env',
         installed: installed('@dsh-enhanced/lark-channel'),
         enabled: larkValue['enabled'] === true,
-        appIdConfigured: isAppId(larkValue['appId']) && larkValue['appId'] !== PLACEHOLDER_LARK_APP_ID,
+        appIdConfigured: activeLarkAppId !== undefined,
+        ...(activeLarkAppId === undefined ? {} : { appId: activeLarkAppId }),
         ...larkHealth,
       }),
       traex: Object.freeze({
@@ -998,6 +1008,22 @@ export class OwnerConsoleService extends TypertRemoteService {
   /** Cancel an active awaiting-scan Feishu QR onboarding session and abort Host polling immediately. */
   async cancelFeishuQrOnboarding(sessionId: string): Promise<FeishuQrOnboardingSnapshot> {
     return this.feishuQr.cancel(sessionId)
+  }
+
+  /** Promote the scanned Feishu/Lark account from the active completed QR session to primary owner (requires confirmation). */
+  async promoteFeishuQrOwner(sessionId: string, confirmed: boolean): Promise<FeishuQrOnboardingSnapshot> {
+    return this.feishuQr.promoteOwner({
+      host: this.host,
+      getDescriptors: () => this.descriptors(),
+    }, sessionId, confirmed)
+  }
+
+  /** Trigger a clean detached restart of DeepSeek Harness.app or the profile's managed resident service (requires confirmation). */
+  async restartProfile(confirmed: boolean): Promise<OwnerConsoleWriteResult> {
+    return this.restartProfileFn({
+      host: this.host,
+      confirmed,
+    })
   }
 }
 

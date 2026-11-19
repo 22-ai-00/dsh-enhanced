@@ -3,8 +3,10 @@ import { gzipSync } from 'node:zlib'
 import * as QRCode from 'qrcode'
 import { resolveProfilePaths, type AutonomyHostContext } from './autonomy-setup.js'
 import {
-  applyFeishuVaultConfig, PLACEHOLDER_LARK_APP_ID, redactVaultSecret,
-  type ApplyFeishuVaultResult, type DeleteSecretFn, type StoreSecretFn,
+  applyFeishuVaultConfig, inspectProfileRestartSupport, PLACEHOLDER_LARK_APP_ID, promoteLarkOwnerInProfile,
+  redactVaultSecret,
+  type ApplyFeishuVaultResult, type DeleteSecretFn, type InspectProfileRestartInput, type ProfileRestartSupport,
+  type PromoteLarkOwnerInput, type PromoteLarkOwnerResult, type StoreSecretFn,
 } from './doctor-repair.js'
 import {
   hasControlChars, isAppId,
@@ -191,6 +193,8 @@ export interface FeishuQrOnboardingManagerOptions {
   }>) => Promise<ApplyFeishuVaultResult>
   readonly storeSecretFn?: StoreSecretFn
   readonly deleteSecretFn?: DeleteSecretFn
+  readonly promoteOwnerFn?: (input: PromoteLarkOwnerInput) => Promise<PromoteLarkOwnerResult>
+  readonly inspectRestartFn?: (input: InspectProfileRestartInput) => ProfileRestartSupport
   readonly now?: () => number
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   readonly platform?: NodeJS.Platform
@@ -338,13 +342,13 @@ function ownerBindingDetail(binding: FeishuQrOwnerBinding): string {
     case 'reused-owner':
       return '已沿用现有飞书主主人身份'
     case 'linked-to-owner':
-      return '已以关联身份（linked）接入现有主主人账户：普通私聊可正常使用，但主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人；如需切换主主人或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup'
+      return '已以关联身份（linked）接入现有主主人账户：普通私聊可正常使用，主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人；可直接在下方一键设为飞书主主人（或使用终端向导 dsh-lark-setup）'
     case 'reused-linked':
-      return '已沿用已关联飞书身份（linked）：普通私聊可正常使用，但主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人；如需切换主主人或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup'
+      return '已沿用已关联飞书身份（linked）：普通私聊可正常使用，主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人；可直接在下方一键设为飞书主主人（或使用终端向导 dsh-lark-setup）'
     case 'not-returned':
       return '飞书未返回扫码账号 open_id，未写入主人身份表；如需绑定或切换主主人，请使用终端向导 dsh-lark-setup'
     case 'unmodified':
-      return '消息与工具策略已写入，但 Delivery 身份表未改写；如需首次初始化、切换主主人或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup'
+      return '消息与工具策略已写入，但 Delivery 身份表未改写；重启 profile 初始化身份表后可一键切换主主人（或使用终端向导 dsh-lark-setup）'
   }
 }
 
@@ -427,6 +431,8 @@ export class FeishuQrOnboardingManager {
   private readonly applyVaultFn: NonNullable<FeishuQrOnboardingManagerOptions['applyVaultFn']>
   private readonly storeSecretFn: StoreSecretFn | undefined
   private readonly deleteSecretFn: DeleteSecretFn | undefined
+  private readonly promoteOwnerFn: (input: PromoteLarkOwnerInput) => Promise<PromoteLarkOwnerResult>
+  private readonly inspectRestartFn: (input: InspectProfileRestartInput) => ProfileRestartSupport
   private readonly now: () => number
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>
   private readonly platform: NodeJS.Platform
@@ -444,6 +450,8 @@ export class FeishuQrOnboardingManager {
     this.applyVaultFn = options.applyVaultFn ?? applyFeishuVaultConfig
     this.storeSecretFn = options.storeSecretFn
     this.deleteSecretFn = options.deleteSecretFn
+    this.promoteOwnerFn = options.promoteOwnerFn ?? promoteLarkOwnerInProfile
+    this.inspectRestartFn = options.inspectRestartFn ?? inspectProfileRestartSupport
     this.now = options.now ?? (() => Date.now())
     this.sleep = options.sleep ?? defaultSleep
     this.platform = options.platform ?? process.platform
@@ -662,11 +670,13 @@ export class FeishuQrOnboardingManager {
       state: 'awaiting-scan',
       domain,
       domainSwitched: false,
+      appName,
       verificationUrl,
       ...(qrCodeDataUrl === undefined ? {} : { qrCodeDataUrl }),
       startedAt,
       expiresAt,
       pollIntervalMs,
+      businessToolsRequested: request.businessTools,
       note: existingAppId === ''
         ? '请用飞书扫描二维码（或点击下方链接），选择已有应用或一键创建新应用并确认权限。'
         : `请用飞书扫描二维码（或点击下方链接），确认更新应用 ${existingAppId} 并授予所需权限。`,
@@ -680,6 +690,8 @@ export class FeishuQrOnboardingManager {
       controller,
       baseUrl,
       domain,
+      appName,
+      businessTools: request.businessTools,
       deviceCode,
       pollIntervalMs,
       expiresAt,
@@ -690,6 +702,88 @@ export class FeishuQrOnboardingManager {
     return initial
   }
 
+  async promoteOwner(
+    runtime: FeishuQrRuntimeContext,
+    sessionId: string,
+    confirmed: boolean,
+  ): Promise<FeishuQrOnboardingSnapshot> {
+    if (this.disposed) {
+      return this.failSnapshot(this.snapshot.domain, 'disposed', '控制台服务已停止，无法切换飞书主主人。')
+    }
+    const requested = sessionId.trim()
+    if (requested !== '' && this.snapshot.sessionId !== requested) {
+      return Object.freeze({
+        ...idleSnapshot('未找到该扫码授权会话（可能已被新会话替换或已结束），无法切换主主人。'),
+        errorCode: 'session-mismatch',
+      })
+    }
+    if (this.snapshot.state !== 'completed') {
+      return Object.freeze({
+        ...this.snapshot,
+        errorCode: 'invalid-state',
+      })
+    }
+    const genAtCall = this.generation
+    if (confirmed !== true) {
+      return Object.freeze({
+        ...this.snapshot,
+        errorCode: 'confirmation-required',
+        note: '切换飞书主主人需要明确确认后才能执行。',
+      })
+    }
+    const openId = this.snapshot.openId?.trim() ?? ''
+    if (openId === '' || !LARK_OPEN_ID_TOKEN.test(openId)) {
+      return Object.freeze({
+        ...this.snapshot,
+        errorCode: 'missing-open-id',
+        note: '本次扫码未返回账号 open_id，无法一键设为飞书主主人；请重启后使用 dsh-lark-setup 完成主主人绑定。',
+      })
+    }
+
+    let result: PromoteLarkOwnerResult
+    try {
+      result = await this.promoteOwnerFn({
+        host: runtime.host,
+        descriptors: runtime.getDescriptors(),
+        openId,
+        account: this.snapshot.account ?? 'primary',
+        tenant: this.snapshot.tenant ?? 'personal',
+        confirmed: true,
+        platform: this.platform,
+        ...(this.env === undefined ? {} : { env: this.env }),
+        now: this.now(),
+      })
+    } catch (error: unknown) {
+      return Object.freeze({
+        ...this.snapshot,
+        errorCode: 'promote-failed',
+        note: `一键切换飞书主主人失败：${boundedNote(error instanceof Error ? error.message : String(error), 400)}`,
+      })
+    }
+
+    if (this.disposed || this.generation !== genAtCall) return this.snapshot
+    if (!result.applied) {
+      return Object.freeze({
+        ...this.snapshot,
+        existingAutonomyAnchored: result.existingAutonomyAnchored,
+        errorCode: result.errorCode ?? 'promote-refused',
+        note: boundedNote(result.note, 1_800),
+      })
+    }
+
+    const { errorCode: _clearedError, ...rest } = this.snapshot
+    void _clearedError
+    const updated: FeishuQrOnboardingSnapshot = Object.freeze({
+      ...rest,
+      ownerBinding: result.ownerBinding,
+      ownerPromoted: true,
+      existingAutonomyAnchored: result.existingAutonomyAnchored,
+      restartRecommended: true,
+      note: boundedNote(result.note, 1_800),
+    })
+    return this.commitSnapshot(genAtCall, updated)
+  }
+
   private async runPollingLoop(input: Readonly<{
     gen: number
     sessionId: string
@@ -697,6 +791,8 @@ export class FeishuQrOnboardingManager {
     controller: AbortController
     baseUrl: string
     domain: 'feishu' | 'lark'
+    appName: string
+    businessTools: boolean
     deviceCode: string
     pollIntervalMs: number
     expiresAt: number
@@ -792,6 +888,8 @@ export class FeishuQrOnboardingManager {
           gen,
           signal: controller.signal,
           runtime: input.runtime,
+          appName: input.appName,
+          businessTools: input.businessTools,
           appId: clientId,
           appSecret: clientSecret,
           domain: finalDomain,
@@ -849,6 +947,8 @@ export class FeishuQrOnboardingManager {
     gen: number
     signal: AbortSignal
     runtime: FeishuQrRuntimeContext
+    appName: string
+    businessTools: boolean
     appId: string
     appSecret: string
     domain: 'feishu' | 'lark'
@@ -949,6 +1049,20 @@ export class FeishuQrOnboardingManager {
     // a profile restart is always required to load the new versioned keychain handle and policy cleanly.
     const connected = false
     const restartRecommended = true
+    const env = this.env ?? process.env
+    const paths = resolveProfilePaths(input.runtime.host, env)
+    const restartInfo = this.inspectRestartFn({
+      host: input.runtime.host,
+      platform: this.platform,
+      env,
+    })
+    const openPlatformHost = result.domain === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn'
+    const openPlatformUrl = `https://${openPlatformHost}/app/${input.appId}`
+    const resolvedAccount = result.account ?? (input.account || 'primary')
+    const resolvedTenant = result.tenant ?? (input.tenant || 'personal')
+    const businessCliCommand = input.businessTools && SETUP_KEY_TOKEN.test(paths.profileName)
+      ? `dsh-lark-setup --profile ${paths.profileName} --app-id ${input.appId}`
+      : undefined
     const bindingSummary = ownerBindingDetail(result.ownerBinding)
     const finalNote = `飞书一键扫码接入配置已保存（App ID ${input.appId}；${bindingSummary}）。App Secret 已加密存入本机凭据库，通道与策略已写入 cordis.patch.yml；请重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）以加载新凭据句柄与策略并建立新的飞书长连接。`
 
@@ -957,12 +1071,22 @@ export class FeishuQrOnboardingManager {
       state: 'completed',
       domain: result.domain,
       domainSwitched: input.domainSwitched,
+      appName: input.appName,
       appId: input.appId,
+      account: resolvedAccount,
+      tenant: resolvedTenant,
       ...(input.openId === undefined ? {} : { openId: input.openId }),
       ownerBinding: result.ownerBinding,
+      ...(result.existingAutonomyAnchored === true ? { existingAutonomyAnchored: true } : {}),
       applied: true,
       connected,
       restartRecommended,
+      restartSupported: restartInfo.supported,
+      restartMode: restartInfo.mode,
+      restartCommand: restartInfo.command,
+      openPlatformUrl,
+      businessToolsRequested: input.businessTools,
+      ...(businessCliCommand === undefined ? {} : { businessCliCommand }),
       note: finalNote,
     }))
   }

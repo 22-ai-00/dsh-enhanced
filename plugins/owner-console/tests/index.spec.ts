@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(33)
+    expect(asyncMethods).toHaveLength(35)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -121,6 +121,8 @@ describe('dsh-enhanced-owner-console', () => {
       .toEqual(['domain', 'appName', 'existingAppId', 'account', 'tenant', 'calendarReadonly', 'businessTools'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/feishuQrOnboardingStatus')).toEqual(['sessionId'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/cancelFeishuQrOnboarding')).toEqual(['sessionId'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/promoteFeishuQrOwner')).toEqual(['sessionId', 'confirmed'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/restartProfile')).toEqual(['confirmed'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {
@@ -154,7 +156,7 @@ describe('dsh-enhanced-owner-console', () => {
     const { ctx, console } = await mount(lark.service)
     try {
       const status = await console.status()
-      expect(status.feishu).toMatchObject({ entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true })
+      expect(status.feishu).toMatchObject({ entry: 'dsh-enhanced-lark-channel', enabled: true, appIdConfigured: true, appId: 'cli_0123456789abcdef' })
       expect(status.traex).toEqual({ entry: 'dsh-enhanced-traex-acp-provider', installed: false, enabled: false, command: 'traex' })
       expect(status.bundles).toEqual([])
       expect(status.plugins).toEqual([])

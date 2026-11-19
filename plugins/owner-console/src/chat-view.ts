@@ -12,8 +12,8 @@ import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH
 import { codeFont, renderChatMarkdown } from './chat-markdown.js'
 import {
   boundedText, chatMessages, forgetChatSession, modelSelectionFromProjection, openDedicatedChatSession,
-  permissionLabel, permissionOptions, permissionValue, remoteFailureSummary, requiresPermissionConfirmation,
-  sendChatMessage, streamingAssistantText,
+  pendingUserMessages, permissionLabel, permissionOptions, permissionValue, remoteFailureSummary,
+  requiresPermissionConfirmation, sendChatMessage, streamingAssistantText,
   type ChatBinding, type ChatEventWindow, type ChatMessage, type ChatReference, type ChatRuntime,
   type ChatSessionSnapshot, type PermissionCatalog, type SpeechRecognitionLike,
 } from './chat.js'
@@ -236,8 +236,6 @@ const StopSquareIcon = () => el('svg', {
 const CopyIcon = () => svgIcon(13, '0 0 16 16',
   el('rect', { x: 5.2, y: 5.2, width: 8.2, height: 8.2, rx: 1.8 }),
   el('path', { d: 'M10.8 5.2V3.8A1.6 1.6 0 0 0 9.2 2.2H3.8A1.6 1.6 0 0 0 2.2 3.8v5.4a1.6 1.6 0 0 0 1.6 1.6h1.4' }))
-const FolderIcon = () => svgIcon(12, '0 0 16 16',
-  el('path', { d: 'M2.2 4.3A1.3 1.3 0 0 1 3.5 3h3l1.3 1.5h4.7a1.3 1.3 0 0 1 1.3 1.3v6a1.3 1.3 0 0 1-1.3 1.3h-9a1.3 1.3 0 0 1-1.3-1.3V4.3Z' }))
 const CheckIcon = () => svgIcon(11, '0 0 16 16', el('path', { d: 'M3.2 8.4 6.5 11.7 12.8 4.8', strokeWidth: 2 }))
 const PaperclipIcon = () => svgIcon(12, '0 0 16 16',
   el('path', { d: 'M11.6 7.5 6.8 12.3a2.6 2.6 0 0 1-3.7-3.7l5.4-5.4a1.75 1.75 0 0 1 2.5 2.5L5.7 11a.9.9 0 0 1-1.3-1.3l4.6-4.6' }))
@@ -579,12 +577,6 @@ function copyTextToClipboard(value: string, setNotice: (next: ChatNotice) => voi
     return
   }
   setNotice({ tone: 'info', text: '当前环境不支持剪贴板 API' })
-}
-
-function pathBasename(pathValue: string): string {
-  const clean = pathValue.replace(/\/+$/u, '')
-  const at = clean.lastIndexOf('/')
-  return at >= 0 ? clean.slice(at + 1) : clean
 }
 
 /** Quiet compact status chip used in the slim top bar. */
@@ -1118,6 +1110,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   const [localSelection, setLocalSelection] = useState<{ provider: string; model: string; reasoningEffort: string }>()
   const [snapshot, setSnapshot] = useState<ChatSessionSnapshot>({})
   const [window, setWindow] = useState<ChatEventWindow>({})
+  const [inbox, setInbox] = useState<unknown>()
   const [permission, setPermission] = useState<string>()
   const [sessionModelSel, setSessionModelSel] = useState<Readonly<{ provider: string; model: string; reasoningEffort?: string }>>()
   const [catalog, setCatalog] = useState<CatalogState>({ phase: 'loading' })
@@ -1259,12 +1252,15 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     if (binding === undefined) {
       setSnapshot({})
       setWindow({})
+      setInbox(undefined)
       setPermission(undefined)
       setSessionModelSel(undefined)
       return
     }
     const syncSession = () => setSnapshot(binding.session.getSnapshot())
     const syncEvents = () => setWindow(binding.eventSource.getSnapshot())
+    const inboxFace = binding.session.projections.faceOf('inbox')
+    const syncInbox = () => setInbox(inboxFace.getSnapshot())
     const permFace = binding.session.projections.faceOf('permissions')
     const syncPerm = () => setPermission(permissionValue(permFace.getSnapshot()))
     const modelFace = binding.session.projections.faceOf('modelSelection')
@@ -1275,14 +1271,16 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
 
     syncSession()
     syncEvents()
+    syncInbox()
     syncPerm()
     syncModel()
 
     const stopSession = binding.session.subscribe(syncSession)
     const stopEvents = binding.eventSource.subscribe(syncEvents)
+    const stopInbox = inboxFace.subscribe(syncInbox)
     const stopPerm = permFace.subscribe(syncPerm)
     const stopModel = modelFace.subscribe(syncModel)
-    return () => { stopSession(); stopEvents(); stopPerm(); stopModel() }
+    return () => { stopSession(); stopEvents(); stopInbox(); stopPerm(); stopModel() }
   }, [binding])
 
   // Selectable permission presets come from the Host's process catalog Remote.
@@ -1311,6 +1309,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   }, [runtime])
 
   const messages = chatMessages(window.entries)
+  const pending = pendingUserMessages(window.entries, snapshot.pendingSubmissions, inbox, snapshot.running === true)
   const streaming = streamingAssistantText(window.entries)
   const lastAssistant = [...messages].reverse().find(message => message.kind === 'assistant')
   const voiceAvailable = runtime.voiceAvailable()
@@ -1320,7 +1319,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   useEffect(() => {
     const node = log.current
     if (node !== null && stick.current) node.scrollTop = node.scrollHeight
-  }, [messages, streaming, snapshot.running, binding])
+  }, [messages, pending.transcript, pending.queued, streaming, snapshot.running, binding])
 
   useEffect(() => () => {
     const active = recognition.current
@@ -1346,6 +1345,9 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
         setNotice({ tone: 'error', text: outcome.error })
         return
       }
+      stick.current = true
+      setAtBottom(true)
+      if (log.current !== null) log.current.scrollTop = log.current.scrollHeight
       if (clearDraftOnSuccess) {
         setDraft('')
         setFiles([])
@@ -1578,10 +1580,10 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   const activeModelEffort = sourceSelection?.reasoningEffort ?? ''
 
   const caps = assistantCtx?.capabilities
-  const workspaceName = assistantCtx?.workspace ? pathBasename(assistantCtx.workspace) : ''
-  const hasMetadata = workspaceName !== '' || caps?.memory === true || caps?.wiki === true || caps?.feishuConnected === true
+  const hasMetadata = caps?.memory === true || caps?.wiki === true || caps?.feishuConnected === true
 
-  const isWelcome = state.phase === 'ready' && messages.length === 0 && streaming === '' && snapshot.running !== true && window.hasMore !== true
+  const hasTranscriptItems = messages.length > 0 || pending.transcript.length > 0 || pending.queued.length > 0
+  const isWelcome = state.phase === 'ready' && !hasTranscriptItems && streaming === '' && snapshot.running !== true && window.hasMore !== true
 
   let transcriptContent: unknown
   if (state.phase === 'preparing') {
@@ -1620,7 +1622,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     el('div', { style: { display: 'grid', gap: 5 } },
       el('p', { style: { margin: 0, fontWeight: 600, fontSize: 22, letterSpacing: '-0.02em', lineHeight: 1.3, color: ink } }, '你好，我是文鳐 Ray'),
       el('p', { style: { margin: 0, fontFamily: KAI_FONT, fontSize: 13, color: muted, letterSpacing: '0.06em' } },
-        `${QUIET_PHRASE}${workspaceName !== '' ? ` · 专属工作区 ${workspaceName}` : ' · 你的个人助手小鳐'}`)),
+        `${QUIET_PHRASE} · 你的个人助手小鳐`)),
     el('div', {
       style: {
         display: 'grid',
@@ -1663,6 +1665,12 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
         message,
         onCopy: (value: string) => copyTextToClipboard(value, setNotice),
       }, message.key)),
+      ...pending.transcript.map(item => el('div', {
+        key: item.key,
+        'data-chat-message-kind': 'user',
+        'data-chat-message-pending': 'transcript',
+        style: userBubbleStyle,
+      }, item.text)),
       streaming !== ''
         ? el('div', { key: 'streaming', 'data-chat-message-kind': 'streaming', style: assistantRowStyle, 'aria-live': 'polite' },
           el('div', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: caption, marginBottom: 4 } },
@@ -1680,6 +1688,14 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
           el('span', { 'data-chat-pulse': '', 'aria-hidden': true, style: { width: 7, height: 7, borderRadius: 999, background: accent } }),
           '文鳐正在思考…')
           : null,
+      ...pending.queued.map(item => el('div', {
+        key: item.key,
+        'data-chat-message-kind': 'user',
+        'data-chat-message-pending': 'queued',
+        style: { ...userBubbleStyle, opacity: 0.82 },
+      },
+      el('div', {}, item.text),
+      el('div', { style: { marginTop: 4, fontSize: 11, color: caption, textAlign: 'right' } }, '排队中'))),
     ]
   }
 
@@ -1834,23 +1850,6 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
           sessionStatusChip(snapshot, ready)),
         hasMetadata ? el('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, overflow: 'hidden' } },
           el('span', { 'aria-hidden': true, style: { width: 1, height: 13, background: border, flex: 'none' } }),
-          workspaceName !== ''
-            ? el('span', {
-              style: {
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                fontSize: 11.5,
-                color: muted,
-                minWidth: 0,
-                flex: '0 1 auto',
-                overflow: 'hidden',
-              },
-              title: assistantCtx?.workspace,
-            },
-            FolderIcon(),
-            el('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `工作区: ${workspaceName}`))
-            : null,
           caps?.memory ? capabilityChip('记忆') : null,
           caps?.wiki ? capabilityChip('Wiki') : null,
           caps?.feishuConnected ? capabilityChip('飞书在线', true) : null) : null),
@@ -1885,7 +1884,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     el('div', { style: dockShellStyle },
       el('div', { 'aria-hidden': 'true', 'data-chat-dock-veil': '', style: dockVeilStyle }),
       el('div', { style: dockContainerStyle },
-        !atBottom && messages.length > 0 ? el('button', {
+        !atBottom && hasTranscriptItems ? el('button', {
           type: 'button',
           'data-chat-surface-btn': '',
           'data-chat-round': '',

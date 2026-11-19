@@ -117,23 +117,40 @@ describe('doctor repair card, models provider card and easy feishu UI', () => {
     return { remote, applyDoctorRepair, configureTraex, setDefaultModelRoute, configureFeishuEasy }
   }
 
-  it('renders DoctorRepairCard and invokes applyDoctorRepair on click', async () => {
+  it('renders DoctorRepairCard, invokes applyDoctorRepair, and offers inline-confirmed one-click restart when repair requires restart', async () => {
     const { remote, applyDoctorRepair } = makeRemote()
+    const restartProfile = vi.fn(async () => ({ ok: true as const, value: { applied: true, entry: 'profile-restart', note: '正在自动退出并重新打开 DeepSeek Harness.app' } }))
+    applyDoctorRepair.mockResolvedValueOnce({
+      ok: true as const,
+      value: { applied: true, entry: 'setup-doctor', note: '已补齐 assistant-verifier 缺失的 databasePath。请重启 profile 后生效' },
+    })
+    const remoteWithRestart: ConsoleRemote = { ...remote, restartProfile }
     const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
     await act(async () => {
-      root.render(createElement(WenyaoSettingsSection, { remote, navigation }))
+      root.render(createElement(WenyaoSettingsSection, { remote: remoteWithRestart, navigation }))
     })
     await act(async () => { await Promise.resolve() })
 
     expect(container.textContent).toContain('系统体检与一键自动修复')
     expect(container.textContent).toContain('@dsh-enhanced/acp 与桌面/Web 端内置 Host 冲突')
     expect(container.textContent).toContain('/Users/owner/.local/bin/agy acp --login')
+    expect(container.querySelector('button[data-doctor-restart]')).toBeNull()
 
     const fixAllBtn = [...container.querySelectorAll('button')].find(b => b.textContent === '一键全部自动修复（2 项）')
     expect(fixAllBtn).toBeDefined()
     await act(async () => { fixAllBtn!.click() })
     await act(async () => { await Promise.resolve() })
     expect(applyDoctorRepair).toHaveBeenCalledWith([])
+
+    const restartBtn = container.querySelector('button[data-doctor-restart]') as HTMLButtonElement | null
+    expect(restartBtn).not.toBeNull()
+    await act(async () => { restartBtn!.click() })
+    expect(container.querySelector('[data-doctor-restart-confirm]')).not.toBeNull()
+    expect(restartProfile).not.toHaveBeenCalled()
+
+    await act(async () => { (container.querySelector('button[data-doctor-restart-confirm-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(restartProfile).toHaveBeenCalledWith(true)
   })
 
   it('renders ModelsProviderSetupCard inside Settings -> Models and binds ACP path in one click', async () => {

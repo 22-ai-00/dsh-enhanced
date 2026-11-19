@@ -30,10 +30,30 @@ const CATALOG: PermissionCatalog = {
   ],
 }
 
-const user = (seq: number, text: string): ChatEntry => ({ type: 'event', event: {
-  type: 'user/message', seq, data: { message: { source: { kind: 'user' }, content: [{ type: 'text', text }] } } } })
-const assistant = (seq: number, text: string): ChatEntry => ({ type: 'event', event: {
-  type: 'assistant/message', seq, data: { message: { content: [{ type: 'text', text }] } } } })
+/** Real DSH `user/message` wire shape: `event.data` IS `UserMessage` directly (no `data.message` wrapper). */
+const user = (seq: number, text: string, extra: Readonly<{ id?: string; rpcId?: string }> = {}): ChatEntry => ({
+  type: 'event',
+  event: {
+    type: 'user/message',
+    seq,
+    surfaceOp: 'append',
+    data: {
+      id: extra.id ?? `msg-user-${seq}`,
+      role: 'user',
+      source: { kind: 'user', ...(extra.rpcId === undefined ? {} : { rpcId: extra.rpcId }) },
+      content: [{ type: 'text', text }],
+    },
+  },
+})
+const assistant = (seq: number, text: string, turn = 1, step = 1): ChatEntry => ({
+  type: 'event',
+  event: {
+    type: 'assistant/message',
+    seq,
+    surfaceOp: 'append',
+    data: { turn, step, message: { id: `msg-asst-${seq}`, role: 'assistant', content: [{ type: 'text', text }] } },
+  },
+})
 
 interface Harness {
   readonly runtime: ChatRuntime
@@ -49,12 +69,14 @@ interface Harness {
   setEntries(entries: readonly ChatEntry[]): void
   setSnapshot(snapshot: ChatSessionSnapshot): void
   setPermission(value: unknown): void
+  setInbox(value: unknown): void
 }
 
 function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEntry[] = []): Harness {
   const snapshot = observable<ChatSessionSnapshot>({ openState: 'open', running: false })
   const events = observable<ChatEventWindow>({ entries, hasMore: false })
   const permission = observable<unknown>({ currentValue: 'workspace-write' })
+  const inbox = observable<unknown>({ 'next-turn': [], 'next-step': [] })
   const prompt = vi.fn(async () => ({ ok: true as const, value: { accepted: true } }))
   const command = vi.fn(async () => ({ ok: true as const, value: { matched: true } }))
   const cancel = vi.fn(async () => ({ ok: true as const, value: { accepted: true } }))
@@ -75,7 +97,9 @@ function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEnt
     command,
     cancel,
     loadOlder: vi.fn(async () => undefined),
-    projections: { faceOf: key => key === 'permissions' ? permission : observable(undefined) },
+    projections: {
+      faceOf: key => key === 'permissions' ? permission : key === 'inbox' ? inbox : observable(undefined),
+    },
   }
   const binding: ChatBinding = { sessionId: 's1', session, eventSource: events }
   const storage = { value: undefined as string | undefined,
@@ -98,7 +122,8 @@ function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEnt
     ...overrides,
   }
   return { runtime, binding, prompt, command, cancel, upload, uploadImage, release, create, recognition,
-    setEntries: entries => events.set({ entries, hasMore: false }), setSnapshot: snapshot.set, setPermission: permission.set }
+    setEntries: entries => events.set({ entries, hasMore: false }), setSnapshot: snapshot.set,
+    setPermission: permission.set, setInbox: inbox.set }
 }
 
 let container: HTMLDivElement
@@ -154,6 +179,26 @@ describe('文鳐 chat window rendering', () => {
     expect(fake.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: '继续' }], 'queue', undefined)
     const textarea = container.querySelector('textarea[aria-label="给文鳐的消息"]') as HTMLTextAreaElement
     expect(textarea.value).toBe('')
+  })
+
+  it('keeps assistant workspace implicit on the empty welcome view and header without rendering 工作区 badges', async () => {
+    const fake = harness({
+      assistantChatContext: async () => ({
+        ok: true,
+        value: {
+          protocol: 'owner-console/assistant-chat/v1',
+          workspace: '/Users/owner/.dsh/assistant-workspace',
+          activeSessionId: 's1',
+          knownSessionIds: ['s1'],
+          capabilities: { memory: true, wiki: false, dreaming: false, proactive: false, growth: false, feishuConnected: false },
+        },
+      }),
+    }, [])
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+    expect(container.textContent).toContain('云水无事，小鳐静候 · 你的个人助手小鳐')
+    expect(container.textContent).not.toContain('专属工作区')
+    expect(container.textContent).not.toContain('工作区:')
+    expect(container.textContent).not.toContain('assistant-workspace')
   })
 
   it('uploads selected attachments and cites their receipts in the prompt', async () => {
@@ -352,14 +397,19 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
       renderer: { SessionProvider, renderSlot },
     }))
 
-    // Native conversation embedding is bypassed; dedicated dialog renders cleanly with Markdown & workspace pill.
+    // Native conversation embedding is bypassed; dedicated dialog renders cleanly with Markdown & capability chips
+    // without surfacing an internal `工作区: ...` badge in the top bar (assistant workspace is implicit & fixed).
     expect(container.querySelector('[data-owner-console-chat-log]')).not.toBeNull()
     expect(container.querySelector('textarea[aria-label="给文鳐的消息"]')).not.toBeNull()
     expect(container.querySelector('[data-native-conversation-slot]')).toBeNull()
     expect(SessionProvider).not.toHaveBeenCalled()
     expect(renderSlot).not.toHaveBeenCalled()
-    expect(container.textContent).toContain('工作区: assistant-workspace')
-    expect(container.textContent).toContain('飞书在线')
+    const headerText = container.querySelector('[data-owner-console-chat-header]')?.textContent ?? ''
+    expect(headerText).not.toContain('工作区:')
+    expect(headerText).not.toContain('assistant-workspace')
+    expect(headerText).toContain('记忆')
+    expect(headerText).toContain('Wiki')
+    expect(headerText).toContain('飞书在线')
     expect(container.querySelector('strong')?.textContent).toBe('文鳐')
     expect(container.querySelector('code')?.textContent).toBe('assistant-workspace')
     expect(registerAssistantSession).toHaveBeenCalledWith('s1', true)
@@ -848,5 +898,181 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
     expect(codeCard.style.background).toContain('--dsw-alias-markdown-code-block')
     const codeHeader = codeCard.firstElementChild as HTMLElement
     expect(codeHeader.style.background).toContain('--dsw-alias-markdown-code-block-banner')
+  })
+
+  it('keeps user questions visible across send, streaming, durable answer settlement, and queued follow-ups', async () => {
+    const snapshot = observable<ChatSessionSnapshot>({ openState: 'open', running: false, pendingSubmissions: [] })
+    const events = observable<ChatEventWindow>({ entries: [], hasMore: false })
+    const permission = observable<unknown>({ currentValue: 'workspace-write' })
+    const inbox = observable<unknown>({ 'next-turn': [], 'next-step': [] })
+    let reqSeq = 0
+    const beginSubmission = vi.fn((input: Readonly<{ mode: 'queue' | 'steer'; text: string; attachments: readonly unknown[] }>) => {
+      const requestId = `req-${++reqSeq}`
+      const placement: 'transcript' | 'queued' = snapshot.getSnapshot().running === true ? 'queued' : 'transcript'
+      const cur = snapshot.getSnapshot()
+      snapshot.set({
+        ...cur,
+        pendingSubmissions: [...(cur.pendingSubmissions ?? []), { requestId, placement, text: input.text, attachments: input.attachments as never }],
+      })
+      return {
+        requestId,
+        abandon: () => {
+          const latest = snapshot.getSnapshot()
+          snapshot.set({
+            ...latest,
+            pendingSubmissions: (latest.pendingSubmissions ?? []).filter(item => item.requestId !== requestId),
+          })
+        },
+      }
+    })
+    const prompt = vi.fn(async () => ({ ok: true as const, value: { accepted: true } }))
+    const session: ChatSessionFace = {
+      getSnapshot: snapshot.getSnapshot,
+      subscribe: snapshot.subscribe,
+      beginSubmission,
+      prompt,
+      command: vi.fn(async () => ({ ok: true as const, value: { matched: true } })),
+      cancel: vi.fn(async () => ({ ok: true as const, value: { accepted: true } })),
+      loadOlder: vi.fn(async () => undefined),
+      projections: { faceOf: key => key === 'permissions' ? permission : key === 'inbox' ? inbox : observable(undefined) },
+    }
+    const binding: ChatBinding = { sessionId: 's-live', session, eventSource: events }
+    const runtime: ChatRuntime = {
+      sessions: () => ({
+        create: vi.fn(async () => 's-live'),
+        retain: vi.fn(() => ({ sessionId: 's-live', binding, ready: Promise.resolve(binding), release: vi.fn() })),
+      }),
+      fileUploads: () => undefined,
+      permissionCatalog: () => Promise.resolve({ ok: true, value: CATALOG }),
+      openNativeSession: vi.fn(() => true),
+      startConversation: vi.fn(),
+      storage: () => undefined,
+      voiceAvailable: () => false,
+      createRecognition: () => undefined,
+      recognitionLang: () => 'zh-CN',
+      speakAvailable: () => false,
+      speak: () => false,
+    }
+
+    await render(createElement(OwnerConsoleChat, { runtime, onOpenSettings: vi.fn() }))
+    expect(container.querySelector('[data-owner-console-welcome]')).not.toBeNull()
+
+    // 1. User sends first question on idle session -> appears immediately before durable user/message arrives.
+    await fillMessage('介绍一下你自己和当前能力')
+    await click(byLabel('发送消息'))
+    expect(beginSubmission).toHaveBeenCalledTimes(1)
+    expect(prompt).toHaveBeenCalledWith([{ type: 'text', text: '介绍一下你自己和当前能力' }], 'queue', undefined, 'req-1')
+    expect(container.querySelector('[data-owner-console-welcome]')).toBeNull()
+    expect([...container.querySelectorAll('[data-chat-message-kind="user"]')].map(el => el.textContent))
+      .toEqual(['介绍一下你自己和当前能力'])
+
+    // 2. Host starts turn, admits durable user/message (DSH real shape: event.data IS UserMessage) + injected runtime-context,
+    //    and begins streaming -> still exactly one user bubble (zero duplication, no runtime-context leak).
+    await act(async () => {
+      snapshot.set({ ...snapshot.getSnapshot(), running: true })
+      events.set({
+        entries: [
+          user(1, '介绍一下你自己和当前能力', { id: 'm-1', rpcId: 'req-1' }),
+          { type: 'event', event: { type: 'user/message', seq: 2, surfaceOp: 'append', data: {
+            id: 'm-ctx', role: 'user', source: { kind: 'runtime-context' }, content: [{ type: 'text', text: '内部运行时上下文' }] } } },
+          { type: 'transient', event: { seq: 2.5, data: { attemptId: 'a-1', turn: 1, step: 1, chunk: { type: 'text-delta', text: '你好，我是文鳐' } } } },
+        ],
+        hasMore: false,
+      })
+    })
+    await settle()
+    expect([...container.querySelectorAll('[data-chat-message-kind="user"]')].map(el => el.textContent))
+      .toEqual(['介绍一下你自己和当前能力'])
+    expect(container.textContent).not.toContain('内部运行时上下文')
+    expect(container.querySelector('[data-chat-message-kind="streaming"]')?.textContent).toContain('你好，我是文鳐')
+
+    // 3. While turn 1 is still running, user queues a follow-up question -> appears below streaming with 排队中.
+    await fillMessage('帮我查一下今天的日程')
+    await click(byLabel('发送消息'))
+    const queuedMsg = { id: 'm-2', role: 'user', source: { kind: 'user', rpcId: 'req-2' }, content: [{ type: 'text', text: '帮我查一下今天的日程' }] }
+    await act(async () => {
+      events.set({
+        entries: [
+          ...events.getSnapshot().entries!,
+          { type: 'event', event: { type: 'agent/inbox/spliced', seq: 3, data: { target: 'next-turn', start: 0, inserted: [queuedMsg] } } },
+        ],
+        hasMore: false,
+      })
+      inbox.set({
+        'next-step': [],
+        'next-turn': [queuedMsg],
+      })
+      // Real ClientSession retires queued pendingSubmissions once inbox projection observes the item.
+      snapshot.set({ ...snapshot.getSnapshot(), pendingSubmissions: [] })
+    })
+    await settle()
+    const rowsWhileRunning = [...container.querySelectorAll('[data-chat-message-kind]')]
+    expect(rowsWhileRunning.map(el => el.getAttribute('data-chat-message-kind'))).toEqual(['user', 'streaming', 'user'])
+    expect(rowsWhileRunning[2]!.getAttribute('data-chat-message-pending')).toBe('queued')
+    expect(rowsWhileRunning[2]!.textContent).toContain('帮我查一下今天的日程')
+    expect(rowsWhileRunning[2]!.textContent).toContain('排队中')
+
+    // 3.5 Turn 1 finishes and Turn 2 claims m-2 from inbox into preStep/prepareRequest (BEFORE durable user/message arrives):
+    //     both pendingSubmissions and inbox are now empty, yet m-2 MUST stay visible above thinking (never disappear!).
+    await act(async () => {
+      events.set({
+        entries: [
+          user(1, '介绍一下你自己和当前能力', { id: 'm-1', rpcId: 'req-1' }),
+          { type: 'event', event: { type: 'agent/inbox/spliced', seq: 3, data: { target: 'next-turn', start: 0, inserted: [queuedMsg] } } },
+          assistant(4, '你好，我是文鳐，你的长期个人助手。', 1, 1),
+          { type: 'event', event: { type: 'turn/end', seq: 5, data: { turn: 1, reason: { kind: 'completed' } } } },
+          { type: 'event', event: { type: 'turn/start', seq: 6, data: { turn: 2 } } },
+          { type: 'event', event: { type: 'agent/inbox/spliced', seq: 7, data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } } },
+        ],
+        hasMore: false,
+      })
+      inbox.set({ 'next-step': [], 'next-turn': [] })
+      snapshot.set({ openState: 'open', running: true, pendingSubmissions: [] })
+    })
+    await settle()
+    const rowsDuringTurn2PreStep = [...container.querySelectorAll('[data-chat-message-kind]')]
+    expect(rowsDuringTurn2PreStep.map(el => el.getAttribute('data-chat-message-kind'))).toEqual(['user', 'assistant', 'user', 'thinking'])
+    expect(rowsDuringTurn2PreStep[2]!.getAttribute('data-chat-message-pending')).toBe('transcript')
+    expect(rowsDuringTurn2PreStep[2]!.textContent).toBe('帮我查一下今天的日程')
+
+    // 4. Turn 2 finishes (durable user/message + assistant/message settle, running flips false) ->
+    //    Both user questions MUST remain permanently visible above their respective answers!
+    await act(async () => {
+      events.set({
+        entries: [
+          user(1, '介绍一下你自己和当前能力', { id: 'm-1', rpcId: 'req-1' }),
+          { type: 'event', event: { type: 'agent/inbox/spliced', seq: 3, data: { target: 'next-turn', start: 0, inserted: [queuedMsg] } } },
+          assistant(4, '你好，我是文鳐，你的长期个人助手。', 1, 1),
+          { type: 'event', event: { type: 'turn/end', seq: 5, data: { turn: 1, reason: { kind: 'completed' } } } },
+          { type: 'event', event: { type: 'turn/start', seq: 6, data: { turn: 2 } } },
+          { type: 'event', event: { type: 'agent/inbox/spliced', seq: 7, data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } } },
+          user(8, '帮我查一下今天的日程', { id: 'm-2', rpcId: 'req-2' }),
+          assistant(9, '今天下午 3 点有评审会。', 2, 1),
+        ],
+        hasMore: false,
+      })
+      inbox.set({ 'next-step': [], 'next-turn': [] })
+      snapshot.set({ openState: 'open', running: false, pendingSubmissions: [] })
+    })
+    await settle()
+
+    const settledRows = [...container.querySelectorAll('[data-chat-message-kind]')]
+    expect(settledRows.map(el => el.getAttribute('data-chat-message-kind'))).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(settledRows[0]!.textContent).toBe('介绍一下你自己和当前能力')
+    expect(settledRows[1]!.textContent).toContain('你好，我是文鳐，你的长期个人助手。')
+    expect(settledRows[2]!.textContent).toBe('帮我查一下今天的日程')
+    expect(settledRows[3]!.textContent).toContain('今天下午 3 点有评审会。')
+
+    // 5. Submitting a new question while scrolled up re-sticks to bottom so the newly sent question is visible.
+    const logEl = container.querySelector('[data-owner-console-chat-log]') as HTMLDivElement
+    Object.defineProperty(logEl, 'scrollHeight', { configurable: true, value: 1200 })
+    Object.defineProperty(logEl, 'clientHeight', { configurable: true, value: 300 })
+    logEl.scrollTop = 100
+    await act(async () => { logEl.dispatchEvent(new Event('scroll', { bubbles: true })) })
+    expect(byLabel('滚动到底部')).not.toBeNull()
+    await fillMessage('再来一个问题')
+    await click(byLabel('发送消息'))
+    expect(logEl.scrollTop).toBe(1200)
+    expect(byLabel('滚动到底部')).toBeNull()
   })
 })
