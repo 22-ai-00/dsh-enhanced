@@ -11,7 +11,7 @@ import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { WENYAO_BACKDROP_DATA_URI, WENYAO_BACKDROP_HEIGHT, WENYAO_BACKDROP_WIDTH, WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import { codeFont, renderChatMarkdown } from './chat-markdown.js'
 import {
-  boundedText, chatMessages, forgetChatSession, modelSelectionFromProjection, openDedicatedChatSession,
+  boundedText, chatMessages, forgetChatSession, isAuthChatError, modelSelectionFromProjection, openDedicatedChatSession,
   pendingUserMessages, permissionLabel, permissionOptions, permissionValue, remoteFailureSummary,
   requiresPermissionConfirmation, sendChatMessage, streamingAssistantText,
   type ChatBinding, type ChatEventWindow, type ChatMessage, type ChatReference, type ChatRuntime,
@@ -692,8 +692,97 @@ function ChatMark() {
   })
 }
 
+type ChatAuthAlternative = Readonly<{
+  provider: string
+  label: string
+  model: string
+  reasoningEffort?: string
+  kind?: 'acp' | 'api'
+  isDefault?: boolean
+}>
+
+type ChatAuthRecovery = Readonly<{
+  activeProvider: string
+  activeModel: string
+  defaultProvider: string
+  defaultModel: string
+  defaultEffort: string
+  alternatives: readonly ChatAuthAlternative[]
+  disabled: boolean
+  isLatestAuthError?: boolean
+  resolvedByLaterReply?: boolean
+  userSwitchedLocally?: boolean
+  onSwitchModel?: (next: Readonly<{ provider: string; model: string; reasoningEffort: string }>) => void
+  onOpenSettings?: () => void
+}>
+
+const BUILTIN_API_PROVIDERS = new Set(['deepseek', 'deepseek-official'])
+
+function providerFamilyPrefix(providerId: string): string {
+  const clean = providerId.trim().toLowerCase()
+  const idx = clean.indexOf('-')
+  const prefix = idx > 0 ? clean.slice(0, idx) : clean
+  return prefix.length >= 3 ? prefix : ''
+}
+
+function rankAuthRecoveryAlternatives(
+  alternatives: readonly ChatAuthAlternative[],
+  failedProvider: string,
+  defaultSelection: Readonly<{ provider: string; model: string; reasoningEffort: string }>,
+): readonly ChatAuthAlternative[] {
+  const failedFamily = providerFamilyPrefix(failedProvider)
+  const rawList: ChatAuthAlternative[] = [...alternatives]
+  if (
+    defaultSelection.provider !== ''
+    && defaultSelection.provider !== failedProvider
+    && defaultSelection.model !== ''
+    && !rawList.some(item => item.provider === defaultSelection.provider)
+  ) {
+    rawList.unshift({
+      provider: defaultSelection.provider,
+      label: defaultSelection.provider,
+      model: defaultSelection.model,
+      reasoningEffort: defaultSelection.reasoningEffort,
+      isDefault: true,
+    })
+  }
+  const candidates = rawList
+    .filter(item => item.provider !== '' && item.provider !== failedProvider && item.model !== '')
+    .map((item, index) => {
+      const isDefault = defaultSelection.provider !== '' && item.provider === defaultSelection.provider
+      const itemFamily = providerFamilyPrefix(item.provider)
+      const sameFamily = !isDefault && failedFamily !== '' && itemFamily === failedFamily
+      let tier = 2
+      if (isDefault) tier = 0
+      else if (sameFamily) tier = 4
+      else if (item.kind === 'acp') tier = 1
+      else if (BUILTIN_API_PROVIDERS.has(item.provider.toLowerCase())) tier = 3
+      const next: ChatAuthAlternative = isDefault
+        ? {
+          ...item,
+          model: defaultSelection.model || item.model,
+          reasoningEffort: defaultSelection.reasoningEffort,
+          isDefault: true,
+        }
+        : item
+      return { item: next, tier, index, sameFamily }
+    })
+  const nonSibling = candidates.filter(entry => !entry.sameFamily)
+  const pool = nonSibling.length > 0 ? nonSibling : candidates
+  pool.sort((a, b) => a.tier - b.tier || a.index - b.index)
+  return pool.slice(0, 4).map(entry => entry.item)
+}
+
 /** Open-canvas Markdown transcript row for 文鳐 assistant dialog. */
-function ChatMessageRow({ message, onCopy }: Readonly<{ message: ChatMessage; onCopy: (text: string) => void }>) {
+function ChatMessageRow({
+  message,
+  onCopy,
+  authRecovery,
+}: Readonly<{
+  message: ChatMessage
+  onCopy: (text: string) => void
+  authRecovery?: ChatAuthRecovery
+}>) {
   if (message.kind === 'tool') {
     const statusGlyph = message.status === 'ok'
       ? el('span', { style: { color: toneColor.ok, display: 'inline-flex' } }, CheckIcon())
@@ -721,13 +810,93 @@ function ChatMessageRow({ message, onCopy }: Readonly<{ message: ChatMessage; on
     el('span', { style: { color: caption } }, TOOL_STATUS_LABELS[message.status]))
   }
   if (message.kind === 'error') {
+    const isAuth = isAuthChatError(message)
+    const resolvedByLaterReply = authRecovery?.resolvedByLaterReply === true
+    const isLatestAuth = authRecovery?.isLatestAuthError !== false
+    const canInferActiveAsFailed = message.provider === undefined
+      && isLatestAuth
+      && !resolvedByLaterReply
+      && authRecovery?.userSwitchedLocally !== true
+    const failedProvider = message.provider ?? (canInferActiveAsFailed ? authRecovery?.activeProvider : undefined) ?? ''
+    const failedModel = message.model ?? (canInferActiveAsFailed ? authRecovery?.activeModel : undefined) ?? ''
+    const routeLabel = failedProvider === '' ? '' : `${failedProvider}${failedModel === '' ? '' : ` / ${failedModel}`}`
+    const alreadySwitched = isAuth && authRecovery !== undefined
+      && !resolvedByLaterReply
+      && authRecovery.activeProvider !== ''
+      && (
+        (failedProvider !== '' && authRecovery.activeProvider !== failedProvider)
+        || (message.provider === undefined && authRecovery.userSwitchedLocally === true)
+      )
+    const defaultDiffers = isAuth && authRecovery !== undefined
+      && authRecovery.defaultProvider !== ''
+      && authRecovery.defaultProvider !== failedProvider
+    const defaultRouteLabel = defaultDiffers && authRecovery !== undefined
+      ? `${authRecovery.defaultProvider}${authRecovery.defaultModel === '' ? '' : ` / ${authRecovery.defaultModel}`}`
+      : ''
+    const showActionRow = isAuth && authRecovery !== undefined && !resolvedByLaterReply && isLatestAuth
+    const alternatives = showActionRow && !alreadySwitched
+      ? rankAuthRecoveryAlternatives(authRecovery.alternatives, failedProvider, {
+        provider: authRecovery.defaultProvider,
+        model: authRecovery.defaultModel,
+        reasoningEffort: authRecovery.defaultEffort,
+      })
+      : []
+    const showOpenSettings = showActionRow
+      && authRecovery.onOpenSettings !== undefined
+      && (!alreadySwitched || authRecovery.defaultProvider === '' || authRecovery.defaultProvider === failedProvider)
+    const activeRouteLabel = authRecovery !== undefined && authRecovery.activeProvider !== ''
+      ? `${authRecovery.activeProvider}${authRecovery.activeModel === '' ? '' : ` / ${authRecovery.activeModel}`}`
+      : ''
+    const recoveryText = resolvedByLaterReply
+      ? `该历史鉴权错误来自旧模型${routeLabel === '' ? '' : `（${routeLabel}）`}；后续对话已恢复正常。`
+      : alreadySwitched
+        ? `该鉴权错误来自旧模型${routeLabel === '' ? '' : `（${routeLabel}）`}；当前会话已切换至 ${activeRouteLabel}，可直接重新发送消息。`
+        : !isLatestAuth
+          ? `该次发送触发了模型鉴权失败${routeLabel === '' ? '' : `（${routeLabel}）`}；请在下方最新错误提示中一键切换模型。`
+          : defaultDiffers
+            ? `模型鉴权失败${routeLabel === '' ? '' : `（${routeLabel}）`}：该 Provider 的 API Key 无效或已过期。当前系统默认模型已是 ${defaultRouteLabel}，但此会话仍锁定在旧模型；点击下方按钮一键切换当前会话，或点击右上角「+ 新对话」。`
+            : `模型鉴权失败${routeLabel === '' ? '' : `（${routeLabel}）`}：该 Provider 的 API Key 无效或已过期。可在下方模型选择框切换其他可用模型，或前往设置更新默认模型与凭据。`
     return el('div', { 'data-chat-message-kind': 'error', role: 'alert', style: errorRowStyle },
       el('span', {
         'aria-hidden': true,
         'data-chat-round': '',
         style: { width: 6, height: 6, borderRadius: 999, background: danger, flex: 'none', marginTop: 6 },
       }),
-      el('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, message.text))
+      el('div', { style: { display: 'grid', gap: 6, minWidth: 0, flex: '1 1 auto' } },
+        el('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, message.text),
+        isAuth
+          ? el('div', {
+            'data-chat-auth-recovery': '',
+            style: { display: 'grid', gap: 6, paddingTop: 4, borderTop: `1px solid ${tint(danger, 20)}`, fontSize: 12, color: ink },
+          },
+          el('span', { style: { color: muted, lineHeight: 1.5 } }, recoveryText),
+          alternatives.length > 0 || showOpenSettings
+            ? el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+              ...(authRecovery?.onSwitchModel === undefined ? [] : alternatives.map(alt => el('button', {
+                key: alt.provider,
+                type: 'button',
+                'data-chat-auth-switch': alt.provider,
+                ...(alt.isDefault === true ? { 'data-chat-auth-switch-default': '' } : {}),
+                style: idle({
+                  ...smallActionButtonStyle,
+                  fontWeight: alt.isDefault === true ? 600 : 500,
+                  ...(alt.isDefault === true ? { borderColor: tint(accent, 45), background: tint(accent, 10), color: accent } : {}),
+                }, authRecovery.disabled),
+                disabled: authRecovery.disabled,
+                onClick: () => authRecovery.onSwitchModel!({
+                  provider: alt.provider,
+                  model: alt.model,
+                  reasoningEffort: alt.reasoningEffort ?? '',
+                }),
+              }, alt.isDefault === true ? `切换至默认模型（${alt.label}）` : `切换至 ${alt.label}`))),
+              showOpenSettings ? el('button', {
+                type: 'button',
+                'data-chat-auth-open-settings': '',
+                style: smallActionButtonStyle,
+                onClick: () => authRecovery!.onOpenSettings!(),
+              }, '打开设置修改默认模型') : null)
+            : null)
+          : null))
   }
   if (message.kind === 'user') {
     return el('div', { 'data-chat-message-kind': 'user', style: userBubbleStyle }, message.text)
@@ -1643,6 +1812,24 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     el('span', { style: { minWidth: 0 } }, textPrompt),
     el('span', { 'data-chat-starter-arrow': '', style: { color: caption, display: 'inline-flex', flex: 'none' } }, ArrowUpRightIcon())))))
   } else {
+    let lastAssistantIndex = -1
+    let lastAuthErrorIndex = -1
+    for (let idx = 0; idx < messages.length; idx += 1) {
+      const msg = messages[idx]!
+      if (msg.kind === 'assistant') lastAssistantIndex = idx
+      else if (msg.kind === 'error' && isAuthChatError(msg)) lastAuthErrorIndex = idx
+    }
+    const authAlternatives: readonly ChatAuthAlternative[] = effectiveCatalog.providers
+      .filter(p => p.active !== false && p.id !== ''
+        && (p.kind === 'acp'
+          || p.models.length > 0
+          || (p.id === effectiveCatalog.defaultSelection.provider && effectiveCatalog.defaultSelection.model !== '')))
+      .map(p => ({
+        provider: p.id,
+        label: p.name !== '' && p.name !== p.id ? p.name : p.id,
+        model: p.models[0]?.id ?? (p.kind === 'acp' ? 'default' : effectiveCatalog.defaultSelection.model),
+        kind: p.kind,
+      }))
     transcriptContent = [
       window.hasMore === true ? el('div', { key: 'older', style: { display: 'flex', justifyContent: 'center' } },
         el('button', {
@@ -1661,9 +1848,27 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
           disabled: loadingOlder,
           onClick: loadOlder,
         }, loadingOlder ? '正在载入更早的消息…' : '载入更早的消息')) : null,
-      ...messages.map(message => jsx(ChatMessageRow, {
+      ...messages.map((message, index) => jsx(ChatMessageRow, {
         message,
         onCopy: (value: string) => copyTextToClipboard(value, setNotice),
+        ...(message.kind === 'error'
+          ? {
+            authRecovery: {
+              activeProvider: activeModelProvider,
+              activeModel: activeModelId,
+              defaultProvider: effectiveCatalog.defaultSelection.provider,
+              defaultModel: effectiveCatalog.defaultSelection.model,
+              defaultEffort: effectiveCatalog.defaultSelection.reasoningEffort ?? '',
+              alternatives: authAlternatives,
+              disabled: !ready || modelSwitching || typeof runtime.selectSessionModel !== 'function',
+              isLatestAuthError: index === lastAuthErrorIndex,
+              resolvedByLaterReply: index < lastAssistantIndex,
+              userSwitchedLocally: localSelection !== undefined,
+              ...(typeof runtime.selectSessionModel === 'function' ? { onSwitchModel: handleModelRouteChange } : {}),
+              onOpenSettings,
+            },
+          }
+          : {}),
       }, message.key)),
       ...pending.transcript.map(item => el('div', {
         key: item.key,

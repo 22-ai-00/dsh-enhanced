@@ -12,7 +12,7 @@ import { normalizeConfig as validateGrowthConfig } from '../../assistant-growth-
 import { validateLearningConfig } from '../../assistant-memory-learning/lib/index.js'
 import { AssistantPolicyService } from '../../assistant-policy/lib/index.js'
 import { Config as AssistantVerifierConfig, validateMemoryReviewConfig } from '../../assistant-verifier/lib/index.js'
-import { validateMemoryLearningAdoptionGrant } from '../../personal-memory/lib/index.js'
+import { PersonalMemoryService, validateMemoryLearningAdoptionGrant } from '../../personal-memory/lib/index.js'
 import {
   applyAutonomyWizardSetup,
   canonicalObjectDigest,
@@ -783,5 +783,231 @@ describe('autonomy-setup wizard', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  it('rotates memory-learning grant generation on re-apply so frozen PersonalMemory grants never crash startup', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    const memoryDb = join(dshHome, 'personal-memory', 'memory.sqlite')
+    seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_rot_1', 1)
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '      budgets: []',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '    assistantAutomations:',
+      "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
+      '      schedulerEnabled: true',
+      '      allowUnbudgetedExecution: false',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-primary',
+      '        conversation: { channel: web, account: web, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: web, tenant: local, user: operator }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+
+    const { host } = createHostContext({
+      profileDir,
+      dshHome,
+      profileName: 'web',
+      llmProviders: [
+        { id: 'llmgw-general', name: 'LLMBox' },
+        { id: 'super-relay', name: 'Super Relay' },
+      ],
+    })
+
+    // Run 1: initial setup -> base generation (gen 1)
+    const run1 = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'llmgw-general',
+      model: 'deepseek-v4.1-flash',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: 1_760_000_000_000,
+    })
+    expect(run1.applied).toBe(true)
+    const rows1 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
+    const adopt1 = rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['personalMemory']['automaticLearning']
+    const mem1 = rows1.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    expect(adopt1['authorityId']).toBe('web-memory-adopt-web')
+    expect(mem1['authorityId']).toBe('web-memory-extract-web')
+
+    // Boot real PersonalMemoryService so gen-1 grant is frozen in memory.sqlite
+    const ctx1 = new Context()
+    try {
+      await ctx1.plugin(AssistantPolicyService, {
+        databasePath: join(dshHome, 'assistant-policy', 'policy-rot-1.sqlite'),
+        rules: rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy']['rules'],
+        budgets: rows1.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['assistantPolicy']['budgets'],
+      }).await()
+      await ctx1.plugin(PersonalMemoryService, { databasePath: memoryDb, automaticLearning: adopt1, reconcileIntervalMs: 0 }).await()
+      expect(ctx1.get('personalMemory')).toBeDefined()
+    } finally {
+      await ctx1.fiber.dispose()
+    }
+
+    // Run 2: change model + timestamp -> MUST rotate to -g2 + fresh dbPath, and real PersonalMemoryService MUST boot cleanly
+    const run2 = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: 1_760_000_060_000,
+    })
+    expect(run2.applied).toBe(true)
+    const rows2 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
+    const pa2 = rows2.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const adopt2 = pa2['personalMemory']['automaticLearning']
+    const review2 = rows2.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!['memoryReviews']
+    const mem2 = rows2.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    expect(adopt2['authorityId']).toBe('web-memory-adopt-web-g2')
+    expect(review2['authorityId']).toBe('web-memory-review-web-g2')
+    expect(mem2['authorityId']).toBe('web-memory-extract-web-g2')
+    expect(String(mem2['databasePath'])).toContain(join('assistant-memory-learning', 'web-g2.sqlite'))
+    expect(adopt2['reviewAuthorityDigest']).toBe(canonicalObjectDigest(review2))
+    expect(mem2['adoptionGrantDigest']).toBe(canonicalObjectDigest(adopt2))
+    expect(() => validateMemoryLearningAdoptionGrant(adopt2)).not.toThrow()
+    expect(() => validateMemoryReviewConfig(review2)).not.toThrow()
+    expect(() => validateLearningConfig(mem2)).not.toThrow()
+
+    // Policy rules point at the rotated -g2 resources
+    const rules2 = pa2['assistantPolicy']['rules'] as Array<{ id: string; resource: { id: string } }>
+    expect(rules2.find(r => r.id === 'wizard-web-mem-adopt-web')?.resource.id).toBe('learning:web-memory-adopt-web-g2')
+    expect(rules2.find(r => r.id === 'wizard-web-mem-review-web')?.resource.id).toBe('learning:web-memory-review-web-g2')
+    expect(rules2.find(r => r.id === 'wizard-web-mem-extract-web')?.resource.id).toBe('learning:web-memory-extract-web-g2')
+
+    // Boot real PersonalMemoryService against the SAME memory.sqlite -> MUST NOT throw idempotency-conflict!
+    const ctx2 = new Context()
+    try {
+      await ctx2.plugin(AssistantPolicyService, {
+        databasePath: join(dshHome, 'assistant-policy', 'policy-rot-2.sqlite'),
+        rules: pa2['assistantPolicy']['rules'],
+        budgets: pa2['assistantPolicy']['budgets'],
+      }).await()
+      await ctx2.plugin(PersonalMemoryService, { databasePath: memoryDb, automaticLearning: adopt2, reconcileIntervalMs: 0 }).await()
+      expect(ctx2.get('personalMemory')).toBeDefined()
+    } finally {
+      await ctx2.fiber.dispose()
+    }
+
+    // Run 3: another re-apply MUST advance to -g3 (never step back to g1)
+    const run3 = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'balanced',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.balanced,
+      now: 1_760_000_120_000,
+    })
+    expect(run3.applied).toBe(true)
+    const rows3 = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
+    expect(rows3.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!['personalMemory']['automaticLearning']['authorityId']).toBe('web-memory-adopt-web-g3')
+    expect(String(rows3.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!['databasePath'])).toContain(join('assistant-memory-learning', 'web-g3.sqlite'))
+  })
+
+  it('rotates away from an existing assistant-memory-learning sqlite grant_record when config_digest differs even if cordis.patch.yml row was removed', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_stale_db', 1)
+
+    // Pre-existing desktop/web.sqlite with matching gen-1 authority_id & max_extractions, but stale config_digest
+    const learningDir = join(dshHome, 'assistant-memory-learning')
+    mkdirSync(learningDir, { recursive: true })
+    const learningDb = new DatabaseSync(join(learningDir, 'web.sqlite'))
+    try {
+      learningDb.exec(`CREATE TABLE grant_record (authority_id TEXT PRIMARY KEY, config_digest TEXT NOT NULL, max_extractions INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0) STRICT`)
+      learningDb.prepare(`INSERT INTO grant_record VALUES ('web-memory-extract-web', 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 300, 2)`).run()
+    } finally {
+      learningDb.close()
+    }
+
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '      budgets: []',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '    assistantAutomations:',
+      "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
+      '      schedulerEnabled: true',
+      '      allowUnbudgetedExecution: false',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-primary',
+      '        conversation: { channel: web, account: web, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: web, tenant: local, user: operator }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+
+    const { host } = createHostContext({
+      profileDir,
+      dshHome,
+      profileName: 'web',
+      llmProviders: [{ id: 'super-relay', name: 'Super Relay' }],
+    })
+
+    const res = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: true,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: 1_760_000_500_000,
+    })
+    expect(res.applied).toBe(true)
+    const rows = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config?: Record<string, any> }>
+    const learnerCfg = rows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    expect(learnerCfg['authorityId']).toBe('web-memory-extract-web-g2')
+    expect(String(learnerCfg['databasePath'])).toContain(join('assistant-memory-learning', 'web-g2.sqlite'))
+    expect(() => validateLearningConfig(learnerCfg)).not.toThrow()
   })
 })

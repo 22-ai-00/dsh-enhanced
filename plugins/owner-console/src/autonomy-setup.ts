@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  chmodSync, constants, existsSync, lstatSync, mkdirSync, openSync,
+  chmodSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync,
   readFileSync, realpathSync, renameSync, closeSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -770,12 +770,14 @@ export function getPersonalAndPolicyConfigs(
   personalMemoryCfg: Record<string, unknown>
   policyRow?: YAMLMap | undefined
 }> {
-  const hasSplitPolicy = seq !== undefined && findPatchRow(seq, 'dsh-enhanced-assistant-policy') !== undefined
+  const hasSplitRow = seq !== undefined
+    && (findPatchRow(seq, 'dsh-enhanced-assistant-policy') !== undefined
+      || findPatchRow(seq, 'dsh-enhanced-personal-memory') !== undefined)
   const paPatch = seq ? getPatchRowConfig(seq, 'dsh-enhanced-personal-assistant') : {}
   const descPa = findEntry(descriptors, candidate => candidate === 'dsh-enhanced-personal-assistant')
   const runtimePaCfg = descPa ? boundedConfig(descPa.value) : {}
 
-  if (hasSplitPolicy && findPatchRow(seq!, 'dsh-enhanced-personal-assistant') === undefined) {
+  if (hasSplitRow && findPatchRow(seq!, 'dsh-enhanced-personal-assistant') === undefined) {
     const policyCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-policy', getPatchRowConfig(seq!, 'dsh-enhanced-assistant-policy'))
     const automationsCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-assistant-automations', getPatchRowConfig(seq!, 'dsh-enhanced-assistant-automations'))
     const personalMemoryCfg = mergeDescriptorConfig(descriptors, 'dsh-enhanced-personal-memory', getPatchRowConfig(seq!, 'dsh-enhanced-personal-memory'))
@@ -1094,6 +1096,379 @@ export function resolveScopedDbTarget(
   return target
 }
 
+const GRANT_GENERATION_SUFFIX = /-g([0-9]+)$/u
+
+const LEARNING_CONFIG_DIGEST_KEYS = [
+  'databasePath',
+  'authorityId',
+  'owner',
+  'expiresAt',
+  'maxExtractions',
+  'maxPending',
+  'lookbackMs',
+  'policy',
+  'maxInputBytes',
+  'maxOutputTokens',
+  'timeoutMs',
+  'budgetId',
+  'budgetAmount',
+  'scanBudgetId',
+  'scanBudgetAmount',
+  'reviewAuthorityId',
+  'reviewAuthorityDigest',
+  'adoptionAuthorityId',
+  'adoptionGrantDigest',
+] as const
+
+export function normalizeProfileSlug(profileName: string): string {
+  return profileName.replace(/[^A-Za-z0-9._-]/gu, '-') || 'default'
+}
+
+/** Mirror exact normalization applied by personal-memory / assistant-verifier / assistant-memory-learning
+ * before hashing (`workItemExperiences !== true` is omitted, and `databasePath` is resolved to absolute). */
+export function normalizeMemoryGrantForDigest(
+  cfg: Readonly<Record<string, unknown>>,
+  resolvedDatabasePath?: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...cfg }
+  if (out['workItemExperiences'] !== true) delete out['workItemExperiences']
+  if (resolvedDatabasePath !== undefined) out['databasePath'] = resolvedDatabasePath
+  return out
+}
+
+function hasCompleteLearningDigestFields(cfg: Readonly<Record<string, unknown>>): boolean {
+  return LEARNING_CONFIG_DIGEST_KEYS.every(key => cfg[key] !== undefined)
+}
+
+export function stripGrantGenerationSuffix(id: string): string {
+  return id.replace(GRANT_GENERATION_SUFFIX, '')
+}
+
+export function parseGrantGeneration(id: string | null | undefined): number {
+  if (typeof id !== 'string') return 1
+  const match = GRANT_GENERATION_SUFFIX.exec(id)
+  if (match === null) return 1
+  const parsed = Number.parseInt(match[1] ?? '1', 10)
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : 1
+}
+
+export function formatGrantIdWithGeneration(baseId: string, generation: number): string {
+  const clean = stripGrantGenerationSuffix(baseId)
+  return generation <= 1 ? clean : `${clean}-g${generation}`
+}
+
+function readPersonalMemoryGrants(dbPath: string): ReadonlyMap<string, string> {
+  const out = new Map<string, string>()
+  let db: DatabaseSync | undefined
+  try {
+    if (!existsSync(dbPath)) return out
+    const st = lstatSync(dbPath)
+    if (st.isSymbolicLink() || !st.isFile()) return out
+    db = new DatabaseSync(dbPath, { readOnly: true })
+    const rows = db.prepare(
+      `SELECT authority_id, grant_digest FROM memory_learning_adoptions WHERE row_kind = 'grant'`,
+    ).all() as Array<{ authority_id?: unknown; grant_digest?: unknown }>
+    for (const row of rows) {
+      if (typeof row.authority_id === 'string' && typeof row.grant_digest === 'string') {
+        out.set(row.authority_id, row.grant_digest)
+      }
+    }
+  } catch {
+    // Missing table or unreadability falls back to empty map.
+  } finally {
+    try { db?.close() } catch { /* ignore */ }
+  }
+  return out
+}
+
+function readVerifierReviewGrants(
+  verifierDbPath: string,
+): ReadonlyMap<string, Readonly<{ digest: string; max: number }>> {
+  const out = new Map<string, Readonly<{ digest: string; max: number }>>()
+  const ledgerPath = `${verifierDbPath}.memory-reviews`
+  let db: DatabaseSync | undefined
+  try {
+    if (!existsSync(ledgerPath)) return out
+    const st = lstatSync(ledgerPath)
+    if (st.isSymbolicLink() || !st.isFile()) return out
+    db = new DatabaseSync(ledgerPath, { readOnly: true })
+    const rows = db.prepare(`SELECT authority, digest, max FROM grants`).all() as Array<{
+      authority?: unknown
+      digest?: unknown
+      max?: unknown
+    }>
+    for (const row of rows) {
+      if (typeof row.authority === 'string' && typeof row.digest === 'string' && typeof row.max === 'number') {
+        out.set(row.authority, Object.freeze({ digest: row.digest, max: row.max }))
+      }
+    }
+  } catch {
+    // Missing table or unreadability falls back to empty map.
+  } finally {
+    try { db?.close() } catch { /* ignore */ }
+  }
+  return out
+}
+
+function readMemoryLearningStoreGrant(
+  dbPath: string,
+): Readonly<{ authorityId: string; configDigest: string; maxExtractions: number }> | 'unreadable' | null {
+  if (!existsSync(dbPath)) return null
+  let db: DatabaseSync | undefined
+  try {
+    const st = lstatSync(dbPath)
+    if (st.isSymbolicLink() || !st.isFile()) return 'unreadable'
+    db = new DatabaseSync(dbPath, { readOnly: true })
+    const rows = db.prepare(
+      `SELECT authority_id, config_digest, max_extractions FROM grant_record`,
+    ).all() as Array<{ authority_id?: unknown; config_digest?: unknown; max_extractions?: unknown }>
+    if (rows.length === 0) return null
+    if (rows.length !== 1) return 'unreadable'
+    const row = rows[0]!
+    if (typeof row.authority_id !== 'string' || typeof row.config_digest !== 'string' || typeof row.max_extractions !== 'number') {
+      return 'unreadable'
+    }
+    return Object.freeze({
+      authorityId: row.authority_id,
+      configDigest: row.config_digest,
+      maxExtractions: row.max_extractions,
+    })
+  } catch {
+    return 'unreadable'
+  } finally {
+    try { db?.close() } catch { /* ignore */ }
+  }
+}
+
+function maxSqliteFileGeneration(canonicalHome: string, profileSlug: string): number {
+  const dir = join(canonicalHome, 'assistant-memory-learning')
+  let maxGen = 1
+  try {
+    if (!existsSync(dir)) return maxGen
+    const re = new RegExp(`^${profileSlug.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}-g([0-9]+)\\.sqlite$`, 'u')
+    for (const entry of readdirSync(dir)) {
+      const m = re.exec(entry)
+      if (m !== null) {
+        const parsed = Number.parseInt(m[1] ?? '1', 10)
+        if (Number.isSafeInteger(parsed) && parsed > maxGen) maxGen = parsed
+      }
+    }
+  } catch {
+    // Directory absent or unreadable.
+  }
+  return maxGen
+}
+
+function resolveMemoryLearningDbPaths(
+  canonicalHome: string,
+  profileSlug: string,
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+  pp: ReturnType<typeof getPersonalAndPolicyConfigs>,
+): Readonly<{ personalMemoryDbPath: string; verifierDbPath: string; memoryLearningDbPath: string }> {
+  const pmRow = seq
+    ? (pp.layout === 'split'
+      ? findPatchRow(seq, 'dsh-enhanced-personal-memory')
+      : findPatchRow(seq, 'dsh-enhanced-personal-assistant'))
+    : undefined
+  const pmCfgNode = pmRow ? readConfigMap(pmRow, 'config') : undefined
+  const pmRaw: unknown = pmCfgNode?.get('personalMemory', true)
+  const pmSectionNode = pp.layout === 'split'
+    ? pmCfgNode
+    : (isMap(pmRaw) ? pmRaw : undefined)
+  const personalMemoryDbPath = resolveScopedDbTarget(
+    canonicalHome,
+    'personal-memory',
+    'memory.sqlite',
+    pmSectionNode?.get('databasePath', true) ?? pp.personalMemoryCfg['databasePath'],
+  )
+
+  const verifierNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-verifier') : undefined
+  const verifierCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-assistant-verifier',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier') : {},
+  )
+  const verifierDbPath = resolveScopedDbTarget(
+    canonicalHome,
+    'assistant-verifier',
+    'verification.sqlite',
+    verifierNode?.get('databasePath', true) ?? verifierCfg['databasePath'],
+  )
+
+  const memNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-memory-learning') : undefined
+  const memCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-assistant-memory-learning',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning') : {},
+  )
+  const memoryLearningDbPath = resolveScopedDbTarget(
+    canonicalHome,
+    'assistant-memory-learning',
+    `${profileSlug}.sqlite`,
+    memNode?.get('databasePath', true) ?? memCfg['databasePath'],
+  )
+  return Object.freeze({ personalMemoryDbPath, verifierDbPath, memoryLearningDbPath })
+}
+
+export interface MemoryGrantConflictReport {
+  readonly hasConflict: boolean
+  readonly reasons: readonly string[]
+  readonly adoptConflict: boolean
+  readonly reviewConflict: boolean
+  readonly learningStoreConflict: boolean
+  readonly digestMismatch: boolean
+  readonly adoptId: string | null
+  readonly reviewId: string | null
+  readonly extractId: string | null
+  readonly nextGeneration: number
+  readonly storedAdoptGrants: ReadonlyMap<string, string>
+  readonly storedReviewGrants: ReadonlyMap<string, Readonly<{ digest: string; max: number }>>
+  readonly memoryLearningDbPath: string | null
+}
+
+/** Detect frozen-grant idempotency conflicts between cordis.patch.yml and local SQLite ledgers
+ * that cause personal-memory / personal-assistant / assistant-memory-learning to crash at startup. */
+export function inspectMemoryLearningGrantConflicts(
+  paths: ProfilePaths,
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+): MemoryGrantConflictReport {
+  const emptyGrants = new Map<string, string>()
+  const emptyReviews = new Map<string, Readonly<{ digest: string; max: number }>>()
+  const pp = getPersonalAndPolicyConfigs(seq, descriptors)
+  const adoptCfg = asPlainRecord(pp.personalMemoryCfg['automaticLearning'])
+  const verifierCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-assistant-verifier',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier') : {},
+  )
+  const reviewCfg = asPlainRecord(verifierCfg['memoryReviews'])
+  const memCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-assistant-memory-learning',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning') : {},
+  )
+  const adoptId = strOrNull(adoptCfg['authorityId'])
+  const reviewId = strOrNull(reviewCfg['authorityId'])
+  const extractId = strOrNull(memCfg['authorityId'])
+  if (adoptId === null && reviewId === null && extractId === null) {
+    return Object.freeze({
+      hasConflict: false,
+      reasons: [],
+      adoptConflict: false,
+      reviewConflict: false,
+      learningStoreConflict: false,
+      digestMismatch: false,
+      adoptId: null,
+      reviewId: null,
+      extractId: null,
+      nextGeneration: 2,
+      storedAdoptGrants: emptyGrants,
+      storedReviewGrants: emptyReviews,
+      memoryLearningDbPath: null,
+    })
+  }
+
+  const profileSlug = normalizeProfileSlug(paths.profileName)
+  const dbPaths = paths.canonicalHome !== null
+    ? resolveMemoryLearningDbPaths(paths.canonicalHome, profileSlug, seq, descriptors, pp)
+    : null
+  const storedAdoptGrants = dbPaths !== null ? readPersonalMemoryGrants(dbPaths.personalMemoryDbPath) : emptyGrants
+  const storedReviewGrants = dbPaths !== null ? readVerifierReviewGrants(dbPaths.verifierDbPath) : emptyReviews
+  const storedLearningGrant = dbPaths !== null ? readMemoryLearningStoreGrant(dbPaths.memoryLearningDbPath) : null
+
+  const reasons: string[] = []
+  let adoptConflict = false
+  let reviewConflict = false
+  let learningStoreConflict = false
+  let digestMismatch = false
+
+  const normalizedAdoptCfg = normalizeMemoryGrantForDigest(adoptCfg)
+  const normalizedReviewCfg = normalizeMemoryGrantForDigest(reviewCfg)
+  const normalizedMemCfg = normalizeMemoryGrantForDigest(memCfg, dbPaths?.memoryLearningDbPath)
+  const adoptDigest = adoptId !== null ? canonicalObjectDigest(normalizedAdoptCfg) : null
+  const reviewDigest = reviewId !== null ? canonicalObjectDigest(normalizedReviewCfg) : null
+
+  if (adoptId !== null && adoptDigest !== null) {
+    const storedDigest = storedAdoptGrants.get(adoptId)
+    if (storedDigest !== undefined && storedDigest !== adoptDigest) {
+      adoptConflict = true
+      reasons.push(`personal-memory 账本中已冻结的 ${adoptId} 与当前 cordis.patch.yml 摘要不一致`)
+    }
+  }
+  if (reviewId !== null && reviewDigest !== null) {
+    const storedReview = storedReviewGrants.get(reviewId)
+    const maxReviews = typeof reviewCfg['maxReviews'] === 'number' ? reviewCfg['maxReviews'] : null
+    if (storedReview !== undefined && (storedReview.digest !== reviewDigest || (maxReviews !== null && storedReview.max !== maxReviews))) {
+      reviewConflict = true
+      reasons.push(`assistant-verifier 评审账本中已冻结的 ${reviewId} 与当前配置不一致`)
+    }
+  }
+  const memDisabled = isRowDisabled(seq, 'dsh-enhanced-assistant-memory-learning')
+  if (extractId !== null && !memDisabled && dbPaths !== null && storedLearningGrant !== null) {
+    const maxExtractions = typeof memCfg['maxExtractions'] === 'number' ? memCfg['maxExtractions'] : null
+    const expectedConfigDigest = hasCompleteLearningDigestFields(normalizedMemCfg)
+      ? canonicalObjectDigest(normalizedMemCfg)
+      : null
+    if (storedLearningGrant === 'unreadable'
+      || storedLearningGrant.authorityId !== extractId
+      || (maxExtractions !== null && storedLearningGrant.maxExtractions !== maxExtractions)
+      || (expectedConfigDigest !== null && storedLearningGrant.configDigest !== expectedConfigDigest)) {
+      learningStoreConflict = true
+      reasons.push(`assistant-memory-learning 数据库中已冻结的提取授权与当前 ${extractId} 配置不一致`)
+    }
+  }
+  if (adoptId !== null && reviewId !== null && reviewDigest !== null) {
+    if (strOrNull(adoptCfg['reviewAuthorityId']) !== reviewId
+      || strOrNull(adoptCfg['reviewAuthorityDigest']) !== reviewDigest) {
+      digestMismatch = true
+      reasons.push('personal-memory 的 reviewAuthorityId/reviewAuthorityDigest 与 assistant-verifier 不一致')
+    }
+  }
+  if (extractId !== null && !memDisabled) {
+    if (reviewId !== null && reviewDigest !== null && (
+      strOrNull(memCfg['reviewAuthorityId']) !== reviewId
+      || strOrNull(memCfg['reviewAuthorityDigest']) !== reviewDigest
+    )) {
+      digestMismatch = true
+      reasons.push('assistant-memory-learning 的 reviewAuthorityId/reviewAuthorityDigest 与 assistant-verifier 不一致')
+    }
+    if (adoptId !== null && adoptDigest !== null && (
+      strOrNull(memCfg['adoptionAuthorityId']) !== adoptId
+      || strOrNull(memCfg['adoptionGrantDigest']) !== adoptDigest
+    )) {
+      digestMismatch = true
+      reasons.push('assistant-memory-learning 的 adoptionAuthorityId/adoptionGrantDigest 与 personal-memory 不一致')
+    }
+  }
+
+  let maxGen = Math.max(
+    parseGrantGeneration(adoptId),
+    parseGrantGeneration(reviewId),
+    parseGrantGeneration(extractId),
+    paths.canonicalHome !== null ? maxSqliteFileGeneration(paths.canonicalHome, profileSlug) : 1,
+  )
+  for (const key of storedAdoptGrants.keys()) maxGen = Math.max(maxGen, parseGrantGeneration(key))
+  for (const key of storedReviewGrants.keys()) maxGen = Math.max(maxGen, parseGrantGeneration(key))
+
+  return Object.freeze({
+    hasConflict: adoptConflict || reviewConflict || learningStoreConflict || digestMismatch,
+    reasons,
+    adoptConflict,
+    reviewConflict,
+    learningStoreConflict,
+    digestMismatch,
+    adoptId,
+    reviewId,
+    extractId,
+    nextGeneration: Math.max(2, maxGen + 1),
+    storedAdoptGrants,
+    storedReviewGrants,
+    memoryLearningDbPath: dbPaths?.memoryLearningDbPath ?? null,
+  })
+}
+
 export function atomicWritePatchWithBackup(patchPath: string, serialized: string, now: number): Readonly<{ backupPath: string | null }> {
   const dir = dirname(patchPath)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -1333,7 +1708,7 @@ export async function applyAutonomyWizardSetup(
     return failResult('dsh-enhanced-assistant-growth-driver', '@dsh-enhanced/assistant-growth-driver 未安装，请先在插件页安装')
   }
 
-  const profileSlug = paths.profileName.replace(/[^A-Za-z0-9._-]/gu, '-')
+  const profileSlug = normalizeProfileSlug(paths.profileName)
   const prefix = owner.channel === 'lark' ? 'lark' : 'web'
   const expiresAt = now + budgets.grantLeaseDays * DAY_MS
   const learningOwner = {
@@ -1365,75 +1740,170 @@ export async function applyAutonomyWizardSetup(
 
   // 1) Memory self-learning + Verifier + PersonalMemory adoption (3 independent authorities)
   if (input.enableMemoryLearning) {
-    const extractAuthId = `${prefix}-memory-extract-${profileSlug}`
-    const reviewAuthId = `${prefix}-memory-review-${profileSlug}`
-    const adoptAuthId = `${prefix}-memory-adopt-${profileSlug}`
-    if (new Set([extractAuthId, reviewAuthId, adoptAuthId, owner.authorityId]).size !== 4) {
-      return failResult('assistant-memory-learning', '三权分立 authorityId 发生碰撞，拒绝签发')
-    }
-
+    const baseExtractAuthId = `${prefix}-memory-extract-${profileSlug}`
+    const baseReviewAuthId = `${prefix}-memory-review-${profileSlug}`
+    const baseAdoptAuthId = `${prefix}-memory-adopt-${profileSlug}`
     const existingMemNode = getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-memory-learning')
     const existingMemCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning')
-    const memoryDbPath = resolveScopedDbTarget(
+    const existingVerifierCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier')
+    const existingReviewCfg = asPlainRecord(existingVerifierCfg['memoryReviews'])
+    const existingAdoptCfg = asPlainRecord(pp.personalMemoryCfg['automaticLearning'])
+    const dbPaths = resolveMemoryLearningDbPaths(paths.canonicalHome, profileSlug, seq, descriptors, pp)
+    const baseMemoryDbPath = resolveScopedDbTarget(
       paths.canonicalHome,
       'assistant-memory-learning',
       `${profileSlug}.sqlite`,
       existingMemNode?.get('databasePath', true) ?? existingMemCfg['databasePath'],
     )
+    const storedAdoptGrants = readPersonalMemoryGrants(dbPaths.personalMemoryDbPath)
+    const storedReviewGrants = readVerifierReviewGrants(dbPaths.verifierDbPath)
     const memoryBudgetId = findReusableWorkspaceOrGlobalBudgetId(existingBudgets, 'workspace', `${prefix}-memory-learning-${profileSlug}`)
     const memoryScanBudgetId = `${prefix}-memory-scan-${profileSlug}`
 
-    const reviewConfig = {
-      authorityId: reviewAuthId,
-      owner: learningOwner,
-      expiresAt,
-      maxReviews: Math.min(10_000, Math.max(100, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
-      policy: 'Independently verify exact owner statements for facts and preferences and trusted owner objectives with canonical outcomes for experiences.',
-      maxInputBytes: 65_536,
-      maxOutputTokens: 2048,
-      timeoutMs: 60_000,
-      model: modelRef,
-      ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
-    }
-    const reviewAuthorityDigest = canonicalObjectDigest(reviewConfig)
+    let maxSeenGen = Math.max(
+      parseGrantGeneration(strOrNull(existingAdoptCfg['authorityId'])),
+      parseGrantGeneration(strOrNull(existingReviewCfg['authorityId'])),
+      parseGrantGeneration(strOrNull(existingMemCfg['authorityId'])),
+      maxSqliteFileGeneration(paths.canonicalHome, profileSlug),
+    )
+    for (const key of storedAdoptGrants.keys()) maxSeenGen = Math.max(maxSeenGen, parseGrantGeneration(key))
+    for (const key of storedReviewGrants.keys()) maxSeenGen = Math.max(maxSeenGen, parseGrantGeneration(key))
 
-    const adoptionConfig = {
-      authorityId: adoptAuthId,
-      owner: learningOwner,
-      reviewAuthorityId: reviewAuthId,
-      reviewAuthorityDigest,
-      expiresAt,
-      maxMutations: Math.min(1_000, Math.max(50, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
-      maxTotalContentBytes: 1_048_576,
-      maxRecordTtlMs: 90 * DAY_MS,
-      kinds: ['fact', 'experience'],
-      operations: ['add', 'replace', 'remove'],
-      ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+    const buildMemoryGrantBundle = (gen: number) => {
+      const candidateExtractId = formatGrantIdWithGeneration(baseExtractAuthId, gen)
+      const candidateReviewId = formatGrantIdWithGeneration(baseReviewAuthId, gen)
+      const candidateAdoptId = formatGrantIdWithGeneration(baseAdoptAuthId, gen)
+      const candidateDbPath = gen <= 1
+        ? baseMemoryDbPath
+        : resolveScopedDbTarget(paths.canonicalHome!, 'assistant-memory-learning', `${profileSlug}-g${gen}.sqlite`, undefined)
+      const candidateReviewConfig = {
+        authorityId: candidateReviewId,
+        owner: learningOwner,
+        expiresAt,
+        maxReviews: Math.min(10_000, Math.max(100, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
+        policy: 'Independently verify exact owner statements for facts and preferences and trusted owner objectives with canonical outcomes for experiences.',
+        maxInputBytes: 65_536,
+        maxOutputTokens: 2048,
+        timeoutMs: 60_000,
+        model: modelRef,
+        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+      }
+      const candidateReviewDigest = canonicalObjectDigest(candidateReviewConfig)
+      const candidateAdoptionConfig = {
+        authorityId: candidateAdoptId,
+        owner: learningOwner,
+        reviewAuthorityId: candidateReviewId,
+        reviewAuthorityDigest: candidateReviewDigest,
+        expiresAt,
+        maxMutations: Math.min(1_000, Math.max(50, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
+        maxTotalContentBytes: 1_048_576,
+        maxRecordTtlMs: 90 * DAY_MS,
+        kinds: ['fact', 'experience'],
+        operations: ['add', 'replace', 'remove'],
+        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+      }
+      const candidateAdoptionDigest = canonicalObjectDigest(candidateAdoptionConfig)
+      const candidateLearningConfig = {
+        databasePath: candidateDbPath,
+        authorityId: candidateExtractId,
+        owner: learningOwner,
+        expiresAt,
+        maxExtractions: Math.min(10_000, Math.max(20, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
+        maxPending: 64,
+        lookbackMs: 7 * DAY_MS,
+        policy: 'Extract only explicit owner facts, preferences or grounded work-item experiences. Prefer noop when evidence is insufficient.',
+        maxInputBytes: 65_536,
+        maxOutputTokens: 2048,
+        timeoutMs: 60_000,
+        budgetId: memoryBudgetId,
+        budgetAmount: 1,
+        scanBudgetId: memoryScanBudgetId,
+        scanBudgetAmount: 1,
+        reviewAuthorityId: candidateReviewId,
+        reviewAuthorityDigest: candidateReviewDigest,
+        adoptionAuthorityId: candidateAdoptId,
+        adoptionGrantDigest: candidateAdoptionDigest,
+        model: modelRef,
+        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+      }
+      return {
+        extractAuthId: candidateExtractId,
+        reviewAuthId: candidateReviewId,
+        adoptAuthId: candidateAdoptId,
+        memoryDbPath: candidateDbPath,
+        reviewConfig: candidateReviewConfig,
+        reviewAuthorityDigest: candidateReviewDigest,
+        adoptionConfig: candidateAdoptionConfig,
+        adoptionGrantDigest: candidateAdoptionDigest,
+        learningConfig: candidateLearningConfig,
+      }
     }
-    const adoptionGrantDigest = canonicalObjectDigest(adoptionConfig)
 
-    const learningConfig = {
-      databasePath: memoryDbPath,
-      authorityId: extractAuthId,
-      owner: learningOwner,
-      expiresAt,
-      maxExtractions: Math.min(10_000, Math.max(20, budgets.dailyMemoryExtractions * budgets.grantLeaseDays)),
-      maxPending: 64,
-      lookbackMs: 7 * DAY_MS,
-      policy: 'Extract only explicit owner facts, preferences or grounded work-item experiences. Prefer noop when evidence is insufficient.',
-      maxInputBytes: 65_536,
-      maxOutputTokens: 2048,
-      timeoutMs: 60_000,
-      budgetId: memoryBudgetId,
-      budgetAmount: 1,
-      scanBudgetId: memoryScanBudgetId,
-      scanBudgetAmount: 1,
-      reviewAuthorityId: reviewAuthId,
-      reviewAuthorityDigest,
-      adoptionAuthorityId: adoptAuthId,
-      adoptionGrantDigest,
-      model: modelRef,
-      ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+    const normalizedExistingAdopt = normalizeMemoryGrantForDigest(existingAdoptCfg)
+    const normalizedExistingReview = normalizeMemoryGrantForDigest(existingReviewCfg)
+    const normalizedExistingMem = normalizeMemoryGrantForDigest(existingMemCfg, baseMemoryDbPath)
+
+    const hasGenerationCollision = (bundle: ReturnType<typeof buildMemoryGrantBundle>, gen: number): boolean => {
+      const storedAdopt = storedAdoptGrants.get(bundle.adoptAuthId)
+      if (storedAdopt !== undefined && storedAdopt !== bundle.adoptionGrantDigest) return true
+      const storedReview = storedReviewGrants.get(bundle.reviewAuthId)
+      if (storedReview !== undefined
+        && (storedReview.digest !== bundle.reviewAuthorityDigest || storedReview.max !== bundle.reviewConfig.maxReviews)) {
+        return true
+      }
+      if (strOrNull(existingAdoptCfg['authorityId']) === bundle.adoptAuthId
+        && canonicalObjectDigest(normalizedExistingAdopt) !== bundle.adoptionGrantDigest) {
+        return true
+      }
+      if (strOrNull(existingReviewCfg['authorityId']) === bundle.reviewAuthId
+        && canonicalObjectDigest(normalizedExistingReview) !== bundle.reviewAuthorityDigest) {
+        return true
+      }
+      const bundleLearningDigest = canonicalObjectDigest(bundle.learningConfig)
+      const learningDigestChanged = strOrNull(existingMemCfg['authorityId']) === bundle.extractAuthId
+        && canonicalObjectDigest(normalizedExistingMem) !== bundleLearningDigest
+      if (learningDigestChanged) return true
+      if (existsSync(bundle.memoryDbPath)) {
+        if (gen > maxSeenGen) return true
+        const storedLearning = readMemoryLearningStoreGrant(bundle.memoryDbPath)
+        if (storedLearning === 'unreadable') return true
+        if (storedLearning !== null && (
+          storedLearning.authorityId !== bundle.extractAuthId
+          || storedLearning.maxExtractions !== bundle.learningConfig.maxExtractions
+          || storedLearning.configDigest !== bundleLearningDigest
+        )) {
+          return true
+        }
+      }
+      return false
+    }
+
+    let selectedGen = maxSeenGen
+    let bundle = buildMemoryGrantBundle(selectedGen)
+    if (hasGenerationCollision(bundle, selectedGen)) {
+      selectedGen = Math.max(2, maxSeenGen + 1)
+      let attempts = 0
+      while (attempts < 1024) {
+        bundle = buildMemoryGrantBundle(selectedGen)
+        if (!hasGenerationCollision(bundle, selectedGen)) break
+        selectedGen += 1
+        attempts += 1
+      }
+      if (hasGenerationCollision(bundle, selectedGen)) {
+        return failResult('assistant-memory-learning', '无法分配未冲突的记忆自学习授权代数，请清理旧账本后重试')
+      }
+    }
+
+    const {
+      extractAuthId,
+      reviewAuthId,
+      adoptAuthId,
+      reviewConfig,
+      adoptionConfig,
+      learningConfig,
+    } = bundle
+    if (new Set([extractAuthId, reviewAuthId, adoptAuthId, owner.authorityId]).size !== 4) {
+      return failResult('assistant-memory-learning', '三权分立 authorityId 发生碰撞，拒绝签发')
     }
 
     const verifierRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')

@@ -129,6 +129,10 @@ export type DurableChatEvent = Readonly<{
     name?: string
     /** Raw JSON argument string on `tool/call`. */
     arguments?: string
+    /** Request model metadata on `request/header` (`data.header.config`) or `request/context`. */
+    header?: Readonly<{ config?: Readonly<{ provider?: string; model?: string; reasoningEffort?: string }> }>
+    provider?: string
+    model?: string
     reason?: Readonly<{ kind?: string; error?: Readonly<{ code?: string; message?: string }> }>
   }>
 }>
@@ -153,7 +157,7 @@ export type ChatMessage =
   | Readonly<{ kind: 'user'; key: string; seq: number; text: string }>
   | Readonly<{ kind: 'assistant'; key: string; seq: number; text: string }>
   | Readonly<{ kind: 'tool'; key: string; seq: number; name: string; status: 'running' | 'ok' | 'error' }>
-  | Readonly<{ kind: 'error'; key: string; seq: number; text: string }>
+  | Readonly<{ kind: 'error'; key: string; seq: number; text: string; code?: string; provider?: string; model?: string }>
 
 /** Pending/queued human prompt not yet committed as a durable `user/message` event. */
 export type PendingChatUserMessage = Readonly<{
@@ -332,15 +336,61 @@ const nonEmptyId = (value: unknown): string | undefined =>
  * injected `agent.inject()` / `runtime-context` messages and surface replacement copies
  * stay out of this compact transcript. Assistant text, tool activity, and turn errors remain.
  */
+export function isAuthChatError(message: Extract<ChatMessage, { kind: 'error' }>): boolean {
+  if (message.code !== undefined && /^(?:auth|unauthorized|unauthenticated|invalid[_-]?api[_-]?key)$/iu.test(message.code.trim())) {
+    return true
+  }
+  return /\b401\b|authentication[_ ]failed|authentication_error|invalid[_ ]token|invalid[_ ]api[_ ]key|unauthorized/iu.test(message.text)
+}
+
 export function chatMessages(entries: readonly ChatEntry[] | undefined): readonly ChatMessage[] {
   if (entries === undefined) return []
   const messages: ChatMessage[] = []
   const tools = new Map<string, number>()
+  let lastRequestRoute: { provider?: string; model?: string } | undefined
+  let lastSelectedRoute: { provider?: string; model?: string } | undefined
   for (const entry of entries) {
     if (entry.type !== 'event') continue
     const { event } = entry
     const seq = Number.isFinite(event.seq) ? event.seq : messages.length
     switch (event.type) {
+      case 'model/selection': {
+        const provider = nonEmptyId(event.data?.provider?.trim())
+        const model = nonEmptyId(event.data?.model?.trim())
+        if (provider !== undefined || model !== undefined) {
+          lastSelectedRoute = {
+            ...(provider === undefined ? {} : { provider }),
+            ...(model === undefined ? {} : { model }),
+          }
+        }
+        break
+      }
+      case 'turn/start': {
+        lastRequestRoute = undefined
+        break
+      }
+      case 'request/header': {
+        const provider = nonEmptyId(event.data?.header?.config?.provider?.trim())
+        const model = nonEmptyId(event.data?.header?.config?.model?.trim())
+        if (provider !== undefined || model !== undefined) {
+          lastRequestRoute = {
+            ...(provider === undefined ? {} : { provider }),
+            ...(model === undefined ? {} : { model }),
+          }
+        }
+        break
+      }
+      case 'request/context': {
+        const provider = nonEmptyId(event.data?.provider?.trim()) ?? lastRequestRoute?.provider
+        const model = nonEmptyId(event.data?.model?.trim()) ?? lastRequestRoute?.model
+        if (provider !== undefined || model !== undefined) {
+          lastRequestRoute = {
+            ...(provider === undefined ? {} : { provider }),
+            ...(model === undefined ? {} : { model }),
+          }
+        }
+        break
+      }
       case 'user/message': {
         if (!isAppendOrigin(event)) break
         const message = event.data
@@ -385,7 +435,17 @@ export function chatMessages(entries: readonly ChatEntry[] | undefined): readonl
         if (event.data?.reason?.kind !== 'error') break
         const error = event.data.reason.error
         const text = boundedText(failureText(error))
-        messages.push({ kind: 'error', key: `error:${seq}`, seq, text })
+        const code = nonEmptyId(error?.code?.trim())
+        const route = lastRequestRoute ?? lastSelectedRoute
+        messages.push({
+          kind: 'error',
+          key: `error:${seq}`,
+          seq,
+          text,
+          ...(code === undefined ? {} : { code }),
+          ...(route?.provider === undefined ? {} : { provider: route.provider }),
+          ...(route?.model === undefined ? {} : { model: route.model }),
+        })
         break
       }
       default:

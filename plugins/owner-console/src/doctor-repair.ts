@@ -17,11 +17,12 @@ import type {
 } from './typert.js'
 import { detectFrozenSystemdProfile } from './upgrade-probe.js'
 import {
-  asPlainRecord, atomicWritePatchWithBackup, checkScopedDbPath, createPlainNode, ensureConfigMap, ensurePatchRow,
-  ensureVerifierDefaults, externalPrincipalId, findPatchRow, getPatchRowConfig, getPatchRowConfigNode,
-  getPersonalAndPolicyConfigs, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
-  readConfigMap, readPatchDocument, resolveProfilePaths, strOrNull, upsertById, yamlNodeToJs,
-  type AutonomyHostContext, type ProfilePaths,
+  asPlainRecord, atomicWritePatchWithBackup, canonicalObjectDigest, checkScopedDbPath, createPlainNode,
+  ensureConfigMap, ensurePatchRow, ensureVerifierDefaults, externalPrincipalId, findPatchRow,
+  formatGrantIdWithGeneration, getPatchRowConfig, getPatchRowConfigNode, getPersonalAndPolicyConfigs,
+  inspectMemoryLearningGrantConflicts, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
+  normalizeMemoryGrantForDigest, normalizeProfileSlug, readConfigMap, readPatchDocument, resolveProfilePaths,
+  resolveScopedDbTarget, strOrNull, upsertById, yamlNodeToJs, type AutonomyHostContext, type ProfilePaths,
 } from './autonomy-setup.js'
 
 interface JsDshHomeRef {
@@ -42,6 +43,21 @@ const SPLIT_PA_PACKAGES = [
   { pkg: '@dsh-enhanced/personal-memory', rowId: 'dsh-enhanced-personal-memory', section: 'personalMemory' },
   { pkg: '@dsh-enhanced/personal-wiki', rowId: 'dsh-enhanced-personal-wiki', section: 'personalWiki' },
 ] as const
+
+/** Core infrastructure bundles that Doctor must never auto-disable via generic `stalled-bundle:*`,
+ * because disabling them cascades into missing Policy/Delivery/Feishu dependencies. */
+const PROTECTED_CORE_BUNDLES = new Set([
+  '@dsh-enhanced/owner-console',
+  '@dsh-enhanced/personal-assistant',
+  '@dsh-enhanced/assistant-policy',
+  '@dsh-enhanced/personal-memory',
+  '@dsh-enhanced/personal-wiki',
+  '@dsh-enhanced/assistant-automations',
+  '@dsh-enhanced/assistant-delivery',
+  '@dsh-enhanced/credentials-keychain',
+  '@dsh-enhanced/lark-channel',
+  '@dsh-enhanced/assistant-verifier',
+])
 
 const SCOPED_STATE_BUNDLES = [
   { pkg: '@dsh-enhanced/assistant-goals', rowId: 'dsh-enhanced-assistant-goals', subdir: 'assistant-goals' },
@@ -280,13 +296,33 @@ function readProfileManifestBundles(profileDir: string | null): Readonly<Record<
     if (!existsSync(pkgPath)) return {}
     const st = lstatSync(pkgPath)
     if (st.isSymbolicLink() || !st.isFile()) return {}
-    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as { bundles?: unknown }
-    if (parsed.bundles === null || typeof parsed.bundles !== 'object' || Array.isArray(parsed.bundles)) return {}
-    const out: Record<string, boolean> = {}
-    for (const [name, enabled] of Object.entries(parsed.bundles as Record<string, unknown>)) {
-      if (typeof enabled === 'boolean') out[name] = enabled
+    const parsed = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+      bundles?: unknown
+      dependencies?: unknown
+      dsh?: { profile?: { bundles?: unknown } }
     }
-    return out
+    if (parsed.bundles !== null && typeof parsed.bundles === 'object' && !Array.isArray(parsed.bundles)) {
+      const out: Record<string, boolean> = {}
+      for (const [name, enabled] of Object.entries(parsed.bundles as Record<string, unknown>)) {
+        if (typeof enabled === 'boolean') out[name] = enabled
+      }
+      return out
+    }
+    const profileBundles = parsed.dsh?.profile?.bundles
+    if (Array.isArray(profileBundles)) {
+      const enabledSet = new Set(profileBundles.filter((item): item is string => typeof item === 'string'))
+      const out: Record<string, boolean> = {}
+      if (parsed.dependencies !== null && typeof parsed.dependencies === 'object' && !Array.isArray(parsed.dependencies)) {
+        for (const depName of Object.keys(parsed.dependencies as Record<string, unknown>)) {
+          if (depName.startsWith('@dsh-enhanced/')) out[depName] = enabledSet.has(depName)
+        }
+      }
+      for (const pkg of enabledSet) {
+        if (pkg.startsWith('@dsh-enhanced/')) out[pkg] = true
+      }
+      return out
+    }
+    return {}
   } catch {
     return {}
   }
@@ -306,16 +342,42 @@ function backupAndUpdateProfileManifest(
   }
   const original = readFileSync(pkgPath, 'utf8')
   const parsed = JSON.parse(original) as Record<string, unknown>
-  const bundles = asPlainRecord(parsed['bundles'])
   let changed = false
-  for (const [pkg, enabled] of Object.entries(updates)) {
-    if (Object.hasOwn(bundles, pkg) && bundles[pkg] !== enabled) {
-      bundles[pkg] = enabled
-      changed = true
+  if (parsed['bundles'] !== null && typeof parsed['bundles'] === 'object' && !Array.isArray(parsed['bundles'])) {
+    const bundles = asPlainRecord(parsed['bundles'])
+    for (const [pkg, enabled] of Object.entries(updates)) {
+      if (Object.hasOwn(bundles, pkg) && bundles[pkg] !== enabled) {
+        bundles[pkg] = enabled
+        changed = true
+      }
+    }
+    if (changed) parsed['bundles'] = bundles
+  } else {
+    const dsh = asPlainRecord(parsed['dsh'])
+    const profile = asPlainRecord(dsh['profile'])
+    if (Array.isArray(profile['bundles'])) {
+      const list = profile['bundles'].filter((item): item is string => typeof item === 'string')
+      const deps = asPlainRecord(parsed['dependencies'])
+      for (const [pkg, enabled] of Object.entries(updates)) {
+        const idx = list.indexOf(pkg)
+        if (enabled) {
+          if (idx === -1 && Object.hasOwn(deps, pkg)) {
+            list.push(pkg)
+            changed = true
+          }
+        } else if (idx !== -1) {
+          list.splice(idx, 1)
+          changed = true
+        }
+      }
+      if (changed) {
+        profile['bundles'] = list
+        dsh['profile'] = profile
+        parsed['dsh'] = dsh
+      }
     }
   }
   if (!changed) return false
-  parsed['bundles'] = bundles
 
   if (paths.canonicalHome !== null) {
     const backupDir = join(paths.canonicalHome, '.dsh-rsi-upgrade-backups', `doctor-${now}`)
@@ -511,6 +573,100 @@ function readDeliverySqliteSnapshot(dbPath: string | null): SqliteOwnerSnapshot 
   }
 }
 
+interface LinkedLarkIngressInfo {
+  readonly account: string
+  readonly tenant: string
+  readonly openId: string
+  readonly principalKey: string
+  readonly currentOwnerKey: string
+}
+
+/** Detect when the active Feishu ingress policy identity is only `linked` (not `owner`), blocking long-term memory & owner commands. */
+function detectLinkedLarkIngressAccount(
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+  deliveryDbPath: string | null,
+): LinkedLarkIngressInfo | null {
+  if (deliveryDbPath === null || !existsSync(deliveryDbPath)) return null
+  const larkCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-lark-channel',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-lark-channel') : {},
+  )
+  const rawAccount = strOrNull(larkCfg['account']) ?? 'primary'
+  const rawTenant = strOrNull(larkCfg['tenant']) ?? 'personal'
+  const account = SETUP_KEY_TOKEN.test(rawAccount) && !rawAccount.includes('-legacy-') ? rawAccount : 'primary'
+  const tenant = SETUP_KEY_TOKEN.test(rawTenant) && rawTenant !== PLACEHOLDER_LARK_TENANT ? rawTenant : 'personal'
+
+  const policyLayout = getPersonalAndPolicyConfigs(seq, descriptors)
+  const rules = Array.isArray(policyLayout.policyCfg['rules']) ? policyLayout.policyCfg['rules'] : []
+  const ingressRule = rules.map(asPlainRecord).find(rule => rule['id'] === `lark-owner-ingress-${account}`)
+  const subjectId = ingressRule ? strOrNull(asPlainRecord(ingressRule['subject'])['id']) : null
+  const prefix = `lark/${account}/${tenant}/`
+  if (subjectId === null || !subjectId.startsWith(prefix)) return null
+  const openId = subjectId.slice(prefix.length)
+  if (!LARK_OPEN_ID_TOKEN.test(openId)) return null
+
+  let db: DatabaseSync | undefined
+  try {
+    const st = lstatSync(deliveryDbPath)
+    if (st.isSymbolicLink() || !st.isFile()) return null
+    db = new DatabaseSync(deliveryDbPath, { readOnly: true })
+    const tbl = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='delivery_principals'`).get() as { name?: unknown } | undefined
+    if (tbl?.name !== 'delivery_principals') return null
+    const json = JSON.stringify({ channel: 'lark', account, tenant, user: openId })
+    const hash = createHash('sha256').update(json, 'utf8').digest('hex')
+    const ingressRow = db.prepare(
+      `SELECT role, status, principal_json FROM delivery_principals WHERE key_hash = ? AND principal_json = ?`,
+    ).get(hash, json) as Readonly<{ role?: unknown; status?: unknown; principal_json?: unknown }> | undefined
+    if (ingressRow?.role !== 'linked' || ingressRow?.status !== 'active') return null
+
+    const owners = db.prepare(
+      `SELECT principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active' LIMIT 4`,
+    ).all() as ReadonlyArray<{ principal_json?: unknown }>
+    for (const ownerRow of owners) {
+      if (typeof ownerRow.principal_json !== 'string') continue
+      let parsed: Record<string, unknown>
+      try {
+        parsed = asPlainRecord(JSON.parse(ownerRow.principal_json))
+      } catch {
+        continue
+      }
+      const ownerKey = externalPrincipalId(parsed)
+      if (ownerKey !== null && ownerKey !== subjectId) {
+        return {
+          account,
+          tenant,
+          openId,
+          principalKey: subjectId,
+          currentOwnerKey: ownerKey,
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  } finally {
+    try { db?.close() } catch { /* noop */ }
+  }
+}
+
+function resolveDeliveryDbPathForProfile(
+  canonicalHome: string | null,
+  seq: YAMLSeq | undefined,
+  descriptors: readonly SettingsDescriptor[],
+): string | null {
+  if (canonicalHome === null) return null
+  const deliveryNode = seq ? getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery') : undefined
+  const deliveryCfg = mergeDescriptorConfig(
+    descriptors,
+    'dsh-enhanced-assistant-delivery',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery') : {},
+  )
+  const scopedDb = checkScopedDbPath(deliveryNode?.get('databasePath', true) ?? deliveryCfg['databasePath'], canonicalHome)
+  return scopedDb.resolved ?? join(canonicalHome, 'assistant-delivery', 'state.sqlite')
+}
+
 function severityRank(severity: SetupDoctorIssue['severity']): number {
   return severity === 'error' ? 0 : severity === 'warn' ? 1 : 2
 }
@@ -619,6 +775,82 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     })
   }
 
+  const paInstalled = isBundleInstalled(
+    '@dsh-enhanced/personal-assistant',
+    'dsh-enhanced-personal-assistant',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  const splitPolicyInstalled = isBundleInstalled(
+    '@dsh-enhanced/assistant-policy',
+    'dsh-enhanced-assistant-policy',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  const splitPolicyEnabled = isBundleEnabled(
+    '@dsh-enhanced/assistant-policy',
+    'dsh-enhanced-assistant-policy',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  const larkEnabledForPolicy = isBundleEnabled(
+    '@dsh-enhanced/lark-channel',
+    'dsh-enhanced-lark-channel',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  const deliveryEnabledForPolicy = isBundleEnabled(
+    '@dsh-enhanced/assistant-delivery',
+    'dsh-enhanced-assistant-delivery',
+    manifestBundles,
+    input.status.bundles,
+    seq,
+  )
+  const policyDepUnavailable = input.status.dependencies.some(d => d.name === 'assistantPolicy' && !d.available)
+  if (!paEnabled && !splitPolicyEnabled && (policyDepUnavailable || larkEnabledForPolicy || deliveryEnabledForPolicy)) {
+    const recoveryPkg = paInstalled
+      ? '@dsh-enhanced/personal-assistant'
+      : splitPolicyInstalled
+        ? '@dsh-enhanced/assistant-policy'
+        : undefined
+    if (recoveryPkg !== undefined) {
+      coveredPackages.add(recoveryPkg)
+      issues.push({
+        id: 'disabled-core-policy-provider',
+        severity: 'error',
+        category: 'plugins',
+        title: `核心策略组件 ${recoveryPkg} 已停用，导致飞书与消息投递无法启动`,
+        detail: `assistantPolicy 服务由已安装的 \`${recoveryPkg}\` 提供；当前处于停用状态，导致 \`assistant-delivery\` 与飞书通道（\`lark-channel\`）一直处于「等待依赖服务」。一键恢复启用并重启 profile 即可恢复策略、记忆与飞书连接（无需另行安装拆分版 assistant-policy）。`,
+        autoFixable: mutatable,
+        fixLabel: recoveryPkg === '@dsh-enhanced/personal-assistant'
+          ? '一键恢复启用 personal-assistant'
+          : '一键恢复启用 assistant-policy',
+      })
+    }
+  }
+
+  if (seq !== undefined) {
+    const grantConflict = inspectMemoryLearningGrantConflicts(paths, seq, input.descriptors)
+    if (grantConflict.hasConflict) {
+      coveredPackages.add('@dsh-enhanced/personal-assistant')
+      coveredPackages.add('@dsh-enhanced/personal-memory')
+      coveredPackages.add('@dsh-enhanced/assistant-memory-learning')
+      issues.push({
+        id: 'memory-learning-grant-conflict',
+        severity: 'error',
+        category: 'autonomy',
+        title: '记忆自学习授权 ID 与本地账本冲突，导致核心策略与飞书无法启动',
+        detail: `${grantConflict.reasons.join('；')}。历史已冻结账本不可覆盖，需轮换新的授权代数（-gN）并同步重算摘要与策略规则，重启后即可恢复 personal-assistant、策略与飞书连接。`,
+        autoFixable: mutatable,
+        fixLabel: '轮换记忆自学习授权 ID 并恢复启动',
+      })
+    }
+  }
+
   const verifierEnabled = isBundleEnabled(
     '@dsh-enhanced/assistant-verifier',
     'dsh-enhanced-assistant-verifier',
@@ -714,16 +946,9 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     seq,
   )
   if (deliveryInstalled && deliveryEnabled && seq !== undefined) {
+    const deliveryDbPath = resolveDeliveryDbPathForProfile(paths.canonicalHome, seq, input.descriptors)
     const routeInfo = inspectOwnerRoute(input.host, paths, seq, input.descriptors)
     if (!routeInfo.configured || !routeInfo.active) {
-      const deliveryNode = getPatchRowConfigNode(seq, 'dsh-enhanced-assistant-delivery')
-      const deliveryCfg = mergeDescriptorConfig(
-        input.descriptors,
-        'dsh-enhanced-assistant-delivery',
-        getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery'),
-      )
-      const scopedDb = checkScopedDbPath(deliveryNode?.get('databasePath', true) ?? deliveryCfg['databasePath'], paths.canonicalHome)
-      const deliveryDbPath = scopedDb.resolved ?? (paths.canonicalHome ? join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite') : null)
       const sqliteSnapshot = readDeliverySqliteSnapshot(deliveryDbPath)
       const webOwnerInstalled = isBundleInstalled(
         '@dsh-enhanced/assistant-web-owner',
@@ -771,6 +996,28 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
           detail: '一键修复将初始化本地 Web Owner 主体（web/<profile>/local/operator），并补齐 `assistant-delivery.ownerRoutes`、`assistant-web-owner` 与 `assistantPolicy` 路由规则。',
           autoFixable: mutatable && paths.canonicalHome !== null,
           fixLabel: '一键初始化本地 Owner 主路由',
+        })
+      }
+    }
+
+    const larkEnabled = isBundleEnabled(
+      '@dsh-enhanced/lark-channel',
+      'dsh-enhanced-lark-channel',
+      manifestBundles,
+      input.status.bundles,
+      seq,
+    )
+    if (larkEnabled) {
+      const linkedLark = detectLinkedLarkIngressAccount(seq, input.descriptors, deliveryDbPath)
+      if (linkedLark !== null) {
+        issues.push({
+          id: 'lark-linked-not-primary-owner',
+          severity: 'warn',
+          category: 'autonomy',
+          title: '当前飞书账号仍为关联身份（linked），无法使用长期记忆与主人命令',
+          detail: `当前接入的飞书账号（${linkedLark.openId}）以关联身份挂载在旧主主人（${linkedLark.currentOwnerKey}）名下，因此飞书私聊读写长期记忆会提示「无已认证的 owner 命名空间」，且 /permission、/model 与审批卡片不可用。请在「远程接入（飞书）」确认点击「一键将当前飞书账号设为主主人」并重启 profile 生效。`,
+          autoFixable: false,
+          fixLabel: '需确认设为飞书主主人',
         })
       }
     }
@@ -844,6 +1091,18 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     const plugin = input.status.plugins.find(p => p.moduleName === bundle.name)
     if (bundle.error === undefined && plugin?.fiberPhase !== 'failed') continue
     const diag = plugin?.diagnostic ?? bundle.error?.diagnostic ?? bundle.error?.code ?? '未知异常'
+    if (PROTECTED_CORE_BUNDLES.has(bundle.name)) {
+      issues.push({
+        id: `core-bundle-failed:${bundle.name}`,
+        severity: 'error',
+        category: 'plugins',
+        title: `核心组件 ${bundle.name} 当前未就绪`,
+        detail: `诊断信息：${diag.slice(0, 200)}。该组件为策略/消息/飞书核心依赖，自动体检不会停用它；如刚保存过非易失配置，直接重启 profile 即可恢复，否则请检查配置日志。`,
+        autoFixable: false,
+        fixLabel: '核心组件不自动停用，请先重启 profile',
+      })
+      continue
+    }
     issues.push({
       id: `stalled-bundle:${bundle.name}`,
       severity: 'warn',
@@ -936,7 +1195,14 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
   }
 
   const wanted = new Set(input.issueIds.map(id => id.trim()).filter(Boolean))
-  const targets = report.issues.filter(issue => issue.autoFixable && (wanted.size === 0 || wanted.has(issue.id)))
+  // Restoring a disabled core policy provider must also rotate any conflicting memory-learning grant
+  // that would immediately crash personal-assistant / personal-memory again on next boot.
+  if (wanted.has('disabled-core-policy-provider')) {
+    wanted.add('memory-learning-grant-conflict')
+  }
+  const targets = report.issues.filter(issue =>
+    (issue.autoFixable && (wanted.size === 0 || wanted.has(issue.id)))
+    || (issue.id === 'lark-linked-not-primary-owner' && wanted.has(issue.id) && report.writable && !report.frozenSystemdProfile))
   if (targets.length === 0) {
     return Object.freeze({
       applied: true,
@@ -950,8 +1216,10 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
   const seq = doc.contents as YAMLSeq
   let patchDirty = false
   const bundleUpdates: Record<string, boolean> = {}
+  const postPatchEnableBundles: string[] = []
   const notes: string[] = []
   let needsRestart = false
+  let promoteLinkedLark = false
 
   const disableBundle = async (pkgName: string, rowId: string, label: string) => {
     bundleUpdates[pkgName] = false
@@ -968,6 +1236,10 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
   }
 
   for (const issue of targets) {
+    if (issue.id === 'lark-linked-not-primary-owner') {
+      promoteLinkedLark = true
+      continue
+    }
     if (issue.id === 'gui-stdio-acp-conflict') {
       await disableBundle('@dsh-enhanced/acp', 'dsh-enhanced-acp', '@dsh-enhanced/acp')
       continue
@@ -1014,8 +1286,172 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
       await disableBundle('@dsh-enhanced/assistant-memory-learning', 'dsh-enhanced-assistant-memory-learning', '@dsh-enhanced/assistant-memory-learning')
       continue
     }
+    if (issue.id === 'disabled-core-policy-provider') {
+      const manifestBundles = readProfileManifestBundles(paths.profileDir)
+      const paInstalled = isBundleInstalled(
+        '@dsh-enhanced/personal-assistant',
+        'dsh-enhanced-personal-assistant',
+        manifestBundles,
+        input.status.bundles,
+        seq,
+      )
+      const targetPkg = paInstalled ? '@dsh-enhanced/personal-assistant' : '@dsh-enhanced/assistant-policy'
+      const targetRowId = paInstalled ? 'dsh-enhanced-personal-assistant' : 'dsh-enhanced-assistant-policy'
+      const existingRow = findPatchRow(seq, targetRowId)
+      if (existingRow !== undefined && existingRow.get('disabled') === true) {
+        existingRow.delete('disabled')
+        patchDirty = true
+      }
+      bundleUpdates[targetPkg] = true
+      postPatchEnableBundles.push(targetPkg)
+      notes.push(`已恢复启用核心策略组件 ${targetPkg}`)
+      needsRestart = true
+      continue
+    }
+    if (issue.id === 'memory-learning-grant-conflict') {
+      const conflict = inspectMemoryLearningGrantConflicts(paths, seq, input.descriptors)
+      if (!conflict.hasConflict) continue
+      const layout = getPersonalAndPolicyConfigs(seq, input.descriptors)
+      const adoptCfg = asPlainRecord(layout.personalMemoryCfg['automaticLearning'])
+      const verifierPatchCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-verifier')
+      const reviewCfg = asPlainRecord(mergeDescriptorConfig(
+        input.descriptors,
+        'dsh-enhanced-assistant-verifier',
+        verifierPatchCfg,
+      )['memoryReviews'])
+      const memPatchCfg = getPatchRowConfig(seq, 'dsh-enhanced-assistant-memory-learning')
+      const memCfg = mergeDescriptorConfig(input.descriptors, 'dsh-enhanced-assistant-memory-learning', memPatchCfg)
+
+      const oldAdoptId = strOrNull(adoptCfg['authorityId'])
+      const oldReviewId = strOrNull(reviewCfg['authorityId'])
+      const oldExtractId = strOrNull(memCfg['authorityId'])
+      const profileSlug = normalizeProfileSlug(paths.profileName)
+
+      let gen = conflict.nextGeneration
+      let newAdoptId = oldAdoptId !== null ? formatGrantIdWithGeneration(oldAdoptId, gen) : null
+      let newReviewId = oldReviewId !== null ? formatGrantIdWithGeneration(oldReviewId, gen) : null
+      let newExtractId = oldExtractId !== null ? formatGrantIdWithGeneration(oldExtractId, gen) : null
+      let nextMemDbPath = paths.canonicalHome !== null
+        ? resolveScopedDbTarget(paths.canonicalHome, 'assistant-memory-learning', `${profileSlug}-g${gen}.sqlite`, undefined)
+        : null
+      let guard = 0
+      while (guard < 1024 && (
+        (newAdoptId !== null && conflict.storedAdoptGrants.has(newAdoptId))
+        || (newReviewId !== null && conflict.storedReviewGrants.has(newReviewId))
+        || (nextMemDbPath !== null && existsSync(nextMemDbPath))
+      )) {
+        gen += 1
+        guard += 1
+        newAdoptId = oldAdoptId !== null ? formatGrantIdWithGeneration(oldAdoptId, gen) : null
+        newReviewId = oldReviewId !== null ? formatGrantIdWithGeneration(oldReviewId, gen) : null
+        newExtractId = oldExtractId !== null ? formatGrantIdWithGeneration(oldExtractId, gen) : null
+        nextMemDbPath = paths.canonicalHome !== null
+          ? resolveScopedDbTarget(paths.canonicalHome, 'assistant-memory-learning', `${profileSlug}-g${gen}.sqlite`, undefined)
+          : null
+      }
+
+      let newReviewDigest: string | null = null
+      if (newReviewId !== null) {
+        const nextReview = normalizeMemoryGrantForDigest({ ...reviewCfg, authorityId: newReviewId })
+        newReviewDigest = canonicalObjectDigest(nextReview)
+        const verifierRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier')
+        const verifierCfgNode = ensureConfigMap(doc, verifierRow, 'config')
+        const runtimeVerifierDesc = findEntry(input.descriptors, candidate => candidate === 'dsh-enhanced-assistant-verifier')
+        ensureVerifierDefaults(doc, verifierCfgNode, runtimeVerifierDesc?.value && typeof runtimeVerifierDesc.value === 'object'
+          ? runtimeVerifierDesc.value as Record<string, unknown>
+          : undefined)
+        verifierCfgNode.set('memoryReviews', createPlainNode(doc, nextReview))
+        patchDirty = true
+      }
+
+      let newAdoptDigest: string | null = null
+      if (newAdoptId !== null) {
+        const nextAdopt = normalizeMemoryGrantForDigest({
+          ...adoptCfg,
+          authorityId: newAdoptId,
+          ...(newReviewId !== null ? { reviewAuthorityId: newReviewId } : {}),
+          ...(newReviewDigest !== null ? { reviewAuthorityDigest: newReviewDigest } : {}),
+        })
+        newAdoptDigest = canonicalObjectDigest(nextAdopt)
+        if (layout.layout === 'split') {
+          const pmRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-memory', '@dsh-enhanced/personal-memory')
+          const pmCfgNode = ensureConfigMap(doc, pmRow, 'config')
+          if (!pmCfgNode.has('databasePath')) {
+            const runtimePmDb = strOrNull(layout.personalMemoryCfg['databasePath'])
+            pmCfgNode.set('databasePath', runtimePmDb !== null && isAbsolute(runtimePmDb)
+              ? createPlainNode(doc, runtimePmDb)
+              : jsDshHomeScalar('personal-memory/memory.sqlite'))
+          }
+          pmCfgNode.set('automaticLearning', createPlainNode(doc, nextAdopt))
+        } else {
+          const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+          const paCfgNode = ensureConfigMap(doc, paRow, 'config')
+          const pmNode = ensureConfigMap(doc, paCfgNode, 'personalMemory')
+          if (!pmNode.has('databasePath')) {
+            pmNode.set('databasePath', jsDshHomeScalar('personal-memory/memory.sqlite'))
+          }
+          pmNode.set('automaticLearning', createPlainNode(doc, nextAdopt))
+        }
+        patchDirty = true
+      }
+
+      const memRow = findPatchRow(seq, 'dsh-enhanced-assistant-memory-learning')
+      if (newExtractId !== null && memRow !== undefined) {
+        const shouldRotateMemDb = nextMemDbPath !== null
+          && (conflict.learningStoreConflict || (conflict.memoryLearningDbPath !== null && existsSync(conflict.memoryLearningDbPath)))
+        const resolvedMemDbPath = shouldRotateMemDb
+          ? nextMemDbPath!
+          : (conflict.memoryLearningDbPath ?? (typeof memCfg['databasePath'] === 'string' && isAbsolute(memCfg['databasePath']) ? memCfg['databasePath'] : undefined))
+        const nextMem = normalizeMemoryGrantForDigest({
+          ...memCfg,
+          authorityId: newExtractId,
+          ...(newReviewId !== null ? { reviewAuthorityId: newReviewId } : {}),
+          ...(newReviewDigest !== null ? { reviewAuthorityDigest: newReviewDigest } : {}),
+          ...(newAdoptId !== null ? { adoptionAuthorityId: newAdoptId } : {}),
+          ...(newAdoptDigest !== null ? { adoptionGrantDigest: newAdoptDigest } : {}),
+        }, resolvedMemDbPath)
+        memRow.set('config', createPlainNode(doc, nextMem))
+        patchDirty = true
+      }
+
+      // Synchronize policy resource ids (`learning:<authorityId>`) for rotated grants.
+      const resourceRemap = new Map<string, string>()
+      if (oldExtractId !== null && newExtractId !== null) resourceRemap.set(`learning:${oldExtractId}`, `learning:${newExtractId}`)
+      if (oldReviewId !== null && newReviewId !== null) resourceRemap.set(`learning:${oldReviewId}`, `learning:${newReviewId}`)
+      if (oldAdoptId !== null && newAdoptId !== null) resourceRemap.set(`learning:${oldAdoptId}`, `learning:${newAdoptId}`)
+      if (resourceRemap.size > 0) {
+        const policyTargetRow = layout.layout === 'split'
+          ? findPatchRow(seq, 'dsh-enhanced-assistant-policy')
+          : findPatchRow(seq, 'dsh-enhanced-personal-assistant')
+        const policyCfgNode = policyTargetRow ? readConfigMap(policyTargetRow, 'config') : undefined
+        const policySectionRaw: unknown = policyCfgNode?.get('assistantPolicy', true)
+        const policySectionNode = layout.layout === 'split'
+          ? policyCfgNode
+          : (isMap(policySectionRaw) ? policySectionRaw : undefined)
+        const rulesNode = policySectionNode?.get('rules', true)
+        if (isSeq(rulesNode)) {
+          for (let idx = 0; idx < rulesNode.items.length; idx += 1) {
+            const plain = yamlNodeToJs(rulesNode.items[idx], doc)
+            if (plain === null || typeof plain !== 'object' || Array.isArray(plain)) continue
+            const rec = plain as Record<string, unknown>
+            const res = asPlainRecord(rec['resource'])
+            const resId = strOrNull(res['id'])
+            const mapped = res['kind'] === 'memory' && resId !== null ? resourceRemap.get(resId) : undefined
+            if (mapped !== undefined) {
+              rulesNode.set(idx, createPlainNode(doc, { ...rec, resource: { ...res, id: mapped } }))
+              patchDirty = true
+            }
+          }
+        }
+      }
+
+      notes.push(`已轮换记忆自学习授权代数至 g${gen} 并同步摘要与策略规则`)
+      needsRestart = true
+      continue
+    }
     if (issue.id.startsWith('stalled-bundle:')) {
       const pkg = issue.id.slice('stalled-bundle:'.length)
+      if (PROTECTED_CORE_BUNDLES.has(pkg)) continue
       const rowId = input.status.bundles.find(b => b.name === pkg)?.rows[0]?.rowId
         ?? `dsh-enhanced-${pkg.replace(/^@dsh-enhanced\//u, '')}`
       await disableBundle(pkg, rowId, pkg)
@@ -1263,8 +1699,58 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
     atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), now)
   }
 
+  for (const pkg of postPatchEnableBundles) {
+    if (input.manager !== undefined) {
+      try {
+        await input.manager.setBundleEnabled(pkg, true)
+      } catch {
+        // Fallback to manifest update below if manager fails or is stubbed.
+      }
+    }
+  }
+
   if (Object.keys(bundleUpdates).length > 0) {
     backupAndUpdateProfileManifest(paths, now, bundleUpdates)
+  }
+
+  if (promoteLinkedLark) {
+    const freshDoc = paths.patchPath !== null ? readPatchDocument(paths.patchPath) : doc
+    const freshSeq = isSeq(freshDoc.contents) ? freshDoc.contents : seq
+    const deliveryDbPath = resolveDeliveryDbPathForProfile(paths.canonicalHome, freshSeq, input.descriptors)
+    const linkedLark = detectLinkedLarkIngressAccount(freshSeq, input.descriptors, deliveryDbPath)
+    if (linkedLark !== null) {
+      const promoted = await promoteLarkOwnerInProfile({
+        host: input.host,
+        descriptors: input.descriptors,
+        openId: linkedLark.openId,
+        account: linkedLark.account,
+        tenant: linkedLark.tenant,
+        confirmed: true,
+        platform,
+        env,
+        now,
+      })
+      if (!promoted.applied) {
+        if (notes.length === 0) {
+          return Object.freeze({
+            applied: false,
+            entry: 'setup-doctor',
+            note: promoted.note,
+          })
+        }
+        notes.push(`切换飞书主主人失败（${promoted.note}）`)
+      } else {
+        if (notes.length === 0) {
+          return Object.freeze({
+            applied: true,
+            entry: 'setup-doctor',
+            note: promoted.note,
+          })
+        }
+        notes.push(promoted.note)
+        needsRestart = true
+      }
+    }
   }
 
   return Object.freeze({
@@ -1879,6 +2365,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
     let existingRulesBeforeDefaults: unknown
     if (useSplitPolicy) {
       const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+      if (policyRow.get('disabled') === true) policyRow.delete('disabled')
       policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
       existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
         ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
@@ -1894,6 +2381,7 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
     } else {
       const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+      if (paRow.get('disabled') === true) paRow.delete('disabled')
       const paCfg = ensureConfigMap(doc, paRow, 'config')
       const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
       existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
@@ -1904,6 +2392,8 @@ export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): P
       setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
       policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
     }
+    const existingDeliveryRow = findPatchRow(seq, 'dsh-enhanced-assistant-delivery')
+    if (existingDeliveryRow?.get('disabled') === true) existingDeliveryRow.delete('disabled')
 
     const existingRules = existingRulesBeforeDefaults
       ?? (isSeq(policyConfigNode.get('rules', true)) ? yamlNodeToJs(policyConfigNode.get('rules', true), doc) : effectivePolicyCfg['rules'])
@@ -2397,6 +2887,7 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
     let existingRulesBeforeDefaults: unknown
     if (useSplitPolicy) {
       const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+      if (policyRow.get('disabled') === true) policyRow.delete('disabled')
       policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
       existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
         ? yamlNodeToJs(policyConfigNode.get('rules', true), doc)
@@ -2411,6 +2902,7 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
       setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
     } else {
       const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+      if (paRow.get('disabled') === true) paRow.delete('disabled')
       const paCfg = ensureConfigMap(doc, paRow, 'config')
       const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
       existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))

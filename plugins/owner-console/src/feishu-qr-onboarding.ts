@@ -411,13 +411,24 @@ async function checkRequiredFeishuBundles(
       errored.push(`${pkg}（${entry.error.code ?? 'error'}）`)
     }
   }
+  const policyCandidates = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy']
+    .map(pkg => bundles.find(candidate => candidate.name === pkg))
+    .filter((entry): entry is BundleInfoLike => entry !== undefined && entry.installed && entry.error?.code !== 'not-bundle')
+  if (policyCandidates.length > 0 && !policyCandidates.some(entry => entry.enabled && entry.error === undefined)) {
+    const erroredPolicy = policyCandidates.find(entry => entry.enabled && entry.error !== undefined)
+    if (erroredPolicy !== undefined) {
+      errored.push(`${erroredPolicy.name}（${erroredPolicy.error?.code ?? 'error'}）`)
+    } else {
+      disabled.push(policyCandidates[0]!.name)
+    }
+  }
   if (uninstalled.length === 0 && disabled.length === 0 && errored.length === 0) return undefined
 
   const parts: string[] = []
   if (uninstalled.length > 0) parts.push(`未安装：${uninstalled.join('、')}`)
   if (disabled.length > 0) parts.push(`已安装但未启用：${disabled.join('、')}`)
   if (errored.length > 0) parts.push(`状态异常：${errored.join('、')}`)
-  return `缺少飞书扫码接入必需组件（${parts.join('；')}）。请先在「本项目插件管理」安装并启用这些组件（或运行 dsh plugin add 安装）并重启 profile，再重新发起扫码授权。`
+  return `缺少飞书扫码接入必需组件（${parts.join('；')}）。请先在上方第 1 步或「系统体检」一键恢复启用/安装这些组件并重启 profile，再重新发起扫码授权。`
 }
 
 /**

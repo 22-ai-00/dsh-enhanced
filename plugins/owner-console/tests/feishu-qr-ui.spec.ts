@@ -876,4 +876,314 @@ describe('FeishuCard one-click QR onboarding UI', () => {
     expect(blockedRestart).not.toHaveBeenCalled()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('未找到该扫码授权会话')
   })
+
+  it('shows guided onboarding, accurate persisted config, enable-not-install dependency recovery, and QR/manual setup when lark-channel is pending', async () => {
+    const applyDoctorRepair = vi.fn(async () => ({
+      ok: true as const,
+      value: { applied: true, entry: 'setup-doctor', note: '已恢复启用核心策略组件 @dsh-enhanced/personal-assistant。请重启 profile 后生效' },
+    }))
+    const restartProfile = vi.fn(async () => ({
+      ok: true as const,
+      value: { applied: true, entry: 'profile-restart', note: '正在自动退出并重新打开 DeepSeek Harness.app' },
+    }))
+    const base = makeQrRemote()
+    const pendingStatus: OwnerConsoleStatus = {
+      feishu: {
+        mode: 'handle',
+        installed: true,
+        enabled: true,
+        appIdConfigured: true,
+        appId: 'cli_aabbccddeeff0011',
+        connected: false,
+        connection: 'absent',
+      },
+      traex: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'traex' },
+      agy: { entry: 'dsh-enhanced-traex-acp-provider', installed: true, enabled: true, command: 'agy' },
+      defaultModel: { entry: 'agent-default-model', available: true, provider: 'super-relay', model: 'auto_model/alwaysday1' },
+      llmProviders: [{ id: 'super-relay', name: 'Super Relay' }],
+      host: { settings: true, pluginManager: true, bundles: 'ok', plugins: 'ok' },
+      dependencies: [
+        { name: 'assistantPolicy', available: false },
+        { name: 'assistantDelivery', available: false },
+        { name: 'assistantSkills', available: true },
+      ],
+      evaluation: { intakeAgreement: 'absent' },
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-credentials-keychain', moduleName: '@dsh-enhanced/credentials-keychain' }] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+      ],
+    }
+    const remote: ConsoleRemote = {
+      ...base.remote,
+      status: vi.fn(async () => ({ ok: true as const, value: pendingStatus })),
+      applyDoctorRepair,
+      restartProfile,
+    }
+    const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
+
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+
+    // Accurate config status (not falsely "环境变量 secret" or "未配置")
+    expect(container.textContent).toContain('系统凭据库（keychain')
+    expect(container.textContent).toContain('cli_aabbccddeeff0011')
+    expect(container.textContent).toContain('已配置')
+
+    // 4-step guided onboarding panel is visible even when lark-channel is pending
+    const guide = container.querySelector('[data-feishu-guide]')
+    expect(guide).not.toBeNull()
+    expect(guide!.textContent).toContain('飞书接入引导')
+    expect(guide!.textContent).toContain('@dsh-enhanced/personal-assistant')
+    const guidePlatformLink = container.querySelector('a[data-feishu-guide-open-platform]') as HTMLAnchorElement | null
+    expect(guidePlatformLink?.getAttribute('href')).toBe('https://open.feishu.cn/app/cli_aabbccddeeff0011')
+
+    // Must offer "启用 @dsh-enhanced/personal-assistant", NEVER bogus "安装 @dsh-enhanced/assistant-policy" or "安装 @dsh-enhanced/assistant-delivery"
+    const allButtons = [...container.querySelectorAll('button')].map(b => b.textContent)
+    expect(allButtons).toContain('启用 @dsh-enhanced/personal-assistant')
+    expect(allButtons).not.toContain('安装 @dsh-enhanced/assistant-policy')
+    expect(allButtons).not.toContain('安装 @dsh-enhanced/assistant-delivery')
+
+    // QR onboarding form remains visible while pending, AND honestly gates the start button until Step 1 bundles are enabled
+    const qrStartBtn = container.querySelector('button[data-feishu-qr-start]') as HTMLButtonElement | null
+    expect(qrStartBtn).not.toBeNull()
+    expect(qrStartBtn!.disabled).toBe(true)
+    expect(container.querySelector('[data-feishu-qr-blocked-hint]')?.textContent).toContain('@dsh-enhanced/personal-assistant')
+
+    // Clicking enable invokes targeted doctor recovery for disabled-core-policy-provider
+    const enablePaBtn = container.querySelector('button[data-repair-enable-dep="@dsh-enhanced/personal-assistant"]') as HTMLButtonElement
+    await act(async () => { enablePaBtn.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(applyDoctorRepair).toHaveBeenCalledWith(['disabled-core-policy-provider'])
+
+    // Inline-confirmed one-click restart from the guide works cleanly
+    const restartBtn = container.querySelector('button[data-feishu-guide-restart]') as HTMLButtonElement
+    expect(restartBtn).not.toBeNull()
+    await act(async () => { restartBtn.click() })
+    expect(container.querySelector('[data-feishu-guide-restart-confirm]')).not.toBeNull()
+    expect(restartProfile).not.toHaveBeenCalled()
+    await act(async () => { (container.querySelector('button[data-feishu-guide-restart-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    expect(restartProfile).toHaveBeenCalledWith(true)
+  })
+
+  it('unlocks QR start once all required bundles are enabled before restart, flags missing credentials-keychain, and distinguishes post-restart connection errors from pending-restart', async () => {
+    const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
+    const base = makeQrRemote()
+
+    // 1) All required bundles installed & enabled, still pending restart -> QR start is ENABLED
+    const readyForQrStatus: OwnerConsoleStatus = {
+      ...makeStatus({ entry: undefined, installed: true, enabled: false, appIdConfigured: false, connected: false, connection: 'absent' }),
+      dependencies: [
+        { name: 'assistantPolicy', available: false },
+        { name: 'assistantDelivery', available: false },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+      ],
+    }
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'qr-unlocked-pending',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: readyForQrStatus })) },
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const unlockedQrBtn = container.querySelector('button[data-feishu-qr-start]') as HTMLButtonElement | null
+    expect(unlockedQrBtn).not.toBeNull()
+    expect(unlockedQrBtn!.disabled).toBe(false)
+    expect(container.querySelector('[data-feishu-qr-blocked-hint]')).toBeNull()
+
+    // 2) Missing @dsh-enhanced/credentials-keychain shows install button in Step 1
+    const missingKeychainStatus: OwnerConsoleStatus = {
+      ...makeStatus({ entry: 'dsh-enhanced-lark-channel', installed: true, enabled: true, appIdConfigured: false, connected: false, connection: 'disabled' }),
+      dependencies: [
+        { name: 'assistantPolicy', available: true },
+        { name: 'assistantDelivery', available: true },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+      ],
+    }
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'missing-keychain',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: missingKeychainStatus })) },
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('button[data-feishu-guide-install-keychain]')).not.toBeNull()
+    expect(container.querySelector('[data-feishu-guide]')?.textContent).toContain('1. 基础依赖 待处理')
+
+    // 3) Loaded + configured + post-restart disconnected error -> Step 3 is ✓ (not 待重启), Step 4 is 连接异常
+    const errorStatus: OwnerConsoleStatus = {
+      ...makeStatus({
+        entry: 'dsh-enhanced-lark-channel',
+        installed: true,
+        enabled: true,
+        appIdConfigured: true,
+        appId: 'cli_aabbccddeeff0011',
+        connected: false,
+        connection: 'disconnected',
+        lastErrorCode: 'not_connected',
+      }),
+      dependencies: [
+        { name: 'assistantPolicy', available: true },
+        { name: 'assistantDelivery', available: true },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+      ],
+    }
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        key: 'post-restart-error',
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote: { ...base.remote, status: vi.fn(async () => ({ ok: true as const, value: errorStatus })) },
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    const errGuide = container.querySelector('[data-feishu-guide]')!
+    expect(errGuide.textContent).toContain('3. 重启生效 ✓')
+    expect(errGuide.textContent).not.toContain('3. 重启生效 待重启')
+    expect(errGuide.textContent).toContain('4. 飞书验证 连接异常')
+  })
+
+  it('surfaces persistent linked-owner memory warning after restart and lets owner promote + restart with inline confirmation', async () => {
+    const navigation = { openConversation: vi.fn(), openPlugins: vi.fn() }
+    const base = makeQrRemote()
+    const connectedStatus: OwnerConsoleStatus = {
+      ...makeStatus({
+        entry: 'dsh-enhanced-lark-channel',
+        installed: true,
+        enabled: true,
+        appIdConfigured: true,
+        appId: 'cli_aabbccddeeff0011',
+        connected: true,
+        connection: 'connected',
+      }),
+      dependencies: [
+        { name: 'assistantPolicy', available: true },
+        { name: 'assistantDelivery', available: true },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'active' },
+      ],
+    }
+
+    const setupDoctor = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        protocol: 'owner-console/setup-doctor/v1' as const,
+        checkedAt: 5_000,
+        profileName: 'desktop',
+        dshHome: '/tmp/.dsh',
+        frozenSystemdProfile: false,
+        writable: true,
+        healthy: false,
+        autoFixableCount: 0,
+        restartRequiredHint: false,
+        issues: [
+          {
+            id: 'lark-linked-not-primary-owner',
+            severity: 'warn' as const,
+            category: 'autonomy' as const,
+            title: '当前飞书账号仍为关联身份（linked），无法使用长期记忆与主人命令',
+            detail: '当前接入的飞书账号（ou_new_linked_2）以关联身份挂载在旧主主人（lark/primary/personal/ou_old_owner_1）名下，因此飞书私聊读写长期记忆会提示「无已认证的 owner 命名空间」。',
+            autoFixable: false,
+            fixLabel: '需确认设为飞书主主人',
+          },
+        ],
+      },
+    }))
+    const applyDoctorRepair = vi.fn(async () => ({
+      ok: true as const,
+      value: { applied: true, entry: 'setup-doctor', note: '已将飞书账号 ou_new_linked_2 设为本 profile 主主人' },
+    }))
+    const restartProfile = vi.fn(async () => ({
+      ok: true as const,
+      value: { applied: true, entry: 'profile-restart', note: '正在自动退出并重新打开 DeepSeek Harness.app' },
+    }))
+
+    const remote: ConsoleRemote = {
+      ...base.remote,
+      status: vi.fn(async () => ({ ok: true as const, value: connectedStatus })),
+      setupDoctor,
+      applyDoctorRepair,
+      restartProfile,
+    }
+
+    await act(async () => {
+      root.render(createElement(BundleConfigSlotView, {
+        packageName: '@dsh-enhanced/lark-channel',
+        view: 'page',
+        remote,
+        navigation,
+      }))
+    })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+
+    const guide = container.querySelector('[data-feishu-guide]')!
+    expect(guide.textContent).toContain('身份授权 关联身份（无长期记忆）')
+    expect(guide.textContent).toContain('无已认证的 owner 命名空间')
+
+    const promoteOnlyBtn = container.querySelector('button[data-feishu-guide-promote-owner]') as HTMLButtonElement
+    const promoteRestartBtn = container.querySelector('button[data-feishu-guide-promote-restart]') as HTMLButtonElement
+    expect(promoteOnlyBtn).not.toBeNull()
+    expect(promoteRestartBtn).not.toBeNull()
+
+    await act(async () => { promoteRestartBtn.click() })
+    expect(container.querySelector('[data-feishu-guide-promote-confirm="promote-and-restart"]')).not.toBeNull()
+    expect(applyDoctorRepair).not.toHaveBeenCalled()
+
+    await act(async () => { (container.querySelector('button[data-feishu-guide-promote-yes]') as HTMLButtonElement).click() })
+    await act(async () => { await Promise.resolve() })
+    await act(async () => { await Promise.resolve() })
+
+    expect(applyDoctorRepair).toHaveBeenCalledWith(['lark-linked-not-primary-owner'])
+    expect(restartProfile).toHaveBeenCalledWith(true)
+  })
 })

@@ -1318,4 +1318,30 @@ describe('Feishu official QR onboarding (RFC 8628)', () => {
     expect(errPromo.errorCode).toBe('promote-failed')
     expect(errPromo.note).toContain('sqlite busy')
   })
+
+  it('rejects QR preflight when personal-assistant is installed but disabled and no other policy provider is enabled', async () => {
+    const { dshHome, profileDir } = makeTempProfile()
+    const fetchSpy = vi.fn(async () => { throw new Error('must not call Feishu API when policy provider is disabled') })
+    const mgr = new FeishuQrOnboardingManager({
+      fetchFn: fetchSpy,
+      renderQrFn: async () => 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+      storeSecretFn: async () => {},
+      platform: 'darwin',
+      env: {},
+    })
+    const res = await mgr.start({
+      host: makeHost(dshHome, profileDir, 'desktop'),
+      getDescriptors: () => [],
+      listBundles: async () => [
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-enhanced/credentials-keychain', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, optional: false, removable: true, rows: [] },
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, optional: false, removable: true, rows: [] },
+      ],
+    }, { domain: 'feishu', appName: '文鳐', existingAppId: '', account: '', tenant: '', calendarReadonly: false, businessTools: true })
+    expect(res.state).toBe('failed')
+    expect(res.errorCode).toBe('missing-required-bundles')
+    expect(res.note).toContain('@dsh-enhanced/personal-assistant')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
 })

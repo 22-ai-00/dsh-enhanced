@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { isMap, isSeq, type YAMLMap } from 'yaml'
 import type { OwnerConsoleConfig } from './index.js'
 import {
   boundedConfig, configFacts, findEntry, hasControlChars, isAppId, isEntryId, isEnvName, isProjectBundle,
@@ -17,8 +18,11 @@ import {
 import { componentState, missingRemedy, repairPatch } from './state.js'
 import { persistAllowedBuilds } from './build-approvals.js'
 import { CodingToolProber, discoverCodingToolBinary, type CodingToolId } from './probes.js'
-import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus, resolveProfilePaths } from './autonomy-setup.js'
-import { SelfUpgradeProber } from './upgrade-probe.js'
+import {
+  applyAutonomyWizardSetup, atomicWritePatchWithBackup, findPatchRow, getPatchRowConfig,
+  inspectAutonomyWizardStatus, readPatchDocument, resolveProfilePaths,
+} from './autonomy-setup.js'
+import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.js'
 import type {
   AssistantChatContext, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
   AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleGrowthReport, OwnerConsoleModelCatalog,
@@ -352,6 +356,75 @@ export class OwnerConsoleService extends TypertRemoteService {
     return undefined
   }
 
+  /** Fallback read for lark-channel config when the plugin is pending/disabled and absent from `settings.describe()`. */
+  private persistedLarkConfig(): Readonly<Record<string, unknown>> {
+    let loaderCfg: Readonly<Record<string, unknown>> = {}
+    try {
+      const loader = this.host.get('loader' as never) as Partial<LoaderService> | undefined
+      if (typeof loader?.entries === 'function') {
+        for (const entry of loader.entries()) {
+          if (entry.options.name === '@dsh-enhanced/lark-channel' || LARK.test(entry.options.id)) {
+            loaderCfg = configFacts(entry.options.config)
+            break
+          }
+        }
+      }
+    } catch {
+      // Ignore loader inspection failure.
+    }
+    let patchCfg: Readonly<Record<string, unknown>> = {}
+    try {
+      const paths = resolveProfilePaths(this.host, process.env)
+      if (paths.patchExists && paths.patchPath !== null) {
+        const doc = readPatchDocument(paths.patchPath)
+        if (isSeq(doc.contents)) {
+          const rawPatch = getPatchRowConfig(doc.contents, 'dsh-enhanced-lark-channel', doc)
+          if (Object.keys(rawPatch).length > 0) patchCfg = configFacts(rawPatch)
+        }
+      }
+    } catch {
+      // Unreadable patch file falls back to loader inspection / defaults.
+    }
+    if (Object.keys(loaderCfg).length === 0 && Object.keys(patchCfg).length === 0) return Object.freeze({})
+    return Object.freeze({ ...loaderCfg, ...patchCfg })
+  }
+
+  private clearPatchRowDisabled(packageName: string): boolean {
+    try {
+      const paths = resolveProfilePaths(this.host, process.env)
+      if (!paths.writable || !paths.patchExists || paths.patchPath === null) return false
+      if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, process.platform, process.env)) return false
+      const doc = readPatchDocument(paths.patchPath)
+      if (!isSeq(doc.contents)) return false
+      const rowId = `dsh-enhanced-${packageName.replace(/^@dsh-enhanced\//u, '')}`
+      const candidates: YAMLMap[] = []
+      const direct = findPatchRow(doc.contents, rowId)
+      if (direct !== undefined) candidates.push(direct)
+      for (const item of doc.contents.items) {
+        if (!isMap(item)) continue
+        if (item.get('name') === packageName && !candidates.includes(item)) candidates.push(item)
+        const inserted = item.get('insert', true)
+        if (isSeq(inserted)) {
+          for (const sub of inserted.items) {
+            if (isMap(sub) && sub.get('name') === packageName && !candidates.includes(sub)) candidates.push(sub)
+          }
+        }
+      }
+      let cleared = false
+      for (const row of candidates) {
+        if (row.get('disabled') === true) {
+          row.delete('disabled')
+          cleared = true
+        }
+      }
+      if (!cleared) return false
+      atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), Date.now())
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async status(): Promise<OwnerConsoleStatus> {
     const settings = this.host.get('settings' as never) as SettingsService | undefined
     const entries = settings?.describe({ redactSecrets: true }) ?? []
@@ -359,7 +432,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     const lark = findEntry(entries, ns => LARK.test(ns))
     const traex = findEntry(entries, ns => TRAEX.test(ns))
     const defaultModelEntry = this.defaultModelEntry(entries)
-    const larkValue = configFacts(lark?.value)
+    const larkValue = lark === undefined ? this.persistedLarkConfig() : configFacts(lark.value)
     const traexValue = configFacts(traex?.value)
     const defaultModelService = this.host.get('agentDefaultModel' as never) as AgentDefaultModelService | undefined
     let defaultSelection: Readonly<{ provider: string; model: string; reasoningEffort?: string }> | undefined
@@ -391,7 +464,10 @@ export class OwnerConsoleService extends TypertRemoteService {
     return Object.freeze({
       feishu: Object.freeze({
         ...(lark === undefined ? {} : { entry: lark.ns }),
-        mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'handle' : 'env',
+        mode: larkValue['secretSource'] === 'handle'
+          || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string' && larkValue['credentialHandle'].trim() !== '')
+          ? 'handle'
+          : 'env',
         installed: installed('@dsh-enhanced/lark-channel'),
         enabled: larkValue['enabled'] === true,
         appIdConfigured: activeLarkAppId !== undefined,
@@ -483,7 +559,15 @@ export class OwnerConsoleService extends TypertRemoteService {
     if (!isProjectPackage(name)) return refuse('', '只允许管理本项目的 @dsh-enhanced/* bundle')
     const manager = this.manager()
     const result = applyChange(await manager.setBundleEnabled(name, enabled))
-    if (result.applied) this.catalogReader.invalidate()
+    if (result.applied) {
+      this.catalogReader.invalidate()
+      if (enabled && this.clearPatchRowDisabled(name)) {
+        return Object.freeze({
+          ...result,
+          note: `${result.note}；已同时清除 cordis.patch.yml 中的 disabled 覆盖，重启 profile 后生效`,
+        })
+      }
+    }
     return result
   }
 

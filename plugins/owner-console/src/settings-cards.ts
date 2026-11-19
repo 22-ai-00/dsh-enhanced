@@ -678,22 +678,74 @@ function commandCopyRow(command: string, ctrl: Pick<ConsoleController, 'setNotic
       onClick: onRecheck }, '我已登录，重新探测'))
 }
 
-function repairSection(ctrl: ConsoleController, state: ComponentState, packageName: string) {
+function repairSection(
+  ctrl: ConsoleController,
+  state: ComponentState,
+  packageName: string,
+  onAfterRepair?: (result: OwnerConsoleWriteResult) => void,
+) {
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, ctrl.busy)
+  const hasDisabledDep = state.missing.some(item => item.state === 'disabled')
+  const depButtons = state.missing.flatMap(item => {
+    if (item.state === 'stalled') return []
+    if (item.state === 'disabled') {
+      const canDoctorRestorePolicy = item.service === 'assistantPolicy'
+        && typeof ctrl.remote.applyDoctorRepair === 'function'
+      return [el('button', {
+        key: `${item.bundle}:enable`,
+        type: 'button',
+        'data-repair-enable-dep': item.bundle,
+        style: btn(primaryButtonStyle),
+        disabled: ctrl.busy,
+        onClick: () => void ctrl.run(async () => {
+          const res = canDoctorRestorePolicy
+            ? await ctrl.remote.applyDoctorRepair!(['disabled-core-policy-provider'])
+            : await ctrl.remote.setBundleEnabled(item.bundle, true)
+          if (res.ok && res.value.applied) onAfterRepair?.(res.value)
+          return res
+        }),
+      }, `启用 ${item.bundle}`)]
+    }
+    return [el('button', {
+      key: item.bundle,
+      type: 'button',
+      style: btn(buttonStyle),
+      disabled: ctrl.busy,
+      onClick: () => void ctrl.runInstall(item.bundle),
+    }, `安装 ${item.bundle}`)]
+  })
+  const showDoctorBtn = typeof ctrl.remote.applyDoctorRepair === 'function' && (state.stalled || state.kind === 'errored')
+  const waitingOnlyNote = state.missing.filter(item => item.state === 'stalled')
   return el('div', { style: { display: 'grid', gap: 8 } },
     el('p', { style: hintStyle }, state.stalled
-      ? `条目加载后配置表单才会出现。${missingRemedy(state) === '' ? '' : `${missingRemedy(state)}。`}修复依赖后重启 profile。`
+      ? hasDisabledDep
+        ? `检测到前置组件已安装但未启用：${missingRemedy(state)}。点击下方按钮一键恢复启用后重启 profile 即可恢复${waitingOnlyNote.length > 0 ? `（${waitingOnlyNote.map(i => i.bundle).join('、')} 已启用，无需重复安装）` : ''}。`
+        : `条目加载后完整实时配置才会生效。${missingRemedy(state) === '' ? '' : `${missingRemedy(state)}。`}修复依赖后重启 profile。`
       : `该条目当前不可写：${state.label}。`),
-    state.missing.length === 0 && typeof ctrl.remote.applyDoctorRepair !== 'function' ? null : el('div', { style: actionsStyle },
-      ...state.missing.map(item => el('button', { key: item.bundle, style: btn(buttonStyle), disabled: ctrl.busy,
-        onClick: () => void ctrl.runInstall(item.bundle) }, `安装 ${item.bundle}`)),
-      typeof ctrl.remote.applyDoctorRepair === 'function' && (state.stalled || state.kind === 'errored')
-        ? el('button', { type: 'button', style: btn(primaryButtonStyle), disabled: ctrl.busy,
-          onClick: () => void ctrl.run(() => ctrl.remote.applyDoctorRepair!([])) }, '一键自动诊断与修复')
+    depButtons.length === 0 && !showDoctorBtn ? null : el('div', { style: actionsStyle },
+      ...depButtons,
+      showDoctorBtn
+        ? el('button', {
+          type: 'button',
+          style: btn(hasDisabledDep ? buttonStyle : primaryButtonStyle),
+          disabled: ctrl.busy,
+          onClick: () => void ctrl.run(async () => {
+            const res = await ctrl.remote.applyDoctorRepair!([])
+            if (res.ok && res.value.applied) onAfterRepair?.(res.value)
+            return res
+          }),
+        }, '一键自动诊断与修复')
         : null),
     state.stalled || state.kind === 'errored'
-      ? el('textarea', { readOnly: true, rows: 4, 'aria-label': `${packageName} 最小修复 patch`, value: repairPatch(state, packageName),
-        style: { ...inputStyle, fontFamily: monoFont, fontSize: 11, resize: 'vertical' } })
+      ? el('details', { style: { marginTop: 2 } },
+        el('summary', { style: { fontSize: 11.5, color: caption, cursor: 'pointer' } }, '高级：查看最小故障排查 patch（仅在自动修复无法完成时参考）'),
+        el('textarea', {
+          readOnly: true,
+          rows: 4,
+          'aria-label': `${packageName} 最小修复 patch`,
+          value: repairPatch(state, packageName),
+          style: { ...inputStyle, fontFamily: monoFont, fontSize: 11, resize: 'vertical', marginTop: 6 },
+        }))
       : null)
 }
 
@@ -1090,6 +1142,11 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const [qrCopied, setQrCopied] = useState(false)
   const [copiedCmd, setCopiedCmd] = useState<'' | 'restart' | 'business'>('')
   const [qrNowMs, setQrNowMs] = useState(0)
+  const [feishuNeedsRestart, setFeishuNeedsRestart] = useState(false)
+  const [confirmCardRestart, setConfirmCardRestart] = useState(false)
+  const [cardRestarting, setCardRestarting] = useState(false)
+  const [confirmGuidePromote, setConfirmGuidePromote] = useState<null | 'promote' | 'promote-and-restart'>(null)
+  const [guidePromoting, setGuidePromoting] = useState(false)
   const completedSessionRef = useRef('')
   const qrActionSeqRef = useRef(0)
   const qrInFlightRef = useRef(false)
@@ -1334,7 +1391,71 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
     }
   }
 
-  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
+  const triggerCardRestart = async () => {
+    if (typeof remote.restartProfile !== 'function' || cardRestarting) return
+    setConfirmCardRestart(false)
+    setCardRestarting(true)
+    ctrl.setError('')
+    try {
+      const res = await remote.restartProfile(true)
+      if (!res.ok) {
+        ctrl.setError(remoteFailureText(res.error))
+        return
+      }
+      if (!res.value.applied) {
+        ctrl.setError(res.value.note)
+        return
+      }
+      setFeishuNeedsRestart(false)
+      ctrl.setNotice(res.value.note)
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setCardRestarting(false)
+    }
+  }
+
+  const executeGuidePromote = async (alsoRestart: boolean) => {
+    if (typeof remote.applyDoctorRepair !== 'function' || guidePromoting) return
+    setConfirmGuidePromote(null)
+    setGuidePromoting(true)
+    ctrl.setError('')
+    try {
+      const res = await remote.applyDoctorRepair(['lark-linked-not-primary-owner'])
+      if (!res.ok) {
+        ctrl.setError(remoteFailureText(res.error))
+        return
+      }
+      if (!res.value.applied) {
+        ctrl.setError(res.value.note)
+        return
+      }
+      notifyConsoleRefresh(remote)
+      void ctrl.refresh()
+      void ctrl.checkDoctor()
+      if (alsoRestart && typeof remote.restartProfile === 'function' && ctrl.doctorReport?.frozenSystemdProfile !== true) {
+        const restartRes = await remote.restartProfile(true)
+        if (!restartRes.ok) {
+          ctrl.setError(`${res.value.note}（自动重启失败：${remoteFailureText(restartRes.error)}）`)
+          return
+        }
+        if (!restartRes.value.applied) {
+          ctrl.setError(`${res.value.note}（${restartRes.value.note}）`)
+          return
+        }
+        ctrl.setNotice(`${res.value.note} ${restartRes.value.note}`)
+        return
+      }
+      setFeishuNeedsRestart(true)
+      ctrl.setNotice(res.value.note)
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setGuidePromoting(false)
+    }
+  }
+
+  const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy || cardRestarting || guidePromoting)
   const pending = status === undefined
   const larkReady = status !== undefined && status.feishu.entry !== undefined
   const larkState = componentState(status, LARK_PACKAGE)
@@ -1349,20 +1470,79 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   ])
   const larkCompanions = LARK_COMPANION_BUNDLES.filter(bundle => !installedCompanions.has(bundle))
   const installLark = larkState.canInstall
-    ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void ctrl.run(() => installWithCompanions(remote, LARK_PACKAGE, larkCompanions, ctrl.confirmOwner)) }, '安装 lark-channel')
+    ? el('button', { style: btn(primaryButtonStyle), disabled: busy || cardRestarting,
+      onClick: () => void ctrl.run(async () => {
+        const res = await installWithCompanions(remote, LARK_PACKAGE, larkCompanions, ctrl.confirmOwner)
+        if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
+        return res
+      }) }, '安装 lark-channel')
     : null
   const enableLark = larkState.canEnable
-    ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
-      onClick: () => void ctrl.run(() => remote.setBundleEnabled(LARK_PACKAGE, true)) }, '启用 lark-channel')
+    ? el('button', { style: btn(primaryButtonStyle), disabled: busy || cardRestarting,
+      onClick: () => void ctrl.run(async () => {
+        const res = await remote.setBundleEnabled(LARK_PACKAGE, true)
+        if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
+        return res
+      }) }, '启用 lark-channel')
     : null
   const larkRepair = !larkReady && (larkState.stalled || larkState.missing.length > 0 || larkState.kind === 'errored')
-    ? repairSection(ctrl, larkState, LARK_PACKAGE) : null
+    ? repairSection(ctrl, larkState, LARK_PACKAGE, (res) => {
+      if (res.note.includes('重启')) setFeishuNeedsRestart(true)
+    })
+    : null
+
+  const policyMissing = larkState.missing.find(item => item.service === 'assistantPolicy')
+  const deliveryMissing = larkState.missing.find(item => item.service === 'assistantDelivery')
+  const hasBundleInventory = status !== undefined && status.host.bundles === 'ok' && status.bundles.length > 0
+  const keychainBundle = status?.bundles.find(bundle => bundle.name === '@dsh-enhanced/credentials-keychain')
+  const keychainNeedsEnable = keychainBundle !== undefined && keychainBundle.installed && !keychainBundle.enabled
+  const keychainNeedsInstall = hasBundleInventory && (keychainBundle === undefined || !keychainBundle.installed)
+  const qrBlockedBundles = (() => {
+    if (!hasBundleInventory || status === undefined) return [] as string[]
+    const blocked: string[] = []
+    for (const pkg of [LARK_PACKAGE, '@dsh-enhanced/credentials-keychain', '@dsh-enhanced/assistant-delivery'] as const) {
+      const entry = status.bundles.find(candidate => candidate.name === pkg)
+      if (entry === undefined || !entry.installed || !entry.enabled || entry.error !== undefined) {
+        blocked.push(pkg)
+      }
+    }
+    const policyCandidates = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy']
+      .map(pkg => status.bundles.find(candidate => candidate.name === pkg))
+      .filter((entry): entry is OwnerConsoleStatus['bundles'][number] => entry !== undefined && entry.installed && entry.error?.code !== 'not-bundle')
+    if (policyCandidates.length > 0 && !policyCandidates.some(entry => entry.enabled && entry.error === undefined)) {
+      blocked.push(policyCandidates[0]!.name)
+    } else if (policyMissing !== undefined && policyMissing.state !== 'stalled' && !blocked.includes(policyMissing.bundle)) {
+      blocked.push(policyMissing.bundle)
+    }
+    return blocked
+  })()
+  const qrBlockedByBundles = qrBlockedBundles.length > 0
+  const step1Done = larkReady && larkState.missing.length === 0 && !keychainNeedsEnable && !keychainNeedsInstall
+  const knownAppId = (status?.feishu.appId !== undefined && /^cli_[0-9a-fA-F]{16}$/u.test(status.feishu.appId))
+    ? status.feishu.appId
+    : (qrSession?.appId !== undefined && /^cli_[0-9a-fA-F]{16}$/u.test(qrSession.appId) ? qrSession.appId : undefined)
+  const step2Done = status?.feishu.appIdConfigured === true || qrSession?.state === 'completed'
+  const step3NeedsRestart = feishuNeedsRestart || qrSession?.restartRecommended === true || !larkReady
+  const step4Done = status?.feishu.connected === true
+  const step3Done = step4Done || (step1Done && step2Done && !step3NeedsRestart)
+  const canCardRestart = typeof remote.restartProfile === 'function' && ctrl.doctorReport?.frozenSystemdProfile !== true
+  const linkedOwnerIssue = ctrl.doctorReport?.issues.find(item => item.id === 'lark-linked-not-primary-owner')
+  const showGuidePromoteOwner = linkedOwnerIssue !== undefined
+    && qrSession?.state !== 'completed'
+    && typeof remote.applyDoctorRepair === 'function'
+  const guidePlatformUrl = knownAppId !== undefined
+    ? `https://open.feishu.cn/app/${knownAppId}`
+    : 'https://open.feishu.cn/app'
+  const modeLabel = status?.feishu.mode === 'env'
+    ? '环境变量 secret'
+    : !larkReady && status?.feishu.appIdConfigured
+      ? '系统凭据库（keychain · 已保存配置，待启动生效）'
+      : '系统凭据库（keychain）'
 
   const feishuRows = pending
     ? placeholder('正在读取…')
     : el('div', { style: listStyle },
-      row('方式', status.feishu.mode === 'env' ? '环境变量 secret' : 'keychain secret'),
+      row('方式', modeLabel),
       row('入口', el('span', { style: actionsStyle },
         pill(larkState.label, larkState.tone),
         status.feishu.entry === undefined ? null : el('span', { style: monoMuted }, status.feishu.entry))),
@@ -1728,41 +1908,294 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
         el('button', {
           type: 'button',
           'data-feishu-qr-start': '',
-          style: idle(primaryButtonStyle, busy || qrLoading || !canQrFeishu),
-          disabled: busy || qrLoading || !canQrFeishu,
+          style: idle(primaryButtonStyle, busy || qrLoading || !canQrFeishu || qrBlockedByBundles),
+          disabled: busy || qrLoading || !canQrFeishu || qrBlockedByBundles,
           onClick: () => void startQrOnboarding(),
         }, qrLoading ? '正在向飞书申请授权码…' : '一键生成飞书扫码授权'),
-        !canQrFeishu ? el('span', { style: hintStyle }, '当前 Host 尚未暴露扫码授权接口，请升级插件或切换手动填入模式。') : null)
+        !canQrFeishu
+          ? el('span', { style: hintStyle }, '当前 Host 尚未暴露扫码授权接口，请升级插件或切换手动填入模式。')
+          : qrBlockedByBundles
+            ? el('span', { 'data-feishu-qr-blocked-hint': '', style: hintStyle },
+              `请先完成上方第 1 步启用/安装 ${qrBlockedBundles.join('、')} 后，即可发起扫码授权（或切至「手动填入凭据」预先保存）。`)
+            : null)
       : null)
 
-  const feishuActions = !larkReady && !installLark && !enableLark && larkRepair === null
+  const canPersistWithoutLiveEntry = (canQrFeishu || canEasyFeishu)
+    && larkState.kind !== 'absent'
+    && larkState.kind !== 'unavailable'
+    && larkState.kind !== 'unreadable'
+    && larkState.kind !== 'errored'
+  const showConfigForms = status !== undefined && (larkReady || canPersistWithoutLiveEntry)
+  const effectiveSecretSource: 'qr' | 'easy' | 'env' | 'handle' = !larkReady && (secretSource === 'env' || secretSource === 'handle')
+    ? (canQrFeishu ? 'qr' : 'easy')
+    : secretSource
+
+  const guideSummaryText = (() => {
+    if (status === undefined) return ''
+    if (!step1Done) {
+      if (policyMissing?.state === 'disabled') {
+        return `当前缺少 assistantPolicy 服务：核心组件 ${policyMissing.bundle} 已安装但处于停用状态${deliveryMissing?.state === 'stalled' ? '（assistant-delivery 已启用，正在等待它恢复，无需重复安装）' : ''}。请点击下方「启用 ${policyMissing.bundle}」一键恢复，再重启 profile 即可自动连接飞书。`
+      }
+      if (larkState.canInstall) {
+        return '第 1 步：点击「安装 lark-channel」安装飞书通道与配套组件并重启 profile，即可使用一键扫码接入。'
+      }
+      if (larkState.canEnable) {
+        return '第 1 步：请先点击「启用 lark-channel」启用已安装的飞书通道；启用后即可发起扫码或手动保存凭据，再重启一次 profile 生效。'
+      }
+      if (keychainNeedsInstall) {
+        return '第 1 步：缺少安全凭据组件 @dsh-enhanced/credentials-keychain，请先点击下方按钮安装后再保存飞书 App Secret。'
+      }
+      if (keychainNeedsEnable) {
+        return '第 1 步：凭据组件 @dsh-enhanced/credentials-keychain 已安装但未启用，请先启用它以安全保存飞书 App Secret。'
+      }
+      if (larkState.stalled) {
+        return qrBlockedByBundles
+          ? `第 1 步：飞书通道正在等待前置组件就绪；请先启用/安装 ${qrBlockedBundles.join('、')}，然后重启 profile 生效。`
+          : '第 1 步：基础组件已全部启用，正在等待重启生效；可直接点击「一键重启生效」（或先在下方完成第 2 步扫码/凭据配置后再一并重启）。'
+      }
+      return '请先确保基础组件已安装并启用，然后重启 profile 生效。'
+    }
+    if (!step2Done) {
+      return '第 2 步：基础组件已就绪。推荐点击下方「一键生成飞书扫码授权」30 秒完成建应用与授权限，或切换到「手动填入凭据」填写已有飞书应用的 App ID 与 App Secret。'
+    }
+    if (!step4Done) {
+      if (step3NeedsRestart) {
+        return `第 3 步：飞书配置已保存（${knownAppId ?? '已配置'}），请重启一次 profile（约 3–8 秒）以加载新凭据与策略并建立飞书长连接。`
+      }
+      return `第 4 步：已加载应用 ${knownAppId ?? ''}，当前连接为「${larkConnectionLabel(status.feishu.connection, status.feishu.lastErrorCode)}」。若刚改过配置请重启 profile；否则请打开飞书开放平台核对「机器人能力」「事件与回调 -> 长连接」及「版本管理与发布」，或确认凭据未失效。`
+    }
+    if (linkedOwnerIssue !== undefined && qrSession?.state !== 'completed') {
+      return `飞书长连接已在线（${knownAppId ?? '已配置'}），但当前飞书账号仍为关联身份（linked），私聊读写长期记忆会提示「无已认证的 owner 命名空间」，且 /permission、/model 不可用；点击下方「一键将当前飞书账号设为主主人」并重启即可解锁。`
+    }
+    return `飞书长连接已在线（${knownAppId ?? '已配置'}）！现在可直接在飞书私聊机器人发送「你好」、/model 或 /permission；如需更换应用或补齐权限，可在下方重新扫码。`
+  })()
+
+  const step3PillLabel = step3Done
+    ? '3. 重启生效 ✓'
+    : (feishuNeedsRestart || qrSession?.restartRecommended === true || (step2Done && !larkReady))
+      ? '3. 重启生效 待重启'
+      : '3. 重启生效 待前序'
+  const step3PillTone: StatusTone = step3Done
+    ? 'ok'
+    : (feishuNeedsRestart || qrSession?.restartRecommended === true || (step2Done && !larkReady))
+      ? 'warn'
+      : 'neutral'
+  const step4HasError = status?.feishu.connection === 'disconnected' || status?.feishu.lastErrorCode !== undefined
+  const step4PillLabel = step4Done
+    ? '4. 飞书验证 已在线'
+    : !step3Done
+      ? '4. 飞书验证 待连接'
+      : status?.feishu.connection === 'connecting' || status?.feishu.connection === 'reconnecting'
+        ? '4. 飞书验证 连接中…'
+        : step4HasError
+          ? '4. 飞书验证 连接异常'
+          : '4. 飞书验证 未连接'
+  const step4PillTone: StatusTone = step4Done
+    ? 'ok'
+    : !step3Done
+      ? 'neutral'
+      : step4HasError
+        ? 'error'
+        : 'warn'
+
+  const showGuideRestartBtn = canCardRestart
+    && qrSession?.state !== 'completed'
+    && (feishuNeedsRestart || (!step4Done && (step2Done || !step1Done)))
+
+  const feishuGuide = status === undefined || larkState.kind === 'unavailable' || larkState.kind === 'unreadable'
+    ? null
+    : el('div', {
+      'data-feishu-guide': '',
+      style: {
+        display: 'grid',
+        gap: 10,
+        padding: '12px 14px',
+        borderRadius: 12,
+        border: `1px solid ${step4Done ? tint(accent, 30) : border}`,
+        background: sunken,
+      },
+    },
+    el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+      el('span', { style: { fontSize: 12.5, fontWeight: 600, color: ink } }, '飞书接入引导（4 步完成连接）'),
+      el('div', { style: actionsStyle },
+        pill(`1. 基础依赖 ${step1Done ? '✓' : '待处理'}`, step1Done ? 'ok' : larkState.kind === 'errored' || larkState.kind === 'failed' ? 'error' : 'warn'),
+        pill(`2. 绑定应用 ${step2Done ? '✓' : '待配置'}`, step2Done ? 'ok' : step1Done ? 'warn' : 'neutral'),
+        pill(step3PillLabel, step3PillTone),
+        pill(step4PillLabel, step4PillTone),
+        showGuidePromoteOwner ? pill('身份授权 关联身份（无长期记忆）', 'warn') : null)),
+    el('p', { style: { margin: 0, fontSize: 12.5, color: ink, lineHeight: 1.6 } }, guideSummaryText),
+    el('div', { style: actionsStyle },
+      showGuidePromoteOwner && canCardRestart
+        ? el('button', {
+          type: 'button',
+          'data-feishu-guide-promote-restart': '',
+          style: idle(primaryButtonStyle, busy || cardRestarting || guidePromoting),
+          disabled: busy || cardRestarting || guidePromoting,
+          onClick: () => setConfirmGuidePromote('promote-and-restart'),
+        }, guidePromoting ? '正在切换并重启…' : '一键设为主主人并重启生效')
+        : null,
+      showGuidePromoteOwner
+        ? el('button', {
+          type: 'button',
+          'data-feishu-guide-promote-owner': '',
+          style: idle(canCardRestart ? buttonStyle : primaryButtonStyle, busy || cardRestarting || guidePromoting),
+          disabled: busy || cardRestarting || guidePromoting,
+          onClick: () => setConfirmGuidePromote('promote'),
+        }, guidePromoting ? '正在切换主主人…' : '一键将当前飞书账号设为主主人')
+        : null,
+      keychainNeedsInstall
+        ? el('button', {
+          type: 'button',
+          'data-feishu-guide-install-keychain': '',
+          style: btn(primaryButtonStyle),
+          disabled: busy || cardRestarting || guidePromoting,
+          onClick: () => void ctrl.run(async () => {
+            const res = await remote.installProjectBundle('@dsh-enhanced/credentials-keychain', [])
+            if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
+            return res
+          }),
+        }, '安装 @dsh-enhanced/credentials-keychain')
+        : null,
+      keychainNeedsEnable
+        ? el('button', {
+          type: 'button',
+          style: btn(primaryButtonStyle),
+          disabled: busy || cardRestarting || guidePromoting,
+          onClick: () => void ctrl.run(async () => {
+            const res = await remote.setBundleEnabled('@dsh-enhanced/credentials-keychain', true)
+            if (res.ok && res.value.applied) setFeishuNeedsRestart(true)
+            return res
+          }),
+        }, '启用 @dsh-enhanced/credentials-keychain')
+        : null,
+      showGuideRestartBtn
+        ? el('button', {
+          type: 'button',
+          'data-feishu-guide-restart': '',
+          style: idle(feishuNeedsRestart || (step1Done && step2Done && !step4Done) ? primaryButtonStyle : buttonStyle, busy || cardRestarting || guidePromoting),
+          disabled: busy || cardRestarting || guidePromoting,
+          onClick: () => setConfirmCardRestart(true),
+        }, cardRestarting ? '正在触发重启…' : '一键重启生效')
+        : null,
+      el('a', {
+        href: guidePlatformUrl,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        'data-feishu-guide-open-platform': '',
+        style: { ...buttonStyle, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' },
+      }, '打开飞书开放平台'),
+      el('button', {
+        type: 'button',
+        style: btn(),
+        disabled: busy || cardRestarting || guidePromoting,
+        onClick: () => void ctrl.refresh(),
+      }, '刷新状态')),
+    confirmGuidePromote !== null
+      ? el('div', {
+        role: 'alertdialog',
+        'data-feishu-guide-promote-confirm': confirmGuidePromote,
+        style: {
+          display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 10,
+          border: `1px solid ${tint(accent, 34)}`, background: tint(accent, 9), fontSize: 12, color: ink, lineHeight: 1.55,
+        },
+      },
+      el('div', {},
+        `${linkedOwnerIssue?.detail ?? '确认将当前飞书账号设为本 profile 飞书主主人'}（将替换旧主主人身份，立即解锁长期记忆命名空间、/permission、/model 与审批卡片${confirmGuidePromote === 'promote-and-restart' ? '，并随后重启 DeepSeek Harness 生效' : ''}）？`),
+      el('div', { style: actionsStyle },
+        el('button', {
+          type: 'button',
+          'data-feishu-guide-promote-yes': '',
+          style: idle(primaryButtonStyle, guidePromoting),
+          disabled: guidePromoting,
+          onClick: () => void executeGuidePromote(confirmGuidePromote === 'promote-and-restart'),
+        }, confirmGuidePromote === 'promote-and-restart' ? '确认切换并重启' : '确认设为主主人'),
+        el('button', {
+          type: 'button',
+          'data-feishu-guide-promote-no': '',
+          style: buttonStyle,
+          disabled: guidePromoting,
+          onClick: () => setConfirmGuidePromote(null),
+        }, '取消')))
+      : null,
+    confirmCardRestart
+      ? el('div', {
+        role: 'alertdialog',
+        'data-feishu-guide-restart-confirm': '',
+        style: {
+          display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 10,
+          border: `1px solid ${tint(accent, 34)}`, background: tint(accent, 9), fontSize: 12, color: ink, lineHeight: 1.55,
+        },
+      },
+      el('div', {}, '确认立即重启当前 profile（桌面端将退出并重新打开 DeepSeek Harness.app，约 3–8 秒），以加载修复后的依赖与飞书长连接？'),
+      el('div', { style: actionsStyle },
+        el('button', {
+          type: 'button',
+          'data-feishu-guide-restart-yes': '',
+          style: idle(primaryButtonStyle, cardRestarting),
+          disabled: cardRestarting,
+          onClick: () => void triggerCardRestart(),
+        }, '确认立即重启'),
+        el('button', {
+          type: 'button',
+          'data-feishu-guide-restart-no': '',
+          style: buttonStyle,
+          disabled: cardRestarting,
+          onClick: () => setConfirmCardRestart(false),
+        }, '取消')))
+      : null,
+    !step4Done
+      ? el('details', {},
+        el('summary', { style: { fontSize: 12, color: muted, cursor: 'pointer' } }, '常见排查要点（搜不到机器人 / 收不到回复 / 主主人权限）'),
+        el('div', { style: { display: 'grid', gap: 4, marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.6 } },
+          el('div', {}, '• 搜不到机器人：进入飞书开放平台「版本管理与发布」，确认已创建版本并发布生效（可用范围包含自己）。'),
+          el('div', {}, '• 连上但收不到回复：进入「事件与回调」选择「使用长连接接收事件」并订阅 im.message.receive_v1；卡片交互需开启 card.action.trigger。'),
+          el('div', {}, '• 权限或 /model 不可用：若该 profile 曾绑定过旧飞书应用或 Web 主主人，扫码完成后点击「一键设为飞书主主人」或运行 dsh-lark-setup。')))
+      : null)
+
+  const feishuActions = !showConfigForms && !installLark && !enableLark && larkRepair === null && feishuGuide === null
     ? null
     : el('div', { style: { display: 'grid', gap: 12 } },
+      feishuGuide,
       installLark === null && enableLark === null ? null : el('div', { style: actionsStyle }, installLark, enableLark),
       larkRepair,
-      ...(larkReady ? [
+      ...(showConfigForms ? [
+        !larkReady
+          ? el('p', { style: hintStyle }, qrBlockedByBundles
+            ? '完成上方第 1 步启用/安装基础组件后即可发起一键扫码授权；也可先切换到「手动填入凭据」预先保存 App ID 与 App Secret，最后重启一次 profile 生效。'
+            : '基础组件已就绪（待重启加载），当前即可直接通过下方「一键扫码接入」或「手动填入凭据」保存配置，完成后一并重启 profile 上线。')
+          : null,
         el('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
           el('span', { style: subheadStyle }, '配置方式'),
           ...(canQrFeishu ? [
             el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
-              el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'qr', style: { accentColor: accent, margin: 0 },
+              el('input', { type: 'radio', name: 'secret-source', checked: effectiveSecretSource === 'qr', style: { accentColor: accent, margin: 0 },
                 onChange: () => setSecretSource('qr') }), '一键扫码接入（推荐）'),
           ] : []),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
-            el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'easy', style: { accentColor: accent, margin: 0 },
+            el('input', { type: 'radio', name: 'secret-source', checked: effectiveSecretSource === 'easy', style: { accentColor: accent, margin: 0 },
               onChange: () => setSecretSource('easy') }), canQrFeishu ? '手动填入凭据' : '极简一键接入（推荐）'),
-          el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
-            el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'env', style: { accentColor: accent, margin: 0 },
-              onChange: () => setSecretSource('env') }), '环境变量'),
-          el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
-            el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'handle', style: { accentColor: accent, margin: 0 },
-              onChange: () => setSecretSource('handle') }), 'keychain handle')),
-        secretSource === 'qr'
+          ...(larkReady ? [
+            el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+              el('input', { type: 'radio', name: 'secret-source', checked: effectiveSecretSource === 'env', style: { accentColor: accent, margin: 0 },
+                onChange: () => setSecretSource('env') }), '环境变量'),
+            el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+              el('input', { type: 'radio', name: 'secret-source', checked: effectiveSecretSource === 'handle', style: { accentColor: accent, margin: 0 },
+                onChange: () => setSecretSource('handle') }), 'keychain handle'),
+          ] : [])),
+        effectiveSecretSource === 'qr'
           ? qrOnboardingPanel
-          : secretSource === 'easy'
+          : effectiveSecretSource === 'easy'
             ? el('div', { style: { display: 'grid', gap: 10 } },
-              el('p', { style: hintStyle },
-                '只需填入飞书开放平台应用的 App ID 与 App Secret，系统将自动加密存入本机凭据库（macOS 钥匙串 / Linux 受保护文件）并写入通道与访问策略（配置文件绝不存明文）；保存后重启 profile 即可建立长连接。'),
+              el('div', {
+                style: {
+                  display: 'grid', gap: 4, padding: '10px 12px', borderRadius: 10,
+                  border: `1px solid ${border}`, background: sunken, fontSize: 12, color: muted, lineHeight: 1.6,
+                },
+              },
+              el('div', { style: { fontWeight: 600, color: ink } }, '手动接入飞书自建应用指引'),
+              el('div', {}, '1. 在飞书开放平台进入你的企业自建应用 →「凭证与基础信息」复制 App ID 与 App Secret；'),
+              el('div', {}, '2. 确认「添加应用能力」已开启「机器人」，「事件与回调」选择「使用长连接接收事件」并订阅 im.message.receive_v1；'),
+              el('div', {}, '3. 在「版本管理与发布」发布版本后，在此填入凭据保存（App Secret 仅加密存入系统凭据库，配置文件零明文），然后重启 profile 生效。')),
               el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
                 field('App ID', appId, setAppId, 'cli_0123456789abcdef'),
                 el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, 'App Secret（仅存系统凭据库）',
@@ -1788,7 +2221,10 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
                     const submittedSecret = appSecret
                     void ctrl.run(async () => {
                       const res = await remote.configureFeishuEasy!(appId, submittedSecret, account, tenant)
-                      if (res.ok && res.value.applied) setAppSecret('')
+                      if (res.ok && res.value.applied) {
+                        setAppSecret('')
+                        setFeishuNeedsRestart(true)
+                      }
                       return res
                     })
                   },
@@ -1797,7 +2233,7 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
             : el('div', { style: { display: 'grid', gap: 10 } },
               el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
                 field('appId', appId, setAppId, 'cli_0123456789abcdef'),
-                secretSource === 'env'
+                effectiveSecretSource === 'env'
                   ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
                   : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
                 field('account', account, setAccount, '保留当前 owner'),
@@ -1805,12 +2241,12 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
               el('div', { style: actionsStyle },
                 el('button', { style: btn(primaryButtonStyle), disabled: busy,
                   onClick: () => {
-                    const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                    const refs = feishuSecretRefs(effectiveSecretSource, secretEnv, secretHandle)
                     void ctrl.run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
                   } }, '应用配置'),
                 el('button', { style: btn(), disabled: busy,
                   onClick: () => {
-                    const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                    const refs = feishuSecretRefs(effectiveSecretSource, secretEnv, secretHandle)
                     void ctrl.run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
                   } }, '一键配置（从 Host 环境探测 appId）')),
               el('p', { style: hintStyle },

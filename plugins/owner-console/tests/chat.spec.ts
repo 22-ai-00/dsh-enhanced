@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  boundedText, CHAT_SESSION_KEY, chatMessages, messageText, modelSelectionFromProjection, openDedicatedChatSession,
+  boundedText, CHAT_SESSION_KEY, chatMessages, isAuthChatError, messageText, modelSelectionFromProjection, openDedicatedChatSession,
   pendingUserMessages, permissionLabel, permissionOptions, permissionValue, remoteFailureSummary,
   requiresPermissionConfirmation, sendChatMessage, storedChatSession, streamingAssistantText,
   type ChatBinding, type ChatEntry, type ChatReference, type ChatSessions, type ChatUploads, type PermissionCatalog,
@@ -561,5 +561,45 @@ describe('owner console chat sending and permissions', () => {
 
     expect(modelSelectionFromProjection(null)).toBeUndefined()
     expect(modelSelectionFromProjection({ next: { provider: '', model: 'm' } })).toBeUndefined()
+  })
+
+  it('attributes turn/end errors to the preceding request/header route and detects AUTH 401 failures', () => {
+    const rows = chatMessages([
+      { type: 'event', event: { type: 'turn/start', seq: 1 } },
+      { type: 'event', event: { type: 'request/header', seq: 2, data: { header: { config: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' } } } } },
+      { type: 'event', event: { type: 'turn/end', seq: 3, data: { reason: { kind: 'error', error: { code: 'AUTH', message: '401: {"message":"authentication failed","type":"authentication_error"}' } } } } },
+      { type: 'event', event: { type: 'turn/start', seq: 4 } },
+      { type: 'event', event: { type: 'turn/end', seq: 5, data: { reason: { kind: 'error', error: { code: 'NETWORK', message: 'connection reset' } } } } },
+    ])
+    expect(rows).toHaveLength(2)
+    const authErr = rows[0]!
+    expect(authErr.kind).toBe('error')
+    if (authErr.kind === 'error') {
+      expect(authErr.code).toBe('AUTH')
+      expect(authErr.provider).toBe('llmgw-general')
+      expect(authErr.model).toBe('deepseek-v4.1-flash')
+      expect(isAuthChatError(authErr)).toBe(true)
+    }
+    const netErr = rows[1]!
+    expect(netErr.kind).toBe('error')
+    if (netErr.kind === 'error') {
+      // turn/start resets previous turn route so an unrelated turn error is not misattributed
+      expect(netErr.provider).toBeUndefined()
+      expect(isAuthChatError(netErr)).toBe(false)
+    }
+
+    // Falls back to preceding model/selection when turn/end fails before request/header is emitted
+    const withSelection = chatMessages([
+      { type: 'event', event: { type: 'model/selection', seq: 1, data: { provider: 'llmgw-general', model: 'glm-5.3-flash' } } },
+      { type: 'event', event: { type: 'turn/start', seq: 2 } },
+      { type: 'event', event: { type: 'turn/end', seq: 3, data: { reason: { kind: 'error', error: { code: 'AUTH', message: '401 unauthorized' } } } } },
+    ])
+    expect(withSelection).toHaveLength(1)
+    expect(withSelection[0]).toMatchObject({
+      kind: 'error',
+      code: 'AUTH',
+      provider: 'llmgw-general',
+      model: 'glm-5.3-flash',
+    })
   })
 })

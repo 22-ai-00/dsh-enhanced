@@ -72,11 +72,16 @@ interface Harness {
   setInbox(value: unknown): void
 }
 
-function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEntry[] = []): Harness {
+function harness(
+  overrides: Partial<ChatRuntime> = {},
+  entries: readonly ChatEntry[] = [],
+  initialModelSelection: unknown = undefined,
+): Harness {
   const snapshot = observable<ChatSessionSnapshot>({ openState: 'open', running: false })
   const events = observable<ChatEventWindow>({ entries, hasMore: false })
   const permission = observable<unknown>({ currentValue: 'workspace-write' })
   const inbox = observable<unknown>({ 'next-turn': [], 'next-step': [] })
+  const modelSelection = observable<unknown>(initialModelSelection)
   const prompt = vi.fn(async () => ({ ok: true as const, value: { accepted: true } }))
   const command = vi.fn(async () => ({ ok: true as const, value: { matched: true } }))
   const cancel = vi.fn(async () => ({ ok: true as const, value: { accepted: true } }))
@@ -98,7 +103,13 @@ function harness(overrides: Partial<ChatRuntime> = {}, entries: readonly ChatEnt
     cancel,
     loadOlder: vi.fn(async () => undefined),
     projections: {
-      faceOf: key => key === 'permissions' ? permission : key === 'inbox' ? inbox : observable(undefined),
+      faceOf: key => key === 'permissions'
+        ? permission
+        : key === 'inbox'
+          ? inbox
+          : key === 'modelSelection'
+            ? modelSelection
+            : observable(undefined),
     },
   }
   const binding: ChatBinding = { sessionId: 's1', session, eventSource: events }
@@ -1074,5 +1085,174 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
     await click(byLabel('发送消息'))
     expect(logEl.scrollTop).toBe(1200)
     expect(byLabel('滚动到底部')).toBeNull()
+  })
+
+  it('shows actionable model-auth recovery with failed provider/model, quick switch to alternatives, and settings shortcut on AUTH 401', async () => {
+    const selectSessionModel = vi.fn(async () => ({ ok: true as const, value: {} }))
+    const onOpenSettings = vi.fn()
+    const h = harness({
+      selectSessionModel,
+      modelCatalog: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          protocol: 'owner-console/model-catalog/v1' as const,
+          fetchedAt: 1_000,
+          defaultSelection: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' },
+          providers: [
+            { id: 'llmgw-general', name: 'LLMBox DeepSeek', kind: 'api' as const, active: true, models: [{ id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash', efforts: [] }] },
+            { id: 'super-relay', name: 'Super Relay', kind: 'api' as const, active: true, models: [{ id: 'auto_model/alwaysday1', name: 'alwaysday1', efforts: [] }] },
+            { id: 'traex-agent', name: 'TraeX ACP', kind: 'acp' as const, active: true, models: [{ id: 'default', name: 'default', efforts: [] }] },
+          ],
+        },
+      })),
+    }, [
+      user(1, '帮我检查本机插件、模型和飞书健康', { id: 'm-auth-1', rpcId: 'req-auth-1' }),
+      { type: 'event', event: { type: 'request/header', seq: 2, data: { header: { config: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' } } } } },
+      { type: 'event', event: { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'error', error: { code: 'AUTH', message: '401: {"message":"authentication failed","type":"authentication_error"}' } } } } },
+    ])
+
+    await act(async () => {
+      root.render(createElement(OwnerConsoleChat, { runtime: h.runtime, onOpenSettings }))
+    })
+    await settle()
+
+    const recovery = container.querySelector('[data-chat-auth-recovery]')
+    expect(recovery).not.toBeNull()
+    expect(recovery!.textContent).toContain('llmgw-general / deepseek-v4.1-flash')
+    expect(container.querySelector('[data-chat-auth-switch="llmgw-general"]')).toBeNull()
+
+    const switchSuperRelay = container.querySelector('button[data-chat-auth-switch="super-relay"]') as HTMLButtonElement | null
+    expect(switchSuperRelay).not.toBeNull()
+    await click(switchSuperRelay!)
+    expect(selectSessionModel).toHaveBeenCalledWith(h.binding.sessionId, 'super-relay', 'auto_model/alwaysday1', '')
+
+    const settingsBtn = container.querySelector('button[data-chat-auth-open-settings]') as HTMLButtonElement | null
+    expect(settingsBtn).not.toBeNull()
+    await click(settingsBtn!)
+    expect(onOpenSettings).toHaveBeenCalledOnce()
+  })
+
+  it('prioritizes Host defaultSelection first, demotes same-family failed siblings, and clears stale switch buttons after switching', async () => {
+    const selectSessionModel = vi.fn(async () => ({ ok: true as const, value: {} }))
+    const h = harness({
+      selectSessionModel,
+      modelCatalog: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          protocol: 'owner-console/model-catalog/v1' as const,
+          fetchedAt: 2_000,
+          defaultSelection: { provider: 'super-relay', model: 'auto_model/alwaysday1' },
+          providers: [
+            { id: 'deepseek', name: 'DeepSeek', kind: 'api' as const, active: true, models: [{ id: 'deepseek-chat', name: 'deepseek-chat', efforts: [] }] },
+            { id: 'deepseek-official', name: 'DeepSeek Account', kind: 'api' as const, active: true, models: [{ id: 'deepseek-v4-flash', name: 'deepseek-v4-flash', efforts: [] }] },
+            { id: 'llmgw', name: 'LLMBox Seed', kind: 'api' as const, active: true, models: [{ id: 'doubao-seed-evolving', name: 'doubao-seed-evolving', efforts: [] }] },
+            { id: 'llmgw-general', name: 'LLMBox DeepSeek / GLM', kind: 'api' as const, active: true, models: [{ id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash', efforts: [] }] },
+            { id: 'super-relay', name: 'Super Relay', kind: 'api' as const, active: true, models: [{ id: 'auto_model/alwaysday1', name: 'alwaysday1', efforts: [] }] },
+            { id: 'custom-relay', name: 'custom-relay', kind: 'api' as const, active: true, models: [{ id: 'relay-auto', name: 'Auto All', efforts: [] }] },
+            { id: 'traex-agent', name: 'TraeX ACP', kind: 'acp' as const, active: true, models: [{ id: 'default', name: 'default', efforts: [] }] },
+          ],
+        },
+      })),
+    }, [
+      user(1, 'hi', { id: 'm-auth-2', rpcId: 'req-auth-2' }),
+      { type: 'event', event: { type: 'request/header', seq: 2, data: { header: { config: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' } } } } },
+      { type: 'event', event: { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'error', error: { code: 'AUTH', message: '401: {"message":"authentication failed","type":"authentication_error"}' } } } } },
+    ], {
+      next: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' },
+    })
+
+    await act(async () => {
+      root.render(createElement(OwnerConsoleChat, { runtime: h.runtime, onOpenSettings: vi.fn() }))
+    })
+    await settle()
+
+    const recovery = container.querySelector('[data-chat-auth-recovery]')!
+    expect(recovery.textContent).toContain('当前系统默认模型已是 super-relay / auto_model/alwaysday1')
+
+    const switchButtons = [...container.querySelectorAll('button[data-chat-auth-switch]')] as HTMLButtonElement[]
+    const order = switchButtons.map(btn => btn.getAttribute('data-chat-auth-switch'))
+    expect(order[0]).toBe('super-relay')
+    expect(switchButtons[0]!.hasAttribute('data-chat-auth-switch-default')).toBe(true)
+    expect(switchButtons[0]!.textContent).toContain('切换至默认模型')
+    expect(order[1]).toBe('traex-agent')
+    expect(order).toContain('custom-relay')
+    expect(order).not.toContain('llmgw')
+    expect(order).not.toContain('llmgw-general')
+
+    await click(switchButtons[0]!)
+    expect(selectSessionModel).toHaveBeenCalledWith(h.binding.sessionId, 'super-relay', 'auto_model/alwaysday1', '')
+    // After switching session away from llmgw-general, stale switch buttons disappear and recovery notes the new active route
+    expect(container.querySelectorAll('button[data-chat-auth-switch]').length).toBe(0)
+    expect(container.querySelector('[data-chat-auth-recovery]')!.textContent).toContain('当前会话已切换至 super-relay / auto_model/alwaysday1')
+    // Since Host default is already super-relay (not llmgw-general), redundant settings button also collapses
+    expect(container.querySelector('button[data-chat-auth-open-settings]')).toBeNull()
+  })
+
+  it('ranks custom relays ahead of deepseek-official, excludes same-family siblings and empty-model API providers, collapses duplicate/resolved errors, and avoids misattributing providerless errors', async () => {
+    // 1) Default itself failed (llmgw-general); only 3 other providers exist including same-family llmgw and an empty-model API provider
+    const selectSessionModel = vi.fn(async () => ({ ok: true as const, value: {} }))
+    const h = harness({
+      selectSessionModel,
+      modelCatalog: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          protocol: 'owner-console/model-catalog/v1' as const,
+          fetchedAt: 3_000,
+          defaultSelection: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' },
+          providers: [
+            { id: 'deepseek', name: 'DeepSeek', kind: 'api' as const, active: true, models: [{ id: 'deepseek-chat', name: 'deepseek-chat', efforts: [] }] },
+            { id: 'deepseek-official', name: 'DeepSeek Account', kind: 'api' as const, active: true, models: [{ id: 'deepseek-v4-flash', name: 'deepseek-v4-flash', efforts: [] }] },
+            { id: 'llmgw', name: 'LLMBox Seed', kind: 'api' as const, active: true, models: [{ id: 'doubao-seed-evolving', name: 'doubao-seed-evolving', efforts: [] }] },
+            { id: 'empty-api', name: 'Empty API', kind: 'api' as const, active: true, models: [] },
+            { id: 'llmgw-general', name: 'LLMBox DeepSeek / GLM', kind: 'api' as const, active: true, models: [{ id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash', efforts: [] }] },
+            { id: 'custom-relay', name: 'custom-relay', kind: 'api' as const, active: true, models: [{ id: 'relay-fast', name: 'Relay Fast', efforts: [] }] },
+          ],
+        },
+      })),
+    }, [
+      user(1, 'first', { id: 'm-1', rpcId: 'r-1' }),
+      { type: 'event', event: { type: 'request/header', seq: 2, data: { header: { config: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' } } } } },
+      { type: 'event', event: { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'error', error: { code: 'AUTH', message: '401 invalid token' } } } } },
+      user(4, 'second', { id: 'm-2', rpcId: 'r-2' }),
+      // Second error has NO request/header (simulating truncated window / pre-header failure)
+      { type: 'event', event: { type: 'turn/end', seq: 5, data: { turn: 2, reason: { kind: 'error', error: { code: 'AUTH', message: '401 invalid token' } } } } },
+    ], {
+      next: { provider: 'llmgw-general', model: 'deepseek-v4.1-flash' },
+    })
+
+    await act(async () => {
+      root.render(createElement(OwnerConsoleChat, { runtime: h.runtime, onOpenSettings: vi.fn() }))
+    })
+    await settle()
+
+    // Only the LATEST auth error displays action buttons (not duplicated on the earlier auth error)
+    const recoveries = [...container.querySelectorAll('[data-chat-auth-recovery]')]
+    expect(recoveries).toHaveLength(2)
+    expect(recoveries[0]!.querySelectorAll('button').length).toBe(0)
+    const latestSwitches = [...recoveries[1]!.querySelectorAll('button[data-chat-auth-switch]')] as HTMLButtonElement[]
+    const order = latestSwitches.map(btn => btn.getAttribute('data-chat-auth-switch'))
+    // Custom relay custom-relay ranks AHEAD of deepseek & deepseek-official; llmgw (same-family) & empty-api are EXCLUDED
+    expect(order[0]).toBe('custom-relay')
+    expect(order).not.toContain('llmgw')
+    expect(order).not.toContain('empty-api')
+
+    // Switching away on a providerless latest error MUST NOT blame custom-relay!
+    await click(latestSwitches[0]!)
+    expect(selectSessionModel).toHaveBeenCalledWith(h.binding.sessionId, 'custom-relay', 'relay-fast', '')
+    expect(recoveries[1]!.textContent).toContain('当前会话已切换至 custom-relay')
+    expect(recoveries[1]!.textContent).not.toContain('模型鉴权失败（custom-relay')
+    expect(recoveries[1]!.querySelectorAll('button[data-chat-auth-switch]').length).toBe(0)
+
+    // 2) Once a later assistant reply arrives, historical auth errors collapse to a quiet note with zero buttons
+    await act(async () => {
+      h.setEntries([
+        ...(h.binding.eventSource.getSnapshot().entries ?? []),
+        assistant(6, '已经恢复正常，有什么可以帮你？', 3, 1),
+      ])
+    })
+    await settle()
+    const postReplyRecoveries = [...container.querySelectorAll('[data-chat-auth-recovery]')]
+    expect(postReplyRecoveries.every(node => node.querySelectorAll('button').length === 0)).toBe(true)
+    expect(postReplyRecoveries[1]!.textContent).toContain('后续对话已恢复正常')
   })
 })

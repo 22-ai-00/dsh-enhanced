@@ -1,9 +1,13 @@
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseDocument } from 'yaml'
+import { validateLearningConfig } from '../../assistant-memory-learning/lib/index.js'
+import { validateMemoryReviewConfig } from '../../assistant-verifier/lib/index.js'
+import { validateMemoryLearningAdoptionGrant } from '../../personal-memory/lib/index.js'
 import { CodingToolProber, discoverCodingToolBinary } from '../src/probes.ts'
 import {
   applyDoctorRepair, applyFeishuVaultConfig, configureFeishuEasy, inspectProfileRestartSupport,
@@ -1442,5 +1446,842 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     })
     expect(rePromoted.applied).toBe(true)
     expect(rePromoted.note).toContain('已同步更新 ownerRoutes')
+  })
+
+  it('never auto-disables core bundles on failure and restores disabled personal-assistant on real dsh.profile.bundles manifest', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    // 1) Failed core bundle (@dsh-enhanced/personal-assistant) must NEVER become auto-fixable stalled-bundle disable
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      private: true,
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.78',
+        '@dsh-enhanced/assistant-policy': '0.1.78',
+        '@dsh-enhanced/assistant-delivery': '0.1.78',
+        '@dsh-enhanced/lark-channel': '0.1.78',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@dsh-enhanced/personal-assistant',
+            '@dsh-enhanced/assistant-delivery',
+            '@dsh-enhanced/lark-channel',
+          ],
+        },
+      },
+    }, null, 2), 'utf8')
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '      budgets: []',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = {
+      get: (name: string) => name === 'profileContext' ? { dir: profileDir, name: 'desktop' } : undefined,
+    }
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const failedPaStatus = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+      ],
+      plugins: [
+        { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'transient reload error' },
+      ],
+    })
+    const failedReport = await inspectSetupDoctor({ host, status: failedPaStatus, descriptors: [], prober, platform: 'darwin', env: {}, now: 1000 })
+    expect(failedReport.issues.some(i => i.id === 'stalled-bundle:@dsh-enhanced/personal-assistant')).toBe(false)
+    const coreIssue = failedReport.issues.find(i => i.id === 'core-bundle-failed:@dsh-enhanced/personal-assistant')
+    expect(coreIssue).toBeDefined()
+    expect(coreIssue!.autoFixable).toBe(false)
+
+    // 2) Disabled personal-assistant (omitted from dsh.profile.bundles AND disabled: true in cordis.patch.yml) is detected & atomically restored
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      private: true,
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.78',
+        '@dsh-enhanced/assistant-policy': '0.1.78',
+        '@dsh-enhanced/assistant-delivery': '0.1.78',
+        '@dsh-enhanced/lark-channel': '0.1.78',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@dsh-enhanced/assistant-delivery',
+            '@dsh-enhanced/lark-channel',
+          ],
+        },
+      },
+    }, null, 2), 'utf8')
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules:',
+      '        - id: keep-existing-rule',
+      '          effect: allow',
+      '          subject: { kind: agent, id: "*", workspace: "*" }',
+      '          actions: ["*"]',
+      '          resource: { kind: "*", id: "*" }',
+      '          context: { initiators: [foreground] }',
+      '      budgets: []',
+      '  disabled: true',
+      '- id: dsh-enhanced-lark-channel',
+      '  name: "@dsh-enhanced/lark-channel"',
+      '  config:',
+      '    enabled: true',
+      '    appId: cli_aabbccddeeff0011',
+      '',
+    ].join('\n'), 'utf8')
+
+    const disabledStatus = baseStatus({
+      dependencies: [
+        { name: 'assistantPolicy', available: false },
+        { name: 'assistantDelivery', available: false },
+        { name: 'assistantSkills', available: true },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-policy', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-policy', moduleName: '@dsh-enhanced/assistant-policy' }] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+      ],
+    })
+    const disabledReport = await inspectSetupDoctor({ host, status: disabledStatus, descriptors: [], prober, platform: 'darwin', env: {}, now: 1001 })
+    const recoveryIssue = disabledReport.issues.find(i => i.id === 'disabled-core-policy-provider')
+    expect(recoveryIssue).toBeDefined()
+    expect(recoveryIssue!.autoFixable).toBe(true)
+    expect(recoveryIssue!.fixLabel).toContain('personal-assistant')
+
+    let patchDisabledWhenManagerCalled: boolean | undefined
+    const manager = {
+      listBundles: async () => [],
+      listPlugins: async () => [],
+      setBundleEnabled: vi.fn(async (_pkg: string, _enabled: boolean) => {
+        const currentRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean }>
+        patchDisabledWhenManagerCalled = currentRows.find(r => r.id === 'dsh-enhanced-personal-assistant')?.disabled
+        return { target: _pkg, changed: true, application: 'restart-required' as const }
+      }),
+      setPluginEnabled: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      installBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      removeBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+    }
+    const repaired = await applyDoctorRepair({
+      host,
+      status: disabledStatus,
+      descriptors: [],
+      settings: undefined,
+      manager,
+      prober,
+      issueIds: ['disabled-core-policy-provider'],
+      platform: 'darwin',
+      env: {},
+      now: 1002,
+    })
+    expect(repaired.applied).toBe(true)
+    expect(repaired.note).toContain('@dsh-enhanced/personal-assistant')
+    expect(manager.setBundleEnabled).toHaveBeenCalledWith('@dsh-enhanced/personal-assistant', true)
+    // Patch file must already have `disabled` cleared BEFORE pluginManager.setBundleEnabled runs!
+    expect(patchDisabledWhenManagerCalled).toBeUndefined()
+
+    const updatedPkg = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
+    expect(updatedPkg.dsh.profile.bundles).toContain('@dsh-enhanced/personal-assistant')
+    const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    const restoredPa = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    expect(restoredPa.disabled).toBeUndefined()
+    expect((restoredPa.config!['assistantPolicy'] as { rules: Array<{ id: string }> }).rules.some(r => r.id === 'keep-existing-rule')).toBe(true)
+
+    // 3) applyFeishuVaultConfig also clears stale disabled: true on personal-assistant & assistant-delivery
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  disabled: true',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  disabled: true',
+      '  config: {}',
+      '',
+    ].join('\n'), 'utf8')
+    const vaultRes = await applyFeishuVaultConfig({
+      host: { get: (n: string) => n === 'profileContext' ? { dir: profileDir, name: 'desktop', home: dshHome } : undefined },
+      descriptors: [],
+      appId: 'cli_0123456789abcdef',
+      appSecret: 'sec_clear_disabled',
+      account: 'primary',
+      tenant: 'personal',
+      platform: 'darwin',
+      env: {},
+      now: 1003,
+      storeSecretFn: async () => {},
+    })
+    expect(vaultRes.applied).toBe(true)
+    const afterVault = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean }>
+    expect(afterVault.find(r => r.id === 'dsh-enhanced-personal-assistant')?.disabled).toBeUndefined()
+    expect(afterVault.find(r => r.id === 'dsh-enhanced-assistant-delivery')?.disabled).toBeUndefined()
+  })
+
+  it('detects and auto-repairs frozen personal-memory learning grant conflict by rotating authority generation', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const memDir = join(dshHome, 'personal-memory')
+    mkdirSync(memDir, { recursive: true })
+    const memoryDbPath = join(memDir, 'memory.sqlite')
+    const memDb = new DatabaseSync(memoryDbPath)
+    try {
+      memDb.exec(`CREATE TABLE memory_learning_adoptions (
+        authority_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        row_kind TEXT NOT NULL,
+        grant_json TEXT NOT NULL,
+        grant_digest TEXT NOT NULL,
+        used_mutations INTEGER NOT NULL DEFAULT 0,
+        used_content_bytes INTEGER NOT NULL DEFAULT 0
+      )`)
+      memDb.prepare(
+        `INSERT INTO memory_learning_adoptions VALUES ('lark-memory-adopt-desktop', '', 'grant', '{}', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 0, 0)`,
+      ).run()
+    } finally {
+      memDb.close()
+    }
+
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.78',
+        '@dsh-enhanced/assistant-verifier': '0.1.78',
+        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@dsh-enhanced/personal-assistant',
+            '@dsh-enhanced/assistant-verifier',
+            '@dsh-enhanced/assistant-memory-learning',
+          ],
+        },
+      },
+    }, null, 2), 'utf8')
+
+    const reviewObj = {
+      authorityId: 'lark-memory-review-desktop',
+      expiresAt: 1_900_000_000_000,
+      maxReviews: 300,
+    }
+    const adoptObj = {
+      authorityId: 'lark-memory-adopt-desktop',
+      reviewAuthorityId: 'lark-memory-review-desktop',
+      reviewAuthorityDigest: '0000000000000000000000000000000000000000000000000000000000000000',
+      expiresAt: 1_900_000_000_000,
+      maxMutations: 300,
+    }
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules:',
+      '        - id: wizard-lark-mem-extract-desktop',
+      '          effect: allow',
+      '          actions: [extract]',
+      '          resource: { kind: memory, id: "learning:lark-memory-extract-desktop" }',
+      '        - id: wizard-lark-mem-review-desktop',
+      '          effect: allow',
+      '          actions: [review]',
+      '          resource: { kind: memory, id: "learning:lark-memory-review-desktop" }',
+      '        - id: wizard-lark-mem-adopt-desktop',
+      '          effect: allow',
+      '          actions: [adopt]',
+      '          resource: { kind: memory, id: "learning:lark-memory-adopt-desktop" }',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '      automaticLearning:',
+      `        authorityId: ${adoptObj.authorityId}`,
+      `        reviewAuthorityId: ${adoptObj.reviewAuthorityId}`,
+      `        reviewAuthorityDigest: ${adoptObj.reviewAuthorityDigest}`,
+      `        expiresAt: ${adoptObj.expiresAt}`,
+      `        maxMutations: ${adoptObj.maxMutations}`,
+      '- id: dsh-enhanced-assistant-verifier',
+      '  name: "@dsh-enhanced/assistant-verifier"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
+      '    memoryReviews:',
+      `      authorityId: ${reviewObj.authorityId}`,
+      `      expiresAt: ${reviewObj.expiresAt}`,
+      `      maxReviews: ${reviewObj.maxReviews}`,
+      '- id: dsh-enhanced-assistant-memory-learning',
+      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '  disabled: false',
+      '  config:',
+      `    databasePath: ${join(dshHome, 'assistant-memory-learning', 'desktop.sqlite')}`,
+      '    authorityId: lark-memory-extract-desktop',
+      '    reviewAuthorityId: lark-memory-review-desktop',
+      '    reviewAuthorityDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    adoptionAuthorityId: lark-memory-adopt-desktop',
+      '    adoptionGrantDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    maxExtractions: 300',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
+        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
+      ],
+      plugins: [
+        { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'failed', diagnostic: 'learning grant authority changed' },
+        { entryId: 'ver', moduleName: '@dsh-enhanced/assistant-verifier', enabled: true, fiberPhase: 'active' },
+        { entryId: 'mem', moduleName: '@dsh-enhanced/assistant-memory-learning', enabled: true, fiberPhase: 'pending' },
+      ],
+    })
+
+    const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 2001 })
+    const conflictIssue = report.issues.find(i => i.id === 'memory-learning-grant-conflict')
+    expect(conflictIssue).toBeDefined()
+    expect(conflictIssue?.autoFixable).toBe(true)
+    expect(report.issues.some(i => i.id === 'core-bundle-failed:@dsh-enhanced/personal-assistant')).toBe(false)
+
+    const repaired = await applyDoctorRepair({
+      host,
+      status,
+      descriptors: [],
+      settings: undefined,
+      manager: undefined,
+      prober,
+      issueIds: ['memory-learning-grant-conflict'],
+      platform: 'darwin',
+      env: {},
+      now: 2002,
+    })
+    expect(repaired.applied).toBe(true)
+    expect(repaired.note).toContain('g2')
+
+    const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
+    const pa = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config!
+    const ver = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
+    const mem = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+    expect(pa['personalMemory']['automaticLearning']['authorityId']).toBe('lark-memory-adopt-desktop-g2')
+    expect(ver['memoryReviews']['authorityId']).toBe('lark-memory-review-desktop-g2')
+    expect(mem['authorityId']).toBe('lark-memory-extract-desktop-g2')
+    expect(mem['adoptionAuthorityId']).toBe('lark-memory-adopt-desktop-g2')
+    expect(mem['reviewAuthorityId']).toBe('lark-memory-review-desktop-g2')
+    const rules = pa['assistantPolicy']['rules'] as Array<{ id: string; resource: { id: string } }>
+    expect(rules.find(r => r.id === 'wizard-lark-mem-adopt-desktop')?.resource.id).toBe('learning:lark-memory-adopt-desktop-g2')
+    expect(rules.find(r => r.id === 'wizard-lark-mem-review-desktop')?.resource.id).toBe('learning:lark-memory-review-desktop-g2')
+    expect(rules.find(r => r.id === 'wizard-lark-mem-extract-desktop')?.resource.id).toBe('learning:lark-memory-extract-desktop-g2')
+
+    // Re-inspect MUST report zero memory-learning-grant-conflict issues!
+    const afterReport = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 2003 })
+    expect(afterReport.issues.some(i => i.id === 'memory-learning-grant-conflict')).toBe(false)
+  })
+
+  it('co-repairs memory-learning-grant-conflict when restoring disabled-core-policy-provider, resolves !!js databasePath, and normalizes workItemExperiences: false', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const canonicalHome = realpathSync(dshHome)
+    const memDir = join(dshHome, 'personal-memory')
+    mkdirSync(memDir, { recursive: true })
+    const memDb = new DatabaseSync(join(memDir, 'memory.sqlite'))
+    try {
+      memDb.exec(`CREATE TABLE memory_learning_adoptions (
+        authority_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        row_kind TEXT NOT NULL,
+        grant_json TEXT NOT NULL,
+        grant_digest TEXT NOT NULL,
+        used_mutations INTEGER NOT NULL DEFAULT 0,
+        used_content_bytes INTEGER NOT NULL DEFAULT 0
+      )`)
+      memDb.prepare(
+        `INSERT INTO memory_learning_adoptions VALUES ('lark-memory-adopt-desktop', '', 'grant', '{}', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 0)`,
+      ).run()
+    } finally {
+      memDb.close()
+    }
+
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      dependencies: {
+        '@dsh-enhanced/personal-assistant': '0.1.78',
+        '@dsh-enhanced/assistant-verifier': '0.1.78',
+        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
+        '@dsh-enhanced/lark-channel': '0.1.78',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@dsh-enhanced/assistant-verifier',
+            '@dsh-enhanced/assistant-memory-learning',
+            '@dsh-enhanced/lark-channel',
+          ],
+        },
+      },
+    }, null, 2), 'utf8')
+
+    const owner = {
+      authorityId: 'owner-lark-primary',
+      authorityHash: '1111111111111111111111111111111111111111111111111111111111111111',
+      principalId: 'lark/primary/personal/ou_owner_test',
+      principalRecordId: 'principal_test_1',
+      principalVersion: 1,
+      workspace: join(canonicalHome, 'assistant-workspace'),
+      agentPreset: 'standard',
+    }
+
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  disabled: true',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules:',
+      '        - id: wizard-lark-mem-adopt-desktop',
+      '          effect: allow',
+      '          actions: [adopt]',
+      '          resource: { kind: memory, id: "learning:lark-memory-adopt-desktop" }',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '      automaticLearning:',
+      '        authorityId: lark-memory-adopt-desktop',
+      `        owner: ${JSON.stringify(owner)}`,
+      '        reviewAuthorityId: lark-memory-review-desktop',
+      '        reviewAuthorityDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '        expiresAt: 1900000000000',
+      '        maxMutations: 300',
+      '        maxTotalContentBytes: 1048576',
+      '        maxRecordTtlMs: 7776000000',
+      '        kinds: [fact, experience]',
+      '        operations: [add, replace, remove]',
+      '        workItemExperiences: false',
+      '- id: dsh-enhanced-assistant-verifier',
+      '  name: "@dsh-enhanced/assistant-verifier"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
+      '    memoryReviews:',
+      '      authorityId: lark-memory-review-desktop',
+      `      owner: ${JSON.stringify(owner)}`,
+      '      expiresAt: 1900000000000',
+      '      maxReviews: 300',
+      '      policy: Independently verify owner statements.',
+      '      maxInputBytes: 65536',
+      '      maxOutputTokens: 2048',
+      '      timeoutMs: 60000',
+      '      workItemExperiences: false',
+      '- id: dsh-enhanced-assistant-memory-learning',
+      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '  disabled: false',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-memory-learning/desktop.sqlite')",
+      '    authorityId: lark-memory-extract-desktop',
+      `    owner: ${JSON.stringify(owner)}`,
+      '    expiresAt: 1900000000000',
+      '    maxExtractions: 300',
+      '    maxPending: 64',
+      '    lookbackMs: 604800000',
+      '    policy: Extract explicit facts only.',
+      '    maxInputBytes: 65536',
+      '    maxOutputTokens: 2048',
+      '    timeoutMs: 60000',
+      '    budgetId: lark-memory-learning-desktop',
+      '    budgetAmount: 1',
+      '    scanBudgetId: lark-memory-scan-desktop',
+      '    scanBudgetAmount: 1',
+      '    reviewAuthorityId: lark-memory-review-desktop',
+      '    reviewAuthorityDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    adoptionAuthorityId: lark-memory-adopt-desktop',
+      '    adoptionGrantDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    workItemExperiences: false',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const status = baseStatus({
+      dependencies: [
+        { name: 'assistantPolicy', available: false },
+        { name: 'assistantDelivery', available: false },
+        { name: 'assistantSkills', available: true },
+      ],
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
+        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+      ],
+      plugins: [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+      ],
+    })
+
+    // Calling repair with ONLY disabled-core-policy-provider must ALSO co-repair memory-learning-grant-conflict!
+    const repaired = await applyDoctorRepair({
+      host,
+      status,
+      descriptors: [],
+      settings: undefined,
+      manager: undefined,
+      prober,
+      issueIds: ['disabled-core-policy-provider'],
+      platform: 'darwin',
+      env: {},
+      now: 2100,
+    })
+    expect(repaired.applied).toBe(true)
+    expect(repaired.note).toContain('personal-assistant')
+    expect(repaired.note).toContain('g2')
+
+    const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; disabled?: boolean; config?: Record<string, any> }>
+    const paRow = updatedRows.find(r => r.id === 'dsh-enhanced-personal-assistant')!
+    expect(paRow.disabled).toBeUndefined()
+    const adoptCfg = paRow.config!['personalMemory']['automaticLearning'] as Record<string, unknown>
+    const reviewCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!['memoryReviews'] as Record<string, unknown>
+    const memCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config! as Record<string, unknown>
+
+    // !!js databasePath MUST be resolved to a valid absolute path (never leaked as raw "dshHomePath(...)" string!)
+    expect(String(memCfg['databasePath'])).not.toContain('dshHomePath(')
+    expect(memCfg['databasePath']).toBe(join(canonicalHome, 'assistant-memory-learning', 'desktop.sqlite'))
+    // workItemExperiences: false stripped consistently before digesting
+    expect(Object.hasOwn(adoptCfg, 'workItemExperiences')).toBe(false)
+    expect(Object.hasOwn(reviewCfg, 'workItemExperiences')).toBe(false)
+    expect(Object.hasOwn(memCfg, 'workItemExperiences')).toBe(false)
+
+    // All three configs pass real plugin schema validators!
+    expect(() => validateMemoryReviewConfig(reviewCfg as never)).not.toThrow()
+    expect(() => validateMemoryLearningAdoptionGrant(adoptCfg as never)).not.toThrow()
+    expect(() => validateLearningConfig(memCfg as never)).not.toThrow()
+
+    const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 2101 })
+    expect(after.issues.some(i => i.id === 'memory-learning-grant-conflict')).toBe(false)
+    expect(after.issues.some(i => i.id === 'disabled-core-policy-provider')).toBe(false)
+  })
+
+  it('detects and repairs assistant-memory-learning config_digest drift and verifier review conflicts in split layout', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const canonicalHome = realpathSync(dshHome)
+    const owner = {
+      authorityId: 'owner-lark-primary',
+      authorityHash: '2222222222222222222222222222222222222222222222222222222222222222',
+      principalId: 'lark/primary/personal/ou_split_owner',
+      principalRecordId: 'principal_split_1',
+      principalVersion: 1,
+      workspace: join(canonicalHome, 'assistant-workspace'),
+      agentPreset: 'standard',
+    }
+    const learningDbPath = join(canonicalHome, 'assistant-memory-learning', 'desktop.sqlite')
+    mkdirSync(join(canonicalHome, 'assistant-memory-learning'), { recursive: true })
+    const learningDb = new DatabaseSync(learningDbPath)
+    try {
+      learningDb.exec(`CREATE TABLE grant_record (authority_id TEXT PRIMARY KEY, config_digest TEXT NOT NULL, max_extractions INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0) STRICT`)
+      // Same authority_id and max_extractions, ONLY config_digest differs (e.g., model or policy edited in patch)
+      learningDb.prepare(`INSERT INTO grant_record VALUES ('lark-memory-extract-desktop', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 300, 1)`).run()
+    } finally {
+      learningDb.close()
+    }
+
+    const verifierDir = join(canonicalHome, 'assistant-verifier')
+    mkdirSync(verifierDir, { recursive: true })
+    const reviewDb = new DatabaseSync(join(verifierDir, 'verification.sqlite.memory-reviews'))
+    try {
+      reviewDb.exec(`CREATE TABLE grants (authority TEXT PRIMARY KEY, digest TEXT NOT NULL, max INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0) STRICT`)
+      reviewDb.prepare(`INSERT INTO grants VALUES ('lark-memory-review-desktop', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 300, 0)`).run()
+    } finally {
+      reviewDb.close()
+    }
+
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop',
+      dependencies: {
+        '@dsh-enhanced/assistant-policy': '0.1.78',
+        '@dsh-enhanced/personal-memory': '0.1.78',
+        '@dsh-enhanced/assistant-verifier': '0.1.78',
+        '@dsh-enhanced/assistant-memory-learning': '0.1.78',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@dsh-enhanced/assistant-policy',
+            '@dsh-enhanced/personal-memory',
+            '@dsh-enhanced/assistant-verifier',
+            '@dsh-enhanced/assistant-memory-learning',
+          ],
+        },
+      },
+    }, null, 2), 'utf8')
+
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-policy',
+      '  name: "@dsh-enhanced/assistant-policy"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '    rules:',
+      '      - &sharedRule',
+      '        id: wizard-lark-mem-extract-desktop',
+      '        effect: allow',
+      '        actions: [extract]',
+      '        resource: { kind: memory, id: "learning:lark-memory-extract-desktop" }',
+      '      - id: wizard-lark-mem-review-desktop',
+      '        effect: allow',
+      '        actions: [review]',
+      '        resource: { kind: memory, id: "learning:lark-memory-review-desktop" }',
+      '      - id: wizard-lark-mem-adopt-desktop',
+      '        effect: allow',
+      '        actions: [adopt]',
+      '        resource: { kind: memory, id: "learning:lark-memory-adopt-desktop" }',
+      '    budgets: []',
+      '- id: dsh-enhanced-personal-memory',
+      '  name: "@dsh-enhanced/personal-memory"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '    automaticLearning:',
+      '      authorityId: lark-memory-adopt-desktop',
+      `      owner: ${JSON.stringify(owner)}`,
+      '      reviewAuthorityId: lark-memory-review-desktop',
+      '      reviewAuthorityDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '      expiresAt: 1900000000000',
+      '      maxMutations: 300',
+      '      maxTotalContentBytes: 1048576',
+      '      maxRecordTtlMs: 7776000000',
+      '      kinds: [fact, experience]',
+      '      operations: [add, replace, remove]',
+      '- id: dsh-enhanced-assistant-verifier',
+      '  name: "@dsh-enhanced/assistant-verifier"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-verifier/verification.sqlite')",
+      '    memoryReviews:',
+      '      authorityId: lark-memory-review-desktop',
+      `      owner: ${JSON.stringify(owner)}`,
+      '      expiresAt: 1900000000000',
+      '      maxReviews: 300',
+      '      policy: Independently verify owner statements.',
+      '      maxInputBytes: 65536',
+      '      maxOutputTokens: 2048',
+      '      timeoutMs: 60000',
+      '      model: { provider: super-relay, model: auto_model/alwaysday1 }',
+      '- id: dsh-enhanced-assistant-memory-learning',
+      '  name: "@dsh-enhanced/assistant-memory-learning"',
+      '  disabled: false',
+      '  config:',
+      `    databasePath: ${learningDbPath}`,
+      '    authorityId: lark-memory-extract-desktop',
+      `    owner: ${JSON.stringify(owner)}`,
+      '    expiresAt: 1900000000000',
+      '    maxExtractions: 300',
+      '    maxPending: 64',
+      '    lookbackMs: 604800000',
+      '    policy: Extract explicit facts only.',
+      '    maxInputBytes: 65536',
+      '    maxOutputTokens: 2048',
+      '    timeoutMs: 60000',
+      '    budgetId: lark-memory-learning-desktop',
+      '    budgetAmount: 1',
+      '    scanBudgetId: lark-memory-scan-desktop',
+      '    scanBudgetAmount: 1',
+      '    reviewAuthorityId: lark-memory-review-desktop',
+      '    reviewAuthorityDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    adoptionAuthorityId: lark-memory-adopt-desktop',
+      '    adoptionGrantDigest: 0000000000000000000000000000000000000000000000000000000000000000',
+      '    model: { provider: super-relay, model: auto_model/alwaysday1 }',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/assistant-policy', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-policy', moduleName: '@dsh-enhanced/assistant-policy' }] },
+        { name: '@dsh-enhanced/personal-memory', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-memory', moduleName: '@dsh-enhanced/personal-memory' }] },
+        { name: '@dsh-enhanced/assistant-verifier', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-verifier', moduleName: '@dsh-enhanced/assistant-verifier' }] },
+        { name: '@dsh-enhanced/assistant-memory-learning', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-memory-learning', moduleName: '@dsh-enhanced/assistant-memory-learning' }] },
+      ],
+    })
+
+    const before = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 2200 })
+    const issue = before.issues.find(i => i.id === 'memory-learning-grant-conflict')
+    expect(issue).toBeDefined()
+    expect(issue!.detail).toContain('assistant-memory-learning')
+    expect(issue!.detail).toContain('assistant-verifier')
+
+    const repaired = await applyDoctorRepair({
+      host,
+      status,
+      descriptors: [],
+      settings: undefined,
+      manager: undefined,
+      prober,
+      issueIds: ['memory-learning-grant-conflict'],
+      platform: 'darwin',
+      env: {},
+      now: 2201,
+    })
+    expect(repaired.applied).toBe(true)
+
+    const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
+    const splitMem = updatedRows.find(r => r.id === 'dsh-enhanced-personal-memory')!.config!
+    const splitPol = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-policy')!.config!
+    const splitVer = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config!
+    const splitLearner = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!
+
+    expect(splitMem['automaticLearning']['authorityId']).toBe('lark-memory-adopt-desktop-g2')
+    expect(splitVer['memoryReviews']['authorityId']).toBe('lark-memory-review-desktop-g2')
+    expect(splitLearner['authorityId']).toBe('lark-memory-extract-desktop-g2')
+    expect(splitLearner['databasePath']).toBe(join(canonicalHome, 'assistant-memory-learning', 'desktop-g2.sqlite'))
+    expect((splitPol['rules'] as Array<{ id: string; resource: { id: string } }>).find(r => r.id === 'wizard-lark-mem-extract-desktop')?.resource.id).toBe('learning:lark-memory-extract-desktop-g2')
+    expect(() => validateMemoryReviewConfig(splitVer['memoryReviews'])).not.toThrow()
+    expect(() => validateMemoryLearningAdoptionGrant(splitMem['automaticLearning'])).not.toThrow()
+    expect(() => validateLearningConfig(splitLearner)).not.toThrow()
+
+    const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 2202 })
+    expect(after.issues.some(i => i.id === 'memory-learning-grant-conflict')).toBe(false)
+  })
+
+  it('detects active linked Lark ingress account blocking long-term memory, keeps bulk auto-repair hands-off, and promotes on explicit confirmation', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const canonicalHome = realpathSync(dshHome)
+    const dbPath = join(canonicalHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(dbPath, false)
+
+    const oldPrincipal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_old_owner_1' }
+    const oldJson = JSON.stringify(oldPrincipal)
+    const oldHash = createHash('sha256').update(oldJson, 'utf8').digest('hex')
+    const newPrincipal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new_linked_2' }
+    const newJson = JSON.stringify(newPrincipal)
+    const newHash = createHash('sha256').update(newJson, 'utf8').digest('hex')
+    const newConv = { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'oc_new_dm_2' }
+
+    const rwDb = new DatabaseSync(dbPath)
+    try {
+      rwDb.prepare(
+        `INSERT INTO delivery_principals VALUES (?, ?, ?, 'owner', 'active', NULL, 100, 100, 1)`,
+      ).run('principal_old_1', oldHash, oldJson)
+      rwDb.prepare(
+        `INSERT INTO delivery_principals VALUES (?, ?, ?, 'linked', 'active', 'principal_old_1', 200, 200, 1)`,
+      ).run('principal_linked_2', newHash, newJson)
+      rwDb.prepare(
+        `INSERT INTO conversation_bindings VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'owner-dm', 'active', 200, 200, 1)`,
+      ).run(
+        'binding_linked_2',
+        createHash('sha256').update(JSON.stringify(newConv), 'utf8').digest('hex'),
+        JSON.stringify(newConv),
+        'principal_linked_2',
+        newJson,
+        join(canonicalHome, 'assistant-workspace'),
+        'standard',
+        'delivery-new-dm-session-2',
+      )
+    } finally {
+      rwDb.close()
+    }
+
+    const oldKey = 'lark/primary/personal/ou_old_owner_1'
+    const newKey = 'lark/primary/personal/ou_new_linked_2'
+    const syntheticAppId = ['cli', 'aabbccddeeff0011'].join('_')
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      `      databasePath: ${join(canonicalHome, 'assistant-policy', 'policy.sqlite')}`,
+      '      rules:',
+      '        - id: lark-owner-ingress-primary',
+      '          effect: allow',
+      '          subject:',
+      '            kind: external',
+      `            id: ${newKey}`,
+      '          actions: [approval.decide, ingest]',
+      '          resource: { kind: message, id: "*" }',
+      '          context: { initiators: [external] }',
+      '      budgets: []',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      `    databasePath: ${dbPath}`,
+      `    spoolPath: ${join(canonicalHome, 'assistant-delivery', 'spool')}`,
+      `    defaultWorkspace: ${join(canonicalHome, 'assistant-workspace')}`,
+      '    defaultAgentPreset: standard',
+      '    ownerRoutes:',
+      '      - id: owner-lark-primary',
+      '        conversation: { channel: lark, account: primary, tenant: personal, kind: dm, chat: oc_old_dm_1 }',
+      `        principal: ${JSON.stringify(oldPrincipal)}`,
+      `        workspace: ${join(canonicalHome, 'assistant-workspace')}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 3',
+      '- id: dsh-enhanced-lark-channel',
+      '  name: "@dsh-enhanced/lark-channel"',
+      '  config:',
+      '    enabled: true',
+      `    appId: ${syntheticAppId}`,
+      '    account: primary',
+      '    tenant: personal',
+      '',
+    ].join('\n'), 'utf8')
+
+    const host = makeHost(canonicalHome, profileDir, 'desktop')
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+    const status = baseStatus({
+      bundles: [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] },
+        { name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-lark-channel', moduleName: '@dsh-enhanced/lark-channel' }] },
+      ],
+    })
+
+    const before = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 3000 })
+    const linkedIssue = before.issues.find(i => i.id === 'lark-linked-not-primary-owner')
+    expect(linkedIssue).toBeDefined()
+    expect(linkedIssue!.autoFixable).toBe(false)
+    expect(linkedIssue!.detail).toContain(oldKey)
+    expect(linkedIssue!.detail).toContain('无已认证的 owner 命名空间')
+
+    // Bulk applyDoctorRepair([]) MUST NOT silently replace primary owner!
+    await applyDoctorRepair({
+      host, status, descriptors: [], settings: undefined, manager: undefined, prober,
+      issueIds: [], platform: 'darwin', env: {}, now: 3001,
+    })
+    const stillLinked = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 3002 })
+    expect(stillLinked.issues.some(i => i.id === 'lark-linked-not-primary-owner')).toBe(true)
+
+    // Explicit targeted applyDoctorRepair(['lark-linked-not-primary-owner']) promotes linked user to owner and syncs ownerRoutes
+    const promoted = await applyDoctorRepair({
+      host, status, descriptors: [], settings: undefined, manager: undefined, prober,
+      issueIds: ['lark-linked-not-primary-owner'], platform: 'darwin', env: {}, now: 3003,
+    })
+    expect(promoted.applied).toBe(true)
+    expect(promoted.note).toContain('ou_new_linked_2')
+
+    const roDb = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      const newRow = roDb.prepare(`SELECT role, status, linked_to_id FROM delivery_principals WHERE id = 'principal_linked_2'`).get() as { role: string; status: string; linked_to_id: string | null }
+      const oldRow = roDb.prepare(`SELECT status FROM delivery_principals WHERE id = 'principal_old_1'`).get() as { status: string }
+      expect(newRow).toEqual({ role: 'owner', status: 'active', linked_to_id: null })
+      expect(oldRow).toEqual({ status: 'revoked' })
+    } finally {
+      roDb.close()
+    }
+
+    const updatedRows = parseDocument(readFileSync(patchPath, 'utf8'), JS_PARSE_TAG).toJS() as Array<{ id: string; config?: Record<string, any> }>
+    const deliveryCfg = updatedRows.find(r => r.id === 'dsh-enhanced-assistant-delivery')!.config!
+    expect(deliveryCfg['ownerRoutes'][0]['principal']['user']).toBe('ou_new_linked_2')
+
+    const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 3004 })
+    expect(after.issues.some(i => i.id === 'lark-linked-not-primary-owner')).toBe(false)
   })
 })

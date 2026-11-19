@@ -91,4 +91,33 @@ describe('panel component state', () => {
     const guessed = repairPatch(componentState(status({ bundles: [bundle({ rows: [] })] }), LARK), LARK)
     expect(guessed).toContain('- id: dsh-enhanced-lark-channel')
   })
+
+  it('distinguishes installed-disabled personal-assistant and enabled-stalled assistant-delivery instead of suggesting reinstall', () => {
+    const state = componentState(status({
+      dependencies: [
+        { name: 'assistantPolicy', available: false },
+        { name: 'assistantDelivery', available: false },
+        { name: 'assistantSkills', available: false },
+      ],
+      bundles: [
+        bundle({ name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, rows: [{ rowId: 'dsh-enhanced-personal-assistant', moduleName: '@dsh-enhanced/personal-assistant' }] }),
+        bundle({ name: '@dsh-enhanced/assistant-delivery', installed: true, enabled: true, rows: [{ rowId: 'dsh-enhanced-assistant-delivery', moduleName: '@dsh-enhanced/assistant-delivery' }] }),
+        bundle({ name: LARK, installed: true, enabled: true }),
+      ],
+      plugins: [plugin({ fiberPhase: 'pending' })],
+    }), LARK)
+    // lark-channel ignores unrelated assistantSkills unavailability
+    expect(state.missing).toEqual([
+      { service: 'assistantPolicy', bundle: '@dsh-enhanced/personal-assistant', state: 'disabled' },
+      { service: 'assistantDelivery', bundle: '@dsh-enhanced/assistant-delivery', state: 'stalled' },
+    ])
+    const remedy = missingRemedy(state)
+    expect(remedy).toContain('@dsh-enhanced/personal-assistant 已安装但未启用')
+    expect(remedy).toContain('@dsh-enhanced/assistant-delivery 已启用，等待前置服务')
+    expect(remedy).not.toContain('安装 @dsh-enhanced/assistant-policy')
+    expect(remedy).not.toContain('安装 @dsh-enhanced/assistant-delivery')
+    const patch = repairPatch(state, LARK)
+    expect(patch).toContain('@dsh-enhanced/personal-assistant 已安装但未启用')
+    expect(patch).toContain('@dsh-enhanced/assistant-delivery 已启用但尚未就绪')
+  })
 })

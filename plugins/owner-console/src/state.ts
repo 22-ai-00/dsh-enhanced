@@ -7,6 +7,11 @@ export const DEPENDENCY_BUNDLES: Readonly<Record<string, string>> = Object.freez
   assistantSkills: '@dsh-enhanced/assistant-skills',
 })
 
+const POLICY_PROVIDER_BUNDLES = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy'] as const
+const COMPONENT_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  '@dsh-enhanced/lark-channel': ['assistantPolicy', 'assistantDelivery'],
+})
+
 export type StatusTone = 'ok' | 'warn' | 'error' | 'neutral'
 
 /** What the panel can honestly say about one bundle: config alone cannot distinguish a disabled
@@ -17,6 +22,8 @@ export type ComponentKind = 'loading' | 'unavailable' | 'unreadable' | 'absent' 
 export interface MissingDependency {
   readonly service: string
   readonly bundle: string
+  /** Present only when the providing bundle is already installed (`disabled`: needs enable; `stalled`: already enabled, waiting/failed). */
+  readonly state?: 'disabled' | 'stalled'
 }
 
 export interface ComponentState {
@@ -47,14 +54,43 @@ const LABELS: Readonly<Record<ComponentKind, readonly [string, StatusTone]>> = {
   unloaded: ['已启用，但 Loader 没有条目', 'error'],
 }
 
+function resolveMissingDependency(
+  service: string,
+  bundles: OwnerConsoleStatus['bundles'] | undefined,
+): MissingDependency {
+  const list = bundles ?? []
+  if (service === 'assistantPolicy') {
+    const installedProviders = POLICY_PROVIDER_BUNDLES
+      .map(pkg => list.find(candidate => candidate.name === pkg && candidate.installed))
+      .filter((entry): entry is OwnerConsoleStatus['bundles'][number] => entry !== undefined)
+    const enabledProvider = installedProviders.find(entry => entry.enabled)
+    if (enabledProvider !== undefined) {
+      return { service, bundle: enabledProvider.name, state: 'stalled' }
+    }
+    const disabledProvider = installedProviders[0]
+    if (disabledProvider !== undefined) {
+      return { service, bundle: disabledProvider.name, state: 'disabled' }
+    }
+    return { service, bundle: DEPENDENCY_BUNDLES[service]! }
+  }
+  const bundleName = DEPENDENCY_BUNDLES[service] ?? `@dsh-enhanced/${kebab(service)}`
+  const existing = list.find(candidate => candidate.name === bundleName && candidate.installed)
+  if (existing !== undefined) {
+    return { service, bundle: bundleName, state: existing.enabled ? 'stalled' : 'disabled' }
+  }
+  return { service, bundle: bundleName }
+}
+
 /** Derive the display state from the inventory already returned by `status()`. */
 export function componentState(status: OwnerConsoleStatus | undefined, name: string): ComponentState {
+  const scopedDeps = COMPONENT_DEPENDENCIES[name]
   const base = (kind: ComponentKind, bundle?: ComponentState['bundle'], entry?: ComponentState['entry']): ComponentState => {
     const [label, tone] = LABELS[kind]
     const missing = kind === 'loading' || kind === 'unavailable' || kind === 'unreadable'
       ? []
-      : (status?.dependencies ?? []).filter(dependency => !dependency.available)
-        .map(dependency => ({ service: dependency.name, bundle: DEPENDENCY_BUNDLES[dependency.name] ?? `@dsh-enhanced/${kebab(dependency.name)}` })) ?? []
+      : (status?.dependencies ?? [])
+        .filter(dependency => !dependency.available && (scopedDeps === undefined || scopedDeps.includes(dependency.name)))
+        .map(dependency => resolveMissingDependency(dependency.name, status?.bundles))
     return Object.freeze({
       kind, label, tone, missing,
       ...(bundle === undefined ? {} : { bundle }),
@@ -87,7 +123,13 @@ export function componentState(status: OwnerConsoleStatus | undefined, name: str
  * It is the only write the panel can suggest without knowing the bundle's required config. */
 export function repairPatch(state: ComponentState, name: string): string {
   const rowId = state.bundle?.rows?.[0]?.rowId ?? `dsh-enhanced-${name.split('/').at(-1) ?? name}`
-  const missing = state.missing.map(item => `# 缺少服务 ${item.service}：安装 ${item.bundle} 后重启 profile。`)
+  const missing = state.missing.map(item =>
+    item.state === 'disabled'
+      ? `# 缺少服务 ${item.service}：${item.bundle} 已安装但未启用，请先启用后重启 profile。`
+      : item.state === 'stalled'
+        ? `# 缺少服务 ${item.service}：${item.bundle} 已启用但尚未就绪，请先修复前置依赖后重启 profile。`
+        : `# 缺少服务 ${item.service}：安装 ${item.bundle} 后重启 profile。`,
+  )
   return [
     '# 写入 profile 的 cordis.patch.yml，然后重启 profile：',
     ...missing,
@@ -96,10 +138,16 @@ export function repairPatch(state: ComponentState, name: string): string {
   ].join('\n')
 }
 
-/** One-line remedy including the exact bundle names to install. */
+/** One-line remedy including the exact bundle names to install or enable. */
 export function missingRemedy(state: ComponentState): string {
   return state.missing.length === 0 ? ''
-    : `缺少服务：${state.missing.map(item => `${item.service}（安装 ${item.bundle}）`).join('、')}`
+    : `缺少服务：${state.missing.map(item =>
+      item.state === 'disabled'
+        ? `${item.service}（${item.bundle} 已安装但未启用，请先启用）`
+        : item.state === 'stalled'
+          ? `${item.service}（${item.bundle} 已启用，等待前置服务或重启生效）`
+          : `${item.service}（安装 ${item.bundle}）`,
+    ).join('、')}`
 }
 
 /** `assistantDelivery` -> `assistant-delivery`; used only for the three known companion services. */

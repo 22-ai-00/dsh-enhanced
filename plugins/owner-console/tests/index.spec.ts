@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -957,6 +957,134 @@ describe('owner console intake agreement availability (scope-free)', () => {
       expect(JSON.stringify(status)).not.toContain('/secret')
     } finally {
       await ctx.fiber.dispose()
+    }
+  })
+
+  it('reads persisted cordis.patch.yml Feishu config when lark-channel is pending and clears disabled override on setBundleEnabled(true)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'owner-console-lark-fallback-'))
+    const profileDir = join(root, 'profiles', 'desktop')
+    await mkdir(profileDir, { recursive: true })
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    await writeFile(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  disabled: true',
+      '  config: {}',
+      '- id: dsh-enhanced-lark-channel',
+      '  name: "@dsh-enhanced/lark-channel"',
+      '  config:',
+      '    enabled: true',
+      '    appId: cli_aabbccddeeff0011',
+      '    secretSource: handle',
+      '    credentialHandle: lark-app-secret-primary',
+      '',
+    ].join('\n'), 'utf8')
+
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    const setBundleEnabled = vi.fn(async (pkg: string) => ({
+      target: pkg, changed: true, application: 'restart-required' as const,
+    }))
+    ctx.provide('profileContext' as never, { dir: profileDir, name: 'desktop', home: root } as never)
+    ctx.provide('settings' as never, fakeSettings([]).service as never)
+    ctx.provide('pluginManager' as never, {
+      listBundles: async () => [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      listPlugins: async () => [
+        { entryId: 'lark', moduleName: '@dsh-enhanced/lark-channel', enabled: true, fiberPhase: 'pending' },
+      ],
+      setBundleEnabled,
+      setPluginEnabled: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      installBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      removeBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+    } as never)
+    apply(ctx, Config(defaults))
+    try {
+      const svc = ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService
+      const status = await svc.status()
+      expect(status.feishu.entry).toBeUndefined()
+      expect(status.feishu.mode).toBe('handle')
+      expect(status.feishu.enabled).toBe(true)
+      expect(status.feishu.appIdConfigured).toBe(true)
+      expect(status.feishu.appId).toBe('cli_aabbccddeeff0011')
+
+      const enableRes = await svc.setBundleEnabled('@dsh-enhanced/personal-assistant', true)
+      expect(enableRes.applied).toBe(true)
+      expect(enableRes.note).toContain('disabled')
+      const updatedPatch = await readFile(patchPath, 'utf8')
+      expect(updatedPatch).not.toContain('disabled: true')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('merges loader entry beneath partial cordis.patch.yml for persisted Feishu config and clears disabled on rows matched by package name', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'owner-console-lark-merge-'))
+    const profileDir = join(root, 'profiles', 'desktop')
+    await mkdir(profileDir, { recursive: true })
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    await writeFile(patchPath, [
+      '- id: custom-pa-row-id',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  disabled: true',
+      '  config: {}',
+      '- id: dsh-enhanced-lark-channel',
+      '  name: "@dsh-enhanced/lark-channel"',
+      '  config:',
+      '    enabled: true',
+      '',
+    ].join('\n'), 'utf8')
+
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    ctx.provide('profileContext' as never, { dir: profileDir, name: 'desktop', home: root } as never)
+    ctx.provide('settings' as never, fakeSettings([]).service as never)
+    ctx.provide('loader' as never, {
+      entries: () => [
+        {
+          options: {
+            id: 'dsh-enhanced-lark-channel',
+            name: '@dsh-enhanced/lark-channel',
+            config: {
+              appId: 'cli_1122334455667788',
+              secretSource: 'handle',
+              credentialHandle: 'lark-app-secret-primary',
+            },
+          },
+        },
+      ],
+    } as never)
+    ctx.provide('pluginManager' as never, {
+      listBundles: async () => [
+        { name: '@dsh-enhanced/personal-assistant', installed: true, enabled: false, removable: true, rows: [] },
+        { name: '@dsh-enhanced/lark-channel', installed: true, enabled: true, removable: true, rows: [] },
+      ],
+      listPlugins: async () => [],
+      setBundleEnabled: async (pkg: string) => ({ target: pkg, changed: true, application: 'restart-required' as const }),
+      setPluginEnabled: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      installBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+      removeBundle: async () => ({ target: '', changed: false, application: 'applied' as const }),
+    } as never)
+    apply(ctx, Config(defaults))
+    try {
+      const svc = ctx.get('ownerConsole' as never) as unknown as OwnerConsoleService
+      const status = await svc.status()
+      // Partial patch (`enabled: true`) merges over loader entry (`appId`, `secretSource: handle`)
+      expect(status.feishu.enabled).toBe(true)
+      expect(status.feishu.mode).toBe('handle')
+      expect(status.feishu.appIdConfigured).toBe(true)
+      expect(status.feishu.appId).toBe('cli_1122334455667788')
+
+      // Clears `disabled: true` even when patch row id is custom and matched by package name
+      const enableRes = await svc.setBundleEnabled('@dsh-enhanced/personal-assistant', true)
+      expect(enableRes.applied).toBe(true)
+      expect(await readFile(patchPath, 'utf8')).not.toContain('disabled: true')
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
     }
   })
 })
