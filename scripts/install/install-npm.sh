@@ -5,7 +5,7 @@ set -euo pipefail
 # `release:prepare`.
 # A remote `curl | bash` invocation therefore fetches every executable helper
 # from one tagged release and refuses changed payloads before it executes any.
-DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.78'
+DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.79'
 DSH_ENHANCED_PINNED_COMMON_SHA256='9120c89a2c3ca19c81bf22a2e88941a7a1b8edf8c6d101d20ffe2e8089aaf0fc'
 DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='9c5e9817b09607a96fa02fed7ffe9d6d9f2c221407be9843ba15a9c757b4d7a5'
 DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='474cee27f684af95c145138d05bcd836210530e0a53b7eb7c082f8a26471943c'
