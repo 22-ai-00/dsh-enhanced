@@ -1448,6 +1448,90 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     expect(rePromoted.note).toContain('已同步更新 ownerRoutes')
   })
 
+  it('pauses active stale-owner system automations and suppresses their pending incidents on promoteLarkOwnerInProfile', async () => {
+    const { dshHome, profileDir, patchPath } = makeTempHome()
+    const deliveryDbPath = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    makeDeliveryDb(deliveryDbPath, false)
+    const automationsDir = join(dshHome, 'assistant-automations')
+    mkdirSync(automationsDir, { recursive: true })
+    const automationsDbPath = join(automationsDir, 'state.sqlite')
+    const hash = 'a'.repeat(64)
+    const autoDb = new DatabaseSync(automationsDbPath)
+    autoDb.exec(`
+      CREATE TABLE automation_definitions (
+        id TEXT PRIMARY KEY,
+        create_idempotency_key TEXT NOT NULL UNIQUE,
+        system_owner TEXT,
+        definition_hash TEXT NOT NULL,
+        definition_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'deleted')),
+        next_run_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        version INTEGER NOT NULL CHECK (version >= 1)
+      ) STRICT;
+      CREATE TABLE automation_incidents (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        definition_hash TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        state TEXT NOT NULL,
+        failure_class TEXT NOT NULL,
+        failure_phase TEXT NOT NULL,
+        failure_code TEXT NOT NULL,
+        side_effect_state TEXT NOT NULL,
+        retryability TEXT NOT NULL,
+        notification_route_id TEXT NOT NULL,
+        lifecycle_generation INTEGER NOT NULL,
+        presentation_revision INTEGER NOT NULL,
+        alert_status TEXT NOT NULL,
+        alert_ref TEXT,
+        run_id TEXT,
+        opened_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        version INTEGER NOT NULL
+      ) STRICT;
+    `)
+    const ins = autoDb.prepare(`
+      INSERT INTO automation_definitions (id, create_idempotency_key, system_owner, definition_hash, definition_json, status, next_run_at, created_at, updated_at, version)
+      VALUES (?, ?, ?, ?, ?, 'active', 1000, 100, 100, 1)
+    `)
+    ins.run('old-sys', 'k1', 'assistant-memory-learning', hash, JSON.stringify({ principal: 'lark/primary/personal/ou_owner123' }))
+    ins.run('new-sys', 'k2', 'assistant-memory-learning', hash, JSON.stringify({ principal: 'lark/primary/personal/ou_new_owner' }))
+    ins.run('old-user', 'k3', null, hash, JSON.stringify({ principal: 'lark/primary/personal/ou_owner123' }))
+    autoDb.prepare(`
+      INSERT INTO automation_incidents (
+        id, automation_id, definition_hash, stage, state, failure_class, failure_phase, failure_code,
+        side_effect_state, retryability, notification_route_id, lifecycle_generation, presentation_revision,
+        alert_status, alert_ref, run_id, opened_at, updated_at, resolved_at, version
+      ) VALUES ('inc-old', 'old-sys', ?, 'materialize', 'open', 'policy', 'route', 'denied', 'none', 'after-intervention', 'r', 1, 1, 'pending', NULL, NULL, 100, 100, NULL, 1)
+    `).run(hash)
+    autoDb.close()
+
+    writeFileSync(patchPath, '', 'utf8')
+    const host = makeHost(dshHome, profileDir, 'desktop')
+    const res = await promoteLarkOwnerInProfile({
+      host, descriptors: [], openId: 'ou_new_owner', account: 'primary', tenant: 'personal', confirmed: true, platform: 'darwin', env: {}, now: 950,
+    })
+    expect(res.applied).toBe(true)
+    expect(res.note).toContain('已自动暂停 1 条旧主人遗留系统自动化')
+
+    const verifyDb = new DatabaseSync(automationsDbPath, { readOnly: true })
+    const statuses = Object.fromEntries(
+      (verifyDb.prepare('SELECT id, status FROM automation_definitions').all() as Array<{ id: string; status: string }>)
+        .map(row => [row.id, row.status]),
+    )
+    expect(statuses).toEqual({
+      'old-sys': 'paused',
+      'new-sys': 'active',
+      'old-user': 'active',
+    })
+    const inc = verifyDb.prepare('SELECT alert_status FROM automation_incidents WHERE id = ?').get('inc-old') as { alert_status: string }
+    expect(inc.alert_status).toBe('suppressed')
+    verifyDb.close()
+  })
+
   it('never auto-disables core bundles on failure and restores disabled personal-assistant on real dsh.profile.bundles manifest', async () => {
     const { dshHome, profileDir, patchPath } = makeTempHome()
     // 1) Failed core bundle (@dsh-enhanced/personal-assistant) must NEVER become auto-fixable stalled-bundle disable

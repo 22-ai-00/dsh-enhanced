@@ -7,7 +7,14 @@ export const DEPENDENCY_BUNDLES: Readonly<Record<string, string>> = Object.freez
   assistantSkills: '@dsh-enhanced/assistant-skills',
 })
 
-const POLICY_PROVIDER_BUNDLES = ['@dsh-enhanced/personal-assistant', '@dsh-enhanced/assistant-policy'] as const
+const PERSONAL_ASSISTANT_PACKAGE = '@dsh-enhanced/personal-assistant'
+const PERSONAL_ASSISTANT_SUB_BUNDLES = new Set([
+  '@dsh-enhanced/assistant-policy',
+  '@dsh-enhanced/personal-memory',
+  '@dsh-enhanced/personal-wiki',
+  '@dsh-enhanced/assistant-automations',
+])
+const POLICY_PROVIDER_BUNDLES = [PERSONAL_ASSISTANT_PACKAGE, '@dsh-enhanced/assistant-policy'] as const
 const COMPONENT_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   '@dsh-enhanced/lark-channel': ['assistantPolicy', 'assistantDelivery'],
 })
@@ -17,7 +24,7 @@ export type StatusTone = 'ok' | 'warn' | 'error' | 'neutral'
 /** What the panel can honestly say about one bundle: config alone cannot distinguish a disabled
  * bundle from one that is enabled but waiting, failed or missing a loader row. */
 export type ComponentKind = 'loading' | 'unavailable' | 'unreadable' | 'absent' | 'errored'
-  | 'disabled' | 'active' | 'pending' | 'failed' | 'busy' | 'unloaded'
+  | 'disabled' | 'bundled' | 'active' | 'pending' | 'failed' | 'busy' | 'unloaded'
 
 export interface MissingDependency {
   readonly service: string
@@ -47,6 +54,7 @@ const LABELS: Readonly<Record<ComponentKind, readonly [string, StatusTone]>> = {
   absent: ['未安装', 'neutral'],
   errored: ['Host 报告错误', 'error'],
   disabled: ['已安装但未启用', 'neutral'],
+  bundled: ['由 personal-assistant 托管', 'ok'],
   active: ['已启用并加载', 'ok'],
   pending: ['已启用，等待依赖服务', 'warn'],
   failed: ['已启用但加载失败', 'error'],
@@ -110,7 +118,17 @@ export function componentState(status: OwnerConsoleStatus | undefined, name: str
   const entry = entries[0]
   if (bundle.error !== undefined) return base('errored', bundle, entry)
   if (!bundle.installed) return base('absent', bundle, entry)
-  if (!bundle.enabled) return base('disabled', bundle, entry)
+  if (!bundle.enabled) {
+    if (PERSONAL_ASSISTANT_SUB_BUNDLES.has(name)) {
+      const paBundle = (status.bundles ?? []).find(candidate => candidate.name === PERSONAL_ASSISTANT_PACKAGE)
+      const paActive = Boolean(
+        paBundle?.installed && paBundle.enabled
+        && (status.plugins ?? []).some(plugin => plugin.moduleName === PERSONAL_ASSISTANT_PACKAGE && plugin.fiberPhase === 'active'),
+      )
+      if (paActive) return base('bundled', bundle, entry)
+    }
+    return base('disabled', bundle, entry)
+  }
   if (entry === undefined) return base('unloaded', bundle)
   const kind: ComponentKind = entry.fiberPhase === 'active' ? 'active'
     : entry.fiberPhase === 'pending' ? 'pending'

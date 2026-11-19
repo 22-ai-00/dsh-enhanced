@@ -4,6 +4,7 @@ import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-automations'
 export { AssistantAutomationsService, Config, version }
+export type { AutomationIncidentAlertMode } from './coordinator.js'
 export type { PendingAutomationProposal, SystemAutomationReconcileInput } from './service.js'
 export type { PreparationInput, PreparationResult } from './preparation.js'
 export * from './types.js'

@@ -2248,6 +2248,44 @@ export class AutomationStore {
     return output
   }
 
+  private updateIncidentAlertStatus(input: {
+    incidentId: string
+    expectedStatus: 'pending'
+    expectedLifecycleGeneration: number
+    expectedPresentationRevision: number
+    expectedVersion: number
+    nextStatus: 'enqueued' | 'suppressed'
+    alertRef: string | null
+    now: number
+    conflictMessage: string
+  }): AutomationIncident {
+    if (!Number.isSafeInteger(input.now)
+      || !Number.isSafeInteger(input.expectedLifecycleGeneration) || input.expectedLifecycleGeneration < 1
+      || !Number.isSafeInteger(input.expectedPresentationRevision) || input.expectedPresentationRevision < 1
+      || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new AutomationStoreError('invalid-definition', 'incident alert time is invalid')
+    }
+    const changed = this.database.prepare(`
+      UPDATE automation_incidents
+      SET alert_status = ?, alert_ref = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND alert_status = ? AND lifecycle_generation = ?
+        AND presentation_revision = ? AND version = ?
+    `).run(
+      input.nextStatus, input.alertRef, input.now, input.incidentId, input.expectedStatus,
+      input.expectedLifecycleGeneration, input.expectedPresentationRevision, input.expectedVersion,
+    )
+    const row = this.database.prepare('SELECT * FROM automation_incidents WHERE id = ?')
+      .get(input.incidentId) as IncidentRow | undefined
+    if (row === undefined || (changed.changes !== 1
+      && !(row.alert_status === input.nextStatus
+        && row.alert_ref === input.alertRef
+        && row.lifecycle_generation === input.expectedLifecycleGeneration
+        && row.presentation_revision === input.expectedPresentationRevision))) {
+      throw new AutomationStoreError('version-conflict', input.conflictMessage)
+    }
+    return incident(row)
+  }
+
   completeIncidentAlert(input: {
     incidentId: string
     expectedStatus: 'pending'
@@ -2257,31 +2295,28 @@ export class AutomationStore {
     alertRef: string
     now: number
   }): AutomationIncident {
-    if (!Number.isSafeInteger(input.now)
-      || !Number.isSafeInteger(input.expectedLifecycleGeneration) || input.expectedLifecycleGeneration < 1
-      || !Number.isSafeInteger(input.expectedPresentationRevision) || input.expectedPresentationRevision < 1
-      || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
-      throw new AutomationStoreError('invalid-definition', 'incident alert time is invalid')
-    }
-    const alertRef = text(input.alertRef, 'alertRef', 500)
-    const changed = this.database.prepare(`
-      UPDATE automation_incidents
-      SET alert_status = 'enqueued', alert_ref = ?, updated_at = ?, version = version + 1
-      WHERE id = ? AND alert_status = ? AND lifecycle_generation = ?
-        AND presentation_revision = ? AND version = ?
-    `).run(
-      alertRef, input.now, input.incidentId, input.expectedStatus,
-      input.expectedLifecycleGeneration, input.expectedPresentationRevision, input.expectedVersion,
-    )
-    const row = this.database.prepare('SELECT * FROM automation_incidents WHERE id = ?')
-      .get(input.incidentId) as IncidentRow | undefined
-    if (row === undefined || (changed.changes !== 1
-      && !(row.alert_status === 'enqueued' && row.alert_ref === alertRef
-        && row.lifecycle_generation === input.expectedLifecycleGeneration
-        && row.presentation_revision === input.expectedPresentationRevision))) {
-      throw new AutomationStoreError('version-conflict', 'incident alert state changed before completion')
-    }
-    return incident(row)
+    return this.updateIncidentAlertStatus({
+      ...input,
+      nextStatus: 'enqueued',
+      alertRef: text(input.alertRef, 'alertRef', 500),
+      conflictMessage: 'incident alert state changed before completion',
+    })
+  }
+
+  suppressIncidentAlert(input: {
+    incidentId: string
+    expectedStatus: 'pending'
+    expectedLifecycleGeneration: number
+    expectedPresentationRevision: number
+    expectedVersion: number
+    now: number
+  }): AutomationIncident {
+    return this.updateIncidentAlertStatus({
+      ...input,
+      nextStatus: 'suppressed',
+      alertRef: null,
+      conflictMessage: 'incident alert state changed before suppression',
+    })
   }
 
   getCurrentIncident(automationId: string, definitionHash: string): AutomationIncident | undefined {

@@ -64,6 +64,7 @@ import {
 import {
   AutomationCoordinator,
   type AutomationDeliveryDispatcher,
+  type AutomationIncidentAlertMode,
   type AutomationOutcomeRecorder,
   type AutomationRunner,
   type AutomationRunnerInput,
@@ -150,6 +151,8 @@ export interface Config {
   reconcileLimit?: number
   /** Safe default: every unattended occurrence must reserve a configured Policy budget. */
   allowUnbudgetedExecution?: boolean
+  /** Controls incident alert delivery; defaults to 'silent' while preserving SQLite audit and logs. */
+  incidentAlerts?: AutomationIncidentAlertMode
   /** Trusted authority and execution bounds used for model-proposed definitions. */
   proposalDefaults?: AutomationProposalDefaults
 }
@@ -297,6 +300,10 @@ const configSchema = Schema.object({
   reconcileIntervalMs: Schema.number().step(1).min(0).default(15_000),
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
   allowUnbudgetedExecution: Schema.boolean().default(false),
+  incidentAlerts: Schema.union([
+    Schema.const('silent'),
+    Schema.const('deliver'),
+  ]).default('silent'),
   proposalDefaults: proposalDefaultsSchema,
 }) as Schema<Config>
 
@@ -474,6 +481,13 @@ export class AssistantAutomationsService extends Service implements
       maxConcurrency: config.maxConcurrency,
       tickIntervalMs: config.tickIntervalMs,
       hostExecutors: this.hostExecutors,
+      incidentAlerts: config.incidentAlerts ?? 'silent',
+      onIncidentSuppressed: (incident) => {
+        ctx.logger.warn(
+          `assistant-automations incident ${incident.id} (${incident.automationId}): `
+          + `${incident.stage}/${incident.state} ${incident.failureClass}/${incident.failurePhase}/${incident.failureCode}`,
+        )
+      },
     })
     if (initialDelivery !== undefined) {
       this.coordinator.setDeliveryDispatcher(this.deliveryDispatcher(initialDelivery))

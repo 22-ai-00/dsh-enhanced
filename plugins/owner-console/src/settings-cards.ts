@@ -2349,7 +2349,14 @@ export function ProactiveWorkItemsCard({ ctrl }: Readonly<{ ctrl: ConsoleControl
           ...(p?.intakeEvaluation === undefined ? [] : [
             row('Intake 评估', `${p.intakeEvaluation.enabled ? '已启用' : '未启用'} · 本小时 ${p.intakeEvaluation.callsLastHour} 次 · 连续失败 ${p.intakeEvaluation.consecutiveFailures}`),
           ]),
-          row('assistant-work-items', w === undefined ? pill('未知', 'neutral') : subsystemPill(w.state)),
+          row('assistant-work-items', w === undefined
+            ? pill('未知', 'neutral')
+            : w.state === 'disabled'
+              ? pill('未启用（可选）', 'neutral')
+              : subsystemPill(w.state)),
+          ...(w?.state !== 'disabled' ? [] : [
+            row('WorkItems 说明', '可选工作项扩展未启用，不影响主流程；如需启用请在「插件管理」中开启。'),
+          ]),
           ...(w?.health === undefined ? [] : [
             row('WorkItems 模式', `${w.health.mode} · 打开项 ${w.health.openItems} · worker ${w.health.workerConnected ? '已连' : '未连'}`),
             ...(w.health.admitMode === undefined && w.health.pendingAdmissions === undefined ? [] : [
@@ -2498,7 +2505,7 @@ export function BundlesCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
               `${bundle.error.code}${bundle.error.diagnostic === undefined ? '' : `：${boundedLine(bundle.error.diagnostic)}`}`)),
           el('span', { style: actionsStyle },
             pill(state.label, state.tone),
-            bundle.error !== undefined && !bundle.enabled ? null
+            (bundle.error !== undefined || state.kind === 'bundled') && !bundle.enabled ? null
               : el('button', { style: btn(), disabled: busy,
                 onClick: () => void ctrl.run(() => remote.setBundleEnabled(bundle.name, !bundle.enabled)) },
               bundle.enabled ? '停用' : '启用'),

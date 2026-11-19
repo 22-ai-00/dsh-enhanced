@@ -18,6 +18,7 @@ vi.mock('react', async importOriginal => {
 })
 
 const { OwnerConsoleIcon, OwnerConsoleSettingsPanel, larkConnectionTone } = await import('../src/client.ts')
+const { BundlesCard, ProactiveWorkItemsCard } = await import('../src/settings-cards.ts')
 
 type Node = { type: unknown, props: Record<string, unknown> }
 function expand(node: unknown): Node[] {
@@ -211,5 +212,38 @@ describe('owner console panel presentation', () => {
     expect(larkConnectionTone('reconnecting')).toBe('warn')
     expect(larkConnectionTone('disconnected')).toBe('error')
     expect(larkConnectionTone('absent')).toBe('neutral')
+  })
+
+  it('hides enable buttons for bundled personal-assistant sub-bundles and renders optional disabled work-items calmly', () => {
+    const ctrl = {
+      status: {
+        ...STATUS,
+        bundles: [
+          bundle('@dsh-enhanced/personal-assistant', { enabled: true }),
+          bundle('@dsh-enhanced/assistant-policy', { enabled: false, removable: true }),
+          bundle('@dsh-enhanced/assistant-work-items', { enabled: false, removable: true }),
+        ],
+        plugins: [
+          { entryId: 'pa', moduleName: '@dsh-enhanced/personal-assistant', enabled: true, fiberPhase: 'active' },
+        ],
+      } as unknown as OwnerConsoleStatus,
+      overview: {
+        proactive: { state: 'ok', attentionQuestions: [], drafts: [] },
+        workItems: { state: 'disabled', queue: [] },
+      } as never,
+      busy: false,
+      confirmOwner: () => true,
+      run: async () => undefined,
+      remote: {} as never,
+    }
+    const bundleNodes = expand(BundlesCard({ ctrl: ctrl as never }))
+    const bundleText = text(bundleNodes)
+    expect(bundleText).toContain('由 personal-assistant 托管')
+    expect(bundleText).toContain('已安装但未启用')
+    expect(buttons(bundleNodes)).toEqual(['停用', '移除', '移除', '启用', '移除', '禁用', '安装', '应用配置'])
+
+    const proactiveText = text(expand(ProactiveWorkItemsCard({ ctrl: ctrl as never })))
+    expect(proactiveText).toContain('未启用（可选）')
+    expect(proactiveText).not.toContain('已安装未启用')
   })
 })

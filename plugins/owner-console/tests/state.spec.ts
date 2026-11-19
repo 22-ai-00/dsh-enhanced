@@ -120,4 +120,38 @@ describe('panel component state', () => {
     expect(patch).toContain('@dsh-enhanced/personal-assistant 已安装但未启用')
     expect(patch).toContain('@dsh-enhanced/assistant-delivery 已启用但尚未就绪')
   })
+
+  it('marks embedded personal-assistant sub-bundles as bundled when personal-assistant is active', () => {
+    const s = status({
+      bundles: [
+        bundle({ name: '@dsh-enhanced/personal-assistant', enabled: true }),
+        bundle({ name: '@dsh-enhanced/assistant-policy', enabled: false }),
+        bundle({ name: '@dsh-enhanced/personal-memory', enabled: false }),
+        bundle({ name: '@dsh-enhanced/personal-wiki', enabled: false }),
+        bundle({ name: '@dsh-enhanced/assistant-automations', enabled: false }),
+        bundle({ name: '@dsh-enhanced/assistant-work-items', enabled: false }),
+      ],
+      plugins: [plugin({ moduleName: '@dsh-enhanced/personal-assistant', fiberPhase: 'active' })],
+    })
+    for (const pkg of [
+      '@dsh-enhanced/assistant-policy',
+      '@dsh-enhanced/personal-memory',
+      '@dsh-enhanced/personal-wiki',
+      '@dsh-enhanced/assistant-automations',
+    ]) {
+      expect(componentState(s, pkg)).toMatchObject({
+        kind: 'bundled',
+        label: '由 personal-assistant 托管',
+        tone: 'ok',
+        canEnable: false,
+        canInstall: false,
+        stalled: false,
+      })
+    }
+    expect(componentState(s, '@dsh-enhanced/assistant-work-items')).toMatchObject({
+      kind: 'disabled',
+      label: '已安装但未启用',
+      canEnable: true,
+    })
+  })
 })

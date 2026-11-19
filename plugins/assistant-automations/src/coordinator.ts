@@ -164,7 +164,11 @@ export interface AutomationCoordinatorOptions {
   maxConcurrency: number
   tickIntervalMs?: number
   hostExecutors?: HostAutomationExecutorRegistry
+  incidentAlerts?: AutomationIncidentAlertMode
+  onIncidentSuppressed?: (incident: AutomationIncident) => void
 }
+
+export type AutomationIncidentAlertMode = 'deliver' | 'silent'
 
 function sessionId(task: AutomationTask): string {
   return `automation-${task.occurrenceId}-${task.attemptCount + 1}`
@@ -226,6 +230,8 @@ export class AutomationCoordinator {
   private readonly maxConcurrency: number
   private readonly tickIntervalMs: number
   private readonly hostExecutors: HostAutomationExecutorRegistry
+  private readonly incidentAlerts: AutomationIncidentAlertMode
+  private readonly onIncidentSuppressed: ((incident: AutomationIncident) => void) | undefined
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
   private readonly activeEvaluations = new Map<string, Promise<void>>()
   private delivery: AutomationDeliveryDispatcher | undefined
@@ -256,6 +262,8 @@ export class AutomationCoordinator {
     this.maxConcurrency = options.maxConcurrency
     this.tickIntervalMs = options.tickIntervalMs ?? Math.max(1_000, Math.floor(options.dutyLeaseMs / 3))
     this.hostExecutors = options.hostExecutors ?? new HostAutomationExecutorRegistry()
+    this.incidentAlerts = options.incidentAlerts ?? 'deliver'
+    this.onIncidentSuppressed = options.onIncidentSuppressed
   }
 
   start(): void {
@@ -853,15 +861,42 @@ export class AutomationCoordinator {
     }
   }
 
+  private suppressPendingIncidentAlerts(pending: readonly AutomationIncident[]): void {
+    for (const incident of pending) {
+      try {
+        const suppressed = this.store.suppressIncidentAlert({
+          incidentId: incident.id,
+          expectedStatus: 'pending',
+          expectedLifecycleGeneration: incident.lifecycleGeneration,
+          expectedPresentationRevision: incident.presentationRevision,
+          expectedVersion: incident.version,
+          now: this.now(),
+        })
+        this.incidentAlertBackoff.delete(incident.id)
+        try {
+          this.onIncidentSuppressed?.(suppressed)
+        } catch {
+          // Observer failure cannot block alert suppression.
+        }
+      } catch {
+        // Concurrent incident update retries on the next tick.
+      }
+    }
+  }
+
   private dispatchPendingIncidentAlerts(): void {
-    const delivery = this.delivery
-    if (delivery === undefined) return
     const now = this.now()
     const pending = this.store.listPendingIncidentAlerts(100)
     const live = new Set(pending.map(incident => incident.id))
     if (this.incidentAlertBackoff.size > INCIDENT_ALERT_BACKOFF_PRUNE_AT) {
       for (const id of this.incidentAlertBackoff.keys()) if (!live.has(id)) this.incidentAlertBackoff.delete(id)
     }
+    if (this.incidentAlerts === 'silent') {
+      this.suppressPendingIncidentAlerts(pending)
+      return
+    }
+    const delivery = this.delivery
+    if (delivery === undefined) return
     for (const incident of pending) {
       const backoff = this.incidentAlertBackoff.get(incident.id)
       if (backoff !== undefined && now < backoff.nextAttemptAt) continue

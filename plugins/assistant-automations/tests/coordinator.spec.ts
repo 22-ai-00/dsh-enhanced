@@ -1958,3 +1958,57 @@ test('the real timer invokes the Host proof fence before materializing or claimi
     expect(run).toHaveBeenCalledTimes(1)
   } finally { await coordinator.stop(); value.store.close() }
 })
+
+test('suppresses pending incident alerts without enqueueing delivery when incidentAlerts is silent', async () => {
+  const value = await fixture({ run: vi.fn() }, {}, new HostAutomationExecutorRegistry())
+  await value.coordinator.stop()
+  const suppressed: string[] = []
+  const coordinator = new AutomationCoordinator({
+    store: value.store,
+    artifacts: value.artifacts,
+    runner: { run: vi.fn() },
+    ownerId: 'silent-incident-test',
+    now: () => Date.parse('2026-08-21T10:01:00.000Z'),
+    dutyLeaseMs: 10_000,
+    taskLeaseMs: 5_000,
+    misfireGraceMs: minute,
+    maxCatchUp: 10,
+    maxConcurrency: 1,
+    hostExecutors: new HostAutomationExecutorRegistry(),
+    incidentAlerts: 'silent',
+    onIncidentSuppressed: incident => suppressed.push(incident.id),
+  })
+  const enqueueBackground = vi.fn()
+  const enqueueBackgroundRoute = vi.fn()
+  const publishDeliveryPresentation = vi.fn()
+  coordinator.setDeliveryDispatcher({
+    enqueueBackground,
+    enqueueBackgroundRoute,
+    publishDeliveryPresentation,
+  })
+  try {
+    value.store.reconcileSystemOwned({
+      owner: 'assistant-recovery',
+      automationId: 'silent-incident-host',
+      idempotencyKey: 'silent-incident-host:v1',
+      definition: hostDefinition(),
+    })
+    await coordinator.tick()
+    expect(enqueueBackground).not.toHaveBeenCalled()
+    expect(enqueueBackgroundRoute).not.toHaveBeenCalled()
+    expect(publishDeliveryPresentation).not.toHaveBeenCalled()
+    const incidents = value.store.listIncidents({ automationId: 'silent-incident-host', limit: 10 })
+    expect(incidents).toHaveLength(1)
+    expect(incidents[0]).toMatchObject({
+      automationId: 'silent-incident-host',
+      state: 'open',
+      alertStatus: 'suppressed',
+    })
+    expect(incidents[0]!.alertRef).toBeUndefined()
+    expect(suppressed).toEqual([incidents[0]!.id])
+    expect(value.store.listPendingIncidentAlerts(100)).toEqual([])
+  } finally {
+    await coordinator.stop()
+    value.store.close()
+  }
+})

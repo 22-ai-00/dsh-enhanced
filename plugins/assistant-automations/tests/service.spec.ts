@@ -770,6 +770,15 @@ describe('assistant automations Cordis service', () => {
       await ctx.fiber.restart()
     }
     const fixture = await harness()
+    expect(AssistantAutomationsService.Config({
+      databasePath: '/tmp/automations.sqlite',
+      runsPath: '/tmp/runs',
+    }).incidentAlerts).toBe('silent')
+    expect(AssistantAutomationsService.Config({
+      databasePath: '/tmp/automations.sqlite',
+      runsPath: '/tmp/runs',
+      incidentAlerts: 'deliver',
+    }).incidentAlerts).toBe('deliver')
     const current = agent({ cwd: '/work/alpha', preset: 'primary' })
     await fixture.ctx.fiber.restart()
     expect(() => fixture.service.list(current)).toThrowError(expect.objectContaining({ code: 'disposed' }))

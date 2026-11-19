@@ -961,6 +961,8 @@ describe('owner console intake agreement availability (scope-free)', () => {
   })
 
   it('reads persisted cordis.patch.yml Feishu config when lark-channel is pending and clears disabled override on setBundleEnabled(true)', async () => {
+    const prevInvocationId = process.env['INVOCATION_ID']
+    delete process.env['INVOCATION_ID']
     const root = await mkdtemp(join(tmpdir(), 'owner-console-lark-fallback-'))
     const profileDir = join(root, 'profiles', 'desktop')
     await mkdir(profileDir, { recursive: true })
@@ -1016,12 +1018,16 @@ describe('owner console intake agreement availability (scope-free)', () => {
       const updatedPatch = await readFile(patchPath, 'utf8')
       expect(updatedPatch).not.toContain('disabled: true')
     } finally {
+      if (prevInvocationId === undefined) delete process.env['INVOCATION_ID']
+      else process.env['INVOCATION_ID'] = prevInvocationId
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })
     }
   })
 
   it('merges loader entry beneath partial cordis.patch.yml for persisted Feishu config and clears disabled on rows matched by package name', async () => {
+    const prevInvocationId = process.env['INVOCATION_ID']
+    delete process.env['INVOCATION_ID']
     const root = await mkdtemp(join(tmpdir(), 'owner-console-lark-merge-'))
     const profileDir = join(root, 'profiles', 'desktop')
     await mkdir(profileDir, { recursive: true })
@@ -1083,6 +1089,8 @@ describe('owner console intake agreement availability (scope-free)', () => {
       expect(enableRes.applied).toBe(true)
       expect(await readFile(patchPath, 'utf8')).not.toContain('disabled: true')
     } finally {
+      if (prevInvocationId === undefined) delete process.env['INVOCATION_ID']
+      else process.env['INVOCATION_ID'] = prevInvocationId
       await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })
     }

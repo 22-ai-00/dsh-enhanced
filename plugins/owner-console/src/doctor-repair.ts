@@ -2698,6 +2698,73 @@ function handoffLarkOwnerInDeliverySqlite(
   }
 }
 
+function pauseStaleOwnerSystemAutomations(
+  dbPath: string,
+  currentPrincipalKey: string,
+  now: number,
+): number {
+  if (!existsSync(dbPath)) return 0
+  let rwDb: DatabaseSync | undefined
+  let inTx = false
+  try {
+    const st = lstatSync(dbPath)
+    if (st.isSymbolicLink() || !st.isFile()) return 0
+    const ts = Math.max(0, Math.trunc(now))
+    rwDb = new DatabaseSync(dbPath)
+    rwDb.exec('PRAGMA busy_timeout = 5000;')
+    const defTable = rwDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='automation_definitions'`).get() as { name?: unknown } | undefined
+    if (defTable?.name !== 'automation_definitions') return 0
+    rwDb.exec('BEGIN IMMEDIATE;')
+    inTx = true
+    const staleRows = rwDb.prepare(`
+      SELECT id FROM automation_definitions
+      WHERE system_owner IS NOT NULL
+        AND system_owner <> ''
+        AND status = 'active'
+        AND json_valid(definition_json)
+        AND json_type(definition_json, '$.principal') = 'text'
+        AND json_extract(definition_json, '$.principal') <> ''
+        AND json_extract(definition_json, '$.principal') <> ?
+    `).all(currentPrincipalKey) as ReadonlyArray<{ id?: unknown }>
+    const staleIds = staleRows.map(r => r.id).filter((id): id is string => typeof id === 'string')
+    if (staleIds.length === 0) {
+      rwDb.exec('COMMIT;')
+      inTx = false
+      return 0
+    }
+    const paused = rwDb.prepare(`
+      UPDATE automation_definitions
+      SET status = 'paused', next_run_at = NULL, updated_at = ?, version = version + 1
+      WHERE system_owner IS NOT NULL
+        AND system_owner <> ''
+        AND status = 'active'
+        AND json_valid(definition_json)
+        AND json_type(definition_json, '$.principal') = 'text'
+        AND json_extract(definition_json, '$.principal') <> ''
+        AND json_extract(definition_json, '$.principal') <> ?
+    `).run(ts, currentPrincipalKey)
+    const incTable = rwDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='automation_incidents'`).get() as { name?: unknown } | undefined
+    if (incTable?.name === 'automation_incidents') {
+      const placeholders = staleIds.map(() => '?').join(', ')
+      rwDb.prepare(`
+        UPDATE automation_incidents
+        SET alert_status = 'suppressed', alert_ref = NULL, updated_at = ?, version = version + 1
+        WHERE alert_status = 'pending' AND automation_id IN (${placeholders})
+      `).run(ts, ...staleIds)
+    }
+    rwDb.exec('COMMIT;')
+    inTx = false
+    return Number(paused.changes ?? 0)
+  } catch {
+    if (rwDb !== undefined && inTx) {
+      try { rwDb.exec('ROLLBACK;') } catch { /* ignore rollback error */ }
+    }
+    return 0
+  } finally {
+    rwDb?.close()
+  }
+}
+
 /** Explicit owner-confirmed promotion of the scanned Feishu/Lark account to primary owner. */
 export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): Promise<PromoteLarkOwnerResult> {
   const platform = input.platform ?? process.platform
@@ -2937,6 +3004,14 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
     })
   }
 
+  const { automationsCfg } = getPersonalAndPolicyConfigs(seq, input.descriptors)
+  const scopedAutomationsDb = checkScopedDbPath(automationsCfg['databasePath'], paths.canonicalHome)
+  const automationsDbPath = scopedAutomationsDb.scoped && scopedAutomationsDb.resolved !== null
+    ? scopedAutomationsDb.resolved
+    : join(paths.canonicalHome, 'assistant-automations', 'state.sqlite')
+  const pausedStaleAutomations = pauseStaleOwnerSystemAutomations(automationsDbPath, principalKey, now)
+  const pausedNote = pausedStaleAutomations > 0 ? `；已自动暂停 ${pausedStaleAutomations} 条旧主人遗留系统自动化` : ''
+
   const autonomyAnchoredElsewhere = hasAutonomyGrantsForOtherPrincipal(seq, input.descriptors, principalKey)
   const autonomyNote = autonomyAnchoredElsewhere
     ? (ownerRouteSynced
@@ -2949,7 +3024,7 @@ export async function promoteLarkOwnerInProfile(input: PromoteLarkOwnerInput): P
     applied: true,
     ownerBinding: handoff.reused ? 'reused-owner' : 'bound-owner',
     existingAutonomyAnchored: autonomyAnchoredElsewhere,
-    note: `已将飞书账号 ${cleanOpenId} 设为本 profile 主主人（支持 /permission、/model 与审批卡片）${autonomyNote}；下一步请重启 profile 生效。`,
+    note: `已将飞书账号 ${cleanOpenId} 设为本 profile 主主人（支持 /permission、/model 与审批卡片）${pausedNote}${autonomyNote}；下一步请重启 profile 生效。`,
   })
 }
 
