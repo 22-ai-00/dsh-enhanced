@@ -87,6 +87,7 @@
     "@deepseek-ai/dsh-typert-protocol": "catalog:",
     "@deepseek-ai/dsh-typert-registry": "catalog:",
     "@types/node": "catalog:",
+    "@types/qrcode": "1.5.6",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.7",
     "esbuild": "^0.27.0",
@@ -99,6 +100,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
+    "qrcode": "1.5.4",
     "yaml": "2.9.0",
     "zod": "catalog:"
   }

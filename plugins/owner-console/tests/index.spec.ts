@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(30)
+    expect(asyncMethods).toHaveLength(33)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -117,6 +117,10 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/modelCatalog')).toEqual(['force'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/assistantChatContext')).toEqual([])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/registerAssistantSession')).toEqual(['sessionId', 'makeActive'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/startFeishuQrOnboarding'))
+      .toEqual(['domain', 'appName', 'existingAppId', 'account', 'tenant', 'calendarReadonly', 'businessTools'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/feishuQrOnboardingStatus')).toEqual(['sessionId'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/cancelFeishuQrOnboarding')).toEqual(['sessionId'])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {

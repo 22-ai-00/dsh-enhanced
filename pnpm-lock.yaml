@@ -2271,6 +2271,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.19.0
+      qrcode:
+        specifier: 1.5.4
+        version: 1.5.4
       yaml:
         specifier: 2.9.0
         version: 2.9.0
@@ -2299,6 +2302,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
+      '@types/qrcode':
+        specifier: 1.5.6
+        version: 1.5.6
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31

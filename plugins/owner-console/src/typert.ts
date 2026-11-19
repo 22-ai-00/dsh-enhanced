@@ -186,6 +186,52 @@ export const AssistantChatContextSchema = z.object({
 }).readonly()
 export type AssistantChatContext = Readonly<z.infer<typeof AssistantChatContextSchema>>
 
+export const FEISHU_QR_ONBOARDING_STATES = [
+  'idle',
+  'awaiting-scan',
+  'applying',
+  'completed',
+  'expired',
+  'denied',
+  'cancelled',
+  'failed',
+] as const
+export type FeishuQrOnboardingState = typeof FEISHU_QR_ONBOARDING_STATES[number]
+
+export const FEISHU_QR_OWNER_BINDINGS = [
+  'bound-owner',
+  'reused-owner',
+  'linked-to-owner',
+  'reused-linked',
+  'not-returned',
+  'unmodified',
+] as const
+export type FeishuQrOwnerBinding = typeof FEISHU_QR_OWNER_BINDINGS[number]
+
+/** Strict wire snapshot for official Feishu/Lark OAuth 2.0 Device Authorization onboarding.
+ * Never carries `device_code` or `client_secret` across the Host/Web boundary. */
+export const FeishuQrOnboardingSnapshotSchema = z.object({
+  protocol: z.literal('owner-console/feishu-qr-onboarding/v1'),
+  sessionId: z.string().max(128),
+  state: z.enum(FEISHU_QR_ONBOARDING_STATES),
+  domain: z.enum(['feishu', 'lark']),
+  domainSwitched: z.boolean(),
+  verificationUrl: z.string().max(4_096).optional(),
+  qrCodeDataUrl: z.string().max(131_072).optional(),
+  startedAt: z.number().int().nonnegative().optional(),
+  expiresAt: z.number().int().nonnegative().optional(),
+  pollIntervalMs: z.number().int().positive().max(120_000).optional(),
+  appId: z.string().max(64).optional(),
+  openId: z.string().max(256).optional(),
+  ownerBinding: z.enum(FEISHU_QR_OWNER_BINDINGS).optional(),
+  applied: z.boolean().optional(),
+  connected: z.boolean().optional(),
+  restartRecommended: z.boolean().optional(),
+  note: z.string().max(2_048),
+  errorCode: z.string().max(128).optional(),
+}).readonly()
+export type FeishuQrOnboardingSnapshot = Readonly<z.infer<typeof FeishuQrOnboardingSnapshotSchema>>
+
 const subsystemState = z.enum(['absent', 'disabled', 'ok', 'error'])
 const boundedCountMap = z.record(z.string(), z.number().int().nonnegative())
 
@@ -1072,6 +1118,42 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1040, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/startFeishuQrOnboarding',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'startFeishuQrOnboarding',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'domain', wire: 'domain', source: 'json', codec: codec('owner-console#feishuQrDomain', () => z.enum(['feishu', 'lark'])) },
+        { name: 'appName', wire: 'appName', source: 'json', codec: codec('owner-console#feishuQrAppName', () => z.string().max(64)) },
+        { name: 'existingAppId', wire: 'existingAppId', source: 'json', codec: codec('owner-console#feishuQrExistingAppId', () => z.string().max(64)) },
+        { name: 'account', wire: 'account', source: 'json', codec: codec('owner-console#feishuQrAccount', () => z.string().max(128)) },
+        { name: 'tenant', wire: 'tenant', source: 'json', codec: codec('owner-console#feishuQrTenant', () => z.string().max(128)) },
+        { name: 'calendarReadonly', wire: 'calendarReadonly', source: 'json', codec: codec('owner-console#feishuQrCalendarReadonly', () => z.boolean()) },
+        { name: 'businessTools', wire: 'businessTools', source: 'json', codec: codec('owner-console#feishuQrBusinessTools', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#FeishuQrOnboardingSnapshot', () => FeishuQrOnboardingSnapshotSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1082, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/feishuQrOnboardingStatus',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'feishuQrOnboardingStatus',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'sessionId', wire: 'sessionId', source: 'json', codec: codec('owner-console#feishuQrSessionId', () => z.string().max(128)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#FeishuQrOnboardingSnapshot', () => FeishuQrOnboardingSnapshotSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1098, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/cancelFeishuQrOnboarding',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'cancelFeishuQrOnboarding',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'sessionId', wire: 'sessionId', source: 'json', codec: codec('owner-console#feishuQrCancelSessionId', () => z.string().max(128)) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#FeishuQrOnboardingSnapshot', () => FeishuQrOnboardingSnapshotSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1108, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

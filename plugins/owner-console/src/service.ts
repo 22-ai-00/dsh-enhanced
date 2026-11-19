@@ -21,11 +21,12 @@ import { applyAutonomyWizardSetup, inspectAutonomyWizardStatus, resolveProfilePa
 import { SelfUpgradeProber } from './upgrade-probe.js'
 import type {
   AssistantChatContext, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
-  AutonomySetupStatus, OwnerConsoleGrowthReport, OwnerConsoleModelCatalog,
+  AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleGrowthReport, OwnerConsoleModelCatalog,
   SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
-import { applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor } from './doctor-repair.js'
+import { applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor, PLACEHOLDER_LARK_APP_ID } from './doctor-repair.js'
+import { FeishuQrOnboardingManager } from './feishu-qr-onboarding.js'
 import { ModelCatalogReader } from './model-catalog.js'
 import {
   AssistantChatRegistry, buildWenyaoIdentityContext, buildWenyaoSystemPrompt, readAssistantChatCapabilities,
@@ -54,6 +55,7 @@ export class OwnerConsoleService extends TypertRemoteService {
   private readonly upgradeProber: SelfUpgradeProber
   private readonly catalogReader: ModelCatalogReader
   private readonly assistantChat: AssistantChatRegistry
+  private readonly feishuQr: FeishuQrOnboardingManager
 
   constructor(
     ctx: Context,
@@ -62,6 +64,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     upgradeProber: SelfUpgradeProber = new SelfUpgradeProber(),
     catalogReader: ModelCatalogReader = new ModelCatalogReader(),
     assistantChat: AssistantChatRegistry = new AssistantChatRegistry(ctx),
+    feishuQr: FeishuQrOnboardingManager = new FeishuQrOnboardingManager(),
   ) {
     super(ctx, 'ownerConsole')
     this.host = ctx
@@ -69,8 +72,21 @@ export class OwnerConsoleService extends TypertRemoteService {
     this.upgradeProber = upgradeProber
     this.catalogReader = catalogReader
     this.assistantChat = assistantChat
+    this.feishuQr = feishuQr
     this.installAssistantPromptScope()
     this.installModelCatalogInvalidation()
+    this.installFeishuQrDisposal()
+  }
+
+  private installFeishuQrDisposal(): void {
+    try {
+      if (typeof (this.host as { effect?: unknown }).effect !== 'function') return
+      this.host.effect(() => () => {
+        this.feishuQr.dispose()
+      }, 'owner-console.feishu-qr')
+    } catch {
+      // Ignore if test Context stub lacks effect(); Host runtime always supplies it.
+    }
   }
 
   private installModelCatalogInvalidation(): void {
@@ -369,7 +385,7 @@ export class OwnerConsoleService extends TypertRemoteService {
         mode: larkValue['secretSource'] === 'handle' || (larkValue['secretSource'] === undefined && typeof larkValue['credentialHandle'] === 'string') ? 'handle' : 'env',
         installed: installed('@dsh-enhanced/lark-channel'),
         enabled: larkValue['enabled'] === true,
-        appIdConfigured: isAppId(larkValue['appId']),
+        appIdConfigured: isAppId(larkValue['appId']) && larkValue['appId'] !== PLACEHOLDER_LARK_APP_ID,
         ...larkHealth,
       }),
       traex: Object.freeze({
@@ -913,8 +929,6 @@ export class OwnerConsoleService extends TypertRemoteService {
     return configureFeishuEasy({
       host: this.host,
       descriptors: this.descriptors(),
-      settings: this.host.get('settings' as never) as SettingsService | undefined,
-      reloadEntry: entryId => this.reload(entryId),
       appId,
       appSecret,
       account,
@@ -950,6 +964,40 @@ export class OwnerConsoleService extends TypertRemoteService {
     } catch (cause) {
       return refuse('owner-console', cause instanceof Error ? cause.message : '注册助手会话失败')
     }
+  }
+
+  /** Start official Feishu/Lark OAuth 2.0 Device Authorization QR onboarding; secrets remain strictly in Host memory. */
+  async startFeishuQrOnboarding(
+    domain: 'feishu' | 'lark',
+    appName: string,
+    existingAppId: string,
+    account: string,
+    tenant: string,
+    calendarReadonly: boolean,
+    businessTools: boolean,
+  ): Promise<FeishuQrOnboardingSnapshot> {
+    return this.feishuQr.start({
+      host: this.host,
+      getDescriptors: () => this.descriptors(),
+    }, {
+      domain,
+      appName,
+      existingAppId,
+      account,
+      tenant,
+      calendarReadonly,
+      businessTools,
+    })
+  }
+
+  /** Poll sanitized status of the active (or specified) Feishu QR onboarding session. */
+  async feishuQrOnboardingStatus(sessionId: string): Promise<FeishuQrOnboardingSnapshot> {
+    return this.feishuQr.status(sessionId)
+  }
+
+  /** Cancel an active awaiting-scan Feishu QR onboarding session and abort Host polling immediately. */
+  async cancelFeishuQrOnboarding(sessionId: string): Promise<FeishuQrOnboardingSnapshot> {
+    return this.feishuQr.cancel(sessionId)
   }
 }
 

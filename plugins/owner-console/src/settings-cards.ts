@@ -7,7 +7,8 @@ import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type Co
 import {
   AUTONOMY_TIER_DEFAULTS,
   type AssistantChatContext, type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction,
-  type AutonomySetupStatus, type CodingToolProbe, type GrowthDataState, type IntakeAgreementAvailability,
+  type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
+  type GrowthDataState, type IntakeAgreementAvailability,
   type OwnerConsoleAssistantOverview, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
   type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
@@ -100,7 +101,7 @@ export const DREAMING_PACKAGE = '@dsh-enhanced/assistant-dreaming'
 export const PROACTIVE_PACKAGE = '@dsh-enhanced/assistant-proactive'
 export const GROWTH_PACKAGE = '@dsh-enhanced/assistant-growth-driver'
 export const MEMORY_LEARNING_PACKAGE = '@dsh-enhanced/assistant-memory-learning'
-const LARK_COMPANION_BUNDLES = ['@dsh-enhanced/assistant-delivery'] as const
+const LARK_COMPANION_BUNDLES = ['@dsh-enhanced/assistant-delivery', '@dsh-enhanced/credentials-keychain'] as const
 
 export function boundedLine(text: string, limit = 240): string {
   const normalized = text.replace(/\s+/gu, ' ').trim()
@@ -160,6 +161,17 @@ export type ConsoleRemote = Readonly<{
   setupDoctor?(): Promise<RemoteResult<SetupDoctorReport>>
   applyDoctorRepair?(issueIds: readonly string[]): Promise<RemoteResult<OwnerConsoleWriteResult>>
   configureFeishuEasy?(appId: string, appSecret: string, account: string, tenant: string): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  startFeishuQrOnboarding?(
+    domain: 'feishu' | 'lark',
+    appName: string,
+    existingAppId: string,
+    account: string,
+    tenant: string,
+    calendarReadonly: boolean,
+    businessTools: boolean,
+  ): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
+  feishuQrOnboardingStatus?(sessionId: string): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
+  cancelFeishuQrOnboarding?(sessionId: string): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
   registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
@@ -988,23 +1000,255 @@ export function CodingToolsCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
     defaultSwitcher)
 }
 
+function feishuQrStateMeta(state: FeishuQrOnboardingSnapshot['state']): Readonly<{ label: string; tone: StatusTone }> {
+  switch (state) {
+    case 'awaiting-scan': return { label: '等待飞书扫码授权', tone: 'warn' }
+    case 'applying': return { label: '授权已确认，正在安全配置…', tone: 'warn' }
+    case 'completed': return { label: '扫码接入完成', tone: 'ok' }
+    case 'expired': return { label: '二维码已过期', tone: 'warn' }
+    case 'denied': return { label: '已拒绝授权', tone: 'warn' }
+    case 'cancelled': return { label: '已取消扫码', tone: 'neutral' }
+    case 'failed': return { label: '接入未完成', tone: 'error' }
+    default: return { label: '未开始', tone: 'neutral' }
+  }
+}
+
+function feishuQrOwnerBindingTone(binding: FeishuQrOwnerBinding): StatusTone {
+  return binding === 'bound-owner' || binding === 'reused-owner' ? 'ok' : 'warn'
+}
+
+function feishuQrOwnerBindingText(binding: FeishuQrOwnerBinding | undefined): string {
+  switch (binding) {
+    case 'bound-owner': return '已自动绑定为主人'
+    case 'reused-owner': return '已沿用现有飞书主人'
+    case 'linked-to-owner': return '关联身份（仅普通私聊，非主主人）'
+    case 'reused-linked': return '已沿用关联身份（仅普通私聊，非主主人）'
+    case 'not-returned': return '未返回扫码账号 open_id'
+    case 'unmodified': return '仅写入策略（身份表未改写）'
+    default: return ''
+  }
+}
+
+function feishuQrOwnerBindingHint(binding: FeishuQrOwnerBinding | undefined): string | undefined {
+  if (binding === 'linked-to-owner' || binding === 'reused-linked') {
+    return '普通飞书私聊在重启 profile 后即可正常使用；主人专属命令（/permission、/model、审批卡片、反馈学习与自主授权/工作项准入）仍锚定在现有主主人。如需切换主主人，或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup。'
+  }
+  if (binding === 'not-returned' || binding === 'unmodified') {
+    return '当前未自动绑定为飞书主主人；请重启 profile 后确认身份状态，如需绑定/切换主主人或在已有自主授权时更换应用，请使用终端向导 dsh-lark-setup。'
+  }
+  return undefined
+}
+
+function isTrustedFeishuUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw)
+    if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '') return false
+    const host = parsed.hostname.toLowerCase()
+    return host === 'feishu.cn'
+      || host.endsWith('.feishu.cn')
+      || host === 'larksuite.com'
+      || host.endsWith('.larksuite.com')
+  } catch {
+    return false
+  }
+}
+
+function formatCountdown(expiresAt: number | undefined, nowMs: number): string {
+  if (expiresAt === undefined) return ''
+  const sec = Math.max(0, Math.ceil((expiresAt - nowMs) / 1_000))
+  if (sec === 0) return '已过期'
+  const minutes = Math.floor(sec / 60)
+  const seconds = sec % 60
+  return minutes > 0 ? `剩余 ${minutes} 分 ${seconds} 秒` : `剩余 ${seconds} 秒`
+}
+
 export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
   const { status, busy, remote } = ctrl
+  const canQrFeishu = typeof remote.startFeishuQrOnboarding === 'function'
+    && typeof remote.feishuQrOnboardingStatus === 'function'
+  const canEasyFeishu = typeof remote.configureFeishuEasy === 'function'
   const [appId, setAppId] = useState('')
-  const [secretSource, setSecretSource] = useState<'easy' | 'env' | 'handle'>('easy')
+  const [secretSource, setSecretSource] = useState<'qr' | 'easy' | 'env' | 'handle'>(canQrFeishu ? 'qr' : 'easy')
   const [appSecret, setAppSecret] = useState('')
   const [secretEnv, setSecretEnv] = useState('LARK_APP_SECRET')
   const [secretHandle, setSecretHandle] = useState('')
   const [account, setAccount] = useState('')
   const [tenant, setTenant] = useState('')
+  const [qrDomain, setQrDomain] = useState<'feishu' | 'lark'>('feishu')
+  const [qrAppName, setQrAppName] = useState('文鳐助手')
+  const [qrExistingAppId, setQrExistingAppId] = useState('')
+  const [qrBusinessTools, setQrBusinessTools] = useState(true)
+  const [qrCalendarReadonly, setQrCalendarReadonly] = useState(false)
+  const [qrSession, setQrSession] = useState<FeishuQrOnboardingSnapshot | undefined>(undefined)
+  const [qrLoading, setQrLoading] = useState(false)
+  const [qrCopied, setQrCopied] = useState(false)
+  const [qrNowMs, setQrNowMs] = useState(0)
+  const completedSessionRef = useRef('')
+  const qrActionSeqRef = useRef(0)
+  const qrInFlightRef = useRef(false)
+  const ctrlRef = useRef(ctrl)
+  ctrlRef.current = ctrl
+
+  useEffect(() => {
+    if (!canQrFeishu || typeof remote.feishuQrOnboardingStatus !== 'function') return
+    let active = true
+    const seqAtMount = qrActionSeqRef.current
+    void remote.feishuQrOnboardingStatus('').then(res => {
+      if (!active || !res.ok || qrActionSeqRef.current !== seqAtMount) return
+      const restorable = res.value.state === 'awaiting-scan'
+        || res.value.state === 'applying'
+        || res.value.state === 'completed'
+      if (restorable && res.value.sessionId !== '') {
+        setQrSession(res.value)
+        setQrNowMs(Date.now())
+        if (res.value.state === 'completed') completedSessionRef.current = res.value.sessionId
+      }
+    }).catch(() => { /* ignore initial QR status restore failure */ })
+    return () => { active = false }
+  }, [canQrFeishu, remote])
+
+  const activePollSessionId = qrSession !== undefined
+    && (qrSession.state === 'awaiting-scan' || qrSession.state === 'applying')
+    && qrSession.sessionId !== ''
+    ? qrSession.sessionId
+    : ''
+
+  useEffect(() => {
+    if (!canQrFeishu || activePollSessionId === '' || typeof remote.feishuQrOnboardingStatus !== 'function') return
+    let active = true
+    let inFlight = false
+    const pollOnce = () => {
+      if (!active || inFlight) return
+      inFlight = true
+      void remote.feishuQrOnboardingStatus!(activePollSessionId).then(res => {
+        if (!active || !res.ok) return
+        const next = res.value
+        if (next.sessionId !== '' && next.sessionId !== activePollSessionId) return
+        setQrSession(next)
+        setQrNowMs(Date.now())
+        const currentCtrl = ctrlRef.current
+        if (next.state === 'completed' && completedSessionRef.current !== next.sessionId) {
+          completedSessionRef.current = next.sessionId
+          currentCtrl.setError('')
+          currentCtrl.setNotice(next.note)
+          notifyConsoleRefresh(remote)
+          void currentCtrl.refresh()
+        } else if (next.state === 'failed') {
+          currentCtrl.setNotice('')
+          currentCtrl.setError(next.note)
+        } else if (next.state === 'expired' || next.state === 'denied' || next.state === 'cancelled' || next.state === 'idle') {
+          currentCtrl.setError('')
+          currentCtrl.setNotice(next.note)
+        }
+      }).catch(() => {
+        // Keep polling on transient UI IPC hiccup; Host manages protocol timeout/errors.
+      }).finally(() => {
+        inFlight = false
+      })
+    }
+    const pollTimer = setInterval(pollOnce, 2_000)
+    const clockTimer = setInterval(() => {
+      if (active) setQrNowMs(Date.now())
+    }, 1_000)
+    return () => {
+      active = false
+      clearInterval(pollTimer)
+      clearInterval(clockTimer)
+    }
+  }, [activePollSessionId, canQrFeishu, remote])
+
+  const startQrOnboarding = async () => {
+    if (!canQrFeishu || qrInFlightRef.current) return
+    qrInFlightRef.current = true
+    qrActionSeqRef.current += 1
+    setQrLoading(true)
+    setQrCopied(false)
+    ctrl.setError('')
+    try {
+      const res = await remote.startFeishuQrOnboarding!(
+        qrDomain,
+        qrAppName,
+        qrExistingAppId,
+        account,
+        tenant,
+        qrCalendarReadonly,
+        qrBusinessTools,
+      )
+      if (!res.ok) {
+        ctrl.setError(remoteFailureText(res.error))
+        return
+      }
+      setQrSession(res.value)
+      setQrNowMs(Date.now())
+      if (res.value.state === 'failed') {
+        ctrl.setNotice('')
+        ctrl.setError(res.value.note)
+      } else {
+        ctrl.setNotice(res.value.note)
+      }
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      qrInFlightRef.current = false
+      setQrLoading(false)
+    }
+  }
+
+  const cancelQrOnboarding = async () => {
+    if (typeof remote.cancelFeishuQrOnboarding !== 'function' || qrInFlightRef.current) return
+    qrInFlightRef.current = true
+    qrActionSeqRef.current += 1
+    setQrLoading(true)
+    try {
+      const res = await remote.cancelFeishuQrOnboarding(qrSession?.sessionId ?? '')
+      if (res.ok) {
+        setQrSession(res.value)
+        ctrl.setError('')
+        ctrl.setNotice(res.value.note)
+      } else {
+        ctrl.setError(remoteFailureText(res.error))
+      }
+    } catch (cause) {
+      ctrl.setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      qrInFlightRef.current = false
+      setQrLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!qrCopied) return
+    const timer = setTimeout(() => setQrCopied(false), 2_000)
+    return () => clearTimeout(timer)
+  }, [qrCopied])
+
+  const copyQrLink = async (url: string) => {
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+        await navigator.clipboard.writeText(url)
+        setQrCopied(true)
+        ctrl.setNotice('已复制飞书官方授权链接，可直接粘贴到飞书或浏览器打开。')
+        return
+      }
+    } catch {
+      // Fall through to manual guidance.
+    }
+    ctrl.setNotice('当前环境未开放剪贴板写入，请直接点击「打开飞书授权页」或用飞书扫码。')
+  }
+
   const btn = (style: Readonly<Record<string, unknown>> = buttonStyle) => idle(style, busy)
   const pending = status === undefined
   const larkReady = status !== undefined && status.feishu.entry !== undefined
   const larkState = componentState(status, LARK_PACKAGE)
-  const installedCompanions = new Set((status?.dependencies ?? [])
-    .filter(dependency => dependency.available)
-    .map(dependency => DEPENDENCY_BUNDLES[dependency.name])
-    .filter((bundle): bundle is string => bundle !== undefined))
+  const installedCompanions = new Set([
+    ...(status?.dependencies ?? [])
+      .filter(dependency => dependency.available)
+      .map(dependency => DEPENDENCY_BUNDLES[dependency.name])
+      .filter((bundle): bundle is string => bundle !== undefined),
+    ...(status?.bundles ?? [])
+      .filter(bundle => bundle.installed && bundle.enabled)
+      .map(bundle => bundle.name),
+  ])
   const larkCompanions = LARK_COMPANION_BUNDLES.filter(bundle => !installedCompanions.has(bundle))
   const installLark = larkState.canInstall
     ? el('button', { style: btn(primaryButtonStyle), disabled: busy,
@@ -1031,7 +1275,191 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
         larkConnectionTone(status.feishu.connection, status.feishu.lastErrorCode))),
       row('appId', pill(status.feishu.appIdConfigured ? '已配置' : '未配置', status.feishu.appIdConfigured ? 'ok' : 'warn')))
 
-  const canEasyFeishu = typeof remote.configureFeishuEasy === 'function'
+  const safeQrDataUrl = qrSession?.qrCodeDataUrl !== undefined
+    && qrSession.qrCodeDataUrl.startsWith('data:image/svg+xml;base64,')
+    ? qrSession.qrCodeDataUrl
+    : undefined
+  const safeQrUrl = qrSession?.verificationUrl !== undefined
+    && isTrustedFeishuUrl(qrSession.verificationUrl)
+    ? qrSession.verificationUrl
+    : undefined
+  const qrStateMeta = qrSession === undefined ? undefined : feishuQrStateMeta(qrSession.state)
+  const countdownText = qrSession?.state === 'awaiting-scan'
+    ? formatCountdown(qrSession.expiresAt, qrNowMs > 0 ? qrNowMs : (qrSession.startedAt ?? Date.now()))
+    : ''
+
+  const qrOnboardingPanel = el('div', { 'data-feishu-qr-panel': '', style: { display: 'grid', gap: 12 } },
+    el('div', {
+      style: {
+        display: 'grid', gap: 6, padding: '10px 12px', borderRadius: 10,
+        border: `1px solid ${border}`, background: sunken, fontSize: 12, color: muted, lineHeight: 1.6,
+      },
+    },
+    el('div', { style: { fontWeight: 600, color: ink } }, '飞书官方一键扫码授权（与安装向导 dsh-lark-setup 相同协议）'),
+    el('div', {}, '1. 点击下方按钮向飞书开放平台申请官方设备授权二维码与链接；'),
+    el('div', {}, '2. 用飞书扫码（或直接打开授权页），选择已有应用或一键创建新机器人并确认所需权限；'),
+    el('div', {}, '3. 确认后 App Secret 仅在 Host 内存加密存入系统凭据库（配置文件零明文），自动写入通道、收发策略与扫码账号绑定；保存后重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）即可建立新长连接。')),
+    qrSession !== undefined && qrSession.state !== 'idle'
+      ? el('div', {
+        'data-feishu-qr-state': qrSession.state,
+        style: {
+          display: 'grid', gap: 12, padding: '12px 14px', borderRadius: 12,
+          border: `1px solid ${border}`, background: surface,
+        },
+      },
+      el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+        el('div', { style: actionsStyle },
+          qrStateMeta === undefined ? null : pill(qrStateMeta.label, qrStateMeta.tone),
+          qrSession.state === 'completed' && qrSession.restartRecommended === true
+            ? pill('需重启 profile 生效', 'warn')
+            : null,
+          qrSession.domainSwitched ? pill('已切换 Lark 国际版', 'ok') : null,
+          qrSession.appId !== undefined ? el('span', { style: monoMuted }, qrSession.appId) : null),
+        countdownText !== '' ? el('span', { style: { fontSize: 12, color: caption, fontFamily: monoFont } }, countdownText) : null),
+      qrSession.state === 'awaiting-scan'
+        ? el('div', { style: { display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' } },
+          safeQrDataUrl !== undefined
+            ? el('div', {
+              style: {
+                padding: 10, borderRadius: 12, background: '#ffffff',
+                border: `1px solid ${border}`, flex: 'none', lineHeight: 0,
+              },
+            },
+            el('img', {
+              src: safeQrDataUrl,
+              alt: '飞书官方授权二维码',
+              'data-feishu-qr-image': '',
+              width: 240,
+              height: 240,
+              style: { display: 'block', width: 240, height: 240 },
+            }))
+            : null,
+          el('div', { style: { display: 'grid', gap: 10, flex: '1 1 240px', minWidth: 0 } },
+            el('p', { style: { margin: 0, fontSize: 13, color: ink, lineHeight: 1.55 } }, qrSession.note),
+            el('p', { style: hintStyle },
+              '打开手机或电脑端飞书「扫一扫」扫描左侧二维码；若当前就在本机使用飞书，也可以直接点击下方按钮在浏览器中打开授权页。'),
+            el('div', { style: actionsStyle },
+              safeQrUrl !== undefined
+                ? el('a', {
+                  href: safeQrUrl,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                  'data-feishu-qr-link': '',
+                  style: { ...primaryButtonStyle, textDecoration: 'none', display: 'inline-flex', alignItems: 'center' },
+                }, '打开飞书授权页')
+                : null,
+              safeQrUrl !== undefined
+                ? el('button', {
+                  type: 'button',
+                  style: buttonStyle,
+                  onClick: () => void copyQrLink(safeQrUrl),
+                }, qrCopied ? '已复制链接' : '复制授权链接')
+                : null,
+              typeof remote.cancelFeishuQrOnboarding === 'function'
+                ? el('button', {
+                  type: 'button',
+                  style: idle(buttonStyle, qrLoading),
+                  disabled: qrLoading,
+                  onClick: () => void cancelQrOnboarding(),
+                }, '取消扫码')
+                : null)))
+        : qrSession.state === 'completed'
+          ? el('div', { style: { display: 'grid', gap: 8 } },
+            el('p', { style: { margin: 0, fontSize: 13, color: ink, lineHeight: 1.55 } }, qrSession.note),
+            el('div', { style: listStyle },
+              qrSession.appId !== undefined ? row('App ID', el('span', { style: monoMuted }, qrSession.appId)) : null,
+              row('授权区域', qrSession.domain === 'lark' ? 'Lark 国际版（larksuite.com）' : '飞书中国版（feishu.cn）'),
+              qrSession.openId !== undefined ? row('扫码账号', el('span', { style: monoMuted }, qrSession.openId)) : null,
+              qrSession.ownerBinding !== undefined
+                ? row(
+                  '身份授权',
+                  el(
+                    'span',
+                    {
+                      'data-feishu-qr-owner-binding': qrSession.ownerBinding,
+                      'data-feishu-qr-owner-tone': feishuQrOwnerBindingTone(qrSession.ownerBinding),
+                    },
+                    pill(feishuQrOwnerBindingText(qrSession.ownerBinding), feishuQrOwnerBindingTone(qrSession.ownerBinding)),
+                  ),
+                )
+                : null),
+            feishuQrOwnerBindingHint(qrSession.ownerBinding) !== undefined
+              ? el('p', { 'data-feishu-qr-owner-hint': '', style: hintStyle }, feishuQrOwnerBindingHint(qrSession.ownerBinding))
+              : null,
+            el('div', { style: actionsStyle },
+              el('button', {
+                type: 'button',
+                style: btn(primaryButtonStyle),
+                disabled: busy,
+                onClick: () => void ctrl.refresh(),
+              }, '刷新连接状态'),
+              el('button', {
+                type: 'button',
+                style: idle(buttonStyle, busy || qrLoading),
+                disabled: busy || qrLoading,
+                onClick: () => void startQrOnboarding(),
+              }, '重新扫码 / 更换应用')))
+          : el('div', { style: { display: 'grid', gap: 8 } },
+            el('p', { style: { margin: 0, fontSize: 13, color: qrSession.state === 'failed' ? danger : ink, lineHeight: 1.55 } }, qrSession.note),
+            qrSession.state !== 'applying'
+              ? el('div', { style: actionsStyle },
+                el('button', {
+                  type: 'button',
+                  style: idle(primaryButtonStyle, busy || qrLoading),
+                  disabled: busy || qrLoading,
+                  onClick: () => void startQrOnboarding(),
+                }, qrLoading ? '正在生成二维码…' : '重新生成二维码'))
+              : null))
+      : null,
+    el('details', {},
+      el('summary', { style: { fontSize: 12, color: muted, cursor: 'pointer' } }, '高级选项（服务区域 / 应用名称 / 更新已有应用 / 附加权限与身份）'),
+      el('div', { style: { display: 'grid', gap: 10, marginTop: 10 } },
+        el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
+          el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, '服务区域',
+            el('select', {
+              'aria-label': '飞书服务区域',
+              value: qrDomain,
+              disabled: qrLoading || activePollSessionId !== '',
+              style: inputStyle,
+              onChange: (event: { target: { value: string } }) => setQrDomain(event.target.value === 'lark' ? 'lark' : 'feishu'),
+            },
+            el('option', { value: 'feishu' }, '飞书中国版（feishu.cn，默认；国际版扫码自动切换）'),
+            el('option', { value: 'lark' }, 'Lark 国际版（larksuite.com）'))),
+          field('新建应用默认名称', qrAppName, setQrAppName, '文鳐助手'),
+          field('更新已有应用 App ID（可选）', qrExistingAppId, setQrExistingAppId, '留空由飞书自选/新建；填 cli_... 可增量补权'),
+          field('account（可选）', account, setAccount, '留空自动沿用或使用 primary'),
+          field('tenant（可选）', tenant, setTenant, '留空自动沿用或使用 personal')),
+        el('div', { style: { display: 'grid', gap: 6, fontSize: 12, color: ink } },
+          el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+            el('input', {
+              type: 'checkbox',
+              checked: qrBusinessTools,
+              disabled: qrLoading || activePollSessionId !== '',
+              style: { accentColor: accent, margin: 0 },
+              onChange: (event: { target: { checked: boolean } }) => setQrBusinessTools(event.target.checked),
+            }),
+            '包含飞书官方个人助理预设权限（与安装脚本默认一致）'),
+          el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+            el('input', {
+              type: 'checkbox',
+              checked: qrCalendarReadonly,
+              disabled: qrLoading || activePollSessionId !== '',
+              style: { accentColor: accent, margin: 0 },
+              onChange: (event: { target: { checked: boolean } }) => setQrCalendarReadonly(event.target.checked),
+            }),
+            '同时申请日历只读权限（calendar:calendar:readonly）')))),
+    (qrSession === undefined || qrSession.state === 'idle')
+      ? el('div', { style: actionsStyle },
+        el('button', {
+          type: 'button',
+          'data-feishu-qr-start': '',
+          style: idle(primaryButtonStyle, busy || qrLoading || !canQrFeishu),
+          disabled: busy || qrLoading || !canQrFeishu,
+          onClick: () => void startQrOnboarding(),
+        }, qrLoading ? '正在向飞书申请授权码…' : '一键生成飞书扫码授权'),
+        !canQrFeishu ? el('span', { style: hintStyle }, '当前 Host 尚未暴露扫码授权接口，请升级插件或切换手动填入模式。') : null)
+      : null)
+
   const feishuActions = !larkReady && !installLark && !enableLark && larkRepair === null
     ? null
     : el('div', { style: { display: 'grid', gap: 12 } },
@@ -1040,71 +1468,78 @@ export function FeishuCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>) {
       ...(larkReady ? [
         el('div', { style: { display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: 13 }, role: 'radiogroup', 'aria-label': 'secret 引用方式' },
           el('span', { style: subheadStyle }, '配置方式'),
+          ...(canQrFeishu ? [
+            el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
+              el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'qr', style: { accentColor: accent, margin: 0 },
+                onChange: () => setSecretSource('qr') }), '一键扫码接入（推荐）'),
+          ] : []),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
             el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'easy', style: { accentColor: accent, margin: 0 },
-              onChange: () => setSecretSource('easy') }), '极简一键接入（推荐）'),
+              onChange: () => setSecretSource('easy') }), canQrFeishu ? '手动填入凭据' : '极简一键接入（推荐）'),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
             el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'env', style: { accentColor: accent, margin: 0 },
               onChange: () => setSecretSource('env') }), '环境变量'),
           el('label', { style: { display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' } },
             el('input', { type: 'radio', name: 'secret-source', checked: secretSource === 'handle', style: { accentColor: accent, margin: 0 },
               onChange: () => setSecretSource('handle') }), 'keychain handle')),
-        secretSource === 'easy'
-          ? el('div', { style: { display: 'grid', gap: 10 } },
-            el('p', { style: hintStyle },
-              '只需填入飞书开放平台应用的 App ID 与 App Secret，系统将自动加密存入本机凭据库（macOS 钥匙串 / Linux 受保护文件）、签发访问策略并建立长连接，配置文件绝不存明文。'),
-            el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
-              field('App ID', appId, setAppId, 'cli_0123456789abcdef'),
-              el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, 'App Secret（仅存系统凭据库）',
-                el('input', {
-                  type: 'password',
-                  value: appSecret,
-                  placeholder: '粘贴飞书 App Secret',
-                  autoComplete: 'off',
-                  style: inputStyle,
-                  onChange: (event: { target: { value: string } }) => setAppSecret(event.target.value),
-                }))),
-            el('details', {},
-              el('summary', { style: { fontSize: 12, color: muted, cursor: 'pointer' } }, '高级身份标识（默认留空自动沿用或使用 primary / personal）'),
-              el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 8 } },
-                field('account', account, setAccount, 'primary（或留空沿用当前 owner）'),
-                field('tenant', tenant, setTenant, 'personal（或留空沿用当前 owner）'))),
-            el('div', { style: actionsStyle },
-              el('button', {
-                type: 'button',
-                style: idle(primaryButtonStyle, busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === ''),
-                disabled: busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === '',
-                onClick: () => {
-                  const submittedSecret = appSecret
-                  void ctrl.run(async () => {
-                    const res = await remote.configureFeishuEasy!(appId, submittedSecret, account, tenant)
-                    if (res.ok && res.value.applied) setAppSecret('')
-                    return res
-                  })
-                },
-              }, '一键安全存入凭据并启用飞书'),
-              !canEasyFeishu ? el('span', { style: hintStyle }, '当前 Host 未暴露一键接入接口，请切换环境变量或 Handle 模式。') : null))
-          : el('div', { style: { display: 'grid', gap: 10 } },
-            el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
-              field('appId', appId, setAppId, 'cli_0123456789abcdef'),
-              secretSource === 'env'
-                ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
-                : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
-              field('account', account, setAccount, '保留当前 owner'),
-              field('tenant', tenant, setTenant, '保留当前 owner')),
-            el('div', { style: actionsStyle },
-              el('button', { style: btn(primaryButtonStyle), disabled: busy,
-                onClick: () => {
-                  const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
-                  void ctrl.run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
-                } }, '应用配置'),
-              el('button', { style: btn(), disabled: busy,
-                onClick: () => {
-                  const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
-                  void ctrl.run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
-                } }, '一键配置（从 Host 环境探测 appId）')),
-            el('p', { style: hintStyle },
-              '这里配置的是 lark-channel 通道；secret 引用模式下明文不入配置。'))] : []))
+        secretSource === 'qr'
+          ? qrOnboardingPanel
+          : secretSource === 'easy'
+            ? el('div', { style: { display: 'grid', gap: 10 } },
+              el('p', { style: hintStyle },
+                '只需填入飞书开放平台应用的 App ID 与 App Secret，系统将自动加密存入本机凭据库（macOS 钥匙串 / Linux 受保护文件）并写入通道与访问策略（配置文件绝不存明文）；保存后重启 profile 即可建立长连接。'),
+              el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
+                field('App ID', appId, setAppId, 'cli_0123456789abcdef'),
+                el('label', { style: { display: 'grid', gap: 4, fontSize: 12, color: muted } }, 'App Secret（仅存系统凭据库）',
+                  el('input', {
+                    type: 'password',
+                    value: appSecret,
+                    placeholder: '粘贴飞书 App Secret',
+                    autoComplete: 'off',
+                    style: inputStyle,
+                    onChange: (event: { target: { value: string } }) => setAppSecret(event.target.value),
+                  }))),
+              el('details', {},
+                el('summary', { style: { fontSize: 12, color: muted, cursor: 'pointer' } }, '高级身份标识（默认留空自动沿用或使用 primary / personal）'),
+                el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 8 } },
+                  field('account', account, setAccount, 'primary（或留空沿用当前 owner）'),
+                  field('tenant', tenant, setTenant, 'personal（或留空沿用当前 owner）'))),
+              el('div', { style: actionsStyle },
+                el('button', {
+                  type: 'button',
+                  style: idle(primaryButtonStyle, busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === ''),
+                  disabled: busy || !canEasyFeishu || appId.trim() === '' || appSecret.trim() === '',
+                  onClick: () => {
+                    const submittedSecret = appSecret
+                    void ctrl.run(async () => {
+                      const res = await remote.configureFeishuEasy!(appId, submittedSecret, account, tenant)
+                      if (res.ok && res.value.applied) setAppSecret('')
+                      return res
+                    })
+                  },
+                }, '一键安全存入凭据并启用飞书'),
+                !canEasyFeishu ? el('span', { style: hintStyle }, '当前 Host 未暴露一键接入接口，请切换环境变量或 Handle 模式。') : null))
+            : el('div', { style: { display: 'grid', gap: 10 } },
+              el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
+                field('appId', appId, setAppId, 'cli_0123456789abcdef'),
+                secretSource === 'env'
+                  ? field('secret 环境变量名', secretEnv, setSecretEnv, 'LARK_APP_SECRET')
+                  : field('keychain handle', secretHandle, setSecretHandle, 'lark-app-secret'),
+                field('account', account, setAccount, '保留当前 owner'),
+                field('tenant', tenant, setTenant, '保留当前 owner')),
+              el('div', { style: actionsStyle },
+                el('button', { style: btn(primaryButtonStyle), disabled: busy,
+                  onClick: () => {
+                    const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                    void ctrl.run(() => remote.configureFeishu(appId, refs.appSecretEnv, refs.credentialHandle, account, tenant, false))
+                  } }, '应用配置'),
+                el('button', { style: btn(), disabled: busy,
+                  onClick: () => {
+                    const refs = feishuSecretRefs(secretSource, secretEnv, secretHandle)
+                    void ctrl.run(() => remote.configureFeishu('', refs.appSecretEnv, refs.credentialHandle, account, tenant, true))
+                  } }, '一键配置（从 Host 环境探测 appId）')),
+              el('p', { style: hintStyle },
+                '这里配置的是 lark-channel 通道；secret 引用模式下明文不入配置。'))] : []))
 
   return card('远程接入（飞书）', feishuRows, feishuActions)
 }

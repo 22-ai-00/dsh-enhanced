@@ -49,7 +49,7 @@ Host 侧的 `typert` 与 Web 侧的 `react` 由 DSH 提供。安装后左侧栏�
 | 自主能力一键开启向导（`AutonomyWizardCard`） | 基于当前激活的 Web 或飞书 owner 路由，一键授权、切换档位（`conservative` / `balanced` / `custom`）、选择默认模型或 `traex-agent` / `agy-agent` 路由并生成三权分立授权，或执行安全暂停（做梦保持 `enabled: true` + `retired: true`，成长安全关闭含子开关）与停用 | `autonomySetupStatus` + `configureAutonomySetup`（读只读 SQLite 与原子备份写 `cordis.patch.yml`） |
 | 版本与自助升级（`SelfUpgradeCard`） | 检查当前包与 Host 版本及在线/离线最新可用版，预览升级计划（`--dry-run`），在受控 Linux systemd 下阻断应用内热改并给出 CLI 命令，在本地/macOS 二次确认后以后台无 shell 进程启动 `dsh-rsi upgrade --yes` | `checkSelfUpgrade` + `dryRunSelfUpgrade` + `runSelfUpgrade`（`src/upgrade-probe.ts`） |
 | 编程工具与默认模型 | `traex-acp-provider` 条目中的 TraeX (`traex-agent`) 与 Antigravity (`agy-agent`) 开关/命令、`agent-default-model` 默认路由切换、无交互本机 CLI 就绪探测与修复提示 | `settings.describe` + `agentDefaultModel` + `llm` + `probeCodingTool` |
-| 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；两种对接：直接填写 appId + secret 引用，或从 Host 环境一键探测 appId | `settings.describe` + `larkChannel.health()` |
+| 远程接入（飞书） | 接入方式、`lark-channel` 条目、连接状态（`larkChannel.health()` 快照）、appId 是否配置；支持一键官方扫码接入授权（RFC 8628 设备授权，自动加密存入系统凭据库并同步通道/消息策略）、手动输入凭据入库、环境变量引用或 keychain handle 引用 | `settings.describe` + `larkChannel.health()` + `startFeishuQrOnboarding` / `feishuQrOnboardingStatus` / `cancelFeishuQrOnboarding` |
 | 自主做梦想法（Dreaming） | `assistant-dreaming` 运行健康与额度、想法列表（`recorded` / `acknowledged` / `validated` / `rejected` / `retired`）及主人授权流转（确认 / 验证 / 拒绝 / 休眠） | `assistantDreaming`（结构化读取，可缺省） |
 | 主动准备与工作项 | `assistant-proactive` 未验证草稿（接受 / 拒绝 / 取消）、WP22 主人注意力放宽请求（仅本次授权 / 拒绝）及 `assistant-work-items` `observe` / `would-admit` 观察队列 | `assistantProactive` + `assistantWorkItems`（+ `assistantEvaluation` 回退，可缺省） |
 | 成长与记忆学习 | `assistant-memory-learning` 剩余额度/授权可用性、`assistant-growth-driver` 最近唤醒、`usageHealth` 与 `dreamingIntake` 统计 | `assistantMemoryLearning` + `assistantGrowthDriver`（可缺省） |
@@ -67,29 +67,34 @@ composer 由 DSH 的会话骨架自己滚动。飞书「连接」行读取
 连接中 / 重连中 / 未连接 / 已停用）与枚举内的最近错误码；没有该 service 显示「未加载」，service
 存在但 health 抛错、缺失或返回未知值显示「已加载，状态未知」，不会推断为已连接。
 
-### 飞书两种对接方式（配置的是 lark-channel 通道）
+### 飞书接入方式（配置的是 lark-channel 通道）
 
 面板配置的对象是 **`lark-channel` 通道条目**，不是 lark-cli。lark-cli 只是一个可随时安装/配置的
 独立 skill，不属于本插件的依赖，也不是必选项；系统里可能已经有它，但本插件既不调用、不探测它的路径，
 也不管理它的安装。
 
-1. **直接配置**：填写 `appId`（`cli_` + 16 位十六进制），先选 secret 引用方式（单选），点「应用配置」：
-   - 环境变量名：secret 留在 Host 进程环境里；
-   - keychain handle：secret 由 `credentials-keychain` 持有。
-   可选 account/tenant 留空时沿用条目现值，不静默改身份。
-2. **一键配置**：Host 进程环境里已有 `LARK_APP_ID` 或 `FEISHU_APP_ID`（或本插件配置的默认 appId）时，
-   点一个按钮即用探测到的 appId 写入同一份通道配置。环境变量可以由任何方式提供（shell、launchd、
-   或你自己安装的 lark-cli skill），本插件只读取环境，不执行外部 CLI。
+1. **一键扫码接入（推荐，与安装脚本 `dsh-lark-setup` 同协议）**：
+   - 点击「一键生成飞书扫码授权」后，Host 侧向飞书官方 OAuth 2.0 Device Authorization（RFC 8628）端点
+     `https://accounts.feishu.cn/oauth/v1/app/registration`（国际版 `accounts.larksuite.com`）发起 `action=begin`，
+     校验返回的官方 `*.feishu.cn` / `*.larksuite.com` 授权链接并附带与 `dsh-lark-setup` 相同的增量权限/事件/回调参数
+     （`im:message.*`、`im:resource`、`im.message.receive_v1`、`card.action.trigger`，可选预设权限与日历只读及已有 `clientID`），
+     在 Host 侧使用 `qrcode` 生成内联 SVG 二维码返回浏览器展示（同时提供直接打开与复制链接按钮）。
+   - Host 侧后台按 RFC 8628 间隔轮询 `action=poll`（支持 `slow_down` 退避与国际版 `tenant_brand: 'lark'` 自动切域，插件卸载或用户取消时立即通过 Cordis effect 中止）；
+     `device_code` 与 `client_secret` 始终留在 Host 内存中，绝不回传浏览器、日志或 YAML。
+   - 扫码确认后自动将 `client_secret` 加密存入系统凭据库（macOS Keychain `/usr/bin/security` 或 Linux `0o600` 受保护文件），
+     原子写入 `credentials-keychain` handle、`lark-channel` 配置与 `assistantPolicy` 凭据/消息/工具规则（重扫同一账号时保留主人已自定义或收紧的工具/能力策略；若 YAML 写入失败自动回滚本次新建凭据）；若飞书返回扫码用户的 `open_id` 且
+     `assistant-delivery` SQLite 已存在，则在空闲库中绑定为 `owner` 或在已有活跃主人时以 `linked` 关联接入（`linked` 支持普通私聊，`/permission`、`/model`、审批卡片与自主授权仍锚定在现有主主人；切换主主人或在已有自主授权时更换应用需使用 `dsh-lark-setup`）。
+2. **手动填入凭据**：填写 `appId`（`cli_` + 16 位十六进制）与 `App Secret`，在 Host 内存直接加密写入本机凭据库并签发访问策略，配置文件零明文。
+3. **环境变量 / keychain handle 引用配置**：填写 `appId` 或从 Host 环境探测 `LARK_APP_ID` / `FEISHU_APP_ID`，仅写入环境变量名或已有 keychain handle 引用。
 
-写入通过 Host `settings.mutate` 的显式 set/unset + `secretSource` 判别字段完成，并重启 `lark-channel`
-条目让通道按新配置重建；`restart-required` 视为已持久化并提示重启，校验拒绝保持红色告警。
-secret 明文永不进入配置、日志或本插件。
+扫码与手动入库模式采用原子备份写 `cordis.patch.yml`（绝不在进程内触发 `settings.mutate` 协调或热重载 `credentials-keychain` / `personal-assistant` / `lark-channel`），保存后显式提示重启一次 profile（重启 `DeepSeek Harness.app` 或运行 `dsh-rsi restart`）以干净加载新凭据句柄、策略与 WebSocket 长连接；环境变量 / 既有 handle 引用模式仍走 Host `settings.mutate` 的显式 set/unset + `secretSource` 判别字段，校验拒绝保持红色告警。
+secret 明文永不进入 `cordis.patch.yml`、日志或浏览器状态。
 
 卡片按实际状态给出下一步，状态由 `bundles[].enabled` 与 `plugins[].fiberPhase` 判定，不再把
 “条目不在 `settings.describe()` 里”一律当成未启用：
 
-- 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，会先补装激活所需的
-  同伴 bundle `@dsh-enhanced/assistant-delivery`，再装该包及其 pnpm 依赖）；
+- 未安装：显示「安装 lark-channel」（走 Host pluginManager 的 pnpm 安装，会先补装激活与加密入库所需的
+  同伴 bundle `@dsh-enhanced/assistant-delivery`、`@dsh-enhanced/credentials-keychain`，再装该包及其 pnpm 依赖）；
 - 已安装但 bundle 未启用：显示「启用 lark-channel」；
 - 已启用但 fiber 为 pending / failed / 无条目：显示「已启用，等待依赖服务 / 已启用但加载失败 /
   已启用，但 Loader 没有条目」，附 fiber 阶段、诊断、缺少的 companion 服务（及对应要安装的
@@ -183,7 +188,8 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   `cordis.patch.yml`，按 `0o600` 权限创建时间戳备份并以临时文件+原子重命名更新 `cordis.patch.yml`
   （保留无关配置与 `!!js` 表达式；拒绝符号链接、拒绝 `~/.dsh` 越界数据库路径，绝不绕过
   `assistantPolicy` 有限预算与三权分立）。**只读成长计分卡**（`growthReport` / `src/growth-report.ts`）仅调用宿主只读检查方法并在存在 `$DSH_HOME` 内已配置的 `personal-memory` / `preference-learning` SQLite 文件时以 `readOnly: true`（拒绝符号链接与越界路径）统计记忆与偏好暴露计数，不创建数据库、不写 WAL 且不改变任何 schema。
-- **子进程、网络与版本检查边界**（`src/probes.ts`、`src/upgrade-probe.ts`）：
+- **子进程、网络与凭据边界**（`src/probes.ts`、`src/upgrade-probe.ts`、`src/feishu-qr-onboarding.ts`、`src/doctor-repair.ts`）：
+  - **飞书官方扫码授权与凭据入库**（`startFeishuQrOnboarding` / `feishuQrOnboardingStatus` / `cancelFeishuQrOnboarding` / `configureFeishuEasy`）：仅在主人显式点击后由 Host 侧通过 HTTPS POST 访问 `https://accounts.feishu.cn/oauth/v1/app/registration`（及国际版自动切域后的 `https://accounts.larksuite.com/oauth/v1/app/registration`），严格校验返回的授权链接属于 `*.feishu.cn` / `*.larksuite.com`；`device_code` 与 `client_secret` 仅存在于 Host 瞬态内存中，经 `/usr/bin/security`（macOS Keychain）或 `$DSH_HOME/credentials-keychain/*.secret`（Linux `0o600` 原子写入且拒绝符号链接）持久化；受控 Linux systemd 冻结实例拒绝在线改写凭据与策略；插件卸载时通过 Cordis effect 立即中止轮询。
   - 本机编程 CLI 就绪探测仅在主人显式触发时执行无 shell（`execFile`）只读命令（`traex login status`
     或 `agy --version` + `agy models`），传递最小环境变量白名单、有限超时与 15 秒缓存；绝不触发模型推理。
   - **版本检查与自助升级**（`checkSelfUpgrade` / `dryRunSelfUpgrade` / `runSelfUpgrade`）：严格只读读取
@@ -217,14 +223,14 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
 并断言侧栏标签为「文鳐」、main 槽根容器填满固定高度、产物内联 4 个 webp、包含专属控制条与 `/model` 下拉标识且不含外部图片 URL。
 因此该测试依赖先运行 `pnpm --dir plugins/owner-console build`（根检查与 `pnpm check` 均先构建）。
 `tests/coding-tools-service.spec.ts`、`tests/autonomy-service.spec.ts` 与 `tests/model-catalog.spec.ts` 覆盖 `agy` 配置、`/model` 目录聚合（超时隔离/休眠回退/写后缓存失效）、文鳐会话严格作用域系统提示隔离、级联下拉筛选、默认路由切换、无交互 CLI 探测以及 Dreaming / Proactive / WP22 / WorkItems / MemoryLearning / GrowthDriver 读写入契约与 fail-closed 降级；`tests/growth-report.spec.ts` 覆盖只读成长计分卡；`tests/settings-slots.spec.ts` 与 `tests/doctor-ui.spec.ts` 在 jsdom 中渲染设置分组、通用设置行、模型设置卡片与 6 个插件详情槽。
-`tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：专属助手对话窗口（Markdown 渲染、工作区/能力胶囊、新对话、模型切换、`SessionFace.prompt` 发送、附件上传、语音识别/权限切换）、`OwnerConsoleConversation` 子槽相位计算以及齿轮打开设置页/返回对话。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
+`tests/chat-dom.spec.ts` 在 jsdom 中真实挂载 React DOM，覆盖：专属助手对话窗口（GFM 表格/代码块 Markdown 渲染、macOS 顶栏避让、工作区/能力元信息、新对话、紧凑内嵌 `/model` 模型切换与缓冲自定义模型、`SessionFace.prompt` 发送、附件上传、语音识别/权限切换）、`OwnerConsoleConversation` 子槽相位计算以及齿轮打开设置页/返回对话；`tests/feishu-qr-onboarding.spec.ts` 与 `tests/feishu-qr-ui.spec.ts` 覆盖飞书官方扫码授权协议（`begin`/`poll`/切域/竞态/凭据脱敏与回滚）及设置卡片交互。`tests/chat.spec.ts` 覆盖事件折叠、工具状态、会话创建/复用/过期、上传失败、权限标签等纯函数。`jsdom` / `react-dom` / `@types/react-dom` 只作为测试 devDependencies，不进入客户端产物。
 `tests/client-render.spec.ts` 不依赖 DOM，桩掉 React hooks 后展开设置页元素树，断言页头品牌、
 02 水墨化鹏主视觉/面板背景/印章/侧栏图标均为纯装饰（`alt=""` + `aria-hidden`）、状态胶囊带文字
 标签与空状态文案。
 
 ## 界面布局
 
-- **文鳐专属对话窗口**：顶部栏（圆形化鹏标、标题「文鳐 Ray」、会话状态与工作区/记忆/Wiki/飞书胶囊、「新对话」与 ⚙）、控制栏（同 `/model` 级联模型与 Effort 选择、权限切换）、主对话流（欢迎卡片 + 推荐开场白、Markdown 气泡 + 复制按钮、工具胶囊）与底部 composer（附件、语音、朗读、停止、发送）。
+- **文鳐专属对话窗口**：遵循 Codex / DeepSeek 官方紧凑布局与 Apple 设计理念——顶部为单行 `48px` 毛玻璃标题栏（支持 `data-window-drag` 与 macOS `--dsh-frame-leading-clearance` 避让，含化鹏标、「文鳐 Ray」、状态点与精简元信息、右上角「+ 新对话」与 ⚙）；中部为无框通透阅读画布（居中欢迎卡片 + 2×2 推荐开场白、无框对齐用户气泡、全宽 Markdown/GFM 表格助手回复、回底悬浮按钮）；底部为单一悬浮 Composer 底座（柔和顶缘渐隐，内嵌边框归零输入框与单行紧凑工具栏：`+` 附件、权限芯片、`/model` 级联路由/模型/Effort、语音、朗读及圆形主发送/停止钮），字号联动 `--dsh-content-font-size`。
 - **设置页与 DSH 设置弹窗共用分类卡片组（`SettingsCardsDeck`）**：支持「全部 / 体检自愈 / 模型与工具 / 自主与成长 / 飞书与插件 / 只读诊断」分组切换；共用 `--dsw-*` 样式与 `ModelRouteSelects`、CLI 路径下拉选择器。
 - 两个视图共用同一套背景：02 水墨化鹏宽幅图以低透明度铺在面板表面、内容之下，明暗主题对比度不变；颜色只取宿主 `--dsw-*` 变量并带回退值。
 

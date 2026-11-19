@@ -3,16 +3,16 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Document, isMap, isSeq, Scalar, YAMLMap, YAMLSeq } from 'yaml'
+import { Document, isMap, isScalar, isSeq, Scalar, YAMLMap, YAMLSeq } from 'yaml'
 import {
-  boundedConfig, findEntry, hasControlChars, isAppId, isSingleLineCommand,
+  findEntry, hasControlChars, isAppId,
   type PluginManagerService, type SettingsDescriptor, type SettingsService,
 } from './settings.js'
 import { type CodingToolId, type CodingToolProber } from './probes.js'
 import type {
-  OwnerConsoleStatus, OwnerConsoleWriteResult, SetupDoctorIssue, SetupDoctorReport,
+  FeishuQrOwnerBinding, OwnerConsoleStatus, OwnerConsoleWriteResult, SetupDoctorIssue, SetupDoctorReport,
 } from './typert.js'
 import { detectFrozenSystemdProfile } from './upgrade-probe.js'
 import {
@@ -142,7 +142,20 @@ const CREDENTIALS_KEYCHAIN_DEFAULTS: Readonly<Record<string, unknown>> = {
   handles: [],
 }
 
-const ACCOUNT_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,40}$/u
+const SETUP_KEY_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const KEYCHAIN_LOCATOR_TOKEN = /^[A-Za-z0-9][A-Za-z0-9/._-]{0,127}$/u
+const PRESET_ID_TOKEN = /^[a-z0-9][a-z0-9-]*$/u
+const DSH_HOME_EXPR = /^dshHomePath\(\s*(['"])([A-Za-z0-9._/-]+)\1\s*\)$/u
+const LARK_OPEN_ID_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+export const PLACEHOLDER_LARK_APP_ID = 'cli_0000000000000000'
+export const PLACEHOLDER_LARK_TENANT = 'replace-with-tenant-key'
+
+const LARK_APPROVAL_SOURCES = [
+  'dsh-enhanced-personal-memory',
+  'dsh-enhanced-personal-wiki',
+  'dsh-enhanced-assistant-automations',
+  'dsh-enhanced-assistant-evolution',
+] as const
 
 function jsDshHomeScalar(relPath: string): Scalar {
   const node = new Scalar(`dshHomePath('${relPath}')`)
@@ -163,7 +176,7 @@ function setMissingMapDefaults(doc: Document, target: YAMLMap, defaults: Readonl
       continue
     }
     if (existing === undefined) {
-      target.set(key, doc.createNode(val))
+      target.set(key, doc.createNode(val, { aliasDuplicateObjects: false }))
     }
   }
 }
@@ -1090,21 +1103,68 @@ export type EasySecretLocator =
   | Readonly<{ provider: 'linux-protected-file'; path: string }>
 
 export type StoreSecretFn = (locator: EasySecretLocator, secret: string) => Promise<void>
+export type DeleteSecretFn = (locator: EasySecretLocator) => Promise<void>
+
+export function redactVaultSecret(text: string, secret: string): string {
+  if (secret === '') return text
+  const hexLower = Buffer.from(secret, 'utf8').toString('hex')
+  const hexUpper = hexLower.toUpperCase()
+  let out = text.split(secret).join('[REDACTED]')
+  if (hexLower.length >= 8) {
+    out = out.split(hexLower).join('[REDACTED]')
+    if (hexUpper !== hexLower) out = out.split(hexUpper).join('[REDACTED]')
+  }
+  return out
+}
+
+function resolveDeliveryWorkspacePath(
+  patchNode: unknown,
+  runtimeValue: unknown,
+  canonicalHome: string,
+): string {
+  const tryJsExpr = (raw: string): string | null => {
+    const match = DSH_HOME_EXPR.exec(raw.trim())
+    if (match === null) return null
+    const rel = match[2]!
+    if (rel.startsWith('/') || rel.split('/').some(part => part === '' || part === '.' || part === '..')) return null
+    return join(canonicalHome, rel)
+  }
+  if (isScalar(patchNode) && patchNode.tag === 'tag:yaml.org,2002:js' && typeof patchNode.value === 'string') {
+    const resolved = tryJsExpr(patchNode.value)
+    if (resolved !== null) return resolved
+  }
+  const patchStr = isScalar(patchNode) ? strOrNull(patchNode.value) : strOrNull(patchNode)
+  if (patchStr !== null) {
+    const exprResolved = tryJsExpr(patchStr)
+    if (exprResolved !== null) return exprResolved
+    if (isAbsolute(patchStr) && !patchStr.includes('*') && !patchStr.includes('\0')) return patchStr
+  }
+  const runtimeStr = strOrNull(runtimeValue)
+  if (runtimeStr !== null && isAbsolute(runtimeStr) && !runtimeStr.includes('*') && !runtimeStr.includes('\0')) {
+    return runtimeStr
+  }
+  return join(canonicalHome, 'assistant-workspace')
+}
 
 async function defaultStoreSecretFn(locator: EasySecretLocator, secret: string): Promise<void> {
   if (locator.provider === 'macos-keychain') {
+    if (!KEYCHAIN_LOCATOR_TOKEN.test(locator.service) || !KEYCHAIN_LOCATOR_TOKEN.test(locator.account)) {
+      throw new Error('钥匙串标识格式无效，拒绝写入')
+    }
     const hex = Buffer.from(secret, 'utf8').toString('hex')
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const child = nodeExecFile('/usr/bin/security', ['-i'], {
         timeout: 10_000,
+        env: { PATH: '/usr/bin:/bin' },
         windowsHide: true,
-      }, (error, _stdout, stderr) => {
+      }, (error) => {
         if (error) {
-          rejectPromise(new Error(`写入 macOS 钥匙串失败：${stderr.trim() || error.message}`))
+          rejectPromise(new Error('写入 macOS 钥匙串失败（请确认登录钥匙串已解锁并允许访问）'))
           return
         }
         resolvePromise()
       })
+      child.stdin?.on('error', () => { /* ignore EPIPE if security exits early */ })
       child.stdin?.end(`add-generic-password -U -a ${locator.account} -s ${locator.service} -X ${hex}\n`)
     })
     return
@@ -1112,6 +1172,10 @@ async function defaultStoreSecretFn(locator: EasySecretLocator, secret: string):
 
   const dir = dirname(locator.path)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const dirStat = lstatSync(dir)
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+    throw new Error('凭据目录不是普通目录，拒绝写入')
+  }
   chmodSync(dir, 0o700)
   if (existsSync(locator.path)) {
     const st = lstatSync(locator.path)
@@ -1130,66 +1194,368 @@ async function defaultStoreSecretFn(locator: EasySecretLocator, secret: string):
   }
 }
 
+async function defaultDeleteSecretFn(locator: EasySecretLocator): Promise<void> {
+  if (locator.provider === 'macos-keychain') {
+    if (!KEYCHAIN_LOCATOR_TOKEN.test(locator.service) || !KEYCHAIN_LOCATOR_TOKEN.test(locator.account)) {
+      throw new Error('钥匙串标识格式无效，拒绝删除')
+    }
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const child = nodeExecFile('/usr/bin/security', ['-i'], {
+        timeout: 10_000,
+        env: { PATH: '/usr/bin:/bin' },
+        windowsHide: true,
+      }, (error, _stdout, stderr) => {
+        if (error) {
+          const code = (error as { code?: unknown }).code
+          const missingMsg = typeof stderr === 'string' && /(?:could not be found|not found|no matching|no such)/iu.test(stderr)
+          if (code === 44 || missingMsg) {
+            resolvePromise()
+            return
+          }
+          rejectPromise(new Error('清理 macOS 钥匙串凭据失败'))
+          return
+        }
+        resolvePromise()
+      })
+      child.stdin?.on('error', () => { /* ignore EPIPE if security exits early */ })
+      child.stdin?.end(`delete-generic-password -a ${locator.account} -s ${locator.service}\n`)
+    })
+    return
+  }
+
+  try {
+    const st = lstatSync(locator.path)
+    if (st.isSymbolicLink() || !st.isFile()) return
+    unlinkSync(locator.path)
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return
+    }
+    throw error
+  }
+}
+
 export interface ConfigureFeishuEasyInput {
   readonly host: AutonomyHostContext
   readonly descriptors: readonly SettingsDescriptor[]
-  readonly settings: SettingsService | undefined
+  readonly settings?: SettingsService | undefined
   readonly reloadEntry?: (entryId: string) => Promise<string>
   readonly appId: string
   readonly appSecret: string
   readonly account: string
   readonly tenant: string
+  readonly domain?: 'feishu' | 'lark'
+  readonly ownerOpenId?: string
   readonly platform?: NodeJS.Platform
   readonly env?: NodeJS.ProcessEnv
   readonly now?: number
   readonly storeSecretFn?: StoreSecretFn
+  readonly deleteSecretFn?: DeleteSecretFn
 }
 
-/** Foolproof Feishu setup: accepts App Secret in memory, seals it in OS vault, wires keychain handle & policy. */
-export async function configureFeishuEasy(input: ConfigureFeishuEasyInput): Promise<OwnerConsoleWriteResult> {
+export interface ApplyFeishuVaultResult extends OwnerConsoleWriteResult {
+  readonly ownerBinding: FeishuQrOwnerBinding
+  readonly domain: 'feishu' | 'lark'
+}
+
+function authorizeLarkPrincipalInDeliverySqlite(
+  dbPath: string,
+  principal: Readonly<{ channel: 'lark'; account: string; tenant: string; user: string }>,
+  now: number,
+): FeishuQrOwnerBinding {
+  if (!existsSync(dbPath)) return 'unmodified'
+  let rwDb: DatabaseSync | undefined
+  let inTx = false
+  try {
+    const st = lstatSync(dbPath)
+    if (st.isSymbolicLink() || !st.isFile()) return 'unmodified'
+    const json = JSON.stringify({
+      channel: principal.channel,
+      account: principal.account,
+      tenant: principal.tenant,
+      user: principal.user,
+    })
+    const hash = createHash('sha256').update(json, 'utf8').digest('hex')
+    const ts = Math.max(0, Math.trunc(now))
+    rwDb = new DatabaseSync(dbPath)
+    rwDb.exec('PRAGMA busy_timeout = 5000;')
+    rwDb.exec('PRAGMA foreign_keys = ON;')
+    const tbl = rwDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='delivery_principals'`).get() as { name?: unknown } | undefined
+    if (tbl?.name !== 'delivery_principals') return 'unmodified'
+
+    rwDb.exec('BEGIN IMMEDIATE;')
+    inTx = true
+    const existing = rwDb.prepare(
+      `SELECT id, role, status, linked_to_id, principal_json FROM delivery_principals WHERE key_hash = ?`,
+    ).get(hash) as Readonly<{
+      id?: unknown
+      role?: unknown
+      status?: unknown
+      linked_to_id?: unknown
+      principal_json?: unknown
+    }> | undefined
+    const activeOwners = rwDb.prepare(
+      `SELECT id FROM delivery_principals WHERE role = 'owner' AND status = 'active' ORDER BY id LIMIT 2`,
+    ).all() as ReadonlyArray<{ id?: unknown }>
+    const singleOwnerId = activeOwners.length === 1 && typeof activeOwners[0]?.id === 'string'
+      ? activeOwners[0].id
+      : null
+
+    let outcome: FeishuQrOwnerBinding = 'unmodified'
+    if (existing !== undefined) {
+      if (existing.principal_json === json && existing.status === 'active') {
+        if (existing.role === 'owner') {
+          outcome = 'reused-owner'
+        } else if (
+          existing.role === 'linked'
+          && existing.linked_to_id === null
+          && typeof existing.id === 'string'
+          && singleOwnerId !== null
+        ) {
+          rwDb.prepare(
+            `UPDATE delivery_principals SET linked_to_id = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+          ).run(singleOwnerId, ts, existing.id)
+          outcome = 'linked-to-owner'
+        } else {
+          outcome = 'reused-linked'
+        }
+      } else if (
+        existing.principal_json === json
+        && existing.role === 'linked'
+        && existing.status === 'revoked'
+        && typeof existing.id === 'string'
+        && singleOwnerId !== null
+      ) {
+        rwDb.prepare(
+          `UPDATE delivery_principals SET status = 'active', linked_to_id = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        ).run(singleOwnerId, ts, existing.id)
+        outcome = 'linked-to-owner'
+      } else if (
+        existing.principal_json === json
+        && existing.role === 'owner'
+        && existing.status === 'revoked'
+        && typeof existing.id === 'string'
+        && activeOwners.length === 0
+      ) {
+        rwDb.prepare(
+          `UPDATE delivery_principals SET status = 'active', linked_to_id = NULL, updated_at = ?, version = version + 1 WHERE id = ?`,
+        ).run(ts, existing.id)
+        outcome = 'bound-owner'
+      }
+    } else if (activeOwners.length === 0) {
+      rwDb.prepare(
+        `INSERT INTO delivery_principals (id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version)
+         VALUES (?, ?, ?, 'owner', 'active', NULL, ?, ?, 1)`,
+      ).run(`principal_${randomUUID()}`, hash, json, ts, ts)
+      outcome = 'bound-owner'
+    } else if (singleOwnerId !== null) {
+      rwDb.prepare(
+        `INSERT INTO delivery_principals (id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version)
+         VALUES (?, ?, ?, 'linked', 'active', ?, ?, ?, 1)`,
+      ).run(`principal_${randomUUID()}`, hash, json, singleOwnerId, ts, ts)
+      outcome = 'linked-to-owner'
+    }
+    rwDb.exec('COMMIT;')
+    inTx = false
+    return outcome
+  } catch {
+    if (rwDb !== undefined && inTx) {
+      try { rwDb.exec('ROLLBACK;') } catch { /* ignore rollback error */ }
+    }
+    return 'unmodified'
+  } finally {
+    rwDb?.close()
+  }
+}
+
+function buildLarkOwnerPolicyRules(input: Readonly<{
+  account: string
+  principalId: string
+  workspace: string
+  preset: string
+  existingRules?: unknown
+}>): readonly Record<string, unknown>[] {
+  const existingList = Array.isArray(input.existingRules) ? input.existingRules.map(asPlainRecord) : []
+  const hasIngressForPrincipal = existingList.some(rule =>
+    rule['id'] === `lark-owner-ingress-${input.account}`
+    && asPlainRecord(rule['subject'])['id'] === input.principalId)
+  const existingReplyRule = existingList.find(rule => rule['id'] === `lark-owner-reply-${input.account}`)
+  const existingReplyPrincipal = existingReplyRule === undefined
+    ? undefined
+    : asPlainRecord(existingReplyRule['subject'])['principal']
+  const hasExistingOwnerBinding = hasIngressForPrincipal
+    && (existingReplyRule === undefined || existingReplyPrincipal === undefined || existingReplyPrincipal === input.principalId)
+
+  const shouldPreserveExistingRule = (ruleId: string): boolean => {
+    const existingRule = existingList.find(rule => rule['id'] === ruleId)
+    if (existingRule === undefined) return hasExistingOwnerBinding
+    const rulePrincipal = asPlainRecord(existingRule['subject'])['principal']
+    if (rulePrincipal === input.principalId) return true
+    if (rulePrincipal === undefined) {
+      return existingRule['effect'] === 'deny' || hasExistingOwnerBinding
+    }
+    return false
+  }
+
+  const makeAgentSubject = () => ({
+    kind: 'agent',
+    id: input.preset,
+    workspace: input.workspace,
+    principal: input.principalId,
+  })
+  const capabilityRuleId = `lark-owner-capability-*-${input.account}`
+  const toolRuleId = `lark-owner-tool-*-${input.account}`
+  const rules: Record<string, unknown>[] = [
+    {
+      id: `lark-owner-ingress-${input.account}`,
+      effect: 'allow',
+      subject: { kind: 'external', id: input.principalId },
+      actions: ['approval.decide', 'ingest'],
+      resource: { kind: 'message', id: '*' },
+      context: { initiators: ['external'] },
+    },
+    {
+      id: `lark-owner-reply-${input.account}`,
+      effect: 'allow',
+      subject: makeAgentSubject(),
+      actions: ['reply'],
+      resource: { kind: 'message', id: '*' },
+      context: { initiators: ['external'] },
+    },
+  ]
+  // Preserve owner-customized capability/tool restrictions (including deny rules, legacy unscoped rules, and disabled tools) on re-scan for the same principal.
+  if (!shouldPreserveExistingRule(capabilityRuleId)) {
+    rules.push({
+      id: capabilityRuleId,
+      effect: 'allow',
+      subject: makeAgentSubject(),
+      actions: ['*'],
+      resource: { kind: '*', id: '*' },
+      context: { initiators: ['external'] },
+    })
+  }
+  if (!shouldPreserveExistingRule(toolRuleId)) {
+    rules.push({
+      id: toolRuleId,
+      effect: 'allow',
+      subject: makeAgentSubject(),
+      actions: ['execute'],
+      resource: { kind: 'tool', id: '*' },
+      context: { initiators: ['external'] },
+    })
+  }
+  rules.push(
+    ...LARK_APPROVAL_SOURCES.map(sourceId => ({
+      id: `lark-owner-approval-${sourceId}-${input.account}`,
+      effect: 'allow',
+      subject: {
+        kind: 'background',
+        id: sourceId,
+        workspace: input.workspace,
+        principal: input.principalId,
+      },
+      actions: ['approval.send'],
+      resource: { kind: 'message', id: '*' },
+      context: { initiators: ['background'] },
+    })),
+    {
+      id: `lark-owner-preference-signal-${input.account}`,
+      effect: 'allow',
+      subject: {
+        kind: 'external',
+        id: input.principalId,
+        workspace: input.workspace,
+      },
+      actions: ['signal'],
+      resource: { kind: 'preference', id: `${input.preset}/*` },
+      context: { initiators: ['external'] },
+    },
+    {
+      id: `lark-owner-preference-snapshot-${input.account}`,
+      effect: 'allow',
+      subject: makeAgentSubject(),
+      actions: ['snapshot'],
+      resource: { kind: 'preference', id: 'active' },
+      context: { initiators: ['external'] },
+    },
+  )
+  return rules
+}
+
+function ownerBindingNote(binding: FeishuQrOwnerBinding, openId: string | undefined): string {
+  if (openId === undefined) return ''
+  switch (binding) {
+    case 'bound-owner':
+      return `已自动绑定飞书主主人身份（${openId}）并写入消息与工具策略`
+    case 'reused-owner':
+      return `已沿用现有飞书主主人身份（${openId}）并同步消息与工具策略`
+    case 'linked-to-owner':
+      return `已将扫码飞书账号（${openId}）以关联身份（linked）接入当前主主人账户：普通私聊可用，但 /permission、/model、审批卡片与自主授权仍归属现有主主人（切换主主人或已有自主授权时更换应用请运行 dsh-lark-setup）`
+    case 'reused-linked':
+      return `已沿用关联飞书账号（${openId}，linked）：普通私聊可用，但 /permission、/model、审批卡片与自主授权仍归属现有主主人（切换主主人或已有自主授权时更换应用请运行 dsh-lark-setup）`
+    case 'unmodified':
+      return `已写入飞书账号（${openId}）的消息与工具策略（Delivery 身份表未改写，如需初始化或切换主主人请重启 profile 后检查或运行 dsh-lark-setup）`
+    default:
+      return ''
+  }
+}
+
+/** Foolproof Feishu setup: accepts App Secret in memory, seals it in OS vault, wires keychain handle, policy, and optional QR owner authorization. */
+export async function applyFeishuVaultConfig(input: ConfigureFeishuEasyInput): Promise<ApplyFeishuVaultResult> {
   const platform = input.platform ?? process.platform
   const env = input.env ?? process.env
   const now = input.now ?? Date.now()
+  const resolvedDomain: 'feishu' | 'lark' = input.domain === 'lark' ? 'lark' : 'feishu'
   const paths = resolveProfilePaths(input.host, env)
   if (detectFrozenSystemdProfile(paths.dshHome, paths.profileName, platform, env)) {
     return Object.freeze({
       applied: false,
       entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
       note: '当前为受控 Linux systemd 冻结实例，拒绝在线改写系统凭据或通道策略。',
     })
   }
 
   const resolvedAppId = input.appId.trim()
-  if (!isAppId(resolvedAppId)) {
-    return Object.freeze({ applied: false, entry: 'dsh-enhanced-lark-channel', note: 'App ID 必须形如 cli_0123456789abcdef' })
+  if (!isAppId(resolvedAppId) || resolvedAppId === PLACEHOLDER_LARK_APP_ID) {
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
+      note: 'App ID 必须形如 cli_0123456789abcdef',
+    })
   }
 
   const secret = input.appSecret.trim()
   if (secret === '' || secret.length > 512 || hasControlChars(secret) || /[\r\n]/u.test(secret)) {
-    return Object.freeze({ applied: false, entry: 'dsh-enhanced-lark-channel', note: 'App Secret 不能为空，且须为单行有效文本（最多 512 字符）' })
-  }
-
-  const larkDesc = findEntry(input.descriptors, ns => /(^|[-_/])lark(-channel)?($|[-_/])/u.test(ns))
-  const currentLark = larkDesc ? boundedConfig(larkDesc.value) : {}
-  const resolvedAccount = input.account.trim() !== ''
-    ? input.account.trim()
-    : (strOrNull(currentLark['account']) ?? 'primary')
-  const resolvedTenant = input.tenant.trim() !== ''
-    ? input.tenant.trim()
-    : (strOrNull(currentLark['tenant']) ?? 'personal')
-
-  if (!ACCOUNT_TOKEN.test(resolvedAccount)) {
-    return Object.freeze({ applied: false, entry: 'dsh-enhanced-lark-channel', note: 'account 格式无效（需 1..41 位字母/数字/._@-）' })
-  }
-  if (!ACCOUNT_TOKEN.test(resolvedTenant)) {
-    return Object.freeze({ applied: false, entry: 'dsh-enhanced-lark-channel', note: 'tenant 格式无效（需 1..41 位字母/数字/._@-）' })
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
+      note: 'App Secret 不能为空，且须为单行有效文本（最多 512 字符）',
+    })
   }
 
   if (!paths.writable || paths.patchPath === null || paths.canonicalHome === null) {
     return Object.freeze({
       applied: false,
       entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
       note: '当前 profile 的 cordis.patch.yml 或 DSH_HOME 不可写入，无法保存加密凭据句柄。',
+    })
+  }
+
+  if (!SETUP_KEY_TOKEN.test(paths.profileName)) {
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
+      note: '当前 profile 名称含不受支持的字符，无法安全生成系统凭据句柄。',
     })
   }
 
@@ -1197,7 +1563,58 @@ export async function configureFeishuEasy(input: ConfigureFeishuEasyInput): Prom
     return Object.freeze({
       applied: false,
       entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
       note: `当前系统（${platform}）暂不支持一键写入系统凭据库，请改用「环境变量」或「Keychain Handle」模式。`,
+    })
+  }
+
+  let doc: Document
+  try {
+    doc = readPatchDocument(paths.patchPath)
+  } catch (error: unknown) {
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: resolvedDomain,
+      ownerBinding: 'unmodified' as const,
+      note: `读取 profile 配置失败：${error instanceof Error ? error.message : String(error)}`,
+    })
+  }
+  const seq = doc.contents as YAMLSeq
+
+  const larkDesc = findEntry(input.descriptors, ns => /(^|[-_/])lark(-channel)?($|[-_/])/u.test(ns))
+  const currentLark = mergeDescriptorConfig(
+    input.descriptors,
+    larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
+    getPatchRowConfig(seq, 'dsh-enhanced-lark-channel'),
+  )
+  const existingTenant = strOrNull(currentLark['tenant'])
+  const resolvedAccount = input.account.trim() !== ''
+    ? input.account.trim()
+    : (strOrNull(currentLark['account']) ?? 'primary')
+  const resolvedTenant = input.tenant.trim() !== ''
+    ? input.tenant.trim()
+    : (existingTenant !== null && existingTenant !== PLACEHOLDER_LARK_TENANT ? existingTenant : 'personal')
+  const effectiveDomain: 'feishu' | 'lark' = input.domain
+    ?? (currentLark['domain'] === 'lark' ? 'lark' : 'feishu')
+
+  if (!SETUP_KEY_TOKEN.test(resolvedAccount) || resolvedAccount.includes('-legacy-')) {
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: effectiveDomain,
+      ownerBinding: 'unmodified' as const,
+      note: 'account 格式无效（需 1..64 位字母/数字/._-，且不能包含 -legacy-）',
+    })
+  }
+  if (!SETUP_KEY_TOKEN.test(resolvedTenant)) {
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: effectiveDomain,
+      ownerBinding: 'unmodified' as const,
+      note: 'tenant 格式无效（需 1..64 位字母/数字/._-）',
     })
   }
 
@@ -1213,104 +1630,226 @@ export async function configureFeishuEasy(input: ConfigureFeishuEasyInput): Prom
         path: join(paths.canonicalHome, 'credentials-keychain', `lark-${paths.profileName}-${resolvedAccount}-${versionHex}.secret`),
       }
 
-  const storeFn = input.storeSecretFn ?? defaultStoreSecretFn
-  try {
-    await storeFn(locator, secret)
-  } catch (error: unknown) {
+  if (locator.provider === 'macos-keychain'
+    && (!KEYCHAIN_LOCATOR_TOKEN.test(locator.service) || !KEYCHAIN_LOCATOR_TOKEN.test(locator.account))) {
     return Object.freeze({
       applied: false,
       entry: 'dsh-enhanced-lark-channel',
-      note: `保存 App Secret 到系统凭据库失败：${error instanceof Error ? error.message : String(error)}`,
+      domain: effectiveDomain,
+      ownerBinding: 'unmodified' as const,
+      note: 'profile 名称与 account 组合过长（超过系统凭据库 128 字符服务标识上限），请缩短 account 后重试。',
     })
   }
 
-  const handleId = `lark-${paths.profileName}-${resolvedAccount}`
-  const handleEntry = {
-    id: handleId,
-    provider: locator.provider,
-    ...(locator.provider === 'macos-keychain'
-      ? { service: locator.service, account: locator.account }
-      : { path: locator.path }),
-    consumers: ['dsh-enhanced-lark-channel'],
-    purposes: ['connect'],
-    maxLeaseMs: 86_400_000,
+  const storeFn = input.storeSecretFn ?? defaultStoreSecretFn
+  const deleteFn: DeleteSecretFn | undefined = input.deleteSecretFn
+    ?? (input.storeSecretFn === undefined ? defaultDeleteSecretFn : undefined)
+  try {
+    await storeFn(locator, secret)
+  } catch (error: unknown) {
+    const safeDetail = redactVaultSecret(error instanceof Error ? error.message : String(error), secret)
+    return Object.freeze({
+      applied: false,
+      entry: 'dsh-enhanced-lark-channel',
+      domain: effectiveDomain,
+      ownerBinding: 'unmodified' as const,
+      note: `保存 App Secret 到系统凭据库失败：${safeDetail}`,
+    })
   }
 
-  const doc = readPatchDocument(paths.patchPath)
-  const seq = doc.contents as YAMLSeq
-
-  const kcRow = ensurePatchRow(doc, seq, 'dsh-enhanced-credentials-keychain', '@dsh-enhanced/credentials-keychain')
-  const kcCfg = ensureConfigMap(doc, kcRow, 'config')
-  setMissingMapDefaults(doc, kcCfg, CREDENTIALS_KEYCHAIN_DEFAULTS)
-  const existingHandles = isSeq(kcCfg.get('handles', true)) ? kcCfg.get('handles', true)!.toJSON() : []
-  kcCfg.set('handles', doc.createNode(upsertById(existingHandles, [handleEntry])))
-
-  const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
-  let policyConfigNode: YAMLMap
-  if (layoutInfo.layout === 'split') {
-    const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
-    policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
-  } else {
-    const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
-    const paCfg = ensureConfigMap(doc, paRow, 'config')
-    setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
-    policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
-  }
-  const credentialRule = {
-    id: `lark-channel-credential-${resolvedAccount}`,
-    effect: 'allow',
-    subject: { kind: 'background', id: 'dsh-enhanced-lark-channel' },
-    actions: ['credential.use'],
-    resource: { kind: 'credential', id: handleId },
-    context: { initiators: ['background'] },
-  }
-  const existingRules = isSeq(policyConfigNode.get('rules', true)) ? policyConfigNode.get('rules', true)!.toJSON() : layoutInfo.policyCfg['rules']
-  policyConfigNode.set('rules', doc.createNode(upsertById(existingRules, [credentialRule])))
-
-  const larkRow = ensurePatchRow(doc, seq, 'dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel')
-  const larkCfg = ensureConfigMap(doc, larkRow, 'config')
-  larkCfg.set('enabled', doc.createNode(true))
-  larkCfg.set('appId', doc.createNode(resolvedAppId))
-  larkCfg.set('account', doc.createNode(resolvedAccount))
-  larkCfg.set('tenant', doc.createNode(resolvedTenant))
-  larkCfg.set('secretSource', doc.createNode('handle'))
-  larkCfg.set('credentialHandle', doc.createNode(handleId))
-  larkCfg.delete('appSecretEnv')
-  if (!larkCfg.has('connection') && typeof currentLark['connection'] === 'string' && isSingleLineCommand(currentLark['connection'])) {
-    larkCfg.set('connection', doc.createNode(currentLark['connection']))
-  }
-
-  atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), now)
-
-  if (input.settings !== undefined && larkDesc !== undefined) {
-    try {
-      await input.settings.mutate(larkDesc.ns, [
-        { op: 'set', path: ['enabled'], value: true },
-        { op: 'set', path: ['appId'], value: resolvedAppId },
-        { op: 'set', path: ['account'], value: resolvedAccount },
-        { op: 'set', path: ['tenant'], value: resolvedTenant },
-        { op: 'set', path: ['secretSource'], value: 'handle' },
-        { op: 'set', path: ['credentialHandle'], value: handleId },
-        { op: 'unset', path: ['appSecretEnv'] },
-      ], larkDesc.revision)
-    } catch {
-      // Patch is already written cleanly; reload still helps pick it up.
+  // Match dsh-lark-setup (`setup-profile.ts`) canonical handle id so CLI & GUI stay 100% interoperable.
+  const handleId = `lark-app-secret-${resolvedAccount}`
+  let deliveryDbPath: string | undefined
+  let validOpenId: string | undefined
+  try {
+    const handleEntry = {
+      id: handleId,
+      provider: locator.provider,
+      ...(locator.provider === 'macos-keychain'
+        ? { service: locator.service, account: locator.account }
+        : { path: locator.path }),
+      consumers: ['dsh-enhanced-lark-channel'],
+      purposes: ['connect'],
+      maxLeaseMs: 86_400_000,
     }
-  }
 
-  if (input.reloadEntry !== undefined) {
-    for (const id of [
-      'dsh-enhanced-credentials-keychain',
-      layoutInfo.layout === 'split' ? 'dsh-enhanced-assistant-policy' : 'dsh-enhanced-personal-assistant',
-      larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
-    ]) {
-      try { await input.reloadEntry(id) } catch { /* best-effort live reload */ }
+    const kcRow = ensurePatchRow(doc, seq, 'dsh-enhanced-credentials-keychain', '@dsh-enhanced/credentials-keychain')
+    if (kcRow.get('disabled') === true) kcRow.delete('disabled')
+    const kcCfg = ensureConfigMap(doc, kcRow, 'config')
+    const kcDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-credentials-keychain')
+    const runtimeKcHandles = Array.isArray(asPlainRecord(kcDesc?.value)['handles'])
+      ? asPlainRecord(kcDesc?.value)['handles']
+      : []
+    const existingHandles = isSeq(kcCfg.get('handles', true))
+      ? kcCfg.get('handles', true)!.toJSON()
+      : runtimeKcHandles
+    setMissingMapDefaults(doc, kcCfg, CREDENTIALS_KEYCHAIN_DEFAULTS)
+    kcCfg.set('handles', doc.createNode(upsertById(existingHandles, [handleEntry]), { aliasDuplicateObjects: false }))
+
+    const layoutInfo = getPersonalAndPolicyConfigs(seq, input.descriptors)
+    const hasPaRowOrDesc = findPatchRow(seq, 'dsh-enhanced-personal-assistant') !== undefined
+      || findEntry(input.descriptors, ns => ns === 'dsh-enhanced-personal-assistant') !== undefined
+    const splitPolicyDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-policy')
+    const useSplitPolicy = layoutInfo.layout === 'split' || (!hasPaRowOrDesc && splitPolicyDesc !== undefined)
+    const effectivePolicyCfg = useSplitPolicy
+      ? { ...asPlainRecord(splitPolicyDesc?.value), ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-policy') }
+      : layoutInfo.policyCfg
+
+    let policyConfigNode: YAMLMap
+    let existingRulesBeforeDefaults: unknown
+    if (useSplitPolicy) {
+      const policyRow = ensurePatchRow(doc, seq, 'dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy')
+      policyConfigNode = ensureConfigMap(doc, policyRow, 'config')
+      existingRulesBeforeDefaults = isSeq(policyConfigNode.get('rules', true))
+        ? policyConfigNode.get('rules', true)!.toJSON()
+        : effectivePolicyCfg['rules']
+      // Cordis patch config is a whole-value replacement: restate required databasePath and surviving split-policy keys.
+      const splitPolicyDefaults: Record<string, unknown> = {
+        databasePath: jsRef('assistant-policy/policy.sqlite'),
+        budgets: Array.isArray(effectivePolicyCfg['budgets']) ? effectivePolicyCfg['budgets'] : [],
+      }
+      for (const key of ['proposalMaintenanceIntervalMs', 'toolDefaultEffect', 'autoReview'] as const) {
+        if (effectivePolicyCfg[key] !== undefined) splitPolicyDefaults[key] = effectivePolicyCfg[key]
+      }
+      setMissingMapDefaults(doc, policyConfigNode, splitPolicyDefaults)
+    } else {
+      const paRow = ensurePatchRow(doc, seq, 'dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant')
+      const paCfg = ensureConfigMap(doc, paRow, 'config')
+      const existingPolicyNode = readConfigMap(paCfg, 'assistantPolicy')
+      existingRulesBeforeDefaults = isSeq(existingPolicyNode?.get('rules', true))
+        ? existingPolicyNode!.get('rules', true)!.toJSON()
+        : (Array.isArray(effectivePolicyCfg['rules']) && effectivePolicyCfg['rules'].length > 0
+            ? effectivePolicyCfg['rules']
+            : undefined)
+      setMissingMapDefaults(doc, paCfg, PERSONAL_ASSISTANT_DEFAULTS)
+      policyConfigNode = ensureConfigMap(doc, paCfg, 'assistantPolicy')
     }
+
+    const existingRules = existingRulesBeforeDefaults
+      ?? (isSeq(policyConfigNode.get('rules', true)) ? policyConfigNode.get('rules', true)!.toJSON() : effectivePolicyCfg['rules'])
+
+    const rawOpenId = input.ownerOpenId?.trim() ?? ''
+    validOpenId = rawOpenId !== '' && LARK_OPEN_ID_TOKEN.test(rawOpenId) ? rawOpenId : undefined
+    const policyRulesToUpsert: Record<string, unknown>[] = [
+      {
+        id: `lark-channel-credential-${resolvedAccount}`,
+        effect: 'allow',
+        subject: { kind: 'background', id: 'dsh-enhanced-lark-channel' },
+        actions: ['credential.use'],
+        resource: { kind: 'credential', id: handleId },
+        context: { initiators: ['background'] },
+      },
+    ]
+
+    if (validOpenId !== undefined) {
+      const deliveryDesc = findEntry(input.descriptors, ns => ns === 'dsh-enhanced-assistant-delivery')
+      const runtimeDelivery = asPlainRecord(deliveryDesc?.value)
+      const mergedDelivery = {
+        ...runtimeDelivery,
+        ...getPatchRowConfig(seq, 'dsh-enhanced-assistant-delivery'),
+      }
+      const deliveryPatchCfg = findPatchRow(seq, 'dsh-enhanced-assistant-delivery')
+      const deliveryCfgNode = deliveryPatchCfg ? readConfigMap(deliveryPatchCfg, 'config') : undefined
+      const scopedDb = checkScopedDbPath(
+        deliveryCfgNode?.get('databasePath', true) ?? mergedDelivery['databasePath'],
+        paths.canonicalHome,
+      )
+      deliveryDbPath = scopedDb.scoped && scopedDb.resolved !== null
+        ? scopedDb.resolved
+        : join(paths.canonicalHome, 'assistant-delivery', 'state.sqlite')
+      const defaultWorkspace = resolveDeliveryWorkspacePath(
+        deliveryCfgNode?.get('defaultWorkspace', true),
+        runtimeDelivery['defaultWorkspace'],
+        paths.canonicalHome,
+      )
+      const rawPreset = strOrNull(mergedDelivery['defaultAgentPreset'])
+      const defaultPreset = rawPreset !== null && PRESET_ID_TOKEN.test(rawPreset) ? rawPreset : 'standard'
+      const principalKey = externalPrincipalId({
+        channel: 'lark',
+        account: resolvedAccount,
+        tenant: resolvedTenant,
+        user: validOpenId,
+      })
+      if (principalKey !== null) {
+        policyRulesToUpsert.push(...buildLarkOwnerPolicyRules({
+          account: resolvedAccount,
+          principalId: principalKey,
+          workspace: defaultWorkspace,
+          preset: defaultPreset,
+          existingRules,
+        }))
+      }
+    }
+
+    policyConfigNode.set('rules', doc.createNode(upsertById(existingRules, policyRulesToUpsert), { aliasDuplicateObjects: false }))
+
+    const larkRow = ensurePatchRow(doc, seq, 'dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel')
+    if (larkRow.get('disabled') === true) larkRow.delete('disabled')
+    const larkCfg = ensureConfigMap(doc, larkRow, 'config')
+    larkCfg.set('enabled', doc.createNode(true))
+    larkCfg.set('appId', doc.createNode(resolvedAppId))
+    larkCfg.set('account', doc.createNode(resolvedAccount))
+    larkCfg.set('tenant', doc.createNode(resolvedTenant))
+    larkCfg.set('secretSource', doc.createNode('handle'))
+    larkCfg.set('credentialHandle', doc.createNode(handleId))
+    larkCfg.set('credentialPurpose', doc.createNode('connect'))
+    larkCfg.set('credentialLeaseMs', doc.createNode(86_400_000))
+    if (input.domain !== undefined || !larkCfg.has('domain')) {
+      larkCfg.set('domain', doc.createNode(effectiveDomain))
+    }
+    larkCfg.delete('appSecretEnv')
+
+    atomicWritePatchWithBackup(paths.patchPath, doc.toString({ lineWidth: 0 }), now)
+  } catch (error: unknown) {
+    let rollbackFailed = false
+    if (deleteFn !== undefined) {
+      try {
+        await deleteFn(locator)
+      } catch {
+        rollbackFailed = true
+      }
+    }
+    const safeDetail = redactVaultSecret(error instanceof Error ? error.message : String(error), secret)
+    const cleanupNote = deleteFn === undefined
+      ? ''
+      : rollbackFailed
+        ? '；尝试自动回滚新建的系统凭据项也失败，请稍后手动清理'
+        : '；已自动清理本次新建的系统凭据项'
+    return Object.freeze({
+      applied: false,
+      entry: larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
+      domain: effectiveDomain,
+      ownerBinding: 'unmodified' as const,
+      note: `写入 profile 配置（cordis.patch.yml）失败：${safeDetail}${cleanupNote}。`,
+    })
   }
 
+  const ownerBinding: FeishuQrOwnerBinding = validOpenId === undefined
+    ? 'not-returned'
+    : authorizeLarkPrincipalInDeliverySqlite(deliveryDbPath!, {
+        channel: 'lark',
+        account: resolvedAccount,
+        tenant: resolvedTenant,
+        user: validOpenId,
+      }, now)
+
+  // Never call settings.mutate() or hot-reload credentials-keychain / personal-assistant / assistant-policy / lark-channel
+  // in-process after patching cordis.patch.yml (violates Cordis runtime contracts and causes cascading teardown / SETTINGS_CONFLICT).
+  const bindingSummary = ownerBindingNote(ownerBinding, validOpenId)
   return Object.freeze({
     applied: true,
     entry: larkDesc?.ns ?? 'dsh-enhanced-lark-channel',
-    note: `已将 App Secret 安全存入系统凭据库（句柄 ${handleId}，配置文件零明文），并完成凭据策略授权与飞书连接配置；如未立即在线，请重启一次 profile 使新句柄生效。`,
+    domain: effectiveDomain,
+    ownerBinding,
+    note: `已将 App Secret 安全存入系统凭据库（句柄 ${handleId}，配置文件零明文），并写入通道与凭据/消息策略配置${bindingSummary === '' ? '' : `；${bindingSummary}`}；请重启一次 profile（重启 DeepSeek Harness.app 或运行 dsh-rsi restart）以加载新凭据句柄与策略并建立飞书长连接。`,
+  })
+}
+
+export async function configureFeishuEasy(input: ConfigureFeishuEasyInput): Promise<OwnerConsoleWriteResult> {
+  const result = await applyFeishuVaultConfig(input)
+  return Object.freeze({
+    applied: result.applied,
+    entry: result.entry,
+    note: result.note,
   })
 }
