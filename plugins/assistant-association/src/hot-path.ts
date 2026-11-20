@@ -2,12 +2,15 @@ import { isBoundaryMatch, stepAcState } from './aho-corasick.js'
 import type { AssociationMemoryIndex, HotPathScratchpad } from './index-memory.js'
 import { normalizeEntityKey, normalizeForAc, tokenizeAssociationText } from './tokenize.js'
 import {
+  CODE_TO_EDGE_TYPE,
   CODE_TO_NODE_KIND,
+  computeDeterministicEdgeId,
   type HotPathClock,
   type HotPathCue,
   type HotPathFilter,
   type HotPathProfile,
   type HotPathResult,
+  type ProvenanceEdgeRef,
   type ScoredAssociationItem,
   type SessionActivationEntry,
 } from './types.js'
@@ -22,6 +25,25 @@ const DEFAULT_BM25_MAX_POSTINGS = 2_000
 const DEFAULT_BM25_QUERY_BUDGET = 4_000
 
 const sourceWeightsCache = new WeakMap<Record<string, number>, Float32Array>()
+
+interface Hop2ParentBuffers {
+  readonly hop2ParentSlot: Int32Array
+  readonly hop2ParentEdgeIdx: Int32Array
+}
+
+const hop2BuffersCache = new WeakMap<HotPathScratchpad, Hop2ParentBuffers>()
+
+function getHop2Buffers(pad: HotPathScratchpad): Hop2ParentBuffers {
+  let cached = hop2BuffersCache.get(pad)
+  if (cached !== undefined) return cached
+  const hop2ParentSlot = new Int32Array(pad.capacity)
+  const hop2ParentEdgeIdx = new Int32Array(pad.capacity)
+  hop2ParentSlot.fill(-1)
+  hop2ParentEdgeIdx.fill(-1)
+  cached = { hop2ParentSlot, hop2ParentEdgeIdx }
+  hop2BuffersCache.set(pad, cached)
+  return cached
+}
 
 function getSourceWeightsByCode(sourceWeights: Record<string, number>): Float32Array {
   let cached = sourceWeightsCache.get(sourceWeights)
@@ -116,6 +138,61 @@ function formatReason(
   return 'assoc'
 }
 
+function pushProvenanceEdge(
+  index: AssociationMemoryIndex,
+  edges: ProvenanceEdgeRef[],
+  pSlot: number,
+  curSlot: number,
+  pEdge: number,
+): void {
+  const edgeIdx = index.adjEdgeIdx[pEdge]!
+  const edgeType = CODE_TO_EDGE_TYPE[index.adjEdgeType[pEdge]!]!
+  const uId = index.nodeIds[pSlot]!
+  const vId = index.nodeIds[curSlot]!
+  const [aId, bId] = uId <= vId ? [uId, vId] : [vId, uId]
+  let edgeId = index.edgeIds[edgeIdx] ?? ''
+  if (edgeId.length === 0) {
+    edgeId = computeDeterministicEdgeId(aId, bId, edgeType)
+    ;(index.edgeIds as string[])[edgeIdx] = edgeId
+  }
+  edges.push({ edgeId, aId, bId, edgeType })
+}
+
+function collectProvenanceEdges(
+  index: AssociationMemoryIndex,
+  pad: HotPathScratchpad,
+  hop2ParentSlot: Int32Array,
+  hop2ParentEdgeIdx: Int32Array,
+  winnerSlot: number,
+  maxHops: number,
+): ProvenanceEdgeRef[] | undefined {
+  const hop = pad.hopReached[winnerSlot]!
+  if (maxHops <= 0 || hop === 0 || pad.reasonType[winnerSlot] !== REASON_EDGE) {
+    return undefined
+  }
+  if (hop === 1) {
+    const pSlot = pad.parentSlot[winnerSlot]!
+    const pEdge = pad.parentEdgeIdx[winnerSlot]!
+    if (pSlot < 0 || pEdge < 0 || pSlot === winnerSlot) return undefined
+    const edges: ProvenanceEdgeRef[] = []
+    pushProvenanceEdge(index, edges, pSlot, winnerSlot, pEdge)
+    return edges
+  }
+  if (hop === 2 && maxHops >= 2) {
+    const p1 = hop2ParentSlot[winnerSlot]!
+    const e2 = hop2ParentEdgeIdx[winnerSlot]!
+    if (p1 < 0 || e2 < 0 || p1 === winnerSlot) return undefined
+    const p0 = pad.parentSlot[p1]!
+    const e1 = pad.parentEdgeIdx[p1]!
+    if (p0 < 0 || e1 < 0 || p0 === p1 || p0 === winnerSlot) return undefined
+    const edges: ProvenanceEdgeRef[] = []
+    pushProvenanceEdge(index, edges, p0, p1, e1)
+    pushProvenanceEdge(index, edges, p1, winnerSlot, e2)
+    return edges
+  }
+  return undefined
+}
+
 export function runHotPathQuery(
   index: AssociationMemoryIndex,
   cues: readonly HotPathCue[],
@@ -202,6 +279,7 @@ export function runHotPathQuery(
   }
 
   const pad = index.acquireScratchpad()
+  const { hop2ParentSlot, hop2ParentEdgeIdx } = getHop2Buffers(pad)
   try {
     pad.epoch += 1
     if (pad.epoch >= 0xffff_fffe) {
@@ -227,14 +305,22 @@ export function runHotPathQuery(
         pad.bestContrib[slot] = contrib
         pad.reasonType[slot] = reasonType
         pad.reasonArg[slot] = reasonArg
+        pad.parentSlot[slot] = -1
+        pad.parentEdgeIdx[slot] = -1
         pad.touchedSlots[touchedCount] = slot
         touchedCount += 1
       } else {
         pad.score[slot] = pad.score[slot]! + contrib
-        if (contrib > pad.bestContrib[slot]!) {
+        if (
+          contrib > pad.bestContrib[slot]! &&
+          !(reasonType === REASON_SESSION && pad.reasonType[slot] !== REASON_SESSION)
+        ) {
+          pad.hopReached[slot] = hop
           pad.bestContrib[slot] = contrib
           pad.reasonType[slot] = reasonType
           pad.reasonArg[slot] = reasonArg
+          pad.parentSlot[slot] = -1
+          pad.parentEdgeIdx[slot] = -1
         }
       }
     }
@@ -402,11 +488,14 @@ export function runHotPathQuery(
       }
       const hopEpoch = pad.hopEpoch
       let nextCount = 0
+      const targetParentSlots = hop === 1 ? pad.parentSlot : hop2ParentSlot
+      const targetParentEdges = hop === 1 ? pad.parentEdgeIdx : hop2ParentEdgeIdx
 
       for (let f = 0; f < frontierCount; f += 1) {
         if (clock() >= deadline) return abortTimeout()
         const u = pad.frontierSlots[f]!
         const uScore = pad.frontierScores[f]!
+        const uParent = hop === 1 ? -1 : pad.parentSlot[u]!
         pad.expandedStamp[u] = epoch
 
         const eStart = adjOffset[u]!
@@ -415,7 +504,7 @@ export function runHotPathQuery(
           if ((e & 63) === 0 && clock() >= deadline) return abortTimeout()
           if (!allowLowTrust && adjTrust[e] === 0) continue
           const v = adjTarget[e]!
-          if (!isEligible(v)) continue
+          if (v === uParent || !isEligible(v)) continue
 
           const dt = nowMs - nodeUpdatedAt[v]!
           const decay = dt > 0 ? Math.exp((-LN2 * dt) / halfLife) : 1.0
@@ -423,6 +512,7 @@ export function runHotPathQuery(
           const prop = uScore * adjWeight[e]! * sw * decay
           if (prop <= 0) continue
 
+          let updated = false
           if (pad.stamp[v] !== epoch) {
             pad.stamp[v] = epoch
             pad.score[v] = prop
@@ -430,20 +520,26 @@ export function runHotPathQuery(
             pad.bestContrib[v] = prop
             pad.reasonType[v] = REASON_EDGE
             pad.reasonArg[v] = e
+            targetParentSlots[v] = u
+            targetParentEdges[v] = e
             pad.touchedSlots[touchedCount] = v
             touchedCount += 1
-          } else {
+            updated = true
+          } else if (pad.hopReached[v]! > 0 || pad.reasonType[v] === REASON_SESSION) {
             const cur = pad.score[v]!
-            const updated = prop > cur ? prop : cur
-            pad.score[v] = updated
-            if (prop > pad.bestContrib[v]!) {
+            if (prop > cur) {
+              pad.score[v] = prop
+              pad.hopReached[v] = hop
               pad.bestContrib[v] = prop
               pad.reasonType[v] = REASON_EDGE
               pad.reasonArg[v] = e
+              targetParentSlots[v] = u
+              targetParentEdges[v] = e
+              updated = true
             }
           }
 
-          if (pad.expandedStamp[v] !== epoch) {
+          if (updated && hop < maxHops && pad.expandedStamp[v] !== epoch) {
             if (pad.nextStamp[v] !== hopEpoch) {
               pad.nextStamp[v] = hopEpoch
               pad.nextScore[v] = prop
@@ -483,6 +579,14 @@ export function runHotPathQuery(
     const items: ScoredAssociationItem[] = []
     for (let i = 0; i < winnerCount; i += 1) {
       const slot = pad.frontierSlots[i]!
+      const provenanceEdges = collectProvenanceEdges(
+        index,
+        pad,
+        hop2ParentSlot,
+        hop2ParentEdgeIdx,
+        slot,
+        maxHops,
+      )
       items.push({
         slot,
         id: index.nodeIds[slot]!,
@@ -495,6 +599,7 @@ export function runHotPathQuery(
         hop: pad.hopReached[slot]!,
         sourcePlugin: index.nodeSourcePlugins[slot]!,
         updatedAt: nodeUpdatedAt[slot]!,
+        ...(provenanceEdges !== undefined ? { provenanceEdges } : {}),
       })
     }
 

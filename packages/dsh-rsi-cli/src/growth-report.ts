@@ -109,6 +109,71 @@ export interface GrowthMemoryLaneGate {
   readonly status: 'no-data' | 'collecting' | 'passed' | 'attention-needed'
 }
 
+export interface GrowthAssociationSourceSummary {
+  readonly source: string
+  readonly injectedItems: number
+  readonly exposures: number
+  readonly strongUses: number
+  readonly weakUses: number
+  readonly strongUseRatePpm: number | null
+  readonly weakUseRatePpm: number | null
+}
+
+export interface GrowthAssociationCohortMetrics {
+  readonly tasks: number
+  readonly evaluatedTasks: number
+  readonly corrections: number
+  readonly retractions: number
+  readonly redos: number
+  readonly correctionRatePpm: number | null
+  readonly retractionRatePpm: number | null
+  readonly redoRatePpm: number | null
+  readonly turnSamples: number
+  readonly avgTurnsMilli: number | null
+  readonly costSamples: number
+  readonly avgCostUsdMicros: number | null
+  readonly tokenSamples: number
+  readonly avgInputTokens: number | null
+  readonly avgOutputTokens: number | null
+}
+
+export interface GrowthAssociationHoldoutComparison {
+  readonly nonHoldoutTasks: number
+  readonly injectedTasks: number
+  readonly holdoutTasks: number
+  readonly injected: GrowthAssociationCohortMetrics
+  readonly holdout: GrowthAssociationCohortMetrics
+}
+
+export interface GrowthAssociationSummary {
+  readonly state: GrowthDataState
+  readonly evaluatedSteps: number
+  readonly holdoutSteps: number
+  readonly injectedSteps: number
+  readonly totalInjectedItems: number
+  readonly avgInjectedItemsMilli: number | null
+  readonly timedOutSteps: number
+  readonly timeoutRatePpm: number | null
+  readonly fallbackSteps: number
+  readonly latencySamples: number
+  readonly p50LatencyUs: number | null
+  readonly p99LatencyUs: number | null
+  readonly exposuresTotal: number
+  readonly strongUseExposures: number
+  readonly weakUseExposures: number
+  readonly strongUseRatePpm: number | null
+  readonly weakUseRatePpm: number | null
+  readonly assocReadAttempts: number | null
+  readonly assocReadHits: number | null
+  readonly assocReadHitRatePpm: number | null
+  readonly sources: readonly GrowthAssociationSourceSummary[]
+  readonly activeProfileVersion: number | null
+  readonly activeProfileDigest: string | null
+  readonly profileAdoptions: number
+  readonly profileRollbacks: number
+  readonly holdoutComparison: GrowthAssociationHoldoutComparison
+}
+
 export interface GrowthReport {
   readonly protocol: 'dsh-rsi/growth-report/v1'
   readonly dshHome: string
@@ -127,6 +192,7 @@ export interface GrowthReport {
   readonly candidates: GrowthCandidatesSummary
   readonly notifications: GrowthNotificationsSummary
   readonly suppliers: GrowthSuppliersSummary
+  readonly association: GrowthAssociationSummary
   readonly memoryLaneGate: GrowthMemoryLaneGate
 }
 
@@ -208,6 +274,7 @@ type LedgerFamily =
   | 'workItems'
   | 'evolution'
   | 'growthExperiments'
+  | 'association'
 
 type PatchDbMap = Record<LedgerFamily, Set<string>>
 
@@ -253,6 +320,7 @@ function classifyPluginFamily(idOrName: string): LedgerFamily | undefined {
   if (idOrName.includes('assistant-evolution') || idOrName.endsWith('/assistant-evolution')) return 'evolution'
   if (idOrName.includes('assistant-growth-experiments') || idOrName.endsWith('/assistant-growth-experiments')) return 'growthExperiments'
   if (idOrName.includes('assistant-growth-driver') || idOrName.endsWith('/assistant-growth-driver')) return 'growthDriver'
+  if (idOrName.includes('assistant-association') || idOrName.endsWith('/assistant-association')) return 'association'
   return undefined
 }
 
@@ -450,6 +518,92 @@ function inWindowOrUntimestamped(at: unknown, fromAt: number, toAt: number): boo
   return at >= fromAt && at <= toAt
 }
 
+interface EvalTaskMetric {
+  readonly corrected: boolean
+  readonly retracted: boolean
+  readonly redo: boolean
+  readonly turns: number | null
+  readonly costUsdMicros: number | null
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+}
+
+interface AssocTaskTelemetryMetric {
+  readonly turns: number | null
+  readonly inputTokens: number | null
+  readonly outputTokens: number | null
+  readonly costUsdMicros: number | null
+  readonly updatedAt: number
+}
+
+function buildAssocCohortMetrics(
+  taskIds: readonly string[],
+  evalMap: ReadonlyMap<string, EvalTaskMetric>,
+  telemetryMap: ReadonlyMap<string, AssocTaskTelemetryMetric>,
+): GrowthAssociationCohortMetrics {
+  let evaluatedTasks = 0
+  let corrections = 0
+  let retractions = 0
+  let redos = 0
+  let turnSamples = 0
+  let turnSum = 0
+  let costSamples = 0
+  let costSum = 0
+  let inputTokenSamples = 0
+  let inputTokenSum = 0
+  let outputTokenSamples = 0
+  let outputTokenSum = 0
+
+  for (const taskId of taskIds) {
+    const evalInfo = evalMap.get(taskId)
+    const telInfo = telemetryMap.get(taskId)
+    if (evalInfo) {
+      evaluatedTasks += 1
+      if (evalInfo.corrected) corrections += 1
+      if (evalInfo.retracted) retractions += 1
+      if (evalInfo.redo) redos += 1
+    }
+    const turns = evalInfo?.turns ?? telInfo?.turns ?? null
+    if (turns !== null && Number.isFinite(turns)) {
+      turnSamples += 1
+      turnSum += turns
+    }
+    const cost = evalInfo?.costUsdMicros ?? telInfo?.costUsdMicros ?? null
+    if (cost !== null && Number.isFinite(cost)) {
+      costSamples += 1
+      costSum += cost
+    }
+    const inTok = evalInfo?.inputTokens ?? telInfo?.inputTokens ?? null
+    if (inTok !== null && Number.isFinite(inTok)) {
+      inputTokenSamples += 1
+      inputTokenSum += inTok
+    }
+    const outTok = evalInfo?.outputTokens ?? telInfo?.outputTokens ?? null
+    if (outTok !== null && Number.isFinite(outTok)) {
+      outputTokenSamples += 1
+      outputTokenSum += outTok
+    }
+  }
+
+  return Object.freeze({
+    tasks: taskIds.length,
+    evaluatedTasks,
+    corrections,
+    retractions,
+    redos,
+    correctionRatePpm: ppm(corrections, evaluatedTasks),
+    retractionRatePpm: ppm(retractions, evaluatedTasks),
+    redoRatePpm: ppm(redos, evaluatedTasks),
+    turnSamples,
+    avgTurnsMilli: turnSamples > 0 ? Math.round((turnSum * 1000) / turnSamples) : null,
+    costSamples,
+    avgCostUsdMicros: costSamples > 0 ? Math.round(costSum / costSamples) : null,
+    tokenSamples: Math.max(inputTokenSamples, outputTokenSamples),
+    avgInputTokens: inputTokenSamples > 0 ? Math.round(inputTokenSum / inputTokenSamples) : null,
+    avgOutputTokens: outputTokenSamples > 0 ? Math.round(outputTokenSum / outputTokenSamples) : null,
+  })
+}
+
 function skillComparisonPassed(comparisonJson: string): boolean {
   const c = parseJsonObject(comparisonJson)
   const res = c.result && typeof c.result === 'object' && !Array.isArray(c.result)
@@ -509,6 +663,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
     workItems: new Set(),
     evolution: new Set(),
     growthExperiments: new Set(),
+    association: new Set(),
   }
 
   if (homeExists) {
@@ -573,6 +728,12 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
       dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'growth.sqlite'))
       dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'state.sqlite'))
     }
+    if (allowFamily('association')) {
+      dbMap.association.add(join(dshHome, 'assistant-association', 'state.sqlite'))
+      dbMap.association.add(join(dshHome, 'assistant-association', 'association.sqlite'))
+      dbMap.association.add(join(dshHome, 'association.sqlite'))
+      dbMap.association.add(join(dshHome, 'assistant-association.sqlite'))
+    }
     for (const prof of profNames) {
       if (allowFamily('evaluation')) dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', `${prof}.sqlite`))
       if (allowFamily('memory')) dbMap.memory.add(join(dshHome, 'personal-memory', `${prof}.sqlite`))
@@ -592,6 +753,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
       if (allowFamily('workItems')) dbMap.workItems.add(join(dshHome, 'assistant-work-items', `${prof}.sqlite`))
       if (allowFamily('evolution')) dbMap.evolution.add(join(dshHome, 'assistant-evolution', `${prof}.sqlite`))
       if (allowFamily('growthExperiments')) dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', `${prof}.sqlite`))
+      if (allowFamily('association')) dbMap.association.add(join(dshHome, 'assistant-association', `${prof}.sqlite`))
     }
   }
 
@@ -622,6 +784,8 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
     latencies: number[]
   }>()
 
+  const evalTaskMetricsMap = new Map<string, EvalTaskMetric>()
+
   let sawNotificationsTable = false
   let notifTotal = 0
   let notifDelivered = 0
@@ -647,15 +811,37 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
           const hasSplitRefs = hasColumn(db, 'evaluation_task_projections', 'objective_outcome_id')
             && hasColumn(db, 'evaluation_task_projections', 'execution_outcome_id')
           const hasObjConflicted = hasColumn(db, 'evaluation_task_projections', 'objective_conflicted')
+          const hasSubjectKindRef = hasColumn(db, 'evaluation_task_projections', 'subject_kind')
+            && hasColumn(db, 'evaluation_task_projections', 'subject_ref')
+          const hasLearningDisp = hasColumn(db, 'evaluation_task_projections', 'learning_disposition')
+          const hasCostCol = hasColumn(db, 'evaluation_outcomes', 'cost_usd_micros')
+          const hasInTokCol = hasColumn(db, 'evaluation_outcomes', 'input_tokens')
+          const hasOutTokCol = hasColumn(db, 'evaluation_outcomes', 'output_tokens')
           const conflictedExpr = hasObjConflicted ? 'p.objective_conflicted' : '0'
+          const subjectKindExpr = hasSubjectKindRef ? 'p.subject_kind' : 'NULL'
+          const subjectRefExpr = hasSubjectKindRef ? 'p.subject_ref' : 'NULL'
+          const learningDispExpr = hasLearningDisp ? 'p.learning_disposition' : 'NULL'
+          const splitMetricCol = (col: string, present: boolean) =>
+            present
+              ? `CASE WHEN exec_o.id IS NOT NULL THEN exec_o.${col} WHEN o.source_kind != 'user-feedback' THEN o.${col} ELSE NULL END`
+              : 'NULL'
+          const singleMetricCol = (col: string, present: boolean) =>
+            present
+              ? `CASE WHEN o.source_kind != 'user-feedback' THEN o.${col} ELSE NULL END`
+              : 'NULL'
           const taskRows = (hasSplitRefs
             ? db.prepare(`
-                SELECT p.subject_key, ${conflictedExpr} AS objective_conflicted, p.updated_at,
+                SELECT p.subject_key, ${subjectKindExpr} AS subject_kind, ${subjectRefExpr} AS subject_ref,
+                       ${learningDispExpr} AS learning_disposition,
+                       ${conflictedExpr} AS objective_conflicted, p.updated_at,
                        o.id AS outcome_id,
                        CASE WHEN ${conflictedExpr} = 1 THEN 'unknown'
                             ELSE COALESCE(obj.objective_status, o.objective_status, 'unknown')
                        END AS objective_status,
                        COALESCE(exec_o.metrics_json, o.metrics_json, '{}') AS metrics_json,
+                       ${splitMetricCol('cost_usd_micros', hasCostCol)} AS cost_usd_micros,
+                       ${splitMetricCol('input_tokens', hasInTokCol)} AS input_tokens,
+                       ${splitMetricCol('output_tokens', hasOutTokCol)} AS output_tokens,
                        COALESCE(exec_o.occurred_at, o.occurred_at, p.updated_at) AS occurred_at
                 FROM evaluation_task_projections p
                 LEFT JOIN evaluation_outcomes o ON o.id = p.primary_outcome_id
@@ -665,20 +851,31 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
                   AND COALESCE(exec_o.occurred_at, o.occurred_at, p.updated_at) <= ?
               `).all(prevFromAt, toAt)
             : db.prepare(`
-                SELECT p.subject_key, ${conflictedExpr} AS objective_conflicted, p.updated_at,
+                SELECT p.subject_key, ${subjectKindExpr} AS subject_kind, ${subjectRefExpr} AS subject_ref,
+                       ${learningDispExpr} AS learning_disposition,
+                       ${conflictedExpr} AS objective_conflicted, p.updated_at,
                        o.id AS outcome_id, COALESCE(o.objective_status, 'unknown') AS objective_status,
                        COALESCE(o.metrics_json, '{}') AS metrics_json,
+                       ${singleMetricCol('cost_usd_micros', hasCostCol)} AS cost_usd_micros,
+                       ${singleMetricCol('input_tokens', hasInTokCol)} AS input_tokens,
+                       ${singleMetricCol('output_tokens', hasOutTokCol)} AS output_tokens,
                        COALESCE(o.occurred_at, p.updated_at) AS occurred_at
                 FROM evaluation_task_projections p
                 LEFT JOIN evaluation_outcomes o ON o.id = p.primary_outcome_id
                 WHERE COALESCE(o.occurred_at, p.updated_at) >= ? AND COALESCE(o.occurred_at, p.updated_at) <= ?
               `).all(prevFromAt, toAt)) as Array<{
             subject_key: string
+            subject_kind: string | null
+            subject_ref: string | null
+            learning_disposition: string | null
             objective_conflicted: number
             updated_at: number
             outcome_id: string | null
             objective_status: string
             metrics_json: string
+            cost_usd_micros: number | null
+            input_tokens: number | null
+            output_tokens: number | null
             occurred_at: number
           }>
 
@@ -792,7 +989,31 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
 
             const m = parseJsonObject(row.metrics_json)
             const retries = typeof m.retries === 'number' ? m.retries : 0
-            if (retries > 0 || multiAttemptSubjects.has(row.subject_key)) reworkTasks += 1
+            const isRedo = retries > 0 || multiAttemptSubjects.has(row.subject_key)
+            if (isRedo) reworkTasks += 1
+
+            const evalEntry: EvalTaskMetric = {
+              corrected: correctedSubjectsInWindow.has(row.subject_key),
+              retracted: row.learning_disposition === 'retract' || withdrawnSubjectsInWindow.has(row.subject_key),
+              redo: isRedo,
+              turns: typeof m.turns === 'number' && Number.isFinite(m.turns)
+                ? m.turns
+                : (typeof m.turnCount === 'number' && Number.isFinite(m.turnCount) ? m.turnCount : null),
+              costUsdMicros: typeof row.cost_usd_micros === 'number' && Number.isFinite(row.cost_usd_micros)
+                ? Math.trunc(row.cost_usd_micros)
+                : (typeof m.costUsdMicros === 'number' && Number.isFinite(m.costUsdMicros) ? Math.trunc(m.costUsdMicros) : null),
+              inputTokens: typeof row.input_tokens === 'number' && Number.isFinite(row.input_tokens)
+                ? Math.trunc(row.input_tokens)
+                : (typeof m.inputTokens === 'number' && Number.isFinite(m.inputTokens) ? Math.trunc(m.inputTokens) : null),
+              outputTokens: typeof row.output_tokens === 'number' && Number.isFinite(row.output_tokens)
+                ? Math.trunc(row.output_tokens)
+                : (typeof m.outputTokens === 'number' && Number.isFinite(m.outputTokens) ? Math.trunc(m.outputTokens) : null),
+            }
+            evalTaskMetricsMap.set(row.subject_key, evalEntry)
+            if (typeof row.subject_kind === 'string' && row.subject_kind !== ''
+              && typeof row.subject_ref === 'string' && row.subject_ref !== '') {
+              evalTaskMetricsMap.set(`${row.subject_kind}:${row.subject_ref}`, evalEntry)
+            }
           }
 
           ownerCorrections += correctedSubjectsInWindow.size
@@ -1202,6 +1423,289 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
     closeAll(geDbs)
   }
 
+  // 4. Association DBs -> Online Metrics & Sealed Holdout Comparison
+  const assocDbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected)
+  let sawAssociationTable = false
+  let assocEvaluatedSteps = 0
+  let assocHoldoutSteps = 0
+  let assocInjectedSteps = 0
+  let assocTotalInjectedItems = 0
+  let assocTimedOutSteps = 0
+  let assocFallbackSteps = 0
+  const assocLatenciesUs: number[] = []
+  let assocExposuresTotal = 0
+  let assocStrongUseExposures = 0
+  let assocWeakUseExposures = 0
+  let sawAssocReadEvents = false
+  let assocReadAttemptsTotal = 0
+  let assocReadHitsTotal = 0
+  let assocActiveProfileVersion: number | null = null
+  let assocActiveProfileDigest: string | null = null
+  let assocLatestHeadChangedAt = -1
+  let assocProfileAdoptions = 0
+  let assocProfileRollbacks = 0
+
+  const assocInjectedTaskIds = new Set<string>()
+  const assocNonHoldoutTaskIds = new Set<string>()
+  const assocHoldoutTaskIds = new Set<string>()
+  const assocSourceBuckets = new Map<string, {
+    injectedItems: number
+    exposures: number
+    strongUses: number
+    weakUses: number
+  }>()
+  const assocTaskTelemetryMap = new Map<string, AssocTaskTelemetryMetric>()
+
+  const ensureSourceBucket = (source: string) => {
+    let bucket = assocSourceBuckets.get(source)
+    if (!bucket) {
+      bucket = { injectedItems: 0, exposures: 0, strongUses: 0, weakUses: 0 }
+      assocSourceBuckets.set(source, bucket)
+    }
+    return bucket
+  }
+
+  try {
+    for (const db of assocDbs) {
+      if (hasTable(db, 'assoc_step_metrics')) {
+        sawAssociationTable = true
+        const hasTaskId = hasColumn(db, 'assoc_step_metrics', 'task_id')
+        const hasInHoldout = hasColumn(db, 'assoc_step_metrics', 'in_holdout')
+        const hasLatencyUs = hasColumn(db, 'assoc_step_metrics', 'latency_us')
+        const hasTimedOut = hasColumn(db, 'assoc_step_metrics', 'timed_out')
+        const hasFallbackMode = hasColumn(db, 'assoc_step_metrics', 'fallback_mode')
+        const hasInjectedCount = hasColumn(db, 'assoc_step_metrics', 'injected_count')
+        const hasSourceCounts = hasColumn(db, 'assoc_step_metrics', 'source_counts_json')
+        const hasOccurredAt = hasColumn(db, 'assoc_step_metrics', 'occurred_at')
+        if (hasInHoldout && hasLatencyUs && hasTimedOut && hasFallbackMode && hasInjectedCount && hasOccurredAt) {
+          const stepRows = db.prepare(`
+            SELECT ${hasTaskId ? 'task_id' : 'NULL AS task_id'},
+                   in_holdout, latency_us, timed_out, fallback_mode, injected_count,
+                   ${hasSourceCounts ? 'source_counts_json' : "'{}' AS source_counts_json"}
+            FROM assoc_step_metrics
+            WHERE occurred_at >= ? AND occurred_at <= ?
+          `).all(fromAt, toAt) as Array<{
+            task_id: string | null
+            in_holdout: number
+            latency_us: number
+            timed_out: number
+            fallback_mode: string
+            injected_count: number
+            source_counts_json: string
+          }>
+          for (const row of stepRows) {
+            if (row.in_holdout === 1 || row.fallback_mode === 'holdout') {
+              assocHoldoutSteps += 1
+              continue
+            }
+            assocEvaluatedSteps += 1
+            if (typeof row.latency_us === 'number' && Number.isFinite(row.latency_us) && row.latency_us >= 0) {
+              assocLatenciesUs.push(Math.trunc(row.latency_us))
+            }
+            if (row.timed_out === 1) assocTimedOutSteps += 1
+            if (row.fallback_mode === 'memory-only' || row.fallback_mode === 'cold-start') {
+              assocFallbackSteps += 1
+            }
+            const inj = typeof row.injected_count === 'number' && Number.isFinite(row.injected_count) && row.injected_count > 0
+              ? Math.trunc(row.injected_count)
+              : 0
+            assocTotalInjectedItems += inj
+            if (inj > 0) {
+              assocInjectedSteps += 1
+              if (typeof row.task_id === 'string' && row.task_id !== '') {
+                assocInjectedTaskIds.add(row.task_id)
+              }
+            }
+            const counts = parseJsonObject(row.source_counts_json)
+            for (const [src, rawCount] of Object.entries(counts)) {
+              if (typeof rawCount === 'number' && Number.isFinite(rawCount) && rawCount > 0) {
+                ensureSourceBucket(src).injectedItems += Math.trunc(rawCount)
+              }
+            }
+          }
+        }
+      }
+
+      if (hasTable(db, 'assoc_exposures')) {
+        sawAssociationTable = true
+        const hasExposedAt = hasColumn(db, 'assoc_exposures', 'exposed_at')
+        const hasSourcePlugin = hasColumn(db, 'assoc_exposures', 'source_plugin')
+        const hasReadCount = hasColumn(db, 'assoc_exposures', 'assoc_read_count')
+        const hasWeakCount = hasColumn(db, 'assoc_exposures', 'weak_use_count')
+        const hasWasExposed = hasColumn(db, 'assoc_exposures', 'was_exposed')
+        const hasStrongUsed = hasColumn(db, 'assoc_exposures', 'strong_used')
+        const hasWeakUsed = hasColumn(db, 'assoc_exposures', 'weak_used')
+        if (hasExposedAt && (hasStrongUsed || hasReadCount) && (hasWeakUsed || hasWeakCount)) {
+          const hasAssocNodesKind = hasTable(db, 'assoc_nodes')
+            && hasColumn(db, 'assoc_nodes', 'id')
+            && hasColumn(db, 'assoc_nodes', 'kind')
+          const srcPluginExpr = hasSourcePlugin ? 'e.source_plugin' : "'unknown'"
+          const readCountExpr = hasReadCount ? 'e.assoc_read_count' : '0 AS assoc_read_count'
+          const weakCountExpr = hasWeakCount ? 'e.weak_use_count' : '0 AS weak_use_count'
+          const strongUsedExpr = hasStrongUsed ? 'e.strong_used' : 'NULL AS strong_used'
+          const weakUsedExpr = hasWeakUsed ? 'e.weak_used' : 'NULL AS weak_used'
+          const whereClause = hasWasExposed
+            ? 'WHERE e.was_exposed = 1 AND e.exposed_at >= ? AND e.exposed_at <= ?'
+            : 'WHERE e.exposed_at >= ? AND e.exposed_at <= ?'
+          const expRows = (hasAssocNodesKind
+            ? db.prepare(`
+                SELECT e.task_id, ${srcPluginExpr} AS source_plugin,
+                       ${readCountExpr}, ${weakCountExpr}, ${strongUsedExpr}, ${weakUsedExpr},
+                       n.kind AS node_kind
+                FROM assoc_exposures e
+                LEFT JOIN assoc_nodes n ON n.id = e.node_id
+                ${whereClause}
+              `).all(fromAt, toAt)
+            : db.prepare(`
+                SELECT e.task_id, ${srcPluginExpr} AS source_plugin,
+                       ${readCountExpr}, ${weakCountExpr}, ${strongUsedExpr}, ${weakUsedExpr},
+                       NULL AS node_kind
+                FROM assoc_exposures e
+                ${whereClause}
+              `).all(fromAt, toAt)) as Array<{
+            task_id: string
+            source_plugin: string
+            assoc_read_count: number
+            weak_use_count: number
+            strong_used: number | null
+            weak_used: number | null
+            node_kind: string | null
+          }>
+          for (const row of expRows) {
+            assocExposuresTotal += 1
+            const isStrong = hasStrongUsed
+              ? Number(row.strong_used ?? 0) > 0
+              : Number(row.assoc_read_count ?? 0) > 0
+            const isWeak = hasWeakUsed
+              ? Number(row.weak_used ?? 0) > 0
+              : Number(row.weak_use_count ?? 0) > 0
+            if (isStrong) assocStrongUseExposures += 1
+            if (isWeak) assocWeakUseExposures += 1
+            if (typeof row.task_id === 'string' && row.task_id !== '') {
+              assocInjectedTaskIds.add(row.task_id)
+            }
+            const srcKey = (typeof row.node_kind === 'string' && row.node_kind !== '')
+              ? row.node_kind
+              : (typeof row.source_plugin === 'string' && row.source_plugin !== '' ? row.source_plugin : 'unknown')
+            const bucket = ensureSourceBucket(srcKey)
+            bucket.exposures += 1
+            if (isStrong) bucket.strongUses += 1
+            if (isWeak) bucket.weakUses += 1
+          }
+        }
+      }
+
+      if (hasTable(db, 'assoc_holdout_assignments')
+        && hasColumn(db, 'assoc_holdout_assignments', 'task_id')
+        && hasColumn(db, 'assoc_holdout_assignments', 'in_holdout')
+        && hasColumn(db, 'assoc_holdout_assignments', 'assigned_at')) {
+        sawAssociationTable = true
+        const holdRows = db.prepare(`
+          SELECT task_id, in_holdout
+          FROM assoc_holdout_assignments
+          WHERE assigned_at >= ? AND assigned_at <= ?
+        `).all(fromAt, toAt) as Array<{ task_id: string; in_holdout: number }>
+        for (const row of holdRows) {
+          if (typeof row.task_id !== 'string' || row.task_id === '') continue
+          if (row.in_holdout === 1) assocHoldoutTaskIds.add(row.task_id)
+          else assocNonHoldoutTaskIds.add(row.task_id)
+        }
+      }
+
+      if (hasTable(db, 'assoc_read_events')
+        && hasColumn(db, 'assoc_read_events', 'hit')
+        && hasColumn(db, 'assoc_read_events', 'occurred_at')) {
+        sawAssociationTable = true
+        sawAssocReadEvents = true
+        const readRow = db.prepare(`
+          SELECT COUNT(*) AS attempts, COALESCE(SUM(hit), 0) AS hits
+          FROM assoc_read_events
+          WHERE occurred_at >= ? AND occurred_at <= ?
+        `).get(fromAt, toAt) as { attempts: number; hits: number } | undefined
+        assocReadAttemptsTotal += readRow?.attempts ?? 0
+        assocReadHitsTotal += readRow?.hits ?? 0
+      }
+
+      if (hasTable(db, 'assoc_param_profile_heads')
+        && hasColumn(db, 'assoc_param_profile_heads', 'active_version')) {
+        sawAssociationTable = true
+        const hasDigest = hasColumn(db, 'assoc_param_profile_heads', 'active_digest')
+        const hasChangedAt = hasColumn(db, 'assoc_param_profile_heads', 'changed_at')
+        const headRow = db.prepare(`
+          SELECT active_version,
+                 ${hasDigest ? 'active_digest' : 'NULL AS active_digest'},
+                 ${hasChangedAt ? 'changed_at' : '0 AS changed_at'}
+          FROM assoc_param_profile_heads
+          ORDER BY ${hasChangedAt ? 'changed_at DESC' : 'active_version DESC'}
+          LIMIT 1
+        `).get() as { active_version: number; active_digest: string | null; changed_at: number } | undefined
+        if (headRow && (assocActiveProfileVersion === null || headRow.changed_at >= assocLatestHeadChangedAt)) {
+          assocLatestHeadChangedAt = headRow.changed_at
+          assocActiveProfileVersion = headRow.active_version
+          assocActiveProfileDigest = headRow.active_digest
+        }
+      }
+
+      if (hasTable(db, 'assoc_param_profile_events')
+        && hasColumn(db, 'assoc_param_profile_events', 'kind')
+        && hasColumn(db, 'assoc_param_profile_events', 'occurred_at')) {
+        sawAssociationTable = true
+        const evRows = db.prepare(`
+          SELECT kind, COUNT(*) AS n
+          FROM assoc_param_profile_events
+          WHERE occurred_at >= ? AND occurred_at <= ?
+          GROUP BY kind
+        `).all(fromAt, toAt) as Array<{ kind: string; n: number }>
+        for (const r of evRows) {
+          if (r.kind === 'adopted') assocProfileAdoptions += r.n
+          else if (r.kind === 'rolled-back') assocProfileRollbacks += r.n
+        }
+      }
+
+      if (hasTable(db, 'assoc_task_telemetry')
+        && hasColumn(db, 'assoc_task_telemetry', 'task_id')
+        && hasColumn(db, 'assoc_task_telemetry', 'updated_at')) {
+        sawAssociationTable = true
+        const hasTurns = hasColumn(db, 'assoc_task_telemetry', 'turns')
+        const hasInTok = hasColumn(db, 'assoc_task_telemetry', 'input_tokens')
+        const hasOutTok = hasColumn(db, 'assoc_task_telemetry', 'output_tokens')
+        const hasCost = hasColumn(db, 'assoc_task_telemetry', 'cost_usd_micros')
+        const telRows = db.prepare(`
+          SELECT task_id,
+                 ${hasTurns ? 'turns' : 'NULL AS turns'},
+                 ${hasInTok ? 'input_tokens' : 'NULL AS input_tokens'},
+                 ${hasOutTok ? 'output_tokens' : 'NULL AS output_tokens'},
+                 ${hasCost ? 'cost_usd_micros' : 'NULL AS cost_usd_micros'},
+                 updated_at
+          FROM assoc_task_telemetry
+          WHERE updated_at >= ? AND updated_at <= ?
+        `).all(fromAt, toAt) as Array<{
+          task_id: string
+          turns: number | null
+          input_tokens: number | null
+          output_tokens: number | null
+          cost_usd_micros: number | null
+          updated_at: number
+        }>
+        for (const r of telRows) {
+          if (typeof r.task_id !== 'string' || r.task_id === '') continue
+          const prev = assocTaskTelemetryMap.get(r.task_id)
+          if (!prev || r.updated_at >= prev.updatedAt) {
+            assocTaskTelemetryMap.set(r.task_id, {
+              turns: typeof r.turns === 'number' && Number.isFinite(r.turns) ? r.turns : null,
+              inputTokens: typeof r.input_tokens === 'number' && Number.isFinite(r.input_tokens) ? Math.trunc(r.input_tokens) : null,
+              outputTokens: typeof r.output_tokens === 'number' && Number.isFinite(r.output_tokens) ? Math.trunc(r.output_tokens) : null,
+              costUsdMicros: typeof r.cost_usd_micros === 'number' && Number.isFinite(r.cost_usd_micros) ? Math.trunc(r.cost_usd_micros) : null,
+              updatedAt: r.updated_at,
+            })
+          }
+        }
+      }
+    }
+  } finally {
+    closeAll(assocDbs)
+  }
+
   // Finalize Tasks section
   const correctionRatePpm = ppm(ownerCorrections, totalTasks)
   const reworkRatePpm = ppm(reworkTasks, totalTasks)
@@ -1296,7 +1800,36 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
     ? 'no-data'
     : totalRuns === 0 ? 'zero' : 'data'
 
-  const allStates = [tasksState, memoryState, candidatesState, notificationsState, suppliersState]
+  // Finalize Association section
+  const sortedAssocLatenciesUs = [...assocLatenciesUs].sort((a, b) => a - b)
+  const assocSourcesList: GrowthAssociationSourceSummary[] = [...assocSourceBuckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([source, b]) => Object.freeze({
+      source,
+      injectedItems: b.injectedItems,
+      exposures: b.exposures,
+      strongUses: b.strongUses,
+      weakUses: b.weakUses,
+      strongUseRatePpm: ppm(b.strongUses, b.exposures),
+      weakUseRatePpm: ppm(b.weakUses, b.exposures),
+    }))
+  const nonHoldoutIds = [...assocNonHoldoutTaskIds].filter(id => !assocHoldoutTaskIds.has(id))
+  const holdoutIds = [...assocHoldoutTaskIds]
+  const injectedIds = nonHoldoutIds.filter(id => assocInjectedTaskIds.has(id))
+  const associationState: GrowthDataState = !sawAssociationTable
+    ? 'no-data'
+    : assocEvaluatedSteps === 0
+      && assocHoldoutSteps === 0
+      && assocExposuresTotal === 0
+      && assocReadAttemptsTotal === 0
+      && assocProfileAdoptions === 0
+      && assocProfileRollbacks === 0
+      && nonHoldoutIds.length === 0
+      && holdoutIds.length === 0
+      ? 'zero'
+      : 'data'
+
+  const allStates = [tasksState, memoryState, candidatesState, notificationsState, suppliersState, associationState]
   const overallState: GrowthDataState = allStates.includes('data')
     ? 'data'
     : allStates.includes('zero') ? 'zero' : 'no-data'
@@ -1395,6 +1928,40 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
       totalCostUsdMicros,
       suppliers: Object.freeze(suppliersList),
     }),
+    association: Object.freeze({
+      state: associationState,
+      evaluatedSteps: assocEvaluatedSteps,
+      holdoutSteps: assocHoldoutSteps,
+      injectedSteps: assocInjectedSteps,
+      totalInjectedItems: assocTotalInjectedItems,
+      avgInjectedItemsMilli: assocEvaluatedSteps > 0 ? Math.round((assocTotalInjectedItems * 1000) / assocEvaluatedSteps) : null,
+      timedOutSteps: assocTimedOutSteps,
+      timeoutRatePpm: ppm(assocTimedOutSteps, assocEvaluatedSteps),
+      fallbackSteps: assocFallbackSteps,
+      latencySamples: sortedAssocLatenciesUs.length,
+      p50LatencyUs: percentile(sortedAssocLatenciesUs, 50),
+      p99LatencyUs: percentile(sortedAssocLatenciesUs, 99),
+      exposuresTotal: assocExposuresTotal,
+      strongUseExposures: assocStrongUseExposures,
+      weakUseExposures: assocWeakUseExposures,
+      strongUseRatePpm: ppm(assocStrongUseExposures, assocExposuresTotal),
+      weakUseRatePpm: ppm(assocWeakUseExposures, assocExposuresTotal),
+      assocReadAttempts: sawAssocReadEvents ? assocReadAttemptsTotal : null,
+      assocReadHits: sawAssocReadEvents ? assocReadHitsTotal : null,
+      assocReadHitRatePpm: sawAssocReadEvents ? ppm(assocReadHitsTotal, assocReadAttemptsTotal) : null,
+      sources: Object.freeze(assocSourcesList),
+      activeProfileVersion: assocActiveProfileVersion,
+      activeProfileDigest: assocActiveProfileDigest,
+      profileAdoptions: assocProfileAdoptions,
+      profileRollbacks: assocProfileRollbacks,
+      holdoutComparison: Object.freeze({
+        nonHoldoutTasks: nonHoldoutIds.length,
+        injectedTasks: injectedIds.length,
+        holdoutTasks: holdoutIds.length,
+        injected: buildAssocCohortMetrics(injectedIds, evalTaskMetricsMap, assocTaskTelemetryMap),
+        holdout: buildAssocCohortMetrics(holdoutIds, evalTaskMetricsMap, assocTaskTelemetryMap),
+      }),
+    }),
     memoryLaneGate: Object.freeze({
       targetWindowDays: 14,
       windowSatisfied,
@@ -1473,7 +2040,40 @@ export function formatGrowthReport(report: GrowthReport): string {
     }
   }
 
-  // 6. Pre-registered Dogfood Gate
+  // 6. Association online metrics & sealed holdout comparison
+  const a = report.association
+  lines.push(`6. 联想层在线指标与留出对照 [${formatStateLabel(a.state)}]`)
+  if (a.state !== 'no-data') {
+    const p50Text = a.p50LatencyUs !== null ? `${(a.p50LatencyUs / 1000).toFixed(2)}ms` : '—'
+    const p99Text = a.p99LatencyUs !== null ? `${(a.p99LatencyUs / 1000).toFixed(2)}ms` : '—'
+    const avgInjText = a.avgInjectedItemsMilli !== null ? (a.avgInjectedItemsMilli / 1000).toFixed(2) : '—'
+    const hitRateText = a.assocReadAttempts === null
+      ? '不可用'
+      : a.assocReadHitRatePpm !== null
+        ? `${formatPct(a.assocReadHitRatePpm)}（${a.assocReadHits}/${a.assocReadAttempts}）`
+        : `—（${a.assocReadHits ?? 0}/${a.assocReadAttempts}）`
+    const profVerText = a.activeProfileVersion !== null
+      ? `v${a.activeProfileVersion}${a.activeProfileDigest ? ` (${a.activeProfileDigest.slice(0, 8)})` : ''}`
+      : '不可用'
+    lines.push(`   步骤评估：${a.evaluatedSteps} 次（留出 ${a.holdoutSteps} 次 / 回退 ${a.fallbackSteps} 次） · 热路径延迟：p50=${p50Text} p99=${p99Text} · 超时：${a.timedOutSteps} 次（${formatPct(a.timeoutRatePpm)}）`)
+    lines.push(`   注入条数：总计 ${a.totalInjectedItems} 条（步均 ${avgInjText}） · 强使用（assoc_read）：${a.strongUseExposures}/${a.exposuresTotal}（${formatPct(a.strongUseRatePpm)}） · 弱使用（实体复现）：${a.weakUseExposures}/${a.exposuresTotal}（${formatPct(a.weakUseRatePpm)}） · assoc_read 命中率：${hitRateText}`)
+    lines.push(`   参数档案版本：${profVerText} · 窗口采用：${a.profileAdoptions} 次 · 回滚：${a.profileRollbacks} 次`)
+    if (a.sources.length > 0) {
+      lines.push(`   来源贡献：${a.sources.map(src => `${src.source}(注${src.injectedItems}/强${src.strongUses}/弱${src.weakUses})`).join(' · ')}`)
+    }
+    const fmtAvgTurns = (v: number | null): string => (v === null ? '—' : (v / 1000).toFixed(2))
+    const fmtCost = (v: number | null): string => (v === null ? '—' : `$${(v / 1_000_000).toFixed(6)}`)
+    const fmtTok = (inTok: number | null, outTok: number | null): string =>
+      inTok === null && outTok === null ? '—' : `in=${inTok ?? '—'}/out=${outTok ?? '—'}`
+    const fmtCohort = (label: string, cm: GrowthAssociationCohortMetrics) =>
+      `     ${label}（${cm.tasks} 任务，已评估 ${cm.evaluatedTasks}）：纠正率 ${formatPct(cm.correctionRatePpm)} · 撤回率 ${formatPct(cm.retractionRatePpm)} · 重做率 ${formatPct(cm.redoRatePpm)} · 平均轮数 ${fmtAvgTurns(cm.avgTurnsMilli)} · 平均成本 ${fmtCost(cm.avgCostUsdMicros)} · 平均 tokens ${fmtTok(cm.avgInputTokens, cm.avgOutputTokens)}`
+    const hc = a.holdoutComparison
+    lines.push(`   留出对照（注入组 ${hc.injectedTasks} 任务 [非留出总 ${hc.nonHoldoutTasks}] vs 留出组 ${hc.holdoutTasks} 任务）：`)
+    lines.push(fmtCohort('注入组', hc.injected))
+    lines.push(fmtCohort('留出组', hc.holdout))
+  }
+
+  // 7. Pre-registered Dogfood Gate
   const g = report.memoryLaneGate
   const gateLabel = g.status === 'passed' ? '已满足预登记口径'
     : g.status === 'attention-needed' ? '存在冲突待排查'

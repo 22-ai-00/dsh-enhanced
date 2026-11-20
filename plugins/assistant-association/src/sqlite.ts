@@ -8,31 +8,44 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type {
-  AssociationNodeMetadata,
-  AssociationNodeStatus,
-  AssociationOwnerMode,
-  AssociationOwnerScope,
-  AssociationScopeMode,
-  AssociationSensitivity,
-  AssociationTrust,
-  DerivedRefInput,
-  EdgeType,
-  ExposureRow,
-  HoldoutAssignmentRow,
-  HoldoutTaskKind,
-  IngestCursorRow,
-  NodeKind,
-  StepMetricRow,
-  StoredAssociationEdge,
-  StoredAssociationNode,
-  StoredAssociationSynonym,
-  UpsertEdgeInput,
-  UpsertNodeInput,
-  UpsertSynonymInput,
+import {
+  computeDeterministicEdgeId,
+  DEFAULT_HEBBIAN_CONFIG,
+  type ApplyHebbianCorrectionInput,
+  type ApplyHebbianCorrectionResult,
+  type ApplyHebbianDecayInput,
+  type ApplyHebbianDecayResult,
+  type ApplyHebbianUseInput,
+  type ApplyHebbianUseResult,
+  type AssocReadEventInput,
+  type AssocReplayEpisodeInput,
+  type AssociationNodeMetadata,
+  type AssociationNodeStatus,
+  type AssociationOwnerMode,
+  type AssociationOwnerScope,
+  type AssociationScopeMode,
+  type AssociationSensitivity,
+  type AssociationTrust,
+  type AssocTaskTelemetryInput,
+  type DerivedRefInput,
+  type EdgeType,
+  type ExposureRow,
+  type HoldoutAssignmentRow,
+  type HoldoutTaskKind,
+  type IngestCursorRow,
+  type NodeKind,
+  type ProvenanceEdgeRef,
+  type StepMetricRow,
+  type StoredAssociationEdge,
+  type StoredAssociationNode,
+  type StoredAssociationSynonym,
+  type StoredExposureRow,
+  type UpsertEdgeInput,
+  type UpsertNodeInput,
+  type UpsertSynonymInput,
 } from './types.js'
 
-export const ASSOCIATION_SCHEMA_VERSION = 1
+export const ASSOCIATION_SCHEMA_VERSION = 2
 
 export type AssociationDatabaseErrorCode =
   | 'invalid-path'
@@ -278,6 +291,211 @@ function createV1Schema(database: DatabaseSync): void {
   `)
 }
 
+function migrateV1ToV2(database: DatabaseSync): void {
+  database.exec(`
+    ALTER TABLE assoc_edges ADD COLUMN last_decayed_at INTEGER CHECK (last_decayed_at IS NULL OR last_decayed_at >= 0);
+    CREATE INDEX IF NOT EXISTS assoc_edges_decay ON assoc_edges(last_used_at, created_at, weight);
+
+    ALTER TABLE assoc_exposures ADD COLUMN was_exposed INTEGER NOT NULL DEFAULT 1 CHECK (was_exposed IN (0, 1));
+    ALTER TABLE assoc_exposures ADD COLUMN hop INTEGER NOT NULL DEFAULT 0 CHECK (hop >= 0 AND hop <= 2);
+    ALTER TABLE assoc_exposures ADD COLUMN score REAL NOT NULL DEFAULT 0.0;
+    ALTER TABLE assoc_exposures ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+    ALTER TABLE assoc_exposures ADD COLUMN provenance_edges_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(provenance_edges_json));
+    ALTER TABLE assoc_exposures ADD COLUMN session_id TEXT;
+    ALTER TABLE assoc_exposures ADD COLUMN strong_used INTEGER NOT NULL DEFAULT 0 CHECK (strong_used IN (0, 1));
+    ALTER TABLE assoc_exposures ADD COLUMN weak_used INTEGER NOT NULL DEFAULT 0 CHECK (weak_used IN (0, 1));
+    ALTER TABLE assoc_exposures ADD COLUMN hebbian_delta_applied REAL NOT NULL DEFAULT 0.0;
+    ALTER TABLE assoc_exposures ADD COLUMN corrected_at INTEGER CHECK (corrected_at IS NULL OR corrected_at >= 0);
+    CREATE INDEX IF NOT EXISTS assoc_exposures_node_time ON assoc_exposures(owner_scope_key, node_id, exposed_at DESC);
+
+    UPDATE assoc_exposures
+    SET strong_used = CASE WHEN assoc_read_count > 0 THEN 1 ELSE 0 END,
+        weak_used = CASE WHEN weak_use_count > 0 THEN 1 ELSE 0 END
+    WHERE was_exposed = 1 AND (assoc_read_count > 0 OR weak_use_count > 0);
+
+    ALTER TABLE assoc_step_metrics ADD COLUMN profile_version INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE assoc_hebbian_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_scope_key TEXT NOT NULL CHECK (length(owner_scope_key) = 64 AND owner_scope_key NOT GLOB '*[^0-9a-f]*'),
+      task_id TEXT,
+      node_id TEXT,
+      edge_id TEXT NOT NULL CHECK (length(edge_id) = 64 AND edge_id NOT GLOB '*[^0-9a-f]*'),
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('strong-use', 'weak-use', 'correction', 'decay')),
+      delta REAL NOT NULL,
+      weight_before REAL NOT NULL,
+      weight_after REAL NOT NULL,
+      occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_hebbian_events_scope_time ON assoc_hebbian_events(owner_scope_key, occurred_at DESC, seq DESC);
+    CREATE INDEX assoc_hebbian_events_edge ON assoc_hebbian_events(edge_id, occurred_at DESC);
+
+    CREATE TABLE assoc_read_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT,
+      node_id TEXT NOT NULL,
+      owner_scope_key TEXT NOT NULL,
+      hit INTEGER NOT NULL CHECK (hit IN (0, 1)),
+      reason TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_read_events_time ON assoc_read_events(occurred_at DESC, seq DESC);
+
+    CREATE TABLE assoc_replay_episodes (
+      task_id TEXT PRIMARY KEY CHECK (length(task_id) BETWEEN 1 AND 512),
+      owner_scope_key TEXT NOT NULL CHECK (length(owner_scope_key) = 64 AND owner_scope_key NOT GLOB '*[^0-9a-f]*'),
+      in_holdout INTEGER NOT NULL CHECK (in_holdout IN (0, 1)),
+      cues_json TEXT NOT NULL CHECK (json_valid(cues_json)),
+      used_node_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(used_node_ids_json)),
+      corrected_node_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(corrected_node_ids_json)),
+      profile_version INTEGER NOT NULL DEFAULT 0 CHECK (profile_version >= 0),
+      occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_replay_episodes_scope_time ON assoc_replay_episodes(owner_scope_key, occurred_at DESC);
+
+    CREATE TABLE assoc_task_telemetry (
+      task_id TEXT PRIMARY KEY,
+      owner_scope_key TEXT NOT NULL,
+      in_holdout INTEGER NOT NULL CHECK (in_holdout IN (0, 1)),
+      turns INTEGER NOT NULL DEFAULT 0 CHECK (turns >= 0),
+      steps INTEGER NOT NULL DEFAULT 0 CHECK (steps >= 0),
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cost_usd_micros INTEGER,
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_task_telemetry_time ON assoc_task_telemetry(updated_at DESC);
+
+    CREATE TABLE assoc_param_profile_versions (
+      scope_key TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version >= 0),
+      parent_version INTEGER CHECK (parent_version IS NULL OR (parent_version >= 0 AND parent_version < version)),
+      params_json TEXT NOT NULL CHECK (json_valid(params_json)),
+      params_digest TEXT NOT NULL,
+      basis_json TEXT NOT NULL CHECK (json_valid(basis_json)),
+      change_json TEXT NOT NULL CHECK (json_valid(change_json)),
+      origin TEXT NOT NULL CHECK (origin IN ('baseline', 'auto', 'replay', 'manual')),
+      digest TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL CHECK (created_at >= 0),
+      PRIMARY KEY (scope_key, version)
+    ) STRICT;
+
+    CREATE TRIGGER assoc_param_profile_versions_immutable
+      BEFORE UPDATE ON assoc_param_profile_versions
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_profile_versions are immutable'); END;
+
+    CREATE TRIGGER assoc_param_profile_versions_no_delete
+      BEFORE DELETE ON assoc_param_profile_versions
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_profile_versions are durable'); END;
+
+    CREATE TABLE assoc_param_profile_heads (
+      scope_key TEXT PRIMARY KEY,
+      active_version INTEGER NOT NULL CHECK (active_version >= 0),
+      latest_version INTEGER NOT NULL CHECK (latest_version >= active_version),
+      active_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('idle', 'observing')),
+      observing_version INTEGER,
+      observe_from INTEGER,
+      observe_until INTEGER,
+      changed_at INTEGER NOT NULL CHECK (changed_at >= 0),
+      CHECK (
+        (state = 'idle' AND observing_version IS NULL AND observe_from IS NULL AND observe_until IS NULL)
+        OR (state = 'observing' AND observing_version = active_version AND observe_from IS NOT NULL AND observe_until IS NOT NULL AND observe_until > observe_from)
+      )
+    ) STRICT;
+
+    CREATE TRIGGER assoc_param_profile_heads_no_delete
+      BEFORE DELETE ON assoc_param_profile_heads
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_profile_heads are durable'); END;
+
+    CREATE TABLE assoc_param_profile_events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope_key TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('adopted', 'rolled-back', 'settled', 'request-rejected')),
+      from_version INTEGER,
+      to_version INTEGER,
+      from_digest TEXT,
+      to_digest TEXT,
+      reason TEXT NOT NULL,
+      detail_json TEXT NOT NULL CHECK (json_valid(detail_json)),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_param_profile_events_scope ON assoc_param_profile_events(scope_key, seq);
+
+    CREATE TRIGGER assoc_param_profile_events_immutable
+      BEFORE UPDATE ON assoc_param_profile_events
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_profile_events are immutable'); END;
+
+    CREATE TRIGGER assoc_param_profile_events_no_delete
+      BEFORE DELETE ON assoc_param_profile_events
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_profile_events are durable'); END;
+
+    CREATE TABLE assoc_param_relax_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      scope_key TEXT NOT NULL,
+      parent_version INTEGER NOT NULL,
+      parent_digest TEXT NOT NULL,
+      candidate_json TEXT NOT NULL CHECK (json_valid(candidate_json)),
+      params_digest TEXT NOT NULL,
+      change_json TEXT NOT NULL CHECK (json_valid(change_json)),
+      holdout_seal TEXT NOT NULL,
+      window_from INTEGER NOT NULL,
+      window_to INTEGER NOT NULL,
+      basis_json TEXT NOT NULL CHECK (json_valid(basis_json)),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'adopted', 'rejected')),
+      created_at INTEGER NOT NULL CHECK (created_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX assoc_param_relax_proposals_scope ON assoc_param_relax_proposals(scope_key, created_at);
+
+    CREATE TRIGGER assoc_param_relax_proposals_immutable
+      BEFORE UPDATE ON assoc_param_relax_proposals
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_relax_proposals are immutable'); END;
+
+    CREATE TRIGGER assoc_param_relax_proposals_no_delete
+      BEFORE DELETE ON assoc_param_relax_proposals
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_relax_proposals are durable'); END;
+
+    CREATE TABLE assoc_param_relax_decisions (
+      decision_id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL UNIQUE,
+      scope_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('adopted', 'rejected')),
+      reason TEXT NOT NULL,
+      replay_json TEXT NOT NULL CHECK (json_valid(replay_json)),
+      decided_at INTEGER NOT NULL CHECK (decided_at >= 0),
+      FOREIGN KEY (proposal_id) REFERENCES assoc_param_relax_proposals(proposal_id) ON DELETE RESTRICT
+    ) STRICT;
+
+    CREATE TRIGGER assoc_param_relax_decisions_immutable
+      BEFORE UPDATE ON assoc_param_relax_decisions
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_relax_decisions are immutable'); END;
+
+    CREATE TRIGGER assoc_param_relax_decisions_no_delete
+      BEFORE DELETE ON assoc_param_relax_decisions
+      BEGIN SELECT RAISE(ABORT, 'assoc_param_relax_decisions are durable'); END;
+
+    CREATE TABLE assoc_param_rolled_back_digests (
+      scope_key TEXT NOT NULL,
+      params_digest TEXT NOT NULL,
+      rolled_back_at INTEGER NOT NULL CHECK (rolled_back_at >= 0),
+      from_version INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      PRIMARY KEY (scope_key, params_digest)
+    ) STRICT;
+
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '2')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+  `)
+}
+
 function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
@@ -290,6 +508,10 @@ function migrate(database: DatabaseSync): void {
     }
     if (row.user_version === 0) {
       createV1Schema(database)
+      migrateV1ToV2(database)
+      database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
+    } else if (row.user_version === 1) {
+      migrateV1ToV2(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     }
     database.exec('COMMIT')
@@ -391,6 +613,79 @@ function mapRawNode(row: RawNodeRow): StoredAssociationNode {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
+}
+
+interface RawExposureRow {
+  task_id: string
+  node_id: string
+  owner_scope_key: string
+  source_plugin: string
+  exposed_at: number
+  was_exposed: number
+  hop: number
+  score: number
+  reason: string
+  provenance_edges_json: string
+  session_id: string | null
+  assoc_read_count: number
+  weak_use_count: number
+  strong_used: number
+  weak_used: number
+  hebbian_delta_applied: number
+  corrected: number
+  corrected_at: number | null
+}
+
+function mapRawExposure(row: RawExposureRow): StoredExposureRow {
+  let provenanceEdges: ProvenanceEdgeRef[] = []
+  try {
+    const parsed = JSON.parse(row.provenance_edges_json) as unknown
+    if (Array.isArray(parsed)) {
+      provenanceEdges = parsed as ProvenanceEdgeRef[]
+    }
+  } catch {
+    provenanceEdges = []
+  }
+  return {
+    taskId: row.task_id,
+    nodeId: row.node_id,
+    ownerScopeKey: row.owner_scope_key,
+    sourcePlugin: row.source_plugin,
+    exposedAt: row.exposed_at,
+    wasExposed: row.was_exposed === 1,
+    hop: row.hop,
+    score: row.score,
+    reason: row.reason,
+    provenanceEdges,
+    sessionId: row.session_id,
+    assocReadCount: row.assoc_read_count,
+    weakUseCount: row.weak_use_count,
+    strongUsed: row.strong_used === 1,
+    weakUsed: row.weak_used === 1,
+    hebbianDeltaApplied: row.hebbian_delta_applied,
+    corrected: row.corrected === 1,
+    correctedAt: row.corrected_at,
+  }
+}
+
+function clampEdgeWeight(value: number, weightMin: number, weightMax: number): number {
+  const lo = Math.max(0.0, Math.min(10.0, weightMin))
+  const hi = Math.max(lo, Math.min(10.0, weightMax))
+  if (!Number.isFinite(value)) return lo
+  return Math.min(hi, Math.max(lo, value))
+}
+
+function mergeUniqueStrings(existing: readonly string[], incoming: readonly string[]): string[] {
+  if (incoming.length === 0) return [...existing]
+  const seen = new Set<string>(existing)
+  const merged = [...existing]
+  for (const item of incoming) {
+    if (!seen.has(item)) {
+      seen.add(item)
+      merged.push(item)
+    }
+  }
+  return merged
 }
 
 export interface WithdrawalCascadeResult {
@@ -904,7 +1199,7 @@ export class AssociationStore {
     const rows = this.#db
       .prepare(`
         SELECT e.edge_id, e.a_id, e.b_id, e.edge_type, e.weight, e.trust, e.reason,
-               e.use_count, e.last_used_at, e.created_at, e.updated_at
+               e.use_count, e.last_used_at, e.last_decayed_at, e.created_at, e.updated_at
         FROM assoc_edges e
         JOIN assoc_nodes a ON a.id = e.a_id AND a.status = 'active'
         JOIN assoc_nodes b ON b.id = e.b_id AND b.status = 'active'
@@ -921,6 +1216,7 @@ export class AssociationStore {
       reason: string
       use_count: number
       last_used_at: number | null
+      last_decayed_at: number | null
       created_at: number
       updated_at: number
     }>
@@ -934,6 +1230,7 @@ export class AssociationStore {
       reason: row.reason,
       useCount: row.use_count,
       lastUsedAt: row.last_used_at,
+      lastDecayedAt: row.last_decayed_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))
@@ -1261,8 +1558,9 @@ export class AssociationStore {
         const insertMetric = this.#db.prepare(`
           INSERT INTO assoc_step_metrics (
             task_id, owner_scope_key, in_holdout, latency_us, timed_out,
-            fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            fallback_mode, injected_count, candidate_count, source_counts_json,
+            profile_version, occurred_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         for (const m of metrics) {
           insertMetric.run(
@@ -1275,6 +1573,7 @@ export class AssociationStore {
             m.injectedCount,
             m.candidateCount,
             JSON.stringify(m.sourceCounts),
+            m.profileVersion ?? 0,
             m.occurredAt,
           )
         }
@@ -1284,14 +1583,27 @@ export class AssociationStore {
         const upsertExposure = this.#db.prepare(`
           INSERT INTO assoc_exposures (
             task_id, node_id, owner_scope_key, source_plugin, exposed_at,
-            assoc_read_count, weak_use_count, corrected
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            assoc_read_count, weak_use_count, corrected,
+            was_exposed, hop, score, reason, provenance_edges_json, session_id,
+            strong_used, weak_used, hebbian_delta_applied, corrected_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(task_id, node_id) DO UPDATE SET
+            was_exposed = MAX(assoc_exposures.was_exposed, excluded.was_exposed),
+            hop = CASE WHEN excluded.was_exposed = 1 THEN excluded.hop ELSE assoc_exposures.hop END,
+            score = CASE WHEN excluded.was_exposed = 1 THEN excluded.score ELSE assoc_exposures.score END,
+            reason = CASE WHEN excluded.was_exposed = 1 AND excluded.reason <> '' THEN excluded.reason ELSE assoc_exposures.reason END,
+            provenance_edges_json = CASE WHEN excluded.was_exposed = 1 AND excluded.provenance_edges_json <> '[]' THEN excluded.provenance_edges_json ELSE assoc_exposures.provenance_edges_json END,
+            session_id = COALESCE(excluded.session_id, assoc_exposures.session_id),
             assoc_read_count = assoc_exposures.assoc_read_count + excluded.assoc_read_count,
             weak_use_count = assoc_exposures.weak_use_count + excluded.weak_use_count,
-            corrected = MAX(assoc_exposures.corrected, excluded.corrected)
+            strong_used = MAX(assoc_exposures.strong_used, excluded.strong_used),
+            weak_used = MAX(assoc_exposures.weak_used, excluded.weak_used),
+            hebbian_delta_applied = assoc_exposures.hebbian_delta_applied + excluded.hebbian_delta_applied,
+            corrected = MAX(assoc_exposures.corrected, excluded.corrected),
+            corrected_at = COALESCE(assoc_exposures.corrected_at, excluded.corrected_at)
         `)
         for (const exp of exposures) {
+          const hop = Math.max(0, Math.min(2, Math.trunc(exp.hop ?? 0)))
           upsertExposure.run(
             exp.taskId,
             exp.nodeId,
@@ -1301,9 +1613,750 @@ export class AssociationStore {
             exp.assocReadCount ?? 0,
             exp.weakUseCount ?? 0,
             exp.corrected ? 1 : 0,
+            exp.wasExposed === false ? 0 : 1,
+            hop,
+            exp.score ?? 0,
+            exp.reason ?? '',
+            JSON.stringify(exp.provenanceEdges ?? []),
+            exp.sessionId ?? null,
+            exp.strongUsed ? 1 : 0,
+            exp.weakUsed ? 1 : 0,
+            exp.hebbianDeltaApplied ?? 0,
+            exp.correctedAt ?? null,
           )
         }
       }
+    })
+  }
+
+  recordReadEvent(event: AssocReadEventInput): void {
+    this.#db
+      .prepare(`
+        INSERT INTO assoc_read_events (
+          task_id, node_id, owner_scope_key, hit, reason, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        event.taskId ?? null,
+        event.nodeId,
+        event.ownerScopeKey,
+        event.hit ? 1 : 0,
+        event.reason,
+        event.occurredAt,
+      )
+  }
+
+  upsertTaskTelemetry(input: AssocTaskTelemetryInput): void {
+    this.runInTransaction(() => {
+      const existing = this.#db
+        .prepare(`
+          SELECT turns, steps, input_tokens, output_tokens, cost_usd_micros
+          FROM assoc_task_telemetry
+          WHERE task_id = ?
+        `)
+        .get(input.taskId) as
+        | {
+            turns: number
+            steps: number
+            input_tokens: number | null
+            output_tokens: number | null
+            cost_usd_micros: number | null
+          }
+        | undefined
+
+      const turns = Math.max(
+        0,
+        Math.trunc(input.turns ?? ((existing?.turns ?? 0) + (input.turnsDelta ?? 0))),
+      )
+      const steps = Math.max(
+        0,
+        Math.trunc(input.steps ?? ((existing?.steps ?? 0) + (input.stepsDelta ?? 0))),
+      )
+
+      const resolveOptionalCounter = (
+        abs: number | null | undefined,
+        delta: number | null | undefined,
+        prev: number | null,
+      ): number | null => {
+        if (abs !== undefined) return abs
+        if (delta !== undefined && delta !== null) {
+          return (prev ?? 0) + delta
+        }
+        return prev
+      }
+
+      const inputTokens = resolveOptionalCounter(
+        input.inputTokens,
+        input.inputTokensDelta,
+        existing?.input_tokens ?? null,
+      )
+      const outputTokens = resolveOptionalCounter(
+        input.outputTokens,
+        input.outputTokensDelta,
+        existing?.output_tokens ?? null,
+      )
+      const costUsdMicros = resolveOptionalCounter(
+        input.costUsdMicros,
+        input.costUsdMicrosDelta,
+        existing?.cost_usd_micros ?? null,
+      )
+
+      this.#db
+        .prepare(`
+          INSERT INTO assoc_task_telemetry (
+            task_id, owner_scope_key, in_holdout, turns, steps,
+            input_tokens, output_tokens, cost_usd_micros, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET
+            in_holdout = excluded.in_holdout,
+            turns = excluded.turns,
+            steps = excluded.steps,
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            cost_usd_micros = excluded.cost_usd_micros,
+            updated_at = excluded.updated_at
+        `)
+        .run(
+          input.taskId,
+          input.ownerScopeKey,
+          input.inHoldout ? 1 : 0,
+          turns,
+          steps,
+          inputTokens,
+          outputTokens,
+          costUsdMicros,
+          input.updatedAt,
+        )
+    })
+  }
+
+  upsertReplayEpisode(input: AssocReplayEpisodeInput): void {
+    this.runInTransaction(() => {
+      const existing = this.#db
+        .prepare(`
+          SELECT cues_json, used_node_ids_json, corrected_node_ids_json, profile_version
+          FROM assoc_replay_episodes
+          WHERE task_id = ?
+        `)
+        .get(input.taskId) as
+        | {
+            cues_json: string
+            used_node_ids_json: string
+            corrected_node_ids_json: string
+            profile_version: number
+          }
+        | undefined
+
+      const cuesJson =
+        input.cues.length > 0 || existing === undefined
+          ? JSON.stringify(input.cues)
+          : existing.cues_json
+
+      const prevUsed = existing !== undefined ? (JSON.parse(existing.used_node_ids_json) as string[]) : []
+      const prevCorrected =
+        existing !== undefined ? (JSON.parse(existing.corrected_node_ids_json) as string[]) : []
+      const usedIds = mergeUniqueStrings(prevUsed, input.usedNodeIds ?? [])
+      const correctedIds = mergeUniqueStrings(prevCorrected, input.correctedNodeIds ?? [])
+      const profileVersion = input.profileVersion ?? existing?.profile_version ?? 0
+
+      this.#db
+        .prepare(`
+          INSERT INTO assoc_replay_episodes (
+            task_id, owner_scope_key, in_holdout, cues_json,
+            used_node_ids_json, corrected_node_ids_json, profile_version, occurred_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET
+            in_holdout = excluded.in_holdout,
+            cues_json = excluded.cues_json,
+            used_node_ids_json = excluded.used_node_ids_json,
+            corrected_node_ids_json = excluded.corrected_node_ids_json,
+            profile_version = excluded.profile_version,
+            occurred_at = excluded.occurred_at
+        `)
+        .run(
+          input.taskId,
+          input.ownerScopeKey,
+          input.inHoldout ? 1 : 0,
+          cuesJson,
+          JSON.stringify(usedIds),
+          JSON.stringify(correctedIds),
+          profileVersion,
+          input.occurredAt,
+        )
+    })
+  }
+
+  hasExposedRow(taskId: string, nodeId: string): boolean {
+    const row = this.#db
+      .prepare(
+        'SELECT 1 AS ok FROM assoc_exposures WHERE task_id = ? AND node_id = ? AND was_exposed = 1',
+      )
+      .get(taskId, nodeId) as { ok: number } | undefined
+    return row !== undefined
+  }
+
+  findLatestUncorrectedMemoryExposure(
+    ownerScopeKey: string,
+    nodeId: string,
+    minExposedAt = 0,
+  ): StoredExposureRow | null {
+    const row = this.#db
+      .prepare(`
+        SELECT * FROM assoc_exposures
+        WHERE owner_scope_key = ?
+          AND node_id = ?
+          AND was_exposed = 1
+          AND corrected = 0
+          AND exposed_at >= ?
+        ORDER BY (CASE WHEN strong_used = 1 OR weak_used = 1 THEN 1 ELSE 0 END) DESC,
+                 exposed_at DESC
+        LIMIT 1
+      `)
+      .get(ownerScopeKey, nodeId, minExposedAt) as RawExposureRow | undefined
+    return row === undefined ? null : mapRawExposure(row)
+  }
+
+  findExposuresByTaskOrSession(
+    ownerScopeKey: string,
+    taskId: string,
+    sessionId?: string | null,
+  ): StoredExposureRow[] {
+    const byTask = this.#db
+      .prepare(`
+        SELECT * FROM assoc_exposures
+        WHERE owner_scope_key = ? AND task_id = ? AND was_exposed = 1
+        ORDER BY exposed_at ASC, node_id ASC
+      `)
+      .all(ownerScopeKey, taskId) as unknown as RawExposureRow[]
+    if (byTask.length > 0) {
+      return byTask.map(mapRawExposure)
+    }
+    if (
+      !taskId.startsWith('foreground-turn:') &&
+      sessionId !== undefined &&
+      sessionId !== null &&
+      sessionId.length > 0
+    ) {
+      const bySession = this.#db
+        .prepare(`
+          SELECT * FROM assoc_exposures
+          WHERE owner_scope_key = ? AND session_id = ?
+            AND task_id NOT LIKE 'foreground-turn:%'
+            AND was_exposed = 1
+          ORDER BY exposed_at ASC, node_id ASC
+        `)
+        .all(ownerScopeKey, sessionId) as unknown as RawExposureRow[]
+      return bySession.map(mapRawExposure)
+    }
+    return []
+  }
+
+  applyHebbianUse(input: ApplyHebbianUseInput): ApplyHebbianUseResult {
+    return this.runInTransaction(() => {
+      const cfg = input.hebbianConfig
+      const alpha = cfg?.alpha ?? DEFAULT_HEBBIAN_CONFIG.alpha
+      const weakRatio = cfg?.weakRatio ?? DEFAULT_HEBBIAN_CONFIG.weakRatio
+      const wMin = cfg?.weightMin ?? DEFAULT_HEBBIAN_CONFIG.weightMin
+      const wMax = cfg?.weightMax ?? DEFAULT_HEBBIAN_CONFIG.weightMax
+      const initWeight = clampEdgeWeight(
+        cfg?.initialHebbianWeight ?? DEFAULT_HEBBIAN_CONFIG.initialHebbianWeight,
+        wMin,
+        wMax,
+      )
+      const weakDelta = alpha * weakRatio
+
+      const rawExp = this.#db
+        .prepare(`
+          SELECT * FROM assoc_exposures
+          WHERE task_id = ? AND node_id = ?
+        `)
+        .get(input.taskId, input.nodeId) as RawExposureRow | undefined
+
+      if (
+        rawExp === undefined ||
+        rawExp.was_exposed !== 1 ||
+        rawExp.owner_scope_key !== input.ownerScopeKey ||
+        rawExp.corrected === 1
+      ) {
+        return { appliedDelta: 0, updatedEdges: 0, createdEdges: 0 }
+      }
+
+      const exp = mapRawExposure(rawExp)
+      let delta = 0
+      let nextStrongUsed = exp.strongUsed ? 1 : 0
+      let nextWeakUsed = exp.weakUsed ? 1 : 0
+      const addReadCount = input.useKind === 'strong' ? 1 : 0
+      const addWeakCount = input.useKind === 'weak' ? 1 : 0
+
+      if (input.useKind === 'strong') {
+        if (exp.strongUsed) {
+          delta = 0
+        } else if (exp.weakUsed) {
+          const alreadyApplied =
+            exp.hebbianDeltaApplied > 0 ? Math.min(alpha, exp.hebbianDeltaApplied) : weakDelta
+          delta = Math.max(0, alpha - alreadyApplied)
+          nextStrongUsed = 1
+        } else {
+          delta = Math.max(0, alpha)
+          nextStrongUsed = 1
+        }
+      } else {
+        if (exp.strongUsed || exp.weakUsed) {
+          delta = 0
+        } else {
+          delta = Math.max(0, weakDelta)
+          nextWeakUsed = 1
+        }
+      }
+
+      this.#db
+        .prepare(`
+          UPDATE assoc_exposures
+          SET assoc_read_count = assoc_read_count + ?,
+              weak_use_count = weak_use_count + ?,
+              strong_used = ?,
+              weak_used = ?,
+              hebbian_delta_applied = hebbian_delta_applied + ?,
+              session_id = COALESCE(session_id, ?)
+          WHERE task_id = ? AND node_id = ?
+        `)
+        .run(
+          addReadCount,
+          addWeakCount,
+          nextStrongUsed,
+          nextWeakUsed,
+          delta,
+          input.sessionId ?? null,
+          input.taskId,
+          input.nodeId,
+        )
+
+      if (delta <= 0) {
+        return { appliedDelta: 0, updatedEdges: 0, createdEdges: 0 }
+      }
+
+      const selectActiveNode = this.#db.prepare(`
+        SELECT id, source_version, owner_scope_key, sensitivity, trust
+        FROM assoc_nodes
+        WHERE id = ? AND status = 'active'
+      `)
+      const targetNode = selectActiveNode.get(input.nodeId) as
+        | {
+            id: string
+            source_version: number
+            owner_scope_key: string
+            sensitivity: AssociationSensitivity
+            trust: AssociationTrust
+          }
+        | undefined
+      if (targetNode === undefined) {
+        return { appliedDelta: delta, updatedEdges: 0, createdEdges: 0 }
+      }
+
+      const eventKind = input.useKind === 'strong' ? 'strong-use' : 'weak-use'
+      const provenance =
+        input.provenanceEdges !== undefined && input.provenanceEdges.length > 0
+          ? input.provenanceEdges
+          : exp.provenanceEdges
+
+      const selectActiveEdge = this.#db.prepare(`
+        SELECT e.edge_id, e.weight
+        FROM assoc_edges e
+        JOIN assoc_nodes a ON a.id = e.a_id AND a.status = 'active'
+        JOIN assoc_nodes b ON b.id = e.b_id AND b.status = 'active'
+        WHERE e.edge_id = ?
+      `)
+      const updateEdgeStmt = this.#db.prepare(`
+        UPDATE assoc_edges
+        SET weight = ?, use_count = use_count + 1, last_used_at = ?, last_decayed_at = ?, updated_at = ?
+        WHERE edge_id = ?
+      `)
+      const insertHebbianEvent = this.#db.prepare(`
+        INSERT INTO assoc_hebbian_events (
+          owner_scope_key, task_id, node_id, edge_id, event_kind,
+          delta, weight_before, weight_after, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+
+      const processedEdges = new Set<string>()
+      let updatedEdges = 0
+      let createdEdges = 0
+
+      for (const prov of provenance) {
+        if (processedEdges.has(prov.edgeId)) continue
+        processedEdges.add(prov.edgeId)
+        const edgeRow = selectActiveEdge.get(prov.edgeId) as
+          | { edge_id: string; weight: number }
+          | undefined
+        if (edgeRow === undefined) continue
+        const weightBefore = edgeRow.weight
+        const weightAfter = clampEdgeWeight(weightBefore + delta, wMin, wMax)
+        updateEdgeStmt.run(weightAfter, input.nowMs, input.nowMs, input.nowMs, edgeRow.edge_id)
+        insertHebbianEvent.run(
+          input.ownerScopeKey,
+          input.taskId,
+          input.nodeId,
+          edgeRow.edge_id,
+          eventKind,
+          weightAfter - weightBefore,
+          weightBefore,
+          weightAfter,
+          input.nowMs,
+        )
+        updatedEdges += 1
+      }
+
+      if (
+        provenance.length === 0 &&
+        input.coActivatedNodeIds !== undefined &&
+        input.coActivatedNodeIds.length > 0
+      ) {
+        const insertEdgeStmt = this.#db.prepare(`
+          INSERT INTO assoc_edges (
+            edge_id, a_id, b_id, edge_type, weight, trust, reason,
+            use_count, last_used_at, last_decayed_at, created_at, updated_at
+          ) VALUES (?, ?, ?, 'hebbian', ?, ?, 'hebbian:co-use', 1, ?, ?, ?, ?)
+        `)
+        const insertDerivedStmt = this.#db.prepare(`
+          INSERT OR IGNORE INTO assoc_derived_from (
+            source_node_id, source_version, target_kind, target_id
+          ) VALUES (?, ?, 'edge', ?)
+        `)
+        const seenPeers = new Set<string>()
+
+        for (const peerId of input.coActivatedNodeIds) {
+          if (peerId === input.nodeId || seenPeers.has(peerId)) continue
+          seenPeers.add(peerId)
+          const peerNode = selectActiveNode.get(peerId) as
+            | {
+                id: string
+                source_version: number
+                owner_scope_key: string
+                sensitivity: AssociationSensitivity
+                trust: AssociationTrust
+              }
+            | undefined
+          if (
+            peerNode === undefined ||
+            peerNode.owner_scope_key !== input.ownerScopeKey ||
+            peerNode.sensitivity !== 'private'
+          ) {
+            continue
+          }
+
+          const [aId, bId] =
+            input.nodeId <= peerId ? [input.nodeId, peerId] : [peerId, input.nodeId]
+          const hebbianEdgeId = computeDeterministicEdgeId(aId, bId, 'hebbian')
+          if (processedEdges.has(hebbianEdgeId)) continue
+          processedEdges.add(hebbianEdgeId)
+
+          const existingEdge = selectActiveEdge.get(hebbianEdgeId) as
+            | { edge_id: string; weight: number }
+            | undefined
+          if (existingEdge !== undefined) {
+            const weightBefore = existingEdge.weight
+            const weightAfter = clampEdgeWeight(weightBefore + delta, wMin, wMax)
+            updateEdgeStmt.run(
+              weightAfter,
+              input.nowMs,
+              input.nowMs,
+              input.nowMs,
+              existingEdge.edge_id,
+            )
+            insertHebbianEvent.run(
+              input.ownerScopeKey,
+              input.taskId,
+              input.nodeId,
+              existingEdge.edge_id,
+              eventKind,
+              weightAfter - weightBefore,
+              weightBefore,
+              weightAfter,
+              input.nowMs,
+            )
+            updatedEdges += 1
+          } else {
+            const createdWeight = clampEdgeWeight(initWeight + delta, wMin, wMax)
+            const edgeTrust: AssociationTrust =
+              targetNode.trust === 'low' || peerNode.trust === 'low' ? 'low' : 'trusted'
+            insertEdgeStmt.run(
+              hebbianEdgeId,
+              aId,
+              bId,
+              createdWeight,
+              edgeTrust,
+              input.nowMs,
+              input.nowMs,
+              input.nowMs,
+              input.nowMs,
+            )
+            insertDerivedStmt.run(targetNode.id, targetNode.source_version, hebbianEdgeId)
+            insertDerivedStmt.run(peerNode.id, peerNode.source_version, hebbianEdgeId)
+            insertHebbianEvent.run(
+              input.ownerScopeKey,
+              input.taskId,
+              input.nodeId,
+              hebbianEdgeId,
+              eventKind,
+              createdWeight,
+              0,
+              createdWeight,
+              input.nowMs,
+            )
+            createdEdges += 1
+          }
+        }
+      }
+
+      return { appliedDelta: delta, updatedEdges, createdEdges }
+    })
+  }
+
+  applyHebbianCorrection(input: ApplyHebbianCorrectionInput): ApplyHebbianCorrectionResult {
+    return this.runInTransaction(() => {
+      const cfg = input.hebbianConfig
+      const beta = Math.max(0, cfg?.beta ?? DEFAULT_HEBBIAN_CONFIG.beta)
+      const wMin = cfg?.weightMin ?? DEFAULT_HEBBIAN_CONFIG.weightMin
+      const wMax = cfg?.weightMax ?? DEFAULT_HEBBIAN_CONFIG.weightMax
+
+      let targets: RawExposureRow[] = []
+      if (input.taskId !== undefined && input.taskId !== null && input.taskId.length > 0) {
+        if (input.nodeId !== undefined && input.nodeId !== null && input.nodeId.length > 0) {
+          targets = this.#db
+            .prepare(`
+              SELECT * FROM assoc_exposures
+              WHERE owner_scope_key = ? AND task_id = ? AND node_id = ?
+                AND was_exposed = 1 AND corrected = 0
+            `)
+            .all(input.ownerScopeKey, input.taskId, input.nodeId) as unknown as RawExposureRow[]
+        } else {
+          targets = this.#db
+            .prepare(`
+              SELECT * FROM assoc_exposures
+              WHERE owner_scope_key = ? AND task_id = ?
+                AND was_exposed = 1 AND corrected = 0
+            `)
+            .all(input.ownerScopeKey, input.taskId) as unknown as RawExposureRow[]
+        }
+        if (
+          targets.length === 0 &&
+          !input.taskId.startsWith('foreground-turn:') &&
+          input.sessionId !== undefined &&
+          input.sessionId !== null &&
+          input.sessionId.length > 0
+        ) {
+          targets = this.#db
+            .prepare(`
+              SELECT * FROM assoc_exposures
+              WHERE owner_scope_key = ? AND session_id = ?
+                AND task_id NOT LIKE 'foreground-turn:%'
+                AND was_exposed = 1 AND corrected = 0
+            `)
+            .all(input.ownerScopeKey, input.sessionId) as unknown as RawExposureRow[]
+        }
+      } else if (input.nodeId !== undefined && input.nodeId !== null && input.nodeId.length > 0) {
+        const single = this.#db
+          .prepare(`
+            SELECT * FROM assoc_exposures
+            WHERE owner_scope_key = ? AND node_id = ?
+              AND was_exposed = 1 AND corrected = 0 AND exposed_at >= ?
+            ORDER BY (CASE WHEN strong_used = 1 OR weak_used = 1 THEN 1 ELSE 0 END) DESC,
+                     exposed_at DESC
+            LIMIT 1
+          `)
+          .get(input.ownerScopeKey, input.nodeId, input.minExposedAt ?? 0) as
+          | RawExposureRow
+          | undefined
+        if (single !== undefined) {
+          targets = [single]
+        }
+      }
+
+      if (targets.length === 0) {
+        return { correctedExposures: 0, updatedEdges: 0 }
+      }
+
+      const markCorrectedStmt = this.#db.prepare(`
+        UPDATE assoc_exposures
+        SET corrected = 1, corrected_at = ?
+        WHERE task_id = ? AND node_id = ? AND corrected = 0
+      `)
+      let correctedExposures = 0
+      for (const row of targets) {
+        const res = markCorrectedStmt.run(input.nowMs, row.task_id, row.node_id)
+        if (res.changes > 0) correctedExposures += 1
+      }
+
+      const mapped = targets.map(mapRawExposure)
+      const usedTargets = mapped.filter((e) => e.strongUsed || e.weakUsed)
+      const penalizedTargets = usedTargets.length > 0 ? usedTargets : mapped
+
+      const edgeCandidates = new Map<string, { taskId: string; nodeId: string }>()
+      const selectTaskExposedNodes = this.#db.prepare(`
+        SELECT node_id FROM assoc_exposures
+        WHERE task_id = ? AND owner_scope_key = ? AND was_exposed = 1
+      `)
+      const selectIncidentHebbian = this.#db.prepare(`
+        SELECT edge_id, a_id, b_id FROM assoc_edges
+        WHERE edge_type = 'hebbian' AND (a_id = ? OR b_id = ?)
+      `)
+      const selectTaskHebbianEvents = this.#db.prepare(`
+        SELECT DISTINCT edge_id FROM assoc_hebbian_events
+        WHERE owner_scope_key = ? AND task_id = ? AND node_id = ?
+          AND event_kind IN ('strong-use', 'weak-use')
+      `)
+
+      for (const exp of penalizedTargets) {
+        for (const prov of exp.provenanceEdges) {
+          if (!edgeCandidates.has(prov.edgeId)) {
+            edgeCandidates.set(prov.edgeId, { taskId: exp.taskId, nodeId: exp.nodeId })
+          }
+        }
+        const hebbianEventRows = selectTaskHebbianEvents.all(
+          input.ownerScopeKey,
+          exp.taskId,
+          exp.nodeId,
+        ) as Array<{ edge_id: string }>
+        for (const ev of hebbianEventRows) {
+          if (!edgeCandidates.has(ev.edge_id)) {
+            edgeCandidates.set(ev.edge_id, { taskId: exp.taskId, nodeId: exp.nodeId })
+          }
+        }
+        const peerRows = selectTaskExposedNodes.all(exp.taskId, input.ownerScopeKey) as Array<{
+          node_id: string
+        }>
+        const taskPeers = new Set(peerRows.map((p) => p.node_id))
+        const incidentHebbian = selectIncidentHebbian.all(exp.nodeId, exp.nodeId) as Array<{
+          edge_id: string
+          a_id: string
+          b_id: string
+        }>
+        for (const edge of incidentHebbian) {
+          const otherId = edge.a_id === exp.nodeId ? edge.b_id : edge.a_id
+          if (taskPeers.has(otherId) && !edgeCandidates.has(edge.edge_id)) {
+            edgeCandidates.set(edge.edge_id, { taskId: exp.taskId, nodeId: exp.nodeId })
+          }
+        }
+      }
+
+      const selectEdgeWeight = this.#db.prepare(
+        'SELECT edge_id, weight FROM assoc_edges WHERE edge_id = ?',
+      )
+      const updateEdgeWeight = this.#db.prepare(
+        'UPDATE assoc_edges SET weight = ?, updated_at = ? WHERE edge_id = ?',
+      )
+      const insertHebbianEvent = this.#db.prepare(`
+        INSERT INTO assoc_hebbian_events (
+          owner_scope_key, task_id, node_id, edge_id, event_kind,
+          delta, weight_before, weight_after, occurred_at
+        ) VALUES (?, ?, ?, ?, 'correction', ?, ?, ?, ?)
+      `)
+
+      let updatedEdges = 0
+      for (const [edgeId, meta] of edgeCandidates) {
+        const edgeRow = selectEdgeWeight.get(edgeId) as
+          | { edge_id: string; weight: number }
+          | undefined
+        if (edgeRow === undefined) continue
+        const weightBefore = edgeRow.weight
+        const weightAfter = clampEdgeWeight(weightBefore - beta, wMin, wMax)
+        updateEdgeWeight.run(weightAfter, input.nowMs, edgeRow.edge_id)
+        insertHebbianEvent.run(
+          input.ownerScopeKey,
+          meta.taskId,
+          meta.nodeId,
+          edgeRow.edge_id,
+          weightAfter - weightBefore,
+          weightBefore,
+          weightAfter,
+          input.nowMs,
+        )
+        updatedEdges += 1
+      }
+
+      return { correctedExposures, updatedEdges }
+    })
+  }
+
+  applyHebbianDecayBatch(input: ApplyHebbianDecayInput): ApplyHebbianDecayResult {
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(input.limit ?? 200)))
+    const wMin = Math.max(0.0, Math.min(10.0, input.weightMin))
+    const wMax = Math.max(wMin, Math.min(10.0, input.weightMax))
+
+    return this.runInTransaction(() => {
+      const rows = this.#db
+        .prepare(`
+          SELECT e.edge_id, e.a_id, e.weight, e.last_used_at, e.created_at, e.last_decayed_at,
+                 a.owner_scope_key
+          FROM assoc_edges e
+          JOIN assoc_nodes a ON a.id = e.a_id
+          WHERE e.weight > ?
+            AND COALESCE(e.last_used_at, e.created_at) <= ?
+            AND COALESCE(e.last_decayed_at, COALESCE(e.last_used_at, e.created_at) + ?) < ?
+          ORDER BY COALESCE(e.last_decayed_at, COALESCE(e.last_used_at, e.created_at) + ?) ASC, e.edge_id ASC
+          LIMIT ?
+        `)
+        .all(
+          wMin,
+          input.nowMs - input.nonUseGraceMs,
+          input.nonUseGraceMs,
+          input.nowMs,
+          input.nonUseGraceMs,
+          safeLimit + 1,
+        ) as Array<{
+        edge_id: string
+        a_id: string
+        weight: number
+        last_used_at: number | null
+        created_at: number
+        last_decayed_at: number | null
+        owner_scope_key: string
+      }>
+
+      const hasMore = rows.length > safeLimit
+      const batch = hasMore ? rows.slice(0, safeLimit) : rows
+      if (batch.length === 0) {
+        return { decayedEdges: 0, hasMore: false }
+      }
+
+      const updateEdge = this.#db.prepare(`
+        UPDATE assoc_edges
+        SET weight = ?, last_decayed_at = ?, updated_at = ?
+        WHERE edge_id = ?
+      `)
+      const insertEvent = this.#db.prepare(`
+        INSERT INTO assoc_hebbian_events (
+          owner_scope_key, task_id, node_id, edge_id, event_kind,
+          delta, weight_before, weight_after, occurred_at
+        ) VALUES (?, NULL, ?, ?, 'decay', ?, ?, ?, ?)
+      `)
+
+      let decayedEdges = 0
+      for (const edge of batch) {
+        const anchor = edge.last_used_at ?? edge.created_at
+        const graceEnd = anchor + input.nonUseGraceMs
+        const decayStart = Math.max(edge.last_decayed_at ?? graceEnd, graceEnd)
+        const dt = Math.max(0, input.nowMs - decayStart)
+        if (dt <= 0 || input.decayHalfLifeMs <= 0) continue
+
+        const baseWeight = clampEdgeWeight(edge.weight, wMin, wMax)
+        const decayed =
+          baseWeight * Math.exp((-Math.LN2 * dt) / input.decayHalfLifeMs)
+        const weightAfter = clampEdgeWeight(decayed, wMin, wMax)
+        updateEdge.run(weightAfter, input.nowMs, input.nowMs, edge.edge_id)
+        insertEvent.run(
+          edge.owner_scope_key,
+          edge.a_id,
+          edge.edge_id,
+          weightAfter - edge.weight,
+          edge.weight,
+          weightAfter,
+          input.nowMs,
+        )
+        decayedEdges += 1
+      }
+
+      return { decayedEdges, hasMore }
     })
   }
 }

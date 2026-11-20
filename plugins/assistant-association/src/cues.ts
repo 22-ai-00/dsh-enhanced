@@ -6,14 +6,17 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantGoalsService, GoalTaskContext } from '@dsh-enhanced/assistant-goals'
 import { isBoundaryMatch, stepAcState, type EntityAutomaton } from './aho-corasick.js'
+import { extractEntities } from './entities.js'
+import { MAX_WEAK_USE_TEXT_CHARS } from './hebbian.js'
 import type { AssociationMemoryIndex } from './index-memory.js'
-import { normalizeForAc } from './tokenize.js'
+import { normalizeEntityKey, normalizeForAc } from './tokenize.js'
 import {
   computeOwnerScopeKey,
   computePrincipalDigest,
   type AssociationOwnerScope,
   type HoldoutTaskKind,
   type HotPathCue,
+  type ProvenanceEdgeRef,
   type ScoredAssociationItem,
   type SessionActivationEntry,
 } from './types.js'
@@ -73,6 +76,36 @@ export interface StepOutcomeRecord {
   readonly outcome: 'injected' | 'holdout' | 'timeout'
 }
 
+export interface TaskExposureEntry {
+  readonly nodeId: string
+  readonly sourcePlugin: string
+  readonly hop: number
+  readonly score: number
+  readonly reason: string
+  readonly provenanceEdges: readonly ProvenanceEdgeRef[]
+  strongUsed: boolean
+  weakUsed: boolean
+}
+
+export interface SessionEventTelemetryEffect {
+  readonly turn: number
+  readonly stepsDelta: number
+  readonly turnsDelta: number
+  readonly inputTokensDelta: number | null
+  readonly outputTokensDelta: number | null
+  readonly costUsdMicrosDelta: number | null
+  readonly occurredAt: number
+}
+
+export interface SessionEventOutcome {
+  readonly assistantText?: string
+  readonly assistantTurn?: number
+  readonly telemetry?: SessionEventTelemetryEffect
+}
+
+const MAX_TASK_EXPOSURES_CACHE = 32
+const MAX_TURN_TASK_IDS_CACHE = 32
+
 export interface AgentAssocState {
   ownerKey: string | undefined
   inputNonce: number
@@ -90,6 +123,10 @@ export interface AgentAssocState {
   lastStepOutcome: StepOutcomeRecord | undefined
   memo: StepMemoEntry | undefined
   readonly recordedTaskIds: Set<string>
+  turnPromptEntitiesTurn: number
+  readonly turnPromptEntities: Set<string>
+  readonly taskExposures: Map<string, Map<string, TaskExposureEntry>>
+  readonly turnTaskIds: Map<number, string>
 }
 
 export function createAgentAssocState(): AgentAssocState {
@@ -110,6 +147,10 @@ export function createAgentAssocState(): AgentAssocState {
     lastStepOutcome: undefined,
     memo: undefined,
     recordedTaskIds: new Set(),
+    turnPromptEntitiesTurn: -1,
+    turnPromptEntities: new Set(),
+    taskExposures: new Map(),
+    turnTaskIds: new Map(),
   }
 }
 
@@ -147,6 +188,10 @@ export function wipeStateOnOwnerRotation(
     state.lastMetricNonce = -1
     state.lastStepOutcome = undefined
     state.recordedTaskIds.clear()
+    state.turnPromptEntitiesTurn = -1
+    state.turnPromptEntities.clear()
+    state.taskExposures.clear()
+    state.turnTaskIds.clear()
     state.invalidationNonce += 1
   }
   return rotated
@@ -166,6 +211,9 @@ export function evictNodesFromAgentState(
     }
     if (state.sessionActivation.delete(id)) changed = true
     state.overflowDroppedIds.delete(id)
+    for (const expMap of state.taskExposures.values()) {
+      expMap.delete(id)
+    }
   }
   if (retainedEvicted) {
     state.retainedDirty = true
@@ -174,6 +222,92 @@ export function evictNodesFromAgentState(
   if (changed) {
     state.invalidationNonce += 1
     state.memo = undefined
+  }
+}
+
+export function ensureTurnPromptEntities(state: AgentAssocState, turn: number): void {
+  if (state.turnPromptEntitiesTurn !== turn) {
+    state.turnPromptEntities.clear()
+    state.turnPromptEntitiesTurn = turn
+  }
+}
+
+export function addPromptEntitiesFromText(
+  state: AgentAssocState,
+  text: string,
+  activeIndex?: AssociationMemoryIndex | null,
+): void {
+  if (text.trim().length === 0) return
+  for (const raw of extractEntities(text, 256)) {
+    const key = normalizeEntityKey(raw)
+    if (key !== null) {
+      state.turnPromptEntities.add(key)
+    }
+  }
+  if (activeIndex !== undefined && activeIndex !== null) {
+    for (const hit of extractAcEntitiesFromText(activeIndex.ac, text)) {
+      const key = normalizeEntityKey(hit.entityId)
+      if (key !== null) {
+        state.turnPromptEntities.add(key)
+      }
+    }
+  }
+}
+
+export function recordTaskExposures(
+  state: AgentAssocState,
+  taskId: string,
+  items: readonly ScoredAssociationItem[],
+): void {
+  if (items.length === 0) return
+  let map = state.taskExposures.get(taskId)
+  if (map === undefined) {
+    map = new Map()
+    state.taskExposures.set(taskId, map)
+    while (state.taskExposures.size > MAX_TASK_EXPOSURES_CACHE) {
+      const oldest = state.taskExposures.keys().next().value
+      if (oldest === undefined) break
+      state.taskExposures.delete(oldest)
+    }
+  } else {
+    state.taskExposures.delete(taskId)
+    state.taskExposures.set(taskId, map)
+  }
+  for (const item of items) {
+    const existing = map.get(item.id)
+    if (existing !== undefined) {
+      map.set(item.id, {
+        nodeId: item.id,
+        sourcePlugin: item.sourcePlugin,
+        hop: item.hop,
+        score: item.score,
+        reason: item.reason,
+        provenanceEdges: item.provenanceEdges ?? existing.provenanceEdges,
+        strongUsed: existing.strongUsed,
+        weakUsed: existing.weakUsed,
+      })
+    } else {
+      map.set(item.id, {
+        nodeId: item.id,
+        sourcePlugin: item.sourcePlugin,
+        hop: item.hop,
+        score: item.score,
+        reason: item.reason,
+        provenanceEdges: item.provenanceEdges ?? [],
+        strongUsed: false,
+        weakUsed: false,
+      })
+    }
+  }
+}
+
+export function recordTurnTaskId(state: AgentAssocState, turn: number, taskId: string): void {
+  state.turnTaskIds.delete(turn)
+  state.turnTaskIds.set(turn, taskId)
+  while (state.turnTaskIds.size > MAX_TURN_TASK_IDS_CACHE) {
+    const oldest = state.turnTaskIds.keys().next().value
+    if (oldest === undefined) break
+    state.turnTaskIds.delete(oldest)
   }
 }
 
@@ -211,15 +345,19 @@ export function handleInboxClaimed(
   state: AgentAssocState,
   message: UserMessage,
   turn: number,
+  activeIndex?: AssociationMemoryIndex | null,
 ): void {
   state.inputNonce += 1
+  ensureTurnPromptEntities(state, turn)
   if (isHumanOrTaskMessage(message)) {
+    const text = extractTextBounded(message.content, MAX_CUE_TEXT_CHARS)
     state.claimedUserMessage = {
       turn,
       messageId: String(message.id),
-      text: extractTextBounded(message.content, MAX_CUE_TEXT_CHARS),
+      text,
       sourceKind: message.source.kind,
     }
+    addPromptEntitiesFromText(state, text, activeIndex)
   }
 }
 
@@ -352,18 +490,73 @@ export function handleSessionEvent(
   event: SessionEvent,
   activeIndex: AssociationMemoryIndex | null,
   toolNamesBySessionTurn: Map<string, string[]>,
-): void {
+): SessionEventOutcome {
   if (event.type === 'user/message') {
     if ((event.data.source?.kind as string | undefined) === 'runtime-context') {
-      return
+      return {}
     }
     state.inputNonce += 1
-    return
+    const text = extractTextBounded(event.data.content, MAX_CUE_TEXT_CHARS)
+    if (text.length > 0) {
+      addPromptEntitiesFromText(state, text, activeIndex)
+    }
+    return {}
   }
 
-  if (event.type === 'turn/start' || event.type === 'step/end' || event.type === 'assistant/message') {
+  if (event.type === 'turn/start') {
     state.inputNonce += 1
-    return
+    ensureTurnPromptEntities(state, event.data.turn)
+    return {}
+  }
+
+  if (event.type === 'step/end') {
+    state.inputNonce += 1
+    return {}
+  }
+
+  if (event.type === 'assistant/message') {
+    state.inputNonce += 1
+    const data = event.data
+    const assistantText =
+      data.interrupted !== true
+        ? extractTextBounded(data.message.content, MAX_WEAK_USE_TEXT_CHARS)
+        : ''
+    let inputTokensDelta: number | null = null
+    let outputTokensDelta: number | null = null
+    let costUsdMicrosDelta: number | null = null
+    if (data.usage !== undefined) {
+      const u = data.usage
+      const uncached = Number.isFinite(u.inputTokens) ? Math.max(0, Math.trunc(u.inputTokens)) : 0
+      const cacheRead = Number.isFinite(u.cacheReadTokens)
+        ? Math.max(0, Math.trunc(u.cacheReadTokens!))
+        : 0
+      const cacheWrite = Number.isFinite(u.cacheWriteTokens)
+        ? Math.max(0, Math.trunc(u.cacheWriteTokens!))
+        : 0
+      inputTokensDelta = uncached + cacheRead + cacheWrite
+      outputTokensDelta = Number.isFinite(u.outputTokens)
+        ? Math.max(0, Math.trunc(u.outputTokens))
+        : 0
+      const rawCost = (u as { readonly costUsdMicros?: unknown }).costUsdMicros
+      costUsdMicrosDelta =
+        typeof rawCost === 'number' && Number.isFinite(rawCost)
+          ? Math.max(0, Math.trunc(rawCost))
+          : null
+    }
+    return {
+      ...(assistantText.length > 0
+        ? { assistantText, assistantTurn: data.turn }
+        : {}),
+      telemetry: {
+        turn: data.turn,
+        stepsDelta: 1,
+        turnsDelta: 0,
+        inputTokensDelta,
+        outputTokensDelta,
+        costUsdMicrosDelta,
+        occurredAt: event.time,
+      },
+    }
   }
 
   if (event.type === 'turn/end') {
@@ -371,7 +564,17 @@ export function handleSessionEvent(
     if (state.claimedUserMessage?.turn === event.data.turn) {
       state.claimedUserMessage = undefined
     }
-    return
+    return {
+      telemetry: {
+        turn: event.data.turn,
+        stepsDelta: 0,
+        turnsDelta: 1,
+        inputTokensDelta: null,
+        outputTokensDelta: null,
+        costUsdMicrosDelta: null,
+        occurredAt: event.time,
+      },
+    }
   }
 
   if (event.type === 'tool/call') {
@@ -381,12 +584,12 @@ export function handleSessionEvent(
       event.data.turn,
       event.data.name,
     )
-    return
+    return {}
   }
 
   if (event.type === 'tool/result') {
     const surfaceOp = (event as { readonly surfaceOp?: unknown }).surfaceOp
-    if (surfaceOp !== 'append') return
+    if (surfaceOp !== 'append') return {}
 
     state.inputNonce += 1
     const msg = event.data.message
@@ -401,21 +604,33 @@ export function handleSessionEvent(
 
     if (toolName === 'assoc_read') {
       // Never echo untrusted <association_item> wrapper prose back into step cues
-      return
+      return {}
     }
 
-    if (activeIndex === null) return
-
-    // Read tool result text into a local bounded buffer, run AC-only entity matching,
+    // Read tool result text into a local bounded buffer, extract entities,
     // and discard the local buffer immediately without retaining raw prose.
     const localText = extractTextBounded(msg.content, MAX_TOOL_RESULT_SCAN_CHARS)
-    if (localText.length === 0) return
+    if (localText.length === 0) return {}
+
+    ensureTurnPromptEntities(state, event.data.turn)
+    for (const raw of extractEntities(localText, 256)) {
+      const key = normalizeEntityKey(raw)
+      if (key !== null) {
+        state.turnPromptEntities.add(key)
+      }
+    }
+
+    if (activeIndex === null) return {}
 
     const matched = extractAcEntitiesFromText(activeIndex.ac, localText)
     if (matched.length > 0) {
       state.hasNewToolEntity = true
     }
     for (const hit of matched) {
+      const key = normalizeEntityKey(hit.entityId)
+      if (key !== null) {
+        state.turnPromptEntities.add(key)
+      }
       const existing = state.toolEntities.get(hit.entityId)
       if (existing !== undefined) {
         existing.hits += 1
@@ -445,6 +660,7 @@ export function handleSessionEvent(
       }
     }
   }
+  return {}
 }
 
 export function resolveOwnerScope(
@@ -665,6 +881,7 @@ export function assembleStepCues(input: {
   readonly turnNumber: number
   readonly nowMs: number
   readonly shouldDecaySession: boolean
+  readonly activeIndex?: AssociationMemoryIndex | null
   readonly sessionHalfLifeMs?: number
   readonly sessionStepDecay?: number
 }): {
@@ -672,8 +889,9 @@ export function assembleStepCues(input: {
   readonly goalKey: string
   readonly sessionActivations: readonly SessionActivationEntry[]
 } {
-  const { agent, state, goalContext, turnNumber, nowMs, shouldDecaySession } = input
+  const { agent, state, goalContext, turnNumber, nowMs, shouldDecaySession, activeIndex } = input
   const cues: HotPathCue[] = []
+  ensureTurnPromptEntities(state, turnNumber)
 
   // Cue 1: Latest user message (weight 1.0)
   const derivedMessages = agent.session.deriveMessages()
@@ -689,6 +907,7 @@ export function assembleStepCues(input: {
     userText = extractTextBounded(derivedLatest.content, MAX_CUE_TEXT_CHARS)
   }
   if (userText.trim().length > 0) {
+    addPromptEntitiesFromText(state, userText, activeIndex)
     cues.push({
       kind: 'user',
       text: userText,
@@ -704,6 +923,7 @@ export function assembleStepCues(input: {
     const goalText = [objective, nextStep].filter((s) => s.trim().length > 0).join('\n')
     goalKey = `${goalContext.goal.id}:${goalContext.goal.definition.version}:${goalContext.goal.native.revision}:${nextStep.slice(0, 64)}`
     if (goalText.length > 0) {
+      addPromptEntitiesFromText(state, goalText, activeIndex)
       cues.push({
         kind: 'goal',
         text: goalText,
@@ -717,6 +937,10 @@ export function assembleStepCues(input: {
   for (const cue of state.toolEntities.values()) {
     if (cue.turn === turnNumber) {
       entityIds.push(cue.entityId)
+      const key = normalizeEntityKey(cue.entityId)
+      if (key !== null) {
+        state.turnPromptEntities.add(key)
+      }
     }
   }
   if (entityIds.length > 0) {

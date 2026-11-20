@@ -15,14 +15,18 @@ function yieldImmediate(): Promise<void> {
   })
 }
 
+export interface GraphMutationSummary {
+  readonly withdrawals: readonly WithdrawalCascadeResult[]
+  readonly hasUpserts: boolean
+  readonly hasEdgeWeightUpdates: boolean
+  readonly hasStructuralGraphChanges: boolean
+}
+
 export interface AssociationWriteQueueOptions {
   readonly maxItemsPerTx?: number
   readonly flushIntervalMs?: number
   readonly coalesceBatchLimit?: number
-  readonly onGraphMutated?: (info: {
-    readonly withdrawals: readonly WithdrawalCascadeResult[]
-    readonly hasUpserts: boolean
-  }) => void
+  readonly onGraphMutated?: (info: GraphMutationSummary) => void
   readonly onError?: (error: unknown) => void
 }
 
@@ -31,10 +35,7 @@ export class AssociationWriteQueue {
   readonly #maxItemsPerTx: number
   readonly #flushIntervalMs: number
   readonly #coalesceBatchLimit: number
-  readonly #onGraphMutated?: (info: {
-    readonly withdrawals: readonly WithdrawalCascadeResult[]
-    readonly hasUpserts: boolean
-  }) => void
+  readonly #onGraphMutated?: (info: GraphMutationSummary) => void
   readonly #onError?: (error: unknown) => void
 
   readonly #queue: WriteTask[] = []
@@ -126,6 +127,20 @@ export class AssociationWriteQueue {
 
   enqueue(task: WriteTask): void {
     if (this.#disposed) return
+    if (task.kind === 'record-holdout') {
+      this.#pendingHoldouts.push(task.row)
+      this.#scheduleCoalescedFlush()
+      return
+    }
+    if (task.kind === 'record-metrics') {
+      this.#pendingMetricRows.push(...task.metrics)
+      this.#pendingExposures.push(...task.exposures)
+      this.#scheduleCoalescedFlush()
+      return
+    }
+    // Drain coalesced exposure/metric/holdout buffers first so causal ordering
+    // holds between step exposures and subsequent Hebbian/telemetry/graph tasks.
+    this.#drainCoalescedBuffers()
     if (task.kind === 'withdraw-source') {
       this.markTombstoneSync({
         ownerScopeKey: task.ownerScopeKey,
@@ -136,17 +151,6 @@ export class AssociationWriteQueue {
       // Preserve strict FIFO causal ordering with queued upsert-nodes tasks
       this.#queue.push(task)
       this.#ensureRunning()
-      return
-    }
-    if (task.kind === 'record-holdout') {
-      this.#pendingHoldouts.push(task.row)
-      this.#scheduleCoalescedFlush()
-      return
-    }
-    if (task.kind === 'record-metrics') {
-      this.#pendingMetricRows.push(...task.metrics)
-      this.#pendingExposures.push(...task.exposures)
-      this.#scheduleCoalescedFlush()
       return
     }
     this.#queue.push(task)
@@ -236,13 +240,17 @@ export class AssociationWriteQueue {
     while (this.#queue.length > 0) {
       const task = this.#queue.shift()!
       let hasUpserts = false
+      let hasEdgeWeightUpdates = false
+      let hasStructuralGraphChanges = false
       const withdrawals: WithdrawalCascadeResult[] = []
 
       try {
         if (task.kind === 'upsert-nodes') {
           hasUpserts = true
+          hasStructuralGraphChanges = true
           await this.#executeChunkedUpsert(task, withdrawals)
         } else if (task.kind === 'withdraw-source') {
+          hasStructuralGraphChanges = true
           try {
             const result = this.#store.withdrawSource({
               ownerScopeKey: task.ownerScopeKey,
@@ -276,13 +284,55 @@ export class AssociationWriteQueue {
               await yieldImmediate()
             }
           }
+        } else if (task.kind === 'record-read-event') {
+          this.#store.recordReadEvent(task.event)
+        } else if (task.kind === 'upsert-task-telemetry') {
+          this.#store.upsertTaskTelemetry(task.telemetry)
+        } else if (task.kind === 'upsert-replay-episode') {
+          this.#store.upsertReplayEpisode(task.episode)
+        } else if (task.kind === 'apply-hebbian-use') {
+          const res = this.#store.applyHebbianUse(task)
+          if (res.updatedEdges > 0 || res.createdEdges > 0) {
+            hasEdgeWeightUpdates = true
+          }
+        } else if (task.kind === 'apply-hebbian-correction') {
+          const res = this.#store.applyHebbianCorrection(task)
+          if (res.updatedEdges > 0) {
+            hasEdgeWeightUpdates = true
+          }
+        } else if (task.kind === 'apply-hebbian-decay') {
+          const chunkLimit = Math.min(200, Math.max(1, Math.trunc(task.limit ?? 200)))
+          let decayedAny = false
+          while (!this.#disposed) {
+            const res = this.#store.applyHebbianDecayBatch({
+              nowMs: task.nowMs,
+              decayHalfLifeMs: task.decayHalfLifeMs,
+              nonUseGraceMs: task.nonUseGraceMs,
+              weightMin: task.weightMin,
+              weightMax: task.weightMax,
+              limit: chunkLimit,
+            })
+            if (res.decayedEdges > 0) {
+              decayedAny = true
+            }
+            if (!res.hasMore || res.decayedEdges === 0) break
+            await yieldImmediate()
+          }
+          if (decayedAny) {
+            hasEdgeWeightUpdates = true
+          }
         }
       } catch (error) {
         this.#onError?.(error)
       }
 
-      if (hasUpserts || withdrawals.length > 0) {
-        this.#onGraphMutated?.({ withdrawals, hasUpserts })
+      if (hasUpserts || withdrawals.length > 0 || hasEdgeWeightUpdates) {
+        this.#onGraphMutated?.({
+          withdrawals,
+          hasUpserts,
+          hasEdgeWeightUpdates,
+          hasStructuralGraphChanges,
+        })
       }
 
       if (this.#queue.length > 0) {

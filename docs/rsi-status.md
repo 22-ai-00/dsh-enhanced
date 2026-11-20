@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-19（已发布 npm 基线 `0.1.76`；工作区解冻进入 `assistant-association` 联想记忆层 Slice S1 交付，同时继续维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-20（已发布 npm 基线 `0.1.79`；`assistant-association` 联想记忆层已完成 Slice S1 与 Slice S2 交付并经全仓 `pnpm check` 与独立复核/审计通过后推送 `dev`，下一步推进 Slice S3–S4，同时维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -8,13 +8,13 @@
 
 ## 能力边界
 
-- **发布与 Host 基线**：已发布 npm 基线为 `0.1.76`（39 个包，[release-manifest](../release-manifest.json)，`pinnedHostVersion: 0.2.2-rc.3`、`verifiedHostRange: >=0.2.2-rc.3 <0.3.0`、`pending: none`）；Node `24.9.0`（Linux 原生工具链与 CI 节点为 `/usr/bin/node` `v22.23.2`、`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
-- **只读成长计分卡**：`dsh-rsi growth-report [--since 7d|14d|30d] [--now <ms|iso>] [--json]` 与 `owner-console`「成长计分卡（只读）」卡片复用既有只读接口与 SQLite 只读快照（零 schema 变更），汇总任务与纠正/重做/撤回率及趋势、新增有来源记忆与提示词暴露及暴露后同类纠正变化、候选生成/验收/采用/回滚、通知送达与 `would-accept` 吻合度及密封留出（1/4 holdout）样本量、按冻结 supplier 的成本与延迟分布，并显式区分「无数据（未启用/无账本）」与「数据为 0（账本就绪，窗口内无记录）」。
+- **发布与 Host 基线**：已发布 npm 基线为 `0.1.79`（39 个包，[release-manifest](../release-manifest.json)，`pinnedHostVersion: 0.2.2-rc.3`、`verifiedHostRange: >=0.2.2-rc.3 <0.3.0`、`pending: none`）；Node `24.9.0`（Linux 原生工具链与 CI 节点为 `/usr/bin/node` `v22.23.2`、`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
+- **只读成长计分卡**：`dsh-rsi growth-report [--since 7d|14d|30d] [--now <ms|iso>] [--json]` 与 `owner-console`「成长计分卡（只读）」卡片复用既有只读接口与 SQLite 只读快照（零 schema 变更），汇总任务与纠正/重做/撤回率及趋势、新增有来源记忆与提示词暴露及暴露后同类纠正变化、候选生成/验收/采用/回滚、通知送达与 `would-accept` 吻合度及密封留出（1/4 holdout）样本量、按冻结 supplier 的成本与延迟分布，并显式区分「无数据（未启用/无账本）」与「数据为 0（账本就绪，窗口内无记录）」；`dsh-rsi growth-report` 第 6 节另汇报联想层在线指标（p50/p99 延迟、超时率、强/弱使用率、`assoc_read` 命中率、来源贡献、参数档案版本/采用/回滚）与密封留出对照。
 - **自主授权、隔离与动态采用**：
   - 渠道无关三权分立授权（`dsh-web-owner-setup --autonomy-setup` / `owner-console` 向导）、`traex-agent` / `agy-agent` ACP 路由与 `dsh-rsi upgrade` 自助升级回滚。
   - 原生隔离：macOS 使用 `macos-seatbelt`；Linux `backend: 'linux-native'` 同时支持委派 `cgroup v1` 四控制器与纯统一 `cgroup v2` 委派子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 及 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`，在 `prepare` 与 `create` 阶段校验共同祖先 `cgroup.procs` 写权限、无内部进程规则、`cgroup.freeze` 与 `cgroup.kill`）。
   - 受控动态采用与主动评估：`assistant-delivery` / `plugin-control-plane` Cordis 同进程重载（`config-only` 与非 denylist `<version>-<artifactDigest>` `artifact-replace` 及失败回退）、`event-triggers` → `assistant-work-items` 事件入站与终态退订、WP19 超限文本附件、WP20 预设规则与 WP22 `IntakeEvaluationAgreementLedger` 密封留出重放均默认关闭。
-  - **联想记忆层 S1 边界（`assistant-association`）**：SQLite + 进程内存双缓冲索引（AC 实体匹配、CJK bigram BM25 回退、≤2 跳扩散与 ≤5ms 热路径超时降级 `assoc-timeout`）、`<association>` 单块迟滞注入（5–8 条、≤400 tokens）与 `assoc_read(id)` 授权重验、`personal-memory` 关键词召回协同（首步仍保留已确认 `preference`/`instruction` standing 注入，未就绪/回退时恢复完整关键词召回）、`goals`/`work-items`/`automations`/Delivery+Evaluation 回合片段接入与 `derivedFrom` 撤回级联删除，以及 10–15% `HMAC(seed, taskId)` 密封留出。`dogfood` 预设默认开启本地联想（`dreaming.enabled: false`、`intakeSignal.enabled: false`、`webLearning.enabled: false`）；S2（Hebbian 强化与 WP22 调参）、S3（Dreaming / 扩展源 / 观察信号 / WP04 技能候选）、S4（受限 Web 学习）待后续切片交付。
+  - **联想记忆层 S1–S2 边界（`assistant-association`）**：已完成 S1 核心引擎（SQLite + 双缓冲索引、AC/CJK BM25/≤2 跳扩散与 ≤5ms `assoc-timeout` 回退、`<association>` 单块滞回注入与 `assoc_read(id)`、`personal-memory` 协同、`derivedFrom` 撤回级联、10–15% `HMAC(seed, taskId)` 密封留出）与 S2 闭环（`assoc_read` `+α` 强使用、唯一实体输出复现 `+α/3` 弱使用、`nonUseGraceMs` 后指数衰减、owner 纠正 `-β` 降权及 `[weightMin, weightMax]` 夹逼；WP22 不可变参数版本链与摘要验真、有界自动收紧、`assoc_replay_episodes` 留出重放门控放宽、退化精确回退及已回退 digest 黑名单；Schema v2 `assoc_read_events`/`assoc_task_telemetry`/`assoc_replay_episodes` 与 `growth-report` 第 6 节对照）。`dogfood` 预设默认开启本地联想（`dreaming.enabled: false`、`intakeSignal.enabled: false`、`webLearning.enabled: false`）；S3（Dreaming / 扩展源 / 观察信号 / WP04 技能候选）与 S4（受限 Web 学习）待后续切片交付。
 - **验证边界**：单元测试、组合测试与合成重放**不证明**真实宿主上的长期普通任务因果收益或用户打扰分布；arm64 与非空创建历史迁移仍未实机验收。
 
 ## 真实自用（Dogfood Profile）与预登记验收口径
@@ -27,10 +27,10 @@
 
 ## 阻塞项与下一步验收
 
-- **当前阻塞**：`assistant-association` Slice S1 已完成开发与核心/回归验证，待全仓 `pnpm check` 与终审门禁后推送 `dev`；外部纵向待完成事项仍为 macOS 14 天普通使用记忆通道数据采集、Linux cgroup v2 实机冷安装→学习运行记录，以及记忆通道达标后的专用沙箱仓库 WP18 端到端实跑。
-- **下一步验收**：完成 `assistant-association` S1 最终复核与全仓 `pnpm check` 后推送 `dev`，随后按序推进 S2–S4，并继续以 `dogfood` 预设及 `dsh-rsi growth-report --since 14d` 验收记忆进化通道。
+- **当前阻塞**：代码仓内 Slice S2 已通过全仓 `pnpm check` 与独立复核/审计并交付 `dev`；外部纵向待完成事项仍为 macOS 14 天普通使用记忆通道数据采集、Linux cgroup v2 实机冷安装→学习运行记录，以及记忆通道达标后的专用沙箱仓库 WP18 端到端实跑。
+- **下一步验收**：按序推进 `assistant-association` Slice S3–S4，并继续以 `dogfood` 预设及 `dsh-rsi growth-report --since 14d` 验收记忆进化与联想层纵向收益。
 
 ## 最新验证
 
-- **已发布基线**：`0.1.76`（`39` 个 npm 包，`DSH 0.2.2-rc.3`）。
-- **S1 就绪进展**：已完成 `assistant-association` S1 引擎实现、双探针与全部同行协同（`personal-memory` standing/低信任/类型/留出及超时回退、`assistant-delivery`/`assistant-goals`/`assistant-work-items`/`assistant-automations`/`assistant-evaluation`、`order: 239` 同步注入、Step-2 工具实体与 `minItems=5` 密排 CJK 自适应截断、`derivedFrom` 撤回/覆盖级联与 FIFO 写队列防重入）；包内 10 文件 27 条测试、`oxlint --deny-warnings`、`dogfood-profile` + `optional-peer-imports` 75 条根契约测试与 100k 节点/1M 边压测（1000 次查询 `p99 = 0.8156ms ≤ 5.0ms`，0 超时）均已通过，待全仓 `pnpm check` 与最终复核。
+- **已发布基线**：`0.1.79`（`39` 个 npm 包，`DSH 0.2.2-rc.3`）。
+- **S1+S2 已交付状态**：S1 已随 `0467aa08` 并入 `dev`；S2 已完成 Schema v2、Hebbian 强化/衰减/纠正（含合成重放验证）、WP22 参数档案与留出重放门控、`dsh-rsi growth-report` 第 6 节联想在线指标与留出对照、策略 `knownOptionalKeys` 补齐与实时文档更新，经全仓 `pnpm check`、dry-run pack 与独立复核/审计通过后交付 `dev`（下一步：Slice S3–S4）。

@@ -1,8 +1,10 @@
 import { buildEntityAutomaton, type AcSynonymEntry, type EntityAutomaton } from './aho-corasick.js'
 import { buildBm25Index, type Bm25InvertedIndex } from './bm25.js'
+import { normalizeEntityKey } from './tokenize.js'
 import {
   EDGE_TYPE_TO_CODE,
   NODE_KIND_TO_CODE,
+  computeDeterministicEdgeId,
   type AssociationOwnerMode,
   type AssociationScopeMode,
   type AssociationSensitivity,
@@ -31,6 +33,7 @@ export interface MemoryIndexNodeInput {
 }
 
 export interface MemoryIndexEdgeInput {
+  readonly edgeId?: string
   readonly aId: string
   readonly bId: string
   readonly edgeType: EdgeType
@@ -51,6 +54,8 @@ export interface HotPathScratchpad {
   readonly bestContrib: Float32Array
   readonly reasonType: Uint8Array
   readonly reasonArg: Int32Array
+  readonly parentSlot: Int32Array
+  readonly parentEdgeIdx: Int32Array
   readonly expandedStamp: Uint32Array
   readonly nextStamp: Uint32Array
   readonly nextScore: Float32Array
@@ -72,6 +77,10 @@ export function createHotPathScratchpad(
 ): HotPathScratchpad {
   const cap = Math.max(1, nodeCount)
   const entCap = Math.max(1, entityCount)
+  const parentSlot = new Int32Array(cap)
+  const parentEdgeIdx = new Int32Array(cap)
+  parentSlot.fill(-1)
+  parentEdgeIdx.fill(-1)
   return {
     capacity: cap,
     epoch: 0,
@@ -84,6 +93,8 @@ export function createHotPathScratchpad(
     bestContrib: new Float32Array(cap),
     reasonType: new Uint8Array(cap),
     reasonArg: new Int32Array(cap),
+    parentSlot,
+    parentEdgeIdx,
     expandedStamp: new Uint32Array(cap),
     nextStamp: new Uint32Array(cap),
     nextScore: new Float32Array(cap),
@@ -117,6 +128,7 @@ export interface AssociationMemoryIndex {
   readonly nodeTombstoned: Uint8Array
   readonly nodeTitles: readonly string[]
   readonly nodeSourcePlugins: readonly string[]
+  readonly nodeEntities: readonly (readonly string[])[]
   readonly ownerKeys: ReadonlyMap<string, number>
   readonly workspaces: ReadonlyMap<string, number>
   readonly presets: ReadonlyMap<string, number>
@@ -126,6 +138,8 @@ export interface AssociationMemoryIndex {
   readonly adjEdgeType: Uint8Array
   readonly adjTrust: Uint8Array
   readonly adjReasonId: Uint32Array
+  readonly adjEdgeIdx: Uint32Array
+  readonly edgeIds: readonly string[]
   readonly reasonPool: readonly string[]
   readonly ac: EntityAutomaton
   readonly bm25: Bm25InvertedIndex
@@ -146,9 +160,281 @@ function internString(map: Map<string, number>, value: string): number {
 interface HalfEdgeRecord {
   readonly target: number
   readonly weight: number
-  readonly edgeType: number
-  readonly trust: number
+  readonly flags: number
   readonly reasonId: number
+  readonly edgeIdx: number
+}
+
+const EAGER_EDGE_ID_HASH_LIMIT = 20_000
+
+interface CsrAdjacencyResult {
+  readonly edgeHalfCount: number
+  readonly adjOffset: Uint32Array
+  readonly adjTarget: Uint32Array
+  readonly adjWeight: Float32Array
+  readonly adjEdgeType: Uint8Array
+  readonly adjTrust: Uint8Array
+  readonly adjReasonId: Uint32Array
+  readonly adjEdgeIdx: Uint32Array
+  readonly edgeIds: readonly string[]
+  readonly reasonPool: readonly string[]
+}
+
+function fastNormalizeEntityKey(raw: string): string | null {
+  const len = raw.length
+  if (len >= 2 && len <= 128) {
+    let clean = true
+    for (let i = 0; i < len; i += 1) {
+      const c = raw.charCodeAt(i)
+      const ok =
+        (c >= 97 && c <= 122) || // a-z
+        (c >= 48 && c <= 57) || // 0-9
+        (c >= 0x4e00 && c <= 0x9fff) || // CJK Unified Ideographs
+        c === 95 || // _
+        c === 46 || // .
+        c === 45 || // -
+        c === 58 || // :
+        c === 47 // /
+      if (!ok) {
+        clean = false
+        break
+      }
+    }
+    if (clean) return raw
+  }
+  return normalizeEntityKey(raw)
+}
+
+function normalizeNodeEntityList(entities: readonly string[]): readonly string[] {
+  const len = entities.length
+  if (len === 0) return []
+  if (len === 1) {
+    const key = fastNormalizeEntityKey(entities[0]!)
+    return key === null ? [] : [key]
+  }
+  const out: string[] = []
+  if (len <= 6) {
+    for (let i = 0; i < len; i += 1) {
+      const key = fastNormalizeEntityKey(entities[i]!)
+      if (key !== null && !out.includes(key)) {
+        out.push(key)
+      }
+    }
+    return out
+  }
+  const seen = new Set<string>()
+  for (let i = 0; i < len; i += 1) {
+    const key = fastNormalizeEntityKey(entities[i]!)
+    if (key === null || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
+function buildCsrAdjacency(
+  nodeCount: number,
+  nodeIdToSlot: ReadonlyMap<string, number>,
+  edges: readonly MemoryIndexEdgeInput[],
+  maxFanoutPerNode?: number,
+): CsrAdjacencyResult {
+  const reasonToId = new Map<string, number>()
+  const reasonPool: string[] = []
+  // eslint-disable-next-line unicorn/no-new-array
+  const edgeIds: string[] = new Array<string>(edges.length)
+  let validEdgeCount = 0
+  const eagerHash = edges.length <= EAGER_EDGE_ID_HASH_LIMIT
+  const adjBuckets: HalfEdgeRecord[][] = Array.from(
+    { length: nodeCount },
+    (): HalfEdgeRecord[] => [],
+  )
+
+  for (const edge of edges) {
+    const aSlot = nodeIdToSlot.get(edge.aId)
+    const bSlot = nodeIdToSlot.get(edge.bId)
+    if (aSlot === undefined || bSlot === undefined || aSlot === bSlot) continue
+    let reasonId = reasonToId.get(edge.reason)
+    if (reasonId === undefined) {
+      reasonId = reasonPool.length
+      reasonToId.set(edge.reason, reasonId)
+      reasonPool.push(edge.reason)
+    }
+    const edgeIdx = validEdgeCount
+    validEdgeCount += 1
+    if (edge.edgeId !== undefined) {
+      edgeIds[edgeIdx] = edge.edgeId
+    } else if (eagerHash) {
+      edgeIds[edgeIdx] = computeDeterministicEdgeId(edge.aId, edge.bId, edge.edgeType)
+    }
+    const edgeTypeCode = EDGE_TYPE_TO_CODE[edge.edgeType] ?? 0
+    const trustCode = edge.trust === 'trusted' ? 1 : 0
+    const flags = (edgeTypeCode << 1) | trustCode
+    adjBuckets[aSlot]!.push({
+      target: bSlot,
+      weight: edge.weight,
+      flags,
+      reasonId,
+      edgeIdx,
+    })
+    adjBuckets[bSlot]!.push({
+      target: aSlot,
+      weight: edge.weight,
+      flags,
+      reasonId,
+      edgeIdx,
+    })
+  }
+  edgeIds.length = validEdgeCount
+
+  const fanoutCap =
+    maxFanoutPerNode !== undefined && maxFanoutPerNode >= 0
+      ? Math.floor(maxFanoutPerNode)
+      : Number.POSITIVE_INFINITY
+
+  let edgeHalfCount = 0
+  for (let u = 0; u < nodeCount; u += 1) {
+    const bucket = adjBuckets[u]!
+    if (bucket.length > 1) {
+      bucket.sort((a, b) => {
+        if (b.weight !== a.weight) return b.weight - a.weight
+        return a.target - b.target
+      })
+    }
+    if (bucket.length > fanoutCap) {
+      bucket.length = fanoutCap
+    }
+    edgeHalfCount += bucket.length
+  }
+
+  const adjOffset = new Uint32Array(nodeCount + 1)
+  const adjTarget = new Uint32Array(edgeHalfCount)
+  const adjWeight = new Float32Array(edgeHalfCount)
+  const adjEdgeType = new Uint8Array(edgeHalfCount)
+  const adjTrust = new Uint8Array(edgeHalfCount)
+  const adjReasonId = new Uint32Array(edgeHalfCount)
+  const adjEdgeIdx = new Uint32Array(edgeHalfCount)
+
+  let cursor = 0
+  for (let u = 0; u < nodeCount; u += 1) {
+    adjOffset[u] = cursor
+    const bucket = adjBuckets[u]!
+    for (let i = 0; i < bucket.length; i += 1) {
+      const rec = bucket[i]!
+      adjTarget[cursor] = rec.target
+      adjWeight[cursor] = rec.weight
+      adjEdgeType[cursor] = rec.flags >>> 1
+      adjTrust[cursor] = rec.flags & 1
+      adjReasonId[cursor] = rec.reasonId
+      adjEdgeIdx[cursor] = rec.edgeIdx
+      cursor += 1
+    }
+  }
+  adjOffset[nodeCount] = cursor
+
+  return {
+    edgeHalfCount,
+    adjOffset,
+    adjTarget,
+    adjWeight,
+    adjEdgeType,
+    adjTrust,
+    adjReasonId,
+    adjEdgeIdx,
+    edgeIds,
+    reasonPool,
+  }
+}
+
+function createIndexObject(fields: {
+  readonly buildEpoch: number
+  readonly builtAt: number
+  readonly nodeCount: number
+  readonly nodeIds: readonly string[]
+  readonly nodeIdToSlot: ReadonlyMap<string, number>
+  readonly sourceRefToSlots: ReadonlyMap<string, readonly number[]>
+  readonly nodeKind: Uint8Array
+  readonly nodeOwnerIdx: Uint32Array
+  readonly nodeScopeMode: Uint8Array
+  readonly nodeWorkspaceIdx: Uint32Array
+  readonly nodePresetIdx: Uint32Array
+  readonly nodeTrust: Uint8Array
+  readonly nodeSensitivity: Uint8Array
+  readonly nodeUpdatedAt: Float64Array
+  readonly nodeExpiresAt: Float64Array
+  readonly nodeTombstoned: Uint8Array
+  readonly nodeTitles: readonly string[]
+  readonly nodeSourcePlugins: readonly string[]
+  readonly nodeEntities: readonly (readonly string[])[]
+  readonly ownerKeys: ReadonlyMap<string, number>
+  readonly workspaces: ReadonlyMap<string, number>
+  readonly presets: ReadonlyMap<string, number>
+  readonly csr: CsrAdjacencyResult
+  readonly ac: EntityAutomaton
+  readonly bm25: Bm25InvertedIndex
+}): AssociationMemoryIndex {
+  const primaryScratchpad = createHotPathScratchpad(fields.nodeCount, fields.ac.entityCount)
+  return {
+    buildEpoch: fields.buildEpoch,
+    builtAt: fields.builtAt,
+    nodeCount: fields.nodeCount,
+    edgeHalfCount: fields.csr.edgeHalfCount,
+    nodeIds: fields.nodeIds,
+    nodeIdToSlot: fields.nodeIdToSlot,
+    sourceRefToSlots: fields.sourceRefToSlots,
+    nodeKind: fields.nodeKind,
+    nodeOwnerIdx: fields.nodeOwnerIdx,
+    nodeScopeMode: fields.nodeScopeMode,
+    nodeWorkspaceIdx: fields.nodeWorkspaceIdx,
+    nodePresetIdx: fields.nodePresetIdx,
+    nodeTrust: fields.nodeTrust,
+    nodeSensitivity: fields.nodeSensitivity,
+    nodeUpdatedAt: fields.nodeUpdatedAt,
+    nodeExpiresAt: fields.nodeExpiresAt,
+    nodeTombstoned: fields.nodeTombstoned,
+    nodeTitles: fields.nodeTitles,
+    nodeSourcePlugins: fields.nodeSourcePlugins,
+    nodeEntities: fields.nodeEntities,
+    ownerKeys: fields.ownerKeys,
+    workspaces: fields.workspaces,
+    presets: fields.presets,
+    adjOffset: fields.csr.adjOffset,
+    adjTarget: fields.csr.adjTarget,
+    adjWeight: fields.csr.adjWeight,
+    adjEdgeType: fields.csr.adjEdgeType,
+    adjTrust: fields.csr.adjTrust,
+    adjReasonId: fields.csr.adjReasonId,
+    adjEdgeIdx: fields.csr.adjEdgeIdx,
+    edgeIds: fields.csr.edgeIds,
+    reasonPool: fields.csr.reasonPool,
+    ac: fields.ac,
+    bm25: fields.bm25,
+    acquireScratchpad(): HotPathScratchpad {
+      if (!primaryScratchpad.inUse) {
+        primaryScratchpad.inUse = true
+        return primaryScratchpad
+      }
+      const pad = createHotPathScratchpad(fields.nodeCount, fields.ac.entityCount)
+      pad.inUse = true
+      return pad
+    },
+    releaseScratchpad(pad: HotPathScratchpad): void {
+      pad.inUse = false
+    },
+    tombstoneNodeId(nodeId: string): boolean {
+      const slot = fields.nodeIdToSlot.get(nodeId)
+      if (slot === undefined) return false
+      fields.nodeTombstoned[slot] = 1
+      return true
+    },
+    tombstoneSourceRef(ownerScopeKey: string, sourcePlugin: string, sourceRef: string): number {
+      const slots = fields.sourceRefToSlots.get(`${ownerScopeKey}\0${sourcePlugin}\0${sourceRef}`)
+      if (slots === undefined) return 0
+      for (const slot of slots) {
+        fields.nodeTombstoned[slot] = 1
+      }
+      return slots.length
+    },
+  }
 }
 
 export function buildMemoryIndex(
@@ -161,6 +447,7 @@ export function buildMemoryIndex(
     readonly buildEpoch?: number
     readonly builtAt?: number
     readonly maxEntityPostings?: number
+    readonly maxFanoutPerNode?: number
   },
 ): AssociationMemoryIndex {
   const nodes = snapshot.nodes
@@ -214,76 +501,16 @@ export function buildMemoryIndex(
     nodeTombstoned[slot] = 0
     nodeTitles[slot] = node.title
     nodeSourcePlugins[slot] = node.sourcePlugin
-    nodeEntities[slot] = node.entities
+    nodeEntities[slot] = normalizeNodeEntityList(node.entities)
     nodeTokens[slot] = node.tokens
   }
 
-  // Build CSR Adjacency (undirected edges stored as two weight-sorted half-edges)
-  const reasonToId = new Map<string, number>()
-  const reasonPool: string[] = []
-  const adjBuckets: HalfEdgeRecord[][] = Array.from(
-    { length: nodeCount },
-    (): HalfEdgeRecord[] => [],
+  const csr = buildCsrAdjacency(
+    nodeCount,
+    nodeIdToSlot,
+    snapshot.edges,
+    options?.maxFanoutPerNode,
   )
-
-  let edgeHalfCount = 0
-  for (const edge of snapshot.edges) {
-    const aSlot = nodeIdToSlot.get(edge.aId)
-    const bSlot = nodeIdToSlot.get(edge.bId)
-    if (aSlot === undefined || bSlot === undefined || aSlot === bSlot) continue
-    let reasonId = reasonToId.get(edge.reason)
-    if (reasonId === undefined) {
-      reasonId = reasonPool.length
-      reasonToId.set(edge.reason, reasonId)
-      reasonPool.push(edge.reason)
-    }
-    const edgeTypeCode = EDGE_TYPE_TO_CODE[edge.edgeType] ?? 0
-    const trustCode = edge.trust === 'trusted' ? 1 : 0
-    adjBuckets[aSlot]!.push({
-      target: bSlot,
-      weight: edge.weight,
-      edgeType: edgeTypeCode,
-      trust: trustCode,
-      reasonId,
-    })
-    adjBuckets[bSlot]!.push({
-      target: aSlot,
-      weight: edge.weight,
-      edgeType: edgeTypeCode,
-      trust: trustCode,
-      reasonId,
-    })
-    edgeHalfCount += 2
-  }
-
-  const adjOffset = new Uint32Array(nodeCount + 1)
-  const adjTarget = new Uint32Array(edgeHalfCount)
-  const adjWeight = new Float32Array(edgeHalfCount)
-  const adjEdgeType = new Uint8Array(edgeHalfCount)
-  const adjTrust = new Uint8Array(edgeHalfCount)
-  const adjReasonId = new Uint32Array(edgeHalfCount)
-
-  let cursor = 0
-  for (let u = 0; u < nodeCount; u += 1) {
-    adjOffset[u] = cursor
-    const bucket = adjBuckets[u]!
-    if (bucket.length > 1) {
-      bucket.sort((a, b) => {
-        if (b.weight !== a.weight) return b.weight - a.weight
-        return a.target - b.target
-      })
-    }
-    for (let i = 0; i < bucket.length; i += 1) {
-      const rec = bucket[i]!
-      adjTarget[cursor] = rec.target
-      adjWeight[cursor] = rec.weight
-      adjEdgeType[cursor] = rec.edgeType
-      adjTrust[cursor] = rec.trust
-      adjReasonId[cursor] = rec.reasonId
-      cursor += 1
-    }
-  }
-  adjOffset[nodeCount] = cursor
 
   const ac = buildEntityAutomaton({
     nodeCount,
@@ -301,13 +528,10 @@ export function buildMemoryIndex(
     nodeTokens,
   })
 
-  const primaryScratchpad = createHotPathScratchpad(nodeCount, ac.entityCount)
-
-  return {
+  return createIndexObject({
     buildEpoch: options?.buildEpoch ?? 1,
     builtAt: options?.builtAt ?? Date.now(),
     nodeCount,
-    edgeHalfCount,
     nodeIds,
     nodeIdToSlot,
     sourceRefToSlots: sourceRefMap,
@@ -323,43 +547,58 @@ export function buildMemoryIndex(
     nodeTombstoned,
     nodeTitles,
     nodeSourcePlugins,
+    nodeEntities,
     ownerKeys,
     workspaces,
     presets,
-    adjOffset,
-    adjTarget,
-    adjWeight,
-    adjEdgeType,
-    adjTrust,
-    adjReasonId,
-    reasonPool,
+    csr,
     ac,
     bm25,
-    acquireScratchpad(): HotPathScratchpad {
-      if (!primaryScratchpad.inUse) {
-        primaryScratchpad.inUse = true
-        return primaryScratchpad
-      }
-      const pad = createHotPathScratchpad(nodeCount, ac.entityCount)
-      pad.inUse = true
-      return pad
-    },
-    releaseScratchpad(pad: HotPathScratchpad): void {
-      pad.inUse = false
-    },
-    tombstoneNodeId(nodeId: string): boolean {
-      const slot = nodeIdToSlot.get(nodeId)
-      if (slot === undefined) return false
-      nodeTombstoned[slot] = 1
-      return true
-    },
-    tombstoneSourceRef(ownerScopeKey: string, sourcePlugin: string, sourceRef: string): number {
-      const slots = sourceRefMap.get(`${ownerScopeKey}\0${sourcePlugin}\0${sourceRef}`)
-      if (slots === undefined) return 0
-      for (const slot of slots) {
-        nodeTombstoned[slot] = 1
-      }
-      return slots.length
-    },
-  }
+  })
+}
+
+export function rebuildMemoryIndexEdges(
+  baseIndex: AssociationMemoryIndex,
+  edges: readonly MemoryIndexEdgeInput[],
+  options?: {
+    readonly buildEpoch?: number
+    readonly builtAt?: number
+    readonly maxFanoutPerNode?: number
+  },
+): AssociationMemoryIndex {
+  const csr = buildCsrAdjacency(
+    baseIndex.nodeCount,
+    baseIndex.nodeIdToSlot,
+    edges,
+    options?.maxFanoutPerNode,
+  )
+  const nodeTombstoned = new Uint8Array(baseIndex.nodeTombstoned)
+
+  return createIndexObject({
+    buildEpoch: options?.buildEpoch ?? baseIndex.buildEpoch + 1,
+    builtAt: options?.builtAt ?? Date.now(),
+    nodeCount: baseIndex.nodeCount,
+    nodeIds: baseIndex.nodeIds,
+    nodeIdToSlot: baseIndex.nodeIdToSlot,
+    sourceRefToSlots: baseIndex.sourceRefToSlots,
+    nodeKind: baseIndex.nodeKind,
+    nodeOwnerIdx: baseIndex.nodeOwnerIdx,
+    nodeScopeMode: baseIndex.nodeScopeMode,
+    nodeWorkspaceIdx: baseIndex.nodeWorkspaceIdx,
+    nodePresetIdx: baseIndex.nodePresetIdx,
+    nodeTrust: baseIndex.nodeTrust,
+    nodeSensitivity: baseIndex.nodeSensitivity,
+    nodeUpdatedAt: baseIndex.nodeUpdatedAt,
+    nodeExpiresAt: baseIndex.nodeExpiresAt,
+    nodeTombstoned,
+    nodeTitles: baseIndex.nodeTitles,
+    nodeSourcePlugins: baseIndex.nodeSourcePlugins,
+    nodeEntities: baseIndex.nodeEntities,
+    ownerKeys: baseIndex.ownerKeys,
+    workspaces: baseIndex.workspaces,
+    presets: baseIndex.presets,
+    csr,
+    ac: baseIndex.ac,
+    bm25: baseIndex.bm25,
+  })
 }

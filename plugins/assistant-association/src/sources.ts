@@ -31,14 +31,18 @@ import type {
   PersonalMemoryService,
 } from '@dsh-enhanced/personal-memory'
 import { buildSharedEntityEdges, extractEntities } from './entities.js'
+import { clampEdgeWeight, classifyEvaluationCorrection } from './hebbian.js'
 import type { AssociationStore } from './sqlite.js'
 import { tokenizeAssociationText } from './tokenize.js'
 import {
+  computeDeterministicEdgeId,
   computeOwnerScopeKey,
   computePrincipalDigest,
+  DEFAULT_HEBBIAN_CONFIG,
   normalizeSourceVersion,
   type AssociationOwnerScope,
   type DerivedRefInput,
+  type NormalizedHebbianConfig,
   type UpsertEdgeInput,
   type UpsertNodeInput,
 } from './types.js'
@@ -76,6 +80,13 @@ export interface SourceManagerCallbacks {
   readonly onConflictSuppressed: (info: {
     readonly nodeIds: readonly string[]
   }) => void
+  readonly onTaskCorrected?: (info: {
+    readonly ownerScopeKey: string
+    readonly taskId: string
+    readonly nodeIds: readonly string[]
+    readonly nowMs: number
+  }) => void
+  readonly hebbianConfig?: NormalizedHebbianConfig
   readonly consumeSessionToolNames?: (sessionId: string) => readonly string[]
   readonly onError?: (error: unknown) => void
   readonly now?: () => number
@@ -338,6 +349,7 @@ export class AssociationSourceManager {
       this.#syncAutomationsScope(scope)
       this.#syncDeliveryEpisodesScope(scope)
       await this.#writeQueue.flush()
+      if (this.#disposed) return
       this.#syncEvaluationScope(scope)
       await this.#writeQueue.flush()
     } catch (error) {
@@ -428,6 +440,75 @@ export class AssociationSourceManager {
         edges.push(edge)
       }
       derivedRefs.push(...built.derivedRefs)
+
+      if (
+        node.kind === 'episode' &&
+        node.sourcePlugin === 'assistant-delivery' &&
+        node.sourceRef.startsWith('foreground-turn:') &&
+        this.#callbacks.hebbianConfig?.enabled !== false
+      ) {
+        const hebbianCfg = this.#callbacks.hebbianConfig ?? DEFAULT_HEBBIAN_CONFIG
+        const initWeight = clampEdgeWeight(
+          hebbianCfg.initialHebbianWeight,
+          hebbianCfg.weightMin,
+          hebbianCfg.weightMax,
+        )
+        const taskExposures = this.#store.findExposuresByTaskOrSession(
+          scope.ownerScopeKey,
+          node.sourceRef,
+        )
+        for (const exp of taskExposures) {
+          if (
+            exp.hop !== 0 ||
+            (!exp.strongUsed && !exp.weakUsed) ||
+            exp.corrected ||
+            exp.nodeId === node.id
+          ) {
+            continue
+          }
+          const peerNode = this.#store.getNodeById(exp.nodeId)
+          if (
+            peerNode === null ||
+            peerNode.status !== 'active' ||
+            peerNode.ownerScopeKey !== scope.ownerScopeKey ||
+            peerNode.sensitivity !== 'private'
+          ) {
+            continue
+          }
+          const [aId, bId] = node.id <= peerNode.id ? [node.id, peerNode.id] : [peerNode.id, node.id]
+          const edgeId = computeDeterministicEdgeId(aId, bId, 'hebbian')
+          if (!seenEdges.has(edgeId)) {
+            seenEdges.add(edgeId)
+            edges.push({
+              edgeId,
+              aId,
+              bId,
+              edgeType: 'hebbian',
+              weight: initWeight,
+              trust: node.trust === 'low' || peerNode.trust === 'low' ? 'low' : 'trusted',
+              reason: 'hebbian:episode-co-use',
+              useCount: 1,
+              lastUsedAt: nowMs,
+              createdAt: nowMs,
+              updatedAt: nowMs,
+            })
+          }
+          derivedRefs.push(
+            {
+              sourceNodeId: node.id,
+              sourceVersion: node.sourceVersion,
+              targetKind: 'edge',
+              targetId: edgeId,
+            },
+            {
+              sourceNodeId: peerNode.id,
+              sourceVersion: peerNode.sourceVersion,
+              targetKind: 'edge',
+              targetId: edgeId,
+            },
+          )
+        }
+      }
     }
 
     this.#writeQueue.enqueue({
@@ -643,6 +724,7 @@ export class AssociationSourceManager {
   #handleMemoryRecordChange(event: MemoryRecordChangeEvent): void {
     if (this.#disposed) return
     const rec = event.record
+    const hebbianCfg = this.#callbacks.hebbianConfig
     for (const scope of this.#scopes.values()) {
       if (!this.#memoryRecordMatchesScope(rec, scope)) continue
       if (event.op === 'remove' || rec.status === 'removed') {
@@ -653,6 +735,52 @@ export class AssociationSourceManager {
           recordWithdrawalTombstone: event.reason === 'withdrawn',
         })
       } else {
+        if (
+          hebbianCfg?.enabled !== false &&
+          (event.op === 'replace' ||
+            (event.op === 'add' && typeof rec.supersedes === 'string' && rec.supersedes.length > 0))
+        ) {
+          const targetRecordIds = new Set<string>()
+          if (event.op === 'replace') {
+            targetRecordIds.add(rec.id)
+          }
+          if (typeof rec.supersedes === 'string' && rec.supersedes.length > 0) {
+            targetRecordIds.add(rec.supersedes)
+          }
+          const nowMs = this.#now()
+          const lookbackMs =
+            hebbianCfg?.correctionLookbackMs ?? DEFAULT_HEBBIAN_CONFIG.correctionLookbackMs
+          const minExposedAt = Math.max(0, nowMs - lookbackMs)
+          for (const targetRecordId of targetRecordIds) {
+            const existingNode = this.#store.findNodeBySourceRef(
+              scope.ownerScopeKey,
+              'personal-memory',
+              `memory:${targetRecordId}`,
+            )
+            const targetNodeId = existingNode?.id ?? `a:m-${targetRecordId}`
+            const latestExp = this.#store.findLatestUncorrectedMemoryExposure(
+              scope.ownerScopeKey,
+              targetNodeId,
+              minExposedAt,
+            )
+            this.#writeQueue.enqueue({
+              kind: 'apply-hebbian-correction',
+              ownerScopeKey: scope.ownerScopeKey,
+              nodeId: targetNodeId,
+              minExposedAt,
+              nowMs,
+              ...(hebbianCfg === undefined ? {} : { hebbianConfig: hebbianCfg }),
+            })
+            if (latestExp !== null) {
+              this.#callbacks.onTaskCorrected?.({
+                ownerScopeKey: scope.ownerScopeKey,
+                taskId: latestExp.taskId,
+                nodeIds: [targetNodeId],
+                nowMs,
+              })
+            }
+          }
+        }
         const node = this.#mapMemoryRecordToNode(rec, scope)
         this.#enqueueUpsertWithEdges(scope, [node])
       }
@@ -1252,8 +1380,9 @@ export class AssociationSourceManager {
 
         const { subjectKind, subjectRef, disposition } = receipt.projection
 
-        // Case 1: Explicit owner withdrawal (action === 'withdraw') -> hard cascade delete + tombstone
+        // Case 1: Explicit owner withdrawal (action === 'withdraw') -> correction -β then hard cascade delete + tombstone
         if (revision?.action === 'withdraw') {
+          this.#triggerEvaluationCorrection(scope, receipt, revision)
           if (subjectKind === 'foreground-turn') {
             this.#withdrawImmediate({
               ownerScopeKey: scope.ownerScopeKey,
@@ -1273,6 +1402,7 @@ export class AssociationSourceManager {
 
         // Case 2: Conflict retraction (disposition === 'retract' without 'withdraw')
         if (disposition === 'retract') {
+          this.#triggerEvaluationCorrection(scope, receipt, revision)
           const objStatus = receipt.objective?.status ?? 'retracted'
           if (subjectKind === 'foreground-turn') {
             const fgNode = this.#store.findNodeBySourceRef(
@@ -1318,6 +1448,7 @@ export class AssociationSourceManager {
         if (disposition === 'upsert') {
           const verified = this.#verifyEvaluationProjectionOwner(receipt, scope)
           if (!verified) continue
+          this.#triggerEvaluationCorrection(scope, receipt, revision)
           if (subjectKind === 'foreground-turn') {
             // Foreground turns are ingested via Delivery foreground ledger; skip duplicate creation if present
             const existingFg = this.#store.findNodeBySourceRef(
@@ -1348,6 +1479,74 @@ export class AssociationSourceManager {
       })
 
       if (!page.hasMore) break
+    }
+  }
+
+  #resolveEvaluationSessionId(
+    receipt: TrustedTaskLearningProjectionReceipt,
+    scope: AssociationOwnerScope,
+  ): string | null {
+    const { subjectKind, subjectRef } = receipt.projection
+    const evidenceLists = [receipt.objective?.evidence, receipt.execution?.evidence]
+    for (const list of evidenceLists) {
+      if (!Array.isArray(list)) continue
+      for (const item of list) {
+        if ((item.kind === 'session' || item.kind === 'session-id') && item.ref.length > 0) {
+          return item.ref
+        }
+      }
+    }
+    const existing = this.#store.findNodeBySourceRef(
+      scope.ownerScopeKey,
+      'assistant-evaluation',
+      `${subjectKind}:${subjectRef}`,
+    )
+    const extraSession = existing?.metadata.extra?.sessionId
+    if (typeof extraSession === 'string' && extraSession.length > 0) {
+      return extraSession
+    }
+    return subjectRef.length > 0 ? subjectRef : null
+  }
+
+  #triggerEvaluationCorrection(
+    scope: AssociationOwnerScope,
+    receipt: TrustedTaskLearningProjectionReceipt,
+    revision: ReturnType<AssistantEvaluationService['inspectTrustedTaskOwnerRevision']> | undefined,
+  ): void {
+    const hebbianCfg = this.#callbacks.hebbianConfig
+    if (hebbianCfg?.enabled === false) return
+    if (!classifyEvaluationCorrection(receipt, revision)) return
+    const { subjectKind, subjectRef } = receipt.projection
+    const taskId = `${subjectKind}:${subjectRef}`
+    const sessionId =
+      subjectKind !== 'foreground-turn'
+        ? this.#resolveEvaluationSessionId(receipt, scope)
+        : null
+    const nowMs = this.#now()
+    const matchedExposures = this.#store.findExposuresByTaskOrSession(
+      scope.ownerScopeKey,
+      taskId,
+      sessionId,
+    )
+    const uncorrectedNodeIds = matchedExposures
+      .filter((e) => !e.corrected)
+      .map((e) => e.nodeId)
+    this.#writeQueue.enqueue({
+      kind: 'apply-hebbian-correction',
+      ownerScopeKey: scope.ownerScopeKey,
+      taskId,
+      ...(sessionId === null ? {} : { sessionId }),
+      nowMs,
+      ...(hebbianCfg === undefined ? {} : { hebbianConfig: hebbianCfg }),
+    })
+    if (uncorrectedNodeIds.length > 0) {
+      const resolvedTaskId = matchedExposures[0]?.taskId ?? taskId
+      this.#callbacks.onTaskCorrected?.({
+        ownerScopeKey: scope.ownerScopeKey,
+        taskId: resolvedTaskId,
+        nodeIds: uncorrectedNodeIds,
+        nowMs,
+      })
     }
   }
 

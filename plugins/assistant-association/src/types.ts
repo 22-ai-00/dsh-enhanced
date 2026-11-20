@@ -198,6 +198,13 @@ export interface StoredAssociationNode {
   readonly updatedAt: number
 }
 
+export interface ProvenanceEdgeRef {
+  readonly edgeId: string
+  readonly aId: string
+  readonly bId: string
+  readonly edgeType: EdgeType
+}
+
 export interface StoredAssociationEdge {
   readonly edgeId: string
   readonly aId: string
@@ -208,6 +215,7 @@ export interface StoredAssociationEdge {
   readonly reason: string
   readonly useCount: number
   readonly lastUsedAt: number | null
+  readonly lastDecayedAt?: number | null
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -252,6 +260,7 @@ export interface StepMetricRow {
   readonly injectedCount: number
   readonly candidateCount: number
   readonly sourceCounts: Readonly<Record<string, number>>
+  readonly profileVersion?: number
   readonly occurredAt: number
 }
 
@@ -261,9 +270,253 @@ export interface ExposureRow {
   readonly ownerScopeKey: string
   readonly sourcePlugin: string
   readonly exposedAt: number
+  readonly wasExposed?: boolean
+  readonly hop?: number
+  readonly score?: number
+  readonly reason?: string
+  readonly provenanceEdges?: readonly ProvenanceEdgeRef[]
+  readonly sessionId?: string | null
   readonly assocReadCount?: number
   readonly weakUseCount?: number
+  readonly strongUsed?: boolean
+  readonly weakUsed?: boolean
+  readonly hebbianDeltaApplied?: number
   readonly corrected?: boolean
+  readonly correctedAt?: number | null
+}
+
+export interface StoredExposureRow {
+  readonly taskId: string
+  readonly nodeId: string
+  readonly ownerScopeKey: string
+  readonly sourcePlugin: string
+  readonly exposedAt: number
+  readonly wasExposed: boolean
+  readonly hop: number
+  readonly score: number
+  readonly reason: string
+  readonly provenanceEdges: readonly ProvenanceEdgeRef[]
+  readonly sessionId: string | null
+  readonly assocReadCount: number
+  readonly weakUseCount: number
+  readonly strongUsed: boolean
+  readonly weakUsed: boolean
+  readonly hebbianDeltaApplied: number
+  readonly corrected: boolean
+  readonly correctedAt: number | null
+}
+
+export const HEBBIAN_EVENT_KINDS = [
+  'strong-use',
+  'weak-use',
+  'correction',
+  'decay',
+] as const
+export type HebbianEventKind = (typeof HEBBIAN_EVENT_KINDS)[number]
+
+export interface HebbianConfig {
+  readonly enabled?: boolean
+  readonly alpha?: number
+  readonly weakRatio?: number
+  readonly beta?: number
+  readonly weightMin?: number
+  readonly weightMax?: number
+  readonly initialHebbianWeight?: number
+  readonly decayHalfLifeMs?: number
+  readonly nonUseGraceMs?: number
+  readonly decayIntervalMs?: number
+  readonly correctionLookbackMs?: number
+}
+
+export interface NormalizedHebbianConfig {
+  readonly enabled: boolean
+  readonly alpha: number
+  readonly weakRatio: number
+  readonly beta: number
+  readonly weightMin: number
+  readonly weightMax: number
+  readonly initialHebbianWeight: number
+  readonly decayHalfLifeMs: number
+  readonly nonUseGraceMs: number
+  readonly decayIntervalMs: number
+  readonly correctionLookbackMs: number
+}
+
+export const DEFAULT_HEBBIAN_CONFIG: NormalizedHebbianConfig = Object.freeze({
+  enabled: true,
+  alpha: 0.25,
+  weakRatio: 1 / 3,
+  beta: 0.35,
+  weightMin: 0.05,
+  weightMax: 3.0,
+  initialHebbianWeight: 0.35,
+  decayHalfLifeMs: 30 * 86_400_000,
+  nonUseGraceMs: 7 * 86_400_000,
+  decayIntervalMs: 3_600_000,
+  correctionLookbackMs: 86_400_000,
+})
+
+export interface ParamTuningConfig {
+  readonly enabled?: boolean
+  readonly minSample?: number
+  readonly minStepSample?: number
+  readonly minHoldoutSamples?: number
+  readonly minSourceSample?: number
+  readonly maxTimeoutRatePpm?: number
+  readonly lowUsageRatePpm?: number
+  readonly healthyUsageRatePpm?: number
+  readonly highCorrectionRatePpm?: number
+  readonly noisySourceRatePpm?: number
+  readonly regressionMarginPpm?: number
+  readonly timeoutMarginPpm?: number
+  readonly maxTimeoutMarginPpm?: number
+  readonly usageDropMarginPpm?: number
+  readonly observationMs?: number
+  readonly evaluationWindowMs?: number
+  readonly relaxationReplayWindowMs?: number
+  readonly relaxationReplayEnabled?: boolean
+  readonly rollbackCooldownMs?: number
+}
+
+export interface NormalizedParamTuningConfig {
+  readonly enabled: boolean
+  readonly minSample: number
+  readonly minStepSample: number
+  readonly minHoldoutSamples: number
+  readonly minSourceSample: number
+  readonly maxTimeoutRatePpm: number
+  readonly lowUsageRatePpm: number
+  readonly healthyUsageRatePpm: number
+  readonly highCorrectionRatePpm: number
+  readonly noisySourceRatePpm: number
+  readonly regressionMarginPpm: number
+  readonly timeoutMarginPpm: number
+  readonly maxTimeoutMarginPpm: number
+  readonly usageDropMarginPpm: number
+  readonly observationMs: number
+  readonly evaluationWindowMs: number
+  readonly relaxationReplayWindowMs: number
+  readonly relaxationReplayEnabled: boolean
+  readonly rollbackCooldownMs: number
+}
+
+export const DEFAULT_PARAM_TUNING_CONFIG: NormalizedParamTuningConfig = Object.freeze({
+  enabled: true,
+  minSample: 20,
+  minStepSample: 20,
+  minHoldoutSamples: 20,
+  minSourceSample: 10,
+  maxTimeoutRatePpm: 50_000,
+  lowUsageRatePpm: 100_000,
+  healthyUsageRatePpm: 250_000,
+  highCorrectionRatePpm: 250_000,
+  noisySourceRatePpm: 850_000,
+  regressionMarginPpm: 100_000,
+  timeoutMarginPpm: 25_000,
+  maxTimeoutMarginPpm: 25_000,
+  usageDropMarginPpm: 100_000,
+  observationMs: 7 * 86_400_000,
+  evaluationWindowMs: 7 * 86_400_000,
+  relaxationReplayWindowMs: 30 * 86_400_000,
+  relaxationReplayEnabled: true,
+  rollbackCooldownMs: 7 * 86_400_000,
+})
+
+export interface AssocReadEventInput {
+  readonly taskId?: string | null
+  readonly nodeId: string
+  readonly ownerScopeKey: string
+  readonly hit: boolean
+  readonly reason: string
+  readonly occurredAt: number
+}
+
+export interface AssocTaskTelemetryInput {
+  readonly taskId: string
+  readonly ownerScopeKey: string
+  readonly inHoldout: boolean
+  readonly turnsDelta?: number
+  readonly stepsDelta?: number
+  readonly inputTokensDelta?: number | null
+  readonly outputTokensDelta?: number | null
+  readonly costUsdMicrosDelta?: number | null
+  readonly turns?: number
+  readonly steps?: number
+  readonly inputTokens?: number | null
+  readonly outputTokens?: number | null
+  readonly costUsdMicros?: number | null
+  readonly updatedAt: number
+}
+
+export interface AssocReplayEpisodeInput {
+  readonly taskId: string
+  readonly ownerScopeKey: string
+  readonly inHoldout: boolean
+  readonly cues: readonly HotPathCue[]
+  readonly usedNodeIds?: readonly string[]
+  readonly correctedNodeIds?: readonly string[]
+  readonly profileVersion?: number
+  readonly occurredAt: number
+}
+
+export interface ApplyHebbianUseInput {
+  readonly useKind: 'strong' | 'weak'
+  readonly taskId: string
+  readonly ownerScopeKey: string
+  readonly nodeId: string
+  readonly sessionId?: string | null
+  readonly coActivatedNodeIds?: readonly string[]
+  readonly provenanceEdges?: readonly ProvenanceEdgeRef[]
+  readonly nowMs: number
+  readonly hebbianConfig?: HebbianConfig
+}
+
+export interface ApplyHebbianUseResult {
+  readonly appliedDelta: number
+  readonly updatedEdges: number
+  readonly createdEdges: number
+}
+
+export interface ApplyHebbianCorrectionInput {
+  readonly ownerScopeKey: string
+  readonly taskId?: string | null
+  readonly sessionId?: string | null
+  readonly nodeId?: string | null
+  readonly minExposedAt?: number
+  readonly nowMs: number
+  readonly hebbianConfig?: HebbianConfig
+}
+
+export interface ApplyHebbianCorrectionResult {
+  readonly correctedExposures: number
+  readonly updatedEdges: number
+}
+
+export interface ApplyHebbianDecayInput {
+  readonly nowMs: number
+  readonly decayHalfLifeMs: number
+  readonly nonUseGraceMs: number
+  readonly weightMin: number
+  readonly weightMax: number
+  readonly limit?: number
+}
+
+export interface ApplyHebbianDecayResult {
+  readonly decayedEdges: number
+  readonly hasMore: boolean
+}
+
+export interface StoredHebbianEvent {
+  readonly seq: number
+  readonly ownerScopeKey: string
+  readonly taskId: string | null
+  readonly nodeId: string | null
+  readonly edgeId: string
+  readonly eventKind: HebbianEventKind
+  readonly delta: number
+  readonly weightBefore: number
+  readonly weightAfter: number
+  readonly occurredAt: number
 }
 
 export type WriteTask =
@@ -297,6 +550,27 @@ export type WriteTask =
       readonly metrics: readonly StepMetricRow[]
       readonly exposures: readonly ExposureRow[]
     }
+  | {
+      readonly kind: 'record-read-event'
+      readonly event: AssocReadEventInput
+    }
+  | {
+      readonly kind: 'upsert-task-telemetry'
+      readonly telemetry: AssocTaskTelemetryInput
+    }
+  | {
+      readonly kind: 'upsert-replay-episode'
+      readonly episode: AssocReplayEpisodeInput
+    }
+  | ({
+      readonly kind: 'apply-hebbian-use'
+    } & ApplyHebbianUseInput)
+  | ({
+      readonly kind: 'apply-hebbian-correction'
+    } & ApplyHebbianCorrectionInput)
+  | ({
+      readonly kind: 'apply-hebbian-decay'
+    } & ApplyHebbianDecayInput)
 
 export type HotPathCueKind = 'user' | 'goal' | 'tool-entity' | 'session'
 
@@ -344,6 +618,7 @@ export interface ScoredAssociationItem {
   readonly hop: number
   readonly sourcePlugin: string
   readonly updatedAt: number
+  readonly provenanceEdges?: readonly ProvenanceEdgeRef[]
 }
 
 export interface HotPathResult {

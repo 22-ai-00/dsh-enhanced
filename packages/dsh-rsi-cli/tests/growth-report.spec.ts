@@ -126,6 +126,122 @@ function initEmptyMemoryAndPrefDbs(memPath: string, prefPath: string): void {
   }
 }
 
+function initS1AssociationDb(path: string): void {
+  const db = new DatabaseSync(path)
+  try {
+    db.exec(`
+      CREATE TABLE assoc_nodes (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        source_plugin TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        owner_scope_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_holdout_assignments (
+        task_id TEXT PRIMARY KEY,
+        owner_scope_key TEXT NOT NULL,
+        task_kind TEXT NOT NULL,
+        session_id TEXT,
+        turn_number INTEGER,
+        in_holdout INTEGER NOT NULL,
+        bucket_bps INTEGER NOT NULL,
+        rate_bps INTEGER NOT NULL,
+        hmac_digest TEXT NOT NULL,
+        assigned_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_step_metrics (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT,
+        owner_scope_key TEXT NOT NULL,
+        in_holdout INTEGER NOT NULL,
+        latency_us INTEGER NOT NULL,
+        timed_out INTEGER NOT NULL,
+        fallback_mode TEXT NOT NULL,
+        injected_count INTEGER NOT NULL,
+        candidate_count INTEGER NOT NULL,
+        source_counts_json TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_exposures (
+        task_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        owner_scope_key TEXT NOT NULL,
+        source_plugin TEXT NOT NULL,
+        exposed_at INTEGER NOT NULL,
+        assoc_read_count INTEGER NOT NULL DEFAULT 0,
+        weak_use_count INTEGER NOT NULL DEFAULT 0,
+        corrected INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (task_id, node_id)
+      );
+    `)
+  } finally {
+    db.close()
+  }
+}
+
+function initS2AssociationDb(path: string): void {
+  initS1AssociationDb(path)
+  const db = new DatabaseSync(path)
+  try {
+    db.exec(`
+      ALTER TABLE assoc_step_metrics ADD COLUMN profile_version INTEGER;
+      ALTER TABLE assoc_exposures ADD COLUMN was_exposed INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE assoc_exposures ADD COLUMN hop INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE assoc_exposures ADD COLUMN score REAL NOT NULL DEFAULT 0.0;
+      ALTER TABLE assoc_exposures ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+      ALTER TABLE assoc_exposures ADD COLUMN provenance_edges_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE assoc_exposures ADD COLUMN session_id TEXT;
+      ALTER TABLE assoc_exposures ADD COLUMN strong_used INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE assoc_exposures ADD COLUMN weak_used INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE assoc_exposures ADD COLUMN hebbian_delta_applied REAL NOT NULL DEFAULT 0.0;
+      ALTER TABLE assoc_exposures ADD COLUMN corrected_at INTEGER;
+      CREATE TABLE assoc_read_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT,
+        node_id TEXT NOT NULL,
+        owner_scope_key TEXT NOT NULL,
+        hit INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_param_profile_heads (
+        scope_key TEXT PRIMARY KEY,
+        active_version INTEGER NOT NULL,
+        latest_version INTEGER NOT NULL,
+        active_digest TEXT,
+        state TEXT NOT NULL,
+        changed_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_param_profile_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope_key TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_version INTEGER,
+        to_version INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL
+      );
+      CREATE TABLE assoc_task_telemetry (
+        task_id TEXT PRIMARY KEY,
+        owner_scope_key TEXT NOT NULL,
+        in_holdout INTEGER NOT NULL,
+        turns INTEGER NOT NULL DEFAULT 0,
+        steps INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cost_usd_micros INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+    `)
+  } finally {
+    db.close()
+  }
+}
+
 describe('dsh-rsi growth-report', () => {
   test('parseGrowthSince, parseGrowthNow, and parseArgs validate options strictly', () => {
     expect(parseGrowthSince('7d')).toEqual({ spec: '7d', windowMs: 7 * 86_400_000 })
@@ -158,6 +274,7 @@ describe('dsh-rsi growth-report', () => {
     expect(noDataReport.candidates.state).toBe('no-data')
     expect(noDataReport.notifications.state).toBe('no-data')
     expect(noDataReport.suppliers.state).toBe('no-data')
+    expect(noDataReport.association.state).toBe('no-data')
     expect(noDataReport.memoryLaneGate.status).toBe('no-data')
     expect(formatGrowthReport(noDataReport)).toContain('无数据（未启用/无账本）')
 
@@ -181,6 +298,7 @@ describe('dsh-rsi growth-report', () => {
     expect(zeroReport.candidates.state).toBe('zero')
     expect(zeroReport.notifications.state).toBe('zero')
     expect(zeroReport.suppliers.state).toBe('zero')
+    expect(zeroReport.association.state).toBe('no-data')
     expect(formatGrowthReport(zeroReport)).toContain('0（账本就绪，窗口内无记录）')
   })
 
@@ -676,5 +794,496 @@ describe('dsh-rsi growth-report', () => {
       adopted: 2,
       rolledBack: 1,
     })
+  })
+
+  test('association S1 DB compatibility: filters holdout zero-latency rows and returns null for S2-only and missing telemetry fields', async () => {
+    const home = await createTempHome()
+    const now = Date.parse('2026-11-18T00:00:00Z')
+    const day = 86_400_000
+    await mkdir(join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-association'), { recursive: true })
+    await writeFile(join(home, 'profiles', 'web', 'package.json'), '{"private":true}\n')
+
+    // Empty initialized S1 DB -> association.state === 'zero'
+    await mkdir(join(home, 'assistant-association'), { recursive: true })
+    const assocPath = join(home, 'assistant-association', 'state.sqlite')
+    initS1AssociationDb(assocPath)
+    const emptyReport = await collectGrowthReport({ dshHome: home, profile: 'web', since: '7d', now })
+    expect(emptyReport.overallState).toBe('zero')
+    expect(emptyReport.association.state).toBe('zero')
+    expect(emptyReport.association.assocReadAttempts).toBeNull()
+    expect(emptyReport.association.activeProfileVersion).toBeNull()
+
+    const db = new DatabaseSync(assocPath)
+    try {
+      const scope = 'a'.repeat(64)
+      const hmac = 'b'.repeat(64)
+      db.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-mem-1', 'memory', 'personal-memory', 'm1', scope, 'active', '{}', now - day)
+      db.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-goal-1', 'goal', 'assistant-goals', 'g1', scope, 'active', '{}', now - day)
+
+      // 1 holdout task + 2 non-holdout tasks (1 injected, 1 uninjected)
+      db.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:h1', scope, 'foreground-turn', 's1', 1, 1, 500, 1250, hmac, now - day)
+      db.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:i1', scope, 'foreground-turn', 's2', 1, 0, 5000, 1250, hmac, now - day)
+      db.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:u1', scope, 'foreground-turn', 's3', 1, 0, 6000, 1250, hmac, now - day)
+
+      // 3 holdout zero-latency placeholders MUST NOT skew p50/p99 or timeout rate
+      for (let i = 0; i < 3; i++) {
+        db.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run('foreground-turn:h1', scope, 1, 0, 0, 'holdout', 0, 0, '{}', now - day + i)
+      }
+      // 3 evaluated steps: latencies [1200, 2400, 4800], 1 timeout, 1 cold-start fallback
+      db.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:i1', scope, 0, 1200, 0, 'none', 2, 5, JSON.stringify({ memory: 1, goal: 1 }), now - day)
+      db.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:i1', scope, 0, 2400, 0, 'cold-start', 0, 0, '{}', now - day + 100)
+      db.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:u1', scope, 0, 4800, 1, 'timeout', 0, 2, '{}', now - day + 200)
+
+      // Exposures: 1 strong+weak, 1 unused
+      db.prepare('INSERT INTO assoc_exposures VALUES (?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:i1', 'n-mem-1', scope, 'personal-memory', now - day, 1, 1, 0)
+      db.prepare('INSERT INTO assoc_exposures VALUES (?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:i1', 'n-goal-1', scope, 'assistant-goals', now - day, 0, 0, 0)
+    } finally {
+      db.close()
+    }
+
+    const report = await collectGrowthReport({ dshHome: home, profile: 'web', since: '7d', now })
+    expect(report.association).toMatchObject({
+      state: 'data',
+      evaluatedSteps: 3,
+      holdoutSteps: 3,
+      injectedSteps: 1,
+      totalInjectedItems: 2,
+      avgInjectedItemsMilli: 667,
+      timedOutSteps: 1,
+      timeoutRatePpm: 333_333,
+      fallbackSteps: 1,
+      latencySamples: 3,
+      p50LatencyUs: 2400,
+      p99LatencyUs: 4800,
+      exposuresTotal: 2,
+      strongUseExposures: 1,
+      weakUseExposures: 1,
+      strongUseRatePpm: 500_000,
+      weakUseRatePpm: 500_000,
+      assocReadAttempts: null,
+      assocReadHits: null,
+      assocReadHitRatePpm: null,
+      activeProfileVersion: null,
+      activeProfileDigest: null,
+      profileAdoptions: 0,
+      profileRollbacks: 0,
+    })
+    expect(report.association.holdoutComparison).toEqual({
+      nonHoldoutTasks: 2,
+      injectedTasks: 1,
+      holdoutTasks: 1,
+      injected: {
+        tasks: 1,
+        evaluatedTasks: 0,
+        corrections: 0,
+        retractions: 0,
+        redos: 0,
+        correctionRatePpm: null,
+        retractionRatePpm: null,
+        redoRatePpm: null,
+        turnSamples: 0,
+        avgTurnsMilli: null,
+        costSamples: 0,
+        avgCostUsdMicros: null,
+        tokenSamples: 0,
+        avgInputTokens: null,
+        avgOutputTokens: null,
+      },
+      holdout: {
+        tasks: 1,
+        evaluatedTasks: 0,
+        corrections: 0,
+        retractions: 0,
+        redos: 0,
+        correctionRatePpm: null,
+        retractionRatePpm: null,
+        redoRatePpm: null,
+        turnSamples: 0,
+        avgTurnsMilli: null,
+        costSamples: 0,
+        avgCostUsdMicros: null,
+        tokenSamples: 0,
+        avgInputTokens: null,
+        avgOutputTokens: null,
+      },
+    })
+    const formatted = formatGrowthReport(report)
+    expect(formatted).toContain('6. 联想层在线指标与留出对照 [有数据]')
+    expect(formatted).toContain('assoc_read 命中率：不可用')
+    expect(formatted).toContain('参数档案版本：不可用')
+  })
+
+  test('association S2 full telemetry: profile isolation, symlink rejection, read events, WP22 profile, and joined holdout comparison', async () => {
+    const home = await createTempHome()
+    const outside = await createTempHome()
+    const now = Date.parse('2026-11-18T00:00:00Z')
+    const day = 86_400_000
+
+    await mkdir(join(home, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-association'), { recursive: true })
+    await mkdir(join(home, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-evaluation'), { recursive: true })
+    await mkdir(join(home, 'profiles', 'acp'), { recursive: true })
+    await writeFile(join(home, 'profiles', 'desktop', 'package.json'), '{"private":true}\n')
+    await writeFile(join(home, 'profiles', 'acp', 'package.json'), '{"private":true}\n')
+
+    // Symlinked outside association DB must be rejected with diagnostic
+    const outsideAssocPath = join(outside, 'leak-assoc.sqlite')
+    initS2AssociationDb(outsideAssocPath)
+    await mkdir(join(home, 'assistant-association'), { recursive: true })
+    await symlink(outsideAssocPath, join(home, 'assistant-association', 'association.sqlite'))
+
+    const assocPath = join(home, 'assistant-association', 'state.sqlite')
+    initS2AssociationDb(assocPath)
+
+    await mkdir(join(home, 'assistant-evaluation'), { recursive: true })
+    const evalPath = join(home, 'assistant-evaluation', 'evaluation.sqlite')
+    initEmptyEvaluationDb(evalPath)
+
+    // Upgrade evaluation_task_projections + evaluation_owner_revisions with subject_kind/subject_ref & lineage/version
+    const evalDb = new DatabaseSync(evalPath)
+    try {
+      evalDb.exec(`
+        DROP TABLE evaluation_task_projections;
+        DROP TABLE evaluation_owner_revisions;
+        CREATE TABLE evaluation_task_projections (
+          subject_key TEXT PRIMARY KEY,
+          scope_key TEXT NOT NULL,
+          subject_kind TEXT NOT NULL,
+          subject_ref TEXT NOT NULL,
+          primary_outcome_id TEXT,
+          execution_outcome_id TEXT,
+          objective_outcome_id TEXT,
+          objective_conflicted INTEGER NOT NULL DEFAULT 0,
+          learning_disposition TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE evaluation_owner_revisions (
+          outcome_id TEXT PRIMARY KEY,
+          subject_key TEXT NOT NULL,
+          lineage TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          action TEXT NOT NULL
+        );
+      `)
+      // Injected task 1: achieved, NO cost/tokens in evaluation_outcomes (NULL), has turns in assoc_task_telemetry
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('eo-i1', 's', 'achieved', 'succeeded', 'foreground', 'eval-1', '{}', '[]', null, 300, null, null, 1, now - day, '["s","foreground-turn","inj-1"]')
+      evalDb.prepare('INSERT INTO evaluation_task_projections VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('["s","foreground-turn","inj-1"]', 's', 'foreground-turn', 'inj-1', 'eo-i1', 'eo-i1', 'eo-i1', 0, 'upsert', now - day)
+
+      // Injected task 2: had correction v1 superseded by withdraw v2 -> counted as retraction, NOT correction!
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('eo-i2', 's', 'achieved', 'succeeded', 'foreground', 'eval-1', JSON.stringify({ retries: 1, turns: 4 }), '[]', 2500, 400, 300, 120, 2, now - day, '["s","foreground-turn","inj-2"]')
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('rev-i2-1', 's', 'not-achieved', 'succeeded', 'user-feedback', 'owner', '{}', '[]', 0, null, 0, 0, 0, now - day + 1000, '["s","foreground-turn","inj-2"]')
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('rev-i2-2', 's', 'unknown', 'succeeded', 'user-feedback', 'owner', '{}', '[]', 0, null, 0, 0, 0, now - day + 2000, '["s","foreground-turn","inj-2"]')
+      evalDb.prepare('INSERT INTO evaluation_task_projections VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('["s","foreground-turn","inj-2"]', 's', 'foreground-turn', 'inj-2', 'eo-i2', 'eo-i2', 'rev-i2-2', 0, 'retract', now - day + 2000)
+      evalDb.prepare('INSERT INTO evaluation_owner_revisions VALUES (?,?,?,?,?)')
+        .run('rev-i2-1', '["s","foreground-turn","inj-2"]', 'owner-1', 1, 'correct')
+      evalDb.prepare('INSERT INTO evaluation_owner_revisions VALUES (?,?,?,?,?)')
+        .run('rev-i2-2', '["s","foreground-turn","inj-2"]', 'owner-1', 2, 'withdraw')
+
+      // Holdout task 1: corrected by owner, partial, retries=1
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('eo-h1', 's', 'partial', 'succeeded', 'foreground', 'eval-1', JSON.stringify({ retries: 1 }), '[]', 4000, 500, 500, 200, 3, now - day, '["s","foreground-turn","hold-1"]')
+      evalDb.prepare('INSERT INTO evaluation_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run('rev-h1-1', 's', 'partial', 'succeeded', 'user-feedback', 'owner', '{}', '[]', 0, null, 0, 0, 0, now - day + 1000, '["s","foreground-turn","hold-1"]')
+      evalDb.prepare('INSERT INTO evaluation_task_projections VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('["s","foreground-turn","hold-1"]', 's', 'foreground-turn', 'hold-1', 'eo-h1', 'eo-h1', 'rev-h1-1', 0, 'retract', now - day + 1000)
+      evalDb.prepare('INSERT INTO evaluation_owner_revisions VALUES (?,?,?,?,?)')
+        .run('rev-h1-1', '["s","foreground-turn","hold-1"]', 'owner-1', 1, 'correct')
+    } finally {
+      evalDb.close()
+    }
+
+    const assocDb = new DatabaseSync(assocPath)
+    try {
+      const scope = 'c'.repeat(64)
+      const hmac = 'd'.repeat(64)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-ep-1', 'episode', 'assistant-delivery', 'fg:1', scope, 'active', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-wi-1', 'work-item', 'assistant-work-items', 'wi:1', scope, 'active', '{}', now - day)
+
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', scope, 'foreground-turn', 's1', 1, 0, 5000, 1250, hmac, now - day)
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-2', scope, 'foreground-turn', 's2', 1, 0, 6000, 1250, hmac, now - day)
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-1', scope, 'foreground-turn', 's3', 1, 1, 500, 1250, hmac, now - day)
+      // Holdout task 2 has NO evaluation row and NO telemetry -> tests null handling
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-2', scope, 'foreground-turn', 's4', 1, 1, 600, 1250, hmac, now - day)
+
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', scope, 0, 1000, 0, 'none', 2, 4, JSON.stringify({ episode: 1, 'work-item': 1 }), now - day, 2)
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-2', scope, 0, 3000, 0, 'memory-only', 1, 2, JSON.stringify({ episode: 1 }), now - day, 2)
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-1', scope, 1, 0, 0, 'holdout', 0, 0, '{}', now - day, 2)
+
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:inj-1', 'n-ep-1', scope, 'assistant-delivery', now - day, 1, 0, 0, 1, 1, 0)
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:inj-1', 'n-wi-1', scope, 'assistant-work-items', now - day, 0, 1, 0, 1, 0, 1)
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:inj-2', 'n-ep-1', scope, 'assistant-delivery', now - day, 0, 1, 1, 1, 0, 1)
+
+      // 3 assoc_read attempts (2 hits, 1 miss) + 1 out-of-window event
+      assocDb.prepare('INSERT INTO assoc_read_events (task_id, node_id, owner_scope_key, hit, reason, occurred_at) VALUES (?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', 'n-ep-1', scope, 1, 'ok', now - day)
+      assocDb.prepare('INSERT INTO assoc_read_events (task_id, node_id, owner_scope_key, hit, reason, occurred_at) VALUES (?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', 'n-wi-1', scope, 1, 'ok', now - day)
+      assocDb.prepare('INSERT INTO assoc_read_events (task_id, node_id, owner_scope_key, hit, reason, occurred_at) VALUES (?,?,?,?,?,?)')
+        .run('foreground-turn:inj-2', 'missing', scope, 0, 'not-found', now - day)
+      assocDb.prepare('INSERT INTO assoc_read_events (task_id, node_id, owner_scope_key, hit, reason, occurred_at) VALUES (?,?,?,?,?,?)')
+        .run('foreground-turn:old', 'n-ep-1', scope, 0, 'policy-denied', now - 30 * day)
+
+      assocDb.prepare('INSERT INTO assoc_param_profile_heads VALUES (?,?,?,?,?,?)')
+        .run(scope, 2, 2, 'e'.repeat(64), 'active', now - day)
+      assocDb.prepare('INSERT INTO assoc_param_profile_events (scope_key, kind, from_version, to_version, reason, detail_json, occurred_at) VALUES (?,?,?,?,?,?,?)')
+        .run(scope, 'adopted', 1, 2, 'tightening', '{}', now - 2 * day)
+      assocDb.prepare('INSERT INTO assoc_param_profile_events (scope_key, kind, from_version, to_version, reason, detail_json, occurred_at) VALUES (?,?,?,?,?,?,?)')
+        .run(scope, 'rolled-back', 2, 1, 'degradation', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_param_profile_events (scope_key, kind, from_version, to_version, reason, detail_json, occurred_at) VALUES (?,?,?,?,?,?,?)')
+        .run(scope, 'adopted', 0, 1, 'old', '{}', now - 30 * day)
+
+      // Telemetry: inj-1 has turns=2 and NULL cost/tokens (must NOT be fabricated as 0!); hold-1 has turns=3
+      assocDb.prepare('INSERT INTO assoc_task_telemetry VALUES (?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', scope, 0, 2, 2, null, null, null, now - day)
+      assocDb.prepare('INSERT INTO assoc_task_telemetry VALUES (?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-1', scope, 1, 3, 4, null, null, null, now - day)
+    } finally {
+      assocDb.close()
+    }
+
+    // 1. Profile `acp` without assistant-association must NOT leak `desktop` association ledger
+    const acpReport = await collectGrowthReport({ dshHome: home, profile: 'acp', since: '7d', now })
+    expect(acpReport.association.state).toBe('no-data')
+
+    // 2. Profile `desktop` rejects symlinked association.sqlite and computes S2 metrics accurately
+    const report = await collectGrowthReport({ dshHome: home, profile: 'desktop', since: '7d', now })
+    expect(report.diagnostics.some(d => d.includes('越界') || d.includes('非普通账本文件'))).toBe(true)
+    expect(report.inspectedLedgers).not.toContain(outsideAssocPath)
+
+    expect(report.association).toMatchObject({
+      state: 'data',
+      evaluatedSteps: 2,
+      holdoutSteps: 1,
+      injectedSteps: 2,
+      totalInjectedItems: 3,
+      avgInjectedItemsMilli: 1500,
+      timedOutSteps: 0,
+      timeoutRatePpm: 0,
+      fallbackSteps: 1,
+      latencySamples: 2,
+      p50LatencyUs: 1000,
+      p99LatencyUs: 3000,
+      exposuresTotal: 3,
+      strongUseExposures: 1,
+      weakUseExposures: 2,
+      strongUseRatePpm: 333_333,
+      weakUseRatePpm: 666_667,
+      assocReadAttempts: 3,
+      assocReadHits: 2,
+      assocReadHitRatePpm: 666_667,
+      activeProfileVersion: 2,
+      activeProfileDigest: 'e'.repeat(64),
+      profileAdoptions: 1,
+      profileRollbacks: 1,
+    })
+    expect(report.association.sources).toEqual([
+      {
+        source: 'episode',
+        injectedItems: 2,
+        exposures: 2,
+        strongUses: 1,
+        weakUses: 1,
+        strongUseRatePpm: 500_000,
+        weakUseRatePpm: 500_000,
+      },
+      {
+        source: 'work-item',
+        injectedItems: 1,
+        exposures: 1,
+        strongUses: 0,
+        weakUses: 1,
+        strongUseRatePpm: 0,
+        weakUseRatePpm: 1_000_000,
+      },
+    ])
+    expect(report.association.holdoutComparison).toEqual({
+      nonHoldoutTasks: 2,
+      injectedTasks: 2,
+      holdoutTasks: 2,
+      injected: {
+        tasks: 2,
+        evaluatedTasks: 2,
+        corrections: 0,
+        retractions: 1,
+        redos: 1,
+        correctionRatePpm: 0,
+        retractionRatePpm: 500_000,
+        redoRatePpm: 500_000,
+        turnSamples: 2,
+        avgTurnsMilli: 3000,
+        costSamples: 1,
+        avgCostUsdMicros: 2500,
+        tokenSamples: 1,
+        avgInputTokens: 300,
+        avgOutputTokens: 120,
+      },
+      holdout: {
+        tasks: 2,
+        evaluatedTasks: 1,
+        corrections: 1,
+        retractions: 1,
+        redos: 1,
+        correctionRatePpm: 1_000_000,
+        retractionRatePpm: 1_000_000,
+        redoRatePpm: 1_000_000,
+        turnSamples: 1,
+        avgTurnsMilli: 3000,
+        costSamples: 1,
+        avgCostUsdMicros: 4000,
+        tokenSamples: 1,
+        avgInputTokens: 500,
+        avgOutputTokens: 200,
+      },
+    })
+
+    const formatted = formatGrowthReport(report)
+    expect(formatted).toContain('6. 联想层在线指标与留出对照 [有数据]')
+    expect(formatted).toContain('assoc_read 命中率：66.7%（2/3）')
+    expect(formatted).toContain('参数档案版本：v2 (eeeeeeee) · 窗口采用：1 次 · 回滚：1 次')
+    expect(formatted).toContain('来源贡献：episode(注2/强1/弱1) · work-item(注1/强0/弱1)')
+    expect(formatted).toContain('留出对照（注入组 2 任务 [非留出总 2] vs 留出组 2 任务）：')
+  })
+
+  test('association S2 excludes was_exposed=0 assoc_read rows for holdout and uninjected tasks from exposures, sources, and injectedTasks', async () => {
+    const home = await createTempHome()
+    const now = Date.parse('2026-11-18T00:00:00Z')
+    const day = 86_400_000
+
+    await mkdir(join(home, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-association'), { recursive: true })
+    await writeFile(join(home, 'profiles', 'desktop', 'package.json'), '{"private":true}\n')
+    await mkdir(join(home, 'assistant-association'), { recursive: true })
+    const assocPath = join(home, 'assistant-association', 'state.sqlite')
+    initS2AssociationDb(assocPath)
+
+    const assocDb = new DatabaseSync(assocPath)
+    try {
+      const scope = 'a'.repeat(64)
+      const hmac = 'b'.repeat(64)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-ep-1', 'episode', 'assistant-delivery', 'fg:1', scope, 'active', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-ep-2', 'episode', 'assistant-delivery', 'fg:2', scope, 'active', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-wi-1', 'work-item', 'assistant-work-items', 'wi:1', scope, 'active', '{}', now - day)
+
+      // 1 injected non-holdout task, 1 uninjected non-holdout task, 1 holdout task
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', scope, 'foreground-turn', 's1', 1, 0, 5000, 1250, hmac, now - day)
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:noinj-1', scope, 'foreground-turn', 's2', 1, 0, 6000, 1250, hmac, now - day)
+      assocDb.prepare('INSERT INTO assoc_holdout_assignments VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-1', scope, 'foreground-turn', 's3', 1, 1, 500, 1250, hmac, now - day)
+
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:inj-1', scope, 0, 1200, 0, 'none', 1, 2, JSON.stringify({ episode: 1 }), now - day, 2)
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:noinj-1', scope, 0, 800, 0, 'none', 0, 0, '{}', now - day, 2)
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:hold-1', scope, 1, 0, 0, 'holdout', 0, 0, '{}', now - day, 2)
+
+      // Legitimate exposed rows on inj-1:
+      // - n-ep-1 has strong_used=1
+      // - n-ep-2 has assoc_read_count=1, strong_used=0 (must use strong_used column rather than assoc_read_count)
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:inj-1', 'n-ep-1', scope, 'assistant-delivery', now - day, 1, 0, 0, 1, 1, 0)
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:inj-1', 'n-ep-2', scope, 'assistant-delivery', now - day, 1, 0, 0, 1, 0, 0)
+
+      // Unexposed assoc_read rows (was_exposed = 0, assoc_read_count = 1, strong_used = 0):
+      // 1. uninjected non-holdout task calling assoc_read
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:noinj-1', 'n-wi-1', scope, 'assistant-work-items', now - day, 1, 0, 0, 0, 0, 0)
+      // 2. holdout task calling assoc_read
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:hold-1', 'n-wi-1', scope, 'assistant-work-items', now - day, 1, 0, 0, 0, 0, 0)
+    } finally {
+      assocDb.close()
+    }
+
+    const report = await collectGrowthReport({ dshHome: home, profile: 'desktop', since: '7d', now })
+    expect(report.association).toMatchObject({
+      state: 'data',
+      evaluatedSteps: 2,
+      holdoutSteps: 1,
+      injectedSteps: 1,
+      totalInjectedItems: 1,
+      exposuresTotal: 2,
+      strongUseExposures: 1,
+      weakUseExposures: 0,
+      strongUseRatePpm: 500_000,
+      weakUseRatePpm: 0,
+    })
+    expect(report.association.sources).toEqual([
+      {
+        source: 'episode',
+        injectedItems: 1,
+        exposures: 2,
+        strongUses: 1,
+        weakUses: 0,
+        strongUseRatePpm: 500_000,
+        weakUseRatePpm: 0,
+      },
+    ])
+    expect(report.association.holdoutComparison.nonHoldoutTasks).toBe(2)
+    expect(report.association.holdoutComparison.injectedTasks).toBe(1)
+    expect(report.association.holdoutComparison.holdoutTasks).toBe(1)
+    expect(report.association.holdoutComparison.injected.tasks).toBe(1)
+    expect(report.association.holdoutComparison.holdout.tasks).toBe(1)
   })
 })

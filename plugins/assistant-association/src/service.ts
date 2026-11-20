@@ -16,20 +16,37 @@ import {
   handleInboxClaimed,
   handleInboxDiscarded,
   handleSessionEvent,
+  recordTaskExposures,
+  recordTurnTaskId,
   resolveOwnerScope,
   resolveTaskId,
   wipeStateOnOwnerRotation,
   type AgentAssocState,
 } from './cues.js'
+import {
+  detectWeakUseNodes,
+  selectHop0CoActivationTargets,
+  type ExposedNodeEntitiesInput,
+} from './hebbian.js'
 import { resolveHoldoutSeedKey, evaluateHoldout } from './holdout.js'
 import { runHotPathQuery } from './hot-path.js'
 import { applyHysteresisAndFormat } from './hysteresis.js'
 import {
   buildMemoryIndex,
+  rebuildMemoryIndexEdges,
   type AssociationMemoryIndex,
   type MemoryIndexEdgeInput,
   type MemoryIndexNodeInput,
 } from './index-memory.js'
+import {
+  AssociationParamTuningLedger,
+  toHotPathProfile,
+  type AssocParamCurrent,
+  type AssocParamProfileValues,
+  type AssocParamRequestResult,
+  type AssocParamTickAction,
+  type AssocParamTuningStatus,
+} from './param-tuning.js'
 import { AssociationSourceManager } from './sources.js'
 import { AssociationStore, openAssociationDatabase } from './sqlite.js'
 import {
@@ -43,6 +60,7 @@ import {
   type HotPathClock,
   type HotPathProfile,
   type NodeKind,
+  type ProvenanceEdgeRef,
   type StepMetricRow,
   type StoredAssociationEdge,
   type StoredAssociationNode,
@@ -67,6 +85,7 @@ export class AssistantAssociationService extends Service {
   private readonly assocStore: AssociationStore | null
   private readonly writeQueue: AssociationWriteQueue | null
   private readonly sourceManager: AssociationSourceManager | null
+  private readonly paramLedger: AssociationParamTuningLedger | null
   private readonly holdoutSeedKey: Buffer | null
 
   private readonly agentStates = new WeakMap<Agent, AgentAssocState>()
@@ -99,6 +118,7 @@ export class AssistantAssociationService extends Service {
       this.assocStore = null
       this.writeQueue = null
       this.sourceManager = null
+      this.paramLedger = null
       this.holdoutSeedKey = null
       ctx.effect(() => () => {
         this.active = false
@@ -121,6 +141,46 @@ export class AssistantAssociationService extends Service {
       throw error
     }
 
+    const pt = normalized.paramTuning
+    this.paramLedger = new AssociationParamTuningLedger(store.database, {
+      baseConfig: {
+        decayHalfLifeMs: normalized.decayHalfLifeMs,
+        maxHops: normalized.maxHops,
+        maxItems: normalized.maxItems,
+        minItems: normalized.minItems,
+        hysteresisDelta: normalized.hysteresisDelta,
+        sourceWeights: normalized.sourceWeights,
+        hopTopN: normalized.hopTopN,
+        maxFanoutPerNode: normalized.maxFanoutPerNode,
+        hotPathBudgetMs: normalized.hotPathBudgetMs,
+      },
+      policy: {
+        minSample: pt.minSample,
+        minStepSample: pt.minStepSample,
+        minSourceSample: pt.minSourceSample,
+        minHoldoutSamples: pt.minHoldoutSamples,
+        maxTimeoutRatePpm: pt.maxTimeoutRatePpm,
+        lowUsageRatePpm: pt.lowUsageRatePpm,
+        healthyUsageRatePpm: pt.healthyUsageRatePpm,
+        highCorrectionRatePpm: pt.highCorrectionRatePpm,
+        noisySourceRatePpm: pt.noisySourceRatePpm,
+        regressionMarginPpm: pt.regressionMarginPpm,
+        timeoutMarginPpm: pt.timeoutMarginPpm,
+        maxTimeoutMarginPpm: pt.maxTimeoutMarginPpm,
+        usageDropMarginPpm: pt.usageDropMarginPpm,
+        observationMs: pt.observationMs,
+        evaluationWindowMs: pt.evaluationWindowMs,
+        relaxReplayWindowMs: pt.relaxationReplayWindowMs,
+        rollbackCooldownMs: pt.rollbackCooldownMs,
+        hotPathBudgetMs: normalized.hotPathBudgetMs,
+        minItems: normalized.minItems,
+        autoTightenEnabled: pt.enabled,
+        relaxationReplayEnabled: pt.relaxationReplayEnabled,
+      },
+      now: () => this.nowClock(),
+      hotPathClock: () => (this.hotPathClock !== undefined ? this.hotPathClock() : performance.now()),
+    })
+
     const writeQueue = new AssociationWriteQueue(store, {
       onGraphMutated: (info) => {
         const evicted = new Set<string>()
@@ -131,8 +191,14 @@ export class AssistantAssociationService extends Service {
         if (evicted.size > 0) {
           this.evictNodesAcrossActiveAgents(evicted)
         }
-        if (info.hasUpserts || info.withdrawals.length > 0) {
+        if (info.hasStructuralGraphChanges || info.hasUpserts || info.withdrawals.length > 0) {
           void this.rebuildIndex()
+        } else if (
+          info.hasEdgeWeightUpdates &&
+          this.activeIndex !== null &&
+          !this.writeQueue?.hasPendingWithdrawals
+        ) {
+          this.rebuildEdgesOnly()
         }
       },
       onError: (error) => {
@@ -171,6 +237,22 @@ export class AssistantAssociationService extends Service {
         this.evictNodesAcrossActiveAgents(evicted)
         void this.rebuildIndex()
       },
+      onTaskCorrected: ({ ownerScopeKey, taskId, nodeIds, nowMs }) => {
+        if (!this.active || this.writeQueue === null || nodeIds.length === 0) return
+        if (this.isTaskInHoldout(taskId).inHoldout) return
+        this.writeQueue.enqueue({
+          kind: 'upsert-replay-episode',
+          episode: {
+            taskId,
+            ownerScopeKey,
+            inHoldout: false,
+            cues: [],
+            correctedNodeIds: nodeIds,
+            occurredAt: nowMs,
+          },
+        })
+      },
+      hebbianConfig: normalized.hebbian,
       consumeSessionToolNames: (sessionId) =>
         consumeSessionTurnToolNames(this.toolNamesBySessionTurn, sessionId),
       onError: (error) => {
@@ -201,7 +283,7 @@ export class AssistantAssociationService extends Service {
       if (!this.active) return
       this.activeAgents.add(agent)
       const state = getOrCreateAgentAssocState(this.agentStates, agent)
-      handleInboxClaimed(state, message, turn)
+      handleInboxClaimed(state, message, turn, this.activeIndex)
     })
 
     ctx.on('agent/inbox/discarded', ({ agent, message }) => {
@@ -228,7 +310,61 @@ export class AssistantAssociationService extends Service {
       if (agent === undefined || agent.session !== session) return
       this.activeAgents.add(agent)
       const state = getOrCreateAgentAssocState(this.agentStates, agent)
-      handleSessionEvent(state, session, event, this.activeIndex, this.toolNamesBySessionTurn)
+      const outcome = handleSessionEvent(
+        state,
+        session,
+        event,
+        this.activeIndex,
+        this.toolNamesBySessionTurn,
+      )
+      if (outcome.telemetry !== undefined || outcome.assistantText !== undefined) {
+        const ownerScope = this.resolveAgentScope(agent)
+        if (ownerScope !== undefined) {
+          const turnNum = outcome.telemetry?.turn ?? outcome.assistantTurn ?? -1
+          let taskId = state.turnTaskIds.get(turnNum)
+          if (taskId === undefined) {
+            taskId = resolveTaskId(this.ctx, agent, state, ownerScope).taskId
+            if (turnNum >= 0) {
+              recordTurnTaskId(state, turnNum, taskId)
+            }
+          }
+          const holdout = this.isTaskInHoldout(taskId)
+          const nowMs = this.nowClock()
+          if (outcome.telemetry !== undefined && this.writeQueue !== null) {
+            this.writeQueue.enqueue({
+              kind: 'upsert-task-telemetry',
+              telemetry: {
+                taskId,
+                ownerScopeKey: ownerScope.ownerScopeKey,
+                inHoldout: holdout.inHoldout,
+                turnsDelta: outcome.telemetry.turnsDelta,
+                stepsDelta: outcome.telemetry.stepsDelta,
+                inputTokensDelta: outcome.telemetry.inputTokensDelta,
+                outputTokensDelta: outcome.telemetry.outputTokensDelta,
+                costUsdMicrosDelta: outcome.telemetry.costUsdMicrosDelta,
+                updatedAt: nowMs,
+              },
+            })
+          }
+          if (
+            outcome.assistantText !== undefined &&
+            outcome.assistantText.length > 0 &&
+            !holdout.inHoldout &&
+            this.assocConfig.hebbian.enabled &&
+            this.activeIndex !== null &&
+            this.writeQueue !== null
+          ) {
+            this.processWeakUseFromAssistantText(
+              agent,
+              state,
+              ownerScope,
+              taskId,
+              outcome.assistantText,
+              nowMs,
+            )
+          }
+        }
+      }
     })
 
     ctx.on('goal/changed' as never, ({ agent }: { readonly agent?: Agent }) => {
@@ -257,14 +393,35 @@ export class AssistantAssociationService extends Service {
     const syncTimer = setInterval(() => {
       if (this.active) {
         sourceManager.scheduleSync(0)
+        if (this.assocConfig.paramTuning.enabled) {
+          try {
+            this.reconcileParamTuning()
+          } catch (error) {
+            this.ctx.logger.warn?.('assistant-association param tuning error', {
+              error: String(error),
+            })
+          }
+        }
       }
     }, normalized.syncIntervalMs)
     syncTimer.unref?.()
+
+    const decayTimer = normalized.hebbian.enabled
+      ? setInterval(() => {
+          if (this.active) {
+            this.enqueueHebbianDecayPass()
+          }
+        }, normalized.hebbian.decayIntervalMs)
+      : null
+    decayTimer?.unref?.()
 
     ctx.effect(
       () => async () => {
         this.active = false
         clearInterval(syncTimer)
+        if (decayTimer !== null) {
+          clearInterval(decayTimer)
+        }
         unregisterTools()
         sourceManager.dispose()
         await writeQueue.dispose()
@@ -373,6 +530,7 @@ export class AssistantAssociationService extends Service {
       state,
       ownerScope,
     )
+    recordTurnTaskId(state, turnNumber, taskId)
 
     const holdout = this.isTaskInHoldout(taskId)
     const nowMs = this.nowClock()
@@ -383,12 +541,38 @@ export class AssistantAssociationService extends Service {
       return ''
     }
 
+    const activeProfile = this.paramLedger?.current(ownerScope.ownerScopeKey)
+    const profileVersion = activeProfile?.version ?? 0
+    const useProfileParams =
+      activeProfile !== undefined &&
+      (this.assocConfig.paramTuning.enabled || activeProfile.version > 0)
+    const resolvedHotPath = useProfileParams
+      ? toHotPathProfile(activeProfile.parameters, {
+          hopTopN: this.assocConfig.hopTopN,
+          maxFanoutPerNode: this.assocConfig.maxFanoutPerNode,
+          hotPathBudgetMs: this.assocConfig.hotPathBudgetMs,
+        })
+      : undefined
+    const effectiveMaxItems = resolvedHotPath?.maxItems ?? this.assocConfig.maxItems
+    const effectiveMinItems = Math.min(this.assocConfig.minItems, effectiveMaxItems)
+    const effectiveHysteresisDelta =
+      resolvedHotPath?.hysteresisDelta ?? this.assocConfig.hysteresisDelta
+    const profile: HotPathProfile = resolvedHotPath ?? {
+      maxHops: this.assocConfig.maxHops,
+      hopTopN: this.assocConfig.hopTopN,
+      maxFanoutPerNode: this.assocConfig.maxFanoutPerNode,
+      maxItems: this.assocConfig.maxItems,
+      decayHalfLifeMs: this.assocConfig.decayHalfLifeMs,
+      budgetMs: this.assocConfig.hotPathBudgetMs,
+      sourceWeights: this.assocConfig.sourceWeights,
+    }
+
     const goalKey =
       goalContext === undefined
         ? 'none'
         : `${goalContext.goal.id}:${goalContext.goal.definition.version}:${goalContext.goal.native.revision}:${goalContext.checkpoint.nextStep.slice(0, 64)}`
 
-    const epochKey = `${state.inputNonce}:${state.invalidationNonce}:${ownerScope.ownerScopeKey}:${taskId}:${goalKey}:${activeIndex.buildEpoch}:${this.invalidationGeneration}`
+    const epochKey = `${state.inputNonce}:${state.invalidationNonce}:${ownerScope.ownerScopeKey}:${taskId}:${goalKey}:${activeIndex.buildEpoch}:${this.invalidationGeneration}:${profileVersion}`
     if (state.memo !== undefined && state.memo.epochKey === epochKey) {
       return state.memo.renderedBlock
     }
@@ -403,22 +587,13 @@ export class AssistantAssociationService extends Service {
       turnNumber,
       nowMs,
       shouldDecaySession,
+      activeIndex,
     })
 
     if (cues.length === 0 && sessionActivations.length === 0 && state.retainedItems.size === 0) {
       state.lastStepOutcome = { nonce: state.inputNonce, taskId, outcome: 'injected' }
       state.memo = { epochKey, renderedBlock: '' }
       return ''
-    }
-
-    const profile: HotPathProfile = {
-      maxHops: this.assocConfig.maxHops,
-      hopTopN: this.assocConfig.hopTopN,
-      maxFanoutPerNode: this.assocConfig.maxFanoutPerNode,
-      maxItems: this.assocConfig.maxItems,
-      decayHalfLifeMs: this.assocConfig.decayHalfLifeMs,
-      budgetMs: this.assocConfig.hotPathBudgetMs,
-      sourceWeights: this.assocConfig.sourceWeights,
     }
 
     const result = runHotPathQuery(
@@ -459,6 +634,8 @@ export class AssistantAssociationService extends Service {
           [],
           result.candidateCount,
           nowMs,
+          profileVersion,
+          String(agent.session.id),
         )
       }
       state.memo = { epochKey, renderedBlock: '' }
@@ -470,10 +647,10 @@ export class AssistantAssociationService extends Service {
       index: activeIndex,
       ownerScope,
       candidates: result.items,
-      maxItems: this.assocConfig.maxItems,
-      minItems: this.assocConfig.minItems,
+      maxItems: effectiveMaxItems,
+      minItems: effectiveMinItems,
       maxContextTokens: this.assocConfig.maxContextTokens,
-      hysteresisDelta: this.assocConfig.hysteresisDelta,
+      hysteresisDelta: effectiveHysteresisDelta,
       allowLowTrust: this.assocConfig.allowLowTrust,
       allowSensitive: this.assocConfig.allowSensitive,
       nowMs,
@@ -483,6 +660,7 @@ export class AssistantAssociationService extends Service {
     if (state.lastMetricNonce !== state.inputNonce) {
       state.lastMetricNonce = state.inputNonce
       foldStepSessionActivation(state, formatted.injectedItems, nowMs)
+      recordTaskExposures(state, taskId, formatted.injectedItems)
       this.enqueueStepMetrics(
         taskId,
         ownerScope.ownerScopeKey,
@@ -490,10 +668,33 @@ export class AssistantAssociationService extends Service {
         result.elapsedMs,
         false,
         'none',
-        formatted.injectedItems.map((i) => ({ id: i.id, sourcePlugin: i.sourcePlugin, kind: i.kind })),
+        formatted.injectedItems.map((i) => ({
+          id: i.id,
+          sourcePlugin: i.sourcePlugin,
+          kind: i.kind,
+          hop: i.hop,
+          score: i.score,
+          reason: i.reason,
+          ...(i.provenanceEdges !== undefined ? { provenanceEdges: i.provenanceEdges } : {}),
+        })),
         result.candidateCount,
         nowMs,
+        profileVersion,
+        String(agent.session.id),
       )
+      if (cues.length > 0) {
+        this.writeQueue?.enqueue({
+          kind: 'upsert-replay-episode',
+          episode: {
+            taskId,
+            ownerScopeKey: ownerScope.ownerScopeKey,
+            inHoldout: false,
+            cues,
+            profileVersion,
+            occurredAt: nowMs,
+          },
+        })
+      }
     }
 
     state.memo = { epochKey, renderedBlock: formatted.block }
@@ -507,12 +708,36 @@ export class AssistantAssociationService extends Service {
     if (!this.assocConfig.enabled || this.assocStore === null || this.writeQueue === null) {
       throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
     }
+
+    const trimmedRaw = rawId.trim()
+    const nowMs = this.nowClock()
+
     if (exec.signal.aborted) {
+      const earlyScope = this.resolveReadEventScopeSafe(exec.agent)
+      if (earlyScope !== undefined) {
+        const earlyTaskId = resolveTaskId(
+          this.ctx,
+          exec.agent!,
+          getOrCreateAgentAssocState(this.agentStates, exec.agent!),
+          earlyScope,
+        ).taskId
+        this.recordReadEvent(earlyScope.ownerScopeKey, earlyTaskId, trimmedRaw, false, 'policy-denied', nowMs)
+      }
       throw new AssistantAssociationError('policy-denied', 'association read was cancelled')
     }
 
-    const id = rawId.trim()
+    const id = trimmedRaw
     if (id.length === 0 || Buffer.byteLength(id, 'utf8') > 256) {
+      const earlyScope = this.resolveReadEventScopeSafe(exec.agent)
+      if (earlyScope !== undefined) {
+        const earlyTaskId = resolveTaskId(
+          this.ctx,
+          exec.agent!,
+          getOrCreateAgentAssocState(this.agentStates, exec.agent!),
+          earlyScope,
+        ).taskId
+        this.recordReadEvent(earlyScope.ownerScopeKey, earlyTaskId, id, false, 'invalid-input', nowMs)
+      }
       throw new AssistantAssociationError('invalid-input', 'association id is invalid')
     }
 
@@ -534,6 +759,10 @@ export class AssistantAssociationService extends Service {
       throw new AssistantAssociationError('missing-identity', 'assoc_read requires an owner scope')
     }
 
+    const state = getOrCreateAgentAssocState(this.agentStates, agent)
+    const taskInfo = resolveTaskId(this.ctx, agent, state, ownerScope)
+    const { taskId } = taskInfo
+
     const toolDecision = this.policy.authorizeAgent(
       agent,
       'read',
@@ -541,15 +770,16 @@ export class AssistantAssociationService extends Service {
       { idempotencyKey: `assoc-read:${String(exec.rootCallId)}:${String(exec.callId)}` },
     )
     if (toolDecision.effect !== 'allow') {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'policy-denied', nowMs)
       throw new AssistantAssociationError('policy-denied', 'assoc_read denied by policy')
     }
 
     if (this.writeQueue.isNodeTombstoned(id)) {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
 
     const row = this.assocStore.getNodeById(id)
-    const nowMs = this.nowClock()
     if (
       row === null ||
       row.status !== 'active' ||
@@ -557,11 +787,13 @@ export class AssistantAssociationService extends Service {
       this.writeQueue.isSourceTombstoned(row.ownerScopeKey, row.sourcePlugin, row.sourceRef) ||
       this.assocStore.isSourceWithdrawn(row.ownerScopeKey, row.sourcePlugin, row.sourceRef)
     ) {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
 
     // Fail-closed sensitivity & owner lineage check (zero cross-owner / ABA oracle)
     if (row.sensitivity !== 'private') {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
     if (
@@ -569,6 +801,7 @@ export class AssistantAssociationService extends Service {
       row.ownerMode !== ownerScope.mode ||
       row.principalDigest !== ownerScope.principalDigest
     ) {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
     if (
@@ -576,12 +809,14 @@ export class AssistantAssociationService extends Service {
       (row.principalRecordId !== ownerScope.principalRecordId ||
         row.principalVersion !== ownerScope.principalVersion)
     ) {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
     if (
       row.scopeMode === 'workspace' &&
       (row.workspace !== ownerScope.workspace || row.agentPreset !== ownerScope.agentPreset)
     ) {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
 
@@ -592,6 +827,7 @@ export class AssistantAssociationService extends Service {
         idempotencyKey: `assoc-read-src:${String(exec.rootCallId)}:${String(exec.callId)}`,
       })
       if (srcDecision.effect !== 'allow') {
+        this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'policy-denied', nowMs)
         throw new AssistantAssociationError('policy-denied', 'association source read denied by policy')
       }
     }
@@ -613,9 +849,11 @@ export class AssistantAssociationService extends Service {
             'code' in error &&
             error.code === 'policy-denied'
           ) {
+            this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'policy-denied', nowMs)
             throw new AssistantAssociationError('policy-denied', 'memory source read denied')
           }
           this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
           throw new AssistantAssociationError('not-found', 'association item is unavailable')
         }
         const liveRec = records[0]
@@ -626,6 +864,7 @@ export class AssistantAssociationService extends Service {
           (liveRec.expiresAt !== undefined && liveRec.expiresAt <= nowMs)
         ) {
           this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
           throw new AssistantAssociationError('not-found', 'association item is unavailable')
         }
       }
@@ -633,6 +872,7 @@ export class AssistantAssociationService extends Service {
 
     if (row.kind === 'episode') {
       if (row.metadata.conflicted === true) {
+        this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
         throw new AssistantAssociationError('not-found', 'association item is unavailable')
       }
       const outcomeId = row.metadata.extra?.outcomeId
@@ -660,32 +900,94 @@ export class AssistantAssociationService extends Service {
           })
           if (rev?.action === 'withdraw') {
             this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+            this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
             throw new AssistantAssociationError('not-found', 'association item is unavailable')
           }
         } catch (error) {
           if (error instanceof AssistantAssociationError) throw error
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
           throw new AssistantAssociationError('not-found', 'association item is unavailable')
         }
       }
     }
 
-    // Telemetry log (assoc_read_count += 1 for S2 Hebbian reinforcement)
-    const state = getOrCreateAgentAssocState(this.agentStates, agent)
-    const { taskId } = resolveTaskId(this.ctx, agent, state, ownerScope)
-    this.writeQueue.enqueue({
-      kind: 'record-metrics',
-      metrics: [],
-      exposures: [
-        {
+    // Record read hit & S2 Hebbian strong use (+α) ONLY for active exposed non-holdout items
+    this.recordReadEvent(ownerScope.ownerScopeKey, taskId, row.id, true, 'ok', nowMs)
+
+    const inHoldout = this.isTaskInHoldout(taskId).inHoldout
+    const taskExpMap = state.taskExposures.get(taskId)
+    const expEntry = taskExpMap?.get(row.id)
+    const inRetained =
+      state.lastStepOutcome?.taskId === taskId &&
+      state.lastStepOutcome.outcome === 'injected' &&
+      state.retainedItems.has(row.id)
+    const isExposed =
+      !inHoldout &&
+      (expEntry !== undefined || inRetained || this.assocStore.hasExposedRow(taskId, row.id))
+
+    if (isExposed && this.assocConfig.hebbian.enabled) {
+      if (expEntry !== undefined) {
+        expEntry.strongUsed = true
+      }
+      const provenanceEdges = expEntry?.provenanceEdges ?? []
+      const coActivatedNodeIds =
+        provenanceEdges.length === 0 && (expEntry?.hop ?? 0) === 0
+          ? selectHop0CoActivationTargets({
+              nodeId: row.id,
+              coExposedNodeIds: taskExpMap !== undefined ? [...taskExpMap.keys()] : [],
+              goalNodeId:
+                taskInfo.goalContext !== undefined
+                  ? `a:g-${taskInfo.goalContext.goal.id}`
+                  : null,
+              sessionNodeIds: [...state.sessionActivation.keys()],
+              episodeNodeId:
+                taskInfo.taskKind === 'foreground-turn'
+                  ? `a:e-fg-${taskId.slice('foreground-turn:'.length)}`
+                  : null,
+            })
+          : []
+      this.writeQueue.enqueue({
+        kind: 'apply-hebbian-use',
+        useKind: 'strong',
+        taskId,
+        ownerScopeKey: row.ownerScopeKey,
+        nodeId: row.id,
+        sessionId: String(agent.session.id),
+        ...(provenanceEdges.length > 0 ? { provenanceEdges } : {}),
+        ...(coActivatedNodeIds.length > 0 ? { coActivatedNodeIds } : {}),
+        nowMs,
+        hebbianConfig: this.assocConfig.hebbian,
+      })
+      this.writeQueue.enqueue({
+        kind: 'upsert-replay-episode',
+        episode: {
           taskId,
-          nodeId: row.id,
           ownerScopeKey: row.ownerScopeKey,
-          sourcePlugin: row.sourcePlugin,
-          exposedAt: nowMs,
-          assocReadCount: 1,
+          inHoldout: false,
+          cues: [],
+          usedNodeIds: [row.id],
+          occurredAt: nowMs,
         },
-      ],
-    })
+      })
+    } else {
+      this.writeQueue.enqueue({
+        kind: 'record-metrics',
+        metrics: [],
+        exposures: [
+          {
+            taskId,
+            nodeId: row.id,
+            ownerScopeKey: row.ownerScopeKey,
+            sourcePlugin: row.sourcePlugin,
+            exposedAt: nowMs,
+            wasExposed: isExposed,
+            strongUsed: isExposed,
+            sessionId: String(agent.session.id),
+            assocReadCount: 1,
+          },
+        ],
+      })
+    }
 
     return Object.freeze({
       id: row.id,
@@ -699,6 +1001,99 @@ export class AssistantAssociationService extends Service {
       entities: [...row.entities],
       updatedAt: row.updatedAt,
     })
+  }
+
+  currentParamProfile(scopeKey: string): AssocParamCurrent {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.paramLedger === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return this.paramLedger.current(scopeKey)
+  }
+
+  paramTuningStatus(scopeKey: string, eventLimit = 50): AssocParamTuningStatus {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.paramLedger === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return this.paramLedger.status(scopeKey, eventLimit)
+  }
+
+  requestParamTuning(input: {
+    readonly scopeKey: string
+    readonly candidate: AssocParamProfileValues
+    readonly reason: string
+    readonly idempotencyKey?: string
+    readonly nowMs?: number
+  }): AssocParamRequestResult {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.paramLedger === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return this.paramLedger.requestChange(input)
+  }
+
+  reconcileParamTuning(scopeKey: string, nowMs?: number): AssocParamTickAction
+  reconcileParamTuning(
+    scopeKey?: undefined,
+    nowMs?: number,
+  ): Readonly<Record<string, AssocParamTickAction>>
+  reconcileParamTuning(
+    scopeKey?: string,
+    nowMs?: number,
+  ): AssocParamTickAction | Readonly<Record<string, AssocParamTickAction>> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.paramLedger === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    const filterTemplate = {
+      allowLowTrust: this.assocConfig.allowLowTrust,
+      allowSensitive: this.assocConfig.allowSensitive,
+    }
+    if (scopeKey !== undefined) {
+      return this.paramLedger.tick({
+        scopeKey,
+        ...(nowMs === undefined ? {} : { nowMs }),
+        ...(this.activeIndex === null ? {} : { index: this.activeIndex }),
+        filterTemplate,
+      })
+    }
+    const allScopes = new Set<string>(this.paramLedger.listScopeKeys())
+    if (this.sourceManager !== null) {
+      for (const scope of this.sourceManager.listScopes()) {
+        allScopes.add(scope.ownerScopeKey)
+      }
+    }
+    const results: Record<string, AssocParamTickAction> = {}
+    for (const key of allScopes) {
+      results[key] = this.paramLedger.tick({
+        scopeKey: key,
+        ...(nowMs === undefined ? {} : { nowMs }),
+        ...(this.activeIndex === null ? {} : { index: this.activeIndex }),
+        filterTemplate,
+      })
+    }
+    return Object.freeze(results)
+  }
+
+  async runHebbianDecayPass(nowMs?: number): Promise<void> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.writeQueue === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    if (!this.assocConfig.hebbian.enabled) return
+    this.enqueueHebbianDecayPass(nowMs)
+    await this.flush()
   }
 
   async syncAll(): Promise<void> {
@@ -734,6 +1129,178 @@ export class AssistantAssociationService extends Service {
     return resolveOwnerScope(this.ctx, agent, {
       allowHeadlessScope: this.assocConfig.allowHeadlessScope,
       headlessPrincipals: this.headlessPrincipals,
+    })
+  }
+
+  private resolveReadEventScopeSafe(agent: Agent | undefined): AssociationOwnerScope | undefined {
+    if (agent === undefined) return undefined
+    const agents = this.ctx.get('agents', false) as { get(id: unknown): Agent | undefined } | undefined
+    if (agents !== undefined && agents.get(agent.id) !== agent) return undefined
+    const sessions = this.ctx.get('sessions', false) as { get(id: unknown): unknown } | undefined
+    if (sessions !== undefined && sessions.get(agent.session.id) !== agent.session) return undefined
+    return this.resolveAgentScope(agent)
+  }
+
+  private recordReadEvent(
+    ownerScopeKey: string,
+    taskId: string | null,
+    nodeId: string,
+    hit: boolean,
+    reason: string,
+    occurredAt: number,
+  ): void {
+    if (this.writeQueue === null) return
+    this.writeQueue.enqueue({
+      kind: 'record-read-event',
+      event: {
+        taskId,
+        nodeId: nodeId.length > 0 ? nodeId.slice(0, 256) : '<invalid>',
+        ownerScopeKey,
+        hit,
+        reason,
+        occurredAt,
+      },
+    })
+  }
+
+  private processWeakUseFromAssistantText(
+    agent: Agent,
+    state: AgentAssocState,
+    ownerScope: AssociationOwnerScope,
+    taskId: string,
+    assistantText: string,
+    nowMs: number,
+  ): void {
+    const activeIndex = this.activeIndex
+    if (activeIndex === null || this.writeQueue === null) return
+    const taskExpMap = state.taskExposures.get(taskId)
+    if (taskExpMap === undefined || taskExpMap.size === 0) return
+
+    const exposedNodes: ExposedNodeEntitiesInput[] = []
+    let hasUnusedExposed = false
+    for (const entry of taskExpMap.values()) {
+      const slot = activeIndex.nodeIdToSlot.get(entry.nodeId)
+      if (slot === undefined || activeIndex.nodeTombstoned[slot] !== 0) continue
+      if (!entry.strongUsed && !entry.weakUsed) {
+        hasUnusedExposed = true
+      }
+      exposedNodes.push({
+        nodeId: entry.nodeId,
+        entities: activeIndex.nodeEntities[slot] ?? [],
+      })
+    }
+    if (!hasUnusedExposed || exposedNodes.length === 0) return
+
+    const matchedIds = detectWeakUseNodes({
+      assistantText,
+      exposedNodes,
+      turnPromptEntities: state.turnPromptEntities,
+      entityAutomaton: activeIndex.ac,
+    })
+    if (matchedIds.length === 0) return
+
+    const goalContext = resolveTaskId(this.ctx, agent, state, ownerScope).goalContext
+    const goalNodeId = goalContext !== undefined ? `a:g-${goalContext.goal.id}` : null
+    const episodeNodeId = taskId.startsWith('foreground-turn:')
+      ? `a:e-fg-${taskId.slice('foreground-turn:'.length)}`
+      : null
+    const usedNodeIds: string[] = []
+    for (const nodeId of matchedIds) {
+      const expEntry = taskExpMap.get(nodeId)
+      if (expEntry === undefined || expEntry.strongUsed || expEntry.weakUsed) continue
+      expEntry.weakUsed = true
+      usedNodeIds.push(nodeId)
+      const provenanceEdges = expEntry.provenanceEdges
+      const coActivatedNodeIds =
+        provenanceEdges.length === 0 && expEntry.hop === 0
+          ? selectHop0CoActivationTargets({
+              nodeId,
+              coExposedNodeIds: [...taskExpMap.keys()],
+              goalNodeId,
+              sessionNodeIds: [...state.sessionActivation.keys()],
+              episodeNodeId,
+            })
+          : []
+      this.writeQueue.enqueue({
+        kind: 'apply-hebbian-use',
+        useKind: 'weak',
+        taskId,
+        ownerScopeKey: ownerScope.ownerScopeKey,
+        nodeId,
+        sessionId: String(agent.session.id),
+        ...(provenanceEdges.length > 0 ? { provenanceEdges } : {}),
+        ...(coActivatedNodeIds.length > 0 ? { coActivatedNodeIds } : {}),
+        nowMs,
+        hebbianConfig: this.assocConfig.hebbian,
+      })
+    }
+
+    if (usedNodeIds.length > 0) {
+      this.writeQueue.enqueue({
+        kind: 'upsert-replay-episode',
+        episode: {
+          taskId,
+          ownerScopeKey: ownerScope.ownerScopeKey,
+          inHoldout: false,
+          cues: [],
+          usedNodeIds,
+          occurredAt: nowMs,
+        },
+      })
+    }
+  }
+
+  private enqueueHebbianDecayPass(nowMs?: number): void {
+    if (!this.active || !this.assocConfig.hebbian.enabled || this.writeQueue === null) return
+    const heb = this.assocConfig.hebbian
+    this.writeQueue.enqueue({
+      kind: 'apply-hebbian-decay',
+      nowMs: nowMs ?? this.nowClock(),
+      decayHalfLifeMs: heb.decayHalfLifeMs,
+      nonUseGraceMs: heb.nonUseGraceMs,
+      weightMin: heb.weightMin,
+      weightMax: heb.weightMax,
+      limit: 200,
+    })
+  }
+
+  private rebuildEdgesOnly(): void {
+    if (!this.active || this.assocStore === null || this.activeIndex === null) return
+    if (this.writeQueue?.hasPendingWithdrawals) return
+    if (this.rebuildInFlight !== null) {
+      this.rebuildQueued = true
+      return
+    }
+    const baseIndex = this.activeIndex
+    const nowMs = this.nowClock()
+    const edges: StoredAssociationEdge[] = []
+    let offset = 0
+    const pageSize = 10_000
+    while (true) {
+      const page = this.assocStore.loadActiveEdgesPage(pageSize, offset)
+      if (page.length === 0) break
+      edges.push(...page)
+      if (page.length < pageSize) break
+      offset += pageSize
+    }
+    const indexEdges: MemoryIndexEdgeInput[] = []
+    for (const e of edges) {
+      if (!baseIndex.nodeIdToSlot.has(e.aId) || !baseIndex.nodeIdToSlot.has(e.bId)) continue
+      indexEdges.push({
+        edgeId: e.edgeId,
+        aId: e.aId,
+        bId: e.bId,
+        edgeType: e.edgeType,
+        weight: e.weight,
+        trust: e.trust,
+        reason: e.reason,
+      })
+    }
+    this.indexBuildEpoch += 1
+    this.activeIndex = rebuildMemoryIndexEdges(baseIndex, indexEdges, {
+      buildEpoch: this.indexBuildEpoch,
+      builtAt: nowMs,
+      maxFanoutPerNode: this.assocConfig.maxFanoutPerNode,
     })
   }
 
@@ -821,6 +1388,7 @@ export class AssistantAssociationService extends Service {
       },
     })
     if (holdout.inHoldout) {
+      const profileVersion = this.paramLedger?.current(ownerScopeKey).version ?? 0
       this.writeQueue.enqueue({
         kind: 'record-metrics',
         metrics: [
@@ -834,6 +1402,7 @@ export class AssistantAssociationService extends Service {
             injectedCount: 0,
             candidateCount: 0,
             sourceCounts: {},
+            profileVersion,
             occurredAt: nowMs,
           },
         ],
@@ -849,9 +1418,19 @@ export class AssistantAssociationService extends Service {
     elapsedMs: number,
     timedOut: boolean,
     fallbackMode: StepMetricRow['fallbackMode'],
-    injected: readonly { readonly id: string; readonly sourcePlugin: string; readonly kind: NodeKind }[],
+    injected: readonly {
+      readonly id: string
+      readonly sourcePlugin: string
+      readonly kind: NodeKind
+      readonly hop: number
+      readonly score: number
+      readonly reason: string
+      readonly provenanceEdges?: readonly ProvenanceEdgeRef[]
+    }[],
     candidateCount: number,
     nowMs: number,
+    profileVersion = 0,
+    sessionId?: string | null,
   ): void {
     if (this.writeQueue === null) return
     const sourceCounts: Record<string, number> = {}
@@ -871,6 +1450,7 @@ export class AssistantAssociationService extends Service {
           injectedCount: injected.length,
           candidateCount,
           sourceCounts,
+          profileVersion,
           occurredAt: nowMs,
         },
       ],
@@ -880,6 +1460,12 @@ export class AssistantAssociationService extends Service {
         ownerScopeKey,
         sourcePlugin: item.sourcePlugin,
         exposedAt: nowMs,
+        wasExposed: true,
+        hop: item.hop,
+        score: item.score,
+        reason: item.reason,
+        provenanceEdges: item.provenanceEdges ?? [],
+        sessionId: sessionId ?? null,
       })),
     })
   }
@@ -967,6 +1553,7 @@ export class AssistantAssociationService extends Service {
     for (const e of edges) {
       if (!activeIds.has(e.aId) || !activeIds.has(e.bId)) continue
       indexEdges.push({
+        edgeId: e.edgeId,
         aId: e.aId,
         bId: e.bId,
         edgeType: e.edgeType,
@@ -989,6 +1576,7 @@ export class AssistantAssociationService extends Service {
       {
         buildEpoch: this.indexBuildEpoch,
         builtAt: nowMs,
+        maxFanoutPerNode: this.assocConfig.maxFanoutPerNode,
       },
     )
 

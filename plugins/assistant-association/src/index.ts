@@ -1,10 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { Config, normalizeConfig, type AssociationConfig, type NormalizedAssociationConfig } from './config.js'
+import {
+  Config,
+  normalizeAssociationConfig,
+  normalizeConfig,
+  type AssociationConfig,
+  type NormalizedAssociationConfig,
+} from './config.js'
 import { AssistantAssociationService } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-association'
-export { AssistantAssociationService, Config, normalizeConfig, version }
+export { AssistantAssociationService, Config, normalizeAssociationConfig, normalizeConfig, version }
 export type { AssociationConfig, NormalizedAssociationConfig }
 
 export * from './types.js'
@@ -21,6 +27,8 @@ export * from './cues.js'
 export * from './hysteresis.js'
 export * from './tools.js'
 export * from './sources.js'
+export * from './hebbian.js'
+export * from './param-tuning.js'
 export * from './service.js'
 
 export const inject = ['assistantPolicy'] as const

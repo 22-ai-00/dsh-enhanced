@@ -52,6 +52,10 @@ export {
   type GrowthReport,
   type GrowthReportOptions,
   type GrowthDataState,
+  type GrowthAssociationSourceSummary,
+  type GrowthAssociationCohortMetrics,
+  type GrowthAssociationHoldoutComparison,
+  type GrowthAssociationSummary,
 } from './growth-report.ts'
 export { inspectBoundHostRuntime } from './install-host.ts'
 export { openWebProfile, canOpenBrowser, defaultOpenBrowser } from './open.ts'
@@ -94,7 +98,9 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   doctor      全面实时诊断：检查 .dsh-rsi-host.json、--dump-config、凭据权限与可用性、
               traex/agy 登录状态、autonomy readiness、端口与系统前提、崩溃日志（支持 --json）
   growth-report 只读成长计分卡：汇总任务纠正率与趋势、记忆写入与提示词暴露、候选验收与采用、
-              通知反馈与 would-accept 吻合度样本、按冻结 supplier 的成本与延迟（支持 --since 7d --json）
+              通知反馈与 would-accept 吻合度样本、按冻结 supplier 的成本与延迟、以及联想层
+              在线指标（p50/p99 延迟、超时率、注入与强/弱使用、assoc_read 命中率、参数版本）
+              与密封留出对照（支持 --since 7d --json）
   start       启动已注册的受管常驻服务（不改动服务定义，未注册时报错并给出指引）
   stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
   restart     重启受管常驻服务（配置/插件变更后生效的常用方式）

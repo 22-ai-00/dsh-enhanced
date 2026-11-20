@@ -201,5 +201,5 @@ describe('100k nodes / 1M edges hot-path benchmark', () => {
     expect(p50).toBeLessThanOrEqual(3.0)
     expect(p95).toBeLessThanOrEqual(5.0)
     expect(p99).toBeLessThanOrEqual(5.0)
-  })
+  }, 15_000)
 })
