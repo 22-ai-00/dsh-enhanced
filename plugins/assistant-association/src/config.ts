@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import {
@@ -27,6 +28,8 @@ import {
   DEFAULT_HEBBIAN_CONFIG,
   DEFAULT_PARAM_TUNING_CONFIG,
   DEFAULT_SOURCE_WEIGHTS,
+  type AssociationWebLearningConfig,
+  type AssociationWebLearningNormalizedConfig,
   type HebbianConfig,
   type NodeKind,
   type NormalizedHebbianConfig,
@@ -34,9 +37,30 @@ import {
   type ParamTuningConfig,
 } from './types.js'
 
-export interface AssociationFeatureToggleConfig {
-  enabled?: boolean
-}
+export const DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG: AssociationWebLearningNormalizedConfig =
+  Object.freeze({
+    enabled: false,
+    allowedDomains: Object.freeze([]),
+    seedUrls: Object.freeze([]),
+    allowSubdomains: false,
+    allowIpv6: false,
+    isolationMode: 'subprocess',
+    intervalMs: 3_600_000,
+    idleMinMs: 900_000,
+    cooldownMs: 86_400_000,
+    maxInterestsPerRun: 3,
+    maxRequestsPerRun: 5,
+    maxPagesPerRun: 3,
+    maxBytesPerRequest: 524_288,
+    maxTotalBytesPerRun: 1_048_576,
+    maxRequestsPerDay: 20,
+    maxBytesPerDay: 5_242_880,
+    maxDurationMs: 30_000,
+    requestTimeoutMs: 10_000,
+    maxRedirects: 2,
+    discoverLinks: false,
+    nodeTtlMs: 14 * 86_400_000,
+  })
 
 export interface AssociationConfig {
   enabled?: boolean
@@ -63,7 +87,7 @@ export interface AssociationConfig {
   dreaming?: AssociationDreamingConfig
   intakeSignal?: AssociationIntakeSignalConfig
   clustering?: ClusteringConfig
-  webLearning?: AssociationFeatureToggleConfig
+  webLearning?: AssociationWebLearningConfig
 }
 
 export interface NormalizedAssociationConfig {
@@ -92,7 +116,7 @@ export interface NormalizedAssociationConfig {
   readonly dreaming: AssociationDreamingNormalizedConfig
   readonly intakeSignal: AssociationIntakeSignalNormalizedConfig
   readonly clustering: NormalizedClusteringConfig
-  readonly webLearning: Readonly<{ readonly enabled: boolean }>
+  readonly webLearning: AssociationWebLearningNormalizedConfig
 }
 
 const DEFAULT_DECAY_HALF_LIFE_MS = 14 * 86_400_000
@@ -195,13 +219,110 @@ const KNOWN_CLUSTERING_FIELDS = new Set<string>([
   'reAskMinEntityJaccard',
 ])
 
-const KNOWN_WEB_LEARNING_FIELDS = new Set<string>(['enabled'])
+export const KNOWN_WEB_LEARNING_FIELDS = new Set<string>([
+  'enabled',
+  'allowedDomains',
+  'seedUrls',
+  'allowSubdomains',
+  'allowIpv6',
+  'isolationMode',
+  'intervalMs',
+  'idleMinMs',
+  'cooldownMs',
+  'maxInterestsPerRun',
+  'maxRequestsPerRun',
+  'maxPagesPerRun',
+  'maxBytesPerRequest',
+  'maxTotalBytesPerRun',
+  'maxRequestsPerDay',
+  'maxBytesPerDay',
+  'maxDurationMs',
+  'requestTimeoutMs',
+  'maxRedirects',
+  'discoverLinks',
+  'nodeTtlMs',
+  'budgetId',
+  'budgetAmount',
+])
 
 const boundedPath = Schema.string().min(1).max(4_096)
 
-const featureToggleSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
-}).default({ enabled: false })
+const webLearningSchema = Schema.object({
+  enabled: Schema.boolean().default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.enabled),
+  allowedDomains: Schema.array(Schema.string().min(1).max(253)).default([]),
+  seedUrls: Schema.array(Schema.string().min(1).max(2_048)).default([]),
+  allowSubdomains: Schema.boolean().default(
+    DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.allowSubdomains,
+  ),
+  allowIpv6: Schema.boolean().default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.allowIpv6),
+  isolationMode: Schema.union([
+    Schema.const('subprocess' as const),
+    Schema.const('in-process' as const),
+  ]).default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.isolationMode),
+  intervalMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.intervalMs),
+  idleMinMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.idleMinMs),
+  cooldownMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.cooldownMs),
+  maxInterestsPerRun: Schema.natural()
+    .min(1)
+    .max(50)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxInterestsPerRun),
+  maxRequestsPerRun: Schema.natural()
+    .min(1)
+    .max(100)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerRun),
+  maxPagesPerRun: Schema.natural()
+    .min(1)
+    .max(100)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxPagesPerRun),
+  maxBytesPerRequest: Schema.natural()
+    .min(1)
+    .max(10 * 1024 * 1024)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerRequest),
+  maxTotalBytesPerRun: Schema.natural()
+    .min(1)
+    .max(50 * 1024 * 1024)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxTotalBytesPerRun),
+  maxRequestsPerDay: Schema.natural()
+    .min(1)
+    .max(1_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerDay),
+  maxBytesPerDay: Schema.natural()
+    .min(1)
+    .max(200 * 1024 * 1024)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerDay),
+  maxDurationMs: Schema.natural()
+    .min(1)
+    .max(600_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxDurationMs),
+  requestTimeoutMs: Schema.natural()
+    .min(1)
+    .max(120_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.requestTimeoutMs),
+  maxRedirects: Schema.natural()
+    .min(0)
+    .max(10)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRedirects),
+  discoverLinks: Schema.boolean().default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.discoverLinks),
+  nodeTtlMs: Schema.natural()
+    .min(0)
+    .max(3_650 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.nodeTtlMs),
+  budgetId: Schema.string().min(1).max(256),
+  budgetAmount: Schema.number().min(0).max(1_000_000),
+}).default({
+  ...DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG,
+  allowedDomains: [],
+  seedUrls: [],
+})
 
 const dreamingSchema = Schema.object({
   enabled: Schema.boolean().default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.enabled),
@@ -412,7 +533,7 @@ const rawSchema = Schema.object({
   dreaming: dreamingSchema,
   intakeSignal: intakeSignalSchema,
   clustering: clusteringSchema,
-  webLearning: featureToggleSchema,
+  webLearning: webLearningSchema,
 }).default({})
 
 function checkKnownNestedFields(
@@ -471,6 +592,220 @@ function assertFiniteRange(
   if (!Number.isFinite(value) || !check(value)) {
     throw new Error(`assistant-association: ${label} ${message}`)
   }
+}
+
+const HOSTNAME_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u
+
+function validateAndNormalizeAllowedDomain(raw: string): string {
+  if (typeof raw !== 'string') {
+    throw new Error('assistant-association: webLearning.allowedDomains entries must be strings')
+  }
+  const domain = raw.trim().toLowerCase()
+  if (domain.length === 0 || domain.length > 253) {
+    throw new Error(
+      'assistant-association: webLearning.allowedDomains entries must be non-empty hostnames (<= 253 chars)',
+    )
+  }
+  if (
+    domain.includes('://') ||
+    domain.includes(':') ||
+    domain.includes('/') ||
+    domain.includes('\\') ||
+    domain.includes('*') ||
+    domain.includes('?') ||
+    domain.includes('#') ||
+    domain.includes('@') ||
+    domain.includes('[') ||
+    domain.includes(']') ||
+    /\s/u.test(domain) ||
+    domain.startsWith('.') ||
+    domain.endsWith('.') ||
+    domain.includes('..')
+  ) {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": must be a plain hostname without scheme, port, path, wildcard, or trailing dot`,
+    )
+  }
+  if (isIP(domain) !== 0) {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": IP literals are not allowed`,
+    )
+  }
+  if (
+    domain === 'localhost' ||
+    domain.endsWith('.localhost') ||
+    domain.endsWith('.local') ||
+    domain.endsWith('.internal') ||
+    domain.endsWith('.arpa')
+  ) {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": local/internal/reserved domains are not allowed`,
+    )
+  }
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(`https://${domain}`)
+  } catch {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": invalid hostname`,
+    )
+  }
+  if (
+    parsedUrl.hostname.toLowerCase() !== domain ||
+    isIP(parsedUrl.hostname) !== 0 ||
+    parsedUrl.port !== '' ||
+    parsedUrl.username !== '' ||
+    parsedUrl.password !== ''
+  ) {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": invalid hostname`,
+    )
+  }
+  const labels = domain.split('.')
+  if (labels.some((label) => !HOSTNAME_LABEL_RE.test(label))) {
+    throw new Error(
+      `assistant-association: invalid webLearning.allowedDomains entry "${raw}": invalid hostname label`,
+    )
+  }
+  return domain
+}
+
+function validateAndNormalizeSeedUrl(raw: string): string {
+  if (typeof raw !== 'string') {
+    throw new Error('assistant-association: webLearning.seedUrls entries must be strings')
+  }
+  const trimmed = raw.trim()
+  if (trimmed.length === 0 || trimmed.length > 2_048) {
+    throw new Error(
+      'assistant-association: webLearning.seedUrls entries must be non-empty URLs (<= 2048 chars)',
+    )
+  }
+  if (!trimmed.startsWith('https://')) {
+    throw new Error(
+      `assistant-association: invalid webLearning.seedUrls entry "${raw}": must start with https://`,
+    )
+  }
+  const authority = trimmed.slice('https://'.length).split(/[/?#]/u, 1)[0] ?? ''
+  if (authority.length === 0 || authority.includes('{query}')) {
+    throw new Error(
+      `assistant-association: invalid webLearning.seedUrls entry "${raw}": invalid authority`,
+    )
+  }
+  const probe = trimmed.replaceAll('{query}', 'query')
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(probe)
+  } catch {
+    throw new Error(
+      `assistant-association: invalid webLearning.seedUrls entry "${raw}": invalid URL syntax`,
+    )
+  }
+  if (
+    parsedUrl.protocol !== 'https:' ||
+    parsedUrl.hostname.length === 0 ||
+    parsedUrl.username !== '' ||
+    parsedUrl.password !== ''
+  ) {
+    throw new Error(
+      `assistant-association: invalid webLearning.seedUrls entry "${raw}": must be a credential-free HTTPS URL`,
+    )
+  }
+  return trimmed
+}
+
+export function normalizeAssociationWebLearningConfig(
+  raw?: AssociationWebLearningConfig,
+): AssociationWebLearningNormalizedConfig {
+  const src = raw ?? {}
+  const dedupedDomains: string[] = []
+  const seenDomains = new Set<string>()
+  for (const entry of src.allowedDomains ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.allowedDomains) {
+    const normalizedDomain = validateAndNormalizeAllowedDomain(entry)
+    if (!seenDomains.has(normalizedDomain)) {
+      seenDomains.add(normalizedDomain)
+      dedupedDomains.push(normalizedDomain)
+    }
+  }
+  const normalizedSeeds = (src.seedUrls ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.seedUrls).map(
+    validateAndNormalizeSeedUrl,
+  )
+
+  const intOrDefault = (val: number | undefined, fallback: number, min: number): number =>
+    typeof val === 'number' && Number.isFinite(val) && val >= min ? Math.floor(val) : fallback
+
+  const normalized: AssociationWebLearningNormalizedConfig = {
+    enabled: src.enabled === true,
+    allowedDomains: Object.freeze(dedupedDomains),
+    seedUrls: Object.freeze(normalizedSeeds),
+    allowSubdomains: src.allowSubdomains === true,
+    allowIpv6: src.allowIpv6 === true,
+    isolationMode:
+      src.isolationMode === 'in-process' ? 'in-process' : DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.isolationMode,
+    intervalMs: intOrDefault(src.intervalMs, DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.intervalMs, 0),
+    idleMinMs: intOrDefault(src.idleMinMs, DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.idleMinMs, 0),
+    cooldownMs: intOrDefault(src.cooldownMs, DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.cooldownMs, 0),
+    maxInterestsPerRun: intOrDefault(
+      src.maxInterestsPerRun,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxInterestsPerRun,
+      1,
+    ),
+    maxRequestsPerRun: intOrDefault(
+      src.maxRequestsPerRun,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerRun,
+      1,
+    ),
+    maxPagesPerRun: intOrDefault(
+      src.maxPagesPerRun,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxPagesPerRun,
+      1,
+    ),
+    maxBytesPerRequest: intOrDefault(
+      src.maxBytesPerRequest,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerRequest,
+      1,
+    ),
+    maxTotalBytesPerRun: intOrDefault(
+      src.maxTotalBytesPerRun,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxTotalBytesPerRun,
+      1,
+    ),
+    maxRequestsPerDay: intOrDefault(
+      src.maxRequestsPerDay,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerDay,
+      1,
+    ),
+    maxBytesPerDay: intOrDefault(
+      src.maxBytesPerDay,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerDay,
+      1,
+    ),
+    maxDurationMs: intOrDefault(
+      src.maxDurationMs,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxDurationMs,
+      1,
+    ),
+    requestTimeoutMs: intOrDefault(
+      src.requestTimeoutMs,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.requestTimeoutMs,
+      1,
+    ),
+    maxRedirects: intOrDefault(
+      src.maxRedirects,
+      DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRedirects,
+      0,
+    ),
+    discoverLinks: src.discoverLinks === true,
+    nodeTtlMs: intOrDefault(src.nodeTtlMs, DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.nodeTtlMs, 0),
+    ...(typeof src.budgetId === 'string' && src.budgetId.length > 0
+      ? { budgetId: src.budgetId }
+      : {}),
+    ...(typeof src.budgetAmount === 'number' &&
+    Number.isFinite(src.budgetAmount) &&
+    src.budgetAmount > 0
+      ? { budgetAmount: src.budgetAmount }
+      : {}),
+  }
+  return Object.freeze(normalized)
 }
 
 function validateCrossFieldConstraints(parsed: AssociationConfig): void {
@@ -678,6 +1013,131 @@ function validateCrossFieldConstraints(parsed: AssociationConfig): void {
     (n) => n >= 0 && n <= 1,
     'must be in [0, 1]',
   )
+
+  const web = parsed.webLearning ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG
+  for (const domain of web.allowedDomains ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.allowedDomains) {
+    validateAndNormalizeAllowedDomain(domain)
+  }
+  for (const seedUrl of web.seedUrls ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.seedUrls) {
+    validateAndNormalizeSeedUrl(seedUrl)
+  }
+  const webIntervalMs = web.intervalMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.intervalMs
+  const webIdleMinMs = web.idleMinMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.idleMinMs
+  const webCooldownMs = web.cooldownMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.cooldownMs
+  const webMaxInterestsPerRun =
+    web.maxInterestsPerRun ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxInterestsPerRun
+  const webMaxRequestsPerRun =
+    web.maxRequestsPerRun ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerRun
+  const webMaxPagesPerRun =
+    web.maxPagesPerRun ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxPagesPerRun
+  const webMaxBytesPerRequest =
+    web.maxBytesPerRequest ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerRequest
+  const webMaxTotalBytesPerRun =
+    web.maxTotalBytesPerRun ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxTotalBytesPerRun
+  const webMaxRequestsPerDay =
+    web.maxRequestsPerDay ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRequestsPerDay
+  const webMaxBytesPerDay =
+    web.maxBytesPerDay ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxBytesPerDay
+  const webMaxDurationMs =
+    web.maxDurationMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxDurationMs
+  const webRequestTimeoutMs =
+    web.requestTimeoutMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.requestTimeoutMs
+  const webMaxRedirects = web.maxRedirects ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.maxRedirects
+  const webNodeTtlMs = web.nodeTtlMs ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.nodeTtlMs
+
+  assertFiniteRange(webIntervalMs, 'webLearning.intervalMs', (n) => n >= 0, 'must be >= 0')
+  assertFiniteRange(webIdleMinMs, 'webLearning.idleMinMs', (n) => n >= 0, 'must be >= 0')
+  assertFiniteRange(webCooldownMs, 'webLearning.cooldownMs', (n) => n >= 0, 'must be >= 0')
+  assertFiniteRange(
+    webMaxInterestsPerRun,
+    'webLearning.maxInterestsPerRun',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxRequestsPerRun,
+    'webLearning.maxRequestsPerRun',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxPagesPerRun,
+    'webLearning.maxPagesPerRun',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxBytesPerRequest,
+    'webLearning.maxBytesPerRequest',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxTotalBytesPerRun,
+    'webLearning.maxTotalBytesPerRun',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxRequestsPerDay,
+    'webLearning.maxRequestsPerDay',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxBytesPerDay,
+    'webLearning.maxBytesPerDay',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxDurationMs,
+    'webLearning.maxDurationMs',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webRequestTimeoutMs,
+    'webLearning.requestTimeoutMs',
+    (n) => Number.isSafeInteger(n) && n >= 1,
+    'must be an integer >= 1',
+  )
+  assertFiniteRange(
+    webMaxRedirects,
+    'webLearning.maxRedirects',
+    (n) => Number.isSafeInteger(n) && n >= 0,
+    'must be an integer >= 0',
+  )
+  assertFiniteRange(webNodeTtlMs, 'webLearning.nodeTtlMs', (n) => n >= 0, 'must be >= 0')
+  if (web.budgetAmount !== undefined) {
+    assertFiniteRange(web.budgetAmount, 'webLearning.budgetAmount', (n) => n > 0, 'must be > 0')
+  }
+
+  if (webMaxPagesPerRun > webMaxRequestsPerRun) {
+    throw new Error(
+      `assistant-association: webLearning.maxPagesPerRun (${webMaxPagesPerRun}) cannot exceed webLearning.maxRequestsPerRun (${webMaxRequestsPerRun})`,
+    )
+  }
+  if (webMaxRequestsPerRun > webMaxRequestsPerDay) {
+    throw new Error(
+      `assistant-association: webLearning.maxRequestsPerRun (${webMaxRequestsPerRun}) cannot exceed webLearning.maxRequestsPerDay (${webMaxRequestsPerDay})`,
+    )
+  }
+  if (webMaxBytesPerRequest > webMaxTotalBytesPerRun) {
+    throw new Error(
+      `assistant-association: webLearning.maxBytesPerRequest (${webMaxBytesPerRequest}) cannot exceed webLearning.maxTotalBytesPerRun (${webMaxTotalBytesPerRun})`,
+    )
+  }
+  if (webMaxTotalBytesPerRun > webMaxBytesPerDay) {
+    throw new Error(
+      `assistant-association: webLearning.maxTotalBytesPerRun (${webMaxTotalBytesPerRun}) cannot exceed webLearning.maxBytesPerDay (${webMaxBytesPerDay})`,
+    )
+  }
+  if (webRequestTimeoutMs > webMaxDurationMs) {
+    throw new Error(
+      `assistant-association: webLearning.requestTimeoutMs (${webRequestTimeoutMs}) cannot exceed webLearning.maxDurationMs (${webMaxDurationMs})`,
+    )
+  }
 }
 
 export function normalizeConfig(input?: AssociationConfig): NormalizedAssociationConfig {
@@ -765,7 +1225,7 @@ export function normalizeConfig(input?: AssociationConfig): NormalizedAssociatio
     dreaming: normalizeAssociationDreamingConfig(parsed.dreaming),
     intakeSignal: normalizeAssociationIntakeSignalConfig(parsed.intakeSignal),
     clustering: normalizeClusteringConfig(parsed.clustering),
-    webLearning: Object.freeze({ enabled: parsed.webLearning?.enabled ?? false }),
+    webLearning: normalizeAssociationWebLearningConfig(parsed.webLearning),
   })
 }
 

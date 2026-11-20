@@ -46,7 +46,7 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       const uvRow = db.prepare('PRAGMA user_version').get() as { user_version: number }
       expect(modeRow.journal_mode.toLowerCase()).toBe('wal')
       expect(uvRow.user_version).toBe(ASSOCIATION_SCHEMA_VERSION)
-      expect(uvRow.user_version).toBe(3)
+      expect(uvRow.user_version).toBe(4)
 
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -75,6 +75,9 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       expect(tableNames).toContain('assoc_skill_candidates')
       expect(tableNames).toContain('assoc_implicit_signals')
       expect(tableNames).toContain('assoc_eval_pool')
+      expect(tableNames).toContain('assoc_web_learning_runs')
+      expect(tableNames).toContain('assoc_web_learning_budget_usage')
+      expect(tableNames).toContain('assoc_web_learning_fetches')
     } finally {
       db.close()
     }
@@ -542,11 +545,11 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
     const migrated = openAssociationDatabase(dbPath)
     try {
       const uv = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
-      expect(uv.user_version).toBe(3)
+      expect(uv.user_version).toBe(4)
       const meta = migrated
         .prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'")
         .get() as { value: string }
-      expect(meta.value).toBe('3')
+      expect(meta.value).toBe('4')
       const v3Tables = (
         migrated
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -557,6 +560,9 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       expect(v3Tables).toContain('assoc_skill_candidates')
       expect(v3Tables).toContain('assoc_implicit_signals')
       expect(v3Tables).toContain('assoc_eval_pool')
+      expect(v3Tables).toContain('assoc_web_learning_runs')
+      expect(v3Tables).toContain('assoc_web_learning_budget_usage')
+      expect(v3Tables).toContain('assoc_web_learning_fetches')
 
       const metric = migrated
         .prepare('SELECT task_id, profile_version FROM assoc_step_metrics WHERE task_id = ?')
@@ -1462,6 +1468,9 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       DROP TABLE IF EXISTS assoc_skill_candidates;
       DROP TABLE IF EXISTS assoc_implicit_signals;
       DROP TABLE IF EXISTS assoc_eval_pool;
+      DROP TABLE IF EXISTS assoc_web_learning_runs;
+      DROP TABLE IF EXISTS assoc_web_learning_budget_usage;
+      DROP TABLE IF EXISTS assoc_web_learning_fetches;
       UPDATE schema_meta SET value = '2' WHERE key = 'schema-version';
       PRAGMA user_version = 2;
     `)
@@ -1471,11 +1480,11 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
     const migrated = openAssociationDatabase(dbPath)
     try {
       const uv = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
-      expect(uv.user_version).toBe(3)
+      expect(uv.user_version).toBe(4)
       const meta = migrated
         .prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'")
         .get() as { value: string }
-      expect(meta.value).toBe('3')
+      expect(meta.value).toBe('4')
 
       const v2Store = new AssociationStore(migrated)
       expect(v2Store.getNodeById('a:m-v2')?.title).toBe('V2 Memory')
@@ -1494,15 +1503,65 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       expect(tables).toContain('assoc_skill_candidates')
       expect(tables).toContain('assoc_implicit_signals')
       expect(tables).toContain('assoc_eval_pool')
+      expect(tables).toContain('assoc_web_learning_runs')
+      expect(tables).toContain('assoc_web_learning_budget_usage')
+      expect(tables).toContain('assoc_web_learning_fetches')
     } finally {
       migrated.close()
     }
 
-    // Idempotent reopen on v3
+    // Also verify direct v3 -> v4 migration preserves v3 rows and creates the 3 S4 tables
+    const v3Db = new DatabaseSync(dbPath)
+    v3Db.prepare(`
+      INSERT INTO assoc_dream_runs (
+        run_id, owner_scope_key, status,
+        edges_created, abstractions_created, synonyms_created, ran_at
+      ) VALUES (?, ?, 'completed', 2, 1, 1, ?)
+    `).run('dream-v3-keep', ownerScopeKey, now)
+    v3Db.exec(`
+      DROP TABLE IF EXISTS assoc_web_learning_runs;
+      DROP TABLE IF EXISTS assoc_web_learning_budget_usage;
+      DROP TABLE IF EXISTS assoc_web_learning_fetches;
+      UPDATE schema_meta SET value = '3' WHERE key = 'schema-version';
+      PRAGMA user_version = 3;
+    `)
+    v3Db.close()
+    chmodSync(dbPath, 0o600)
+
+    const migratedV3 = openAssociationDatabase(dbPath)
+    try {
+      const uv = migratedV3.prepare('PRAGMA user_version').get() as { user_version: number }
+      expect(uv.user_version).toBe(ASSOCIATION_SCHEMA_VERSION)
+      expect(uv.user_version).toBe(4)
+      const meta = migratedV3
+        .prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'")
+        .get() as { value: string }
+      expect(meta.value).toBe('4')
+
+      const v3Store = new AssociationStore(migratedV3)
+      expect(v3Store.getNodeById('a:m-v2')?.title).toBe('V2 Memory')
+      const dreamRow = migratedV3
+        .prepare('SELECT run_id, edges_created FROM assoc_dream_runs WHERE run_id = ?')
+        .get('dream-v3-keep') as { run_id: string; edges_created: number } | undefined
+      expect(dreamRow).toEqual({ run_id: 'dream-v3-keep', edges_created: 2 })
+
+      const tables = (
+        migratedV3
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+      expect(tables).toContain('assoc_web_learning_runs')
+      expect(tables).toContain('assoc_web_learning_budget_usage')
+      expect(tables).toContain('assoc_web_learning_fetches')
+    } finally {
+      migratedV3.close()
+    }
+
+    // Idempotent reopen on v4
     const reopened = openAssociationDatabase(dbPath)
     try {
       const uv = reopened.prepare('PRAGMA user_version').get() as { user_version: number }
-      expect(uv.user_version).toBe(3)
+      expect(uv.user_version).toBe(4)
     } finally {
       reopened.close()
     }

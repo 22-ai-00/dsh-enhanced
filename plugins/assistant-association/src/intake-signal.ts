@@ -502,6 +502,10 @@ export function emitAssociationIntakeSignal(
     | undefined
   const attemptOrdinal = pairCountRow?.cnt ?? 0
 
+  if (input.assistantWorkItems === undefined || typeof input.assistantWorkItems.recordIntake !== 'function') {
+    return failResult('work-items-unavailable')
+  }
+
   const sourceEventId = `assoc-${sha256Hex(
     `${input.scope.ownerScopeKey}\0${input.goalNode.id}\0${input.targetNode.id}\0${nowMs}\0${attemptOrdinal}`,
   ).slice(0, 48)}`
@@ -525,10 +529,6 @@ export function emitAssociationIntakeSignal(
         ? undefined
         : { policyReasonCode: policyDecision.reasonCode },
     )
-  }
-
-  if (input.assistantWorkItems === undefined || typeof input.assistantWorkItems.recordIntake !== 'function') {
-    return failResult('work-items-unavailable')
   }
 
   const { sourceText, contentDigest } = buildAssociationIntakeSummary({

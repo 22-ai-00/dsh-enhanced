@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-20（已发布 npm 基线 `0.1.79`；`assistant-association` 联想记忆层已完成 Slice S1–S3 交付并经全仓验证，下一步推进 Slice S4 受限 Web 学习，同时维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-20（已发布 npm 基线 `0.1.79`；`assistant-association` 联想记忆层 Slice S1–S4 已在 `dev` 完成并验证，维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -9,12 +9,12 @@
 ## 能力边界
 
 - **发布与 Host 基线**：已发布 npm 基线为 `0.1.79`（39 个包，[release-manifest](../release-manifest.json)，`pinnedHostVersion: 0.2.2-rc.3`、`verifiedHostRange: >=0.2.2-rc.3 <0.3.0`、`pending: none`）；Node `24.9.0`（Linux 原生工具链与 CI 节点为 `/usr/bin/node` `v22.23.2`、`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
-- **只读成长计分卡**：`dsh-rsi growth-report [--since 7d|14d|30d] [--now <ms|iso>] [--json]` 与 `owner-console`「成长计分卡（只读）」卡片复用既有只读接口与 SQLite 只读快照（零 schema 变更），汇总任务与纠正/重做/撤回率及趋势、新增有来源记忆与提示词暴露及暴露后同类纠正变化、候选生成/验收/采用/回滚、通知送达与 `would-accept` 吻合度及密封留出（1/4 holdout）样本量、按冻结 supplier 的成本与延迟分布，并显式区分「无数据（未启用/无账本）」与「数据为 0（账本就绪，窗口内无记录）」；`dsh-rsi growth-report` 第 6 节另汇报联想层在线指标（p50/p99 延迟、超时率、强/弱使用率、`assoc_read` 命中率、来源贡献、参数档案版本/采用/回滚及可选 S3 隐式信号/评估池/技能候选计数）与密封留出对照。
+- **只读成长计分卡**：`dsh-rsi growth-report [--since 7d|14d|30d] [--now <ms|iso>] [--json]` 与 `owner-console`「成长计分卡（只读）」卡片复用既有只读接口与 SQLite 只读快照（零 schema 变更），汇总任务与纠正/重做/撤回率及趋势、新增有来源记忆与提示词暴露及暴露后同类纠正变化、候选生成/验收/采用/回滚、通知送达与 `would-accept` 吻合度及密封留出（1/4 holdout）样本量、按冻结 supplier 的成本与延迟分布，并显式区分「无数据（未启用/无账本）」与「数据为 0（账本就绪，窗口内无记录）」；`dsh-rsi growth-report` 第 6 节另汇报联想层在线指标（p50/p99 延迟、超时率、强/弱使用率、`assoc_read` 命中率、来源贡献、参数档案版本/采用/回滚与可选 S3/S4 进化反馈及 Web 学习计数）与密封留出对照。
 - **自主授权、隔离与动态采用**：
   - 渠道无关三权分立授权（`dsh-web-owner-setup --autonomy-setup` / `owner-console` 向导）、`traex-agent` / `agy-agent` ACP 路由与 `dsh-rsi upgrade` 自助升级回滚。
   - 原生隔离：macOS 使用 `macos-seatbelt`；Linux `backend: 'linux-native'` 同时支持委派 `cgroup v1` 四控制器与纯统一 `cgroup v2` 委派子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 及 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`，在 `prepare` 与 `create` 阶段校验共同祖先 `cgroup.procs` 写权限、无内部进程规则、`cgroup.freeze` 与 `cgroup.kill`）。
   - 受控动态采用与主动评估：`assistant-delivery` / `plugin-control-plane` Cordis 同进程重载（`config-only` 与非 denylist `<version>-<artifactDigest>` `artifact-replace` 及失败回退）、`event-triggers` → `assistant-work-items` 事件入站与终态退订、WP19 超限文本附件、WP20 预设规则与 WP22 `IntakeEvaluationAgreementLedger` 密封留出重放均默认关闭。
-  - **联想记忆层 S1–S3 边界（`assistant-association`）**：已完成 S1 核心引擎（SQLite + 双缓冲索引、AC/CJK BM25/≤2 跳扩散与 ≤5ms `assoc-timeout` 回退、`<association>` 单块滞回注入与 `assoc_read(id)`、`personal-memory` 协同、`derivedFrom` 撤回级联、10–15% `HMAC(seed, taskId)` 密封留出）、S2 闭环（`assoc_read` `+α` 强使用、唯一实体输出复现 `+α/3` 弱使用、`nonUseGraceMs` 后指数衰减、owner 纠正 `-β` 降权及 `[weightMin, weightMax]` 夹逼；WP22 不可变参数版本链与完整祖先链摘要验真、有界自动收紧、`assoc_replay_episodes` 留出重放门控放宽、退化精确回退及已回退 digest 黑名单；`assoc_read_events`/`assoc_task_telemetry`/`assoc_replay_episodes` 与 `growth-report` 第 6 节对照）与 S3 扩展（Schema v3：Policy 门控空闲做梦建边/抽象/AC 同义词及双端失效级联；`personal-wiki`/`assistant-skills`/`event-triggers`/`assistant-dreaming` 扩展来源；`observe` 态闭集 10 键 `intakeSignal`；非留出片段聚类经 WP04 守卫生成技能候选、`low` 信任隐式信号、冻结契约+回执准入的 `assoc_eval_pool` 生产评估池与 `growth-report` S3 计数）。`dogfood` 预设默认开启本地联想（`dreaming.enabled: false`、`intakeSignal.enabled: false`、`webLearning.enabled: false`）；S4（受限隔离 Web 学习）待下一切片交付。
+  - **联想记忆层 S1–S4 边界（`assistant-association`）**：已完成 S1 核心引擎（SQLite + 双缓冲索引、AC/CJK BM25/≤2 跳扩散与 ≤5ms `assoc-timeout` 回退、`<association>` 单块滞回注入与 `assoc_read(id)`、`personal-memory` 协同、`derivedFrom` 撤回级联、10–15% `HMAC(seed, taskId)` 密封留出）、S2 闭环（`assoc_read` `+α` 强使用、唯一实体输出复现 `+α/3` 弱使用、`nonUseGraceMs` 后指数衰减、owner 纠正 `-β` 降权及 `[weightMin, weightMax]` 夹逼；WP22 不可变参数版本链与完整祖先链摘要验真、有界自动收紧、`assoc_replay_episodes` 留出重放门控放宽、退化精确回退及已回退 digest 黑名单；`assoc_read_events`/`assoc_task_telemetry`/`assoc_replay_episodes` 与 `growth-report` 第 6 节对照）、S3 扩展（Schema v3：Policy 门控空闲做梦建边/抽象/AC 同义词及双端失效级联；`personal-wiki`/`assistant-skills`/`event-triggers`/`assistant-dreaming` 扩展来源；`observe` 态闭集 10 键 `intakeSignal`；非留出片段聚类经 WP04 守卫生成技能候选、`low` 信任隐式信号、冻结契约+回执准入的 `assoc_eval_pool` 生产评估池与 `growth-report` S3 计数）与 S4 受限隔离 Web 学习（Schema v4：`assoc_web_learning_runs` / `assoc_web_learning_budget_usage` / `assoc_web_learning_fetches`；默认 `webLearning.enabled: false`，经非空 `allowedDomains` 白名单、紧急停止、间隔/空闲、持久化日预算、Delivery active route 与 Policy `web.learn` 门控；默认 `subprocess` 在空 `0o700` 沙箱目录及无凭据环境中执行只读 HTTPS `GET` 与公网 IP DNS 钉扎，无写工具且预算耗尽即停；产物以 `kind: 'web'`、`trust: 'low'`、`sourceUrl`、`fetchedAt` 与 `expiresAt` 入库并支持 `withdrawWebSource`/TTL 级联删除与 `growth-report` S4 统计）。`dogfood` 预设默认开启本地联想（`dreaming.enabled: false`、`intakeSignal.enabled: false`、`webLearning.enabled: false`）。
 - **验证边界**：单元测试、组合测试与合成重放**不证明**真实宿主上的长期普通任务因果收益或用户打扰分布；arm64 与非空创建历史迁移仍未实机验收。
 
 ## 真实自用（Dogfood Profile）与预登记验收口径
@@ -27,10 +27,10 @@
 
 ## 阻塞项与下一步验收
 
-- **当前阻塞**：代码仓内 Slice S3 已完成全仓实现与联动更新；外部纵向待完成事项仍为 macOS 14 天普通使用记忆通道数据采集、Linux cgroup v2 实机冷安装→学习运行记录，以及记忆通道达标后的专用沙箱仓库 WP18 端到端实跑。
-- **下一步验收**：完成 Slice S3 全仓 `pnpm check` 与独立复核/审计并提交 `dev` 后，推进 `assistant-association` Slice S4（受限隔离 Web 学习），同时继续以 `dogfood` 预设及 `dsh-rsi growth-report --since 14d` 验收记忆进化与联想层纵向收益。
+- **当前阻塞**：代码仓内 `assistant-association` Slice S1–S4 已全部完成；外部纵向待完成事项为 macOS 14 天普通使用记忆通道数据采集、Linux cgroup v2 实机冷安装→学习运行记录，以及记忆通道达标后的专用沙箱仓库 WP18 端到端实跑。
+- **下一步验收**：以 `dogfood` 预设及 `dsh-rsi growth-report --since 14d` 持续收集并验收记忆进化与联想层真实纵向收益。
 
 ## 最新验证
 
 - **已发布基线**：`0.1.79`（`39` 个 npm 包，`DSH 0.2.2-rc.3`）。
-- **S1–S3 已交付状态**：S1（`0467aa08`）与 S2（`5901ab35`）已并入 `dev`；S3 已完成 Schema v3、空闲做梦建边与双端失效级联、`personal-wiki`/`assistant-skills`/`event-triggers`/`assistant-dreaming` 来源接入、观察态 `intakeSignal`、WP04 片段聚类与隐式信号/评估池馈送、`param-tuning` 完整祖先链校验、`growth-report` 跨窗口留出对账与 S3 计数、策略 `knownOptionalKeys` 补齐与实时文档更新（下一步：Slice S4 受限 Web 学习）。
+- **S1–S4 已交付状态**：`assistant-association` Slice S1（`0467aa08`）、S2（`5901ab35`）、S3（`8865bc28`）与 S4（Schema v4 迁移、隔离只读 HTTPS 抓取、`subprocess`/`in-process` 执行器、非敏感脱敏兴趣提取、Policy `web.learn` 门控与持久化日预算、`runWebLearningNow` / `withdrawWebSource`、`assoc_read` provenance、`assistant-policy` `knownOptionalKeys` `string[]`、`growth-report` S4 统计）已全部完成全仓 `pnpm check`、受影响包测试与独立复核并并入 `dev`。

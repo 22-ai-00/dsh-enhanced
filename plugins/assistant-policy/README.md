@@ -203,7 +203,7 @@ $bin preset dogfood --yes
 行为：
 
 - 读取与校验：先校验选定 Host 为已批准版本并读取原生 `--dump-config`。Cordis 中行级 `config` 整段替换继承配置，所以首次编辑会从有效配置完整克隆该行，保留注释、其它行与 `!!js`。
-- 值校验：按当前值类型转换（布尔、数字、字符串、JSON 对象/数组）；未知 key 和 `!!js` 值需 `--force`，已登记的可选键（如 `work-items.mode`、`intakeLedger.*`、`delivery.attentionAttachOverCap`、`evaluation.notificationOutcomesEnabled`、`event-triggers.pollerEnabled`、`owner-console.feishuAppId`、`assistant-proactive.*`（含 `intakeEvaluation.preset`：`conservative|balanced`）、`assistant-dreaming.*`、`assistant-growth-driver.*`、`assistant-memory-learning.*` 等，可用 `$bin show <plugin>` 查看清单）无需 `--force`。
+- 值校验：按当前值类型转换（布尔、数字、字符串、字符串数组 `string[]`、JSON 对象/数组）；未知 key 和 `!!js` 值需 `--force`，已登记的可选键（如 `work-items.mode`、`intakeLedger.*`、`delivery.attentionAttachOverCap`、`evaluation.notificationOutcomesEnabled`、`event-triggers.pollerEnabled`、`owner-console.feishuAppId`、`assistant-proactive.*`（含 `intakeEvaluation.preset`：`conservative|balanced`）、`assistant-dreaming.*`、`assistant-growth-driver.*`、`assistant-memory-learning.*`、`assistant-association.*` 含 `webLearning.*` 与 `isolationMode` 枚举等，可用 `$bin show <plugin>` 查看清单）无需 `--force`。
 - 写入：`0600` 临时文件原子替换，再次 dump 核对每项改动真实生效；失败即恢复原文件（或删除新建文件）并报错。
 - 拒绝项（`--force` 也不放开）：修改 `assistant-policy` 与 `plugin-control-plane` 配置；停用 `assistant-policy`；写入 secret/password/token/apiKey 等秘密 key（凭据用对应 `*Handle` 或专用 setup CLI）；修改 Delivery `ownerRoutes`、`policyRef` 授权 key；在占位 tenant/appId 下启用 lark-channel（改用 `dsh-lark-setup`）；启用缺少 `workerAutomationId` 或 `scope` 的 active 模式 work-items。
 - 不改任何权限默认值，不改 owner 认证、密封验证或凭据处理。

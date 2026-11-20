@@ -50,7 +50,7 @@ import {
   type UpsertSynonymInput,
 } from './types.js'
 
-export const ASSOCIATION_SCHEMA_VERSION = 3
+export const ASSOCIATION_SCHEMA_VERSION = 4
 
 export type AssociationDatabaseErrorCode =
   | 'invalid-path'
@@ -512,6 +512,63 @@ function migrateV2ToV3(database: DatabaseSync): void {
   `)
 }
 
+export function ensureWebLearningSchema(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS assoc_web_learning_runs (
+      run_id TEXT PRIMARY KEY,
+      owner_scope_key TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('completed', 'budget-exhausted', 'skipped', 'failed')),
+      reason TEXT,
+      topics_considered INTEGER NOT NULL DEFAULT 0,
+      requests_used INTEGER NOT NULL DEFAULT 0,
+      pages_fetched INTEGER NOT NULL DEFAULT 0,
+      bytes_fetched INTEGER NOT NULL DEFAULT 0,
+      nodes_written INTEGER NOT NULL DEFAULT 0,
+      details_json TEXT
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS assoc_web_runs_scope_started
+      ON assoc_web_learning_runs(owner_scope_key, started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS assoc_web_learning_budget_usage (
+      owner_scope_key TEXT NOT NULL,
+      utc_day TEXT NOT NULL,
+      requests_used INTEGER NOT NULL DEFAULT 0,
+      pages_fetched INTEGER NOT NULL DEFAULT 0,
+      bytes_fetched INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (owner_scope_key, utc_day)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS assoc_web_learning_fetches (
+      fetch_id TEXT PRIMARY KEY,
+      owner_scope_key TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      canonical_url TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      interest_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      bytes_fetched INTEGER NOT NULL DEFAULT 0,
+      node_id TEXT,
+      fetched_at INTEGER NOT NULL,
+      expires_at INTEGER
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS assoc_web_fetches_scope_url
+      ON assoc_web_learning_fetches(owner_scope_key, canonical_url, fetched_at DESC);
+  `)
+}
+
+function migrateV3ToV4(database: DatabaseSync): void {
+  ensureWebLearningSchema(database)
+  database.exec(`
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+  `)
+}
+
 function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
@@ -526,13 +583,19 @@ function migrate(database: DatabaseSync): void {
       createV1Schema(database)
       migrateV1ToV2(database)
       migrateV2ToV3(database)
+      migrateV3ToV4(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     } else if (row.user_version === 1) {
       migrateV1ToV2(database)
       migrateV2ToV3(database)
+      migrateV3ToV4(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     } else if (row.user_version === 2) {
       migrateV2ToV3(database)
+      migrateV3ToV4(database)
+      database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
+    } else if (row.user_version === 3) {
+      migrateV3ToV4(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     }
     database.exec('COMMIT')

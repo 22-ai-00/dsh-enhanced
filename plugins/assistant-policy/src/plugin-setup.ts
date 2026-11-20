@@ -42,7 +42,7 @@ const protectedKeys: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['dsh-enhanced-assistant-delivery', new Set(['ownerRoutes', 'policyRef'])],
 ])
 
-type KnownType = 'boolean' | 'number' | 'string' | 'path' | readonly string[]
+type KnownType = 'boolean' | 'number' | 'string' | 'path' | 'string[]' | readonly string[]
 
 /**
  * Documented optional keys that are absent from bundle defaults. `set` accepts
@@ -300,6 +300,28 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['clustering.reAskWindowMs', 'number'],
     ['clustering.reAskMinEntityJaccard', 'number'],
     ['webLearning.enabled', 'boolean'],
+    ['webLearning.allowedDomains', 'string[]'],
+    ['webLearning.seedUrls', 'string[]'],
+    ['webLearning.allowSubdomains', 'boolean'],
+    ['webLearning.allowIpv6', 'boolean'],
+    ['webLearning.isolationMode', ['subprocess', 'in-process'] as const],
+    ['webLearning.intervalMs', 'number'],
+    ['webLearning.idleMinMs', 'number'],
+    ['webLearning.cooldownMs', 'number'],
+    ['webLearning.maxInterestsPerRun', 'number'],
+    ['webLearning.maxRequestsPerRun', 'number'],
+    ['webLearning.maxPagesPerRun', 'number'],
+    ['webLearning.maxBytesPerRequest', 'number'],
+    ['webLearning.maxTotalBytesPerRun', 'number'],
+    ['webLearning.maxRequestsPerDay', 'number'],
+    ['webLearning.maxBytesPerDay', 'number'],
+    ['webLearning.maxDurationMs', 'number'],
+    ['webLearning.requestTimeoutMs', 'number'],
+    ['webLearning.maxRedirects', 'number'],
+    ['webLearning.discoverLinks', 'boolean'],
+    ['webLearning.nodeTtlMs', 'number'],
+    ['webLearning.budgetId', 'string'],
+    ['webLearning.budgetAmount', 'number'],
   ])],
 ])
 
@@ -616,6 +638,13 @@ function coerceKnown(raw: string, key: string, type: KnownType): unknown {
     }
     return raw
   }
+  if (type === 'string[]') {
+    const parsed = parseJson(raw, key, 'array') as unknown[]
+    if (!parsed.every((item): item is string => typeof item === 'string')) {
+      fail(`${key} expects a JSON array of strings`)
+    }
+    return parsed
+  }
   if (!type.includes(raw)) fail(`${key} must be one of ${type.join(', ')}`)
   return raw
 }
@@ -635,7 +664,7 @@ export function coerceConfigValue(id: string, key: string, raw: string, current:
     fail(`${key} is a !!js expression (${String((current as Scalar).value)}); pass --force to replace it with a literal`)
   }
   if (isMap(current)) return parseJson(raw, key, 'object')
-  if (isSeq(current)) return parseJson(raw, key, 'array')
+  if (isSeq(current)) return known === 'string[]' ? coerceKnown(raw, key, known) : parseJson(raw, key, 'array')
   const value = isScalar(current) ? current.value : current
   if (known !== undefined) return coerceKnown(raw, key, known)
   if (typeof value === 'boolean') return parseBoolean(raw, key)
@@ -1525,6 +1554,7 @@ function formatWrite(result: PluginWriteResult): string {
 function formatKnownTypeHint(type: KnownType): string {
   if (typeof type !== 'string') return type.join('|')
   if (type === 'path') return 'absolute path under $DSH_HOME'
+  if (type === 'string[]') return 'JSON string array'
   return type
 }
 

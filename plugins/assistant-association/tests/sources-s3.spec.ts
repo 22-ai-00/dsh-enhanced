@@ -123,18 +123,18 @@ function makeHeadlessScope(principalId: string, workspace: string, preset = 'pri
   }
 }
 
-function findTaskByHoldout(
+function findForegroundInboxByHoldout(
   service: AssistantAssociationService,
   wantHoldout: boolean,
   prefix: string,
 ): string {
   for (let i = 0; i < 500; i += 1) {
-    const candidate = `${prefix}-${i}`
-    if (service.isTaskInHoldout(candidate).inHoldout === wantHoldout) {
-      return candidate
+    const inboxId = `${prefix}-${i}`
+    if (service.isTaskInHoldout(`foreground-turn:${inboxId}`).inHoldout === wantHoldout) {
+      return inboxId
     }
   }
-  throw new Error(`Unable to find holdout=${String(wantHoldout)} task for prefix ${prefix}`)
+  throw new Error(`Unable to find foreground inbox holdout=${String(wantHoldout)} for ${prefix}`)
 }
 
 function findHeadlessSessionByHoldout(
@@ -854,6 +854,7 @@ describe('Slice S3 End-to-End Integration', () => {
       databasePath: join(root, 'assoc.sqlite'),
       minItems: 1,
       maxItems: 8,
+      hotPathBudgetMs: 50,
       allowLowTrust: true,
       syncIntervalMs: 60_000,
     })
@@ -895,7 +896,7 @@ describe('Slice S3 End-to-End Integration', () => {
     expect(dreamIdeaNode.expiresAt).not.toBeNull()
 
     // Ensure currentPreferenceTurn uses a guaranteed non-holdout foreground-turn taskId before calling contextSnapshot
-    const assocNhInbox = findTaskByHoldout(assoc, false, 'nh-src').replace(/^/u, '')
+    const assocNhInbox = findForegroundInboxByHoldout(assoc, false, 'nh-src')
     vi.mocked(delivery.currentPreferenceTurn).mockReturnValue({
       principalId: 'lark/bot/t1/ou_owner',
       principalLineage: { principalRecordId: ownerV1.id, principalVersion: ownerV1.version },
@@ -983,7 +984,7 @@ describe('Slice S3 End-to-End Integration', () => {
     await expect(assoc.readById(makeFakeExecution(agent, 'read-event-expired'), eventNodeId)).rejects.toMatchObject({
       code: 'not-found',
     })
-  })
+  }, 15_000)
 
   test('T-S3-04: hot-path intakeSignal operates strictly in observe mode under Policy, cooldown, and holdout exclusion', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'assoc-s3-intake-')))

@@ -11,6 +11,7 @@ import type { AssociationMemoryIndex } from './index-memory.js'
 import {
   DEFAULT_SOURCE_WEIGHTS,
   NODE_KINDS,
+  WEB_LEARNING_SOURCE_PLUGIN,
   type HotPathClock,
   type HotPathCue,
   type HotPathFilter,
@@ -55,6 +56,7 @@ const SOURCE_PLUGIN_TO_KIND: Readonly<Record<string, NodeKind>> = Object.freeze(
   'assistant-skills': 'skill',
   'event-triggers': 'event',
   'assistant-dreaming': 'dream',
+  [WEB_LEARNING_SOURCE_PLUGIN]: 'web',
 })
 
 export interface AssocParamProfileValues {
@@ -2499,14 +2501,34 @@ export class AssociationParamTuningLedger {
             | { parent_version: number | null; params_digest: string; digest: string }
             | undefined
           const rawParent = rowInfo?.parent_version
-          const parent =
+          let candidate =
             rawParent != null &&
             Number.isSafeInteger(rawParent) &&
             rawParent >= 0 &&
             rawParent < observed
               ? rawParent
               : 0
-          const parentInfo = this.#verified(scopeKey, parent) ?? this.#verified(scopeKey, 0)!
+          let parentInfo: AssocParamProfileVersion | undefined
+          const visited = new Set<number>()
+          while (candidate > 0 && !visited.has(candidate)) {
+            visited.add(candidate)
+            parentInfo = this.#verified(scopeKey, candidate)
+            if (parentInfo !== undefined) break
+            const nextParent = (
+              this.#database
+                .prepare(
+                  'SELECT parent_version FROM assoc_param_profile_versions WHERE scope_key = ? AND version = ?',
+                )
+                .get(scopeKey, candidate) as { parent_version: unknown } | undefined
+            )?.parent_version
+            candidate =
+              Number.isSafeInteger(nextParent) &&
+              (nextParent as number) >= 0 &&
+              (nextParent as number) < candidate
+                ? (nextParent as number)
+                : 0
+          }
+          parentInfo ??= this.#verified(scopeKey, 0)!
           const parentVersion = parentInfo.version
           const parentDigest = parentInfo.digest
 

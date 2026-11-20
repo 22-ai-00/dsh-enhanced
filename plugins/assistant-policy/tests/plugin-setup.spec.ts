@@ -184,6 +184,37 @@ describe('plugin setup: naming and validation', () => {
     expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.reAskMinEntityJaccard', '0.5', undefined)).toBe(0.5)
     expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minClusterSize', 'three', undefined)).toThrow(/expects a number/u)
     expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["docs.python.org","nodejs.org"]', undefined)).toEqual(['docs.python.org', 'nodejs.org'])
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["example.com"]', map.get('list', true))).toEqual(['example.com'])
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.seedUrls', '["https://nodejs.org/api/"]', undefined)).toEqual(['https://nodejs.org/api/'])
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '{}', undefined)).toThrow(/JSON array/u)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', 'not-json', undefined)).toThrow(/JSON array/u)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '[123]', undefined)).toThrow(/JSON array of strings/u)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowedDomains', '["ok", null]', map.get('list', true))).toThrow(/JSON array of strings/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowSubdomains', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.allowIpv6', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'subprocess', undefined)).toBe('subprocess')
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'in-process', undefined)).toBe('in-process')
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.isolationMode', 'docker', undefined)).toThrow(/subprocess, in-process/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.intervalMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.idleMinMs', '300000', undefined)).toBe(300000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.cooldownMs', '86400000', undefined)).toBe(86400000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxInterestsPerRun', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerRun', '5', undefined)).toBe(5)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxPagesPerRun', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxBytesPerRequest', '524288', undefined)).toBe(524288)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxTotalBytesPerRun', '1048576', undefined)).toBe(1048576)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerDay', '20', undefined)).toBe(20)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxBytesPerDay', '5242880', undefined)).toBe(5242880)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxDurationMs', '30000', undefined)).toBe(30000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.requestTimeoutMs', '10000', undefined)).toBe(10000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRedirects', '2', undefined)).toBe(2)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.discoverLinks', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.nodeTtlMs', '1209600000', undefined)).toBe(1209600000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.budgetId', 'web-learn-budget', undefined)).toBe('web-learn-budget')
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.budgetAmount', '2', undefined)).toBe(2)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.maxRequestsPerDay', 'many', undefined)).toThrow(/expects a number/u)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.discoverLinks', 'maybe', undefined)).toThrow(/expects a boolean/u)
     expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.enabled', 'false', undefined)).toBe(false)
     expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.maxIdeasPerWake', '3', undefined)).toBe(3)
     expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.enabled', 'false', undefined)).toBe(false)
@@ -797,5 +828,83 @@ describe('plugin setup: CLI', () => {
         { id: 'dsh-enhanced-assistant-association', key: 'webLearning.enabled', from: true, to: false },
       ]),
     )
+  })
+
+  test('sets S4 assistant-association webLearning keys including string[] arrays without --force while dogfood preset keeps webLearning.enabled false', async () => {
+    const home = await temporaryHome()
+    const assocS4Bundle = `
+- id: dsh-enhanced-assistant-association
+  name: '@dsh-enhanced/assistant-association'
+  config:
+    enabled: true
+    webLearning:
+      enabled: false
+      allowedDomains: []
+`
+    const dumpOpts = { readDump: dumpFixture(assocS4Bundle) }
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.allowedDomains',
+      value: '["nodejs.org","typescriptlang.org"]',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.seedUrls',
+      value: '["https://nodejs.org/docs/"]',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.isolationMode',
+      value: 'subprocess',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.maxRequestsPerDay',
+      value: '20',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.budgetId',
+      value: 'web-budget-1',
+    }, dumpOpts)
+    await expect(setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-association',
+      key: 'webLearning.allowedDomains',
+      value: '[42]',
+    }, dumpOpts)).rejects.toThrow(/JSON array of strings/u)
+
+    const patchText = await profilePatch(home)
+    expect(patchText).toContain('- nodejs.org')
+    expect(patchText).toContain('- typescriptlang.org')
+    expect(patchText).toContain('- https://nodejs.org/docs/')
+    expect(patchText).toContain('isolationMode: subprocess')
+    expect(patchText).toContain('maxRequestsPerDay: 20')
+    expect(patchText).toContain('budgetId: web-budget-1')
+
+    const homeDogfood = await temporaryHome()
+    const enabledBundle = assocS4Bundle.replace('    webLearning:\n      enabled: false', '    webLearning:\n      enabled: true')
+    const dogfoodResult = await applyDogfoodPluginPreset(
+      { dshHome: homeDogfood, profile: 'web' },
+      { readDump: dumpFixture(enabledBundle) },
+    )
+    expect(dogfoodResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-association',
+      key: 'webLearning.enabled',
+      from: true,
+      to: false,
+    })
+    expect(await profilePatch(homeDogfood)).toContain('enabled: false')
   })
 })

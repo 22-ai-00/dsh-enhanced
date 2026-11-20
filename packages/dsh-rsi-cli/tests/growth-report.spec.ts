@@ -881,6 +881,7 @@ describe('dsh-rsi growth-report', () => {
       implicitSignals: null,
       evalPool: null,
       skillCandidates: null,
+      webLearning: null,
     })
     expect(report.association.holdoutComparison).toEqual({
       nonHoldoutTasks: 2,
@@ -926,6 +927,7 @@ describe('dsh-rsi growth-report', () => {
     expect(formatted).toContain('assoc_read 命中率：不可用')
     expect(formatted).toContain('参数档案版本：不可用')
     expect(formatted).not.toContain('S3 进化反馈：')
+    expect(formatted).not.toContain('S4 Web 学习：')
   })
 
   test('association S2 full telemetry: profile isolation, symlink rejection, read events, WP22 profile, and joined holdout comparison', async () => {
@@ -1292,6 +1294,7 @@ describe('dsh-rsi growth-report', () => {
     expect(report.association.implicitSignals).toBeNull()
     expect(report.association.evalPool).toBeNull()
     expect(report.association.skillCandidates).toBeNull()
+    expect(report.association.webLearning).toBeNull()
   })
 
   test('association Low Radar #6: counts pre-window holdout assignments active in-window and uninjected step-metric non-holdout tasks', async () => {
@@ -1458,8 +1461,191 @@ describe('dsh-rsi growth-report', () => {
     expect(report.association.skillCandidates).toEqual({
       pending: 3,
     })
+    expect(report.association.webLearning).toBeNull()
 
     const formatted = formatGrowthReport(report)
     expect(formatted).toContain('S3 进化反馈：隐式低可信信号：4（重问 2/重做 1/纠正 1） · 生产评估池：回放 2 / 留出 1 · 待处理技能候选：3')
+    expect(formatted).not.toContain('S4 Web 学习：')
+  })
+
+  test('association S4 webLearning summary & expired assistant-association:web exposure fallback', async () => {
+    const home = await createTempHome()
+    const now = Date.parse('2026-11-18T00:00:00Z')
+    const day = 86_400_000
+
+    await mkdir(join(home, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-association'), { recursive: true })
+    await writeFile(join(home, 'profiles', 'desktop', 'package.json'), '{"private":true}\n')
+    await mkdir(join(home, 'assistant-association'), { recursive: true })
+    const assocPath = join(home, 'assistant-association', 'state.sqlite')
+    initS2AssociationDb(assocPath)
+
+    const assocDb = new DatabaseSync(assocPath)
+    try {
+      const scope = 'f'.repeat(64)
+      assocDb.exec(`
+        CREATE TABLE assoc_web_learning_runs (
+          run_id TEXT PRIMARY KEY,
+          owner_scope_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          pages_stored INTEGER NOT NULL DEFAULT 0,
+          ran_at INTEGER NOT NULL
+        );
+        CREATE TABLE assoc_web_learning_budget_usage (
+          owner_scope_key TEXT NOT NULL,
+          day_key TEXT NOT NULL,
+          requests_used INTEGER NOT NULL DEFAULT 0,
+          bytes_fetched INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (owner_scope_key, day_key)
+        );
+      `)
+
+      // 2 active web nodes, 1 withdrawn web node, 1 active memory node
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-web-1', 'web', 'assistant-association:web', 'https://nodejs.org/a', scope, 'active', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-web-2', 'web', 'assistant-association:web', 'https://nodejs.org/b', scope, 'active', '{}', now - day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-web-old', 'web', 'assistant-association:web', 'https://nodejs.org/old', scope, 'withdrawn', '{}', now - 2 * day)
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-mem-1', 'memory', 'personal-memory', 'm1', scope, 'active', '{}', now - day)
+
+      // Step metric injecting 2 web items
+      assocDb.prepare('INSERT INTO assoc_step_metrics (task_id, owner_scope_key, in_holdout, latency_us, timed_out, fallback_mode, injected_count, candidate_count, source_counts_json, occurred_at, profile_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('foreground-turn:w1', scope, 0, 900, 0, 'none', 2, 2, JSON.stringify({ web: 2 }), now - day, 3)
+
+      // Exposure 1: active web node n-web-1 (strong use)
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:w1', 'n-web-1', scope, 'assistant-association:web', now - day, 1, 0, 0, 1, 1, 0)
+      // Exposure 2: expired/deleted web node (no row in assoc_nodes!) must still map assistant-association:web -> 'web'
+      assocDb.prepare(`
+        INSERT INTO assoc_exposures (
+          task_id, node_id, owner_scope_key, source_plugin, exposed_at,
+          assoc_read_count, weak_use_count, corrected, was_exposed, strong_used, weak_used
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).run('foreground-turn:w1', 'n-web-deleted', scope, 'assistant-association:web', now - day, 0, 1, 0, 1, 0, 1)
+
+      // Runs: 1 completed (2 pages), 1 budget-exhausted (1 page) in window + 1 stale out-of-window
+      assocDb.prepare('INSERT INTO assoc_web_learning_runs VALUES (?,?,?,?,?)')
+        .run('wr-1', scope, 'completed', 2, now - 2 * day)
+      assocDb.prepare('INSERT INTO assoc_web_learning_runs VALUES (?,?,?,?,?)')
+        .run('wr-2', scope, 'budget-exhausted', 1, now - day)
+      assocDb.prepare('INSERT INTO assoc_web_learning_runs VALUES (?,?,?,?,?)')
+        .run('wr-old', scope, 'completed', 5, now - 30 * day)
+
+      // Budget usage: 2 in-window days + 1 stale out-of-window day
+      assocDb.prepare('INSERT INTO assoc_web_learning_budget_usage VALUES (?,?,?,?,?)')
+        .run(scope, '2026-11-16', 3, 12000, now - 2 * day)
+      assocDb.prepare('INSERT INTO assoc_web_learning_budget_usage VALUES (?,?,?,?,?)')
+        .run(scope, '2026-11-17', 5, 24000, now - day)
+      assocDb.prepare('INSERT INTO assoc_web_learning_budget_usage VALUES (?,?,?,?,?)')
+        .run(scope, '2026-10-01', 10, 50000, now - 45 * day)
+    } finally {
+      assocDb.close()
+    }
+
+    const report = await collectGrowthReport({ dshHome: home, profile: 'desktop', since: '7d', now })
+    expect(report.association.state).toBe('data')
+    expect(report.association.sources).toEqual([
+      {
+        source: 'web',
+        injectedItems: 2,
+        exposures: 2,
+        strongUses: 1,
+        weakUses: 1,
+        strongUseRatePpm: 500_000,
+        weakUseRatePpm: 500_000,
+      },
+    ])
+    expect(report.association.webLearning).toEqual({
+      runs: 2,
+      budgetExhaustedRuns: 1,
+      storedPages: 3,
+      activeWebNodes: 2,
+      requestsUsed: 8,
+      bytesFetched: 36000,
+    })
+
+    const formatted = formatGrowthReport(report)
+    expect(formatted).toContain('来源贡献：web(注2/强1/弱1)')
+    expect(formatted).toContain('S4 Web 学习：运行 2 次（预算耗尽 1 次） · 入库页面 3 个 · 活跃 Web 节点 2 · 预算使用 8 请求 / 36000 B')
+  })
+
+  test('association S4 Schema v4 column alignment (nodes_written, started_at, utc_day)', async () => {
+    const home = await createTempHome()
+    const now = Date.parse('2026-11-18T12:00:00Z')
+    const day = 86_400_000
+
+    await mkdir(join(home, 'profiles', 'desktop', 'node_modules', '@dsh-enhanced', 'assistant-association'), { recursive: true })
+    await writeFile(join(home, 'profiles', 'desktop', 'package.json'), '{"private":true}\n')
+    await mkdir(join(home, 'assistant-association'), { recursive: true })
+    const assocPath = join(home, 'assistant-association', 'state.sqlite')
+    initS2AssociationDb(assocPath)
+
+    const assocDb = new DatabaseSync(assocPath)
+    try {
+      const scope = 'e'.repeat(64)
+      assocDb.exec(`
+        CREATE TABLE assoc_web_learning_runs (
+          run_id TEXT PRIMARY KEY,
+          owner_scope_key TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          reason TEXT,
+          topics_considered INTEGER NOT NULL DEFAULT 0,
+          requests_used INTEGER NOT NULL DEFAULT 0,
+          pages_fetched INTEGER NOT NULL DEFAULT 0,
+          bytes_fetched INTEGER NOT NULL DEFAULT 0,
+          nodes_written INTEGER NOT NULL DEFAULT 0,
+          details_json TEXT
+        ) STRICT;
+        CREATE TABLE assoc_web_learning_budget_usage (
+          owner_scope_key TEXT NOT NULL,
+          utc_day TEXT NOT NULL,
+          requests_used INTEGER NOT NULL DEFAULT 0,
+          pages_fetched INTEGER NOT NULL DEFAULT 0,
+          bytes_fetched INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (owner_scope_key, utc_day)
+        ) STRICT, WITHOUT ROWID;
+      `)
+
+      assocDb.prepare('INSERT INTO assoc_nodes VALUES (?,?,?,?,?,?,?,?)')
+        .run('n-web-v4', 'web', 'assistant-association:web', 'https://nodejs.org/v4', scope, 'active', '{}', now - day)
+
+      assocDb.prepare(`
+        INSERT INTO assoc_web_learning_runs (
+          run_id, owner_scope_key, started_at, finished_at, status, reason,
+          topics_considered, requests_used, pages_fetched, bytes_fetched, nodes_written, details_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run('wr-v4-1', scope, now - day, now - day + 500, 'budget-exhausted', 'budget-exhausted', 2, 4, 3, 9500, 2, null)
+
+      assocDb.prepare(`
+        INSERT INTO assoc_web_learning_budget_usage (
+          owner_scope_key, utc_day, requests_used, pages_fetched, bytes_fetched
+        ) VALUES (?,?,?,?,?)
+      `).run(scope, '2026-11-17', 4, 3, 9500)
+      assocDb.prepare(`
+        INSERT INTO assoc_web_learning_budget_usage (
+          owner_scope_key, utc_day, requests_used, pages_fetched, bytes_fetched
+        ) VALUES (?,?,?,?,?)
+      `).run(scope, '2026-10-01', 99, 50, 99999)
+    } finally {
+      assocDb.close()
+    }
+
+    const report = await collectGrowthReport({ dshHome: home, profile: 'desktop', since: '7d', now })
+    expect(report.association.webLearning).toEqual({
+      runs: 1,
+      budgetExhaustedRuns: 1,
+      storedPages: 2,
+      activeWebNodes: 1,
+      requestsUsed: 4,
+      bytesFetched: 9500,
+    })
   })
 })

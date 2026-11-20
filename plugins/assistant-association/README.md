@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-association
 
-面向 DeepSeek Harness 的亚 5ms 进程内存双缓冲关联图与联想召回层（Slice S1–S3）：将 `personal-memory`、`assistant-goals`、`assistant-work-items`、`assistant-automations`、`personal-wiki`、`assistant-skills`、`event-triggers`、`assistant-dreaming` 与确定性任务片段（Delivery + Evaluation 混合账本）统一建图并持久保存在本地 SQLite（Schema v3）中，在每步模型调用前完成同步 Aho-Corasick 实体匹配、CJK bigram BM25 回退与 ≤2 跳邻接表扩散，注入单段滞回 `<association>` 上下文块并提供 `assoc_read(id)` 按需读取工具；同时支持基于隐式使用信号的有界 Hebbian 边权更新、WP22 版本化参数档案自调参与精确回退、独立授权的空闲做梦建边（`low` 信任与双端失效级联）、`observe` 态 `work-items` 信号发射，以及通过 WP04 守卫的非留出片段聚类、隐式低可信信号与生产评估池馈送。
+面向 DeepSeek Harness 的亚 5ms 进程内存双缓冲关联图与联想召回层（Slice S1–S4）：将 `personal-memory`、`assistant-goals`、`assistant-work-items`、`assistant-automations`、`personal-wiki`、`assistant-skills`、`event-triggers`、`assistant-dreaming`、受限隔离 Web 学习产物与确定性任务片段（Delivery + Evaluation 混合账本）统一建图并持久保存在本地 SQLite（Schema v4）中，在每步模型调用前完成同步 Aho-Corasick 实体匹配、CJK bigram BM25 回退与 ≤2 跳邻接表扩散，注入单段滞回 `<association>` 上下文块并提供 `assoc_read(id)` 按需读取工具（对 `'web'` 节点附带 `sourceUrl` 与 `fetchedAt`  provenance）；同时支持基于隐式使用信号的有界 Hebbian 边权更新、WP22 版本化参数档案自调参与精确回退、独立授权的空闲做梦建边（`low` 信任与双端失效级联）、`observe` 态 `work-items` 信号发射、通过 WP04 守卫的非留出片段聚类、隐式低可信信号与生产评估池馈送，以及默认关闭、独立授权的隔离只读兴趣驱动 Web 学习（S4）。
 
 ## 安装
 
@@ -67,7 +67,18 @@ dsh --profile web --dump-config
 | `clustering.entityWeight` / `toolWeight` | `number` | `0.4` / `0.6` | S3 片段聚类的实体 Jaccard 与工具名序列 LCS 权重。 |
 | `clustering.minSimilarity` / `minClusterSize` | `number` / `integer` | `0.55` / `3` | 片段聚类最小相似度与最小成簇片段数（`>= 2`）。 |
 | `clustering.reAskWindowMs` / `reAskMinEntityJaccard` | `integer` / `number` | `3600000` (1h) / `0.5` | 隐式重问（`re-ask`）检测回看窗口（ms）与最小实体 Jaccard 阈值。 |
-| `webLearning.enabled` | `boolean` | `false` | S4 隔离网页学习开关（S1–S3 保持关闭）。 |
+| `webLearning.enabled` | `boolean` | `false` | S4 受限兴趣驱动 Web 学习总开关（默认关闭，需独立 Policy `web.learn` 授权与非空 `allowedDomains`）。 |
+| `webLearning.allowedDomains` | `string[]` | `[]` | 允许抓取的 HTTPS 域名白名单（拒绝 IP、通配符、`localhost`、`.local`/`.internal`/`.arpa`；空名单失败关闭）。 |
+| `webLearning.seedUrls` | `string[]` | `[]` | 允许的 `https:` 检索/种子 URL 模板（支持 `{query}` URL 编码替换，主机须命中 `allowedDomains`）。 |
+| `webLearning.allowSubdomains` / `allowIpv6` | `boolean` / `boolean` | `false` / `false` | 是否允许白名单子域名匹配及 IPv6 公网地址。 |
+| `webLearning.isolationMode` | `'subprocess' \| 'in-process'` | `'subprocess'` | 抓取隔离模式（默认在空 `0o700` 沙箱目录和剥离凭据环境的子进程中执行）。 |
+| `webLearning.intervalMs` / `idleMinMs` / `cooldownMs` | `integer` | `3600000` (1h) / `900000` (15m) / `86400000` (24h) | 运行最小间隔、最近活动空闲门槛与同 URL 重复抓取冷却期（ms）。 |
+| `webLearning.maxInterestsPerRun` / `maxRequestsPerRun` / `maxPagesPerRun` | `integer` | `3` / `5` / `3` | 单轮最多提取的兴趣主题数、HTTP 请求次数与成功页面上限。 |
+| `webLearning.maxBytesPerRequest` / `maxTotalBytesPerRun` | `integer` | `524288` (512 KiB) / `1048576` (1 MiB) | 单次请求与单轮总响应字节上限。 |
+| `webLearning.maxRequestsPerDay` / `maxBytesPerDay` | `integer` | `20` / `5242880` (5 MiB) | 按 UTC 日持久化的每日请求与字节硬上限（跨进程重启保留）。 |
+| `webLearning.maxDurationMs` / `requestTimeoutMs` / `maxRedirects` | `integer` | `30000` / `10000` / `2` | 单轮总时长上限（ms）、单次请求超时（ms）与最大重定向跳数（`0..10`）。 |
+| `webLearning.discoverLinks` / `nodeTtlMs` | `boolean` / `integer` | `false` / `1209600000` (14d) | 是否发现同白名单页内链接与 `'web'` 节点默认过期 TTL（ms；`0` 表示不过期）。 |
+| `webLearning.budgetId` / `webLearning.budgetAmount` | `string?` / `number?` | — | 可选关联 Policy 预算标识与单次额度（`> 0`）。 |
 
 ## 架构与行为边界
 
@@ -84,7 +95,7 @@ dsh --profile web --dump-config
    - **自动收紧**：当窗口样本达到 `minSample` 且超时率、纠正率、低使用率或单来源噪声率超标时，按有界离散阶梯单步收紧（如降 `maxHops`/`maxItems`、缩 `decayHalfLifeMs`、升 `hysteresisDeltaMilli` 或下调高噪声来源权重）并自动进入 `observing` 观察期。
    - **放宽重放门控**：任何参数放宽（含混合收紧与放宽）均禁止直接自动采用，必须绑定不可变 `holdoutSeal`（`assoc_param_relax_proposals`）并通过 `assoc_replay_episodes` 同步热路径重放与留出健康核验（`timeouts <= parent`、`p99Ms <= hotPathBudgetMs`、`usedHits >= parent` 且 `usedHitsGain > noiseExposedGain`），决策记入 `assoc_param_relax_decisions`。
    - **精确版本回退与防震荡黑名单**：观察期内若超时率、纠正率或使用率出现显著退化，立即回退至精确 `parent_version` 并将退化配置 `params_digest` 写入 `assoc_param_rolled_back_digests`，防止后续周期重复震荡采用。
-7. **S2–S3 遥测与成长反馈账本（Schema v3）**：在既有 `assoc_step_metrics`、`assoc_exposures` 与 `assoc_holdout_assignments` 基础上提供 `assoc_read_events`、`assoc_task_telemetry`（对称记录注入组与留出组的轮数/步数/token/成本）与 `assoc_replay_episodes`（S2），并在 Schema v3 新增 `assoc_dream_runs`、`assoc_intake_signals`、`assoc_skill_candidates`、`assoc_implicit_signals` 与 `assoc_eval_pool`（支持 `v0/v1/v2 -> v3` 幂等迁移）；供 `dsh-rsi growth-report` 第 6 节输出在线指标、跨窗口留出对照及 S3 进化反馈计数。
+7. **S2–S4 遥测与成长反馈账本（Schema v4）**：在既有 `assoc_step_metrics`、`assoc_exposures` 与 `assoc_holdout_assignments` 基础上提供 `assoc_read_events`、`assoc_task_telemetry` 与 `assoc_replay_episodes`（S2），Schema v3 新增 `assoc_dream_runs`、`assoc_intake_signals`、`assoc_skill_candidates`、`assoc_implicit_signals` 与 `assoc_eval_pool`，Schema v4 新增 `assoc_web_learning_runs`、`assoc_web_learning_budget_usage` 与 `assoc_web_learning_fetches`（支持 `v0/v1/v2/v3 -> v4` 幂等迁移）；供 `dsh-rsi growth-report` 第 6 节输出在线指标、跨窗口留出对照及 S3/S4 计数。
 8. **空闲做梦建边与双端失效级联（Slice S3）**：`dreaming.enabled: true` 时（默认 `false`），在空闲门（`idleMinMs`、`intervalMs`、无运行中 Agent）、Policy `evolution`（`dream.build`）与可选预算及 Delivery active route 全部通过后，确定性生成 `trust: 'low'` 的长程 `'dream'` 边、桥接 `'abstraction'` 节点/边与绑定 `ownerScopeKey` / `trust` 的 AC 同义词（`assoc_synonyms`），并可投影可选 `assistant-dreaming` idea。所有派生节点、边与同义词均在 `assoc_derived_from` 登记全部支撑端点，任一端点被撤回（`withdrawSource`）、冲突抑制（`suppressNodeConflict`）、版本更新或 TTL 过期清理（`sweepExpiredNodesNow`）时立即级联硬删除。
 9. **扩展来源接入（Slice S3）**：
    - `personal-wiki`：通过 `inspectHostPages` 与 `onPageChange` 投影页面（`draft` 为 `low` 信任，其余为 `trusted`），归档或删除即撤回；`assoc_read` 实时校验 `wiki` 读取策略与有效状态。
@@ -96,19 +107,25 @@ dsh --profile web --dump-config
     - `runClusteringNow` 基于实体 Jaccard 与工具名序列 LCS 相似度（`clustering.*`）对非留出任务片段聚类，经 WP04 守卫（`assertWp04CandidateOrigin` / `assertCandidateGenerationInput`，强制拒绝任何留出任务或缺失种子）生成类型化技能候选存入 `assoc_skill_candidates`（仅候选，不自动激活）。
     - 从重复/重问（`re-ask`）、重做（`redo`）与 owner 纠正（`owner-correction`）聚类记录 `low` 信任隐式信号到 `assoc_implicit_signals`（仅作候选/报告输入；向 `assistantEvaluation.append` 上报时强制标记 `self-reported`）。
     - 仅当 Evaluation `upsert` 回执同时携带 `acceptance-contract` 与 `verification-receipt` 证据且通过 `assistantVerifier` 溯源核验时，按留出分区写入 `assoc_eval_pool`（`replay` / `holdout`），并在 `retract` / `withdraw` 时立即标记撤回。
+12. **受限兴趣驱动 Web 学习（Slice S4）**：
+    - 默认关闭（`webLearning.enabled: false`）；启用后必须依次通过非空 `allowedDomains` 白名单、紧急停止、间隔/空闲门、持久化 UTC 日预算（`assoc_web_learning_budget_usage`）、Delivery active route、可选 Policy 预算与 `Policy.authorize({ action: 'web.learn', resource: { kind: 'network', id: 'assistant-association:web-learning' } })`，任何门控拒绝均产生 0 次抓取与 0 节点。
+    - 兴趣提取（`extractWebLearningInterests`）仅消费同 owner 非留出、非敏感（`sensitivity !== 'private'`）目标/工作项/做梦节点/低覆盖片段；`extractWebLearningInterests` / `scrubInterestText` 的脱敏（剥离路径、邮箱、IP、UUID、工作区/身份片段与常见凭据模式，并截断为 ≤3 词 / ≤64 字符查询）仅作为启发式纵深防御（defense-in-depth），与显式 opt-in 授权（`webLearning.enabled` + Policy `web.learn`）、非私有敏感度过滤（排除 `sensitivity = 'private'`）、非空域名白名单（`allowedDomains`）及无凭据隔离子进程共同生效。
+    - 默认以 `isolationMode: 'subprocess'` 在空 `0o700` 临时工作目录和无凭据环境（仅 `PATH`/`LANG`/`LC_ALL`/`TZ`）中执行只读 HTTPS `GET`（强制域名白名单、公网 IP DNS 钉扎、禁止私网/本地/元数据 SSRF、禁用写工具与凭据头、流式字节上限与单轮/每日预算耗尽即停并保留已成功页面）。
+    - 生成的节点统一标注 `kind: 'web'`、`trust: 'low'`、`sourcePlugin: 'assistant-association:web'`、`metadata.sourceUrl`、`metadata.fetchedAt` 与 `expiresAt`（TTL 过期或 `withdrawWebSource` 均沿 `assoc_derived_from` 级联删除节点与共现 `'entity'` 边）；`assoc_read(id)` 返回 `sourceUrl`、`fetchedAt` 与 `<association_item trust="low" ...>` 不可信边界，且 `allowLowTrust: false` 时对热路径与 `assoc_read` 完全隐藏。
 
 ## 服务接口概览
 
 - 热路径与读取：`contextSnapshot`、`shouldSuppressMemoryKeywordHits`、`readById`、`isTaskInHoldout`、`bindHeadlessPrincipal`、`syncAll` / `syncScope` / `flush` / `refreshIndex`。
 - S2 自调参与衰减：`currentParamProfile`、`paramTuningStatus`、`requestParamTuning`、`reconcileParamTuning`、`runHebbianDecayPass`。
 - S3 扩展方法：`runDreamingNow`、`listDreamRuns`、`sweepExpiredNodesNow`、`emitIntakeSignalNow`、`listIntakeSignals`、`runClusteringNow`、`listSkillCandidates`、`listImplicitSignals`、`listEvalPool`。
+- S4 Web 学习方法：`runWebLearningNow`、`listWebLearningRuns`、`listWebLearningFetches`、`getWebLearningBudgetUsage`、`withdrawWebSource`。
 
 ## 权限与数据
 
-- **文件系统**：仅读写 `databasePath`（及其 `-wal` / `-shm` 伴随文件，Schema v3 本地 SQLite 账本）与同目录 `holdout.seed`；父目录权限强制 `0o700`，数据库与种子文件权限强制 `0o600`（拒绝符号链接与非当前 UID 文件）。
-- **网络**：无（S1–S3 仅本地内存索引与 SQLite 持久化；`webLearning.enabled` 默认 `false`）。
-- **子进程**：无。
-- **凭据**：无（`holdout.seed` 为本地匿名分区 HMAC 密钥，不访问用户账号、模型 API 或外部凭据；S3 做梦与信号发射受 Policy `evolution` / `automation` 独立门控，`wiki` 读取校验 Policy `wiki` 规则）。
+- **文件系统**：仅读写 `databasePath`（及其 `-wal` / `-shm` 伴随文件，Schema v4 本地 SQLite 账本）与同目录 `holdout.seed`；父目录权限强制 `0o700`，数据库与种子文件权限强制 `0o600`（拒绝符号链接与非当前 UID 文件）。当启用 `webLearning.enabled` 且处于默认 `isolationMode: 'subprocess'` 时，每轮创建并立即清理独立的空 `0o700` 临时沙箱工作目录。
+- **网络**：S1–S3 无网络请求。S4 仅在显式开启 `webLearning.enabled: true`、配置非空 `allowedDomains` 且通过 Policy `web.learn` 授权时发起只读 HTTPS `GET` 请求（固定 443 端口、公网 IP DNS 钉扎、SSRF 防护、手动重定向校验、禁止写入与凭据请求头、到达请求/字节/时长预算即停）。
+- **子进程**：S1–S3 无子进程。S4 默认 `isolationMode: 'subprocess'` 在空 `0o700` 沙箱目录派生独立只读 `web-learning-worker` 子进程，仅透传 `{ PATH, LANG, LC_ALL, TZ }`，无写工具或凭据，超时执行 `SIGTERM` → `SIGKILL`。
+- **凭据**：不读取、传递或存储用户账号、Cookie、API 密钥或 OAuth token（`holdout.seed` 仅为本地匿名分区 HMAC 密钥；S3 做梦/信号受 Policy `evolution`/`automation` 门控，`wiki` 读取校验 `wiki` 规则，S4 Web 学习剥离全部凭据环境变量并在提取兴趣前脱敏私有上下文）。
 - **浏览器**：无。
 - **安装脚本**：无。
 

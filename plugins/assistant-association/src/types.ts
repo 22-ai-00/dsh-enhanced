@@ -701,6 +701,60 @@ export function computeDeterministicSynonymId(
     .slice(0, 24)}`
 }
 
+export const WEB_LEARNING_SOURCE_PLUGIN = 'assistant-association:web' as const
+
+export interface AssociationWebLearningConfig {
+  readonly enabled?: boolean
+  readonly allowedDomains?: readonly string[]
+  readonly seedUrls?: readonly string[]
+  readonly allowSubdomains?: boolean
+  readonly allowIpv6?: boolean
+  readonly isolationMode?: 'subprocess' | 'in-process'
+  readonly intervalMs?: number
+  readonly idleMinMs?: number
+  readonly cooldownMs?: number
+  readonly maxInterestsPerRun?: number
+  readonly maxRequestsPerRun?: number
+  readonly maxPagesPerRun?: number
+  readonly maxBytesPerRequest?: number
+  readonly maxTotalBytesPerRun?: number
+  readonly maxRequestsPerDay?: number
+  readonly maxBytesPerDay?: number
+  readonly maxDurationMs?: number
+  readonly requestTimeoutMs?: number
+  readonly maxRedirects?: number
+  readonly discoverLinks?: boolean
+  readonly nodeTtlMs?: number
+  readonly budgetId?: string
+  readonly budgetAmount?: number
+}
+
+export interface AssociationWebLearningNormalizedConfig {
+  readonly enabled: boolean
+  readonly allowedDomains: readonly string[]
+  readonly seedUrls: readonly string[]
+  readonly allowSubdomains: boolean
+  readonly allowIpv6: boolean
+  readonly isolationMode: 'subprocess' | 'in-process'
+  readonly intervalMs: number
+  readonly idleMinMs: number
+  readonly cooldownMs: number
+  readonly maxInterestsPerRun: number
+  readonly maxRequestsPerRun: number
+  readonly maxPagesPerRun: number
+  readonly maxBytesPerRequest: number
+  readonly maxTotalBytesPerRun: number
+  readonly maxRequestsPerDay: number
+  readonly maxBytesPerDay: number
+  readonly maxDurationMs: number
+  readonly requestTimeoutMs: number
+  readonly maxRedirects: number
+  readonly discoverLinks: boolean
+  readonly nodeTtlMs: number
+  readonly budgetId?: string
+  readonly budgetAmount?: number
+}
+
 export type {
   AssociationDreamingConfig,
   AssociationDreamingNormalizedConfig,

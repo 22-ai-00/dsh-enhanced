@@ -161,6 +161,15 @@ export interface GrowthAssociationSkillCandidatesSummary {
   readonly pending: number
 }
 
+export interface GrowthAssociationWebLearningSummary {
+  readonly runs: number
+  readonly budgetExhaustedRuns: number
+  readonly storedPages: number
+  readonly activeWebNodes: number
+  readonly requestsUsed: number
+  readonly bytesFetched: number
+}
+
 export interface GrowthAssociationSummary {
   readonly state: GrowthDataState
   readonly evaluatedSteps: number
@@ -191,6 +200,7 @@ export interface GrowthAssociationSummary {
   readonly implicitSignals: GrowthAssociationImplicitSignalsSummary | null
   readonly evalPool: GrowthAssociationEvalPoolSummary | null
   readonly skillCandidates: GrowthAssociationSkillCandidatesSummary | null
+  readonly webLearning: GrowthAssociationWebLearningSummary | null
 }
 
 export interface GrowthReport {
@@ -1473,6 +1483,13 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   let assocEvalPoolActiveHoldout = 0
   let sawAssocSkillCandidates = false
   let assocSkillCandidatesPending = 0
+  let sawAssocWebLearning = false
+  let assocWebRuns = 0
+  let assocWebBudgetExhaustedRuns = 0
+  let assocWebStoredPages = 0
+  let assocWebActiveNodes = 0
+  let assocWebRequestsUsed = 0
+  let assocWebBytesFetched = 0
 
   const assocInjectedTaskIds = new Set<string>()
   const assocNonHoldoutTaskIds = new Set<string>()
@@ -1623,9 +1640,12 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
               assocInjectedTaskIds.add(row.task_id)
               assocActiveWindowTaskIds.add(row.task_id)
             }
+            const fallbackSource = row.source_plugin === 'assistant-association:web'
+              ? 'web'
+              : (typeof row.source_plugin === 'string' && row.source_plugin !== '' ? row.source_plugin : 'unknown')
             const srcKey = (typeof row.node_kind === 'string' && row.node_kind !== '')
               ? row.node_kind
-              : (typeof row.source_plugin === 'string' && row.source_plugin !== '' ? row.source_plugin : 'unknown')
+              : fallbackSource
             const bucket = ensureSourceBucket(srcKey)
             bucket.exposures += 1
             if (isStrong) bucket.strongUses += 1
@@ -1771,6 +1791,105 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
           WHERE status IN ('pending', 'staged')
         `).get() as { n: number } | undefined
         assocSkillCandidatesPending += candRow?.n ?? 0
+      }
+
+      const hasWebRunsTable = hasTable(db, 'assoc_web_learning_runs')
+      const hasWebBudgetTable = hasTable(db, 'assoc_web_learning_budget_usage')
+      if (hasWebRunsTable) {
+        sawAssociationTable = true
+        sawAssocWebLearning = true
+        const timeCol = hasColumn(db, 'assoc_web_learning_runs', 'ran_at')
+          ? 'ran_at'
+          : hasColumn(db, 'assoc_web_learning_runs', 'started_at')
+            ? 'started_at'
+            : hasColumn(db, 'assoc_web_learning_runs', 'created_at')
+              ? 'created_at'
+              : null
+        if (timeCol !== null) {
+          const hasStatus = hasColumn(db, 'assoc_web_learning_runs', 'status')
+          const pagesCol = hasColumn(db, 'assoc_web_learning_runs', 'nodes_written')
+            ? 'nodes_written'
+            : hasColumn(db, 'assoc_web_learning_runs', 'pages_stored')
+              ? 'pages_stored'
+              : hasColumn(db, 'assoc_web_learning_runs', 'stored_pages')
+                ? 'stored_pages'
+                : hasColumn(db, 'assoc_web_learning_runs', 'nodes_stored')
+                  ? 'nodes_stored'
+                  : null
+          const hasRunReq = !hasWebBudgetTable && hasColumn(db, 'assoc_web_learning_runs', 'requests_used')
+          const hasRunBytes = !hasWebBudgetTable && hasColumn(db, 'assoc_web_learning_runs', 'bytes_fetched')
+          const runRows = db.prepare(`
+            SELECT ${hasStatus ? 'status' : "'unknown' AS status"},
+                   ${pagesCol ? `${pagesCol} AS pages_stored` : '0 AS pages_stored'},
+                   ${hasRunReq ? 'requests_used' : '0 AS requests_used'},
+                   ${hasRunBytes ? 'bytes_fetched' : '0 AS bytes_fetched'}
+            FROM assoc_web_learning_runs
+            WHERE ${timeCol} >= ? AND ${timeCol} <= ?
+          `).all(fromAt, toAt) as Array<{
+            status: string
+            pages_stored: number | null
+            requests_used: number | null
+            bytes_fetched: number | null
+          }>
+          for (const r of runRows) {
+            assocWebRuns += 1
+            if (r.status === 'budget-exhausted') assocWebBudgetExhaustedRuns += 1
+            if (typeof r.pages_stored === 'number' && Number.isFinite(r.pages_stored) && r.pages_stored > 0) {
+              assocWebStoredPages += Math.trunc(r.pages_stored)
+            }
+            if (hasRunReq && typeof r.requests_used === 'number' && Number.isFinite(r.requests_used) && r.requests_used > 0) {
+              assocWebRequestsUsed += Math.trunc(r.requests_used)
+            }
+            if (hasRunBytes && typeof r.bytes_fetched === 'number' && Number.isFinite(r.bytes_fetched) && r.bytes_fetched > 0) {
+              assocWebBytesFetched += Math.trunc(r.bytes_fetched)
+            }
+          }
+        }
+      }
+
+      if (hasWebBudgetTable) {
+        sawAssociationTable = true
+        sawAssocWebLearning = true
+        const hasReq = hasColumn(db, 'assoc_web_learning_budget_usage', 'requests_used')
+        const hasBytes = hasColumn(db, 'assoc_web_learning_budget_usage', 'bytes_fetched')
+        if (hasReq || hasBytes) {
+          const hasUpdatedAt = hasColumn(db, 'assoc_web_learning_budget_usage', 'updated_at')
+          const dayCol = hasColumn(db, 'assoc_web_learning_budget_usage', 'utc_day')
+            ? 'utc_day'
+            : hasColumn(db, 'assoc_web_learning_budget_usage', 'day_key')
+              ? 'day_key'
+              : null
+          const whereSql = hasUpdatedAt
+            ? 'WHERE updated_at >= ? AND updated_at <= ?'
+            : dayCol !== null
+              ? `WHERE ${dayCol} >= ? AND ${dayCol} <= ?`
+              : ''
+          const params = hasUpdatedAt
+            ? [fromAt, toAt]
+            : dayCol !== null
+              ? [new Date(fromAt).toISOString().slice(0, 10), new Date(toAt).toISOString().slice(0, 10)]
+              : []
+          const budgetRow = db.prepare(`
+            SELECT ${hasReq ? 'COALESCE(SUM(requests_used), 0)' : '0'} AS requests_used,
+                   ${hasBytes ? 'COALESCE(SUM(bytes_fetched), 0)' : '0'} AS bytes_fetched
+            FROM assoc_web_learning_budget_usage
+            ${whereSql}
+          `).get(...params) as { requests_used: number; bytes_fetched: number } | undefined
+          assocWebRequestsUsed += Math.max(0, Math.trunc(budgetRow?.requests_used ?? 0))
+          assocWebBytesFetched += Math.max(0, Math.trunc(budgetRow?.bytes_fetched ?? 0))
+        }
+      }
+
+      if ((hasWebRunsTable || hasWebBudgetTable)
+        && hasTable(db, 'assoc_nodes')
+        && hasColumn(db, 'assoc_nodes', 'kind')
+        && hasColumn(db, 'assoc_nodes', 'status')) {
+        const webNodeRow = db.prepare(`
+          SELECT COUNT(*) AS n
+          FROM assoc_nodes
+          WHERE kind = 'web' AND status = 'active'
+        `).get() as { n: number } | undefined
+        assocWebActiveNodes += webNodeRow?.n ?? 0
       }
     }
 
@@ -1938,6 +2057,11 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
       && assocEvalPoolActiveReplay === 0
       && assocEvalPoolActiveHoldout === 0
       && assocSkillCandidatesPending === 0
+      && assocWebRuns === 0
+      && assocWebStoredPages === 0
+      && assocWebActiveNodes === 0
+      && assocWebRequestsUsed === 0
+      && assocWebBytesFetched === 0
       ? 'zero'
       : 'data'
 
@@ -2092,6 +2216,16 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
             pending: assocSkillCandidatesPending,
           })
         : null,
+      webLearning: sawAssocWebLearning
+        ? Object.freeze({
+            runs: assocWebRuns,
+            budgetExhaustedRuns: assocWebBudgetExhaustedRuns,
+            storedPages: assocWebStoredPages,
+            activeWebNodes: assocWebActiveNodes,
+            requestsUsed: assocWebRequestsUsed,
+            bytesFetched: assocWebBytesFetched,
+          })
+        : null,
     }),
     memoryLaneGate: Object.freeze({
       targetWindowDays: 14,
@@ -2215,6 +2349,10 @@ export function formatGrowthReport(report: GrowthReport): string {
         s3Parts.push(`待处理技能候选：${a.skillCandidates.pending}`)
       }
       lines.push(`   S3 进化反馈：${s3Parts.join(' · ')}`)
+    }
+    if (a.webLearning !== null) {
+      const w = a.webLearning
+      lines.push(`   S4 Web 学习：运行 ${w.runs} 次（预算耗尽 ${w.budgetExhaustedRuns} 次） · 入库页面 ${w.storedPages} 个 · 活跃 Web 节点 ${w.activeWebNodes} · 预算使用 ${w.requestsUsed} 请求 / ${w.bytesFetched} B`)
     }
   }
 

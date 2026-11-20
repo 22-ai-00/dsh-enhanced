@@ -793,6 +793,21 @@ function deterministicSha256(payload: unknown): string {
   return growthObjectDigest(payload)
 }
 
+function truncateCandidateName(raw: string, maxCodePoints = 96, maxBytes = 128): string {
+  const safe = raw.toWellFormed().normalize('NFC').trim()
+  let out = ''
+  let codePoints = 0
+  let bytes = 0
+  for (const ch of safe) {
+    const chBytes = Buffer.byteLength(ch, 'utf8')
+    if (codePoints + 1 > maxCodePoints || bytes + chBytes > maxBytes) break
+    out += ch
+    codePoints += 1
+    bytes += chBytes
+  }
+  return out.trimEnd()
+}
+
 function buildCandidateName(
   sharedEntities: readonly string[],
   toolSequence: readonly string[],
@@ -806,7 +821,7 @@ function buildCandidateName(
       : toolLabel.length > 0
         ? toolLabel
         : `cluster-${signatureDigest.slice(0, 8)}`
-  return `skill-${base}`.slice(0, 96)
+  return truncateCandidateName(`skill-${base}`, 96, 128)
 }
 
 function buildCandidateDescription(

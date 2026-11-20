@@ -1,7 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import {
   Config,
+  DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG,
   normalizeAssociationConfig,
+  normalizeAssociationWebLearningConfig,
   normalizeConfig,
   type AssociationConfig,
   type NormalizedAssociationConfig,
@@ -10,7 +12,15 @@ import { AssistantAssociationService } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-association'
-export { AssistantAssociationService, Config, normalizeAssociationConfig, normalizeConfig, version }
+export {
+  AssistantAssociationService,
+  Config,
+  DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG,
+  normalizeAssociationConfig,
+  normalizeAssociationWebLearningConfig,
+  normalizeConfig,
+  version,
+}
 export type { AssociationConfig, NormalizedAssociationConfig }
 
 export * from './types.js'
@@ -33,6 +43,11 @@ export * from './dreaming.js'
 export * from './intake-signal.js'
 export * from './clustering.js'
 export * from './eval-pool.js'
+export * from './web-fetch.js'
+export * from './web-learning-worker.js'
+export * from './web-learning-runner.js'
+export * from './web-learning-interests.js'
+export * from './web-learning.js'
 export * from './service.js'
 
 export const inject = ['assistantPolicy'] as const

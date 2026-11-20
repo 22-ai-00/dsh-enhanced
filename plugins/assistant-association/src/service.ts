@@ -93,13 +93,18 @@ import {
   type AssocParamTuningStatus,
 } from './param-tuning.js'
 import { AssociationSourceManager } from './sources.js'
-import { AssociationStore, openAssociationDatabase } from './sqlite.js'
+import {
+  AssociationStore,
+  openAssociationDatabase,
+  type WithdrawalCascadeResult,
+} from './sqlite.js'
 import {
   AssistantAssociationError,
   registerAssociationTools,
   type AssocReadResult,
 } from './tools.js'
 import {
+  WEB_LEARNING_SOURCE_PLUGIN,
   type AssociationOwnerScope,
   type HoldoutDecision,
   type HotPathClock,
@@ -112,6 +117,25 @@ import {
   type StoredAssociationNode,
   type StoredAssociationSynonym,
 } from './types.js'
+import {
+  canonicalizeWebSourceUrl,
+  computeWebSourceRef,
+  getWebLearningBudgetUsage as queryWebLearningBudgetUsage,
+  listWebLearningFetches as queryWebLearningFetches,
+  listWebLearningRuns as queryWebLearningRuns,
+  runWebLearningPass,
+  withdrawWebSourceByUrl,
+  type RunWebLearningPassResult,
+  type StoredWebLearningFetchRow,
+  type StoredWebLearningRunRow,
+  type WebLearningBudgetUsageRow,
+  type WebLearningDeliveryPeer,
+} from './web-learning.js'
+import {
+  type SubprocessWebLearningRunnerOptions,
+  type WebLearningRunner,
+} from './web-learning-runner.js'
+import type { WebLearningWorkerDeps } from './web-learning-worker.js'
 import { AssociationWriteQueue, loadGraphSnapshotChunked } from './write-queue.js'
 
 declare module '@deepseek-ai/cordis' {
@@ -140,6 +164,7 @@ export class AssistantAssociationService extends Service {
   private readonly toolNamesBySessionTurn = new Map<string, string[]>()
   private readonly lastActivityByScope = new Map<string, number>()
   private readonly pendingTasks = new Set<Promise<void>>()
+  private readonly inFlightWebLearningScopes = new Set<string>()
 
   private activeIndex: AssociationMemoryIndex | null = null
   private ready = false
@@ -148,6 +173,7 @@ export class AssistantAssociationService extends Service {
   private rebuildInFlight: Promise<void> | null = null
   private rebuildQueued = false
   private active = true
+  private readonly effectAbortController = new AbortController()
   private hotPathClock: HotPathClock | undefined
   private nowClock: () => number = () => Date.now()
 
@@ -170,6 +196,7 @@ export class AssistantAssociationService extends Service {
       this.holdoutSeedKey = null
       ctx.effect(() => () => {
         this.active = false
+        this.effectAbortController.abort()
       }, 'assistant-association.disabled')
       return
     }
@@ -463,6 +490,20 @@ export class AssistantAssociationService extends Service {
             })
           }),
         )
+        if (
+          this.active &&
+          this.assocConfig.enabled &&
+          this.assocConfig.webLearning.enabled &&
+          !this.writeQueue?.hasPendingWithdrawals
+        ) {
+          this.trackBackgroundTask(
+            this.runPeriodicS4WebLearning().catch((error) => {
+              this.ctx.logger.warn?.('assistant-association web learning error', {
+                error: String(error),
+              })
+            }),
+          )
+        }
       }
     }, normalized.syncIntervalMs)
     syncTimer.unref?.()
@@ -479,6 +520,7 @@ export class AssistantAssociationService extends Service {
     ctx.effect(
       () => async () => {
         this.active = false
+        this.effectAbortController.abort()
         clearInterval(syncTimer)
         if (decayTimer !== null) {
           clearInterval(decayTimer)
@@ -1226,6 +1268,8 @@ export class AssistantAssociationService extends Service {
       content: row.body,
       entities: [...row.entities],
       updatedAt: row.updatedAt,
+      ...(row.metadata.sourceUrl !== undefined ? { sourceUrl: row.metadata.sourceUrl } : {}),
+      ...(row.metadata.fetchedAt !== undefined ? { fetchedAt: row.metadata.fetchedAt } : {}),
     })
   }
 
@@ -1685,6 +1729,221 @@ export class AssistantAssociationService extends Service {
       throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
     }
     return queryEvalPool(this.assocStore.database, ownerScopeKey, options)
+  }
+
+  async runWebLearningNow(
+    scope: AssociationOwnerScope,
+    options?: {
+      readonly now?: number
+      readonly nowMs?: number
+      readonly lastActivityAt?: number | null
+      readonly hasRunningAgent?: boolean
+      readonly ignoreIdle?: boolean
+      readonly runner?: WebLearningRunner
+      readonly workerDeps?: WebLearningWorkerDeps
+      readonly subprocessOptions?: SubprocessWebLearningRunnerOptions
+      readonly signal?: AbortSignal
+    },
+  ): Promise<RunWebLearningPassResult> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null || this.writeQueue === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+
+    const nowMs = options?.nowMs ?? options?.now ?? this.nowClock()
+    if (this.inFlightWebLearningScopes.has(scope.ownerScopeKey)) {
+      return {
+        ran: false,
+        runId: null,
+        status: 'skipped',
+        reason: 'run-in-progress',
+        topicsConsidered: 0,
+        requestsUsed: 0,
+        pagesFetched: 0,
+        bytesFetched: 0,
+        nodesWritten: 0,
+        edgesWritten: 0,
+        writtenNodeIds: [],
+        interests: [],
+        fetches: [],
+        dailyUsage: queryWebLearningBudgetUsage(
+          this.assocStore.database,
+          scope.ownerScopeKey,
+          nowMs,
+        ),
+      }
+    }
+
+    const store = this.assocStore
+    const writeQueue = this.writeQueue
+    this.inFlightWebLearningScopes.add(scope.ownerScopeKey)
+
+    const execution = (async (): Promise<RunWebLearningPassResult> => {
+      await writeQueue.flush()
+      if (!this.active) {
+        throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+      }
+      if (writeQueue.hasPendingWithdrawals) {
+        await writeQueue.flush()
+      }
+      if (!this.active) {
+        throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+      }
+
+      const delivery = this.ctx.get('assistantDelivery' as never, false) as
+        | WebLearningDeliveryPeer
+        | undefined
+      const resolvedLastActivity =
+        options?.lastActivityAt !== undefined
+          ? options.lastActivityAt
+          : this.lastActivityByScope.get(scope.ownerScopeKey)
+      const hasRunningAgent =
+        options?.hasRunningAgent ?? this.hasRunningAgentForScope(scope.ownerScopeKey)
+      const effectiveSignal =
+        options?.signal !== undefined
+          ? AbortSignal.any([this.effectAbortController.signal, options.signal])
+          : this.effectAbortController.signal
+
+      const result = await runWebLearningPass({
+        store,
+        scope,
+        rootEnabled: this.assocConfig.enabled,
+        config: this.assocConfig.webLearning,
+        policy: this.policy,
+        ...(delivery === undefined ? {} : { delivery }),
+        hasRunningAgent,
+        ...(resolvedLastActivity !== undefined ? { lastActivityAt: resolvedLastActivity } : {}),
+        ...(options?.ignoreIdle !== undefined ? { ignoreIdle: options.ignoreIdle } : {}),
+        nowMs,
+        ...(options?.runner !== undefined ? { runner: options.runner } : {}),
+        ...(options?.workerDeps !== undefined ? { workerDeps: options.workerDeps } : {}),
+        ...(options?.subprocessOptions !== undefined
+          ? { subprocessOptions: options.subprocessOptions }
+          : {}),
+        signal: effectiveSignal,
+        enqueueUpsertNodes: async (batch) => {
+          if (!this.active || this.writeQueue === null || effectiveSignal.aborted) return
+          this.writeQueue.enqueue({
+            kind: 'upsert-nodes',
+            nodes: batch.nodes,
+            edges: batch.edges,
+            derivedRefs: batch.derivedRefs,
+          })
+          await this.writeQueue.flush()
+        },
+      })
+
+      if (this.active && (result.nodesWritten > 0 || result.edgesWritten > 0)) {
+        await this.rebuildIndex()
+      }
+
+      return result
+    })().finally(() => {
+      this.inFlightWebLearningScopes.delete(scope.ownerScopeKey)
+    })
+
+    this.trackBackgroundTask(execution.then(() => {}, () => {}))
+    return await execution
+  }
+
+  listWebLearningRuns(ownerScopeKey: string, limit = 20): readonly StoredWebLearningRunRow[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryWebLearningRuns(this.assocStore.database, ownerScopeKey, limit)
+  }
+
+  listWebLearningFetches(
+    ownerScopeKey: string,
+    limit = 50,
+  ): readonly StoredWebLearningFetchRow[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryWebLearningFetches(this.assocStore.database, ownerScopeKey, limit)
+  }
+
+  getWebLearningBudgetUsage(
+    ownerScopeKey: string,
+    utcDay?: string | number,
+  ): WebLearningBudgetUsageRow {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    let effectiveNowMs: number
+    if (typeof utcDay === 'string') {
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(utcDay)) {
+        throw new AssistantAssociationError(
+          'invalid-input',
+          'utcDay must be formatted as YYYY-MM-DD',
+        )
+      }
+      const parsed = Date.parse(`${utcDay}T00:00:00.000Z`)
+      if (!Number.isFinite(parsed)) {
+        throw new AssistantAssociationError('invalid-input', 'utcDay is not a valid UTC date')
+      }
+      effectiveNowMs = parsed
+    } else {
+      effectiveNowMs = utcDay ?? this.nowClock()
+    }
+    return queryWebLearningBudgetUsage(this.assocStore.database, ownerScopeKey, effectiveNowMs)
+  }
+
+  async withdrawWebSource(
+    scope: Pick<AssociationOwnerScope, 'ownerScopeKey'>,
+    sourceUrl: string,
+    nowMs?: number,
+  ): Promise<WithdrawalCascadeResult> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null || this.writeQueue === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    await this.writeQueue.flush()
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    const canonicalUrl = canonicalizeWebSourceUrl(sourceUrl)
+    const sourceRef = computeWebSourceRef(canonicalUrl)
+    this.writeQueue.markTombstoneSync({
+      ownerScopeKey: scope.ownerScopeKey,
+      sourcePlugin: WEB_LEARNING_SOURCE_PLUGIN,
+      sourceRef,
+    })
+    this.activeIndex?.tombstoneSourceRef(
+      scope.ownerScopeKey,
+      WEB_LEARNING_SOURCE_PLUGIN,
+      sourceRef,
+    )
+    const result = withdrawWebSourceByUrl(
+      this.assocStore,
+      scope,
+      sourceUrl,
+      nowMs ?? this.nowClock(),
+    )
+    const evicted = new Set<string>([...result.deletedNodeIds, ...result.suppressedNodeIds])
+    if (evicted.size > 0) {
+      if (this.activeIndex !== null) {
+        for (const id of evicted) {
+          this.activeIndex.tombstoneNodeId(id)
+        }
+      }
+      this.evictNodesAcrossActiveAgents(evicted)
+    }
+    await this.rebuildIndex()
+    return result
   }
 
   private resolveAgentScope(agent: Agent): AssociationOwnerScope | undefined {
@@ -2196,6 +2455,30 @@ export class AssistantAssociationService extends Service {
     for (const scope of this.sourceManager.listScopes()) {
       if (!this.active) return
       await this.runDreamingNow(scope)
+    }
+  }
+
+  private async runPeriodicS4WebLearning(): Promise<void> {
+    if (
+      !this.active ||
+      !this.assocConfig.enabled ||
+      !this.assocConfig.webLearning.enabled ||
+      this.sourceManager === null ||
+      this.writeQueue?.hasPendingWithdrawals
+    ) {
+      return
+    }
+    for (const scope of this.sourceManager.listScopes()) {
+      if (!this.active || this.writeQueue?.hasPendingWithdrawals) return
+      if (this.inFlightWebLearningScopes.has(scope.ownerScopeKey)) continue
+      try {
+        await this.runWebLearningNow(scope)
+      } catch (error) {
+        if (error instanceof AssistantAssociationError && error.code === 'disposed') {
+          return
+        }
+        throw error
+      }
     }
   }
 
