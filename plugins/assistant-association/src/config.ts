@@ -1,10 +1,28 @@
 import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import {
+  DEFAULT_CLUSTERING_CONFIG,
+  normalizeClusteringConfig,
+  type ClusteringConfig,
+  type NormalizedClusteringConfig,
+} from './clustering.js'
+import {
+  DEFAULT_ASSOCIATION_DREAMING_CONFIG,
+  normalizeAssociationDreamingConfig,
+  type AssociationDreamingConfig,
+  type AssociationDreamingNormalizedConfig,
+} from './dreaming.js'
+import {
   DEFAULT_HOLDOUT_RATE_BPS,
   MAX_HOLDOUT_RATE_BPS,
   MIN_HOLDOUT_RATE_BPS,
 } from './holdout.js'
+import {
+  DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG,
+  normalizeAssociationIntakeSignalConfig,
+  type AssociationIntakeSignalConfig,
+  type AssociationIntakeSignalNormalizedConfig,
+} from './intake-signal.js'
 import {
   DEFAULT_HEBBIAN_CONFIG,
   DEFAULT_PARAM_TUNING_CONFIG,
@@ -42,8 +60,9 @@ export interface AssociationConfig {
   allowSensitive?: boolean
   hebbian?: HebbianConfig
   paramTuning?: ParamTuningConfig
-  dreaming?: AssociationFeatureToggleConfig
-  intakeSignal?: AssociationFeatureToggleConfig
+  dreaming?: AssociationDreamingConfig
+  intakeSignal?: AssociationIntakeSignalConfig
+  clustering?: ClusteringConfig
   webLearning?: AssociationFeatureToggleConfig
 }
 
@@ -70,12 +89,14 @@ export interface NormalizedAssociationConfig {
   readonly sourceWeights: Readonly<Record<NodeKind, number>>
   readonly hebbian: NormalizedHebbianConfig
   readonly paramTuning: NormalizedParamTuningConfig
-  readonly dreaming: Readonly<{ readonly enabled: boolean }>
-  readonly intakeSignal: Readonly<{ readonly enabled: boolean }>
+  readonly dreaming: AssociationDreamingNormalizedConfig
+  readonly intakeSignal: AssociationIntakeSignalNormalizedConfig
+  readonly clustering: NormalizedClusteringConfig
   readonly webLearning: Readonly<{ readonly enabled: boolean }>
 }
 
 const DEFAULT_DECAY_HALF_LIFE_MS = 14 * 86_400_000
+const INTAKE_SOURCE_ID_RE = /^[a-z][a-z0-9-]{0,63}$/u
 
 const KNOWN_FIELDS = new Set<string>([
   'enabled',
@@ -101,6 +122,7 @@ const KNOWN_FIELDS = new Set<string>([
   'paramTuning',
   'dreaming',
   'intakeSignal',
+  'clustering',
   'webLearning',
 ])
 
@@ -140,11 +162,123 @@ const KNOWN_PARAM_TUNING_FIELDS = new Set<string>([
   'rollbackCooldownMs',
 ])
 
+const KNOWN_DREAMING_FIELDS = new Set<string>([
+  'enabled',
+  'intervalMs',
+  'idleMinMs',
+  'maxPairsPerRun',
+  'maxAbstractionsPerRun',
+  'maxSynonymsPerRun',
+  'nodeTtlMs',
+  'allowModelSynthesis',
+  'budgetId',
+  'budgetAmount',
+])
+
+const KNOWN_INTAKE_SIGNAL_FIELDS = new Set<string>([
+  'enabled',
+  'minScore',
+  'maxSignalsPerHour',
+  'cooldownMs',
+  'maxSummaryBytes',
+  'sourceId',
+  'budgetId',
+  'budgetAmount',
+])
+
+const KNOWN_CLUSTERING_FIELDS = new Set<string>([
+  'entityWeight',
+  'toolWeight',
+  'minSimilarity',
+  'minClusterSize',
+  'reAskWindowMs',
+  'reAskMinEntityJaccard',
+])
+
+const KNOWN_WEB_LEARNING_FIELDS = new Set<string>(['enabled'])
+
 const boundedPath = Schema.string().min(1).max(4_096)
 
 const featureToggleSchema = Schema.object({
   enabled: Schema.boolean().default(false),
 }).default({ enabled: false })
+
+const dreamingSchema = Schema.object({
+  enabled: Schema.boolean().default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.enabled),
+  intervalMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.intervalMs),
+  idleMinMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.idleMinMs),
+  maxPairsPerRun: Schema.natural()
+    .min(0)
+    .max(1_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxPairsPerRun),
+  maxAbstractionsPerRun: Schema.natural()
+    .min(0)
+    .max(1_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxAbstractionsPerRun),
+  maxSynonymsPerRun: Schema.natural()
+    .min(0)
+    .max(1_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxSynonymsPerRun),
+  nodeTtlMs: Schema.natural()
+    .min(0)
+    .max(3_650 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_DREAMING_CONFIG.nodeTtlMs),
+  allowModelSynthesis: Schema.boolean().default(
+    DEFAULT_ASSOCIATION_DREAMING_CONFIG.allowModelSynthesis,
+  ),
+  budgetId: Schema.string().min(1).max(256),
+  budgetAmount: Schema.number().min(0).max(1_000_000),
+}).default({ ...DEFAULT_ASSOCIATION_DREAMING_CONFIG })
+
+const intakeSignalSchema = Schema.object({
+  enabled: Schema.boolean().default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.enabled),
+  minScore: Schema.number()
+    .min(0)
+    .max(100)
+    .default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.minScore),
+  maxSignalsPerHour: Schema.natural()
+    .min(0)
+    .max(10_000)
+    .default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.maxSignalsPerHour),
+  cooldownMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.cooldownMs),
+  maxSummaryBytes: Schema.natural()
+    .min(64)
+    .max(65_536)
+    .default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.maxSummaryBytes),
+  sourceId: Schema.string()
+    .min(1)
+    .max(64)
+    .default(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.sourceId),
+  budgetId: Schema.string().min(1).max(256),
+  budgetAmount: Schema.number().min(0).max(1_000_000),
+}).default({ ...DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG })
+
+const clusteringSchema = Schema.object({
+  entityWeight: Schema.number().min(0).max(10).default(DEFAULT_CLUSTERING_CONFIG.entityWeight),
+  toolWeight: Schema.number().min(0).max(10).default(DEFAULT_CLUSTERING_CONFIG.toolWeight),
+  minSimilarity: Schema.number().min(0).max(1).default(DEFAULT_CLUSTERING_CONFIG.minSimilarity),
+  minClusterSize: Schema.natural()
+    .min(2)
+    .max(100)
+    .default(DEFAULT_CLUSTERING_CONFIG.minClusterSize),
+  reAskWindowMs: Schema.natural()
+    .min(0)
+    .max(365 * 86_400_000)
+    .default(DEFAULT_CLUSTERING_CONFIG.reAskWindowMs),
+  reAskMinEntityJaccard: Schema.number()
+    .min(0)
+    .max(1)
+    .default(DEFAULT_CLUSTERING_CONFIG.reAskMinEntityJaccard),
+}).default({ ...DEFAULT_CLUSTERING_CONFIG })
 
 const hebbianSchema = Schema.object({
   enabled: Schema.boolean().default(DEFAULT_HEBBIAN_CONFIG.enabled),
@@ -275,8 +409,9 @@ const rawSchema = Schema.object({
   allowSensitive: Schema.boolean().default(false),
   hebbian: hebbianSchema,
   paramTuning: paramTuningSchema,
-  dreaming: featureToggleSchema,
-  intakeSignal: featureToggleSchema,
+  dreaming: dreamingSchema,
+  intakeSignal: intakeSignalSchema,
+  clustering: clusteringSchema,
   webLearning: featureToggleSchema,
 }).default({})
 
@@ -311,6 +446,10 @@ export const Config: Schema<AssociationConfig> = new Proxy(rawSchema, {
       }
       checkKnownNestedFields(record.hebbian, KNOWN_HEBBIAN_FIELDS, 'hebbian')
       checkKnownNestedFields(record.paramTuning, KNOWN_PARAM_TUNING_FIELDS, 'paramTuning')
+      checkKnownNestedFields(record.dreaming, KNOWN_DREAMING_FIELDS, 'dreaming')
+      checkKnownNestedFields(record.intakeSignal, KNOWN_INTAKE_SIGNAL_FIELDS, 'intakeSignal')
+      checkKnownNestedFields(record.clustering, KNOWN_CLUSTERING_FIELDS, 'clustering')
+      checkKnownNestedFields(record.webLearning, KNOWN_WEB_LEARNING_FIELDS, 'webLearning')
     }
     const parsed = Reflect.apply(target, thisArg, argumentsList) as AssociationConfig
     validateCrossFieldConstraints(parsed)
@@ -427,6 +566,118 @@ function validateCrossFieldConstraints(parsed: AssociationConfig): void {
   ] as const) {
     assertFiniteRange(val, `paramTuning.${key}`, (n) => n >= 0 && n <= 1_000_000, 'must be in [0, 1000000]')
   }
+
+  const dream = parsed.dreaming ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG
+  assertFiniteRange(
+    dream.intervalMs ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.intervalMs,
+    'dreaming.intervalMs',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    dream.idleMinMs ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.idleMinMs,
+    'dreaming.idleMinMs',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    dream.maxPairsPerRun ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxPairsPerRun,
+    'dreaming.maxPairsPerRun',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    dream.maxAbstractionsPerRun ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxAbstractionsPerRun,
+    'dreaming.maxAbstractionsPerRun',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    dream.maxSynonymsPerRun ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.maxSynonymsPerRun,
+    'dreaming.maxSynonymsPerRun',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    dream.nodeTtlMs ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.nodeTtlMs,
+    'dreaming.nodeTtlMs',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  if (dream.budgetAmount !== undefined) {
+    assertFiniteRange(dream.budgetAmount, 'dreaming.budgetAmount', (n) => n > 0, 'must be > 0')
+  }
+
+  const intake = parsed.intakeSignal ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG
+  assertFiniteRange(
+    intake.minScore ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.minScore,
+    'intakeSignal.minScore',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    intake.maxSignalsPerHour ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.maxSignalsPerHour,
+    'intakeSignal.maxSignalsPerHour',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    intake.cooldownMs ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.cooldownMs,
+    'intakeSignal.cooldownMs',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    intake.maxSummaryBytes ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.maxSummaryBytes,
+    'intakeSignal.maxSummaryBytes',
+    (n) => n >= 64 && n <= 65_536,
+    'must be in [64, 65536]',
+  )
+  const sourceId = intake.sourceId ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.sourceId
+  if (!INTAKE_SOURCE_ID_RE.test(sourceId)) {
+    throw new Error('assistant-association: intakeSignal.sourceId must match /^[a-z][a-z0-9-]{0,63}$/u')
+  }
+  if (intake.budgetAmount !== undefined) {
+    assertFiniteRange(intake.budgetAmount, 'intakeSignal.budgetAmount', (n) => n > 0, 'must be > 0')
+  }
+
+  const clust = parsed.clustering ?? DEFAULT_CLUSTERING_CONFIG
+  assertFiniteRange(
+    clust.entityWeight ?? DEFAULT_CLUSTERING_CONFIG.entityWeight,
+    'clustering.entityWeight',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    clust.toolWeight ?? DEFAULT_CLUSTERING_CONFIG.toolWeight,
+    'clustering.toolWeight',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    clust.minSimilarity ?? DEFAULT_CLUSTERING_CONFIG.minSimilarity,
+    'clustering.minSimilarity',
+    (n) => n >= 0 && n <= 1,
+    'must be in [0, 1]',
+  )
+  assertFiniteRange(
+    clust.minClusterSize ?? DEFAULT_CLUSTERING_CONFIG.minClusterSize,
+    'clustering.minClusterSize',
+    (n) => Number.isSafeInteger(n) && n >= 2,
+    'must be an integer >= 2',
+  )
+  assertFiniteRange(
+    clust.reAskWindowMs ?? DEFAULT_CLUSTERING_CONFIG.reAskWindowMs,
+    'clustering.reAskWindowMs',
+    (n) => n >= 0,
+    'must be >= 0',
+  )
+  assertFiniteRange(
+    clust.reAskMinEntityJaccard ?? DEFAULT_CLUSTERING_CONFIG.reAskMinEntityJaccard,
+    'clustering.reAskMinEntityJaccard',
+    (n) => n >= 0 && n <= 1,
+    'must be in [0, 1]',
+  )
 }
 
 export function normalizeConfig(input?: AssociationConfig): NormalizedAssociationConfig {
@@ -511,8 +762,9 @@ export function normalizeConfig(input?: AssociationConfig): NormalizedAssociatio
     sourceWeights: DEFAULT_SOURCE_WEIGHTS,
     hebbian,
     paramTuning,
-    dreaming: Object.freeze({ enabled: parsed.dreaming?.enabled ?? false }),
-    intakeSignal: Object.freeze({ enabled: parsed.intakeSignal?.enabled ?? false }),
+    dreaming: normalizeAssociationDreamingConfig(parsed.dreaming),
+    intakeSignal: normalizeAssociationIntakeSignalConfig(parsed.intakeSignal),
+    clustering: normalizeClusteringConfig(parsed.clustering),
     webLearning: Object.freeze({ enabled: parsed.webLearning?.enabled ?? false }),
   })
 }

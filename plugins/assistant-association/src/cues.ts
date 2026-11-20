@@ -245,7 +245,9 @@ export function addPromptEntitiesFromText(
     }
   }
   if (activeIndex !== undefined && activeIndex !== null) {
-    for (const hit of extractAcEntitiesFromText(activeIndex.ac, text)) {
+    const acOpts =
+      state.ownerKey !== undefined ? { ownerScopeKey: state.ownerKey } : undefined
+    for (const hit of extractAcEntitiesFromText(activeIndex.ac, text, acOpts)) {
       const key = normalizeEntityKey(hit.entityId)
       if (key !== null) {
         state.turnPromptEntities.add(key)
@@ -282,7 +284,8 @@ export function recordTaskExposures(
         hop: item.hop,
         score: item.score,
         reason: item.reason,
-        provenanceEdges: item.provenanceEdges ?? existing.provenanceEdges,
+        provenanceEdges:
+          item.hop === 0 ? [] : (item.provenanceEdges ?? existing.provenanceEdges),
         strongUsed: existing.strongUsed,
         weakUsed: existing.weakUsed,
       })
@@ -383,8 +386,15 @@ export function handleAgentStatus(
 export function extractAcEntitiesFromText(
   ac: EntityAutomaton,
   rawText: string,
+  options?: {
+    readonly ownerScopeKey?: string
+    readonly allowLowTrust?: boolean
+  },
 ): Array<{ readonly entityId: string; readonly surface: string }> {
   if (ac.entityCount === 0 || rawText.length === 0) return []
+  const filterByOwner = options?.ownerScopeKey !== undefined
+  const acOwnerIdx = filterByOwner ? (ac.ownerKeyToIdx.get(options.ownerScopeKey!) ?? -1) : -1
+  const allowLowTrust = options?.allowLowTrust ?? true
   const normText = normalizeForAc(rawText)
   const seen = new Set<number>()
   const matches: Array<{ readonly entityId: string; readonly surface: string }> = []
@@ -399,6 +409,11 @@ export function extractAcEntitiesFromText(
     for (let oi = oStart; oi < oEnd; oi += 1) {
       const startPos = isBoundaryMatch(ac, oi, normText, i)
       if (startPos < 0) continue
+      if (filterByOwner) {
+        const synOwnerIdx = ac.outSynonymOwnerIdx[oi]!
+        if (synOwnerIdx >= 0 && synOwnerIdx !== acOwnerIdx) continue
+      }
+      if (!allowLowTrust && ac.outSynonymTrust[oi] === 0) continue
       const eid = ac.outEntityId[oi]!
       if (seen.has(eid)) continue
       seen.add(eid)
@@ -622,7 +637,11 @@ export function handleSessionEvent(
 
     if (activeIndex === null) return {}
 
-    const matched = extractAcEntitiesFromText(activeIndex.ac, localText)
+    const matched = extractAcEntitiesFromText(
+      activeIndex.ac,
+      localText,
+      state.ownerKey !== undefined ? { ownerScopeKey: state.ownerKey } : undefined,
+    )
     if (matched.length > 0) {
       state.hasNewToolEntity = true
     }

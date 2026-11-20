@@ -27,6 +27,8 @@ import {
 import { tokenizeWiki, truncateUtf8, wikiParagraphs } from './tokenize.js'
 import type {
   WikiPage,
+  WikiPageChangeEvent,
+  WikiPageChangeKind,
   WikiPageInput,
   WikiLintFinding,
   WikiLintReport,
@@ -130,6 +132,7 @@ export class WikiVault {
   private readonly now: () => number
   private readonly entropy: () => Uint8Array
   private pages = new Map<string, WikiPage>()
+  private readonly pageChangeListeners = new Set<(event: WikiPageChangeEvent) => void>()
 
   constructor(options: WikiVaultOptions) {
     if (!isAbsolute(options.root)) throw new WikiVaultError('invalid-path', 'wiki vault root must be absolute')
@@ -510,8 +513,85 @@ export class WikiVault {
       next.set(page.metadata.id, page)
     }
     for (const page of next.values()) this.assertDerivedSources(page.metadata, next)
+    const previous = this.pages
     this.pages = next
+    this.notifyPageChanges(previous, next)
     return this.list()
+  }
+
+  onPageChange(listener: (event: WikiPageChangeEvent) => void): () => void {
+    if (typeof listener !== 'function') {
+      throw new WikiVaultError('invalid-page', 'wiki page change listener must be a function')
+    }
+    this.pageChangeListeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      this.pageChangeListeners.delete(listener)
+    }
+  }
+
+  clearPageChangeListeners(): void {
+    this.pageChangeListeners.clear()
+  }
+
+  private notifyPageChanges(previous: ReadonlyMap<string, WikiPage>, next: ReadonlyMap<string, WikiPage>): void {
+    if (this.pageChangeListeners.size === 0) return
+    const events: WikiPageChangeEvent[] = []
+    for (const [pageId, nextPage] of next.entries()) {
+      const prevPage = previous.get(pageId)
+      if (prevPage === undefined) {
+        const kind: WikiPageChangeKind = nextPage.metadata.status === 'archived' ? 'archived' : 'added'
+        events.push(Object.freeze({
+          kind,
+          pageId,
+          revision: nextPage.revision,
+          status: nextPage.metadata.status,
+          page: nextPage,
+        }))
+        continue
+      }
+      if (
+        prevPage.revision !== nextPage.revision
+        || prevPage.metadata.updated !== nextPage.metadata.updated
+        || prevPage.metadata.status !== nextPage.metadata.status
+      ) {
+        const kind: WikiPageChangeKind =
+          prevPage.metadata.status !== 'archived' && nextPage.metadata.status === 'archived'
+            ? 'archived'
+            : 'updated'
+        events.push(Object.freeze({
+          kind,
+          pageId,
+          revision: nextPage.revision,
+          previousRevision: prevPage.revision,
+          status: nextPage.metadata.status,
+          previousStatus: prevPage.metadata.status,
+          page: nextPage,
+        }))
+      }
+    }
+    for (const [pageId, prevPage] of previous.entries()) {
+      if (next.has(pageId)) continue
+      events.push(Object.freeze({
+        kind: 'deleted',
+        pageId,
+        previousRevision: prevPage.revision,
+        previousStatus: prevPage.metadata.status,
+      }))
+    }
+    if (events.length === 0) return
+    const listeners = [...this.pageChangeListeners]
+    for (const event of events) {
+      for (const listener of listeners) {
+        try {
+          listener(event)
+        } catch {
+          // Listener errors must never disrupt committed vault rebuilds or writes.
+        }
+      }
+    }
   }
 
   createPage(input: WikiPageInput): WikiPage {

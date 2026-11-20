@@ -1203,13 +1203,137 @@ describe('exact-parent rollback & anti-thrashing', () => {
       action: 'rolled-back',
       fromVersion: 2,
       toVersion: 0,
-      reason: 'timeout-rate-regressed',
+      reason: 'version-unverifiable',
     })
     const headAfterFb = db
       .prepare('SELECT active_version, active_digest FROM assoc_param_profile_heads WHERE scope_key = ?')
       .get(fallbackScope) as { active_version: number; active_digest: string }
     expect(headAfterFb.active_version).toBe(0)
     expect(headAfterFb.active_digest).toBe(ledger.current(fallbackScope).digest)
+
+    db.close()
+  })
+
+  test('recursively verifies ancestor payloads in #verified so tampered ancestor params_json or basis_json rejects entire descendant chain', () => {
+    const dir = makeTempDir()
+    const dbPath = join(dir, 'ancestor-tamper.sqlite')
+    const db = openAssociationDatabase(dbPath)
+    ensureParamTuningSchema(db)
+
+    let now = 20_000_000
+    const ledger = new AssociationParamTuningLedger(db, {
+      now: () => now,
+      policy: { observationMs: DAY_MS },
+    })
+
+    // 1. Chain v0 -> v1 -> v2 -> v3: tamper v1.basis_json (leaving all digest columns untouched) -> rejects v3, v2, v1
+    const basisScope = makeScopeKey('ancestor-basis-tamper')
+    const v0 = ledger.current(basisScope)
+    expect(
+      ledger.requestChange({
+        scopeKey: basisScope,
+        candidate: makeDefaultProfile({ maxItems: 7 }),
+        reason: 'v1',
+      }),
+    ).toMatchObject({ status: 'adopted', version: 1 })
+    now += DAY_MS
+    expect(ledger.tick({ scopeKey: basisScope })).toEqual({ action: 'settled', version: 1 })
+
+    expect(
+      ledger.requestChange({
+        scopeKey: basisScope,
+        candidate: makeDefaultProfile({ maxItems: 6 }),
+        reason: 'v2',
+      }),
+    ).toMatchObject({ status: 'adopted', version: 2 })
+    now += DAY_MS
+    expect(ledger.tick({ scopeKey: basisScope })).toEqual({ action: 'settled', version: 2 })
+    const v1 = ledger.status(basisScope).versions.find((v) => v.version === 1)!
+    expect(v1).toBeDefined()
+
+    expect(
+      ledger.requestChange({
+        scopeKey: basisScope,
+        candidate: makeDefaultProfile({ maxItems: 5 }),
+        reason: 'v3',
+      }),
+    ).toMatchObject({ status: 'adopted', version: 3 })
+    now += DAY_MS
+    expect(ledger.tick({ scopeKey: basisScope })).toEqual({ action: 'settled', version: 3 })
+    expect(ledger.current(basisScope)).toMatchObject({ version: 3, source: 'active' })
+
+    db.exec(`DROP TRIGGER IF EXISTS assoc_param_profile_versions_immutable;`)
+    db.prepare(
+      'UPDATE assoc_param_profile_versions SET basis_json = ? WHERE scope_key = ? AND version = 1',
+    ).run('{"stats":{"tampered":true}}', basisScope)
+
+    // Entire descendant chain v3 -> v2 -> v1 must be rejected, falling back to verified baseline v0
+    expect(ledger.current(basisScope)).toMatchObject({
+      version: 0,
+      origin: 'baseline',
+      source: 'default',
+      digest: v0.digest,
+    })
+    expect(ledger.status(basisScope).versions).toEqual([])
+
+    // 2. Chain v0 -> v1 -> v2 with v2 observing: tamper v1.params_json (digests untouched) -> tick() rejects v2 as version-unverifiable & rolls back to v0
+    const paramsScope = makeScopeKey('ancestor-params-tamper')
+    expect(
+      ledger.requestChange({
+        scopeKey: paramsScope,
+        candidate: makeDefaultProfile({ maxItems: 7 }),
+        reason: 'p-v1',
+      }),
+    ).toMatchObject({ status: 'adopted', version: 1 })
+    now += DAY_MS
+    expect(ledger.tick({ scopeKey: paramsScope })).toEqual({ action: 'settled', version: 1 })
+
+    expect(
+      ledger.requestChange({
+        scopeKey: paramsScope,
+        candidate: makeDefaultProfile({ maxItems: 7, maxHops: 1 }),
+        reason: 'p-v2',
+      }),
+    ).toMatchObject({ status: 'adopted', version: 2 })
+    expect(ledger.status(paramsScope).state).toBe('observing')
+
+    db.prepare(
+      'UPDATE assoc_param_profile_versions SET params_json = ? WHERE scope_key = ? AND version = 1',
+    ).run('{"tampered":true}', paramsScope)
+
+    now += 100
+    expect(ledger.tick({ scopeKey: paramsScope })).toEqual({
+      action: 'rolled-back',
+      fromVersion: 2,
+      toVersion: 0,
+      reason: 'version-unverifiable',
+    })
+    expect(ledger.current(paramsScope).version).toBe(0)
+    expect(ledger.status(paramsScope).versions).toEqual([])
+
+    // 3. Chain v0 -> v1 -> v2 -> v3: tamper v2.params_json (digests untouched) -> rejects v3 & v2, falls back to verified v1
+    const midScope = makeScopeKey('ancestor-mid-tamper')
+    ledger.requestChange({ scopeKey: midScope, candidate: makeDefaultProfile({ maxItems: 7 }), reason: 'm-v1' })
+    now += DAY_MS
+    ledger.tick({ scopeKey: midScope })
+    const midV1 = ledger.current(midScope)
+    ledger.requestChange({ scopeKey: midScope, candidate: makeDefaultProfile({ maxItems: 6 }), reason: 'm-v2' })
+    now += DAY_MS
+    ledger.tick({ scopeKey: midScope })
+    ledger.requestChange({ scopeKey: midScope, candidate: makeDefaultProfile({ maxItems: 5 }), reason: 'm-v3' })
+    now += DAY_MS
+    ledger.tick({ scopeKey: midScope })
+
+    db.prepare(
+      'UPDATE assoc_param_profile_versions SET params_json = ? WHERE scope_key = ? AND version = 2',
+    ).run('{"tampered":true}', midScope)
+
+    expect(ledger.current(midScope)).toMatchObject({
+      version: 1,
+      source: 'parent-fallback',
+      digest: midV1.digest,
+    })
+    expect(ledger.status(midScope).versions.map((v) => v.version)).toEqual([1])
 
     db.close()
   })

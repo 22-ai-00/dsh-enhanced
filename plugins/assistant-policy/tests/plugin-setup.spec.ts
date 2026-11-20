@@ -154,6 +154,41 @@ describe('plugin setup: naming and validation', () => {
     expect(() => coerceConfigValue('dsh-enhanced-assistant-work-items', 'acceptance.holdReport.holdTimeoutMs', 'soon', undefined)).toThrow(/expects a number/u)
     expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'on', undefined)).toBe(true)
     expect(() => coerceConfigValue('dsh-enhanced-assistant-delivery', 'ownerReportRouting.orderAcrossLanes', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    // Slice S3 assistant-association optional nested keys validate without `--force`.
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.intervalMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.idleMinMs', '1800000', undefined)).toBe(1800000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxPairsPerRun', '16', undefined)).toBe(16)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxAbstractionsPerRun', '4', undefined)).toBe(4)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.maxSynonymsPerRun', '16', undefined)).toBe(16)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.nodeTtlMs', '2592000000', undefined)).toBe(2592000000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.allowModelSynthesis', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.budgetId', 'dream-budget', undefined)).toBe('dream-budget')
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.budgetAmount', '5', undefined)).toBe(5)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.allowModelSynthesis', 'maybe', undefined)).toThrow(/expects a boolean/u)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'dreaming.intervalMs', 'soon', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.minScore', '0.75', undefined)).toBe(0.75)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.maxSignalsPerHour', '10', undefined)).toBe(10)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.cooldownMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.maxSummaryBytes', '1024', undefined)).toBe(1024)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.sourceId', 'assistant-association', undefined)).toBe('assistant-association')
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.budgetId', 'intake-budget', undefined)).toBe('intake-budget')
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.budgetAmount', '2', undefined)).toBe(2)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'intakeSignal.minScore', 'high', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.entityWeight', '0.4', undefined)).toBe(0.4)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.toolWeight', '0.6', undefined)).toBe(0.6)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minSimilarity', '0.55', undefined)).toBe(0.55)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minClusterSize', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.reAskWindowMs', '3600000', undefined)).toBe(3600000)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.reAskMinEntityJaccard', '0.5', undefined)).toBe(0.5)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-association', 'clustering.minClusterSize', 'three', undefined)).toThrow(/expects a number/u)
+    expect(coerceConfigValue('dsh-enhanced-assistant-association', 'webLearning.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'dreamingIdeas.maxIdeasPerWake', '3', undefined)).toBe(3)
+    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', '3', undefined)).toBe(3)
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-growth-driver', 'associationCandidates.maxCandidatesPerWake', 'many', undefined)).toThrow(/expects a number/u)
   })
 
   test('parses commands and rejects bad arity or options', () => {
@@ -696,5 +731,71 @@ describe('plugin setup: CLI', () => {
       from: true,
       to: false,
     })
+  })
+
+  test('sets S3 assistant-association nested keys without --force and pins S3/S4 flags off in dogfood preset', async () => {
+    const home = await temporaryHome()
+    const assocBundle = `
+- id: dsh-enhanced-assistant-association
+  name: '@dsh-enhanced/assistant-association'
+  config:
+    enabled: false
+    dreaming:
+      enabled: true
+    intakeSignal:
+      enabled: true
+    webLearning:
+      enabled: true
+`
+    const dumpOpts = { readDump: dumpFixture(assocBundle) }
+    const s3Settings: ReadonlyArray<readonly [string, string]> = [
+      ['dreaming.enabled', 'false'],
+      ['dreaming.intervalMs', '3600000'],
+      ['dreaming.idleMinMs', '1800000'],
+      ['dreaming.maxPairsPerRun', '16'],
+      ['dreaming.maxAbstractionsPerRun', '4'],
+      ['dreaming.maxSynonymsPerRun', '16'],
+      ['dreaming.nodeTtlMs', '2592000000'],
+      ['dreaming.allowModelSynthesis', 'false'],
+      ['dreaming.budgetId', 'assoc-dream-budget'],
+      ['dreaming.budgetAmount', '4'],
+      ['intakeSignal.enabled', 'false'],
+      ['intakeSignal.minScore', '0.8'],
+      ['intakeSignal.maxSignalsPerHour', '5'],
+      ['intakeSignal.cooldownMs', '3600000'],
+      ['intakeSignal.maxSummaryBytes', '1024'],
+      ['intakeSignal.sourceId', 'assistant-association'],
+      ['intakeSignal.budgetId', 'assoc-intake-budget'],
+      ['intakeSignal.budgetAmount', '2'],
+      ['clustering.entityWeight', '0.4'],
+      ['clustering.toolWeight', '0.6'],
+      ['clustering.minSimilarity', '0.55'],
+      ['clustering.minClusterSize', '3'],
+      ['clustering.reAskWindowMs', '3600000'],
+      ['clustering.reAskMinEntityJaccard', '0.5'],
+    ]
+    for (const [key, value] of s3Settings) {
+      await setPluginConfigValue({ dshHome: home, profile: 'web', plugin: 'assistant-association', key, value }, dumpOpts)
+    }
+
+    const patchText = await profilePatch(home)
+    expect(patchText).toContain('maxPairsPerRun: 16')
+    expect(patchText).toContain('budgetId: assoc-dream-budget')
+    expect(patchText).toContain('minScore: 0.8')
+    expect(patchText).toContain('minClusterSize: 3')
+
+    const homeDogfood = await temporaryHome()
+    const dogfoodResult = await applyDogfoodPluginPreset(
+      { dshHome: homeDogfood, profile: 'web' },
+      { readDump: dumpFixture(assocBundle) },
+    )
+    expect(dogfoodResult.changes).toEqual(
+      expect.arrayContaining([
+        { id: 'dsh-enhanced-assistant-association', key: 'enabled', from: false, to: true },
+        { id: 'dsh-enhanced-assistant-association', key: 'dreaming.enabled', from: true, to: false },
+        { id: 'dsh-enhanced-assistant-association', key: 'intakeSignal.enabled', from: true, to: false },
+        { id: 'dsh-enhanced-assistant-association', key: 'webLearning.enabled', from: true, to: false },
+      ]),
+    )
   })
 })

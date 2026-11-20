@@ -138,6 +138,7 @@ export class AssistantDreamingService extends Service {
   #unregister: (() => void) | undefined
   #unsubscribeWake: (() => void) | undefined
   #unsubscribeLlm: (() => void) | undefined
+  readonly #ideaChangeListeners = new Set<() => void>()
   #coldStartAnchorAt: number
   /**
    * Fresh per-load reconcile nonce for the active transition. Automations
@@ -211,6 +212,7 @@ export class AssistantDreamingService extends Service {
     }
     ctx.effect(() => () => {
       this.#active = false
+      this.#ideaChangeListeners.clear()
       this.#unsubscribeLlm?.()
       this.#unsubscribeLlm = undefined
       this.#unsubscribeWake?.()
@@ -230,7 +232,10 @@ export class AssistantDreamingService extends Service {
    * keep expired ideas forever. Failure is observable but never fails a wake.
    */
   #pruneStore(now: number): void {
-    try { this.#store?.prune(now, this.#config.retentionDays) } catch (error) {
+    try {
+      const removed = this.#store?.prune(now, this.#config.retentionDays) ?? 0
+      if (removed > 0) this.#notifyIdeaChange()
+    } catch (error) {
       this.ctx.logger.warn(`assistant-dreaming: idea retention prune failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -608,13 +613,17 @@ export class AssistantDreamingService extends Service {
         signal: input.signal,
         onSubmit: ideas => {
           let recorded = 0
-          for (const idea of ideas) {
-            store.recordIdea({
-              id: createHash('sha256').update(`${runId}\0${recorded}\0${idea.summary}`).digest('hex').slice(0, 32),
-              runId, createdAt: Date.now(), dayKey: decision.dayKey,
-              summary: idea.summary, detail: idea.detail, evidenceRefs: idea.evidenceRefs,
-            })
-            recorded += 1
+          try {
+            for (const idea of ideas) {
+              store.recordIdea({
+                id: createHash('sha256').update(`${runId}\0${recorded}\0${idea.summary}`).digest('hex').slice(0, 32),
+                runId, createdAt: Date.now(), dayKey: decision.dayKey,
+                summary: idea.summary, detail: idea.detail, evidenceRefs: idea.evidenceRefs,
+              })
+              recorded += 1
+            }
+          } finally {
+            if (recorded > 0) this.#notifyIdeaChange()
           }
           return recorded
         },
@@ -717,6 +726,31 @@ export class AssistantDreamingService extends Service {
     return this.#store.listIdeaEvents(id, normalizeLimit(limit))
   }
 
+  /** Host-only notification when dreaming ideas are created, validated, or transitioned. */
+  onIdeaChange = (listener: () => void): (() => void) => {
+    if (!this.#active) throw new Error('assistant-dreaming: dreaming service is not active')
+    if (typeof listener !== 'function') throw new TypeError('assistant-dreaming: listener must be a function')
+    if (!this.#config.enabled) return () => {}
+    this.#ideaChangeListeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      this.#ideaChangeListeners.delete(listener)
+    }
+  }
+
+  #notifyIdeaChange(): void {
+    if (!this.#active) return
+    for (const listener of Array.from(this.#ideaChangeListeners)) {
+      try {
+        listener()
+      } catch {
+        // Listener errors must never disrupt idea persistence or transitions.
+      }
+    }
+  }
+
   /** Owner-authorized transition from `recorded` -> `owner-acknowledged`. */
   acknowledgeIdea = (input: AcknowledgeIdeaInput): DreamIdeaTransitionResult =>
     this.#authorizeAndTransition(input, 'acknowledge', 'owner-acknowledged')
@@ -797,6 +831,7 @@ export class AssistantDreamingService extends Service {
     }
     const result = this.#store.transitionIdea(ideaId, targetState, 'owner', Date.now(), raw.note)
     this.#store.pruneResolvedIdeaTickets()
+    this.#notifyIdeaChange()
     return result
   }
 
@@ -807,6 +842,7 @@ export class AssistantDreamingService extends Service {
   retire = (): void => {
     if (!this.#config.enabled || this.#store === undefined) return
     this.#active = false
+    this.#ideaChangeListeners.clear()
     this.#unsubscribeLlm?.()
     this.#unsubscribeLlm = undefined
     this.#unsubscribeWake?.()

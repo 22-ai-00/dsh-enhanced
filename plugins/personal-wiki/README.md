@@ -59,7 +59,7 @@ dsh --profile web --dump-config
 
 页面只位于固定目录 `wiki/{sources,people,projects,concepts,decisions,questions,meta}`。严格 JSON-compatible YAML frontmatter 包含 ULID、标题、类型、状态、authority、tags、aliases、直接 sources、创建/更新时间；未知字段和坏 SHA-256 会明确报错。`curated` 页面是独立真源；`derived` 页面必须指向直接 curated evidence，禁止 derived page 再总结 derived page。
 
-启动时构建进程快照；获授权的 service search/read 每次调用先重建，人工编辑或其他进程写入后无需显式 `rebuild`。底层 `WikiVault` 直接使用时仍提供显式 `rebuild`。失败的重建保留上一个可用快照，但 service search/read 会抛错，不把旧结果称为最新。页面写入使用同目录 `0600` 临时文件、文件 fsync、atomic rename 和目录 fsync。页面目录为 `0700`，拒绝相对 root、`..`、绝对子路径、symlink、非普通文件、越界 realpath、大小写碰撞和超限页面。
+启动时构建进程快照；获授权的 service search/read 每次调用先重建，人工编辑或其他进程写入后无需显式 `rebuild`。底层 `WikiVault` 直接使用时仍提供显式 `rebuild`。失败的重建保留上一个可用快照，但 service search/read 会抛错，不把旧结果称为最新。面向同进程可信 Host 服务（如可选的 `assistant-association`），`ctx.personalWiki` 另暴露只读 `inspectHostPages({ includeArchived? })` 与页面变更订阅 `onPageChange(listener)`，仅投影已有有效页面快照与变更事件，不放宽审批或写入权限。页面写入使用同目录 `0600` 临时文件、文件 fsync、atomic rename 和目录 fsync。页面目录为 `0700`，拒绝相对 root、`..`、绝对子路径、symlink、非普通文件、越界 realpath、大小写碰撞和超限页面。
 
 备份时以整个 `vault/wiki` 为准；`state.sqlite` 只需在还要保留未决审批时一并备份。删除进程索引无需恢复，因为它只存在内存中。
 

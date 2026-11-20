@@ -64,6 +64,8 @@ export interface DetectWeakUseNodesInput {
   readonly exposedNodes: readonly ExposedNodeEntitiesInput[]
   readonly turnPromptEntities: ReadonlySet<string>
   readonly entityAutomaton?: EntityAutomaton | null
+  readonly ownerScopeKey?: string
+  readonly allowLowTrust?: boolean
   readonly extractFallbackEntities?: (text: string) => readonly string[]
 }
 
@@ -93,6 +95,9 @@ export function detectWeakUseNodes(input: DetectWeakUseNodesInput): string[] {
 
   const ac = input.entityAutomaton
   if (ac !== undefined && ac !== null && ac.entityCount > 0) {
+    const filterByOwner = input.ownerScopeKey !== undefined
+    const acOwnerIdx = filterByOwner ? (ac.ownerKeyToIdx.get(input.ownerScopeKey!) ?? -1) : -1
+    const allowLowTrust = input.allowLowTrust ?? true
     const normText = normalizeForAc(boundedText)
     let state = 0
     for (let i = 0; i < normText.length; i += 1) {
@@ -103,6 +108,11 @@ export function detectWeakUseNodes(input: DetectWeakUseNodesInput): string[] {
       if (oStart === oEnd) continue
       for (let oi = oStart; oi < oEnd; oi += 1) {
         if (isBoundaryMatch(ac, oi, normText, i) < 0) continue
+        if (filterByOwner) {
+          const synOwnerIdx = ac.outSynonymOwnerIdx[oi]!
+          if (synOwnerIdx >= 0 && synOwnerIdx !== acOwnerIdx) continue
+        }
+        if (!allowLowTrust && ac.outSynonymTrust[oi] === 0) continue
         const eid = ac.outEntityId[oi]!
         const entName = ac.entityNames[eid]
         if (entName !== undefined) {

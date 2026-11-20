@@ -347,6 +347,9 @@ export class AssociationWriteQueue {
     sourceRef: string,
     nodeId: string,
   ): boolean {
+    if (this.#pendingWithdrawalCount > 0 && this.#tombstonedNodeIds.has(nodeId)) {
+      return true
+    }
     for (const queued of this.#queue) {
       if (queued.kind !== 'withdraw-source') continue
       if (
@@ -357,7 +360,6 @@ export class AssociationWriteQueue {
         return true
       }
     }
-    void nodeId
     return false
   }
 
@@ -374,22 +376,23 @@ export class AssociationWriteQueue {
         edges: isLastNodeChunk && task.edges.length <= chunkSize ? task.edges : [],
         synonyms: isLastNodeChunk && (task.synonyms?.length ?? 0) <= chunkSize ? (task.synonyms ?? []) : [],
         derivedRefs: isLastNodeChunk && task.derivedRefs.length <= chunkSize ? task.derivedRefs : [],
-        ...(isLastNodeChunk && task.cursor !== undefined ? { cursor: task.cursor } : {}),
       })
-      for (const node of nodeChunk) {
-        if (
-          !this.#hasQueuedWithdrawalFor(
-            node.ownerScopeKey,
-            node.sourcePlugin,
-            node.sourceRef,
-            node.id,
-          ) &&
-          !this.#store.isSourceWithdrawn(node.ownerScopeKey, node.sourcePlugin, node.sourceRef)
-        ) {
-          this.#tombstonedNodeIds.delete(node.id)
-          this.#tombstonedSourceRefs.delete(
-            `${node.ownerScopeKey}\0${node.sourcePlugin}\0${node.sourceRef}`,
-          )
+      if (this.#pendingWithdrawalCount === 0) {
+        for (const node of nodeChunk) {
+          if (
+            !this.#hasQueuedWithdrawalFor(
+              node.ownerScopeKey,
+              node.sourcePlugin,
+              node.sourceRef,
+              node.id,
+            ) &&
+            !this.#store.isSourceWithdrawn(node.ownerScopeKey, node.sourcePlugin, node.sourceRef)
+          ) {
+            this.#tombstonedNodeIds.delete(node.id)
+            this.#tombstonedSourceRefs.delete(
+              `${node.ownerScopeKey}\0${node.sourcePlugin}\0${node.sourceRef}`,
+            )
+          }
         }
       }
       if (res.deletedNodeIds.length > 0 || res.deletedEdgeIds.length > 0) {
@@ -400,13 +403,15 @@ export class AssociationWriteQueue {
       }
     }
 
-    if (task.nodes.length === 0) {
+    if (
+      task.nodes.length === 0 &&
+      (task.edges.length > 0 || (task.synonyms?.length ?? 0) > 0 || task.derivedRefs.length > 0)
+    ) {
       const res = this.#store.upsertBatch({
         nodes: [],
         edges: task.edges.length <= chunkSize ? task.edges : [],
         synonyms: (task.synonyms?.length ?? 0) <= chunkSize ? (task.synonyms ?? []) : [],
         derivedRefs: task.derivedRefs.length <= chunkSize ? task.derivedRefs : [],
-        ...(task.cursor !== undefined ? { cursor: task.cursor } : {}),
       })
       if (res.deletedNodeIds.length > 0 || res.deletedEdgeIds.length > 0) {
         withdrawals.push(res)
@@ -445,6 +450,15 @@ export class AssociationWriteQueue {
         })
         if (i + chunkSize < task.derivedRefs.length) await yieldImmediate()
       }
+    }
+
+    if (task.cursor !== undefined) {
+      this.#store.upsertBatch({
+        nodes: [],
+        edges: [],
+        derivedRefs: [],
+        cursor: task.cursor,
+      })
     }
   }
 }

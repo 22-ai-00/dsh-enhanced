@@ -166,3 +166,15 @@ export interface StoredWikiProposal {
   dispatch?: Readonly<ApprovalDispatchRoute>
   resultPageId?: string
 }
+
+export type WikiPageChangeKind = 'added' | 'updated' | 'archived' | 'deleted'
+
+export interface WikiPageChangeEvent {
+  readonly kind: WikiPageChangeKind
+  readonly pageId: string
+  readonly revision?: string
+  readonly previousRevision?: string
+  readonly status?: WikiPageStatus
+  readonly previousStatus?: WikiPageStatus
+  readonly page?: WikiPage
+}

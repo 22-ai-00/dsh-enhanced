@@ -1,4 +1,5 @@
 import { normalizeEntityKey } from './tokenize.js'
+import type { AssociationTrust } from './types.js'
 
 export interface EntityAutomaton {
   readonly entityCount: number
@@ -17,12 +18,18 @@ export interface EntityAutomaton {
   readonly outPatternLen: Uint16Array
   readonly outWordStart: Uint8Array
   readonly outWordEnd: Uint8Array
+  readonly outSynonymOwnerIdx: Int32Array
+  readonly outSynonymTrust: Uint8Array
+  readonly ownerKeys: readonly string[]
+  readonly ownerKeyToIdx: ReadonlyMap<string, number>
   readonly entityToId: ReadonlyMap<string, number>
 }
 
 export interface AcSynonymEntry {
   readonly surface: string
   readonly canonicalEntity: string
+  readonly ownerScopeKey?: string
+  readonly trust?: AssociationTrust
 }
 
 interface PatternBinding {
@@ -30,6 +37,8 @@ interface PatternBinding {
   readonly entityId: number
   readonly isWordStart: number
   readonly isWordEnd: number
+  readonly ownerIdx: number
+  readonly trust: number
 }
 
 function isAsciiAlnumCode(code: number): boolean {
@@ -78,12 +87,38 @@ export function buildEntityAutomaton(input: {
   readonly nodeUpdatedAt: Float64Array
   readonly nodeEntities: readonly (readonly string[])[]
   readonly synonyms?: readonly AcSynonymEntry[]
+  readonly ownerKeys?: ReadonlyMap<string, number> | readonly string[]
   readonly maxEntityPostings?: number
 }): EntityAutomaton {
   const maxEntityPostings = input.maxEntityPostings ?? 1_000
   const entityToId = new Map<string, number>()
   const entityNames: string[] = []
   const entityPostings: number[][] = []
+  const ownerKeyToIdx = new Map<string, number>()
+  const ownerKeys: string[] = []
+  if (input.ownerKeys !== undefined) {
+    if (input.ownerKeys instanceof Map) {
+      for (const [key, idx] of input.ownerKeys) {
+        ownerKeyToIdx.set(key, idx)
+        ownerKeys[idx] = key
+      }
+    } else {
+      for (const key of input.ownerKeys as readonly string[]) {
+        if (!ownerKeyToIdx.has(key)) {
+          ownerKeyToIdx.set(key, ownerKeys.length)
+          ownerKeys.push(key)
+        }
+      }
+    }
+  }
+  const internOwner = (key: string): number => {
+    const existing = ownerKeyToIdx.get(key)
+    if (existing !== undefined) return existing
+    const idx = ownerKeys.length
+    ownerKeys.push(key)
+    ownerKeyToIdx.set(key, idx)
+    return idx
+  }
 
   for (let slot = 0; slot < input.nodeCount; slot += 1) {
     const entities = input.nodeEntities[slot]
@@ -143,8 +178,13 @@ export function buildEntityAutomaton(input: {
   const patternBindings: PatternBinding[] = []
   const seenPatternPair = new Set<string>()
 
-  const addPattern = (pattern: string, eid: number): void => {
-    const key = `${pattern}\0${eid}`
+  const addPattern = (
+    pattern: string,
+    eid: number,
+    ownerIdx: number,
+    trust: number,
+  ): void => {
+    const key = `${pattern}\0${eid}\0${ownerIdx}\0${trust}`
     if (seenPatternPair.has(key)) return
     seenPatternPair.add(key)
     const firstCode = pattern.charCodeAt(0)
@@ -154,11 +194,13 @@ export function buildEntityAutomaton(input: {
       entityId: eid,
       isWordStart: isAsciiAlnumCode(firstCode) ? 1 : 0,
       isWordEnd: isAsciiAlnumCode(lastCode) ? 1 : 0,
+      ownerIdx,
+      trust,
     })
   }
 
   for (let eid = 0; eid < entityCount; eid += 1) {
-    addPattern(entityNames[eid]!, eid)
+    addPattern(entityNames[eid]!, eid, -1, 1)
   }
 
   if (input.synonyms) {
@@ -168,7 +210,10 @@ export function buildEntityAutomaton(input: {
       if (surface === null || canonical === null) continue
       const eid = entityToId.get(canonical)
       if (eid !== undefined) {
-        addPattern(surface, eid)
+        const ownerIdx =
+          syn.ownerScopeKey !== undefined ? internOwner(syn.ownerScopeKey) : -1
+        const trust = syn.trust === 'low' ? 0 : 1
+        addPattern(surface, eid, ownerIdx, trust)
       }
     }
   }
@@ -305,6 +350,8 @@ export function buildEntityAutomaton(input: {
   const outPatternLen = new Uint16Array(totalOutputs)
   const outWordStart = new Uint8Array(totalOutputs)
   const outWordEnd = new Uint8Array(totalOutputs)
+  const outSynonymOwnerIdx = new Int32Array(totalOutputs)
+  const outSynonymTrust = new Uint8Array(totalOutputs)
 
   for (let s = 0; s < stateCount; s += 1) {
     const list = allOutputs[s]!
@@ -315,6 +362,8 @@ export function buildEntityAutomaton(input: {
       outPatternLen[base + i] = binding.pattern.length
       outWordStart[base + i] = binding.isWordStart
       outWordEnd[base + i] = binding.isWordEnd
+      outSynonymOwnerIdx[base + i] = binding.ownerIdx
+      outSynonymTrust[base + i] = binding.trust
     }
   }
 
@@ -335,6 +384,10 @@ export function buildEntityAutomaton(input: {
     outPatternLen,
     outWordStart,
     outWordEnd,
+    outSynonymOwnerIdx,
+    outSynonymTrust,
+    ownerKeys,
+    ownerKeyToIdx,
     entityToId,
   }
 }

@@ -64,11 +64,16 @@
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0",
     "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-dreaming": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-work-items": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/personal-memory": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/event-triggers": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/personal-memory": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/personal-wiki": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": { "optional": true },
@@ -79,11 +84,16 @@
     "@deepseek-ai/dsh-tools": { "optional": true },
     "@dsh-enhanced/assistant-automations": { "optional": true },
     "@dsh-enhanced/assistant-delivery": { "optional": true },
+    "@dsh-enhanced/assistant-dreaming": { "optional": true },
     "@dsh-enhanced/assistant-evaluation": { "optional": true },
     "@dsh-enhanced/assistant-goals": { "optional": true },
     "@dsh-enhanced/assistant-policy": { "optional": true },
+    "@dsh-enhanced/assistant-skills": { "optional": true },
+    "@dsh-enhanced/assistant-verifier": { "optional": true },
     "@dsh-enhanced/assistant-work-items": { "optional": true },
-    "@dsh-enhanced/personal-memory": { "optional": true }
+    "@dsh-enhanced/event-triggers": { "optional": true },
+    "@dsh-enhanced/personal-memory": { "optional": true },
+    "@dsh-enhanced/personal-wiki": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
@@ -97,11 +107,16 @@
     "@deepseek-ai/dsh-tool-executor-native": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-dreaming": "workspace:*",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-goals": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/assistant-skills": "workspace:*",
+    "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/assistant-work-items": "workspace:*",
+    "@dsh-enhanced/event-triggers": "workspace:*",
     "@dsh-enhanced/personal-memory": "workspace:*",
+    "@dsh-enhanced/personal-wiki": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

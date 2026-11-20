@@ -2,10 +2,55 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { AssistantDreamingService } from '@dsh-enhanced/assistant-dreaming'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type { BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import type { EventTriggersService } from '@dsh-enhanced/event-triggers'
 import type { PersonalMemoryService } from '@dsh-enhanced/personal-memory'
+import type { PersonalWikiService } from '@dsh-enhanced/personal-wiki'
+import {
+  clusterEpisodes,
+  detectImplicitSignals,
+  listImplicitSignals as queryImplicitSignals,
+  listSkillCandidates as querySkillCandidates,
+  reportImplicitSignalsToEvaluation,
+  type AssocImplicitSignal,
+  type AssocSkillCandidate,
+  type AssocSkillCandidateStatus,
+  type ClusterEpisodesResult,
+  type ClusteringConfig,
+  type ClusteringEpisodeInput,
+  type DetectImplicitSignalsResult,
+  type EvaluationAppendPeer,
+  type ImplicitSignalKind,
+} from './clustering.js'
 import { normalizeConfig, Config, type AssociationConfig, type NormalizedAssociationConfig } from './config.js'
+import {
+  listDreamRuns as queryDreamRuns,
+  runDreamingPass,
+  sweepExpiredDreamingNodes,
+  type DreamIdeaRecord,
+  type DreamingDeliveryPeer,
+  type ExpiredNodeCleanupTarget,
+  type RunDreamingPassResult,
+  type StoredDreamRunRow,
+} from './dreaming.js'
+import {
+  listEvalPool as queryEvalPool,
+  type EvalPoolEntry,
+  type EvalPoolKind,
+  type EvalPoolStatus,
+} from './eval-pool.js'
+import {
+  emitAssociationIntakeSignal,
+  listIntakeSignals as queryIntakeSignals,
+  type EmitAssociationIntakeSignalResult,
+  type IntakeSignalNodeRef,
+  type IntakeSignalWorkItemsPeer,
+  type StoredIntakeSignalRow,
+} from './intake-signal.js'
 import {
   assembleStepCues,
   consumeSessionTurnToolNames,
@@ -61,6 +106,7 @@ import {
   type HotPathProfile,
   type NodeKind,
   type ProvenanceEdgeRef,
+  type ScoredAssociationItem,
   type StepMetricRow,
   type StoredAssociationEdge,
   type StoredAssociationNode,
@@ -92,6 +138,8 @@ export class AssistantAssociationService extends Service {
   private readonly activeAgents = new Set<Agent>()
   private readonly headlessPrincipals = new WeakMap<Agent, string>()
   private readonly toolNamesBySessionTurn = new Map<string, string[]>()
+  private readonly lastActivityByScope = new Map<string, number>()
+  private readonly pendingTasks = new Set<Promise<void>>()
 
   private activeIndex: AssociationMemoryIndex | null = null
   private ready = false
@@ -253,8 +301,14 @@ export class AssistantAssociationService extends Service {
         })
       },
       hebbianConfig: normalized.hebbian,
+      dreamingConfig: normalized.dreaming,
+      holdoutSeedKey: this.holdoutSeedKey,
+      holdoutRateBps: normalized.holdoutRateBps,
       consumeSessionToolNames: (sessionId) =>
         consumeSessionTurnToolNames(this.toolNamesBySessionTurn, sessionId),
+      onEpisodesSynced: (scope) => {
+        this.scheduleClusteringForScope(scope)
+      },
       onError: (error) => {
         this.ctx.logger.warn?.('assistant-association source sync error', { error: String(error) })
       },
@@ -402,6 +456,13 @@ export class AssistantAssociationService extends Service {
             })
           }
         }
+        this.trackBackgroundTask(
+          this.runPeriodicS3Maintenance().catch((error) => {
+            this.ctx.logger.warn?.('assistant-association s3 maintenance error', {
+              error: String(error),
+            })
+          }),
+        )
       }
     }, normalized.syncIntervalMs)
     syncTimer.unref?.()
@@ -425,6 +486,9 @@ export class AssistantAssociationService extends Service {
         unregisterTools()
         sourceManager.dispose()
         await writeQueue.dispose()
+        if (this.pendingTasks.size > 0) {
+          await Promise.allSettled(this.pendingTasks)
+        }
         this.activeAgents.clear()
         try {
           store.close()
@@ -534,6 +598,10 @@ export class AssistantAssociationService extends Service {
 
     const holdout = this.isTaskInHoldout(taskId)
     const nowMs = this.nowClock()
+    const prevActivity = this.lastActivityByScope.get(ownerScope.ownerScopeKey) ?? 0
+    if (nowMs > prevActivity) {
+      this.lastActivityByScope.set(ownerScope.ownerScopeKey, nowMs)
+    }
     this.recordHoldoutOnce(state, taskId, ownerScope.ownerScopeKey, taskKind, agent, turnNumber, holdout, nowMs)
 
     if (holdout.inHoldout) {
@@ -695,6 +763,17 @@ export class AssistantAssociationService extends Service {
           },
         })
       }
+      if (this.assocConfig.intakeSignal.enabled && result.items.length > 0) {
+        const candidate = this.findIntakeSignalCandidate(
+          ownerScope,
+          result.items,
+          goalContext?.goal.id,
+          nowMs,
+        )
+        if (candidate !== null) {
+          this.scheduleIntakeSignal(ownerScope, candidate, nowMs)
+        }
+      }
     }
 
     state.memo = { epochKey, renderedBlock: formatted.block }
@@ -791,8 +870,12 @@ export class AssistantAssociationService extends Service {
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
 
-    // Fail-closed sensitivity & owner lineage check (zero cross-owner / ABA oracle)
+    // Fail-closed sensitivity, trust & owner lineage check (zero cross-owner / ABA oracle)
     if (row.sensitivity !== 'private') {
+      this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+      throw new AssistantAssociationError('not-found', 'association item is unavailable')
+    }
+    if (!this.assocConfig.allowLowTrust && row.trust === 'low') {
       this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
       throw new AssistantAssociationError('not-found', 'association item is unavailable')
     }
@@ -905,6 +988,149 @@ export class AssistantAssociationService extends Service {
           }
         } catch (error) {
           if (error instanceof AssistantAssociationError) throw error
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+      }
+    }
+
+    if (row.kind === 'wiki' || row.sourcePlugin === 'personal-wiki') {
+      const wiki = this.ctx.get('personalWiki' as never, false) as PersonalWikiService | undefined
+      if (wiki !== undefined && typeof wiki.inspectHostPages === 'function') {
+        const pageId = row.sourceRef.replace(/^wiki:/u, '')
+        let pages: ReturnType<PersonalWikiService['inspectHostPages']>
+        try {
+          pages = wiki.inspectHostPages({ includeArchived: false })
+        } catch {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+        const livePage = pages.find((p) => p.metadata.id === pageId)
+        if (livePage === undefined || livePage.metadata.status === 'archived') {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+      }
+    }
+
+    if (row.kind === 'skill' || row.sourcePlugin === 'assistant-skills') {
+      const skills = this.ctx.get('assistantSkills' as never, false) as
+        | AssistantSkillsService
+        | undefined
+      if (skills !== undefined && typeof skills.inspectOwnerActiveSkills === 'function') {
+        if (
+          ownerScope.mode !== 'delivery' ||
+          ownerScope.principalRecordId === null ||
+          ownerScope.principalVersion === null
+        ) {
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+        const skillName = row.sourceRef.replace(/^skill:/u, '')
+        let activeSkills: ReturnType<AssistantSkillsService['inspectOwnerActiveSkills']>
+        try {
+          activeSkills = skills.inspectOwnerActiveSkills({
+            principalId: ownerScope.principalId,
+            principalRecordId: ownerScope.principalRecordId,
+            principalVersion: ownerScope.principalVersion,
+            workspace: ownerScope.workspace,
+            preset: ownerScope.agentPreset,
+          })
+        } catch {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+        const liveSkill = activeSkills.find(
+          (s) => s.name === skillName && (s as { readonly retired?: boolean }).retired !== true,
+        )
+        if (liveSkill === undefined) {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+      }
+    }
+
+    if (row.kind === 'event' || row.sourcePlugin === 'event-triggers') {
+      const triggers = this.ctx.get('eventTriggers' as never, false) as
+        | EventTriggersService
+        | undefined
+      const triggerId = row.metadata.extra?.triggerId
+      if (
+        triggers !== undefined &&
+        typeof triggers.inspectOwnerSources === 'function' &&
+        typeof triggerId === 'string' &&
+        triggerId.length > 0 &&
+        ownerScope.mode === 'delivery' &&
+        ownerScope.principalRecordId !== null &&
+        ownerScope.principalVersion !== null
+      ) {
+        let activeSources: ReturnType<EventTriggersService['inspectOwnerSources']>
+        try {
+          activeSources = triggers.inspectOwnerSources({
+            principalId: ownerScope.principalId,
+            principalRecordId: ownerScope.principalRecordId,
+            principalVersion: ownerScope.principalVersion,
+            workspace: ownerScope.workspace,
+            preset: ownerScope.agentPreset,
+          })
+        } catch {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+        const liveSource = activeSources.find((s) => s.triggerId === triggerId)
+        if (
+          liveSource === undefined ||
+          (liveSource.expiresAt !== undefined && liveSource.expiresAt <= nowMs)
+        ) {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+          this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+          throw new AssistantAssociationError('not-found', 'association item is unavailable')
+        }
+      }
+    }
+
+    if (row.kind === 'dream' || row.kind === 'abstraction') {
+      if (row.sourcePlugin === 'assistant-dreaming' && row.sourceRef.startsWith('dream-idea:')) {
+        const dreaming = this.ctx.get('assistantDreaming' as never, false) as
+          | AssistantDreamingService
+          | undefined
+        if (dreaming !== undefined && typeof dreaming.inspectIdeas === 'function') {
+          const ideaId = row.sourceRef.slice('dream-idea:'.length)
+          try {
+            const ideas = dreaming.inspectIdeas(500)
+            const matched = ideas.find((idea) => idea.id === ideaId)
+            if (
+              matched !== undefined &&
+              (matched.state === 'rejected' || matched.state === 'withdrawn')
+            ) {
+              this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
+              this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
+              throw new AssistantAssociationError('not-found', 'association item is unavailable')
+            }
+          } catch (error) {
+            if (error instanceof AssistantAssociationError) throw error
+          }
+        }
+      }
+      const derivedParents = this.assocStore.database
+        .prepare(
+          "SELECT source_node_id FROM assoc_derived_from WHERE target_kind = 'node' AND target_id = ?",
+        )
+        .all(row.id) as Array<{ source_node_id: string }>
+      for (const parentRef of derivedParents) {
+        const parentNode = this.assocStore.getNodeById(parentRef.source_node_id)
+        if (
+          parentNode === null ||
+          parentNode.status !== 'active' ||
+          (parentNode.expiresAt !== null && parentNode.expiresAt <= nowMs) ||
+          this.writeQueue.isNodeTombstoned(parentNode.id)
+        ) {
+          this.triggerInvalidation(row.ownerScopeKey, row.sourcePlugin, row.sourceRef, row.id)
           this.recordReadEvent(ownerScope.ownerScopeKey, taskId, id, false, 'not-found', nowMs)
           throw new AssistantAssociationError('not-found', 'association item is unavailable')
         }
@@ -1112,8 +1338,14 @@ export class AssistantAssociationService extends Service {
   }
 
   async flush(): Promise<void> {
+    if (this.pendingTasks.size > 0) {
+      await Promise.allSettled(this.pendingTasks)
+    }
     if (this.writeQueue !== null) {
       await this.writeQueue.flush()
+    }
+    if (this.pendingTasks.size > 0) {
+      await Promise.allSettled(this.pendingTasks)
     }
     if (this.rebuildInFlight !== null) {
       await this.rebuildInFlight
@@ -1123,6 +1355,336 @@ export class AssistantAssociationService extends Service {
   async refreshIndex(): Promise<void> {
     await this.flush()
     await this.rebuildIndex()
+  }
+
+  async runDreamingNow(
+    scope: AssociationOwnerScope,
+    options?: {
+      readonly nowMs?: number
+      readonly lastActivityAt?: number | null
+      readonly hasRunningAgent?: boolean
+      readonly weightMin?: number
+      readonly weightMax?: number
+      readonly nodeLimit?: number
+    },
+  ): Promise<RunDreamingPassResult> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null || this.writeQueue === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    await this.writeQueue.flush()
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+
+    const nowMs = options?.nowMs ?? this.nowClock()
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as
+      | DreamingDeliveryPeer
+      | undefined
+    const dreaming = this.ctx.get('assistantDreaming' as never, false) as
+      | AssistantDreamingService
+      | undefined
+    let ideas: DreamIdeaRecord[] | undefined
+    if (dreaming !== undefined && typeof dreaming.inspectIdeas === 'function') {
+      try {
+        ideas = dreaming.inspectIdeas(200).map((idea) => ({
+          id: idea.id,
+          lane: idea.lane,
+          runId: idea.runId,
+          createdAt: idea.createdAt,
+          dayKey: idea.dayKey,
+          state: idea.state,
+          summary: idea.summary,
+          detail: idea.detail,
+          evidenceRefs: [...idea.evidenceRefs],
+        }))
+      } catch {
+        ideas = undefined
+      }
+    }
+
+    const evictedNodeIds = new Set<string>()
+    const resolvedLastActivity =
+      options?.lastActivityAt !== undefined
+        ? options.lastActivityAt
+        : this.lastActivityByScope.get(scope.ownerScopeKey)
+    const hasRunningAgent =
+      options?.hasRunningAgent ?? this.hasRunningAgentForScope(scope.ownerScopeKey)
+
+    const result = runDreamingPass({
+      db: this.assocStore.database,
+      scope,
+      config: this.assocConfig.dreaming,
+      policy: this.policy,
+      ...(delivery === undefined ? {} : { delivery }),
+      hasRunningAgent,
+      ...(resolvedLastActivity !== undefined ? { lastActivityAt: resolvedLastActivity } : {}),
+      nowMs,
+      ...(ideas === undefined ? {} : { ideas }),
+      weightMin: options?.weightMin ?? this.assocConfig.hebbian.weightMin,
+      weightMax: options?.weightMax ?? this.assocConfig.hebbian.weightMax,
+      ...(options?.nodeLimit !== undefined ? { nodeLimit: options.nodeLimit } : {}),
+      writer: {
+        upsertBatch: (batch) => {
+          const res = this.assocStore!.upsertBatch(batch)
+          for (const id of res.deletedNodeIds) evictedNodeIds.add(id)
+          for (const id of res.suppressedNodeIds) evictedNodeIds.add(id)
+          return res
+        },
+        withdrawSource: (w) => {
+          const res = this.assocStore!.withdrawSource({ ...w, hardDelete: true })
+          for (const id of res.deletedNodeIds) evictedNodeIds.add(id)
+          for (const id of res.suppressedNodeIds) evictedNodeIds.add(id)
+          return res
+        },
+      },
+    })
+
+    if (evictedNodeIds.size > 0) {
+      if (this.activeIndex !== null) {
+        for (const id of evictedNodeIds) {
+          this.activeIndex.tombstoneNodeId(id)
+        }
+      }
+      this.evictNodesAcrossActiveAgents(evictedNodeIds)
+    }
+
+    if (
+      result.ran &&
+      (result.edgesCreated > 0 ||
+        result.abstractionsCreated > 0 ||
+        result.synonymsCreated > 0 ||
+        result.expiredSwept > 0 ||
+        result.ideasProjected > 0 ||
+        result.ideasWithdrawn > 0)
+    ) {
+      await this.rebuildIndex()
+    }
+
+    return result
+  }
+
+  listDreamRuns(ownerScopeKey: string, limit = 20): readonly StoredDreamRunRow[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryDreamRuns(this.assocStore.database, ownerScopeKey, limit)
+  }
+
+  async sweepExpiredNodesNow(nowMs?: number): Promise<readonly ExpiredNodeCleanupTarget[]> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null || this.writeQueue === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    await this.writeQueue.flush()
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    const effectiveNow = nowMs ?? this.nowClock()
+    const evicted = new Set<string>()
+    const swept = sweepExpiredDreamingNodes(this.assocStore.database, {
+      nowMs: effectiveNow,
+      withdrawSource: (w) => {
+        const res = this.assocStore!.withdrawSource({ ...w, hardDelete: true })
+        for (const id of res.deletedNodeIds) evicted.add(id)
+        for (const id of res.suppressedNodeIds) evicted.add(id)
+        return res
+      },
+    })
+    for (const target of swept) {
+      evicted.add(target.id)
+    }
+    if (evicted.size > 0) {
+      if (this.activeIndex !== null) {
+        for (const id of evicted) {
+          this.activeIndex.tombstoneNodeId(id)
+        }
+      }
+      this.evictNodesAcrossActiveAgents(evicted)
+      await this.rebuildIndex()
+    }
+    return swept
+  }
+
+  emitIntakeSignalNow(input: {
+    readonly scope: AssociationOwnerScope
+    readonly goalNode: IntakeSignalNodeRef
+    readonly targetNode: IntakeSignalNodeRef
+    readonly score: number
+    readonly reason?: string
+    readonly inHoldout: boolean
+    readonly nowMs?: number
+  }): EmitAssociationIntakeSignalResult {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    const assistantWorkItems = this.ctx.get('assistantWorkItems' as never, false) as
+      | IntakeSignalWorkItemsPeer
+      | undefined
+    return emitAssociationIntakeSignal({
+      db: this.assocStore.database,
+      scope: input.scope,
+      config: this.assocConfig.intakeSignal,
+      goalNode: input.goalNode,
+      targetNode: input.targetNode,
+      score: input.score,
+      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      inHoldout: input.inHoldout,
+      policy: this.policy,
+      ...(assistantWorkItems === undefined ? {} : { assistantWorkItems }),
+      nowMs: input.nowMs ?? this.nowClock(),
+    })
+  }
+
+  listIntakeSignals(ownerScopeKey: string, limit = 50): readonly StoredIntakeSignalRow[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryIntakeSignals(this.assocStore.database, ownerScopeKey, limit)
+  }
+
+  async runClusteringNow(
+    scope: AssociationOwnerScope | string,
+    options?: {
+      readonly episodes?: readonly ClusteringEpisodeInput[]
+      readonly config?: ClusteringConfig
+      readonly benchmarkPlan?: BenchmarkPlan
+      readonly nowMs?: number
+      readonly persist?: boolean
+      readonly reportImplicitSignals?: boolean
+    },
+  ): Promise<{
+    readonly clustering: ClusterEpisodesResult
+    readonly implicitSignals: DetectImplicitSignalsResult
+    readonly reportedImplicitSignals: { readonly reported: number; readonly skipped: number }
+  }> {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    await this.writeQueue?.flush()
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    const ownerScopeKey = typeof scope === 'string' ? scope : scope.ownerScopeKey
+    const nowMs = options?.nowMs ?? this.nowClock()
+    const cfg = options?.config ?? this.assocConfig.clustering
+    const persist = options?.persist ?? true
+
+    const clustering = await clusterEpisodes(this.assocStore.database, {
+      ownerScopeKey,
+      holdoutSeedKey: this.holdoutSeedKey,
+      holdoutRateBps: this.assocConfig.holdoutRateBps,
+      config: cfg,
+      ...(options?.episodes !== undefined ? { episodes: options.episodes } : {}),
+      ...(options?.benchmarkPlan !== undefined ? { benchmarkPlan: options.benchmarkPlan } : {}),
+      nowMs,
+      persist,
+    })
+
+    const implicitSignals = detectImplicitSignals(this.assocStore.database, {
+      ownerScopeKey,
+      holdoutSeedKey: this.holdoutSeedKey,
+      holdoutRateBps: this.assocConfig.holdoutRateBps,
+      config: cfg,
+      ...(options?.episodes !== undefined ? { episodes: options.episodes } : {}),
+      nowMs,
+      persist,
+    })
+
+    let reportedImplicitSignals: { readonly reported: number; readonly skipped: number } = {
+      reported: 0,
+      skipped: 0,
+    }
+    if (
+      options?.reportImplicitSignals !== false &&
+      implicitSignals.signals.length > 0 &&
+      this.active
+    ) {
+      const resolvedScope =
+        typeof scope === 'string'
+          ? this.sourceManager?.listScopes().find((s) => s.ownerScopeKey === ownerScopeKey)
+          : scope
+      if (resolvedScope !== undefined) {
+        const evalPeer = this.ctx.get('assistantEvaluation' as never, false) as
+          | EvaluationAppendPeer
+          | undefined
+        reportedImplicitSignals = reportImplicitSignalsToEvaluation(
+          evalPeer,
+          implicitSignals.signals,
+          { workspace: resolvedScope.workspace, preset: resolvedScope.agentPreset },
+        )
+      }
+    }
+
+    return Object.freeze({
+      clustering,
+      implicitSignals,
+      reportedImplicitSignals,
+    })
+  }
+
+  listSkillCandidates(
+    ownerScopeKey: string,
+    options?: { readonly status?: AssocSkillCandidateStatus; readonly limit?: number },
+  ): AssocSkillCandidate[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return querySkillCandidates(this.assocStore.database, ownerScopeKey, options)
+  }
+
+  listImplicitSignals(
+    ownerScopeKey: string,
+    options?: {
+      readonly kind?: ImplicitSignalKind
+      readonly clusterId?: string
+      readonly limit?: number
+    },
+  ): AssocImplicitSignal[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryImplicitSignals(this.assocStore.database, ownerScopeKey, options)
+  }
+
+  listEvalPool(
+    ownerScopeKey: string,
+    options?: {
+      readonly poolKind?: EvalPoolKind
+      readonly status?: EvalPoolStatus
+      readonly includeRetracted?: boolean
+      readonly limit?: number
+    },
+  ): EvalPoolEntry[] {
+    if (!this.active) {
+      throw new AssistantAssociationError('disposed', 'assistant-association service is disposed')
+    }
+    if (!this.assocConfig.enabled || this.assocStore === null) {
+      throw new AssistantAssociationError('disabled', 'assistant-association is disabled')
+    }
+    return queryEvalPool(this.assocStore.database, ownerScopeKey, options)
   }
 
   private resolveAgentScope(agent: Agent): AssociationOwnerScope | undefined {
@@ -1196,6 +1758,8 @@ export class AssistantAssociationService extends Service {
       exposedNodes,
       turnPromptEntities: state.turnPromptEntities,
       entityAutomaton: activeIndex.ac,
+      ownerScopeKey: ownerScope.ownerScopeKey,
+      allowLowTrust: this.assocConfig.allowLowTrust,
     })
     if (matchedIds.length === 0) return
 
@@ -1315,7 +1879,9 @@ export class AssistantAssociationService extends Service {
     if (kind === 'automation') {
       return { kind: 'automation', id: sourceRef.replace(/^automation:/u, '') || 'catalog' }
     }
-    if (kind === 'wiki') return { kind: 'wiki', id: 'visible' }
+    if (kind === 'wiki') {
+      return { kind: 'wiki', id: sourceRef.replace(/^wiki:/u, '') || 'visible' }
+    }
     return undefined
   }
 
@@ -1568,10 +2134,14 @@ export class AssistantAssociationService extends Service {
       {
         nodes: indexNodes,
         edges: indexEdges,
-        synonyms: synonyms.map((s) => ({
-          surface: s.surface,
-          canonicalEntity: s.canonicalEntity,
-        })),
+        synonyms: synonyms
+          .filter((s) => s.sourceNodeId === null || activeIds.has(s.sourceNodeId))
+          .map((s) => ({
+            surface: s.surface,
+            canonicalEntity: s.canonicalEntity,
+            ownerScopeKey: s.ownerScopeKey,
+            trust: s.trust,
+          })),
       },
       {
         buildEpoch: this.indexBuildEpoch,
@@ -1583,5 +2153,173 @@ export class AssistantAssociationService extends Service {
     this.activeIndex = nextIndex
     this.ready = true
     this.writeQueue?.clearTombstonesForRebuiltGraph(activeIds, snapshotWithdrawalEpoch)
+  }
+
+  private trackBackgroundTask(promise: Promise<void>): void {
+    this.pendingTasks.add(promise)
+    void promise.finally(() => {
+      this.pendingTasks.delete(promise)
+    })
+  }
+
+  private hasRunningAgentForScope(ownerScopeKey: string): boolean {
+    for (const agent of this.activeAgents) {
+      if (agent.status !== 'running') continue
+      const scope = this.resolveAgentScope(agent)
+      if (scope?.ownerScopeKey === ownerScopeKey) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private scheduleClusteringForScope(scope: AssociationOwnerScope): void {
+    if (!this.active || !this.assocConfig.enabled || this.holdoutSeedKey === null) return
+    this.trackBackgroundTask(
+      this.runClusteringNow(scope).then(
+        () => {},
+        (error) => {
+          this.ctx.logger.warn?.('assistant-association clustering error', {
+            error: String(error),
+          })
+        },
+      ),
+    )
+  }
+
+  private async runPeriodicS3Maintenance(): Promise<void> {
+    if (!this.active || !this.assocConfig.enabled) return
+    if (!this.writeQueue?.hasPendingWithdrawals) {
+      await this.sweepExpiredNodesNow()
+    }
+    if (!this.active || !this.assocConfig.dreaming.enabled || this.sourceManager === null) return
+    for (const scope of this.sourceManager.listScopes()) {
+      if (!this.active) return
+      await this.runDreamingNow(scope)
+    }
+  }
+
+  private findIntakeSignalCandidate(
+    ownerScope: AssociationOwnerScope,
+    items: readonly ScoredAssociationItem[],
+    activeGoalId: string | undefined,
+    nowMs: number,
+  ): {
+    readonly goalNode: IntakeSignalNodeRef
+    readonly targetNode: IntakeSignalNodeRef
+    readonly score: number
+    readonly reason: string
+  } | null {
+    if (this.assocStore === null) return null
+    const minScore = this.assocConfig.intakeSignal.minScore
+    const isEligibleStored = (node: StoredAssociationNode | null): node is StoredAssociationNode =>
+      node !== null &&
+      node.status === 'active' &&
+      node.sensitivity === 'private' &&
+      node.ownerScopeKey === ownerScope.ownerScopeKey &&
+      (node.expiresAt === null || node.expiresAt > nowMs)
+
+    for (const item of items) {
+      if (item.kind !== 'goal' || item.score < minScore) continue
+      const goalNode = this.assocStore.getNodeById(item.id)
+      if (!isEligibleStored(goalNode) || goalNode.kind !== 'goal') continue
+
+      let targetNode: StoredAssociationNode | null = null
+      if (item.provenanceEdges !== undefined) {
+        for (const edge of item.provenanceEdges) {
+          const otherId = edge.aId === goalNode.id ? edge.bId : edge.aId
+          if (otherId === goalNode.id) continue
+          const cand = this.assocStore.getNodeById(otherId)
+          if (isEligibleStored(cand)) {
+            targetNode = cand
+            break
+          }
+        }
+      }
+      if (targetNode === null) {
+        for (const other of items) {
+          if (other.id === goalNode.id || other.kind === 'goal') continue
+          const cand = this.assocStore.getNodeById(other.id)
+          if (isEligibleStored(cand)) {
+            targetNode = cand
+            break
+          }
+        }
+      }
+      if (targetNode === null) {
+        for (const other of items) {
+          if (other.id === goalNode.id) continue
+          const cand = this.assocStore.getNodeById(other.id)
+          if (isEligibleStored(cand)) {
+            targetNode = cand
+            break
+          }
+        }
+      }
+      if (targetNode !== null) {
+        return {
+          goalNode,
+          targetNode,
+          score: item.score,
+          reason: item.reason,
+        }
+      }
+    }
+
+    if (activeGoalId !== undefined) {
+      const goalNode = this.assocStore.getNodeById(`a:g-${activeGoalId}`)
+      if (isEligibleStored(goalNode) && goalNode.kind === 'goal') {
+        for (const other of items) {
+          if (other.id === goalNode.id || other.score < minScore) continue
+          const targetNode = this.assocStore.getNodeById(other.id)
+          if (isEligibleStored(targetNode)) {
+            return {
+              goalNode,
+              targetNode,
+              score: other.score,
+              reason: other.reason,
+            }
+          }
+        }
+      }
+    }
+
+    return null
+  }
+
+  private scheduleIntakeSignal(
+    ownerScope: AssociationOwnerScope,
+    candidate: {
+      readonly goalNode: IntakeSignalNodeRef
+      readonly targetNode: IntakeSignalNodeRef
+      readonly score: number
+      readonly reason: string
+    },
+    nowMs: number,
+  ): void {
+    const task = new Promise<void>((resolve) => {
+      queueMicrotask(() => {
+        try {
+          if (this.active && this.assocConfig.enabled && this.assocStore !== null) {
+            this.emitIntakeSignalNow({
+              scope: ownerScope,
+              goalNode: candidate.goalNode,
+              targetNode: candidate.targetNode,
+              score: candidate.score,
+              reason: candidate.reason,
+              inHoldout: false,
+              nowMs,
+            })
+          }
+        } catch (error) {
+          this.ctx.logger.warn?.('assistant-association intake signal error', {
+            error: String(error),
+          })
+        } finally {
+          resolve()
+        }
+      })
+    })
+    this.trackBackgroundTask(task)
   }
 }

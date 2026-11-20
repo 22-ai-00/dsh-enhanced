@@ -97,6 +97,7 @@ export interface AssistantGrowthDriverConfig {
   workflowOwnerAnchored?: WorkflowOwnerAnchoredConfig
   pluginSourceProposals?: PluginSourceProposalsConfig
   dreamingIdeas?: DreamingIdeasIntakeConfig
+  associationCandidates?: AssociationCandidatesIntakeConfig
   /** One-time opt-in to durable reviews driven by actual trusted foreground results. */
   usageLearning?: {
     enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number
@@ -138,7 +139,17 @@ export interface NormalizedDreamingIdeasIntakeConfig {
   readonly maxIdeasPerWake: number
 }
 
-export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals' | 'dreamingIdeas' | 'usageLearning' | 'toolPresentation'>> {
+export interface AssociationCandidatesIntakeConfig {
+  enabled?: boolean
+  maxCandidatesPerWake?: number
+}
+
+export interface NormalizedAssociationCandidatesIntakeConfig {
+  readonly enabled: boolean
+  readonly maxCandidatesPerWake: number
+}
+
+export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals' | 'dreamingIdeas' | 'associationCandidates' | 'usageLearning' | 'toolPresentation'>> {
   readonly toolPresentation: 'native' | 'ptc'
   readonly provider: string | null
   readonly model: string | null
@@ -150,6 +161,7 @@ export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGro
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
   readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
   readonly dreamingIdeas: NormalizedDreamingIdeasIntakeConfig
+  readonly associationCandidates: NormalizedAssociationCandidatesIntakeConfig
   readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number;
     scanBudgetId: string | null; scanBudgetAmount: number | null; workItemFailures?: true;
     workItemAuthorities?: WorkItemGrowthAuthorityPins; workItemRevisionAuthorities?: WorkItemRevisionAuthorityPins }>
@@ -176,6 +188,7 @@ const fields = new Set([
   'workflowOwnerAnchored',
   'pluginSourceProposals',
   'dreamingIdeas',
+  'associationCandidates',
   'usageLearning',
 ])
 
@@ -232,6 +245,13 @@ const dreamingIdeasObjectSchema = Schema.object({
 const dreamingIdeasSchema = dreamingIdeasObjectSchema
   .default(undefined as unknown as DreamingIdeasIntakeConfig) as Schema<DreamingIdeasIntakeConfig | undefined>
 
+const associationCandidatesObjectSchema = Schema.object({
+  enabled: Schema.boolean().default(false),
+  maxCandidatesPerWake: Schema.natural().min(1).max(10).default(3),
+}) as unknown as Schema<AssociationCandidatesIntakeConfig>
+const associationCandidatesSchema = associationCandidatesObjectSchema
+  .default(undefined as unknown as AssociationCandidatesIntakeConfig) as Schema<AssociationCandidatesIntakeConfig | undefined>
+
 const schema = Schema.object({
   enabled: Schema.boolean().default(false),
   intervalMs: Schema.natural().min(0).max(86_400_000).default(0),
@@ -258,6 +278,7 @@ const schema = Schema.object({
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
   dreamingIdeas: dreamingIdeasSchema,
+  associationCandidates: associationCandidatesSchema,
   usageLearning: Schema.object({ workItemFailures: Schema.boolean(), workItemAuthorities: Schema.any(), workItemRevisionAuthorities: Schema.any(),
     enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
     scanBudgetId: boundedText(128),
@@ -336,6 +357,10 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       enabled: config.dreamingIdeas?.enabled ?? false,
       maxIdeasPerWake: config.dreamingIdeas?.maxIdeasPerWake ?? 3,
     }),
+    associationCandidates: Object.freeze({
+      enabled: config.associationCandidates?.enabled ?? false,
+      maxCandidatesPerWake: config.associationCandidates?.maxCandidatesPerWake ?? 3,
+    }),
     usageLearning: Object.freeze({ ...(config.usageLearning?.workItemFailures === true ? { workItemFailures: true as const, workItemAuthorities: frozenPins! } : {}),
       ...(frozenRevisionPins === undefined ? {} : { workItemRevisionAuthorities: frozenRevisionPins }),
       enabled: config.usageLearning?.enabled ?? false,
@@ -394,6 +419,12 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   }
   if (normalized.dreamingIdeas.enabled && !normalized.scope) {
     throw new Error('assistant-growth-driver: dreamingIdeas.enabled requires an explicit owner scope')
+  }
+  if (normalized.associationCandidates.enabled && !normalized.enabled) {
+    throw new Error('assistant-growth-driver: associationCandidates.enabled requires the driver itself to be enabled')
+  }
+  if (normalized.associationCandidates.enabled && !normalized.scope) {
+    throw new Error('assistant-growth-driver: associationCandidates.enabled requires an explicit owner scope')
   }
   if (normalized.pluginSourceProposals.allowRevision
     && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'

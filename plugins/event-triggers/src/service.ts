@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { isAbsolute, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import {
@@ -27,11 +28,11 @@ import {
   type PinnedFileRoot,
   type SensorObservation,
 } from './sensors.js'
-import { EventTriggerStore, type GoalSourceClaim, type TriggerOutboxEvent } from './store.js'
+import { EventTriggerStore, EventTriggerStoreError, type GoalSourceClaim, type TriggerOutboxEvent } from './store.js'
 import type { EventSourceReader, EventSourceSnapshot, SourceEvent } from './source.js'
 import { version } from './version.js'
 import { EventSourceObservers, type GoalSourceDetachEvent, type GoalSourceUnsubscribeHook, type GoalSourceUnsubscribeInput } from './observer.js'
-import { EventIntakeAdapter, buildEventIntakeObservation, type EventIntakeObserver } from './intake.js'
+import { EventIntakeAdapter, buildEventIntakeObservation, buildEventIntakeSummary, type EventIntakeObserver } from './intake.js'
 import { readGitHubRepositoryObservation } from './github-sensor.js'
 import { readLarkCalendarObservation, type LarkCalendarPageReader } from './lark-calendar-sensor.js'
 import type { RepositoryEventObservationPort } from './actions-port.js'
@@ -62,6 +63,41 @@ export interface EventTriggersServiceOptions {
   fileObserver?: typeof readFileObservation
   larkCalendarReader?: LarkCalendarPageReader
   intakeObserver?: EventIntakeObserver
+}
+
+export interface OwnerOutboxScope {
+  readonly principalId: string
+  readonly principalRecordId: string
+  readonly principalVersion: number
+  readonly workspace: string
+  readonly preset: string
+}
+
+export interface OwnerOutboxEventSummary {
+  readonly sequence: number
+  readonly triggerId: string
+  readonly triggerKind: NormalizedTrigger['kind']
+  readonly automationId: string
+  readonly eventId: string
+  readonly occurredAt: number
+  readonly title: string
+  readonly summary: string
+  readonly envelopeDigest: string
+  readonly observationDigest: string
+  readonly ttlMs?: number
+  readonly entities: readonly string[]
+}
+
+export interface InspectOwnerOutboxEventsInput {
+  readonly scope: OwnerOutboxScope
+  readonly afterSequence?: number
+  readonly limit?: number
+}
+
+export interface InspectOwnerOutboxEventsResult {
+  readonly items: readonly OwnerOutboxEventSummary[]
+  readonly nextSequence: number
+  readonly hasMore: boolean
 }
 
 function isTerminalGoalChangedPayload(payload: unknown): boolean {
@@ -591,6 +627,147 @@ export class EventTriggersService extends Service implements EventSourceReader {
       return [Object.freeze({ triggerId: trigger.id, automationId: trigger.automationId, kind: trigger.kind, expiresAt: owner.expiresAt,
         ...(trigger.kind === 'github-repository' ? { repository: trigger.repository, branch: trigger.branch } : {}) })]
     }))
+  }
+
+  /**
+   * Host-only paginated outbox reader scoped strictly to current owner-bound
+   * triggers. Validates envelope provenance digests and projects sanitized
+   * metadata only (never credentials, tokens, headers, or unredacted bodies).
+   */
+  inspectOwnerOutboxEvents = (input: InspectOwnerOutboxEventsInput): InspectOwnerOutboxEventsResult => {
+    this.assertActive()
+    if (!input || typeof input !== 'object' || !input.scope || typeof input.scope !== 'object') {
+      throw new EventTriggerStoreError('invalid-input', 'owner outbox inspection requires a scope')
+    }
+    const { scope } = input
+    if (
+      typeof scope.principalId !== 'string' || scope.principalId.length === 0
+      || typeof scope.principalRecordId !== 'string' || scope.principalRecordId.length === 0
+      || !Number.isSafeInteger(scope.principalVersion) || scope.principalVersion < 1
+      || typeof scope.workspace !== 'string' || !isAbsolute(scope.workspace)
+      || typeof scope.preset !== 'string' || scope.preset.length === 0
+    ) {
+      throw new EventTriggerStoreError('invalid-input', 'owner outbox scope is invalid')
+    }
+    const afterSequence = input.afterSequence ?? 0
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new EventTriggerStoreError('invalid-input', 'afterSequence must be a non-negative safe integer')
+    }
+    const rawLimit = input.limit ?? 50
+    if (!Number.isSafeInteger(rawLimit) || rawLimit < 1) {
+      throw new EventTriggerStoreError('invalid-input', 'limit must be a positive safe integer')
+    }
+    const limit = Math.min(rawLimit, 200)
+    const normalizedWorkspace = resolve(scope.workspace)
+
+    const matchedTriggers = new Map<string, NormalizedTrigger>()
+    for (const trigger of this.config.triggers) {
+      const owner = trigger.observer
+      if (
+        !owner
+        || !trigger.enabled
+        || owner.principalId !== scope.principalId
+        || owner.principalRecordId !== scope.principalRecordId
+        || owner.principalVersion !== scope.principalVersion
+        || resolve(owner.workspace) !== normalizedWorkspace
+        || owner.preset !== scope.preset
+      ) {
+        continue
+      }
+      if (this.observers.isRetiredGoalSource(trigger.id)) continue
+      try {
+        this.observers.assertCurrent(trigger.id)
+      } catch {
+        continue
+      }
+      matchedTriggers.set(trigger.id, trigger)
+    }
+
+    if (matchedTriggers.size === 0) {
+      return Object.freeze({ items: Object.freeze([]), nextSequence: afterSequence, hasMore: false })
+    }
+
+    const page = this.store.outboxRowsForTriggersAfter({
+      triggerIds: [...matchedTriggers.keys()],
+      afterSequence,
+      limit,
+    })
+
+    let nextSequence = afterSequence
+    const items: OwnerOutboxEventSummary[] = []
+    for (const row of page.rows) {
+      if (row.sequence > nextSequence) nextSequence = row.sequence
+      const trigger = matchedTriggers.get(row.triggerId)
+      if (trigger === undefined || row.canonical === null || row.digest === null) continue
+      let envelope: ExternalEventEnvelope
+      try {
+        envelope = parseExternalEventEnvelope(JSON.parse(row.canonical))
+      } catch {
+        continue
+      }
+      if (
+        externalEventDigest(envelope) !== row.digest
+        || envelope.source.id !== `event-triggers:${trigger.id}`
+        || envelope.source.kind !== trigger.kind
+        || envelope.target.automationId !== trigger.automationId
+        || envelope.event.id !== row.eventId
+        || envelope.event.occurredAt !== row.occurredAt
+      ) {
+        continue
+      }
+      items.push(this.projectSanitizedOutboxEvent(trigger, row.sequence, row.digest, envelope))
+    }
+
+    return Object.freeze({
+      items: Object.freeze(items),
+      nextSequence,
+      hasMore: page.hasMore,
+    })
+  }
+
+  private projectSanitizedOutboxEvent(
+    trigger: NormalizedTrigger,
+    sequence: number,
+    envelopeDigest: string,
+    envelope: Readonly<ExternalEventEnvelope>,
+  ): OwnerOutboxEventSummary {
+    const summaryLabel = trigger.intake?.summaryLabel
+    const summary = buildEventIntakeSummary({
+      trigger,
+      envelope,
+      ...(summaryLabel === undefined ? {} : { summaryLabel }),
+    })
+    const title = summaryLabel ?? (
+      trigger.kind === 'github-repository' ? `${trigger.kind}:${trigger.repository}`
+        : trigger.kind === 'lark-calendar' ? `${trigger.kind}:${trigger.calendarId}`
+          : trigger.kind === 'http-json' ? `${trigger.kind}:${new URL(trigger.url).origin}`
+            : `${trigger.kind}:${trigger.id}`
+    )
+    const entityCandidates = new Set<string>([trigger.id, trigger.kind, trigger.automationId])
+    if (summaryLabel !== undefined) entityCandidates.add(summaryLabel)
+    if (trigger.kind === 'github-repository') {
+      entityCandidates.add(trigger.repository)
+      entityCandidates.add(trigger.branch)
+      entityCandidates.add(trigger.baseBranch)
+    } else if (trigger.kind === 'lark-calendar') {
+      entityCandidates.add(trigger.calendarId)
+    } else if (trigger.kind === 'http-json') {
+      entityCandidates.add(new URL(trigger.url).origin)
+    }
+    return Object.freeze({
+      sequence,
+      triggerId: trigger.id,
+      triggerKind: trigger.kind,
+      automationId: trigger.automationId,
+      eventId: envelope.event.id,
+      occurredAt: envelope.event.occurredAt,
+      title,
+      summary,
+      envelopeDigest,
+      observationDigest: envelope.observation.digest,
+      ...(trigger.ttlMs === undefined ? {} : { ttlMs: trigger.ttlMs }),
+      entities: Object.freeze([...entityCandidates]),
+    })
   }
 
   sourceSnapshot(triggerId: string): Readonly<EventSourceSnapshot> {

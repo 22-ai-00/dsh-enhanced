@@ -12,6 +12,11 @@ import { SourceGrowthRunUnavailableError, type AnySourceGrowthRunProducer,
 import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import {
+  readAssociationCandidates,
+  type AssociationIntakeSummary,
+  type AssociationSkillCandidateInput,
+} from './association-intake.js'
+import {
   readValidatedDreamIdeas,
   type DreamingIntakeSummary,
   type ValidatedDreamIdeaInput,
@@ -25,9 +30,16 @@ export const name = 'dsh-enhanced-assistant-growth-driver'
 export { version, Config, normalizeConfig }
 export type {
   AssistantGrowthDriverConfig,
+  AssociationCandidatesIntakeConfig,
   DreamingIdeasIntakeConfig,
+  NormalizedAssociationCandidatesIntakeConfig,
   NormalizedDreamingIdeasIntakeConfig,
 } from './config.js'
+export type {
+  AssociationCandidateGoalLocator,
+  AssociationIntakeSummary,
+  AssociationSkillCandidateInput,
+} from './association-intake.js'
 export type { DreamingIntakeSummary, ValidatedDreamIdeaInput } from './dreaming-intake.js'
 export type { GrowthAuthority } from './deposit.js'
 
@@ -57,6 +69,7 @@ export interface GrowthWakeHealth {
   // rejects assigning an implicit-undefined optional property otherwise.
   readonly ownerAnchored?: OwnerAnchoredWakeSummary | undefined
   readonly dreamingIntake?: DreamingIntakeSummary | undefined
+  readonly associationIntake?: AssociationIntakeSummary | undefined
 }
 
 type InspectedOwnerGoal = ReturnType<AssistantGoalsService['inspectOwnerGoals']>[number]
@@ -438,17 +451,21 @@ export class AssistantGrowthDriverService extends Service {
       ? Object.freeze({ enabled: false, considered: 0, ingested: 0, rejectedUnvalidated: 0, ideaIds: Object.freeze([]) })
       : undefined
     const spreadDreamingHealth = dreamingIntake === undefined ? {} : { dreamingIntake }
+    let associationIntake: AssociationIntakeSummary | undefined = config.associationCandidates.enabled && input.usage === undefined
+      ? Object.freeze({ enabled: false, considered: 0, ingested: 0, rejectedUnverified: 0, candidateIds: Object.freeze([]) })
+      : undefined
+    const spreadAssociationHealth = associationIntake === undefined ? {} : { associationIntake }
 
     if (model === undefined || modelFailure !== undefined) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored, ...spreadDreamingHealth }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored, ...spreadDreamingHealth, ...spreadAssociationHealth }
       return
     }
     if (!await this.#resolveCredential()) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored, ...spreadDreamingHealth }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored, ...spreadDreamingHealth, ...spreadAssociationHealth }
       return
     }
     if (policy === undefined) {
-      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-policy', run: null, ownerAnchored, ...spreadDreamingHealth }
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-policy', run: null, ownerAnchored, ...spreadDreamingHealth, ...spreadAssociationHealth }
       return
     }
 
@@ -464,12 +481,12 @@ export class AssistantGrowthDriverService extends Service {
           idempotencyKey: `growth-budget:${wakeId}`,
         })
         if (reservation.status !== 'reserved') {
-          this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${reservation.status}`, run: null, ownerAnchored, ...spreadDreamingHealth }
+          this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${reservation.status}`, run: null, ownerAnchored, ...spreadDreamingHealth, ...spreadAssociationHealth }
           return
         }
         reservationId = reservation.reservationId
       } catch (error) {
-        this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${errorMessage(error)}`, run: null, ownerAnchored, ...spreadDreamingHealth }
+        this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `budget:${errorMessage(error)}`, run: null, ownerAnchored, ...spreadDreamingHealth, ...spreadAssociationHealth }
         return
       }
     }
@@ -482,6 +499,13 @@ export class AssistantGrowthDriverService extends Service {
         dreamingIntake = intake.summary
       }
       const nextDreamingHealth = dreamingIntake === undefined ? {} : { dreamingIntake }
+      let associationCandidates: readonly AssociationSkillCandidateInput[] = []
+      if (config.associationCandidates.enabled && input.usage === undefined) {
+        const intake = readAssociationCandidates(this.ctx, authority, config.associationCandidates.maxCandidatesPerWake)
+        associationCandidates = intake.candidates
+        associationIntake = intake.summary
+      }
+      const nextAssociationHealth = associationIntake === undefined ? {} : { associationIntake }
       agentSubmitted = true
       const bound = this.#sourceBinding
       const source = bound !== undefined && bound.available() ? bound : undefined
@@ -549,6 +573,7 @@ export class AssistantGrowthDriverService extends Service {
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
         ...(sourcePort === undefined ? {} : { sourcePlane: sourcePort }),
         ...(validatedDreamIdeas.length === 0 ? {} : { validatedDreamIdeas }),
+        ...(associationCandidates.length === 0 ? {} : { associationCandidates }),
         ...(input.usage === undefined ? {} : { feedback: input.usage.source,
           ...(workItemUsage ? { assertFirstModelAdmission: workItemUsage.assertFirstModelAdmission, workItemAuthorization: { runId: workItemUsage.id, intentDigest: workItemUsage.intentDigest, definitionHash: workItemUsage.definitionHash, occurrenceId: workItemUsage.occurrenceId, assertCurrent: workItemUsage.assertCurrent } } : {}),
           generationDeadlineAt: input.usage.expiresAt,
@@ -559,7 +584,7 @@ export class AssistantGrowthDriverService extends Service {
           ...(input.usage === undefined ? [] : [input.usage.signal])]),
       })
       if (reservationId !== undefined) { policy.finalize(reservationId, config.budgetAmount!); reservationSettled = true }
-      this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored, ...nextDreamingHealth }
+      this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored, ...nextDreamingHealth, ...nextAssociationHealth }
     } catch (error) {
       if (reservationId !== undefined && !reservationSettled) {
         // The agent factory may already have submitted a request: charge the
@@ -569,7 +594,7 @@ export class AssistantGrowthDriverService extends Service {
           else policy.release(reservationId)
         } catch { /* leave the reservation ledger state visible for the owner */ }
       }
-      this.#health = { lastWakeAt: startedAt, outcome: 'failed', reason: errorMessage(error), run: null, ownerAnchored, ...(dreamingIntake === undefined ? {} : { dreamingIntake }) }
+      this.#health = { lastWakeAt: startedAt, outcome: 'failed', reason: errorMessage(error), run: null, ownerAnchored, ...(dreamingIntake === undefined ? {} : { dreamingIntake }), ...(associationIntake === undefined ? {} : { associationIntake }) }
       this.ctx.logger.warn(`assistant-growth-driver: wake ${wakeId} failed: ${errorMessage(error)}`)
     }
   }

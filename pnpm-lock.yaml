@@ -708,6 +708,9 @@ importers:
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-dreaming':
+        specifier: workspace:*
+        version: link:../assistant-dreaming
       '@dsh-enhanced/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
@@ -717,12 +720,24 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-skills':
+        specifier: workspace:*
+        version: link:../assistant-skills
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@dsh-enhanced/assistant-work-items':
         specifier: workspace:*
         version: link:../assistant-work-items
+      '@dsh-enhanced/event-triggers':
+        specifier: workspace:*
+        version: link:../event-triggers
       '@dsh-enhanced/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
+      '@dsh-enhanced/personal-wiki':
+        specifier: workspace:*
+        version: link:../personal-wiki
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

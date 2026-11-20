@@ -110,6 +110,8 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 | `workflowOwnerAnchored.lookbackMs` | `86400000` | 只枚举该回看窗口内更新过的 owner goal（1 分钟–7 天）。 |
 | `dreamingIdeas.enabled` | `false` | 可选读取同 scope 下 owner 已验证（`state === 'validated'` 且含 owner 审计事件）的 `assistant-dreaming` idea，作为普通背景成长 wake 的有界建议输入；永不接收未验证/已拒绝/已撤回 idea，也不绕过现有预算、权限、受保护插件清单或独立验收。启用时要求驱动本体 `enabled: true` 且已声明 `scope`。 |
 | `dreamingIdeas.maxIdeasPerWake` | `3` | 单轮最多纳入提示的已验证 dreaming idea 条数上限（1–10）。 |
+| `associationCandidates.enabled` | `false` | 可选只读消费可选 `assistant-association` 服务产出的同 scope `status === 'pending'` 且 `wp04Verified === true` 技能候选，作为背景成长 wake 的有界建议输入（拒绝非 pending、未通过 WP04 校验、摘要不符或跨 scope 候选，且不绕过既有重复门、预算、Policy 与独立验收）。启用时要求驱动本体 `enabled: true` 且已声明 `scope`。 |
+| `associationCandidates.maxCandidatesPerWake` | `3` | 单轮最多纳入提示的 `assistant-association` 待处理技能候选条数上限（1–10）。 |
 | `usageLearning.enabled` | `false` | 真实任务触发开关；要求主开关、owner scope、预算及 Evaluation/Automations 服务。 |
 | `usageLearning.workItemFailures` | `false` | 严格可选布尔值；缺失/false 在授权摘要中省略，true 要求 usageLearning、durable source、allowCreation 与显式 workItemAuthorities。只允许后台新工具创建；前台 modify/revise 开关不改变。 |
 | `usageLearning.workItemAuthorities` | 无 | 后台开关开启时必填的准确四份 pins：sourceJobs（authorityId/authorityDigest/expiresAt）、creationGrant（id/digest/expiresAt）、creationAcceptance（完整独立验收引用）、adoption（authorityId/authorityDigest/expiresAt），外层 protocol 为 `assistant-growth/work-item-authorities/v1`。从已授权当前 CP 免费 readiness 获取并由 owner 显式冻结，不自动补签或扩大旧 grant。 |

@@ -516,6 +516,7 @@ export function buildMemoryIndex(
     nodeCount,
     nodeUpdatedAt,
     nodeEntities,
+    ownerKeys,
     ...(snapshot.synonyms !== undefined ? { synonyms: snapshot.synonyms } : {}),
     ...(options?.maxEntityPostings !== undefined
       ? { maxEntityPostings: options.maxEntityPostings }

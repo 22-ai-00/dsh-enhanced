@@ -4,12 +4,14 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
+  ASSOCIATION_SCHEMA_VERSION,
   AssociationDatabaseError,
   AssociationParamTuningLedger,
   AssociationStore,
   AssociationWriteQueue,
   DEFAULT_HEBBIAN_CONFIG,
   computeDeterministicEdgeId,
+  computeDeterministicSynonymId,
   computeOwnerScopeKey,
   computePrincipalDigest,
   loadGraphSnapshotChunked,
@@ -43,7 +45,8 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       const modeRow = db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
       const uvRow = db.prepare('PRAGMA user_version').get() as { user_version: number }
       expect(modeRow.journal_mode.toLowerCase()).toBe('wal')
-      expect(uvRow.user_version).toBe(2)
+      expect(uvRow.user_version).toBe(ASSOCIATION_SCHEMA_VERSION)
+      expect(uvRow.user_version).toBe(3)
 
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -67,6 +70,11 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
       expect(tableNames).toContain('assoc_param_relax_proposals')
       expect(tableNames).toContain('assoc_param_relax_decisions')
       expect(tableNames).toContain('assoc_param_rolled_back_digests')
+      expect(tableNames).toContain('assoc_dream_runs')
+      expect(tableNames).toContain('assoc_intake_signals')
+      expect(tableNames).toContain('assoc_skill_candidates')
+      expect(tableNames).toContain('assoc_implicit_signals')
+      expect(tableNames).toContain('assoc_eval_pool')
     } finally {
       db.close()
     }
@@ -412,7 +420,7 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
     store.close()
   })
 
-  test('migrates S1 v1 database to v2 preserving existing rows and enforces WP22 immutability triggers', () => {
+  test('migrates S1 v1 database to v3 preserving existing rows and enforces WP22 immutability triggers', () => {
     const dir = makeTempDir()
     const dbPath = join(dir, 'v1-state.sqlite')
     const ownerScopeKey = computeOwnerScopeKey({
@@ -534,11 +542,21 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
     const migrated = openAssociationDatabase(dbPath)
     try {
       const uv = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
-      expect(uv.user_version).toBe(2)
+      expect(uv.user_version).toBe(3)
       const meta = migrated
         .prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'")
         .get() as { value: string }
-      expect(meta.value).toBe('2')
+      expect(meta.value).toBe('3')
+      const v3Tables = (
+        migrated
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+      expect(v3Tables).toContain('assoc_dream_runs')
+      expect(v3Tables).toContain('assoc_intake_signals')
+      expect(v3Tables).toContain('assoc_skill_candidates')
+      expect(v3Tables).toContain('assoc_implicit_signals')
+      expect(v3Tables).toContain('assoc_eval_pool')
 
       const metric = migrated
         .prepare('SELECT task_id, profile_version FROM assoc_step_metrics WHERE task_id = ?')
@@ -1380,6 +1398,395 @@ describe('association sqlite, permissions, write queue & derivedFrom cascade', (
     }
     const overAfter10d = store.loadActiveEdgesPage(10, 0).find((e) => e.edgeId === eOverMax)!.weight
     expect(overAfter10d).toBeCloseTo(1.25, 8)
+
+    store.close()
+  })
+
+  test('migrates S2 v2 database to v3 idempotently while preserving all v2 rows', () => {
+    const dir = makeTempDir()
+    const dbPath = join(dir, 'v2-state.sqlite')
+    const ownerScopeKey = computeOwnerScopeKey({
+      mode: 'delivery',
+      principalDigest: computePrincipalDigest('owner-v2'),
+      principalRecordId: 'pr-v2',
+      principalVersion: 1,
+      workspace: '/ws/v2',
+      agentPreset: 'primary',
+    })
+    const now = 1_700_000_000_000
+
+    // Create a full database, downgrade its user_version/schema-version to 2 and drop v3 tables to simulate pre-S3 DB
+    const setupDb = openAssociationDatabase(dbPath)
+    const storeV2 = new AssociationStore(setupDb)
+    storeV2.upsertBatch({
+      nodes: [
+        {
+          id: 'a:m-v2',
+          kind: 'memory',
+          sourcePlugin: 'personal-memory',
+          sourceRef: 'memory:v2',
+          sourceVersion: 1,
+          ownerScopeKey,
+          ownerMode: 'delivery',
+          principalDigest: computePrincipalDigest('owner-v2'),
+          principalRecordId: 'pr-v2',
+          principalVersion: 1,
+          scopeMode: 'workspace',
+          workspace: '/ws/v2',
+          agentPreset: 'primary',
+          trust: 'trusted',
+          sensitivity: 'private',
+          title: 'V2 Memory',
+          body: 'Preserved across v2->v3',
+          entities: ['v2_entity'],
+          tokens: tokenizeAssociationText('V2 Memory Preserved'),
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      edges: [],
+      derivedRefs: [],
+    })
+    storeV2.upsertReplayEpisode({
+      taskId: 'foreground-turn:v2-1',
+      ownerScopeKey,
+      inHoldout: false,
+      cues: [{ kind: 'user', text: 'v2_entity', weight: 1.0 }],
+      usedNodeIds: ['a:m-v2'],
+      profileVersion: 0,
+      occurredAt: now,
+    })
+    setupDb.exec(`
+      DROP TABLE IF EXISTS assoc_dream_runs;
+      DROP TABLE IF EXISTS assoc_intake_signals;
+      DROP TABLE IF EXISTS assoc_skill_candidates;
+      DROP TABLE IF EXISTS assoc_implicit_signals;
+      DROP TABLE IF EXISTS assoc_eval_pool;
+      UPDATE schema_meta SET value = '2' WHERE key = 'schema-version';
+      PRAGMA user_version = 2;
+    `)
+    setupDb.close()
+    chmodSync(dbPath, 0o600)
+
+    const migrated = openAssociationDatabase(dbPath)
+    try {
+      const uv = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
+      expect(uv.user_version).toBe(3)
+      const meta = migrated
+        .prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'")
+        .get() as { value: string }
+      expect(meta.value).toBe('3')
+
+      const v2Store = new AssociationStore(migrated)
+      expect(v2Store.getNodeById('a:m-v2')?.title).toBe('V2 Memory')
+      const replayRow = migrated
+        .prepare('SELECT task_id, used_node_ids_json FROM assoc_replay_episodes WHERE task_id = ?')
+        .get('foreground-turn:v2-1') as { task_id: string; used_node_ids_json: string }
+      expect(JSON.parse(replayRow.used_node_ids_json)).toEqual(['a:m-v2'])
+
+      const tables = (
+        migrated
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name)
+      expect(tables).toContain('assoc_dream_runs')
+      expect(tables).toContain('assoc_intake_signals')
+      expect(tables).toContain('assoc_skill_candidates')
+      expect(tables).toContain('assoc_implicit_signals')
+      expect(tables).toContain('assoc_eval_pool')
+    } finally {
+      migrated.close()
+    }
+
+    // Idempotent reopen on v3
+    const reopened = openAssociationDatabase(dbPath)
+    try {
+      const uv = reopened.prepare('PRAGMA user_version').get() as { user_version: number }
+      expect(uv.user_version).toBe(3)
+    } finally {
+      reopened.close()
+    }
+  })
+
+  test('enforces Low Radar #2 cross-kind session isolation, Low Radar #4 Hop-0 provenance reset, deterministic synonym IDs, and dual-endpoint suppressNodeConflict cascade', () => {
+    const db = openAssociationDatabase(':memory:')
+    const store = new AssociationStore(db)
+    const ownerScopeKey = computeOwnerScopeKey({
+      mode: 'delivery',
+      principalDigest: computePrincipalDigest('owner-radar'),
+      principalRecordId: 'pr-radar',
+      principalVersion: 1,
+      workspace: '/ws/radar',
+      agentPreset: 'primary',
+    })
+    const now = 1_700_000_000_000
+    const makeNode = (id: string, kind: 'memory' | 'abstraction', ref: string) => ({
+      id,
+      kind,
+      sourcePlugin: kind === 'memory' ? 'personal-memory' : 'assistant-association',
+      sourceRef: ref,
+      sourceVersion: 1,
+      ownerScopeKey,
+      ownerMode: 'delivery' as const,
+      principalDigest: computePrincipalDigest('owner-radar'),
+      principalRecordId: 'pr-radar',
+      principalVersion: 1,
+      scopeMode: 'workspace' as const,
+      workspace: '/ws/radar',
+      agentPreset: 'primary',
+      trust: (kind === 'abstraction' ? 'low' : 'trusted') as 'low' | 'trusted',
+      sensitivity: 'private' as const,
+      title: `Node ${id}`,
+      body: `Body ${id}`,
+      entities: ['radar_ent'],
+      tokens: tokenizeAssociationText(`Node ${id}`),
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    const eEntity = computeDeterministicEdgeId('a:m-a', 'a:m-b', 'entity')
+    const eDream = computeDeterministicEdgeId('a:m-a', 'a:m-b', 'dream')
+    const eAbsA = computeDeterministicEdgeId('a:m-a', 'a:abs-ab', 'abstraction')
+    const eAbsB = computeDeterministicEdgeId('a:m-b', 'a:abs-ab', 'abstraction')
+    const expectedSynId = computeDeterministicSynonymId(ownerScopeKey, 'rdr', 'radar_ent')
+
+    store.upsertBatch({
+      nodes: [
+        makeNode('a:m-a', 'memory', 'memory:a'),
+        makeNode('a:m-b', 'memory', 'memory:b'),
+        makeNode('a:abs-ab', 'abstraction', 'abstraction:ab'),
+      ],
+      edges: [
+        {
+          edgeId: eEntity,
+          aId: 'a:m-a',
+          bId: 'a:m-b',
+          edgeType: 'entity',
+          weight: 0.8,
+          trust: 'trusted',
+          reason: 'entity:radar_ent',
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          edgeId: eDream,
+          aId: 'a:m-a',
+          bId: 'a:m-b',
+          edgeType: 'dream',
+          weight: 0.5,
+          trust: 'low',
+          reason: 'dream:radar',
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          edgeId: eAbsA,
+          aId: 'a:m-a',
+          bId: 'a:abs-ab',
+          edgeType: 'abstraction',
+          weight: 0.5,
+          trust: 'low',
+          reason: 'abstraction:radar',
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          edgeId: eAbsB,
+          aId: 'a:m-b',
+          bId: 'a:abs-ab',
+          edgeType: 'abstraction',
+          weight: 0.5,
+          trust: 'low',
+          reason: 'abstraction:radar',
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      synonyms: [
+        // Non-deterministic ID -> normalized to deterministic syn-<sha256>, and derivedRef remapped
+        {
+          id: 'legacy-syn-1',
+          ownerScopeKey,
+          surface: 'rdr',
+          canonicalEntity: 'radar_ent',
+          sourceNodeId: 'a:m-b',
+          trust: 'low',
+          createdAt: now,
+        },
+        // Missing sourceNodeId -> skipped cleanly
+        {
+          id: 'missing-syn',
+          ownerScopeKey,
+          surface: 'ghost',
+          canonicalEntity: 'radar_ent',
+          sourceNodeId: 'a:m-does-not-exist',
+          trust: 'low',
+          createdAt: now,
+        },
+      ],
+      derivedRefs: [
+        { sourceNodeId: 'a:m-a', sourceVersion: 1, targetKind: 'edge', targetId: eDream },
+        { sourceNodeId: 'a:m-b', sourceVersion: 1, targetKind: 'edge', targetId: eDream },
+        { sourceNodeId: 'a:m-a', sourceVersion: 1, targetKind: 'node', targetId: 'a:abs-ab' },
+        { sourceNodeId: 'a:m-b', sourceVersion: 1, targetKind: 'node', targetId: 'a:abs-ab' },
+        { sourceNodeId: 'a:m-a', sourceVersion: 1, targetKind: 'edge', targetId: eAbsA },
+        { sourceNodeId: 'a:abs-ab', sourceVersion: 1, targetKind: 'edge', targetId: eAbsA },
+        { sourceNodeId: 'a:m-b', sourceVersion: 1, targetKind: 'edge', targetId: eAbsB },
+        { sourceNodeId: 'a:abs-ab', sourceVersion: 1, targetKind: 'edge', targetId: eAbsB },
+        { sourceNodeId: 'a:m-a', sourceVersion: 1, targetKind: 'synonym', targetId: 'legacy-syn-1' },
+        { sourceNodeId: 'a:m-b', sourceVersion: 1, targetKind: 'synonym', targetId: 'legacy-syn-1' },
+        { sourceNodeId: 'a:m-a', sourceVersion: 1, targetKind: 'synonym', targetId: 'missing-syn' },
+      ],
+    })
+
+    const activeSyns = store.loadActiveSynonymsPage(10, 0)
+    expect(activeSyns).toHaveLength(1)
+    expect(activeSyns[0]?.id).toBe(expectedSynId)
+
+    // Low Radar #2: exact task-kind family scoping across automation-run, work-item, goal-step/outcome, headless-session
+    store.recordMetricsAndExposures(
+      [],
+      [
+        {
+          taskId: 'automation-run:auto-1',
+          nodeId: 'a:m-a',
+          ownerScopeKey,
+          sourcePlugin: 'personal-memory',
+          exposedAt: now + 10,
+          wasExposed: true,
+          hop: 1,
+          provenanceEdges: [{ edgeId: eEntity, aId: 'a:m-a', bId: 'a:m-b', edgeType: 'entity' }],
+          sessionId: 'sess-family',
+        },
+        {
+          taskId: 'goal-step:g1:turn:1',
+          nodeId: 'a:m-b',
+          ownerScopeKey,
+          sourcePlugin: 'personal-memory',
+          exposedAt: now + 20,
+          wasExposed: true,
+          hop: 0,
+          sessionId: 'sess-family',
+        },
+      ],
+    )
+
+    // work-item MUST NOT fall back to automation-run or goal-step in the same session!
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 'work-item:wi-1', 'sess-family'),
+    ).toHaveLength(0)
+    expect(
+      store.applyHebbianCorrection({
+        ownerScopeKey,
+        taskId: 'work-item:wi-1',
+        sessionId: 'sess-family',
+        nowMs: now + 25,
+        hebbianConfig: DEFAULT_HEBBIAN_CONFIG,
+      }).correctedExposures,
+    ).toBe(0)
+
+    // headless-session MUST NOT fall back to automation-run or goal-step
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 'headless-session:hs-1:turn:0', 'sess-family'),
+    ).toHaveLength(0)
+
+    // goal-outcome MUST match goal-step in the same session, and NOT automation-run
+    const goalFamily = store.findExposuresByTaskOrSession(
+      ownerScopeKey,
+      'goal-outcome:g1',
+      'sess-family',
+    )
+    expect(goalFamily).toHaveLength(1)
+    expect(goalFamily[0]?.taskId).toBe('goal-step:g1:turn:1')
+
+    // automation-run fallback matches automation-run:% only
+    const autoFamily = store.findExposuresByTaskOrSession(
+      ownerScopeKey,
+      'automation-run:auto-other',
+      'sess-family',
+    )
+    expect(autoFamily).toHaveLength(1)
+    expect(autoFamily[0]?.taskId).toBe('automation-run:auto-1')
+
+    // Low Radar #4 SQLite side: Hop-1 exposure shifting to Hop-0 clears provenance_edges_json = '[]'
+    store.recordMetricsAndExposures(
+      [],
+      [
+        {
+          taskId: 't-hop-shift',
+          nodeId: 'a:m-a',
+          ownerScopeKey,
+          sourcePlugin: 'personal-memory',
+          exposedAt: now + 30,
+          wasExposed: true,
+          hop: 1,
+          provenanceEdges: [{ edgeId: eEntity, aId: 'a:m-a', bId: 'a:m-b', edgeType: 'entity' }],
+        },
+      ],
+    )
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 't-hop-shift')[0]?.provenanceEdges,
+    ).toHaveLength(1)
+
+    // Unexposed assoc_read (wasExposed: false) must NOT clear Hop-1 provenanceEdges
+    store.recordMetricsAndExposures(
+      [],
+      [
+        {
+          taskId: 't-hop-shift',
+          nodeId: 'a:m-a',
+          ownerScopeKey,
+          sourcePlugin: 'personal-memory',
+          exposedAt: now + 35,
+          wasExposed: false,
+          hop: 0,
+          provenanceEdges: [],
+        },
+      ],
+    )
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 't-hop-shift')[0]?.provenanceEdges,
+    ).toHaveLength(1)
+
+    // Exposed Hop-0 shift (wasExposed: true, hop: 0) MUST clear provenance_edges_json to '[]'
+    store.recordMetricsAndExposures(
+      [],
+      [
+        {
+          taskId: 't-hop-shift',
+          nodeId: 'a:m-a',
+          ownerScopeKey,
+          sourcePlugin: 'personal-memory',
+          exposedAt: now + 40,
+          wasExposed: true,
+          hop: 0,
+          provenanceEdges: [],
+        },
+      ],
+    )
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 't-hop-shift')[0]?.provenanceEdges,
+    ).toEqual([])
+    expect(
+      store.findExposuresByTaskOrSession(ownerScopeKey, 't-hop-shift')[0]?.hop,
+    ).toBe(0)
+
+    // suppressNodeConflict on B deletes derived dream edge, abstraction node, abstraction edges, and synonym
+    const supp = store.suppressNodeConflict({
+      ownerScopeKey,
+      sourcePlugin: 'personal-memory',
+      sourceRef: 'memory:b',
+      nowMs: now + 50,
+    })
+    expect(supp.suppressedNodeIds).toEqual(['a:m-b'])
+    expect(supp.deletedNodeIds).toContain('a:abs-ab')
+    expect(supp.deletedEdgeIds).toContain(eDream)
+    expect(supp.deletedEdgeIds).toContain(eAbsA)
+    expect(supp.deletedEdgeIds).toContain(eAbsB)
+    expect(supp.deletedSynonymIds).toContain(expectedSynId)
+    expect(store.getNodeById('a:abs-ab')).toBeNull()
+    expect(store.loadActiveEdgesPage(10, 0)).toHaveLength(0)
+    expect(store.loadActiveSynonymsPage(10, 0)).toHaveLength(0)
 
     store.close()
   })

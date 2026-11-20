@@ -265,6 +265,8 @@ export function runHotPathQuery(
     bm25,
   } = index
 
+  const acOwnerIdx = ac.ownerKeyToIdx.get(filter.ownerScopeKey) ?? -1
+
   const isEligible = (slot: number): boolean => {
     if (nodeTombstoned[slot] !== 0) return false
     if (nodeOwnerIdx[slot] !== ownerIdx) return false
@@ -388,6 +390,10 @@ export function runHotPathQuery(
           const startPos = isBoundaryMatch(ac, oi, normText, i)
           if (startPos < 0) continue
 
+          const synOwnerIdx = ac.outSynonymOwnerIdx[oi]!
+          if (synOwnerIdx >= 0 && synOwnerIdx !== acOwnerIdx) continue
+          if (!allowLowTrust && ac.outSynonymTrust[oi] === 0) continue
+
           const eid = ac.outEntityId[oi]!
           if (pad.entitySeenStamp[eid] === cueEpoch) continue
           pad.entitySeenStamp[eid] = cueEpoch
@@ -494,6 +500,7 @@ export function runHotPathQuery(
       for (let f = 0; f < frontierCount; f += 1) {
         if (clock() >= deadline) return abortTimeout()
         const u = pad.frontierSlots[f]!
+        if (hop === 1 && pad.hopReached[u]! > 0) continue
         const uScore = pad.frontierScores[f]!
         const uParent = hop === 1 ? -1 : pad.parentSlot[u]!
         pad.expandedStamp[u] = epoch
@@ -525,7 +532,10 @@ export function runHotPathQuery(
             pad.touchedSlots[touchedCount] = v
             touchedCount += 1
             updated = true
-          } else if (pad.hopReached[v]! > 0 || pad.reasonType[v] === REASON_SESSION) {
+          } else if (
+            pad.hopReached[v]! > 0 ||
+            (hop === 1 && pad.reasonType[v] === REASON_SESSION && pad.expandedStamp[v] !== epoch)
+          ) {
             const cur = pad.score[v]!
             if (prop > cur) {
               pad.score[v] = prop

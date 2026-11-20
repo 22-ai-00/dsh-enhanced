@@ -690,6 +690,27 @@ export function computeDeterministicEdgeId(
     .digest('hex')
 }
 
+export function computeDeterministicSynonymId(
+  ownerScopeKey: string,
+  surface: string,
+  canonicalEntity: string,
+): string {
+  return `syn-${createHash('sha256')
+    .update(`${ownerScopeKey}\0${surface}\0${canonicalEntity}`, 'utf8')
+    .digest('hex')
+    .slice(0, 24)}`
+}
+
+export type {
+  AssociationDreamingConfig,
+  AssociationDreamingNormalizedConfig,
+} from './dreaming.js'
+export type {
+  AssociationIntakeSignalConfig,
+  AssociationIntakeSignalNormalizedConfig,
+} from './intake-signal.js'
+export type { ClusteringConfig, NormalizedClusteringConfig } from './clustering.js'
+
 export function normalizeSourceVersion(version: number | string): number {
   if (typeof version === 'number') {
     if (!Number.isSafeInteger(version) || version < 0) {

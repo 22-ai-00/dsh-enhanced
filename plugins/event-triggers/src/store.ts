@@ -38,6 +38,15 @@ export interface EventSourceCandidate {
   digest: string
 }
 
+export interface OutboxRawPageRow {
+  readonly sequence: number
+  readonly triggerId: string
+  readonly eventId: string
+  readonly occurredAt: number
+  readonly canonical: string | null
+  readonly digest: string | null
+}
+
 export interface GoalSourceClaim {
   triggerId: string
   scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }
@@ -335,6 +344,36 @@ export class EventTriggerStore {
     return (this.database.prepare(`
       SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'event_sequence'), 0) AS sequence
     `).get() as { sequence: number }).sequence
+  }
+
+  outboxRowsForTriggersAfter(input: {
+    triggerIds: readonly string[]
+    afterSequence: number
+    limit: number
+  }): { rows: readonly OutboxRawPageRow[]; hasMore: boolean } {
+    validTime(input.afterSequence, 'afterSequence')
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 200) {
+      throw new EventTriggerStoreError('invalid-input', 'outbox query limit must be between 1 and 200')
+    }
+    if (input.triggerIds.length === 0) {
+      return { rows: Object.freeze([]), hasMore: false }
+    }
+    const uniqueTriggerIds = [...new Set(input.triggerIds)]
+    const placeholders = uniqueTriggerIds.map(() => '?').join(', ')
+    const rawRows = this.database.prepare(`
+      SELECT sequence, trigger_id AS triggerId, event_id AS eventId, occurred_at AS occurredAt,
+             envelope_canonical AS canonical, envelope_digest AS digest
+      FROM event_outbox
+      WHERE trigger_id IN (${placeholders}) AND sequence > ?
+      ORDER BY sequence ASC
+      LIMIT ?
+    `).all(...uniqueTriggerIds, input.afterSequence, input.limit + 1) as unknown as OutboxRawPageRow[]
+    const hasMore = rawRows.length > input.limit
+    const bounded = hasMore ? rawRows.slice(0, input.limit) : rawRows
+    return {
+      rows: Object.freeze(bounded.map(row => Object.freeze({ ...row }))),
+      hasMore,
+    }
   }
 
   claimGoalSource(input: GoalSourceClaim): StoredGoalSourceClaim {

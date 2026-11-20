@@ -145,6 +145,22 @@ export interface GrowthAssociationHoldoutComparison {
   readonly holdout: GrowthAssociationCohortMetrics
 }
 
+export interface GrowthAssociationImplicitSignalsSummary {
+  readonly total: number
+  readonly reAsk: number
+  readonly redo: number
+  readonly ownerCorrection: number
+}
+
+export interface GrowthAssociationEvalPoolSummary {
+  readonly activeReplay: number
+  readonly activeHoldout: number
+}
+
+export interface GrowthAssociationSkillCandidatesSummary {
+  readonly pending: number
+}
+
 export interface GrowthAssociationSummary {
   readonly state: GrowthDataState
   readonly evaluatedSteps: number
@@ -172,6 +188,9 @@ export interface GrowthAssociationSummary {
   readonly profileAdoptions: number
   readonly profileRollbacks: number
   readonly holdoutComparison: GrowthAssociationHoldoutComparison
+  readonly implicitSignals: GrowthAssociationImplicitSignalsSummary | null
+  readonly evalPool: GrowthAssociationEvalPoolSummary | null
+  readonly skillCandidates: GrowthAssociationSkillCandidatesSummary | null
 }
 
 export interface GrowthReport {
@@ -1444,10 +1463,21 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
   let assocLatestHeadChangedAt = -1
   let assocProfileAdoptions = 0
   let assocProfileRollbacks = 0
+  let sawAssocImplicitSignals = false
+  let assocImplicitSignalsTotal = 0
+  let assocImplicitReAsk = 0
+  let assocImplicitRedo = 0
+  let assocImplicitOwnerCorrection = 0
+  let sawAssocEvalPool = false
+  let assocEvalPoolActiveReplay = 0
+  let assocEvalPoolActiveHoldout = 0
+  let sawAssocSkillCandidates = false
+  let assocSkillCandidatesPending = 0
 
   const assocInjectedTaskIds = new Set<string>()
   const assocNonHoldoutTaskIds = new Set<string>()
   const assocHoldoutTaskIds = new Set<string>()
+  const assocActiveWindowTaskIds = new Set<string>()
   const assocSourceBuckets = new Map<string, {
     injectedItems: number
     exposures: number
@@ -1496,7 +1526,15 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
           for (const row of stepRows) {
             if (row.in_holdout === 1 || row.fallback_mode === 'holdout') {
               assocHoldoutSteps += 1
+              if (typeof row.task_id === 'string' && row.task_id !== '') {
+                assocHoldoutTaskIds.add(row.task_id)
+                assocActiveWindowTaskIds.add(row.task_id)
+              }
               continue
+            }
+            if (typeof row.task_id === 'string' && row.task_id !== '') {
+              assocNonHoldoutTaskIds.add(row.task_id)
+              assocActiveWindowTaskIds.add(row.task_id)
             }
             assocEvaluatedSteps += 1
             if (typeof row.latency_us === 'number' && Number.isFinite(row.latency_us) && row.latency_us >= 0) {
@@ -1583,6 +1621,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
             if (isWeak) assocWeakUseExposures += 1
             if (typeof row.task_id === 'string' && row.task_id !== '') {
               assocInjectedTaskIds.add(row.task_id)
+              assocActiveWindowTaskIds.add(row.task_id)
             }
             const srcKey = (typeof row.node_kind === 'string' && row.node_kind !== '')
               ? row.node_kind
@@ -1592,23 +1631,6 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
             if (isStrong) bucket.strongUses += 1
             if (isWeak) bucket.weakUses += 1
           }
-        }
-      }
-
-      if (hasTable(db, 'assoc_holdout_assignments')
-        && hasColumn(db, 'assoc_holdout_assignments', 'task_id')
-        && hasColumn(db, 'assoc_holdout_assignments', 'in_holdout')
-        && hasColumn(db, 'assoc_holdout_assignments', 'assigned_at')) {
-        sawAssociationTable = true
-        const holdRows = db.prepare(`
-          SELECT task_id, in_holdout
-          FROM assoc_holdout_assignments
-          WHERE assigned_at >= ? AND assigned_at <= ?
-        `).all(fromAt, toAt) as Array<{ task_id: string; in_holdout: number }>
-        for (const row of holdRows) {
-          if (typeof row.task_id !== 'string' || row.task_id === '') continue
-          if (row.in_holdout === 1) assocHoldoutTaskIds.add(row.task_id)
-          else assocNonHoldoutTaskIds.add(row.task_id)
         }
       }
 
@@ -1689,6 +1711,7 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
         }>
         for (const r of telRows) {
           if (typeof r.task_id !== 'string' || r.task_id === '') continue
+          assocActiveWindowTaskIds.add(r.task_id)
           const prev = assocTaskTelemetryMap.get(r.task_id)
           if (!prev || r.updated_at >= prev.updatedAt) {
             assocTaskTelemetryMap.set(r.task_id, {
@@ -1698,6 +1721,91 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
               costUsdMicros: typeof r.cost_usd_micros === 'number' && Number.isFinite(r.cost_usd_micros) ? Math.trunc(r.cost_usd_micros) : null,
               updatedAt: r.updated_at,
             })
+          }
+        }
+      }
+
+      if (hasTable(db, 'assoc_implicit_signals')
+        && hasColumn(db, 'assoc_implicit_signals', 'kind')
+        && hasColumn(db, 'assoc_implicit_signals', 'created_at')) {
+        sawAssociationTable = true
+        sawAssocImplicitSignals = true
+        const sigRows = db.prepare(`
+          SELECT kind, COUNT(*) AS n
+          FROM assoc_implicit_signals
+          WHERE created_at >= ? AND created_at <= ?
+          GROUP BY kind
+        `).all(fromAt, toAt) as Array<{ kind: string; n: number }>
+        for (const r of sigRows) {
+          assocImplicitSignalsTotal += r.n
+          if (r.kind === 're-ask') assocImplicitReAsk += r.n
+          else if (r.kind === 'redo') assocImplicitRedo += r.n
+          else if (r.kind === 'owner-correction') assocImplicitOwnerCorrection += r.n
+        }
+      }
+
+      if (hasTable(db, 'assoc_eval_pool')
+        && hasColumn(db, 'assoc_eval_pool', 'pool_kind')
+        && hasColumn(db, 'assoc_eval_pool', 'status')) {
+        sawAssociationTable = true
+        sawAssocEvalPool = true
+        const poolRows = db.prepare(`
+          SELECT pool_kind, COUNT(*) AS n
+          FROM assoc_eval_pool
+          WHERE status = 'active'
+          GROUP BY pool_kind
+        `).all() as Array<{ pool_kind: string; n: number }>
+        for (const r of poolRows) {
+          if (r.pool_kind === 'replay') assocEvalPoolActiveReplay += r.n
+          else if (r.pool_kind === 'holdout') assocEvalPoolActiveHoldout += r.n
+        }
+      }
+
+      if (hasTable(db, 'assoc_skill_candidates')
+        && hasColumn(db, 'assoc_skill_candidates', 'status')) {
+        sawAssociationTable = true
+        sawAssocSkillCandidates = true
+        const candRow = db.prepare(`
+          SELECT COUNT(*) AS n
+          FROM assoc_skill_candidates
+          WHERE status IN ('pending', 'staged')
+        `).get() as { n: number } | undefined
+        assocSkillCandidatesPending += candRow?.n ?? 0
+      }
+    }
+
+    // Pass 2: Resolve holdout assignments both in-window (assigned_at in [fromAt, toAt])
+    // and for any active in-window task IDs regardless of assigned_at.
+    const activeTaskIdList = [...assocActiveWindowTaskIds]
+    for (const db of assocDbs) {
+      if (hasTable(db, 'assoc_holdout_assignments')
+        && hasColumn(db, 'assoc_holdout_assignments', 'task_id')
+        && hasColumn(db, 'assoc_holdout_assignments', 'in_holdout')) {
+        sawAssociationTable = true
+        if (hasColumn(db, 'assoc_holdout_assignments', 'assigned_at')) {
+          const holdRows = db.prepare(`
+            SELECT task_id, in_holdout
+            FROM assoc_holdout_assignments
+            WHERE assigned_at >= ? AND assigned_at <= ?
+          `).all(fromAt, toAt) as Array<{ task_id: string; in_holdout: number }>
+          for (const row of holdRows) {
+            if (typeof row.task_id !== 'string' || row.task_id === '') continue
+            if (row.in_holdout === 1) assocHoldoutTaskIds.add(row.task_id)
+            else assocNonHoldoutTaskIds.add(row.task_id)
+          }
+        }
+        for (let i = 0; i < activeTaskIdList.length; i += 500) {
+          const batch = activeTaskIdList.slice(i, i + 500)
+          const placeholders = batch.map(() => '?').join(',')
+          const activeHoldRows = db.prepare(`
+            SELECT task_id, in_holdout
+            FROM assoc_holdout_assignments
+            WHERE task_id IN (${placeholders})
+          `).all(...batch) as Array<{ task_id: string; in_holdout: number }>
+          for (const row of activeHoldRows) {
+            if (typeof row.task_id !== 'string' || row.task_id === '') continue
+            if (row.in_holdout === 1) assocHoldoutTaskIds.add(row.task_id)
+            else assocNonHoldoutTaskIds.add(row.task_id)
           }
         }
       }
@@ -1826,6 +1934,10 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
       && assocProfileRollbacks === 0
       && nonHoldoutIds.length === 0
       && holdoutIds.length === 0
+      && assocImplicitSignalsTotal === 0
+      && assocEvalPoolActiveReplay === 0
+      && assocEvalPoolActiveHoldout === 0
+      && assocSkillCandidatesPending === 0
       ? 'zero'
       : 'data'
 
@@ -1961,6 +2073,25 @@ export async function collectGrowthReport(options: GrowthReportOptions): Promise
         injected: buildAssocCohortMetrics(injectedIds, evalTaskMetricsMap, assocTaskTelemetryMap),
         holdout: buildAssocCohortMetrics(holdoutIds, evalTaskMetricsMap, assocTaskTelemetryMap),
       }),
+      implicitSignals: sawAssocImplicitSignals
+        ? Object.freeze({
+            total: assocImplicitSignalsTotal,
+            reAsk: assocImplicitReAsk,
+            redo: assocImplicitRedo,
+            ownerCorrection: assocImplicitOwnerCorrection,
+          })
+        : null,
+      evalPool: sawAssocEvalPool
+        ? Object.freeze({
+            activeReplay: assocEvalPoolActiveReplay,
+            activeHoldout: assocEvalPoolActiveHoldout,
+          })
+        : null,
+      skillCandidates: sawAssocSkillCandidates
+        ? Object.freeze({
+            pending: assocSkillCandidatesPending,
+          })
+        : null,
     }),
     memoryLaneGate: Object.freeze({
       targetWindowDays: 14,
@@ -2071,6 +2202,20 @@ export function formatGrowthReport(report: GrowthReport): string {
     lines.push(`   留出对照（注入组 ${hc.injectedTasks} 任务 [非留出总 ${hc.nonHoldoutTasks}] vs 留出组 ${hc.holdoutTasks} 任务）：`)
     lines.push(fmtCohort('注入组', hc.injected))
     lines.push(fmtCohort('留出组', hc.holdout))
+    if (a.implicitSignals !== null || a.evalPool !== null || a.skillCandidates !== null) {
+      const s3Parts: string[] = []
+      if (a.implicitSignals !== null) {
+        const is = a.implicitSignals
+        s3Parts.push(`隐式低可信信号：${is.total}（重问 ${is.reAsk}/重做 ${is.redo}/纠正 ${is.ownerCorrection}）`)
+      }
+      if (a.evalPool !== null) {
+        s3Parts.push(`生产评估池：回放 ${a.evalPool.activeReplay} / 留出 ${a.evalPool.activeHoldout}`)
+      }
+      if (a.skillCandidates !== null) {
+        s3Parts.push(`待处理技能候选：${a.skillCandidates.pending}`)
+      }
+      lines.push(`   S3 进化反馈：${s3Parts.join(' · ')}`)
+    }
   }
 
   // 7. Pre-registered Dogfood Gate

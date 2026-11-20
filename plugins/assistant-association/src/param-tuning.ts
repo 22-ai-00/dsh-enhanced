@@ -1284,7 +1284,15 @@ export class AssociationParamTuningLedger {
       .get(scopeKey, version) as unknown as VersionRow | undefined
   }
 
-  #verified(scopeKey: string, version: number): AssocParamProfileVersion | undefined {
+  #verified(
+    scopeKey: string,
+    version: number,
+    visited = new Set<number>(),
+  ): AssocParamProfileVersion | undefined {
+    if (!Number.isSafeInteger(version) || version < 0 || visited.has(version)) {
+      return undefined
+    }
+    visited.add(version)
     if (version === 0) {
       const base = this.#baseline(scopeKey)
       return deepFreeze({
@@ -1303,12 +1311,17 @@ export class AssociationParamTuningLedger {
       })
     }
     const row = this.#row(scopeKey, version)
-    if (row === undefined) return undefined
+    if (row === undefined || row.version !== version) return undefined
     try {
       const base = this.#baseline(scopeKey)
       const parentVersion = row.parent_version ?? 0
+      if (!Number.isSafeInteger(parentVersion) || parentVersion < 0 || parentVersion >= row.version) {
+        return undefined
+      }
       const parentDigest =
-        parentVersion === 0 ? base.digest : this.#row(scopeKey, parentVersion)?.digest
+        parentVersion === 0
+          ? base.digest
+          : this.#verified(scopeKey, parentVersion, visited)?.digest
       if (parentDigest === undefined) return undefined
       const parameters = normalizeAssocParamProfile(JSON.parse(row.params_json))
       if (!withinAssocParamBounds(parameters, { minItems: this.#policy.minItems })) return undefined

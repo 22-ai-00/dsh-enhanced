@@ -15,6 +15,8 @@ import { registerWikiTools } from './tools.js'
 import type {
   WikiLintReport,
   WikiPage,
+  WikiPageChangeEvent,
+  WikiPageChangeKind,
   WikiProposalDecisionInput,
   WikiProposalResult,
   WikiReadResult,
@@ -22,6 +24,8 @@ import type {
   WikiUpsertMutation,
 } from './types.js'
 import { WikiVault } from './vault.js'
+
+export type { WikiPageChangeEvent, WikiPageChangeKind }
 
 export interface Config {
   vaultRoot: string
@@ -149,6 +153,7 @@ export class PersonalWikiService extends Service {
 
     ctx.effect(() => () => {
       this.active = false
+      this.vault.clearPageChangeListeners()
       this.proposalStore.close()
     }, 'personal-wiki.database')
     if (config.reconcileIntervalMs > 0) {
@@ -304,6 +309,28 @@ export class PersonalWikiService extends Service {
   health(): { pages: number; lintErrors: number; lintWarnings: number; pendingProposals: number } {
     this.assertActive()
     return { ...this.vault.health(), ...this.proposalStore.health() }
+  }
+
+  /** Host-only read of current vault pages; refreshes safely and excludes archived pages by default. */
+  inspectHostPages(options?: { includeArchived?: boolean }): readonly WikiPage[] {
+    this.assertActive()
+    try {
+      this.vault.rebuild()
+    } catch {
+      // Keep the last valid in-memory snapshot if an external edit is invalid or mid-flight.
+    }
+    const includeArchived = options?.includeArchived === true
+    const pages = this.vault.list().filter(page => includeArchived || page.metadata.status !== 'archived')
+    return Object.freeze(pages)
+  }
+
+  /** Host-only post-commit page change notification across proposal commits and vault rebuilds. */
+  onPageChange(listener: (event: WikiPageChangeEvent) => void): () => void {
+    this.assertActive()
+    if (typeof listener !== 'function') {
+      throw new TypeError('personal-wiki: listener must be a function')
+    }
+    return this.vault.onPageChange(listener)
   }
 
   private authorize(

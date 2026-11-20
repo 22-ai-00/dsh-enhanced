@@ -29,6 +29,10 @@ export * from './tools.js'
 export * from './sources.js'
 export * from './hebbian.js'
 export * from './param-tuning.js'
+export * from './dreaming.js'
+export * from './intake-signal.js'
+export * from './clustering.js'
+export * from './eval-pool.js'
 export * from './service.js'
 
 export const inject = ['assistantPolicy'] as const

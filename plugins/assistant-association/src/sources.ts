@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   AutomationDefinitionChangeEvent,
@@ -10,6 +11,7 @@ import type {
   OwnerForegroundTaskSourceCursor,
   OwnerRouteScopeSummary,
 } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDreamingService } from '@dsh-enhanced/assistant-dreaming'
 import type {
   AssistantEvaluationService,
   TrustedTaskLearningProjectionReceipt,
@@ -19,23 +21,46 @@ import type {
   GoalRecord,
   GoalRecordChangeEvent,
 } from '@dsh-enhanced/assistant-goals'
+import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import type {
   AssistantWorkItemsService,
   WorkItemChangeEvent,
   WorkItemSummaryForHost,
 } from '@dsh-enhanced/assistant-work-items'
 import type {
+  EventTriggersService,
+  OwnerOutboxEventSummary,
+} from '@dsh-enhanced/event-triggers'
+import type {
   MemoryAgentContext,
   MemoryRecord,
   MemoryRecordChangeEvent,
   PersonalMemoryService,
 } from '@dsh-enhanced/personal-memory'
+import type {
+  PersonalWikiService,
+  WikiPage,
+  WikiPageChangeEvent,
+} from '@dsh-enhanced/personal-wiki'
+import {
+  DEFAULT_ASSOCIATION_DREAMING_CONFIG,
+  projectDreamIdeasToAssociation,
+  type AssociationDreamingNormalizedConfig,
+  type DreamIdeaRecord,
+} from './dreaming.js'
 import { buildSharedEntityEdges, extractEntities } from './entities.js'
+import {
+  retractEvalPoolTask,
+  upsertEvalPoolFromReceipt,
+  withdrawEvalPoolTask,
+  type EvalPoolVerifierPeer,
+} from './eval-pool.js'
 import { clampEdgeWeight, classifyEvaluationCorrection } from './hebbian.js'
 import type { AssociationStore } from './sqlite.js'
-import { tokenizeAssociationText } from './tokenize.js'
+import { normalizeEntityKey, tokenizeAssociationText } from './tokenize.js'
 import {
   computeDeterministicEdgeId,
+  computeDeterministicSynonymId,
   computeOwnerScopeKey,
   computePrincipalDigest,
   DEFAULT_HEBBIAN_CONFIG,
@@ -45,6 +70,7 @@ import {
   type NormalizedHebbianConfig,
   type UpsertEdgeInput,
   type UpsertNodeInput,
+  type UpsertSynonymInput,
 } from './types.js'
 import type { AssociationWriteQueue } from './write-queue.js'
 
@@ -52,6 +78,16 @@ const MAX_ENTITY_PEERS_PER_UPSERT = 64
 const MAX_SHARED_EDGES_PER_NODE = 16
 const MAX_TITLE_CHARS = 160
 const MAX_BODY_CHARS = 8_192
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function sanitizeEventSummaryText(raw: string): string {
+  return raw
+    .replace(/\b(?:sk|pk|tok|token|secret|bearer)[_-]?[A-Za-z0-9._-]{12,}\b/giu, '[redacted]')
+    .replace(/\bauthorization\s*:\s*\S+/giu, 'authorization:[redacted]')
+}
 
 function compactTitle(raw: string, maxChars = MAX_TITLE_CHARS): string {
   const collapsed = raw.normalize('NFKC').replace(/\s+/gu, ' ').trim()
@@ -87,7 +123,11 @@ export interface SourceManagerCallbacks {
     readonly nowMs: number
   }) => void
   readonly hebbianConfig?: NormalizedHebbianConfig
+  readonly dreamingConfig?: AssociationDreamingNormalizedConfig
+  readonly holdoutSeedKey?: Buffer | null
+  readonly holdoutRateBps?: number
   readonly consumeSessionToolNames?: (sessionId: string) => readonly string[]
+  readonly onEpisodesSynced?: (scope: AssociationOwnerScope) => void
   readonly onError?: (error: unknown) => void
   readonly now?: () => number
 }
@@ -255,6 +295,98 @@ export class AssociationSourceManager {
     this.#disposers.push(() => {
       void fEvaluation.dispose()
     })
+
+    // Bind optional PersonalWiki service
+    const fWiki = this.#ctx.inject(['personalWiki' as never], (wikiCtx) => {
+      const wiki = wikiCtx.get('personalWiki' as never, false) as PersonalWikiService | undefined
+      if (wiki === undefined) return
+      const unsub =
+        typeof wiki.onPageChange === 'function'
+          ? wiki.onPageChange((event) => {
+              this.#handleWikiPageChange(event)
+            })
+          : undefined
+      this.scheduleSync()
+      return () => {
+        unsub?.()
+      }
+    })
+    this.#disposers.push(() => {
+      void fWiki.dispose()
+    })
+
+    // Bind optional AssistantSkills service
+    const fSkills = this.#ctx.inject(['assistantSkills' as never], (skillsCtx) => {
+      const skills = skillsCtx.get('assistantSkills' as never, false) as
+        | AssistantSkillsService
+        | undefined
+      if (skills === undefined) return
+      const unsub =
+        typeof skills.onSkillChange === 'function'
+          ? skills.onSkillChange(() => {
+              this.scheduleSync()
+            })
+          : undefined
+      this.scheduleSync()
+      return () => {
+        unsub?.()
+      }
+    })
+    this.#disposers.push(() => {
+      void fSkills.dispose()
+    })
+
+    // Bind optional EventTriggers service
+    const fTriggers = this.#ctx.inject(['eventTriggers' as never], (trigCtx) => {
+      const triggers = trigCtx.get('eventTriggers' as never, false) as
+        | EventTriggersService
+        | undefined
+      if (triggers === undefined) return
+      const unsubChanges =
+        typeof triggers.subscribeSourceChanges === 'function'
+          ? triggers.subscribeSourceChanges(() => {
+              this.scheduleSync()
+            })
+          : undefined
+      const unsubIntake =
+        typeof triggers.registerIntakeObserver === 'function'
+          ? triggers.registerIntakeObserver({
+              protocol: 1,
+              observe: () => {
+                this.scheduleSync()
+              },
+            })
+          : undefined
+      this.scheduleSync()
+      return () => {
+        unsubChanges?.()
+        unsubIntake?.()
+      }
+    })
+    this.#disposers.push(() => {
+      void fTriggers.dispose()
+    })
+
+    // Bind optional AssistantDreaming service
+    const fDreaming = this.#ctx.inject(['assistantDreaming' as never], (dreamCtx) => {
+      const dreaming = dreamCtx.get('assistantDreaming' as never, false) as
+        | AssistantDreamingService
+        | undefined
+      if (dreaming === undefined) return
+      const unsub =
+        typeof dreaming.onIdeaChange === 'function'
+          ? dreaming.onIdeaChange(() => {
+              this.scheduleSync()
+            })
+          : undefined
+      this.scheduleSync()
+      return () => {
+        unsub?.()
+      }
+    })
+    this.#disposers.push(() => {
+      void fDreaming.dispose()
+    })
   }
 
   dispose(): void {
@@ -347,11 +479,18 @@ export class AssociationSourceManager {
       this.#syncGoalsScope(scope)
       this.#syncWorkItemsScope(scope)
       this.#syncAutomationsScope(scope)
-      this.#syncDeliveryEpisodesScope(scope)
+      this.#syncWikiScope(scope)
+      this.#syncSkillsScope(scope)
+      this.#syncEventTriggersScope(scope)
+      this.#syncDreamIdeasScope(scope)
+      const hadFg = this.#syncDeliveryEpisodesScope(scope)
       await this.#writeQueue.flush()
       if (this.#disposed) return
-      this.#syncEvaluationScope(scope)
+      const hadEval = this.#syncEvaluationScope(scope)
       await this.#writeQueue.flush()
+      if ((hadFg || hadEval) && !this.#disposed) {
+        this.#callbacks.onEpisodesSynced?.(scope)
+      }
     } catch (error) {
       this.#callbacks.onError?.(error)
     }
@@ -394,8 +533,21 @@ export class AssociationSourceManager {
     scope: AssociationOwnerScope,
     nodes: readonly UpsertNodeInput[],
     cursor?: { readonly sourcePlugin: string; readonly scopeKey: string; readonly cursorJson: string },
+    extra?: {
+      readonly synonyms?: readonly UpsertSynonymInput[]
+      readonly extraDerivedRefs?: readonly DerivedRefInput[]
+    },
   ): void {
-    if (nodes.length === 0 && cursor === undefined) return
+    const extraSynonyms = extra?.synonyms ?? []
+    const extraDerivedRefs = extra?.extraDerivedRefs ?? []
+    if (
+      nodes.length === 0 &&
+      cursor === undefined &&
+      extraSynonyms.length === 0 &&
+      extraDerivedRefs.length === 0
+    ) {
+      return
+    }
     const existingPeers =
       nodes.length > 0
         ? this.#store.loadEntityCandidateNodesForScope(scope.ownerScopeKey, MAX_ENTITY_PEERS_PER_UPSERT)
@@ -515,7 +667,9 @@ export class AssociationSourceManager {
       kind: 'upsert-nodes',
       nodes,
       edges,
-      derivedRefs,
+      ...(extraSynonyms.length > 0 ? { synonyms: extraSynonyms } : {}),
+      derivedRefs:
+        extraDerivedRefs.length > 0 ? [...derivedRefs, ...extraDerivedRefs] : derivedRefs,
       ...(cursor === undefined ? {} : { cursor }),
     })
   }
@@ -1152,6 +1306,539 @@ export class AssociationSourceManager {
   }
 
   // ---------------------------------------------------------------------------
+  // Source (d.1): personal-wiki
+  // ---------------------------------------------------------------------------
+
+  #mapWikiPageToNode(
+    page: WikiPage,
+    scope: AssociationOwnerScope,
+  ): {
+    readonly node: UpsertNodeInput
+    readonly synonyms: readonly UpsertSynonymInput[]
+    readonly derivedRefs: readonly DerivedRefInput[]
+  } {
+    const scope8 = scope.ownerScopeKey.slice(0, 8)
+    const rawId = `a:wk-${scope8}-${page.metadata.id}`
+    const nodeId =
+      rawId.length <= 128 ? rawId : `a:wk-${scope8}-${sha256Hex(page.metadata.id).slice(0, 24)}`
+    const title = compactTitle(page.metadata.title)
+    const body = page.body.slice(0, MAX_BODY_CHARS)
+    const combinedText = `${title}\n${body}\n${page.metadata.tags.join(' ')}\n${page.metadata.aliases.join(' ')}`
+    const extracted = extractEntities(combinedText)
+    const entitySet = new Set<string>(extracted)
+    const normalizedTitle = normalizeEntityKey(page.metadata.title)
+    if (normalizedTitle !== null) entitySet.add(normalizedTitle)
+    for (const tag of page.metadata.tags) {
+      const k = normalizeEntityKey(tag)
+      if (k !== null) entitySet.add(k)
+    }
+    for (const alias of page.metadata.aliases) {
+      const k = normalizeEntityKey(alias)
+      if (k !== null) entitySet.add(k)
+    }
+    const entities = [...entitySet]
+    const parsedCreated = Date.parse(page.metadata.created)
+    const parsedUpdated = Date.parse(page.metadata.updated)
+    const nowMs = this.#now()
+    const createdAt = Number.isFinite(parsedCreated) && parsedCreated >= 0 ? parsedCreated : nowMs
+    const updatedAt = Number.isFinite(parsedUpdated) && parsedUpdated >= 0 ? parsedUpdated : nowMs
+    const sourceVersion = normalizeSourceVersion(page.revision)
+
+    const synonyms: UpsertSynonymInput[] = []
+    const derivedRefs: DerivedRefInput[] = []
+    if (page.metadata.status !== 'draft' && page.metadata.aliases.length > 0) {
+      const canonical = normalizedTitle ?? entities[0] ?? null
+      if (canonical !== null) {
+        for (const alias of page.metadata.aliases) {
+          const surface = normalizeEntityKey(alias)
+          if (surface === null || surface === canonical) continue
+          const synId = computeDeterministicSynonymId(scope.ownerScopeKey, surface, canonical)
+          synonyms.push({
+            id: synId,
+            ownerScopeKey: scope.ownerScopeKey,
+            surface,
+            canonicalEntity: canonical,
+            sourceNodeId: nodeId,
+            trust: 'trusted',
+            createdAt: updatedAt,
+          })
+          derivedRefs.push({
+            sourceNodeId: nodeId,
+            sourceVersion,
+            targetKind: 'synonym',
+            targetId: synId,
+          })
+        }
+      }
+    }
+
+    const node: UpsertNodeInput = {
+      id: nodeId,
+      kind: 'wiki',
+      sourcePlugin: 'personal-wiki',
+      sourceRef: `wiki:${page.metadata.id}`,
+      sourceVersion,
+      ownerScopeKey: scope.ownerScopeKey,
+      ownerMode: scope.mode,
+      principalDigest: scope.principalDigest,
+      principalRecordId: scope.mode === 'delivery' ? scope.principalRecordId : null,
+      principalVersion: scope.mode === 'delivery' ? scope.principalVersion : null,
+      scopeMode: 'user-global',
+      workspace: scope.workspace,
+      agentPreset: scope.agentPreset,
+      trust: page.metadata.status === 'draft' ? 'low' : 'trusted',
+      sensitivity: 'private',
+      title,
+      body,
+      entities,
+      tokens: tokenizeAssociationText(combinedText),
+      metadata: {
+        extra: {
+          pageId: page.metadata.id,
+          relativePath: page.relativePath,
+          status: page.metadata.status,
+          authority: page.metadata.authority,
+          type: page.metadata.type,
+          aliases: [...page.metadata.aliases],
+        },
+      },
+      createdAt,
+      updatedAt,
+    }
+    return { node, synonyms, derivedRefs }
+  }
+
+  #syncWikiScope(scope: AssociationOwnerScope): void {
+    const wiki = this.#ctx.get('personalWiki' as never, false) as PersonalWikiService | undefined
+    if (wiki === undefined || typeof wiki.inspectHostPages !== 'function') return
+
+    let pages: readonly WikiPage[]
+    try {
+      pages = wiki.inspectHostPages({ includeArchived: false })
+    } catch {
+      return
+    }
+
+    const activeRefs = new Set<string>()
+    const upserts: UpsertNodeInput[] = []
+    const synonyms: UpsertSynonymInput[] = []
+    const extraDerivedRefs: DerivedRefInput[] = []
+    for (const page of pages) {
+      if (page.metadata.status === 'archived') continue
+      const sourceRef = `wiki:${page.metadata.id}`
+      activeRefs.add(sourceRef)
+      if (this.#store.isSourceWithdrawn(scope.ownerScopeKey, 'personal-wiki', sourceRef)) {
+        continue
+      }
+      const mapped = this.#mapWikiPageToNode(page, scope)
+      upserts.push(mapped.node)
+      synonyms.push(...mapped.synonyms)
+      extraDerivedRefs.push(...mapped.derivedRefs)
+    }
+
+    for (const existingRef of this.#store.listActiveSourceRefsForPlugin(
+      scope.ownerScopeKey,
+      'personal-wiki',
+    )) {
+      if (!activeRefs.has(existingRef)) {
+        this.#withdrawImmediate({
+          ownerScopeKey: scope.ownerScopeKey,
+          sourcePlugin: 'personal-wiki',
+          sourceRef: existingRef,
+          recordWithdrawalTombstone: false,
+        })
+      }
+    }
+
+    this.#enqueueUpsertWithEdges(scope, upserts, undefined, {
+      synonyms,
+      extraDerivedRefs,
+    })
+  }
+
+  #handleWikiPageChange(event: WikiPageChangeEvent): void {
+    if (this.#disposed) return
+    if (
+      event.kind === 'archived' ||
+      event.kind === 'deleted' ||
+      event.page?.metadata.status === 'archived'
+    ) {
+      for (const scope of this.#scopes.values()) {
+        this.#withdrawImmediate({
+          ownerScopeKey: scope.ownerScopeKey,
+          sourcePlugin: 'personal-wiki',
+          sourceRef: `wiki:${event.pageId}`,
+          recordWithdrawalTombstone: false,
+        })
+      }
+      return
+    }
+    this.scheduleSync()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Source (d.2): assistant-skills
+  // ---------------------------------------------------------------------------
+
+  #syncSkillsScope(scope: AssociationOwnerScope): void {
+    if (
+      scope.mode !== 'delivery' ||
+      scope.principalRecordId === null ||
+      scope.principalVersion === null
+    ) {
+      return
+    }
+    const skills = this.#ctx.get('assistantSkills' as never, false) as
+      | AssistantSkillsService
+      | undefined
+    if (skills === undefined || typeof skills.inspectOwnerActiveSkills !== 'function') return
+
+    let activeSkills: ReturnType<AssistantSkillsService['inspectOwnerActiveSkills']>
+    try {
+      activeSkills = skills.inspectOwnerActiveSkills({
+        principalId: scope.principalId,
+        principalRecordId: scope.principalRecordId,
+        principalVersion: scope.principalVersion,
+        workspace: scope.workspace,
+        preset: scope.agentPreset,
+      })
+    } catch {
+      return
+    }
+
+    const activeRefs = new Set<string>()
+    const upserts: UpsertNodeInput[] = []
+    const nowMs = this.#now()
+
+    for (const skill of activeSkills) {
+      if ((skill as { readonly retired?: boolean }).retired === true) continue
+      const sourceRef = `skill:${skill.name}`
+      activeRefs.add(sourceRef)
+      if (this.#store.isSourceWithdrawn(scope.ownerScopeKey, 'assistant-skills', sourceRef)) {
+        continue
+      }
+      const toolNames = [
+        ...new Set(skill.steps.map((s) => s.toolName).filter((t) => t.trim().length > 0)),
+      ]
+      const title = compactTitle(`[skill] ${skill.name}: ${skill.description}`)
+      const body = [
+        skill.name,
+        skill.description,
+        skill.inputs.length > 0 ? `inputs: ${skill.inputs.map((i) => i.name).join(', ')}` : '',
+        toolNames.length > 0 ? `tools: ${toolNames.join(' -> ')}` : '',
+      ]
+        .filter((s) => s.length > 0)
+        .join('\n')
+        .slice(0, MAX_BODY_CHARS)
+      const combinedText = `${title}\n${body}`
+      const entitySet = new Set<string>(extractEntities(combinedText))
+      const normName = normalizeEntityKey(skill.name)
+      if (normName !== null) entitySet.add(normName)
+      for (const tool of toolNames) {
+        const normTool = normalizeEntityKey(tool)
+        if (normTool !== null) entitySet.add(normTool)
+      }
+      const skillVersionRaw = (skill as { readonly version?: number }).version
+      const definitionDigest = (skill as { readonly definitionDigest?: string }).definitionDigest
+      const sourceVersion =
+        typeof skillVersionRaw === 'number' && Number.isSafeInteger(skillVersionRaw)
+          ? skillVersionRaw
+          : normalizeSourceVersion(definitionDigest ?? 1)
+      const createdAtRaw = (skill as { readonly createdAt?: number }).createdAt
+      const updatedAtRaw = (skill as { readonly updatedAt?: number }).updatedAt
+      const createdAt = typeof createdAtRaw === 'number' ? createdAtRaw : nowMs
+      const updatedAt = typeof updatedAtRaw === 'number' ? updatedAtRaw : nowMs
+
+      upserts.push({
+        id: `a:sk-${scope.ownerScopeKey.slice(0, 8)}-${sha256Hex(skill.name).slice(0, 24)}`,
+        kind: 'skill',
+        sourcePlugin: 'assistant-skills',
+        sourceRef,
+        sourceVersion,
+        ownerScopeKey: scope.ownerScopeKey,
+        ownerMode: scope.mode,
+        principalDigest: scope.principalDigest,
+        principalRecordId: scope.principalRecordId,
+        principalVersion: scope.principalVersion,
+        scopeMode: 'workspace',
+        workspace: scope.workspace,
+        agentPreset: scope.agentPreset,
+        trust: 'trusted',
+        sensitivity: 'private',
+        title,
+        body,
+        entities: [...entitySet],
+        tokens: tokenizeAssociationText(combinedText),
+        metadata: {
+          ...(toolNames.length > 0 ? { toolNames } : {}),
+          extra: {
+            skillName: skill.name,
+            version: sourceVersion,
+          },
+        },
+        createdAt,
+        updatedAt,
+      })
+    }
+
+    for (const existingRef of this.#store.listActiveSourceRefsForPlugin(
+      scope.ownerScopeKey,
+      'assistant-skills',
+    )) {
+      if (!activeRefs.has(existingRef)) {
+        this.#withdrawImmediate({
+          ownerScopeKey: scope.ownerScopeKey,
+          sourcePlugin: 'assistant-skills',
+          sourceRef: existingRef,
+          recordWithdrawalTombstone: false,
+        })
+      }
+    }
+
+    this.#enqueueUpsertWithEdges(scope, upserts)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Source (d.3): event-triggers
+  // ---------------------------------------------------------------------------
+
+  #mapOutboxEventToNode(
+    item: OwnerOutboxEventSummary,
+    scope: AssociationOwnerScope,
+  ): UpsertNodeInput {
+    const rawKey = `${item.triggerId}\0${item.eventId}`
+    const scope8 = scope.ownerScopeKey.slice(0, 8)
+    const nodeId = `a:ev-${scope8}-${sha256Hex(rawKey).slice(0, 24)}`
+    const candidateRef = `event:${item.triggerId}:${item.eventId}`
+    const sourceRef =
+      candidateRef.length <= 512 ? candidateRef : `event:${sha256Hex(rawKey).slice(0, 32)}`
+    const sanitizedTitle = sanitizeEventSummaryText(item.title)
+    const sanitizedSummary = sanitizeEventSummaryText(item.summary)
+    const title = compactTitle(`[event:${item.triggerKind}] ${sanitizedTitle}`)
+    const body = `${sanitizedTitle}\n${sanitizedSummary}`.slice(0, MAX_BODY_CHARS)
+    const combinedText = `${title}\n${sanitizedSummary}\n${item.entities.join(' ')}`
+    const entitySet = new Set<string>(extractEntities(combinedText))
+    for (const ent of item.entities) {
+      const k = normalizeEntityKey(sanitizeEventSummaryText(ent))
+      if (k !== null) entitySet.add(k)
+    }
+    const ttlMs = item.ttlMs !== undefined && item.ttlMs > 0 ? item.ttlMs : null
+    const expiresAt = ttlMs !== null ? item.occurredAt + ttlMs : null
+
+    return {
+      id: nodeId,
+      kind: 'event',
+      sourcePlugin: 'event-triggers',
+      sourceRef,
+      sourceVersion: Math.max(1, item.sequence),
+      ownerScopeKey: scope.ownerScopeKey,
+      ownerMode: scope.mode,
+      principalDigest: scope.principalDigest,
+      principalRecordId: scope.principalRecordId,
+      principalVersion: scope.principalVersion,
+      scopeMode: 'workspace',
+      workspace: scope.workspace,
+      agentPreset: scope.agentPreset,
+      trust: 'low',
+      sensitivity: 'private',
+      title,
+      body,
+      entities: [...entitySet],
+      tokens: tokenizeAssociationText(combinedText),
+      metadata: {
+        extra: {
+          triggerId: item.triggerId,
+          triggerKind: item.triggerKind,
+          automationId: item.automationId,
+          eventId: item.eventId,
+          sequence: item.sequence,
+          envelopeDigest: item.envelopeDigest,
+          observationDigest: item.observationDigest,
+        },
+      },
+      ttlMs,
+      expiresAt,
+      createdAt: item.occurredAt,
+      updatedAt: item.occurredAt,
+    }
+  }
+
+  #syncEventTriggersScope(scope: AssociationOwnerScope): void {
+    if (
+      scope.mode !== 'delivery' ||
+      scope.principalRecordId === null ||
+      scope.principalVersion === null
+    ) {
+      return
+    }
+    const triggers = this.#ctx.get('eventTriggers' as never, false) as
+      | EventTriggersService
+      | undefined
+    if (triggers === undefined) return
+
+    const ownerScope = {
+      principalId: scope.principalId,
+      principalRecordId: scope.principalRecordId,
+      principalVersion: scope.principalVersion,
+      workspace: scope.workspace,
+      preset: scope.agentPreset,
+    }
+
+    const nowMs = this.#now()
+    if (typeof triggers.inspectOwnerSources === 'function') {
+      let activeSources: ReturnType<EventTriggersService['inspectOwnerSources']>
+      try {
+        activeSources = triggers.inspectOwnerSources(ownerScope)
+      } catch {
+        activeSources = []
+      }
+      const activeTriggerIds = new Set(activeSources.map((s) => s.triggerId))
+      for (const existingNode of this.#store.listActiveNodesBySourcePlugin(
+        scope.ownerScopeKey,
+        'event-triggers',
+      )) {
+        const triggerId = existingNode.metadata.extra?.triggerId
+        const isExpired = existingNode.expiresAt !== null && existingNode.expiresAt <= nowMs
+        if (
+          isExpired ||
+          (typeof triggerId === 'string' && !activeTriggerIds.has(triggerId))
+        ) {
+          this.#withdrawImmediate({
+            ownerScopeKey: scope.ownerScopeKey,
+            sourcePlugin: 'event-triggers',
+            sourceRef: existingNode.sourceRef,
+            recordWithdrawalTombstone: false,
+          })
+        }
+      }
+    }
+
+    if (typeof triggers.inspectOwnerOutboxEvents !== 'function') return
+
+    const cursorRow = this.#store.getIngestCursor('event-triggers', scope.ownerScopeKey)
+    let afterSequence = 0
+    if (cursorRow !== null) {
+      try {
+        const parsed = JSON.parse(cursorRow.cursorJson) as { afterSequence?: unknown }
+        if (
+          typeof parsed.afterSequence === 'number' &&
+          Number.isSafeInteger(parsed.afterSequence) &&
+          parsed.afterSequence >= 0
+        ) {
+          afterSequence = parsed.afterSequence
+        }
+      } catch {
+        afterSequence = 0
+      }
+    }
+
+    while (!this.#disposed) {
+      let page: ReturnType<EventTriggersService['inspectOwnerOutboxEvents']>
+      try {
+        page = triggers.inspectOwnerOutboxEvents({
+          scope: ownerScope,
+          afterSequence,
+          limit: 100,
+        })
+      } catch {
+        return
+      }
+
+      if (page.items.length === 0) break
+
+      const upserts: UpsertNodeInput[] = []
+      for (const item of page.items) {
+        const expiresAt =
+          item.ttlMs !== undefined && item.ttlMs > 0 ? item.occurredAt + item.ttlMs : null
+        if (expiresAt !== null && expiresAt <= nowMs) continue
+        const mapped = this.#mapOutboxEventToNode(item, scope)
+        if (
+          this.#store.isSourceWithdrawn(
+            scope.ownerScopeKey,
+            'event-triggers',
+            mapped.sourceRef,
+          )
+        ) {
+          continue
+        }
+        upserts.push(mapped)
+      }
+
+      afterSequence = page.nextSequence
+      this.#enqueueUpsertWithEdges(scope, upserts, {
+        sourcePlugin: 'event-triggers',
+        scopeKey: scope.ownerScopeKey,
+        cursorJson: JSON.stringify({ afterSequence: page.nextSequence }),
+      })
+
+      if (!page.hasMore) break
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Source (d.4): assistant-dreaming ideas
+  // ---------------------------------------------------------------------------
+
+  #syncDreamIdeasScope(scope: AssociationOwnerScope): void {
+    const dreaming = this.#ctx.get('assistantDreaming' as never, false) as
+      | AssistantDreamingService
+      | undefined
+    if (dreaming === undefined || typeof dreaming.inspectIdeas !== 'function') return
+
+    let rawIdeas: ReturnType<AssistantDreamingService['inspectIdeas']>
+    try {
+      rawIdeas = dreaming.inspectIdeas(200)
+    } catch {
+      return
+    }
+    if (rawIdeas.length === 0) return
+
+    const ideas: DreamIdeaRecord[] = rawIdeas.map((idea) => ({
+      id: idea.id,
+      lane: idea.lane,
+      runId: idea.runId,
+      createdAt: idea.createdAt,
+      dayKey: idea.dayKey,
+      state: idea.state,
+      summary: idea.summary,
+      detail: idea.detail,
+      evidenceRefs: [...idea.evidenceRefs],
+    }))
+
+    const cfg = this.#callbacks.dreamingConfig ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG
+    const projected = projectDreamIdeasToAssociation(ideas, scope, cfg, this.#now())
+
+    for (const withdrawal of projected.withdrawals) {
+      if (
+        this.#store.findNodeBySourceRef(
+          withdrawal.ownerScopeKey,
+          withdrawal.sourcePlugin,
+          withdrawal.sourceRef,
+        ) !== null
+      ) {
+        this.#withdrawImmediate({
+          ownerScopeKey: withdrawal.ownerScopeKey,
+          sourcePlugin: withdrawal.sourcePlugin,
+          sourceRef: withdrawal.sourceRef,
+          recordWithdrawalTombstone: true,
+        })
+      }
+    }
+
+    const upserts = projected.upserts.filter(
+      (node) =>
+        !this.#store.isSourceWithdrawn(
+          scope.ownerScopeKey,
+          node.sourcePlugin,
+          node.sourceRef,
+        ),
+    )
+    if (upserts.length > 0) {
+      this.#enqueueUpsertWithEdges(scope, upserts)
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Source (e): Episodes (Delivery foreground + Evaluation projections)
   // ---------------------------------------------------------------------------
 
@@ -1209,17 +1896,17 @@ export class AssociationSourceManager {
     }
   }
 
-  #syncDeliveryEpisodesScope(scope: AssociationOwnerScope): void {
+  #syncDeliveryEpisodesScope(scope: AssociationOwnerScope): boolean {
     if (
       scope.mode !== 'delivery' ||
       scope.principalRecordId === null ||
       scope.principalVersion === null ||
       scope.authorityId === undefined
     ) {
-      return
+      return false
     }
     const route = this.#routeAuthorities.get(scope.ownerScopeKey)
-    if (route === undefined) return
+    if (route === undefined) return false
     const delivery = this.#ctx.get('assistantDelivery' as never, false) as
       | AssistantDeliveryService
       | undefined
@@ -1228,7 +1915,7 @@ export class AssociationSourceManager {
       typeof delivery.listOwnerForegroundTaskSources !== 'function' ||
       typeof delivery.withOwnerForegroundTaskSourcesFence !== 'function'
     ) {
-      return
+      return false
     }
 
     const cursorRow = this.#store.getIngestCursor('delivery-foreground', scope.ownerScopeKey)
@@ -1253,6 +1940,7 @@ export class AssociationSourceManager {
       },
     }
 
+    let syncedAny = false
     while (!this.#disposed) {
       let page: ReturnType<AssistantDeliveryService['listOwnerForegroundTaskSources']>
       try {
@@ -1262,7 +1950,7 @@ export class AssociationSourceManager {
           limit: 50,
         })
       } catch {
-        return
+        return syncedAny
       }
 
       if (page.items.length === 0) break
@@ -1298,10 +1986,13 @@ export class AssociationSourceManager {
           )
         } catch {
           // If owner route rotated or fence failed, skip this batch cleanly
-          return
+          return syncedAny
         }
       }
 
+      if (upserts.length > 0) {
+        syncedAny = true
+      }
       after = page.nextCursor
       this.#enqueueUpsertWithEdges(scope, upserts, {
         sourcePlugin: 'delivery-foreground',
@@ -1311,15 +2002,16 @@ export class AssociationSourceManager {
 
       if (!page.hasMore) break
     }
+    return syncedAny
   }
 
-  #syncEvaluationScope(scope: AssociationOwnerScope): void {
+  #syncEvaluationScope(scope: AssociationOwnerScope): boolean {
     if (
       scope.mode !== 'delivery' ||
       scope.principalRecordId === null ||
       scope.principalVersion === null
     ) {
-      return
+      return false
     }
     const evaluation = this.#ctx.get('assistantEvaluation' as never, false) as
       | AssistantEvaluationService
@@ -1329,8 +2021,14 @@ export class AssociationSourceManager {
       typeof evaluation.createHostScope !== 'function' ||
       typeof evaluation.listTrustedTaskLearningProjections !== 'function'
     ) {
-      return
+      return false
     }
+
+    const verifier = this.#ctx.get('assistantVerifier' as never, false) as
+      | EvalPoolVerifierPeer
+      | undefined
+    const holdoutSeedKey = this.#callbacks.holdoutSeedKey ?? null
+    const holdoutRateBps = this.#callbacks.holdoutRateBps
 
     const hostScope = evaluation.createHostScope({
       workspace: scope.workspace,
@@ -1348,6 +2046,7 @@ export class AssociationSourceManager {
       }
     }
 
+    let syncedAny = false
     while (!this.#disposed) {
       let page: ReturnType<AssistantEvaluationService['listTrustedTaskLearningProjections']>
       try {
@@ -1357,7 +2056,7 @@ export class AssociationSourceManager {
           limit: 100,
         })
       } catch {
-        return
+        return syncedAny
       }
       if (page.items.length === 0) break
 
@@ -1379,10 +2078,14 @@ export class AssociationSourceManager {
             : undefined
 
         const { subjectKind, subjectRef, disposition } = receipt.projection
+        const evalTaskId = `${subjectKind}:${subjectRef}`
 
         // Case 1: Explicit owner withdrawal (action === 'withdraw') -> correction -β then hard cascade delete + tombstone
         if (revision?.action === 'withdraw') {
           this.#triggerEvaluationCorrection(scope, receipt, revision)
+          withdrawEvalPoolTask(this.#store.database, scope.ownerScopeKey, evalTaskId, {
+            updatedAt: this.#now(),
+          })
           if (subjectKind === 'foreground-turn') {
             this.#withdrawImmediate({
               ownerScopeKey: scope.ownerScopeKey,
@@ -1394,15 +2097,21 @@ export class AssociationSourceManager {
           this.#withdrawImmediate({
             ownerScopeKey: scope.ownerScopeKey,
             sourcePlugin: 'assistant-evaluation',
-            sourceRef: `${subjectKind}:${subjectRef}`,
+            sourceRef: evalTaskId,
             recordWithdrawalTombstone: true,
           })
+          syncedAny = true
           continue
         }
 
         // Case 2: Conflict retraction (disposition === 'retract' without 'withdraw')
         if (disposition === 'retract') {
           this.#triggerEvaluationCorrection(scope, receipt, revision)
+          retractEvalPoolTask(this.#store.database, scope.ownerScopeKey, evalTaskId, {
+            updatedAt: this.#now(),
+            projectionVersion: receipt.projection.version,
+            projectionDigest: receipt.projection.digest,
+          })
           const objStatus = receipt.objective?.status ?? 'retracted'
           if (subjectKind === 'foreground-turn') {
             const fgNode = this.#store.findNodeBySourceRef(
@@ -1426,13 +2135,13 @@ export class AssociationSourceManager {
             const evalNode = this.#store.findNodeBySourceRef(
               scope.ownerScopeKey,
               'assistant-evaluation',
-              `${subjectKind}:${subjectRef}`,
+              evalTaskId,
             )
             if (evalNode !== null) {
               const res = this.#store.suppressNodeConflict({
                 ownerScopeKey: scope.ownerScopeKey,
                 sourcePlugin: 'assistant-evaluation',
-                sourceRef: `${subjectKind}:${subjectRef}`,
+                sourceRef: evalTaskId,
                 objectiveStatus: objStatus,
                 nowMs: this.#now(),
               })
@@ -1441,6 +2150,7 @@ export class AssociationSourceManager {
               })
             }
           }
+          syncedAny = true
           continue
         }
 
@@ -1449,25 +2159,53 @@ export class AssociationSourceManager {
           const verified = this.#verifyEvaluationProjectionOwner(receipt, scope)
           if (!verified) continue
           this.#triggerEvaluationCorrection(scope, receipt, revision)
-          if (subjectKind === 'foreground-turn') {
-            // Foreground turns are ingested via Delivery foreground ledger; skip duplicate creation if present
-            const existingFg = this.#store.findNodeBySourceRef(
+          const existingFg =
+            subjectKind === 'foreground-turn'
+              ? this.#store.findNodeBySourceRef(
+                  scope.ownerScopeKey,
+                  'assistant-delivery',
+                  `foreground-turn:${subjectRef}`,
+                )
+              : null
+
+          const mappedEvalNode =
+            existingFg !== null ||
+            this.#store.isSourceWithdrawn(
               scope.ownerScopeKey,
-              'assistant-delivery',
-              `foreground-turn:${subjectRef}`,
+              'assistant-evaluation',
+              evalTaskId,
             )
-            if (existingFg !== null) {
-              if (typeof outcomeId === 'string' && outcomeId.length > 0) {
-                this.#store.attachNodeOutcomeId(existingFg.id, outcomeId)
-              }
-              continue
-            }
+              ? null
+              : this.#mapEvaluationReceiptToNode(receipt, scope)
+
+          const poolEntities = existingFg?.entities ?? mappedEvalNode?.entities ?? []
+          const poolToolNames =
+            existingFg?.metadata.toolNames ?? mappedEvalNode?.metadata?.toolNames ?? []
+          if (holdoutSeedKey !== null) {
+            upsertEvalPoolFromReceipt(this.#store.database, {
+              ownerScopeKey: scope.ownerScopeKey,
+              receipt,
+              holdoutSeedKey,
+              ...(holdoutRateBps === undefined ? {} : { holdoutRateBps }),
+              taskId: evalTaskId,
+              ...(poolEntities.length > 0 ? { entities: poolEntities } : {}),
+              ...(poolToolNames.length > 0 ? { toolNames: poolToolNames } : {}),
+              ...(verifier === undefined ? {} : { assistantVerifier: verifier }),
+              nowMs: this.#now(),
+            })
           }
-          const sourceRef = `${subjectKind}:${subjectRef}`
-          if (this.#store.isSourceWithdrawn(scope.ownerScopeKey, 'assistant-evaluation', sourceRef)) {
+
+          if (existingFg !== null) {
+            if (typeof outcomeId === 'string' && outcomeId.length > 0) {
+              this.#store.attachNodeOutcomeId(existingFg.id, outcomeId)
+            }
+            syncedAny = true
             continue
           }
-          upserts.push(this.#mapEvaluationReceiptToNode(receipt, scope))
+          if (mappedEvalNode !== null) {
+            upserts.push(mappedEvalNode)
+            syncedAny = true
+          }
         }
       }
 
@@ -1480,6 +2218,7 @@ export class AssociationSourceManager {
 
       if (!page.hasMore) break
     }
+    return syncedAny
   }
 
   #resolveEvaluationSessionId(

@@ -211,7 +211,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
    - 默认只有私有 idea，不写 Goals/WorkItems、不创建候选、不自动采用、不发消息；
      `notifyOwner: true` 时才通过 Delivery 认证通道发有界摘要（每日/间隔门内）。
    - 服务接口：只读 `health()` / `inspectIdeas()` / `inspectValidatedIdeas()` /
-     `inspectIdeaEvents(ideaId)`，以及受 owner 路由与 `assistantPolicy.authorize`
+     `inspectIdeaEvents(ideaId)` 与变更订阅 `onIdeaChange(listener)`（`enabled: false` 时返回无副作用的退订函数；供可选 `assistant-association` 等可信 Host 在 idea 创建、状态迁移或过期清理后刷新投影与撤回已拒绝/已撤回条目），以及受 owner 路由与 `assistantPolicy.authorize`
      门禁保护的 `acknowledgeIdea(...)`、`transitionIdea(...)`（支持 `validate` /
      `reject` / `retire` -> `withdrawn`）与 `retire()`（暂停 system automation、
      注销执行器并保留账本）。owner 也可通过配置项 `retired: true` 完成静态退役：

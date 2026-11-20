@@ -8,8 +8,13 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { ensureClusteringSchema } from './clustering.js'
+import { ensureDreamingSchema } from './dreaming.js'
+import { ensureEvalPoolSchema } from './eval-pool.js'
+import { ensureIntakeSignalSchema } from './intake-signal.js'
 import {
   computeDeterministicEdgeId,
+  computeDeterministicSynonymId,
   DEFAULT_HEBBIAN_CONFIG,
   type ApplyHebbianCorrectionInput,
   type ApplyHebbianCorrectionResult,
@@ -45,7 +50,7 @@ import {
   type UpsertSynonymInput,
 } from './types.js'
 
-export const ASSOCIATION_SCHEMA_VERSION = 2
+export const ASSOCIATION_SCHEMA_VERSION = 3
 
 export type AssociationDatabaseErrorCode =
   | 'invalid-path'
@@ -496,6 +501,17 @@ function migrateV1ToV2(database: DatabaseSync): void {
   `)
 }
 
+function migrateV2ToV3(database: DatabaseSync): void {
+  ensureDreamingSchema(database)
+  ensureIntakeSignalSchema(database)
+  ensureClusteringSchema(database)
+  ensureEvalPoolSchema(database)
+  database.exec(`
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '3')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+  `)
+}
+
 function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
@@ -509,9 +525,14 @@ function migrate(database: DatabaseSync): void {
     if (row.user_version === 0) {
       createV1Schema(database)
       migrateV1ToV2(database)
+      migrateV2ToV3(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     } else if (row.user_version === 1) {
       migrateV1ToV2(database)
+      migrateV2ToV3(database)
+      database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
+    } else if (row.user_version === 2) {
+      migrateV2ToV3(database)
       database.exec(`PRAGMA user_version = ${ASSOCIATION_SCHEMA_VERSION}`)
     }
     database.exec('COMMIT')
@@ -779,6 +800,8 @@ export class AssociationStore {
       const deletedEdgeIds: string[] = []
       const deletedSynonymIds: string[] = []
       const skippedWithdrawnNodeIds = new Set<string>()
+      const skippedSynonymIds = new Set<string>()
+      const synonymIdMap = new Map<string, string>()
 
       for (const node of input.nodes) {
         if (
@@ -867,6 +890,7 @@ export class AssociationStore {
       }
 
       if (input.synonyms && input.synonyms.length > 0) {
+        const checkNodeExists = this.#db.prepare('SELECT 1 AS ok FROM assoc_nodes WHERE id = ?')
         const upsertSynonymStmt = this.#db.prepare(`
           INSERT INTO assoc_synonyms (
             id, owner_scope_key, surface, canonical_entity, source_node_id, trust, created_at
@@ -876,8 +900,24 @@ export class AssociationStore {
             trust = excluded.trust
         `)
         for (const syn of input.synonyms) {
+          if (syn.sourceNodeId !== undefined && syn.sourceNodeId !== null) {
+            if (
+              skippedWithdrawnNodeIds.has(syn.sourceNodeId) ||
+              checkNodeExists.get(syn.sourceNodeId) === undefined
+            ) {
+              skippedSynonymIds.add(syn.id)
+              continue
+            }
+          }
+          const deterministicId = computeDeterministicSynonymId(
+            syn.ownerScopeKey,
+            syn.surface,
+            syn.canonicalEntity,
+          )
+          const resolvedId = /^syn-[0-9a-f]{24}$/u.test(syn.id) ? syn.id : deterministicId
+          synonymIdMap.set(syn.id, resolvedId)
           upsertSynonymStmt.run(
-            syn.id,
+            resolvedId,
             syn.ownerScopeKey,
             syn.surface,
             syn.canonicalEntity,
@@ -897,15 +937,20 @@ export class AssociationStore {
         for (const ref of input.derivedRefs) {
           if (
             skippedWithdrawnNodeIds.has(ref.sourceNodeId) ||
-            (ref.targetKind === 'node' && skippedWithdrawnNodeIds.has(ref.targetId))
+            (ref.targetKind === 'node' && skippedWithdrawnNodeIds.has(ref.targetId)) ||
+            (ref.targetKind === 'synonym' && skippedSynonymIds.has(ref.targetId))
           ) {
             continue
           }
+          const resolvedTargetId =
+            ref.targetKind === 'synonym'
+              ? (synonymIdMap.get(ref.targetId) ?? ref.targetId)
+              : ref.targetId
           insertDerivedStmt.run(
             ref.sourceNodeId,
             ref.sourceVersion,
             ref.targetKind,
-            ref.targetId,
+            resolvedTargetId,
           )
         }
       }
@@ -971,6 +1016,9 @@ export class AssociationStore {
         'SELECT edge_id FROM assoc_edges WHERE a_id = ? OR b_id = ?',
       )
       const deleteEdgeById = this.#db.prepare('DELETE FROM assoc_edges WHERE edge_id = ?')
+      const deleteDerivedEdgeByTarget = this.#db.prepare(
+        "DELETE FROM assoc_derived_from WHERE target_kind = 'edge' AND target_id = ?",
+      )
       const deleteNodeById = this.#db.prepare('DELETE FROM assoc_nodes WHERE id = ?')
       const suppressNodeById = this.#db.prepare(
         "UPDATE assoc_nodes SET status = 'suppressed', updated_at = ? WHERE id = ?",
@@ -982,6 +1030,7 @@ export class AssociationStore {
         for (const edge of incident) {
           deletedEdgeSet.add(edge.edge_id)
           deleteEdgeById.run(edge.edge_id)
+          deleteDerivedEdgeByTarget.run(edge.edge_id)
         }
         if (input.hardDelete) {
           deletedNodeSet.add(row.id)
@@ -1036,6 +1085,9 @@ export class AssociationStore {
     const selectExactVersionBySource = this.#db.prepare(
       'SELECT target_kind, target_id FROM assoc_derived_from WHERE source_node_id = ? AND source_version = ?',
     )
+    const selectSynonymsBySourceNode = this.#db.prepare(
+      'SELECT id FROM assoc_synonyms WHERE source_node_id = ?',
+    )
 
     const visitedNodes = new Set<string>()
     const deletedNodeIds = new Set<string>()
@@ -1077,6 +1129,13 @@ export class AssociationStore {
             queue.push({ nodeId: row.target_id })
           }
         }
+      }
+
+      const attachedSynonyms = selectSynonymsBySourceNode.all(current.nodeId) as Array<{
+        id: string
+      }>
+      for (const syn of attachedSynonyms) {
+        deletedSynonymIds.add(syn.id)
       }
     }
 
@@ -1357,6 +1416,27 @@ export class AssociationStore {
     return row === undefined ? null : mapRawNode(row)
   }
 
+  listActiveSourceRefsForPlugin(ownerScopeKey: string, sourcePlugin: string): string[] {
+    const rows = this.#db
+      .prepare(
+        "SELECT source_ref FROM assoc_nodes WHERE owner_scope_key = ? AND source_plugin = ? AND status = 'active'",
+      )
+      .all(ownerScopeKey, sourcePlugin) as Array<{ source_ref: string }>
+    return rows.map((row) => row.source_ref)
+  }
+
+  listActiveNodesBySourcePlugin(
+    ownerScopeKey: string,
+    sourcePlugin: string,
+  ): StoredAssociationNode[] {
+    const rows = this.#db
+      .prepare(
+        "SELECT * FROM assoc_nodes WHERE owner_scope_key = ? AND source_plugin = ? AND status = 'active'",
+      )
+      .all(ownerScopeKey, sourcePlugin) as unknown as RawNodeRow[]
+    return rows.map(mapRawNode)
+  }
+
   listCascadeNodeIdsForSource(
     ownerScopeKey: string,
     sourcePlugin: string,
@@ -1450,7 +1530,6 @@ export class AssociationStore {
 
       const seeds = matchingNodes.map((row) => ({
         nodeId: row.id,
-        maxVersion: row.source_version,
       }))
       const cascade = this.#cascadeDerivedInCurrentTx(seeds)
       const deletedEdgeSet = new Set(cascade.deletedEdgeIds)
@@ -1461,6 +1540,9 @@ export class AssociationStore {
         'SELECT edge_id FROM assoc_edges WHERE a_id = ? OR b_id = ?',
       )
       const deleteEdgeById = this.#db.prepare('DELETE FROM assoc_edges WHERE edge_id = ?')
+      const deleteDerivedEdgeByTarget = this.#db.prepare(
+        "DELETE FROM assoc_derived_from WHERE target_kind = 'edge' AND target_id = ?",
+      )
       const updateNodeStmt = this.#db.prepare(`
         UPDATE assoc_nodes
         SET status = 'suppressed', trust = 'low', metadata_json = ?, updated_at = ?
@@ -1472,6 +1554,7 @@ export class AssociationStore {
         for (const edge of incident) {
           deletedEdgeSet.add(edge.edge_id)
           deleteEdgeById.run(edge.edge_id)
+          deleteDerivedEdgeByTarget.run(edge.edge_id)
         }
         const prevMeta = JSON.parse(row.metadata_json) as Record<string, unknown>
         const nextMeta: Record<string, unknown> = {
@@ -1592,7 +1675,11 @@ export class AssociationStore {
             hop = CASE WHEN excluded.was_exposed = 1 THEN excluded.hop ELSE assoc_exposures.hop END,
             score = CASE WHEN excluded.was_exposed = 1 THEN excluded.score ELSE assoc_exposures.score END,
             reason = CASE WHEN excluded.was_exposed = 1 AND excluded.reason <> '' THEN excluded.reason ELSE assoc_exposures.reason END,
-            provenance_edges_json = CASE WHEN excluded.was_exposed = 1 AND excluded.provenance_edges_json <> '[]' THEN excluded.provenance_edges_json ELSE assoc_exposures.provenance_edges_json END,
+            provenance_edges_json = CASE
+              WHEN excluded.was_exposed = 1 AND excluded.hop = 0 THEN '[]'
+              WHEN excluded.was_exposed = 1 AND excluded.provenance_edges_json <> '[]' THEN excluded.provenance_edges_json
+              ELSE assoc_exposures.provenance_edges_json
+            END,
             session_id = COALESCE(excluded.session_id, assoc_exposures.session_id),
             assoc_read_count = assoc_exposures.assoc_read_count + excluded.assoc_read_count,
             weak_use_count = assoc_exposures.weak_use_count + excluded.weak_use_count,
@@ -1816,6 +1903,33 @@ export class AssociationStore {
     return row === undefined ? null : mapRawExposure(row)
   }
 
+  #taskKindFamilyFallbackClause(
+    taskId: string,
+  ): { readonly sql: string; readonly params: readonly string[] } | null {
+    if (taskId.startsWith('foreground-turn:')) {
+      return null
+    }
+    if (taskId.startsWith('automation-run:')) {
+      return { sql: "task_id LIKE 'automation-run:%'", params: [] }
+    }
+    if (taskId.startsWith('work-item:')) {
+      return { sql: "task_id LIKE 'work-item:%'", params: [] }
+    }
+    if (taskId.startsWith('goal-step:') || taskId.startsWith('goal-outcome:')) {
+      return { sql: "(task_id LIKE 'goal-step:%' OR task_id LIKE 'goal-outcome:%')", params: [] }
+    }
+    if (taskId.startsWith('headless-session:')) {
+      return { sql: "task_id LIKE 'headless-session:%'", params: [] }
+    }
+    const colonIdx = taskId.indexOf(':')
+    if (colonIdx > 0) {
+      const prefix = taskId.slice(0, colonIdx)
+      const escaped = prefix.replace(/[\\%_]/gu, (ch) => `\\${ch}`)
+      return { sql: "task_id LIKE ? ESCAPE '\\'", params: [`${escaped}:%`] }
+    }
+    return { sql: "task_id NOT LIKE '%:%'", params: [] }
+  }
+
   findExposuresByTaskOrSession(
     ownerScopeKey: string,
     taskId: string,
@@ -1831,8 +1945,9 @@ export class AssociationStore {
     if (byTask.length > 0) {
       return byTask.map(mapRawExposure)
     }
+    const fallbackClause = this.#taskKindFamilyFallbackClause(taskId)
     if (
-      !taskId.startsWith('foreground-turn:') &&
+      fallbackClause !== null &&
       sessionId !== undefined &&
       sessionId !== null &&
       sessionId.length > 0
@@ -1841,11 +1956,11 @@ export class AssociationStore {
         .prepare(`
           SELECT * FROM assoc_exposures
           WHERE owner_scope_key = ? AND session_id = ?
-            AND task_id NOT LIKE 'foreground-turn:%'
+            AND ${fallbackClause.sql}
             AND was_exposed = 1
           ORDER BY exposed_at ASC, node_id ASC
         `)
-        .all(ownerScopeKey, sessionId) as unknown as RawExposureRow[]
+        .all(ownerScopeKey, sessionId, ...fallbackClause.params) as unknown as RawExposureRow[]
       return bySession.map(mapRawExposure)
     }
     return []
@@ -2138,9 +2253,10 @@ export class AssociationStore {
             `)
             .all(input.ownerScopeKey, input.taskId) as unknown as RawExposureRow[]
         }
+        const fallbackClause = this.#taskKindFamilyFallbackClause(input.taskId)
         if (
           targets.length === 0 &&
-          !input.taskId.startsWith('foreground-turn:') &&
+          fallbackClause !== null &&
           input.sessionId !== undefined &&
           input.sessionId !== null &&
           input.sessionId.length > 0
@@ -2149,10 +2265,14 @@ export class AssociationStore {
             .prepare(`
               SELECT * FROM assoc_exposures
               WHERE owner_scope_key = ? AND session_id = ?
-                AND task_id NOT LIKE 'foreground-turn:%'
+                AND ${fallbackClause.sql}
                 AND was_exposed = 1 AND corrected = 0
             `)
-            .all(input.ownerScopeKey, input.sessionId) as unknown as RawExposureRow[]
+            .all(
+              input.ownerScopeKey,
+              input.sessionId,
+              ...fallbackClause.params,
+            ) as unknown as RawExposureRow[]
         }
       } else if (input.nodeId !== undefined && input.nodeId !== null && input.nodeId.length > 0) {
         const single = this.#db

@@ -272,6 +272,7 @@ export class AssistantSkillsService extends Service {
   readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
   readonly #providers = new Set<SkillProviderControl>()
+  readonly #changeListeners = new Set<() => void>()
   #sealedHoldout: SealedSkillHoldoutProvider | undefined
   #sealedGeneration: string | undefined
   #reconcileQueued = false
@@ -295,7 +296,7 @@ export class AssistantSkillsService extends Service {
     this.#repairProfiles = validateRepairProfiles(config.repairProfiles ?? [], this.#externalHoldouts)
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
     AssistantSkillsService.#benchmarkRecipients.set(this.#benchmarkIdentity, this)
-    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); this.#mountedBenchmarkArms.clear(); await Promise.allSettled(this.#benchmarkRuns); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); this.#changeListeners.clear(); this.#mountedBenchmarkArms.clear(); await Promise.allSettled(this.#benchmarkRuns); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
     ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       this.#benchmarkGeneration++
       runtime.effect(() => () => {
@@ -476,7 +477,16 @@ export class AssistantSkillsService extends Service {
     const policy = this.ctx.get('assistantPolicy', false) as AssistantPolicyService | undefined
     if (policy?.authorizeAgent(agent, action, resource, { idempotencyKey: `skill-${acceptanceDigest([action, key])}` }).effect !== 'allow') throw new Error('assistant-skills: policy authorization denied')
   }
-  #changed(): void { for (const control of this.#providers) control.invalidate() }
+  #changed(): void {
+    for (const control of this.#providers) control.invalidate()
+    for (const listener of Array.from(this.#changeListeners)) {
+      try {
+        listener()
+      } catch {
+        // Host change listeners must never disrupt committed skill mutations.
+      }
+    }
+  }
   /** Host-only registration; there is intentionally no model tool for sealed inputs or attestations. */
   registerSealedHoldoutProvider = (provider: SealedSkillHoldoutProvider): (() => void) => {
     if (!this.#active || this.#sealedHoldout !== undefined || !provider || typeof provider.read !== 'function' || typeof provider.generation !== 'string' || !provider.generation) throw new Error('assistant-skills: sealed holdout provider unavailable')
@@ -1008,14 +1018,26 @@ export class AssistantSkillsService extends Service {
    * no live owner turn and exists for bounded background growth agents.  It is
    * discovery-only and cannot write.
    */
-  inspectOwnerActiveSkills(scope: GoalScope) {
+  inspectOwnerActiveSkills = (scope: GoalScope) => {
     if (!this.#active) throw new Error('assistant-skills: inactive')
     return this.#store.list(scope).map(publicDefinition)
   }
   /** Host-only read of every skill candidate of a delivery-anchored owner scope. */
-  inspectOwnerSkillCandidates(scope: GoalScope) {
+  inspectOwnerSkillCandidates = (scope: GoalScope) => {
     if (!this.#active) throw new Error('assistant-skills: inactive')
     return this.#store.listCandidates(scope).map(candidate => this.#preview(scope, candidate))
+  }
+  /** Host-only post-commit notification when active skills change. */
+  onSkillChange = (listener: () => void): (() => void) => {
+    if (!this.#active) throw new Error('assistant-skills: inactive')
+    if (typeof listener !== 'function') throw new TypeError('assistant-skills: listener must be a function')
+    this.#changeListeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      this.#changeListeners.delete(listener)
+    }
   }
   #benchmarkSource(selection: BenchmarkArmSelection): BenchmarkArmSnapshot {
     if (!this.#active) throw new Error('assistant-skills: benchmark source inactive')
