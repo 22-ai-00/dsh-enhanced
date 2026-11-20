@@ -46,6 +46,7 @@ import type {
   MemoryProposalDecisionInput,
   MemoryProposalResult,
   MemoryRecord,
+  MemoryRecordChangeEvent,
   MemorySearchHit,
   MemorySnapshot,
   MemorySnapshotRequest,
@@ -618,6 +619,23 @@ export class PersonalMemoryService extends Service {
     return this.memoryStore.health()
   }
 
+  /** Host-only post-commit mutation/withdrawal notification; never exposed as a model tool. */
+  onRecordChange(listener: (event: MemoryRecordChangeEvent) => void): () => void {
+    this.assertActive()
+    return this.memoryStore.onRecordChange(listener)
+  }
+
+  /** Host-only startup backfill of active private records; never exposed as a model tool. */
+  listActiveRecordsForAssociationSync(
+    context: MemoryAgentContext,
+    options?: { afterUpdatedAt?: number; afterId?: string; limit?: number },
+  ): readonly MemoryRecord[] {
+    this.assertActive()
+    return this.withLearningVisibility(context, () =>
+      this.memoryStore.listActivePrivateRecordsForSync(context, options),
+    )
+  }
+
   /** Trusted producer registration hook; intentionally not exposed as a model tool. */
   bindPreferencePromotionProducer(producer: unknown): (() => void) | undefined {
     this.assertActive()
@@ -848,15 +866,25 @@ export class PersonalMemoryService extends Service {
           task = { objective: goal.goal.objective.slice(0, 2_048), nextStep: goal.checkpoint.nextStep.slice(0, 2_048), query }
         }
       } catch { /* An absent, older, or invalid optional Goals service cannot suppress owner memory. */ }
+      const assoc = this.ctx.get('assistantAssociation' as never, false) as {
+        shouldSuppressMemoryKeywordHits?: (agent: Agent) => boolean
+      } | undefined
+      let standingOnly = false
+      try {
+        standingOnly = assoc?.shouldSuppressMemoryKeywordHits?.(agent) === true
+      } catch {
+        standingOnly = false
+      }
       const snapshot = () => this.memoryStore.snapshot({
         context, query, ...(task === undefined ? {} : { task }),
+        ...(standingOnly ? { standingOnly: true } : {}),
         limit: this.config.snapshotLimit,
         maxBytes: this.config.snapshotMaxBytes,
         maxTokens: this.config.snapshotMaxTokens,
       }).text
       // Automatic facts/experiences need a current task, including for claim
       // partners; the no-query fallback uses only the default manual view.
-      return query.trim() || task?.objective.trim() || task?.nextStep.trim()
+      return standingOnly || query.trim() || task?.objective.trim() || task?.nextStep.trim()
         ? this.withLearningVisibility(context, snapshot) : snapshot()
     } catch {
       // Missing/revoked owner scope must clear the contribution, not retain an

@@ -11,14 +11,15 @@ describe('protected plugin trust boundaries', () => {
     for (const name of OWNER_REPAIR_PROTECTED_PLUGINS) {
       expect(MODEL_PROPOSAL_PROTECTED_PLUGINS.has(name)).toBe(true)
     }
-    expect(MODEL_PROPOSAL_PROTECTED_PLUGINS.size).toBe(24)
+    expect(MODEL_PROPOSAL_PROTECTED_PLUGINS.size).toBe(25)
     expect(OWNER_REPAIR_PROTECTED_PLUGINS.size).toBe(12)
   })
 
   test('governance machinery is model-proposal protected but stays owner-repairable', () => {
     for (const name of ['assistant-growth-driver', 'assistant-recovery', 'owner-console', 'assistant-actions',
       'assistant-work-items', 'assistant-goals', 'event-triggers', 'assistant-heartbeat',
-      'assistant-proactive', 'assistant-memory-learning', 'assistant-evolution', 'assistant-dreaming']) {
+      'assistant-proactive', 'assistant-memory-learning', 'assistant-evolution', 'assistant-dreaming',
+      'assistant-association']) {
       expect(MODEL_PROPOSAL_PROTECTED_PLUGINS.has(name)).toBe(true)
       expect(OWNER_REPAIR_PROTECTED_PLUGINS.has(name)).toBe(false)
     }

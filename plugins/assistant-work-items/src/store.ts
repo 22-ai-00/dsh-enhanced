@@ -46,6 +46,8 @@ import type {
   WorkItemOwnerEvidence,
   WorkItemProvenance,
   WorkItemAuthorityBasis,
+  WorkItemChangeEvent,
+  WorkItemHostInspectScope,
   WorkItemRecord,
   WorkItemReportRecord,
   WorkItemReportStatus,
@@ -55,6 +57,7 @@ import type {
   WorkItemResumeReport,
   WorkItemScope,
   WorkItemState,
+  WorkItemSummaryForHost,
   WorkItemThreadClosure,
   WorkItemThreadOutcome,
   WorkItemIntakeEvaluationFeedItem,
@@ -1281,6 +1284,8 @@ export class WorkItemStore {
   readonly #now: () => number
   readonly #settleWindowMs: number
   #closed = false
+  #pendingChanges: WorkItemChangeEvent[] | undefined
+  readonly #changeListeners = new Set<(event: WorkItemChangeEvent) => void>()
 
   constructor(path: string, options: { now?: () => number; settleWindowMs?: number } = {}) {
     this.#now = options.now ?? (() => Date.now())
@@ -1333,11 +1338,27 @@ export class WorkItemStore {
 
   #transaction<T>(work: () => T): T {
     this.#database.exec('BEGIN IMMEDIATE')
+    const pending: WorkItemChangeEvent[] = []
+    this.#pendingChanges = pending
     try {
       const result = work()
       this.#database.exec('COMMIT')
+      this.#pendingChanges = undefined
+      if (pending.length > 0 && this.#changeListeners.size > 0) {
+        const listeners = [...this.#changeListeners]
+        for (const event of pending) {
+          for (const listener of listeners) {
+            try {
+              listener(event)
+            } catch {
+              // Listener errors must never disrupt committed ledger mutations.
+            }
+          }
+        }
+      }
       return result
     } catch (error) {
+      this.#pendingChanges = undefined
       try {
         this.#database.exec('ROLLBACK')
       } catch {
@@ -1345,6 +1366,30 @@ export class WorkItemStore {
       }
       throw error
     }
+  }
+
+  onWorkItemChange(listener: (event: WorkItemChangeEvent) => void): () => void {
+    if (this.#closed) fail('storage', 'work-item store is closed')
+    if (typeof listener !== 'function') fail('invalid-input', 'work-item change listener must be a function')
+    this.#changeListeners.add(listener)
+    return () => {
+      this.#changeListeners.delete(listener)
+    }
+  }
+
+  #recordChange(op: WorkItemChangeEvent['op'], item: WorkItemRecord): void {
+    this.#pendingChanges?.push(Object.freeze({
+      op,
+      itemId: item.id,
+      scope: Object.freeze({
+        principalId: item.scope.principalId,
+        principalRecordId: item.owner.principalRecordId,
+        principalVersion: item.owner.principalVersion,
+        workspace: item.scope.workspace,
+        preset: item.scope.preset,
+        ownerRouteId: item.scope.ownerRouteId,
+      }),
+    }))
   }
 
   #appendEvent(itemId: string, kind: string, actor: string, detail: unknown, now: number, canonical = false): void {
@@ -1362,6 +1407,7 @@ export class WorkItemStore {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#changeListeners.clear()
     this.#statements.clear()
     this.#database.close()
   }
@@ -1713,6 +1759,57 @@ export class WorkItemStore {
       owner.bindingVersion, itemId ?? null, itemId ?? null, after?.createdAt ?? null, after?.createdAt ?? null,
       after?.createdAt ?? null, after?.id ?? '', limit) as Row[]
     return Object.freeze(rows.map(itemFromRow))
+  }
+
+  /** Host-only owner-filtered summary enumeration across active and observe-only items. */
+  inspectOwnerItems(
+    scope: WorkItemHostInspectScope,
+    options: { after?: { createdAt: number; id: string }; limit?: number } = {},
+  ): readonly WorkItemSummaryForHost[] {
+    const limit = options.limit ?? 50
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      fail('invalid-input', 'work-item inspect limit must be between 1 and 100')
+    }
+    const after = options.after
+    if (after !== undefined && (!Number.isSafeInteger(after.createdAt) || after.createdAt < 0
+      || typeof after.id !== 'string' || after.id === '')) {
+      fail('invalid-input', 'work-item inspect cursor is invalid')
+    }
+    const rows = this.#statement(`
+      SELECT i.id, i.kind, i.external_id, i.title, i.brief, i.state, i.state_reason, i.observed,
+             i.last_report_status, i.created_at, i.updated_at,
+             (SELECT COUNT(*) FROM work_item_report r WHERE r.item_id = i.id) AS revision_count,
+             (SELECT r.summary FROM work_item_report r WHERE r.item_id = i.id ORDER BY r.revision DESC LIMIT 1) AS last_report_summary
+      FROM work_item i
+      WHERE i.principal_id = ? AND i.principal_record_id = ? AND i.principal_version = ?
+        AND i.workspace = ? AND i.agent_preset = ? AND i.owner_route_id = ?
+        AND (? IS NULL OR i.created_at < ? OR (i.created_at = ? AND i.id > ?))
+      ORDER BY i.created_at DESC, i.id ASC
+      LIMIT ?
+    `).all(
+      scope.principalId, scope.principalRecordId, scope.principalVersion,
+      scope.workspace, scope.preset, scope.ownerRouteId,
+      after?.createdAt ?? null, after?.createdAt ?? null, after?.createdAt ?? null, after?.id ?? '',
+      limit,
+    ) as Row[]
+    return Object.freeze(rows.map(row => {
+      const lastReportSummary = optString(row['last_report_summary'])
+      return Object.freeze({
+        id: String(row['id']),
+        kind: String(row['kind']),
+        externalId: String(row['external_id']),
+        title: String(row['title']),
+        brief: String(row['brief']),
+        state: String(row['state']) as WorkItemState,
+        stateReason: optString(row['state_reason']),
+        observed: Number(row['observed']) === 1,
+        lastReportStatus: optString(row['last_report_status']) as WorkItemReportStatus | null,
+        ...(lastReportSummary === null ? {} : { lastReportSummary }),
+        createdAt: Number(row['created_at']),
+        updatedAt: Number(row['updated_at']),
+        revisionCount: Number(row['revision_count']),
+      })
+    }))
   }
 
   /** Exact UTF-8 body bytes after the caller has selected an owner-filtered item. */
@@ -2239,7 +2336,9 @@ export class WorkItemStore {
         provenance: this.#admissionProvenance(item.id),
         now,
       })
-      return this.#insertOutcome(item.id, draft, now)
+      const inserted = this.#insertOutcome(item.id, draft, now)
+      this.#recordChange('upsert', this.#requireItem(item.id))
+      return inserted
     })
   }
 
@@ -2484,6 +2583,7 @@ export class WorkItemStore {
           VALUES (?, ?, ?, ?, 'open', NULL, NULL, ?, ?, ?, NULL)
         `).run(record.id, position, follow.kind, follow.ref, follow.source, follow.sourceGeneration, record.createdAt)
       })
+      this.#recordChange('upsert', record)
       return record
     })
   }
@@ -2541,7 +2641,9 @@ export class WorkItemStore {
           ...(attribution === undefined ? {} : { sourceId: attribution.sourceId, externalId: attribution.externalId, observedAt: attribution.observedAt }),
         }, now)
         this.#insertOutcome(item.id, deriveWithdrawalOutcome(now), now)
-        retired.push(this.#requireItem(item.id))
+        const updated = this.#requireItem(item.id)
+        retired.push(updated)
+        this.#recordChange('withdraw', updated)
       }
       return Object.freeze({ outcome: 'withdrawn' as const, items: Object.freeze(retired) })
     })
@@ -2689,7 +2791,9 @@ export class WorkItemStore {
       const draft = input.expired
         ? expiredOutcome(latest, now, input.degraded)
         : observedOutcome(latest, input.evidence, input.reason, now)
-      return this.#insertOutcome(input.itemId, draft, now)
+      const outcome = this.#insertOutcome(input.itemId, draft, now)
+      this.#recordChange('upsert', this.#requireItem(input.itemId))
+      return outcome
     })
   }
 
@@ -3159,6 +3263,7 @@ export class WorkItemStore {
       ...(detail.receiptDigest === undefined ? {} : { receiptDigest: detail.receiptDigest }),
       ...(detail.verifierReason === undefined || detail.verifierReason === null ? {} : { verifierReason: truncateUtf8(detail.verifierReason, 256).value }),
     }, now)
+    this.#recordChange('upsert', this.#requireItem(itemId))
     return true
   }
 
@@ -3632,6 +3737,7 @@ export class WorkItemStore {
         this.#statement("UPDATE work_item SET state = 'blocked', state_reason = 'retry-exhausted', updated_at = ? WHERE id = ?").run(now, item.id)
         this.#appendEvent(item.id, 'blocked', 'claim', { reason: 'retry-exhausted' }, now)
         this.#insertOutcome(item.id, deriveRetryExhaustedOutcome(now), now)
+        this.#recordChange('upsert', this.#requireItem(item.id))
         // Commit the terminal transition, then fail: throwing inside the
         // transaction would roll the durable blocked state back.
         return { exhausted: true as const }
@@ -3649,7 +3755,9 @@ export class WorkItemStore {
       this.#appendEvent(item.id, 'claimed', 'worker', { runId: input.runId, occurrenceId: input.occurrenceId, attempt }, now)
       const claim = this.findClaimByRun(input.runId)
       if (claim === undefined) fail('storage', 'claim row disappeared after insert')
-      return { exhausted: false as const, result: Object.freeze({ item: this.#requireItem(item.id), claim, replayed: false }) }
+      const updated = this.#requireItem(item.id)
+      this.#recordChange('upsert', updated)
+      return { exhausted: false as const, result: Object.freeze({ item: updated, claim, replayed: false }) }
     })
     if (outcome.exhausted) fail('retry-exhausted', 'work item exhausted its attempt budget')
     return outcome.result
@@ -3839,7 +3947,9 @@ export class WorkItemStore {
       // is appended by `settleThreadClosure()` once every follow is closed.
       if (outcome !== null && !deferred) this.#insertOutcome(item.id, outcome, now)
       const stored = this.#statement('SELECT * FROM work_item_report WHERE item_id = ? AND revision = ?').get(item.id, revision) as Row
-      return Object.freeze({ item: this.#requireItem(item.id), report: reportFromRow(stored), replayed: false })
+      const updated = this.#requireItem(item.id)
+      this.#recordChange('upsert', updated)
+      return Object.freeze({ item: updated, report: reportFromRow(stored), replayed: false })
     })
   }
 

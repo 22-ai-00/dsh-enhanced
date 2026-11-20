@@ -20,6 +20,7 @@ describe('protected plugin denylists', () => {
       'assistant-web-owner',
       'assistant-actions',
       'assistant-work-items',
+      'assistant-association',
     ]) {
       expect(GROWTH_PROTECTED_PLUGIN_DENYLIST.has(name), name).toBe(true)
     }

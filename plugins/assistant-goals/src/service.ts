@@ -11,7 +11,7 @@ import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContra
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, HostFailureTriggerEvidence, NativeGoalState, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput, OwnerFailureCaptureSummaryInput, OwnerFailureTriggerInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
+import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalRecordChangeEvent, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, HostFailureTriggerEvidence, NativeGoalState, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput, OwnerFailureCaptureSummaryInput, OwnerFailureTriggerInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime, type GoalRoundTiming } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
@@ -303,6 +303,7 @@ export class AssistantGoalsService extends Service {
   /** Native create emits goal/changed synchronously; this marker defers legacy binding. */
   #preparingPreparedCreation = false
   readonly #ownerRepairBindings = new Map<Agent, { scope: GoalScope; ownerRouteId: string; expiresAt: number; routeReceipt: unknown; currentAuthority: () => void; dispose: () => void }>()
+  readonly #goalRecordChangeListeners = new Set<(event: GoalRecordChangeEvent) => void>()
   readonly eventWaitsEnabled!: boolean
   readonly ownerAcceptanceEnabled!: boolean
   readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
@@ -362,6 +363,7 @@ export class AssistantGoalsService extends Service {
       this.#acceptanceRegistration = undefined
       for (const binding of this.#ownerRepairBindings.values()) binding.dispose()
       this.#ownerRepairBindings.clear()
+      this.#goalRecordChangeListeners.clear()
       this.#store.close()
       this.#ownerIntent?.store.close()
       this.#ownerAcceptance?.store.close()
@@ -536,10 +538,37 @@ export class AssistantGoalsService extends Service {
       maxGoalRounds: goal.maxGoalRounds, updatedAt: goal.updatedAt }
   }
 
+  #notifyGoalRecordChange(event: GoalRecordChangeEvent): void {
+    if (!this.#active || this.#goalRecordChangeListeners.size === 0) return
+    const frozen = Object.freeze({
+      scope: Object.freeze({ ...event.scope }),
+      ...(event.record === undefined ? {} : { record: event.record }),
+      ...(event.clearedGoalId === undefined ? {} : { clearedGoalId: event.clearedGoalId }),
+    })
+    for (const listener of Array.from(this.#goalRecordChangeListeners)) {
+      try {
+        listener(frozen)
+      } catch {
+        // Listener errors must never disrupt committed GoalStore updates.
+      }
+    }
+  }
+
+  /** Host-only post-commit GoalStore change notification; never exposed as a model tool. */
+  onGoalRecordChange = (listener: (event: GoalRecordChangeEvent) => void): (() => void) => {
+    if (!this.#active) throw new Error('assistant-goals: service is inactive')
+    if (typeof listener !== 'function') throw new TypeError('assistant-goals: listener must be a function')
+    this.#goalRecordChangeListeners.add(listener)
+    return () => {
+      this.#goalRecordChangeListeners.delete(listener)
+    }
+  }
+
   #observe(agent: Agent, create: boolean, consume = true): GoalRecord | undefined {
     const scope = this.#scope(agent, 'observe', consume)
     const current = this.ctx.get('goals')?.get(agent)
     if (current === undefined) return undefined
+    const previous = this.#store.findNative(scope, String(agent.session.id), String(current.id))
     // First binding must coincide with an authenticated human turn. Never adopt
     // old unbound session goals after an owner/session ownership change.
     const turn = (this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined)?.currentPreferenceTurn(agent)
@@ -547,6 +576,9 @@ export class AssistantGoalsService extends Service {
       || this.#ownerRepairBindings.has(agent))
     const record = this.#store.observe(scope, this.#native(agent, current), allowCreate)
     if (allowCreate && record !== undefined) this.#store.setFocus(scope, String(agent.session.id), record.id)
+    if (record !== undefined && (previous === undefined || previous.version !== record.version)) {
+      this.#notifyGoalRecordChange({ scope: record.scope, record })
+    }
     return record
   }
 
@@ -554,7 +586,10 @@ export class AssistantGoalsService extends Service {
     const scope = this.#scope(agent, 'observe')
     const previous = this.#store.findNative(scope, String(agent.session.id), goalId)
     if (previous === undefined) return
-    this.#store.observe(scope, { ...previous.native, revision, phase: 'cleared', updatedAt: Math.max(Date.now(), previous.native.updatedAt) }, false)
+    const updated = this.#store.observe(scope, { ...previous.native, revision, phase: 'cleared', updatedAt: Math.max(Date.now(), previous.native.updatedAt) }, false)
+    if (updated !== undefined && updated.version !== previous.version) {
+      this.#notifyGoalRecordChange({ scope: updated.scope, record: updated, clearedGoalId: updated.id })
+    }
   }
 
   /** Owner-scoped retrieval context, including explicit focus; never execution authority. */
@@ -1330,7 +1365,9 @@ export class AssistantGoalsService extends Service {
   checkpoint = (agent: Agent | undefined, goalId: string, expectedVersion: number, checkpoint: GoalCheckpoint): GoalRecord => {
     const scope = this.#scope(agent, 'checkpoint')
     if (agent !== undefined) this.#observe(agent, false)
-    return this.#store.checkpoint(scope, goalId, expectedVersion, checkpoint)
+    const updated = this.#store.checkpoint(scope, goalId, expectedVersion, checkpoint)
+    this.#notifyGoalRecordChange({ scope: updated.scope, record: updated })
+    return updated
   }
 
   #dependencies(record: GoalRecord) {

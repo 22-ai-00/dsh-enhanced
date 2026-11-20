@@ -242,6 +242,12 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     expect(byId.get('dsh-enhanced-assistant-memory-learning')?.config).toMatchObject({
       workItemExperiences: true,
     })
+    expect(byId.get('dsh-enhanced-assistant-association')?.config).toMatchObject({
+      enabled: true,
+      dreaming: { enabled: false },
+      intakeSignal: { enabled: false },
+      webLearning: { enabled: false },
+    })
 
     // Step 5: Initialize the configured SQLite ledgers (as Host boot does) and verify `growth-report` has zero `no-data` sections!
     await mkdir(join(dshHome, 'assistant-evaluation'), { recursive: true })

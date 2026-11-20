@@ -82,6 +82,7 @@ import type {
   AutomationDeliveryEvidenceReceipt,
   AgentAutomationDefinition,
   AutomationDefinition,
+  AutomationDefinitionChangeEvent,
   AutomationEvaluationOutcome,
   AutomationOccurrence,
   AutomationProposalDecisionInput,
@@ -1697,6 +1698,40 @@ export class AssistantAutomationsService extends Service implements
   list(agent: Agent | undefined): AutomationRecord[] {
     this.authorizeAgent(agent, 'list', 'catalog')
     return this.store.list()
+  }
+
+  /** Host-only owner-filtered catalog read by exact `(workspace, agentPreset, principalId)`. */
+  inspectOwnerAutomations(scope: {
+    principalId: string
+    workspace: string
+    preset: string
+    limit?: number
+  }): readonly AutomationRecord[] {
+    this.assertActive()
+    if (scope === null || typeof scope !== 'object' || Array.isArray(scope)
+      || typeof scope.principalId !== 'string' || scope.principalId.trim() === ''
+      || typeof scope.workspace !== 'string' || !isAbsolute(scope.workspace)
+      || typeof scope.preset !== 'string' || scope.preset.trim() === '') {
+      throw new AssistantAutomationsError('invalid-input', 'owner automation inspection scope is invalid')
+    }
+    const limit = scope.limit ?? 100
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new AssistantAutomationsError('invalid-input', 'owner automation inspection limit must be between 1 and 1000')
+    }
+    const filtered = this.store.list().filter(record =>
+      record.definition.workspace === scope.workspace
+      && record.definition.agentPreset === scope.preset
+      && record.definition.principal === scope.principalId)
+    return Object.freeze(filtered.slice(0, limit))
+  }
+
+  /** Host-only post-commit definition change listener; never exposed as a model tool. */
+  onDefinitionChange(listener: (event: AutomationDefinitionChangeEvent) => void): () => void {
+    this.assertActive()
+    if (typeof listener !== 'function') {
+      throw new AssistantAutomationsError('invalid-input', 'definition change listener must be a function')
+    }
+    return this.store.onDefinitionChange(listener)
   }
 
   history(agent: Agent | undefined, input: {

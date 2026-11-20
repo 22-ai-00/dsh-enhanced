@@ -23,6 +23,7 @@ import type {
   AutomationCircuitCanaryReceipt,
   AutomationCircuitProbeReceipt,
   AutomationCircuitExecutionDecision,
+  AutomationDefinitionChangeEvent,
   AutomationDeliveryStatus,
   AutomationExecutionDiagnostic,
   AutomationExecutionMode,
@@ -1317,6 +1318,8 @@ export class AutomationStore {
   private readonly maxPromptBytes: number
   private readonly maxAllowedTools: number
   private closed = false
+  private pendingDefinitionChanges: AutomationDefinitionChangeEvent[] | undefined
+  private readonly definitionChangeListeners = new Set<(event: AutomationDefinitionChangeEvent) => void>()
 
   constructor(options: { path: string; now?: () => number; maxPromptBytes?: number; maxAllowedTools?: number }) {
     this.now = options.now ?? Date.now
@@ -1333,16 +1336,55 @@ export class AutomationStore {
   close(): void {
     if (this.closed) return
     this.closed = true
+    this.definitionChangeListeners.clear()
     this.database.close()
+  }
+
+  onDefinitionChange(listener: (event: AutomationDefinitionChangeEvent) => void): () => void {
+    if (this.closed) throw new AutomationStoreError('invalid-state', 'automation store is closed')
+    if (typeof listener !== 'function') {
+      throw new AutomationStoreError('invalid-definition', 'definition change listener must be a function')
+    }
+    this.definitionChangeListeners.add(listener)
+    return () => {
+      this.definitionChangeListeners.delete(listener)
+    }
+  }
+
+  private recordDefinitionChange(automation: AutomationRecord): void {
+    this.pendingDefinitionChanges?.push(Object.freeze({
+      automationId: automation.id,
+      status: automation.status,
+      version: automation.version,
+      workspace: automation.definition.workspace,
+      agentPreset: automation.definition.agentPreset,
+      principal: automation.definition.principal,
+    }))
   }
 
   private transaction<T>(operation: () => T): T {
     this.database.exec('BEGIN IMMEDIATE')
+    const pending: AutomationDefinitionChangeEvent[] = []
+    this.pendingDefinitionChanges = pending
     try {
       const value = operation()
       this.database.exec('COMMIT')
+      this.pendingDefinitionChanges = undefined
+      if (pending.length > 0 && this.definitionChangeListeners.size > 0) {
+        const listeners = [...this.definitionChangeListeners]
+        for (const event of pending) {
+          for (const listener of listeners) {
+            try {
+              listener(event)
+            } catch {
+              // Listener errors must never disrupt committed automation writes.
+            }
+          }
+        }
+      }
       return value
     } catch (error) {
+      this.pendingDefinitionChanges = undefined
       this.database.exec('ROLLBACK')
       throw error
     }
@@ -1374,7 +1416,9 @@ export class AutomationStore {
           next_run_at, created_at, updated_at, version
         ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 1)
       `).run(id, idempotencyKey, definitionHash, JSON.stringify(definition), next ?? null, now, now)
-      return this.get(id)!
+      const created = this.get(id)!
+      this.recordDefinitionChange(created)
+      return created
     })
   }
 
@@ -1439,6 +1483,7 @@ export class AutomationStore {
         throw new AutomationStoreError('version-conflict', 'system-owned automation changed before exact reconciliation')
       }
       const now = this.now()
+      let changed = false
       if (current === undefined) {
         this.database.prepare(`
           INSERT INTO automation_definitions(
@@ -1449,6 +1494,7 @@ export class AutomationStore {
           id, `system:${owner}:${idempotencyKey}`, owner, definitionHash, JSON.stringify(definition), desiredStatus,
           desiredStatus === 'active' ? initialNext(definition.schedule, now) ?? null : null, now, now,
         )
+        changed = true
       } else {
         const currentHash = hash(current.definition)
         if (currentHash !== definitionHash || current.status !== desiredStatus) {
@@ -1462,9 +1508,11 @@ export class AutomationStore {
             desiredStatus === 'active' ? initialNext(definition.schedule, now) ?? null : null,
             now, id, owner, current.version,
           )
+          changed = true
         }
       }
       const result = this.get(id)!
+      if (changed) this.recordDefinitionChange(result)
       this.database.prepare(`
         INSERT INTO automation_system_reconciles(
           idempotency_key, system_owner, automation_id, input_hash, result_json, created_at
@@ -1943,6 +1991,8 @@ export class AutomationStore {
           idempotency_key, system_owner, automation_id, input_hash, result_json, created_at
         ) VALUES (?, ?, ?, ?, ?, ?)
       `).run(operationId, owner, automationId, inputHash, JSON.stringify(stored), now)
+      const updated = this.get(automationId)
+      if (updated !== undefined) this.recordDefinitionChange(updated)
       return Object.freeze({ operationId, ...stored, replayed: false })
     })
   }
@@ -2026,6 +2076,8 @@ export class AutomationStore {
         reason, evidence_digest, retired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(owner, automationId, operationId, input.definitionHash, input.expectedVersion,
           input.expectedVersion + 1, input.reason, input.evidenceDigest, retiredAt)
+      const updated = this.get(automationId)
+      if (updated !== undefined) this.recordDefinitionChange(updated)
       return Object.freeze({ ...this.inspectSystemOwnedRetirement({ owner, automationId })!, replayed: false })
     })
   }
@@ -2474,6 +2526,7 @@ export class AutomationStore {
         input.idempotencyKey, input.automationId, input.operation, input.expectedVersion,
         inputHash, JSON.stringify(result), now,
       )
+      this.recordDefinitionChange(result)
       return result
     })
   }

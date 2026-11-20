@@ -60,6 +60,8 @@ dsh --profile web --dump-config
 
 该组合的可选 peer 为 `@dsh-enhanced/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
 
+当宿主挂载了 `@dsh-enhanced/assistant-association`（服务名 `assistantAssociation`）且 `shouldSuppressMemoryKeywordHits(agent)` 返回 `true` 时，`personal-memory:task-context` 会抑制动态关键词 `hits`（由 `<association>` 统一承接），同时保留并在首步（含空 `deriveMessages()`）继续注入已确认的 `preference`/`instruction` standing 记录；关联服务缺失、尚未就绪或返回 `false`/抛错时自动回退为完整关键词召回。面向 Host 的只读回填接口 `listActiveRecordsForAssociationSync` 与事务提交后回调 `onRecordChange` 不注册为模型工具。
+
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 
 ## 有限授权的事实与经验采用

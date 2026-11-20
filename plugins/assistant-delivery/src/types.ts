@@ -15,6 +15,17 @@ export interface OwnerForegroundTaskSourceScope {
   readonly expectedOwner: Readonly<{ authorityHash: string; principalRecordId: string; principalVersion: number }>
 }
 
+/** Host-only summary of one active configured owner route; zero message/secret exposure. */
+export interface OwnerRouteScopeSummary {
+  readonly authorityId: string
+  readonly authorityHash: string
+  readonly principalId: string
+  readonly principalRecordId: string
+  readonly principalVersion: number
+  readonly workspace: string
+  readonly agentPreset: string
+}
+
 export interface OwnerForegroundTaskSourceCursor {
   readonly protocol: 'assistant-delivery/owner-foreground-source-cursor/v1'
   readonly epoch: string

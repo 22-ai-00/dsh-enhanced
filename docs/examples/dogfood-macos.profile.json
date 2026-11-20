@@ -15,7 +15,8 @@
     "assistant-evaluation",
     "assistant-verifier",
     "assistant-memory-learning",
-    "assistant-work-items"
+    "assistant-work-items",
+    "assistant-association"
   ],
   "applyCommands": [
     "dsh-rsi install --profile web --scenario web --workspace <absolute-workspace-path> --plugin-preset dogfood --yes",

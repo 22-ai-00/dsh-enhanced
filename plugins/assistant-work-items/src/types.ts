@@ -1049,3 +1049,34 @@ export interface WorkItemIntakeEvaluationFeedPage {
   readonly hasMore: boolean
   readonly nextCursor: WorkItemIntakeEvaluationFeedCursor | null
 }
+
+export interface WorkItemHostInspectScope {
+  readonly principalId: string
+  readonly principalRecordId: string
+  readonly principalVersion: number
+  readonly workspace: string
+  readonly preset: string
+  readonly ownerRouteId: string
+}
+
+export interface WorkItemSummaryForHost {
+  readonly id: string
+  readonly kind: string
+  readonly externalId: string
+  readonly title: string
+  readonly brief: string
+  readonly state: WorkItemState
+  readonly stateReason: string | null
+  readonly observed: boolean
+  readonly lastReportStatus: WorkItemReportStatus | null
+  readonly lastReportSummary?: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly revisionCount: number
+}
+
+export interface WorkItemChangeEvent {
+  readonly op: 'upsert' | 'withdraw'
+  readonly itemId: string
+  readonly scope: WorkItemHostInspectScope
+}

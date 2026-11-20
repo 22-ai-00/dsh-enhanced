@@ -712,3 +712,12 @@ export interface ProductionOccurrenceTerminalProjection {
     owner?: string
   }
 }
+
+export interface AutomationDefinitionChangeEvent {
+  readonly automationId: string
+  readonly status: AutomationStatus
+  readonly version: number
+  readonly workspace: string
+  readonly agentPreset: string
+  readonly principal: string
+}

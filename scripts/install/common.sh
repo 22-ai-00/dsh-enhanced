@@ -5479,7 +5479,7 @@ NODE
       ;;
     esac
     if [[ "$plugin_preset" == 'dogfood' ]]; then
-      for slug in preference-learning assistant-evaluation assistant-verifier assistant-memory-learning assistant-work-items; do
+      for slug in preference-learning assistant-evaluation assistant-verifier assistant-memory-learning assistant-work-items assistant-association; do
         dsh_enhanced_append_slug "$slug"
       done
     fi

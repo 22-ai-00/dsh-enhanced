@@ -222,6 +222,24 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['stepMaxDurationMs', 'number'],
   ])],
   ['dsh-enhanced-event-triggers', new Map<string, KnownType>([['pollerEnabled', 'boolean']])],
+  ['dsh-enhanced-assistant-association', new Map<string, KnownType>([
+    ['enabled', 'boolean'],
+    ['databasePath', 'path'],
+    ['holdoutSeedPath', 'path'],
+    ['hotPathBudgetMs', 'number'],
+    ['maxItems', 'number'],
+    ['minItems', 'number'],
+    ['maxContextTokens', 'number'],
+    ['maxHops', 'number'],
+    ['hopTopN', 'number'],
+    ['hysteresisDelta', 'number'],
+    ['holdoutRateBps', 'number'],
+    ['syncIntervalMs', 'number'],
+    ['decayHalfLifeMs', 'number'],
+    ['dreaming.enabled', 'boolean'],
+    ['intakeSignal.enabled', 'boolean'],
+    ['webLearning.enabled', 'boolean'],
+  ])],
 ])
 
 export interface PluginSetupTarget {
@@ -1179,6 +1197,23 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
         reason: 'assistant-memory-learning has no finite owner learning configuration; run dsh-web-owner-setup --autonomy-setup or owner RSI setup first' },
     ],
     set: [['workItemExperiences', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-association',
+    purpose: 'enable local in-memory associative recall and scope databasePath to $DSH_HOME while keeping S3/S4 autonomous extensions disabled',
+    whenInstalled: true,
+    set: [
+      ['enabled', true],
+      ['dreaming.enabled', false],
+      ['intakeSignal.enabled', false],
+      ['webLearning.enabled', false],
+    ],
+    resolveSet: scopedDatabaseResolver({
+      id: 'dsh-enhanced-assistant-association',
+      subdir: 'assistant-association',
+      publishedDefault: join(homedir(), '.dsh', 'assistant-association.sqlite'),
+      setWhenMissing: true,
+    }),
   },
 ])
 

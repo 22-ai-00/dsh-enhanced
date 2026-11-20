@@ -38,6 +38,7 @@ import type {
   MemoryProposalInput,
   MemoryProposalStatus,
   MemoryRecord,
+  MemoryRecordChangeEvent,
   MemorySearchHit,
   MemorySearchRequest,
   MemorySensitivity,
@@ -572,6 +573,8 @@ export class MemoryStore {
   #closed = false
   #reading = false
   #learningVisibility: ReadonlySet<string> | undefined
+  #pendingChanges: MemoryRecordChangeEvent[] | undefined
+  readonly #changeListeners = new Set<(event: MemoryRecordChangeEvent) => void>()
   readonly evidence: MemoryEvidenceLedger
 
   constructor(options: MemoryStoreOptions) {
@@ -596,7 +599,18 @@ export class MemoryStore {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#changeListeners.clear()
     this.#database.close()
+  }
+
+  onRecordChange(listener: (event: MemoryRecordChangeEvent) => void): () => void {
+    if (typeof listener !== 'function') {
+      throw new MemoryStoreError('invalid-entry', 'record change listener must be a function')
+    }
+    this.#changeListeners.add(listener)
+    return () => {
+      this.#changeListeners.delete(listener)
+    }
   }
 
   #learningNamespace(owner: MemoryLearningAdoptionGrant['owner']): MemoryOwnerNamespace {
@@ -849,7 +863,7 @@ export class MemoryStore {
         WHERE namespace_key = ? AND idempotency_key = ?`).get(memoryOwnerNamespaceKey(namespace), invalidationKey)
       if (reservedAudit !== undefined) throw new MemoryStoreError('idempotency-conflict', 'learning invalidation audit key was already used')
       this.#applyMutationInCurrentTransaction({ op: 'remove', namespace, identity, id: input.id,
-        expectedVersion: input.version, idempotencyKey: invalidationKey })
+        expectedVersion: input.version, idempotencyKey: invalidationKey }, input.reason)
       const changed = this.#database.prepare(`UPDATE memory_learning_adoptions SET invalidated_at = ?, invalidation_reason = ?
         WHERE authority_id = ? AND operation_id = ? AND invalidated_at IS NULL`).run(
         this.#now(), input.reason, managed.authority_id, managed.operation_id)
@@ -879,11 +893,27 @@ export class MemoryStore {
 
   #transaction<T>(operation: () => T): T {
     this.#database.exec('BEGIN IMMEDIATE')
+    const pending: MemoryRecordChangeEvent[] = []
+    this.#pendingChanges = pending
     try {
       const result = operation()
       this.#database.exec('COMMIT')
+      this.#pendingChanges = undefined
+      if (pending.length > 0 && this.#changeListeners.size > 0) {
+        const listeners = [...this.#changeListeners]
+        for (const event of pending) {
+          for (const listener of listeners) {
+            try {
+              listener(event)
+            } catch {
+              // Listener errors must never break committed store mutations.
+            }
+          }
+        }
+      }
       return result
     } catch (error) {
+      this.#pendingChanges = undefined
       this.#database.exec('ROLLBACK')
       throw error
     }
@@ -927,6 +957,36 @@ export class MemoryStore {
       const record = visible.get(id)
       if (record === undefined) throw new MemoryStoreError('not-found', `visible memory record was not found: ${id}`)
       return record
+    })
+  }
+
+  /** Host-only backfill read of active private records for a validated context. */
+  listActivePrivateRecordsForSync(
+    contextInput: MemoryAgentContext,
+    options: { afterUpdatedAt?: number; afterId?: string; limit?: number } = {},
+  ): readonly MemoryRecord[] {
+    const context = normalizeAgentContext(contextInput)
+    const limit = options.limit ?? 100
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new MemoryStoreError('invalid-entry', 'memory sync limit must be between 1 and 1000')
+    }
+    if (options.afterUpdatedAt !== undefined && (!Number.isSafeInteger(options.afterUpdatedAt) || options.afterUpdatedAt < 0)) {
+      throw new MemoryStoreError('invalid-entry', 'memory sync afterUpdatedAt must be a non-negative safe integer')
+    }
+    if (options.afterId !== undefined && typeof options.afterId !== 'string') {
+      throw new MemoryStoreError('invalid-entry', 'memory sync afterId must be a string')
+    }
+    return this.#readSnapshot(() => {
+      const records = this.#visibleRecords(context)
+        .filter(record => record.sensitivity === 'private')
+        .sort((left, right) => left.updatedAt - right.updatedAt || left.id.localeCompare(right.id, 'en'))
+      const filtered = options.afterUpdatedAt === undefined
+        ? records
+        : records.filter(record =>
+          record.updatedAt > options.afterUpdatedAt!
+          || (record.updatedAt === options.afterUpdatedAt!
+            && (options.afterId === undefined || record.id.localeCompare(options.afterId, 'en') > 0)))
+      return Object.freeze(filtered.slice(0, limit))
     })
   }
 
@@ -1052,12 +1112,15 @@ export class MemoryStore {
     if (!Number.isSafeInteger(request.maxTokens) || request.maxTokens <= 0) {
       throw new MemoryStoreError('invalid-entry', 'memory snapshot maxTokens must be a positive safe integer')
     }
+    const standingOnly = request.standingOnly === true
     const query = request.query ?? ''
     const taskQueries = request.task === undefined ? [query] : [request.task.nextStep, request.task.query, request.task.objective].map(value => value.slice(0, 2_048))
     const nonEmpty = taskQueries.filter((value, index, values) => value.trim() !== '' && values.indexOf(value) === index)
-    const hits = (nonEmpty.length === 0 ? [''] : nonEmpty)
-      .flatMap(value => this.search({ context: request.context, query: value, limit: request.limit, sensitivities: ['private'] }))
-    const standing = nonEmpty.length > 0 ? this.search({
+    const hits = standingOnly
+      ? []
+      : (nonEmpty.length === 0 ? [''] : nonEmpty)
+        .flatMap(value => this.search({ context: request.context, query: value, limit: request.limit, sensitivities: ['private'] }))
+    const standing = (standingOnly || nonEmpty.length > 0) ? this.search({
       context: request.context, query: '', limit: request.limit, sensitivities: ['private'],
       kinds: ['preference', 'instruction'], trusts: ['user-confirmed'],
     }) : []
@@ -1807,7 +1870,10 @@ export class MemoryStore {
     return this.#transaction(() => this.#applyMutationInCurrentTransaction(mutation))
   }
 
-  #applyMutationInCurrentTransaction(mutation: ApprovedMemoryMutation): MemoryRecord {
+  #applyMutationInCurrentTransaction(
+    mutation: ApprovedMemoryMutation,
+    reason: 'withdrawn' | 'source-changed' | 'mutation' = 'mutation',
+  ): MemoryRecord {
     const identity = normalizeIdentity(mutation.identity, mutation.namespace)
     const hash = hashMemoryMutation(this.#withoutIdempotencyKey(mutation))
     const prior = this.#database.prepare(`
@@ -1831,7 +1897,7 @@ export class MemoryStore {
       : mutation.op === 'replace'
         ? this.#replace(identity, mutation.id, mutation.expectedVersion, mutation.entry)
         : this.#remove(identity, mutation.id, mutation.expectedVersion)
-    this.#database.prepare(`
+    const audit = this.#database.prepare(`
       INSERT INTO memory_audit(
         namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,
         headless_lineage_id, headless_lineage_version, idempotency_key, mutation_hash,
@@ -1839,6 +1905,12 @@ export class MemoryStore {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...namespaceSqlValues(identity), mutation.idempotencyKey, hash, mutation.op, result.id,
       result.version, this.#now())
+    this.#pendingChanges?.push(Object.freeze({
+      op: mutation.op,
+      record: result,
+      auditSequence: Number(audit.lastInsertRowid),
+      reason,
+    }))
     return result
   }
 

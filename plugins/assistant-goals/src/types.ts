@@ -224,6 +224,12 @@ export type GoalStoreErrorCode =
   | 'schema'
   | 'unsafe-file'
 
+export interface GoalRecordChangeEvent {
+  readonly scope: GoalScope
+  readonly record?: GoalRecord
+  readonly clearedGoalId?: string
+}
+
 /** An intentionally non-descriptive error for owner-scoped ledger operations. */
 export class GoalStoreError extends Error {
   constructor(readonly code: GoalStoreErrorCode) {

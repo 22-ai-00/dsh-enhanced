@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { WorkItemEngineeringTargets, type WorkItemEngineeringMaterial } from './engineering-context.js'
 import type { Context } from '@deepseek-ai/cordis'
@@ -73,6 +74,9 @@ import type {
   WorkItemObservedItemInspection,
   WorkItemIntakeEvaluationFeedOptions,
   WorkItemIntakeEvaluationFeedPage,
+  WorkItemChangeEvent,
+  WorkItemHostInspectScope,
+  WorkItemSummaryForHost,
 } from './types.js'
 import { TERMINAL_STATES, WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL, WorkItemError } from './types.js'
 import { WorkItemWorkspace } from './workspace.js'
@@ -309,6 +313,7 @@ export class AssistantWorkItemsService extends Service {
 
   private readonly workItemsOwnerReads: WorkItemOwnerRecall
   private readonly workItemsOwnerContinuations: WorkItemOwnerContinuation
+  private readonly workItemsChangeListeners = new Set<(event: WorkItemChangeEvent) => void>()
   /** Bounded, memory-only producer hints for inferred auto admission; never persisted. */
   private readonly workItemsIntakeHints = new Map<string, Readonly<{ objective?: WorkItemIntakeObjective; acceptance?: WorkItemIntakeAcceptance }>>()
   private static readonly MAX_INTAKE_HINTS = 256
@@ -1102,6 +1107,61 @@ export class AssistantWorkItemsService extends Service {
   /** Foreground-only historical reads, independent of occurrence/worker authority. */
   listForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemListInput) => this.workItemsOwnerReads.list(execution, input)
   recallForOwner = (execution: OwnerWorkItemExecution, input: OwnerWorkItemRecallInput) => this.workItemsOwnerReads.recall(execution, input)
+
+  /** Host-only owner-scoped read across active and observe-only items; validates owner route via Delivery. */
+  inspectOwnerWorkItems(
+    scope: WorkItemHostInspectScope,
+    options?: { after?: { createdAt: number; id: string }; limit?: number },
+  ): readonly WorkItemSummaryForHost[] {
+    if (this.workItemsClosed) fail('storage', 'the work-item ledger is disposed')
+    if (scope === null || typeof scope !== 'object' || Array.isArray(scope)
+      || typeof scope.principalId !== 'string' || scope.principalId.trim() === ''
+      || typeof scope.principalRecordId !== 'string' || scope.principalRecordId.trim() === ''
+      || !Number.isSafeInteger(scope.principalVersion) || scope.principalVersion < 1
+      || typeof scope.workspace !== 'string' || !isAbsolute(scope.workspace)
+      || typeof scope.preset !== 'string' || scope.preset.trim() === ''
+      || typeof scope.ownerRouteId !== 'string' || scope.ownerRouteId.trim() === '') {
+      fail('invalid-input', 'work-item host inspect scope is invalid')
+    }
+    const delivery = this.workItemsDelivery()
+    if (typeof delivery?.validateOwnerRoute !== 'function') {
+      fail('owner-route-unavailable', 'assistantDelivery is required to validate the owner route')
+    }
+    let receipt: Readonly<PeerOwnerRouteReceipt>
+    try {
+      receipt = delivery.validateOwnerRoute({
+        authorityId: scope.ownerRouteId,
+        principalId: scope.principalId,
+        workspace: scope.workspace,
+        agentPreset: scope.preset,
+      })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      const missing = error !== null && typeof error === 'object' && 'code' in error && error.code === 'missing-binding'
+      fail(missing ? 'owner-route-invalid' : 'owner-route-unavailable', 'owner route validation failed', detail)
+    }
+    if (receipt.receiptVersion !== 2
+      || receipt.authorityId !== scope.ownerRouteId
+      || receipt.principalId !== scope.principalId
+      || receipt.principalRecordId !== scope.principalRecordId
+      || receipt.principalVersion !== scope.principalVersion
+      || receipt.workspace !== scope.workspace
+      || receipt.agentPreset !== scope.preset) {
+      fail('owner-route-invalid', 'owner route receipt does not match the requested scope')
+    }
+    if (!this.workItemsConfig.enabled) return Object.freeze([])
+    return this.workItemsOpen().store.inspectOwnerItems(scope, options)
+  }
+
+  /** Host-only post-commit change listener covering admit, claim, report, settle, and withdraw. */
+  onWorkItemChange(listener: (event: WorkItemChangeEvent) => void): () => void {
+    if (this.workItemsClosed) fail('storage', 'the work-item ledger is disposed')
+    if (typeof listener !== 'function') fail('invalid-input', 'work-item change listener must be a function')
+    this.workItemsChangeListeners.add(listener)
+    return () => {
+      this.workItemsChangeListeners.delete(listener)
+    }
+  }
 
   continueForOwner = (execution: OwnerWorkItemExecution, input: { item_id: string }) => this.workItemsOwnerContinuations.continue(execution, input)
 
@@ -2144,6 +2204,7 @@ export class AssistantWorkItemsService extends Service {
       try { unregister() } catch (error) { this.ctx.logger.warn(`assistant-work-items: scheduler wake removal failed: ${describe(error)}`) }
     }
     this.workItemsEvaluation.dispose()
+    this.workItemsChangeListeners.clear()
     const components = this.workItemsComponents
     this.workItemsComponents = undefined
     if (components === undefined) return
@@ -2338,6 +2399,16 @@ export class AssistantWorkItemsService extends Service {
     const workspace = new WorkItemWorkspace(config.workRoot)
     workspace.prepare()
     const store = new WorkItemStore(config.databasePath)
+    store.onWorkItemChange(event => {
+      if (this.workItemsClosed || this.workItemsChangeListeners.size === 0) return
+      for (const listener of Array.from(this.workItemsChangeListeners)) {
+        try {
+          listener(event)
+        } catch {
+          // Listener errors must never disrupt committed ledger operations.
+        }
+      }
+    })
     let diagnosisHistory: boolean
     try {
       diagnosisHistory = store.readCanonicalMeta('diagnosis.activation/v1') !== undefined

@@ -167,6 +167,7 @@ import type {
   ModelSelectionSettlementInput,
   ModelSelectionTerminalResult,
   OwnerRouteAuthority,
+  OwnerRouteScopeSummary,
   OwnerForegroundTaskSourceScope,
   OwnerForegroundTaskSource,
   OwnerForegroundTaskSourceCursor,
@@ -6771,6 +6772,31 @@ export class AssistantDeliveryService extends Service {
     }
   }
 
+  /** Host-only enumeration of active owner routes; zero message or secret exposure. */
+  listActiveOwnerRouteScopes(): readonly OwnerRouteScopeSummary[] {
+    this.assertActive()
+    const scopes: OwnerRouteScopeSummary[] = []
+    for (const [authorityId, authority] of this.ownerRoutes) {
+      const binding = this.deliveryStore.getActiveBinding(authority.conversation)
+      const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+      if (binding === undefined || binding.status !== 'active'
+        || !bindingMatchesOwnerRoute(binding, authority)
+        || owner?.status !== 'active' || owner.role !== 'owner') {
+        continue
+      }
+      scopes.push(Object.freeze({
+        authorityId,
+        authorityHash: ownerRouteAuthorityHash(authority),
+        principalId: externalPrincipalId(binding.principal),
+        principalRecordId: owner.id,
+        principalVersion: owner.version,
+        workspace: binding.workspace,
+        agentPreset: binding.agentPreset,
+      }))
+    }
+    return Object.freeze(scopes)
+  }
+
   /**
    * Read-only Host observation of the configured owner, even after its binding
    * has been revoked. Missing routes and transient failures are not revocation.
@@ -8029,7 +8055,9 @@ export class AssistantDeliveryService extends Service {
       : definition.name === 'wiki_read' || definition.name === 'wiki_search'
         ? caller.fiber.name === 'PersonalWikiService' || caller.fiber.name === 'dsh-enhanced-personal-wiki'
         : definition.name === 'memory_search'
-          && (caller.fiber.name === 'PersonalMemoryService' || caller.fiber.name === 'dsh-enhanced-personal-memory')
+          ? caller.fiber.name === 'PersonalMemoryService' || caller.fiber.name === 'dsh-enhanced-personal-memory'
+          : definition.name === 'assoc_read'
+            && (caller.fiber.name === 'AssistantAssociationService' || caller.fiber.name === 'dsh-enhanced-assistant-association')
     // The installed Cordis fork declares FiberState as an ambient const enum;
     // its ACTIVE and LOADING numeric values are 2 and 1, respectively.
     if (!trusted || caller.fiber.uid === null || (caller.fiber.state !== 1 && caller.fiber.state !== 2)) {

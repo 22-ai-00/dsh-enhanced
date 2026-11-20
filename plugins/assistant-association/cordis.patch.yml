@@ -1,0 +1,26 @@
+- insert:
+    - id: dsh-enhanced-assistant-association
+      name: '@dsh-enhanced/assistant-association'
+      inject:
+        - assistantPolicy
+      config:
+        enabled: true
+        localOnly: true
+        databasePath: !!js dshHomePath('assistant-association/state.sqlite')
+        hotPathBudgetMs: 4.5
+        maxItems: 8
+        minItems: 5
+        maxContextTokens: 400
+        maxHops: 2
+        hopTopN: 32
+        maxFanoutPerNode: 128
+        hysteresisDelta: 0.15
+        holdoutRateBps: 1250
+        syncIntervalMs: 15000
+        allowLowTrust: true
+        dreaming:
+          enabled: false
+        intakeSignal:
+          enabled: false
+        webLearning:
+          enabled: false

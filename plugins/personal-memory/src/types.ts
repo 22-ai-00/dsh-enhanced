@@ -112,6 +112,12 @@ export interface MemorySnapshotRequest {
   query?: string
   /** Host-attested active Goal context; never contains a caller-selected namespace. */
   task?: { objective: string; nextStep: string; query: string }
+  /**
+   * When true, omit keyword recall `hits` and return only confirmed standing
+   * `preference`/`instruction` records (including on Step 1 before session
+   * messages exist).
+   */
+  readonly standingOnly?: boolean
   limit: number
   maxBytes: number
   maxTokens: number
@@ -122,6 +128,13 @@ export interface MemorySnapshot {
   text: string
   bytes: number
   tokens: number
+}
+
+export interface MemoryRecordChangeEvent {
+  readonly op: 'add' | 'replace' | 'remove'
+  readonly record: Readonly<MemoryRecord>
+  readonly auditSequence?: number
+  readonly reason?: 'withdrawn' | 'source-changed' | 'mutation'
 }
 
 export type MemoryMutation =
