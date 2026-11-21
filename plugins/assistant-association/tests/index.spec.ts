@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
 import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import {
@@ -27,10 +28,14 @@ import {
 import { runHotPathQuery } from '../src/hot-path.js'
 import { rebuildMemoryIndexEdges } from '../src/index-memory.js'
 
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  version: string
+}
+
 describe('assistant-association config & core indexing', () => {
   test('exports expected plugin identity and aligns version', () => {
     expect(name).toBe('dsh-enhanced-assistant-association')
-    expect(version).toBe('0.1.79')
+    expect(version).toBe(manifest.version)
   })
 
   test('validates synchronous Standard-Schema Config defaults and bounds', () => {
