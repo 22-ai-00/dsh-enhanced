@@ -17,12 +17,12 @@ concurrency:
 
 env:
   VITEST_MAX_WORKERS: '2'
-  DSH_TEST_CONCURRENCY: '4'
+  DSH_TEST_CONCURRENCY: '2'
 
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     environment: npm-release
     outputs:
       source_commit: ${{ steps.release_source.outputs.source_commit }}
@@ -164,7 +164,20 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify repository
-        run: pnpm check
+        shell: bash
+        run: |
+          set -o pipefail
+          verify_log="${RUNNER_TEMP}/verify-repository.log"
+          verify_status=0
+          pnpm check 2>&1 | tee "${verify_log}" || verify_status=$?
+          if [ "${verify_status}" -ne 0 ]; then
+            printf 'verify repository status: %s\n' "${verify_status}"
+            grep -aE '(^| )(FAIL|×) |AssertionError|Error: |ERR_PNPM' "${verify_log}" \
+              | grep -av 'ExperimentalWarning' | head -40 \
+              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            tail -30 "${verify_log}" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            exit 1
+          fi
 
       - name: Verify release tag and pending versions
         run: node ./scripts/release-version.mjs verify-tag "${RELEASE_TAG}"
