@@ -10,7 +10,7 @@
 
 - **文鳐专属对话窗口**（左侧栏「文鳐」的默认视图）：独立于 DSH 原生编码界面的 `conversation.content`，由 `src/chat-view.ts` 提供专属个人助手体验：顶部显示文鳐身份徽章与已加载能力胶囊（记忆 / Wiki / 飞书），不暴露内部工作区路径（助手工作区固定默认 `$DSH_HOME/assistant-workspace`），支持一键开启「新对话」与打开 ⚙ 设置；内置同 `/model` 的级联模型与 Effort 下拉切换条、权限预设开关、推荐开场白、Markdown 代码块渲染与复制、流式预览、附件上传及浏览器语音转写/朗读。底层仍直接复用 DSH 宿主 `sessions` 持久事件日志与 agent loop（不自建第二套 loop），且仅对文鳐助手注册表记录的会话在 `$DSH_HOME/assistant-workspace` 中注入 `owner-console:wenyao-persona` 身份提示，零干扰 DSH 原生编程对话。
 - **设置页与 DSH 原生设置槽**（右上角 ⚙ 及 DSH 左侧设置弹窗 `wenyao-assistant`）：按「全部 / 体检自愈 / 模型与工具 / 自主与成长 / 飞书与插件 / 只读诊断」分组浏览 `src/settings-cards.ts` 卡片，提供一键体检自愈、`/model` 级联模型/Effort 与 CLI 路径下拉选择器、自主能力一键授权向导与飞书极简安全接入。除「文鳐」⚙ 设置页外，
-  客户端还向 DSH `0.2.2-rc.3` 注入原生设置扩展槽：左侧栏设置分组 `settings.section` / `settings.section.icon`
+  客户端还向 DSH `0.2.2-rc.5` 注入原生设置扩展槽：左侧栏设置分组 `settings.section` / `settings.section.icon`
   （「文鳐助手」）、通用设置一行快捷切换 `settings.general.item`（默认编程工具 `TraeX` / `Antigravity` /
   API 路由）、模型设置页脚 `settings.models.footer`（本地 ACP 就绪探测与默认路由切换），`settings.models.provider-card`（`dsh-enhanced-traex-acp-provider` 的模型/Effort/CLI 一键绑定），以及插件管理详情/摘要
   `plugins.bundle.config`（覆盖 `traex-acp-provider`、`lark-channel`、`assistant-proactive`、`assistant-dreaming`、

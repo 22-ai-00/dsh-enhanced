@@ -39,7 +39,7 @@ async function createHomeFixture(options: {
   await writeFile(join(profileDir, 'pnpm-lock.yaml'), lockOriginal, { mode: 0o600 })
   await writeFile(join(enhancedDir, 'package.json'), pluginPkgOriginal, { mode: 0o600 })
 
-  const hostVersion = options.hostVersion ?? '0.2.2-rc.3'
+  const hostVersion = options.hostVersion ?? '0.2.2-rc.5'
   const hostPath = join(dshHome, '.dsh-rsi-host.json')
   const hostOriginal = options.corruptHost
     ? '{not-valid-json'
@@ -119,8 +119,8 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
       inspectBoundHost: async () => ({
         status: 'ready',
         bindingPath: f.hostPath,
-        version: '0.2.2-rc.3',
-        dshPath: join(f.root, 'host-cache', '0.2.2-rc.3', 'dsh'),
+        version: '0.2.2-rc.5',
+        dshPath: join(f.root, 'host-cache', '0.2.2-rc.5', 'dsh'),
         issues: [],
       }),
     }
@@ -150,7 +150,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
         installedEnhancedVersion: '0.1.73',
         targetEnhancedVersion: '0.1.74',
         upgradeAvailable: true,
-        boundHost: { status: 'ready', installedVersion: '0.2.2-rc.3', targetVersion: '0.2.2', upgradeAvailable: true },
+        boundHost: { status: 'ready', installedVersion: '0.2.2-rc.5', targetVersion: '0.2.2', upgradeAvailable: true },
       },
       readiness: { ok: true, bindingOk: true, ledgersOk: true },
       plan: { canExecute: true, rollbackSupported: true },
@@ -205,7 +205,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
       inspectBoundHost: async () => ({
         status: 'ready',
         bindingPath: ledgerFixture.hostPath,
-        version: '0.2.2-rc.3',
+        version: '0.2.2-rc.5',
         dshPath: '/bin/dsh',
         issues: [],
       }),
@@ -250,7 +250,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     expect(blockedRes.report.execution?.executed).toBe(false)
   })
 
-  test('detects frozen Linux systemd profile and delegates --dry-run / --yes safely without breaking 0.2.2-rc.3 selector', async () => {
+  test('detects frozen Linux systemd profile and delegates --dry-run / --yes safely without breaking 0.2.2-rc.5 selector', async () => {
     const f = await createHomeFixture({ profile: 'owner' })
     const cohortDir = join(f.dshHome, 'rsi-local-cohorts', 'owner')
     const repoDir = join(f.root, 'repo')
@@ -265,7 +265,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     const frozenCalls: Array<{ dryRun: boolean; dshVersion?: string }> = []
     const frozenDeps: UpgradeDeps = {
       fetch: makeRegistryFetch('0.1.74', '0.2.2'),
-      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.3', dshPath: '/bin/dsh', issues: [] }),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
       runFrozenOwnerUpdate: async (_owner, opts) => {
         frozenCalls.push(opts)
         return 0
@@ -278,17 +278,17 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     )
     expect(dry.exitCode).toBe(0)
     expect(dry.report.mode).toBe('frozen-linux-systemd')
-    expect(dry.report.frozenSystemd).toMatchObject({ detected: true, profiles: ['owner'], targetDshVersion: '0.2.2-rc.3' })
+    expect(dry.report.frozenSystemd).toMatchObject({ detected: true, profiles: ['owner'], targetDshVersion: '0.2.2-rc.5' })
     expect(dry.report.execution).toMatchObject({ executed: false, dryRun: true, delegatedScript: 'scripts/install/upgrade-program.mjs' })
     expect(frozenCalls).toEqual([{ dryRun: true }])
 
     const applied = await runUpgrade(
-      { dshHome: f.dshHome, action: 'apply', dshVersion: '0.2.2-rc.3', platform: 'linux', osHome: f.osHome },
+      { dshHome: f.dshHome, action: 'apply', dshVersion: '0.2.2-rc.5', platform: 'linux', osHome: f.osHome },
       frozenDeps,
     )
     expect(applied.exitCode).toBe(0)
     expect(applied.report.execution).toMatchObject({ executed: true, dryRun: false, healthCheckPassed: true, rolledBack: false })
-    expect(frozenCalls).toEqual([{ dryRun: true }, { dryRun: false, dshVersion: '0.2.2-rc.3' }])
+    expect(frozenCalls).toEqual([{ dryRun: true }, { dryRun: false, dshVersion: '0.2.2-rc.5' }])
   })
 
   test('executes transactional macOS launchd upgrade with backup & doctor check, and rolls back automatically on failure', async () => {
@@ -297,7 +297,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
 
     const baseDeps = (healthOk: boolean): UpgradeDeps => ({
       fetch: makeRegistryFetch('0.1.74', '0.2.2'),
-      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.3', dshPath: '/bin/dsh', issues: [] }),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
       isServiceRunning: async () => true,
       inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.web.plist'), foreign: false }),
       controlService: async (_plat, _home, profile, action) => {

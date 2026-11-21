@@ -645,22 +645,22 @@ describe('model setup', () => {
   test('resolves bound host executable from .dsh-rsi-host.json when PATH lacks dsh and rejects unsafe binding files', async () => {
     const home = await realpath(await temporaryHome())
     const cacheRoot = await realpath(await temporaryHome())
-    const hostRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh')
-    const bootRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
-    const binDir = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin')
+    const hostRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh')
+    const bootRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+    const binDir = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin')
     await mkdir(join(hostRoot, 'bin'), { recursive: true })
     await mkdir(bootRoot, { recursive: true })
     await mkdir(binDir, { recursive: true })
-    await writeFile(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.3', bin: { dsh: 'bin/dsh.js' } }), 'utf8')
+    await writeFile(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5', bin: { dsh: 'bin/dsh.js' } }), 'utf8')
     await writeFile(join(hostRoot, 'bin', 'dsh.js'), '#!/usr/bin/env node\n', 'utf8')
-    await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.3' }), 'utf8')
+    await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5' }), 'utf8')
     await symlink('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
 
     const bindingPath = join(home, '.dsh-rsi-host.json')
     await writeFile(bindingPath, JSON.stringify({
       schemaVersion: 1,
       cacheRoot,
-      version: '0.2.2-rc.3',
+      version: '0.2.2-rc.5',
       receiptDigest: 'a'.repeat(64),
     }), { encoding: 'utf8', mode: 0o600 })
     await chmod(bindingPath, 0o600)

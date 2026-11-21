@@ -27,7 +27,7 @@ import type { AcpConfig } from '../src/index.ts'
 class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
-  constructor(private readonly script: (StreamChunk[] | 'hang')[]) {
+  constructor(private readonly script: (StreamChunk[] | 'hang' | Error)[]) {
     super()
   }
 
@@ -47,6 +47,7 @@ class ScriptedAdapter extends LlmAdapter {
     this.requests.push(options)
     const entry = this.script.shift()
     if (entry === undefined) throw new Error('ScriptedAdapter: script exhausted')
+    if (entry instanceof Error) throw entry
     if (entry === 'hang') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: 'partial' }
@@ -98,7 +99,7 @@ export interface BridgeHarness {
 type AcpConfigOverrides = { [K in keyof AcpConfig]?: AcpConfig[K] | undefined }
 
 export async function makeBridgeHarness(options: {
-  script?: (StreamChunk[] | 'hang')[]
+  script?: (StreamChunk[] | 'hang' | Error)[]
   config?: AcpConfigOverrides
 } = {}): Promise<BridgeHarness> {
   const ctx = new Context()

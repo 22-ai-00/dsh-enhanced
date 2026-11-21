@@ -178,6 +178,10 @@ function updateEvents(
     ...textEvents(`failed-${sequence}-${step}`, '已响应停止请求，结束本次等待。'),
     progressEvent('RUN_ERROR', { message: '已结束本次等待。', code: 'TASK_STOPPED' }),
   ]
+  if (update.code === 'CONTENT_REFUSED' || update.code === 'ACP_REFUSAL') return [
+    ...textEvents(`failed-${sequence}-${step}`, '模型提供方拒绝了本次请求。'),
+    progressEvent('RUN_ERROR', { message: '模型提供方拒绝了本次请求。', code: 'CONTENT_REFUSED' }),
+  ]
   const code = !showDetails || update.code === undefined ? undefined : boundedLabel(update.code, 80)
   return [
     ...textEvents(`failed-${sequence}-${step}`,

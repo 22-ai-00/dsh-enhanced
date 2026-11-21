@@ -154,7 +154,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ## 兼容性
 
-本包已在安装的 DeepSeek Harness `0.2.2-rc.3` 上通过类型检查及包测试；完整宿主安装和外部模型/渠道仍按仓库[兼容性基线](../../docs/compatibility.md)验收。
+本包已在安装的 DeepSeek Harness `0.2.2-rc.5` 上通过类型检查及包测试；完整宿主安装和外部模型/渠道仍按仓库[兼容性基线](../../docs/compatibility.md)验收。
 
 ### Finite action broker preauthorization
 

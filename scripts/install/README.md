@@ -18,7 +18,7 @@ npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install
 ```
 
-默认 `supervised` 包含飞书常驻助理、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive` / `assistant-growth-driver` / `assistant-memory-learning` / `assistant-work-items` 等自主组件。安装器解析并固定兼容的 DSH Host（`0.2.2-rc.3`）和同批插件版本；遇到未知 Host 版本会拒绝安装，并把绑定的 Host 写入 `$DSH_HOME/.dsh-rsi-host.json`。第一次安装请按终端向导完成飞书应用、本人绑定、模型与可选能力选择。
+默认 `supervised` 包含飞书常驻助理、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive` / `assistant-growth-driver` / `assistant-memory-learning` / `assistant-work-items` 等自主组件。安装器解析并固定兼容的 DSH Host（`0.2.2-rc.5`）和同批插件版本；遇到未知 Host 版本会拒绝安装，并把绑定的 Host 写入 `$DSH_HOME/.dsh-rsi-host.json`。第一次安装请按终端向导完成飞书应用、本人绑定、模型与可选能力选择。
 
 交互式首装先问一次“按推荐配置一路继续 / 逐项自定义”：
 - **推荐继续**：自动探测本机 `PATH` 上已登录的 `traex`/`trae-cli` 与 `agy`（均先用无交互命令检查，必要时启用 `traex-acp-provider` 并通过 `--default-if-absent` 在未设默认模型时设为默认），缺少本机 agent 登录时则配置 DeepSeek 官方默认模型 `deepseek-v4-flash`（缺少 Key 时隐藏输入一次，存入 `0600` 的 `$DSH_HOME/.credentials.yaml`）；随后连接飞书、验证模型 route、等待首次 owner 会话（最长 600 秒，`--owner-wait-seconds <n>` 调整，`0` 关闭），并执行 `dsh-plugin-setup preset recommended`。
@@ -47,17 +47,17 @@ dsh-rsi web-url --profile web       # 仅读取已运行服务的带 token URL
 
 ## 只用本机 Web
 
-适合先在本机体验聊天与「文鳐」控制台，暂不连接飞书；无需 Docker。`--scenario web` 直接包含 `owner-console` 与 `assistant-web-owner`；极简 `--scenario core` 可按需追加 `--with console`。两者都不默认注册常驻服务，安装后直接运行 `dsh-rsi open --profile web` 即可自动读取 `.dsh-rsi-host.json` 绑定的 `0.2.2-rc.3` 私有 Host 前台启动并打开浏览器：
+适合先在本机体验聊天与「文鳐」控制台，暂不连接飞书；无需 Docker。`--scenario web` 直接包含 `owner-console` 与 `assistant-web-owner`；极简 `--scenario core` 可按需追加 `--with console`。两者都不默认注册常驻服务，安装后直接运行 `dsh-rsi open --profile web` 即可自动读取 `.dsh-rsi-host.json` 绑定的 `0.2.2-rc.5` 私有 Host 前台启动并打开浏览器：
 
 ```sh
 dsh-rsi install --scenario web --model skip --yes
 dsh-rsi open --profile web
 ```
 
-如需手动在前台直接拉起新安装的 `0.2.2-rc.3` 私有 Host，可运行（旧 Home 或自定义路径请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)）：
+如需手动在前台直接拉起新安装的 `0.2.2-rc.5` 私有 Host，可运行（旧 Home 或自定义路径请先[查找绑定的 Host 入口](maintenance.md#查找私有-host-入口)）：
 
 ```sh
-~/.local/share/dsh-enhanced/hosts/0.2.2-rc.3/node_modules/.bin/dsh --profile web
+~/.local/share/dsh-enhanced/hosts/0.2.2-rc.5/node_modules/.bin/dsh --profile web
 ```
 
 前台启动需要保持终端运行（Ctrl-C 停止）；它没有注册常驻服务，因此不用 `dsh-rsi web-url` 或 `start`。按[模型指南](../../docs/models.md)或左栏 **Settings** 配置模型后即可对话，切勿用另一个全局 `dsh` 代替 Home 绑定入口。
@@ -73,7 +73,7 @@ dsh-rsi restart --profile web
 dsh-rsi install --help
 ```
 
-只需升级全局 CLI：`dsh-rsi update`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.3`（保留原 owner、授权与非空判断前的空白历史）；旧 CLI 须先单独运行一次 `dsh-rsi update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
+只需升级全局 CLI：`dsh-rsi update`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.5`（保留原 owner、授权与非空判断前的空白历史）；旧 CLI 须先单独运行一次 `dsh-rsi update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
 ## 配置插件
 

@@ -5,7 +5,7 @@ import { describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const baseline = '0.2.2-rc.3'
+const baseline = '0.2.2-rc.5'
 
 interface WorkspaceManifest {
   name: string

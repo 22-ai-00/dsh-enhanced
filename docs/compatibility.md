@@ -2,16 +2,16 @@
 
 本页记录当前已验证的 DSH / Cordis / Node 运行时契约、CLI 与第三方适配器边界，以及跨包存储迁移规则。过往版本的逐期变更历史见 Git 提交记录。
 
-## 0.2.2-rc.3 Host 基线与工具链
+## 0.2.2-rc.5 Host 基线与工具链
 
-当前桌面 Host 与仓库验证基线锁定为 **DSH `0.2.2-rc.3`**：
+当前桌面 Host 与仓库验证基线锁定为 **DSH `0.2.2-rc.5`**：
 
-- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.2-rc.3`（workspace catalog 与源码安装同步固定）。
-- **包与 peer 范围**：所有插件与共享包的 `@deepseek-ai/*` peer 范围收紧为 `>=0.2.2-rc.3 <0.3.0`，`@deepseek-ai/cordis` 为 `^4.1.0`（锁定 Loader / Include / Group `1.1.0`，参见 [Cordis runtime contracts](cordis-runtime-contracts.md)）。Host 使用 `semver.satisfies(..., { includePrerelease: true })` 检查范围；根 `tests/dsh-compatibility.spec.ts` 拒绝低于 `0.2.2-rc.3` 的基线或未验证的 `0.3.x`。已发布包基线以[发布账本](../release-manifest.json)为准。
+- DeepSeek Harness 运行时与 npm 测试依赖：`0.2.2-rc.5`（workspace catalog 与源码安装同步固定）。
+- **包与 peer 范围**：所有插件与共享包的 `@deepseek-ai/*` peer 范围收紧为 `>=0.2.2-rc.5 <0.3.0`，`@deepseek-ai/cordis` 为 `^4.1.0`（锁定 Loader / Include / Group `1.1.0`，参见 [Cordis runtime contracts](cordis-runtime-contracts.md)）。Host 使用 `semver.satisfies(..., { includePrerelease: true })` 检查范围；根 `tests/dsh-compatibility.spec.ts` 拒绝低于 `0.2.2-rc.5` 的基线或未验证的 `0.3.x`。已发布包基线以[发布账本](../release-manifest.json)为准。
 - **Node.js 与 pnpm**：工作区与 `.node-version` 锁定 Node **`24.9.0`**（引擎兼容 `^22.19.0 || >=24.0.0`），Linux bwrap 行为隔离与 CI 验证节点（`.github/workflows/ci.yml`）使用 `/usr/bin/node` **`v22.23.2`**，包管理器锁定 **`pnpm@11.7.0`**。
 - **依赖边界与无自引用约束**：插件不得把 `@deepseek-ai/dsh-*` 运行时包写成普通 `dependencies`（否则 Loader 会优先解析 profile 内旧副本并禁用 `working-directory`、`session-projection` 等根服务）；非必需的兄弟插件集成（例如 `assistant-dreaming` 读取可选业务插件服务）须声明为可选 `peerDependencies`。
 - **循环构建引导（`build:bootstrap`）**：针对存在循环 `devDependencies` 的包组，根 `pnpm run build` 先按序执行 `build:bootstrap`（共享包 `packages/*` → `assistant-policy` → Evaluation `build:core` → Delivery → Isolation → Evaluation → Verifier → Automations → Preference Learning / Health / Evolution / Growth Experiments / Heartbeat / Recovery / Goals / Skills / Control Plane / Personal Memory / Memory Learning / Keychain / Actions / Event Triggers / `assistant-dreaming`），再以 `--workspace-concurrency=1` 递归构建全部工作区及前端产物（如 `owner-console/lib/client.js`）。
-- **DSH `0.2.2-rc.3` 运行时契约**：
+- **DSH `0.2.2-rc.5` 运行时契约**：
   - 使用显式 `ToolExecutor`（`@deepseek-ai/dsh-tool-executor-native` / `@deepseek-ai/dsh-tool-executor-ptc`）、批量 `tools.execute(ToolBatchInput)`、Session format `4`、生产者专属 `MessageSource`、顶层工具结果消息与 `agent-preset-registry`。
   - Agent setup 第二参数为确切未发布 Agent 实例（不再使用 `ctx.agent`）；子任务使用 `SubagentRuntime.startActivation()`；系统提示组装使用 `system-prompt/assemble` 并支持 `runtime-context` 用户消息与 suppression；自定义 setup CLI 通过所选 Host 原生 `createRuntimeResolution` 与 `PluginPackages` 解析，不依赖已移除的 fallback API。
   - **助手审批与 Harness 原生 Auto 分离**：Policy 不注册保留档位 `auto`，也不凭原生 Auto 选择启动项目 reviewer；助手 `/permission auto` 基于 `workspace-write + ask` 与 required reviewer 事件；安装器与 `dsh-permission-setup` 只接受 `workspace-write` / `danger-full-access` 静态默认。
@@ -36,7 +36,7 @@
 - **Linux 原生隔离（`assistant-isolation`）**：唯一 Linux 后端为 `backend: 'linux-native'`（bubblewrap、user/mount/PID/network namespace 与有界 tmpfs）。`scripts/isolation/prepare-linux-cgroups.mjs --auto`、`discoverLinuxCgroupRoots`、`dsh-rsi doctor`、`assistant-isolation` 运行时进程迁入及 `assistant-verifier` / `plugin-control-plane` / `assistant-web-owner` 配置与 authority 编译器均支持已委派 cgroup v1 四控制器或统一 cgroup v2 子树（`/sys/fs/cgroup/dsh-native/uid-<uid>` 及 `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`，含共同祖先 `cgroup.procs` 写权限与 `cgroup.freeze` + `cgroup.kill` 终止；Linux v2 实机冷安装→学习场景待跑）。Docker 构建与执行后端已移除，历史 Docker ledger 与 `isolated-runner` 配置仅保留只读解码供迁移校对；macOS 使用原生 sandbox/seatbelt（`pluginRevision` 现亦支持 `schemaVersion: 2`）。
 - **Host 升级与 `docker→native` 迁移**：
   - 通用 `dsh-rsi install` 解析官方 `latest` 并锁定到已验证基线，将绑定入口写入 `$DSH_HOME/.dsh-rsi-host.json`。
-  - `dsh-rsi update --all --yes` 对冻结 Linux owner Home 仅允许**原安装为 Docker 后端**、原 Host 属于 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3`（目标固定 `0.2.2-rc.3`）、绑定官方 `dev`/`main` 可干净快进、授权未过期且创建/审查/回归/采用历史库均为空的场景；已有 native owner 的原地程序升级、非空创建历史迁移、完整 live Docker→native 切换及冻结 Mac Home 均不支持/未验收。详情见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)、[CLI 升级与重装](../packages/dsh-rsi-cli/README.md#升级与重装)、[联合迁移](../scripts/install/README.md#旧-home-的联合-host--源码迁移)与[首次 owner 修复](../scripts/install/README.md#已-applied未首次采用的-owner-修复)。
+  - `dsh-rsi update --all --yes` 对冻结 Linux owner Home 仅允许**原安装为 Docker 后端**、原 Host 属于 `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` / `0.2.2-rc.5`（目标固定 `0.2.2-rc.5`）、绑定官方 `dev`/`main` 可干净快进、授权未过期且创建/审查/回归/采用历史库均为空的场景；已有 native owner 的原地程序升级、非空创建历史迁移、完整 live Docker→native 切换及冻结 Mac Home 均不支持/未验收。详情见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)、[CLI 升级与重装](../packages/dsh-rsi-cli/README.md#升级与重装)、[联合迁移](../scripts/install/README.md#旧-home-的联合-host--源码迁移)与[首次 owner 修复](../scripts/install/README.md#已-applied未首次采用的-owner-修复)。
   - Linux service-aware `supervised` 升级要求 systemd user manager、`flock`、Perl、`/usr/bin/python3`、bubblewrap 与同文件系统 `DSH_HOME`（`renameat2`），预览过程只在隔离副本内临时屏蔽 `larkChannel`。
 
 ## 本地源码维护历史（Control Plane schema 28）

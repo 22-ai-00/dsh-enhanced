@@ -695,6 +695,18 @@ describe('Lark delivery adapter', () => {
     expect(serialized).toContain('TOOL_FAILED')
   })
 
+  test('renders model provider refusal as an explicit CONTENT_REFUSED progress error', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-refusal', eventId: 'om_refusal', target: intent().target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'failed', code: 'CONTENT_REFUSED' } })
+
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).toContain('模型提供方拒绝了本次请求。')
+    expect(serialized).toContain('CONTENT_REFUSED')
+  })
+
   test('does not widen a group run to details when a later intent changes target metadata', async () => {
     const f = fixture()
     await f.adapter.start(f.context)

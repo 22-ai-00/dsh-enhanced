@@ -17,7 +17,7 @@ import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const releaseManifest = JSON.parse(readFileSync(resolve(root, 'release-manifest.json'), 'utf8'))
-const defaultHostVersion = releaseManifest?.pending?.pinnedHostVersion ?? releaseManifest?.current?.pinnedHostVersion ?? '0.2.2-rc.3'
+const defaultHostVersion = releaseManifest?.pending?.pinnedHostVersion ?? releaseManifest?.current?.pinnedHostVersion ?? '0.2.2-rc.5'
 const hostVersion = process.env.DSH_E2E_HOST_VERSION ?? defaultHostVersion
 if (!/^0\.(?:1|2)\.\d+(?:-rc\.\d+)?$/u.test(hostVersion)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'

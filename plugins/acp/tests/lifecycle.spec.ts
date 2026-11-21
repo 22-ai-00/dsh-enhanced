@@ -1,6 +1,6 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -91,6 +91,22 @@ describe('official ACP lifecycle contracts', () => {
     await expect(harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] }))
       .resolves.toEqual({ stopReason: 'max_tokens' })
     expect(messageText(harness, sessionId)).toBe('partial answer')
+  })
+
+  it('reports CONTENT_REFUSED as the ACP refusal stop reason while still rejecting other turn errors', async () => {
+    harness = await makeBridgeHarness({
+      script: [
+        new LlmError('DeepSeek refused to answer under its content safety review', 'CONTENT_REFUSED'),
+        new LlmError('upstream server error', 'SERVER'),
+      ],
+    })
+    await initialize(harness)
+    const sessionId = await newSession(harness)
+
+    await expect(harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'unsafe' }] }))
+      .resolves.toEqual({ stopReason: 'refusal' })
+    await expect(harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'retry' }] }))
+      .rejects.toThrow(/turn failed: upstream server error/)
   })
 
   it('session/close cancels work, removes the session, and leaves peers alive', async () => {

@@ -181,7 +181,7 @@ export interface UpgradeDeps {
 const DEFAULT_REGISTRY_URL = 'https://registry.npmjs.org'
 const REGISTRY_TIMEOUT_MS = 4_000
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u
-const FROZEN_DSH_SELECTOR = '0.2.2-rc.3'
+const FROZEN_DSH_SELECTOR = '0.2.2-rc.5'
 
 const CREATION_ROW_TABLES = [
   'source_creation_verifications',

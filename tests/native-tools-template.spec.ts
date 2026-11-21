@@ -56,7 +56,7 @@ test('generated manifest pins the optional Host Tools contract and default entry
     peerDependenciesMeta: Record<string, { optional: boolean }>
     devDependencies: Record<string, string>
   }
-  expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.2.2-rc.3 <0.3.0')
+  expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.2.2-rc.5 <0.3.0')
   expect(manifest.peerDependenciesMeta['@deepseek-ai/dsh-tools']).toEqual({ optional: true })
   expect(manifest.devDependencies['@deepseek-ai/dsh-tools']).toBe('catalog:')
   expect(manifest.devDependencies['@deepseek-ai/dsh-system-prompt']).toBe('catalog:')

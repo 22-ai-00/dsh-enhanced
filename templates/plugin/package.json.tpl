@@ -50,7 +50,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
-    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3 <0.3.0"
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.5 <0.3.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

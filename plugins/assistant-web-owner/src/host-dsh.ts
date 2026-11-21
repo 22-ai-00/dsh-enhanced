@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { isMap, isScalar, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
 const execFileAsync = promisify(execFile)
-const supportedHostVersions = new Set(['0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3'])
+const supportedHostVersions = new Set(['0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5'])
 
 export type Fail = (message: string) => never
 

@@ -39,7 +39,7 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     // These are imported as values by lib/*.js; they must never be ordinary
     // dependencies (a second Host runtime copy breaks service identity).
     for (const peer of ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-tools']) {
-      expect(manifest.peerDependencies?.[peer]).toBe('>=0.2.2-rc.3 <0.3.0')
+      expect(manifest.peerDependencies?.[peer]).toBe('>=0.2.2-rc.5 <0.3.0')
       expect(manifest.peerDependenciesMeta?.[peer]?.optional).toBe(true)
       expect(manifest.dependencies?.[peer]).toBeUndefined()
     }

@@ -73,7 +73,7 @@ describe('detached lifecycle YAML parser', () => {
     expect(rejectedEscape.stderr).toContain('resolves outside canonical DSH_HOME')
   })
 
-  test.each(['0.2.1-rc.2', '0.2.2-rc.1'])('uses the %s Host parser from its matching plugin manager', async version => {
+  test.each(['0.2.1-rc.2', '0.2.2-rc.1', '0.2.2-rc.3', '0.2.2-rc.5'])('uses the %s Host parser from its matching plugin manager', async version => {
     const input = await fixture()
     for (const file of [join(input.host, 'package.json'), join(input.manager, 'package.json')]) {
       const manifest = JSON.parse(await readFile(file, 'utf8'))

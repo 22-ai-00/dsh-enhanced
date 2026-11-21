@@ -71,28 +71,28 @@ describe('inspectBoundHostRuntime', () => {
     const cacheRoot = join(home, 'hosts')
     const digest = 'b'.repeat(64)
     await writeFile(join(home, '.dsh-rsi-host.json'), JSON.stringify({
-      schemaVersion: 1, cacheRoot, version: '0.2.2-rc.3', receiptDigest: digest,
+      schemaVersion: 1, cacheRoot, version: '0.2.2-rc.5', receiptDigest: digest,
     }), { mode: 0o600 })
 
     const ready = await inspectBoundHostRuntime(home, {
       read: async () => ({
-        version: '0.2.2-rc.3',
-        root: join(cacheRoot, '0.2.2-rc.3'),
-        dshPath: join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin', 'dsh'),
-        binDirectory: join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin'),
+        version: '0.2.2-rc.5',
+        root: join(cacheRoot, '0.2.2-rc.5'),
+        dshPath: join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin', 'dsh'),
+        binDirectory: join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin'),
         integrity: 'sha512-x',
         receiptDigest: digest,
       }),
     })
     expect(ready.status).toBe('ready')
-    expect(ready.version).toBe('0.2.2-rc.3')
+    expect(ready.version).toBe('0.2.2-rc.5')
 
     const mismatch = await inspectBoundHostRuntime(home, {
       read: async () => ({
-        version: '0.2.2-rc.3',
-        root: join(cacheRoot, '0.2.2-rc.3'),
-        dshPath: join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin', 'dsh'),
-        binDirectory: join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin'),
+        version: '0.2.2-rc.5',
+        root: join(cacheRoot, '0.2.2-rc.5'),
+        dshPath: join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin', 'dsh'),
+        binDirectory: join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin'),
         integrity: 'sha512-x',
         receiptDigest: 'c'.repeat(64),
       }),
@@ -130,7 +130,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
 
     const digest = 'd'.repeat(64)
     await writeFile(join(dshHome, '.dsh-rsi-host.json'), JSON.stringify({
-      schemaVersion: 1, cacheRoot: join(root, 'hosts'), version: '0.2.2-rc.3', receiptDigest: digest,
+      schemaVersion: 1, cacheRoot: join(root, 'hosts'), version: '0.2.2-rc.5', receiptDigest: digest,
     }), { mode: 0o600 })
 
     const fakeTraex = join(binDir, 'traex')
@@ -144,7 +144,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     await writeFile(join(cgroupRoot, 'cgroup.controllers'), 'cpu memory pids\n')
 
     const runner: DetailedCommandRunner = (command, args) => {
-      if (command === 'dsh' && args[0] === '--version') return { status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }
+      if (command === 'dsh' && args[0] === '--version') return { status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }
       if (command === join(boundBinDir, 'dsh') && args.includes('--dump-config')) {
         return {
           status: 0,
@@ -193,8 +193,8 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
       env: { PATH: binDir, USER: 'alice', DEEPSEEK_API_KEY: 'env-secret-value-999' },
       runner,
       readHostRuntime: async () => ({
-        version: '0.2.2-rc.3',
-        root: join(root, 'hosts', '0.2.2-rc.3'),
+        version: '0.2.2-rc.5',
+        root: join(root, 'hosts', '0.2.2-rc.5'),
         dshPath: join(boundBinDir, 'dsh'),
         binDirectory: boundBinDir,
         integrity: 'sha512-x',
@@ -273,7 +273,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
             stderr: '',
           }
         }
-        return { status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }
+        return { status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }
       },
     })
 
@@ -300,7 +300,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
       home: root,
       platform: 'linux',
       env: { PATH: '' },
-      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }),
       linuxPaths: { cgroupRoot, uid: 1000 },
     })
     const okCheck = okReport.checks.find(c => c.id === 'platform.cgroup')
@@ -312,7 +312,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
       home: root,
       platform: 'linux',
       env: { PATH: '' },
-      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }),
       linuxPaths: { cgroupRoot, uid: 1000, procSelfCgroup: '0::/dsh-native/uid-1000/host\n' },
     })
     const explicitHostLeafCheck = explicitHostLeafReport.checks.find(c => c.id === 'platform.cgroup')
@@ -325,7 +325,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
       home: root,
       platform: 'linux',
       env: { PATH: '' },
-      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }),
       linuxPaths: { cgroupRoot, uid: 1000, procSelfCgroup: '0::/user.slice/user-1000.slice/session-7.scope\n' },
     })
     const sshStandaloneCheck = sshStandaloneOnlyReport.checks.find(c => c.id === 'platform.cgroup')
@@ -338,7 +338,7 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
       home: root,
       platform: 'linux',
       env: { PATH: '' },
-      runner: () => ({ status: 0, stdout: '0.2.2-rc.3\n', stderr: '' }),
+      runner: () => ({ status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }),
       linuxPaths: { cgroupRoot, uid: 1000 },
     })
     const frozenCheck = frozenReport.checks.find(c => c.id === 'platform.cgroup')

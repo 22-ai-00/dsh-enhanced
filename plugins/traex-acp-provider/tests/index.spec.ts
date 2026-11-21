@@ -21,7 +21,7 @@ describe('dsh-enhanced-traex-acp-provider', () => {
       peerDependencies: Record<string, string>
     }
     for (const name of ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session']) {
-      expect(manifest.peerDependencies[name]).toBe('>=0.2.2-rc.3 <0.3.0')
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.2-rc.5 <0.3.0')
     }
   })
 

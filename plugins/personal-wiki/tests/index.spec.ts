@@ -28,7 +28,7 @@ describe('dsh-enhanced-personal-wiki', () => {
     expect(bundle).toContain('readMaxBytes: 8192')
     expect(bundle).toContain('- assistantPolicy')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-skill']).toBe('>=0.2.2-rc.3 <0.3.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-skill']).toBe('>=0.2.2-rc.5 <0.3.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
   })
 

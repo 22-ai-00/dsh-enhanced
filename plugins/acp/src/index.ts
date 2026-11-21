@@ -129,9 +129,10 @@ function turnEndToStopReason(reason: TurnEndReason): StopReason {
       return 'max_tokens'
     case 'interrupted':
       return 'cancelled'
+    case 'error':
+      return reason.error.code === 'CONTENT_REFUSED' ? 'refusal' : 'end_turn'
     case 'aborted':
     case 'blocked':
-    case 'error':
     default:
       return 'end_turn'
   }
@@ -271,7 +272,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
     } finally {
       const inflight = record.inflight
       if (inflight !== undefined && event.type === 'turn/end' && inflight.turn === event.data.turn) {
-        if (event.data.reason.kind === 'error') {
+        if (event.data.reason.kind === 'error' && event.data.reason.error.code !== 'CONTENT_REFUSED') {
           record.inflight = undefined
           inflight.reject(internalError(`turn failed: ${event.data.reason.error.message}`))
         } else {

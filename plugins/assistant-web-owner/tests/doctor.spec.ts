@@ -492,23 +492,23 @@ describe('autonomy doctor static readiness snapshot', () => {
   it('falls back to verified $DSH_HOME/.dsh-rsi-host.json when PATH lacks dsh', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-bound-'))); roots.push(home)
     const cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-cache-'))); roots.push(cacheRoot)
-    const hostRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh')
-    const bootRoot = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
-    const binDir = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin')
+    const hostRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh')
+    const bootRoot = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+    const binDir = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin')
     mkdirSync(join(hostRoot, 'bin'), { recursive: true })
     mkdirSync(bootRoot, { recursive: true })
     mkdirSync(binDir, { recursive: true })
     const dumpPath = join(home, 'bound-dump.yml')
     writeFileSync(dumpPath, readinessBundles)
-    writeFileSync(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.3', bin: { dsh: 'bin/dsh.js' } }))
+    writeFileSync(join(hostRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.5', bin: { dsh: 'bin/dsh.js' } }))
     writeFileSync(join(hostRoot, 'bin', 'dsh.js'), '#!/bin/bash\ncat "$BOUND_READINESS_FIXTURE"\n')
     chmodSync(join(hostRoot, 'bin', 'dsh.js'), 0o755)
-    writeFileSync(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.3' }))
+    writeFileSync(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5' }))
     symlinkSync('../@deepseek-ai/dsh/bin/dsh.js', join(binDir, 'dsh'))
     writeFileSync(join(home, '.dsh-rsi-host.json'), JSON.stringify({
       schemaVersion: 1,
       cacheRoot,
-      version: '0.2.2-rc.3',
+      version: '0.2.2-rc.5',
       receiptDigest: 'b'.repeat(64),
     }), { mode: 0o600 })
     chmodSync(join(home, '.dsh-rsi-host.json'), 0o600)

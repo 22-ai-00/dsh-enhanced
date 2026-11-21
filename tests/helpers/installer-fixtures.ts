@@ -618,7 +618,7 @@ ${options.activationFails ? "printf 'activation failed\\n' >&2; exit 23" : `prin
     const lifecycleDshExecutable = await nativeInstallerHost(root, String.raw`#!/bin/bash
 set -euo pipefail
 { printf 'CALL'; printf '\t%s' "$@"; printf '\n'; } >> "$LIFECYCLE_DSH_LOG"
-if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.2.2-rc.3\n'; exit 0; fi
+if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.2.2-rc.5\n'; exit 0; fi
 if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   transaction_state='absent'
   [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
@@ -1366,7 +1366,7 @@ process.exit(result.status ?? 99)
     const bootRoot = join(f.root, 'fake-host', 'node_modules', '@deepseek-ai', 'dsh-app-boot')
     await rm(bootRoot)
     await mkdir(join(bootRoot, 'lib'), { recursive: true })
-    await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.3',
+    await writeFile(join(bootRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5',
       type: 'module', exports: { '.': './lib/index.js', './package.json': './package.json' } }))
     await writeFile(join(bootRoot, 'lib/index.js'), `export function loadProfileDirectory(name, dir, installAnchor) {
   if (name !== 'dsh' || !dir.endsWith('/profiles/web') || !installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host profile')

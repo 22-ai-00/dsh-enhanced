@@ -90,7 +90,7 @@ describe('openWebProfile', () => {
   test('无常驻服务的按需 profile 使用私有 Host dshPath 启动并打印 URL 与文鳐提示', async () => {
     const home = await makeTempDir('dsh-open-fg-')
     const cacheRoot = join(home, 'cache')
-    const binDir = join(cacheRoot, '0.2.2-rc.3', 'node_modules', '.bin')
+    const binDir = join(cacheRoot, '0.2.2-rc.5', 'node_modules', '.bin')
     await mkdir(binDir, { recursive: true })
     await writeFile(join(binDir, 'dsh'), '#!/bin/sh\n', { mode: 0o755 })
     await seedProfile(home, 'web', true)
@@ -98,7 +98,7 @@ describe('openWebProfile', () => {
     await writeFile(join(home, '.dsh-rsi-host.json'), JSON.stringify({
       schemaVersion: 1,
       cacheRoot,
-      version: '0.2.2-rc.3',
+      version: '0.2.2-rc.5',
       receiptDigest: digest,
     }), { mode: 0o600 })
 
@@ -114,8 +114,8 @@ describe('openWebProfile', () => {
       env: { DISPLAY: ':0', PATH: '/usr/bin' },
       runner,
       readHostRuntime: async () => ({
-        version: '0.2.2-rc.3',
-        root: join(cacheRoot, '0.2.2-rc.3'),
+        version: '0.2.2-rc.5',
+        root: join(cacheRoot, '0.2.2-rc.5'),
         dshPath: join(binDir, 'dsh'),
         binDirectory: binDir,
         integrity: 'sha512-x',

@@ -60,7 +60,7 @@ exit 0
   await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
   const hostExecutable = await nativeInstallerHost(root, `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.3\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ " $* " == *' plugin '* ]]; then
   mkdir -p "$DSH_HOME/profiles/web/node_modules/.bin"
   printf 'plugin-add\\n' >> "$INSTALL_LOG"
@@ -83,7 +83,7 @@ exit 0
       join(profileBin, 'dsh-web-owner-setup'))
   }
   const result = spawnSync('/bin/bash', [installer,
-    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.2.2-rc.3',
+    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.2.2-rc.5',
     '--no-service', '--model', 'skip', '--model-route', 'skip',
   ], {
     cwd: repoRoot,
@@ -201,7 +201,7 @@ describe('experimental Web owner installer scenario', () => {
     await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web' }))
     await writeFile(join(dshHome, '.credentials.yaml'), 'DEEPSEEK_API_KEY: top-secret-doctor-key\n', { mode: 0o600 })
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.3\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.2.2-rc.5\\n'; exit 0; fi
 if [[ " $* " == *' --dump-config '* ]]; then
   printf '%s\\n' '- id: dsh-enhanced-owner-console' '  name: "@dsh-enhanced/owner-console"'
   exit 0

@@ -47,7 +47,7 @@ plugins/<name>/
 
 普通插件只有 Node/Host 入口。需要改动 Web UI 时，一个包通常同时拥有 Host 与 browser 两半：Host 提供数据/Typert RPC，browser 入口通过 `dsh.client` 声明 `platform: web` 和依赖边，并从 `exports["./client"]` 发布预构建客户端产物（如 `owner-console` 产出 `./lib/client.js`，注册 `sidebar.panellist` / `main` 与 DSH 原生左栏设置槽位 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer` 及 `plugins.bundle.config`）。
 
-双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH `0.2.2-rc.3` 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
+双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH `0.2.2-rc.5` 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
 
 Web owner 适配通过内存 `EntryTree` 将宿主 Session Controller 的 client 元数据与 owner-scoped 的 Host 包装绑定，只在浏览器加载同源原生 client，不复制旧版 Session 协议；子树由 Cordis effect 释放，不回写 profile 或 `node_modules`。
 

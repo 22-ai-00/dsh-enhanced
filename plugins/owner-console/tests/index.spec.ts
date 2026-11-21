@@ -62,7 +62,7 @@ describe('dsh-enhanced-owner-console', () => {
 
   it('declares the verified 0.2 DSH line so the live app can install it', () => {
     for (const name of ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-typert-protocol', '@deepseek-ai/dsh-typert-registry']) {
-      expect(manifest.peerDependencies[name]).toBe('>=0.2.2-rc.3 <0.3.0')
+      expect(manifest.peerDependencies[name]).toBe('>=0.2.2-rc.5 <0.3.0')
     }
   })
 

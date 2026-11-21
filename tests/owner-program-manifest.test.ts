@@ -14,7 +14,7 @@ const runtime = (version: string, receiptDigest: string) => ({ version, root: `$
   binDirectory: `${cache}/${version}/node_modules/.bin`,
   integrity: `sha512-${Buffer.alloc(64).toString('base64')}`, receiptDigest })
 const originalRuntime = runtime('0.2.0-rc.2', 'a'.repeat(64))
-const candidateRuntime = runtime('0.2.2-rc.3', 'b'.repeat(64))
+const candidateRuntime = runtime('0.2.2-rc.5', 'b'.repeat(64))
 const binding = (selected: ReturnType<typeof runtime>) => `${JSON.stringify({ schemaVersion: 1,
   cacheRoot: cache, version: selected.version, receiptDigest: selected.receiptDigest })}\n`
 

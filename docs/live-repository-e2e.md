@@ -1,6 +1,6 @@
 # Live GitHub repository E2E
 
-The `scripts/e2e/repo-autonomy-real.spec.mjs` Playwright harness validates the WP18 engineering lane against a **dedicated sandbox repository** (never run against this repository's `dev`/`main` branches). It defaults to the locked `pinnedHostVersion` in [release-manifest](../release-manifest.json) (`0.2.2-rc.3`) and uses the `linux-native` `IsolatedVerifierRunner` (delegated `cgroup v1` or unified `cgroup v2` roots + pinned `LinuxRuntime`), with no Docker image or daemon dependency.
+The `scripts/e2e/repo-autonomy-real.spec.mjs` Playwright harness validates the WP18 engineering lane against a **dedicated sandbox repository** (never run against this repository's `dev`/`main` branches). It defaults to the locked `pinnedHostVersion` in [release-manifest](../release-manifest.json) (`0.2.2-rc.5`) and uses the `linux-native` `IsolatedVerifierRunner` (delegated `cgroup v1` or unified `cgroup v2` roots + pinned `LinuxRuntime`), with no Docker image or daemon dependency.
 
 The repository Playwright scenario uses the production Actions and
 EventTriggers GitHub transports when `DSH_REPO_LIVE_INPUT` names a private JSON
