@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-association",
-  "version": "0.1.80",
+  "version": "0.1.81",
   "description": "Sub-5ms in-memory associative recall over SQLite-backed memory, goal, work-item, automation, and episode graphs for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
