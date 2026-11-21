@@ -100,6 +100,173 @@ function serializeMessage(message: RequestMessage, agentLabel: string): Transcri
   return { role: message.role, content: message.content.map(block => serializeBlock(block, agentLabel)) }
 }
 
+const COMPACTION_TEXT_BLOCK_MAX_BYTES = 8_192
+const COMPACTION_TEXT_TRUNCATION_SUFFIX = '…[truncated for compaction]'
+const COMPACTION_OMISSION_MARKER: TranscriptMessage = {
+  role: 'user',
+  content: [{
+    type: 'text',
+    text: '[Earlier conversation messages omitted to fit local ACP prompt byte limit during compaction.]',
+  }],
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function safeCodeUnitBoundary(text: string, index: number): number {
+  if (index <= 0) return 0
+  if (index >= text.length) return text.length
+  const prev = text.charCodeAt(index - 1)
+  const curr = text.charCodeAt(index)
+  if (prev >= 0xd800 && prev <= 0xdbff && curr >= 0xdc00 && curr <= 0xdfff) {
+    return index - 1
+  }
+  return index
+}
+
+function sliceUtf8Bounded(text: string, maxBytes: number): string {
+  if (maxBytes <= 0 || text.length === 0) return ''
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const rawMid = (low + high + 1) >>> 1
+    const mid = safeCodeUnitBoundary(text, rawMid)
+    if (mid <= low) {
+      const candidate = safeCodeUnitBoundary(text, high)
+      if (candidate > low && Buffer.byteLength(text.slice(0, candidate), 'utf8') <= maxBytes) {
+        low = candidate
+      }
+      break
+    }
+    if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= maxBytes) {
+      low = mid
+    } else {
+      high = mid - 1
+    }
+  }
+  return text.slice(0, safeCodeUnitBoundary(text, low))
+}
+
+function isRuntimeContextSnapshot(message: RequestMessage): boolean {
+  if (message.role !== 'user' || !isRecord(message.source)) return false
+  const source = message.source as { kind?: unknown; form?: unknown }
+  return source.kind === 'runtime-context' && source.form === 'snapshot'
+}
+
+function skillCatalogSource(message: RequestMessage): { update?: unknown } | undefined {
+  if (message.role !== 'user' || !isRecord(message.source)) return undefined
+  const source = message.source as { kind?: unknown; form?: unknown; update?: unknown; entries?: unknown }
+  if (source.kind !== 'skill-catalog' || source.form !== 'catalog' || !Array.isArray(source.entries)) {
+    return undefined
+  }
+  for (const entry of source.entries) {
+    if (!isRecord(entry)) return undefined
+    const fields = entry as { name?: unknown; description?: unknown }
+    if (typeof fields.name !== 'string' || fields.name.length === 0 || typeof fields.description !== 'string') {
+      return undefined
+    }
+  }
+  return source
+}
+
+/**
+ * Each ACP invocation runs in a fresh stateless process without cross-step KV cache, so drop
+ * superseded `runtime-context` snapshots and replaced `skill-catalog` messages before serializing.
+ */
+function effectiveMessages(messages: readonly RequestMessage[]): readonly RequestMessage[] {
+  let newestRuntimeContext = -1
+  let newestCatalog = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!
+    if (newestRuntimeContext < 0 && isRuntimeContextSnapshot(message)) {
+      newestRuntimeContext = index
+    }
+    if (newestCatalog < 0 && skillCatalogSource(message) !== undefined) {
+      newestCatalog = index
+    }
+    if (newestRuntimeContext >= 0 && newestCatalog >= 0) break
+  }
+  const dropOlderCatalogs = newestCatalog >= 0 && skillCatalogSource(messages[newestCatalog]!)?.update === true
+  if (newestRuntimeContext < 0 && !dropOlderCatalogs) return messages
+  return messages.filter((message, index) => {
+    if (newestRuntimeContext >= 0 && index < newestRuntimeContext && isRuntimeContextSnapshot(message)) {
+      return false
+    }
+    if (dropOlderCatalogs && index !== newestCatalog && skillCatalogSource(message) !== undefined) {
+      return false
+    }
+    return true
+  })
+}
+
+function boundTranscriptBlock(block: TranscriptBlock): TranscriptBlock {
+  if (block.type === 'text' && typeof block.text === 'string') {
+    if (Buffer.byteLength(block.text, 'utf8') <= COMPACTION_TEXT_BLOCK_MAX_BYTES) return block
+    return {
+      ...block,
+      text: `${sliceUtf8Bounded(block.text, COMPACTION_TEXT_BLOCK_MAX_BYTES)}${COMPACTION_TEXT_TRUNCATION_SUFFIX}`,
+    }
+  }
+  if (block.type === 'tool-result' && Array.isArray(block.content)) {
+    return { ...block, content: block.content.map(boundTranscriptBlock) }
+  }
+  return block
+}
+
+interface SerializedPromptRequest {
+  protocol: string
+  instruction: string
+  constraints: Record<string, unknown>
+  system: string | null
+  conversation: TranscriptMessage[]
+}
+
+function renderPrompt(request: SerializedPromptRequest): string {
+  return `Act as a text model backend for DeepSeek Harness. The JSON request follows.\n${JSON.stringify(request)}`
+}
+
+function boundCompactionConversation(
+  request: SerializedPromptRequest,
+  maxPromptBytes: number,
+): string | undefined {
+  const { conversation } = request
+  if (conversation.length < 2) return undefined
+  const head = conversation[0]?.role === 'system' ? [conversation[0]] : []
+  const directive = conversation.at(-1)!
+  const body = conversation.slice(head.length, -1)
+  if (body.length === 0) return undefined
+
+  const boundedBody: TranscriptMessage[] = body.map(message => ({
+    ...message,
+    content: message.content.map(boundTranscriptBlock),
+  }))
+  const pass1Prompt = renderPrompt({ ...request, conversation: [...head, ...boundedBody, directive] })
+  if (Buffer.byteLength(pass1Prompt, 'utf8') <= maxPromptBytes) return pass1Prompt
+
+  const minimalPrompt = renderPrompt({ ...request, conversation: [...head, COMPACTION_OMISSION_MARKER, directive] })
+  if (Buffer.byteLength(minimalPrompt, 'utf8') > maxPromptBytes) return undefined
+
+  let low = 1
+  let high = boundedBody.length
+  let bestPrompt = minimalPrompt
+  while (low <= high) {
+    const mid = (low + high) >>> 1
+    const candidate = renderPrompt({
+      ...request,
+      conversation: [...head, COMPACTION_OMISSION_MARKER, ...boundedBody.slice(mid), directive],
+    })
+    if (Buffer.byteLength(candidate, 'utf8') <= maxPromptBytes) {
+      bestPrompt = candidate
+      high = mid - 1
+    } else {
+      low = mid + 1
+    }
+  }
+  return bestPrompt
+}
+
 /** Serialize one provider-neutral DSH call into a stateless ACP turn. */
 export function buildPrompt(
   options: GenerateOptions,
@@ -107,17 +274,21 @@ export function buildPrompt(
   agentLabel = 'TraeX',
 ): string {
   const tools = options.tools ?? []
-  const request = {
+  const planGuard = agentLabel === 'Antigravity'
+    ? ' Do not enter or use plan mode and never invoke exit_plan_mode, ask_question, subagents, or swarms; produce the complete response directly in this single turn.'
+    : ''
+  const baseInstruction = options.purpose === 'compaction'
+    ? 'Produce only the requested compaction checkpoint as normal assistant text. Do not request or invoke any tool, and do not emit a DSH tool-call JSON envelope. Tool schemas remain present only so the host can verify that this auxiliary request is an exact projection of the active Agent Loop request.'
+    : tools.length === 0
+    ? `Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside ${agentLabel}.`
+    : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside ${agentLabel} and do not invoke ${agentLabel}-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`
+  const request: SerializedPromptRequest = {
     protocol: 'dsh-traex-acp-provider/v1',
-    instruction: options.purpose === 'compaction'
-      ? 'Produce only the requested compaction checkpoint as normal assistant text. Do not request or invoke any tool, and do not emit a DSH tool-call JSON envelope. Tool schemas remain present only so the host can verify that this auxiliary request is an exact projection of the active Agent Loop request.'
-      : tools.length === 0
-      ? `Continue the conversation as the assistant within the DSH system and user instructions in this request. Return only the next assistant response. Do not modify files or execute commands inside ${agentLabel}.`
-      : `Continue the conversation as the assistant within the DSH system and user instructions in this request. Do not modify files or execute commands inside ${agentLabel} and do not invoke ${agentLabel}-native tools; they are unavailable in this backend session. Tools can only be used through DSH. Declared tools describe availability, not authorization: follow the applicable DSH system, user, policy, and prior tool-result constraints before requesting one. If a tool action was rejected or denied by the user, by policy, or because authorization is absent, do not retry it, bypass the rejection, or substitute an equivalent action unless a later authorized user or system instruction explicitly permits it. You may correct invalid arguments through authorized read-only discovery when the tool result recommends it. You may continue independent permitted work, or honestly report that the requested work is blocked; do not claim completion for work that did not occur. When an authorized tool call is needed, request it now instead of merely describing future work: return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Otherwise, return only the next assistant response as normal text.`,
-    system: options.system ?? null,
-    conversation: options.messages.map(message => serializeMessage(message, agentLabel)),
+    instruction: `${baseInstruction}${planGuard}`,
     constraints: {
-      tools: tools.length === 0
+      tools: options.purpose === 'compaction'
+        ? { available: tools.map(tool => ({ name: tool.name })) }
+        : tools.length === 0
         ? { available: [] }
         : {
             responseProtocol: DSH_TOOL_CALL_PROTOCOL,
@@ -133,21 +304,23 @@ export function buildPrompt(
       reasoningEffort: options.reasoningEffort ?? null,
       purpose: options.purpose ?? null,
     },
+    system: options.system ?? null,
+    conversation: effectiveMessages(options.messages).map(message => serializeMessage(message, agentLabel)),
   }
-  const prompt = `Act as a text model backend for DeepSeek Harness. The JSON request follows.\n${JSON.stringify(request)}`
+  const prompt = renderPrompt(request)
   const size = Buffer.byteLength(prompt, 'utf8')
-  if (size > maxPromptBytes) {
-    throw new Error(
-      `serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes}. `
-      + 'Raise `maxPromptBytes` for this plugin if the request is legitimately this large.',
-      { cause: 'prompt-limit' },
-    )
-  }
-  return prompt
-}
+  if (size <= maxPromptBytes) return prompt
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
+  if (options.purpose === 'compaction') {
+    const bounded = boundCompactionConversation(request, maxPromptBytes)
+    if (bounded !== undefined) return bounded
+  }
+
+  throw new Error(
+    `serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes}. `
+    + 'Raise `maxPromptBytes` (or `agyMaxPromptBytes` within Antigravity\'s 190000-byte input cap) or compact the conversation.',
+    { cause: 'prompt-limit' },
+  )
 }
 
 function toolArguments(value: unknown): Record<string, unknown> | undefined {

@@ -3,6 +3,15 @@ import Schema from '@deepseek-ai/schemastery'
 export type AgySessionMode = 'default' | 'plan'
 export type AcpCwdMode = 'session' | 'exact'
 
+/**
+ * Antigravity CLI (`agy acp`) wraps `session/prompt` in `<USER_REQUEST>` and silently
+ * truncates input above ~192 KiB without raising an ACP error. Keep the default and
+ * configurable ceiling safely below that cliff so DSH triggers compaction instead.
+ */
+export const AGY_MAX_PROMPT_BYTES_CEILING = 190_000
+export const DEFAULT_AGY_MAX_PROMPT_BYTES = 180 * 1024
+export const DEFAULT_AGY_CONTEXT_WINDOW = 112_000
+
 export interface TraexAcpProviderConfig {
   /** Register the experimental TraeX route (`traex-agent`) after the local runtime is prepared. */
   enabled: boolean
@@ -34,8 +43,10 @@ export interface TraexAcpProviderConfig {
   agyMode: AgySessionMode
   /** Whole ACP prompt deadline. */
   timeoutMs: number
-  /** Advertised context capacity (tokens) reported to DSH compaction checks. */
+  /** Advertised context capacity (tokens) reported for `traex-agent` compaction checks. */
   contextWindow: number
+  /** Advertised context capacity (tokens) reported for `agy-agent` compaction checks. */
+  agyContextWindow: number
   /** Deadline for the non-model auth/catalog readiness probe. */
   authProbeTimeoutMs: number
   /** Maximum stdout/stderr bytes captured from the login-status probe. */
@@ -59,6 +70,12 @@ export interface TraexAcpProviderConfig {
    * NDJSON framing growth; the coding CLI still enforces its own model context window.
    */
   maxPromptBytes: number
+  /**
+   * Maximum UTF-8 bytes in the serialized DSH request sent to `agy-agent`. Capped at
+   * `AGY_MAX_PROMPT_BYTES_CEILING` (190,000 bytes) because `agy acp` silently truncates
+   * `<USER_REQUEST>` payloads above ~192 KiB. Effective limit is `min(maxPromptBytes, agyMaxPromptBytes)`.
+   */
+  agyMaxPromptBytes: number
   /** Additional environment variable names inherited by the child process. */
   extraEnvNames: string[]
   /** Include a redacted tail of child stderr in host logs. */
@@ -91,15 +108,17 @@ const schema = Schema.object({
   agyMode: Schema.union(['default', 'plan'] as const).default('default'),
   timeoutMs: Schema.natural().min(1_000).max(60 * 60_000).default(10 * 60_000),
   contextWindow: Schema.natural().min(4_096).max(10_000_000).default(200_000),
+  agyContextWindow: Schema.natural().min(4_096).max(10_000_000).default(DEFAULT_AGY_CONTEXT_WINDOW),
   authProbeTimeoutMs: Schema.natural().min(1_000).max(120_000).default(30_000),
   maxAuthProbeBytes: Schema.natural().min(1_024).max(1024 * 1024).default(32 * 1024),
   killGraceMs: Schema.natural().min(100).max(30_000).default(3_000),
-  maxMessageBytes: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(256 * 1024),
+  maxMessageBytes: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(2 * 1024 * 1024),
   maxProtocolBytes: Schema.natural().min(4 * 1_024).max(256 * 1024 * 1024).default(16 * 1024 * 1024),
   maxProtocolMessages: Schema.natural().min(16).max(1_000_000).default(10_000),
   maxOutputBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(2 * 1024 * 1024),
   maxStderrBytes: Schema.natural().min(256).max(4 * 1024 * 1024).default(32 * 1024),
   maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(4 * 1024 * 1024),
+  agyMaxPromptBytes: Schema.natural().min(1_024).max(AGY_MAX_PROMPT_BYTES_CEILING).default(DEFAULT_AGY_MAX_PROMPT_BYTES),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
 })

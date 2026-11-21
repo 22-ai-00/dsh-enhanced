@@ -340,10 +340,10 @@ const BACKEND_SPECS: Record<AcpBackend, BackendSpec> = {
 const defaults = {
   timeoutMs: 10 * 60_000,
   killGraceMs: 3_000,
-  maxMessageBytes: 256 * 1024,
+  maxMessageBytes: 2 * 1024 * 1024,
   maxProtocolBytes: 16 * 1024 * 1024,
   maxProtocolMessages: 10_000,
-  maxOutputBytes: 512 * 1024,
+  maxOutputBytes: 2 * 1024 * 1024,
   maxStderrBytes: 32 * 1024,
 } as const
 

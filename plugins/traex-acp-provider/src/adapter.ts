@@ -52,6 +52,8 @@ interface RouteSpec {
   command(config: TraexAcpProviderConfig): string
   models(config: TraexAcpProviderConfig): readonly string[]
   args(config: TraexAcpProviderConfig): readonly string[]
+  contextWindow(config: TraexAcpProviderConfig): number
+  maxPromptBytes(config: TraexAcpProviderConfig): number
   configRevision(config: TraexAcpProviderConfig): string
 }
 
@@ -66,6 +68,8 @@ const ROUTE_SPECS: Readonly<Record<AcpProviderRoute, RouteSpec>> = {
     command: config => config.command,
     models: config => config.models,
     args: () => [...SAFE_TRAEX_ARGS],
+    contextWindow: config => config.contextWindow,
+    maxPromptBytes: config => config.maxPromptBytes,
     configRevision: config => config.models.join(','),
   },
   [AGY_PROVIDER_ROUTE]: {
@@ -83,6 +87,8 @@ const ROUTE_SPECS: Readonly<Record<AcpProviderRoute, RouteSpec>> = {
       includeDefaultCustomizations: config.agyIncludeDefaultCustomizations,
       disableTelemetry: config.agyDisableTelemetry,
     }),
+    contextWindow: config => config.agyContextWindow,
+    maxPromptBytes: config => Math.min(config.maxPromptBytes, config.agyMaxPromptBytes),
     configRevision: config => `${config.agyModels.join(',')};custom=${String(config.agyIncludeDefaultCustomizations)};telemetry=${String(config.agyDisableTelemetry)};mode=${config.agyMode}`,
   },
 }
@@ -577,7 +583,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         ? `${spec.label} active model${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
         : (catalogModel?.name ?? model),
       description: catalogModel?.description ?? 'Experimental local ACP coding-agent delegation',
-      context: { contextWindow: this.config.contextWindow },
+      context: { contextWindow: spec.contextWindow(this.config) },
       inputModalities: ['text'],
       ...reasoningInfo(catalogModel),
     }
@@ -657,7 +663,7 @@ export class TraexAcpAdapter extends LlmAdapter {
           command,
           args: spec.args(this.config),
           cwd,
-          prompt: buildPrompt(options, this.config.maxPromptBytes, spec.label),
+          prompt: buildPrompt(options, spec.maxPromptBytes(this.config), spec.label),
           ...(options.model === 'default' ? {} : { model: options.model }),
           ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
           ...(spec.backend === 'agy' ? { agyMode: this.config.agyMode } : {}),

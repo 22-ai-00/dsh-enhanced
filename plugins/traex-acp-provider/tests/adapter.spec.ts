@@ -1592,18 +1592,22 @@ describe('TraeX ACP LLM adapter', () => {
     await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-hydrogen')).resolves.toMatchObject({
       provider: 'agy-agent',
       id: 'gemini-4-hydrogen',
-      context: { contextWindow: 200_000 },
+      context: { contextWindow: 112_000 },
       reasoning: {
         efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'XHigh' }],
         defaultEffort: 'medium',
       },
     })
+    await expect(adapter.resolveModel('traex-agent', 'default')).resolves.toMatchObject({
+      provider: 'traex-agent',
+      context: { contextWindow: 200_000 },
+    })
 
-    const customContextAdapter = new TraexAcpAdapter(Config({ contextWindow: 128_000 } as never))
+    const customContextAdapter = new TraexAcpAdapter(Config({ agyContextWindow: 96_000 } as never))
     await expect(customContextAdapter.resolveModel(AGY_PROVIDER_ROUTE, 'claude-sonnet-5-5')).resolves.toMatchObject({
       provider: 'agy-agent',
       id: 'claude-sonnet-5-5',
-      context: { contextWindow: 128_000 },
+      context: { contextWindow: 96_000 },
     })
 
     const agyRequest: GenerateOptions = {
@@ -1659,5 +1663,247 @@ describe('TraeX ACP LLM adapter', () => {
       message: expect.stringContaining('Antigravity'),
     })
     expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeUndefined()
+  })
+
+  it('rejects a 250 KB normal prompt in preflight for agy-agent while traex-agent accepts it', async () => {
+    const contexts: Array<{ provider?: string; phase?: string; promptSubmissionState?: string; outcome?: string }> = []
+    const runText = vi.fn((_invocation: TraexAcpInvocation, options?: RunTraexAcpOptions) => (
+      async function* () {
+        yield 'traex-ok'
+        options?.onStopReason?.('end_turn')
+      }
+    )())
+    const adapter = new TraexAcpAdapter(Config({ enabled: true, agyEnabled: true } as never), {
+      verifyAuth: async () => {},
+      runText,
+      onSettled: context => { contexts.push(context) },
+    })
+    const bigRequest: GenerateOptions = {
+      provider: AGY_PROVIDER_ROUTE,
+      model: 'default',
+      system: 'Be concise.',
+      messages: [createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'A'.repeat(250_000) }],
+      })],
+    }
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(bigRequest)) { /* drain */ }
+    })()).rejects.toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(runText).not.toHaveBeenCalled()
+    expect(contexts.at(-1)).toMatchObject({
+      provider: AGY_PROVIDER_ROUTE,
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'preflight',
+    })
+
+    const traexChunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({ ...bigRequest, provider: 'traex-agent' })) {
+      traexChunks.push(chunk)
+    }
+    expect(runText).toHaveBeenCalledTimes(1)
+    expect(traexChunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('clamps agy-agent prompt budget to Math.min(maxPromptBytes, agyMaxPromptBytes)', async () => {
+    const runText = vi.fn(() => (async function* () { yield 'unreachable' })())
+    const adapter = new TraexAcpAdapter(Config({
+      agyEnabled: true,
+      maxPromptBytes: 4_096,
+    } as never), {
+      verifyAuth: async () => {},
+      runText,
+    })
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream({
+        provider: AGY_PROVIDER_ROUTE,
+        model: 'default',
+        messages: [createMessage({
+          role: 'user',
+          source: { kind: 'user' },
+          content: [{ type: 'text', text: 'A'.repeat(10_000) }],
+        })],
+      })) { /* drain */ }
+    })()).rejects.toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('completes DSH 0.2 compaction end-to-end on agy-agent with defaultEffort materialization and 65536 maxTokens', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-agy-compaction-e2e-'))
+    try {
+      const workspace = join(root, 'workspace')
+      await mkdir(workspace)
+      const COMPACTION_INSTRUCTION = [
+        'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
+        '',
+        'Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.',
+        '',
+        '## Primary Request and Intent',
+        '- [the user\'s original and evolving goals; quote verbatim where the exact wording matters]',
+        '',
+        '## Key Technical Concepts',
+        '- [technologies, frameworks, patterns, and conventions in play]',
+        '',
+        '## Files and Code',
+        '- [exact path: why it matters, key changes or snippets]',
+        '',
+        '## Errors and Fixes',
+        '- [error: how it was resolved, plus any related user feedback]',
+        '',
+        '## Pending Jobs',
+        '- [explicitly requested work not yet completed]',
+        '',
+        '## Current Work',
+        '- [precisely what was in progress at this checkpoint]',
+        '',
+        '## Next Step',
+        '- [the single next action, directly in line with the most recent request, or "(none)"]',
+        '',
+        '## Critical Context',
+        '- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]',
+        '',
+        'Rules:',
+        '- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.',
+        '- Capture user feedback and explicit instructions faithfully, especially corrections.',
+        '- Do NOT mention this summarization request or that the context was compacted.',
+        '- Output only the checkpoint text: do not call any tool or take any other action.',
+        '- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.',
+      ].join('\n')
+      const ctx = new Context()
+      ctx.provide('sessionProjections', {
+        register: async () => ({ stateOf: () => ({}), readerFor: () => () => ({}), dispose: async () => {} }),
+      } as never)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LlmRuntime)
+
+      const system = createSystemMessage('Be concise.')
+      const bigHistoryMessage = createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'H'.repeat(220_000) }],
+      })
+      const latestUser = createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'latest turn kept after checkpoint' }],
+      })
+      const tools = [{
+        name: 'lookup',
+        description: 'Lookup details.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } } },
+      }]
+      const events = [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        {
+          type: 'compaction/start',
+          seq: 1,
+          time: 2,
+          data: { compactionId: '8e90cc20-8275-43c9-b34f-a3fbe3536d84', turn: 1 },
+        },
+      ]
+      const session = {
+        id: TEST_SESSION_ID,
+        header: { cwd: workspace },
+        snapshotEvents: () => events,
+        requestHeader: () => ({
+          config: { provider: AGY_PROVIDER_ROUTE, model: 'gemini-4-carbon' },
+          tools,
+        }),
+        toolHistory: () => ({ tools, updates: [] }),
+        deriveMessages: () => [system, bigHistoryMessage, latestUser],
+      } as unknown as Agent['session']
+      const agent = {
+        id: TEST_SESSION_ID,
+        session,
+        status: 'running',
+        model: { current: () => ({ provider: AGY_PROVIDER_ROUTE, model: 'gemini-4-carbon' }), select: () => {} },
+        ctx,
+      } as unknown as Agent
+      ctx.agents.register(agent)
+
+      const hostAttestor = createAgentLoopRequestAttestor(ctx.agents, ['traex-agent', 'agy-agent'])
+      const compactionClaims: Array<{ wasFrozenBefore: boolean; accepted: boolean; isFrozenAfter: boolean; request: GenerateOptions }> = []
+      let capturedInvocation: TraexAcpInvocation | undefined
+      const adapter = new RawTraexAcpAdapter(Config({
+        agyEnabled: true,
+        cwd: workspace,
+      } as never), {
+        liveSessions: { get: id => id === TEST_SESSION_ID ? session : undefined },
+        requestAttestor: {
+          claim: (observed, claimedSession) => hostAttestor.claim(observed, claimedSession),
+          claimCompaction(observed, claimedSession) {
+            const wasFrozenBefore = Object.isFrozen(observed)
+            const accepted = hostAttestor.claimCompaction?.(observed, claimedSession) ?? false
+            const isFrozenAfter = Object.isFrozen(observed)
+            compactionClaims.push({ wasFrozenBefore, accepted, isFrozenAfter, request: observed })
+            return accepted
+          },
+        },
+        discoverModels: async () => ({
+          currentValue: 'gemini-4-carbon',
+          modelValues: ['gemini-4-carbon'],
+          models: [{
+            id: 'gemini-4-carbon',
+            name: 'Gemini 4 Carbon',
+            reasoning: {
+              efforts: [{ id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }],
+              defaultEffort: 'medium',
+            },
+          }],
+          completeReasoning: true,
+          observedAt: 1,
+        }),
+        runText: (invocation, options) => {
+          capturedInvocation = invocation
+          return (async function* () {
+            yield '## Primary Request and Intent\n- Compacted.\n'
+            options?.onStopReason?.('end_turn')
+          })()
+        },
+      })
+      ctx.llm.registerAdapter([AGY_PROVIDER_ROUTE], adapter)
+
+      await adapter.listModels(AGY_PROVIDER_ROUTE)
+
+      const compactionRequest: GenerateOptions = {
+        provider: AGY_PROVIDER_ROUTE,
+        model: 'gemini-4-carbon',
+        messages: [
+          system,
+          bigHistoryMessage,
+          { role: 'user', content: [{ type: 'text', text: COMPACTION_INSTRUCTION }] },
+        ],
+        tools,
+        toolHistory: session.toolHistory(),
+        maxTokens: 65_536,
+        sessionId: TEST_SESSION_ID,
+        purpose: 'compaction' as never,
+        signal: new AbortController().signal,
+      }
+
+      const chunks = await ctx.agents.withInitiator(agent, async () => {
+        const result: StreamChunk[] = []
+        for await (const chunk of ctx.llm.stream(compactionRequest)) result.push(chunk)
+        return result
+      })
+
+      expect(compactionClaims.length).toBeGreaterThanOrEqual(1)
+      expect(compactionClaims.every(entry => entry.accepted && entry.isFrozenAfter)).toBe(true)
+      expect(compactionClaims[0]?.wasFrozenBefore).toBe(false)
+      expect(compactionClaims[0]?.request.reasoningEffort).toBe('medium')
+      expect(capturedInvocation).toBeDefined()
+      expect(capturedInvocation?.reasoningEffort).toBe('medium')
+      expect(Buffer.byteLength(capturedInvocation!.prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+      expect(capturedInvocation?.prompt).toContain('…[truncated for compaction]')
+      expect(capturedInvocation?.prompt).toContain('You are now acting as a compaction engine')
+      expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

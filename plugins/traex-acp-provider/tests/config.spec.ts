@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { Config, normalizeConfig } from '../src/config.ts'
+import {
+  AGY_MAX_PROMPT_BYTES_CEILING,
+  Config,
+  DEFAULT_AGY_CONTEXT_WINDOW,
+  DEFAULT_AGY_MAX_PROMPT_BYTES,
+  normalizeConfig,
+} from '../src/config.ts'
 
 describe('configuration', () => {
   it('materializes bounded local ACP defaults', () => {
@@ -17,17 +23,23 @@ describe('configuration', () => {
       agyDisableTelemetry: true,
       agyMode: 'default',
       contextWindow: 200_000,
+      agyContextWindow: DEFAULT_AGY_CONTEXT_WINDOW,
+      maxMessageBytes: 2 * 1024 * 1024,
+      agyMaxPromptBytes: DEFAULT_AGY_MAX_PROMPT_BYTES,
       authProbeTimeoutMs: 30_000,
       extraEnvNames: [],
       logDiagnostics: false,
     })
+    expect(config.agyContextWindow).toBe(112_000)
+    expect(config.agyMaxPromptBytes).toBe(184_320)
+    expect(config.agyMaxPromptBytes).toBeLessThanOrEqual(AGY_MAX_PROMPT_BYTES_CEILING)
     expect(config.timeoutMs).toBeGreaterThan(0)
     expect(config.maxMessageBytes).toBeGreaterThan(0)
     expect(config.maxProtocolBytes).toBeGreaterThan(config.maxMessageBytes)
     expect(config.maxProtocolMessages).toBeGreaterThan(0)
   })
 
-  it('rejects empty models, whitespace commands, invalid agyMode and invalid environment names', () => {
+  it('rejects empty models, whitespace commands, invalid agyMode, excessive agyMaxPromptBytes and invalid environment names', () => {
     expect(() => Config({ models: [] } as never)).toThrow()
     expect(() => Config({ agyModels: [] } as never)).toThrow()
     expect(() => Config({ command: ' ' } as never)).toThrow()
@@ -35,6 +47,8 @@ describe('configuration', () => {
     expect(() => Config({ agyMode: 'bypass' } as never)).toThrow()
     expect(() => Config({ cwdMode: 'anywhere' } as never)).toThrow()
     expect(() => Config({ contextWindow: 1024 } as never)).toThrow()
+    expect(() => Config({ agyContextWindow: 1024 } as never)).toThrow()
+    expect(() => Config({ agyMaxPromptBytes: 200_000 } as never)).toThrow()
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 

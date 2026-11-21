@@ -57,7 +57,7 @@ const registrySymbol = Symbol.for('@dsh-enhanced/llm-route-capabilities/runtime-
 const providerPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u
 const modes = new Set<ToolCallMode>(['none', 'native', 'bridge'])
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
-const MAX_COMPACTION_TOKENS = 8_192
+const MAX_COMPACTION_TOKENS = 131_072
 const compactionRequestKeys = new Set([
   'provider',
   'model',
@@ -65,6 +65,7 @@ const compactionRequestKeys = new Set([
   'tools',
   'toolHistory',
   'maxTokens',
+  'reasoningEffort',
   'sessionId',
   'purpose',
   'signal',
@@ -514,6 +515,11 @@ function exactCompactionEnvelope(
     || !ownedRoutes.has(request.provider)
     || !providerPattern.test(request.provider)
     || request.model.length === 0 || request.model.length > 512 || /[\s\p{Cc}]/u.test(request.model)
+    || (own(request, 'reasoningEffort')
+      && (typeof request.reasoningEffort !== 'string'
+        || request.reasoningEffort.length === 0
+        || request.reasoningEffort.length > 128
+        || /[\s\p{Cc}]/u.test(request.reasoningEffort)))
     || !Number.isInteger(request.maxTokens) || request.maxTokens! <= 0 || request.maxTokens! > MAX_COMPACTION_TOKENS
     || !own(request, 'signal') || !(request.signal instanceof AbortSignal) || request.signal.aborted
     || !deeplyFrozen(request)) return false

@@ -14,7 +14,16 @@ import {
   type TraexReadinessProbeOptions,
 } from './adapter.js'
 import { buildAgyArgs, SAFE_TRAEX_ARGS, type AcpBackend } from './acp-client.js'
-import { Config, normalizeConfig, type AcpCwdMode, type AgySessionMode, type TraexAcpProviderConfig } from './config.js'
+import {
+  AGY_MAX_PROMPT_BYTES_CEILING,
+  Config,
+  DEFAULT_AGY_CONTEXT_WINDOW,
+  DEFAULT_AGY_MAX_PROMPT_BYTES,
+  normalizeConfig,
+  type AcpCwdMode,
+  type AgySessionMode,
+  type TraexAcpProviderConfig,
+} from './config.js'
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
@@ -23,9 +32,12 @@ export const inject = ['llm', 'sessions', 'agents']
 
 export {
   ACP_PROVIDER_ROUTES,
+  AGY_MAX_PROMPT_BYTES_CEILING,
   AGY_PROVIDER_ROUTE,
   buildAgyArgs,
   Config,
+  DEFAULT_AGY_CONTEXT_WINDOW,
+  DEFAULT_AGY_MAX_PROMPT_BYTES,
   normalizeConfig,
   probeAcpReadiness,
   probeTraexReadiness,

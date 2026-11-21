@@ -281,5 +281,228 @@ describe('DSH request serialization', () => {
       purpose: 'compaction',
       tools: { available: [{ name: 'read' }] },
     })
+    expect(payload.constraints.tools.available[0]).toEqual({ name: 'read' })
+  })
+
+  it('deduplicates superseded runtime-context snapshots and skill-catalogs, places constraints before conversation, and adds Antigravity plan guard', () => {
+    const options = request()
+    const tools = Array.from({ length: 80 }, (_, index) => ({
+      name: `tool_${index}`,
+      description: `Tool ${index} description ${'x'.repeat(200)}`,
+      parameters: { type: 'object', properties: { arg: { type: 'string', description: 'y'.repeat(300) } } },
+    }))
+    options.tools = tools
+    const runtimeSnapshots = Array.from({ length: 18 }, (_, index) => createMessage({
+      role: 'user',
+      source: {
+        kind: 'runtime-context',
+        form: 'snapshot',
+        sections: [{ name: 'memory', text: `snapshot-${index}:${'M'.repeat(10_000)}` }],
+      } as never,
+      content: [{ type: 'text', text: `<system-reminder>\nsnapshot-${index}:${'M'.repeat(10_000)}\n</system-reminder>` }],
+    }))
+    const oldCatalog = createMessage({
+      role: 'user',
+      source: {
+        kind: 'skill-catalog',
+        form: 'catalog',
+        entries: [{ name: 'old-skill', description: 'old' }],
+      } as never,
+      content: [{ type: 'text', text: `OLD_CATALOG:${'C'.repeat(40_000)}` }],
+    })
+    const newCatalog = createMessage({
+      role: 'user',
+      source: {
+        kind: 'skill-catalog',
+        form: 'catalog',
+        update: true,
+        entries: [{ name: 'new-skill', description: 'new' }],
+      } as never,
+      content: [{ type: 'text', text: 'NEW_CATALOG:new-skill' }],
+    })
+    const latestQuestion = createMessage({
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '你现在什么版本' }],
+    })
+    options.messages = [
+      ...runtimeSnapshots.slice(0, 9),
+      oldCatalog,
+      ...runtimeSnapshots.slice(9),
+      newCatalog,
+      latestQuestion,
+    ]
+
+    const prompt = buildPrompt(options, 184_320, 'Antigravity')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(184_320)
+    expect(prompt.indexOf('"constraints":')).toBeLessThan(prompt.indexOf('"conversation":'))
+
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      instruction: string
+      constraints: { tools: { available: unknown[] } }
+      conversation: Array<{ content: Array<{ text?: string }> }>
+    }
+    expect(payload.instruction).toContain('never invoke exit_plan_mode')
+    expect(payload.constraints.tools.available).toHaveLength(80)
+    const serializedConversation = JSON.stringify(payload.conversation)
+    expect(serializedConversation).not.toContain('snapshot-0:')
+    expect(serializedConversation).not.toContain('snapshot-16:')
+    expect(serializedConversation).toContain('snapshot-17:')
+    expect(serializedConversation).not.toContain('OLD_CATALOG:')
+    expect(serializedConversation).toContain('NEW_CATALOG:new-skill')
+    expect(serializedConversation).toContain('你现在什么版本')
+  })
+
+  it('bounds oversized shadowed compaction history with UTF-8 multi-byte safety while keeping COMPACTION_INSTRUCTION intact', () => {
+    const options = request()
+    options.purpose = 'compaction' as never
+    options.tools = Array.from({ length: 80 }, (_, index) => ({
+      name: `tool_${index}`,
+      description: 'z'.repeat(400),
+      parameters: { type: 'object', properties: { p: { type: 'string', description: 'w'.repeat(400) } } },
+    }))
+    const emojiBlock = '中文测试😀'.repeat(3_000)
+    const directive = 'Produce exact structured compaction checkpoint now.'
+    options.messages = [
+      createMessage({ role: 'system', source: { kind: 'system-prompt' } as never, content: [{ type: 'text', text: 'SYS_HEAD' }] }),
+      ...Array.from({ length: 14 }, (_, index) => createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: `MSG_${index}_${emojiBlock}` }],
+      })),
+      { role: 'user', content: [{ type: 'text', text: directive }] },
+    ]
+
+    const prompt = buildPrompt(options, 184_320, 'Antigravity')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      constraints: { tools: { available: Array<Record<string, unknown>> } }
+      conversation: Array<{ role: string; content: Array<{ text?: string }> }>
+    }
+    expect(payload.constraints.tools.available[0]).toEqual({ name: 'tool_0' })
+    expect(payload.conversation[0]).toEqual({ role: 'system', content: [{ type: 'text', text: 'SYS_HEAD' }] })
+    expect(payload.conversation.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: directive }] })
+    expect(JSON.stringify(payload)).not.toMatch(/[\ud800-\udfff]/u)
+  })
+
+  it('uses Pass 2 omission binary search to retain the newest compaction messages within maxPromptBytes', () => {
+    const options = request()
+    options.purpose = 'compaction' as never
+    options.tools = []
+    const directive = 'Produce exact structured compaction checkpoint now.'
+    options.messages = [
+      createMessage({ role: 'system', source: { kind: 'system-prompt' } as never, content: [{ type: 'text', text: 'SYS_HEAD' }] }),
+      ...Array.from({ length: 30 }, (_, index) => createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: `MSG_${String(index).padStart(2, '0')}_${'B'.repeat(9_000)}` }],
+      })),
+      { role: 'user', content: [{ type: 'text', text: directive }] },
+    ]
+
+    const prompt = buildPrompt(options, 184_320, 'Antigravity')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(184_320)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{ role: string; content: Array<{ text?: string }> }>
+    }
+    expect(payload.conversation[0]).toEqual({ role: 'system', content: [{ type: 'text', text: 'SYS_HEAD' }] })
+    expect(payload.conversation[1]).toEqual({
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: '[Earlier conversation messages omitted to fit local ACP prompt byte limit during compaction.]',
+      }],
+    })
+    expect(payload.conversation.at(-2)?.content[0]?.text).toMatch(/^MSG_29_B+…\[truncated for compaction\]$/u)
+    expect(payload.conversation.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: directive }] })
+  })
+
+  it('throws cause prompt-limit when even minimal compaction envelope exceeds maxPromptBytes', () => {
+    const options = request()
+    options.purpose = 'compaction' as never
+    options.tools = []
+    options.messages = [
+      createMessage({ role: 'system', source: { kind: 'system-prompt' } as never, content: [{ type: 'text', text: 'SYS_HEAD' }] }),
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'old context' }] }),
+      { role: 'user', content: [{ type: 'text', text: 'Compact now.' }] },
+    ]
+
+    let caught: unknown
+    try {
+      buildPrompt(options, 100, 'Antigravity')
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).cause).toBe('prompt-limit')
+  })
+
+  it('never splits UTF-16 surrogate pairs at the 8192-byte boundary and truncates nested tool-result blocks in compaction', () => {
+    const options = request()
+    options.purpose = 'compaction' as never
+    options.tools = []
+    const boundaryText = `${'a'.repeat(8_191)}😀${'tail'.repeat(500)}`
+    const callId = 'call-compaction-nested' as never
+    const directive = 'Compact cleanly.'
+    options.messages = [
+      createMessage({ role: 'system', source: { kind: 'system-prompt' } as never, content: [{ type: 'text', text: 'SYS_HEAD' }] }),
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: boundaryText }] }),
+      createMessage({
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text: `NESTED_TOOL_${'b'.repeat(9_000)}` }],
+      }),
+      createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'c'.repeat(2_000) }] }),
+      { role: 'user', content: [{ type: 'text', text: directive }] },
+    ]
+
+    const prompt = buildPrompt(options, 21_000, 'Antigravity')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(21_000)
+    expect(prompt).not.toMatch(/[\ud800-\udfff]/u)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{
+        role: string
+        content: Array<{ type: string; text?: string; content?: Array<{ type: string; text?: string }> }>
+      }>
+    }
+    const surrogateMsg = payload.conversation.find(message => message.content[0]?.text?.startsWith('a'))
+    expect(surrogateMsg?.content[0]?.text).toBe(`${'a'.repeat(8_191)}…[truncated for compaction]`)
+    const toolMsg = payload.conversation.find(message => message.role === 'tool')
+    expect(toolMsg?.content[0]?.type).toBe('tool-result')
+    expect(toolMsg?.content[0]?.content?.[0]?.text).toMatch(/^NESTED_TOOL_b+…\[truncated for compaction\]$/u)
+    expect(Buffer.byteLength(toolMsg?.content[0]?.content?.[0]?.text ?? '', 'utf8')).toBeLessThan(8_250)
+  })
+
+  it('retains earlier skill-catalog messages when a newer skill-catalog omits update: true', () => {
+    const options = request()
+    options.tools = []
+    const firstCatalog = createMessage({
+      role: 'user',
+      source: {
+        kind: 'skill-catalog',
+        form: 'catalog',
+        entries: [{ name: 'skill-a', description: 'First skill' }],
+      } as never,
+      content: [{ type: 'text', text: 'FIRST_CATALOG_KEEP' }],
+    })
+    const secondCatalog = createMessage({
+      role: 'user',
+      source: {
+        kind: 'skill-catalog',
+        form: 'catalog',
+        entries: [{ name: 'skill-b', description: 'Second skill' }],
+      } as never,
+      content: [{ type: 'text', text: 'SECOND_CATALOG_KEEP' }],
+    })
+    options.messages = [firstCatalog, secondCatalog]
+
+    const prompt = buildPrompt(options, 100_000, 'Antigravity')
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{ content: Array<{ text?: string }> }>
+    }
+    const serialized = JSON.stringify(payload.conversation)
+    expect(serialized).toContain('FIRST_CATALOG_KEEP')
+    expect(serialized).toContain('SECOND_CATALOG_KEEP')
   })
 })

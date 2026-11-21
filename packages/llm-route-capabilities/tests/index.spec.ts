@@ -400,6 +400,13 @@ describe('Agent Loop request attestor', () => {
     expect(Object.isFrozen(request.messages.at(-1)?.content)).toBe(true)
     expect(Object.isFrozen(signal)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(request, fixture.session)).toBe(true)
+    expect(fixture.attestor.claimCompaction?.(compactionEnvelope([system, first], {
+      maxTokens: 65_536,
+      reasoningEffort: 'medium' as never,
+    }), fixture.session)).toBe(true)
+    expect(fixture.attestor.claimCompaction?.(compactionEnvelope([system, first], {
+      maxTokens: 131_072,
+    }), fixture.session)).toBe(true)
   })
 
   test('accepts only cross-adapter replayState removal in the compacted head prefix', () => {
@@ -479,13 +486,15 @@ describe('Agent Loop request attestor', () => {
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { model: 'other' }), fixture.session)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { system: 'changed' }), fixture.session)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { tools: [] }), fixture.session)).toBe(false)
-    expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], {
-      reasoningEffort: 'high' as never,
-    }), fixture.session)).toBe(false)
+    for (const reasoningEffort of ['', 'bad effort', 'bad\neffort', 'x'.repeat(129), 123]) {
+      expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], {
+        reasoningEffort: reasoningEffort as never,
+      }), fixture.session)).toBe(false)
+    }
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], {
       temperature: 0,
     }), fixture.session)).toBe(false)
-    for (const maxTokens of [0, 8193, 1.5]) {
+    for (const maxTokens of [0, 131_073, 1.5]) {
       expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { maxTokens }), fixture.session)).toBe(false)
     }
   })

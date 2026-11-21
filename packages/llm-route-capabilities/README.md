@@ -12,5 +12,5 @@ messages 重建完整普通对话请求，系统提示词由消息历史中的 `
 request header 不含独立 `system` 字段。绑定 Session 的完整 `toolHistory`，并按不支持增量工具声明的 route 重建原生 `projectToolUpdates()` 投影。只允许 DSH 0.2 `forAdapter()` 为跨 route
 历史删除 `replayState` 时产生的冻结副本，以及 text-only route 对完整消息序列
 执行 `projectImagesForTextModel()` 后产生的确定性副本。文件附件的句柄文本由当前 Host 的公开 `llm.fileRequestText()` 重建，不能从请求自报文件路径；缺失、伪造路径或局部投影均拒绝。局部图片投影、任意嵌套
-调用、过期 Session 与其他变形均失败关闭。该证明不替代 provider 自己的静态
+调用、过期 Session 与其他变形均失败关闭。`claimCompaction()` 核验 DSH 0.2 `dsh-compaction-basic` 的同路由摘要请求，兼容默认 `65536` `maxTokens` 以及 `LlmRuntime` 为支持思考的模型自动补全的可选 `reasoningEffort`（`defaultEffort`）。该证明不替代 provider 自己的静态
 授权目录或 canonical cwd 复核。
