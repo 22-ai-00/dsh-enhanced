@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-association",
-  "version": "0.1.79",
+  "version": "0.1.80",
   "description": "Sub-5ms in-memory associative recall over SQLite-backed memory, goal, work-item, automation, and episode graphs for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
@@ -76,24 +76,60 @@
     "@dsh-enhanced/personal-wiki": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-agent": { "optional": true },
-    "@deepseek-ai/dsh-llm": { "optional": true },
-    "@deepseek-ai/dsh-session": { "optional": true },
-    "@deepseek-ai/dsh-system-prompt": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true },
-    "@dsh-enhanced/assistant-automations": { "optional": true },
-    "@dsh-enhanced/assistant-delivery": { "optional": true },
-    "@dsh-enhanced/assistant-dreaming": { "optional": true },
-    "@dsh-enhanced/assistant-evaluation": { "optional": true },
-    "@dsh-enhanced/assistant-goals": { "optional": true },
-    "@dsh-enhanced/assistant-policy": { "optional": true },
-    "@dsh-enhanced/assistant-skills": { "optional": true },
-    "@dsh-enhanced/assistant-verifier": { "optional": true },
-    "@dsh-enhanced/assistant-work-items": { "optional": true },
-    "@dsh-enhanced/event-triggers": { "optional": true },
-    "@dsh-enhanced/personal-memory": { "optional": true },
-    "@dsh-enhanced/personal-wiki": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-dreaming": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-goals": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-policy": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-skills": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-verifier": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-work-items": {
+      "optional": true
+    },
+    "@dsh-enhanced/event-triggers": {
+      "optional": true
+    },
+    "@dsh-enhanced/personal-memory": {
+      "optional": true
+    },
+    "@dsh-enhanced/personal-wiki": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
