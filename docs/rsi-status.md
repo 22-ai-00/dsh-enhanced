@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-11-20（已发布 npm 基线 `0.1.79`；`assistant-association` 联想记忆层 Slice S1–S4 已在 `dev` 完成并验证，维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
+更新：2026-11-21（已发布 npm 基线 `0.1.81`；`assistant-association` 联想记忆层 Slice S1–S4 已随 `0.1.81` 发布到 npm，维持普通使用 dogfood 观测与缺陷修复）。完整成功条件见[验收合同](rsi-acceptance.md)，发行门见[发布协议](releasing.md)，工具链与 Host 范围见[兼容说明](compatibility.md)。原始日志留在 ignored `docs/evidence/` 或 CI artifacts，历史查 Git。
 
 ## 目标
 
@@ -8,7 +8,7 @@
 
 ## 能力边界
 
-- **发布与 Host 基线**：已发布 npm 基线为 `0.1.79`（39 个包，[release-manifest](../release-manifest.json)，`pinnedHostVersion: 0.2.2-rc.3`、`verifiedHostRange: >=0.2.2-rc.3 <0.3.0`、`pending: none`）；Node `24.9.0`（Linux 原生工具链与 CI 节点为 `/usr/bin/node` `v22.23.2`、`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
+- **发布与 Host 基线**：已发布 npm 基线为 `0.1.81`（40 个包，含 `assistant-association` Slice S1–S4，[release-manifest](../release-manifest.json)，`pinnedHostVersion: 0.2.2-rc.3`、`verifiedHostRange: >=0.2.2-rc.3 <0.3.0`、`pending: none`）；Node `24.9.0`（Linux 原生工具链与 CI 节点为 `/usr/bin/node` `v22.23.2`、`pnpm@11.7.0`），Cordis/Loader/Include/Group 锁定 `4.1.0`/`1.1.0`/`1.1.0`/`1.1.0`。
 - **只读成长计分卡**：`dsh-rsi growth-report [--since 7d|14d|30d] [--now <ms|iso>] [--json]` 与 `owner-console`「成长计分卡（只读）」卡片复用既有只读接口与 SQLite 只读快照（零 schema 变更），汇总任务与纠正/重做/撤回率及趋势、新增有来源记忆与提示词暴露及暴露后同类纠正变化、候选生成/验收/采用/回滚、通知送达与 `would-accept` 吻合度及密封留出（1/4 holdout）样本量、按冻结 supplier 的成本与延迟分布，并显式区分「无数据（未启用/无账本）」与「数据为 0（账本就绪，窗口内无记录）」；`dsh-rsi growth-report` 第 6 节另汇报联想层在线指标（p50/p99 延迟、超时率、强/弱使用率、`assoc_read` 命中率、来源贡献、参数档案版本/采用/回滚与可选 S3/S4 进化反馈及 Web 学习计数）与密封留出对照。
 - **自主授权、隔离与动态采用**：
   - 渠道无关三权分立授权（`dsh-web-owner-setup --autonomy-setup` / `owner-console` 向导）、`traex-agent` / `agy-agent` ACP 路由与 `dsh-rsi upgrade` 自助升级回滚。
@@ -32,5 +32,5 @@
 
 ## 最新验证
 
-- **已发布基线**：`0.1.79`（`39` 个 npm 包，`DSH 0.2.2-rc.3`）。
+- **已发布基线**：`0.1.81`（`40` 个 npm 包，`DSH 0.2.2-rc.3`）。
 - **S1–S4 已交付状态**：`assistant-association` Slice S1（`0467aa08`）、S2（`5901ab35`）、S3（`8865bc28`）与 S4（Schema v4 迁移、隔离只读 HTTPS 抓取、`subprocess`/`in-process` 执行器、非敏感脱敏兴趣提取、Policy `web.learn` 门控与持久化日预算、`runWebLearningNow` / `withdrawWebSource`、`assoc_read` provenance、`assistant-policy` `knownOptionalKeys` `string[]`、`growth-report` S4 统计）已全部完成全仓 `pnpm check`、受影响包测试与独立复核并并入 `dev`。
