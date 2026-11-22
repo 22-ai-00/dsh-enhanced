@@ -42,13 +42,13 @@ export interface CachedCatalog {
 }
 
 export interface CatalogCacheOptions {
-  /** How long a stored observation may still be shown, in ms. Defaults to 5 minutes. */
+  /** How long a stored observation may still be shown, in ms. Defaults to 20 minutes. */
   readonly ttlMs?: number
   /** Injectable clock for tests; defaults to `Date.now`. */
   readonly now?: () => number
 }
 
-const DEFAULT_TTL_MS = 5 * 60_000
+export const DEFAULT_CATALOG_CACHE_TTL_MS = 20 * 60_000
 
 /** Build the opaque cache key from non-sensitive parts only. Never include env values. */
 export function catalogCacheKey(parts: CatalogCacheKeyParts): string {
@@ -69,7 +69,7 @@ export class CatalogObservationCache {
   private readonly entries = new Map<string, CachedCatalog>()
 
   constructor(options: CatalogCacheOptions = {}) {
-    this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS
+    this.ttlMs = options.ttlMs ?? DEFAULT_CATALOG_CACHE_TTL_MS
     this.now = options.now ?? Date.now
   }
 

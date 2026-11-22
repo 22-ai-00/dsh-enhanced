@@ -341,6 +341,7 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 ```text
 /model
 /model use codex-subscription/default
+/model use agy-agent/gemini-4-neon xhigh
 /model reset
 /permissions
 /permission ask
@@ -348,9 +349,9 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 /permission full confirm
 ```
 
-`/model` 从宿主 `ctx.llm` 的实时 provider/model 目录生成受限的 typed `model-picker` intent，不发起模型生成；每个模型会显式关联它自己的 `effortIds`，而不是共享全局 effort 并集。支持它的渠道可以据此显示“分组、模型、effort”三级联动选择和确认按钮，不支持它的渠道会把该 intent 明确拒绝而不会降级为任意卡片 JSON。持久 selection 会先投影为不含 `updatedAt/version` 的纯路由再进入严格 intent 边界；如果目录中的异常数据仍使卡片校验失败，系统会立即退回完整纯文本目录，确定性校验错误不会重试。某个 provider 或模型能力解析失败不影响其他项，最多载入 20 个 provider、50 个模型、每模型 20 档 effort，并且全目录最多 20 个不同 effort id。
+`/model` 从宿主 `ctx.llm` 的实时 provider/model 目录生成受限的 typed `model-picker` intent，不发起模型生成；每个模型会显式关联它自己的 `effortIds`，而不是共享全局 effort 并集。支持它的渠道可以据此显示“分组、模型、effort”三级联动选择和确认按钮，不支持它的渠道会把该 intent 明确拒绝而不会降级为任意卡片 JSON。持久 selection 会先投影为不含 `updatedAt/version` 的纯路由再进入严格 intent 边界；如果目录中的异常数据仍使卡片校验失败，系统会立即退回完整纯文本目录，确定性校验错误不会重试。某个 provider 或模型能力解析失败不影响其他项，最多载入 20 个 provider、200 个模型（按 provider 公平配额并优先保留当前 provider/model，避免大型内置 provider 挤掉后续插件 ACP 路由）、每模型 20 档 effort，并且全目录最多 20 个不同 effort id。
 
-卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat、原始 provider message id 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。渠道可以等待该 durable settlement：同实例由完成通知即时唤醒，共享数据库的另一实例完成时由有界轮询感知，从而把原卡更新成不可交互的最终结果。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use` 保留为无卡片渠道和排错时的文字后备，`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。若某个已持久化的显式 effort 在下一条普通消息前被 DSH 核心判为不支持，Delivery 会在任何 prompt 或 durable dispatch 标记之前，以 version CAS 仅清除该 effort、重新预检同一 provider/model 的默认档位；CAS 冲突会重试而不会覆盖更晚的 `/model` 选择。模型不会被静默替换，也不会重放或重复计费。
+卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat、原始 provider message id 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort（若冷启动或缓存过期导致显式 effort 尚未载入，会先在原租约 deadline 内调用一次无 prompt 的 `listModels()` 预热并重检）；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。渠道可以等待该 durable settlement：同实例由完成通知即时唤醒，共享数据库的另一实例完成时由有界轮询感知，从而把原卡更新成不可交互的最终结果。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use <provider/model> [effort]` 保留为无卡片渠道和排错时的文字后备（省略 effort 时清除显式 effort，恢复模型默认档位），`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。若某个已持久化的显式 effort 在下一条普通消息前被 DSH 核心判为不支持，Delivery 会先尝试通过一次 `listModels()` 预热目录并重新校验；确认仍不支持后，才在任何 prompt 或 durable dispatch 标记之前，以 version CAS 仅清除该 effort、重新预检同一 provider/model 的默认档位；CAS 冲突会重试而不会覆盖更晚的 `/model` 选择。模型不会被静默替换，也不会重放或重复计费。
 
 `/permissions`（别名 `/permission`）只允许当前 active binding 的精确 owner 使用，命令本身不进入 Agent 或触发 LLM。私聊权限卡片提供“请求批准（ask）/帮我批准（auto）/完全访问权限（full）”。助手的 `auto` 使用 `workspace-write + ask` 并持久写入项目专属 reviewer 事件，既不选择也不注册 Harness 保留的原生 `auto`；两套功能可共存。切换仍核验身份、预算和状态指纹，失败时持久回退 ask。`full` 使用 `danger-full-access + never + none`；卡片需要风险确认，文字入口需再次发送 `/permission full confirm`。
 

@@ -289,7 +289,7 @@ function modelPickerFallbackText(intent: Readonly<OutboundIntent>): string {
     '可用模型：',
     ...picker.models.map(model => `- ${model.provider}/${model.id}${model.name === model.id ? '' : ` — ${model.name}`}`),
     '',
-    '切换：/model use <provider/model>',
+    '切换：/model use <provider/model> [effort]',
     '恢复默认：/model reset',
   ].join('\n')
 }

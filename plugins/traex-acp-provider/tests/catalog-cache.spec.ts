@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { CatalogObservationCache, catalogCacheKey, type CatalogCacheKeyParts } from '../src/catalog-cache.ts'
+import {
+  CatalogObservationCache,
+  catalogCacheKey,
+  DEFAULT_CATALOG_CACHE_TTL_MS,
+  type CatalogCacheKeyParts,
+} from '../src/catalog-cache.ts'
 import type { CatalogObservation } from '../src/acp-client.ts'
 
 function parts(overrides: Partial<CatalogCacheKeyParts> = {}): CatalogCacheKeyParts {
@@ -77,6 +82,20 @@ describe('non-authoritative catalog observation cache', () => {
     cache.invalidate(parts({ cwd: '/a' }))
     expect(cache.peek(parts({ cwd: '/a' }))).toBeUndefined()
     expect(cache.peek(parts({ cwd: '/b' }))).toBeDefined()
+  })
+
+  it('defaults TTL to 20 minutes so picker cards stay warm past 15 minutes and expire at 20 minutes', () => {
+    expect(DEFAULT_CATALOG_CACHE_TTL_MS).toBe(20 * 60_000)
+    let clock = 0
+    const cache = new CatalogObservationCache({ now: () => clock })
+    cache.record(parts(), observation())
+    clock = 15 * 60_000
+    expect(cache.peek(parts())?.observation.modelValues).toEqual(['default', 'trae-fast'])
+    clock = 20 * 60_000 - 1
+    expect(cache.peek(parts())?.observation.modelValues).toEqual(['default', 'trae-fast'])
+    clock = 20 * 60_000
+    expect(cache.peek(parts())).toBeUndefined()
+    expect(cache.size).toBe(0)
   })
 
   it('clears every observation on reload', () => {

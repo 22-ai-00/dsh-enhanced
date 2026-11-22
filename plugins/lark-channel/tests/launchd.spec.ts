@@ -268,4 +268,22 @@ describe('DSH profile LaunchAgent', () => {
     await expect(primary).resolves.toBeDefined()
     expect(second.calls).toHaveLength(0)
   })
+
+  test('appends deduplicated user CLI bin directories (~/.local/bin and ~/.antigravity/antigravity/bin) to LaunchAgent PATH', async () => {
+    const f = await fixture()
+    const localBin = join(f.home, '.local', 'bin')
+    const agyBin = join(f.home, '.antigravity', 'antigravity', 'bin')
+    const result = await installDshLaunchAgent({ dshHome: f.dshHome, profile: f.profile }, {
+      ...f.options,
+      path: `${localBin}:/usr/bin:/bin`,
+    })
+    const plist = await readFile(result.plistPath, 'utf8')
+    const match = /<key>PATH<\/key>\s*<string>([^<]+)<\/string>/u.exec(plist)
+    expect(match).not.toBeNull()
+    const entries = match![1]!.split(':')
+    expect(entries).toContain(localBin)
+    expect(entries).toContain(agyBin)
+    expect(entries.filter(entry => entry === localBin)).toHaveLength(1)
+    expect(entries.filter(entry => entry === agyBin)).toHaveLength(1)
+  })
 })

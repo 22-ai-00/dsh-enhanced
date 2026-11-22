@@ -13,6 +13,8 @@ describe('dsh-enhanced-traex-acp-provider', () => {
     expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
     expect(Plugin.probeTraexReadiness).toBeTypeOf('function')
     expect(Plugin.probeAcpReadiness).toBeTypeOf('function')
+    expect(Plugin.resolveAcpCommand).toBeTypeOf('function')
+    expect(Plugin.DEFAULT_CATALOG_CACHE_TTL_MS).toBe(20 * 60_000)
     expect(Plugin.ACP_PROVIDER_ROUTES).toEqual(['traex-agent', 'agy-agent'])
   })
 

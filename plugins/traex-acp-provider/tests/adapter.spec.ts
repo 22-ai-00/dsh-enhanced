@@ -53,6 +53,8 @@ class TraexAcpAdapter extends RawTraexAcpAdapter {
   ) {
     super(config, {
       ...dependencies,
+      // Keep mocked unit tests independent of host-installed CLIs unless a test overrides resolveCommand.
+      resolveCommand: dependencies.resolveCommand ?? (command => command),
       liveSessions: dependencies.liveSessions ?? {
         get(sessionId) {
           return sessionId === TEST_SESSION_ID
@@ -782,7 +784,7 @@ describe('TraeX ACP LLM adapter', () => {
     expect(discoverModels).toHaveBeenCalledTimes(1)
     expect(onDiagnostic.mock.calls.map(call => call[0])).toEqual([
       'TraeX model catalog discovery wrote to stderr; content withheld',
-      'TraeX model catalog refresh failed; using configured model aliases',
+      'TraeX model catalog refresh failed (outcome=process); using configured model aliases',
     ])
     expect(onDiagnostic.mock.calls.flat().join(' ')).not.toContain('top-secret')
     expect(onDiagnostic.mock.calls.flat().join(' ')).not.toContain('other-secret')
@@ -1905,5 +1907,323 @@ describe('TraeX ACP LLM adapter', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('resolves bare agy/traex commands for discovery and stream while keeping resolveModel process-free', async () => {
+    const resolvedCalls: Array<{ command: string; backend: string }> = []
+    const resolveCommand = vi.fn((command: string, backend: 'traex' | 'agy') => {
+      resolvedCalls.push({ command, backend })
+      return `/resolved/bin/${command}`
+    })
+    const discoverModels = vi.fn(async () => ({
+      currentValue: 'gemini-4-neon',
+      modelValues: ['gemini-4-neon'],
+      models: [{
+        id: 'gemini-4-neon',
+        name: 'Gemini 4 Neon',
+        reasoning: {
+          efforts: [
+            { id: 'low', name: 'Low' },
+            { id: 'medium', name: 'Medium' },
+            { id: 'high', name: 'High' },
+            { id: 'xhigh', name: 'Extra' },
+          ],
+          defaultEffort: 'high',
+        },
+      }],
+      completeReasoning: true,
+      observedAt: 1,
+    }))
+    let capturedCommand: string | undefined
+    const runText: TraexAcpTextRunner = (inv, opts) => {
+      capturedCommand = inv.command
+      return (async function* () {
+        yield 'ok'
+        opts?.onStopReason?.('end_turn')
+      })()
+    }
+    const adapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      resolveCommand,
+      discoverModels,
+      runText,
+    })
+
+    // Cold resolveModel must stay process-free and never call resolveCommand or discoverModels.
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'default')).resolves.toMatchObject({
+      provider: AGY_PROVIDER_ROUTE,
+      id: 'default',
+      name: 'Antigravity active model',
+    })
+    expect(resolveCommand).not.toHaveBeenCalled()
+    expect(discoverModels).not.toHaveBeenCalled()
+
+    await expect(adapter.listModels(AGY_PROVIDER_ROUTE)).resolves.toEqual([
+      expect.objectContaining({ id: 'default', name: 'Antigravity active model (Gemini 4 Neon)' }),
+      expect.objectContaining({ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }),
+    ])
+    expect(discoverModels).toHaveBeenCalledWith(
+      expect.objectContaining({ backend: 'agy', command: '/resolved/bin/agy' }),
+      expect.anything(),
+    )
+
+    // Synthetic default exposes the active model's full effort tiers including xhigh.
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'default')).resolves.toMatchObject({
+      provider: AGY_PROVIDER_ROUTE,
+      id: 'default',
+      name: 'Antigravity active model (Gemini 4 Neon)',
+      reasoning: {
+        efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'medium', name: 'Medium' },
+          { id: 'high', name: 'High' },
+          { id: 'xhigh', name: 'Extra' },
+        ],
+        defaultEffort: 'high',
+      },
+    })
+
+    for await (const _chunk of adapter.stream({
+      ...request('default', 'xhigh'),
+      provider: AGY_PROVIDER_ROUTE,
+    })) { /* drain */ }
+    expect(capturedCommand).toBe('/resolved/bin/agy')
+    expect(resolvedCalls).toEqual([
+      { command: 'agy', backend: 'agy' },
+      { command: 'agy', backend: 'agy' },
+    ])
+  })
+
+  it('preserves a live cached catalog across transient discovery failures and invalidates on auth/entitlement/not-found', async () => {
+    const onDiagnostic = vi.fn()
+    let failWith: Error | undefined
+    const discoverModels = vi.fn(async () => {
+      throw failWith ?? new Error('transient timeout', { cause: 'timeout' })
+    })
+    const adapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      discoverModels,
+      onDiagnostic,
+      runText(_inv, options) {
+        return (async function* () {
+          options?.onCatalogObserved?.({
+            currentValue: 'gemini-4-neon',
+            modelValues: ['gemini-4-neon', 'gemini-pro-orchestrator-neon'],
+            models: [
+              {
+                id: 'gemini-4-neon',
+                name: 'Gemini 4 Neon',
+                reasoning: {
+                  efforts: [
+                    { id: 'low', name: 'Low' },
+                    { id: 'medium', name: 'Medium' },
+                    { id: 'high', name: 'High' },
+                    { id: 'xhigh', name: 'Extra' },
+                  ],
+                  defaultEffort: 'high',
+                },
+              },
+              { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+            ],
+            completeReasoning: false,
+            observedAt: 1,
+          })
+          yield 'ok'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    // Seed a live partial observation via a normal stream.
+    for await (const _chunk of adapter.stream({ ...request('gemini-4-neon'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)?.observation.modelValues).toEqual([
+      'gemini-4-neon',
+      'gemini-pro-orchestrator-neon',
+    ])
+
+    // Transient timeout during listModels refresh must keep the cached models & efforts instead of wiping to default-only.
+    failWith = new Error('network blip', { cause: 'timeout' })
+    const listed = await adapter.listModels(AGY_PROVIDER_ROUTE)
+    expect(listed.map(m => m.id)).toEqual(['default', 'gemini-4-neon', 'gemini-pro-orchestrator-neon'])
+    expect(listed[0]?.name).toBe('Antigravity active model (Gemini 4 Neon)')
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeDefined()
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-neon')).resolves.toMatchObject({
+      reasoning: {
+        efforts: expect.arrayContaining([expect.objectContaining({ id: 'xhigh' })]),
+        defaultEffort: 'high',
+      },
+    })
+    expect(onDiagnostic).toHaveBeenLastCalledWith(
+      'Antigravity model catalog refresh failed (outcome=timeout); keeping cached model catalog',
+    )
+
+    // Auth failure MUST invalidate the cached observation and fall back to configured aliases.
+    failWith = new Error('logged out', { cause: 'auth' })
+    const afterAuthFailure = await adapter.listModels(AGY_PROVIDER_ROUTE)
+    expect(afterAuthFailure).toEqual([
+      expect.objectContaining({ id: 'default', name: 'Antigravity active model' }),
+    ])
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeUndefined()
+    expect(onDiagnostic).toHaveBeenLastCalledWith(
+      'Antigravity model catalog refresh failed (outcome=auth-required); using configured model aliases',
+    )
+
+    // Re-seed and verify ENOENT / not-found also invalidates cache.
+    for await (const _chunk of adapter.stream({ ...request('gemini-4-neon'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeDefined()
+    failWith = Object.assign(new Error('spawn agy ENOENT'), { code: 'ENOENT' })
+    const afterNotFound = await adapter.listModels(AGY_PROVIDER_ROUTE)
+    expect(afterNotFound).toEqual([
+      expect.objectContaining({ id: 'default', name: 'Antigravity active model' }),
+    ])
+    expect(adapter.peekObservedCatalog(AGY_PROVIDER_ROUTE)).toBeUndefined()
+    expect(onDiagnostic).toHaveBeenLastCalledWith(
+      'Antigravity model catalog refresh failed (outcome=not-found); using configured model aliases',
+    )
+  })
+
+  it('exposes low/medium/high/xhigh/max efforts for both named models and default across TraeX and Antigravity', async () => {
+    const traexCatalog = {
+      currentValue: 'deepseek-v4.1-flash',
+      modelValues: ['deepseek-v4.1-flash', 'gpt-6.1-sol'],
+      models: [
+        {
+          id: 'deepseek-v4.1-flash',
+          name: 'DeepSeek-V4.1-Flash',
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'medium', name: 'Medium' },
+              { id: 'high', name: 'High' },
+              { id: 'max', name: 'Max' },
+            ],
+            defaultEffort: 'max',
+          },
+        },
+        {
+          id: 'gpt-6.1-sol',
+          name: 'GPT-6.1-Sol',
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'medium', name: 'Medium' },
+              { id: 'high', name: 'High' },
+              { id: 'xhigh', name: 'Xhigh' },
+            ],
+            defaultEffort: 'medium',
+          },
+        },
+      ],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const captured: TraexAcpInvocation[] = []
+    const adapter = new TraexAcpAdapter(Config({ enabled: true } as never), {
+      verifyAuth: async () => {},
+      discoverModels: async () => traexCatalog,
+      runText: (inv, opts) => {
+        captured.push(inv)
+        return (async function* () {
+          yield 'ok'
+          opts?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    await adapter.listModels('traex-agent')
+    await expect(adapter.resolveModel('traex-agent', 'default')).resolves.toMatchObject({
+      name: 'TraeX active model (DeepSeek-V4.1-Flash)',
+      reasoning: {
+        efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'medium', name: 'Medium' },
+          { id: 'high', name: 'High' },
+          { id: 'max', name: 'Max' },
+        ],
+        defaultEffort: 'max',
+      },
+    })
+    await expect(adapter.resolveModel('traex-agent', 'gpt-6.1-sol')).resolves.toMatchObject({
+      reasoning: {
+        efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'medium', name: 'Medium' },
+          { id: 'high', name: 'High' },
+          { id: 'xhigh', name: 'Xhigh' },
+        ],
+        defaultEffort: 'medium',
+      },
+    })
+
+    for (const [model, effort] of [
+      ['default', 'max'],
+      ['gpt-6.1-sol', 'xhigh'],
+      ['deepseek-v4.1-flash', 'low'],
+    ] as const) {
+      for await (const _chunk of adapter.stream(request(model, effort))) { /* drain */ }
+    }
+    expect(captured.map(inv => ({ model: inv.model, reasoningEffort: inv.reasoningEffort }))).toEqual([
+      { model: undefined, reasoningEffort: 'max' },
+      { model: 'gpt-6.1-sol', reasoningEffort: 'xhigh' },
+      { model: 'deepseek-v4.1-flash', reasoningEffort: 'low' },
+    ])
+  })
+
+  it('merges partial stream observations across models without overwriting the newly observed active model', async () => {
+    let call = 0
+    const adapter = new TraexAcpAdapter(Config({ agyEnabled: true } as never), {
+      runText(_inv, options) {
+        const step = call++
+        return (async function* () {
+          if (step === 0) {
+            options?.onCatalogObserved?.({
+              currentValue: 'gemini-4-neon',
+              modelValues: ['gemini-4-neon', 'claude-opus-5-5'],
+              models: [
+                {
+                  id: 'gemini-4-neon',
+                  name: 'Gemini 4 Neon',
+                  reasoning: {
+                    efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra' }],
+                    defaultEffort: 'high',
+                  },
+                },
+                { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+              ],
+              completeReasoning: false,
+              observedAt: 1,
+            })
+          } else {
+            options?.onCatalogObserved?.({
+              currentValue: 'claude-opus-5-5',
+              modelValues: ['gemini-4-neon', 'claude-opus-5-5'],
+              models: [
+                { id: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+                {
+                  id: 'claude-opus-5-5',
+                  name: 'Claude Opus 5.5',
+                  reasoning: {
+                    efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+                    defaultEffort: 'high',
+                  },
+                },
+              ],
+              completeReasoning: false,
+              observedAt: 2,
+            })
+          }
+          yield 'ok'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    for await (const _chunk of adapter.stream({ ...request('gemini-4-neon'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+    for await (const _chunk of adapter.stream({ ...request('claude-opus-5-5'), provider: AGY_PROVIDER_ROUTE })) { /* drain */ }
+
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'gemini-4-neon')).resolves.toMatchObject({
+      reasoning: { efforts: [{ id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra' }], defaultEffort: 'high' },
+    })
+    await expect(adapter.resolveModel(AGY_PROVIDER_ROUTE, 'claude-opus-5-5')).resolves.toMatchObject({
+      reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' },
+    })
   })
 })

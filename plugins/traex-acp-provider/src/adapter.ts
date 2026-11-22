@@ -33,6 +33,7 @@ import {
 } from './acp-client.js'
 import { verifyTraexAuth, type TraexAuthVerifier } from './auth.js'
 import { CatalogObservationCache, type CatalogCacheKeyParts, type CachedCatalog } from './catalog-cache.js'
+import { resolveAcpCommand, type AcpCommandResolver } from './command-resolve.js'
 import type { TraexAcpProviderConfig } from './config.js'
 import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
 import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
@@ -137,6 +138,8 @@ export interface AdapterDependencies {
   runText?: TraexAcpTextRunner
   discoverModels?: TraexAcpCatalogDiscoverer
   verifyAuth?: TraexAuthVerifier
+  /** Optional resolver for bare executable names (e.g. `traex`, `agy`); tests may inject a stub. */
+  resolveCommand?: AcpCommandResolver
   /** Receives bounded stderr tails or fixed, credential-free adapter diagnostics. */
   onDiagnostic?: (diagnostic: string) => void
   /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
@@ -162,8 +165,8 @@ const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
   jitterRatio: 0.1,
 })
 
-function catalogFallbackDiagnostic(label: string): string {
-  return `${label} model catalog refresh failed; using configured model aliases`
+function catalogFallbackDiagnostic(label: string, outcome: RouteOutcome, usingCached = false): string {
+  return `${label} model catalog refresh failed (outcome=${outcome}); ${usingCached ? 'keeping cached model catalog' : 'using configured model aliases'}`
 }
 
 function catalogStderrDiagnostic(label: string): string {
@@ -259,8 +262,9 @@ function preflightFailure(error: unknown, label = 'TraeX'): Error {
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
 function outcomeFor(error: unknown): RouteOutcome {
-  const cause = error instanceof Error ? error.cause : undefined
-  const code = (error as (NodeJS.ErrnoException & { systemCode?: string }) | undefined)
+  const target = error instanceof LlmError && error.cause !== undefined ? error.cause : error
+  const cause = target instanceof Error ? target.cause : undefined
+  const code = (target as (NodeJS.ErrnoException & { systemCode?: string }) | undefined)
   if ((code?.systemCode ?? code?.code) === 'ENOENT') return 'not-found'
   if (cause === 'abort') return 'aborted'
   if (cause === 'timeout') return 'timeout'
@@ -273,6 +277,26 @@ function outcomeFor(error: unknown): RouteOutcome {
   if (cause === 'protocol') return 'protocol'
   if (cause === 'process') return 'process'
   return 'failed'
+}
+
+function mergePartialCatalog(
+  previous: CatalogObservation,
+  incoming: CatalogObservation,
+): CatalogObservation {
+  const priorReasoning = new Map(
+    previous.models
+      .filter((model): model is CatalogModel & { reasoning: NonNullable<CatalogModel['reasoning']> } => model.reasoning !== undefined)
+      .map(model => [model.id, model.reasoning]),
+  )
+  if (priorReasoning.size === 0) return incoming
+  return {
+    ...incoming,
+    models: incoming.models.map(model => (
+      model.reasoning !== undefined || model.id === incoming.currentValue || !priorReasoning.has(model.id)
+        ? model
+        : { ...model, reasoning: priorReasoning.get(model.id)! }
+    )),
+  }
 }
 
 function reasoningInfo(model: CatalogModel | undefined): Pick<LlmResolvedModelInfo, 'reasoning'> | Record<string, never> {
@@ -297,6 +321,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly runText: TraexAcpTextRunner
   private readonly discoverModels: TraexAcpCatalogDiscoverer
   private readonly verifyAuthOverride: TraexAuthVerifier | undefined
+  private readonly resolveCommand: AcpCommandResolver
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
@@ -315,6 +340,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     this.runText = dependencies.runText ?? runTraexAcpText
     this.discoverModels = dependencies.discoverModels ?? discoverTraexAcpModels
     this.verifyAuthOverride = dependencies.verifyAuth
+    this.resolveCommand = dependencies.resolveCommand ?? resolveAcpCommand
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
     this.onCatalogObserved = dependencies.onCatalogObserved
@@ -324,6 +350,10 @@ export class TraexAcpAdapter extends LlmAdapter {
     })
     this.liveSessions = dependencies.liveSessions
     this.requestAttestor = dependencies.requestAttestor
+  }
+
+  private resolvedCommandFor(spec: RouteSpec): string {
+    return this.resolveCommand(spec.command(this.config), spec.backend)
   }
 
   private authVerifierFor(spec: RouteSpec): TraexAuthVerifier | undefined {
@@ -371,7 +401,10 @@ export class TraexAcpAdapter extends LlmAdapter {
     // entry expires, peek evicts it and a later partial observation may be recorded normally.
     const existing = this.peekObservedCatalog(spec.route)?.observation
     if (existing?.completeReasoning !== true || observation.completeReasoning) {
-      this.catalogCache.record(this.catalogKeyParts(spec), observation)
+      const next = !observation.completeReasoning && existing !== undefined && !existing.completeReasoning
+        ? mergePartialCatalog(existing, observation)
+        : observation
+      this.catalogCache.record(this.catalogKeyParts(spec), next)
     }
     if (this.onCatalogObserved === undefined) return
     try {
@@ -404,10 +437,14 @@ export class TraexAcpAdapter extends LlmAdapter {
     const deadline = AbortSignal.timeout(this.config.authProbeTimeoutMs)
     const signal = AbortSignal.any([this.lifecycle.signal, deadline])
     const pending = this.probeReadinessWithin(spec, signal, this.config.authProbeTimeoutMs)
-      .catch(() => {
+      .catch((error: unknown) => {
         // Never surface local auth/process details through `/model`, and never let a transient
-        // discovery failure hide the deployer's configured aliases. Shutdown is intentionally quiet.
-        if (!this.lifecycle.signal.aborted) this.reportDiagnostic(catalogFallbackDiagnostic(spec.label))
+        // discovery failure hide a live cached catalog or the deployer's configured aliases.
+        // Shutdown is intentionally quiet.
+        if (!this.lifecycle.signal.aborted) {
+          const hasLiveFallback = this.peekObservedCatalog(spec.route) !== undefined
+          this.reportDiagnostic(catalogFallbackDiagnostic(spec.label, outcomeFor(error), hasLiveFallback))
+        }
         return undefined
       })
     this.catalogRefreshInFlight.set(spec.route, pending)
@@ -486,7 +523,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     const cacheAtStart = this.peekObservedCatalog(spec.route)
     const cached = cacheAtStart?.observation
     if (cached?.completeReasoning === true) return cached
-    const command = spec.command(this.config)
+    const command = this.resolvedCommandFor(spec)
     const verifyAuth = this.authVerifierFor(spec)
     const discoveryCwd = existsSync(this.cwd) ? this.cwd : tmpdir()
     try {
@@ -527,8 +564,12 @@ export class TraexAcpAdapter extends LlmAdapter {
       this.handleCatalogObserved(spec, catalog)
       return catalog
     } catch (error: unknown) {
-      // Do not let a slower concurrent probe erase a newer successful observation.
-      if (this.peekObservedCatalog(spec.route) === cacheAtStart) {
+      const failureOutcome = outcomeFor(error)
+      // Invalidate cached observations only when auth, entitlement, or the executable itself is
+      // unavailable; preserve a still-live valid observation across transient timeout/protocol/process
+      // errors, and never let a slower concurrent probe erase a newer successful observation.
+      if ((failureOutcome === 'auth-required' || failureOutcome === 'entitlement' || failureOutcome === 'not-found')
+        && this.peekObservedCatalog(spec.route) === cacheAtStart) {
         this.catalogCache.invalidate(this.catalogKeyParts(spec))
       }
       throw connectorFailure(command, error, spec.label)
@@ -540,7 +581,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     const cached = this.peekObservedCatalog(spec.route)?.observation
     const catalog = cached?.completeReasoning === true
       ? cached
-      : await this.refreshCatalogForList(spec)
+      : (await this.refreshCatalogForList(spec)) ?? this.peekObservedCatalog(spec.route)?.observation
     const active = catalog?.models.find(model => model.id === catalog.currentValue)
     const entries = new Map<string, LlmModelInfo>()
     for (const model of spec.models(this.config)) {
@@ -591,7 +632,7 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const spec = ensureProvider(options.provider)
-    const command = spec.command(this.config)
+    const command = this.resolvedCommandFor(spec)
     const verifyAuth = this.authVerifierFor(spec)
     const signal = options.signal === undefined
       ? this.lifecycle.signal

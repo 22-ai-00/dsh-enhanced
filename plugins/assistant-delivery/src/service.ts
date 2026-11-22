@@ -9017,10 +9017,23 @@ export class AssistantDeliveryService extends Service {
         })
         let resolved: Awaited<ReturnType<typeof llm.resolveModelInfo>> | undefined
         try {
-          resolved = await Promise.race([
+          const initial = await Promise.race([
             llm.resolveModelInfo(payload.provider, payload.model, resolveController.signal),
             deadline,
           ])
+          if (payload.reasoningEffort !== null
+            && !initial.reasoning?.efforts.some(effort => String(effort.id) === payload.reasoningEffort)) {
+            await Promise.race([
+              llm.listModels(payload.provider).then(() => undefined, () => undefined),
+              deadline,
+            ])
+            resolved = await Promise.race([
+              llm.resolveModelInfo(payload.provider, payload.model, resolveController.signal),
+              deadline,
+            ])
+          } else {
+            resolved = initial
+          }
         } catch {
           // Model availability is persisted below, after refreshing authority.
         } finally {

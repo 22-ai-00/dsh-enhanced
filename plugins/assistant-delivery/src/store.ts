@@ -2036,7 +2036,7 @@ function canonicalModelPicker(input: ModelPickerIntent | undefined): ModelPicker
   }
   const current = canonicalPickerRoute(input.current)
   if (!Array.isArray(input.providers) || input.providers.length < 1 || input.providers.length > 20
-    || !Array.isArray(input.models) || input.models.length < 1 || input.models.length > 50
+    || !Array.isArray(input.models) || input.models.length < 1 || input.models.length > 200
     || !Array.isArray(input.efforts) || input.efforts.length > 20) {
     throw new DeliveryStoreError('invalid-intent', 'model picker option budget is invalid')
   }

@@ -46,9 +46,11 @@ export {
   TraexAcpAdapter,
   version,
 }
-export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
+export { CatalogObservationCache, catalogCacheKey, DEFAULT_CATALOG_CACHE_TTL_MS } from './catalog-cache.js'
+export { resolveAcpCommand } from './command-resolve.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'
+export type { AcpCommandResolver, ResolveAcpCommandOptions } from './command-resolve.js'
 export type { AcpBackend, AcpCwdMode, AcpProviderRoute, AcpReadinessProbeOptions, AgySessionMode, TraexReadinessProbeOptions, TraexAcpProviderConfig }
 
 function registerConfigurableRoutes(ctx: Context, llm: LlmRuntime): (() => void) | undefined {

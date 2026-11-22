@@ -1574,6 +1574,99 @@ describe('Lark delivery adapter', () => {
     }))
   })
 
+  test('cascades and confirms ACP models with full low/medium/high/xhigh/max effort tiers', async () => {
+    const transport = new FakeTransport()
+    const settleModelSelection = vi.fn(() => ({ status: 'selected' as const, selection: {
+      provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'xhigh',
+    } }))
+    const advanceModelPicker = durablePickerAdvance()
+    const acpPicker = {
+      operationId: 'model-picker-acp-efforts',
+      expiresAt: 2_000,
+      current: { provider: 'agy-agent', model: 'gemini-pro-orchestrator-neon' },
+      providers: [
+        { id: 'agy-agent', name: 'Antigravity Agent (local ACP)' },
+        { id: 'traex-agent', name: 'TraeX Agent (local ACP)' },
+      ],
+      models: [
+        { provider: 'agy-agent', id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)', effortIds: [] },
+        { provider: 'agy-agent', id: 'gemini-4-neon', name: 'Gemini 4 Neon', effortIds: ['low', 'medium', 'high', 'xhigh'] },
+        { provider: 'traex-agent', id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', effortIds: ['low', 'medium', 'high', 'max'] },
+      ],
+      efforts: [
+        { id: 'low', name: 'Low' },
+        { id: 'medium', name: 'Medium' },
+        { id: 'high', name: 'High' },
+        { id: 'xhigh', name: 'Extra' },
+        { id: 'max', name: 'Max' },
+      ],
+    } as const
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection,
+      loadModelPicker: vi.fn(() => acpPicker),
+      advanceModelPicker,
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker: acpPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as { modelPicker: Parameters<typeof renderLarkMessage>[0] extends {
+      modelPicker: infer T
+    } ? T : never }
+    const card = JSON.parse(renderLarkMessage({ modelPicker: sent.modelPicker }).content) as Record<string, unknown>
+
+    // Initial model (Orchestrator Neon) has no effort tiers; switching to Gemini 4 Neon exposes low..xhigh.
+    expect(modelPickerElement(card, 'model_effort').options).toEqual([
+      { text: { tag: 'plain_text', content: '默认（该模型无 effort 档位）' }, value: '__default__' },
+    ])
+    const modelUpdate = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'agy-agent/gemini-4-neon',
+      value: modelPickerElement(card, 'model_route').value,
+    }) as { card: { data: Record<string, unknown> } }
+    const agyEffort = modelPickerElement(modelUpdate.card.data, 'model_effort')
+    expect((agyEffort.options as Array<{ value: string }>).map(option => option.value)).toEqual([
+      '__default__', 'low', 'medium', 'high', 'xhigh',
+    ])
+
+    // Also verify TraeX exposes `max` before switching back to Antigravity + `xhigh` to confirm.
+    const traexUpdate = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'traex-agent',
+      value: modelPickerElement(modelUpdate.card.data, 'model_provider').value,
+    }) as { card: { data: Record<string, unknown> } }
+    expect((modelPickerElement(traexUpdate.card.data, 'model_effort').options as Array<{ value: string }>).map(option => option.value)).toEqual([
+      '__default__', 'low', 'medium', 'high', 'max',
+    ])
+
+    const backAgy = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'agy-agent',
+      value: modelPickerElement(traexUpdate.card.data, 'model_provider').value,
+    }) as { card: { data: Record<string, unknown> } }
+    const backNeon = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'agy-agent/gemini-4-neon',
+      value: modelPickerElement(backAgy.card.data, 'model_route').value,
+    }) as { card: { data: Record<string, unknown> } }
+    const pickXhigh = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'xhigh',
+      value: modelPickerElement(backNeon.card.data, 'model_effort').value,
+    }) as { card: { data: Record<string, unknown> } }
+    await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: modelPickerElement(pickXhigh.card.data, 'model_confirm').value,
+    })
+    expect(settleModelSelection).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'xhigh',
+    }))
+  })
+
   test('falls back to a usable text catalog when Lark rejects the model-picker card format', async () => {
     const transport = new FakeTransport()
     transport.send.mockRejectedValueOnce(new LarkTransportError('format_error', 'invalid card'))

@@ -362,7 +362,7 @@ const inheritedEnvNames = new Set([
   'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR',
   'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'DBUS_SESSION_BUS_ADDRESS',
   'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA',
-  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE',
 ])
 
@@ -710,7 +710,9 @@ export async function* runTraexAcpText(
       const initialModelOption = validateModelCatalog(session.configOptions)
       let activeModelOption = initialModelOption
       let activeConfigOptions = session.configOptions
-      const initialReasoning = validateReasoningCatalog(activeConfigOptions)
+      const initialReasoning = invocation.operation === 'catalog'
+        ? tryValidateReasoningCatalog(activeConfigOptions)
+        : validateReasoningCatalog(activeConfigOptions)
       observeCatalog(buildCatalogObservation(
         initialModelOption,
         initialReasoning === undefined
@@ -724,19 +726,33 @@ export async function* runTraexAcpText(
         const initialCurrentValue = initialModelOption.currentValue
         for (const entry of selectEntries(initialModelOption)) {
           if (activeModelOption.currentValue !== entry.value) {
-            const updated = await awaitRpc(client.setSessionConfigOption({
-              sessionId,
-              configId: initialModelOption.id,
-              value: entry.value,
-            }))
-            activeModelOption = validateModelCatalog(updated.configOptions)
-            activeConfigOptions = updated.configOptions
-            if (activeModelOption.id !== initialModelOption.id || activeModelOption.currentValue !== entry.value) {
-              throw new TraexAcpError('protocol')
+            let updated: Awaited<ReturnType<ClientSideConnection['setSessionConfigOption']>>
+            try {
+              updated = await awaitRpc(client.setSessionConfigOption({
+                sessionId,
+                configId: initialModelOption.id,
+                value: entry.value,
+              }))
+            } catch (error: unknown) {
+              // If the ACP server rejects one model via a JSON-RPC error (e.g. unentitled or
+              // deprecated model), skip only that model's reasoning so the rest of the catalog
+              // remains usable. Auth (-32000), framing/transport, abort, and timeout errors still
+              // fail closed.
+              if (fatal !== undefined) throw fatal
+              if (error instanceof RequestError && error.code !== -32000) {
+                continue
+              }
+              throw error
             }
             throwIfFatal(fatal)
+            const nextModelOption = validateModelCatalog(updated.configOptions)
+            if (nextModelOption.id !== initialModelOption.id || nextModelOption.currentValue !== entry.value) {
+              throw new TraexAcpError('protocol')
+            }
+            activeModelOption = nextModelOption
+            activeConfigOptions = updated.configOptions
           }
-          const reasoning = validateReasoningCatalog(activeConfigOptions)
+          const reasoning = tryValidateReasoningCatalog(activeConfigOptions)
           if (reasoning !== undefined) reasoningByModel.set(entry.value, catalogReasoning(reasoning))
         }
         observeCatalog(buildCatalogObservation(
@@ -1057,6 +1073,21 @@ function validateReasoningCatalog(
     option => option.category === 'thought_level' || option.id === 'reasoning_effort',
     false,
   )
+}
+
+function tryValidateReasoningCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+): Extract<SessionConfigOption, { type: 'select' }> | undefined {
+  try {
+    return validateReasoningCatalog(options)
+  } catch (error: unknown) {
+    // During catalog discovery, malformed optional reasoning metadata for one model should omit
+    // only that model's reasoning efforts instead of discarding the entire model list.
+    if (error instanceof TraexAcpError && error.failure === 'protocol') {
+      return undefined
+    }
+    throw error
+  }
 }
 
 function validateModeCatalog(

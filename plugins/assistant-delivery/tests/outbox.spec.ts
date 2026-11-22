@@ -449,6 +449,43 @@ describe('durable outbox', () => {
       modelPicker: { ...modelPicker.modelPicker!, providers: Array.from({ length: 21 }, (_, index) => ({
         id: `provider-${index}`, name: `Provider ${index}`,
       })) } })).toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    const allEfforts = [
+      { id: 'low', name: 'Low' },
+      { id: 'medium', name: 'Medium' },
+      { id: 'high', name: 'High' },
+      { id: 'xhigh', name: 'Extra' },
+      { id: 'max', name: 'Max' },
+    ]
+    const largePicker: OutboundIntent = {
+      ...modelPicker,
+      idempotencyKey: 'model-picker:200-models',
+      modelPicker: {
+        ...modelPicker.modelPicker!,
+        operationId: 'model-picker-200',
+        current: { provider: 'agy-agent', model: 'model-199', reasoningEffort: 'xhigh' },
+        providers: [{ id: 'agy-agent', name: 'Antigravity Agent (local ACP)' }],
+        models: Array.from({ length: 200 }, (_, index) => ({
+          provider: 'agy-agent',
+          id: `model-${index}`,
+          name: `Model ${index}`,
+          effortIds: index === 199 ? ['low', 'medium', 'high', 'xhigh', 'max'] : [],
+        })),
+        efforts: allEfforts,
+      },
+    }
+    expect(f.store.enqueue(largePicker)).toMatchObject({ status: 'pending' })
+    expect(() => f.store.enqueue({
+      ...largePicker,
+      idempotencyKey: 'model-picker:201-models',
+      modelPicker: {
+        ...largePicker.modelPicker!,
+        operationId: 'model-picker-201',
+        models: [
+          ...largePicker.modelPicker!.models,
+          { provider: 'agy-agent', id: 'model-200', name: 'Model 200', effortIds: [] },
+        ],
+      },
+    })).toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     expect(() => f.store.enqueue({ ...modelPicker, idempotencyKey: 'model-picker:bad-effort-link',
       modelPicker: { ...modelPicker.modelPicker!, models: [{
         provider: 'codex-subscription', id: 'default', name: 'Default', effortIds: ['missing'],

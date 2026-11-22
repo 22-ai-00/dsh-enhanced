@@ -308,7 +308,8 @@ interface GoalContinuationWait {
   dispose(): void
 }
 
-const MAX_CATALOG_MODELS = 50
+const MAX_CATALOG_PROVIDERS = 20
+const MAX_CATALOG_MODELS = 200
 const MAX_PROGRESS_TODOS = 20
 const MAX_PROGRESS_TEXT_CHARS = 240
 const MAX_PROGRESS_TOOL_PREVIEW_CHARS = 1_500
@@ -709,6 +710,17 @@ function parseModelRoute(value: string): ModelRouteRef | undefined {
   return { provider, model }
 }
 
+function parseModelUseTarget(value: string): ModelRouteRef | undefined {
+  const tokens = value === '' ? [] : value.split(/\s+/u)
+  if (tokens.length < 1 || tokens.length > 2) return undefined
+  const base = parseModelRoute(tokens[0]!)
+  if (base === undefined) return undefined
+  if (tokens.length === 1) return base
+  const effort = tokens[1]!
+  if (effort.length === 0 || effort.length > 128 || /[\s\p{Cc}]/u.test(effort)) return undefined
+  return { ...base, reasoningEffort: effort }
+}
+
 function modelCommand(command: ParsedDeliveryCommand | undefined): string | undefined {
   return command?.name === 'model' ? command.rawInput.trim() : undefined
 }
@@ -1014,6 +1026,95 @@ function errorHasCode(error: unknown, code: string): boolean {
   return false
 }
 
+function waitWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void operation.catch(() => undefined)
+    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void operation.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
+type ProviderListEntry = ReturnType<LlmRuntime['listProviders']>[number]
+type ProviderModelEntry = Awaited<ReturnType<LlmRuntime['listModels']>>[number]
+
+interface ProviderCatalogSnapshot {
+  readonly provider: ProviderListEntry
+  readonly models: readonly ProviderModelEntry[] | undefined
+}
+
+function allocateCatalogModels(
+  catalogs: readonly ProviderCatalogSnapshot[],
+  current: Readonly<ModelRouteRef>,
+): Map<string, readonly ProviderModelEntry[]> {
+  const nonEmpty = catalogs.filter(
+    (catalog): catalog is { provider: ProviderListEntry; models: readonly ProviderModelEntry[] } =>
+      catalog.models !== undefined && catalog.models.length > 0,
+  )
+  let selected = nonEmpty
+  if (nonEmpty.length > MAX_CATALOG_PROVIDERS) {
+    selected = nonEmpty.slice(0, MAX_CATALOG_PROVIDERS)
+    if (!selected.some(catalog => catalog.provider.id === current.provider)) {
+      const currentCatalog = nonEmpty.find(catalog => catalog.provider.id === current.provider)
+      if (currentCatalog !== undefined) {
+        selected = [...selected.slice(0, MAX_CATALOG_PROVIDERS - 1), currentCatalog]
+      }
+    }
+  }
+  const quotas = selected.map(catalog => ({
+    catalog,
+    allocated: 0,
+    isCurrent: catalog.provider.id === current.provider,
+  }))
+  let remaining = MAX_CATALOG_MODELS
+  while (remaining > 0) {
+    const active = quotas.filter(entry => entry.allocated < entry.catalog.models.length)
+    if (active.length === 0) break
+    const share = Math.floor(remaining / active.length)
+    if (share === 0) {
+      const ordered = [...active].sort((left, right) => Number(right.isCurrent) - Number(left.isCurrent))
+      for (const entry of ordered) {
+        if (remaining === 0) break
+        entry.allocated += 1
+        remaining -= 1
+      }
+      break
+    }
+    for (const entry of active) {
+      const take = Math.min(share, entry.catalog.models.length - entry.allocated)
+      entry.allocated += take
+      remaining -= take
+    }
+  }
+  const visibleByProvider = new Map<string, readonly ProviderModelEntry[]>()
+  for (const { catalog, allocated, isCurrent } of quotas) {
+    if (allocated <= 0) continue
+    const slice = catalog.models.slice(0, allocated)
+    if (isCurrent && !slice.some(model => model.id === current.model)) {
+      const currentEntry = catalog.models.find(model => model.id === current.model)
+      if (currentEntry !== undefined) {
+        slice[slice.length - 1] = currentEntry
+      }
+    }
+    visibleByProvider.set(catalog.provider.id, slice)
+  }
+  return visibleByProvider
+}
+
 async function modelCatalog(
   llm: LlmRuntime,
   conversation: ConversationRef,
@@ -1024,13 +1125,14 @@ async function modelCatalog(
   signal: AbortSignal,
 ): Promise<ModelCommandReply> {
   const providers = llm.listProviders()
-  const catalogs = await Promise.all(providers.map(async provider => {
+  const catalogs: ProviderCatalogSnapshot[] = await Promise.all(providers.map(async provider => {
     try {
       return { provider, models: await llm.listModels(provider.id) }
     } catch {
       return { provider, models: undefined }
     }
   }))
+  const visibleByProvider = allocateCatalogModels(catalogs, current)
   const fallback = [
     `当前模型：${routeLabel(current)}${isDefault ? '（默认）' : ''}`,
     '',
@@ -1038,7 +1140,6 @@ async function modelCatalog(
   ]
   const models: ModelPickerIntent['models'][number][] = []
   const visibleProviders = new Map<string, ModelPickerIntent['providers'][number]>()
-  let shown = 0
   let hidden = 0
   for (const catalog of catalogs) {
     fallback.push(`${catalog.provider.name} [${catalog.provider.id}]`)
@@ -1050,11 +1151,9 @@ async function modelCatalog(
       fallback.push('- 未提供可枚举模型')
       continue
     }
-    for (const model of catalog.models) {
-      if (shown >= MAX_CATALOG_MODELS) {
-        hidden += 1
-        continue
-      }
+    const visibleModels = visibleByProvider.get(catalog.provider.id) ?? []
+    hidden += catalog.models.length - visibleModels.length
+    for (const model of visibleModels) {
       const route = `${catalog.provider.id}/${model.id}`
       const marker = catalog.provider.id === current.provider && model.id === current.model ? '（当前）' : ''
       const display = model.name === model.id ? '' : ` — ${model.name}`
@@ -1064,12 +1163,11 @@ async function modelCatalog(
         name: displayName(catalog.provider.name),
       })
       models.push({ provider: catalog.provider.id, id: model.id, name: displayName(model.name), effortIds: [] })
-      shown += 1
     }
   }
   if (providers.length === 0) fallback.push('- 当前没有已注册的模型 provider')
   if (hidden > 0) fallback.push(`- 另有 ${hidden} 个模型未展示`)
-  fallback.push('', '切换：/model use <provider/model>', '恢复默认：/model reset')
+  fallback.push('', '切换：/model use <provider/model> [effort]', '恢复默认：/model reset')
   if (models.length === 0) return { text: fallback.join('\n'), format: 'plain' }
   const resolved = await Promise.allSettled(models.map(model => llm.resolveModelInfo(model.provider, model.id, signal)))
   const efforts = new Map<string, string>()
@@ -1132,17 +1230,27 @@ async function runModelCommand(
       : `本会话已在使用默认模型 ${routeLabel(defaults)}。` }
   }
   if (!argument.startsWith('use ')) {
-    return { text: '用法：/model、/model use <provider/model>、/model reset' }
+    return { text: '用法：/model、/model use <provider/model> [effort]、/model reset' }
   }
   const target = argument.slice('use '.length).trim()
-  const selected = parseModelRoute(target)
-  if (selected === undefined) return { text: '用法：/model use <provider/model>' }
+  const selected = parseModelUseTarget(target)
+  if (selected === undefined) return { text: '用法：/model use <provider/model> [effort]' }
   if (!llm.listProviders().some(provider => provider.id === selected.provider)) {
     return { text: `没有注册 provider “${selected.provider}”。发送 /model 查看当前可用模型。` }
   }
   const epoch = options.beginModelCommand(conversation)
+  let info: Awaited<ReturnType<typeof llm.resolveModelInfo>>
   try {
-    await llm.resolveModelInfo(selected.provider, selected.model, signal)
+    info = await llm.resolveModelInfo(selected.provider, selected.model, signal)
+    if (selected.reasoningEffort !== undefined
+      && !info.reasoning?.efforts.some(effort => String(effort.id) === selected.reasoningEffort)) {
+      try {
+        await waitWithAbort(llm.listModels(selected.provider), signal)
+      } catch (listError) {
+        if (signal.aborted) throw listError
+      }
+      info = await llm.resolveModelInfo(selected.provider, selected.model, signal)
+    }
   } catch (error) {
     if (signal.aborted) throw error
     const code = typeof error === 'object' && error !== null && 'code' in error
@@ -1151,8 +1259,19 @@ async function runModelCommand(
       : ''
     return { text: `模型 ${routeLabel(selected)} 当前不可用${code}。发送 /model 重新选择。` }
   }
-  const changed = current?.provider !== selected.provider || current.model !== selected.model
-  if (!changed && current.reasoningEffort === undefined) return { text: `本会话已在使用 ${routeLabel(selected)}。` }
+  if (selected.reasoningEffort !== undefined
+    && !info.reasoning?.efforts.some(effort => String(effort.id) === selected.reasoningEffort)) {
+    const supported = info.reasoning?.efforts.map(effort => String(effort.id)) ?? []
+    const hint = supported.length > 0
+      ? `（可用档位：${supported.join('、')}）`
+      : '（该模型无可选 effort 档位）'
+    return { text: `模型 ${selected.provider}/${selected.model} 不支持 effort “${selected.reasoningEffort}”${hint}。发送 /model 重新选择。` }
+  }
+  const same = current !== undefined
+    && current.provider === selected.provider
+    && current.model === selected.model
+    && current.reasoningEffort === selected.reasoningEffort
+  if (same) return { text: `本会话已在使用 ${routeLabel(selected)}。` }
   const committed = options.commitModelCommand({ conversation, expectedEpoch: epoch, route: selected })
   if (!committed.applied) return { text: '模型选择已被更晚的操作取代，请重新发送 /model。' }
   return { text: `已切换到 ${routeLabel(selected)}。\n下一条消息起生效，上下文保留。` }
@@ -2239,15 +2358,34 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (route.reasoningEffort === undefined) return { route }
     const llm = this.ctx.get('llm')
     if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
+    const requestConfig = {
+      provider: route.provider,
+      model: route.model,
+      reasoningEffort: ReasoningEffortId(route.reasoningEffort),
+    }
     try {
-      await llm.resolveCallConfig({
-        provider: route.provider,
-        model: route.model,
-        reasoningEffort: ReasoningEffortId(route.reasoningEffort),
-      }, signal)
+      await llm.resolveCallConfig(requestConfig, signal)
       return { route }
     } catch (error) {
       if (signal.aborted || !errorHasCode(error, 'UNSUPPORTED_REASONING_EFFORT')) throw error
+      // Dynamic-catalog adapters (such as local ACP providers) keep resolveModel process-free
+      // and populate per-model reasoning metadata via prompt-free listModels(). Warm the
+      // provider catalog once before treating a persisted effort as genuinely stale.
+      let warmed = false
+      try {
+        await waitWithAbort(llm.listModels(route.provider), signal)
+        warmed = true
+      } catch (listError) {
+        if (signal.aborted) throw listError
+      }
+      if (warmed) {
+        try {
+          await llm.resolveCallConfig(requestConfig, signal)
+          return { route }
+        } catch (retryError) {
+          if (signal.aborted || !errorHasCode(retryError, 'UNSUPPORTED_REASONING_EFFORT')) throw retryError
+        }
+      }
       const fallback = { provider: route.provider, model: route.model }
       // Do not turn an invalid model/default into a silent recovery. This is the same core
       // preflight without the stale explicit effort, still before an Agent turn is dispatched.

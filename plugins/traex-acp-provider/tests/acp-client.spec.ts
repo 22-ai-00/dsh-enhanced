@@ -1142,6 +1142,8 @@ function agyHarness(options: {
   readonly agentName?: string
   readonly omitThoughtLevelFor?: ReadonlySet<string>
   readonly includeModeOption?: boolean
+  readonly rejectModelSwitch?: ReadonlyMap<string, { code: number; message: string }>
+  readonly malformedReasoningFor?: ReadonlySet<string>
 } = {}): { state: FakeState; spawn: SpawnProcess } {
   const state: FakeState = {
     initialize: [],
@@ -1179,9 +1181,18 @@ function agyHarness(options: {
             { value: 'gemini-pro-orchestrator', name: 'Orchestrator (Carbon)' },
           ],
         }]
-        if (!(options.omitThoughtLevelFor?.has(selectedModel) ?? selectedModel === 'gemini-pro-orchestrator')) {
+        if (options.malformedReasoningFor?.has(selectedModel)) {
+          result.push({
+            id: 'thought_level',
+            name: 'Thinking Level',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'not-in-options',
+            options: [{ value: 'low', name: 'Low' }],
+          })
+        } else if (!(options.omitThoughtLevelFor?.has(selectedModel) ?? selectedModel === 'gemini-pro-orchestrator')) {
           const efforts = selectedModel === 'gemini-4-hydrogen'
-            ? ['low', 'medium', 'high', 'xhigh']
+            ? ['low', 'medium', 'high', 'xhigh', 'max']
             : ['low', 'medium', 'high']
           result.push({
             id: 'thought_level',
@@ -1249,7 +1260,13 @@ function agyHarness(options: {
         },
         async setSessionConfigOption(request) {
           state.modelSelections.push(request)
-          if (request.configId === 'model') selectedModel = request.value as string
+          if (request.configId === 'model') {
+            const rejection = options.rejectModelSwitch?.get(request.value as string)
+            if (rejection !== undefined) {
+              throw new RequestError(rejection.code, rejection.message)
+            }
+            selectedModel = request.value as string
+          }
           if (request.configId === 'thought_level') selectedThought = request.value as string
           if (request.configId === 'mode') {
             selectedMode = request.value as string
@@ -1333,6 +1350,7 @@ describe('Antigravity ACP subprocess transport', () => {
               { id: 'medium', name: 'Medium' },
               { id: 'high', name: 'High' },
               { id: 'xhigh', name: 'Xhigh' },
+              { id: 'max', name: 'Max' },
             ],
             defaultEffort: 'medium',
           },
@@ -1402,5 +1420,91 @@ describe('Antigravity ACP subprocess transport', () => {
     await expect(collect({ ...agyInvocation, args: badArgs }, { spawn }))
       .rejects.toMatchObject({ cause: 'protocol' })
     expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('skips only a single rejected model during catalog discovery while keeping all other models and efforts', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { state, spawn } = agyHarness({
+      rejectModelSwitch: new Map([['gemini-4-hydrogen', { code: -32602, message: 'model unavailable for tier' }]]),
+    })
+    const observation = await discoverTraexAcpModels({
+      backend: 'agy',
+      command: 'agy',
+      args: agySafeArgs,
+      cwd: process.cwd(),
+    }, { spawn })
+
+    expect(observation.completeReasoning).toBe(true)
+    expect(observation.modelValues).toEqual(['gemini-4-carbon', 'gemini-4-hydrogen', 'gemini-pro-orchestrator'])
+    expect(observation.models[0]?.reasoning?.efforts.map(e => e.id)).toEqual(['low', 'medium', 'high'])
+    expect(observation.models[1]).not.toHaveProperty('reasoning')
+    expect(observation.models[2]).not.toHaveProperty('reasoning')
+    expect(state.prompts).toHaveLength(0)
+  })
+
+  it('still fails closed with auth when a model switch during catalog discovery returns -32000', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { spawn } = agyHarness({
+      rejectModelSwitch: new Map([['gemini-4-hydrogen', { code: -32000, message: 'Authentication required' }]]),
+    })
+    await expect(discoverTraexAcpModels({
+      backend: 'agy',
+      command: 'agy',
+      args: agySafeArgs,
+      cwd: process.cwd(),
+    }, { spawn })).rejects.toMatchObject({ cause: 'auth' })
+  })
+
+  it('omits malformed optional thought_level on one model during catalog discovery while keeping prompt mode strict', async () => {
+    const catalogRun = agyHarness({ malformedReasoningFor: new Set(['gemini-4-hydrogen']) })
+    const observation = await discoverTraexAcpModels({
+      backend: 'agy',
+      command: 'agy',
+      args: agySafeArgs,
+      cwd: process.cwd(),
+    }, { spawn: catalogRun.spawn })
+
+    expect(observation.completeReasoning).toBe(true)
+    expect(observation.models[0]?.reasoning?.efforts.map(e => e.id)).toEqual(['low', 'medium', 'high'])
+    expect(observation.models[1]).not.toHaveProperty('reasoning')
+
+    const initialMalformed = agyHarness({ malformedReasoningFor: new Set(['gemini-4-carbon']) })
+    const obs2 = await discoverTraexAcpModels({
+      backend: 'agy',
+      command: 'agy',
+      args: agySafeArgs,
+      cwd: process.cwd(),
+    }, { spawn: initialMalformed.spawn })
+    expect(obs2.completeReasoning).toBe(true)
+    expect(obs2.models[0]).not.toHaveProperty('reasoning')
+    expect(obs2.models[1]?.reasoning?.efforts.map(e => e.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+
+    const promptRun = agyHarness({ malformedReasoningFor: new Set(['gemini-4-hydrogen']) })
+    await expect(collect({
+      ...agyInvocation,
+      model: 'gemini-4-hydrogen',
+      reasoningEffort: 'xhigh',
+    }, { spawn: promptRun.spawn })).rejects.toMatchObject({ cause: 'protocol' })
+  })
+
+  it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)('passes %s thought_level cleanly through session/set_config_option', async effort => {
+    const { state, spawn } = agyHarness()
+    await expect(collect({
+      ...agyInvocation,
+      model: 'gemini-4-hydrogen',
+      reasoningEffort: effort,
+    }, { spawn })).resolves.toEqual(['agy-answer'])
+    expect(state.modelSelections).toEqual([
+      { sessionId: 'agy-session-1', configId: 'model', value: 'gemini-4-hydrogen' },
+      { sessionId: 'agy-session-1', configId: 'thought_level', value: effort },
+    ])
+  })
+
+  it('inherits ALL_PROXY and all_proxy with proxy credentials stripped', () => {
+    vi.stubEnv('ALL_PROXY', 'socks5://alice:secret@proxy.internal:1080')
+    vi.stubEnv('all_proxy', 'http://bob:pw@proxy.internal:8080/')
+    const env = buildTraexEnv()
+    expect(env.ALL_PROXY).toBe('socks5://proxy.internal:1080')
+    expect(env.all_proxy).toBe('http://proxy.internal:8080/')
   })
 })

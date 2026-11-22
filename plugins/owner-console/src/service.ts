@@ -875,7 +875,7 @@ export class OwnerConsoleService extends TypertRemoteService {
         return Object.freeze({
           applied: true,
           entry: 'agent-default-model',
-          note: `默认模型已切换为 ${cleanProvider} / ${cleanModel}${extraNote}`,
+          note: `默认模型已切换为 ${cleanProvider} / ${cleanModel}${cleanEffort === '' ? '' : `（${cleanEffort}）`}${extraNote}`,
         })
       } catch (cause) {
         return writeFailure('agent-default-model', cause)

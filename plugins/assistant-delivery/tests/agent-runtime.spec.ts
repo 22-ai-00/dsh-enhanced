@@ -10416,6 +10416,260 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('/model fairly allocates up to 200 models without starving later ACP providers and preserves current model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-model-fair-cap-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    class AcpCatalogAdapter extends LlmAdapter {
+      constructor(
+        private readonly label: string,
+        private readonly entries: readonly { id: string; name: string; efforts?: readonly { id: string; name: string }[] }[],
+      ) {
+        super()
+      }
+      override providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: this.label } }
+      override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+        return this.entries.map(entry => ({ provider, id: entry.id, name: entry.name, inputModalities: ['text'] }))
+      }
+      override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        const found = this.entries.find(entry => entry.id === model)
+        return {
+          provider,
+          id: model,
+          name: found?.name ?? model,
+          inputModalities: ['text'],
+          ...(found?.efforts === undefined ? {} : {
+            reasoning: {
+              efforts: found.efforts.map(effort => ({ id: ReasoningEffortId(effort.id), name: effort.name })),
+              defaultEffort: ReasoningEffortId(found.efforts[0]!.id),
+            },
+          }),
+        }
+      }
+      override async * stream(): AsyncIterable<StreamChunk> {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    const hugeModels = Array.from({ length: 190 }, (_, index) => `builtin-${index}`)
+    fixture.ctx.llm.registerAdapter(['huge-builtin'], new ReplyAdapter('Huge Builtin', hugeModels))
+    fixture.ctx.llm.registerAdapter(['traex-agent'], new AcpCatalogAdapter('TraeX Agent (local ACP)', [
+      { id: 'default', name: 'TraeX active model' },
+      { id: 'deepseek-v4.1-flash', name: 'DeepSeek-V4.1-Flash', efforts: [
+        { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' },
+      ] },
+      { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', efforts: [
+        { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'xhigh', name: 'Xhigh' },
+      ] },
+      ...Array.from({ length: 11 }, (_, index) => ({ id: `traex-m-${index}`, name: `TraeX Model ${index}` })),
+    ]))
+    fixture.ctx.llm.registerAdapter(['agy-agent'], new AcpCatalogAdapter('Antigravity Agent (local ACP)', [
+      { id: 'default', name: 'Antigravity active model (Gemini 4 Neon)', efforts: [
+        { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra' },
+      ] },
+      { id: 'gemini-4-neon', name: 'Gemini 4 Neon', efforts: [
+        { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'xhigh', name: 'Extra' },
+      ] },
+      { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+      ...Array.from({ length: 9 }, (_, index) => ({ id: `agy-m-${index}`, name: `Agy Model ${index}` })),
+    ]))
+
+    // Select a late model inside the truncated huge-builtin provider so we also prove current.model is retained.
+    runtimeStore(fixture.service).setModelSelection(conversation, { provider: 'huge-builtin', model: 'builtin-185' })
+
+    await fixture.service.acceptInbound(message('evt-fair-catalog', '/model', 'command'))
+    await drive(fixture.service)
+    const picker = fixture.sends.at(-1)?.modelPicker
+    expect(picker).toBeDefined()
+    expect(picker!.models.length).toBeLessThanOrEqual(200)
+    expect(picker!.models.filter(model => model.provider === 'traex-agent')).toHaveLength(14)
+    expect(picker!.models.filter(model => model.provider === 'agy-agent')).toHaveLength(12)
+    expect(picker!.models).toContainEqual(expect.objectContaining({
+      provider: 'huge-builtin', id: 'builtin-185',
+    }))
+    expect(picker!.models).toContainEqual(expect.objectContaining({
+      provider: 'agy-agent', id: 'gemini-4-neon', effortIds: ['low', 'medium', 'high', 'xhigh'],
+    }))
+    expect(picker!.models).toContainEqual(expect.objectContaining({
+      provider: 'traex-agent', id: 'deepseek-v4.1-flash', effortIds: ['low', 'medium', 'high', 'max'],
+    }))
+    expect(picker!.efforts.map(effort => effort.id)).toEqual(
+      expect.arrayContaining(['low', 'medium', 'high', 'xhigh', 'max']),
+    )
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('warms a cold dynamic ACP catalog before rejecting card confirmation or clearing persisted effort', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-cold-acp-effort-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    class ColdCacheAcpAdapter extends LlmAdapter {
+      readonly requests: GenerateOptions[] = []
+      listCalls = 0
+      warm = false
+      override providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'Antigravity Agent (local ACP)' } }
+      override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+        this.listCalls += 1
+        this.warm = true
+        return [
+          { provider, id: 'default', name: 'Antigravity active model (Gemini 4 Neon)', inputModalities: ['text'] },
+          { provider, id: 'gemini-4-neon', name: 'Gemini 4 Neon', inputModalities: ['text'] },
+          { provider, id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)', inputModalities: ['text'] },
+        ]
+      }
+      override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        // Mirror TraexAcpAdapter: process-free resolveModel only exposes reasoning while catalog cache is warm.
+        if (!this.warm || model === 'gemini-pro-orchestrator-neon') {
+          return { provider, id: model, name: model, inputModalities: ['text'] }
+        }
+        return {
+          provider,
+          id: model,
+          name: model === 'gemini-4-neon' ? 'Gemini 4 Neon' : model,
+          inputModalities: ['text'],
+          reasoning: {
+            efforts: [
+              { id: ReasoningEffortId('low'), name: 'Low' },
+              { id: ReasoningEffortId('medium'), name: 'Medium' },
+              { id: ReasoningEffortId('high'), name: 'High' },
+              { id: ReasoningEffortId('xhigh'), name: 'Extra' },
+            ],
+            defaultEffort: ReasoningEffortId('high'),
+          },
+        }
+      }
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: `acp-${String(options.reasoningEffort ?? 'default')}` }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: `acp-${String(options.reasoningEffort ?? 'default')}` } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    const acp = new ColdCacheAcpAdapter()
+    fixture.ctx.llm.registerAdapter(['agy-agent'], acp)
+
+    await fixture.service.acceptInbound(message('evt-acp-picker', '/model', 'command'))
+    await drive(fixture.service)
+    const picker = fixture.sends.at(-1)!
+    const pickerMessageId = replyProviderMessageId(fixture.service, 'evt-acp-picker')
+    expect(acp.listCalls).toBe(1)
+
+    // Simulate cache TTL expiry / Host restart before the user clicks "确认选择".
+    acp.warm = false
+    const confirmCallback = {
+      operationId: picker.modelPicker!.operationId,
+      callbackEventId: 'card-callback-acp-cold',
+      callbackChatId: conversation.chat,
+      cardMessageId: pickerMessageId,
+      bindingId: picker.bindingId,
+      principal,
+      provider: 'agy-agent',
+      modelProvider: 'agy-agent',
+      model: 'gemini-4-neon',
+      reasoningEffort: 'xhigh',
+      expectedRevision: 0,
+    } as const
+    expect(fixture.service.settleModelSelection(confirmCallback)).toEqual({ status: 'pending' })
+    const settledWait = fixture.service.awaitModelSelection(confirmCallback, new AbortController().signal)
+    await fixture.service.whenIdle()
+    expect(await settledWait).toEqual({
+      status: 'selected',
+      selection: { provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'xhigh' },
+    })
+    expect(acp.listCalls).toBe(2)
+
+    // Simulate cache expiry / restart again before the next ordinary message: resolveExecutionRoute
+    // must warm the catalog once and preserve `reasoningEffort: 'xhigh'` instead of clearing SQLite.
+    acp.warm = false
+    await fixture.service.acceptInbound(message('evt-acp-turn-cold', 'run with xhigh'))
+    await drive(fixture.service)
+    expect(acp.listCalls).toBe(3)
+    expect(acp.requests).toHaveLength(1)
+    expect(acp.requests[0]).toMatchObject({
+      provider: 'agy-agent',
+      model: 'gemini-4-neon',
+      reasoningEffort: 'xhigh',
+    })
+    expect(runtimeStore(fixture.service).getModelSelection(conversation)).toMatchObject({
+      provider: 'agy-agent',
+      model: 'gemini-4-neon',
+      reasoningEffort: 'xhigh',
+    })
+
+    // Confirming a genuinely unsupported effort still rejects with invalid-effort even after warming.
+    await fixture.service.acceptInbound(message('evt-acp-picker-2', '/model', 'command'))
+    await drive(fixture.service)
+    const picker2 = fixture.sends.at(-1)!
+    const picker2MsgId = replyProviderMessageId(fixture.service, 'evt-acp-picker-2')
+    // Inject a stale/unsupported effort on an otherwise valid model by warming & resolving:
+    // use /model use to validate unsupported effort text path and cold-cache warm-up too.
+    acp.warm = false
+    await fixture.service.acceptInbound(message('evt-use-bad-effort', '/model use agy-agent/gemini-4-neon max', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('不支持 effort “max”')
+    expect(fixture.sends.at(-1)?.text).toContain('xhigh')
+    expect(runtimeStore(fixture.service).getModelSelection(conversation)).toMatchObject({
+      provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'xhigh',
+    })
+
+    // `/model use <provider/model> [effort]` warms cold cache, supports xhigh, detects no-op, and clears effort when omitted.
+    acp.warm = false
+    await fixture.service.acceptInbound(message('evt-use-same', '/model use agy-agent/gemini-4-neon xhigh', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('本会话已在使用 agy-agent/gemini-4-neon，effort：xhigh')
+
+    acp.warm = false
+    await fixture.service.acceptInbound(message('evt-use-medium', '/model use agy-agent/gemini-4-neon medium', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已切换到 agy-agent/gemini-4-neon，effort：medium')
+    expect(runtimeStore(fixture.service).getModelSelection(conversation)).toMatchObject({
+      provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'medium',
+    })
+
+    await fixture.service.acceptInbound(message('evt-use-clear', '/model use agy-agent/gemini-4-neon', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已切换到 agy-agent/gemini-4-neon。')
+    expect(runtimeStore(fixture.service).getModelSelection(conversation)?.reasoningEffort).toBeUndefined()
+
+    await fixture.service.acceptInbound(message('evt-use-extra-args', '/model use agy-agent/gemini-4-neon low extra', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('/model use <provider/model> [effort]')
+
+    // Verify picker2 still rejects an unsupported effort when the model loses effort support after card issuance.
+    const originalResolve = acp.resolveModel.bind(acp)
+    acp.resolveModel = async (provider, model) => {
+      if (model === 'gemini-4-neon') return { provider, id: model, name: 'Gemini 4 Neon', inputModalities: ['text'] }
+      return await originalResolve(provider, model)
+    }
+    const unsupportedCallback = {
+      operationId: picker2.modelPicker!.operationId,
+      callbackEventId: 'card-callback-acp-unsupported',
+      callbackChatId: conversation.chat,
+      cardMessageId: picker2MsgId,
+      bindingId: picker2.bindingId,
+      principal,
+      provider: 'agy-agent',
+      modelProvider: 'agy-agent',
+      model: 'gemini-4-neon',
+      reasoningEffort: 'xhigh',
+      expectedRevision: 0,
+    } as const
+    expect(fixture.service.settleModelSelection(unsupportedCallback)).toEqual({ status: 'pending' })
+    const rejectedWait = fixture.service.awaitModelSelection(unsupportedCallback, new AbortController().signal)
+    await fixture.service.whenIdle()
+    expect(await rejectedWait).toEqual({ status: 'rejected', reason: 'invalid-effort' })
+
+    await fixture.ctx.fiber.restart()
+  })
+
   test('indexes native business goals for the live owner and restores an awaiting-verification checkpoint', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goals-'))
     roots.push(root)

@@ -156,10 +156,23 @@ function findExecutable(name: string, pathValue: string | undefined): string {
   throw new Error(`lark-channel setup: cannot find ${name} in PATH`)
 }
 
-function servicePath(nodePath: string, dshPath: string, current: string | undefined): string {
+function defaultHomeDir(explicit?: string): string {
+  if (explicit !== undefined) return explicit
+  return process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir()
+}
+
+function servicePath(
+  nodePath: string,
+  dshPath: string,
+  current: string | undefined,
+  home: string | undefined = defaultHomeDir(),
+): string {
+  const userBins = home !== undefined && isAbsolute(home)
+    ? [join(home, '.local', 'bin'), join(home, '.antigravity', 'antigravity', 'bin')]
+    : []
   const values = [dirname(nodePath), dirname(dshPath), ...(current ?? '').split(':'),
-    '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
-  return [...new Set(values.filter(value => isAbsolute(value)))].join(':')
+    ...userBins, '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+  return [...new Set(values.filter(value => isAbsolute(value) && !/[\p{Cc}]/u.test(value)))].join(':')
 }
 
 function defaultRun(command: string, args: readonly string[]): CommandResult {
@@ -345,7 +358,7 @@ export async function installDshLaunchAgent(
   const currentPath = options.path ?? process.env.PATH
   const nodePath = realpathSync(options.nodePath ?? findExecutable('node', currentPath))
   const dshPath = realpathSync(options.dshPath ?? findExecutable('dsh', currentPath))
-  const path = servicePath(nodePath, dshPath, currentPath)
+  const path = servicePath(nodePath, dshPath, currentPath, defaultHomeDir(options.home))
   const run = options.run ?? defaultRun
   const wait = options.wait ?? defaultWait
 

@@ -149,7 +149,43 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
       expect(settings.entries[0]!.value['enabled']).toBe(true)
       expect(settings.entries[1]!.value).toEqual({ provider: 'traex-agent', model: 'Doubao-Seed-Code', reasoningEffort: 'high' })
 
+      const withXhigh = WRITE_RESULT.parse(await service.setDefaultModelRoute('agy-agent', 'gemini-4-neon', 'xhigh'))
+      expect(withXhigh.applied).toBe(true)
+      expect(withXhigh.note).toContain('（xhigh）')
+      expect(settings.entries[1]!.value).toEqual({ provider: 'agy-agent', model: 'gemini-4-neon', reasoningEffort: 'xhigh' })
+
       expect((await service.setDefaultModelRoute('bad provider!', 'default', '')).applied).toBe(false)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('includes reasoningEffort in note when falling back to agentDefaultModel.saveSelection', async () => {
+    const saveSelection = vi.fn(async () => undefined)
+    const { ctx, service } = await mountService({
+      entries: [
+        { ns: 'dsh-enhanced-traex-acp-provider', value: { enabled: true, command: '/bin/traex', agyEnabled: true, agyCommand: '/bin/agy' } },
+      ],
+      agentDefaultModel: { saveSelection },
+    })
+    try {
+      const res = WRITE_RESULT.parse(await service.setDefaultModelRoute('agy-agent', 'gemini-4-neon', 'xhigh'))
+      expect(res.applied).toBe(true)
+      expect(res.note).toContain('agy-agent / gemini-4-neon（xhigh）')
+      expect(saveSelection).toHaveBeenCalledWith({
+        provider: 'agy-agent',
+        model: 'gemini-4-neon',
+        reasoningEffort: 'xhigh',
+      })
+
+      const maxRes = WRITE_RESULT.parse(await service.setDefaultModelRoute('traex-agent', 'deepseek-v4.1-flash', 'max'))
+      expect(maxRes.applied).toBe(true)
+      expect(maxRes.note).toContain('traex-agent / deepseek-v4.1-flash（max）')
+      expect(saveSelection).toHaveBeenCalledWith({
+        provider: 'traex-agent',
+        model: 'deepseek-v4.1-flash',
+        reasoningEffort: 'max',
+      })
     } finally {
       await ctx.fiber.dispose()
     }
