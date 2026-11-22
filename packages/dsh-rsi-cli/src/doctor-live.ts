@@ -1,8 +1,9 @@
 import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
-import { access, readFile, stat } from 'node:fs/promises'
+import { access, lstat, readFile, stat } from 'node:fs/promises'
 import { createConnection } from 'node:net'
 import { userInfo } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
+import { parseDocument } from 'yaml'
 import {
   collectStatus,
   extractYamlTopLevelKeys,
@@ -548,6 +549,80 @@ function probePlatformPrerequisites(
   return checks
 }
 
+const ELECTRON_MANAGED_PROFILE_RE = /managed exclusively by the Electron application/iu
+const CORDIS_PATCH_CUSTOM_TAGS = [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }]
+
+async function readRegularFileText(
+  filePath: string,
+  label: string,
+): Promise<{ status: 'ok'; text: string } | { status: 'missing' } | { status: 'error'; error: string }> {
+  let meta
+  try {
+    meta = await lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing' }
+    return { status: 'error', error: `无法访问 ${label}（${filePath}）：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (!meta.isFile() || meta.isSymbolicLink()) {
+    return { status: 'error', error: `${label} 非普通文件：${filePath}` }
+  }
+  try {
+    return { status: 'ok', text: await readFile(filePath, 'utf8') }
+  } catch (error) {
+    return { status: 'error', error: `读取 ${label} 失败（${filePath}）：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/**
+ * Direct read-only disk validation for an Electron-managed desktop profile (`package.json` + optional
+ * `cordis.patch.yml`) when `dsh --dump-config` refuses access because the desktop app owns it.
+ */
+async function inspectElectronManagedProfileConfig(
+  dshHome: string,
+  profile: string,
+): Promise<{ ok: true; rows: DumpConfigRow[] } | { ok: false; error: string }> {
+  const profileDir = join(profilesDirectory(dshHome), profile)
+  const pkgFile = await readRegularFileText(join(profileDir, 'package.json'), 'package.json')
+  if (pkgFile.status === 'missing') {
+    return { ok: false, error: `package.json 不存在：${join(profileDir, 'package.json')}` }
+  }
+  if (pkgFile.status === 'error') {
+    return { ok: false, error: pkgFile.error }
+  }
+  let pkgParsed: unknown
+  try {
+    pkgParsed = JSON.parse(pkgFile.text)
+  } catch (error) {
+    return { ok: false, error: `package.json JSON 解析失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (pkgParsed === null || typeof pkgParsed !== 'object' || Array.isArray(pkgParsed)) {
+    return { ok: false, error: 'package.json 根结构必须为 JSON 对象' }
+  }
+
+  const patchFile = await readRegularFileText(join(profileDir, 'cordis.patch.yml'), 'cordis.patch.yml')
+  if (patchFile.status === 'missing') {
+    return { ok: true, rows: [] }
+  }
+  if (patchFile.status === 'error') {
+    return { ok: false, error: patchFile.error }
+  }
+
+  const doc = parseDocument(patchFile.text, { customTags: CORDIS_PATCH_CUSTOM_TAGS })
+  if (doc.errors.length > 0) {
+    return { ok: false, error: `cordis.patch.yml YAML 语法错误：${doc.errors[0]!.message}` }
+  }
+  let rootValue: unknown
+  try {
+    rootValue = doc.toJS()
+  } catch (error) {
+    return { ok: false, error: `cordis.patch.yml 解析失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+  if (rootValue !== null && rootValue !== undefined && !Array.isArray(rootValue)) {
+    return { ok: false, error: 'cordis.patch.yml 根结构必须为空或 YAML 序列' }
+  }
+  return { ok: true, rows: parseDumpConfigRows(patchFile.text) }
+}
+
 /**
  * Run a comprehensive, strictly read-only live diagnostic pass over bound Host, credentials,
  * `traex`/`agy` CLI availability & auth, profile config dumps, autonomy readiness, ports,
@@ -667,15 +742,40 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
     const hasPlugin = (slug: string): boolean => plugins.some(item => item.name === `@dsh-enhanced/${slug}`)
 
     const dump = runner(dshExecutable, ['--profile', profile, '--dump-config'], { timeoutMs: 20_000, env: dshEnv })
-    const configDumpOk = dump.status === 0 && dump.stdout.trim().length > 0
-    const rows = configDumpOk ? parseDumpConfigRows(dump.stdout) : []
-    if (!configDumpOk) {
+    let configDumpOk = dump.status === 0 && dump.stdout.trim().length > 0
+    let configDumpError: string | undefined = !configDumpOk ? (dump.stderr.trim() || `退出码 ${dump.status}`) : undefined
+    let rows: DumpConfigRow[] = configDumpOk ? parseDumpConfigRows(dump.stdout) : []
+    if (dump.status !== 0 && ELECTRON_MANAGED_PROFILE_RE.test(`${dump.stderr}\n${dump.stdout}`)) {
+      const fallback = await inspectElectronManagedProfileConfig(dshHome, profile)
+      if (fallback.ok) {
+        configDumpOk = true
+        configDumpError = undefined
+        rows = fallback.rows
+        checks.push({
+          id: `profile.${profile}.dump`,
+          category: 'profile',
+          status: 'ok',
+          summary: `profile ${profile} 由桌面端 Electron 独占托管；已直接校验 cordis.patch.yml 与 package.json`,
+        })
+      } else {
+        configDumpOk = false
+        configDumpError = fallback.error
+        rows = []
+        checks.push({
+          id: `profile.${profile}.dump`,
+          category: 'profile',
+          status: 'fail',
+          summary: `profile ${profile} --dump-config 执行失败`,
+          detail: fallback.error,
+        })
+      }
+    } else if (!configDumpOk) {
       checks.push({
         id: `profile.${profile}.dump`,
         category: 'profile',
         status: 'fail',
         summary: `profile ${profile} --dump-config 执行失败`,
-        detail: dump.stderr.trim() || `退出码 ${dump.status}`,
+        detail: configDumpError ?? `退出码 ${dump.status}`,
       })
     }
 
@@ -796,7 +896,7 @@ export async function collectLiveDoctorReport(options: LiveDoctorOptions): Promi
       serviceInstalled: profileEntry.serviceInstalled,
       serviceActive: profileEntry.serviceActive,
       configDumpOk,
-      ...(!configDumpOk ? { configDumpError: dump.stderr.trim() || `退出码 ${dump.status}` } : {}),
+      ...(!configDumpOk ? { configDumpError: configDumpError ?? (dump.stderr.trim() || `退出码 ${dump.status}`) } : {}),
       ...(defaultModelRoute ? { defaultModelRoute } : {}),
       providers: {
         traexConfigured: Boolean(acpRow),

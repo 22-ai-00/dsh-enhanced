@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { createFakeBin, type FakeBin } from './fake-bin.ts'
 import {
@@ -105,6 +105,39 @@ describe('paths 枚举', () => {
       ])
       expect(plugins.find(p => p.name === '@dsh-enhanced/personal-assistant')?.linkTarget)
         .toBe(join(fixture.checkout, 'plugins', 'personal-assistant'))
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('pnpm 虚拟存储符号链接判定为 npm，外部 checkout 符号链接判定为 local', async () => {
+    const fixture = await makeFixture()
+    try {
+      const nodeModulesDir = join(fixture.dshHome, 'profiles', 'web', 'node_modules')
+      const scopeDir = join(nodeModulesDir, '@dsh-enhanced')
+      const relPnpmPkg = join(nodeModulesDir, '.pnpm', '@dsh-enhanced+assistant-growth-driver@0.1.81', 'node_modules', '@dsh-enhanced', 'assistant-growth-driver')
+      const absPnpmPkg = join(nodeModulesDir, '.pnpm', '@dsh-enhanced+assistant-dreaming@0.1.81', 'node_modules', '@dsh-enhanced', 'assistant-dreaming')
+      const siblingFakeStore = join(nodeModulesDir, '.pnpm-external', '@dsh-enhanced', 'owner-console')
+      await mkdir(relPnpmPkg, { recursive: true })
+      await mkdir(absPnpmPkg, { recursive: true })
+      await mkdir(siblingFakeStore, { recursive: true })
+
+      await symlink(
+        '../.pnpm/@dsh-enhanced+assistant-growth-driver@0.1.81/node_modules/@dsh-enhanced/assistant-growth-driver',
+        join(scopeDir, 'assistant-growth-driver'),
+      )
+      await symlink(absPnpmPkg, join(scopeDir, 'assistant-dreaming'))
+      await symlink('../.pnpm-external/@dsh-enhanced/owner-console', join(scopeDir, 'owner-console'))
+
+      const plugins = await listProfilePlugins(fixture.dshHome, 'web')
+      expect(plugins).toEqual([
+        { name: '@dsh-enhanced/assistant-dreaming', kind: 'npm' },
+        { name: '@dsh-enhanced/assistant-growth-driver', kind: 'npm' },
+        { name: '@dsh-enhanced/assistant-policy', kind: 'npm' },
+        { name: '@dsh-enhanced/lark-channel', kind: 'npm' },
+        { name: '@dsh-enhanced/owner-console', kind: 'local', linkTarget: resolve(siblingFakeStore) },
+        { name: '@dsh-enhanced/personal-assistant', kind: 'local', linkTarget: resolve(join(fixture.checkout, 'plugins', 'personal-assistant')) },
+      ])
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }

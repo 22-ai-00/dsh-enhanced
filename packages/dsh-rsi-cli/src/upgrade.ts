@@ -1,11 +1,12 @@
-import { existsSync } from 'node:fs'
-import { chmod, cp, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { constants, existsSync } from 'node:fs'
+import { access, chmod, cp, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { parseDocument } from 'yaml'
+import { isMap, isScalar, parseDocument } from 'yaml'
 import { collectLiveDoctorReport, type LiveDoctorReport } from './doctor-live.ts'
 import { withDshHomeLifecycleLock } from './home-lifecycle-lock.ts'
+import { isSupportedCandidateVersion } from './host-runtime.ts'
 import { inspectBoundHostRuntime, prepareHostUpdatePlan, type BoundHostInspection, type InstallHostPorts } from './install-host.ts'
 import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
 import { listProfilePlugins, listProfiles, profilesDirectory } from './paths.ts'
@@ -142,6 +143,9 @@ export interface UpgradeDeps {
     registryUrl: string
     npmPlugins: readonly string[]
     runner: CommandRunner
+    platform?: NodeJS.Platform
+    osHome?: string
+    env?: NodeJS.ProcessEnv
   }) => Promise<void> | void
   readonly verifyHealth?: (input: {
     dshHome: string
@@ -179,9 +183,27 @@ export interface UpgradeDeps {
 }
 
 const DEFAULT_REGISTRY_URL = 'https://registry.npmjs.org'
-const REGISTRY_TIMEOUT_MS = 4_000
+const REGISTRY_TIMEOUT_MS = 8_000
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u
 const FROZEN_DSH_SELECTOR = '0.2.2-rc.5'
+const PROFILE_BACKUP_FILES = [
+  'cordis.patch.yml',
+  'package.json',
+  'pnpm-workspace.yaml',
+  'pnpm-lock.yaml',
+  'package-lock.json',
+] as const
+const NON_REGISTRY_SPEC_PREFIXES = [
+  'file:',
+  'link:',
+  'workspace:',
+  'portal:',
+  'git+',
+  'http:',
+  'https:',
+  'npm:',
+] as const
+const DSH_APP_PNPM_SCRIPT = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs'
 
 const CREATION_ROW_TABLES = [
   'source_creation_verifications',
@@ -521,44 +543,239 @@ async function fetchNpmLatestVersion(
   registryUrl: string,
   packageName: string,
   timeoutMs: number,
-): Promise<{ ok: true; latest?: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; latest: string } | { ok: false; error: string }> {
+  // Preserve `@scope/name` slash so both registry.npmjs.org and test stubs match.
   const slug = packageName.startsWith('@')
     ? `@${encodeURIComponent(packageName.slice(1)).replace('%2F', '/')}`
     : encodeURIComponent(packageName)
-  const url = `${registryUrl}/${slug}`
+  const headers = { Accept: 'application/vnd.npm.install-v1+json, application/json' }
+  const latestUrl = `${registryUrl}/${slug}/latest`
   try {
-    const response = await fetchImpl(url, {
-      headers: { Accept: 'application/vnd.npm.install-v1+json, application/json' },
+    let response = await fetchImpl(latestUrl, {
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     })
+    if (response.status === 404 || response.status === 405) {
+      response = await fetchImpl(`${registryUrl}/${slug}`, {
+        headers,
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    }
     if (!response.ok) {
       return { ok: false, error: `HTTP ${response.status} (${packageName})` }
     }
-    const payload = await response.json() as { 'dist-tags'?: { latest?: unknown } }
-    const latest = payload?.['dist-tags']?.latest
-    if (typeof latest !== 'string' || !SEMVER_RE.test(latest.trim())) {
+    const payload = await response.json() as { version?: unknown; 'dist-tags'?: { latest?: unknown } }
+    const rawLatest = typeof payload?.version === 'string' && payload.version.trim().length > 0
+      ? payload.version
+      : payload?.['dist-tags']?.latest
+    if (typeof rawLatest !== 'string' || !SEMVER_RE.test(rawLatest.trim())) {
       return { ok: false, error: `registry 返回的 ${packageName} latest 版本无效` }
     }
-    return { ok: true, latest: latest.trim() }
+    return { ok: true, latest: rawLatest.trim() }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
-async function defaultUpgradeProfilePackages(input: {
+function isNonRegistrySpec(value: unknown): boolean {
+  if (typeof value !== 'string') return true
+  const lower = value.trim().toLowerCase()
+  return NON_REGISTRY_SPEC_PREFIXES.some(prefix => lower.startsWith(prefix))
+}
+
+async function writeTextAtomically(targetPath: string, content: string, mode: number): Promise<void> {
+  const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+  try {
+    await writeFile(tempPath, content, { encoding: 'utf8', mode })
+    await chmod(tempPath, mode)
+    await rename(tempPath, targetPath)
+  } catch (error) {
+    await rm(tempPath, { force: true })
+    throw error
+  }
+}
+
+async function updatePnpmProfilePackageJson(
+  profileDir: string,
+  profile: string,
+  targetVersion: string,
+  npmPlugins: readonly string[],
+): Promise<void> {
+  const pkgPath = join(profileDir, 'package.json')
+  const pkgStat = await lstat(pkgPath)
+  if (!pkgStat.isFile() || pkgStat.isSymbolicLink()) {
+    throw new Error(`profile ${profile} package.json 非普通文件：${pkgPath}`)
+  }
+  const pkgMode = pkgStat.mode & 0o777
+  const raw = await readFile(pkgPath, 'utf8')
+  const parsed = asObject(JSON.parse(raw) as unknown)
+  if (!parsed) {
+    throw new Error(`profile ${profile} package.json 格式无效：根必须为 JSON 对象`)
+  }
+
+  let hasAnyEnhanced = false
+  let changed = false
+  for (const sectionName of ['dependencies', 'optionalDependencies', 'devDependencies'] as const) {
+    const sectionVal = parsed[sectionName]
+    if (sectionVal === undefined) continue
+    const section = asObject(sectionVal)
+    if (!section) {
+      throw new Error(`profile ${profile} package.json 字段 ${sectionName} 必须为对象`)
+    }
+    for (const [depName, depSpec] of Object.entries(section)) {
+      if (!depName.startsWith('@dsh-enhanced/')) continue
+      hasAnyEnhanced = true
+      if (!isNonRegistrySpec(depSpec) && section[depName] !== targetVersion) {
+        section[depName] = targetVersion
+        changed = true
+      }
+    }
+  }
+
+  if (!hasAnyEnhanced) {
+    const deps = asObject(parsed.dependencies) ?? {}
+    for (const plugin of npmPlugins) {
+      if (deps[plugin] !== targetVersion) {
+        deps[plugin] = targetVersion
+        changed = true
+      }
+    }
+    parsed.dependencies = deps
+  }
+
+  if (changed) {
+    const trailing = raw.endsWith('\n') ? '\n' : ''
+    await writeTextAtomically(pkgPath, `${JSON.stringify(parsed, null, 2)}${trailing}`, pkgMode)
+  }
+}
+
+async function updatePnpmWorkspaceOverrides(
+  profileDir: string,
+  profile: string,
+  targetVersion: string,
+): Promise<void> {
+  const wsPath = join(profileDir, 'pnpm-workspace.yaml')
+  let wsStat
+  try {
+    wsStat = await lstat(wsPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (!wsStat.isFile() || wsStat.isSymbolicLink()) {
+    throw new Error(`profile ${profile} pnpm-workspace.yaml 非普通文件：${wsPath}`)
+  }
+  const wsMode = wsStat.mode & 0o777
+  const raw = await readFile(wsPath, 'utf8')
+  const doc = parseDocument(raw)
+  if (doc.errors.length > 0) {
+    throw new Error(`profile ${profile} pnpm-workspace.yaml YAML 语法错误：${doc.errors[0]!.message}`)
+  }
+  const overrides = doc.get('overrides', true)
+  if (!isMap(overrides)) return
+
+  let changed = false
+  for (const pair of overrides.items) {
+    const keyVal = isScalar(pair.key) ? pair.key.value : pair.key
+    if (typeof keyVal !== 'string' || !keyVal.startsWith('@dsh-enhanced/') || keyVal.includes('>')) continue
+    if (!isScalar(pair.value) || typeof pair.value.value !== 'string') continue
+    if (isNonRegistrySpec(pair.value.value)) continue
+    if (pair.value.value !== targetVersion) {
+      pair.value.value = targetVersion
+      changed = true
+    }
+  }
+
+  if (changed) {
+    await writeTextAtomically(wsPath, doc.toString(), wsMode)
+  }
+}
+
+async function checkRegularFileAccess(filePath: string, modeMask: number): Promise<boolean> {
+  try {
+    await access(filePath, modeMask)
+    return (await stat(filePath)).isFile()
+  } catch {
+    return false
+  }
+}
+
+async function resolvePnpmCommand(
+  env: NodeJS.ProcessEnv,
+  osHome: string,
+  platform: NodeJS.Platform,
+): Promise<{ command: string; prefixArgs: readonly string[] }> {
+  const searchDirs = [
+    ...(env.PATH ?? '').split(delimiter).filter(Boolean),
+    join(osHome, '.local', 'bin'),
+    join(osHome, '.npm-global', 'bin'),
+    join(osHome, 'Library', 'pnpm'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ]
+  const seen = new Set<string>()
+  for (const dir of searchDirs) {
+    if (seen.has(dir)) continue
+    seen.add(dir)
+    const candidate = join(dir, 'pnpm')
+    if (await checkRegularFileAccess(candidate, constants.X_OK)) {
+      return { command: candidate, prefixArgs: [] }
+    }
+  }
+  if (platform === 'darwin' && await checkRegularFileAccess(DSH_APP_PNPM_SCRIPT, constants.R_OK)) {
+    return { command: process.execPath, prefixArgs: [DSH_APP_PNPM_SCRIPT] }
+  }
+  return { command: 'pnpm', prefixArgs: [] }
+}
+
+/**
+ * Upgrade a profile's `@dsh-enhanced/*` packages using pnpm (updating `package.json` and
+ * `pnpm-workspace.yaml` overrides while preserving local protocol specs) or npm with `--legacy-peer-deps`.
+ */
+export async function defaultUpgradeProfilePackages(input: {
   dshHome: string
   profile: string
   targetVersion: string
   registryUrl: string
   npmPlugins: readonly string[]
   runner: CommandRunner
+  platform?: NodeJS.Platform
+  osHome?: string
+  env?: NodeJS.ProcessEnv
 }): Promise<void> {
   if (input.npmPlugins.length === 0) return
   const profileDir = join(profilesDirectory(input.dshHome), input.profile)
+  const isPnpmProfile = existsSync(join(profileDir, 'pnpm-lock.yaml'))
+    || existsSync(join(profileDir, 'pnpm-workspace.yaml'))
+    || existsSync(join(profileDir, 'node_modules', '.pnpm'))
+
+  if (isPnpmProfile) {
+    await updatePnpmProfilePackageJson(profileDir, input.profile, input.targetVersion, input.npmPlugins)
+    await updatePnpmWorkspaceOverrides(profileDir, input.profile, input.targetVersion)
+    const env = input.env ?? process.env
+    const osHome = input.osHome ?? env.HOME ?? homedir()
+    const platform = input.platform ?? process.platform
+    const pnpmCmd = await resolvePnpmCommand(env, osHome, platform)
+    const res = input.runner(pnpmCmd.command, [
+      ...pnpmCmd.prefixArgs,
+      'install',
+      '--dir', profileDir,
+      '--no-frozen-lockfile',
+      '--ignore-scripts',
+      '--registry', input.registryUrl,
+    ])
+    if (res.status !== 0) {
+      const detail = res.stderr.trim() || res.stdout.trim()
+      throw new Error(`profile ${input.profile} pnpm 升级失败（退出码 ${res.status}）：${detail}`)
+    }
+    return
+  }
+
   const specs = input.npmPlugins.map(pkg => `${pkg}@${input.targetVersion}`)
   const res = input.runner('npm', [
     'install',
     '--prefix', profileDir,
+    '--legacy-peer-deps',
     '--no-audit',
     '--no-fund',
     '--ignore-scripts',
@@ -576,14 +793,7 @@ async function defaultUpgradeHost(input: {
 }, ports?: InstallHostPorts): Promise<void> {
   const plan = await prepareHostUpdatePlan({ dshHome: input.dshHome, selector: input.targetVersion }, ports)
   if (plan.status === 'current') return
-  const tempPath = `${plan.bindingPath}.tmp-${process.pid}-${Date.now()}`
-  try {
-    await writeFile(tempPath, plan.candidateBindingSource, { encoding: 'utf8', mode: 0o600 })
-    await rename(tempPath, plan.bindingPath)
-  } catch (error) {
-    await rm(tempPath, { force: true })
-    throw error
-  }
+  await writeTextAtomically(plan.bindingPath, plan.candidateBindingSource, 0o600)
 }
 
 async function defaultVerifyHealth(input: {
@@ -661,7 +871,7 @@ async function createUpgradeBackup(dshHome: string, profiles: readonly string[])
     const profBackupDir = join(backupDir, 'profiles', profile)
     await mkdir(profBackupDir, { recursive: true, mode: 0o700 })
     const backedFiles: string[] = []
-    for (const fileName of ['cordis.patch.yml', 'package.json', 'pnpm-lock.yaml', 'package-lock.json']) {
+    for (const fileName of PROFILE_BACKUP_FILES) {
       const src = join(profileDir, fileName)
       const dst = join(profBackupDir, fileName)
       if (await copyIfRegularFile(src, dst)) {
@@ -706,11 +916,13 @@ async function restoreUpgradeBackup(
     }
 
     for (const item of backup.profileBackups) {
-      for (const fileName of ['cordis.patch.yml', 'package.json', 'pnpm-lock.yaml', 'package-lock.json']) {
+      for (const fileName of PROFILE_BACKUP_FILES) {
         const src = join(item.backupDir, fileName)
         const dst = join(item.profileDir, fileName)
         if (item.files.includes(fileName)) {
+          const meta = await lstat(src)
           await cp(src, dst, { force: true })
+          await chmod(dst, meta.mode & 0o777)
         } else {
           await rm(dst, { force: true })
         }
@@ -864,19 +1076,25 @@ export async function runUpgrade(
   let latestDshHostVersion: string | undefined
   let registryError: string | undefined
 
-  if (options.targetVersion && !SEMVER_RE.test(options.targetVersion.trim())) {
+  const explicitTargetVersion = options.targetVersion?.trim()
+  if (options.targetVersion !== undefined && (!explicitTargetVersion || !SEMVER_RE.test(explicitTargetVersion))) {
     blockedReasons.push(`无效的目标版本号：${options.targetVersion}`)
   }
-  if (options.dshVersion && !SEMVER_RE.test(options.dshVersion.trim())) {
+  const explicitDshVersion = options.dshVersion?.trim()
+  if (options.dshVersion !== undefined && (!explicitDshVersion || !SEMVER_RE.test(explicitDshVersion))) {
     blockedReasons.push(`无效的 Host 目标版本号：${options.dshVersion}`)
+  } else if (explicitDshVersion && !isSupportedCandidateVersion(explicitDshVersion) && !deps.upgradeHost) {
+    blockedReasons.push(`不支持的 Host 目标版本 ${explicitDshVersion}：当前仅支持已验证基线 ${FROZEN_DSH_SELECTOR}`)
   }
 
   const shouldCheckRegistry = typeof fetchImpl === 'function'
   if (shouldCheckRegistry) {
-    const cliQuery = await fetchNpmLatestVersion(fetchImpl, registryUrl, '@dsh-enhanced/dsh-rsi-cli', timeoutMs)
-    const dshQuery = mode === 'frozen-linux-systemd'
-      ? { ok: true as const, latest: FROZEN_DSH_SELECTOR }
-      : await fetchNpmLatestVersion(fetchImpl, registryUrl, '@deepseek-ai/dsh', timeoutMs)
+    const [cliQuery, dshQuery] = await Promise.all([
+      fetchNpmLatestVersion(fetchImpl, registryUrl, '@dsh-enhanced/dsh-rsi-cli', timeoutMs),
+      mode === 'frozen-linux-systemd'
+        ? Promise.resolve({ ok: true as const, latest: FROZEN_DSH_SELECTOR })
+        : fetchNpmLatestVersion(fetchImpl, registryUrl, '@deepseek-ai/dsh', timeoutMs),
+    ])
     if (cliQuery.ok || dshQuery.ok) {
       registryStatus = 'ok'
       if (cliQuery.ok) latestEnhancedVersion = cliQuery.latest
@@ -885,14 +1103,19 @@ export async function runUpgrade(
       if (!dshQuery.ok) registryError = registryError ? `${registryError}; ${dshQuery.error}` : dshQuery.error
     } else {
       registryStatus = 'unavailable'
-      registryError = cliQuery.error
+      registryError = cliQuery.error === dshQuery.error ? cliQuery.error : `${cliQuery.error}; ${dshQuery.error}`
     }
   }
 
-  const targetEnhancedVersion = options.targetVersion?.trim() ?? latestEnhancedVersion
+  const targetEnhancedVersion = explicitTargetVersion || latestEnhancedVersion
+  // Clamp automatic Host target to the validated baseline when upstream publishes a newer untested rc/version.
   const targetDshVersion = mode === 'frozen-linux-systemd'
-    ? (options.dshVersion?.trim() ?? FROZEN_DSH_SELECTOR)
-    : (options.dshVersion?.trim() ?? latestDshHostVersion)
+    ? (explicitDshVersion || FROZEN_DSH_SELECTOR)
+    : (explicitDshVersion || (
+      latestDshHostVersion && !isSupportedCandidateVersion(latestDshHostVersion) && semverIsNewer(latestDshHostVersion, FROZEN_DSH_SELECTOR)
+        ? FROZEN_DSH_SELECTOR
+        : latestDshHostVersion
+    ))
 
   const enhancedUpgradeAvailable = semverIsNewer(targetEnhancedVersion, installedEnhancedVersion)
   const hostUpgradeAvailable = boundHostStatus === 'ready'
@@ -905,7 +1128,7 @@ export async function runUpgrade(
   const backupFiles: string[] = []
   if (boundHostStatus === 'ready') backupFiles.push(join(canonicalHome, '.dsh-rsi-host.json'))
   for (const profile of targetProfiles) {
-    for (const fileName of ['cordis.patch.yml', 'package.json', 'pnpm-lock.yaml', 'package-lock.json']) {
+    for (const fileName of PROFILE_BACKUP_FILES) {
       const candidate = join(profilesDirectory(canonicalHome), profile, fileName)
       if (existsSync(candidate)) backupFiles.push(candidate)
     }
@@ -1208,6 +1431,9 @@ export async function runUpgrade(
             registryUrl,
             npmPlugins,
             runner,
+            platform,
+            osHome,
+            env,
           })
         }
       }
@@ -1295,6 +1521,9 @@ export function formatUpgradeReport(report: UpgradeReport): string {
   lines.push(`DSH_HOME：${report.dshHome}`)
   lines.push(`部署模式：${report.mode}${report.frozenSystemd.detected ? `（profiles: ${report.frozenSystemd.profiles.join(', ')}）` : ''}`)
   lines.push(`CLI 版本：${report.packages.cliPackageVersion}；已安装 @dsh-enhanced/*：${report.packages.installedEnhancedVersion ?? '未检测到'}${report.packages.targetEnhancedVersion ? ` -> 目标：${report.packages.targetEnhancedVersion}` : ''}`)
+  if (semverIsNewer(report.packages.targetEnhancedVersion, report.packages.cliPackageVersion)) {
+    lines.push(`提示：全局 dsh-rsi CLI 当前为 ${report.packages.cliPackageVersion}，可运行 dsh-rsi update 同步升级至 ${report.packages.targetEnhancedVersion}`)
+  }
   lines.push(`私有 Host（.dsh-rsi-host.json）：${report.packages.boundHost.status}${report.packages.boundHost.installedVersion ? ` ${report.packages.boundHost.installedVersion}` : ''}${report.packages.boundHost.targetVersion ? ` -> ${report.packages.boundHost.targetVersion}` : ''}`)
   lines.push(`Registry（${report.registry.url}）：${report.registry.status}${report.registry.error ? `（${report.registry.error}）` : ''}`)
   lines.push(`迁移就绪：${report.readiness.ok ? '就绪' : '阻断'}（bindingOk=${report.readiness.bindingOk}, ledgersOk=${report.readiness.ledgersOk}）`)

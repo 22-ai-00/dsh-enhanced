@@ -194,11 +194,7 @@ intake 吻合度卡片只读：两个输入框只决定查询哪个 Evaluation �
   - 本机编程 CLI 就绪探测仅在主人显式触发时执行无 shell（`execFile`）只读命令（`traex login status`
     或 `agy --version` + `agy models`），传递最小环境变量白名单、有限超时与 15 秒缓存；绝不触发模型推理。
   - **版本检查与自助升级**（`checkSelfUpgrade` / `dryRunSelfUpgrade` / `runSelfUpgrade`）：严格只读读取
-    `$DSH_HOME/.dsh-rsi-host.json`（`O_NOFOLLOW` / `0o600`）与运行时包版本；通过有界超时的
-    `dsh-rsi upgrade --check/--dry-run --json` 或 `https://registry.npmjs.org/@dsh-enhanced%2Fowner-console/latest`
-    获取最新版本（带 60 秒 TTL 缓存与离线回退）。在非受控本地 / macOS profile 且主人完成预演与明确二次确认后，
-    以无 shell 独立后台进程启动 `dsh-rsi upgrade --yes`（日志写入 `$DSH_HOME/logs/`）；在受控 Linux systemd
-    profile 上拒绝进程内自升级并仅展示带外终端升级命令。
+    `$DSH_HOME/.dsh-rsi-host.json`（`O_NOFOLLOW` / `0o600`）与运行时包版本；子进程环境变量沿用最小白名单并严格过滤密钥/token，校验并保留合法绝对路径的 `DSH_DESKTOP_NODE_EXECUTABLE`（供桌面端内置 `node` 包装脚本执行），注入 `DSH_HOME` 并去重追加实际存在的用户可执行目录（`~/.local/bin`、`~/.npm-global/bin`、`~/Library/pnpm`、`/opt/homebrew/bin`、`/usr/local/bin`；Windows 为 `%APPDATA%\npm`）到 `PATH`。通过有界超时的 `dsh-rsi upgrade --check`（25 秒）/ `--dry-run --json`（30 秒）或 `https://registry.npmjs.org/@dsh-enhanced%2Fowner-console/latest` 获取最新版本（带 60 秒 TTL 缓存与离线回退）；若 `dsh-rsi` 返回 `ENOENT`/`ENOTDIR`/`EACCES` 则回退扫描上述用户可执行目录并缓存绝对路径，且细化区分未安装、超时（`ETIMEDOUT`）、离线及脱敏后的 CLI 错误/阻塞诊断（预演通过后自动清理陈旧失败缓存并激活面板升级确认入口）。在非受控本地 / macOS profile 且主人完成预演与明确二次确认后，以无 shell 独立后台进程启动 `dsh-rsi upgrade --yes`（`standard-local` 模式自动附加 `--confirm-dsh-home-stopped`，`macos-launchd` 保持 LaunchAgent 停启事务参数不变；日志写入 `$DSH_HOME/logs/`）；在受控 Linux systemd profile 上拒绝进程内自升级并仅展示带外终端升级命令。
 - 安装动作因此会经由 Host 启动 pnpm 并访问 registry（与 `dsh plugin` 相同）；只在主人点击时发生。
   依赖构建脚本只有在主人于面板再次确认后、且仅针对 Host 记入 `pendingBuilds` 或安装输出中读到的
   精确名称才被批准；确认写入 profile 的 `allowBuilds` 后由服务端重试，不经模型。

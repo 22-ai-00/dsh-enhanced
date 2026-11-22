@@ -1,15 +1,16 @@
 import { createRequire } from 'node:module'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { defaultExecProbe, sanitizedProbeEnv, type ProbeExecFn } from './probes.js'
+import { defaultExecProbe, redactProbeDetail, sanitizedProbeEnv, type ProbeExecFn, type ProbeExecResult } from './probes.js'
 import { boundedConfig, hasControlChars, isSingleLineCommand, type SettingsService } from './settings.js'
 import type { SelfUpgradePreview, SelfUpgradeStatus, OwnerConsoleWriteResult } from './typert.js'
 import { version as PACKAGE_VERSION } from './version.js'
 
 const CACHE_TTL_MS = 60_000
-const CLI_CHECK_TIMEOUT_MS = 8_000
-const CLI_DRY_RUN_TIMEOUT_MS = 10_000
+const CLI_CHECK_TIMEOUT_MS = 25_000
+const CLI_DRY_RUN_TIMEOUT_MS = 30_000
 const REGISTRY_TIMEOUT_MS = 6_000
 const MAX_HOST_METADATA_BYTES = 16_384
 const MAX_REGISTRY_BYTES = 32_768
@@ -59,6 +60,7 @@ interface ResolvedUpgradeContext {
 }
 
 interface ParsedCliPayload {
+  readonly mode: string | null
   readonly frozenSystemdProfile: boolean
   readonly currentEnhancedVersion: string
   readonly latestEnhancedVersion: string | null
@@ -275,6 +277,93 @@ function buildCliUpgradeCommand(dshHome: string | null, profileName: string, fro
   return args.join(' ')
 }
 
+function candidateUpgradeBinDirs(
+  envSource: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): readonly string[] {
+  if (platform === 'win32') {
+    const appData = envSource['APPDATA']?.trim()
+    return appData !== undefined && appData !== '' ? [join(appData, 'npm')] : []
+  }
+  const home = envSource['HOME']?.trim() || homedir()
+  return [
+    join(home, '.local', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, 'Library', 'pnpm'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ]
+}
+
+function normalizePathKey(entry: string, platform: NodeJS.Platform): string {
+  const trimmed = entry.trim().replace(/[\\/]+$/u, '') || entry.trim()
+  return platform === 'win32' ? trimmed.toLowerCase() : trimmed
+}
+
+/** Build sanitized upgrade child environment with `DSH_HOME` and existing user executable directories on `PATH`. */
+export function buildUpgradeProbeEnv(
+  envSource: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  dshHome: string | null = null,
+): NodeJS.ProcessEnv {
+  const env = sanitizedProbeEnv(envSource)
+  if (dshHome !== null && dshHome.trim() !== '') {
+    env['DSH_HOME'] = dshHome
+  }
+  const pathDelimiter = platform === 'win32' ? ';' : ':'
+  const pathEntries = (env['PATH'] ?? '')
+    .split(pathDelimiter)
+    .map(entry => entry.trim())
+    .filter(entry => entry !== '')
+  const seen = new Set(pathEntries.map(entry => normalizePathKey(entry, platform)))
+  for (const dir of candidateUpgradeBinDirs(envSource, platform)) {
+    const key = normalizePathKey(dir, platform)
+    if (seen.has(key) || !existsSync(dir)) continue
+    seen.add(key)
+    pathEntries.push(dir)
+  }
+  if (pathEntries.length > 0) {
+    env['PATH'] = pathEntries.join(pathDelimiter)
+  }
+  return env
+}
+
+function isExecutableBinary(candidatePath: string, platform: NodeJS.Platform): boolean {
+  try {
+    const st = statSync(candidatePath)
+    if (!st.isFile()) return false
+    return platform === 'win32' || (st.mode & 0o111) !== 0
+  } catch {
+    return false
+  }
+}
+
+function discoverDshRsiBinary(
+  envSource: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const names = platform === 'win32' ? ['dsh-rsi.cmd', 'dsh-rsi.exe'] : ['dsh-rsi']
+  for (const dir of candidateUpgradeBinDirs(envSource, platform)) {
+    for (const name of names) {
+      const candidate = join(dir, name)
+      if (isExecutableBinary(candidate, platform)) return candidate
+    }
+  }
+  return undefined
+}
+
+function isMissingBinaryError(result: ProbeExecResult): boolean {
+  return result.errorCode === 'ENOENT' || result.errorCode === 'ENOTDIR' || result.errorCode === 'EACCES'
+}
+
+function isPlainObject(input: unknown): input is Readonly<Record<string, unknown>> {
+  return input !== null && typeof input === 'object' && !Array.isArray(input)
+}
+
+function upgradeCacheKey(ctx: ResolvedUpgradeContext): string {
+  return `${ctx.dshHome ?? ''}::${ctx.profileName}`
+}
+
 function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): ParsedCliPayload | null {
   const trimmed = stdout.trim()
   if (trimmed === '') return null
@@ -283,21 +372,27 @@ function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): Parsed
   let parsed: Record<string, unknown>
   try {
     const raw = JSON.parse(trimmed.slice(jsonStart)) as unknown
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+    if (!isPlainObject(raw)) return null
     parsed = raw as Record<string, unknown>
   } catch {
     return null
   }
   if (parsed['command'] !== 'upgrade' && parsed['schemaVersion'] !== 1) return null
+  if (parsed['command'] !== 'upgrade'
+    && (!isPlainObject(parsed['packages']) || !isPlainObject(parsed['readiness']) || !isPlainObject(parsed['plan']))) {
+    return null
+  }
 
-  const packages = boundedConfig(parsed['packages'])
-  const boundHost = boundedConfig(packages['boundHost'])
-  const registry = boundedConfig(parsed['registry'])
-  const readiness = boundedConfig(parsed['readiness'])
-  const plan = boundedConfig(parsed['plan'])
-  const frozenSystemd = boundedConfig(parsed['frozenSystemd'])
+  const packages = isPlainObject(parsed['packages']) ? parsed['packages'] : {}
+  const boundHost = isPlainObject(packages['boundHost']) ? packages['boundHost'] : {}
+  const registry = isPlainObject(parsed['registry']) ? parsed['registry'] : {}
+  const readiness = isPlainObject(parsed['readiness']) ? parsed['readiness'] : {}
+  const plan = isPlainObject(parsed['plan']) ? parsed['plan'] : {}
+  const frozenSystemd = isPlainObject(parsed['frozenSystemd']) ? parsed['frozenSystemd'] : {}
+  const execution = isPlainObject(parsed['execution']) ? parsed['execution'] : {}
 
-  const frozenDetected = parsed['mode'] === 'frozen-linux-systemd' || frozenSystemd['detected'] === true
+  const mode = textOrNull(parsed['mode'])
+  const frozenDetected = mode === 'frozen-linux-systemd' || frozenSystemd['detected'] === true
   const currentEnhancedVersion = textOrNull(packages['installedEnhancedVersion']) ?? fallbackCurrent
   const latestEnhancedVersion = textOrNull(registry['latestEnhancedVersion'])
     ?? textOrNull(packages['targetEnhancedVersion'])
@@ -317,9 +412,18 @@ function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): Parsed
     ? plan['steps'].filter((item): item is string => typeof item === 'string' && item.trim() !== '').slice(0, 16)
     : []
   const backupFiles = Array.isArray(plan['backupFiles']) ? plan['backupFiles'] : []
-  const canExecute = plan['canExecute'] !== false && readiness['ok'] !== false
+  const rawExecutionError = typeof execution['error'] === 'string' ? redactProbeDetail(execution['error']) : ''
+  const canExecute = plan['canExecute'] !== false && readiness['ok'] !== false && rawExecutionError === ''
+  if (!canExecute && blockedReasons.length === 0) {
+    if (rawExecutionError !== '') {
+      blockedReasons.push(rawExecutionError)
+    } else if (offline) {
+      blockedReasons.push('当前无法连接 npm registry 解析目标版本，请检查网络后重试。')
+    }
+  }
 
   return {
+    mode,
     frozenSystemdProfile: frozenDetected,
     currentEnhancedVersion,
     latestEnhancedVersion,
@@ -338,10 +442,14 @@ function parseDshRsiUpgradeJson(stdout: string, fallbackCurrent: string): Parsed
 function buildDshRsiArgs(
   subcommandFlag: '--check' | '--dry-run' | '--yes',
   ctx: ResolvedUpgradeContext,
+  confirmDshHomeStopped = false,
 ): string[] {
   const args = ['upgrade', subcommandFlag, '--json']
   if (ctx.dshHome !== null) args.push('--dsh-home', ctx.dshHome)
   if (ctx.profileName !== '') args.push('--profile', ctx.profileName)
+  if (subcommandFlag === '--yes' && confirmDshHomeStopped) {
+    args.push('--confirm-dsh-home-stopped')
+  }
   return args
 }
 
@@ -371,8 +479,10 @@ export class SelfUpgradeProber {
   private readonly platform: NodeJS.Platform
   private readonly envSource: NodeJS.ProcessEnv
   private readonly cliBin: string
+  private resolvedCliBin: string | undefined
   private readonly cache = new Map<string, Readonly<{ expiresAt: number; status: SelfUpgradeStatus }>>()
   private readonly inflight = new Map<string, Promise<SelfUpgradeStatus>>()
+  private readonly resolvedModes = new Map<string, string | null>()
 
   constructor(options: SelfUpgradeProberOptions = {}) {
     this.execFn = options.execFn ?? defaultExecProbe
@@ -388,6 +498,36 @@ export class SelfUpgradeProber {
 
   invalidate(): void {
     this.cache.clear()
+  }
+
+  private async execUpgradeCli(
+    args: readonly string[],
+    timeoutMs: number,
+    env: NodeJS.ProcessEnv,
+  ): Promise<ProbeExecResult> {
+    const initialBin = this.resolvedCliBin ?? this.cliBin
+    if (!isSingleLineCommand(initialBin)) {
+      return { stdout: '', stderr: 'invalid dsh-rsi binary', exitCode: 1, errorCode: 'EINVAL' }
+    }
+    const firstResult = await this.execFn(initialBin, args, { timeoutMs, env })
+    if (!isMissingBinaryError(firstResult)) {
+      return firstResult
+    }
+    if (this.resolvedCliBin !== undefined) {
+      this.resolvedCliBin = undefined
+    }
+    if (this.cliBin !== 'dsh-rsi') {
+      return firstResult
+    }
+    const discovered = discoverDshRsiBinary(this.envSource, this.platform)
+    if (discovered === undefined || discovered === initialBin || !isSingleLineCommand(discovered)) {
+      return firstResult
+    }
+    const retryResult = await this.execFn(discovered, args, { timeoutMs, env })
+    if (!isMissingBinaryError(retryResult)) {
+      this.resolvedCliBin = discovered
+    }
+    return retryResult
   }
 
   private async fetchLatestFromNpm(): Promise<Readonly<{ latest: string | null; offline: boolean; error?: string }>> {
@@ -421,7 +561,7 @@ export class SelfUpgradeProber {
 
   async check(host: UpgradeHostContext, force = false): Promise<SelfUpgradeStatus> {
     const resolved = resolveUpgradeContext(host, this.envSource)
-    const cacheKey = `${resolved.dshHome ?? ''}::${resolved.profileName}`
+    const cacheKey = upgradeCacheKey(resolved)
     if (!force) {
       const hit = this.cache.get(cacheKey)
       if (hit !== undefined && this.now() < hit.expiresAt) {
@@ -442,30 +582,31 @@ export class SelfUpgradeProber {
 
   private async runCheck(ctx: ResolvedUpgradeContext): Promise<SelfUpgradeStatus> {
     const checkedAt = this.now()
+    const cacheKey = upgradeCacheKey(ctx)
     const hostMeta = readBoundHostMetadata(ctx.dshHome)
     const installedHostVersion = readInstalledHostVersion()
     const baseFrozen = detectFrozenSystemdProfile(ctx.dshHome, ctx.profileName, this.platform, this.envSource)
-    const safeEnv = sanitizedProbeEnv(this.envSource)
-    if (ctx.dshHome !== null) safeEnv['DSH_HOME'] = ctx.dshHome
+    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, ctx.dshHome)
 
-    const cliResult = isSingleLineCommand(this.cliBin)
-      ? await this.execFn(this.cliBin, buildDshRsiArgs('--check', ctx), { timeoutMs: CLI_CHECK_TIMEOUT_MS, env: safeEnv })
-      : { stdout: '', stderr: 'invalid dsh-rsi binary', exitCode: 1, errorCode: 'EINVAL' }
-    const cliPayload = cliResult.errorCode === undefined ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
+    const cliResult = await this.execUpgradeCli(buildDshRsiArgs('--check', ctx), CLI_CHECK_TIMEOUT_MS, safeEnv)
+    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
+      this.resolvedModes.set(cacheKey, cliPayload.mode)
       const frozen = baseFrozen || cliPayload.frozenSystemdProfile
       const boundHostVersion = cliPayload.boundHostVersion ?? hostMeta.version
       const upgradeCommand = buildCliUpgradeCommand(ctx.dshHome, ctx.profileName, frozen)
-      const note = frozen
+      const note = (frozen
         ? '检测到受控 Linux systemd profile；请停止服务后按终端引导执行升级。'
         : cliPayload.blockedReasons.length > 0
           ? `存在升级前置阻塞：${cliPayload.blockedReasons[0]}`
           : cliPayload.offline
             ? '离线回退：已完成本地绑定与账本检查，未能连接 npm 查询最新版本。'
-            : cliPayload.enhancedUpdateAvailable || cliPayload.hostUpdateAvailable
-              ? `发现可升级版本（@dsh-enhanced ${cliPayload.latestEnhancedVersion ?? this.currentVersion}）`
-              : '当前已是最新已检查版本'
+            : !cliPayload.canExecute || cliResult.exitCode !== 0
+              ? '升级前置检查未通过，请查看升级预演诊断或在终端执行下方命令。'
+              : cliPayload.enhancedUpdateAvailable || cliPayload.hostUpdateAvailable
+                ? `发现可升级版本（@dsh-enhanced ${cliPayload.latestEnhancedVersion ?? this.currentVersion}）`
+                : '当前已是最新已检查版本').slice(0, 500)
       return Object.freeze({
         currentEnhancedVersion: cliPayload.currentEnhancedVersion,
         latestEnhancedVersion: cliPayload.latestEnhancedVersion,
@@ -487,21 +628,29 @@ export class SelfUpgradeProber {
       })
     }
 
+    this.resolvedModes.delete(cacheKey)
     const npmResult = await this.fetchLatestFromNpm()
     const latestEnhancedVersion = npmResult.latest
     const enhancedUpdateAvailable = latestEnhancedVersion !== null
       && compareSemver(latestEnhancedVersion, this.currentVersion) > 0
     const upgradeCommand = buildCliUpgradeCommand(ctx.dshHome, ctx.profileName, baseFrozen)
+    const cliDetail = redactProbeDetail(cliResult.stderr) || redactProbeDetail(cliResult.stdout)
     const cliUnavailableNote = cliResult.errorCode === 'ENOENT'
-      ? '未在 PATH 中检测到 dsh-rsi CLI；'
-      : ''
-    const note = baseFrozen
+      ? '未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli；'
+      : cliResult.errorCode === 'ETIMEDOUT'
+        ? '本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令；'
+        : cliResult.exitCode !== 0 || cliResult.errorCode !== undefined
+          ? (cliDetail !== ''
+            ? `本地 dsh-rsi CLI 异常（退出码 ${cliResult.exitCode}：${cliDetail}）；`
+            : `本地 dsh-rsi CLI 返回退出码 ${cliResult.exitCode}；`)
+          : ''
+    const note = (baseFrozen
       ? `${cliUnavailableNote}受控 Linux systemd profile 仅支持终端带外升级。`
       : npmResult.offline
         ? `${cliUnavailableNote}离线回退（${npmResult.error ?? '网络不可达'}），已展示本地当前版本与绑定宿主版本。`
         : enhancedUpdateAvailable
           ? `${cliUnavailableNote}检测到 npm 新版本 ${latestEnhancedVersion}（当前 ${this.currentVersion}）。`
-          : `${cliUnavailableNote}当前版本 ${this.currentVersion} 已为 npm 最新版本。`
+          : `${cliUnavailableNote}当前版本 ${this.currentVersion} 已为 npm 最新版本。`).slice(0, 500)
 
     return Object.freeze({
       currentEnhancedVersion: this.currentVersion,
@@ -525,69 +674,108 @@ export class SelfUpgradeProber {
   }
 
   async dryRun(host: UpgradeHostContext): Promise<SelfUpgradePreview> {
-    const resolved = resolveUpgradeContext(host, this.envSource)
-    const status = await this.check(host, false)
-    const safeEnv = sanitizedProbeEnv(this.envSource)
-    if (resolved.dshHome !== null) safeEnv['DSH_HOME'] = resolved.dshHome
+    const { preview } = await this.runDryRun(host)
+    return preview
+  }
 
-    const cliResult = isSingleLineCommand(this.cliBin)
-      ? await this.execFn(this.cliBin, buildDshRsiArgs('--dry-run', resolved), { timeoutMs: CLI_DRY_RUN_TIMEOUT_MS, env: safeEnv })
-      : { stdout: '', stderr: 'invalid dsh-rsi binary', exitCode: 1, errorCode: 'EINVAL' }
-    const cliPayload = cliResult.errorCode === undefined ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
+  private async runDryRun(
+    host: UpgradeHostContext,
+  ): Promise<Readonly<{ preview: SelfUpgradePreview; mode: string | null }>> {
+    const resolved = resolveUpgradeContext(host, this.envSource)
+    const cacheKey = upgradeCacheKey(resolved)
+    const status = await this.check(host, false)
+    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
+
+    const cliResult = await this.execUpgradeCli(buildDshRsiArgs('--dry-run', resolved), CLI_DRY_RUN_TIMEOUT_MS, safeEnv)
+    const cliPayload = cliResult.errorCode !== 'ENOENT' ? parseDshRsiUpgradeJson(cliResult.stdout, this.currentVersion) : null
 
     if (cliPayload !== null) {
+      if (cliPayload.mode !== null) {
+        this.resolvedModes.set(cacheKey, cliPayload.mode)
+      }
       const frozen = status.frozenSystemdProfile || cliPayload.frozenSystemdProfile
       const supported = !frozen && cliPayload.canExecute && cliResult.exitCode === 0
+      if (supported && !status.canTriggerDetached) {
+        this.invalidate()
+      }
       const warnings = [
         ...cliPayload.blockedReasons,
         ...(frozen ? ['受控 Linux systemd profile 禁止在 Host 内直接启动升级，请在停止服务后使用终端 CLI 升级。'] : []),
-      ].slice(0, 32)
-      const summary = cliPayload.steps.length > 0
+        ...(!frozen && !supported && cliPayload.blockedReasons.length === 0 && cliResult.exitCode !== 0
+          ? [`dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`]
+          : []),
+      ].map(item => item.slice(0, 500)).slice(0, 32)
+      const summary = (cliPayload.steps.length > 0
         ? cliPayload.steps.join(' -> ')
         : frozen
           ? '预览完成：受控 Linux systemd profile 需在终端停止服务后执行带外升级'
           : supported
             ? '升级预演通过：将先备份现有配置与绑定并在后台执行 dsh-rsi upgrade --yes'
-            : '升级预演发现阻塞项，请先修复后再升级'
-      return Object.freeze({
-        supported,
-        frozenSystemdProfile: frozen,
-        requiresOutOfBandCli: frozen,
-        command: buildCliUpgradeCommand(resolved.dshHome, resolved.profileName, frozen),
-        currentEnhancedVersion: cliPayload.currentEnhancedVersion,
-        targetEnhancedVersion: cliPayload.latestEnhancedVersion,
-        boundHostVersion: cliPayload.boundHostVersion ?? status.boundHostVersion,
-        targetHostVersion: cliPayload.targetHostVersion,
-        backupRequired: cliPayload.backupRequired,
-        warnings,
-        summary,
-      })
+            : cliPayload.blockedReasons[0]
+              ? `升级预演发现阻塞项：${cliPayload.blockedReasons[0]}`
+              : '升级预演发现阻塞项，请先修复后再升级').slice(0, 1_000)
+      return {
+        mode: cliPayload.mode,
+        preview: Object.freeze({
+          supported,
+          frozenSystemdProfile: frozen,
+          requiresOutOfBandCli: frozen,
+          command: buildCliUpgradeCommand(resolved.dshHome, resolved.profileName, frozen),
+          currentEnhancedVersion: cliPayload.currentEnhancedVersion,
+          targetEnhancedVersion: cliPayload.latestEnhancedVersion,
+          boundHostVersion: cliPayload.boundHostVersion ?? status.boundHostVersion,
+          targetHostVersion: cliPayload.targetHostVersion,
+          backupRequired: cliPayload.backupRequired,
+          warnings,
+          summary,
+        }),
+      }
     }
 
     const warnings: string[] = []
+    const cliDetail = redactProbeDetail(cliResult.stderr) || redactProbeDetail(cliResult.stdout)
     if (cliResult.errorCode === 'ENOENT') {
-      warnings.push('未检测到可执行 dsh-rsi CLI（请确认 @dsh-enhanced/dsh-rsi-cli 已安装并在 PATH 中）。')
-    } else if (cliResult.exitCode !== 0) {
-      warnings.push(`dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`)
+      warnings.push('未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli。')
+    } else if (cliResult.errorCode === 'ETIMEDOUT') {
+      warnings.push('本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。')
+    } else if (cliResult.exitCode !== 0 || cliResult.errorCode !== undefined) {
+      warnings.push((cliDetail !== ''
+        ? `dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}：${cliDetail}`
+        : `dsh-rsi upgrade --dry-run 返回退出码 ${cliResult.exitCode}。`).slice(0, 500))
+    } else {
+      warnings.push((cliDetail !== ''
+        ? `dsh-rsi upgrade --dry-run 输出无法解析：${cliDetail}`
+        : 'dsh-rsi upgrade --dry-run 未返回有效升级报告 JSON。').slice(0, 500))
     }
     if (status.frozenSystemdProfile) {
       warnings.push('受控 Linux systemd profile 仅支持终端带外升级。')
     }
-    return Object.freeze({
-      supported: false,
-      frozenSystemdProfile: status.frozenSystemdProfile,
-      requiresOutOfBandCli: status.frozenSystemdProfile,
-      command: status.upgradeCommand,
-      currentEnhancedVersion: status.currentEnhancedVersion,
-      targetEnhancedVersion: status.latestEnhancedVersion,
-      boundHostVersion: status.boundHostVersion,
-      targetHostVersion: status.targetHostVersion,
-      backupRequired: true,
-      warnings,
-      summary: status.frozenSystemdProfile
-        ? '当前为受控 Linux systemd profile，请先停止服务并在终端执行 CLI 升级。'
-        : '未能完成本地 dsh-rsi CLI 预演；请先在终端检查并运行 dsh-rsi upgrade。',
-    })
+    const summary = (status.frozenSystemdProfile
+      ? '当前为受控 Linux systemd profile，请先停止服务并在终端执行 CLI 升级。'
+      : cliResult.errorCode === 'ENOENT'
+        ? '未检测到可执行 dsh-rsi CLI，请确认已全局安装 @dsh-enhanced/dsh-rsi-cli。'
+        : cliResult.errorCode === 'ETIMEDOUT'
+          ? '本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢），请稍后重试或在终端执行下方升级命令。'
+          : cliDetail !== ''
+            ? `未能完成本地 dsh-rsi CLI 预演（${cliDetail}）；请先在终端检查并运行 dsh-rsi upgrade。`
+            : '未能完成本地 dsh-rsi CLI 预演；请先在终端检查并运行 dsh-rsi upgrade。').slice(0, 1_000)
+
+    return {
+      mode: null,
+      preview: Object.freeze({
+        supported: false,
+        frozenSystemdProfile: status.frozenSystemdProfile,
+        requiresOutOfBandCli: status.frozenSystemdProfile,
+        command: status.upgradeCommand,
+        currentEnhancedVersion: status.currentEnhancedVersion,
+        targetEnhancedVersion: status.latestEnhancedVersion,
+        boundHostVersion: status.boundHostVersion,
+        targetHostVersion: status.targetHostVersion,
+        backupRequired: true,
+        warnings,
+        summary,
+      }),
+    }
   }
 
   async trigger(host: UpgradeHostContext, confirmed: boolean): Promise<OwnerConsoleWriteResult> {
@@ -606,7 +794,10 @@ export class SelfUpgradeProber {
         note: `当前为受控 Linux systemd profile，禁止在 Host 内直接升级；${status.upgradeCommand}`,
       })
     }
-    const preview = await this.dryRun(host)
+    const resolved = resolveUpgradeContext(host, this.envSource)
+    const cacheKey = upgradeCacheKey(resolved)
+    const checkMode = this.resolvedModes.get(cacheKey) ?? null
+    const { preview, mode: dryRunMode } = await this.runDryRun(host)
     if (!preview.supported) {
       const reason = preview.warnings[0] ?? preview.summary
       return Object.freeze({
@@ -615,7 +806,12 @@ export class SelfUpgradeProber {
         note: `升级前置检查未通过：${reason}；可执行命令：${preview.command}`,
       })
     }
-    if (!isSingleLineCommand(this.cliBin)) {
+    const effectiveMode = dryRunMode ?? checkMode
+    const confirmDshHomeStopped = effectiveMode === 'standard-local'
+      && !status.frozenSystemdProfile
+      && !preview.frozenSystemdProfile
+    const cliCommand = this.resolvedCliBin ?? this.cliBin
+    if (!isSingleLineCommand(cliCommand)) {
       return Object.freeze({
         applied: false,
         entry: 'dsh-rsi-upgrade',
@@ -623,16 +819,14 @@ export class SelfUpgradeProber {
       })
     }
 
-    const resolved = resolveUpgradeContext(host, this.envSource)
-    const safeEnv = sanitizedProbeEnv(this.envSource)
-    if (resolved.dshHome !== null) safeEnv['DSH_HOME'] = resolved.dshHome
-    const args = buildDshRsiArgs('--yes', resolved)
+    const safeEnv = buildUpgradeProbeEnv(this.envSource, this.platform, resolved.dshHome)
+    const args = buildDshRsiArgs('--yes', resolved, confirmDshHomeStopped)
     const log = resolveLogFile(resolved.dshHome, this.now())
 
     let pid: number | undefined
     try {
       const workDir = resolved.dshHome ?? resolved.profileDir
-      const child = this.spawnFn(this.cliBin, args, {
+      const child = this.spawnFn(cliCommand, args, {
         ...(workDir !== null ? { cwd: workDir } : {}),
         env: safeEnv,
         detached: true,

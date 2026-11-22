@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -344,5 +344,126 @@ describe('collectLiveDoctorReport & enriched collectStatus', () => {
     const frozenCheck = frozenReport.checks.find(c => c.id === 'platform.cgroup')
     expect(frozenCheck?.status).toBe('warn')
     expect(frozenCheck?.summary).toContain('cgroup v2')
+  })
+
+  test('Electron 独占 desktop profile 直读校验 cordis.patch.yml 与 package.json 通过（含无 patch 情况）', async () => {
+    const root = await makeTempDir('dsh-live-desktop-ok-')
+    const dshHome = join(root, 'dsh')
+    const profileDir = join(dshHome, 'profiles', 'desktop')
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'owner-console'), { recursive: true })
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-dreaming'), { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: {} }))
+    await writeFile(join(profileDir, 'cordis.patch.yml'), `- id: agent-default-model
+  config:
+    provider: agy-agent
+    model: default
+- id: dsh-enhanced-owner-console
+  name: "@dsh-enhanced/owner-console"
+- id: dsh-enhanced-assistant-dreaming
+  name: "@dsh-enhanced/assistant-dreaming"
+  config:
+    enabled: false
+    databasePath: !js "dshHomePath('dreaming.sqlite')"
+`)
+
+    const runner: DetailedCommandRunner = (command, args) => {
+      if (command === 'dsh' && args.includes('--dump-config')) {
+        return {
+          status: 1,
+          stdout: '',
+          stderr: 'error: profile "desktop" is managed exclusively by the Electron application\n',
+        }
+      }
+      return { status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }
+    }
+
+    const report = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'darwin',
+      env: { PATH: '' },
+      fileExists: path => path === '/usr/bin/sandbox-exec',
+      runner,
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.profiles[0]).toMatchObject({
+      profile: 'desktop',
+      configDumpOk: true,
+      defaultModelRoute: { provider: 'agy-agent', model: 'default' },
+      capabilities: {
+        ownerConsoleInstalled: true,
+        ownerConsoleEnabled: true,
+        dreamingInstalled: true,
+        dreamingEnabled: false,
+      },
+    })
+    expect(report.profiles[0]?.configDumpError).toBeUndefined()
+    const dumpCheck = report.checks.find(c => c.id === 'profile.desktop.dump')
+    expect(dumpCheck).toMatchObject({
+      status: 'ok',
+      summary: 'profile desktop 由桌面端 Electron 独占托管；已直接校验 cordis.patch.yml 与 package.json',
+    })
+
+    // Missing cordis.patch.yml with valid package.json also succeeds cleanly.
+    await rm(join(profileDir, 'cordis.patch.yml'))
+    const noPatchReport = await collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'darwin',
+      env: { PATH: '' },
+      fileExists: path => path === '/usr/bin/sandbox-exec',
+      runner,
+    })
+    expect(noPatchReport.ok).toBe(true)
+    expect(noPatchReport.profiles[0]?.configDumpOk).toBe(true)
+  })
+
+  test('Electron 独占 desktop profile 的 cordis.patch.yml / package.json 损坏、非序列或为符号链接时 fail-closed', async () => {
+    const root = await makeTempDir('dsh-live-desktop-fail-')
+    const dshHome = join(root, 'dsh')
+    const profileDir = join(dshHome, 'profiles', 'desktop')
+    await mkdir(profileDir, { recursive: true })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop' }))
+    await writeFile(join(profileDir, 'cordis.patch.yml'), '- id: broken\n  config: [\n')
+
+    const runner: DetailedCommandRunner = (command, args) => {
+      if (command === 'dsh' && args.includes('--dump-config')) {
+        return {
+          status: 1,
+          stdout: '',
+          stderr: 'error: profile "desktop" is managed exclusively by the Electron application\n',
+        }
+      }
+      return { status: 0, stdout: '0.2.2-rc.5\n', stderr: '' }
+    }
+    const run = () => collectLiveDoctorReport({
+      dshHome,
+      home: root,
+      platform: 'darwin',
+      env: { PATH: '' },
+      fileExists: path => path === '/usr/bin/sandbox-exec',
+      runner,
+    })
+
+    const badYaml = await run()
+    expect(badYaml.ok).toBe(false)
+    expect(badYaml.profiles[0]?.configDumpOk).toBe(false)
+    expect(badYaml.checks.find(c => c.id === 'profile.desktop.dump')?.status).toBe('fail')
+
+    await writeFile(join(profileDir, 'cordis.patch.yml'), 'notASequence: true\n')
+    const badRoot = await run()
+    expect(badRoot.ok).toBe(false)
+    expect(badRoot.profiles[0]?.configDumpOk).toBe(false)
+    expect(badRoot.checks.find(c => c.id === 'profile.desktop.dump')?.status).toBe('fail')
+
+    const externalPatch = join(root, 'external-patch.yml')
+    await writeFile(externalPatch, '[]\n')
+    await rm(join(profileDir, 'cordis.patch.yml'))
+    await symlink(externalPatch, join(profileDir, 'cordis.patch.yml'))
+    const symlinkPatch = await run()
+    expect(symlinkPatch.ok).toBe(false)
+    expect(symlinkPatch.profiles[0]?.configDumpOk).toBe(false)
+    expect(symlinkPatch.checks.find(c => c.id === 'profile.desktop.dump')?.status).toBe('fail')
   })
 })

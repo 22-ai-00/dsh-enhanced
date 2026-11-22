@@ -3,7 +3,7 @@ import { statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { isSingleLineCommand } from './settings.js'
+import { hasControlChars, isSingleLineCommand } from './settings.js'
 
 const execFileAsync = promisify(nodeExecFile)
 
@@ -75,6 +75,14 @@ export function sanitizedProbeEnv(source: NodeJS.ProcessEnv = process.env): Node
     if (value === undefined) continue
     if (SAFE_ENV_KEYS.has(key) || key.startsWith('LC_') || key.startsWith('XDG_')) {
       env[key] = value
+    }
+  }
+  // Preserve Electron desktop's bundled Node runtime path when valid so wrapper scripts work inside GUI host.
+  const desktopNode = source['DSH_DESKTOP_NODE_EXECUTABLE']
+  if (typeof desktopNode === 'string') {
+    const trimmed = desktopNode.trim()
+    if (trimmed !== '' && !hasControlChars(desktopNode) && isAbsolute(trimmed)) {
+      env['DSH_DESKTOP_NODE_EXECUTABLE'] = desktopNode
     }
   }
   return env
@@ -184,7 +192,7 @@ export function discoverCodingToolBinary(
 }
 
 const TOKEN_TEXT = /[\p{Cc}]/gu
-function redactProbeDetail(raw: string): string {
+export function redactProbeDetail(raw: string): string {
   return raw
     .replace(TOKEN_TEXT, ' ')
     .replace(/\b((?:bearer|token|key|secret|password)\s*[:=]?\s*)[^\s]+/giu, '$1[redacted]')

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readdir, readlink, lstat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, basename } from 'node:path'
+import { join, basename, resolve, sep } from 'node:path'
 
 /**
  * dsh 受管 profile 在 macOS LaunchAgent 中使用的 label 前缀。
@@ -70,11 +70,13 @@ export interface ProfilePlugin {
 
 /**
  * 枚举一个 profile 中安装的 @dsh-enhanced 插件及其安装形态。
- * 符号链接（pnpm link / dsh plugin add <checkout>）判定为 local；
+ * 符号链接（pnpm link / dsh plugin add <checkout>）判定为 local，
+ * 但指向本 profile `node_modules/.pnpm` 虚拟存储的符号链接属于标准 pnpm npm 安装，判定为 npm；
  * 实体目录判定为 npm cohort 副本。
  */
 export async function listProfilePlugins(dshHome: string, profile: string): Promise<ProfilePlugin[]> {
   const scopeDirectory = join(profilesDirectory(dshHome), profile, 'node_modules', '@dsh-enhanced')
+  const pnpmStoreRoot = resolve(profilesDirectory(dshHome), profile, 'node_modules', '.pnpm')
   let entries: string[]
   try {
     entries = await readdir(scopeDirectory)
@@ -89,12 +91,16 @@ export async function listProfilePlugins(dshHome: string, profile: string): Prom
     const metadata = await lstat(pluginPath)
     const name = `@dsh-enhanced/${entry}`
     if (metadata.isSymbolicLink()) {
-      const target = await readlink(pluginPath)
-      plugins.push({
-        name,
-        kind: 'local',
-        linkTarget: target.startsWith('/') ? target : join(scopeDirectory, target),
-      })
+      const resolvedTarget = resolve(scopeDirectory, await readlink(pluginPath))
+      if (resolvedTarget === pnpmStoreRoot || resolvedTarget.startsWith(pnpmStoreRoot + sep)) {
+        plugins.push({ name, kind: 'npm' })
+      } else {
+        plugins.push({
+          name,
+          kind: 'local',
+          linkTarget: resolvedTarget,
+        })
+      }
     } else if (metadata.isDirectory()) {
       plugins.push({ name, kind: 'npm' })
     }

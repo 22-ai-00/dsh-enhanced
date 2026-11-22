@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { main, parseArgs, runUpgrade, validateRegistryUrl, type UpgradeDeps } from '../src/index.ts'
+import { formatUpgradeReport, main, parseArgs, runUpgrade, validateRegistryUrl, type UpgradeDeps } from '../src/index.ts'
+import { defaultUpgradeProfilePackages } from '../src/upgrade.ts'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -113,14 +114,14 @@ describe('dsh-rsi upgrade CLI parsing and URL checks', () => {
 
 describe('dsh-rsi upgrade check, readiness, and transactional execution', () => {
   test('--check --json compares versions online and degrades cleanly when registry is offline without mutating disk', async () => {
-    const f = await createHomeFixture()
+    const f = await createHomeFixture({ hostVersion: '0.2.2-rc.1' })
     const okDeps: UpgradeDeps = {
-      fetch: makeRegistryFetch('0.1.74', '0.2.2'),
+      fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5'),
       inspectBoundHost: async () => ({
         status: 'ready',
         bindingPath: f.hostPath,
-        version: '0.2.2-rc.5',
-        dshPath: join(f.root, 'host-cache', '0.2.2-rc.5', 'dsh'),
+        version: '0.2.2-rc.1',
+        dshPath: join(f.root, 'host-cache', '0.2.2-rc.1', 'dsh'),
         issues: [],
       }),
     }
@@ -145,12 +146,12 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
       ok: true,
       ready: true,
       mode: 'standard-local',
-      registry: { status: 'ok', latestEnhancedVersion: '0.1.74', latestDshHostVersion: '0.2.2' },
+      registry: { status: 'ok', latestEnhancedVersion: '0.1.74', latestDshHostVersion: '0.2.2-rc.5' },
       packages: {
         installedEnhancedVersion: '0.1.73',
         targetEnhancedVersion: '0.1.74',
         upgradeAvailable: true,
-        boundHost: { status: 'ready', installedVersion: '0.2.2-rc.5', targetVersion: '0.2.2', upgradeAvailable: true },
+        boundHost: { status: 'ready', installedVersion: '0.2.2-rc.1', targetVersion: '0.2.2-rc.5', upgradeAvailable: true },
       },
       readiness: { ok: true, bindingOk: true, ledgersOk: true },
       plan: { canExecute: true, rollbackSupported: true },
@@ -178,7 +179,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     const corrupt = await createHomeFixture({ corruptHost: true })
     const corruptCheck = await runUpgrade(
       { dshHome: corrupt.dshHome, action: 'check', osHome: corrupt.osHome, platform: 'linux' },
-      { fetch: makeRegistryFetch('0.1.74', '0.2.2') },
+      { fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5') },
     )
     expect(corruptCheck.exitCode).toBe(1)
     expect(corruptCheck.report.ok).toBe(false)
@@ -193,7 +194,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     await symlink(targetJson, linked.hostPath)
     const symlinkCheck = await runUpgrade(
       { dshHome: linked.dshHome, action: 'check', osHome: linked.osHome, platform: 'linux' },
-      { fetch: makeRegistryFetch('0.1.74', '0.2.2') },
+      { fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5') },
     )
     expect(symlinkCheck.exitCode).toBe(1)
     expect(symlinkCheck.report.packages.boundHost.status).toBe('corrupt')
@@ -201,7 +202,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
     // 2. Empty ledger tables pass cleanly, non-empty creation/revision ledgers fail closed.
     const ledgerFixture = await createHomeFixture()
     const readyInspect: UpgradeDeps = {
-      fetch: makeRegistryFetch('0.1.74', '0.2.2'),
+      fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5'),
       inspectBoundHost: async () => ({
         status: 'ready',
         bindingPath: ledgerFixture.hostPath,
@@ -264,7 +265,7 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
 
     const frozenCalls: Array<{ dryRun: boolean; dshVersion?: string }> = []
     const frozenDeps: UpgradeDeps = {
-      fetch: makeRegistryFetch('0.1.74', '0.2.2'),
+      fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5'),
       inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
       runFrozenOwnerUpdate: async (_owner, opts) => {
         frozenCalls.push(opts)
@@ -292,12 +293,12 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
   })
 
   test('executes transactional macOS launchd upgrade with backup & doctor check, and rolls back automatically on failure', async () => {
-    const f = await createHomeFixture({ withLaunchd: true })
+    const f = await createHomeFixture({ withLaunchd: true, hostVersion: '0.2.2-rc.1' })
     const serviceEvents: string[] = []
 
     const baseDeps = (healthOk: boolean): UpgradeDeps => ({
-      fetch: makeRegistryFetch('0.1.74', '0.2.2'),
-      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.1', dshPath: '/bin/dsh', issues: [] }),
       isServiceRunning: async () => true,
       inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, 'Library', 'LaunchAgents', 'ai.deepseek.dsh.profile.web.plist'), foreign: false }),
       controlService: async (_plat, _home, profile, action) => {
@@ -357,8 +358,278 @@ describe('dsh-rsi upgrade check, readiness, and transactional execution', () => 
       healthCheckPassed: true,
       rolledBack: false,
     })
-    expect(JSON.parse(await readFile(f.hostPath, 'utf8')).version).toBe('0.2.2')
+    expect(JSON.parse(await readFile(f.hostPath, 'utf8')).version).toBe('0.2.2-rc.5')
     expect(JSON.parse(await readFile(join(f.enhancedDir, 'package.json'), 'utf8')).version).toBe('0.1.74')
     expect(serviceEvents).toEqual(['web:stop', 'web:start'])
+  })
+
+  test('clamps newer upstream @deepseek-ai/dsh (0.2.2-rc.9) to validated baseline 0.2.2-rc.5, supports /latest fallback, blocks explicit unvalidated --dsh-version, and warns on older CLI', async () => {
+    const f = await createHomeFixture({ hostVersion: '0.2.2-rc.1' })
+    const requestedUrls: string[] = []
+    const fetchStub = (async (input: string | URL | Request) => {
+      const url = String(input)
+      requestedUrls.push(url)
+      if (url.endsWith('/@dsh-enhanced/dsh-rsi-cli/latest')) {
+        return new Response('{}', { status: 404 })
+      }
+      if (url.endsWith('/@dsh-enhanced/dsh-rsi-cli')) {
+        return new Response(JSON.stringify({ 'dist-tags': { latest: '99.0.0' } }), { status: 200 })
+      }
+      if (url.endsWith('/@deepseek-ai/dsh/latest')) {
+        return new Response(JSON.stringify({ version: '0.2.2-rc.9' }), { status: 200 })
+      }
+      return new Response('{}', { status: 404 })
+    }) as typeof globalThis.fetch
+
+    const clamped = await runUpgrade(
+      { dshHome: f.dshHome, profile: f.profile, action: 'check', osHome: f.osHome, platform: 'linux' },
+      {
+        fetch: fetchStub,
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.1', dshPath: '/bin/dsh', issues: [] }),
+      },
+    )
+    expect(clamped.exitCode).toBe(0)
+    expect(requestedUrls).toEqual(expect.arrayContaining([
+      'https://registry.npmjs.org/@dsh-enhanced/dsh-rsi-cli/latest',
+      'https://registry.npmjs.org/@dsh-enhanced/dsh-rsi-cli',
+      'https://registry.npmjs.org/@deepseek-ai/dsh/latest',
+    ]))
+    expect(requestedUrls.some(url => url.includes('%2F'))).toBe(false)
+    expect(clamped.report.registry.latestDshHostVersion).toBe('0.2.2-rc.9')
+    expect(clamped.report.packages.boundHost).toMatchObject({
+      installedVersion: '0.2.2-rc.1',
+      targetVersion: '0.2.2-rc.5',
+      upgradeAvailable: true,
+    })
+
+    const formatted = formatUpgradeReport(clamped.report)
+    expect(formatted).toContain(`提示：全局 dsh-rsi CLI 当前为 ${clamped.report.packages.cliPackageVersion}，可运行 dsh-rsi update 同步升级至 99.0.0`)
+
+    // Already on validated baseline 0.2.2-rc.5 -> no host upgrade needed despite upstream 0.2.2-rc.9.
+    const alreadyBaseline = await runUpgrade(
+      { dshHome: f.dshHome, profile: f.profile, action: 'check', osHome: f.osHome, platform: 'linux' },
+      {
+        fetch: fetchStub,
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      },
+    )
+    expect(alreadyBaseline.report.packages.boundHost).toMatchObject({
+      installedVersion: '0.2.2-rc.5',
+      targetVersion: '0.2.2-rc.5',
+      upgradeAvailable: false,
+    })
+
+    // Explicit unvalidated --dsh-version without custom upgradeHost fails closed in blockedReasons.
+    const blocked = await runUpgrade(
+      { dshHome: f.dshHome, profile: f.profile, action: 'check', dshVersion: '0.2.2-rc.9', osHome: f.osHome, platform: 'linux' },
+      {
+        fetch: fetchStub,
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      },
+    )
+    expect(blocked.exitCode).toBe(1)
+    expect(blocked.report.readiness.ok).toBe(false)
+    expect(blocked.report.readiness.blockedReasons.join('\n')).toContain('0.2.2-rc.5')
+  })
+
+  test('upgrades pnpm profile (package.json + pnpm-workspace.yaml overrides + .pnpm symlink) and rolls back pnpm-workspace.yaml on health failure', async () => {
+    const f = await createHomeFixture({ profile: 'desktop', hostVersion: '0.2.2-rc.5' })
+    const fakeBinDir = join(f.root, 'fake-pnpm-bin')
+    await mkdir(fakeBinDir, { recursive: true })
+    const fakePnpmPath = join(fakeBinDir, 'pnpm')
+    await writeFile(fakePnpmPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+    // Replace entity dir with standard pnpm virtual-store symlink + pnpm-workspace.yaml overrides.
+    await rm(f.enhancedDir, { recursive: true, force: true })
+    const pnpmTarget = join(
+      f.profileDir,
+      'node_modules',
+      '.pnpm',
+      '@dsh-enhanced+assistant-web-owner@0.1.73',
+      'node_modules',
+      '@dsh-enhanced',
+      'assistant-web-owner',
+    )
+    await mkdir(pnpmTarget, { recursive: true })
+    await writeFile(join(pnpmTarget, 'package.json'), f.pluginPkgOriginal, { mode: 0o600 })
+    await symlink(
+      '../.pnpm/@dsh-enhanced+assistant-web-owner@0.1.73/node_modules/@dsh-enhanced/assistant-web-owner',
+      f.enhancedDir,
+    )
+
+    const pkgPath = join(f.profileDir, 'package.json')
+    const pkgInitial = JSON.stringify({
+      name: 'dsh-profile-desktop',
+      private: true,
+      dependencies: {
+        '@dsh-enhanced/assistant-web-owner': '0.1.73',
+        '@dsh-enhanced/vendor-local': 'file:./vendor/local.tgz',
+        lodash: '4.17.21',
+      },
+      optionalDependencies: {
+        '@dsh-enhanced/lark-channel': '^0.1.73',
+      },
+    }, null, 2) + '\n'
+    await writeFile(pkgPath, pkgInitial, { mode: 0o640 })
+    await chmod(pkgPath, 0o640)
+
+    const wsPath = join(f.profileDir, 'pnpm-workspace.yaml')
+    const wsOriginal = `# preserve workspace comments
+nodeLinker: hoisted
+autoInstallPeers: true
+allowBuilds:
+  better-sqlite3: true
+minimumReleaseAgeExclude:
+  - "@dsh-enhanced/*"
+overrides:
+  # keep vendor local override untouched
+  "@dsh-enhanced/vendor-local": "file:./vendor/local.tgz"
+  "@dsh-enhanced/assistant-web-owner": "0.1.73"
+  "@dsh-enhanced/lark-channel": ^0.1.73
+  "@dsh-enhanced/a>@dsh-enhanced/b": "0.1.70"
+`
+    await writeFile(wsPath, wsOriginal, { mode: 0o640 })
+    await chmod(wsPath, 0o640)
+
+    const runnerCalls: Array<{ command: string; args: readonly string[] }> = []
+    const makeDeps = (healthOk: boolean): UpgradeDeps => ({
+      fetch: makeRegistryFetch('0.1.74', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+      runner: (command, args) => {
+        runnerCalls.push({ command, args })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      verifyHealth: async () => healthOk ? { ok: true } : { ok: false, error: 'desktop health check failed' },
+    })
+
+    // 1. Health check failure rolls back package.json AND pnpm-workspace.yaml cleanly.
+    const failed = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        confirmDshHomeStopped: true,
+        platform: 'linux',
+        osHome: f.osHome,
+        env: { PATH: fakeBinDir },
+      },
+      makeDeps(false),
+    )
+    expect(failed.exitCode).toBe(1)
+    expect(failed.report.execution).toMatchObject({
+      executed: true,
+      rolledBack: true,
+      rollbackSucceeded: true,
+    })
+    expect(failed.report.plan.backupFiles).toContain(wsPath)
+    expect(await readFile(pkgPath, 'utf8')).toBe(pkgInitial)
+    expect(await readFile(wsPath, 'utf8')).toBe(wsOriginal)
+
+    // 2. Successful upgrade updates package.json & pnpm-workspace.yaml overrides while preserving local protocols & comments.
+    runnerCalls.length = 0
+    const succeeded = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        confirmDshHomeStopped: true,
+        platform: 'linux',
+        osHome: f.osHome,
+        env: { PATH: fakeBinDir },
+      },
+      makeDeps(true),
+    )
+    expect(succeeded.exitCode).toBe(0)
+    expect(runnerCalls).toEqual([
+      {
+        command: fakePnpmPath,
+        args: ['install', '--dir', f.profileDir, '--no-frozen-lockfile', '--ignore-scripts', '--registry', 'https://registry.npmjs.org'],
+      },
+    ])
+
+    const updatedPkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+    expect(updatedPkg.dependencies).toEqual({
+      '@dsh-enhanced/assistant-web-owner': '0.1.74',
+      '@dsh-enhanced/vendor-local': 'file:./vendor/local.tgz',
+      lodash: '4.17.21',
+    })
+    expect(updatedPkg.optionalDependencies).toEqual({
+      '@dsh-enhanced/lark-channel': '0.1.74',
+    })
+    expect((await stat(pkgPath)).mode & 0o777).toBe(0o640)
+
+    const updatedWs = await readFile(wsPath, 'utf8')
+    expect(updatedWs).toContain('# preserve workspace comments')
+    expect(updatedWs).toContain('nodeLinker: hoisted')
+    expect(updatedWs).toContain('autoInstallPeers: true')
+    expect(updatedWs).toContain('better-sqlite3: true')
+    expect(updatedWs).toContain('minimumReleaseAgeExclude:')
+    expect(updatedWs).toContain('"@dsh-enhanced/vendor-local": "file:./vendor/local.tgz"')
+    expect(updatedWs).toContain('"@dsh-enhanced/assistant-web-owner": "0.1.74"')
+    expect(updatedWs).toContain('"@dsh-enhanced/lark-channel": 0.1.74')
+    expect(updatedWs).toContain('"@dsh-enhanced/a>@dsh-enhanced/b": "0.1.70"')
+    expect((await stat(wsPath)).mode & 0o777).toBe(0o640)
+  })
+
+  test('defaultUpgradeProfilePackages injects npmPlugins when package.json lacks @dsh-enhanced/* and passes --legacy-peer-deps for pure npm profiles', async () => {
+    const f = await createHomeFixture({ profile: 'npm-only' })
+    await rm(join(f.profileDir, 'pnpm-lock.yaml'))
+    const npmCalls: Array<{ command: string; args: readonly string[] }> = []
+
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: f.profile,
+      targetVersion: '0.1.75',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-enhanced/assistant-web-owner'],
+      runner: (command, args) => {
+        npmCalls.push({ command, args })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+    expect(npmCalls).toEqual([
+      {
+        command: 'npm',
+        args: [
+          'install',
+          '--prefix', f.profileDir,
+          '--legacy-peer-deps',
+          '--no-audit',
+          '--no-fund',
+          '--ignore-scripts',
+          '--registry', 'https://registry.npmjs.org',
+          '@dsh-enhanced/assistant-web-owner@0.1.75',
+        ],
+      },
+    ])
+
+    // Empty dependencies in pnpm profile -> populate dependencies with npmPlugins.
+    const pkgPath = join(f.profileDir, 'package.json')
+    await writeFile(join(f.profileDir, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+    await writeFile(pkgPath, JSON.stringify({ name: 'dsh-profile-npm-only', dependencies: {} }, null, 2))
+    const pnpmCalls: Array<{ command: string; args: readonly string[] }> = []
+    await defaultUpgradeProfilePackages({
+      dshHome: f.dshHome,
+      profile: f.profile,
+      targetVersion: '0.1.75',
+      registryUrl: 'https://registry.npmjs.org',
+      npmPlugins: ['@dsh-enhanced/assistant-web-owner'],
+      osHome: f.osHome,
+      platform: 'linux',
+      env: { PATH: '' },
+      runner: (command, args) => {
+        pnpmCalls.push({ command, args })
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+    const populatedPkg = JSON.parse(await readFile(pkgPath, 'utf8'))
+    expect(populatedPkg.dependencies).toEqual({ '@dsh-enhanced/assistant-web-owner': '0.1.75' })
+    expect(pnpmCalls[0]?.args).toEqual([
+      'install',
+      '--dir', f.profileDir,
+      '--no-frozen-lockfile',
+      '--ignore-scripts',
+      '--registry', 'https://registry.npmjs.org',
+    ])
   })
 })

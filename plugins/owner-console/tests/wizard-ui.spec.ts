@@ -231,4 +231,65 @@ describe('AutonomyWizardCard & SelfUpgradeCard UI surfaces', () => {
     expect(container.textContent).toContain('受控 Linux systemd')
     expect(container.textContent).not.toContain('准备自助升级')
   })
+
+  it('enables arming and confirming self-upgrade immediately after dry-run passes even if initial check had canTriggerDetached=false', async () => {
+    const failedCheck: SelfUpgradeStatus = {
+      ...baseUpgradeStatus(false),
+      canTriggerDetached: false,
+      offline: true,
+      checkSource: 'offline',
+      note: '本地 dsh-rsi CLI 执行超时',
+    }
+    const dryRunSelfUpgrade = vi.fn(async () => ({
+      ok: true as const,
+      value: {
+        supported: true,
+        frozenSystemdProfile: false,
+        requiresOutOfBandCli: false,
+        command: 'dsh-rsi upgrade --yes --profile web',
+        currentEnhancedVersion: '0.1.80',
+        targetEnhancedVersion: '0.1.81',
+        boundHostVersion: '0.2.2-rc.1',
+        targetHostVersion: '0.2.2-rc.3',
+        backupRequired: true,
+        warnings: [],
+        summary: '预演通过',
+      },
+    }))
+    const runSelfUpgrade = vi.fn(async () => ({
+      ok: true as const,
+      value: { applied: true, entry: 'dsh-rsi-upgrade', note: '已启动后台升级（PID 77777）' },
+    }))
+    const remote = makeBaseRemote({
+      autonomySetupStatus: async () => ({ ok: true, value: baseAutonomyStatus() }),
+      checkSelfUpgrade: async () => ({ ok: true, value: failedCheck }),
+      dryRunSelfUpgrade,
+      runSelfUpgrade,
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push({ root, el: container })
+
+    await act(async () => {
+      root.render(jsx(WenyaoSettingsSection, { remote, navigation: { openConversation: vi.fn(), openPlugins: vi.fn() } }))
+    })
+    await flushUi()
+
+    const armButtonBefore = [...container.querySelectorAll('button')].find(b => b.textContent?.includes('准备自助升级'))
+    expect(armButtonBefore?.disabled).toBe(true)
+
+    await act(async () => { clickButtonByText(container, '升级预演') })
+    await flushUi()
+    expect(dryRunSelfUpgrade).toHaveBeenCalledOnce()
+
+    const armButtonAfter = [...container.querySelectorAll('button')].find(b => b.textContent?.includes('准备自助升级'))
+    expect(armButtonAfter?.disabled).toBe(false)
+
+    await act(async () => { clickButtonByText(container, '准备自助升级') })
+    await act(async () => { clickButtonByText(container, '确认并启动后台升级') })
+    await flushUi()
+    expect(runSelfUpgrade).toHaveBeenCalledWith(true)
+  })
 })

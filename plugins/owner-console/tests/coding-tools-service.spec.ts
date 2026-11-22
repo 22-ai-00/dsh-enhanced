@@ -214,10 +214,34 @@ describe('owner console coding tools (TraeX & Antigravity) and default model rou
   it('distinguishes missing binaries and auth-required errors and strips secret env vars from subprocess', async () => {
     vi.stubEnv('LARK_APP_SECRET', 'super-secret-value')
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-secret')
-    const env = sanitizedProbeEnv()
-    expect(env['LARK_APP_SECRET']).toBeUndefined()
-    expect(env['DEEPSEEK_API_KEY']).toBeUndefined()
-    vi.unstubAllEnvs()
+    try {
+      const env = sanitizedProbeEnv()
+      expect(env['LARK_APP_SECRET']).toBeUndefined()
+      expect(env['DEEPSEEK_API_KEY']).toBeUndefined()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+
+    const validDesktopNode = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness'
+    const withDesktopNode = sanitizedProbeEnv({
+      PATH: '/usr/bin:/bin',
+      DSH_DESKTOP_NODE_EXECUTABLE: validDesktopNode,
+      DEEPSEEK_API_KEY: 'sk-still-redacted',
+      LARK_APP_SECRET: 'secret-still-redacted',
+    })
+    expect(withDesktopNode['DSH_DESKTOP_NODE_EXECUTABLE']).toBe(validDesktopNode)
+    expect(withDesktopNode['DEEPSEEK_API_KEY']).toBeUndefined()
+    expect(withDesktopNode['LARK_APP_SECRET']).toBeUndefined()
+
+    for (const invalidDesktopNode of ['', '   ', 'relative/node', './node', '/usr/bin/node\n--eval', '/usr/bin/node\r', '/usr/bin/node\0evil']) {
+      const sanitized = sanitizedProbeEnv({
+        PATH: '/usr/bin:/bin',
+        DSH_DESKTOP_NODE_EXECUTABLE: invalidDesktopNode,
+        OPENAI_API_KEY: 'sk-redacted',
+      })
+      expect(sanitized['DSH_DESKTOP_NODE_EXECUTABLE']).toBeUndefined()
+      expect(sanitized['OPENAI_API_KEY']).toBeUndefined()
+    }
 
     const execFn: ProbeExecFn = async (cmd, args) => {
       if (cmd === 'missing-agy' && args[0] === '--version') {

@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OwnerConsoleService } from '../src/service.js'
-import { compareSemver, readBoundHostMetadata, SelfUpgradeProber } from '../src/upgrade-probe.js'
+import { buildUpgradeProbeEnv, compareSemver, readBoundHostMetadata, SelfUpgradeProber } from '../src/upgrade-probe.js'
 
 function makeHost(dshHome: string, profileName = 'web') {
   const profileDir = join(dshHome, 'profiles', profileName)
@@ -280,5 +280,274 @@ describe('upgrade-probe & SelfUpgradeProber', () => {
     const logFile = join(dshHome, 'logs', 'owner-console-upgrade-1760000000123.log')
     expect(statSync(logFile).mode & 0o777).toBe(0o600)
     expect(readFileSync(logFile, 'utf8')).toBe('')
+  })
+
+  it('builds sanitized upgrade env with DSH_HOME, valid desktop node executable, and deduplicated user bin dirs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'owner-console-upg-env-'))
+    dirs.push(root)
+    const home = join(root, 'home')
+    const localBin = join(home, '.local', 'bin')
+    const npmGlobalBin = join(home, '.npm-global', 'bin')
+    const dshHome = join(root, 'dsh-home')
+    mkdirSync(localBin, { recursive: true })
+    mkdirSync(npmGlobalBin, { recursive: true })
+
+    const desktopNode = '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness'
+    const env = buildUpgradeProbeEnv({
+      HOME: home,
+      PATH: `/usr/bin:${localBin}/`,
+      DSH_DESKTOP_NODE_EXECUTABLE: desktopNode,
+      DEEPSEEK_API_KEY: 'sk-never-leak',
+    }, 'darwin', dshHome)
+
+    expect(env['DSH_HOME']).toBe(dshHome)
+    expect(env['DSH_DESKTOP_NODE_EXECUTABLE']).toBe(desktopNode)
+    expect(env['DEEPSEEK_API_KEY']).toBeUndefined()
+    const pathParts = (env['PATH'] ?? '').split(':')
+    expect(pathParts.filter(p => p.replace(/\/+$/u, '') === localBin)).toHaveLength(1)
+    expect(pathParts).toContain(npmGlobalBin)
+
+    const winAppData = join(root, 'appdata')
+    const winNpm = join(winAppData, 'npm')
+    mkdirSync(winNpm, { recursive: true })
+    const winEnv = buildUpgradeProbeEnv({ APPDATA: winAppData, PATH: 'C:\\Windows\\System32' }, 'win32', dshHome)
+    expect((winEnv['PATH'] ?? '').split(';')).toContain(winNpm)
+  })
+
+  it('falls back to executable dsh-rsi in user bin dirs on ENOENT and caches resolved path across dryRun and trigger', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'owner-console-upg-discover-'))
+    dirs.push(root)
+    const dshHome = join(root, 'dsh-home')
+    const home = join(root, 'home')
+    const localBin = join(home, '.local', 'bin')
+    mkdirSync(localBin, { recursive: true })
+    const discoveredBin = join(localBin, 'dsh-rsi')
+    writeFileSync(discoveredBin, '#!/bin/sh\nexit 0\n', { encoding: 'utf8', mode: 0o755 })
+
+    const host = makeHost(dshHome, 'desktop')
+    const execCalls: Array<{ cmd: string; args: readonly string[]; timeoutMs: number }> = []
+    const spawnSpy = vi.fn(() => ({ pid: 51515, unref: vi.fn() }))
+
+    const prober = new SelfUpgradeProber({
+      currentVersion: '0.1.80',
+      platform: 'darwin',
+      now: () => 1_760_000_001_000,
+      env: { HOME: home, PATH: '/usr/bin:/bin' },
+      spawnFn: spawnSpy,
+      execFn: async (cmd, args, opts) => {
+        execCalls.push({ cmd, args, timeoutMs: opts.timeoutMs })
+        if (cmd === 'dsh-rsi') {
+          return { stdout: '', stderr: 'spawn dsh-rsi ENOENT', exitCode: 127, errorCode: 'ENOENT' }
+        }
+        return {
+          stdout: JSON.stringify({
+            schemaVersion: 1,
+            command: 'upgrade',
+            action: args.includes('--dry-run') ? 'dry-run' : 'check',
+            ok: true,
+            ready: true,
+            mode: 'standard-local',
+            frozenSystemd: { detected: false, profiles: [] },
+            packages: {
+              cliPackageVersion: '0.1.81',
+              installedEnhancedVersion: '0.1.80',
+              targetEnhancedVersion: '0.1.81',
+              upgradeAvailable: true,
+              boundHost: { status: 'ready', installedVersion: '0.2.2-rc.1', targetVersion: '0.2.2-rc.3', upgradeAvailable: true },
+              profiles: [],
+            },
+            registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok', latestEnhancedVersion: '0.1.81' },
+            readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+            plan: { canExecute: true, steps: ['backup', 'upgrade'], rollbackSupported: true, backupFiles: ['cordis.patch.yml'] },
+          }),
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+
+    const status = await prober.check(host, true)
+    expect(status.checkSource).toBe('dsh-rsi')
+    expect(status.canTriggerDetached).toBe(true)
+    expect(execCalls.map(c => c.cmd)).toEqual(['dsh-rsi', discoveredBin])
+    expect(execCalls[0]!.timeoutMs).toBe(25_000)
+
+    const preview = await prober.dryRun(host)
+    expect(preview.supported).toBe(true)
+    expect(execCalls).toHaveLength(3)
+    expect(execCalls[2]!.cmd).toBe(discoveredBin)
+    expect(execCalls[2]!.timeoutMs).toBe(30_000)
+
+    const triggered = await prober.trigger(host, true)
+    expect(triggered.applied).toBe(true)
+    expect(spawnSpy).toHaveBeenCalledOnce()
+    const [spawnCmd, spawnArgs] = spawnSpy.mock.calls[0]! as unknown as [string, string[]]
+    expect(spawnCmd).toBe(discoveredBin)
+    expect(spawnArgs).toEqual(['upgrade', '--yes', '--json', '--dsh-home', dshHome, '--profile', 'desktop', '--confirm-dsh-home-stopped'])
+  })
+
+  it('surfaces timeout, redacted stderr, and non-zero JSON execution/offline diagnostics, and invalidates stale failed cache after dryRun succeeds', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-diag-'))
+    dirs.push(dshHome)
+    const host = makeHost(dshHome, 'web')
+
+    // 1. ETIMEDOUT during check caches canTriggerDetached: false, then dryRun reports clear timeout warning.
+    let mode: 'timeout' | 'stderr' | 'offline-json' | 'recover' = 'timeout'
+    let checkCalls = 0
+    const prober = new SelfUpgradeProber({
+      currentVersion: '0.1.80',
+      platform: 'darwin',
+      env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+      fetchFn: async () => new Response(JSON.stringify({ version: '0.1.81' }), { status: 200 }),
+      execFn: async (_cmd, args) => {
+        if (args.includes('--check')) checkCalls += 1
+        if (mode === 'timeout') {
+          return { stdout: '', stderr: 'timed out after 25000ms', exitCode: 1, errorCode: 'ETIMEDOUT' }
+        }
+        if (mode === 'stderr') {
+          return { stdout: '', stderr: 'fatal: token: super-secret-tok failed to verify receipt', exitCode: 1 }
+        }
+        if (mode === 'offline-json') {
+          return {
+            stdout: JSON.stringify({
+              schemaVersion: 1,
+              command: 'upgrade',
+              action: args.includes('--dry-run') ? 'dry-run' : 'check',
+              ok: false,
+              ready: false,
+              mode: 'standard-local',
+              frozenSystemd: { detected: false, profiles: [] },
+              packages: {
+                cliPackageVersion: '0.1.81',
+                installedEnhancedVersion: '0.1.80',
+                upgradeAvailable: false,
+                boundHost: { status: 'ready', installedVersion: '0.2.2-rc.3', upgradeAvailable: false },
+                profiles: [],
+              },
+              registry: { url: 'https://registry.npmjs.org', checked: true, status: 'unavailable' },
+              readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+              plan: { canExecute: false, steps: [], rollbackSupported: true, backupFiles: [] },
+            }),
+            stderr: '',
+            exitCode: 1,
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            schemaVersion: 1,
+            command: 'upgrade',
+            action: args.includes('--dry-run') ? 'dry-run' : 'check',
+            ok: true,
+            ready: true,
+            mode: 'standard-local',
+            frozenSystemd: { detected: false, profiles: [] },
+            packages: {
+              cliPackageVersion: '0.1.81',
+              installedEnhancedVersion: '0.1.80',
+              targetEnhancedVersion: '0.1.81',
+              upgradeAvailable: true,
+              boundHost: { status: 'ready', installedVersion: '0.2.2-rc.1', targetVersion: '0.2.2-rc.3', upgradeAvailable: true },
+              profiles: [],
+            },
+            registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok', latestEnhancedVersion: '0.1.81' },
+            readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+            plan: { canExecute: true, steps: ['backup', 'upgrade'], rollbackSupported: true, backupFiles: [] },
+          }),
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+
+    const timedOutStatus = await prober.check(host, true)
+    expect(timedOutStatus.canTriggerDetached).toBe(false)
+    expect(timedOutStatus.note).toContain('执行超时')
+
+    const timedOutPreview = await prober.dryRun(host)
+    expect(timedOutPreview.supported).toBe(false)
+    expect(timedOutPreview.warnings[0]).toContain('本地 dsh-rsi CLI 执行超时（私有 Host 收据校验或网络较慢）')
+    expect(timedOutPreview.summary).toContain('本地 dsh-rsi CLI 执行超时')
+
+    // 2. Non-zero exit with stderr redacts secrets and surfaces detail in warnings & summary.
+    mode = 'stderr'
+    const stderrStatus = await prober.check(host, true)
+    expect(stderrStatus.note).toContain('token: [redacted]')
+    expect(stderrStatus.note).not.toContain('super-secret-tok')
+    const stderrPreview = await prober.dryRun(host)
+    expect(stderrPreview.supported).toBe(false)
+    expect(stderrPreview.warnings[0]).toContain('token: [redacted]')
+    expect(stderrPreview.warnings[0]).not.toContain('super-secret-tok')
+    expect(stderrPreview.summary).toContain('token: [redacted]')
+    expect(stderrPreview.summary).not.toContain('super-secret-tok')
+
+    // 3. Non-zero exit with valid JSON and empty blockedReasons populates offline/execution diagnostic.
+    mode = 'offline-json'
+    const offlineJsonStatus = await prober.check(host, true)
+    expect(offlineJsonStatus.canTriggerDetached).toBe(false)
+    expect(offlineJsonStatus.note).toContain('当前无法连接 npm registry 解析目标版本')
+    const offlineJsonPreview = await prober.dryRun(host)
+    expect(offlineJsonPreview.supported).toBe(false)
+    expect(offlineJsonPreview.warnings[0]).toContain('当前无法连接 npm registry 解析目标版本')
+
+    // 4. When check cached canTriggerDetached: false and dryRun succeeds, dryRun invalidates stale status cache.
+    mode = 'recover'
+    const callsBeforeDryRun = checkCalls
+    const recoveredPreview = await prober.dryRun(host)
+    expect(recoveredPreview.supported).toBe(true)
+    const refreshedAfterDryRun = await prober.check(host, false)
+    expect(refreshedAfterDryRun.cached).toBe(false)
+    expect(refreshedAfterDryRun.canTriggerDetached).toBe(true)
+    expect(checkCalls).toBe(callsBeforeDryRun + 1)
+  })
+
+  it('appends --confirm-dsh-home-stopped for standard-local mode but omits it for macos-launchd', async () => {
+    const dshHome = mkdtempSync(join(tmpdir(), 'owner-console-upg-modes-'))
+    dirs.push(dshHome)
+    const host = makeHost(dshHome, 'web')
+
+    const makeProber = (mode: 'standard-local' | 'macos-launchd') => {
+      const spawnSpy = vi.fn(() => ({ pid: 61616, unref: vi.fn() }))
+      const prober = new SelfUpgradeProber({
+        currentVersion: '0.1.80',
+        platform: 'darwin',
+        env: { HOME: '/Users/test', PATH: '/usr/bin:/bin' },
+        spawnFn: spawnSpy,
+        execFn: async (_cmd, args) => ({
+          stdout: JSON.stringify({
+            schemaVersion: 1,
+            command: 'upgrade',
+            action: args.includes('--dry-run') ? 'dry-run' : 'check',
+            ok: true,
+            ready: true,
+            mode,
+            frozenSystemd: { detected: false, profiles: [] },
+            packages: {
+              cliPackageVersion: '0.1.81',
+              installedEnhancedVersion: '0.1.80',
+              targetEnhancedVersion: '0.1.81',
+              upgradeAvailable: true,
+              boundHost: { status: 'ready', installedVersion: '0.2.2-rc.1', targetVersion: '0.2.2-rc.3', upgradeAvailable: true },
+              profiles: [],
+            },
+            registry: { url: 'https://registry.npmjs.org', checked: true, status: 'ok', latestEnhancedVersion: '0.1.81' },
+            readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+            plan: { canExecute: true, steps: ['backup', 'upgrade'], rollbackSupported: true, backupFiles: ['cordis.patch.yml'] },
+          }),
+          stderr: '',
+          exitCode: 0,
+        }),
+      })
+      return { prober, spawnSpy }
+    }
+
+    const local = makeProber('standard-local')
+    expect((await local.prober.trigger(host, true)).applied).toBe(true)
+    const localArgs = (local.spawnSpy.mock.calls[0]! as unknown as [string, string[]])[1]
+    expect(localArgs).toEqual(['upgrade', '--yes', '--json', '--dsh-home', dshHome, '--profile', 'web', '--confirm-dsh-home-stopped'])
+
+    const launchd = makeProber('macos-launchd')
+    expect((await launchd.prober.trigger(host, true)).applied).toBe(true)
+    const launchdArgs = (launchd.spawnSpy.mock.calls[0]! as unknown as [string, string[]])[1]
+    expect(launchdArgs).toEqual(['upgrade', '--yes', '--json', '--dsh-home', dshHome, '--profile', 'web'])
   })
 })

@@ -2870,9 +2870,13 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
   const canCheck = typeof remote.checkSelfUpgrade === 'function'
   const canDryRun = typeof remote.dryRunSelfUpgrade === 'function'
   const canTrigger = typeof remote.runSelfUpgrade === 'function'
+  const isFrozen = Boolean(upgradeStatus?.frozenSystemdProfile || upgradePreview?.frozenSystemdProfile)
+  const canArmUpgrade = !isFrozen && Boolean(
+    upgradeStatus?.canTriggerDetached || (upgradePreview?.supported && !upgradePreview.frozenSystemdProfile),
+  )
 
   const triggerConfirmedUpgrade = () => {
-    if (!canTrigger) return
+    if (!canTrigger || !canArmUpgrade) return
     setUpgradeArmed(false)
     void ctrl.run(() => remote.runSelfUpgrade!(true))
   }
@@ -2907,12 +2911,12 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
             ? el('div', { style: { fontSize: 12, color: danger } }, `提示 / 阻塞：${upgradePreview.warnings.join('；')}`)
             : null,
           el('div', { style: monoMuted }, `命令：${upgradePreview.command}`)),
-      upgradeArmed && upgradeStatus !== undefined && !upgradeStatus.frozenSystemdProfile
+      upgradeArmed && !upgradeStatus?.frozenSystemdProfile && !upgradePreview?.frozenSystemdProfile
         ? el('div', { style: bannerStyle(danger) },
           el('div', { style: { display: 'grid', gap: 8 } },
-            el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus.upgradeCommand}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
+            el('span', {}, `即将启动独立后台进程执行：${upgradePreview?.command ?? upgradeStatus?.upgradeCommand ?? 'dsh-rsi upgrade --yes'}（升级期间将先备份并校验账本，完成后需按日志重启 Host）。`),
             el('div', { style: actionsStyle },
-              el('button', { type: 'button', style: idle(dangerButtonStyle, busy || !canTrigger), disabled: busy || !canTrigger, onClick: triggerConfirmedUpgrade }, '确认并启动后台升级'),
+              el('button', { type: 'button', style: idle(dangerButtonStyle, busy || !canTrigger || !canArmUpgrade), disabled: busy || !canTrigger || !canArmUpgrade, onClick: triggerConfirmedUpgrade }, '确认并启动后台升级'),
               el('button', { type: 'button', style: buttonStyle, disabled: busy, onClick: () => setUpgradeArmed(false) }, '取消'))))
         : null,
       el('div', { style: actionsStyle },
@@ -2928,12 +2932,12 @@ export function SelfUpgradeCard({ ctrl }: Readonly<{ ctrl: ConsoleController }>)
           disabled: previewingUpgrade || !canDryRun,
           onClick: () => void ctrl.previewUpgrade(),
         }, previewingUpgrade ? '预演中…' : '升级预演'),
-        upgradeStatus?.frozenSystemdProfile
+        isFrozen
           ? null
           : el('button', {
             type: 'button',
-            style: idle(primaryButtonStyle, busy || !canTrigger || !upgradeStatus?.canTriggerDetached),
-            disabled: busy || !canTrigger || !upgradeStatus?.canTriggerDetached,
+            style: idle(primaryButtonStyle, busy || !canTrigger || !canArmUpgrade),
+            disabled: busy || !canTrigger || !canArmUpgrade,
             onClick: () => setUpgradeArmed(true),
           }, '准备自助升级'))))
 }
