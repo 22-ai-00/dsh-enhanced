@@ -58,6 +58,7 @@ Agent，并把
   次数、输出 token、时长、输入字节、每日次数都有硬顶。
 - 随机性是 `HMAC(seedDigest, lane+occurrence)` 的确定性抽签，可审计可重放，从不
   调用 `Math.random`。
+- 权限摘要：文件系统仅读写配置指定的绝对私有 SQLite（`0600`）及其目录（`0700`）；网络仅经 Host 已注册的 `llm` route 发起有界模型请求（`notifyOwner: true` 时经 Delivery 通知通道）；**子进程、凭据存储、浏览器、安装脚本：无。**
 
 ## 配置（全部默认关；未知字段拒绝）
 
@@ -96,9 +97,9 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 1. 安装 bundle（npm 发布后）或把本地打包 tarball 装进目标 profile：
 
    ```sh
-   dsh plugin --profile <profile> add @dsh-enhanced/assistant-dreaming@0.1.67
+   dsh plugin --profile <profile> add @dsh-enhanced/assistant-dreaming
    # 或本地验证：pnpm --dir plugins/assistant-dreaming pack --pack-destination /tmp
-   # dsh plugin --profile <profile> add /tmp/dsh-enhanced-assistant-dreaming-0.1.67.tgz
+   # dsh plugin --profile <profile> add /tmp/dsh-enhanced-assistant-dreaming-<version>.tgz
    dsh --profile <profile> --dump-config | grep -A2 assistant-dreaming
    ```
 

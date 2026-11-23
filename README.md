@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@dsh-enhanced/dsh-rsi-cli"><img alt="npm" src="https://img.shields.io/npm/v/@dsh-enhanced/dsh-rsi-cli?color=2f6f6f"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="node" src="https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-339933">
+  <img alt="node" src="https://img.shields.io/badge/node-%3E%3D24.9.0-339933">
   <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
 
@@ -31,15 +31,16 @@
 - **自我成长闭环**：在日常使用与纠偏中记住你的习惯与经验，空闲时酝酿新技能或改进方案，先在沙箱中独立验收通过后再启用。
 - **本机安全护航**：记忆与凭据默认留在本机，敏感操作与自主权限需经你明确授权，实验改动在原生沙箱中隔离验证，异常时可一键回滚。
 
-开发者可查阅[架构说明](docs/architecture.md)与[插件目录](plugins/README.md)了解完整包清单与各自边界；共享库在 `packages/*`，不自动启用。当前主线另集成三项默认关闭、需显式开启（opt-in）的主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
+开发者可查阅[架构说明](docs/architecture.md)、[插件目录](plugins/README.md)与[共享包目录](packages/README.md)了解完整包清单（36 个插件 + 4 个共享包 = 40 个发布包）与各自边界；共享库在 `packages/*`，不自动启用。当前主线另集成四项默认关闭或按预设启用的记忆、主动与通知增强（实际长期效果仍在真实宿主观测中，见[当前状态](docs/rsi-status.md)与[验收合同](docs/rsi-acceptance.md)）：
 
+- **联想记忆层（`assistant-association`）**：面向日常记忆进化的进程内存双缓冲关联图与 ≤5ms 联想召回层（Slice S1–S4，含 Hebbian 边权更新、WP22 参数自调参与 `dsh-rsi growth-report` 第 6 节留出对照）；由 `--plugin-preset dogfood` 安装并开启本地联想，其中 S3 空闲做梦/observe 信号与 S4 隔离子进程只读 Web 学习均默认关闭。
 - **受控事件源与目标退订**：`event-triggers` 5 类 sensor（GitHub 仓库、飞书日历、文件、HTTPS/JSON、Webhook）可按触发器开启 `intake` 适配器桥接至 `assistant-work-items`，并在 `assistant-proactive` / Goal 终态时无轮询自动退订。
 - **超限文本附件与注意力边界**：`assistant-delivery`（`attentionAttachOverCap`）配合 `assistant-web-owner` 与 `lark-channel` 支持把超长后台/owner 通知转为短摘要加 UTF-8 文本附件，同时保持目的审计与可选强制门禁（`attentionEnforce` 默认关闭）。
 - **Inferred 规则预设与吻合度闭环**：`assistant-policy`（`conservative` / `balanced`）与 `assistant-proactive` 提供 opt-in `inferred` intake 规则预设；`assistant-work-items` 只读 `listIntakeEvaluationFeed` 供 `assistant-evaluation` 记录 `would-accept` 吻合度，用于密封留出重放与一次性授权内的有界调优。
 
 ## 开始使用
 
-准备好 [Node.js 24 LTS](https://nodejs.org/en/download)、飞书账号，以及一个可用模型（已登录的 TraeX 或模型服务的 API Key）。也支持 Node.js 22.19 及以上的 22.x，以及 24 以上版本。
+准备好 [Node.js 24 LTS](https://nodejs.org/en/download)（推荐 `>=24.9.0`，与各包 `package.json` 的 `engines.node` 一致；当前安装脚本预检仍兼容 22.19+ / 24+，详细版本与平台基线见[兼容性基线](docs/compatibility.md)）、飞书账号，以及一个可用模型（已登录的本机 **TraeX / Antigravity (`agy`)** 或模型服务的 API Key）。
 
 - **macOS**：原生运行，无需 Docker；已在 Apple Silicon Mac 验证，Intel Mac 尚未实机验收。
 - **Linux**：新安装的默认学习场景采用原生隔离，需要 bubblewrap、systemd 用户服务与已委派给当前用户的 cgroup v1 四控制器或统一 cgroup v2 子树（Linux x64/v1 已实机验证，v2 实机冷安装→学习验证待跑）。详见[安装准备](scripts/install/README.md)。
@@ -83,6 +84,7 @@ dsh-rsi open --profile web
 | --- | --- |
 | 打开 Web 与文鳐控制台 | `dsh-rsi open --profile web` |
 | 检查或执行自助升级 | `dsh-rsi upgrade --check` / `dsh-rsi upgrade --dry-run` / `dsh-rsi upgrade --yes` |
+| 查看只读成长计分卡（含联想层对照） | `dsh-rsi growth-report --since 7d` |
 | 一键配置 Web-owner 自主授权 | `dsh-web-owner-setup --profile web --autonomy-setup --enable-memory-learning --enable-dreaming --enable-growth --dry-run` |
 | 查看运行状态（含 JSON） | `dsh-rsi status [--json]` |
 | 只读体检（含 `traex`/`agy` 与前提） | `dsh-rsi doctor [--profile web] [--json]` |
@@ -90,7 +92,7 @@ dsh-rsi open --profile web
 | 查看最近日志 | `dsh-rsi logs --profile web --lines 100` |
 | 重启服务 | `dsh-rsi restart --profile web` |
 
-浏览器关闭后，默认安装的服务仍会在后台运行。日常常用命令：`dsh-rsi open --profile web`（直接打开本地 Web 与「文鳐」控制台）、`dsh-rsi upgrade --dry-run`（预演用户向就地升级与自动回滚保护）、`dsh-rsi status --json`（查看状态与 `.dsh-rsi-host.json` 绑定）及 `dsh-rsi doctor --json`（只读诊断 `traex`/`agy` 登录、配置与运行前提）。注意安装或向导授权成功不代表真实宿主上的长期普通任务效果已通过验收（见[当前状态](docs/rsi-status.md)）。只升级 CLI 命令本身用 `dsh-rsi update`；Docker 迁移边界与 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](scripts/install/maintenance.md)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
+浏览器关闭后，默认安装的服务仍会在后台运行。注意：安装、向导授权或体检通过不代表真实宿主上的长期普通任务效果已通过验收（见[当前状态](docs/rsi-status.md)）。只升级 CLI 命令本身用 `dsh-rsi update`；Docker 迁移边界与 macOS 限制见 [CLI 帮助](packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](scripts/install/maintenance.md)。`reinstall` 会删除旧配置和历史后重新安装，请勿当作普通升级使用。
 
 ## 按需阅读
 
@@ -101,17 +103,17 @@ dsh-rsi open --profile web
 | 飞书绑定、权限、没有回复 | [飞书接入](plugins/lark-channel/docs/setup.md) |
 | 升级、重装、卸载 | [命令参考](packages/dsh-rsi-cli/README.md) |
 | 已支持什么、还有哪些限制 | [当前状态](docs/rsi-status.md) |
-| 选择额外插件 | [插件目录](plugins/README.md) |
+| 选择额外插件与共享包 | [插件目录](plugins/README.md) · [共享包目录](packages/README.md) |
 
 ## 参与开发
 
-开发需要 Node.js（版本范围同上）和 pnpm 11.7.0。本地和远端只保留 `dev`、`main`；开发、版本准备、提交与推送使用 `dev`，仅在发布验证通过后合入 `main`。克隆仓库后：
+开发需要 Node.js（`.node-version` 锁定 `24.9.0`，`engines.node >=24.9.0`）和 `pnpm@11.7.0`。本地和远端只保留 `dev`、`main`；开发、版本准备、提交与推送使用 `dev`，仅在发布验证通过后合入 `main`。克隆仓库后：
 
 ```sh
 pnpm install
 pnpm check
 ```
 
-`pnpm check` 包含校验、lint、构建、类型检查、测试和打包检查。新增插件见[开发指南](docs/creating-a-plugin.md)，包边界见[架构说明](docs/architecture.md)，发布见[发版指南](docs/releasing.md)。更多资料见[文档索引](docs/README.md)。
+`pnpm check` 包含校验、lint、构建、类型检查、测试和打包检查。参与协作见[贡献指南](CONTRIBUTING.md)与[安全政策](SECURITY.md)，新增插件见[开发指南](docs/creating-a-plugin.md)，包边界见[架构说明](docs/architecture.md)，Linux 复跑门禁见[Linux 验证环境](docs/linux-validation.md)，发布见[发版指南](docs/releasing.md)。更多资料见[文档索引](docs/README.md)。
 
 [MIT License](LICENSE)

@@ -134,8 +134,6 @@ Cordis fiber identity 与 callback 是同进程合作式边界，不能阻止恶
 
 ## 兼容性
 
-- `@deepseek-ai/cordis ^4.0.1`
-- `@dsh-enhanced/assistant-policy >=0.1.0 <0.2.0`
-- Node.js `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）
-
-参见仓库的[兼容性基线](../../docs/compatibility.md)。
+- `@deepseek-ai/cordis ^4.1.0`
+- `@dsh-enhanced/assistant-policy`（同批发布版本）
+- Node.js：依赖内置 `node:sqlite`，具体 `engines.node` 与运行时基线参见仓库[兼容性基线](../../docs/compatibility.md)。

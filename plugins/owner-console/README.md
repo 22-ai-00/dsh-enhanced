@@ -300,8 +300,8 @@ pnpm --dir plugins/owner-console build:assets
 - **真实 Web GUI 已验证（设置/安装切片）**：临时 profile + pinned DSH `0.2.1-rc.2` 下左侧栏入口、
   设置页全部卡片、原生插件页已安装行、「打开插件页 / 开始对话」均通过（证据
   `docs/evidence/owner-console/browser-smoke/`）。2026-11-06 的新 smoke 也确认 ⚙ 打开设置页、
-  五张卡片渲染、返回对话正常。live Harness Mac app 为 `0.2.2-rc.1`：owner-console `0.1.66`
-  起 peer 采用已验证的 0.2 线范围（`>=0.2.1-rc.2 <0.3.0`），不再需要 owner 豁免即可安装；
+  五张卡片渲染、返回对话正常。当时 live Harness Mac app 为 `0.2.2-rc.1`（历史 `0.1.66` 起采用
+  0.2 线 peer 范围，当前仓库 peer 基线已收紧至 `>=0.2.2-rc.5 <0.3.0`，详见[兼容性基线](../../docs/compatibility.md)），不再需要 owner 豁免即可安装；
   同日在 live `desktop` profile 复验了侧栏「文鳐」入口、对话面板、原生正文与 composer、
   ⚙ 设置入口（证据 `docs/evidence/owner-console/mac-live-app-20261106/`）。
 - **未在真实 GUI 中复验的部分**：飞书/TraeX 的“已安装未启用→启用”“活动→配置”两态此前是用 patch

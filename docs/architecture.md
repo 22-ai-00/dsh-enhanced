@@ -45,25 +45,19 @@ plugins/<name>/
 
 ## Host 与 Web 双端插件
 
-普通插件只有 Node/Host 入口。需要改动 Web UI 时，一个包通常同时拥有 Host 与 browser 两半：Host 提供数据/Typert RPC，browser 入口通过 `dsh.client` 声明 `platform: web` 和依赖边，并从 `exports["./client"]` 发布预构建客户端产物（如 `owner-console` 产出 `./lib/client.js`，注册 `sidebar.panellist` / `main` 与 DSH 原生左栏设置槽位 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer` 及 `plugins.bundle.config`）。
+普通插件只有 Node/Host 入口。需要改动 Web UI 时，一个包通常同时拥有 Host 与 browser 两半：Host 提供数据/Typert RPC，browser 入口通过 `dsh.client` 声明 `platform: web` 和依赖边，并从 `exports["./client"]` 发布预构建客户端产物（如 `owner-console` 产出 `./lib/client.js`，注册 `sidebar.panellist` / `main` 与 DSH 原生左栏设置槽位 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer`、`settings.models.provider-card` 及 `plugins.bundle.config`）。
 
 双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH `0.2.2-rc.5` 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
 
 Web owner 适配通过内存 `EntryTree` 将宿主 Session Controller 的 client 元数据与 owner-scoped 的 Host 包装绑定，只在浏览器加载同源原生 client，不复制旧版 Session 协议；子树由 Cordis effect 释放，不回写 profile 或 `node_modules`。
 
-此外，跨插件纯契约库放在 `packages/*`（如 `assistant-growth-contract`、`task-acceptance-contract`、`llm-route-capabilities`、`dsh-rsi-cli`），而 `assistant-dreaming` 等需要感知兄弟能力但不必强制装入的插件通过**可选 `peerDependencies`** 接入，保证独立包边界不被拉链锁定。
+此外，跨插件纯契约库放在 `packages/*`（如 `assistant-growth-contract`、`task-acceptance-contract`、`llm-route-capabilities`、`dsh-rsi-cli`），而 `assistant-dreaming`、`assistant-association` 等需要感知兄弟能力但不必强制装入的插件通过**可选 `peerDependencies`** 接入，保证独立包边界不被拉链锁定。
 
 ## 分发
 
 本地开发可以把 `plugins/<name>` 目录链接进 profile。`--local --scenario supervised` 则从冻结的已提交 HEAD 构建独立 tarball，将选定插件及其运行依赖安装到 profile 内；协调器复用同一批制品。共享库作为依赖安装，不作为 bundle 启用。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
 
-发布由 tag 驱动的 CI 自动完成。维护者先用根目录的 `release:prepare` 统一更新仓库版本和 `release-manifest.json` 的 `pending`，验证后合入 `main`；发布标签必须严格为 `vX.Y.Z`，必须从当时的 `origin/main` HEAD 创建，而且版本必须等于 `pending`。GitHub Actions（`.github/workflows/release.yml`）检出这个精确 tag，而不是移动中的分支，并在发布前要求 tag peeled commit 仍等于当前 `origin/main` HEAD。它还会验证 current/history/pending 的账本顺序、根版本、pending 包集合与全部 `plugins/*` / `packages/*` 目录一一对应，且每个包的 manifest 和运行时版本都一致；`src/version.ts` 只允许单一稳定字面量导出。任一条件不满足都会 fail closed。
-
-发布阶段必须使用 pnpm，让 workspace `catalog:` 依赖在上传前转换为实际版本；插件的 `prepublishOnly` 会拒绝直接使用 npm 发布。当前新包首次发布以 GitHub Environment `npm-release` 中的 `NPM_TOKEN` 作为 bootstrap 凭据，该 secret 应是有期限、最小包范围的 granular access token；environment 必须配置 required reviewers 和允许的部署分支/标签。workflow 在发布前验证 token 非空并执行 `npm whoami`。新包完成首次发布和 npm 侧配置后，可以迁移到 trusted publishing/OIDC，但当前流程不擅自启用 OIDC。publish job 只有仓库只读权限，持有写权限的 record job 不安装依赖且拿不到 npm token；本地 record 脚本执行步骤也不注入仓库写 token。
-
-`release:publish` 紧前会再次检查 tag、`origin/main` 和 tracked index/worktree；未跟踪构建产物不影响发布，但任何 staged/unstaged tracked 改动都会拒绝。发布成功后，`release:record` 复用同一套版本与包集合校验，只更新 `release-manifest.json`：提升 `current`、追加 `history` 并清空 `pending`。workflow 只提交这个账本文件，并在推送前再次确认 `origin/main` 没有从发布源码提交前进。按下述 immutable tag ruleset 部署后，tag 会稳定指向发布源码，而账本记录位于其后的独立提交；workflow 自身不创建也不移动 tag。
-
-这些远端复核只能缩小 TOCTOU 窗口，不能证明检查与 npm registry 写入之间具有原子性。仓库必须为 `v*` 配置 immutable tag ruleset（禁止删除和 force-update），发布期间冻结 `main` 合入，或让所有 main 写入者共享一个会实际阻塞写入的互斥机制；protected environment 的审批只能约束 job/secret 使用，不能单独锁定分支。递归 npm 发布也不是原子事务；暂时性失败应通过 Actions rerun，或用 `workflow_dispatch` 输入同一个现有 tag 重试，不能创建替代 tag 或改变 pending/source。整体发版统一推进版本，同时仍保留每个包作为独立 npm 安装、回滚和审计边界。
+仓库级发布采用统一版本号（`release-manifest.json` 账本 + `vX.Y.Z` 不可变 tag 驱动的 `.github/workflows/release.yml`），在发布前以 `pnpm` 转换 workspace `catalog:` 依赖并执行 fail-closed 一致性核验；发布与记录权限隔离，失败按同 tag 重试或 `release:supersede` 推进，发布后须逐包核对 npm 读回。完整发布协议、TOCTOU 约束与凭据要求以[发版指南](releasing.md)为单一权威说明。
 
 ## 持续目标上下文
 
@@ -75,12 +69,13 @@ Web owner 适配通过内存 `EntryTree` 将宿主 Session Controller 的 client
 
 - **入站与主动跟进（`assistant-work-items` / `assistant-proactive` / `assistant-delivery`）**：Delivery 在受认证人类回复上落盘独占入站、自然结果反馈及续办序（不把模型自报或 `role:user` Host notice 当作授权）；WorkItems 以 `observe` 模式记录 intake 台账、受控召回（owner recall）与显式 continuation；Proactive 对已授权事件做收益评估（`intakeEvaluation`）、去重提醒与主人注意力调节提问。
 - **记忆与经验学习（`assistant-memory-learning` / `personal-memory`）**：在三份独立签名授权齐备后通过 canonical 游标提取前台或 WorkItem 经验，并在查询与模型组装边界按当前 owner 实时复核/隐藏已撤回条目。
+- **联想记忆层（`assistant-association`）**：通过可选 `peerDependencies` 聚合 `personal-memory`、`assistant-goals`、`assistant-work-items`、`assistant-automations`、`personal-wiki`、`assistant-skills`、`event-triggers`、`assistant-dreaming` 与任务片段，在本地 SQLite（Schema v4）与进程内存双缓冲索引上执行 ≤5ms 同步联想召回（`<association>` 与 `assoc_read(id)`），支持撤回级联、10–15% 密封留出、Hebbian 更新与 WP22 参数自调参；`dogfood` 预设安装并开启本地联想，S3 空闲做梦/observe 信号与 S4 隔离子进程（无凭据环境，非 OS 沙箱）只读 Web 学习均默认关闭。
 - **做梦奇想与成长驱动（`assistant-dreaming` / `assistant-growth-driver` / `assistant-growth-contract`）**：`assistant-dreaming` 默认休眠（fail-closed），启用后经确定性 HMAC 抽签与空闲/冷启动门由单工具冻结 Agent 仅写入私有 idea 账本（L0）；只有经 owner 受策略验证的 idea，才允许可选 `assistant-growth-driver` 结合前台真实反馈或认证后台失败（`workItemFailures`）在冻结模型路由与预算下形成持久成长作业，再交 Control Plane 与 Verifier 独立审查、有限采用或物理回退。
 - **多 ACP 编码 Agent 与控制台（`traex-acp-provider` / `owner-console`）**：同时提供 `traex-agent` 与 Antigravity `agy-agent` 本机 ACP 接入并支持配置热重载；`owner-console` 聚合各插件的脱敏健康与概览（经 `assistant-health` / 服务读写端），写入全部走 Host `settings`/`pluginManager` 或受授权服务方法，浏览器端不持密钥、不发模型请求。
 
 ## 离线隔离执行与独立验收
 
-`assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy 与 SQLite 授权账本：Linux 唯一支持 `backend: 'linux-native'`（bubblewrap、user/mount/PID/network namespace、tmpfs 与已委派 cgroup v1 控制器，Docker 后端已移除，旧账本只读留存），macOS 使用原生 sandbox/seatbelt。每条 Isolation grant 精确绑定 owner lineage、scope、期限与有限次数/时长，按 `unknown` 保留资源占位、不自动重放。
+`assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy 与 SQLite 授权账本：Linux 唯一支持 `backend: 'linux-native'`（bubblewrap、user/mount/PID/network namespace、tmpfs 与已委派 cgroup v1 控制器或统一 cgroup v2 子树，Docker 后端已移除，旧账本只读留存）；macOS 的 `macos-seatbelt` 仅用于 `plugin-control-plane` 的受限 `create`/`revise-created` 构建与行为验收路径（`assistant-isolation` 普通离线执行为 Linux 专用）。每条 Isolation grant 精确绑定 owner lineage、scope、期限与有限次数/时长，按 `unknown` 保留资源占位、不自动重放。
 
 `assistant-verifier`、`assistant-goals`、`assistant-skills` 与 `plugin-control-plane` 通过共享非激活契约库（`task-acceptance-contract`、`assistant-growth-contract`）解耦：候选源码在无网离线环境构造，独立评测/回归使用私有 held-out 用例与冻结父基线比对；动态采用的新工具、技能与有限修订（`creationCapabilities.retention` / Control Plane 签名证书与物理回退）均保留独立创建/审查/采用账本，详见各包 README 与 [Control Plane 有限试用合同](bounded-live-adoption.md)。
 

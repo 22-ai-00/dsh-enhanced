@@ -26,4 +26,4 @@ Memory→Wiki 会生成 `memory://<id>?version=<n>` source 与 content SHA-256�
 
 ## 兼容性与参考
 
-以 DSH `0.1.2-rc.1` 验证。思路参考 Memento proposal-only mutation、Hindsight evidence→observation→page 和 Wiki 的 save/pin 工作流；社区包未进入依赖，也没有复制其自动 retain/dreaming 行为。
+兼容范围与验证基线见仓库[兼容性基线](../../docs/compatibility.md)。思路参考 Memento proposal-only mutation、Hindsight evidence→observation→page 和 Wiki 的 save/pin 工作流；社区包未进入依赖，也没有复制其自动 retain/dreaming 行为。

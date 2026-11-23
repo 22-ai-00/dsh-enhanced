@@ -1,6 +1,6 @@
 # `dsh-rsi`：安装和管理 DSH enhanced
 
-`dsh-rsi` 管理 macOS / Linux 上的 DSH enhanced 插件集合。安装器会安装这个全局命令；也可单独安装 CLI（Node.js `^22.19.0 || >=24.0.0`）：
+`dsh-rsi` 管理 macOS / Linux 上的 DSH enhanced 插件集合。安装器会安装这个全局命令；也可单独安装 CLI（`package.json` 声明 `engines.node >=24.9.0`，当前安装脚本预检仍兼容 22.19+ / 24+，详见[兼容性基线](../../docs/compatibility.md)）：
 
 ```sh
 npm install --global @dsh-enhanced/dsh-rsi-cli
@@ -56,7 +56,7 @@ dsh-rsi reinstall                       # 备份、删除、重新安装并重�
 
 `dsh-rsi upgrade` 面向普通日常用户的可审计自助升级：先通过有界超时的 npm registry 查询（优先 `/latest` 并并行检查）与只读 `.dsh-rsi-host.json` 对比当前与最新版本（网络不可用或超时干净回退为离线报告，不崩进程），并在 `--dry-run` / `--yes` 前做 fail-closed 就绪检查（损坏或符号链接绑定、非空 `creation-review`/`revision-review`/`revision-regression`/`creation-adoptions` 台账等直接阻断）。未显式传入 `--dsh-version` 时，若远端 `@deepseek-ai/dsh` 领先于已验证基线，会自动将目标 Host 版本钳制至已验证基线（如 `0.2.2-rc.5`），同时保留 `registry.latestDshHostVersion` 展示真实远端版本；显式传入未验证的 `--dsh-version` 会提前阻断。在 Linux 受控 systemd 冻结部署上会委托 `scripts/install/upgrade-program.mjs` 并维持锁定 Host 基线；在 macOS / 非受控本地 profile 上会要求先停止同 Home 进程或显式 `--confirm-dsh-home-stopped`，自动区分 `pnpm` profile（同步更新 `package.json` 与 `pnpm-workspace.yaml` `overrides` 的 `@dsh-enhanced/*` 并保留 `file:` 本地协议，随后执行 `pnpm install --no-frozen-lockfile --ignore-scripts`）与纯 npm profile（使用 `--legacy-peer-deps`）。升级前对 `cordis.patch.yml`、`package.json`、`pnpm-workspace.yaml`、`pnpm-lock.yaml`、`package-lock.json` 与 `@dsh-enhanced/*` 生成 `0600` 备份、升级后执行 `doctor` 复验，若关键检查失败自动字节级回滚恢复原状态。升级成功只证明包版本与静态就绪检查通过，不自动替代真实模型可用性或长期普通任务效果评估。
 
-`update --all` 先升级 CLI，再按原场景升级插件。对于保留的**原 Docker 后端 Linux 冻结 owner/cohort Home**，`dsh-rsi update --all --yes` 仅在全部前置成立时执行一次性 docker→native 升级（将候选固定更新至 `0.2.2-rc.5`，保留原 owner 绑定、期限、已用额度、凭据、模型、Session、Goal 与历史）：绑定官方仓库 `dev`/`main` 可干净快进（detached HEAD 须在本机记录的 `origin/dev` 或 `origin/main` 历史内）、原 Host 属于支持基线（`0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` / `0.2.2-rc.5`）、owner 授权未过期且 target/coordinator 双服务均活动、无已采用源码或未结 activation，以及已配置的 `creation-review` / `revision-review` / `revision-regression` / `creation-adoptions` 业务记录均为空（不存在的库不算空库）。已有 owner 的 native→native 程序升级、非空创建历史迁移与完整 live Docker→native 切换均不支持/未验收。
+`update --all` 先升级 CLI，再按原场景升级插件。对于保留的**原 Docker 后端 Linux 冻结 owner/cohort Home**，`dsh-rsi update --all --yes` 仅在全部前置成立时执行一次性 docker→native 升级（将候选固定更新至 `0.2.2-rc.5`，保留原 owner 绑定、期限、已用额度、凭据、模型、Session、Goal 与历史）：绑定官方仓库 `dev`/`main` 可干净快进（detached HEAD 须在本机记录的 `origin/dev` 或 `origin/main` 历史内）、原 Host 属于支持基线（`0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.2-rc.1` / `0.2.2-rc.3` / `0.2.2-rc.5`）、owner 授权未过期且 target/coordinator 双服务均活动、无已采用源码或未结 activation。对于 `creation-review` / `revision-review` / `revision-regression` / `creation-adoptions`，空历史沿用空历史交接协议，非空历史已在代码层实现只读封存归档（`creation-adoptions.sealed/<digest>.sqlite`）与审查库 v2 grant handoff（均尚未完成完整 live 实机切换验收，见[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)与[RSI 状态](../../docs/rsi-status.md)）。普通本地自助升级 `dsh-rsi upgrade` 遇到非空创建/审查台账仍 fail-closed 阻断；已有 owner 的 native→native 程序升级不受支持。
 
 尚无 owner 的 pre-owner Home 另有 checkout 内的 v3 维护入口，见 [pre-owner 维护](../../scripts/install/maintenance.md#checkout-内的-pre-owner-冻结源码维护)。若本机旧版 CLI 尚不能识别冻结 owner 升级，先单独执行一次 `dsh-rsi update` 自举 CLI 后再运行 `dsh-rsi update --all --yes`；普通待恢复事务与已绑定 readiness 修复按[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)处理，能力状态见[RSI 状态](../../docs/rsi-status.md)。
 

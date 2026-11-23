@@ -2,7 +2,7 @@
 
 普通任务驱动的持久事实与经验学习：前台对话可形成事实与经验；显式开启 `workItemExperiences` 并配置相应有限授权后，后台 WorkItem 的认证主人结果反馈也可形成经验。一次 owner 配置与有限授权后，原生 Automations 发现来源，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
-验证基线为仓库固定的 DSH `0.2.1-rc.2`、Cordis `4.0.5` 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
+验证基线以仓库[兼容性基线](../../docs/compatibility.md)为准（DSH、Cordis、Node.js 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory）。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
 
 ```sh
 dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning

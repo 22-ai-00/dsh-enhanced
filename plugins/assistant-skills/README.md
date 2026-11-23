@@ -6,7 +6,7 @@ Save a successfully verified Goal's tool workflow and reuse it in a new Goal. Th
 dsh plugin --profile web add @dsh-enhanced/assistant-skills
 ```
 
-Install the Goals, Delivery and Policy bundles and native Skills/Tools services in the same Host. Goals must be `@dsh-enhanced/assistant-goals >=0.1.25 <0.2.0` and have native execution and independent whole-goal verification configured; the minimum supplies the Host-only failure-evidence and exact-run-proof APIs used by failure candidates and causal canary watches. This bundle never enables those services or creates acceptance profiles automatically.
+Install the Goals, Delivery and Policy bundles and native Skills/Tools services in the same Host (see the repository [compatibility baseline](../../docs/compatibility.md)). Use matching release versions of `@dsh-enhanced/assistant-goals` with native execution and independent whole-goal verification configured; this supplies the Host-only failure-evidence and exact-run-proof APIs used by failure candidates and causal canary watches. This bundle never enables those services or creates acceptance profiles automatically.
 
 Configuration:
 
@@ -237,7 +237,7 @@ registered meter. No installation script or credential authority is added.
 
 ### Repair checkpoint recovery
 
-The dev increment after v0.1.31 persists an execution fence per authorized repair
+Repair iterations persist an execution fence per authorized repair
 iteration. A cold Linux Host may reacquire it only when the prior process is
 proven gone in the same PID namespace and no model or tool effect remains
 pending. Tool completion also requires its native Session result to be flushed.

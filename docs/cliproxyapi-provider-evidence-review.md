@@ -1,10 +1,10 @@
 # CLIProxyAPI：Provider 设计依据
 
-上游研究截点为 2026-08-18，固定提交 [`d3a5988`](https://github.com/router-for-me/CLIProxyAPI/tree/d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0)。本页保留来源和可迁移的设计依据；旧实施计划与复核流水从 Git 历史查询。当前行为以 [Coding provider](../plugins/coding-subscription-provider/README.md)、[详细参考](coding-subscription-provider-reference.md) 和 [TraeX provider](../plugins/traex-acp-provider/README.md) 为准。
+> **历史设计依据。** 上游研究截点为 2026-08-18，固定提交 [`d3a5988`](https://github.com/router-for-me/CLIProxyAPI/tree/d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0)。本页保留来源和可迁移的设计依据；旧实施计划与复核流水从 Git 历史查询。当前行为以 [Coding provider](../plugins/coding-subscription-provider/README.md)、[详细参考](coding-subscription-provider-reference.md) 和 [TraeX provider](../plugins/traex-acp-provider/README.md) 为准。
 
 ## 当前实现对应关系
 
-按本仓库代码复核（2026-09-20）：
+以下为 2026-09-20 代码复核快照（非实时配置契约，当前行为以上方链接为准）：
 
 | 机制 | 当前实现与边界 |
 | --- | --- |

@@ -1,6 +1,6 @@
 # Linux 原生自迭代运行时
 
-本文说明 Linux 原生运行时的安全合同及安装迁移边界。已有实现和验收范围见[当前状态](rsi-status.md)；完整 live owner Docker→native 切换尚未验收，非空创建历史迁移尚未实现。配置生成、单元测试和临时 Home 演练不能替代真实切换验收。
+本文说明 Linux 原生运行时的安全合同及安装迁移边界。已有实现和验收范围见[当前状态](rsi-status.md)；完整 live owner Docker→native 切换与非空创建历史迁移均尚未完成实机验收（非空采用封存与审查库 v2 handoff 已在代码层实现，见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)）。配置生成、单元测试和临时 Home 演练不能替代真实切换验收。
 
 ## 不变的能力
 
@@ -14,7 +14,7 @@
 | 已有安装迁移 | 保留主人、会话、凭据、权限范围、授权期限、已用额度、历史证据与回退点；包括未授权创建的源码修复部署。 |
 | 安装与更新 | 新装、源码准备、独立验证、更新及运行时不需要 Docker CLI、daemon、socket 或镜像。 |
 
-macOS 已有 Seatbelt 路径继续保持其现有能力。它不具备 Linux 完整仓库源码替换合同，因此不能用其受限路径代替本次 Linux 改造。
+macOS 已有 `macos-seatbelt` 路径仅用于 `plugin-control-plane` 的受限 `create`/`revise-created` 构建与行为验收（`assistant-isolation` 普通离线执行为 Linux 专用）。它不具备 Linux 完整仓库源码替换合同，因此不能用其受限路径代替本次 Linux 改造。
 
 ## 执行边界
 
@@ -44,23 +44,23 @@ CPU、内存（含 swap）、PID 数使用实际内核 cgroup 限额，配置后
 | 安装状态 | 当前维护边界 |
 | --- | --- |
 | 尚无 owner 的 pre-owner Home | v3 维护证明支持 Docker→native、native→native，仅更新基础 runtime、release 工具链/store/cache 与 cohort；不创建 owner、runner 或预算，拒绝混合后端、native→Docker、非空权限状态及 owner 专用构建家族。 |
-| 已有 owner 的 Home | 程序升级只接纳受支持的 Docker 原安装；已是 native 的原安装明确拒绝。Docker→native 还须已配置的 creation-review、revision-review 及 revision-regression 库的 grants/verifications 与采用的 adoptions/calls/source_archives 全空；非空迁移尚未实现。 |
+| 已有 owner 的 Home | 程序升级只接纳受支持的 Docker 原安装；已是 native 的原安装明确拒绝。Docker→native 支持空历史路径（creation-review、revision-review、revision-regression 与 creation-adoptions 均为空），以及代码层已实现的非空采用封存（`creation-adoptions.sealed/<digest>.sqlite`）与审查库 v2 grant handoff（详见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)）；两条路径的完整 live 切换均尚未实机验收。 |
 
-owner 的空业务迁移在停服前和 stage 变更前复核原身份与空历史，使用原 key、有限额度、期限与签名链完成移交；切换前仍核验资源身份及实际静止，失败保留事务和回退证据，不自动重放 unknown 或重建授权。完整 live 服务切换仍未验收。临时 Home、副本、单个 runner 或包安装成功，都不能替代 owner 身份、持久预算、双服务就绪与回滚的完整验收。操作入口与恢复条件见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。
+owner 的业务迁移在停服前和 stage 变更前复核原身份与历史状态，使用原 key、有限额度、期限与签名链完成移交；切换前仍核验资源身份及实际静止，失败保留事务和回退证据，不自动重放 unknown 或重建授权。完整 live 服务切换仍未验收。临时 Home、副本、单个 runner 或包安装成功，都不能替代 owner 身份、持久预算、双服务就绪与回滚的完整验收。操作入口与恢复条件见[维护说明](../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)。
 
 ## 验收条件
 
-1. 在受支持的 delegated cgroup v1 实机上验证资源和 namespace 边界，包括正常执行、文件/网络边界、硬字节/inode/内存/CPU/PID 限额、超时和故障清理。
+1. 在受支持的 delegated cgroup v1 与统一 cgroup v2 实机上验证资源和 namespace 边界，包括正常执行、文件/网络边界、硬字节/inode/内存/CPU/PID 限额、超时和故障清理（Linux x64/v1 已实机验证，v2 实机冷安装→学习运行待跑）。
 2. 验证已接入的普通执行与 Verifier 账本：重启恢复、撤销、unknown、幂等和受支持的历史迁移。
 3. 验证整仓源码检查、创建/修订、独立行为验证、发布/采用/回退，保留原来的检查范围，不能以单包成功替代。
-4. 在没有可用 Docker CLI/socket 的环境验证安装及上表支持的迁移路径；已有 owner 的空业务 Docker→native 完整 live 切换仍待验收，非空迁移与 native owner 升级不在当前支持范围。
+4. 在没有可用 Docker CLI/socket 的环境验证安装及上表支持的迁移路径；已有 owner 的 Docker→native 完整 live 切换与非空历史迁移仍待实机验收，native→native owner 程序升级不在当前支持范围。
 5. 独立审查、根目录 `pnpm check`、公开包安装及实机部署验证通过后发布。普通任务的长期收益继续单独观察，不与本次去依赖验收混同。
 
 ## 当前实机发现
 
 Linux x64/cgroup v1 的资源原语、普通执行、整仓源码 prepare、创建/修订独立验证、发布/采用/回退已有范围内实现和验证；pre-owner 基础资源维护与 owner 程序升级的支持条件按上表分别限定。普通 native Goal 已有固定脚本供应商的真实组件验收，不证明真实模型或任意任务的成功率。当前证据、完整 live 切换与长期普通使用的未验收项统一见[当前状态](rsi-status.md)。
 
-进程内热加载不属于本次去 Docker 依赖的验收范围；它作为工程进化的独立缺口处理，不能据此宣称完整能力等价。
+进程内热加载不属于本次去 Docker 依赖的验收范围：`assistant-delivery` / `plugin-control-plane` 已提供默认关闭的 opt-in Cordis 同进程重载 Host API（`config-only` 与 `<version>-<artifactDigest>` `artifact-replace`），但尚未接入 `AdoptionCoordinatorRuntime` 自动执行路径或任何安装预设，不能据此宣称完整能力等价（见[兼容性基线](compatibility.md)与[当前状态](rsi-status.md)）。
 
 仓库持久执行通过独立合同和二进制通道支持 64 MiB 归档、32 MiB 产物、8 GiB workspace、4 GiB 可执行 tmp 与嵌套 namespace。双 UID 使用 schema 3，额外绑定固定映射、系统工具快照及执行实现摘要；历史 schema 1/2 不重新解释。候选退出且资源消失后才接收产物；私有收据绑定摘要，字节保存在受限 spool。账本准入包含全部临时挂载与持久存储，上层归档和 pack 暂存另外预留。完整源码 prepare 已在本机真实执行全新离线冻结安装、根 `pnpm check`、输入复核及打包；明确未启动且清理完成的本次失败可以终结，历史缺证仍保持 unknown，不重派或退还预算。当前证明范围及检查计数见[当前状态](rsi-status.md)。
 

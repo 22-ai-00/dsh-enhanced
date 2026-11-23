@@ -45,16 +45,13 @@ pnpm 在执行构建脚本前已把依赖写入 `package.json`；若 add 中途�
 
 ## 安装入口
 
-安装器默认解析官方 npm `latest`，并校验当前源码允许的已验证范围 `>=0.2.2-rc.5 <0.3.0`；新安装固定 `0.2.2-rc.5` 并将入口写入 `$DSH_HOME/.dsh-rsi-host.json`，未知新版不会未经验证直接装入。当前发布包与 Host 固定值以[发布账本](../../release-manifest.json)为准；旧 `0.1` Home 到 `0.2` 不走普通自动升级，满足下述严格前提时使用显式联合迁移。远端引导器的固定 tag 和资产摘要由 release prepare 更新。
+安装器先确保 Node.js、pnpm 和兼容的 DSH：默认解析官方 `@deepseek-ai/dsh` 的 `latest`（不追踪 `next` 或 beta），校验当前源码允许的已验证范围 `>=0.2.2-rc.5 <0.3.0`，对全新空 Home 将精确 Host（`0.2.2-rc.5`，可用显式 `--dsh-version` 指定允许的精确版本）安装到独立目录并在 `$DSH_HOME/.dsh-rsi-host.json` 中持久绑定；重试、插件升级及生成的服务复用该入口，不修改全局 DSH，未知新版或解析失败会拒绝。`--dry-run` 离线展示计划，已有未绑定 Home 保留原 Host。当前发布包与 Host 固定值以[发布账本](../../release-manifest.json)为准；旧 `0.1` Home 到 `0.2` 不走普通自动升级，满足下述严格前提时使用显式联合迁移；远端引导器的固定 tag 和资产摘要由 `release:prepare` 更新。普通 Linux npm cohort 的受管 Host 更新与下述冻结 owner 程序升级有不同适用条件；真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#升级与重装)。
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
 同一 macOS 用户的同名 profile 共用一个 launchd 目标。安装、重启与清理会核对 plist 和已加载服务的 DSH_HOME、profile 与执行参数，并按该目标互斥；另一 Home 已占用时停止操作。替换服务失败会尝试恢复原定义与注册状态，无法证明停服或恢复时保留现场并报错。运行检查要求 `state = running` 和有效 PID；重启还须确认新 PID，只有注册记录不算运行成功。
 
 macOS purge 从枚举 profile 到停服、备份和删除结束持续持有 Home 生命周期锁，并在停服前获取全部目标服务锁，阻止同 Home 的安装或同目标的启动与清理并发。`/tmp` 中的 Home 和服务锁文件保留稳定 inode；进程退出即释放内核锁，保留文件不表示仍被占用。同 profile 的手动 Host 若无法证明所属 Home，清理会中止，`--yes` 不会自动终止它。
-
-
-安装器先确保 Node.js、pnpm 和兼容的 DSH。新安装解析官方 `@deepseek-ai/dsh` 的 `latest` 并固定精确版本；与当前源码基线不符或解析失败时会拒绝，不追踪 `next` 或 beta。`--dry-run` 离线展示计划，显式 `--dsh-version` 可指定允许的精确版本。`dsh-rsi install` 对全新空 Home 将 Host 安装到独立目录，并在 Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，不修改全局 DSH。已有未绑定 Home 保留原 Host。普通 Linux npm cohort 的受管 Host 更新与下述冻结 owner 程序升级有不同适用条件；真实跨版本验收状态见 [RSI 状态](../../docs/rsi-status.md)，缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#升级与重装)。
 
 三档基础场景能力逐级叠加：`core ⊂ lark ⊂ supervised`（另提供面向本机 Web 的 `web` 与 Linux 隔离 `autonomy`）。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`：Linux/macOS 默认配置飞书常驻、`owner-console`（「文鳐」控制台与原生设置 UI）、`assistant-proactive`、`assistant-growth-driver`、`assistant-work-items`、`assistant-memory-learning`、新工具独立验收和有限采用，Linux 另配置独立采用协调器，不因 `--yes` 或非交互而降为 `core`。全新 Home 的 `supervised` 需要交互式飞书 onboarding；未配对时 `--yes` 或管道执行会在安装前停止。显式 `--scenario core` / `web` 或 `--lark skip` / `--no-service` 保留有限场景。macOS 使用原生 launchd Host，支持记忆学习、新工具独立验证与动态采用；源码替换发布轨仍限 Linux。
 
@@ -145,6 +142,8 @@ dsh-rsi update --all --yes
 切换前若发现受管服务以外的进程仍持有 Home 文件或目录，安装器会拒绝继续。先确认占用者及其用途；对可暂停的目录监控使用其正常服务停止方式，事务完成后恢复原服务状态。不要删除仍在使用的数据、杀死不明进程或绕过进程占用检查。
 
 ### 旧 Home 的联合 Host / 源码迁移
+
+> **历史迁移路径（DSH `0.1.x → 0.2.0-rc.2` / 遗留预备 Home）：** 以下章节仅面向遗留 DSH `0.1` 或 Docker 时代旧 Home 的一次性迁移与恢复；新装与当前 `0.2.2-rc.5` 日常维护请优先使用前文的 `dsh-rsi` 常规入口。
 
 开发 checkout 提供显式 `host-local-update`，适用于尚无 owner 授权、具有精确匹配的惰性预备协调器及单个活动目标服务的 Linux Home。原 Host 必须有可验证的私有缓存收据；支持未绑定 Home 的 `0.1.x → 0.2.0-rc.2`，以及已绑定 `0.2.0-rc.2` 的同 Host 源码更新。它不是普通 `dsh-rsi update` 的自动路径，也不自动开启学习。其他状态仍拒绝，不能删除协调器标记或伪造 Host 绑定来满足前提。
 
@@ -401,7 +400,7 @@ macOS 的 supervised 使用原生 launchd Host、私有固定 Node 与系统沙�
 
 `web` 是本机桌面/Web 入口：它安装 core、Delivery、Goals、Web owner 与 `owner-console`（「文鳐」控制台与原生左栏设置 UI），并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。安装器通过已验证的 Host 解析配置工具的依赖；当前 DSH 0.2 使用原生运行时解析，不创建旧版共享 peer 目录。它不接入 Lark、不启动常驻服务（可直接用 `dsh-rsi open --profile web` 拉起并打开），也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
-`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见两轮验收记录。
+`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、`assistant-deepseek-budget`、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见[验收合同](../../docs/rsi-acceptance.md)与[当前状态](../../docs/rsi-status.md)。
 
 Linux 新安装默认使用 native；源码安装可显式固定当前仓库的已提交 HEAD：
 
@@ -414,7 +413,7 @@ Linux 新安装默认使用 native；源码安装可显式固定当前仓库的�
 
 省略 source repository 时只取已安装包版本的官方 tag，缺失不会换用其他版本。native 要求非 root Linux、bubblewrap、namespace/tmpfs 支持及已委派的 cgroup v1 或统一 cgroup v2 子树；资源准备只读取固定 Git manifests/lockfile，下载校验官方工具链并准备离线依赖，不创建 RSI owner、协调器或服务。setup 在创建 Web owner/grant 前使用真实原生执行器探测非 root、只读根目录及 artifact 导出，之后重新核对 runtime 收据。缺少 cgroup 委派时拒绝，不自动提权。
 
-Docker 后端已从产品移除：新安装与新配置只接受 linux-native（Linux）或 macOS seatbelt，安装器不再接受 `--isolation-backend docker` / `--isolation-image`，传入即 fail-closed，也不再拉取镜像、安装或重启 Docker。仍保留 Docker 的原安装只能在满足严格前提（创建/修订审查、修订回归与采用业务记录为空）时执行一次性 docker→native 迁移，详见 [dockerless 运行时](../../docs/dockerless-runtime.md)；Docker 时代的配置与收据仅作只读迁移证据，不会再拉起容器。清理状态未知时保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
+Docker 后端已从产品移除：新安装与新配置只接受 linux-native（Linux）或 macOS seatbelt（受限于 `plugin-control-plane` `create`/`revise-created`），安装器不再接受 `--isolation-backend docker` / `--isolation-image`，传入即 fail-closed，也不再拉取镜像、安装或重启 Docker。仍保留 Docker 的原安装需按上文[现有 Linux 冻结 owner 程序升级](#现有-linux-冻结-owner-程序升级)执行一次性 docker→native 迁移（支持空历史路径，以及代码层已实现的非空采用封存与审查库 v2 grant handoff，两者均尚未完成完整 live 实机切换验收），详见 [dockerless 运行时](../../docs/dockerless-runtime.md)；Docker 时代的配置与收据仅作只读迁移证据，不会再拉起容器。清理状态未知时保留私有 probe 证据目录；探测通过不证明任意自定义任务或完整自治。
 
 普通 Goal admission 的独立 `isolated-runner` 验收现在只支持 linux-native（Linux）/ seatbelt（macOS）后端；Docker 时代的 isolated-runner 配置仅保留只读解码，不能再执行。native 复用持久 runtime 与已委派 cgroup v1/v2 描述符，不另行准备或续权。RSI 专用 review runner 与普通 Goal 验收保持各自授权边界。固定供应商的真实 native Goal 验收范围见[当前状态](../../docs/rsi-status.md)，不据此宣称任意任务或真实模型均已验收。
 

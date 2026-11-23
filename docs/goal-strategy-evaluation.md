@@ -8,7 +8,7 @@
 
 ## 配置与计划
 
-从 [strategy-benchmark.config.json](examples/strategy-benchmark.config.json) 复制模板，替换所有路径和两个 SHA-256。零 SHA 是可解析占位值，不能作为可运行的真实配置。执行部分必须给出固定 `linux-native` 运行时描述符与当前 UID 的 cgroup v1 roots；adapter 文件的实际 SHA-256 必须同时匹配 `adapterDigest` 和 `tokenCounterDigest`。
+从 [strategy-benchmark.config.json](examples/strategy-benchmark.config.json) 复制模板，替换所有路径和两个 SHA-256。零 SHA 是可解析占位值，不能作为可运行的真实配置。执行部分必须给出固定 `linux-native` 运行时描述符与当前 UID 委派的 cgroup v1 或统一 cgroup v2 roots；adapter 文件的实际 SHA-256 必须同时匹配 `adapterDigest` 和 `tokenCounterDigest`。
 
 策略配置固定 `suite: "strategy-v1"`，包含任务 id、公共 persona、原生模型、每 cell 预算和 `execution` 的 model calls、单次输出及 Goal rounds。parser 在加载 adapter、创建目录或访问原生运行时前拒绝未知字段、accessor、非 plain snapshot、非公开 case、重复 case、非绝对/嵌套 state 根、非法后端/运行时描述和不一致限额。
 
@@ -77,7 +77,7 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 3. `greedy-paragraph-wrap`：空行分段、纯空白段忽略；段内所有空白折叠；宽度恰 40 的 greedy 填充（`长度 + 1 + 词长 <= 40` 才同行）；超长词独占不截断；段间恰好一个空行。
 4. `quoted-csv-account-totals`：跳固定表头；双引号列状态机（列内逗号是数据、`""` 是字面引号）；按 (jurisdiction, account) 求整数分和，`-0` 视为 0、恰好归零仍输出；TAB 分隔、整行 ASCII 字节序。
 
-每题只向模型公开 objective、提示和**一个**只演示格式与主规则、不暴露任何陷阱的公开示例；8 个私有验证向量（逐字节 stdin/stdout/exit）只在独立隔离验证时使用。全部 32 个私有向量的期望字节均由 POSIX-sh 参考实现产生，并在冻结 verifier image（dash + busybox awk）内逐字节比对锚定，不是手算结果。v2 的加入不改变 v1 dataset 的任何字节（测试钉死 v1 digest `b9e5dc4d…`），两个 suite 共用同一套 config/executor/runtime/evidence/projection，只在 config 层以 `suite: "strategy-v2"` 选择独立语料与 dataset 身份；私有 verifier 窗口仍须满足全部向量期限之和小于 step 窗口（每题 8×5000ms = 40000ms，故 v2 配置 `stepMaxDurationMs` 必须大于 40000）。
+每题只向模型公开 objective、提示和**一个**只演示格式与主规则、不暴露任何陷阱的公开示例；8 个私有验证向量（逐字节 stdin/stdout/exit）只在独立隔离验证时使用。全部 32 个私有向量的期望字节均由 POSIX-sh 参考实现产生，并在历史冻结参考环境（dash + busybox awk）内逐字节比对锚定，不是手算结果（当前运行期验证统一使用 `linux-native`，不依赖 Docker 镜像）。v2 的加入不改变 v1 dataset 的任何字节（测试钉死 v1 digest `b9e5dc4d…`），两个 suite 共用同一套 config/executor/runtime/evidence/projection，只在 config 层以 `suite: "strategy-v2"` 选择独立语料与 dataset 身份；私有 verifier 窗口仍须满足全部向量期限之和小于 step 窗口（每题 8×5000ms = 40000ms，故 v2 配置 `stepMaxDurationMs` 必须大于 40000）。
 
 从 [strategy-v2 TraeX 配置模板](examples/strategy-v2-traex.config.json) 开始，命令与 v1 完全对称，只把 `--suite` 换成 `strategy-v2`：
 

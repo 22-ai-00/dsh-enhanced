@@ -147,7 +147,7 @@ active 的旧定义会通过 definition hash + version CAS 原地 pause，不会
   `0600`。不读取目标 workspace 内容。
 - 网络：无直接网络客户端。Recovery 失败由 Assistant Automations 的 Host incident/outbox 使用
   definition 中固定的 owner route 投递；Recovery 自己不能构造任意 Delivery 目标。
-- 模型、工具、浏览器、子进程、凭据：均不使用。
+- 模型、工具、浏览器、子进程、凭据、安装脚本：均不使用。
 - Policy、凭据、安全目录、预算定义/上限：没有修改 API。Recovery 只能消费 profile 中
   Host 已固定的 T1 grant；emergency stop 和显式 deny 始终优先。
 - SQLite receipt 只保存标识符、版本、低基数结果码和摘要，不保存模型输出、异常正文、
@@ -174,6 +174,4 @@ proposal。
 
 ## 兼容性
 
-参见仓库[兼容性基线](../../docs/compatibility.md)。Recovery 所需的 6 个 Host seam 在已发布的
-`0.1.7` 内部 peer 集合中尚不存在，因此 manifest 明确拒绝这些旧 peer；首次发布必须通过仓库
-`release:prepare` 统一提升版本，不能把当前工作树伪装成 `0.1.7` 兼容包。
+参见仓库[兼容性基线](../../docs/compatibility.md)。Recovery 所需的 6 个 Host seam 要求同批发布版本的内部 peer 集合，manifest 会拒绝缺少这些 seam 的早期版本，须通过仓库 `release:prepare` 统一版本发布。

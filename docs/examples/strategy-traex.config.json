@@ -42,7 +42,7 @@
     "pnpmPath": "/absolute/private/linux-runtime/pnpm/bin/pnpm.mjs",
     "nativePnpmRoot": "/absolute/private/linux-runtime/pnpm-native", "nativePnpmPath": "/absolute/private/linux-runtime/pnpm-native/pnpm",
     "modulesPath": "/absolute/private/linux-runtime/node_modules", "storePath": "/absolute/private/linux-runtime/store", "cachePath": "/absolute/private/linux-runtime/cache",
-    "versions": { "node": "v22.23.2", "pnpm": "11.7.0", "typescript": "6.0.3", "cordis": "4.0.5", "tools": "0.2.1-rc.2", "systemPrompt": "0.2.1-rc.2" }
+    "versions": { "node": "v22.23.2", "pnpm": "11.7.0", "typescript": "6.0.3", "cordis": "4.1.0", "tools": "0.2.2-rc.5", "systemPrompt": "0.2.2-rc.5" }
   },
   "cgroupRoots": {
     "mode": "v1", "cpu": "/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-1000", "memory": "/sys/fs/cgroup/memory/dsh-native/uid-1000",

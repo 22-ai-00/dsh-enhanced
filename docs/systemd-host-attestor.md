@@ -565,8 +565,9 @@ production publication or proof of behavioral improvement.
 
 Each arm retains local signed recovery requests/receipts and observation
 preimages, the CLI-restored pending plan, final persisted plan, and exact runtime
-hashes. Current schema-2 request verification covers real reload/readiness and
-restore on DSH CLI `0.1.5-rc.2`. The active-candidate probe also rejects a
+hashes. The historical schema-2 request probe exercised real reload/readiness and
+restore on DSH CLI `0.1.5-rc.2` (see [compatibility](compatibility.md) for the
+current pinned Host baseline). The active-candidate probe also rejects a
 correctly signed synthetic replay receipt with a substituted Host generation;
 that negative fixture does not observe external effects. See [RSI status](rsi-status.md)
 for current verification and remaining acceptance work.

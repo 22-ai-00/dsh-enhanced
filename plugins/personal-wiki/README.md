@@ -101,4 +101,4 @@ dsh --profile web --dump-config
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+兼容范围与验证基线见仓库[兼容性基线](../../docs/compatibility.md)。

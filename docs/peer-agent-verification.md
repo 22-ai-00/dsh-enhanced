@@ -1,29 +1,29 @@
 # Peer agent 真实渠道验收与白名单配置
 
-> 本页记录 2026-11-16 在 Linux 主机上完成的一次真实渠道验收：另一个飞书机器人（Hermes）在群里 @ 助手机器人「柳七月」，消息经 assistant-delivery 入站、在柳七月作为独立 peer principal 的会话中处理后，由柳七月应用把回复发回同一渠道。下面给出精确白名单的取得方法、配置项、校验步骤和已知限制。原始 ledger 与日志留在运行主机，仓库只保留可复现的字段与状态值。
+> 本页记录 2026-11-16 在 Linux 主机上完成的一次真实渠道验收：另一个飞书机器人（peer bot）在群里 @ 助手机器人，消息经 assistant-delivery 入站、在助手侧作为独立 peer principal 的会话中处理后，由助手应用把回复发回同一渠道。下面给出精确白名单的取得方法、配置项、校验步骤和已知限制。文中所有主机 IP、`app_id`、`chat_id`、`open_id` 与 `provider_message_id` 均以脱敏占位符表示；原始 ledger、部署标识与日志留在运行主机，仓库只保留可复现的字段与状态值。
 
 ## 结论摘要
 
 - **peer bot 默认不可信**：入站消息带 `senderIsBot=true` 但不在 `peerAgents` 精确白名单中时，Delivery 直接判 `unauthorized-principal` 并进入 `dead_letter`。这是默认拒绝，不是配置错误。
 - **白名单只解决「谁可以进来」**：命中白名单后还要通过 assistant-policy 的 `ingest` 授权；回复还要通过 `reply`/`send` 授权。两者是独立的两道门。
-- **open_id 是应用作用域的**：对方 bot 在「柳七月」应用下有自己的 open_id，与其他应用、其他租户或对方自己侧看到的 id 都不同；必须从本应用收到的 envelope 里取。
+- **open_id 是应用作用域的**：对方 bot 在本应用下有自己的 open_id，与其他应用、其他租户或对方自己侧看到的 id 都不同；必须从本应用收到的 envelope 里取。
 - **peer 是独立 Policy subject**：它被链接（`role=linked`）到当前 owner，但不继承 owner 的工具、记忆、WorkItem 反馈或续办通道，因此默认拿不到任何工具。
-- 本次验收结果：inbox `processed`、attempt `processed` 且无 failure、outbox `accepted` 且 `provider_message_id` 可经飞书 API 读回，正文以 `B3_OK` 开头，柳七月 app 还对该消息加了 `DONE` 表情回执。
+- 本次验收结果：inbox `processed`、attempt `processed` 且无 failure、outbox `accepted` 且 `provider_message_id` 可经飞书 API 读回，正文以 `B3_OK` 开头，助手应用还对该消息加了 `DONE` 表情回执。
 
 ## 环境与验收链路
 
-| 项 | 值 |
+| 项 | 值（部署标识已脱敏为占位符） |
 | --- | --- |
-| 主机 | 同一台 Linux 主机；IPv4 `10.251.239.139` 与 IPv6 `2605:340:cd52:106:9270:243a:5a94:9747` 是同一台 |
-| profile | `assistant`（柳七月，组合 15 个插件） |
-| 发起方 | Hermes bot（飞书 app `cli_a9561fcf367cdbd3`） |
-| 群 | 【DSH开发群】，`chat_id` `oc_b665be38b6144879430df47bf8310b43` |
-| 被 @ 的 bot | 柳七月，bot open_id `ou_bc15d58bbbce267b3a283d1f87325e94` |
-| peer 身份（本应用作用域） | `{ channel: lark, account: primary, tenant: personal, user: ou_0583c3546cb2c671cb21c798156fd70d }` |
+| 主机 | 单台 Linux 验证主机（`<linux-host>`，不记录真实 IP 地址） |
+| profile | `assistant`（组合 15 个插件） |
+| 发起方 | peer bot（飞书 app `cli_<peer_app_id>`） |
+| 群 | 验证群，`chat_id` `oc_<group_chat_id>` |
+| 被 @ 的 bot | 助手机器人，bot open_id `ou_<assistant_bot_open_id>` |
+| peer 身份（本应用作用域） | `{ channel: lark, account: primary, tenant: personal, user: ou_<peer_open_id> }` |
 
-链路：Hermes 在群里 @ 柳七月 → lark-channel 规范化并带 `senderIsBot=true` 交给 Delivery → Delivery 用 `peerAgents` 精确匹配 `envelope.principal` → Policy `ingest` 放行 → 柳七月在 peer 会话中处理 → Policy `reply` 放行 → outbox 经 lark-channel 发回群里。
+链路：peer bot 在群里 @ 助手机器人 → lark-channel 规范化并带 `senderIsBot=true` 交给 Delivery → Delivery 用 `peerAgents` 精确匹配 `envelope.principal` → Policy `ingest` 放行 → 助手在 peer 会话中处理 → Policy `reply` 放行 → outbox 经 lark-channel 发回群里。
 
-首发失败时，inbox 记录为 `dead_letter`，`envelope_json.principal` 是上面那个 `ou_0583…`；根因是 `peerAgents` 只登记了另一个 id，没有登记 Hermes。注意 `ou_0583…` 与 `ou_bc15…` 都是正确的：前者是 Hermes 在柳七月应用作用域下的 open_id，后者是 Hermes 一侧 @ 柳七月时使用的 bot open_id；open_id 天然按应用隔离，两者不是同一作用域的值。
+首发失败时，inbox 记录为 `dead_letter`，`envelope_json.principal.user` 是上面那个 `ou_<peer_open_id>`；根因是 `peerAgents` 只登记了另一个 id，没有登记该 peer bot。注意 `ou_<peer_open_id>` 与 `ou_<assistant_bot_open_id>` 都是正确的：前者是对方 bot 在本应用作用域下的 open_id，后者是对方一侧 @ 本机器人时使用的 bot open_id；open_id 天然按应用隔离，两者不是同一作用域的值。
 
 ## 为什么 peer 需要精确白名单
 
@@ -38,7 +38,7 @@
 open_id 由应用（app_id）决定作用域，因此**唯一可靠的办法**是让本应用先真正收到一条对方 bot 的消息，再从 Delivery 的 inbox envelope 里读出它。不要用其他应用、其他租户或外部文档里的 open_id 代替，也不要让对方在自己应用里查一个 id 给你。
 
 1. **确认本应用的身份四元组。** 读取目标 profile 的 `cordis.patch.yml`，确认 lark-channel 行的 `account` 与 `tenant`（本次为 `primary` / `personal`）；`channel` 固定为 `lark`。
-2. **让对方 bot 发一条消息。** 用**对方的应用身份**在群里 @ 柳七月。普通用户账号代发不算 bot 消息，`senderIsBot` 不会为 true。首条消息即使被拒也没关系：`dead_letter` 行同样保存 envelope，本次正是在失败记录里取到 open_id 的。
+2. **让对方 bot 发一条消息。** 用**对方的应用身份**在群里 @ 助手机器人。普通用户账号代发不算 bot 消息，`senderIsBot` 不会为 true。首条消息即使被拒也没关系：`dead_letter` 行同样保存 envelope，本次正是在失败记录里取到 open_id 的。
 3. **在 Delivery 账本里读最近的入站。** 默认数据库是 `$DSH_HOME/assistant-delivery/state.sqlite`；若 profile 覆盖了 `databasePath`，以运行中配置的实际值为准（`dsh --profile assistant --dump-config | grep -n databasePath`）。以同一 OS 用户执行只读查询：
 
    ```sh
@@ -70,7 +70,7 @@ open_id 由应用（app_id）决定作用域，因此**唯一可靠的办法**�
    '
    ```
 
-4. **取 `principal.user`，并核对其余三项。** 本次得到 `user: ou_0583c3546cb2c671cb21c798156fd70d`（首发 `dead_letter` 记录里的值），`sender_is_bot=true`，`channel/account/tenant` 与配置一致。四项一起才是白名单元组；只抄 `user` 而写错 account/tenant 同样不匹配。
+4. **取 `principal.user`，并核对其余三项。** 从首发 `dead_letter` 记录中读到本应用作用域的 `user: ou_<peer_open_id>`，`sender_is_bot=true`，`channel/account/tenant` 与配置一致。四项一起才是白名单元组；只抄 `user` 而写错 account/tenant 同样不匹配。
 5. **重新取值的时机。** 对方换应用（app_id）、换租户，或本应用换 app_id/租户后，open_id 会变；必须重新触发一条消息并从 envelope 重新读取。升级或迁移后不要沿用旧 id。
 
 ## 需要改哪些配置项
@@ -98,7 +98,7 @@ grep -n "dsh-enhanced-assistant-delivery\|dsh-enhanced-assistant-policy\|dsh-enh
       - channel: lark
         account: primary        # lark-channel 配置的 account
         tenant: personal        # lark-channel 配置的 tenant
-        user: ou_0583c3546cb2c671cb21c798156fd70d   # 从 inbox envelope 读到的 open_id
+        user: ou_<peer_open_id>   # 从 inbox envelope 读到的 open_id
 ```
 
 | 字段 | 来源 |
@@ -115,23 +115,23 @@ grep -n "dsh-enhanced-assistant-delivery\|dsh-enhanced-assistant-policy\|dsh-enh
 ```yaml
 rules:
   # 门 1：允许该 external principal 的入站消息进入 Inbox
-  - id: lark-peer-agent-ingest-hermes
+  - id: lark-peer-agent-ingest-example
     effect: allow
     subject:
       kind: external
-      id: "lark/primary/personal/ou_0583c3546cb2c671cb21c798156fd70d"
+      id: "lark/primary/personal/ou_<peer_open_id>"
     actions: [ingest]
     resource: { kind: message, id: '*' }
     context: { initiators: [external] }
 
   # 门 2：允许该 peer 会话（preset + 绝对 workspace + 该 principal）回写渠道
-  - id: lark-peer-agent-reply-hermes
+  - id: lark-peer-agent-reply-example
     effect: allow
     subject:
       kind: agent
       id: standard                                   # 与 defaultAgentPreset 一致
       workspace: /absolute/path/to/assistant-workspace
-      principal: "lark/primary/personal/ou_0583c3546cb2c671cb21c798156fd70d"
+      principal: "lark/primary/personal/ou_<peer_open_id>"
     actions: [reply, send]
     resource: { kind: message, id: '*' }
     context: { initiators: [external] }
@@ -139,8 +139,8 @@ rules:
 
 | 规则 | 决定什么 | 缺少时的现象 |
 | --- | --- | --- |
-| `lark-peer-agent-ingest-hermes` | 已通过 `peerAgents` 并链接的 peer principal 能否把入站消息送入 Inbox（Policy `ingest` 门） | 消息仍进 `dead_letter`，`failure_code` 为 `policy-<reasonCode>` |
-| `lark-peer-agent-reply-hermes` | 该 peer 会话的 Agent 能否在 external initiator 下把最终回复与出站发送写回渠道（`reply`/`send` 门） | 入站可能已处理，但回复在 Policy 层被拒、发不到渠道 |
+| `lark-peer-agent-ingest-example` | 已通过 `peerAgents` 并链接的 peer principal 能否把入站消息送入 Inbox（Policy `ingest` 门） | 消息仍进 `dead_letter`，`failure_code` 为 `policy-<reasonCode>` |
+| `lark-peer-agent-reply-example` | 该 peer 会话的 Agent 能否在 external initiator 下把最终回复与出站发送写回渠道（`reply`/`send` 门） | 入站可能已处理，但回复在 Policy 层被拒、发不到渠道 |
 
 三条硬对齐：`workspace` 必须是**绝对路径**且与 binding 的实际 workspace 完全一致（默认 `!!js dshHomePath('assistant-workspace')`，也可直接写展开后的绝对路径）；`id` 必须等于 `defaultAgentPreset`（默认 `standard`）；`principal` 必须是 `lark/<account>/<tenant>/<user>` 的 canonical 形式，与 `peerAgents` 及 envelope 完全一致。
 
@@ -150,7 +150,7 @@ rules:
 
    ```sh
    dsh --profile assistant --dump-config > /tmp/assistant-config.yml; echo "rc=$?"
-   grep -n "peerAgents\|lark-peer-agent-ingest-hermes\|lark-peer-agent-reply-hermes" /tmp/assistant-config.yml
+   grep -n "peerAgents\|lark-peer-agent-ingest-example\|lark-peer-agent-reply-example" /tmp/assistant-config.yml
    ```
 
    本次验收在重启后执行 `dsh --profile assistant --dump-config` 得到 **rc=0**，说明 profile 组合与字段校验通过。rc 非 0 时先按报错修 YAML，不要带错重启。
@@ -185,21 +185,21 @@ rules:
    FROM outbox_messages ORDER BY created_at DESC LIMIT 5;"
    ```
 
-   本次复验：inbox `processed`；`inbox_attempts.status=processed` 且 `failure_code` 为空；outbox `status=accepted`、`provider_message_id=om_x100b609e4a2ea0a8df74d104f74e8ba`；用飞书 OpenAPI（`im/v1/messages/{message_id}` 读消息内容）可读回同一条消息，正文以 `B3_OK` 开头；柳七月 app 另加 `DONE` 表情回执。
+   本次复验：inbox `processed`；`inbox_attempts.status=processed` 且 `failure_code` 为空；outbox `status=accepted`、`provider_message_id=om_<provider_message_id>`；用飞书 OpenAPI（`im/v1/messages/{message_id}` 读消息内容）可读回同一条消息，正文以 `B3_OK` 开头；助手应用另加 `DONE` 表情回执。
 
 ## 验收证据快照
 
-本次为真实渠道验收，原始数据库、日志与截图留在运行主机（按仓库约定放在 ignored 的 `docs/evidence/` 或 CI artifacts，不入库）。仓库内只记录可核对的表名、字段名与状态值：
+本次为真实渠道验收，原始数据库、日志与截图留在运行主机（按仓库约定放在 ignored 的 `docs/evidence/` 或 CI artifacts，不入库）。仓库内只记录可核对的表名、字段名与脱敏状态值：
 
 | 环节 | 账本 / 接口 | 字段 | 观测值 |
 | --- | --- | --- | --- |
 | 首发被拒 | `inbox_messages` | `status` / `failure_code` | `dead_letter` / `unauthorized-principal` |
-| 首发 principal | `inbox_messages` | `envelope_json.principal` | `{channel: lark, account: primary, tenant: personal, user: ou_0583c3546cb2c671cb21c798156fd70d}` |
+| 首发 principal | `inbox_messages` | `envelope_json.principal` | `{channel: lark, account: primary, tenant: personal, user: ou_<peer_open_id>}` |
 | 修复后入站 | `inbox_messages` | `status` | `processed` |
 | 入站尝试 | `inbox_attempts` | `status` / `failure_code` | `processed` / 空（无失败） |
-| 出站 | `outbox_messages` | `status` / `provider_message_id` | `accepted` / `om_x100b609e4a2ea0a8df74d104f74e8ba` |
+| 出站 | `outbox_messages` | `status` / `provider_message_id` | `accepted` / `om_<provider_message_id>` |
 | 渠道读回 | 飞书 OpenAPI | 消息正文 | 可按 `provider_message_id` 读回，以 `B3_OK` 开头 |
-| 渠道回执 | 飞书 reaction | `emoji_type` | `DONE`（由柳七月 app 添加） |
+| 渠道回执 | 飞书 reaction | `emoji_type` | `DONE`（由助手应用添加） |
 
 关键状态值（来自 Delivery schema）：`inbox_messages.status ∈ received/authorized/queued/claimed/processed/retry_wait/dead_letter`；`inbox_attempts.status ∈ claimed/processed/retry_wait/dead_letter/lost`；`outbox_messages.status ∈ pending/attempting/accepted/delivered/read/retry_wait/dead/unknown_after_send`。`accepted` 表示供应商已接受该次发送；这是本次验收使用的成功判据。
 
@@ -215,10 +215,10 @@ rules:
 
 | 规则 id | actions | resource | 作用 |
 | --- | --- | --- | --- |
-| `lark-peer-agent-tool-assistant-health-hermes` | `execute` | `{ kind: tool, id: assistant_health }` | 工具层允许调用 |
-| `lark-peer-agent-health-inspect-hermes` | `inspect` | `{ kind: tool, id: assistant-health }` | assistant-health 内层 `authorizeAgent(agent, 'inspect', …)` |
-| `lark-peer-agent-tool-delivery-status-hermes` | `execute` | `{ kind: tool, id: delivery_status }` | 工具层允许调用 |
-| `lark-peer-agent-delivery-history-hermes` | `history` | `{ kind: message, id: "*" }` | assistant-delivery 内层 `authorizeAgent(agent, 'history', …)` |
+| `lark-peer-agent-tool-assistant-health-example` | `execute` | `{ kind: tool, id: assistant_health }` | 工具层允许调用 |
+| `lark-peer-agent-health-inspect-example` | `inspect` | `{ kind: tool, id: assistant-health }` | assistant-health 内层 `authorizeAgent(agent, 'inspect', …)` |
+| `lark-peer-agent-tool-delivery-status-example` | `execute` | `{ kind: tool, id: delivery_status }` | 工具层允许调用 |
+| `lark-peer-agent-delivery-history-example` | `history` | `{ kind: message, id: "*" }` | assistant-delivery 内层 `authorizeAgent(agent, 'history', …)` |
 
 **关键点：工具可见 ≠ 可执行。** 只有工具层 `execute` 规则时，插件自己的内层策略仍会拒绝，表现为 `assistant-health policy denied report: default-deny` 或 `assistant-delivery policy denied operation: default-deny`；必须同时放开该插件使用的动作（health 用 `inspect`，delivery 用 `history`）。
 
@@ -246,8 +246,8 @@ rules:
 | `dead_letter` + `unauthorized-principal` | 四元组未命中：account/tenant 写错、用了别的应用作用域的 open_id、`senderIsBot` 不是 true、配置未重启生效 | 用本页 SQL 重读 envelope 四字段，逐字比对；发一条新消息复验 |
 | `dead_letter` + `peer-owner-unavailable` | 当前 Home 尚无 active owner | 先完成 owner 配对，再让 peer 发消息 |
 | `dead_letter` + `peer-principal-unavailable` | linked principal 准入失败（如旧行被撤销/不一致） | 核对 `delivery_principals`；保留白名单并让新消息触发重新链接，或按 Host 控制面显式重新授权 |
-| `dead_letter` + `policy-<reasonCode>` | 缺 `ingest` 规则，或 external subject id / initiator 不匹配 | 检查 `lark-peer-agent-ingest-hermes` 的 subject 与 `context.initiators: [external]` |
-| inbox `processed` 但渠道没回复 | 缺 `reply`/`send` 授权，或 agent subject 的 preset/绝对 workspace/principal 与 binding 不一致 | 核对 `lark-peer-agent-reply-hermes` 三个字段；看 Policy 拒绝原因 |
+| `dead_letter` + `policy-<reasonCode>` | 缺 `ingest` 规则，或 external subject id / initiator 不匹配 | 检查 `lark-peer-agent-ingest-example` 的 subject 与 `context.initiators: [external]` |
+| inbox `processed` 但渠道没回复 | 缺 `reply`/`send` 授权，或 agent subject 的 preset/绝对 workspace/principal 与 binding 不一致 | 核对 `lark-peer-agent-reply-example` 三个字段；看 Policy 拒绝原因 |
 | outbox `accepted` 但人没看到 | 消息已由供应商接受，可能是群权限/可见性问题 | 用 `provider_message_id` 经飞书 API 读回确认正文与目标会话 |
 | 重投同一事件仍是被拒 | 同一 `event_id` 幂等返回旧记录，不会重判 | 让对方重新发一条新消息复验 |
 

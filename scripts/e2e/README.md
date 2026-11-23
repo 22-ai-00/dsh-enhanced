@@ -2,11 +2,22 @@
 
 These opt-in probes have separate prerequisites and evidence boundaries; they are not all run by `pnpm check`. Current project progress is maintained in [RSI status](../../docs/rsi-status.md). Raw results stay in ignored local directories or CI artifacts.
 
-> **Migration note (Docker removal):** the product's Docker backend is gone; new builds/verification accept only linux-native or macOS seatbelt. Several opt-in harnesses below (the autonomy family `DSH_ISOLATION_TEST_IMAGE=sha256:…`, canary/repair `DSH_HOLDOUT_TEST_IMAGE`, repo-autonomy, and the personal-memory acceptance script) still construct Docker-era `image`/`dockerPath` configs. They are now rejected by linux-native validation (fail-closed), are not run by CI or `pnpm check`, and are tracked for migration to `DSH_ISOLATION_TEST_NATIVE_RUNTIME` in the next batch. Until migrated, treat their Docker prerequisites as obsolete.
+> **Migration note (Docker removal):** the product's Docker backend is gone; new builds/verification accept only `linux-native` (Linux) or `macos-seatbelt` (`plugin-control-plane` `create`/`revise-created`). `repo-autonomy-real.spec.mjs` is **already migrated** to `linux-native` and the Host pinned in `release-manifest.json` (currently `0.2.2-rc.5`; run only against a dedicated sandbox repo, never this repository's `dev`/`main`). Several other opt-in harnesses below — the autonomy family (`autonomy.spec.mjs`, `autonomy-goal-setup.spec.mjs`, `autonomy-goal.spec.mjs`, `autonomy-wake.spec.mjs` using `DSH_ISOLATION_TEST_IMAGE=sha256:…`), canary/repair (`web-owner-real-canary.spec.mjs`, `web-owner-real-repair.spec.mjs` using `DSH_HOLDOUT_TEST_IMAGE`), and `personal-memory-source-acceptance.mjs` — still construct Docker-era `image`/`dockerPath` configs. They are rejected by `linux-native` validation (fail-closed), are not run by CI or `pnpm check`, and remain tracked for migration to `DSH_ISOLATION_TEST_NATIVE_RUNTIME`.
+
+### Probe & script inventory
+
+| Entry / Script | Status | Notes |
+| --- | --- | --- |
+| `node scripts/e2e/linux-native-boundary.mjs` | Active (`linux-native`) | Real Linux namespace + delegated cgroup v1/v2 boundary probe. |
+| `scripts/e2e/repo-autonomy-real.spec.mjs` (`playwright-repo-real.config.mjs` / `playwright-repo-external-events.config.mjs`) | Migrated (`linux-native`, Host `0.2.2-rc.5`) | Sandbox repository E2E (dedicated sandbox repo only; live run pending; see [live-repository-e2e](../../docs/live-repository-e2e.md)). |
+| `pnpm test:web-owner`, `test:web-owner:real`, `test:web-owner:real-event`, `test:web-owner:real-skill`, `test:web-owner:real-capture` | Opt-in Web/Playwright | No Docker dependency; require compatible DSH (`release-manifest.json` `pinnedHostVersion`) + Chromium (real routes require provider login). |
+| `node scripts/e2e/session-persistence-compat.mjs`, `replay-endpoint-real-dsh.mjs`, `systemd-readiness-real-dsh.mjs`, `runtime-observer-real-dsh.mjs` | Active real-Host probes | Exercise pinned DSH closure, replay, systemd readiness, and runtime observer contracts. |
+| `node scripts/e2e/npm-{publish-preparation,registry,release-verifier,catalog-admission}-readback.mjs` | Active npm readback probes | Reproducible local readback probes (fixed integrity pins in [fixtures/README.md](fixtures/README.md); see `docs/npm-*.md`). |
+| `pnpm test:autonomy`, `test:autonomy:setup`, `test:autonomy:wake`, `test:autonomy:deepseek`, `test:web-owner:real-canary`, `test:web-owner:real-repair`, `test:web-owner:real-repair:topology`, `playwright-real-repair-restart.config.mjs`, `personal-memory-source-acceptance.mjs` | Unmigrated (Docker-era) | Still construct Docker-era `image`/`dockerPath` config; fail closed under `linux-native` until migrated. |
 
 ## Real Day1 native skill comparison
 
-The approved Day1 native-skill comparison is run by a trusted Host-provided adapter module that satisfies the native adapter contract; it drives a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, a prepared linux-native `LinuxRuntime` + cgroup v1 roots supplied via `DSH_ISOLATION_TEST_NATIVE_RUNTIME` (no Docker image), and a resolvable credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
+The approved Day1 native-skill comparison is run by a trusted Host-provided adapter module that satisfies the native adapter contract; it drives a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, a prepared linux-native `LinuxRuntime` + delegated cgroup v1 or unified cgroup v2 roots supplied via `DSH_ISOLATION_TEST_NATIVE_RUNTIME` (no Docker image), and a resolvable credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
 
 ## Linux native boundary (real kernel)
 
@@ -24,7 +35,7 @@ activate a Profile or prove model behavior.
 
 ## Native Web owner browser regression
 
-Run from the repository root after `CI=true pnpm build`, with DSH `0.1.2-rc.1` on PATH and a Playwright Chromium installation:
+Run from the repository root after `CI=true pnpm build`, with the DSH version pinned by `release-manifest.json` (currently `0.2.2-rc.5`; see [compatibility baseline](../../docs/compatibility.md)) on PATH and a Playwright Chromium installation:
 
 ```sh
 CI=true pnpm test:web-owner
@@ -116,15 +127,11 @@ The foreground schedules a wake and the test restarts the actual Host again. Ass
 
 ## Real model repository event continuation
 
-> **Migration pending:** this scenario and its external-event companion still
-> construct Docker-era verifier configuration. The native Host migration is
-> incomplete, so the commands formerly listed here are not runnable validation
-> paths. Keep the scenario description below as its test and acceptance contract
-> until the verifier is migrated.
+> **Migrated to `linux-native` (live sandbox run pending):** `repo-autonomy-real.spec.mjs` now reads `release-manifest.json`'s `pinnedHostVersion` (currently `0.2.2-rc.5`; override within the verified range via `DSH_E2E_HOST_VERSION`) and executes verification through `linux-native` with delegated cgroup v1/v2 roots (no Docker image). Run it **only** against a dedicated sandbox repository (never this repository's `dev`/`main`); see [live repository E2E](../../docs/live-repository-e2e.md) for current prerequisites and commands.
 
 The installed profile receives an ordinary repair-and-delivery request. The model chooses tools and creates its own finite Goal; the test does not supply trigger IDs, invoke Goal tools or select tool order. After an independently accepted intermediate PR and a durable event wait, it restarts the real Host while CI/review remain pending, returns to the original Session, and changes only the remote fixture state. Assertions bind the resumed Goal and source execution to an event after the saved cursor, require fresh repository outcome evidence for the actual committed head and visible feedback, then check that another restart and unchanged observation create no duplicate event or commit/PR.
 
-GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The historical scenario ran the model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier as actual components. Its evidence did not establish live GitHub authentication or remote CI/review behavior. Migration must preserve its limit of 26 model dispatches and 300-second task budget, separate installer and cleanup timeout, ordinary-profile isolation, and credential redaction. The Docker image precondition must be replaced by a verified native runtime before this path can run again.
+GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes in fixture mode, including the non-production Keychain token. The scenario runs the model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and `linux-native` verifier as actual components. Fixture mode does not establish live GitHub authentication or remote CI/review behavior. Runs preserve the limit of 26 model dispatches and 300-second task budget, separate installer and cleanup timeout, ordinary-profile isolation, and credential redaction.
 
 The external broker companion keeps the following acceptance contract:
 
@@ -217,11 +224,13 @@ retained environments after diagnosis and never publish their contents.
 
 ## Owner-authorized autonomous repair
 
+> **Unmigrated (Docker-era):** this suite still requires `DSH_HOLDOUT_TEST_IMAGE` and fails closed under `linux-native` until migrated.
+
 Run from the repository root after building the workspace. The command requires
 the exact DSH version pinned by `release-manifest.json` (currently
-`0.1.2-rc.1`) on `PATH`, Playwright Chromium (or its executable path), the
+`0.2.2-rc.5`) on `PATH`, Playwright Chromium (or its executable path), the
 `traex` ACP command with an already usable local TraeX login for the selected
-model, `zstd`, and a reachable local Docker daemon. `DSH_HOLDOUT_TEST_IMAGE`
+model, `zstd`, and (historically, pre-migration) a reachable local Docker daemon. `DSH_HOLDOUT_TEST_IMAGE`
 must be an already-pulled `sha256:` image digest; the test does not build or
 pull it. It creates a disposable `DSH_HOME`, so it does not modify an ordinary
 profile or configure a provider credential.

@@ -69,4 +69,4 @@ activeActivations / failed / rollbackPending`；required control plane 尚有 ac
 
 ## 兼容性
 
-以 DSH `0.1.2-rc.1` 验证；参考官方 session telemetry/OTel 的观测边界，不把 best-effort telemetry 当审计。
+兼容范围与验证基线见仓库[兼容性基线](../../docs/compatibility.md)；参考官方 session telemetry/OTel 的观测边界，不把 best-effort telemetry 当审计。

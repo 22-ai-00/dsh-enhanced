@@ -22,10 +22,10 @@ comparisons:
       schemaVersion: 1
       backend: linux-native
       # ...nodePath/nodeSha256, root, modulesPath, storePath/cachePath, versions
-    cgroupRoots: # current-UID delegated cgroup v1 roots
-      mode: v1
-      # ...cpu/memory/pids/freezer under /sys/fs/cgroup/.../dsh-native/uid-<uid>
-    command: /bin/busybox cp /workspace/artifact /workspace/program.mjs && /usr/local/bin/node /workspace/program.mjs < /workspace/input
+    cgroupRoots: # current-UID delegated cgroup v1 or unified cgroup v2 roots
+      mode: v1 # or mode: v2 with `unified: /sys/fs/cgroup/.../dsh-native/uid-<uid>`
+      # ...for v1: cpu/memory/pids/freezer under /sys/fs/cgroup/.../dsh-native/uid-<uid>
+    command: /bin/cp /workspace/artifact /workspace/program.mjs && /runtime/0/bin/node /workspace/program.mjs < /workspace/input
     artifactPath: summarize.mjs
     expiresAt: 1788998400000
     maxComparisons: 3

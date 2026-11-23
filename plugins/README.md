@@ -1,6 +1,6 @@
 # 插件目录
 
-每个条目都是可独立安装、发布的 DSH bundle；按职责分组如下。发布版本见[发布账本](../release-manifest.json)，当前开发进展和验收边界见 [RSI 状态](../docs/rsi-status.md)。
+每个条目都是可独立安装、发布的 DSH bundle；按职责分组如下。不自动激活的共享库与 CLI 见[共享包目录](../packages/README.md)，发布版本见[发布账本](../release-manifest.json)（36 个插件 + 4 个共享包 = 40 个发布包），当前开发进展和验收边界见 [RSI 状态](../docs/rsi-status.md)。
 
 ## Agent 与模型接入
 
@@ -22,7 +22,7 @@
 | [preference-learning](preference-learning) | `@dsh-enhanced/preference-learning` | 实验性 | 从有界 typed feedback 形成可衰减偏好假设；只允许 Host 固定目录中的 T1 局部偏好临时生效并自动回滚，不把推断伪装成长期 Memory。 |
 | [personal-memory](personal-memory) | `@dsh-enhanced/personal-memory` | 实验性 | 有界、分域的长期记忆，支持手动审批及独立审查后的有限事实/经验采用。 |
 | [assistant-memory-learning](assistant-memory-learning) | `@dsh-enhanced/assistant-memory-learning` | 实验性 | 前台任务驱动事实/经验学习；三份授权显式启用后可从后台 WorkItem 结果提取经验。原生调度、独立审查、有限采用，保留纠正撤回与未知结果对账。 |
-| [assistant-association](assistant-association) | `@dsh-enhanced/assistant-association` | 实验性 | 进程内存双缓冲关联图与 ≤5ms 联想召回层（S1–S4）；本地默认开启，支持多源召回（含 Wiki/Skills/Event-Triggers）、撤回级联、密封留出、Hebbian 更新与 WP22 参数自调参、空闲做梦建边、observe 态 work-items 信号、WP04 片段聚类与评估池反馈、默认关闭的隔离只读白名单 Web 学习（`low` 信任 + URL/时间戳 provenance + 持久预算停止）及 `growth-report` 第 6 节对照。 |
+| [assistant-association](assistant-association) | `@dsh-enhanced/assistant-association` | 实验性（`dogfood` 预设包含） | 进程内存双缓冲关联图与 ≤5ms 联想召回层（S1–S4，Schema v4）：支持多源召回、撤回级联、密封留出、Hebbian 更新与 WP22 参数自调参，以及默认关闭的 S3 做梦建边/observe 信号/片段聚类与 S4 隔离子进程只读白名单 Web 学习，配合 `growth-report` 第 6 节对照。 |
 | [personal-wiki](personal-wiki) | `@dsh-enhanced/personal-wiki` | 实验性 | 以 Markdown 为真源、支持中文检索与审批写入的个人知识库。 |
 | [assistant-automations](assistant-automations) | `@dsh-enhanced/assistant-automations` | 实验性 | 单机冷启动持久调度、occurrence/task/run 账本、租约 fencing 与隔离 Agent 执行。 |
 | [personal-assistant](personal-assistant) | `@dsh-enhanced/personal-assistant` | 实验性 | 只组合 Policy、Memory、Wiki、Automations 四核心的保守默认 meta-bundle。 |
@@ -36,7 +36,7 @@
 | [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding 与 launchd/systemd/Windows Task 常驻。 |
 | [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性（`web`/`supervised` 包含） | 统一「文鳐」控制台与 DSH 原生左栏 Settings UI（`settings.section` / `general` / `models` / `plugins.bundle.config`）：飞书接入、TraeX / Antigravity `agy` 启用切换，以及 Dreaming/Proactive/WorkItems/Learning/Growth 只读状态与受控操作。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
-| [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
+| [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态、飞书日历与 HMAC webhook 事件，支持有限 owner 授权观察、opt-in intake 桥接与目标等待来源。 |
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性（`supervised`/`autonomy` 场景包含） | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；含 intake 评估与主人注意力提问；实际执行仍经 Goals 验收。 |
 | [assistant-work-items](assistant-work-items) | `@dsh-enhanced/assistant-work-items` | 实验性 | 默认关闭、observe 模式；持久认领/汇报与有界 resume，显式授权可启用诊断、主人召回、报告回复续办及结果反馈。复用 Automations/Delivery/Policy，不新增 loop、timer 或 outbox；结果反馈可另行授权进入经验学习，工程 Growth 仍待完整验收。 |
 
@@ -48,6 +48,7 @@
 | [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（supervised 场景包含） | 审批后的工作流 replay/shadow/单次 canary、晋升与撤回；已接入真实 Automations 服务及组合测试。core/lark 不默认安装，阶段通过不单独证明能力相对基线改善。 |
 | [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性（`supervised` 场景包含） | 按真实前台 owner 任务反馈创建持久成长作业，并在启用可选 `assistant-dreaming` 时接通已验证 idea 消费；复用原生调度并冻结实际模型与预算，完整长期成长闭环尚未验收。 |
+| [assistant-dreaming](assistant-dreaming) | `@dsh-enhanced/assistant-dreaming` | 实验性（`--with dreaming` / `--dreaming` 显式选装，默认休眠） | 默认关闭的“做梦”插件：确定性 HMAC 召回抽签+空闲/冷启动门，单工具冻结 Agent 只记录私有 idea（L0），通过可选 peer 接入外部插件，无自动采用/自评。 |
 
 ## 安全、治理与运维
 
@@ -57,7 +58,7 @@
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 | [assistant-recovery](assistant-recovery) | `@dsh-enhanced/assistant-recovery` | 实验性 | 无模型、固定 catalog、带幂等步骤账本的 `supervised-growth/v2` Host 恢复控制面。 |
-| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux 原生执行、持久恢复、私有审计与外部撤销；无 Docker 依赖，Linux 原生新装及 pre-owner 维护已接通，cgroup v1 与已有 owner 迁移限制见[运行时指南](../docs/dockerless-runtime.md)。 |
+| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux 原生执行、持久恢复、私有审计与外部撤销；无 Docker 依赖，Linux 原生新装及 pre-owner 维护已接通，cgroup v1/v2 委派与已有 owner 迁移限制见[运行时指南](../docs/dockerless-runtime.md)。 |
 | [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；外部 v1 broker 支持 expected-head commit、仓库/分支/文件/PR/check/review/指定提交检查读取，以及独立授权的已验收产物 PR 交付。直接模型建 PR 仅限内嵌模式。外部凭据与权威账本由独立 broker 持有，UID、service unit、key 与基础设施由部署方配置。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；按配置后端准备并检查源码候选。新工具创建支持独立行为验收和有限动态采用，修改、修订与源码发布各有独立授权和验收门；平台与迁移限制见本包说明。 |
 
@@ -66,7 +67,6 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
-| [assistant-dreaming](assistant-dreaming) | `@dsh-enhanced/assistant-dreaming` | 实验性（`--with dreaming` / `--dreaming` 显式选装，默认休眠） | 默认关闭的“做梦”插件：确定性 HMAC 召回抽签+空闲/冷启动门，单工具冻结 Agent 只记录私有 idea（L0），通过可选 peer 接入外部插件，无自动采用/自评。 |
 
 <!-- plugin-catalog:end -->
 

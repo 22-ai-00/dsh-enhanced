@@ -77,14 +77,9 @@ runbook 执行，不增加逐动作审批。
 
 ## Health 与安装场景
 
-`supervised` 场景安装 `assistant-evaluation`、`preference-learning`、`assistant-evolution`、`assistant-growth-experiments`、
-`assistant-heartbeat`、`assistant-health` 和 `assistant-recovery`。Heartbeat 不接管 Recovery，只承载
-独立 analyst，因此 `assistantHeartbeat` 始终是 supervised Health required provider；用户已有的其他
-Heartbeat 配置保持不变。
+`supervised` 场景在 core 与 `lark` 集合（含 `preference-learning`）基础上，安装完整受管成长组合：`assistant-evaluation`、`assistant-evolution`、`assistant-growth-experiments`、`assistant-heartbeat`、`assistant-health`、`assistant-skills`、`assistant-verifier`、`assistant-growth-driver`、`assistant-work-items`、`assistant-memory-learning`、`assistant-goals`、`assistant-recovery`、`event-triggers`、`assistant-proactive` 与 `owner-console`（完整安装集合以[安装指南](../../../scripts/install/README.md)为准；其中 `assistant-goals` 是 `assistant-recovery` 的必需 Cordis 注入）。Heartbeat 不接管 Recovery，只承载独立 analyst，因此 `assistantHeartbeat` 始终是 supervised Health required provider；用户已有的其他 Heartbeat 配置保持不变。
 
-必需 Health provider 包含 Policy、Memory、Wiki、Automations、Evaluation、Preference、Evolution、
-Delivery、Heartbeat、Recovery 和 Lark Channel。Recovery bootstrap 的 `failed`、stale run/step、缺 provider、
-Lark 断联、open incident/circuit 等都不会被 resident running 状态掩盖。
+必需 Health provider 包含 Policy、Memory、Wiki、Automations、Heartbeat、Evaluation、Preference、Evolution、Growth Experiments（`assistantGrowthExperiments`）、Delivery、Recovery 和 Lark Channel。Recovery bootstrap 的 `failed`、stale run/step、缺 provider、Lark 断联、open incident/circuit 等都不会被 resident running 状态掩盖。
 
 TraeX 或其他模型 route 不是 Recovery 依赖。它们只影响普通前台助手；需要时用 `--with traex` 等
 方式单独安装。Windows Task Scheduler 没有可验证的 resident running gate，因此当前拒绝激活

@@ -302,6 +302,7 @@ Linux 需要预先存在的 delegated cgroups/user namespace helpers；准备命
 - 文件系统：启用 `usageLearning` 后写私有 SQLite（文件权限 `0600`），保存冻结任务正文、owner 与模型，未自动清理历史。前台正文最多 4096 字符；后台完整 objective 最多16KiB，另有封存背景报告（单条64KiB、合计256KiB）和有界反馈。均经 owner 校验后作为不可信数据交给获授权的成长模型；Automations 定义与公开 health 不含正文。skill candidate 由 Skills 入库，源码提案经 Control Plane 写入其私有 worktree 和 SQLite。
 - 子进程：源码轨开启时委托 Control Plane 调用 Git 与实际隔离 runner（按 CP 配置支持 native 等后端）构建；构建权属于 owner 配置的 Control Plane，见其权限说明。driver 无浏览器能力。
 - 凭据：只读解析一次凭据引用（存在性检查），不持久化、不回显、不入日志。
+- 安装脚本：无运行时 install/postinstall 脚本。
 - 审批/策略：每次沉淀与每个工具调用都在 service 边界经 `assistant-policy`；空规则默认拒绝。driver 只产候选；独立 CP 另获创建审查与采用授权后可有限 adopt，driver 不直接 activate/install。
 
 ## 明确不做（边界）

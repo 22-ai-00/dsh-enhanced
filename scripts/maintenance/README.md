@@ -1,5 +1,7 @@
 # 旧 Delivery 会话迁移
 
+> **适用范围（历史 DSH 0.1 遗留迁移）：** 本工具仅用于将遗留 DSH `0.1.x`（session format `v2 → v3`）中包含 `delivery` 来源的旧会话离线迁移到 v3；当前仓库基线 DSH `0.2.2-rc.5` 已使用 Session format `4`（见[兼容性基线](../../docs/compatibility.md)）。
+
 `migrate-delivery-session.mjs` 修复一种已复现的兼容问题：旧格式会话包含本项目的 `delivery` 消息来源，新版 DSH 的 v2→v3 迁移器拒绝它，导致飞书无法恢复原会话。
 
 这是一项离线维护操作。目前支持审查过的 `@deepseek-ai/dsh-session-format-v2-to-v3@0.1.5-rc.2` 实现，使用源码 SHA-256 校验。维护子进程只扩展 `delivery` 的分类，严格要求 `kind/channel/account/eventId/trust` 五个字段、非空标识及 `trust: 'untrusted'`。其余未知数据仍被拒绝；不会改写为普通用户来源，不修改已安装的 DSH 包。

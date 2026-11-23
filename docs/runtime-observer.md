@@ -99,7 +99,7 @@ not infer this from a pathname or timeout.
 
 ## Evidence and limits
 
-The implementation consumes pinned Cordis 4.0.4 / Loader 1.0.5 / Include 1.0.9 public
+The implementation consumes pinned Cordis 4.1.0 / Loader 1.1.0 / Include 1.1.0 (per [pnpm-workspace.yaml](../pnpm-workspace.yaml)) public
 `resolve`, `Entry.fiber`, `Fiber.state/uid/store/inertia` and reflection realm
 and store surfaces. Tests cover the native Include root and direct-child
 binding, profile/path drift, same-ID entries outside the root, pending

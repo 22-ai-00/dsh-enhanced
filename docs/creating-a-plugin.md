@@ -26,7 +26,7 @@ pnpm create:plugin my-plugin
 
 ## 3. 实现 Cordis 插件
 
-入口通常导出 `name`、`version`、可选的 `inject` / `Config`，以及 `apply(ctx, config)`。生成的 `src/version.ts` 由仓库发版命令同步维护，不要在其他源码中重复硬编码包版本。遵循以下约束：
+涉及生命周期、服务注入、配置校验、资源释放、隔离或热重载时，须先阅读 [Cordis 运行时契约](cordis-runtime-contracts.md)。入口通常导出 `name`、`version`、可选的 `inject` / `Config`，以及 `apply(ctx, config)`。生成的 `src/version.ts` 由仓库发版命令同步维护，不要在其他源码中重复硬编码包版本。遵循以下约束：
 
 - 用 `inject` 表达所需服务，让 Cordis 决定激活时机。
 - 可能因部署不同而变化的值进入同步 Standard-Schema `Config`，并在加载时校验。
@@ -36,11 +36,11 @@ pnpm create:plugin my-plugin
 
 ### 客户端 UI 与原生 Settings 槽位
 
-带 Web 界面的插件可在 `package.json` 的 `dsh.client` 声明预构建浏览器入口（如 `owner-console` 产出 `./lib/client.js`），并在客户端通过 Host `slots` 扩展 DSH 原生界面：除 `sidebar.panellist` / `main` 外，还可注册 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer`（出现在左侧栏原生设置中），以及按包名 `key` 注册的 `plugins.bundle.config` 摘要/详情卡片（由插件自有 Typert `remote` 提供脱敏状态与受控操作，不在浏览器直接持有密钥或模型调用）。
+带 Web 界面的插件可在 `package.json` 的 `dsh.client` 声明预构建浏览器入口（如 `owner-console` 产出 `./lib/client.js`），并在客户端通过 Host `slots` 扩展 DSH 原生界面：除 `sidebar.panellist` / `main` 外，还可注册 `settings.section`、`settings.section.icon`、`settings.general.item`、`settings.models.footer`、`settings.models.provider-card`（出现在左侧栏原生设置中），以及按包名 `key` 注册的 `plugins.bundle.config` 摘要/详情卡片（由插件自有 Typert `remote` 提供脱敏状态与受控操作，不在浏览器直接持有密钥或模型调用）。
 
 ## 4. 测试与文档
 
-至少覆盖插件的核心行为和清理路径。插件 README 需要包含：用途、兼容性、安装、配置、使用、权限/数据边界和限制。随后把插件加入 [插件目录](../plugins/README.md)。
+至少覆盖插件的核心行为和清理路径。插件 README 需要包含：用途、兼容性（指向 [兼容性基线](compatibility.md)）、安装、配置、使用、权限/数据边界（分别说明**文件系统、网络、子进程、凭据、浏览器与安装脚本**六项权限，未使用写“无”）和限制。随后把插件加入 [插件目录](../plugins/README.md)。
 
 ## 5. 验证
 

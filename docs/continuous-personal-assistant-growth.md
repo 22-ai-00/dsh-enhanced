@@ -146,7 +146,7 @@ replay → shadow → canary
 - `plugin-control-plane`：能力发现、完整性固定、staging、canary 与版本提升。
 - `assistant-policy`：权限、预算、审批、紧急停止和不可绕过的外部约束。
 
-只有出现第二个真实消费者时，纯类型或算法才下沉到 `packages/*`；每个用户可启用能力仍保持独立 bundle。
+以上为初版核心包边界概览；后续新增的可独立安装 bundle（如 `assistant-memory-learning`、`assistant-work-items`、`assistant-association`、`assistant-goals`、`assistant-verifier`、`assistant-skills`、`assistant-growth-driver`、`assistant-isolation` 等）与完整职责清单见[插件目录](../plugins/README.md)。只有出现第二个真实消费者时，纯类型或算法才下沉到 `packages/*`；每个用户可启用能力仍保持独立 bundle。
 
 ## 自动化等级
 

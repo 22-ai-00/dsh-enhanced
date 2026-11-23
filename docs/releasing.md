@@ -6,7 +6,7 @@
 
 实验性版本可以先发布供用户安装，再通过真实普通任务持续验证学习、后续复用、质量、成本与回归收益。完整普通使用闭环尚未验收，不再单独阻止实验性 npm 发布；发行说明必须保留这一边界，不能把工程测试或服务就绪说成自迭代收益证明。
 
-发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。CI 与 Release 共同读取根目录 `.node-version`，并使用相同的 Vitest 工作进程上限，保持 Node 与测试并发基线一致。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
+发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。CI 与 Release 共同读取根目录 `.node-version`，并按各自 runner 规格显式固定 Vitest 并发上限（共享 lane 为 `2`，CI 专用慢包 runner 为 `3`，见 `.github/workflows/ci.yml` 与 `release.yml`）。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
 
 Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 与 Release 的 Linux job 先将该版本安装到只读 namespace 可见的 `/usr/bin/node`，再按 `.node-version` 切回工作区 Node，并分别校验两个版本。不能用工作区 Node 替代隔离运行时基线。跨平台测试继续验证可移植的源码准备契约；非 Linux Host 验证 Linux 专用执行入口在派发前拒绝。
 
@@ -66,11 +66,11 @@ pnpm release:publish
 pnpm release:record
 ```
 
-该命令复用发布前的完整一致性校验，然后更新 `current`、追加 `history` 并清空 `pending`。CI 的 publish job 只有 `contents: read`，账本 job 才有 `contents: write` 且不接触 `NPM_TOKEN`、不安装依赖；它只提交 `release-manifest.json`，并且在 npm 发布前和账本推送前都会重新确认 `origin/main` 未前进。
+该命令复用发布前的完整一致性校验，然后更新 `current`、追加 `history` 并清空 `pending`。CI 的 publish job 只有 `contents: read`，账本 job 才有 `contents: write` 且不接触 `NPM_TOKEN`、不安装依赖；它只提交 `release-manifest.json`，并且在 npm 发布前和账本推送前都会重新确认 `origin/main` 未前进。注意：当前 `release.yml` 的 `record` job 在 `publish` 返回成功后即更新账本，**尚未内置自动化的全包 npm registry 读回门禁**，因此 `release-manifest.json` 推进本身不证明所有 40 个包已在公共 npm 可安装。
 
 按下述 immutable tag ruleset 部署后，release tag 会稳定指向实际发布的源码提交；workflow 自身不会创建或移动 tag，账本记录位于其后的独立提交。
 
-发布后逐包核对 npm 上的精确版本、dist-tag 与包集合，再从公开 tag 下载安装资产并核对摘要。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。最后将 `main` 的发布账本记录同步回 `dev`。
+发布后必须逐包核对 npm 上的精确版本、dist-tag 与完整 40 包集合，再从公开 tag 下载安装资产并核对摘要；若发现任一包缺失或 404，不得宣称发布完成，也不可移动/删除旧 tag 重试，须按下方失败协议修复后以更高版本替代。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。最后将 `main` 的发布账本记录同步回 `dev`。
 
 涉及 Linux supervised 安装或依赖布局的修改，还须在安装器实际生成的 hoisted profile 上验证私有授权运行时准备，覆盖支持的 Node 22 和当前开发 Node。使用完整 supervised 包集合、真实安装元数据与锁文件，通过安装器的 Host peer 解析入口执行 `--prepare-authorities`，或在同一解析上下文中分别调用运行时与资源准备函数；核验独立程序可运行、重复准备不更换内容或身份。此检查不绑定 owner、不签发任务授权、不启动 Host，也不替代所选隔离后端的完整源码构建及 supervised 就绪验收。仅通过 core 激活或模拟 setup 返回值，不能证明该准备步骤可用。
 

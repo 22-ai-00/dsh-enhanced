@@ -31,16 +31,13 @@ Linux 成对升级会在候选 Host 首次启动前，核验旧 manifest 的冻�
 
 ## 兼容性
 
-- DeepSeek Harness：`0.2.1-rc.2` 基线语义（通过 `assistant-delivery`）。
-- `@dsh-enhanced/assistant-delivery`：`>0.1.7 <0.2.0`；本包的 supervised setup 使用当前发布切片的私有 capability。
-- `@deepseek-ai/dsh-user-questions`：由 DSH `0.1.2-rc.1` 定义 Agent-scoped `user-questions/request` answerer waterfall。Web Host 通过 Remote Events 提供 scoped answerer；飞书通道要承接 `ask_user_question` 时也必须直接注册同一 scope 的 answerer。
-- `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。
+- DeepSeek Harness / Cordis / Node.js 基线见仓库[兼容性说明](../../docs/compatibility.md)（通过 `assistant-delivery` 消费当前基线语义）。
+- `@dsh-enhanced/assistant-delivery`：同批发布版本；本包的 supervised setup 使用当前发布切片的私有 capability。
+- `@deepseek-ai/dsh-user-questions`：由 DSH 定义 Agent-scoped `user-questions/request` answerer waterfall。Web Host 通过 Remote Events 提供 scoped answerer；飞书通道要承接 `ask_user_question` 时也必须直接注册同一 scope 的 answerer。
+- `@dsh-enhanced/credentials-keychain`：handle 模式使用同批发布版本；env fallback 不要求其激活。
 - 普通个人助理场景同时安装 `@dsh-enhanced/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
 - 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/personal-assistant`、`@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-heartbeat`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution`、`@dsh-enhanced/assistant-growth-experiments`、`@dsh-enhanced/assistant-health` 与 `@dsh-enhanced/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
 - 官方 `@larksuiteoapi/node-sdk`：固定 `1.76.0`。该版在握手超时和关闭 socket 时保留错误监听，避免异步错误终止 Host；`type=card` 回调仍由本包的 CardKit 桥处理。
-- Node.js：`^22.19.0 || >=24.0.0`。
-
-仓库级基线见[兼容性说明](../../docs/compatibility.md)。
 
 ## 安装
 
@@ -172,7 +169,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - macOS 安装使用系统 Perl 的内核 `flock` 串行化同一用户、同名 profile 的 LaunchAgent 操作，使用 `plutil`/`launchctl` 核对服务归属并管理当前用户服务；运行检查核对状态与 PID。同名目标属于另一 DSH_HOME 时拒绝修改，替换失败时尝试恢复旧定义与注册状态。原生学习另串行化 Home 配置，写入私有计划、有限授权、恢复日志和 HMAC observer 密钥。新安装从冻结源码清单和锁文件准备私有 Node、pnpm 及依赖，候选构建和行为检查使用本机 Seatbelt；Host 也是原生 Node。支持范围与失败恢复见[原生 macOS 学习](docs/rsi-setup.md#原生-macos-学习)。
 - Linux 安装的 `--prepare-build` 还自动准备私有授权运行时和本地发布资源，也可单独执行 `--prepare-authorities`：从同版本已安装 Control Plane 复制官方程序及模块、固定独立 Node，运行副本做版本/模块检查，并生成 14 个独立 Ed25519 身份和本地 registry/catalog。共享契约从 Control Plane 声明的依赖解析，接受包内依赖边、同一 pnpm 虚拟包目录内的相邻依赖边，以及安装器生成的受管 profile 内经 profile 清单、pnpm 工作区、安装元数据和两份锁文件共同核验的 hoisted 直接依赖边；普通扁平项目或任意祖先目录的同名包不能替代它。核验材料在复制前后保持一致，目录和密钥仅当前用户可读写；重复执行核验固定内容并保留发布/状态进展。此步骤需要文件写入与子进程权限，不需要网络、浏览器或飞书凭据，不执行 npm lifecycle，不签发 owner grant 或启动 Host。
 - Linux 的 `dsh-rsi-setup --prepare-build` 准备摘要固定的原生运行时：从 nodejs.org 与 npm registry 下载官方 Node v22.23.2、pnpm 11.7.0，经 bubblewrap 私有命名空间与无凭据环境先 `pnpm fetch` 再离线 `--frozen-lockfile --ignore-scripts` 安装，保存 schema 3 sourceBuild（运行时全树摘要）与 schema 2 `releaseBuild`（工具链/store/cache 三树副本加 `runtimeDigest`），全程不调用 Docker CLI、daemon、socket 或镜像。环境前置（Linux x64/arm64、bwrap/unshare/mount 等）缺失时经 `--optional-build` 报告 `buildUnavailable`/`releaseBuildUnavailable` 并保留源码与已验证运行时；完整性错误始终致命。旧 Docker 镜像构建路径已下线，`--docker-path` 不再是 CLI 选项；历史 Docker 收据只用于只读迁移解码，不能被续跑。随后候选检查使用离线完整仓库 sandbox；安装期间不会读取主机 Docker registry 凭据或启动候选 Host。Mac 则准备受摘要固定的私有 Node、pnpm 与冻结清单依赖，并在候选期用 Seatbelt 离线执行。当前 runtime 支持与资源上限见 [RSI 配置](docs/rsi-setup.md)。
-- Linux 新 `--install-owner` 使用原生完整仓库边界：基础运行时导出发布工具链，repository schema 4 固定双 UID、系统工具快照与 cgroup v1，独立行为运行时支持工具创建、修订、配对回归及有限采用。准备阶段使用固定归档和冻结依赖；候选不读取 owner 凭据、浏览器、验收答案或网络。首次授权前创建五个空 runner 账本，在独立 seal 文件中固定目录/数据库身份，并把引用纳入原授权摘要；读取、安装重试和直接重启都不能补造丢失账本。旧 Docker 安装不再可续跑：安装器会 fail-closed 拒绝，需显式迁移，且不重建资源、不续期或新增创建/修订授权。
+- Linux 新 `--install-owner` 使用原生完整仓库边界：基础运行时导出发布工具链，repository schema 4 固定双 UID、系统工具快照与已委派 cgroup v1 四控制器或统一 cgroup v2 子树，独立行为运行时支持工具创建、修订、配对回归及有限采用。准备阶段使用固定归档和冻结依赖；候选不读取 owner 凭据、浏览器、验收答案或网络。首次授权前创建五个空 runner 账本，在独立 seal 文件中固定目录/数据库身份，并把引用纳入原授权摘要；读取、安装重试和直接重启都不能补造丢失账本。旧 Docker 安装不再可续跑：安装器会 fail-closed 拒绝，需显式迁移，且不重建资源、不续期或新增创建/修订授权。
 - `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。
@@ -184,7 +181,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 ## 当前限制
 
-- Linux 原生准备已接入 `--prepare-build`、本地更新候选构建和全新 `--install-owner` 配置事务。已有 Docker owner 的程序升级已接入空业务历史检查与停服采用授权 CAS：停服前、资源迁移前及 finalizer 重查，签名 overlay 绑定迁移计划、证明和文件身份，两个启动前验收点显式复核空表；后续正常就绪检查允许新的业务记录。配置启用但库缺失、非空 review/采用历史、sidecar、native→native 或授权不匹配会拒绝；不删库、不刷新额度和期限。完整临时 Home 升级、双服务就绪及回滚仍待实机验收，现有生产 Home 尚未迁移。旧 Docker 安装不能以重复安装续跑；迁移须显式进行，且不会借此扩大授权。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
+- Linux 原生准备已接入 `--prepare-build`、本地更新候选构建和全新 `--install-owner` 配置事务。已有 Docker owner 的程序升级支持空业务历史路径，并已在代码层接入非空采用封存（`creation-adoptions.sealed/<digest>.sqlite`）与审查库 v2 grant handoff（详见[维护说明](../../scripts/install/maintenance.md#现有-linux-冻结-owner-程序升级)）；配置启用但库缺失、sidecar 异常、native→native 或授权不匹配会拒绝，不删库、不刷新额度和期限。完整临时 Home 升级、非空历史迁移、双服务就绪及回滚仍待实机验收，现有生产 Home 尚未迁移。旧 Docker 安装不能以重复安装续跑；迁移须显式进行，且不会借此扩大授权。实施边界见[原生运行时](../../docs/dockerless-runtime.md)。
 
 - v0.1 支持文本、受限图片描述符、文本/Markdown-card 出站、WP19 `plain` 超长通知的 UTF-8 `text/plain` / `text/markdown` 附件上传与摘要并发（`capabilities.textAttachments: true`）、durable proposal、owner-DM 一次性工具审批、模型/权限卡片、reaction 和原生进度；模型不能提交任意 card JSON 或任意上传文件路径，也不能直接控制 reaction 或进度载荷。出站文本附件在发送前强校验 SHA-256 摘要及 `maxTextBytes` / 1 MiB 上限，经 `/open-apis/im/v1/files` 上传后再发送 `msg_type: 'file'` 消息和行内摘要；任一步失败均按可重试/不可重试语义 fail closed，绝不会只发截断摘要而丢弃附件。
 - 入站只有图片资源具备受限下载能力，且依赖 AttachmentStore 与模型图片能力；入站文件、音频、视频和 sticker 只进入 metadata quarantine。没有病毒扫描、任意入站文件下载、任意二进制上传或消息编辑（仅 CardKit 卡片支持通过 `updatePresentation` 原位替换）。

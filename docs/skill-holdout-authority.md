@@ -8,11 +8,11 @@ This is a runnable judging and recovery boundary, not a declaration that a datas
 
 Run the authority in a separate evaluation service, VM or container. Mount its private configuration, dataset, key and state only there. Candidate workers must not receive these mounts, the authority stdin, the Host filesystem or network access. The trusted controller bridges the authority's pipe and the existing `IsolatedVerifierRunner`; the latter runs in the fixed linux-native namespace/cgroup/seccomp boundary and receives only an artifact and the current input. The authority itself does not execute candidate code and needs no container runtime socket.
 
-The CLI enforces private canonical directories and owned regular single-link files, rejects symlink configuration/key/data, and creates SQLite state with private permissions. These checks do not sandbox a malicious administrator or another trusted Host process. Merely starting the CLI beside an unrestricted candidate shell is insufficient. The container integration test checks the concrete separate-mount boundary; it does not claim whole-Host isolation.
+The CLI enforces private canonical directories and owned regular single-link files, rejects symlink configuration/key/data, and creates SQLite state with private permissions. These checks do not sandbox a malicious administrator or another trusted Host process. Merely starting the CLI beside an unrestricted candidate shell is insufficient. The live isolation integration test checks the concrete separate-mount boundary; it does not claim whole-Host isolation.
 
 ## Operator configuration
 
-Use Node `^22.19.0 || >=24.0.0` on a POSIX system. Create an operator-owned directory with mode `0700`; configuration, dataset and private key files must have mode `0600`. Do not place these files in the candidate workspace or commit them to the repository.
+Use Node `>=24.9.0` (`engines.node`; see [compatibility baseline](compatibility.md)) on a POSIX system. Create an operator-owned directory with mode `0700`; configuration, dataset and private key files must have mode `0600`. Do not place these files in the candidate workspace or commit them to the repository.
 
 The configuration contains only these fields:
 

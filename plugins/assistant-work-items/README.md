@@ -687,7 +687,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 
 ## 兼容性
 
-以 DeepSeek Harness `0.1.2-rc.1` 的服务与工具契约验证。依赖 `node:sqlite`（Node.js 22+ 内置），不兼容 Node.js 20 及更早版本。
+兼容范围、DSH / Cordis / Node.js 基线见仓库[兼容性基线](../../docs/compatibility.md)（依赖内置 `node:sqlite`，不兼容 Node.js 20 及更早版本）。
 
 ### Host-only engineering source context
 

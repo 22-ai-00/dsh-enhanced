@@ -106,7 +106,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 - `agyEnabled` / `agyCommand` / `agyModels` 控制 Antigravity route（`agy-agent`），默认 `agyEnabled: false`；`agyEnabled` 与 `agyCommand` 均支持 live-editable 设置，可与 TraeX 同时开启并在模型选择器中实时切换。
 - `agyIncludeDefaultCustomizations` 默认 `false`（向 `agy acp` 传 `--include-default-customizations=false`），避免把 Antigravity 内置技能提示注入 DSH 后端上下文；`agyDisableTelemetry` 默认 `true`（传 `--disable-telemetry`）；`agyMode` 可选 `default` 或 `plan`，在 `session/new` 后通过 `session/set_config_option` 切换（`agy acp` 不接受 `--model` / `--effort` / `--mode` / `--disable-slash-commands` CLI flag，参数均通过 ACP `configOptions` 传递）。
 - `command` / `agyCommand` 均是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。当配置为不带路径分隔符的裸命令名（如默认 `traex` / `agy`）时，适配器会先按 `PATH` 查找，再依次检查标准用户/系统安装目录（POSIX：`~/.local/bin`、`~/.antigravity/antigravity/bin`（仅 `agy`）、`~/.npm-global/bin`、`~/Library/pnpm`、`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`；Windows：`%APPDATA%\npm`、`%LOCALAPPDATA%\Programs\{Antigravity,Trae}\bin`、`%USERPROFILE%\.local\bin`），避免在 launchd / Desktop GUI 精简 `PATH` 下因 `ENOENT` 回退为空目录；若配置了显式路径则严格原样使用不做回退，未找到时原样传出以保留标准 `CLI_NOT_FOUND`。
-- `cwd` 与 `cwdMode`（`'session' | 'exact'`，默认 `'session'`，且 `cwdMode` 支持 live-editable）决定 ACP `session/new` 使用的工作目录；bundle 默认将 `cwd` 设为 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析。每个**带 prompt 的普通对话调用**或**由 Host `claimCompaction` 核验的 compaction 摘要请求**必须是深冻结的 DSH Agent Loop 请求：同模块 marker 可直接验证；包被源码 link 或 DSH 在 adapter 边界复制请求时，则由 Host `agents` 服务核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session 的 header 与 derived messages 重建请求，只容许 `0.1.2-rc.1` `forAdapter()` 删除跨 route `replayState`。当 `cwdMode` 为默认值 `'session'` 时，插件对同一 live Session 的 `header.cwd` 做 `realpath` 验证并直接绑定给 ACP（即使尚未创建 `cwd` 目录或用户在 Desktop/Web 打开了不同项目文件夹）；设为 `'exact'` 时，则会把 `cwd` 与 live Session `header.cwd` 分别 `realpath` 后要求完全相等。缺失、过期、伪造、未核验的辅助/嵌套调用、请求变形、`exact` 模式下 cwd mismatch 或不存在的工作目录都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。
+- `cwd` 与 `cwdMode`（`'session' | 'exact'`，默认 `'session'`，且 `cwdMode` 支持 live-editable）决定 ACP `session/new` 使用的工作目录；bundle 默认将 `cwd` 设为 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析。每个**带 prompt 的普通对话调用**或**由 Host `claimCompaction` 核验的 compaction 摘要请求**必须是深冻结的 DSH Agent Loop 请求：同模块 marker 可直接验证；包被源码 link 或 DSH 在 adapter 边界复制请求时，则由 Host `agents` 服务核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session 的 header 与 derived messages 重建请求，只容许 `forAdapter()` 删除跨 route `replayState`。当 `cwdMode` 为默认值 `'session'` 时，插件对同一 live Session 的 `header.cwd` 做 `realpath` 验证并直接绑定给 ACP（即使尚未创建 `cwd` 目录或用户在 Desktop/Web 打开了不同项目文件夹）；设为 `'exact'` 时，则会把 `cwd` 与 live Session `header.cwd` 分别 `realpath` 后要求完全相等。缺失、过期、伪造、未核验的辅助/嵌套调用、请求变形、`exact` 模式下 cwd mismatch 或不存在的工作目录都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。
 - `listModels` 在缓存为空、过期或只有不完整的普通 stream 观察时，会通过当前 adapter 的 `probeReadiness` 执行 `traex login status`（仅 `traex-agent`）和无 prompt 的 ACP discovery，读取 2 维 `configOptions`（`model` 与逐模型 `thought_level` / `reasoning_effort`，完整透传 `low` / `medium` / `high` / `xhigh` / `max` 等档位；`default` 别名同时继承当前活动模型的 effort 档位）。它使用配置 `cwd`（若该目录尚不存在则安全回退到系统临时目录）、read-only sandbox、`ask-for-approval=never`，不携带消息内容，不声明文件/terminal capability，并拒绝 permission request。目录巡检中若单个模型的 `set_config_option` 返回非认证类 JSON-RPC 错误或无效的可选 reasoning 描述，只跳过该模型的 effort 元数据而不丢弃整份模型列表（认证错误 `-32000`、帧/协议错误与 `prompt` 执行路径仍严格 fail closed）。并发查询 single-flight；完整目录默认缓存 20 分钟（覆盖 15 分钟模型选择卡 TTL）。瞬态刷新失败（`timeout` / `protocol` / `process`）不会清空仍在有效期的已观测目录，`listModels` 会优先保留缓存观测，仅在 `auth-required` / `entitlement` / `not-found` 或无缓存时回退到配置别名，并只记录带无凭据 `outcome` 分类的固定诊断。
 - `resolveModel` 仍然 **不认证、不启动子进程**，只读取配置与当前内存缓存，保证 Agent Loop 的 `prepareCall` 路径 process-free。真实 `stream` 不信任该展示缓存；它继续要求 live session + canonical cwd，并以自己新建 ACP session 的目录重新权威校验模型与 effort。
 - 部署工具仍可在启用 route 前显式调用包导出的 `probeTraexReadiness`，主动验证本机登录和完整目录；调用完成后应 shutdown 临时 adapter。adapter shutdown 会 abort 尚未完成的目录发现、清除 single-flight 引用与缓存。
@@ -159,7 +159,7 @@ agy acp --sandbox [--include-default-customizations=false] [--disable-telemetry]
 - `end_turn` 是正常完成终态；`max_tokens`、`max_turn_requests` 都映射为 DSH `max-tokens` 截断终态，供上层决定是否创建新的补全 turn。`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
 - 已保存的 effort 可能在切换模型、账号权益变化或目录更新后失效。此时插件在 `session/prompt` 前丢弃该陈旧值，使用本次 ACP session 返回的当前默认档位继续执行；不会重放 prompt 或重复计费，生命周期日志会标记 `reasoningFallback=true`。下次打开模型选择器会显示新目录。
-- Provider 不会重放同一个已提交请求。外部 agent 可能已经读取上下文或产生服务端计费，原请求自动重试会放大副作用；上层 `assistant-delivery` 可在持久化 `max_tokens` / `max_turn_requests` 终态后，选择创建新的、有界、禁止工具执行的后续 turn 来补齐回答，这不属于 Provider 重试。DSH `0.1.2-rc.1` 仍可能向 Provider 序列化 scoped tool schema，但恢复期间的任何工具调用都会在审批和执行前被拒绝。TraeX 的每个后续 turn 仍会启动新进程/session，并按一次新的模型调用消耗额度。
+- Provider 不会重放同一个已提交请求。外部 agent 可能已经读取上下文或产生服务端计费，原请求自动重试会放大副作用；上层 `assistant-delivery` 可在持久化 `max_tokens` / `max_turn_requests` 终态后，选择创建新的、有界、禁止工具执行的后续 turn 来补齐回答，这不属于 Provider 重试。DSH 当前基线仍可能向 Provider 序列化 scoped tool schema，但恢复期间的任何工具调用都会在审批和执行前被拒绝。TraeX 的每个后续 turn 仍会启动新进程/session，并按一次新的模型调用消耗额度。
 
 调用失败时返回的稳定 `LlmError` code 与排查：
 
@@ -186,16 +186,16 @@ agy acp --sandbox [--include-default-customizations=false] [--disable-telemetry]
 
 ## 已知限制
 
-- DSH `0.1.2-rc.1` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
+- DSH 当前基线暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
 - 暂不转发图片、音频或 TraeX token usage。DSH tool schema 会随每一步序列化，工具结果则通过下一步的完整 DSH 对话返回给模型；实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
 - TraeX 是变化中的开发工具；本实现以 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手和本机 `traecli 0.210.1 (internal edition)` 的 `traecli-acp` 身份、模型目录、逐模型 reasoning selector，以及官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
 
 ## 兼容性与调研
 
-- Node.js `^22.19.0 || >=24.0.0`
+- Node.js：`package.json` 声明 `engines.node >=24.9.0`（详细运行时与安装器基线见[兼容基线](../../docs/compatibility.md)）
 - DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.2.2-rc.5 <0.3.0`（已验证基线 `0.2.2-rc.5`）
-- Cordis `^4.0.1`
+- Cordis `^4.1.0`
 - Agent Client Protocol SDK `0.25.1`，protocol version `1`
 
 进一步阅读：[Provider 设计依据与来源](../../docs/cliproxyapi-provider-evidence-review.md)、[兼容基线](../../docs/compatibility.md)。

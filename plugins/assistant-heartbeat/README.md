@@ -32,4 +32,4 @@ scratch 为空或 `enabled: false` 时，对应 automation 被持久化为 pause
 
 ## 兼容性
 
-以 DeepSeek Harness `0.1.2-rc.1` 验证。设计参考 OpenClaw heartbeat 的 active-hours/no-op 语义与 `dsh-plugin-heartbeat@d470c35` 的 busy coalescing；未引入或复制这些社区包。
+兼容范围与验证基线见仓库[兼容性基线](../../docs/compatibility.md)。设计参考 OpenClaw heartbeat 的 active-hours/no-op 语义与 `dsh-plugin-heartbeat@d470c35` 的 busy coalescing；未引入或复制这些社区包。

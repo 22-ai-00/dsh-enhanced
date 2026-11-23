@@ -47,16 +47,16 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 1. 重新验证 live 来源，冻结模型、预算、候选、训练证据和已部署模块摘要。
 2. authority `begin` 持久冻结后生成随机任务；`manifest` 返回签名 case/cell 摘要，不暴露答案。核验生成器、公钥与完整调度顺序。
 3. 在现有 `BenchmarkStore` 占用 cell 后，领取签名输入并启动全新 owner/Goal。baseline 不提供 Skills，candidate 临时挂载精确委派；两臂使用相同预算。
-4. 独立 Goal smoke 验收后读回产物，关闭原 runtime，再由 `IsolatedVerifierRunner` 在独立容器执行隐藏输入。
+4. 独立 Goal smoke 验收后读回产物，关闭原 runtime，再由 `IsolatedVerifierRunner` 在独立 `linux-native` 隔离沙箱（user/mount/PID/network 命名空间、cgroup 与 seccomp）执行隐藏输入。
 5. 保存私有逐 cell 观察；未签名的 `record` 响应不能成为成功结论。执行账本保留 provisional unknown verdict，只有最终签名 receipt、观察摘要与原生计量均通过重验后，才计算质量报告。
 
 `complete` 同时要求全部单元已记录、独立 authority 完整、执行已确认且没有 unknown。重跑同一实验不会重新派发；不要更换数据库、authority state 或 scope 绕过 reservation。`reuse` 只列出确实成功调用委派技能的单元；模型未使用技能不能算作复用。报告始终 `promotionAuthorized: false`。
 
-当前 transport 复用 Skills 的受限 NDJSON 子进程协议；authority 是可信 Host 程序，继承该进程的环境和 cwd。私有文件目录隔离及候选的无 Host 挂载容器，不构成独立 UID/机器部署证明。插件内使用这些 Host API 时，须将整个实验的取消与 `close()` 绑定到调用方 Cordis effect。
+当前 transport 复用 Skills 的受限 NDJSON 子进程协议；authority 是可信 Host 程序，继承该进程的环境和 cwd。私有文件目录隔离及候选的无 Host 挂载 `linux-native` 隔离沙箱，不构成独立 UID/机器部署证明。插件内使用这些 Host API 时，须将整个实验的取消与 `close()` 绑定到调用方 Cordis effect。
 
 ## 真实 Day1 探针
 
-先运行 `pnpm build`，准备已存在、包含 `bin/node`、`pnpm` 与 `node_modules` 的固定只读 Linux 运行时（`LinuxRuntime`），并确认当前 UID 已获得 cgroup v1 委派。真实 Day1 探针须由可信 Host 提供一个固定 adapter 模块（导出一个满足 native adapter 契约的工厂），在全新私有目录运行；探针拒绝覆盖或恢复已有实验，不准备运行时、不安装插件、不修改日常 profile。
+先运行 `pnpm build`，准备已存在、包含 `bin/node`、`pnpm` 与 `node_modules` 的固定只读 Linux 运行时（`LinuxRuntime`），并确认当前 UID 已获得 cgroup v1 或统一 cgroup v2 委派。真实 Day1 探针须由可信 Host 提供一个固定 adapter 模块（导出一个满足 native adapter 契约的工厂），在全新私有目录运行；探针拒绝覆盖或恢复已有实验，不准备运行时、不安装插件、不修改日常 profile。
 
 凭据由 Host 的 adapter 或本地凭据服务按引用解析，不接受明文 key；`DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）须同时设置。文件内容不会写入证据。真实执行测试用 `DSH_ISOLATION_TEST_NATIVE_RUNTIME` 指向已准备的 runtime 描述符。
 

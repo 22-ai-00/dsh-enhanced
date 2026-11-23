@@ -4,7 +4,7 @@
 
 ## 准备
 
-- 推荐安装 [Node.js 24 LTS](https://nodejs.org/en/download)（也支持 22.19 及以上的 22.x、24 以上版本），确保 `node`、`npm` 可在终端运行。安装器会检查和准备兼容的 DSH 与 pnpm。
+- 推荐安装 [Node.js 24 LTS](https://nodejs.org/en/download)（推荐 `>=24.9.0`，与各包 `package.json` 的 `engines.node` 一致；当前安装脚本预检仍兼容 22.19+ / 24+，详见[兼容性基线](../../docs/compatibility.md)），确保 `node`、`npm` 可在终端运行。安装器会检查和准备兼容的 DSH 与 pnpm。
 - 默认安装需要飞书账号，以及已登录的本机 **TraeX (`traex`) / Antigravity (`agy`)** 或模型服务的 API Key。按向导选择机器人、发送验证码绑定本人；服务启动后再发送 `/model`，建立真实聊天会话。步骤见[连接飞书](../../plugins/lark-channel/docs/setup.md)。暂不接飞书可选下方[只用本机 Web](#只用本机-web)。
 - 在信任的机器和账号上运行。新安装且没有既有权限设置时，后续新会话默认 **Full access**：可访问文件和网络，不逐次请求批准。已有权限设置和会话选择会保留。若需收紧新会话默认，安装时加 `--permission workspace-write`（人工批准）。原生自动审查在 Harness 当前会话中选择，助手内部自动审批由已绑定主人发送 `/permission auto` 开启。
 - macOS 原生安装、新工具构建与验证无需 Docker。Linux 新安装的默认完整学习场景采用原生隔离，需要可用的 systemd 用户服务、bubblewrap（`bwrap`）与已委派的 cgroup v1 四控制器或统一 cgroup v2 子树；环境不足时可能只能完成普通助理安装，学习授权会报告未就绪。旧部署不会自动切换 backend。完整环境前提与实验性 `autonomy` 的边界见[维护说明](maintenance.md#实验性-web-与-autonomy)。
@@ -68,12 +68,14 @@ dsh-rsi open --profile web
 dsh-rsi open --profile web
 dsh-rsi status --json
 dsh-rsi doctor --json
+dsh-rsi growth-report --since 7d
+dsh-rsi upgrade --check
 dsh-rsi logs --profile web --lines 100
 dsh-rsi restart --profile web
 dsh-rsi install --help
 ```
 
-只需升级全局 CLI：`dsh-rsi update`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.5`（保留原 owner、授权与非空判断前的空白历史）；旧 CLI 须先单独运行一次 `dsh-rsi update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
+只需升级全局 CLI：`dsh-rsi update`；普通日常用户的就地自助升级与自动回滚用 `dsh-rsi upgrade --check` / `--dry-run` / `--yes`。受支持的**现有 Linux 原 Docker 冻结 owner/cohort** 可先用 `dsh-rsi update --all --dry-run --yes` 看计划，再运行 `dsh-rsi update --all --yes`，从原绑定官方源码一次性迁移至 native 并更新至 `0.2.2-rc.5`（保留原 owner、授权与历史；空历史与代码层已实现的非空采用封存/审查库 v2 handoff 均尚未完成完整 live 实机验收）；旧 CLI 须先单独运行一次 `dsh-rsi update`。完整条件与恢复步骤见[冻结 owner 升级](maintenance.md#现有-linux-冻结-owner-程序升级)及 [CLI 升级说明](../../packages/dsh-rsi-cli/README.md#升级与重装)。macOS 必须先停止整个 Home 并显式确认；**冻结了原生 owner/source/cohort 资源的 Mac Home 暂不支持普通原地升级。** `dsh-rsi reinstall` 属于破坏性清理重装；先核对 [CLI 重装与 purge 说明](../../packages/dsh-rsi-cli/README.md#升级与重装) 和[维护说明](maintenance.md#彻底卸载purge)。
 
 ## 配置插件
 
@@ -87,11 +89,11 @@ $bin enable work-items
 $bin set event-triggers pollerEnabled true
 $bin preset recommended --dry-run     # 查看推荐的可选功能
 $bin preset recommended --yes
-$bin preset dogfood --yes             # 日常记忆/偏好通道自用预设（见 docs/examples/dogfood-macos.profile.json）
+$bin preset dogfood --yes             # 日常记忆/偏好通道自用预设（含 assistant-association，见 docs/examples/dogfood-macos.profile.json）
 dsh-rsi restart --profile web         # 改动重启后生效
 ```
 
-CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 显式打开 work-items observe 台账与 intake 账本、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询，并在 owner 已声明前置时打开 intake 评估生产者、后台 WorkItem 经验/失败学习开关；模型路由与规则、签名 pin、修订密钥等不会由预设生成，未满足前置的项以 skipped 原因列出。安装器的 `--plugin-preset <name>` 与引导式首装的最后一问都调用 `dsh_enhanced_apply_plugin_preset`，写入后自动重启已注册的常驻服务；全新 supervised 安装的学习装配另见上文。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
+CLI 先读取原生有效配置，单项修改时自动保留整行其它配置，写入后核对生效，失败则恢复原文件。它拒绝写入秘密值、修改 Policy/Control Plane 与 owner 授权项，飞书凭据仍用 `dsh-lark-setup`。默认值不变；`recommended` 显式打开 work-items observe 台账与 intake 账本、Delivery `attentionAttachOverCap`、Evaluation 通知结果和 event-triggers 轮询，并在 owner 已声明前置时打开 intake 评估生产者、后台 WorkItem 经验/失败学习开关；模型路由与规则、签名 pin、修订密钥等不会由预设生成，未满足前置的项以 skipped 原因列出。`--plugin-preset dogfood`（配合 `--scenario web`）会自动补齐 `preference-learning`、`assistant-evaluation`、`assistant-verifier`、`assistant-memory-learning`、`assistant-work-items` 与 `assistant-association` 6 个顶层包，开启本地联想召回（S3 `dreaming`/`intakeSignal` 与 S4 `webLearning` 保持关闭）并强制主动通道停留在 `observe` 模式。安装器的 `--plugin-preset <name>` 与引导式首装的最后一问都调用 `dsh_enhanced_apply_plugin_preset`，写入后自动重启已注册的常驻服务；全新 supervised 安装的学习装配另见上文。完整说明见 [assistant-policy](../../plugins/assistant-policy/README.md#插件配置-clidsh-plugin-setup)。
 
 逐环节就绪状态可用只读 `dsh-autonomy-doctor --readiness`（`assistant-web-owner` 提供，需匹配版本；Web/autonomy 场景的 Home 自带该入口）查看：它读取组合后的 profile，输出确定性文本加一行 JSON，覆盖安装/启用、WorkItems observe+intake、intake 评估生产者配置、交付自然反馈入口、后台学习开关、修订采用授权和 event poller；缺项标 not-ready 并给原因，必需环节未就绪时退出码为 1。它不激活 Host、不请求模型，因此不能证明运行时注册、Policy 或外部送达。
 

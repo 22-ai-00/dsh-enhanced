@@ -28,7 +28,7 @@ dsh --profile web --dump-config
   },
   "executor": {
     "id": "dsh",
-    "version": "0.1.2-rc.1",
+    "version": "0.2.2-rc.5",
     "path": "/usr/local/bin/dsh",
     "sha256": "64-hex",
     "environmentAllowlist": ["PATH"]
@@ -626,7 +626,7 @@ sourceReleases:
   "candidateId": "personal-memory",
   "packageName": "@dsh-enhanced/personal-memory",
   "packagePath": "plugins/personal-memory",
-  "dshBaseline": "0.1.5-rc.2",
+  "dshBaseline": "0.2.2-rc.5",
   "capabilities": ["memory"],
   "authorities": ["filesystem"],
   "requires": [],
@@ -782,7 +782,7 @@ dsh-plugin-control source revision-show --request-id <request-id>
 - catalog admission 使用同一文件系统的 `O_TMPFILE`、固定系统入口 `/usr/bin/python3` 安全解析出的 Python 3.8+ canonical target，以及跨目录 `renameat2(RENAME_EXCHANGE)` 提交和可验证反向交换。它不查询 `PATH`：入口、canonical target 及目录链必须 root-owned 且不可被 group/other 写，target 以 `O_NOFOLLOW` 打开并通过保留 descriptor 执行，执行前后复验 inode、时间戳与 SHA-256。父目录 descriptor 上的内核 `flock` 覆盖整个事务且随进程崩溃释放；每次 exchange 的确定性私有目录、before/desired/stage inode 与摘要先写入并 fsync 到 request-bound v2 journal。broker 不执行 pathname cleanup，无法归类的文件原样保留供人工 reconcile。缺少 Linux procfs、`O_TMPFILE`、`renameat2`、`flock` 或安全兼容的 interpreter 时 fail closed。Unix 文件 mode 不能隔离持续恶意的同 UID 进程；生产部署必须使用独立 UID 的 commit broker，或确保 worker 对 catalog 父目录无写权限。
 - local artifact activation 在安装期间持续持有已验证 cache inode，并把 `/proc/<control-plane-pid>/fd/<n>` reference 交给 DSH；registered DSH executor 及其解释器也从已验证 descriptor 启动。该路径是 Linux-only，且不会把 `release-complete` 视为 activation。
 
-兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。
+兼容性与 Node.js 基线见仓库 [compatibility baseline](../../docs/compatibility.md)（依赖内置 `node:sqlite`）。
 
 物理 Host 回退使用随包 systemd attestor v6 的 schema-3 配置与 schema-2 请求，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
 

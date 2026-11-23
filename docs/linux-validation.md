@@ -28,7 +28,8 @@ ps -u "$(id -u)" -o pid,etime,args | rg '(pnpm|vitest)' || true
 cd "$TASK_ROOT/src"
 test "$(node -v)" = "v$(cat .node-version)"
 test "$(pnpm -v)" = 11.7.0
-# 安装器/namespace fixture 还会显式调用系统 Node；两套 Node 都要核对，不能只验证一个。
+# 安装器/namespace fixture 还会显式调用系统 Node（CI/Release 锁定为 v22.23.2）；两套 Node 都要核对，不能只验证一个。
+test "$(/usr/bin/node --version)" = 'v22.23.2'
 export XDG_CACHE_HOME="$TASK_ROOT/cache" XDG_DATA_HOME="$TASK_ROOT/data"
 export XDG_STATE_HOME="$TASK_ROOT/state" COREPACK_HOME="$TASK_ROOT/cache/corepack"
 export npm_config_cache="$TASK_ROOT/cache/npm" PNPM_HOME="$TASK_ROOT/pnpm-home"

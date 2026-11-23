@@ -62,7 +62,7 @@ Harness 原生「自动审查」独占保留档位 `auto`，由官方组件注�
 
 canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
 
-`assistant-policy/approval-reviewer` 是 required session event。当前 DSH 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验当前 `0.2.0-rc.2` 的 format v4（仍识别旧 v3），并在插件本地目录与真实 Host reader 使用的目录不同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
+`assistant-policy/approval-reviewer` 是 required session event。当前 DSH 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验当前 DSH 0.2 线的 format v4（仍识别旧 v3），并在插件本地目录与真实 Host reader 使用的目录不同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
@@ -240,9 +240,10 @@ const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun
 
 ### dogfood 预设（记忆与偏好通道日常自用）
 
-`preset dogfood`（编程入口 `applyDogfoodPluginPreset(target, options)` / `applyPluginPreset({ ...target, preset: 'dogfood' }, options)`，完整安装与授权闭环见 [`docs/examples/dogfood-macos.profile.json`](../../docs/examples/dogfood-macos.profile.json)）面向日常对话纵向验收记忆与偏好进化通道。在 `--scenario web` 下传入 `--plugin-preset dogfood` 时，安装器会自动补齐 `preference-learning`、`assistant-evaluation`、`assistant-verifier`、`assistant-memory-learning` 与 `assistant-work-items` 顶层包；运行 `dsh-rsi open --profile web` 打开并新建一次会话建立首个真实 owner 会话绑定后，可在「文鳐」控制台向导签发三权记忆授权并重启一次 Host，或停机运行 profile 内的 `dsh-web-owner-setup --autonomy-setup --enable-memory-learning --work-item-experiences` + `$bin preset dogfood --profile web --yes` 后再 `dsh-rsi open --profile web` 启动：
+`preset dogfood`（编程入口 `applyDogfoodPluginPreset(target, options)` / `applyPluginPreset({ ...target, preset: 'dogfood' }, options)`，完整安装与授权闭环见 [`docs/examples/dogfood-macos.profile.json`](../../docs/examples/dogfood-macos.profile.json)）面向日常对话纵向验收记忆与偏好进化通道。在 `--scenario web` 下传入 `--plugin-preset dogfood` 时，安装器会自动补齐 `preference-learning`、`assistant-evaluation`、`assistant-verifier`、`assistant-memory-learning`、`assistant-work-items` 与 `assistant-association` 6 个顶层包；运行 `dsh-rsi open --profile web` 打开并新建一次会话建立首个真实 owner 会话绑定后，可在「文鳐」控制台向导签发三权记忆授权并重启一次 Host，或停机运行 profile 内的 `dsh-web-owner-setup --autonomy-setup --enable-memory-learning --work-item-experiences` + `$bin preset dogfood --profile web --yes` 后再 `dsh-rsi open --profile web` 启动：
 
 - 打开 `preference-learning`、`assistant-delivery` 自然反馈（`naturalFeedback.coverage` / `mixedIntent` 与 `attentionAttachOverCap`）及 `assistant-evaluation` 结果与吻合度记录（`notificationOutcomesEnabled`、`intakeAttentionAgreementEnabled`、`intakeEvaluationAgreementEnabled`，固定 `attentionTuningAutoAdopt: false`、`attentionLooseningEnabled: false`）；
+- 开启本地 `assistant-association` 联想召回（`enabled: true`、`localOnly: true`、Hebbian 与 WP22 参数自调参；显式固定 S3 `dreaming.enabled: false`、`intakeSignal.enabled: false` 与 S4 `webLearning.enabled: false`），并将数据库路径规范化至 `$DSH_HOME/assistant-association/<profile>.sqlite`；
 - 在 owner 已有签名学习授权与 `workItemExperiences` 许可时打开 `assistant-memory-learning` 的 `workItemExperiences: true`（前台对话记忆学习在授权后已默认运行）；
 - 强制把主动通道固定在只观察模式：`assistant-work-items` 固定 `mode: 'observe'`、`intakeLedger.enabled: true`、`intakeLedger.evaluation.admit.enabled: false`，`assistant-proactive` 在已有规则与路由时开启 `intakeEvaluation.enabled: true`（不开启自动准入或注意力放宽），`event-triggers.pollerEnabled: false`。预登记 14 天验收口径见[当前状态](../../docs/rsi-status.md)。
 

@@ -2,8 +2,8 @@
 
 研究日期：2026-11-07。来源：飞书文章《打造 Personal Agent（四）：从 ReAct 到 CodeAct》
 （内部飞书文章（链接不随仓库公开），本地快照见忽略目录
-`docs/evidence/ptc-research-20261107/`），以及当前 Harness 的 `dsh-tools` PTC 实现
-（`mode`/`presentAs`、`run_code`、生成 SDK、`@deepseek-ai/dsh-ptc-runtime-node`）。
+`docs/evidence/ptc-research-20261107/`），以及当前 Harness 的 PTC 执行实现
+（`@deepseek-ai/dsh-tool-executor-ptc` 的 `PtcExecutor`、`run_code`、生成 SDK 及运行期 `ctx.ptcRuntime`，如 `@deepseek-ai/dsh-ptc-runtime-node`）。
 
 本文说明 PTC 为什么与本项目的持续成长目标直接相关、它改变哪些实施顺序、以及落地边界。
 实现状态与剩余工作以 [RSI 当前状态](rsi-status.md) 为准；本文只保留设计判断。
@@ -43,6 +43,8 @@
 ## 分阶段落地
 
 ### 阶段 1（当前）：内部代理可选 PTC 呈现
+
+> 注：本阶段已在 `assistant-growth-driver` 中实现（`toolPresentation: 'native' | 'ptc'`、默认 `native`，以及 `assistant-growth/ptc-trajectory/v1` 有界摘要）；阶段 2–4 仍为设计提案。
 
 - 对象：`assistant-growth-driver` 的后台成长代理（审计记录其真实模型任务曾因作者 5/7 次模型调用
   耗尽预算而失败）。PTC 下同一 wake 的 gaps→read→prepare→status 可压缩为 1 个模型回合。

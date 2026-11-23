@@ -1,5 +1,7 @@
 # DSH plugin/tool agent self-iteration: research note
 
+> **Historical research snapshot (2026-09-19).** Retained for design rationale only; the prioritized items below are historical proposals rather than an active backlog or current capability status. See [AGENTS.md self-iteration principles](../AGENTS.md#self-iteration-principles) for standing rules and [RSI status](rsi-status.md) for current delivery boundaries.
+
 Research date: 2026-09-19. Scope: improve this repository as a **self-iterating DSH plugin/tool agent**. Model providers are replaceable suppliers; this is not a proposal to train model weights, build a provider benchmark, or claim unrestricted autonomous RSI.
 
 ## Source status and primary-source check

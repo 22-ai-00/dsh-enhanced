@@ -1,6 +1,6 @@
 # ACP 插件 Windows 兼容性
 
-更新：2026-11-07。以下按当前工作区代码和 CI 配置整理；发布版本与 DSH 支持范围统一见[兼容性基线](compatibility.md)。
+更新：2026-11-23。以下按当前工作区代码和 CI 配置整理；发布版本与 DSH 支持范围统一见[兼容性基线](compatibility.md)。
 
 ## 当前边界
 
@@ -8,7 +8,7 @@ ACP 提供实验性原生 Windows 支持。当前源码与自动化检查覆盖�
 
 | 项目 | 当前行为与依据 |
 | --- | --- |
-| 运行环境 | Node `^22.19.0 || >=24.0.0`；DSH peer 范围 `>=0.2.1-rc.2 <0.3.0`，见[包清单](../plugins/acp/package.json)。 |
+| 运行环境 | `engines.node` 为 `>=24.9.0`（工作区兼容基线见[兼容性基线](compatibility.md)）；Cordis peer 范围 `^4.1.0`，DSH peer 范围 `>=0.2.2-rc.5 <0.3.0`，见[包清单](../plugins/acp/package.json)。 |
 | 默认模式 | `standard`；ACP 的 `code` 映射到 DSH 原生 `ptc`，另有 `cordis`，见[模式实现](../plugins/acp/src/control.ts)。 |
 | `minimal` | 在 win32 隐藏并拒绝；不能把安装 Git Bash 或 WSL 当作原生 Windows 支持证明。 |
 | stdio 与路径 | 使用 Node Web Stream 桥接 ACP；cwd 使用运行平台的绝对路径判断，见[入口实现](../plugins/acp/src/index.ts)。 |

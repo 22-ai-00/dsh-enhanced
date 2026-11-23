@@ -50,6 +50,8 @@
 
 ## 后续优先级
 
+> 以下为研究截点时的候选优先级，不作为当前待办或发布计划；当前进展见 [RSI 当前状态](rsi-status.md)。
+
 - P1：为 WebSocket 增加独立 keepalive/watchdog 和退避可观测性，或以兼容层接入官方 Channel SDK 的 transport 生命周期。
 - P2：可选同步飞书原生 slash-command 菜单，让输入 `/` 时能发现 `/model`；同步失败不能影响手工命令。
 - P2：逐类接入 `post`、合并转发、图片和文件，继续让二进制权限、隔离和 durable operation 留在 Delivery 边界。

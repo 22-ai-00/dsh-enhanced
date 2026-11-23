@@ -31,7 +31,7 @@ approve, publish, install or activate that plan.
   descriptor, manifest inventory and lock digest; re-prepare when the lock changes.
 - Use the documented [native runtime boundary](dockerless-runtime.md).
   The nested repository sandbox runs inside the linux-native user namespace,
-  cgroup v1 delegation and the pinned seccomp profile. It keeps network disabled,
+  delegated cgroup v1 or unified cgroup v2 roots and the pinned seccomp profile. It keeps network disabled,
   non-root execution, no capabilities, and no Host mounts. Its `/proc` exposure is
   limited by the namespace and seccomp policy rather than a container default.
 - Keep the target plugin clean at HEAD. The source reader exposes committed
@@ -97,13 +97,12 @@ node scripts/e2e/personal-memory-source-acceptance.mjs \
   --evidence /absolute/candidate-acceptance.json
 ```
 
-The operator harness bundles source as data and sends it to the existing
-isolated verifier with a fixed Node/BusyBox image. It tests actual MemoryStore
+In that pending-migration legacy harness, the operator bundles source as data and previously sent it to the isolated verifier with a fixed Node/BusyBox image (to be replaced by a pinned `LinuxRuntime` upon migration). It tests actual MemoryStore
 retrieval, persistent v6 index migration, normalization and token boundaries,
 owner separation, removed records and reopen idempotence. The Host evaluates
 returned observations against fixed expectations. This is a finite engineering
 test set; candidate output is still untrusted and source review remains a
-separate gate. The evidence retains image, input, bundle and harness digests,
+separate gate. Its evidence retains runtime/image, input, bundle and harness digests,
 failed assertions and the runner's quiescence receipt.
 
 Candidate inputs come from Git blobs at the proposal's full `baseCommit`, then

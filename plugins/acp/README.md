@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要先安装 DSH `>=0.2.1-rc.2 <0.3.0`。然后创建一个独立的 `acp` profile 并安装插件：
+需要先安装兼容的 DSH（当前验证基线与 peer 范围见[兼容性基线](../../docs/compatibility.md)）。然后创建一个独立的 `acp` profile 并安装插件：
 
 ```sh
 dsh plugin --profile acp add @dsh-enhanced/acp

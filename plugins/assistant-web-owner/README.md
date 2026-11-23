@@ -4,7 +4,7 @@
 
 ## 安装与配置
 
-兼容 DSH `>=0.2.1-rc.2 <0.3.0`。这是可独立安装的可选实验性 bundle。本地源码安装可使用现有安装器的显式 Web 场景；默认 `core` 不会自动启用它：
+兼容基线见仓库[兼容性基线](../../docs/compatibility.md)（DSH peer 范围 `>=0.2.2-rc.5 <0.3.0`）。这是可独立安装的可选实验性 bundle。本地源码安装可使用现有安装器的显式 Web 场景；默认 `core` 不会自动启用它：
 
 ```sh
 ./scripts/install/install-local.sh --scenario web --workspace /absolute/workspace --yes --no-service
@@ -104,7 +104,7 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 | 参数 | 默认值 | 边界 |
 | --- | --- | --- |
-| `--isolation-backend` | `linux-native`（唯一支持值） | native 需要非 root Linux、受支持的 user namespace、cgroup v1 当前用户委派及原生探测通过；不自动安装系统前提 |
+| `--isolation-backend` | `linux-native`（唯一支持值） | native 需要非 root Linux、受支持的 user namespace、已委派的 cgroup v1 四控制器或统一 cgroup v2 子树及原生探测通过；不自动安装系统前提 |
 | `--isolation-source-repository` | 无 | native 可选的规范绝对仓库路径；冻结 committed HEAD，版本固定取本安装包 package.json；省略时只读取固定官方同版本 tag |
 | `--isolation-max-runs` | `20` | 有限 grant 最大次数（1–10000） |
 | `--isolation-lease-minutes` | `60` | grant 原始期限（1–10080 分钟）；setup CLI 对应 `--isolation-lease-ms` |
