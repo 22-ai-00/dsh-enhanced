@@ -12,6 +12,33 @@ export interface SensorObservation {
   truthy: boolean
 }
 
+export interface HttpReadInput {
+  url: string
+  maxBodyBytes: number
+  timeoutMs: number
+  allowedHosts?: ReadonlySet<string>
+  allowedOrigins?: ReadonlySet<string>
+  allowIpv6?: boolean
+  fetcher?: Fetcher
+  lookup?: Lookup
+  trackOperation?: OperationTracker
+  signal?: AbortSignal
+  headers?: RequestInit['headers']
+  rejectPagination?: boolean
+  method?: 'GET' | 'POST'
+  body?: string
+  ifNoneMatch?: string
+  allowNotModified?: boolean
+}
+
+export interface HttpBodyResponse {
+  readonly status: number
+  readonly notModified: boolean
+  readonly etag?: string
+  readonly headers: Headers
+  readonly body: Buffer
+}
+
 export interface PinnedFileRoot {
   configuredPath: string
   realPath: string
@@ -326,7 +353,7 @@ async function boundedBody(
   return Buffer.concat(chunks, total)
 }
 
-function pointer(document: unknown, value: string): unknown {
+export function selectJsonPointer(document: unknown, value: string): unknown {
   if (value === '') return document
   let current = document
   for (const raw of value.slice(1).split('/')) {
@@ -337,6 +364,13 @@ function pointer(document: unknown, value: string): unknown {
     current = (current as Record<string, unknown>)[key]
   }
   return current
+}
+
+function normalizedEtag(value: string | null): string | undefined {
+  if (value === null) return undefined
+  const trimmed = value.trim()
+  if (trimmed.length === 0 || trimmed.length > 1_024 || /[\p{Cc}]/u.test(trimmed)) return undefined
+  return trimmed
 }
 
 export async function defaultLookup(hostname: string): Promise<Array<{ address: string; family: number }>> {
@@ -378,24 +412,15 @@ async function pinnedHttpsFetch(urlValue: string, init: RequestInit, route: Vali
       }
     })
     request.once('error', rejectResponse)
-    request.end()
+    if (typeof init.body === 'string' || init.body instanceof Uint8Array) {
+      request.end(init.body)
+    } else {
+      request.end()
+    }
   })
 }
 
-export async function readHttpJsonValue(input: {
-  url: string
-  maxBodyBytes: number
-  timeoutMs: number
-  allowedHosts?: ReadonlySet<string>
-  allowedOrigins?: ReadonlySet<string>
-  allowIpv6?: boolean
-  fetcher?: Fetcher
-  lookup?: Lookup
-  trackOperation?: OperationTracker
-  signal?: AbortSignal
-  headers?: RequestInit['headers']
-  rejectPagination?: boolean
-}): Promise<unknown> {
+export async function readHttpBodyValue(input: HttpReadInput): Promise<HttpBodyResponse> {
   const url = new URL(input.url)
   if (url.protocol !== 'https:') throw new Error('event-triggers: HTTP sensor requires HTTPS')
   const legacyAllowed = (url.port === '' || url.port === '443') && (input.allowedHosts?.has(url.hostname.toLowerCase()) ?? false)
@@ -410,15 +435,79 @@ export async function readHttpJsonValue(input: {
     const resolving = family === 0 ? (input.lookup ?? defaultLookup)(address) : Promise.resolve([{ address, family }])
     const resolved = await raceWithAbort(tracked(resolving, input.trackOperation), controller.signal)
     const addresses = validatedAddresses(resolved, input.allowIpv6 ?? false)
-    const fetching = (input.fetcher ?? pinnedHttpsFetch)(url.toString(), { method: 'GET', redirect: 'manual', signal: controller.signal,
-      headers: input.headers ?? { accept: 'application/json' } }, { addresses })
+    let headers: RequestInit['headers'] = input.headers ?? { accept: 'application/json' }
+    if (input.ifNoneMatch !== undefined) {
+      const normalizedHeaders = new Headers(headers)
+      if (!normalizedHeaders.has('if-none-match')) normalizedHeaders.set('if-none-match', input.ifNoneMatch)
+      headers = Object.fromEntries(normalizedHeaders.entries())
+    }
+    const fetching = (input.fetcher ?? pinnedHttpsFetch)(url.toString(), {
+      method: input.method ?? 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers,
+      ...(input.body === undefined ? {} : { body: input.body }),
+    }, { addresses })
     const response = await raceWithAbort(tracked(fetching, input.trackOperation), controller.signal)
+    if (input.allowNotModified && response.status === 304) {
+      await cancelBody(response, controller.signal, input.trackOperation)
+      const etag = normalizedEtag(response.headers.get('etag')) ?? input.ifNoneMatch
+      return Object.freeze({
+        status: 304,
+        notModified: true,
+        ...(etag === undefined ? {} : { etag }),
+        headers: response.headers,
+        body: Buffer.alloc(0),
+      })
+    }
     if (response.status >= 300 && response.status < 400) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error('event-triggers: HTTP redirects are not allowed') }
     if (!response.ok) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error(`event-triggers: HTTP sensor returned ${response.status}`) }
     if (input.rejectPagination && /(?:^|[;,\s])rel="?next"?/iu.test(response.headers.get('link') ?? '')) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error('event-triggers: HTTP response is paginated') }
     const body = await boundedBody(response, input.maxBodyBytes, controller.signal, input.trackOperation)
-    try { return JSON.parse(body.toString('utf8')) } catch { throw new Error('event-triggers: HTTP body is not valid JSON') }
+    const etag = normalizedEtag(response.headers.get('etag'))
+    return Object.freeze({
+      status: response.status,
+      notModified: false,
+      ...(etag === undefined ? {} : { etag }),
+      headers: response.headers,
+      body,
+    })
   } finally { clearTimeout(timer); input.signal?.removeEventListener('abort', forwardAbort) }
+}
+
+export async function readHttpTextValue(input: HttpReadInput): Promise<Readonly<{ text: string; etag?: string; notModified: boolean }>> {
+  const response = await readHttpBodyValue({
+    ...input,
+    headers: input.headers ?? { accept: 'text/calendar, text/plain;q=0.9, */*;q=0.1' },
+  })
+  return Object.freeze({
+    text: response.notModified ? '' : response.body.toString('utf8'),
+    notModified: response.notModified,
+    ...(response.etag === undefined ? {} : { etag: response.etag }),
+  })
+}
+
+export async function readHttpJsonWithMeta(input: HttpReadInput): Promise<Readonly<{ value?: unknown; etag?: string; notModified: boolean }>> {
+  const response = await readHttpBodyValue(input)
+  if (response.notModified) {
+    return Object.freeze({ notModified: true, ...(response.etag === undefined ? {} : { etag: response.etag }) })
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(response.body.toString('utf8'))
+  } catch {
+    throw new Error('event-triggers: HTTP body is not valid JSON')
+  }
+  return Object.freeze({
+    value,
+    notModified: false,
+    ...(response.etag === undefined ? {} : { etag: response.etag }),
+  })
+}
+
+export async function readHttpJsonValue(input: HttpReadInput): Promise<unknown> {
+  const response = await readHttpJsonWithMeta({ ...input, allowNotModified: false })
+  return response.value
 }
 
 export async function readHttpJsonObservation(input: {
@@ -434,7 +523,7 @@ export async function readHttpJsonObservation(input: {
   trackOperation?: OperationTracker
   signal?: AbortSignal
 }): Promise<SensorObservation> {
-  const selected = pointer(await readHttpJsonValue(input), input.pointer)
+  const selected = selectJsonPointer(await readHttpJsonValue(input), input.pointer)
   const serialized = JSON.stringify(selected)
   if (serialized === undefined) throw new Error('event-triggers: JSON pointer selected an unsupported value')
   return { fingerprint: `sha256:${hash(serialized)}`, truthy: Boolean(selected) }

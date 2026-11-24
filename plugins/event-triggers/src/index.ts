@@ -11,11 +11,19 @@ export * from './source.js'
 export * from './observer.js'
 export * from './intake.js'
 export * from './lark-calendar-sensor.js'
+export * from './task-system-sensor.js'
+export * from './calendar-sensor.js'
+export * from './email-sensor.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = normalizeEventTriggersConfig(config)
   const dependencies: string[] = []
-  if (normalized.triggers.some(trigger => trigger.kind === 'webhook' || (trigger.kind === 'github-repository' && trigger.credentialHandle !== undefined))) dependencies.push('credentialsKeychain')
+  const needsCredentials = normalized.triggers.some(trigger =>
+    trigger.kind === 'webhook'
+    || ((trigger.kind === 'github-repository' || trigger.kind === 'task-system' || trigger.kind === 'calendar' || trigger.kind === 'email')
+      && trigger.credentialHandle !== undefined && trigger.credentialHandle !== ''),
+  )
+  if (needsCredentials) dependencies.push('credentialsKeychain')
   if (normalized.triggers.some(trigger => trigger.kind === 'github-repository' && trigger.externalGrant !== undefined)) dependencies.push('assistantActions')
   if (normalized.triggers.some(trigger => trigger.kind === 'lark-calendar')) dependencies.push('larkChannel')
   if (normalized.triggers.some(trigger => trigger.observer !== undefined)) dependencies.push('assistantDelivery')

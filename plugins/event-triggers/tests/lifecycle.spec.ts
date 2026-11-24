@@ -260,4 +260,33 @@ describe('event trigger runtime lifecycle', () => {
     expect(reopened.health()).toMatchObject({ triggersObserved: 0, failingTriggers: 1 })
     reopened.close()
   })
+
+  test('starts polling automatically when pollerEnabled is omitted (default true)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'event-triggers-default-poller-'))
+    roots.push(root)
+    const ctx = new Context()
+    new FakePolicy(ctx)
+    new FakeAutomations(ctx)
+    let resolvePolled!: () => void
+    const polled = new Promise<void>(resolve => { resolvePolled = resolve })
+    const fetcher = vi.fn(async () => {
+      resolvePolled()
+      return new Response('{"ready":true}', { status: 200 })
+    })
+    new EventTriggersService(ctx, {
+      databasePath: join(root, 'events.sqlite'),
+      allowedHttpOrigins: ['https://api.example.com'],
+      triggers: [{
+        id: 'auto-polled', kind: 'http-json', automationId: 'remote-task',
+        url: 'https://api.example.com/state', pointer: '/ready', fireWhen: 'changed',
+        debounceMs: 0, cooldownMs: 0, maxFires: 10,
+      }],
+    }, {
+      fetcher,
+      lookup: async () => [{ address: '93.184.216.34', family: 4 }],
+    })
+    await polled
+    expect(fetcher).toHaveBeenCalledOnce()
+    await ctx.fiber.restart()
+  })
 })

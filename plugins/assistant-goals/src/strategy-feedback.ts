@@ -1,12 +1,14 @@
 import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 import { buildGoalFeedback, type GoalStepFeedback } from './feedback.js'
 import type { GoalBudgetRunUsage } from './budget-store.js'
+import type { StrategyRoutingDecision } from './strategy-router.js'
 import type { StrategyRecord } from './strategy-store.js'
 import type { GoalExecutionRun, GoalRecord } from './types.js'
 
 export interface GoalStrategyAssessment {
   readonly id: string
   readonly kind: StrategyRecord['intent']['kind']
+  readonly requestedKind?: StrategyRecord['intent']['requestedKind']
   readonly state: StrategyRecord['state']
   readonly outcome?: StrategyRecord['outcome']
   readonly terminationReason?: StrategyRecord['terminationReason']
@@ -17,6 +19,7 @@ export interface GoalStrategyAssessment {
   /** Correlation to one exact execution, never causal credit or a strategy verdict. */
   readonly attribution: 'same-parent-step-only'
   readonly parentStep: GoalStepFeedback | null
+  readonly routing?: StrategyRecord['intent']['routing']
   readonly nextAction: 'reconcile-execution' | 'inspect-strategy-execution' | 'await-parent-verification'
     | 'inspect-parent-verification' | 'revise-solution' | 'review-remaining-goal' | 'plan-current-definition'
   readonly children: ReadonlyArray<Readonly<StrategyRecord['children'][number] & { usage?: Readonly<GoalBudgetRunUsage> }>>
@@ -25,6 +28,7 @@ export interface GoalStrategyAssessment {
 export interface GoalStrategyHistory {
   readonly available: true
   readonly records: readonly GoalStrategyAssessment[]
+  readonly recommendation?: StrategyRoutingDecision
 }
 
 const same = (left: unknown, right: unknown): boolean => {
@@ -39,6 +43,7 @@ export function buildGoalStrategyHistory(
   lookup: ((id: string) => unknown) | undefined,
   usage: (runId: string) => Readonly<GoalBudgetRunUsage> | undefined,
   now: number,
+  recommendation?: StrategyRoutingDecision,
 ): GoalStrategyHistory {
   const records = strategies.slice(0, 32).filter(value => value.intent.goalId === goal.id && same(value.intent.scope, goal.scope)).slice(0, 3).map(value => {
     const intent = value.intent
@@ -64,20 +69,34 @@ export function buildGoalStrategyHistory(
           : value.state === 'prepared' || value.state === 'starting' || parentStep?.status === 'pending' ? 'await-parent-verification'
             : parentStep?.status === 'not-achieved' ? 'revise-solution'
               : parentStep?.status === 'achieved' ? 'review-remaining-goal' : 'inspect-parent-verification'
-    return Object.freeze({ id: intent.id, kind: intent.kind, state: value.state,
+    return Object.freeze({
+      id: intent.id,
+      kind: intent.kind,
+      ...(intent.requestedKind === undefined ? {} : { requestedKind: intent.requestedKind }),
+      state: value.state,
       ...(value.outcome === undefined ? {} : { outcome: value.outcome }),
       ...(value.terminationReason === undefined ? {} : { terminationReason: value.terminationReason }),
       ...(value.completedAt === undefined ? {} : { durationMs: value.completedAt - intent.createdAt }),
-      definitionCurrent, parentRunId: intent.parentRunId, parentSessionId: intent.parentSessionId,
-      attribution: 'same-parent-step-only' as const, parentStep, nextAction,
+      definitionCurrent,
+      parentRunId: intent.parentRunId,
+      parentSessionId: intent.parentSessionId,
+      attribution: 'same-parent-step-only' as const,
+      parentStep,
+      ...(intent.routing === undefined ? {} : { routing: Object.freeze({ ...intent.routing }) }),
+      nextAction,
       children: Object.freeze(value.children.map(child => {
         const measured = usage(`strategy-${child.sessionId}`)
         const diagnostics = child.diagnostics === undefined ? undefined : Object.freeze({ ...child.diagnostics,
           ...(child.diagnostics.failure === undefined ? {} : { failure: Object.freeze({ ...child.diagnostics.failure }) }),
+          ...(child.diagnostics.executedTools === undefined ? {} : { executedTools: Object.freeze([...child.diagnostics.executedTools]) }),
         })
         return Object.freeze({ ...child, ...(diagnostics === undefined ? {} : { diagnostics }), ...(measured === undefined ? {} : { usage: Object.freeze({ ...measured }) }) })
       })),
     })
   })
-  return Object.freeze({ available: true, records: Object.freeze(records) })
+  return Object.freeze({
+    available: true,
+    records: Object.freeze(records),
+    ...(recommendation === undefined ? {} : { recommendation }),
+  })
 }

@@ -29,8 +29,12 @@ export interface BenchmarkArmMount {
 
 export function benchmarkArmDefinition(value: SkillDefinition): SkillDefinition {
   // Stored version/timestamp fields are not part of the frozen executable arm.
-  const { protocol, name, description, source, inputs, steps, preconditions, compensation, fileObservations, runExpansions } = value
-  return structuredClone({ protocol, name, description, source, inputs, steps, preconditions, compensation,
+  const { protocol, name, description, source, inputs, steps, preconditions, preconditionPlan, workflowFamily, compensation, compensationPlan, fileObservations, runExpansions } = value
+  return structuredClone({ protocol, name, description, source, inputs, steps, preconditions,
+    ...(preconditionPlan === undefined ? {} : { preconditionPlan }),
+    ...(workflowFamily === undefined ? {} : { workflowFamily }),
+    compensation,
+    ...(compensationPlan === undefined ? {} : { compensationPlan }),
     ...(fileObservations === undefined ? {} : { fileObservations }), ...(runExpansions === undefined ? {} : { runExpansions }) })
 }
 

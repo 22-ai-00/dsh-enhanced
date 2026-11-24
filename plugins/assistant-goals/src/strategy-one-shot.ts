@@ -5,8 +5,15 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { appendDelegatedPolicyOverrides, applyChildComposition, assertSubagentMaxDepth, captureDelegatedPolicyOverrides, childSessionMeta, finalAssistantOutput, resolveChildAgentOptions, resolveChildDepth } from '@deepseek-ai/dsh-subagent'
 import type { ResolvedSubagentStartRequest, SubagentRun, SubagentStopReason } from '@deepseek-ai/dsh-subagent'
+import { projectToolSchema } from '@deepseek-ai/dsh-tools'
 import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
 import { STRATEGY_PROVIDER } from './strategy-identity.js'
+import { isForbiddenStrategyTool } from './strategy-router.js'
+
+export interface StrategyOneShotToolPolicy {
+  readonly allow: readonly string[]
+  readonly maxToolCalls?: number | undefined
+}
 
 // Adapted from @deepseek-ai/dsh-subagent-in-process-driver 0.2.0-rc.2
 // (MIT, Copyright (c) 2026 DeepSeek). AgentRegistry and AgentLoop still own
@@ -15,6 +22,7 @@ export async function startStrategyOneShot(
   request: ResolvedSubagentStartRequest,
   onCreate: (child: Agent) => void,
   toolsCtx?: Context,
+  toolPolicy?: StrategyOneShotToolPolicy,
 ): Promise<SubagentRun> {
   assertSubagentMaxDepth(request.maxDepth)
   if (request.signal.aborted) throw new Error('assistant-goals: strategy start was cancelled')
@@ -28,6 +36,9 @@ export async function startStrategyOneShot(
   const inherited = captureDelegatedPolicyOverrides(request.parent)
   const descriptor = { version: 3, mode: 'one-shot' as const, provider: STRATEGY_PROVIDER,
     ...(request.label === undefined ? {} : { label: request.label }) }
+  const requestedAllow = toolPolicy?.maxToolCalls !== undefined && toolPolicy.maxToolCalls <= 0
+    ? []
+    : (toolPolicy?.allow ?? [])
   const handle = await request.parent.ctx.agents.create({
     sessionId: id,
     meta: childSessionMeta(request.parent, depth, false),
@@ -36,16 +47,36 @@ export async function startStrategyOneShot(
     setup(childCtx, child) {
       onCreate(child)
       appendDelegatedPolicyOverrides(child.session, inherited)
-      applyChildComposition(childCtx, request.parent, { persona: `${STRATEGY_PROVIDER}:${request.label}`, toolFilter: { allow: [] } })
-      if (childCtx.get('tools') !== undefined && toolsCtx !== undefined) {
-        // Keep zero model-visible schemas (including overriding parent PtcExecutor)
-        // while routing any rejected tool call through ToolExecutionPipeline so
-        // tools/pre-execute and tools/result still fire.
-        const pipeline = new ToolExecutionPipeline(toolsCtx)
-        childCtx.tools.setExecutor({
-          describe: () => ({ schemas: [] }),
-          execute: batch => executeToolBatch(batch, pipeline, () => 1),
-        })
+      if (requestedAllow.length === 0) {
+        applyChildComposition(childCtx, request.parent, { persona: `${STRATEGY_PROVIDER}:${request.label}`, toolFilter: { allow: [] } })
+        if (childCtx.get('tools') !== undefined && toolsCtx !== undefined) {
+          // Keep zero model-visible schemas (including overriding parent PtcExecutor)
+          // while routing any rejected tool call through ToolExecutionPipeline so
+          // tools/pre-execute and tools/result still fire.
+          const pipeline = new ToolExecutionPipeline(toolsCtx)
+          childCtx.tools.setExecutor({
+            describe: () => ({ schemas: [] }),
+            execute: batch => executeToolBatch(batch, pipeline, () => 1),
+          })
+        }
+      } else {
+        applyChildComposition(childCtx, request.parent, { persona: `${STRATEGY_PROVIDER}:${request.label}` })
+        if (childCtx.get('tools') !== undefined) {
+          const parentVisible = new Set(request.parent.ctx.tools.definitions(request.parent).map(item => item.name))
+          const childVisible = new Set(childCtx.tools.definitions(child).map(item => item.name))
+          const effectiveAllow = requestedAllow.filter(name => parentVisible.has(name) && childVisible.has(name) && !isForbiddenStrategyTool(name))
+          childCtx.tools.restrict({ allow: effectiveAllow })
+          if (toolsCtx !== undefined) {
+            const allowedSet = new Set(effectiveAllow)
+            const pipeline = new ToolExecutionPipeline(toolsCtx)
+            childCtx.tools.setExecutor({
+              describe: tools => allowedSet.size === 0
+                ? { schemas: [] }
+                : { schemas: tools.filter(definition => allowedSet.has(definition.name)).map(definition => projectToolSchema(definition, false)) },
+              execute: batch => executeToolBatch(batch, pipeline, () => 1),
+            })
+          }
+        }
       }
       let appended = false
       childCtx.on('agent/pre-step', async ({ agent }, next) => {

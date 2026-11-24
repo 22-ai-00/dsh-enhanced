@@ -144,13 +144,34 @@ export function buildEventIntakeSummary(input: {
   if (trigger.kind === 'github-repository') {
     parts.push(`repo=${trigger.repository}`, `branch=${trigger.branch}`, `mode=${trigger.deliveryMode ?? 'pull-request'}`)
   } else if (trigger.kind === 'lark-calendar') {
-    parts.push(`calendar=${trigger.calendarId}`, `window=${trigger.startTime}..${trigger.endTime}`)
+    if (trigger.startTime !== undefined && trigger.endTime !== undefined) {
+      parts.push(`calendar=${trigger.calendarId}`, `window=${trigger.startTime}..${trigger.endTime}`)
+    } else {
+      parts.push(
+        `calendar=${trigger.calendarId}`,
+        `window=-${trigger.lookbackSeconds ?? 0}s..+${trigger.lookaheadSeconds ?? 0}s`,
+        ...(trigger.windowStepSeconds === undefined ? [] : [`step=${trigger.windowStepSeconds}s`]),
+      )
+    }
   } else if (trigger.kind === 'http-json') {
     parts.push(`origin=${new URL(trigger.url).origin}`)
+  } else if (trigger.kind === 'task-system') {
+    parts.push(`origin=${new URL(trigger.url).origin}`, `auth=${trigger.authScheme}`)
+  } else if (trigger.kind === 'calendar') {
+    parts.push(`origin=${new URL(trigger.url).origin}`, `format=${trigger.format}`)
+    if (trigger.window !== undefined) {
+      if (trigger.window.mode === 'static') {
+        parts.push(`window=${trigger.window.startTime}..${trigger.window.endTime}`)
+      } else {
+        parts.push(`window=-${trigger.window.lookbackSeconds ?? 0}s..+${trigger.window.lookaheadSeconds ?? 0}s`)
+      }
+    }
+  } else if (trigger.kind === 'email') {
+    parts.push(`origin=${new URL(trigger.url).origin}`, `protocol=${trigger.protocol}`)
   } else if (trigger.kind === 'file') {
     parts.push(`mode=${trigger.mode}`)
   } else {
-    parts.push('method=hmac-sha256')
+    parts.push(`method=${trigger.authMode ?? 'hmac-sha256'}`)
   }
   parts.push(`rev=${envelope.observation.revision}`, `digest=${envelope.observation.digest.slice(0, 12)}`)
   return boundUtf8(parts.join(' '), MAX_EVENT_INTAKE_SUMMARY_BYTES)

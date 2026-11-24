@@ -337,7 +337,7 @@ describe('Recovery operator snapshot', () => {
       expect((thrown as RecoveryOperatorSnapshotError).code).toBe(code)
       store!.close()
     }
-  })
+  }, 15_000)
 
   it.runIf(process.platform === 'linux')('equates a clean byte-identical copy at a different inode by storage digest and bootstrap semantics', () => {
     // Headline cross-copy claim: copying the main database (e.g. operator

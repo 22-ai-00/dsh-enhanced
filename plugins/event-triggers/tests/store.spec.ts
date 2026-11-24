@@ -21,11 +21,11 @@ describe('event trigger state store', () => {
     expect((await stat(join(value.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(value.path)).mode & 0o777).toBe(0o600)
     const db = new DatabaseSync(value.path, { readOnly: true })
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
     expect(db.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     db.close(); value.store.close()
 
-    for (const version of [6, 99]) {
+    for (const version of [7, 99]) {
       const future = join(value.root, `future-${version}.sqlite`)
       const newer = new DatabaseSync(future); newer.exec(`PRAGMA user_version = ${version}`); newer.close(); await chmod(future, 0o600)
       expect(() => new EventTriggerStore({ path: future }))
@@ -161,7 +161,104 @@ describe('event trigger state store', () => {
     expect(migrated.health()).toMatchObject({ pendingEvents: 1, retryingEvents: 1, quarantinedEvents: 0 })
     migrated.close()
     const inspected = new DatabaseSync(path, { readOnly: true })
-    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    inspected.close()
+  })
+
+  test('migrates a v5 database to v6 and persists trigger_cursor across reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'event-triggers-v5-'))
+    roots.push(root)
+    const path = join(root, 'events.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE trigger_state (
+        trigger_id TEXT PRIMARY KEY, first_observed_at INTEGER NOT NULL, last_observed_at INTEGER NOT NULL,
+        last_fingerprint TEXT NOT NULL, last_truthy INTEGER NOT NULL CHECK (last_truthy IN (0, 1)),
+        edge_revision INTEGER NOT NULL DEFAULT 0, pending_fingerprint TEXT, pending_since INTEGER,
+        pending_revision INTEGER, last_fire_at INTEGER, fire_count INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE TABLE event_outbox (
+        id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE CHECK (sequence > 0), trigger_id TEXT NOT NULL,
+        event_id TEXT NOT NULL UNIQUE, occurred_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'quarantined')),
+        attempts INTEGER NOT NULL DEFAULT 0, delivered_at INTEGER, created_at INTEGER NOT NULL,
+        next_attempt_at INTEGER NOT NULL, last_attempt_at INTEGER, last_error TEXT,
+        envelope_canonical TEXT, envelope_digest TEXT,
+        CHECK ((envelope_canonical IS NULL AND envelope_digest IS NULL)
+          OR (envelope_canonical IS NOT NULL AND envelope_digest IS NOT NULL))
+      ) STRICT;
+      CREATE TABLE trigger_health (
+        trigger_id TEXT PRIMARY KEY, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT, last_failed_at INTEGER, last_success_at INTEGER
+      ) STRICT;
+      CREATE TABLE event_sequence (sequence INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+      CREATE TABLE goal_source_claims (
+        trigger_id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, goal_id TEXT NOT NULL,
+        definition_version INTEGER NOT NULL, definition_digest TEXT NOT NULL,
+        session_id TEXT NOT NULL, native_goal_id TEXT NOT NULL, native_revision INTEGER NOT NULL,
+        config_digest TEXT NOT NULL, automation_id TEXT NOT NULL, retired_at INTEGER
+      ) STRICT;
+      CREATE INDEX event_outbox_pending ON event_outbox(status, next_attempt_at, created_at, id);
+      CREATE INDEX event_outbox_source ON event_outbox(trigger_id, sequence);
+      INSERT INTO trigger_state VALUES ('legacy-src', 1000, 1000, 'sha256:abc', 1, 0, NULL, NULL, NULL, NULL, 0);
+      PRAGMA user_version = 5;
+    `)
+    legacy.close()
+    await chmod(path, 0o600)
+
+    let now = 2_000
+    const store = new EventTriggerStore({ path, now: () => now })
+    expect(store.hasTriggerState('legacy-src')).toBe(true)
+    expect(store.getTriggerCursor('legacy-src')).toBeUndefined()
+
+    expect(store.observe({
+      triggerId: 'tasks-1',
+      fingerprint: 'sha256:' + 'a'.repeat(64),
+      truthy: true,
+      occurredAt: now,
+      fireWhen: 'changed',
+      debounceMs: 0,
+      cooldownMs: 0,
+      maxFires: 10,
+      cursor: { etag: '"v1"', syncToken: 'tok-1', since: '2026-01-01T00:00:00Z' },
+    })).toEqual([])
+    expect(store.getTriggerCursor('tasks-1')).toEqual({
+      etag: '"v1"',
+      syncToken: 'tok-1',
+      since: '2026-01-01T00:00:00Z',
+    })
+    now = 3_000
+    expect(store.observe({
+      triggerId: 'tasks-1',
+      fingerprint: '',
+      truthy: true,
+      occurredAt: now,
+      fireWhen: 'changed',
+      debounceMs: 0,
+      cooldownMs: 0,
+      maxFires: 10,
+      notModified: true,
+      cursor: { etag: '"v1"', syncToken: 'tok-1', since: '2026-01-01T00:00:00Z' },
+    })).toEqual([])
+    store.setTriggerCursor('email-1', { historyId: 'hist-42', jmapState: 's-9' })
+    store.close()
+
+    const reopened = new EventTriggerStore({ path, now: () => now })
+    expect(reopened.getTriggerCursor('tasks-1')).toEqual({
+      etag: '"v1"',
+      syncToken: 'tok-1',
+      since: '2026-01-01T00:00:00Z',
+    })
+    expect(reopened.getTriggerCursor('email-1')).toEqual({
+      historyId: 'hist-42',
+      jmapState: 's-9',
+    })
+    reopened.setTriggerCursor('email-1', undefined)
+    expect(reopened.getTriggerCursor('email-1')).toBeUndefined()
+    reopened.close()
+
+    const inspected = new DatabaseSync(path, { readOnly: true })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
     inspected.close()
   })
 

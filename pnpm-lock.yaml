@@ -674,6 +674,9 @@ importers:
       '@dsh-enhanced/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
@@ -1868,6 +1871,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-recovery':
+        specifier: workspace:*
+        version: link:../assistant-recovery
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier

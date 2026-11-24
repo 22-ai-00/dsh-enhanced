@@ -27,8 +27,9 @@ import type { GoalEventSourceSnapshot, GoalEventWaitIntent } from './event-wait-
 import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
-import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
-import type { StrategyAdviceDefinitionSummary } from './strategy-store.js'
+import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfigInput } from './strategy.js'
+import { extractRecentSessionToolOutcomes, type StrategyRoutingDecision } from './strategy-router.js'
+import type { StrategyAdviceDefinitionSummary, StrategyOutcomeTelemetry } from './strategy-store.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
 import { failureSummaryEvidenceDigest, OwnerVerifiedWorkflowSourceError, ownerGoalRunProof, verifiedWorkflowSource, verifiedWorkflowSourceChain, type VerifiedWorkflowSource } from './verified-workflow.js'
 import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
@@ -38,7 +39,7 @@ import { GoalOwnerIntentStore, goalOwnerIntentSupplier } from './owner-intent-st
 import { validateOwnerAcceptanceSeal, validateOwnerPreparedAcceptanceInput, resolveOwnerPreparedAcceptanceInput, preparedRegistration, type GoalOwnerAcceptanceSeal, type OwnerPreparedAcceptanceInput, type OwnerPreparedContractInput, type OwnerPreparedRegistration } from './owner-acceptance.js'
 import { GoalOwnerAcceptanceStore } from './owner-acceptance-store.js'
 
-export interface Config { eventWaits?: boolean; ownerIntent?: boolean; ownerPreparedAcceptance?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
+export interface Config { eventWaits?: boolean; ownerIntent?: boolean; ownerPreparedAcceptance?: boolean; strategy?: GoalStrategyConfigInput | undefined; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   preauthorizedCreateMaxRounds: Schema.number().step(1).min(0).max(32).default(0),
@@ -60,7 +61,27 @@ export const Config: Schema<Config> = Schema.object({
     maxPromptBytes: Schema.number().step(1).min(1024).max(65536).default(32768),
     maxOutputBytes: Schema.number().step(1).min(256).max(65536).default(16384),
     maxRunsPerGoal: Schema.number().step(1).min(1).max(32).default(16),
-  })]),
+    autoRoute: Schema.boolean().default(true),
+    experiment: Schema.object({
+      enabled: Schema.boolean().default(true),
+      allowedTools: Schema.array(Schema.string()).default(['read', 'glob', 'grep', 'isolation_run']) as Schema<readonly string[]>,
+      maxToolCalls: Schema.number().step(1).min(0).max(32).default(4),
+      maxModelCalls: Schema.number().step(1).min(1).max(16).default(3),
+      workspaceWriteAllowed: Schema.boolean().default(false),
+    }),
+    subagent: Schema.object({
+      enabled: Schema.boolean().default(true),
+      allowedTools: Schema.array(Schema.string()).default(['read', 'glob', 'grep', 'isolation_run']) as Schema<readonly string[]>,
+      maxToolCalls: Schema.number().step(1).min(0).max(64).default(8),
+      maxModelCalls: Schema.number().step(1).min(1).max(32).default(5),
+      workspaceWriteAllowed: Schema.boolean().default(false),
+    }),
+    costBenefit: Schema.object({
+      minNetBenefit: Schema.number().min(-100).max(100).default(0.25),
+      minRemainingParentCalls: Schema.number().step(1).min(0).max(32).default(1),
+      maxAdviceRepetitions: Schema.number().step(1).min(1).max(32).default(2),
+    }),
+  })]) as Schema<GoalStrategyConfigInput | undefined>,
   executionBudget: Schema.union([Schema.object({
     modelCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
     toolCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
@@ -178,7 +199,7 @@ function render(record: GoalRecord, now: number, maxChars: number, verification?
   const feedbackGuide = verification === undefined ? '' : ' Step feedback binds independent evidence to an exact historical run. Use failed criteria to revise the plan; reconcile unknown execution before retrying. Pending, expired and old-definition evidence cannot establish current success. A passed step does not complete the whole goal or grant action authority.'
   const outcomeGuide = goalAcceptance === undefined ? '' : ' goalAcceptance contains frozen whole-goal conditions and independent results; stepFeedback alone cannot establish whole-goal success. When the work is ready for verification, report the result and end the native round normally; the Host then evaluates it. goal_checkpoint records progress but does not request verification. Do not use native update_goal to claim completion.'
   const timingGuide = roundTiming === undefined ? '' : ' roundTiming.maxDurationMs is the configured whole-round limit. When active is present, expiresAt is fixed and remainingMs is only this context snapshot; leave time to end normally for Host acceptance. Timing neither extends a deadline nor grants permission.'
-  const strategyGuide = strategies === undefined ? '' : ' Strategy records show execution and coordination cost, not correctness. Child diagnostics describe observed failure boundaries; a stream or tool failure is not a failed reasoning verdict. parentStep revalidates only the exact parent run, not a later successful step; this association does not prove strategy benefit. Use failed independent criteria to revise the solution, and inspect operational failures before changing reasoning. Continue directly for clear next steps. On uncertain reasoning or repeated failed criteria, goal_strategy can investigate supplied context, review reasoning or compare two alternatives; all calls share this goal budget. Advice stays unverified. Resolve unknown work before retrying.'
+  const strategyGuide = strategies === undefined ? '' : ' Strategy records show execution and coordination cost, not correctness. Child diagnostics describe observed failure boundaries; a stream or tool failure is not a failed reasoning verdict. parentStep revalidates only the exact parent run, not a later successful step; this association does not prove strategy benefit. Use failed independent criteria to revise the solution, and inspect operational failures before changing reasoning. Continue directly for clear next steps or when strategies.recommendation advises direct. On uncertain reasoning or repeated failed criteria, goal_strategy supports auto routing, read-only investigate/review/compare, or bounded experiment/subagent branches; all calls share this goal budget. Results stay unverified. Resolve unknown work before retrying.'
   const dependencyGuide = dependencies === undefined || dependencies.length === 0 ? '' : ' Dependencies are Host-resolved against frozen definitions. Only achieved means independently verified complete; pending, failed, unknown, cleared, and stale block autonomous resume. A stale reason distinguishes definition changes from legacy unbound checkpoints.'
   const identifiers = `Goal tool arguments (business goal): goal_id="${record.id}"; expected_revision=${record.native.revision}; expected_version=${record.version}.`
   const context = `${identifiers}\nUntrusted goal history; recheck stale assumptions and evidence. Native completion is unverified. Focus supplies context only.${feedbackGuide}${outcomeGuide}${timingGuide}${strategyGuide}${dependencyGuide}${eventWaits === undefined ? '' : ' Event waits record untrusted source observations, not achievement or new permissions. Re-read the relevant system through authorized tools before acting on an event.'}\n<business-goal-data>\n${json}\n</business-goal-data>`
@@ -404,6 +425,25 @@ export class AssistantGoalsService extends Service {
           const current = this.#execution.budgetState(parent)
           if (!current) throw new Error('assistant-goals: strategy requires the active native goal round')
           return current
+        },
+        recommendationContext: (parent, record) => {
+          const feedback = this.#feedback(record)
+          const lastAchieved = feedback?.verification.history.find(item => item.status === 'achieved' && item.execution !== null)
+          const lastAchievedRun = lastAchieved === undefined
+            ? undefined
+            : this.#execution.list(record.scope, record.id).find(run => run.intent.runId === lastAchieved.runId)
+          return {
+            feedback,
+            goalAcceptance: this.#outcome?.view(record),
+            ...(parent === undefined ? {} : {
+              recentToolOutcomes: extractRecentSessionToolOutcomes(parent.session.snapshotEvents(), {
+                nativeGoalId: record.native.goalId,
+                ...(lastAchieved?.execution ? { sinceTime: lastAchieved.execution.completedAt } : {}),
+                ...(lastAchievedRun === undefined ? {} : { afterGoalRound: lastAchievedRun.intent.admission.round }),
+              }),
+              availableTools: parent.ctx.get('tools')?.definitions(parent).map(item => item.name),
+            }),
+          }
         },
       })
       this.#strategy = instance
@@ -1442,7 +1482,7 @@ export class AssistantGoalsService extends Service {
       // omit it rather than truncating either authority-bearing JSON claim.
       const sourcePrefix = this.#maxChars - sources.length >= 256 ? sources : ''
       const now = Date.now()
-      return sourcePrefix + render(record, now, this.#maxChars - sourcePrefix.length, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record), this.#eventWaitContext(record), this.#dependencies(record), this.#execution.roundTiming(agent, record), this.#outcome?.viewLatestSettled(record))
+      return sourcePrefix + render(record, now, this.#maxChars - sourcePrefix.length, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record, agent), this.#eventWaitContext(record), this.#dependencies(record), this.#execution.roundTiming(agent, record), this.#outcome?.viewLatestSettled(record))
     } catch { return '' }
   }
 
@@ -1468,7 +1508,7 @@ export class AssistantGoalsService extends Service {
   describeForAgent = (agent: Agent | undefined, goalId: string): string => {
     const record = this.inspect(agent, goalId)
     const now = Date.now()
-    return render(record, now, 131072, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record), this.#eventWaitContext(record), this.#dependencies(record), this.#execution.roundTiming(agent, record), this.#outcome?.viewLatestSettled(record))
+    return render(record, now, 131072, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record, agent), this.#eventWaitContext(record), this.#dependencies(record), this.#execution.roundTiming(agent, record), this.#outcome?.viewLatestSettled(record))
   }
   #eventWaitContext(record: GoalRecord): readonly unknown[] | undefined {
     if (this.#eventWait === undefined) return undefined
@@ -1501,7 +1541,11 @@ export class AssistantGoalsService extends Service {
     const record = this.inspect(agent, goalId)
     return this.#strategy?.list(record.scope, goalId) ?? []
   }
-  inspectStrategyAssessments = (agent: Agent | undefined, goalId: string): GoalStrategyHistory | undefined => this.#strategyHistory(this.inspect(agent, goalId))
+  inspectStrategyAssessments = (agent: Agent | undefined, goalId: string): GoalStrategyHistory | undefined => this.#strategyHistory(this.inspect(agent, goalId), agent)
+  recommendStrategy = (agent: Agent | undefined, goalId: string): StrategyRoutingDecision | undefined => {
+    const record = this.inspect(agent, goalId)
+    return this.#strategy?.recommend(agent, record)
+  }
 
   /**
    * Host-only read-only advice-repetition view for the supervised learning
@@ -1512,11 +1556,16 @@ export class AssistantGoalsService extends Service {
   hostSummarizeAdviceByDefinition = (scope: GoalScope): readonly StrategyAdviceDefinitionSummary[] => {
     return this.#strategy?.summarizeAdviceByDefinition(scope) ?? []
   }
-  #strategyHistory(record: GoalRecord): GoalStrategyHistory | undefined {
+  hostSummarizeStrategyOutcomes = (scope: GoalScope, definitionDigest?: string): StrategyOutcomeTelemetry | undefined => {
+    return this.#strategy?.summarizeOutcomeTelemetry(scope, definitionDigest)
+  }
+  #strategyHistory(record: GoalRecord, agent?: Agent): GoalStrategyHistory | undefined {
     if (!this.#strategy) return undefined
     const verifier = this.ctx.get('assistantVerifier', false)
+    let recommendation: StrategyRoutingDecision | undefined
+    try { recommendation = this.#strategy.recommend(agent, record) } catch { recommendation = undefined }
     return buildGoalStrategyHistory(record, this.#strategy.list(record.scope, record.id), this.#execution.list(record.scope, record.id),
-      verifier === undefined ? undefined : id => verifier.inspectAcceptedTask(id), runId => this.#budget?.runUsage(record, runId), Date.now())
+      verifier === undefined ? undefined : id => verifier.inspectAcceptedTask(id), runId => this.#budget?.runUsage(record, runId), Date.now(), recommendation)
   }
   registerBudgetMeter = (meter: GoalBudgetMeter): (() => void) => {
     if (this.#budget === undefined) throw new Error('assistant-goals: execution budget is not enabled')

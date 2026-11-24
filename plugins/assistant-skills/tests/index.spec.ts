@@ -33,5 +33,8 @@ describe('dsh-enhanced-assistant-skills', () => {
       expect(manifest.peerDependencies[dependency]).toBe('>=0.2.2-rc.5 <0.3.0')
       expect(manifest.peerDependenciesMeta[dependency]?.optional).toBe(true)
     }
+    expect(manifest.dependencies['@dsh-enhanced/assistant-recovery']).toBeUndefined()
+    expect(manifest.peerDependencies['@dsh-enhanced/assistant-recovery']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependenciesMeta['@dsh-enhanced/assistant-recovery']?.optional).toBe(true)
   })
 })

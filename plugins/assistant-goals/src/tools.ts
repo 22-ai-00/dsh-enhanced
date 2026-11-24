@@ -21,8 +21,15 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   if (service.strategyEnabled) {
     const strategy = defineTool({
       name: 'goal_strategy',
-      description: 'Change approach during an active business goal round: ask a fresh no-tools native subagent to investigate supplied evidence or independently review reasoning; compare requests two perspectives. All model calls use the same goal budget and owner authority. Supply the question and relevant non-secret context. Results are unverified advice and never replace independent goal acceptance.',
-      parameters: { kind: { type: 'string', enum: ['investigate', 'review', 'compare'], required: true }, question: { type: 'string', required: true }, context: { type: 'string' } },
+      description: 'Change approach during an active business goal round: use auto to route by task difficulty, failure type, and coordination cost/benefit (returning direct-recommended without spawning when direct work is optimal); use investigate/review/compare for zero-tools unverified advice; or use experiment/subagent for bounded tool-enabled diagnostic or subproblem branches. All calls share the same goal budget and owner authority, and never replace independent goal acceptance.',
+      parameters: {
+        kind: { type: 'string', enum: ['auto', 'investigate', 'review', 'compare', 'experiment', 'subagent'], required: true },
+        question: { type: 'string', required: true },
+        context: { type: 'string' },
+        tools: { type: 'array', items: { type: 'string' } },
+        failure_hint: { type: 'string', enum: ['tool-failure', 'reasoning-failure'] },
+        difficulty_hint: { type: 'string', enum: ['trivial', 'moderate', 'complex'] },
+      },
       output,
       async execute(args, execution) {
         return { context: JSON.stringify(await service.runStrategy(execution.agent, args, execution.signal)) }

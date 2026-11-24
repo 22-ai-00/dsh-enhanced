@@ -1738,6 +1738,268 @@ describe('goal strategy compare concurrency', () => {
     const durable = f.service.inspectStrategies(agent, record.id)[0]!
     expect(durable).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed' })
   })
+
+  it('recovers zero-tool compare child on Turn 2 after tools/pre-execute rejects a scoped tool, decoupled from experiment/subagent maxModelCalls', async () => {
+    const objective = 'Compare approaches when Policy rejects a scoped tool before Goals sees it'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: compareBudget,
+      strategy: { experiment: { enabled: false, maxModelCalls: 1 }, subagent: { enabled: false, maxModelCalls: 1 } },
+    })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-compare-pre-execute-recovery', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    const scopedExecute = vi.fn(async () => ({ ok: true }))
+    f.ctx.on('agent/created', ({ agent: created }) => {
+      if (created.session.header.origin !== 'subagent') return
+      created.ctx.tools.register(defineTool({
+        name: 'strategy_scoped_probe',
+        description: 'Child-scoped tool that must never execute on zero-tool strategy children.',
+        parameters: {},
+        output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [] },
+        execute: scopedExecute,
+      }))
+    })
+    f.ctx.on('tools/pre-execute', async (execution, next) => {
+      if (execution.agent?.session.header.origin === 'subagent' && execution.name === 'strategy_scoped_probe') {
+        return { kind: 'deny', reason: 'assistant-policy: ask-review (simulated)' }
+      }
+      return next()
+    })
+
+    let parentRequests = 0
+    let skepticalTurns = 0
+    let skepticalRecoveryPrompt = ''
+    class PreExecuteRecoveryAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (!isStrategyChild(options)) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('compare-call'), name: 'goal_strategy', argumentsDelta: compareArguments }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('compare-call'), name: 'goal_strategy', arguments: compareArguments } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'noted' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        expect(options.tools ?? []).toEqual([])
+        if (isSkepticalPersona(options)) {
+          skepticalTurns += 1
+          if (skepticalTurns === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('scoped-attack-1'), name: 'strategy_scoped_probe', argumentsDelta: '{}' }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('scoped-attack-1'), name: 'strategy_scoped_probe', arguments: '{}' } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          skepticalRecoveryPrompt = JSON.stringify(options.messages[options.messages.length - 1])
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'SKEPTICAL-POST-PREEXECUTE' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'SKEPTICAL-POST-PREEXECUTE' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'ALTERNATIVE-OK' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ALTERNATIVE-OK' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new PreExecuteRecoveryAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(compareResult(agent)).toBeDefined(), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(skepticalTurns).toBe(2)
+    expect(skepticalRecoveryPrompt).toContain('assistant-policy: ask-review (simulated)')
+    expect(scopedExecute).not.toHaveBeenCalled()
+
+    const result = compareResult(agent)!
+    expect(result).toMatchObject({
+      outcome: 'advice',
+      terminationReason: 'completed',
+      advice: ['SKEPTICAL-POST-PREEXECUTE', 'ALTERNATIVE-OK'],
+      unverified: true,
+    })
+
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed' })
+    expect(durable.children).toHaveLength(2)
+    for (const child of durable.children) {
+      expect(child.stopReason).toBe('completed')
+      expect(child.quiescent).toBe(true)
+      expect(child.diagnostics).toEqual({ toolRejections: 0, output: 'accepted' })
+    }
+    expect(f.service.inspectBudget(agent, record.id)).toMatchObject({ toolCalls: 1, modelCalls: 5 })
+  })
+
+  it('recovers zero-tool investigate child on Turn 2 after Goals #guardTool rejects an attempted tool call', async () => {
+    const objective = 'Investigate failure when Goals guard rejects child tool call'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: compareBudget,
+      strategy: { experiment: { enabled: false, maxModelCalls: 1 }, subagent: { enabled: false, maxModelCalls: 1 } },
+    })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-investigate-guard-recovery', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    const scopedExecute = vi.fn(async () => ({ ok: true }))
+    f.ctx.on('agent/created', ({ agent: created }) => {
+      if (created.session.header.origin !== 'subagent') return
+      created.ctx.tools.register(defineTool({
+        name: 'strategy_scoped_probe',
+        description: 'Child-scoped tool rejected by Goals guard.',
+        parameters: {},
+        output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [] },
+        execute: scopedExecute,
+      }))
+    })
+
+    let parentRequests = 0
+    let childTurns = 0
+    let recoveryPrompt = ''
+    class GuardRecoveryAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const isChild = options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('Task kind: investigate'))
+        if (!isChild) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            const args = JSON.stringify({ kind: 'investigate', question: 'Inspect the discrepancy' })
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('investigate-call'), name: 'goal_strategy', argumentsDelta: args }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('investigate-call'), name: 'goal_strategy', arguments: args } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'noted' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        expect(options.tools ?? []).toEqual([])
+        childTurns += 1
+        if (childTurns === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('guard-attack-1'), name: 'strategy_scoped_probe', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('guard-attack-1'), name: 'strategy_scoped_probe', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        recoveryPrompt = JSON.stringify(options.messages[options.messages.length - 1])
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'INVESTIGATE-RECOVERED' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'INVESTIGATE-RECOVERED' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new GuardRecoveryAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(childTurns).toBe(2)
+    expect(recoveryPrompt).toContain('assistant-goals: strategy children cannot use tools')
+    expect(scopedExecute).not.toHaveBeenCalled()
+
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed', intent: { kind: 'investigate' } })
+    expect(durable.children).toHaveLength(1)
+    expect(durable.children[0]).toMatchObject({ stopReason: 'completed', quiescent: true })
+    expect(durable.children[0]!.diagnostics).toEqual({ toolRejections: 1, output: 'accepted' })
+    expect(Object.keys(durable.children[0]!.diagnostics!)).not.toContain('modelCalls')
+    expect(Object.keys(durable.children[0]!.diagnostics!)).not.toContain('toolCalls')
+    expect(f.service.inspectBudget(agent, record.id)).toMatchObject({ toolCalls: 1, modelCalls: 4 })
+  })
+
+  it('caps looping zero-tool strategy children at DEFAULT_ADVICE_MAX_MODEL_CALLS without exhausting parent budget', async () => {
+    const objective = 'Cap looping zero-tool investigate child before exhausting parent budget'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: { ...compareBudget, modelCalls: 10 },
+      strategy: { experiment: { enabled: false, maxModelCalls: 1 }, subagent: { enabled: false, maxModelCalls: 1 } },
+    })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-investigate-loop-cap', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let parentRequests = 0
+    let childTurns = 0
+    class LoopingAdviceAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const isChild = options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('Task kind: investigate'))
+        if (!isChild) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            const args = JSON.stringify({ kind: 'investigate', question: 'Attempt tools repeatedly' })
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('loop-call'), name: 'goal_strategy', argumentsDelta: args }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('loop-call'), name: 'goal_strategy', arguments: args } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'handled advice cap' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'handled advice cap' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        expect(options.tools ?? []).toEqual([])
+        childTurns += 1
+        const callId = ToolCallId(`loop-tool-${childTurns}`)
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id: callId, name: 'nonexistent_probe', argumentsDelta: '{}' }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'nonexistent_probe', arguments: '{}' } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new LoopingAdviceAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(childTurns).toBe(3)
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({
+      state: 'settled',
+      outcome: 'execution-failed',
+      terminationReason: 'execution-failed',
+      intent: { kind: 'investigate' },
+      children: [{ stopReason: 'error', quiescent: true, diagnostics: { toolRejections: 3, output: 'not-observed' } }],
+    })
+    expect(f.service.inspectBudget(agent, record.id)).toMatchObject({ toolCalls: 1, modelCalls: 5 })
+  })
 })
 
 describe('inspectOwnerGoals host-only enumeration', () => {
@@ -1779,5 +2041,618 @@ describe('inspectOwnerGoals host-only enumeration', () => {
     f.service.create(agent, 'Objective one', 2)
     await f.plugin.dispose()
     expect(() => f.service.inspectOwnerGoals(ownerScope(f.root))).toThrow('assistant-goals: service is inactive')
+  })
+})
+
+describe('WP06 bounded experiment branches and automatic strategy routing', () => {
+  const budgetConfig = { mode: 'calls' as const, modelCalls: 12, toolCalls: 8, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
+  const isChildOptions = (options: GenerateOptions, kind: string): boolean => options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes(`Task kind: ${kind}`))
+
+  it('executes bounded experiment tools under PtcExecutor without exposing run_code or goal_* and enforces maxToolCalls', async () => {
+    const objective = 'Diagnose report artifact with bounded experiment tools'
+    const ptcRuntime = {
+      language: 'typescript',
+      isolation: 'process',
+      programFormat: 'function',
+      retainsState: false,
+      release: async () => {},
+      executionInstructions: '',
+      sandboxMode: undefined,
+      timeout: { defaultMs: 30_000, maxMs: 60_000 },
+      resolve: (request: { bindings: Array<{ functions: Record<string, (args: unknown) => Promise<unknown>> }>; timeoutMs?: number }) => ({
+        ...request, timeoutMs: request.timeoutMs ?? 30_000,
+      }),
+      run: async (spec: { bindings: Array<{ functions: Record<string, (args: unknown) => Promise<unknown>> }> }) => {
+        const value = await spec.bindings[0]!.functions.goal_strategy!({ kind: 'experiment', question: 'Verify report.md contents' })
+        return { logs: [], value }
+      },
+    }
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { experiment: { allowedTools: ['read_report'], maxToolCalls: 1, maxModelCalls: 4 } },
+    }, false, false, ptcRuntime)
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    f.ctx.tools.register(defineTool({
+      name: 'write_secret',
+      description: 'Mutating tool that must never reach experiment children.',
+      parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() { return { ok: true } },
+    }))
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-experiment-ptc', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    const childSeenTools: string[][] = []
+    let parentRequests = 0
+    let childStep = 0
+    let toolResultText = ''
+    class ExperimentAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (!isChildOptions(options, 'experiment')) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            const runCodeArgs = JSON.stringify({ code: 'return await tools.goal_strategy({})', description: 'Run experiment branch' })
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('ptc-exp'), name: 'run_code', argumentsDelta: runCodeArgs }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('ptc-exp'), name: 'run_code', arguments: runCodeArgs } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'observed experiment' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'observed experiment' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        childSeenTools.push((options.tools ?? []).map(tool => tool.name))
+        childStep += 1
+        if (childStep === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('exp-read-1'), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('exp-read-1'), name: 'read_report', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        if (childStep === 2) {
+          // Second call exceeds maxToolCalls=1 and must be rejected by guard without consuming parent budget.
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('exp-read-2'), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('exp-read-2'), name: 'read_report', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        const lastMessage = options.messages[options.messages.length - 1]
+        toolResultText = JSON.stringify(lastMessage)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'EXPERIMENT-FINDING: report verified text observed' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'EXPERIMENT-FINDING: report verified text observed' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new ExperimentAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(childSeenTools.length).toBeGreaterThanOrEqual(2)
+    for (const tools of childSeenTools) {
+      expect(tools).toEqual(['read_report'])
+    }
+    expect(toolResultText).toContain('tool call limit exceeded')
+
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({
+      state: 'settled',
+      outcome: 'experiment',
+      terminationReason: 'completed',
+      intent: { kind: 'experiment', experiment: { allowedTools: ['read_report'], maxToolCalls: 1, maxModelCalls: 4, workspaceWriteAllowed: false } },
+      children: [{ stopReason: 'completed', quiescent: true, diagnostics: { toolCalls: 1, modelCalls: 3, toolRejections: 1, executedTools: ['read_report'], output: 'accepted' } }],
+    })
+    // Parent budget consumed 2 parent calls (run_code + goal_strategy) + 1 accepted child call (rejected 2nd child call consumed 0).
+    expect(f.service.inspectBudget(agent, record.id)?.toolCalls).toBe(3)
+  })
+
+  it('auto-routes trivial tasks to direct-recommended without spawning children, and routes tool failures to experiment', async () => {
+    const objective = 'Auto-route strategy based on task state and tool failures'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { experiment: { allowedTools: ['read_report'], maxToolCalls: 2, maxModelCalls: 3 } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'pending\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    f.ctx.tools.register(defineTool({
+      name: 'failing_probe',
+      description: 'Tool that fails operationally.',
+      parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() { throw new Error('simulated tool failure') },
+    }))
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-auto-route', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let parentRequests = 0
+    let childCalls = 0
+    const autoResults: Array<Record<string, unknown>> = []
+    let snapshotWithRecommendation = ''
+    class AutoRouteAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (isChildOptions(options, 'experiment') || isChildOptions(options, 'investigate') || isChildOptions(options, 'review') || isChildOptions(options, 'compare') || isChildOptions(options, 'subagent')) {
+          childCalls += 1
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'AUTO-CHILD-EXPERIMENT' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'AUTO-CHILD-EXPERIMENT' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        parentRequests += 1
+        if (parentRequests === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        if (parentRequests === 2) {
+          // Trivial fresh goal: auto must return direct-recommended without spawning any child.
+          const args = JSON.stringify({ kind: 'auto', question: 'Should we branch?' })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('auto-1'), name: 'goal_strategy', argumentsDelta: args }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('auto-1'), name: 'goal_strategy', arguments: args } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        if (parentRequests === 3) {
+          // Trigger an operational tool failure in the parent session.
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('fail-tool-1'), name: 'failing_probe', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('fail-tool-1'), name: 'failing_probe', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        if (parentRequests === 4) {
+          snapshotWithRecommendation = JSON.stringify(options.messages)
+          const args = JSON.stringify({ kind: 'auto', question: 'Investigate tool failure' })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('auto-2'), name: 'goal_strategy', argumentsDelta: args }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('auto-2'), name: 'goal_strategy', arguments: args } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'done' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new AutoRouteAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id).length).toBe(2), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    for (const event of agent.session.snapshotEvents()) {
+      if (event.type === 'tool/result') {
+        const msg = event.data.message
+        if (msg.toolCallId === 'auto-1' || msg.toolCallId === 'auto-2') {
+          const text = typeof msg.content === 'string' ? msg.content
+            : Array.isArray(msg.content) ? msg.content.map(b => b.type === 'text' ? b.text : '').join('') : ''
+          autoResults.push(JSON.parse(text) as Record<string, unknown>)
+        }
+      }
+    }
+
+    expect(autoResults).toHaveLength(2)
+    expect(autoResults[0]).toMatchObject({
+      requestedKind: 'auto',
+      resolvedKind: 'direct',
+      outcome: 'direct-recommended',
+      terminationReason: 'skipped-direct',
+      children: [],
+      unverified: true,
+    })
+    expect(autoResults[1]).toMatchObject({
+      requestedKind: 'auto',
+      resolvedKind: 'experiment',
+      outcome: 'experiment',
+      terminationReason: 'completed',
+      advice: ['AUTO-CHILD-EXPERIMENT'],
+      routing: { failureType: 'tool-failure', selectedStrategy: 'experiment' },
+      unverified: true,
+    })
+    expect(childCalls).toBe(1)
+    expect(snapshotWithRecommendation).toContain('strategies')
+    expect(snapshotWithRecommendation).toContain('tool-failure')
+
+    const assessments = f.service.inspectStrategyAssessments(agent, record.id)
+    expect(assessments?.recommendation?.failureType).toBe('tool-failure')
+    expect(f.service.recommendStrategy(agent, record.id)?.selectedStrategy).toBe('experiment')
+  })
+
+  it('enforces bounded subagent maxModelCalls and rejects unpermitted write tools', async () => {
+    const objective = 'Delegate bounded subproblem safely'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { subagent: { allowedTools: ['read_report'], maxToolCalls: 2, maxModelCalls: 1, workspaceWriteAllowed: false } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-subagent-cap', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let parentRequests = 0
+    class SubagentCapAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (isChildOptions(options, 'subagent')) {
+          // Request a tool call on turn 1 when maxModelCalls === 1; follow-up turn 2 must be rejected.
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('sub-read-1'), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('sub-read-1'), name: 'read_report', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        parentRequests += 1
+        if (parentRequests === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        if (parentRequests === 2) {
+          const args = JSON.stringify({ kind: 'subagent', question: 'Solve subproblem' })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('sub-call'), name: 'goal_strategy', argumentsDelta: args }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('sub-call'), name: 'goal_strategy', arguments: args } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'handled cap' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'handled cap' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new SubagentCapAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({
+      state: 'settled',
+      outcome: 'execution-failed',
+      terminationReason: 'execution-failed',
+      intent: { kind: 'subagent' },
+      children: [{ quiescent: true, diagnostics: { toolCalls: 1, modelCalls: 1, executedTools: ['read_report'] } }],
+    })
+  })
+
+  it('does not taint quiescent failed-verifier rounds as tool-failure from pre-goal or recovered tool errors', async () => {
+    const objective = 'Classify reasoning failure accurately after pre-goal and recovered tool errors'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { experiment: { allowedTools: ['read_report'], maxToolCalls: 2, maxModelCalls: 3 } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'Unrelated output without required text\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    let probeCalls = 0
+    f.ctx.tools.register(defineTool({
+      name: 'probe_err',
+      description: 'Fails on first invocation and succeeds thereafter.',
+      parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() {
+        probeCalls += 1
+        if (probeCalls === 1 || probeCalls === 3) throw new Error('transient probe failure')
+        return { ok: true }
+      },
+    }))
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-probe3', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let preGoalTurn = 0
+    let goalRoundRequests = 0
+    class Probe3Adapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const isGoalRound = options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('business-goal-data'))
+        if (!isGoalRound) {
+          preGoalTurn += 1
+          if (preGoalTurn === 1 || preGoalTurn === 3) {
+            const id = ToolCallId(`pre-${preGoalTurn}`)
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id, name: 'probe_err', argumentsDelta: '{}' }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'probe_err', arguments: '{}' } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: `pre-${preGoalTurn}` }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: `pre-${preGoalTurn}` } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        goalRoundRequests += 1
+        if (goalRoundRequests === 2) {
+          // Round 2: in-round transient error followed by recovery, then clean stop (still fails verifier criteria)
+          const id = ToolCallId('r2-err')
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id, name: 'probe_err', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'probe_err', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        if (goalRoundRequests === 3) {
+          const id = ToolCallId('r2-ok')
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id, name: 'probe_err', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'probe_err', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'finished round without writing expected artifact' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'finished round without writing expected artifact' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new Probe3Adapter())
+    // Pre-goal turn 1: probe_err throws; Pre-goal turn 2: probe_err succeeds
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Run pre-goal turn 1.' }] }))
+    await agent.whenIdle()
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Run pre-goal turn 2.' }] }))
+    await agent.whenIdle()
+    expect(probeCalls).toBe(2)
+
+    // Create goal with 2 rounds: round 1 runs cleanly (no tools) and fails verifier criteria
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(2), { timeout: 5_000 })
+    await agent.whenIdle()
+    await f.service.whenIdle()
+
+    await vi.waitFor(() => expect(f.service.recommendStrategy(agent, record.id)?.failureType).toBe('reasoning-failure'), { timeout: 5_000 })
+    const rec = f.service.recommendStrategy(agent, record.id)!
+    expect(rec.failureType).toBe('reasoning-failure')
+    expect(rec.failureSignals).not.toContain('tool-error:probe_err')
+  })
+
+  it('suppresses tool schemas completely when maxToolCalls is 0 even with non-empty allowedTools', async () => {
+    const objective = 'Subagent with maxToolCalls 0 receives zero tool schemas'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { subagent: { allowedTools: ['read_report'], maxToolCalls: 0, maxModelCalls: 2, workspaceWriteAllowed: false } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-zero-toolcalls', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let parentRequests = 0
+    const childToolSchemas: string[][] = []
+    class ZeroToolCapAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (isChildOptions(options, 'subagent')) {
+          childToolSchemas.push((options.tools ?? []).map(tool => tool.name))
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ZERO-TOOL-ADVICE' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ZERO-TOOL-ADVICE' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        parentRequests += 1
+        if (parentRequests === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        if (parentRequests === 2) {
+          const args = JSON.stringify({ kind: 'subagent', question: 'Analyze without tools' })
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('sub-zero'), name: 'goal_strategy', argumentsDelta: args }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('sub-zero'), name: 'goal_strategy', arguments: args } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'done' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new ZeroToolCapAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(f.service.inspectStrategies(agent, record.id)[0]?.state).toBe('settled'), { timeout: 5_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    expect(childToolSchemas).toEqual([[]])
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({
+      state: 'settled',
+      outcome: 'experiment',
+      terminationReason: 'completed',
+      intent: { kind: 'subagent', experiment: { allowedTools: [], maxToolCalls: 0 } },
+    })
+  })
+
+  it('does not taint Goal A as tool-failure from a subsequent regular user turn error in the same session', async () => {
+    const objective = 'Keep Goal A routing clean after a later regular user turn hits a tool error'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { experiment: { allowedTools: ['read_report'], maxToolCalls: 2, maxModelCalls: 3 } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'Unrelated output without required text\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    f.ctx.tools.register(defineTool({
+      name: 'post_goal_user_err',
+      description: 'Fails in a later user turn.',
+      parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() { throw new Error('post-goal user tool error') },
+    }))
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-bleed-user', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+
+    let prepared = false
+    let postGoalToolIssued = false
+    let postGoalDone = false
+    class PostUserBleedAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const serialized = JSON.stringify(options.messages)
+        if (!prepared) {
+          prepared = true
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        if (serialized.includes('Run failing user tool.')) {
+          if (!postGoalToolIssued) {
+            postGoalToolIssued = true
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('post-user-err'), name: 'post_goal_user_err', argumentsDelta: '{}' }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('post-user-err'), name: 'post_goal_user_err', arguments: '{}' } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          postGoalDone = true
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'user turn handled tool error' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'user turn handled tool error' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'goal A finished cleanly without target text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'goal A finished cleanly without target text' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new PostUserBleedAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(prepared).toBe(true), { timeout: 2_000 })
+    await agent.whenIdle()
+
+    const recA = f.service.create(agent, objective, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 5_000 })
+    await agent.whenIdle()
+    await f.service.whenIdle()
+    await vi.waitFor(() => expect(f.service.recommendStrategy(agent, recA.id)?.failureType).toBe('reasoning-failure'), { timeout: 5_000 })
+
+    // Subsequent regular user turn triggers post_goal_user_err failure in the same session.
+    f.human.add(agent)
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Run failing user tool.' }] }))
+    await vi.waitFor(() => expect(postGoalDone).toBe(true), { timeout: 5_000 })
+    await agent.whenIdle()
+    await f.service.whenIdle()
+
+    expect(postGoalToolIssued).toBe(true)
+    const recAfter = f.service.recommendStrategy(agent, recA.id)!
+    expect(recAfter.failureType).toBe('reasoning-failure')
+    expect(recAfter.failureSignals).not.toContain('tool-error:post_goal_user_err')
+  })
+
+  it('does not taint Goal A as tool-failure when a subsequent Goal B hits a tool error in the same session', async () => {
+    const objectiveA = 'Goal A settles cleanly as reasoning-failure'
+    const objectiveB = 'Goal B hits a tool error'
+    const f = await harness(undefined, undefined, undefined, true, true, 5_000, {
+      executionBudget: budgetConfig,
+      strategy: { experiment: { allowedTools: ['read_report'], maxToolCalls: 2, maxModelCalls: 3 } },
+    })
+    await writeFile(join(f.root, 'report.md'), 'Unrelated output without required text\n', 'utf8')
+    registerReadReportTool(f.ctx, f.root)
+    f.ctx.tools.register(defineTool({
+      name: 'goal_b_err',
+      description: 'Fails only during Goal B.',
+      parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
+      async execute() { throw new Error('goal B operational failure') },
+    }))
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-bleed-multigoal', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, [
+      ...goalProfiles(f.root, objectiveA),
+      ...goalProfiles(f.root, objectiveB).map(profile => ({ ...profile, id: `b-${profile.id}` })),
+    ])
+
+    let prepared = false
+    let goalBRoundCalls = 0
+    class MultiGoalBleedAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const serialized = JSON.stringify(options.messages)
+        const isGoalRound = options.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('business-goal-data'))
+        if (!isGoalRound) {
+          prepared = true
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        f.human.delete(agent)
+        if (serialized.includes(objectiveB)) {
+          goalBRoundCalls += 1
+          if (goalBRoundCalls === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('gb-err'), name: 'goal_b_err', argumentsDelta: '{}' }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('gb-err'), name: 'goal_b_err', arguments: '{}' } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'goal B finished after tool error' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'goal B finished after tool error' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'goal A finished without target text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'goal A finished without target text' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    f.ctx.llm.registerAdapter(['fixture'], new MultiGoalBleedAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare goal.' }] }))
+    await vi.waitFor(() => expect(prepared).toBe(true), { timeout: 2_000 })
+    await agent.whenIdle()
+
+    const recA = f.service.create(agent, objectiveA, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 5_000 })
+    await agent.whenIdle()
+    await f.service.whenIdle()
+    await vi.waitFor(() => expect(f.service.recommendStrategy(agent, recA.id)?.failureType).toBe('reasoning-failure'), { timeout: 5_000 })
+
+    // Clear Goal A and start Goal B in the same session; Goal B hits goal_b_err.
+    f.ctx.goals.clear(agent, f.ctx.goals.get(agent)!)
+    f.human.add(agent)
+    const recB = f.service.create(agent, objectiveB, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 5_000 })
+    await agent.whenIdle()
+    await f.service.whenIdle()
+    await vi.waitFor(() => expect(f.service.recommendStrategy(agent, recB.id)?.failureType).toBe('tool-failure'), { timeout: 5_000 })
+
+    const recBAfter = f.service.recommendStrategy(agent, recB.id)!
+    expect(recBAfter.failureSignals).toContain('tool-error:goal_b_err')
+
+    const recAAfter = f.service.recommendStrategy(agent, recA.id)!
+    expect(recAAfter.failureType).toBe('reasoning-failure')
+    expect(recAAfter.failureSignals).not.toContain('tool-error:goal_b_err')
   })
 })

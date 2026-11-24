@@ -625,3 +625,74 @@ it('preserves declared file observations through persistence and rollback withou
     expect(store.get(scope, old.name, 1)).toEqual(legacy)
   } finally { store.close() }
 })
+
+it('persists durable compensation audit records with idempotency fencing and recovers pending rows as unknown on reopen', async () => {
+  const path = await database()
+  const first = new SkillStore(path)
+  const claimed = first.claimCompensation(scope, {
+    runId: 'run-1',
+    skillName: 'read-report',
+    version: 1,
+    stepId: 'step-1',
+    compensationKind: 'rollback-state',
+    idempotencyKey: 'skill-comp:v1:abc',
+    toolName: 'write',
+    preimageDigest: 'a'.repeat(64),
+  })
+  expect(claimed.claimed).toBe(true)
+  expect(claimed.record.status).toBe('pending')
+
+  // Identical idempotencyKey returns existing row without duplicating
+  const replay = first.claimCompensation(scope, {
+    runId: 'run-1',
+    skillName: 'read-report',
+    version: 1,
+    stepId: 'step-1',
+    compensationKind: 'rollback-state',
+    idempotencyKey: 'skill-comp:v1:abc',
+    toolName: 'write',
+    preimageDigest: 'a'.repeat(64),
+  })
+  expect(replay.claimed).toBe(false)
+  expect(replay.record.id).toBe(claimed.record.id)
+
+  // Conflicting payload with same idempotencyKey fails closed
+  expect(() => first.claimCompensation(scope, {
+    runId: 'run-1',
+    skillName: 'read-report',
+    version: 1,
+    stepId: 'step-2',
+    compensationKind: 'rollback-state',
+    idempotencyKey: 'skill-comp:v1:abc',
+  })).toThrow(/idempotency conflict/u)
+
+  // Owner isolation
+  expect(first.listCompensations(otherScope, 'run-1')).toEqual([])
+  first.close()
+
+  // Pending compensation recovers conservatively as unknown on reopen
+  const reopened = new SkillStore(path)
+  const recovered = reopened.listCompensations(scope, 'run-1')
+  expect(recovered).toHaveLength(1)
+  expect(recovered[0]).toMatchObject({
+    id: claimed.record.id,
+    status: 'unknown',
+    detail: 'recovered-pending-as-unknown',
+  })
+
+  // Settling a second compensation transitions cleanly from pending to succeeded
+  const second = reopened.claimCompensation(scope, {
+    runId: 'run-2',
+    skillName: 'read-report',
+    version: 1,
+    stepId: 'step-1',
+    compensationKind: 'compensate-via-registry',
+    idempotencyKey: 'skill-comp:v1:def',
+    compensatorKey: 'lark.undo',
+  })
+  const settled = reopened.finishCompensation(scope, second.record.id, 'succeeded', 'recalled')
+  expect(settled.status).toBe('succeeded')
+  expect(settled.detail).toBe('recalled')
+  expect(() => reopened.finishCompensation(scope, second.record.id, 'failed', 'late')).toThrow(/state conflict/u)
+  reopened.close()
+})

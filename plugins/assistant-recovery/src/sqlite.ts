@@ -158,6 +158,96 @@ function createSchema(database: DatabaseSync): void {
 
     PRAGMA user_version = 5;
   `)
+  ensureCompensationSchema(database)
+}
+
+export function ensureCompensationSchema(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS recovery_compensations (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL,
+      idempotency_digest TEXT NOT NULL CHECK (length(idempotency_digest) = 64),
+      forward_action_id TEXT UNIQUE,
+      kind TEXT NOT NULL,
+      category TEXT NOT NULL CHECK (category IN (
+        'revert', 'delete', 'cancel', 'notify-undo', 'rollback-state', 'custom'
+      )),
+      scope_digest TEXT CHECK (scope_digest IS NULL OR length(scope_digest) = 64),
+      source_plugin TEXT,
+      run_id TEXT,
+      step_id TEXT,
+      target_json TEXT NOT NULL CHECK (
+        json_valid(target_json) AND json_type(target_json) = 'object' AND length(target_json) <= 262144
+      ),
+      metadata_json TEXT CHECK (
+        metadata_json IS NULL OR (
+          json_valid(metadata_json) AND json_type(metadata_json) = 'object' AND length(metadata_json) <= 65536
+        )
+      ),
+      request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
+      envelope_digest TEXT NOT NULL CHECK (length(envelope_digest) = 64),
+      preimage_json TEXT CHECK (
+        preimage_json IS NULL OR (
+          json_valid(preimage_json) AND json_type(preimage_json) = 'object' AND length(preimage_json) <= 1048576
+        )
+      ),
+      preimage_digest TEXT CHECK (preimage_digest IS NULL OR length(preimage_digest) = 64),
+      status TEXT NOT NULL CHECK (status IN (
+        'capturing', 'prepared', 'dispatched', 'succeeded', 'failed', 'unknown'
+      )),
+      result_code TEXT,
+      receipt_json TEXT CHECK (
+        receipt_json IS NULL OR (
+          json_valid(receipt_json) AND json_type(receipt_json) = 'object' AND length(receipt_json) <= 262144
+        )
+      ),
+      receipt_digest TEXT CHECK (receipt_digest IS NULL OR length(receipt_digest) = 64),
+      reason TEXT,
+      expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
+      created_at INTEGER NOT NULL CHECK (created_at >= 0),
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+      settled_at INTEGER CHECK (settled_at IS NULL OR settled_at >= 0),
+      version INTEGER NOT NULL CHECK (version >= 1),
+      UNIQUE(idempotency_digest),
+      CHECK ((status = 'capturing' AND preimage_json IS NULL AND preimage_digest IS NULL)
+        OR (status != 'capturing' AND preimage_json IS NOT NULL AND preimage_digest IS NOT NULL)),
+      CHECK ((status IN ('succeeded', 'failed', 'unknown') AND result_code IS NOT NULL AND settled_at IS NOT NULL)
+        OR (status IN ('capturing', 'prepared', 'dispatched') AND result_code IS NULL AND settled_at IS NULL))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS recovery_compensation_audit (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      compensation_id TEXT NOT NULL,
+      event TEXT NOT NULL CHECK (event IN (
+        'capturing', 'prepared', 'dispatched', 'settled', 'discarded', 'abandoned', 'recovered', 'replayed'
+      )),
+      status TEXT NOT NULL CHECK (status IN (
+        'capturing', 'prepared', 'dispatched', 'succeeded', 'failed', 'unknown'
+      )),
+      version INTEGER NOT NULL CHECK (version >= 1),
+      result_code TEXT,
+      detail_json TEXT CHECK (
+        detail_json IS NULL OR (
+          json_valid(detail_json) AND json_type(detail_json) = 'object' AND length(detail_json) <= 16384
+        )
+      ),
+      detail_digest TEXT CHECK (detail_digest IS NULL OR length(detail_digest) = 64),
+      recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0)
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS recovery_compensations_status
+      ON recovery_compensations(status, created_at);
+
+    CREATE INDEX IF NOT EXISTS recovery_compensations_kind
+      ON recovery_compensations(kind, status, created_at);
+
+    CREATE INDEX IF NOT EXISTS recovery_compensation_audit_comp
+      ON recovery_compensation_audit(compensation_id, sequence);
+  `)
+  const compColumns = database.prepare('PRAGMA table_info(recovery_compensations)').all() as { name: string }[]
+  if (!compColumns.some(column => column.name === 'envelope_digest')) {
+    database.exec('ALTER TABLE recovery_compensations ADD COLUMN envelope_digest TEXT;')
+  }
 }
 
 // Legacy v1-v3 installs never carried the immutable action receipt columns;
@@ -389,6 +479,17 @@ export function openRecoveryDatabase(path: string): DatabaseSync {
       if (version <= 2) migrateV2ToV3(database)
       if (version <= 3) migrateV3ToV4(database)
       if (version <= 4) migrateV4ToV5(database)
+      ensureCompensationSchema(database)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      database.close()
+      throw error
+    }
+  } else {
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      ensureCompensationSchema(database)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')

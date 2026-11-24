@@ -41,6 +41,46 @@ describe('dsh-enhanced-event-triggers entrypoint', () => {
     expect(inject).toHaveBeenCalledWith(['assistantActions', 'assistantDelivery'], expect.any(Function))
   })
 
+  test('declares credentialsKeychain for task-system, calendar, and email triggers only when credentialHandle is set', () => {
+    const injectWithCreds = vi.fn()
+    apply({ inject: injectWithCreds } as unknown as Context, {
+      databasePath: '/state/events.sqlite',
+      allowedHttpOrigins: ['https://tasks.example.com'],
+      triggers: [{
+        id: 'tasks',
+        kind: 'task-system',
+        automationId: 'tasks-auto',
+        url: 'https://tasks.example.com/tasks',
+        credentialHandle: 'task-token',
+      }],
+    })
+    expect(injectWithCreds).toHaveBeenCalledWith(['credentialsKeychain'], expect.any(Function))
+
+    const injectWithoutCreds = vi.fn()
+    apply({ inject: injectWithoutCreds } as unknown as Context, {
+      databasePath: '/state/events.sqlite',
+      allowedHttpOrigins: ['https://cal.example.com'],
+      triggers: [{
+        id: 'cal',
+        kind: 'calendar',
+        automationId: 'cal-auto',
+        url: 'https://cal.example.com/feed.ics',
+        format: 'ics',
+        observer: {
+          workspace: '/state',
+          preset: 'primary',
+          principalId: 'owner:one',
+          principalRecordId: 'record',
+          principalVersion: 1,
+          ownerRouteId: 'route',
+          expiresAt: 2_000_000_000_000,
+          budgetId: 'polls',
+        },
+      }],
+    })
+    expect(injectWithoutCreds).toHaveBeenCalledWith(['assistantDelivery'], expect.any(Function))
+  })
+
   test('does not expose its SQLite store as a cross-plugin API', () => {
     expect(entrypoint).not.toHaveProperty('EventTriggerStore')
     expect(entrypoint).not.toHaveProperty('EventTriggerStoreError')

@@ -11,13 +11,13 @@ dsh plugin --profile web add @dsh-enhanced/event-triggers
 dsh --profile web --dump-config
 ```
 
-默认 `triggers: []`、`pollerEnabled: false`。File/HTTP 需要给 `background:event-triggers:<id>` 的 filesystem/network `observe` 明确 Policy 规则；Webhook 还需要 `external:webhook:<id>` 的 automation `accept` 规则，Automations 本身会再次验证 external `ingest`。
+默认 `triggers: []`、`pollerEnabled: true`（在 Cordis 配置与 `cordis.patch.yml` 中默认开启轮询；显式配置 `pollerEnabled: false` 可仅保留 outbox 投递与 webhook）。File/HTTP/Task/Calendar/Email 来源需要给 `background:event-triggers:<id>` 的 filesystem/network `observe` 明确 Policy 规则；Webhook 还需要 `external:webhook:<id>` 的 automation `accept` 规则，Automations 本身会再次验证 external `ingest`。
 
 `github-repository` 来源以结构化状态摘要产生变化事件，响应内容不进入模型上下文。嵌入式配置绑定 `repository`、`branch`、`baseBranch` 和 `credentialHandle`，只读固定 `api.github.com` 的分支 check-runs、目标 PR 和 reviews。Keychain handle 须允许 consumer `dsh-enhanced-event-triggers`、purpose `github.observe`；每次请求受租约、固定 HTTPS 出口、正文上限和共同 deadline 约束，截断或不一致的提交状态拒绝生成事件。外部 `external-unix-v1` 配置以 `externalGrant: { id, revision, digest }` 替代 `credentialHandle`，两者必须恰有一个；它要求 `observerLifetime: goal` 和 observer。Event Triggers 不取得 GitHub 凭据或网络 transport，而是通过已注入的 `assistantActions.readRepositoryEventObservation` 获取仅含 `sha256:` 指纹和 `truthy: true` 的已验证观测。
 
 该来源必须配置 `observer`：准确 workspace/preset、principalId/principalRecordId/principalVersion、ownerRouteId、绝对 expiresAt 和 budgetId。它复用 Automations 的有限 Host 执行器，不调用模型；另需 Delivery 验证 owner route，Policy 授权观测、凭据、来源执行和下游 ingest。Web Owner 的 `repositoryDelivery.events` 可生成这些配置及有限轮询/执行预算。原有未配置 observer 的来源保持既有行为。
 
-`lark-calendar` 是独立安装后可选的只读来源，需要同时安装并启用 `@dsh-enhanced/lark-channel`。配置必须提供一个精确 `calendarId` 和有限的 Unix-second `startTime`/`endTime` 窗口，以及 `observer`。它不会调用 Calendar list，也不会枚举或探测其他日历。Lark Channel 的 `allowedCalendarIds` 默认空；该 exact ID 必须同时在其中，且 Event Triggers 必须有 exact `network:lark-calendar:<calendarId>` 的 background `observe` Policy 规则。两个门都通过后，连接器才以其受限 SDK/token 生命周期读取 `GET /open-apis/calendar/v4/calendars/{calendar_id}/events` 的固定窗口分页。app secret、tenant token、page token 和日历正文都不进入 Event Triggers 的配置摘要、SQLite outbox、envelope 或健康日志。
+`lark-calendar` 是独立安装后可选的只读来源，需要同时安装并启用 `@dsh-enhanced/lark-channel`。配置必须提供一个精确 `calendarId`、`observer`，以及静态 Unix-second `startTime`/`endTime` 窗口或相对轮询时间的滚动窗口（`lookbackSeconds`/`lookaheadSeconds` 与可选量化步长 `windowStepSeconds`；静态与滚动参数互斥）。滚动窗口在每次轮询时基于当前时钟解析为 `[max(0, baseSec - lookbackSeconds), baseSec + lookaheadSeconds]`，不影响静态触发器的 `configDigest`。它不会调用 Calendar list，也不会枚举或探测其他日历。Lark Channel 的 `allowedCalendarIds` 默认空；该 exact ID 必须同时在其中，且 Event Triggers 必须有 exact `network:lark-calendar:<calendarId>` 的 background `observe` Policy 规则。两个门都通过后，连接器才以其受限 SDK/token 生命周期读取 `GET /open-apis/calendar/v4/calendars/{calendar_id}/events` 的窗口分页。app secret、tenant token、page token 和日历正文都不进入 Event Triggers 的配置摘要、SQLite outbox、envelope 或健康日志。
 
 ```yaml
 triggers:
@@ -66,17 +66,27 @@ allowedHttpOrigins:
 sha256=HMAC_SHA256(secret, timestamp + "\n" + nonce + "\n" + rawBody)
 ```
 
-签名 timestamp 只作为 occurrence 时间和防重放窗口输入；cooldown/TTL 使用服务端一次捕获的接收时间，调用方不能通过伪造窗口内 timestamp 绕过。宿主 adapter 可调用 `ctx.eventTriggers.ingestWebhook()`；本版本不自行暴露公网 listener。若需要 HTTP ingress，应由只监听 loopback、具备 body/rate limit 的部署网关转发，不能把该 service API 当 capability URL。
+签名 timestamp 只作为 occurrence 时间和防重放窗口输入；cooldown/TTL 使用服务端一次捕获的接收时间，调用方不能通过伪造窗口内 timestamp 绕过。宿主 adapter 可继续调用 `ctx.eventTriggers.ingestWebhook()`；若显式配置 `webhookListen`（省略时默认关闭监听），插件会在 Cordis `event-triggers.runtime` 生命周期内启动内置 `node:http` POST 监听：
+- 默认绑定 `host: '127.0.0.1'`、`port: 0`（ephemeral port，可通过 `whenWebhookListening()` / `webhookAddress()` 读取实际端口）、`basePath: '/webhooks'`、`maxConcurrentRequests: 64`、`drainTimeoutMs: 5000`。
+- 非 loopback 地址（如 `0.0.0.0`）默认拒绝，必须显式设置 `allowNonLoopback: true` 才可绑定。
+- 单条 `webhook` 触发器可配置可选 `path`（精确路径覆盖，默认 `<basePath>/<id>`）、`authMode`（`'hmac-sha256'` 默认 / `'bearer'` / `'shared-secret'`）与 `secretHeader`（`'shared-secret'` 模式，默认 `'x-dsh-secret'`），所有模式均通过 `credentials-keychain`（purpose `verify-webhook`）与 `timingSafeEqual` 校验，并强制 `maxBodyBytes` 流式上限、`requestTimeoutMs` 与并发限流。
+
+除 `file` / `http-json` / `github-repository` / `lark-calendar` / `webhook` 外，插件还支持三类基于固定 HTTPS 传输与 `allowedHttpOrigins` 白名单的轮询触发器：
+- **`task-system`**：轮询任务系统 REST JSON 接口（可配置 `itemsPointer`、字段映射 `fields`、`statusFilter`、`assigneeFilter`、`since`、`maxItems`，可选 `credentialHandle` 配合 `authScheme: 'bearer' | 'x-api-key'`，Keychain purpose `task-system.observe`）。任务标题只保留 `titleDigest`，不持久化原始描述或凭据。
+- **`calendar`**：轮询非飞书通用日历源（`format: 'ics' | 'json-events'`，支持静态/滚动 `window` 与可选 `windowParams` 查询参数、RFC 5545 行展开与 `VEVENT` `UID`/`RECURRENCE-ID`/`SEQUENCE`/`RRULE`/`STATUS` 解析、Google 风格 JSON events，可选 `credentialHandle`，Keychain purpose `calendar.observe`）。日程标题仅保存 `summaryDigest`。
+- **`email`**：轮询邮件通知源（`protocol: 'rest-json' | 'jmap'`，支持 `fromFilter`、`subjectContains`、`unreadOnly`、JMAP `Email/query` + `Email/get` POST 批处理，可选 `credentialHandle`，Keychain purpose `email.observe`）。**严格隐私最小化**：原始发件人地址、主题、正文、摘要与 token 均在内存过滤后立即丢弃，仅持久化 `fromDomain` 与不可逆 SHA-256 摘要（`fromDigest`/`subjectDigest`/`snippetDigest`/`flagsDigest`）。
+
+上述三类触发器需对应 `background:event-triggers:<id>` 的 `network:<url>` `observe` Policy 规则；其增量游标（`etag`/`syncToken`/`historyId`/`jmapState`/`since`）持久化于 SQLite `trigger_cursor`（schema v6），并在 `dsh-external-event/v1` / `dsh-event-source/v1` 边界统一投影为 `http-json`（`https-observation`）以保持与 `assistant-automations` / `assistant-goals` 的兼容，同时在 `inspectOwnerSources`、`OwnerOutboxEventSummary.triggerKind` 与 `EventIntakeObservation.triggerKind` 保留原始 `kind`。
 
 ## 权限与数据
 
 - 文件系统：私有 SQLite（WAL/FULL、目录 `0700`、文件 `0600`）；只读取 `allowedFileRoots` 内 regular non-symlink 文件，按 `maxBodyBytes` 限制。被 file trigger 使用的 root 必须在 service 初始化时已存在且为目录；此时一次性固定其配置路径与物理 realpath 的 dev/ino，后续每次读取都复核。文件使用 `O_NOFOLLOW | O_NONBLOCK` 打开，并在 descriptor 上复查 regular file、dev/ino 与固定 root，覆盖跨 poll 以及同一读取内的 leaf、祖先目录、root symlink/FIFO swap。`requestTimeoutMs` 也作为每个 file observation 的 service deadline；底层不可取消的文件系统调用超时后仅保留每 trigger 一个纯读取，结果会丢弃，后续轮询和销毁不会等待它或在关库后回写。
-- 网络：HTTP sensor 仅允许精确 HTTPS origin。每次请求最多接受 16 个去重 DNS answer，只允许 global-unicast IPv4，并校验保留地址。IPv6 默认 `ipv6Mode: deny`，因为任意网络都可能使用无法仅从地址识别的自定义 NAT64/翻译前缀；只有运维方确认出口为纯原生 IPv6、不会把任何 IPv6 前缀翻译到 IPv4 时，才可显式设为 `native-only`。启用后仍会拒绝 mapped、6to4、ISATAP 等可识别的内嵌非公网 IPv4。生产 socket 固定到本次单次解析的已验证地址，同时保留原 hostname 做 TLS SNI/证书校验，并以 `agent: false` 禁止复用全局 keep-alive socket 绕过本次 pin。一个 deadline 覆盖 DNS、连接、响应和正文；禁止 redirect，拒绝响应会取消正文，正文受 `maxBodyBytes` 限制。若底层 resolver/fetch/body 不响应取消，service 会维持该 trigger 的 single-flight 记录直到真实底层 operation 结束，不会每轮重复累积资源。
-- 凭据：webhook 配置需要 `credentials-keychain`；secret 只在 HMAC callback 内短暂可见，不落库/日志/事件。Lark Calendar 不向本插件授予或暴露 app secret/token；它只能调用已启用 Lark Channel 的 exact-ID 只读桥，桥本身仍受 channel credential lifecycle 与 `allowedCalendarIds` 限制。
+- 网络：HTTP sensor 仅允许精确 HTTPS origin。每次请求最多接受 16 个去重 DNS answer，只允许 global-unicast IPv4，并校验保留地址。IPv6 默认 `ipv6Mode: deny`，因为任意网络都可能使用无法仅从地址识别的自定义 NAT64/翻译前缀；只有运维方确认出口为纯原生 IPv6、不会把任何 IPv6 前缀翻译到 IPv4 时，才可显式设为 `native-only`。启用后仍会拒绝 mapped、6to4、ISATAP 等可识别的内嵌非公网 IPv4。生产 socket 固定到本次单次解析的已验证地址，同时保留原 hostname 做 TLS SNI/证书校验，并以 `agent: false` 禁止复用全局 keep-alive socket 绕过本次 pin。一个 deadline 覆盖 DNS、连接、响应和正文；禁止 redirect，拒绝响应会取消正文，正文受 `maxBodyBytes` 限制。若底层 resolver/fetch/body 不响应取消，service 会维持该 trigger 的 single-flight 记录直到真实底层 operation 结束，不会每轮重复累积资源。内置 webhook HTTP 监听器默认仅绑定 loopback，不对外暴露公网端口，销毁时先停止监听并限时排空在途请求后再关闭 SQLite。
+- 凭据：`webhook` 与可选凭据的 `task-system`/`calendar`/`email`、`github-repository` 配置需要 `credentials-keychain`（各自对应 `verify-webhook`、`task-system.observe`、`calendar.observe`、`email.observe`、`github.observe` purpose）；secret 只在校验或单次请求 lease callback 内短暂可见，不落库/日志/事件。Lark Calendar 不向本插件授予或暴露 app secret/token；它只能调用已启用 Lark Channel 的 exact-ID 只读桥，桥本身仍受 channel credential lifecycle 与 `allowedCalendarIds` 限制。
 - 子进程、浏览器、任意 shell、安装脚本：无。
-- 外部 body：验签后也不会成为 Agent prompt；只生成不含正文的 occurrence。
+- 外部 body：验签或轮询解析后均不会进入 Agent prompt；只生成不含原始正文/主题/凭据的摘要 occurrence。
 
-`health()` 会返回 pending/retrying/quarantined/delivered 数、失败 trigger 数以及最近的有界错误摘要。SQLite 当前 schema v4 沿既有版本链迁移；没有 provenance 的历史 pending event 按上述规则隔离。poller 即使关闭，独立 outbox flush 仍会运行。每轮 flush 分页处理并对失败项持久退避，因此 poison/stale 事件不会造成队头永久阻塞。
+`health()` 会返回 pending/retrying/quarantined/delivered 数、失败 trigger 数以及最近的有界错误摘要。SQLite 当前 schema v6 沿既有版本链（v1→v6）原位迁移并新增 `trigger_cursor` 持久化游标表；没有 provenance 的历史 pending event 按上述规则隔离。poller 即使关闭，独立 outbox flush 仍会运行。每轮 flush 分页处理并对失败项持久退避，因此 poison/stale 事件不会造成队头永久阻塞。
 
 ## Host 事件读取
 

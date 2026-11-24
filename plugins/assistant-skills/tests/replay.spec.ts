@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { createDefinition } from '../src/definition.ts'
-import { replaySkill } from '../src/replay.ts'
+import { replaySkill, validateReplayTrace } from '../src/replay.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -92,4 +92,84 @@ test('counts declared file observations against the comparison budget before dis
   await expect(replay(edit, stateRoot)).rejects.toThrow(/read failed/)
   const legacy = { ...value }; delete legacy.fileObservations
   await expect(replay(legacy, stateRoot, { maxToolCalls: 1 })).resolves.toMatchObject({ artifact: 'bound', toolCalls: 1 })
+})
+
+test('validateReplayTrace rejects forged compensation kinds and replaySkill still fails on primary step failure with rollback-state', async () => {
+  const stateRoot = await root()
+  const base = definition([
+    { id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'first' } },
+    { id: 'edit', toolName: 'edit', arguments: { file_path: 'artifact.txt', old_string: 'missing', new_string: 'second' } },
+  ])
+  expect(() => validateReplayTrace({ ...base, compensation: 'forged-kind' as never }, 32, 100000)).toThrow(/compensation/u)
+
+  const workspace = '/source-workspace'
+  const rollbackDef = createDefinition(
+    {
+      ...base.source,
+      steps: [
+        { id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'first' } },
+        { id: 'edit', toolName: 'edit', arguments: { file_path: 'artifact.txt', old_string: 'missing', new_string: 'second' } },
+      ],
+    },
+    { name: 'rollback-replay', description: 'Rollback on replay failure.', compensation: 'rollback-state' },
+    ['read', 'write', 'edit'],
+  )
+  await expect(replaySkill({
+    definition: rollbackDef,
+    inputs: {},
+    files: [],
+    artifactPath: 'artifact.txt',
+    stateRoot,
+    maxToolCalls: 32,
+    maxBytes: 100000,
+    signal: new AbortController().signal,
+    authorize() {},
+  })).rejects.toThrow(/edit failed/u)
+  expect(workspace).toBe('/source-workspace')
+  expect(await readdir(stateRoot)).toEqual([])
+})
+
+test('replaySkill runs compensating-action cleanly on mixed read, write, failing edit workflow and cleans sandbox', async () => {
+  const stateRoot = await root()
+  const workspace = '/source-workspace'
+  const mixedCompDef = createDefinition(
+    {
+      protocol: 'assistant-goals/verified-workflow-source/v1',
+      scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' },
+      goal: { id: 'source', definition: { version: 1, digest: 'a'.repeat(64), objective: 'source' }, sessionId: 'session', nativeGoalId: 'native' },
+      runId: 'run-mixed-comp',
+      turn: 1,
+      acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 },
+      steps: [
+        { id: 'step-read', toolName: 'read', arguments: { file_path: 'info.txt' } },
+        { id: 'step-write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'mutated' } },
+        { id: 'step-edit', toolName: 'edit', arguments: { file_path: 'artifact.txt', old_string: 'missing', new_string: 'next' } },
+      ],
+    },
+    {
+      name: 'mixed-compensating-replay',
+      description: 'Compensates write while skipping read in sandbox replay.',
+      compensation: 'compensating-action',
+      compensationPlan: {
+        kind: 'compensating-action',
+        entries: [
+          { stepId: 'step-write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'reverted' } },
+        ],
+      },
+    },
+    ['read', 'write', 'edit'],
+  )
+
+  await expect(replaySkill({
+    definition: mixedCompDef,
+    inputs: {},
+    files: [{ path: 'info.txt', content: 'readonly' }],
+    artifactPath: 'artifact.txt',
+    stateRoot,
+    maxToolCalls: 32,
+    maxBytes: 100000,
+    signal: new AbortController().signal,
+    authorize() {},
+  })).rejects.toThrow(/edit failed/u)
+  expect(await readdir(stateRoot)).toEqual([])
 })

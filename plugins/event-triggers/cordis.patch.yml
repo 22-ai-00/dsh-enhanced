@@ -10,7 +10,7 @@
         allowedHttpOrigins: []
         allowedHttpHosts: []
         triggers: []
-        pollerEnabled: false
+        pollerEnabled: true
         pollIntervalMs: 5000
         pollConcurrency: 8
         requestTimeoutMs: 10000

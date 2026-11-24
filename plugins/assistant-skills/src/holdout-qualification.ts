@@ -6,7 +6,7 @@ import type { GoalScope } from '@dsh-enhanced/assistant-goals'
 import type { LinuxCgroupRoots, LinuxRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
-import { replaySkill, validateReplayTrace, type ReplayResult } from './replay.js'
+import { replaySkill, validateReplayTrace, type ReplayDomainToolPolicy, type ReplayInput, type ReplayResult } from './replay.js'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from './holdout-authority.js'
 import { verifyProspectiveCertificate } from './prospective-holdout.js'
 
@@ -52,6 +52,7 @@ export interface HoldoutQualificationInput {
   readonly transport: { request(operation: 'begin' | 'manifest' | 'next' | 'record' | 'finish', value?: unknown, signal?: AbortSignal): Promise<unknown> }
   readonly signal: AbortSignal
   readonly authorize: () => void
+  readonly domainToolHandlers?: ReplayInput['domainToolHandlers']
 }
 
 export interface HoldoutQualificationResult {
@@ -271,7 +272,12 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
   if (digest(arms.baseline.source.scope) !== scopeDigest || digest(arms.candidate.source.scope) !== scopeDigest) fail('definition scope does not exactly match qualification scope')
   if (canaryAdmission !== undefined && (expectedGeneratorDigest === undefined || !canaryAdmissionMatches(canaryAdmission, arms.baseline, arms.candidate))) fail('canary admission does not match exact definitions')
   const materialized = { baseline: instantiate(arms.baseline, inputs), candidate: instantiate(arms.candidate, inputs) }
-  for (const definition of Object.values(materialized)) validateReplayTrace(definition, execution.maxToolCalls, execution.maxBytes)
+  const domainTools = input.domainToolHandlers
+    ? Object.fromEntries(Object.keys(input.domainToolHandlers).map(toolName => [toolName, {} as ReplayDomainToolPolicy]))
+    : undefined
+  for (const definition of Object.values(materialized)) {
+    validateReplayTrace(definition, execution.maxToolCalls, execution.maxBytes, domainTools ? { domainTools } : undefined)
+  }
   const frozen = binding(scope, arms.baseline, arms.candidate, execution, inputs, files, canaryAdmission)
   const revalidate = () => { input.signal.throwIfAborted(); if (Date.now() >= execution.expiresAt) fail('qualification expired'); separated(scope.workspace, execution.stateRoot); assertPrivateRoot(execution.stateRoot); separated(scope.workspace, execution.stateRoot); input.authorize() }
   revalidate()
@@ -303,7 +309,8 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
       const executedArm = signed.armDigest === begin.baselineDigest ? materialized.baseline : materialized.candidate
       const cellSignal = AbortSignal.any([input.signal, AbortSignal.timeout(execution.cellDurationMs)])
       const replay = await replaySkill({ definition: originalArm, inputs, files, artifactPath: execution.artifactPath, stateRoot: execution.stateRoot,
-        maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, signal: cellSignal, authorize: revalidate })
+        maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, signal: cellSignal, authorize: revalidate,
+        ...(input.domainToolHandlers === undefined ? {} : { domainToolHandlers: input.domainToolHandlers }) })
       revalidate()
       const observed = await runner.run(`${begin.sessionId}:${signed.cellId}`, replay.artifact, signed.stdin, cellSignal)
       revalidate()

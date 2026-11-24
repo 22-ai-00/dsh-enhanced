@@ -245,17 +245,21 @@ executionBudget:
 
 ## 原生策略子任务（可选）
 
-配置 `strategy: {}` 后，已准入的原生目标回合可以通过 `goal_strategy` 调整解题方法：`investigate` 分析给定上下文，`review` 检查推理，`compare` 并发请求两个独立视角（skeptical、alternative），按固定 persona 顺序而非完成先后聚合建议，因此并发不改变 `outputDigest` 与确定性；模型调用总数与串行一致，只是移除了人为排队。明确的下一步继续直接执行；调查结果只是 `unverified` 建议，不能代替步骤或整个目标的独立验收，也不能把模型的自我评价作为策略收益。
+配置 `strategy: {}` 后，已准入的原生目标回合可以通过 `goal_strategy` 调整解题方法：
 
-需要持久 `databasePath`、`verifyNativeRounds: true`、`executionBudget`、当前模型路由的可信 meter，以及 Host `subagents` 服务。Policy 还须允许当前 owner/workspace/preset 的 goal `delegate` 和 tool `goal_strategy`；拒绝规则继续优先。默认不开启，不授予子任务文件、网络工具或通用 owner 身份。这里的调查只分析调用方给出的材料，模型请求会发往父目标同一 provider/model。
+- **只读无工具建议模式**：`investigate` 分析给定上下文，`review` 检查推理，`compare` 并发请求两个独立视角（skeptical、alternative），按固定 persona 顺序而非完成先后聚合建议，因此并发不改变 `outputDigest` 与确定性。这三种模式**严格零工具**（`tools: []`，覆盖父级 `PtcExecutor` / `run_code`）。
+- **有界工具执行实验与子任务模式**：`experiment`（有界诊断实验，默认 `maxToolCalls: 4`、`maxModelCalls: 3`）和 `subagent`（复杂问题有限委派，默认 `maxToolCalls: 8`、`maxModelCalls: 5`）允许子代理在严格受限的白名单内执行安全工具（默认 `['read', 'glob', 'grep', 'isolation_run']`、`workspaceWriteAllowed: false`）。白名单与父作用域可见工具及 `assistant-policy` 权限取交集，**永久禁止** `run_code` 与全部 `goal_*` 控制工具（`goal_strategy`、`goal_create`、`goal_control`、`goal_schedule`、`goal_wait_event`、`goal_checkpoint`、`goal_acceptance_catalog`）；`workspaceWriteAllowed: false` 时同时拒绝写/修改类工具。每次工具调用均实时计入父目标共享的 `GoalBudgetStore` 限额，且返回结果标记 `unverified: true`，绝不自动标记目标或验收条件通过。
+- **自动难度/故障路由与协调成本收益优化**：`kind: 'auto'`（及上下文 `strategies.recommendation` / Host `recommendStrategy(agent, goalId)`）会确定性评估任务难度（`trivial` / `moderate` / `complex`，基于依赖、阻塞、过期假设、失败轮次与上下文体积）和故障类型（`tool-failure` vs `reasoning-failure` vs `unknown-execution` vs `none`，基于步骤反馈、策略子诊断与会话工具错误），并结合剩余父预算余量、`summarizeAdviceByDefinition` 重复建议饱和度与 `summarizeStrategyOutcomes` 历史开销/成功率对 `direct | investigate | experiment | review | compare | subagent` 打分优化。当协调开销高于预期收益、存在未对账执行或预算余量不足时，优化器降级或抑制冗余分支，直接返回 `outcome: 'direct-recommended'`（`terminationReason: 'skipped-direct'`，不启动子代理）。明确指定 `investigate` / `review` / `compare` 时保持原有确定性执行契约。
 
-默认限制为 `maxDurationMs: 30000`、`maxPromptBytes: 32768`、`maxOutputBytes: 16384`、`maxRunsPerGoal: 16`，最多分别为 300000 / 65536 / 65536 / 32。期限同时受父回合和目标累计期限约束。父工具及全部子模型调用共用原目标预算；子调用用独立 run ID 记账，工具结果和后续目标上下文显示调用/token/已知费用及未结算预留。没有为子任务发放新的预算。
+需要持久 `databasePath`、`verifyNativeRounds: true`、`executionBudget`、当前模型路由的可信 meter，以及 Host `subagents` 服务。Policy 还须允许当前 owner/workspace/preset 的 goal `delegate` 和 tool `goal_strategy`；子代理工具执行仍受 `assistant-policy` 拒绝优先原则约束。默认不开启 `strategy`，模型请求会发往父目标同一 provider/model（保留冻结 owner supplier pin）。
 
-使用 DSH 原生 `ctx.subagents.start()` 与 `startInProcessRun()`，不复制 AgentLoop。策略 schema 2 位于 `databasePath + '.strategies'`，保存 intent、父 run/Session、定义摘要、模型路由、子 Session、终态和输出摘要，不保存建议正文；原生 Session 仍保存模型交互。schema 1 在事务中验证并迁移，旧记录缺少的子任务诊断保持缺失，终止原因保持 unknown。预算与策略账本分别提交，重启将未完成记录标为 unknown，不自动回放，也不退还未知模型预留。未确认停止的子任务不能记录为成功。只读策略建议不是操作系统沙箱承诺；Host 扩展仍属于受信任进程代码。
+默认限制为 `maxDurationMs: 30000`、`maxPromptBytes: 32768`、`maxOutputBytes: 16384`、`maxRunsPerGoal: 16`、`autoRoute: true`，最多分别为 300000 / 65536 / 65536 / 32；`costBenefit` 默认 `{ minNetBenefit: 0.25, minRemainingParentCalls: 1, maxAdviceRepetitions: 2 }`。期限同时受父回合和目标累计期限约束。父工具及全部子模型/子工具调用共用原目标预算；子调用用独立 `strategy-<childId>` run ID 记账，工具结果和后续目标上下文显示调用/token/已知费用及未结算预留。没有为子任务发放新的预算。
 
-新子任务的 `diagnostics` 记录实际工具拒绝次数、输出是否满足非空/长度限制，以及预算运行时最后观察到的失败阶段（准入、请求限额、meter、预留、模型流、用量或结算）。阶段说明失败发生在哪里，不从异常文本猜测预算耗尽或推理错误。`failure.dispatched` 只表示取得了下游流迭代器；不证明真实供应商请求，false 也不证明没有外部效果，更不触发退款。策略工具和历史还给出期限、取消、父授权变化、执行失败或无法确认停止等终止原因。
+使用 DSH 原生 `ctx.subagents.startActivation()` 与受控 one-shot 驱动，不复制 AgentLoop。策略 schema 3 位于 `databasePath + '.strategies'`（事务性兼容迁移 v1/v2 → v3，损坏行触发回滚），保存 intent（含可选 `requestedKind`、`routing` 评估与 `experiment` 边界）、父 run/Session、定义摘要、模型路由、子 Session、终态（`advice` / `experiment` / `direct-recommended` / `execution-failed` / `cancelled` / `unknown`）和输出摘要，不保存建议正文；原生 Session 仍保存模型交互。预算与策略账本分别提交，重启将未完成记录标为 unknown，不自动回放，也不退还未知模型预留。未确认停止的子任务不能记录为成功。只读/有界策略分支不是操作系统沙箱承诺；Host 扩展仍属于受信任进程代码。
 
-后续目标上下文最多展示 3 次策略及每个父步骤的 3 项验收条件。`parentStep` 每次重验当时 exact run/Session/定义的独立回执，不能用后续成功覆盖早先失败；缺失、过期或定义变化保持显式状态。`attribution: same-parent-step-only` 仅为关联，不给策略记因果功劳，也不把建议评价为正确。明确执行故障时先检查执行链，独立条件失败时修订解法，unknown 执行先对账。Host 的 `inspectStrategyAssessments(agent, goalId)` 与目标上下文使用同一 owner 授权和有界读模型。
+新子任务的 `diagnostics` 记录实际工具拒绝次数、输出是否满足非空/长度限制、可选 `toolCalls` / `modelCalls` / `executedTools`，以及预算运行时最后观察到的失败阶段（准入、请求限额、meter、预留、模型流、用量或结算）。阶段说明失败发生在哪里，不从异常文本猜测预算耗尽或推理错误。`failure.dispatched` 只表示取得了下游流迭代器；不证明真实供应商请求，false 也不证明没有外部效果，更不触发退款。策略工具和历史还给出期限、取消、父授权变化、执行失败、跳过直行或无法确认停止等终止原因。
+
+后续目标上下文最多展示 3 次策略、每个父步骤的 3 项验收条件，以及当前 `strategies.recommendation` 路由建议。`parentStep` 每次重验当时 exact run/Session/定义的独立回执，不能用后续成功覆盖早先失败；缺失、过期或定义变化保持显式状态。`attribution: same-parent-step-only` 仅为关联，不给策略记因果功劳，也不把建议评价为正确。明确执行故障时先检查执行链，独立条件失败时修订解法，unknown 执行先对账。Host 的 `inspectStrategyAssessments(agent, goalId)`、`recommendStrategy(agent, goalId)` 与 `hostSummarizeStrategyOutcomes(scope)` 使用同一 owner 授权和有界/无明文读模型。
 
 ## 权限与数据
 

@@ -120,8 +120,18 @@ describe('event triggers service', () => {
     })
     expect(JSON.stringify(envelope)).not.toContain('ignore previous instructions')
     expect(JSON.stringify(fixture.automations.events.at(-1))).not.toContain('ignore previous instructions')
-    await expect(fixture.service.ingestWebhook('hook', { timestamp, nonce, signature, body }))
-      .rejects.toThrowError(expect.objectContaining<Partial<EventTriggersError>>({ code: 'replay' }))
+    await expect(fixture.service.ingestWebhook('hook', {
+      timestamp, nonce, signature, body,
+    })).rejects.toThrowError(expect.objectContaining<Partial<EventTriggersError>>({ code: 'replay' }))
+    await expect(fixture.service.ingestWebhook('hook', {
+      timestamp, nonce, signature: `sha256=${'f'.repeat(64)}`, body,
+    })).rejects.toThrowError(expect.objectContaining<Partial<EventTriggersError>>({ code: 'invalid-signature' }))
+    await expect(fixture.service.ingestWebhook('hook', {
+      timestamp: '-5',
+      nonce: 'nonce-negative-ts',
+      signature: `sha256=${createHmac('sha256', 'super-secret').update(`-5\nnonce-negative-ts\n`).update(body).digest('hex')}`,
+      body,
+    })).rejects.toThrowError(expect.objectContaining<Partial<EventTriggersError>>({ code: 'timestamp' }))
     const cooldownNonce = 'nonce-cooldown'
     const cooldownSignature = `sha256=${createHmac('sha256', 'super-secret')
       .update(`${timestamp}\n${cooldownNonce}\n`).update(body).digest('hex')}`

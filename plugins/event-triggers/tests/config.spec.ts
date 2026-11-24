@@ -21,11 +21,16 @@ describe('event trigger configuration', () => {
       ],
     })
     expect(value.triggers.map(item => item.kind)).toEqual(['file', 'http-json', 'webhook'])
+    expect(value.pollerEnabled).toBe(true)
+    expect(value.webhookListen).toBeUndefined()
     expect(value.pollIntervalMs).toBe(5_000)
     expect(value.pollConcurrency).toBe(8)
     expect(value.maxBodyBytes).toBe(65_536)
     expect(value.allowedHttpOrigins).toEqual(['https://api.example.com'])
     expect(value.ipv6Mode).toBe('deny')
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', pollerEnabled: false, triggers: [],
+    }).pollerEnabled).toBe(false)
   })
 
   test('requires an explicit native-network assertion before enabling public IPv6', () => {
@@ -115,5 +120,136 @@ describe('event trigger configuration', () => {
     const input = { databasePath: '/state/events.sqlite', allowedFileRoots: ['/work/inbox'],
       allowedHttpHosts: [], triggers: [file()], ...override }
     expect(() => normalizeEventTriggersConfig(input as never)).toThrow(/event-triggers/i)
+  })
+
+  test('normalizes lark-calendar rolling windows and rejects mixed or empty windows', () => {
+    const observer = {
+      workspace: '/state', preset: 'primary', principalId: 'owner:one', principalRecordId: 'record',
+      principalVersion: 1, ownerRouteId: 'route', expiresAt: 2_000_000_000_000, budgetId: 'polls',
+    }
+    const rolling = normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      triggers: [{
+        id: 'cal-roll', kind: 'lark-calendar', automationId: 'cal-auto', calendarId: 'cal_1',
+        lookbackSeconds: 300, lookaheadSeconds: 3600, windowStepSeconds: 60, observer,
+      }],
+    }).triggers[0]!
+    expect(rolling).toMatchObject({
+      kind: 'lark-calendar', lookbackSeconds: 300, lookaheadSeconds: 3600, windowStepSeconds: 60,
+    })
+    expect('startTime' in rolling).toBe(false)
+    expect('endTime' in rolling).toBe(false)
+
+    for (const invalid of [
+      { startTime: 1, endTime: 100, lookaheadSeconds: 60 },
+      { lookbackSeconds: 0, lookaheadSeconds: 0 },
+      { lookbackSeconds: 30, lookaheadSeconds: 30, windowStepSeconds: 120 },
+      {},
+    ]) {
+      expect(() => normalizeEventTriggersConfig({
+        databasePath: '/state/events.sqlite',
+        triggers: [{ id: 'cal-bad', kind: 'lark-calendar', automationId: 'cal-auto', calendarId: 'cal_1', observer, ...invalid }],
+      })).toThrow(/Lark calendar/i)
+    }
+  })
+
+  test('normalizes webhookListen loopback defaults, auth modes, and route uniqueness', () => {
+    const normalized = normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      webhookListen: {},
+      triggers: [
+        { id: 'hook-1', kind: 'webhook', automationId: 'a1', credentialHandle: 'h1' },
+        { id: 'hook-2', kind: 'webhook', automationId: 'a2', credentialHandle: 'h2', path: '/custom/ci', authMode: 'shared-secret', secretHeader: 'X-Custom-Token' },
+      ],
+    })
+    expect(normalized.webhookListen).toEqual({
+      enabled: true,
+      host: '127.0.0.1',
+      port: 0,
+      basePath: '/webhooks',
+      allowNonLoopback: false,
+      maxConcurrentRequests: 64,
+      drainTimeoutMs: 5_000,
+    })
+    expect(normalized.triggers[1]).toMatchObject({
+      path: '/custom/ci', authMode: 'shared-secret', secretHeader: 'x-custom-token',
+    })
+
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      webhookListen: { host: '0.0.0.0', port: 8080, allowNonLoopback: true },
+      triggers: [],
+    }).webhookListen).toMatchObject({ host: '0.0.0.0', port: 8080, allowNonLoopback: true })
+
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      webhookListen: { host: '[::1]' },
+      triggers: [],
+    }).webhookListen).toMatchObject({ host: '::1', allowNonLoopback: false })
+
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      webhookListen: { host: '[2001:db8::1]', allowNonLoopback: true },
+      triggers: [],
+    }).webhookListen).toMatchObject({ host: '2001:db8::1', allowNonLoopback: true })
+
+    for (const badHost of ['[localhost]', '[127.0.0.1]', '[::1', '[]']) {
+      expect(() => normalizeEventTriggersConfig({
+        databasePath: '/state/events.sqlite',
+        webhookListen: { host: badHost, allowNonLoopback: true },
+        triggers: [],
+      })).toThrow(/webhookListen\.host/i)
+    }
+
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      webhookListen: { basePath: '/webhooks' },
+      triggers: [
+        { id: 'hook-a', kind: 'webhook', automationId: 'a1', credentialHandle: 'h1', path: '/webhooks/dup' },
+        { id: 'dup', kind: 'webhook', automationId: 'a2', credentialHandle: 'h2' },
+      ],
+    })).toThrow(/duplicate webhook route/i)
+  })
+
+  test('normalizes task-system, calendar, and email trigger configs with HTTPS origin checks', () => {
+    const normalized = normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      allowedHttpOrigins: ['https://tasks.example.com', 'https://cal.example.com', 'https://mail.example.com'],
+      triggers: [
+        {
+          id: 'tasks', kind: 'task-system', automationId: 'auto-tasks', url: 'https://tasks.example.com/api/tasks',
+          itemsPointer: '/data/items', fields: { id: 'key', title: 'summary' }, statusFilter: ['open', 'in_progress'],
+          since: '2026-01-01T00:00:00Z', credentialHandle: 'tasks-tok', authScheme: 'x-api-key',
+        },
+        {
+          id: 'cal-ics', kind: 'calendar', automationId: 'auto-cal', url: 'https://cal.example.com/feed.ics',
+          format: 'ics', window: { mode: 'rolling', lookbackSeconds: 600, lookaheadSeconds: 3600 },
+          windowParams: { startParam: 'start', endParam: 'end', format: 'iso' },
+        },
+        {
+          id: 'mail-jmap', kind: 'email', automationId: 'auto-mail', url: 'https://mail.example.com/jmap',
+          protocol: 'jmap', accountId: 'acc-1', mailboxId: 'mb-inbox', fromFilter: ['Alerts@Example.com'],
+          subjectContains: 'Build failed', unreadOnly: true, credentialHandle: 'mail-tok',
+        },
+      ],
+    })
+    expect(normalized.triggers.map(t => t.kind)).toEqual(['task-system', 'calendar', 'email'])
+    expect(normalized.triggers[0]).toMatchObject({ authScheme: 'x-api-key', credentialHandle: 'tasks-tok' })
+    expect(normalized.triggers[1]).toMatchObject({ format: 'ics', maxEvents: 500 })
+    expect(normalized.triggers[2]).toMatchObject({ protocol: 'jmap', accountId: 'acc-1', fromFilter: ['alerts@example.com'] })
+
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      allowedHttpOrigins: ['https://mail.example.com'],
+      triggers: [{ id: 'bad-jmap', kind: 'email', automationId: 'a', url: 'https://mail.example.com/jmap', protocol: 'jmap' }],
+    })).toThrow(/accountId/i)
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite',
+      allowedHttpOrigins: ['https://cal.example.com'],
+      triggers: [{
+        id: 'bad-ics', kind: 'calendar', automationId: 'a', url: 'https://cal.example.com/feed.ics',
+        format: 'ics', itemsPointer: '/items',
+      }],
+    })).toThrow(/itemsPointer/i)
   })
 })

@@ -130,7 +130,8 @@ export class SkillComparator {
     }
     const local = new AbortController(), combined = AbortSignal.any([signal, this.#abort.signal, local.signal])
     const revalidate = () => { combined.throwIfAborted(); if (Date.now() >= p.expiresAt) throw new Error('assistant-skills: comparison expired'); authorize() }
-    const common = { model: acceptanceDigest('no-model-fixed-tool-replay'), prompt: acceptanceDigest('no-prompt'), tools: acceptanceDigest(['read', 'write', 'edit']), policy: acceptanceDigest({ maxBytes: p.maxBytes, maxToolCalls: p.maxToolCalls, offline: true }), runtime: this.#runtime }
+    const usesApplyPatch = [arms.baseline, arms.candidate].some(arm => arm.steps.some(step => step.toolName === 'apply_patch'))
+    const common = { model: acceptanceDigest('no-model-fixed-tool-replay'), prompt: acceptanceDigest('no-prompt'), tools: acceptanceDigest(usesApplyPatch ? ['read', 'write', 'edit', 'apply_patch'] : ['read', 'write', 'edit']), policy: acceptanceDigest({ maxBytes: p.maxBytes, maxToolCalls: p.maxToolCalls, offline: true }), runtime: this.#runtime }
     // No hard-coded split: the caller must supply split evidence, and the
     // evaluation benchmark guard decides whether this plan may feed generation.
     const dataset = { id: p.dataset.id, version: p.dataset.version, digest: p.dataset.digest, split: p.dataset.split }

@@ -7,8 +7,18 @@ import type { GoalBudgetLimits, GoalBudgetScope, GoalBudgetRoute } from './budge
 import type { GoalExecutionRun, GoalRecord } from './types.js'
 import type { GoalOwnerIntentSupplier } from './owner-intent.js'
 import { isStrategyChild } from './strategy-identity.js'
+import { isForbiddenStrategyTool } from './strategy-router.js'
 
-export type GoalBudgetDelegateResolver = (agent: Agent) => { parent: Agent; runId: string; signal: AbortSignal; provider: string; model: string; accountingRunId: string } | undefined
+export type GoalBudgetDelegateResolver = (agent: Agent) => {
+  parent: Agent
+  runId: string
+  signal: AbortSignal
+  provider: string
+  model: string
+  accountingRunId: string
+  allowedTools?: ReadonlySet<string>
+  maxToolCalls?: number
+} | undefined
 
 export interface GoalTokenBudgetConfig {
   mode?: 'tokens'
@@ -92,6 +102,7 @@ export class GoalBudgetRuntime {
   readonly #deadlines = new Map<Agent, { runId: string; timer: ReturnType<typeof setTimeout> }>()
   /** Host-only, per-child observation. It deliberately excludes error text. */
   readonly #lastFailures = new WeakMap<Agent, GoalBudgetFailure>()
+  readonly #delegateToolCalls = new WeakMap<Agent, number>()
   #active = true
   #delegateResolver: GoalBudgetDelegateResolver | undefined
 
@@ -136,6 +147,13 @@ export class GoalBudgetRuntime {
       if (agent === undefined || bound === undefined) return await next()
       try {
         execution.signal.throwIfAborted()
+        if (bound.delegateRoute !== undefined) {
+          const allowed = bound.delegateRoute.allowedTools
+          if (allowed === undefined || !allowed.has(execution.name) || isForbiddenStrategyTool(execution.name)) fail()
+          const used = this.#delegateToolCalls.get(agent) ?? 0
+          if (bound.delegateRoute.maxToolCalls !== undefined && used >= bound.delegateRoute.maxToolCalls) fail()
+          this.#delegateToolCalls.set(agent, used + 1)
+        }
         this.#store.consumeTool(this.#binding(bound.record), `goal-tool-${randomUUID()}`, Date.now())
         if (this.#current(agent)?.run.intent.runId !== bound.run.intent.runId) fail()
         return await next()
@@ -171,7 +189,15 @@ export class GoalBudgetRuntime {
       if (this.#inflight.has(agent) || (this.config.mode !== 'calls' && meter === undefined)) fail()
       if (this.config.mode === 'calls' && !this.#routeAllowed(options)) fail()
       stage = 'admission'
-      if (bound.delegateRoute && (options.provider !== bound.delegateRoute.provider || options.model !== bound.delegateRoute.model || (options.tools?.length ?? 0) !== 0)) fail()
+      if (bound.delegateRoute) {
+        if (options.provider !== bound.delegateRoute.provider || options.model !== bound.delegateRoute.model) fail()
+        const tools = options.tools ?? []
+        if (bound.delegateRoute.allowedTools === undefined) {
+          if (tools.length !== 0) fail()
+        } else if (tools.some(tool => !bound.delegateRoute!.allowedTools!.has(tool.name) || isForbiddenStrategyTool(tool.name))) {
+          fail()
+        }
+      }
       this.#assert(agent, bound.run, meter, options)
       stage = 'request-limit'
       if (!integer(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > this.config.maxOutputTokensPerCall) fail()
@@ -242,7 +268,7 @@ export class GoalBudgetRuntime {
     }
   }
 
-  #current(agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal; delegateRoute?: { provider: string; model: string }; accountingRunId?: string } | undefined {
+  #current(agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal; delegateRoute?: { provider: string; model: string; allowedTools?: ReadonlySet<string>; maxToolCalls?: number }; accountingRunId?: string } | undefined {
     if (!isStrategyChild(agent)) return this.current(agent)
     // A persisted strategy child must never fall back to an unmetered request,
     // including after restart or after its short-lived resolver is removed.
@@ -252,7 +278,10 @@ export class GoalBudgetRuntime {
     const bound = this.current(delegated.parent)
     if (!bound || bound.signal.aborted || bound.run.intent.runId !== delegated.runId) fail()
     return { ...bound, signal: AbortSignal.any([bound.signal, delegated.signal]),
-      delegateRoute: { provider: delegated.provider, model: delegated.model }, accountingRunId: delegated.accountingRunId }
+      delegateRoute: { provider: delegated.provider, model: delegated.model,
+        ...(delegated.allowedTools === undefined ? {} : { allowedTools: delegated.allowedTools }),
+        ...(delegated.maxToolCalls === undefined ? {} : { maxToolCalls: delegated.maxToolCalls }) },
+      accountingRunId: delegated.accountingRunId }
   }
 
   hasMeter = (route: { provider?: string; model?: string }): boolean => {

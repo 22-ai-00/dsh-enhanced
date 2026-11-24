@@ -18,6 +18,11 @@ export type { ConfigType as AssistantRecoveryConfig }
 export * from './attestation.js'
 export * from './automation-executor.js'
 export * from './catalog.js'
+export * from './compensation-executor.js'
+export * from './compensation-ledger.js'
+export * from './compensation-registry.js'
+export * from './compensation-service.js'
+export * from './compensation-types.js'
 export {
   ConfigSchema,
   normalizeRecoveryConfig,

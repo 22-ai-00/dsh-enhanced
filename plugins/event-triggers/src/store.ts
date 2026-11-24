@@ -59,6 +59,14 @@ export interface GoalSourceClaim {
 
 export interface StoredGoalSourceClaim extends GoalSourceClaim { retiredAt?: number }
 
+export interface TriggerCursor {
+  etag?: string
+  syncToken?: string
+  historyId?: string
+  jmapState?: string
+  since?: string
+}
+
 export type WebhookAcceptance =
   | { accepted: true; event: TriggerOutboxEvent }
   | { accepted: false; event?: TriggerOutboxEvent; reason: 'cooldown' | 'limit' | 'replay' | 'ttl' }
@@ -144,6 +152,33 @@ function validTime(value: number, field: string): void {
 
 const identifier = (value: unknown, max = 512): value is string => typeof value === 'string' && value.length > 0 && value.length <= max
 const sha256 = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+const CURSOR_KEYS = ['etag', 'syncToken', 'historyId', 'jmapState', 'since'] as const
+
+function normalizeTriggerCursor(value: unknown, code: 'invalid-input' | 'invalid-schema' = 'invalid-input'): Readonly<TriggerCursor> | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    throw new EventTriggerStoreError(code, 'trigger cursor must be a plain object')
+  }
+  const input = value as Record<string, unknown>
+  for (const key of Object.keys(input)) {
+    if (!(CURSOR_KEYS as readonly string[]).includes(key)) {
+      throw new EventTriggerStoreError(code, `invalid trigger cursor field ${key}`)
+    }
+  }
+  const output: TriggerCursor = {}
+  let hasField = false
+  for (const key of CURSOR_KEYS) {
+    const raw = input[key]
+    if (raw === undefined) continue
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > 1_024 || raw.trim() !== raw || /[\p{Cc}]/u.test(raw)) {
+      throw new EventTriggerStoreError(code, `trigger cursor field ${key} is invalid`)
+    }
+    output[key] = raw
+    hasField = true
+  }
+  return hasField ? Object.freeze(output) : undefined
+}
 function validClaim(value: unknown): value is GoalSourceClaim {
   if (!value || typeof value !== 'object') return false
   const claim = value as GoalSourceClaim
@@ -200,12 +235,37 @@ export class EventTriggerStore {
     cooldownMs: number
     maxFires: number
     ttlMs?: number
+    notModified?: boolean
+    cursor?: TriggerCursor
     /** Creates an immutable provenance snapshot after the stable outbox event id is known. */
     envelope?: (eventId: string, revision: string) => Readonly<{ canonical: string; digest: string }>
   }): TriggerOutboxEvent[] {
     validTime(input.occurredAt, 'occurredAt')
+    const normalizedCursor = input.cursor !== undefined ? normalizeTriggerCursor(input.cursor, 'invalid-input') : undefined
     return this.transaction(() => {
       let state = this.state(input.triggerId)
+      if (input.notModified) {
+        if (state === undefined) {
+          throw new EventTriggerStoreError('invalid-input', 'cannot record notModified observation without a baseline')
+        }
+        if ((input.ttlMs !== undefined && input.occurredAt >= state.first_observed_at + input.ttlMs)
+          || state.fire_count >= input.maxFires) {
+          if (normalizedCursor !== undefined) this.writeTriggerCursor(input.triggerId, normalizedCursor, input.occurredAt)
+          return []
+        }
+        this.database.prepare('UPDATE trigger_state SET last_observed_at = ? WHERE trigger_id = ?')
+          .run(input.occurredAt, input.triggerId)
+        if (normalizedCursor !== undefined) this.writeTriggerCursor(input.triggerId, normalizedCursor, input.occurredAt)
+        if (state.pending_revision === null || state.pending_since === null) return []
+        if (input.occurredAt < state.pending_since + input.debounceMs) return []
+        if (state.last_fire_at !== null && input.occurredAt < state.last_fire_at + input.cooldownMs) return []
+        const created = this.insertOutbox(input.triggerId, `edge:${state.pending_revision}`, input.occurredAt, input.envelope)
+        this.database.prepare(`
+          UPDATE trigger_state SET pending_fingerprint = NULL, pending_since = NULL, pending_revision = NULL,
+            last_fire_at = ?, fire_count = fire_count + 1 WHERE trigger_id = ?
+        `).run(input.occurredAt, input.triggerId)
+        return created === undefined ? [] : [created]
+      }
       if (state === undefined) {
         this.database.prepare(`
           INSERT INTO trigger_state(
@@ -213,6 +273,7 @@ export class EventTriggerStore {
             edge_revision, pending_fingerprint, pending_since, pending_revision, last_fire_at, fire_count
           ) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL, 0)
         `).run(input.triggerId, input.occurredAt, input.occurredAt, input.fingerprint, input.truthy ? 1 : 0)
+        if (normalizedCursor !== undefined) this.writeTriggerCursor(input.triggerId, normalizedCursor, input.occurredAt)
         return []
       }
       if ((input.ttlMs !== undefined && input.occurredAt >= state.first_observed_at + input.ttlMs)
@@ -235,6 +296,7 @@ export class EventTriggerStore {
         this.database.prepare('UPDATE trigger_state SET last_observed_at = ? WHERE trigger_id = ?')
           .run(input.occurredAt, input.triggerId)
       }
+      if (normalizedCursor !== undefined) this.writeTriggerCursor(input.triggerId, normalizedCursor, input.occurredAt)
       if (state.pending_revision === null || state.pending_since === null) return []
       if (input.occurredAt < state.pending_since + input.debounceMs) return []
       if (state.last_fire_at !== null && input.occurredAt < state.last_fire_at + input.cooldownMs) return []
@@ -245,6 +307,47 @@ export class EventTriggerStore {
       `).run(input.occurredAt, input.triggerId)
       return created === undefined ? [] : [created]
     })
+  }
+
+  hasTriggerState(triggerId: string): boolean {
+    return this.state(triggerId) !== undefined
+  }
+
+  getTriggerCursor(triggerId: string): Readonly<TriggerCursor> | undefined {
+    if (!identifier(triggerId, 200)) throw new EventTriggerStoreError('invalid-input', 'triggerId is invalid')
+    const row = this.database.prepare('SELECT cursor_json FROM trigger_cursor WHERE trigger_id = ?')
+      .get(triggerId) as { cursor_json: string } | undefined
+    if (row === undefined) return undefined
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(row.cursor_json)
+    } catch {
+      throw new EventTriggerStoreError('invalid-schema', 'trigger cursor is malformed')
+    }
+    return normalizeTriggerCursor(parsed, 'invalid-schema')
+  }
+
+  setTriggerCursor(triggerId: string, cursor: TriggerCursor | undefined, updatedAt = this.now()): void {
+    if (!identifier(triggerId, 200)) throw new EventTriggerStoreError('invalid-input', 'triggerId is invalid')
+    validTime(updatedAt, 'updatedAt')
+    const normalized = normalizeTriggerCursor(cursor, 'invalid-input')
+    this.transaction(() => {
+      if (normalized === undefined) {
+        this.database.prepare('DELETE FROM trigger_cursor WHERE trigger_id = ?').run(triggerId)
+      } else {
+        this.writeTriggerCursor(triggerId, normalized, updatedAt)
+      }
+    })
+  }
+
+  private writeTriggerCursor(triggerId: string, cursor: Readonly<TriggerCursor>, updatedAt: number): void {
+    this.database.prepare(`
+      INSERT INTO trigger_cursor(trigger_id, cursor_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(trigger_id) DO UPDATE SET
+        cursor_json = excluded.cursor_json,
+        updated_at = excluded.updated_at
+    `).run(triggerId, JSON.stringify(cursor), updatedAt)
   }
 
   acceptWebhook(input: {

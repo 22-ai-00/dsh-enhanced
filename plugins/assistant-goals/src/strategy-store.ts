@@ -5,22 +5,54 @@ import type { GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
 
 export type StrategyScope = GoalScope
-export type StrategyKind = 'investigate' | 'review' | 'compare'
+export type StrategyKind = 'investigate' | 'review' | 'compare' | 'experiment' | 'subagent'
+export type StrategyRouteMode = 'direct' | StrategyKind
+export type StrategyRequestedKind = 'auto' | StrategyKind
+export type StrategyTaskDifficulty = 'trivial' | 'moderate' | 'complex'
+export type StrategyFailureType = 'none' | 'tool-failure' | 'reasoning-failure' | 'unknown-execution'
+
+export interface StrategyRoutingSummary {
+  difficulty: StrategyTaskDifficulty
+  failureType: StrategyFailureType
+  selectedStrategy: StrategyRouteMode
+  expectedNetBenefit: number
+  estimatedCostCalls: number
+  rationale: string
+}
+
+export interface StrategyExperimentIntent {
+  allowedTools: readonly string[]
+  maxToolCalls: number
+  maxModelCalls: number
+  workspaceWriteAllowed: boolean
+}
 
 export interface StrategyIntent {
   id: string; goalId: string; parentRunId: string; parentSessionId: string; definitionVersion: number; definitionDigest: string
-  scope: GoalScope; kind: StrategyKind; requestDigest: string; provider: string; model: string; maxChildren: number; maxDurationMs: number; createdAt: number; expiresAt: number
+  scope: GoalScope; kind: StrategyRouteMode; requestDigest: string; provider: string; model: string; maxChildren: number; maxDurationMs: number; createdAt: number; expiresAt: number
+  requestedKind?: StrategyRequestedKind
+  routing?: StrategyRoutingSummary
+  experiment?: StrategyExperimentIntent
 }
+
+export type StrategyOutcome = 'advice' | 'experiment' | 'direct-recommended' | 'execution-failed' | 'cancelled' | 'unknown'
 
 export interface StrategyRecord {
   intent: StrategyIntent; state: 'prepared' | 'starting' | 'settled' | 'unknown'; version: number
   children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics?: StrategyChildDiagnostics }>
-  completedAt?: number; outcome?: 'advice' | 'execution-failed' | 'cancelled' | 'unknown'; outputDigest?: string
+  completedAt?: number; outcome?: StrategyOutcome; outputDigest?: string
   terminationReason?: StrategyTerminationReason
 }
-export interface StrategyChildDiagnostics { toolRejections: number; output: 'not-observed' | 'accepted' | 'empty-or-oversized'; failure?: StrategyFailure }
+export interface StrategyChildDiagnostics {
+  toolRejections: number
+  output: 'not-observed' | 'accepted' | 'empty-or-oversized'
+  failure?: StrategyFailure
+  toolCalls?: number
+  modelCalls?: number
+  executedTools?: readonly string[]
+}
 export interface StrategyFailure { stage: 'admission' | 'request-limit' | 'meter' | 'reserve' | 'stream' | 'usage' | 'settlement'; dispatched: boolean }
-export type StrategyTerminationReason = 'deadline' | 'parent-authority-changed' | 'cancelled' | 'execution-failed' | 'unconfirmed-stop' | 'completed' | 'recovered-unknown' | 'unknown'
+export type StrategyTerminationReason = 'deadline' | 'parent-authority-changed' | 'cancelled' | 'execution-failed' | 'unconfirmed-stop' | 'completed' | 'skipped-direct' | 'recovered-unknown' | 'unknown'
 
 /**
  * Read-only repetition view for one advice *request* within a goal-definition
@@ -54,15 +86,39 @@ export interface StrategyAdviceDefinitionSummary {
   requests: readonly StrategyAdviceRequestRepetition[]
 }
 
+export interface StrategyModeTelemetry {
+  readonly total: number
+  readonly succeeded: number
+  readonly failedOrUnknown: number
+  readonly avgDurationMs: number
+  readonly avgModelCalls: number
+  readonly avgToolCalls: number
+}
+
+export interface StrategyOutcomeTelemetry {
+  readonly totalRuns: number
+  readonly adviceRuns: number
+  readonly experimentRuns: number
+  readonly directRecommendedRuns: number
+  readonly failedOrUnknownRuns: number
+  readonly byKind: Readonly<Record<StrategyRouteMode, StrategyModeTelemetry>>
+}
+
 type Row = { id: string; intent_json: string; state: string; version: number; children_json: string; completed_at: number | null; outcome: string | null; output_digest: string | null; termination_reason: string | null; scope_key: string; goal_id: string; created_at: number }
-type Settlement = { children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: StrategyChildDiagnostics }>; outcome: 'advice' | 'execution-failed' | 'cancelled' | 'unknown'; outputDigest?: string; quiescent: boolean; terminationReason: StrategyTerminationReason }
+type Settlement = { children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: StrategyChildDiagnostics }>; outcome: StrategyOutcome; outputDigest?: string; quiescent: boolean; terminationReason: StrategyTerminationReason }
 
 const idPattern = /^[A-Za-z0-9_.:-]{1,512}$/u
 const digestPattern = /^[a-f0-9]{64}$/u
 const states = new Set<StrategyRecord['state']>(['prepared', 'starting', 'settled', 'unknown'])
-const outcomes = new Set<NonNullable<StrategyRecord['outcome']>>(['advice', 'execution-failed', 'cancelled', 'unknown'])
-const terminationReasons = new Set<StrategyTerminationReason>(['deadline', 'parent-authority-changed', 'cancelled', 'execution-failed', 'unconfirmed-stop', 'completed', 'recovered-unknown', 'unknown'])
+const routeModes = new Set<StrategyRouteMode>(['direct', 'investigate', 'review', 'compare', 'experiment', 'subagent'])
+const requestedKinds = new Set<StrategyRequestedKind>(['auto', 'investigate', 'review', 'compare', 'experiment', 'subagent'])
+const difficulties = new Set<StrategyTaskDifficulty>(['trivial', 'moderate', 'complex'])
+const failureTypes = new Set<StrategyFailureType>(['none', 'tool-failure', 'reasoning-failure', 'unknown-execution'])
+const outcomes = new Set<StrategyOutcome>(['advice', 'experiment', 'direct-recommended', 'execution-failed', 'cancelled', 'unknown'])
+const terminationReasons = new Set<StrategyTerminationReason>(['deadline', 'parent-authority-changed', 'cancelled', 'execution-failed', 'unconfirmed-stop', 'completed', 'skipped-direct', 'recovered-unknown', 'unknown'])
 const failureStages = new Set<StrategyFailure['stage']>(['admission', 'request-limit', 'meter', 'reserve', 'stream', 'usage', 'settlement'])
+const baseIntentKeys = ['id', 'goalId', 'parentRunId', 'parentSessionId', 'definitionVersion', 'definitionDigest', 'scope', 'kind', 'requestDigest', 'provider', 'model', 'maxChildren', 'maxDurationMs', 'createdAt', 'expiresAt'] as const
+const optionalIntentKeys = new Set(['requestedKind', 'routing', 'experiment'])
 function fail(code: ConstructorParameters<typeof GoalStoreError>[0]): never { throw new GoalStoreError(code) }
 const parse = (value: string): unknown => { try { return JSON.parse(value) } catch { return fail('schema') } }
 const same = (left: unknown, right: unknown): boolean => acceptanceDigest(left) === acceptanceDigest(right)
@@ -71,6 +127,7 @@ const clone = <T>(value: T): T => freeze(JSON.parse(JSON.stringify(value)) as T)
 const text = (value: unknown, maximum = 512): value is string => typeof value === 'string' && value.length > 0 && value.length <= maximum
 const time = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const positive = (value: unknown, maximum = Number.MAX_SAFE_INTEGER): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= maximum
+const nonNegativeInt = (value: unknown, maximum = 1_000_000): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum
 
 function scopeInput(value: unknown): GoalScope {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 5) fail('invalid-input')
@@ -79,28 +136,66 @@ function scopeInput(value: unknown): GoalScope {
   return clone({ principalId: scope.principalId, principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion, workspace: scope.workspace, preset: scope.preset })
 }
 
+function routingInput(value: unknown): StrategyRoutingSummary {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid-input')
+  const keys = Object.keys(value)
+  if (!same(keys.slice().sort(), ['difficulty', 'estimatedCostCalls', 'expectedNetBenefit', 'failureType', 'rationale', 'selectedStrategy'])) fail('invalid-input')
+  const input = value as StrategyRoutingSummary
+  if (!difficulties.has(input.difficulty) || !failureTypes.has(input.failureType) || !routeModes.has(input.selectedStrategy)
+    || typeof input.expectedNetBenefit !== 'number' || !Number.isFinite(input.expectedNetBenefit)
+    || typeof input.estimatedCostCalls !== 'number' || !Number.isFinite(input.estimatedCostCalls) || input.estimatedCostCalls < 0
+    || !text(input.rationale, 512)) fail('invalid-input')
+  return { difficulty: input.difficulty, failureType: input.failureType, selectedStrategy: input.selectedStrategy, expectedNetBenefit: input.expectedNetBenefit, estimatedCostCalls: input.estimatedCostCalls, rationale: input.rationale }
+}
+
+function experimentIntentInput(value: unknown): StrategyExperimentIntent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid-input')
+  const keys = Object.keys(value)
+  if (!same(keys.slice().sort(), ['allowedTools', 'maxModelCalls', 'maxToolCalls', 'workspaceWriteAllowed'])) fail('invalid-input')
+  const input = value as StrategyExperimentIntent
+  if (!Array.isArray(input.allowedTools) || input.allowedTools.length > 32 || !input.allowedTools.every(item => text(item, 128))
+    || !nonNegativeInt(input.maxToolCalls, 64) || !positive(input.maxModelCalls, 32) || typeof input.workspaceWriteAllowed !== 'boolean') fail('invalid-input')
+  return { allowedTools: [...input.allowedTools], maxToolCalls: input.maxToolCalls, maxModelCalls: input.maxModelCalls, workspaceWriteAllowed: input.workspaceWriteAllowed }
+}
+
 function intentInput(value: unknown): StrategyIntent {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 15) fail('invalid-input')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid-input')
+  const keys = Object.keys(value)
+  if (!baseIntentKeys.every(key => keys.includes(key)) || keys.some(key => !(baseIntentKeys as readonly string[]).includes(key) && !optionalIntentKeys.has(key))) fail('invalid-input')
   const input = value as StrategyIntent
   if (![input.id, input.goalId, input.parentRunId, input.parentSessionId].every(item => typeof item === 'string' && idPattern.test(item))
     || !positive(input.definitionVersion, 1_000_000_000) || !digestPattern.test(input.definitionDigest) || !digestPattern.test(input.requestDigest)
-    || !(['investigate', 'review', 'compare'] as const).includes(input.kind) || !text(input.provider) || !text(input.model)
-    || !positive(input.maxChildren, 2) || !positive(input.maxDurationMs, 300_000) || !time(input.createdAt) || !time(input.expiresAt)
+    || !routeModes.has(input.kind) || !text(input.provider) || !text(input.model)
+    || (input.kind === 'direct' ? input.maxChildren !== 0 : !positive(input.maxChildren, 2))
+    || !positive(input.maxDurationMs, 300_000) || !time(input.createdAt) || !time(input.expiresAt)
     || input.expiresAt <= input.createdAt || input.expiresAt - input.createdAt > input.maxDurationMs) fail('invalid-input')
+  if (input.requestedKind !== undefined && !requestedKinds.has(input.requestedKind)) fail('invalid-input')
   const scope = scopeInput(input.scope)
-  return clone({ id: input.id, goalId: input.goalId, parentRunId: input.parentRunId, parentSessionId: input.parentSessionId, definitionVersion: input.definitionVersion, definitionDigest: input.definitionDigest, scope, kind: input.kind, requestDigest: input.requestDigest, provider: input.provider, model: input.model, maxChildren: input.maxChildren, maxDurationMs: input.maxDurationMs, createdAt: input.createdAt, expiresAt: input.expiresAt })
+  const routing = input.routing === undefined ? undefined : routingInput(input.routing)
+  const experiment = input.experiment === undefined ? undefined : experimentIntentInput(input.experiment)
+  return clone({ id: input.id, goalId: input.goalId, parentRunId: input.parentRunId, parentSessionId: input.parentSessionId, definitionVersion: input.definitionVersion, definitionDigest: input.definitionDigest, scope, kind: input.kind, requestDigest: input.requestDigest, provider: input.provider, model: input.model, maxChildren: input.maxChildren, maxDurationMs: input.maxDurationMs, createdAt: input.createdAt, expiresAt: input.expiresAt,
+    ...(input.requestedKind === undefined ? {} : { requestedKind: input.requestedKind }),
+    ...(routing === undefined ? {} : { routing }),
+    ...(experiment === undefined ? {} : { experiment }) })
 }
 
 function diagnosticsInput(value: unknown): StrategyChildDiagnostics {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || ![2, 3].includes(Object.keys(value).length)) fail('invalid-input')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('invalid-input')
+  const keys = Object.keys(value)
+  if (!keys.includes('toolRejections') || !keys.includes('output')
+    || keys.some(key => !['toolRejections', 'output', 'failure', 'toolCalls', 'modelCalls', 'executedTools'].includes(key))) fail('invalid-input')
   const input = value as StrategyChildDiagnostics
-  if (!Object.keys(input).every(key => key === 'toolRejections' || key === 'output' || key === 'failure')
-    || !Object.keys(input).includes('toolRejections') || !Object.keys(input).includes('output')
-    || !Number.isSafeInteger(input.toolRejections) || input.toolRejections < 0 || input.toolRejections > 1_000_000
-    || !['not-observed', 'accepted', 'empty-or-oversized'].includes(input.output)) fail('invalid-input')
+  if (!nonNegativeInt(input.toolRejections) || !['not-observed', 'accepted', 'empty-or-oversized'].includes(input.output)) fail('invalid-input')
   if (input.failure !== undefined && (!input.failure || typeof input.failure !== 'object' || Array.isArray(input.failure)
     || !same(Object.keys(input.failure).sort(), ['dispatched', 'stage']) || !failureStages.has(input.failure.stage) || typeof input.failure.dispatched !== 'boolean')) fail('invalid-input')
-  return clone({ toolRejections: input.toolRejections, output: input.output, ...(input.failure === undefined ? {} : { failure: { stage: input.failure.stage, dispatched: input.failure.dispatched } }) })
+  if (input.toolCalls !== undefined && !nonNegativeInt(input.toolCalls)) fail('invalid-input')
+  if (input.modelCalls !== undefined && !nonNegativeInt(input.modelCalls)) fail('invalid-input')
+  if (input.executedTools !== undefined && (!Array.isArray(input.executedTools) || input.executedTools.length > 64 || !input.executedTools.every(item => text(item, 128)))) fail('invalid-input')
+  return clone({ toolRejections: input.toolRejections, output: input.output,
+    ...(input.failure === undefined ? {} : { failure: { stage: input.failure.stage, dispatched: input.failure.dispatched } }),
+    ...(input.toolCalls === undefined ? {} : { toolCalls: input.toolCalls }),
+    ...(input.modelCalls === undefined ? {} : { modelCalls: input.modelCalls }),
+    ...(input.executedTools === undefined ? {} : { executedTools: [...input.executedTools] }) })
 }
 
 function childrenInput(value: unknown, maximum: number): Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics?: StrategyChildDiagnostics }> {
@@ -132,7 +227,7 @@ function record(row: Row): StrategyRecord {
   if (!states.has(row.state as StrategyRecord['state']) || !positive(row.version, 1_000_000_000) || row.scope_key !== acceptanceCanonicalJson(intent.scope) || row.goal_id !== intent.goalId || row.created_at !== intent.createdAt) fail('schema')
   const children = childrenInput(parse(row.children_json), intent.maxChildren)
   const completedAt = row.completed_at === null ? undefined : time(row.completed_at) ? row.completed_at : fail('schema')
-  const outcome = row.outcome === null ? undefined : outcomes.has(row.outcome as NonNullable<StrategyRecord['outcome']>) ? row.outcome as NonNullable<StrategyRecord['outcome']> : fail('schema')
+  const outcome = row.outcome === null ? undefined : outcomes.has(row.outcome as StrategyOutcome) ? row.outcome as StrategyOutcome : fail('schema')
   const outputDigest = row.output_digest === null ? undefined : digestPattern.test(row.output_digest) ? row.output_digest : fail('schema')
   const terminationReason = row.termination_reason === null ? undefined : terminationReasons.has(row.termination_reason as StrategyTerminationReason) ? row.termination_reason as StrategyTerminationReason : fail('schema')
   if (row.state === 'prepared' && (children.length !== 0 || completedAt !== undefined || outcome !== undefined || outputDigest !== undefined || terminationReason !== undefined)) fail('schema')
@@ -141,6 +236,8 @@ function record(row: Row): StrategyRecord {
   if (row.state === 'unknown' && outcome !== 'unknown') fail('schema')
   return freeze({ intent, state: row.state as StrategyRecord['state'], version: row.version, children, ...(completedAt === undefined ? {} : { completedAt }), ...(outcome === undefined ? {} : { outcome }), ...(outputDigest === undefined ? {} : { outputDigest }), ...(terminationReason === undefined ? {} : { terminationReason }) })
 }
+
+const V3_TABLE_SQL = `(id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','starting','settled','unknown')), version INTEGER NOT NULL, children_json TEXT NOT NULL, completed_at INTEGER, outcome TEXT CHECK(outcome IN ('advice','experiment','direct-recommended','execution-failed','cancelled','unknown')), output_digest TEXT, scope_key TEXT NOT NULL, goal_id TEXT NOT NULL, created_at INTEGER NOT NULL, termination_reason TEXT CHECK(termination_reason IN ('deadline','parent-authority-changed','cancelled','execution-failed','unconfirmed-stop','completed','skipped-direct','recovered-unknown','unknown'))) STRICT`
 
 /** Private durable ledger. A recovered intent is terminally unknown and is never replayed. */
 export class GoalStrategyStore {
@@ -153,34 +250,40 @@ export class GoalStrategyStore {
       const version = (this.#database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
       const tables = (this.#database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
       if (version === 0 && tables.length === 0) this.#database.exec(`BEGIN IMMEDIATE;
-        CREATE TABLE goal_strategy_records (id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','starting','settled','unknown')), version INTEGER NOT NULL, children_json TEXT NOT NULL, completed_at INTEGER, outcome TEXT CHECK(outcome IN ('advice','execution-failed','cancelled','unknown')), output_digest TEXT, scope_key TEXT NOT NULL, goal_id TEXT NOT NULL, created_at INTEGER NOT NULL, termination_reason TEXT CHECK(termination_reason IN ('deadline','parent-authority-changed','cancelled','execution-failed','unconfirmed-stop','completed','recovered-unknown','unknown'))) STRICT;
+        CREATE TABLE goal_strategy_records ${V3_TABLE_SQL};
         CREATE INDEX goal_strategy_scope_goal_created ON goal_strategy_records(scope_key, goal_id, created_at DESC, id ASC);
-        PRAGMA user_version = 2; COMMIT;`)
-      else if (version === 1 && same(tables, ['goal_strategy_records'])) {
+        PRAGMA user_version = 3; COMMIT;`)
+      else if ((version === 1 || version === 2) && same(tables, ['goal_strategy_records'])) {
         this.#database.exec('BEGIN IMMEDIATE;')
         try {
-          this.#validate(true)
+          this.#validate(version === 1)
+          const terminationExpr = version === 1 ? "CASE WHEN state IN ('settled', 'unknown') THEN 'unknown' ELSE NULL END" : 'termination_reason'
           this.#database.exec(`
-        ALTER TABLE goal_strategy_records ADD COLUMN termination_reason TEXT CHECK(termination_reason IN ('deadline','parent-authority-changed','cancelled','execution-failed','unconfirmed-stop','completed','recovered-unknown','unknown'));
-        UPDATE goal_strategy_records SET termination_reason = CASE WHEN state IN ('settled', 'unknown') THEN 'unknown' ELSE NULL END;
-        PRAGMA user_version = 2;`)
-          this.#validate()
+            CREATE TABLE goal_strategy_records_v3 ${V3_TABLE_SQL};
+            INSERT INTO goal_strategy_records_v3(id, intent_json, state, version, children_json, completed_at, outcome, output_digest, scope_key, goal_id, created_at, termination_reason)
+            SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest, scope_key, goal_id, created_at, ${terminationExpr}
+            FROM goal_strategy_records;
+            DROP TABLE goal_strategy_records;
+            ALTER TABLE goal_strategy_records_v3 RENAME TO goal_strategy_records;
+            CREATE INDEX goal_strategy_scope_goal_created ON goal_strategy_records(scope_key, goal_id, created_at DESC, id ASC);
+            PRAGMA user_version = 3;`)
+          this.#validate(false)
           this.#database.exec('COMMIT;')
         } catch (error) { try { this.#database.exec('ROLLBACK;') } catch {}; throw error }
       }
-      else if (version !== 2 || !same(tables, ['goal_strategy_records'])) fail('schema')
-      this.#validate()
+      else if (version !== 3 || !same(tables, ['goal_strategy_records'])) fail('schema')
+      this.#validate(false)
       if (path !== ':memory:') prepareGoalStoreDatabaseFile(path)
     } catch (error) { this.#database.close(); throw error }
   }
-  #validate(legacy = false): void {
+  #validate(legacyV1 = false): void {
     const columns = (this.#database.prepare('PRAGMA table_info(goal_strategy_records)').all() as Array<{ name: string }>).map(row => row.name)
     const schema = this.#database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'goal_strategy_records'").get() as { sql: string } | undefined
-    if (!schema || !same(columns, ['id', 'intent_json', 'state', 'version', 'children_json', 'completed_at', 'outcome', 'output_digest', 'scope_key', 'goal_id', 'created_at', ...(legacy ? [] : ['termination_reason'])]) || !/\bSTRICT\b/u.test(schema.sql)) fail('schema')
+    if (!schema || !same(columns, ['id', 'intent_json', 'state', 'version', 'children_json', 'completed_at', 'outcome', 'output_digest', 'scope_key', 'goal_id', 'created_at', ...(legacyV1 ? [] : ['termination_reason'])]) || !/\bSTRICT\b/u.test(schema.sql)) fail('schema')
     const index = this.#database.prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'goal_strategy_scope_goal_created'").get() as { name: string } | undefined
     if (!index) fail('schema')
     const check = this.#database.prepare('PRAGMA quick_check').get() as { quick_check: string }; if (check.quick_check !== 'ok') fail('schema')
-    for (const row of this.#database.prepare(`SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest, ${legacy ? "CASE WHEN state IN ('settled', 'unknown') THEN 'unknown' ELSE NULL END AS termination_reason" : 'termination_reason'}, scope_key, goal_id, created_at FROM goal_strategy_records`).all() as Row[]) { const value = record(row); if (value.intent.id !== row.id) fail('schema') }
+    for (const row of this.#database.prepare(`SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest, ${legacyV1 ? "CASE WHEN state IN ('settled', 'unknown') THEN 'unknown' ELSE NULL END AS termination_reason" : 'termination_reason'}, scope_key, goal_id, created_at FROM goal_strategy_records`).all() as Row[]) { const value = record(row); if (value.intent.id !== row.id) fail('schema') }
   }
   #get(id: string): StrategyRecord | undefined {
     const row = this.#database.prepare('SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest, termination_reason, scope_key, goal_id, created_at FROM goal_strategy_records WHERE id = ?').get(id) as Row | undefined
@@ -219,7 +322,7 @@ export class GoalStrategyStore {
     const value = settlementInput(input, found.intent.maxChildren)
     if (found.state !== 'starting' || found.version !== expectedVersion || now < found.intent.createdAt) fail('conflict')
     const bound = new Set(found.children.map(child => child.sessionId)); const settled = new Set(value.children.map(child => child.sessionId))
-    if (bound.size !== settled.size || [...bound].some(sessionId => !settled.has(sessionId)) || (bound.size === 0 && value.outcome === 'advice')) fail('conflict')
+    if (bound.size !== settled.size || [...bound].some(sessionId => !settled.has(sessionId)) || (bound.size === 0 && (value.outcome === 'advice' || value.outcome === 'experiment'))) fail('conflict')
     const incomplete = value.children.some(child => child.stopReason === 'pending' || !child.quiescent)
     const state = value.quiescent && !incomplete && value.outcome !== 'unknown' ? 'settled' : 'unknown'
     const outcome = state === 'settled' ? value.outcome : 'unknown'
@@ -307,6 +410,96 @@ export class GoalStrategyStore {
     }).sort((left, right) => right.adviceRuns - left.adviceRuns
       || left.situation.localeCompare(right.situation)))
   }
+
+  /**
+   * Read-only telemetry aggregation of settled and unknown strategy runs for
+   * coordination cost/benefit optimization. Emits only counts and averages;
+   * never returns plaintext.
+   */
+  summarizeStrategyOutcomes(scope: StrategyScope, options: { definitionDigest?: string; limit?: number } = {}): StrategyOutcomeTelemetry {
+    const key = acceptanceCanonicalJson(scopeInput(scope))
+    const limit = options.limit ?? 100
+    if (!positive(limit, 200)) fail('invalid-input')
+    if (options.definitionDigest !== undefined && !digestPattern.test(options.definitionDigest)) fail('invalid-input')
+    const rows = this.#database.prepare(`
+      SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest,
+        termination_reason, scope_key, goal_id, created_at
+      FROM goal_strategy_records
+      WHERE scope_key = ? AND state IN ('settled', 'unknown')
+      ORDER BY completed_at DESC, id DESC
+      LIMIT ?
+    `).all(key, limit) as Row[]
+
+    const empty = () => ({ total: 0, succeeded: 0, failedOrUnknown: 0, durationSum: 0, modelCallsSum: 0, toolCallsSum: 0 })
+    const buckets: Record<StrategyRouteMode, ReturnType<typeof empty>> = {
+      direct: empty(), investigate: empty(), review: empty(), compare: empty(), experiment: empty(), subagent: empty(),
+    }
+    let totalRuns = 0
+    let adviceRuns = 0
+    let experimentRuns = 0
+    let directRecommendedRuns = 0
+    let failedOrUnknownRuns = 0
+
+    for (const row of rows) {
+      const value = record(row)
+      if (options.definitionDigest !== undefined && value.intent.definitionDigest !== options.definitionDigest) continue
+      if (value.completedAt === undefined || value.outcome === undefined) continue
+      totalRuns += 1
+      const bucket = buckets[value.intent.kind]
+      bucket.total += 1
+      bucket.durationSum += Math.max(0, value.completedAt - value.intent.createdAt)
+      let modelCalls = 0
+      let toolCalls = 0
+      for (const child of value.children) {
+        modelCalls += child.diagnostics?.modelCalls ?? (child.stopReason === 'completed' ? 1 : 0)
+        toolCalls += child.diagnostics?.toolCalls ?? 0
+      }
+      bucket.modelCallsSum += modelCalls
+      bucket.toolCallsSum += toolCalls
+      if (value.outcome === 'advice') {
+        adviceRuns += 1
+        bucket.succeeded += 1
+      } else if (value.outcome === 'experiment') {
+        experimentRuns += 1
+        bucket.succeeded += 1
+      } else if (value.outcome === 'direct-recommended') {
+        directRecommendedRuns += 1
+        bucket.succeeded += 1
+      } else {
+        failedOrUnknownRuns += 1
+        bucket.failedOrUnknown += 1
+      }
+    }
+
+    const finalize = (mode: StrategyRouteMode): StrategyModeTelemetry => {
+      const bucket = buckets[mode]
+      return freeze({
+        total: bucket.total,
+        succeeded: bucket.succeeded,
+        failedOrUnknown: bucket.failedOrUnknown,
+        avgDurationMs: bucket.total === 0 ? 0 : Math.round(bucket.durationSum / bucket.total),
+        avgModelCalls: bucket.total === 0 ? 0 : Number((bucket.modelCallsSum / bucket.total).toFixed(3)),
+        avgToolCalls: bucket.total === 0 ? 0 : Number((bucket.toolCallsSum / bucket.total).toFixed(3)),
+      })
+    }
+
+    return freeze({
+      totalRuns,
+      adviceRuns,
+      experimentRuns,
+      directRecommendedRuns,
+      failedOrUnknownRuns,
+      byKind: freeze({
+        direct: finalize('direct'),
+        investigate: finalize('investigate'),
+        review: finalize('review'),
+        compare: finalize('compare'),
+        experiment: finalize('experiment'),
+        subagent: finalize('subagent'),
+      }),
+    })
+  }
+
   recoverIncomplete(now: number): void {
     if (!time(now)) fail('invalid-input')
     this.#write("UPDATE goal_strategy_records SET state = 'unknown', version = version + 1, completed_at = ?, outcome = 'unknown', output_digest = NULL, termination_reason = 'recovered-unknown' WHERE state IN ('prepared', 'starting')", now)

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import type {
   AutomationRecord,
   HostAutomationDefinition,
@@ -12,6 +12,8 @@ import type {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RECOVERY_CATALOG_DIGEST } from '../src/catalog.ts'
 import type { Config, RecoveryJobConfig } from '../src/config.ts'
+import { inspectRecoveryOperatorSnapshot } from '../src/operator.ts'
+import { AssistantCompensationService } from '../src/compensation-service.ts'
 import {
   AssistantRecoveryService,
   recoveryAutomationId,
@@ -594,4 +596,501 @@ describe('AssistantRecoveryService', () => {
     expect(automations.unregister).toHaveBeenCalledOnce()
     expect(automations.executor).toBeUndefined()
   })
+
+  it('runs concurrent executeCompensation alongside gated 7-service preview and drains cleanly on whenIdle()', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-recovery-service-'))
+    roots.push(root)
+    const automations = new FakeAutomations()
+    let releasePreview!: () => void
+    const previewGate = new Promise<void>((resolve) => { releasePreview = resolve })
+    const originalRunSystemDry = automations.runSystemDry.getMockImplementation()!
+    automations.runSystemDry.mockImplementationOnce(async (input) => {
+      await previewGate
+      return await originalRunSystemDry(input)
+    })
+
+    const ctx = context(automations)
+    await ctx.plugin(AssistantRecoveryService, config(root, 'preview'))
+
+    const compPort = ctx.get('assistantCompensation', false)
+    expect(compPort).toBeDefined()
+
+    let releaseAuth!: (allowed: boolean) => void
+    const authGate = new Promise<boolean>((resolve) => { releaseAuth = resolve })
+    let releaseWork!: () => void
+    const workGate = new Promise<void>((resolve) => { releaseWork = resolve })
+    let captureCount = 0
+    let compensateCount = 0
+
+    ctx.assistantRecovery.registerCompensator({
+      kind: 'external.preview-coexist',
+      category: 'revert',
+      capturePreimage: () => {
+        captureCount += 1
+        return { snapshot: captureCount }
+      },
+      compensate: async ({ idempotencyKey }) => {
+        compensateCount += 1
+        if (idempotencyKey === 'coalesce-key') {
+          await workGate
+        }
+        return { status: 'succeeded', resultCode: 'reverted', receipt: { key: idempotencyKey } }
+      },
+    })
+
+    const pCoalesce1 = compPort!.executeCompensation(
+      {
+        idempotencyKey: 'coalesce-key',
+        kind: 'external.preview-coexist',
+        target: { op: 'coalesce' },
+        forwardActionId: 'fwd-coalesce',
+      },
+      { authorize: () => authGate },
+    )
+    const pCoalesce2 = compPort!.executeCompensation({
+      idempotencyKey: 'coalesce-key',
+      kind: 'external.preview-coexist',
+      target: { op: 'coalesce' },
+      forwardActionId: 'fwd-coalesce',
+    })
+    const pDistinct = compPort!.executeCompensation({
+      idempotencyKey: 'distinct-key',
+      kind: 'external.preview-coexist',
+      target: { op: 'distinct' },
+      forwardActionId: 'fwd-distinct',
+    })
+
+    releaseAuth(true)
+    const distinctRes = await pDistinct
+    expect(distinctRes.status).toBe('succeeded')
+
+    const pConflict = compPort!.executeCompensation({
+      idempotencyKey: 'conflict-key',
+      kind: 'external.preview-coexist',
+      target: { op: 'distinct' },
+      forwardActionId: 'fwd-distinct',
+    })
+
+    releaseWork()
+    releasePreview()
+    await ctx.assistantRecovery.whenIdle()
+
+    const [c1, c2] = await Promise.all([pCoalesce1, pCoalesce2])
+    expect(c1.id).toBe(c2.id)
+    expect(c1.status).toBe('succeeded')
+    expect(c2.status).toBe('succeeded')
+    expect(captureCount).toBe(2) // once for coalesce-key, once for distinct-key
+    expect(compensateCount).toBe(2)
+
+    await expect(pConflict).rejects.toMatchObject({ code: 'conflict' })
+    expect(ctx.assistantRecovery.listCompensations()).toHaveLength(2)
+    expect(ctx.assistantRecovery.health()).toMatchObject({
+      bootstrapStatus: 'succeeded',
+      bootstrapAttestationValid: true,
+    })
+  })
+
+  it('disposes ownerCtx handlers, aborts pre/post-dispatch calls on ctx.fiber.restart(), and replays unknown post-restart', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-recovery-service-'))
+    roots.push(root)
+    const dbPath = join(root, 'recovery.sqlite')
+    const automations = new FakeAutomations()
+    const ctx = context(automations)
+    await ctx.plugin(AssistantRecoveryService, { databasePath: dbPath, jobs: [] })
+    await ctx.assistantRecovery.whenIdle()
+
+    const childFork = ctx.plugin((childCtx) => {
+      ctx.assistantRecovery.registerCompensator(
+        {
+          kind: 'child.owned',
+          category: 'custom',
+          compensate: () => ({ status: 'succeeded', resultCode: 'ok' }),
+        },
+        { ownerCtx: childCtx },
+      )
+    })
+    await expect.poll(() => ctx.assistantRecovery.hasCompensator('child.owned')).toBe(true)
+    await childFork.dispose()
+    expect(ctx.assistantRecovery.hasCompensator('child.owned')).toBe(false)
+
+    let preStarted!: () => void
+    const preGate = new Promise<void>((resolve) => { preStarted = resolve })
+    let postStarted!: () => void
+    const postGate = new Promise<void>((resolve) => { postStarted = resolve })
+
+    ctx.assistantRecovery.registerCompensator({
+      kind: 'comp.pre-hang',
+      category: 'revert',
+      capturePreimage: () => {
+        preStarted()
+        return new Promise(() => {})
+      },
+      compensate: () => ({ status: 'succeeded', resultCode: 'unused' }),
+    })
+    const postCompensateSpy = vi.fn(() => {
+      postStarted()
+      return new Promise<{ status: 'succeeded'; resultCode: string }>(() => {})
+    })
+    ctx.assistantRecovery.registerCompensator({
+      kind: 'comp.post-hang',
+      category: 'revert',
+      compensate: postCompensateSpy,
+    })
+
+    const recoveryRef = ctx.assistantRecovery
+    const compPort = ctx.get('assistantCompensation', false)!
+    const prePromise = compPort.executeCompensation({
+      idempotencyKey: 'pre-dispose-key',
+      kind: 'comp.pre-hang',
+      target: { id: 'pre' },
+    })
+    const postPromise = compPort.executeCompensation({
+      idempotencyKey: 'post-dispose-key',
+      kind: 'comp.post-hang',
+      target: { id: 'post' },
+    })
+
+    await Promise.all([preGate, postGate])
+
+    let preError: unknown
+    const preSettled = prePromise.catch((error: unknown) => { preError = error })
+    const restartPromise = ctx.fiber.restart()
+    contexts.splice(contexts.indexOf(ctx), 1)
+
+    await expect.poll(() => ctx.get('assistantCompensation', false)).toBeUndefined()
+    await expect(recoveryRef.executeCompensation({
+      idempotencyKey: 'after-dispose-key',
+      kind: 'comp.post-hang',
+      target: { id: 'new' },
+    })).rejects.toMatchObject({ code: 'disposed' })
+
+    const [, postSettled] = await Promise.all([restartPromise, postPromise, preSettled])
+    expect(preError).toMatchObject({ code: 'disposed' })
+    expect(postSettled.status).toBe('unknown')
+    expect(postSettled.resultCode).toBe('authorization-ended-after-dispatch')
+
+    // Re-activate AssistantRecoveryService on the same recovery.sqlite
+    const ctx2 = context(new FakeAutomations())
+    await ctx2.plugin(AssistantRecoveryService, { databasePath: dbPath, jobs: [] })
+    await ctx2.assistantRecovery.whenIdle()
+
+    expect(ctx2.assistantRecovery.getCompensationStatus({ idempotencyKey: 'pre-dispose-key' })).toBeUndefined()
+    expect(ctx2.assistantRecovery.getCompensationStatus({ idempotencyKey: 'post-dispose-key' })).toMatchObject({
+      status: 'unknown',
+      resultCode: 'authorization-ended-after-dispatch',
+    })
+
+    const replaySpy = vi.fn(() => ({ status: 'succeeded' as const, resultCode: 'must-not-replay' }))
+    ctx2.assistantRecovery.registerCompensator({
+      kind: 'comp.post-hang',
+      category: 'revert',
+      compensate: replaySpy,
+    })
+    const replayed = await ctx2.get('assistantCompensation', false)!.executeCompensation({
+      idempotencyKey: 'post-dispose-key',
+      kind: 'comp.post-hang',
+      target: { id: 'post' },
+    })
+    expect(replayed.status).toBe('unknown')
+    expect(replayed.replayed).toBe(true)
+    expect(replaySpy).not.toHaveBeenCalled()
+    expect(inspectRecoveryOperatorSnapshot(dbPath).schemaVersion).toBe(5)
+  })
+
+  it('withdraws assistantCompensation and closes cleanly when an injected dependency restarts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-recovery-service-'))
+    roots.push(root)
+    const dbPath = join(root, 'recovery.sqlite')
+    const automations = new FakeAutomations()
+    const ctx = new Context()
+    contexts.push(ctx)
+
+    class DynamicGoalsService extends Service {
+      constructor(serviceCtx: Context) {
+        super(serviceCtx, 'assistantGoals')
+      }
+      hostSummarizeAdviceByDefinition() {
+        return []
+      }
+    }
+
+    ctx.provide('assistantAutomations' as never, automations as never)
+    ctx.provide('assistantDelivery' as never, {
+      validateOwnerRoute: (input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) =>
+        Object.freeze({
+          receiptVersion: 2 as const,
+          authorityId: input.authorityId,
+          authorityHash: 'f'.repeat(64),
+          principalId: input.principalId,
+          principalRecordId: principalLineage.principalRecordId,
+          principalVersion: principalLineage.principalVersion,
+          workspace: input.workspace,
+          agentPreset: input.agentPreset,
+          bindingVersion: 1,
+          generation: 1,
+        }),
+    } as never)
+    ctx.provide('assistantEvaluation' as never, {
+      health: () => ({ ready: true }),
+      peekPendingProjection: () => undefined,
+      reconcileProjection: async () => ({ evaluationId: 'unused', status: 'recorded' as const, attemptCount: 0 }),
+    } as never)
+    ctx.provide('assistantEvolution' as never, {
+      hostCandidates: () => [], hostGoalDefinitionEpisodes: () => [],
+      hostListRules: () => [], hostRollbackOne: () => {},
+    } as never)
+    ctx.provide('assistantPreferenceLearning' as never, {
+      health: () => ({ ready: true }),
+      hostActivationCandidate: () => undefined,
+      hostActivateOne: () => {},
+      hostMaintainOne: () => ({
+        deletedSignals: 0,
+        replayed: false,
+        ownerGeneration: 1,
+        principalLineageId: principalLineage.principalRecordId,
+        principalLineageVersion: principalLineage.principalVersion,
+      }),
+      hostOwnerFence: () => ({ ownerGeneration: 1, principalLineage }),
+      hostReview: () => ({ hypotheses: [], activeOverlay: undefined }),
+    } as never)
+    ctx.provide('assistantHealth' as never, { hostGlobalSnapshot: () => healthReport() } as never)
+
+    const goalsFork = ctx.plugin(DynamicGoalsService)
+    await ctx.plugin(AssistantRecoveryService, { databasePath: dbPath, jobs: [] })
+    await expect.poll(() => ctx.get('assistantCompensation', false)).toBeDefined()
+    await ctx.assistantRecovery.whenIdle()
+
+    await goalsFork.dispose()
+    await expect.poll(() => ctx.get('assistantCompensation', false)).toBeUndefined()
+    expect(automations.unregister).toHaveBeenCalledOnce()
+    expect(inspectRecoveryOperatorSnapshot(dbPath).schemaVersion).toBe(5)
+  })
+
+  it.each([
+    ['options.authorize', 'initial', 1],
+    ['options.authorize', 'during-capture', 2],
+    ['options.authorize', 'pre-dispatch', 3],
+    ['options.authorize', 'post-dispatch', 4],
+    ['handler.authorize', 'initial', 1],
+    ['handler.authorize', 'during-capture', 2],
+    ['handler.authorize', 'pre-dispatch', 3],
+    ['handler.authorize', 'post-dispatch', 4],
+  ] as const)(
+    'unblocks 7-service AssistantRecoveryService ctx.fiber.restart() when %s stalls in %s phase',
+    async (authSource, phase, stallOnCall) => {
+      const root = mkdtempSync(join(tmpdir(), 'assistant-recovery-service-auth-dispose-'))
+      roots.push(root)
+      const dbPath = join(root, 'recovery.sqlite')
+      const automations = new FakeAutomations()
+      const ctx = context(automations)
+      await ctx.plugin(AssistantRecoveryService, { databasePath: dbPath, jobs: [] })
+      await ctx.assistantRecovery.whenIdle()
+
+      let markStalled!: () => void
+      const stalledGate = new Promise<void>((resolve) => { markStalled = resolve })
+      let authCalls = 0
+      const authorizeFn = (): boolean | Promise<boolean> => {
+        authCalls += 1
+        if (authCalls === stallOnCall) {
+          markStalled()
+          return new Promise<boolean>(() => {})
+        }
+        return true
+      }
+
+      const compensateSpy = vi.fn(() => ({ status: 'succeeded' as const, resultCode: 'ok' }))
+      const kind = `auth.restart.${authSource}.${phase}`
+      ctx.assistantRecovery.registerCompensator({
+        kind,
+        category: 'revert',
+        capturePreimage: () => ({ phase }),
+        ...(authSource === 'handler.authorize' ? { authorize: authorizeFn } : {}),
+        compensate: compensateSpy,
+      })
+
+      const key = `restart-${authSource}-${phase}`
+      const compPort = ctx.get('assistantCompensation', false)!
+      const pending = compPort.executeCompensation(
+        {
+          idempotencyKey: key,
+          kind,
+          target: { phase },
+        },
+        {
+          timeoutMs: 30_000,
+          ...(authSource === 'options.authorize' ? { authorize: authorizeFn } : {}),
+        },
+      )
+
+      let capturedError: unknown
+      const settled = phase === 'post-dispatch'
+        ? pending
+        : pending.catch((error: unknown) => {
+            capturedError = error
+            return undefined
+          })
+
+      await stalledGate
+      await ctx.fiber.restart()
+      contexts.splice(contexts.indexOf(ctx), 1)
+      expect(ctx.get('assistantCompensation', false)).toBeUndefined()
+
+      const result = await settled
+      if (phase === 'post-dispatch') {
+        expect(result).toMatchObject({
+          status: 'unknown',
+          resultCode: 'authorization-ended-after-dispatch',
+        })
+        expect(compensateSpy).toHaveBeenCalledTimes(1)
+      } else {
+        expect(capturedError).toMatchObject({ code: 'disposed' })
+        expect(compensateSpy).not.toHaveBeenCalled()
+      }
+
+      // Re-mount AssistantRecoveryService on the same recovery.sqlite to confirm store.close()
+      // completed cleanly and settled/abandoned rows replay as unknown without re-invocation.
+      const ctx2 = context(new FakeAutomations())
+      await ctx2.plugin(AssistantRecoveryService, { databasePath: dbPath, jobs: [] })
+      await ctx2.assistantRecovery.whenIdle()
+
+      const status = ctx2.assistantRecovery.getCompensationStatus({ idempotencyKey: key })
+      if (phase === 'initial' || phase === 'during-capture') {
+        expect(status).toBeUndefined()
+      } else {
+        const expectedCode = phase === 'pre-dispatch'
+          ? 'authorization-ended-before-dispatch'
+          : 'authorization-ended-after-dispatch'
+        expect(status).toMatchObject({ status: 'unknown', resultCode: expectedCode })
+
+        const replaySpy = vi.fn(() => ({ status: 'succeeded' as const, resultCode: 'must-not-replay' }))
+        ctx2.assistantRecovery.registerCompensator({
+          kind,
+          category: 'revert',
+          compensate: replaySpy,
+        })
+        const replayed = await ctx2.get('assistantCompensation', false)!.executeCompensation({
+          idempotencyKey: key,
+          kind,
+          target: { phase },
+        })
+        expect(replayed.status).toBe('unknown')
+        expect(replayed.replayed).toBe(true)
+        expect(replaySpy).not.toHaveBeenCalled()
+      }
+      expect(inspectRecoveryOperatorSnapshot(dbPath).schemaVersion).toBe(5)
+    },
+  )
+
+  it.each([
+    ['options.authorize', 'initial', 1],
+    ['options.authorize', 'during-capture', 2],
+    ['options.authorize', 'pre-dispatch', 3],
+    ['options.authorize', 'post-dispatch', 4],
+    ['handler.authorize', 'initial', 1],
+    ['handler.authorize', 'during-capture', 2],
+    ['handler.authorize', 'pre-dispatch', 3],
+    ['handler.authorize', 'post-dispatch', 4],
+  ] as const)(
+    'unblocks AssistantCompensationService ctx.fiber.restart() when %s stalls in %s phase',
+    async (authSource, phase, stallOnCall) => {
+      const root = mkdtempSync(join(tmpdir(), 'assistant-comp-service-auth-dispose-'))
+      roots.push(root)
+      const dbPath = join(root, 'comp.sqlite')
+      const ctx = new Context()
+      contexts.push(ctx)
+      await ctx.plugin(AssistantCompensationService, { databasePath: dbPath })
+
+      let markStalled!: () => void
+      const stalledGate = new Promise<void>((resolve) => { markStalled = resolve })
+      let authCalls = 0
+      const authorizeFn = (): boolean | Promise<boolean> => {
+        authCalls += 1
+        if (authCalls === stallOnCall) {
+          markStalled()
+          return new Promise<boolean>(() => {})
+        }
+        return true
+      }
+
+      const compensateSpy = vi.fn(() => ({ status: 'succeeded' as const, resultCode: 'ok' }))
+      const kind = `comp.restart.${authSource}.${phase}`
+      const service = ctx.get('assistantCompensation', false)!
+      service.registerCompensator?.({
+        kind,
+        category: 'revert',
+        capturePreimage: () => ({ phase }),
+        ...(authSource === 'handler.authorize' ? { authorize: authorizeFn } : {}),
+        compensate: compensateSpy,
+      })
+
+      const key = `comp-restart-${authSource}-${phase}`
+      const pending = service.executeCompensation(
+        {
+          idempotencyKey: key,
+          kind,
+          target: { phase },
+        },
+        {
+          timeoutMs: 30_000,
+          ...(authSource === 'options.authorize' ? { authorize: authorizeFn } : {}),
+        },
+      )
+
+      let capturedError: unknown
+      const settled = phase === 'post-dispatch'
+        ? pending
+        : pending.catch((error: unknown) => {
+            capturedError = error
+            return undefined
+          })
+
+      await stalledGate
+      await ctx.fiber.restart()
+      contexts.splice(contexts.indexOf(ctx), 1)
+      expect(ctx.get('assistantCompensation', false)).toBeUndefined()
+
+      const result = await settled
+      if (phase === 'post-dispatch') {
+        expect(result).toMatchObject({
+          status: 'unknown',
+          resultCode: 'authorization-ended-after-dispatch',
+        })
+        expect(compensateSpy).toHaveBeenCalledTimes(1)
+      } else {
+        expect(capturedError).toMatchObject({ code: 'disposed' })
+        expect(compensateSpy).not.toHaveBeenCalled()
+      }
+
+      // Re-mount AssistantCompensationService on the same comp.sqlite to confirm ledger.close()
+      // completed cleanly and pre-dispatch/post-dispatch unknown rows replay with 0 re-invocations.
+      const ctx2 = new Context()
+      contexts.push(ctx2)
+      await ctx2.plugin(AssistantCompensationService, { databasePath: dbPath })
+      const service2 = ctx2.get('assistantCompensation', false)!
+      const status = service2.getCompensationStatus?.({ idempotencyKey: key })
+      if (phase === 'initial' || phase === 'during-capture') {
+        expect(status).toBeUndefined()
+      } else {
+        const expectedCode = phase === 'pre-dispatch'
+          ? 'authorization-ended-before-dispatch'
+          : 'authorization-ended-after-dispatch'
+        expect(status).toMatchObject({ status: 'unknown', resultCode: expectedCode })
+
+        const replaySpy = vi.fn(() => ({ status: 'succeeded' as const, resultCode: 'must-not-replay' }))
+        service2.registerCompensator?.({
+          kind,
+          category: 'revert',
+          compensate: replaySpy,
+        })
+        const replayed = await service2.executeCompensation({
+          idempotencyKey: key,
+          kind,
+          target: { phase },
+        })
+        expect(replayed.status).toBe('unknown')
+        expect(replayed.replayed).toBe(true)
+        expect(replaySpy).not.toHaveBeenCalled()
+      }
+    },
+  )
 })

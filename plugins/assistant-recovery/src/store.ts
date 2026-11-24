@@ -1026,4 +1026,8 @@ export class RecoveryStore {
   close(): void {
     this.database.close()
   }
+
+  compensationDatabase(): DatabaseSync {
+    return this.database
+  }
 }

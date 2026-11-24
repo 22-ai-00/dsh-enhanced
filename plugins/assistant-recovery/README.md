@@ -175,3 +175,18 @@ proposal。
 ## 兼容性
 
 参见仓库[兼容性基线](../../docs/compatibility.md)。Recovery 所需的 6 个 Host seam 要求同批发布版本的内部 peer 集合，manifest 会拒绝缺少这些 seam 的早期版本，须通过仓库 `release:prepare` 统一版本发布。
+
+## 通用外部副作用补偿（WP10）
+
+除了 `supervised-growth/v2` runbook，本包还提供通用的外部副作用补偿注册表与执行器，供 `assistant-skills`、恢复流程及自定义插件使用：
+
+- **暴露方式**：
+  - `AssistantRecoveryService`（`ctx.assistantRecovery`）复用同一个 `databasePath` SQLite 连接暴露 `registerCompensator`、`hasCompensator`、`listCompensators`、`executeCompensation`、`getCompensationStatus`、`listCompensations`、`listCompensationAudit`，并在激活期通过 `ctx.reflect.provide('assistantCompensation', ...)` 提供 `RecoveryCompensationPort`。
+  - `AssistantCompensationService`（零 `inject` 依赖，可独立挂载到轻量级 profile 或测试 `Context`，默认 `:memory:` 或绝对 `databasePath`）。
+  - 直接导出 `CompensationRegistry`、`CompensationLedger`、`CompensationExecutor`。
+- **状态机与安全不变量**：
+  - 每次补偿经历 `capturing -> prepared -> dispatched -> succeeded | failed | unknown` 生命周期，并通过 `recovery_compensations` 与 `recovery_compensation_audit` 两张 `STRICT` 表持久化（保持 `PRAGMA user_version = 5` 与 `inspectRecoveryOperatorSnapshot()` 兼容）。
+  - 执行前先捕获并 SHA-256 密封 `preimage`（`capturing -> prepared`）；公开投影 `PublicCompensationStatus` 与 `CompensationExecutionResult` 仅暴露 `preimageDigest` 并对敏感字段脱敏，绝不回显原始 `preimage`。
+  - 按 `idempotencyKey` SHA-256 去重与并发合并；相同 key 若载荷冲突抛出 `idempotency-conflict`；同一 `forwardActionId` 在密封后拒绝第二个补偿 key（`conflict`），而 `dispatched` 前的捕获失败会清理 `capturing` 占位以允许安全重试。
+  - 跨越 `dispatched` 边界后发生的异常、超时或信号中止均保守结算为 `unknown`（`dispatch-unconfirmed-no-replay`），绝不自动重放；启动恢复 `recoverIncomplete()` 会清理未密封的 `capturing` 行并将遗留 `prepared`/`dispatched` 行收敛为 `unknown`（`recovery-crash-no-replay`）。
+- **权限边界**：`assistant-recovery` 不内置无鉴权的网络/文件系统默认补偿器；具体域补偿器由消费方或宿主显式注册，且保留单一私有 `databasePath`（目录 `0700`、文件 `0600`）约束。

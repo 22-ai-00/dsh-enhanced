@@ -18,18 +18,82 @@ export interface SkillRunExpansion {
   inputsDigest: string
   steps: readonly { id: string; toolName: string; arguments: unknown }[]
 }
+export const WORKFLOW_FAMILY_IDS = [
+  'repo-ci-fix',
+  'calendar-meeting-prep',
+  'email-inbox-triage',
+  'wiki-knowledge-synthesis',
+  'dependency-config-audit',
+] as const
+
+export type WorkflowFamilyId = (typeof WORKFLOW_FAMILY_IDS)[number]
+
 /**
- * Discriminated precondition families a captured skill may require at dispatch.
- * The single v1 family admits a run only under the current owner's policy and a
- * Goal distinct from the one whose historical trace was captured.
+ * Closed, fail-closed precondition families a captured skill may require at
+ * dispatch. Every family retains current owner policy-scope matching and a
+ * Goal distinct from the captured source Goal.
  */
-export type SkillPreconditionKind = 'current-owner-policy-and-fresh-goal'
+export const SUPPORTED_SKILL_PRECONDITIONS = [
+  'current-owner-policy-and-fresh-goal',
+  'clean-git-worktree-and-policy-grant',
+  'calendar-window-and-route-binding',
+  'authenticated-inbox-and-idempotency-key',
+  'wiki-vault-revision-and-owner-scope',
+  'workspace-manifest-and-isolation-grant',
+] as const
+
+export type SkillPreconditionKind = (typeof SUPPORTED_SKILL_PRECONDITIONS)[number]
+
+export type SkillPreconditionCheckKind =
+  | 'path-exists'
+  | 'path-absent'
+  | 'path-regular-file'
+  | 'tool-available'
+  | 'input-nonempty'
+  | 'time-window'
+  | 'workflow-family'
+
+export interface SkillPreconditionCheck {
+  readonly id: string
+  readonly kind: SkillPreconditionCheckKind
+  readonly path?: string
+  readonly toolName?: string
+  readonly inputName?: string
+  readonly notBefore?: number
+  readonly notAfter?: number
+  readonly workflowFamily?: WorkflowFamilyId
+}
+
+export interface SkillPreconditionPlan {
+  readonly protocol: 'assistant-skills/precondition-plan/v1'
+  readonly kind: SkillPreconditionKind
+  readonly workflowFamily?: WorkflowFamilyId
+  readonly checks: readonly SkillPreconditionCheck[]
+}
+
 /**
  * Discriminated compensation families governing a run after a step failure.
- * The single v1 family stops the remaining steps and reports for explicit
- * owner-directed repair; the executor never self-remediates.
  */
-export type SkillCompensationKind = 'stop-and-report'
+export type SkillCompensationKind =
+  | 'stop-and-report'
+  | 'compensate-via-registry'
+  | 'compensating-action'
+  | 'rollback-state'
+
+export interface SkillCompensationStepSpec {
+  stepId: string
+  compensatorKey?: string
+  toolName?: string
+  arguments?: unknown
+  capturePreimage?: boolean
+}
+
+export interface SkillCompensationPlan {
+  protocol: 'assistant-skills/compensation-plan/v1'
+  kind: Exclude<SkillCompensationKind, 'stop-and-report'>
+  entries: readonly SkillCompensationStepSpec[]
+}
+
 export interface SkillDefinition {
   protocol: 'assistant-skills/definition/v1'
   name: string
@@ -40,7 +104,10 @@ export interface SkillDefinition {
   fileObservations?: SkillFileObservations
   runExpansions?: readonly SkillRunExpansion[]
   preconditions: SkillPreconditionKind
+  preconditionPlan?: SkillPreconditionPlan
+  workflowFamily?: WorkflowFamilyId
   compensation: SkillCompensationKind
+  compensationPlan?: SkillCompensationPlan
 }
 
 export type FailureCaptureCategory = 'objective-not-achieved' | 'repeated-not-achieved'
@@ -80,7 +147,16 @@ export interface FailureCaptureProvenance {
   rollbackTarget: { name: string; version: number; digest: string }
 }
 
-export interface CreateDefinitionOptions { name: string; description: string; bindings?: readonly SkillBinding[] }
+export interface CreateDefinitionOptions {
+  name: string
+  description: string
+  bindings?: readonly SkillBinding[]
+  preconditions?: SkillPreconditionKind
+  preconditionPlan?: Omit<SkillPreconditionPlan, 'protocol'>
+  workflowFamily?: WorkflowFamilyId
+  compensation?: SkillCompensationKind
+  compensationPlan?: Omit<SkillCompensationPlan, 'protocol'>
+}
 
 const forbidden = new Set(['__proto__', 'prototype', 'constructor'])
 const maximumArgumentsBytes = 256 * 1024
@@ -428,21 +504,221 @@ export function validateStepGraph(steps: readonly Pick<SkillStep, 'id' | 'depend
   })
 }
 
-/** The single v1 precondition family; kept as a set so unknown values fail closed. */
-const preconditionKinds = new Set<SkillPreconditionKind>(['current-owner-policy-and-fresh-goal'])
-/** The single v1 compensation family; kept as a set so unknown values fail closed. */
-const compensationKinds = new Set<SkillCompensationKind>(['stop-and-report'])
+/** Supported closed precondition families; unknown values always fail closed. */
+const preconditionKinds = new Set<SkillPreconditionKind>(SUPPORTED_SKILL_PRECONDITIONS)
+const workflowFamilyIds = new Set<WorkflowFamilyId>(WORKFLOW_FAMILY_IDS)
+const preconditionCheckKinds = new Set<SkillPreconditionCheckKind>([
+  'path-exists',
+  'path-absent',
+  'path-regular-file',
+  'tool-available',
+  'input-nonempty',
+  'time-window',
+  'workflow-family',
+])
+const preconditionPlanAllowedKeys = new Set(['protocol', 'kind', 'workflowFamily', 'checks'])
+const preconditionCheckAllowedKeys = new Set(['id', 'kind', 'path', 'toolName', 'inputName', 'notBefore', 'notAfter', 'workflowFamily'])
+
+function validatePreconditionPlanShape(
+  plan: unknown,
+  declaredKind: SkillPreconditionKind,
+  declaredFamily?: WorkflowFamilyId,
+): asserts plan is SkillPreconditionPlan {
+  if (!json(plan) || !plan || typeof plan !== 'object' || Array.isArray(plan)
+    || Object.getPrototypeOf(plan) !== Object.prototype || Object.getOwnPropertySymbols(plan).length !== 0) {
+    fail('assistant-skills: invalid precondition plan')
+  }
+  const keys = Object.keys(plan)
+  if (keys.some(key => !preconditionPlanAllowedKeys.has(key))
+    || !Object.hasOwn(plan, 'protocol')
+    || !Object.hasOwn(plan, 'kind')
+    || !Object.hasOwn(plan, 'checks')) {
+    fail('assistant-skills: invalid precondition plan')
+  }
+  const candidate = plan as Record<string, unknown>
+  if (candidate.protocol !== 'assistant-skills/precondition-plan/v1'
+    || candidate.kind !== declaredKind
+    || !boundedArray(candidate.checks, 32)) {
+    fail('assistant-skills: invalid precondition plan')
+  }
+  if (candidate.workflowFamily !== undefined) {
+    if (typeof candidate.workflowFamily !== 'string' || !workflowFamilyIds.has(candidate.workflowFamily as WorkflowFamilyId)) {
+      fail('assistant-skills: unsupported workflow family in precondition plan')
+    }
+    if (declaredFamily !== undefined && candidate.workflowFamily !== declaredFamily) {
+      fail('assistant-skills: precondition plan workflowFamily mismatch')
+    }
+  }
+  const seenIds = new Set<string>()
+  for (const rawCheck of candidate.checks) {
+    if (!json(rawCheck) || !rawCheck || typeof rawCheck !== 'object' || Array.isArray(rawCheck)
+      || Object.getPrototypeOf(rawCheck) !== Object.prototype || Object.getOwnPropertySymbols(rawCheck).length !== 0) {
+      fail('assistant-skills: invalid precondition check')
+    }
+    const checkKeys = Object.keys(rawCheck)
+    if (checkKeys.some(key => !preconditionCheckAllowedKeys.has(key)) || !Object.hasOwn(rawCheck, 'id') || !Object.hasOwn(rawCheck, 'kind')) {
+      fail('assistant-skills: invalid precondition check')
+    }
+    const check = rawCheck as Record<string, unknown>
+    if (!text(check.id, 256) || seenIds.has(check.id)) {
+      fail('assistant-skills: invalid precondition check id')
+    }
+    seenIds.add(check.id)
+    if (typeof check.kind !== 'string' || !preconditionCheckKinds.has(check.kind as SkillPreconditionCheckKind)) {
+      fail('assistant-skills: unsupported precondition check kind')
+    }
+    const checkKind = check.kind as SkillPreconditionCheckKind
+    if (checkKind === 'path-exists' || checkKind === 'path-absent' || checkKind === 'path-regular-file') {
+      const hasPath = check.path !== undefined
+      const hasInput = check.inputName !== undefined
+      if ((!hasPath && !hasInput)
+        || (hasPath && (!text(check.path, 4096) || String(check.path).includes('\\')))
+        || (hasInput && !/^[a-z][a-z0-9_]{0,63}$/u.test(String(check.inputName)))
+        || check.toolName !== undefined || check.notBefore !== undefined || check.notAfter !== undefined || check.workflowFamily !== undefined) {
+        fail('assistant-skills: invalid path precondition check')
+      }
+    } else if (checkKind === 'tool-available') {
+      if (!text(check.toolName, 256) || controlTool(check.toolName, {})
+        || check.path !== undefined || check.inputName !== undefined || check.notBefore !== undefined || check.notAfter !== undefined || check.workflowFamily !== undefined) {
+        fail('assistant-skills: invalid tool-available precondition check')
+      }
+    } else if (checkKind === 'input-nonempty') {
+      if (!/^[a-z][a-z0-9_]{0,63}$/u.test(String(check.inputName))
+        || check.path !== undefined || check.toolName !== undefined || check.notBefore !== undefined || check.notAfter !== undefined || check.workflowFamily !== undefined) {
+        fail('assistant-skills: invalid input-nonempty precondition check')
+      }
+    } else if (checkKind === 'time-window') {
+      const hasBefore = check.notBefore !== undefined
+      const hasAfter = check.notAfter !== undefined
+      if ((!hasBefore && !hasAfter)
+        || (hasBefore && !integer(check.notBefore, 0))
+        || (hasAfter && !integer(check.notAfter, 0))
+        || (hasBefore && hasAfter && (check.notAfter as number) < (check.notBefore as number))
+        || check.path !== undefined || check.toolName !== undefined || check.inputName !== undefined || check.workflowFamily !== undefined) {
+        fail('assistant-skills: invalid time-window precondition check')
+      }
+    } else if (checkKind === 'workflow-family') {
+      if (typeof check.workflowFamily !== 'string' || !workflowFamilyIds.has(check.workflowFamily as WorkflowFamilyId)
+        || check.path !== undefined || check.toolName !== undefined || check.inputName !== undefined || check.notBefore !== undefined || check.notAfter !== undefined) {
+        fail('assistant-skills: invalid workflow-family precondition check')
+      }
+    }
+  }
+}
+/** Supported compensation families; unknown values always fail closed. */
+const compensationKinds = new Set<SkillCompensationKind>([
+  'stop-and-report',
+  'compensate-via-registry',
+  'compensating-action',
+  'rollback-state',
+])
+
+const compensatorKeyPattern = /^[a-z][a-z0-9.:_-]{0,127}$/u
+const compensationEntryKeys = new Set(['stepId', 'compensatorKey', 'toolName', 'arguments', 'capturePreimage'])
+
+function validateCompensationPlanShape(
+  plan: unknown,
+  declaredKind: SkillCompensationKind,
+): asserts plan is SkillCompensationPlan {
+  if (!exact(plan, ['protocol', 'kind', 'entries'])
+    || plan.protocol !== 'assistant-skills/compensation-plan/v1'
+    || plan.kind !== declaredKind
+    || declaredKind === 'stop-and-report'
+    || !boundedArray(plan.entries, 32)) {
+    fail('assistant-skills: invalid compensation plan')
+  }
+  if (declaredKind === 'compensating-action' && plan.entries.length === 0) {
+    fail('assistant-skills: compensating-action requires at least one compensation entry')
+  }
+  const seenSteps = new Set<string>()
+  for (const rawEntry of plan.entries) {
+    if (!json(rawEntry) || !rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)
+      || Object.getPrototypeOf(rawEntry) !== Object.prototype || Object.getOwnPropertySymbols(rawEntry).length !== 0) {
+      fail('assistant-skills: invalid compensation plan entry')
+    }
+    const keys = Object.keys(rawEntry)
+    if (keys.some(key => !compensationEntryKeys.has(key)) || !Object.hasOwn(rawEntry, 'stepId')) {
+      fail('assistant-skills: invalid compensation plan entry')
+    }
+    const entry = rawEntry as Record<string, unknown>
+    if (!text(entry.stepId, 256) || seenSteps.has(entry.stepId)) {
+      fail('assistant-skills: invalid compensation plan stepId')
+    }
+    seenSteps.add(entry.stepId)
+    if (entry.compensatorKey !== undefined && (typeof entry.compensatorKey !== 'string' || !compensatorKeyPattern.test(entry.compensatorKey))) {
+      fail('assistant-skills: invalid compensatorKey in compensation plan')
+    }
+    if (entry.toolName !== undefined && (!text(entry.toolName, 256) || controlTool(entry.toolName, entry.arguments ?? {}))) {
+      fail('assistant-skills: invalid toolName in compensation plan')
+    }
+    if (entry.arguments !== undefined && (!json(entry.arguments) || Buffer.byteLength(JSON.stringify(entry.arguments), 'utf8') > maximumArgumentsBytes)) {
+      fail('assistant-skills: invalid arguments in compensation plan')
+    }
+    if (entry.capturePreimage !== undefined && typeof entry.capturePreimage !== 'boolean') {
+      fail('assistant-skills: invalid capturePreimage in compensation plan')
+    }
+    if (declaredKind === 'compensating-action' && (entry.toolName === undefined || !Object.hasOwn(entry, 'arguments'))) {
+      fail('assistant-skills: compensating-action entry requires toolName and arguments')
+    }
+  }
+}
+
+function validateCompensationPlanSteps(definition: Pick<SkillDefinition, 'steps' | 'compensation' | 'compensationPlan'>): void {
+  const plan = definition.compensationPlan
+  if (plan === undefined) return
+  const stepIds = new Set(definition.steps.map(step => step.id))
+  for (const entry of plan.entries) {
+    if (!stepIds.has(entry.stepId)) {
+      fail('assistant-skills: compensation plan references unknown stepId')
+    }
+  }
+  const totalBytes = Buffer.byteLength(
+    JSON.stringify([...definition.steps.map(step => step.arguments), ...plan.entries.map(entry => entry.arguments ?? null)]),
+    'utf8',
+  )
+  if (totalBytes > maximumArgumentsBytes) {
+    fail('assistant-skills: compensation plan arguments exceed bound')
+  }
+}
 
 /** Fail closed on the typed protocol-family declarations of any definition. */
-export function assertDefinitionProtocolFamilies(definition: Pick<SkillDefinition, 'preconditions' | 'compensation'>): void {
+export function assertDefinitionProtocolFamilies(
+  definition: Pick<SkillDefinition, 'preconditions' | 'compensation'> & {
+    preconditionPlan?: SkillPreconditionPlan
+    workflowFamily?: WorkflowFamilyId
+    compensationPlan?: SkillCompensationPlan
+  },
+): void {
   if (!preconditionKinds.has(definition.preconditions as SkillPreconditionKind)) fail('assistant-skills: unsupported skill preconditions')
+  if (definition.workflowFamily !== undefined && !workflowFamilyIds.has(definition.workflowFamily)) {
+    fail('assistant-skills: unsupported workflow family')
+  }
+  if (definition.preconditionPlan !== undefined) {
+    validatePreconditionPlanShape(definition.preconditionPlan, definition.preconditions, definition.workflowFamily)
+  }
   if (!compensationKinds.has(definition.compensation as SkillCompensationKind)) fail('assistant-skills: unsupported skill compensation')
+  if (definition.compensation === 'stop-and-report') {
+    if ('compensationPlan' in definition && definition.compensationPlan !== undefined) {
+      fail('assistant-skills: stop-and-report cannot declare a compensationPlan')
+    }
+  } else if (definition.compensationPlan !== undefined) {
+    validateCompensationPlanShape(definition.compensationPlan, definition.compensation)
+  } else if (definition.compensation === 'compensating-action') {
+    fail('assistant-skills: compensating-action requires a compensationPlan')
+  }
 }
 
 /** Validate the typed protocol fields and dependency graph of any definition. */
-export function assertDefinitionProtocol(definition: Pick<SkillDefinition, 'preconditions' | 'compensation' | 'steps'>): void {
+export function assertDefinitionProtocol(
+  definition: Pick<SkillDefinition, 'preconditions' | 'compensation' | 'steps'> & {
+    preconditionPlan?: SkillPreconditionPlan
+    workflowFamily?: WorkflowFamilyId
+    compensationPlan?: SkillCompensationPlan
+  },
+): void {
   assertDefinitionProtocolFamilies(definition)
   validateStepGraph(definition.steps)
+  validateCompensationPlanSteps(definition)
 }
 
 /** Whether steps already carry the v1 edge shape; absent edges are an untrusted-input defect. */
@@ -450,7 +726,137 @@ function stepsCarryGraphShape(steps: readonly SkillStep[]): boolean {
   return Array.isArray(steps) && steps.every(step => step !== null && typeof step === 'object' && Array.isArray(step.dependsOn))
 }
 
-/** Digests the executor already resolved; the pure gate stays free of Host scope types. */
+export interface PreconditionPathProbeResult {
+  readonly contained: boolean
+  readonly isSymlink: boolean
+  readonly exists: boolean
+  readonly isRegularFile: boolean
+}
+
+export type PreconditionPathProbe = (path: string) => PreconditionPathProbeResult
+
+export interface SkillPreconditionDirective {
+  readonly kind: SkillPreconditionKind
+  readonly requiredChecks: readonly string[]
+  readonly requiresFreshGoal: true
+  readonly requiresOwnerScope: true
+  readonly requiresPolicyGrant: boolean
+  readonly requiresCleanGitWorktree: boolean
+  readonly requiresOwnerRoute: boolean
+  readonly requiresCalendarWindow: boolean
+  readonly requiresAuthenticatedSource: boolean
+  readonly requiresIdempotencyKey: boolean
+  readonly requiresVaultRevision: boolean
+  readonly requiresWorkspaceManifest: boolean
+  readonly requiresIsolationGrant: boolean
+}
+
+/** Resolve the declared precondition family metadata; unknown families fail closed. */
+export function preconditionDirective(preconditions: SkillPreconditionKind): SkillPreconditionDirective {
+  if (!preconditionKinds.has(preconditions)) fail('assistant-skills: unsupported skill preconditions')
+  switch (preconditions) {
+    case 'current-owner-policy-and-fresh-goal':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: false,
+        requiresCleanGitWorktree: false,
+        requiresOwnerRoute: false,
+        requiresCalendarWindow: false,
+        requiresAuthenticatedSource: false,
+        requiresIdempotencyKey: false,
+        requiresVaultRevision: false,
+        requiresWorkspaceManifest: false,
+        requiresIsolationGrant: false,
+      })
+    case 'clean-git-worktree-and-policy-grant':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal', 'clean-git-worktree', 'policy-grant']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: true,
+        requiresCleanGitWorktree: true,
+        requiresOwnerRoute: false,
+        requiresCalendarWindow: false,
+        requiresAuthenticatedSource: false,
+        requiresIdempotencyKey: false,
+        requiresVaultRevision: false,
+        requiresWorkspaceManifest: false,
+        requiresIsolationGrant: false,
+      })
+    case 'calendar-window-and-route-binding':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal', 'calendar-window', 'owner-route-binding']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: false,
+        requiresCleanGitWorktree: false,
+        requiresOwnerRoute: true,
+        requiresCalendarWindow: true,
+        requiresAuthenticatedSource: false,
+        requiresIdempotencyKey: false,
+        requiresVaultRevision: false,
+        requiresWorkspaceManifest: false,
+        requiresIsolationGrant: false,
+      })
+    case 'authenticated-inbox-and-idempotency-key':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal', 'authenticated-source', 'idempotency-key']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: false,
+        requiresCleanGitWorktree: false,
+        requiresOwnerRoute: false,
+        requiresCalendarWindow: false,
+        requiresAuthenticatedSource: true,
+        requiresIdempotencyKey: true,
+        requiresVaultRevision: false,
+        requiresWorkspaceManifest: false,
+        requiresIsolationGrant: false,
+      })
+    case 'wiki-vault-revision-and-owner-scope':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal', 'vault-revision']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: false,
+        requiresCleanGitWorktree: false,
+        requiresOwnerRoute: false,
+        requiresCalendarWindow: false,
+        requiresAuthenticatedSource: false,
+        requiresIdempotencyKey: false,
+        requiresVaultRevision: true,
+        requiresWorkspaceManifest: false,
+        requiresIsolationGrant: false,
+      })
+    case 'workspace-manifest-and-isolation-grant':
+      return Object.freeze({
+        kind: preconditions,
+        requiredChecks: Object.freeze(['owner-scope-match', 'fresh-goal', 'workspace-manifest', 'isolation-grant']),
+        requiresFreshGoal: true,
+        requiresOwnerScope: true,
+        requiresPolicyGrant: false,
+        requiresCleanGitWorktree: false,
+        requiresOwnerRoute: false,
+        requiresCalendarWindow: false,
+        requiresAuthenticatedSource: false,
+        requiresIdempotencyKey: false,
+        requiresVaultRevision: false,
+        requiresWorkspaceManifest: true,
+        requiresIsolationGrant: true,
+      })
+  }
+  const exhaustive: never = preconditions
+  fail(`assistant-skills: unsupported skill preconditions ${String(exhaustive)}`)
+}
+
+/** Digests and live host assertions the executor resolved; the pure gate stays free of Host scope types. */
 export interface SkillPreconditionDecision {
   /** Policy-scope digest the executor resolved for the current action. */
   ownerScopeDigest: string
@@ -459,27 +865,179 @@ export interface SkillPreconditionDecision {
   goalId: string
   /** Goal whose historical trace was captured into the definition. */
   sourceGoalId: string
+  cleanGitWorktree?: boolean
+  policyGrantValid?: boolean
+  calendarWindowValid?: boolean
+  ownerRouteBound?: boolean
+  authenticatedSource?: boolean
+  idempotencyKeyPresent?: boolean
+  vaultRevisionCurrent?: boolean
+  workspaceCleanOrScoped?: boolean
+  isolationGrantValid?: boolean
+  preconditionPlan?: SkillPreconditionPlan
+  workflowFamily?: WorkflowFamilyId
+  allowedTools?: readonly string[]
+  inputs?: Readonly<Record<string, unknown>>
+  now?: number
+  pathProbe?: PreconditionPathProbe
+}
+
+export function evaluatePreconditionPlan(
+  plan: SkillPreconditionPlan,
+  context: {
+    readonly preconditions: SkillPreconditionKind
+    readonly workflowFamily?: WorkflowFamilyId
+    readonly allowedTools?: readonly string[]
+    readonly inputs?: Readonly<Record<string, unknown>>
+    readonly now?: number
+    readonly pathProbe?: PreconditionPathProbe
+  },
+): void {
+  validatePreconditionPlanShape(plan, context.preconditions, context.workflowFamily)
+  const now = context.now ?? Date.now()
+  if (!Number.isSafeInteger(now) || now < 0) fail('assistant-skills: invalid precondition clock')
+  for (const check of plan.checks) {
+    if (check.kind === 'path-exists' || check.kind === 'path-absent' || check.kind === 'path-regular-file') {
+      const hasInput = check.inputName !== undefined && context.inputs !== undefined && Object.hasOwn(context.inputs, check.inputName)
+      const resolvedPath = hasInput ? context.inputs![check.inputName!] : check.path
+      if (typeof resolvedPath !== 'string' || resolvedPath.trim().length === 0) {
+        fail(`assistant-skills: precondition check ${check.id} invalid path`)
+      }
+      if (!context.pathProbe) {
+        fail(`assistant-skills: precondition check ${check.id} path probe unavailable`)
+      }
+      const probe = context.pathProbe(resolvedPath)
+      if (!probe || !probe.contained || probe.isSymlink) {
+        fail(`assistant-skills: precondition check ${check.id} path unsafe or outside workspace`)
+      }
+      if (check.kind === 'path-exists' && !probe.exists) {
+        fail(`assistant-skills: precondition check ${check.id} required path missing`)
+      }
+      if (check.kind === 'path-absent' && probe.exists) {
+        fail(`assistant-skills: precondition check ${check.id} expected path absent`)
+      }
+      if (check.kind === 'path-regular-file' && (!probe.exists || !probe.isRegularFile)) {
+        fail(`assistant-skills: precondition check ${check.id} required regular file missing`)
+      }
+    } else if (check.kind === 'tool-available') {
+      if (!Array.isArray(context.allowedTools) || !context.allowedTools.includes(check.toolName!)) {
+        fail(`assistant-skills: precondition check ${check.id} required tool ${check.toolName} unavailable`)
+      }
+    } else if (check.kind === 'input-nonempty') {
+      const value = context.inputs !== undefined && Object.hasOwn(context.inputs, check.inputName!) ? context.inputs[check.inputName!] : undefined
+      const valid = typeof value === 'string' ? value.trim().length > 0 : typeof value === 'number' ? Number.isFinite(value) : typeof value === 'boolean'
+      if (!valid) {
+        fail(`assistant-skills: precondition check ${check.id} required input ${check.inputName} empty`)
+      }
+    } else if (check.kind === 'time-window') {
+      if ((check.notBefore !== undefined && now < check.notBefore) || (check.notAfter !== undefined && now > check.notAfter)) {
+        fail(`assistant-skills: precondition check ${check.id} outside allowed time window`)
+      }
+    } else if (check.kind === 'workflow-family') {
+      if (context.workflowFamily !== check.workflowFamily) {
+        fail(`assistant-skills: precondition check ${check.id} workflow family mismatch`)
+      }
+    }
+  }
 }
 
 /**
  * Admit a run only when the declared precondition family is satisfied.
- * The v1 family requires the current owner's policy scope to match and a Goal
- * distinct from the captured source Goal. Unknown families never admit a run.
+ * Every family requires the current owner's policy scope to match and a Goal
+ * distinct from the captured source Goal, plus strict family-specific checks.
+ * Unknown families and unmet/missing assertions always fail closed.
  */
 export function evaluatePreconditions(preconditions: SkillPreconditionKind, decision: SkillPreconditionDecision): void {
   if (!preconditionKinds.has(preconditions)) fail('assistant-skills: unsupported skill preconditions')
-  if (preconditions === 'current-owner-policy-and-fresh-goal') {
-    if (decision.ownerScopeDigest !== decision.currentScopeDigest || decision.goalId === decision.sourceGoalId) fail('assistant-skills: fresh owner Goal required')
+  if (decision.ownerScopeDigest !== decision.currentScopeDigest || decision.goalId === decision.sourceGoalId) {
+    fail('assistant-skills: fresh owner Goal required')
+  }
+  switch (preconditions) {
+    case 'current-owner-policy-and-fresh-goal':
+      break
+    case 'clean-git-worktree-and-policy-grant':
+      if (decision.cleanGitWorktree !== true) fail('assistant-skills: clean git worktree precondition unmet')
+      if (decision.policyGrantValid !== true) fail('assistant-skills: policy grant precondition unmet')
+      break
+    case 'calendar-window-and-route-binding':
+      if (decision.calendarWindowValid !== true) fail('assistant-skills: calendar window precondition unmet')
+      if (decision.ownerRouteBound !== true) fail('assistant-skills: owner route binding precondition unmet')
+      break
+    case 'authenticated-inbox-and-idempotency-key':
+      if (decision.authenticatedSource !== true) fail('assistant-skills: authenticated inbox source precondition unmet')
+      if (decision.idempotencyKeyPresent !== true) fail('assistant-skills: idempotency key precondition unmet')
+      break
+    case 'wiki-vault-revision-and-owner-scope':
+      if (decision.vaultRevisionCurrent !== true) fail('assistant-skills: wiki vault revision precondition unmet')
+      break
+    case 'workspace-manifest-and-isolation-grant':
+      if (decision.workspaceCleanOrScoped !== true) fail('assistant-skills: workspace manifest precondition unmet')
+      if (decision.isolationGrantValid !== true) fail('assistant-skills: isolation grant precondition unmet')
+      break
+  }
+  if (decision.preconditionPlan !== undefined) {
+    evaluatePreconditionPlan(decision.preconditionPlan, {
+      preconditions,
+      ...(decision.workflowFamily === undefined ? {} : { workflowFamily: decision.workflowFamily }),
+      ...(decision.allowedTools === undefined ? {} : { allowedTools: decision.allowedTools }),
+      ...(decision.inputs === undefined ? {} : { inputs: decision.inputs }),
+      ...(decision.now === undefined ? {} : { now: decision.now }),
+      ...(decision.pathProbe === undefined ? {} : { pathProbe: decision.pathProbe }),
+    })
   }
 }
 
 /** Directive the executor follows once a step has failed. */
-export interface SkillCompensationDirective { kind: SkillCompensationKind; stopRemainingSteps: boolean; reportForOwnerRepair: boolean }
+export interface SkillCompensationDirective {
+  kind: SkillCompensationKind
+  stopRemainingSteps: boolean
+  reportForOwnerRepair: boolean
+  executeCompensation: boolean
+  capturePreimage: boolean
+  target: 'none' | 'registry' | 'action' | 'rollback'
+}
 
-/** Resolve the declared compensation family; the v1 family stops and reports. */
+/** Resolve the declared compensation family; unknown families fail closed. */
 export function compensationDirective(compensation: SkillCompensationKind): SkillCompensationDirective {
   if (!compensationKinds.has(compensation)) fail('assistant-skills: unsupported skill compensation')
-  if (compensation === 'stop-and-report') return { kind: 'stop-and-report', stopRemainingSteps: true, reportForOwnerRepair: true }
+  switch (compensation) {
+    case 'stop-and-report':
+      return {
+        kind: 'stop-and-report',
+        stopRemainingSteps: true,
+        reportForOwnerRepair: true,
+        executeCompensation: false,
+        capturePreimage: false,
+        target: 'none',
+      }
+    case 'compensate-via-registry':
+      return {
+        kind: 'compensate-via-registry',
+        stopRemainingSteps: true,
+        reportForOwnerRepair: true,
+        executeCompensation: true,
+        capturePreimage: true,
+        target: 'registry',
+      }
+    case 'compensating-action':
+      return {
+        kind: 'compensating-action',
+        stopRemainingSteps: true,
+        reportForOwnerRepair: true,
+        executeCompensation: true,
+        capturePreimage: false,
+        target: 'action',
+      }
+    case 'rollback-state':
+      return {
+        kind: 'rollback-state',
+        stopRemainingSteps: true,
+        reportForOwnerRepair: true,
+        executeCompensation: true,
+        capturePreimage: true,
+        target: 'rollback',
+      }
+  }
   const exhaustive: never = compensation
   fail(`assistant-skills: unsupported skill compensation ${String(exhaustive)}`)
 }
@@ -489,6 +1047,30 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
   if (!json(source) || !json(options) || !source || source.protocol !== 'assistant-goals/verified-workflow-source/v1' || !Array.isArray(source.steps) || source.steps.length === 0 || source.steps.length > 32
     || !options || !/^[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(options.name) || !text(options.description, 512)
     || !Array.isArray(allowedTools) || allowedTools.some(tool => !text(tool, 256))) fail()
+  const preconditions = options.preconditions ?? 'current-owner-policy-and-fresh-goal'
+  if (!preconditionKinds.has(preconditions)) fail('assistant-skills: unsupported skill preconditions')
+  if (options.workflowFamily !== undefined && !workflowFamilyIds.has(options.workflowFamily)) {
+    fail('assistant-skills: unsupported workflow family')
+  }
+  let preconditionPlan: SkillPreconditionPlan | undefined
+  if (options.preconditionPlan !== undefined) {
+    if (!json(options.preconditionPlan) || !options.preconditionPlan || typeof options.preconditionPlan !== 'object' || Array.isArray(options.preconditionPlan)) {
+      fail('assistant-skills: invalid precondition plan')
+    }
+    const candidatePlan: SkillPreconditionPlan = {
+      protocol: 'assistant-skills/precondition-plan/v1',
+      kind: options.preconditionPlan.kind,
+      ...(options.preconditionPlan.workflowFamily === undefined ? {} : { workflowFamily: options.preconditionPlan.workflowFamily }),
+      checks: clone(options.preconditionPlan.checks),
+    }
+    validatePreconditionPlanShape(candidatePlan, preconditions, options.workflowFamily)
+    preconditionPlan = candidatePlan
+  }
+  const compensation = options.compensation ?? 'stop-and-report'
+  if (!compensationKinds.has(compensation)) fail('assistant-skills: unsupported skill compensation')
+  if (compensation === 'stop-and-report' && options.compensationPlan !== undefined) {
+    fail('assistant-skills: stop-and-report cannot declare a compensationPlan')
+  }
   const allow = new Set(allowedTools)
   if (allow.size !== allowedTools.length) fail('assistant-skills: duplicate allowed tool')
   const { steps: sourceSteps, observations } = sourceProjection(source)
@@ -526,10 +1108,30 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
   })
   const observedMutators = standardFileMutators(steps)
   if (steps.length + observedMutators.length > 32) fail('assistant-skills: bounded tool trace is required')
+  let compensationPlan: SkillCompensationPlan | undefined
+  if (options.compensationPlan !== undefined) {
+    if (!exact(options.compensationPlan, ['kind', 'entries'])) fail('assistant-skills: invalid compensation plan')
+    compensationPlan = {
+      protocol: 'assistant-skills/compensation-plan/v1',
+      kind: options.compensationPlan.kind,
+      entries: clone(options.compensationPlan.entries),
+    }
+    if (compensation === 'compensating-action') {
+      for (const entry of compensationPlan.entries) {
+        if (typeof entry.toolName !== 'string' || !allow.has(entry.toolName)) {
+          fail('assistant-skills: compensating-action tool must be in allowedTools')
+        }
+      }
+    }
+  }
   const definition: SkillDefinition = { protocol: 'assistant-skills/definition/v1', name: options.name, description: options.description, source: clone(source), inputs, steps,
     ...(observedMutators.length === 0 ? {} : { fileObservations: { protocol: 'assistant-skills/file-observations/v1' as const, beforeSteps: observedMutators.map(step => step.id) } }),
     ...(expansions.length === 0 ? {} : { runExpansions: clone(expansions) }),
-    preconditions: 'current-owner-policy-and-fresh-goal', compensation: 'stop-and-report' }
+    preconditions,
+    ...(preconditionPlan === undefined ? {} : { preconditionPlan }),
+    ...(options.workflowFamily === undefined ? {} : { workflowFamily: options.workflowFamily }),
+    compensation,
+    ...(compensationPlan === undefined ? {} : { compensationPlan }) }
   assertDefinitionProtocol(definition)
   fileObservations(definition)
   return freeze(definition)
@@ -555,7 +1157,10 @@ export function instantiate(definition: SkillDefinition, values: Readonly<Record
   // whose precise cause belongs to the execution/replay boundary, which runs
   // strict per-step validation before its own graph gate.
   assertDefinitionProtocolFamilies(output)
-  if (stepsCarryGraphShape(output.steps)) validateStepGraph(output.steps)
+  if (stepsCarryGraphShape(output.steps)) {
+    validateStepGraph(output.steps)
+    validateCompensationPlanSteps(output)
+  }
   fileObservations(output)
   if (Buffer.byteLength(JSON.stringify(output.steps.map(step => step.arguments)), 'utf8') > maximumArgumentsBytes) fail('assistant-skills: invocation arguments too large')
   return freeze(output)

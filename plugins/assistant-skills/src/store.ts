@@ -2,11 +2,44 @@ import { closeSync, constants, lstatSync, mkdirSync, openSync, chmodSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { validateFailureCaptureProvenance, type FailureCaptureProvenance, type SkillDefinition } from './definition.js'
+import {
+  validateFailureCaptureProvenance,
+  type FailureCaptureProvenance,
+  type SkillCompensationKind,
+  type SkillDefinition,
+} from './definition.js'
 import { currentRepairProcess, probeRepairProcess, type RepairProcessWitness } from './repair-process.js'
 
 export type SkillRunState = 'running' | 'succeeded' | 'failed' | 'unknown'
 export interface SkillRunStep { id: string; state: 'succeeded' | 'failed' | 'unknown'; detail?: string }
+export type SkillCompensationStatus = 'pending' | 'succeeded' | 'failed' | 'unknown' | 'skipped-unknown'
+export interface SkillCompensationRecord {
+  id: string
+  runId: string
+  skillName: string
+  version: number
+  stepId: string
+  compensationKind: Exclude<SkillCompensationKind, 'stop-and-report'>
+  idempotencyKey: string
+  compensatorKey?: string
+  toolName?: string
+  preimageDigest?: string
+  status: SkillCompensationStatus
+  detail?: string
+  createdAt: number
+  updatedAt: number
+}
+export interface ClaimSkillCompensationInput {
+  runId: string
+  skillName: string
+  version: number
+  stepId: string
+  compensationKind: Exclude<SkillCompensationKind, 'stop-and-report'>
+  idempotencyKey: string
+  compensatorKey?: string
+  toolName?: string
+  preimageDigest?: string
+}
 export interface SkillRun {
   id: string
   invocationId: string
@@ -17,6 +50,7 @@ export interface SkillRun {
   inputs: Readonly<Record<string, unknown>>
   state: SkillRunState
   steps: readonly SkillRunStep[]
+  compensations?: readonly SkillCompensationRecord[]
   candidateId?: string
   delegationDigest?: string
   goalExecutionRunId?: string
@@ -357,14 +391,18 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_repair_continuations(scope_key TEXT NOT NULL,id TEXT NOT NULL,authorization_digest TEXT NOT NULL,route_receipt_digest TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('armed','source-confirmed','creating-repair','repairing','repair-achieved','capturing','candidate-staged','comparing','watching','complete','rejected','revoked','expired','unknown')),continuation_json TEXT NOT NULL,PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_repair_usage(scope_key TEXT NOT NULL,id TEXT NOT NULL,authorization_digest TEXT NOT NULL,model_calls INTEGER NOT NULL CHECK(model_calls>=0),tool_calls INTEGER NOT NULL CHECK(tool_calls>=0),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_repair_execution(scope_key TEXT NOT NULL,id TEXT NOT NULL,iteration INTEGER NOT NULL,lease_json TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),pending_model INTEGER NOT NULL CHECK(pending_model>=0),pending_tool INTEGER NOT NULL CHECK(pending_tool>=0),PRIMARY KEY(scope_key,id,iteration)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_compensations(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, run_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','succeeded','failed','unknown','skipped-unknown')), record_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(scope_key, idempotency_key)) STRICT;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
       CREATE INDEX IF NOT EXISTS skill_watches_scope_state ON skill_watches(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_deployments_scope_state ON skill_deployments(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_captures_scope_state ON skill_captures(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_repair_continuations_scope_state ON skill_repair_continuations(scope_key,state);
+      CREATE INDEX IF NOT EXISTS skill_compensations_run ON skill_compensations(scope_key,run_id);
 `)
-    this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
+    const recoveryNow = Date.now()
+    this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(recoveryNow)
+    this.#db.prepare("UPDATE skill_compensations SET state='unknown', record_json=json_set(record_json, '$.status', 'unknown', '$.detail', coalesce(json_extract(record_json, '$.detail'), 'recovered-pending-as-unknown'), '$.updatedAt', ?) WHERE state='pending'").run(recoveryNow)
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       const migrationTime = Date.now()
@@ -1118,7 +1156,11 @@ export class SkillStore {
   #newDefinition(definition: SkillDefinition, savedVersion: number, parentVersion: number | null, restoredFromVersion?: number): StoredSkillDefinition {
     const now = Date.now()
     const clean: SkillDefinition = { protocol: definition.protocol, name: definition.name, description: definition.description, source: definition.source, inputs: definition.inputs, steps: definition.steps,
-      preconditions: definition.preconditions, compensation: definition.compensation,
+      preconditions: definition.preconditions,
+      ...(definition.preconditionPlan === undefined ? {} : { preconditionPlan: definition.preconditionPlan }),
+      ...(definition.workflowFamily === undefined ? {} : { workflowFamily: definition.workflowFamily }),
+      compensation: definition.compensation,
+      ...(definition.compensationPlan === undefined ? {} : { compensationPlan: definition.compensationPlan }),
       ...(definition.fileObservations === undefined ? {} : { fileObservations: definition.fileObservations }),
       ...(definition.runExpansions === undefined ? {} : { runExpansions: definition.runExpansions }) }
     return { ...clone(clean), version: savedVersion, parentVersion, retired: false, createdAt: now, updatedAt: now, ...(restoredFromVersion === undefined ? {} : { restoredFromVersion }) }
@@ -1290,5 +1332,115 @@ export class SkillStore {
   }
   #validateSteps(steps: readonly SkillRunStep[]): void {
     if (!Array.isArray(steps) || steps.length > 32 || steps.some(step => !step || !text(step.id, 256) || !['succeeded', 'failed', 'unknown'].includes(step.state) || step.detail !== undefined && !text(step.detail, 4096)) || new Set(steps.map(step => step.id)).size !== steps.length) fail('assistant-skills: invalid run completion')
+  }
+
+  claimCompensation(scope: object, input: ClaimSkillCompensationInput): { claimed: boolean; record: SkillCompensationRecord } {
+    const key = scopeKey(scope)
+    if (!input || !text(input.runId, 128) || !name(input.skillName) || !version(input.version) || !text(input.stepId, 256)
+      || !['compensate-via-registry', 'compensating-action', 'rollback-state'].includes(input.compensationKind)
+      || !text(input.idempotencyKey, 512)
+      || input.compensatorKey !== undefined && !text(input.compensatorKey, 128)
+      || input.toolName !== undefined && !text(input.toolName, 256)
+      || input.preimageDigest !== undefined && !digest(input.preimageDigest)) {
+      fail('assistant-skills: invalid compensation claim')
+    }
+    const id = `skill-comp-${acceptanceDigest([scope, input.runId, input.stepId, input.compensationKind, input.idempotencyKey])}`
+    const identityTuple = {
+      runId: input.runId,
+      skillName: input.skillName,
+      version: input.version,
+      stepId: input.stepId,
+      compensationKind: input.compensationKind,
+      ...(input.compensatorKey === undefined ? {} : { compensatorKey: input.compensatorKey }),
+      ...(input.toolName === undefined ? {} : { toolName: input.toolName }),
+      ...(input.preimageDigest === undefined ? {} : { preimageDigest: input.preimageDigest }),
+    }
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.#db
+        .prepare('SELECT record_json FROM skill_compensations WHERE scope_key=? AND idempotency_key=?')
+        .get(key, input.idempotencyKey) as { record_json: string } | undefined
+      if (existing) {
+        const parsed = JSON.parse(existing.record_json) as SkillCompensationRecord
+        const existingIdentity = {
+          runId: parsed.runId,
+          skillName: parsed.skillName,
+          version: parsed.version,
+          stepId: parsed.stepId,
+          compensationKind: parsed.compensationKind,
+          ...(parsed.compensatorKey === undefined ? {} : { compensatorKey: parsed.compensatorKey }),
+          ...(parsed.toolName === undefined ? {} : { toolName: parsed.toolName }),
+          ...(parsed.preimageDigest === undefined ? {} : { preimageDigest: parsed.preimageDigest }),
+        }
+        if (acceptanceDigest(existingIdentity) !== acceptanceDigest(identityTuple)) {
+          fail('assistant-skills: compensation idempotency conflict')
+        }
+        this.#db.exec('COMMIT')
+        return { claimed: false, record: clone(parsed) }
+      }
+      const now = Date.now()
+      const record: SkillCompensationRecord = {
+        id,
+        ...identityTuple,
+        idempotencyKey: input.idempotencyKey,
+        status: 'pending',
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.#db
+        .prepare('INSERT INTO skill_compensations(id, scope_key, run_id, idempotency_key, state, record_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run(id, key, input.runId, input.idempotencyKey, 'pending', JSON.stringify(record), now, now)
+      this.#db.exec('COMMIT')
+      return { claimed: true, record: clone(record) }
+    } catch (error) {
+      try { this.#db.exec('ROLLBACK') } catch {}
+      throw error
+    }
+  }
+
+  finishCompensation(
+    scope: object,
+    id: string,
+    status: Exclude<SkillCompensationStatus, 'pending'>,
+    detail?: string,
+  ): SkillCompensationRecord {
+    const key = scopeKey(scope)
+    if (!text(id, 128) || !['succeeded', 'failed', 'unknown', 'skipped-unknown'].includes(status)
+      || detail !== undefined && !text(detail, 4096)) {
+      fail('assistant-skills: invalid compensation settlement')
+    }
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.#db
+        .prepare('SELECT state, record_json FROM skill_compensations WHERE scope_key=? AND id=?')
+        .get(key, id) as { state: SkillCompensationStatus; record_json: string } | undefined
+      if (!row || row.state !== 'pending') fail('assistant-skills: compensation state conflict')
+      const current = JSON.parse(row.record_json) as SkillCompensationRecord
+      const now = Date.now()
+      const updated: SkillCompensationRecord = {
+        ...current,
+        status,
+        ...(detail === undefined ? {} : { detail }),
+        updatedAt: now,
+      }
+      const changed = this.#db
+        .prepare("UPDATE skill_compensations SET state=?, record_json=?, updated_at=? WHERE scope_key=? AND id=? AND state='pending'")
+        .run(status, JSON.stringify(updated), now, key, id)
+      if (changed.changes !== 1) fail('assistant-skills: compensation state conflict')
+      this.#db.exec('COMMIT')
+      return clone(updated)
+    } catch (error) {
+      try { this.#db.exec('ROLLBACK') } catch {}
+      throw error
+    }
+  }
+
+  listCompensations(scope: object, runIdValue: string): readonly SkillCompensationRecord[] {
+    const key = scopeKey(scope)
+    if (!text(runIdValue, 128)) fail('assistant-skills: invalid run reference')
+    const rows = this.#db
+      .prepare('SELECT record_json FROM skill_compensations WHERE scope_key=? AND run_id=? ORDER BY created_at ASC, rowid ASC')
+      .all(key, runIdValue) as { record_json: string }[]
+    return rows.map(row => clone(JSON.parse(row.record_json) as SkillCompensationRecord))
   }
 }

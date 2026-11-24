@@ -287,9 +287,121 @@ describe('skill dependency DAG and typed protocol semantics', () => {
     expect(() => evaluatePreconditions('future-family' as never, admit)).toThrow(/preconditions/u)
   })
 
-  it('resolves the v1 stop-and-report compensation and rejects unknown families', () => {
-    expect(compensationDirective('stop-and-report')).toEqual({ kind: 'stop-and-report', stopRemainingSteps: true, reportForOwnerRepair: true })
+  it('resolves all four compensation families and rejects unknown or malformed plans', () => {
+    expect(compensationDirective('stop-and-report')).toEqual({
+      kind: 'stop-and-report',
+      stopRemainingSteps: true,
+      reportForOwnerRepair: true,
+      executeCompensation: false,
+      capturePreimage: false,
+      target: 'none',
+    })
+    expect(compensationDirective('rollback-state')).toEqual({
+      kind: 'rollback-state',
+      stopRemainingSteps: true,
+      reportForOwnerRepair: true,
+      executeCompensation: true,
+      capturePreimage: true,
+      target: 'rollback',
+    })
+    expect(compensationDirective('compensating-action')).toEqual({
+      kind: 'compensating-action',
+      stopRemainingSteps: true,
+      reportForOwnerRepair: true,
+      executeCompensation: true,
+      capturePreimage: false,
+      target: 'action',
+    })
+    expect(compensationDirective('compensate-via-registry')).toEqual({
+      kind: 'compensate-via-registry',
+      stopRemainingSteps: true,
+      reportForOwnerRepair: true,
+      executeCompensation: true,
+      capturePreimage: true,
+      target: 'registry',
+    })
     expect(() => compensationDirective('retry-and-continue' as never)).toThrow(/compensation/u)
+
+    const twoSteps = source([
+      { id: 'step-1', toolName: 'write', arguments: { file_path: 'a.txt', content: 'v1' } },
+      { id: 'step-2', toolName: 'edit', arguments: { file_path: 'b.txt', old_string: 'x', new_string: 'y' } },
+    ])
+    const rollbackDef = createDefinition(
+      twoSteps,
+      { name: 'rollback-skill', description: 'Rollback state.', compensation: 'rollback-state' },
+      ['write', 'edit'],
+    )
+    expect(rollbackDef.compensation).toBe('rollback-state')
+    expect(instantiate(rollbackDef).compensation).toBe('rollback-state')
+
+    const actionDef = createDefinition(
+      twoSteps,
+      {
+        name: 'action-skill',
+        description: 'Compensating action.',
+        compensation: 'compensating-action',
+        compensationPlan: {
+          kind: 'compensating-action',
+          entries: [{ stepId: 'step-1', toolName: 'write', arguments: { file_path: 'a.txt', content: 'undo' } }],
+        },
+      },
+      ['write', 'edit'],
+    )
+    expect(actionDef.compensationPlan?.protocol).toBe('assistant-skills/compensation-plan/v1')
+    expect(actionDef.compensationPlan?.entries).toHaveLength(1)
+
+    expect(() => createDefinition(
+      twoSteps,
+      {
+        name: 'bad-stop',
+        description: 'Cannot pair plan with stop-and-report.',
+        compensation: 'stop-and-report',
+        compensationPlan: { kind: 'rollback-state', entries: [{ stepId: 'step-1' }] },
+      },
+      ['write', 'edit'],
+    )).toThrow(/stop-and-report/u)
+
+    expect(() => createDefinition(
+      twoSteps,
+      {
+        name: 'bad-control-comp',
+        description: 'Cannot use controlTool in compensationPlan.',
+        compensation: 'compensating-action',
+        compensationPlan: {
+          kind: 'compensating-action',
+          entries: [{ stepId: 'step-1', toolName: 'create_goal', arguments: {} }],
+        },
+      },
+      ['write', 'edit', 'create_goal'],
+    )).toThrow(/compensation plan/u)
+
+    expect(() => createDefinition(
+      twoSteps,
+      {
+        name: 'missing-step',
+        description: 'Unknown stepId rejected.',
+        compensation: 'compensating-action',
+        compensationPlan: {
+          kind: 'compensating-action',
+          entries: [{ stepId: 'no-such-step', toolName: 'write', arguments: { file_path: 'a.txt', content: 'u' } }],
+        },
+      },
+      ['write', 'edit'],
+    )).toThrow(/unknown stepId/u)
+
+    expect(() => createDefinition(
+      twoSteps,
+      {
+        name: 'unallowed-undo-tool',
+        description: 'Undo tool must be allowlisted.',
+        compensation: 'compensating-action',
+        compensationPlan: {
+          kind: 'compensating-action',
+          entries: [{ stepId: 'step-1', toolName: 'edit', arguments: { file_path: 'a.txt', old_string: '1', new_string: '2' } }],
+        },
+      },
+      ['write'],
+    )).toThrow()
   })
 
   it('instantiate rejects a forged definition whose graph or protocol fields were tampered', () => {

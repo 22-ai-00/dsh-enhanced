@@ -33,6 +33,7 @@ function assertSchema(database: DatabaseSync): void {
     'trigger_id', 'scope_json', 'goal_id', 'definition_version', 'definition_digest',
     'session_id', 'native_goal_id', 'native_revision', 'config_digest', 'automation_id', 'retired_at',
   ])
+  assertColumns(database, 'trigger_cursor', ['trigger_id', 'cursor_json', 'updated_at'])
   const sequenceSql = database.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'event_sequence'`)
     .get() as { sql: string } | undefined
   const outboxSql = database.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'event_outbox'`)
@@ -50,8 +51,8 @@ function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
     const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-    if (version > 5) throw new EventTriggerDatabaseError('schema-too-new', `event trigger schema ${version} is too new`)
-    if (version === 5) { assertSchema(database); database.exec('COMMIT'); return }
+    if (version > 6) throw new EventTriggerDatabaseError('schema-too-new', `event trigger schema ${version} is too new`)
+    if (version === 6) { assertSchema(database); database.exec('COMMIT'); return }
     if (version === 0) database.exec(`
       CREATE TABLE trigger_state (
       trigger_id TEXT PRIMARY KEY,
@@ -182,7 +183,14 @@ function migrate(database: DatabaseSync): void {
         retired_at INTEGER
       ) STRICT;
     `)
-    database.exec('PRAGMA user_version = 5')
+    if (version <= 5) database.exec(`
+      CREATE TABLE trigger_cursor (
+        trigger_id TEXT PRIMARY KEY,
+        cursor_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+    `)
+    database.exec('PRAGMA user_version = 6')
     assertSchema(database)
     database.exec('COMMIT')
   } catch (error) {

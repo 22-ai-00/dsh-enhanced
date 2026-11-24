@@ -23,6 +23,21 @@ import {
   type NormalizedRecoveryJob,
 } from './config.js'
 import { RecoveryExecutor } from './executor.js'
+import { CompensationExecutor } from './compensation-executor.js'
+import { CompensationLedger } from './compensation-ledger.js'
+import { CompensationRegistry } from './compensation-registry.js'
+import {
+  RecoveryCompensationError,
+  type CompensationAuditEntry,
+  type CompensationExecutionResult,
+  type CompensationQueryFilter,
+  type CompensationRecordInput,
+  type CompensatorDescriptor,
+  type CompensatorHandler,
+  type ExecuteCompensationOptions,
+  type PublicCompensationStatus,
+  type RecoveryCompensationPort,
+} from './compensation-types.js'
 import {
   HostRecoveryRunbookPort,
   RECOVERY_SYSTEM_OWNER,
@@ -50,7 +65,10 @@ export class AssistantRecoveryError extends Error {
 }
 
 declare module '@deepseek-ai/cordis' {
-  interface Context { assistantRecovery: AssistantRecoveryService }
+  interface Context {
+    assistantRecovery: AssistantRecoveryService
+    assistantCompensation: RecoveryCompensationPort
+  }
 }
 
 const PREVIEW_AT = '9999-12-31T23:59:59.999Z'
@@ -214,8 +232,11 @@ export class AssistantRecoveryService extends Service {
     'assistantHealth',
   ]
 
+  readonly compensationRegistry: CompensationRegistry
   private readonly config: NormalizedConfig
   private readonly store: RecoveryStore
+  private readonly compensationLedger: CompensationLedger
+  private readonly compensationExecutor: CompensationExecutor
   private readonly automations: AssistantAutomationsService
   private readonly activationPlanDigests: ReadonlyMap<string, string>
   private readonly automationExecutor: RecoveryAutomationExecutor
@@ -231,8 +252,18 @@ export class AssistantRecoveryService extends Service {
       maxStepDurationMs: this.config.maxStepDurationMs,
       deadlineGraceMs: RECOVERY_DEADLINE_GRACE_MS,
     })
+    this.compensationRegistry = new CompensationRegistry()
+    this.compensationLedger = new CompensationLedger({
+      database: this.store.compensationDatabase(),
+    })
+    this.compensationExecutor = new CompensationExecutor(
+      this.compensationRegistry,
+      this.compensationLedger,
+      { defaultTimeoutMs: this.config.maxStepDurationMs },
+    )
     const bootstrapGeneration = (() => {
       try {
+        this.compensationLedger.recoverIncomplete()
         return this.store.beginBootstrap({
           attestationValid: false,
           attestations: Object.freeze([]),
@@ -389,11 +420,24 @@ export class AssistantRecoveryService extends Service {
       throw error
     }
 
+    const compensationPort: RecoveryCompensationPort = Object.freeze({
+      executeCompensation: this.executeCompensation,
+      hasCompensator: this.hasCompensator,
+      registerCompensator: this.registerCompensator,
+      listCompensators: this.listCompensators,
+      getCompensationStatus: this.getCompensationStatus,
+      listCompensations: this.listCompensations,
+      listCompensationAudit: this.listCompensationAudit,
+    })
+    ctx.reflect.provide('assistantCompensation', compensationPort, () => this.active)
+
     ctx.effect(() => async () => {
       this.active = false
       this.unregisterExecutor()
       await Promise.allSettled([this.bootstrap])
       await this.automationExecutor.whenIdle()
+      await this.compensationExecutor.dispose()
+      this.compensationRegistry.clear()
       this.store.close()
     }, 'assistant-recovery.runtime')
   }
@@ -407,6 +451,54 @@ export class AssistantRecoveryService extends Service {
     this.assertActive()
     await this.bootstrap
     await this.automationExecutor.whenIdle()
+    await this.compensationExecutor.whenIdle()
+  }
+
+  registerCompensator = (
+    handler: CompensatorHandler,
+    options: { readonly replace?: boolean; readonly ownerCtx?: Context } = {},
+  ): (() => void) => {
+    this.assertActive()
+    return this.compensationRegistry.register(handler, options)
+  }
+
+  hasCompensator = (kind: string): boolean => {
+    this.assertActive()
+    return this.compensationRegistry.has(kind)
+  }
+
+  listCompensators = (): readonly CompensatorDescriptor[] => {
+    this.assertActive()
+    return this.compensationRegistry.list()
+  }
+
+  executeCompensation = async (
+    record: CompensationRecordInput,
+    options?: ExecuteCompensationOptions,
+  ): Promise<CompensationExecutionResult> => {
+    this.assertActive()
+    return await this.compensationExecutor.executeCompensation(record, options)
+  }
+
+  getCompensationStatus = (
+    idOrKey: { readonly id?: string; readonly idempotencyKey?: string },
+  ): PublicCompensationStatus | undefined => {
+    this.assertActive()
+    if (idOrKey.id !== undefined) return this.compensationLedger.getById(idOrKey.id)
+    if (idOrKey.idempotencyKey !== undefined) {
+      return this.compensationLedger.getByIdempotencyKey(idOrKey.idempotencyKey)
+    }
+    throw new RecoveryCompensationError('invalid-input', 'id or idempotencyKey is required')
+  }
+
+  listCompensations = (filter?: CompensationQueryFilter): readonly PublicCompensationStatus[] => {
+    this.assertActive()
+    return this.compensationLedger.list(filter)
+  }
+
+  listCompensationAudit = (compensationId: string): readonly CompensationAuditEntry[] => {
+    this.assertActive()
+    return this.compensationLedger.listAudit(compensationId)
   }
 
   private previewFor(job: NormalizedRecoveryJob) {

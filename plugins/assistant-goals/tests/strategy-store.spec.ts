@@ -206,3 +206,98 @@ describe('GoalStrategyStore.summarizeAdviceByDefinition', () => {
     store.close()
   })
 })
+
+describe('GoalStrategyStore v3 migration, experiment records, and telemetry aggregation', () => {
+  const v2Schema = "CREATE TABLE goal_strategy_records (id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','starting','settled','unknown')), version INTEGER NOT NULL, children_json TEXT NOT NULL, completed_at INTEGER, outcome TEXT CHECK(outcome IN ('advice','execution-failed','cancelled','unknown')), output_digest TEXT, scope_key TEXT NOT NULL, goal_id TEXT NOT NULL, created_at INTEGER NOT NULL, termination_reason TEXT CHECK(termination_reason IN ('deadline','parent-authority-changed','cancelled','execution-failed','unconfirmed-stop','completed','recovered-unknown','unknown'))) STRICT; CREATE INDEX goal_strategy_scope_goal_created ON goal_strategy_records(scope_key, goal_id, created_at DESC, id ASC); PRAGMA user_version = 2;"
+
+  it('migrates schema 2 records to schema 3 losslessly and rolls back on corrupt v2 rows', async () => {
+    const path = join(await mkdtemp(join(tmpdir(), 'goal-strategy-v2-')), 'strategy.sqlite')
+    const db = new DatabaseSync(path)
+    try {
+      db.exec(v2Schema)
+      db.prepare("INSERT INTO goal_strategy_records(id, intent_json, state, version, children_json, completed_at, outcome, output_digest, scope_key, goal_id, created_at, termination_reason) VALUES (?, ?, 'settled', 4, ?, 20, 'advice', ?, ?, 'goal-a', 1, 'completed')")
+        .run('strategy-v2', JSON.stringify(intent('strategy-v2')), JSON.stringify([child('child-v2')]), 'c'.repeat(64), acceptanceCanonicalJson(scope))
+    } finally { db.close() }
+    chmodSync(path, 0o600)
+
+    const migrated = new GoalStrategyStore(path)
+    try {
+      expect(migrated.inspect(scope, 'strategy-v2')).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed' })
+      // New v3 outcomes (experiment, direct-recommended) work immediately after migration.
+      migrated.prepare({
+        ...intent('strategy-direct', 5),
+        kind: 'direct',
+        requestedKind: 'auto',
+        maxChildren: 0,
+        routing: { difficulty: 'trivial', failureType: 'none', selectedStrategy: 'direct', expectedNetBenefit: 2, estimatedCostCalls: 0, rationale: 'trivial task' },
+      })
+      migrated.dispatch('strategy-direct', 1, 6)
+      const direct = migrated.settle('strategy-direct', 2, { children: [], outcome: 'direct-recommended', quiescent: true, terminationReason: 'skipped-direct' }, 7)
+      expect(direct).toMatchObject({ state: 'settled', outcome: 'direct-recommended', terminationReason: 'skipped-direct', children: [] })
+    } finally { migrated.close() }
+
+    const corruptPath = join(await mkdtemp(join(tmpdir(), 'goal-strategy-bad-v2-')), 'strategy.sqlite')
+    const badDb = new DatabaseSync(corruptPath)
+    badDb.exec(v2Schema)
+    badDb.prepare("INSERT INTO goal_strategy_records(id,intent_json,state,version,children_json,scope_key,goal_id,created_at,termination_reason) VALUES ('bad','{}','prepared',1,'[]','{}','goal-a',1,NULL)").run()
+    badDb.close(); chmodSync(corruptPath, 0o600)
+    expect(() => new GoalStrategyStore(corruptPath)).toThrow(GoalStoreError)
+    const verify = new DatabaseSync(corruptPath, { readOnly: true })
+    try { expect(verify.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 2 }) } finally { verify.close() }
+  })
+
+  it('persists experiment diagnostics and aggregates strategy telemetry via summarizeStrategyOutcomes', () => {
+    const store = new GoalStrategyStore(':memory:')
+    store.prepare({
+      ...intent('exp-1', 10),
+      kind: 'experiment',
+      maxChildren: 1,
+      experiment: { allowedTools: ['read_report'], maxToolCalls: 4, maxModelCalls: 3, workspaceWriteAllowed: false },
+      routing: { difficulty: 'moderate', failureType: 'tool-failure', selectedStrategy: 'experiment', expectedNetBenefit: 1.9, estimatedCostCalls: 2.3, rationale: 'tool failure probe' },
+    })
+    store.dispatch('exp-1', 1, 11)
+    store.bindChild('exp-1', 2, 'child-exp-1', 12)
+    store.settle('exp-1', 3, {
+      children: [{ sessionId: 'child-exp-1', stopReason: 'completed', quiescent: true, diagnostics: { toolRejections: 1, output: 'accepted', toolCalls: 2, modelCalls: 3, executedTools: ['read_report'] } }],
+      outcome: 'experiment',
+      outputDigest: 'd'.repeat(64),
+      quiescent: true,
+      terminationReason: 'completed',
+    }, 50)
+
+    store.prepare({ ...intent('dir-1', 60), kind: 'direct', requestedKind: 'auto', maxChildren: 0 })
+    store.dispatch('dir-1', 1, 61)
+    store.settle('dir-1', 2, { children: [], outcome: 'direct-recommended', quiescent: true, terminationReason: 'skipped-direct' }, 65)
+
+    // Foreign scope row must not leak into summary.
+    store.prepare({ ...intent('foreign-1', 70), scope: { ...scope, principalId: 'other' }, kind: 'experiment', maxChildren: 1 })
+    store.dispatch('foreign-1', 1, 71)
+    store.bindChild('foreign-1', 2, 'child-foreign', 72)
+    store.settle('foreign-1', 3, { children: [child('child-foreign')], outcome: 'execution-failed', quiescent: true, terminationReason: 'execution-failed' }, 80)
+
+    const summary = store.summarizeStrategyOutcomes(scope)
+    expect(summary.totalRuns).toBe(2)
+    expect(summary.experimentRuns).toBe(1)
+    expect(summary.directRecommendedRuns).toBe(1)
+    expect(summary.failedOrUnknownRuns).toBe(0)
+    expect(summary.byKind.experiment).toEqual({
+      total: 1,
+      succeeded: 1,
+      failedOrUnknown: 0,
+      avgDurationMs: 40,
+      avgModelCalls: 3,
+      avgToolCalls: 2,
+    })
+    expect(summary.byKind.direct).toEqual({
+      total: 1,
+      succeeded: 1,
+      failedOrUnknown: 0,
+      avgDurationMs: 5,
+      avgModelCalls: 0,
+      avgToolCalls: 0,
+    })
+    // Experiment records are excluded from summarizeAdviceByDefinition.
+    expect(store.summarizeAdviceByDefinition(scope)).toEqual([])
+    store.close()
+  })
+})

@@ -11,9 +11,35 @@ import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, Owne
 import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
+import { execFile } from 'node:child_process'
+import { lstat, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, type SkillBinding, type SkillDefinition } from './definition.js'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { promisify } from 'node:util'
+import {
+  compensationDirective,
+  createDefinition,
+  evaluatePreconditions,
+  fileObservationSteps,
+  instantiate,
+  type CreateDefinitionOptions,
+  type PreconditionPathProbeResult,
+  type SkillBinding,
+  type SkillCompensationKind,
+  type SkillDefinition,
+  type SkillPreconditionDecision,
+  type SkillPreconditionKind,
+  type SkillPreconditionPlan,
+  type WorkflowFamilyId,
+} from './definition.js'
+import {
+  capturePreimageForStep,
+  compensateFailedSkillRun,
+  inspectApplyPatchValue,
+  recordSkippedUnknownCompensation,
+  type CapturedPreimage,
+  type SkillCompensationHandler,
+} from './compensation.js'
 import { captureFailureCandidateProvenance, captureRunExpansions } from './capture-expansion.js'
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchBindingCurrent, watchObservation, watchObservationResult, watchObservationRevision } from './watch-proof.js'
@@ -162,7 +188,11 @@ function publicDefinition(definition: SkillDefinition | StoredSkillDefinition) {
   return { protocol: definition.protocol, name: definition.name, description: definition.description, source, inputs: definition.inputs, steps: definition.steps,
     ...(definition.fileObservations === undefined ? {} : { fileObservations: definition.fileObservations }),
     ...(definition.runExpansions === undefined ? {} : { runExpansionCount: definition.runExpansions.length, runExpansionsDigest: acceptanceDigest(definition.runExpansions) }),
-    preconditions: definition.preconditions, compensation: definition.compensation,
+    preconditions: definition.preconditions,
+    ...(definition.preconditionPlan === undefined ? {} : { preconditionPlan: definition.preconditionPlan }),
+    ...(definition.workflowFamily === undefined ? {} : { workflowFamily: definition.workflowFamily }),
+    compensation: definition.compensation,
+    ...(definition.compensationPlan === undefined ? {} : { compensationPlan: definition.compensationPlan }),
     ...(!('version' in definition) ? {} : { version: definition.version, parentVersion: definition.parentVersion, retired: definition.retired, definitionDigest: acceptanceDigest(definition), createdAt: definition.createdAt, updatedAt: definition.updatedAt,
       ...(definition.restoredFromVersion === undefined ? {} : { restoredFromVersion: definition.restoredFromVersion }) }) }
 }
@@ -242,6 +272,83 @@ function trialProofSteps(steps: readonly { toolName: string; arguments: unknown 
   return trials === 1
 }
 
+const execFileAsync = promisify(execFile)
+
+async function probeWorkspacePathContainment(workspace: string, rawPath: string): Promise<PreconditionPathProbeResult> {
+  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.includes('\0') || rawPath.includes('\\')) {
+    return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+  }
+  const workspaceAbs = resolve(workspace)
+  let workspaceReal: string
+  try {
+    const wsStat = await lstat(workspaceAbs)
+    if (wsStat.isSymbolicLink() || !wsStat.isDirectory()) {
+      return { contained: false, isSymlink: wsStat.isSymbolicLink(), exists: false, isRegularFile: false }
+    }
+    workspaceReal = await realpath(workspaceAbs)
+  } catch {
+    return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+  }
+  let rel: string
+  if (isAbsolute(rawPath)) {
+    const resolvedRaw = resolve(rawPath)
+    const relAbs = relative(workspaceAbs, resolvedRaw)
+    const relReal = relative(workspaceReal, resolvedRaw)
+    if (relAbs !== '' && relAbs !== '..' && !relAbs.startsWith(`..${sep}`) && !isAbsolute(relAbs)) rel = relAbs
+    else if (relReal !== '' && relReal !== '..' && !relReal.startsWith(`..${sep}`) && !isAbsolute(relReal)) rel = relReal
+    else return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+  } else {
+    rel = rawPath
+  }
+  if (rel.split('/').some(part => part === '' || part === '.' || part === '..')) {
+    return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+  }
+  const target = resolve(workspaceReal, rel)
+  const relFromReal = relative(workspaceReal, target)
+  if (!relFromReal || relFromReal === '..' || relFromReal.startsWith(`..${sep}`) || isAbsolute(relFromReal)) {
+    return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+  }
+  const segments = relFromReal.split(sep).filter(Boolean)
+  let cursor = workspaceReal
+  for (let index = 0; index < segments.length; index++) {
+    cursor = resolve(cursor, segments[index]!)
+    try {
+      const stat = await lstat(cursor)
+      if (stat.isSymbolicLink()) {
+        return { contained: true, isSymlink: true, exists: true, isRegularFile: false }
+      }
+      if (index === segments.length - 1) {
+        return { contained: true, isSymlink: false, exists: true, isRegularFile: stat.isFile() }
+      }
+      if (!stat.isDirectory()) {
+        return { contained: true, isSymlink: false, exists: false, isRegularFile: false }
+      }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        return { contained: true, isSymlink: false, exists: false, isRegularFile: false }
+      }
+      return { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+    }
+  }
+  return { contained: true, isSymlink: false, exists: false, isRegularFile: false }
+}
+
+function buildOptionalDefinitionOptions(args: {
+  preconditions?: string
+  precondition_plan_json?: string
+  workflow_family?: string
+  compensation?: string
+  compensation_plan_json?: string
+}): Partial<CreateDefinitionOptions> {
+  return {
+    ...(args.preconditions === undefined ? {} : { preconditions: args.preconditions as SkillPreconditionKind }),
+    ...(args.precondition_plan_json === undefined ? {} : { preconditionPlan: parse(args.precondition_plan_json) as Omit<SkillPreconditionPlan, 'protocol'> }),
+    ...(args.workflow_family === undefined ? {} : { workflowFamily: args.workflow_family as WorkflowFamilyId }),
+    ...(args.compensation === undefined ? {} : { compensation: args.compensation as SkillCompensationKind }),
+    ...(args.compensation_plan_json === undefined ? {} : { compensationPlan: parse(args.compensation_plan_json) as NonNullable<CreateDefinitionOptions['compensationPlan']> }),
+  }
+}
+
 /** Fixed tool compositions run in the original native Goal; no new AgentLoop or scheduler. */
 export class AssistantSkillsService extends Service {
   static Config = Config
@@ -281,6 +388,7 @@ export class AssistantSkillsService extends Service {
   readonly #captureDirty = new Set<string>()
   readonly #captureTasks = new Set<Promise<void>>()
   readonly #deployedExecutions = new Set<AbortController>()
+  readonly #localCompensators = new Map<string, SkillCompensationHandler>()
   #toolsCtx: Context | undefined
   #active = true
   constructor(ctx: Context, config: Config = {}) {
@@ -296,7 +404,7 @@ export class AssistantSkillsService extends Service {
     this.#repairProfiles = validateRepairProfiles(config.repairProfiles ?? [], this.#externalHoldouts)
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
     AssistantSkillsService.#benchmarkRecipients.set(this.#benchmarkIdentity, this)
-    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); this.#changeListeners.clear(); this.#mountedBenchmarkArms.clear(); await Promise.allSettled(this.#benchmarkRuns); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); this.#changeListeners.clear(); this.#localCompensators.clear(); this.#mountedBenchmarkArms.clear(); await Promise.allSettled(this.#benchmarkRuns); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
     ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       this.#benchmarkGeneration++
       runtime.effect(() => () => {
@@ -314,8 +422,8 @@ export class AssistantSkillsService extends Service {
     })
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
-        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(this.save(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.expected_version ?? 0)) }) }))
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' }, preconditions: { type: 'string' }, precondition_plan_json: { type: 'string' }, workflow_family: { type: 'string' }, compensation: { type: 'string' }, compensation_plan_json: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.save(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[], ...buildOptionalDefinitionOptions(args) }, args.expected_version ?? 0)) }) }))
       const delegatedRun = defineTool({ name: 'skill_run', description: 'Replay a saved skill’s fixed tool steps in a fresh native Goal. If the current owner Goal is active but has no admitted native round, this returns awaiting-native-round with no steps or durable run, ends the turn, and the next native round must repeat the same invocation_id. Every nested call retains native permissions, approvals, cancellation and budgets. Tool success still requires fresh independent Goal acceptance.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, inputs_json: { type: 'string', description: 'JSON object with only declared typed input parameters.' }, invocation_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.run(exec, args.goal_id, args.name, args.version, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) })
@@ -341,8 +449,8 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_comparison_status', description: 'Read redacted comparison identity, state, aggregate quality and public digests, or call without comparison_id to discover exact owner-scoped configured profile IDs and their execution tools before choosing a comparison entrypoint. Private cells, keys, observations, inputs and expected answers are never included.', parameters: { comparison_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.comparisonStatus(exec.agent, args.comparison_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
-        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.parent_version, args.reason, args.trigger)) }) }))
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true }, preconditions: { type: 'string' }, precondition_plan_json: { type: 'string' }, workflow_family: { type: 'string' }, compensation: { type: 'string' }, compensation_plan_json: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[], ...buildOptionalDefinitionOptions(args) }, args.parent_version, args.reason, args.trigger)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_failure_candidate', description: 'Draft a private repair candidate from one or more exact independently verified not-achieved Goals and a later independent achieved repair Goal. Use failure_locators plus minimum_occurrences for repeated failures; the legacy trigger Goal fields remain valid for one failure. Failure outcomes, summaries, provenance and digests are read only from the current Goals Host capability and are never caller inputs. The current active skill stays unchanged.',
         parameters: { owner_route_id: { type: 'string', required: true }, trigger_goal_id: { type: 'string', description: `${businessGoalId} Legacy single-failure input; omit when failure_locators is supplied.` }, trigger_session_id: { type: 'string', description: 'Legacy single-failure session; omit when failure_locators is supplied.' }, failure_locators: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { session_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true, description: businessGoalId } } }, description: 'Bounded list of 1-32 exact failure locators. It contains identities only, never outcomes, receipts, provenance or digests.' }, minimum_occurrences: { type: 'integer', description: 'Required evidence count for failure_locators (1-32 and no greater than the locator count). Legacy single-failure input defaults to 1.' }, repair_goal_id: { type: 'string', required: true, description: businessGoalId }, repair_session_id: { type: 'string', required: true }, task_family_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.stageFailureCandidate(exec, { ownerRouteId: args.owner_route_id, ...(args.trigger_goal_id === undefined ? {} : { triggerGoalId: args.trigger_goal_id }), ...(args.trigger_session_id === undefined ? {} : { triggerSessionId: args.trigger_session_id }), ...(args.failure_locators === undefined ? {} : { failureLocators: args.failure_locators.map(locator => ({ sessionId: locator.session_id, goalId: locator.goal_id })) }), ...(args.minimum_occurrences === undefined ? {} : { minimumOccurrences: args.minimum_occurrences }), repairGoalId: args.repair_goal_id, repairSessionId: args.repair_session_id, taskFamilyId: args.task_family_id, name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[], parentVersion: args.parent_version })) }) }))
@@ -432,7 +540,10 @@ export class AssistantSkillsService extends Service {
     })
   }
   #body(value: StoredSkillDefinition): string {
-    return `# ${value.name}\n${value.description}\n\nSaved tool workflow, version ${value.version}. Source acceptance is historical; it grants no future authority. Run only in a new native Goal with its own independent acceptance conditions. Call skill_run with goal_id, name, version, inputs_json and a stable invocation_id. Do not regenerate the stored tool steps or replay an unknown invocation. Failure stops remaining steps; compensation is explicit owner-directed repair.\n\n${JSON.stringify({ name: value.name, version: value.version, inputs: value.inputs, tools: value.steps.map(step => step.toolName), source: value.source.acceptance })}`
+    const compensationNote = value.compensation === 'stop-and-report'
+      ? 'Failure stops remaining steps; compensation is explicit owner-directed repair.'
+      : `Failure stops remaining steps and triggers ${value.compensation} compensation with a durable audit trail in skill_status.`
+    return `# ${value.name}\n${value.description}\n\nSaved tool workflow, version ${value.version}. Source acceptance is historical; it grants no future authority. Run only in a new native Goal with its own independent acceptance conditions. Call skill_run with goal_id, name, version, inputs_json and a stable invocation_id. Do not regenerate the stored tool steps or replay an unknown invocation. ${compensationNote}\n\n${JSON.stringify({ name: value.name, version: value.version, inputs: value.inputs, tools: value.steps.map(step => step.toolName), source: value.source.acceptance })}`
   }
   #scope(agent: Agent | undefined, action: Action): GoalScope {
     if (!this.#active || !agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-skills: exact live agent required')
@@ -537,7 +648,30 @@ export class AssistantSkillsService extends Service {
     this.#comparing.add(operation)
     try { return await operation } finally { this.#comparing.delete(operation) }
   }
-  save(agent: Agent | undefined, goalId: string, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, expectedVersion = 0) {
+  registerCompensator = (
+    key: string,
+    handler: SkillCompensationHandler,
+    ownerCtx?: Context,
+  ): (() => void) => {
+    if (!this.#active) throw new Error('assistant-skills: service disposed')
+    if (typeof key !== 'string' || !/^[a-z][a-z0-9.:_-]{0,127}$/u.test(key) || typeof handler !== 'function') {
+      throw new Error('assistant-skills: invalid compensator registration')
+    }
+    this.#localCompensators.set(key, handler)
+    let disposed = false
+    const unregister = (): void => {
+      if (disposed) return
+      disposed = true
+      if (this.#localCompensators.get(key) === handler) {
+        this.#localCompensators.delete(key)
+      }
+    }
+    if (ownerCtx !== undefined) {
+      ownerCtx.effect(() => () => unregister(), 'assistant-skills.compensator')
+    }
+    return unregister
+  }
+  save = (agent: Agent | undefined, goalId: string, options: CreateDefinitionOptions, expectedVersion = 0) => {
     const scope = this.#scope(agent, 'save')
     const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)
     if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: source owner mismatch')
@@ -546,7 +680,7 @@ export class AssistantSkillsService extends Service {
     const saved = this.#store.save(scope, definition, expectedVersion)
     this.#changed(); return saved
   }
-  #capturedDefinition(source: import('./definition.js').VerifiedWorkflowSource, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, scope: GoalScope) {
+  #capturedDefinition(source: import('./definition.js').VerifiedWorkflowSource, options: CreateDefinitionOptions, scope: GoalScope) {
     return createDefinition(source, options, this.#allowed, captureRunExpansions(source, scope, this.#store))
   }
   /** Only a live delegated, isolation-only workflow may cross Isolation's tool gate. */
@@ -567,7 +701,12 @@ export class AssistantSkillsService extends Service {
   }
   inspect(agent: Agent | undefined, runId?: string) {
     const scope = this.#scope(agent, 'inspect')
-    if (runId) return this.#store.getRun(scope, runId)
+    if (runId) {
+      const run = this.#store.getRun(scope, runId)
+      if (!run) return undefined
+      const compensations = this.#store.listCompensations(scope, runId)
+      return compensations.length === 0 ? run : { ...run, compensations }
+    }
     const mounted = this.#mountedBenchmarkArms.get(acceptanceDigest(scope))
     if (mounted) { mounted.assertCurrent(); return [{ ...structuredClone(mounted.skill), delegation: structuredClone(mounted.binding), delegationDigest: mounted.bindingDigest }] }
     return this.#store.list(scope)
@@ -834,7 +973,7 @@ export class AssistantSkillsService extends Service {
     this.#comparing.add(operation)
     try { await operation; return this.#comparisonStatus(scope, claim.comparison.id)! } finally { this.#comparing.delete(operation) }
   }
-  stage(agent: Agent | undefined, goalId: string, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, parentVersion: number, reason: string, trigger: string) {
+  stage = (agent: Agent | undefined, goalId: string, options: CreateDefinitionOptions, parentVersion: number, reason: string, trigger: string) => {
     const scope = this.#scope(agent, 'draft')
     const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)
     if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: source owner mismatch')
@@ -1826,8 +1965,9 @@ export class AssistantSkillsService extends Service {
       return { state: 'awaiting-native-round' as const, performed: false, context: 'No skill step or durable invocation has been claimed or executed; this is not a queued background task.', next: `After the Host starts this Goal's native round, call ${tool} again with this same goal, skill or candidate, inputs, and invocation_id.`, goalId, ...(candidateId ? { candidateId } : {}), skillName: name, version, invocationId, inputs }
     }
     // Consume the typed precondition family rather than an ad-hoc condition so
-    // an unknown/tampered declaration fails closed before a run is claimed.
-    evaluatePreconditions(skill.preconditions, { ownerScopeDigest: acceptanceDigest(scope), currentScopeDigest: acceptanceDigest(current.scope), goalId, sourceGoalId: skill.source.goal.id })
+    // an unknown/tampered declaration or unmet runtime check fails closed before a run is claimed.
+    const decision = await this.#resolvePreconditionDecision(exec, action, scope, current, definition, goalId, inputs, invocationId)
+    evaluatePreconditions(skill.preconditions, decision)
     const identity = acceptanceDigest(current)
     const goalContext = current as typeof current & { nativeGoalId?: string }
     // claim() reconciles a deployed version while holding its transaction.  Do
@@ -1874,11 +2014,15 @@ export class AssistantSkillsService extends Service {
     const signal = AbortSignal.any([exec.signal, timeout.signal, this.#lifecycle.signal, ...(delegated ? [delegated.signal] : []), ...(deploymentRevision ? [deploymentRevision.signal] : [])])
     const settle = <T>(work: Promise<T>): Promise<T> => delegated ? awaitBenchmarkSignal(work, signal) : work
     const completed: SkillRunStep[] = []
+    const preimages = new Map<string, CapturedPreimage>()
     let state: 'succeeded' | 'failed' | 'unknown' = 'unknown'
     let dispatched = false
     // Resolve the compensation family up front; an unsupported/tampered value
     // fails closed before any step is dispatched.
     const compensation = compensationDirective(definition.compensation)
+    const planEntryByStep = new Map(
+      (definition.compensationPlan?.entries ?? []).map(entry => [entry.stepId, entry]),
+    )
     const revalidate = () => {
       signal.throwIfAborted()
       assertDelegated()
@@ -1941,6 +2085,19 @@ export class AssistantSkillsService extends Service {
         const succeededById = new Set(completed.filter(entry => entry.state === 'succeeded').map(entry => entry.id))
         if (compensation.stopRemainingSteps && step.dependsOn.some(dependency => !succeededById.has(dependency))) { state = 'failed'; break stepsLoop }
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
+        const stepSpec = planEntryByStep.get(step.id)
+        const needsPreimage = compensation.capturePreimage && (
+          step.toolName === 'write'
+          || step.toolName === 'edit'
+          || step.toolName === 'apply_patch'
+          || stepSpec?.capturePreimage === true
+        )
+        if (needsPreimage) {
+          const captured = await capturePreimageForStep(scope.workspace, step, {
+            capturePreimage: stepSpec?.capturePreimage === true,
+          })
+          if (captured !== undefined) preimages.set(step.id, captured)
+        }
         dispatched = true
         if (this.#toolsCtx === undefined) throw new Error('assistant-skills: tools service unavailable')
         const result = await settle(executeNestedTool(this.#toolsCtx, {
@@ -1957,9 +2114,24 @@ export class AssistantSkillsService extends Service {
         revalidate()
         for (const context of result.additionalContexts ?? []) exec.deferContext(context)
         const interrupted = signal.aborted || result.isError && ['ABORTED', 'ABORTED_BEFORE_DISPATCH'].includes(result.error.info?.code ?? '')
-        completed.push({ id: step.id, state: interrupted ? 'unknown' : result.isError ? 'failed' : 'succeeded', detail: result.isError ? result.error.info?.code ?? 'tool-rejected' : `result:${acceptanceDigest(result.content)}` })
+        const patchOutcome = !interrupted && !result.isError && step.toolName === 'apply_patch'
+          ? inspectApplyPatchValue(result.value)
+          : 'completed'
+        const stepState: 'succeeded' | 'failed' | 'unknown' = interrupted || patchOutcome === 'partial-unknown'
+          ? 'unknown'
+          : result.isError || patchOutcome === 'partial-failed'
+            ? 'failed'
+            : 'succeeded'
+        const stepDetail = result.isError
+          ? result.error.info?.code ?? 'tool-rejected'
+          : patchOutcome === 'partial-unknown'
+            ? 'apply-patch-partial-unknown'
+            : patchOutcome === 'partial-failed'
+              ? 'apply-patch-partial-failed'
+              : `result:${acceptanceDigest(result.content)}`
+        completed.push({ id: step.id, state: stepState, detail: stepDetail })
         this.#store.checkpoint(scope, claim.run.id, completed)
-        if (result.isError || interrupted) { state = interrupted ? 'unknown' : 'failed'; break }
+        if (stepState !== 'succeeded') { state = stepState; break }
         if (result.concludesTurn) exec.concludeTurn()
         if (delegated) await delegated.refresh(signal)
         revalidate()
@@ -1969,9 +2141,218 @@ export class AssistantSkillsService extends Service {
     } catch { state = deployment || dispatched || signal.aborted ? 'unknown' : 'failed' }
     finally { clearTimeout(timer); if (deploymentRevision) this.#deployedExecutions.delete(deploymentRevision) }
     if (!this.#active) throw new Error('assistant-skills: runtime disposed; invocation will recover as unknown')
+    if (state === 'failed' && compensation.executeCompensation) {
+      const compSignal = AbortSignal.any([
+        exec.signal,
+        this.#lifecycle.signal,
+        ...(delegated ? [delegated.signal] : []),
+        AbortSignal.timeout(this.#duration),
+      ])
+      await compensateFailedSkillRun({
+        ctx: this.ctx,
+        store: this.#store,
+        scope,
+        runId: claim.run.id,
+        definition: { ...definition, version },
+        directive: compensation,
+        completed,
+        preimages,
+        allowedTools: this.#allowed,
+        toolsCtx: this.#toolsCtx,
+        exec,
+        signal: compSignal,
+        localHandlers: this.#localCompensators,
+        ...(delegated ? { settle: <T>(work: Promise<T>) => awaitBenchmarkSignal(work, compSignal) } : {}),
+      })
+    } else if (state === 'unknown' && compensation.executeCompensation) {
+      recordSkippedUnknownCompensation({
+        store: this.#store,
+        scope,
+        runId: claim.run.id,
+        definition: { ...definition, version },
+        steps: completed,
+      })
+    }
     const saved = this.#store.finish(scope, claim.run.id, state, completed)
     if (saved.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${saved.id} is ${saved.state}; inspect skill_status, do not replay`)
     this.#queueReconcile()
     return { ...saved, replayed: false, acceptance: 'requires-fresh-goal-verification' }
+  }
+  async #resolvePreconditionDecision(
+    exec: ToolRunContext,
+    action: Action,
+    scope: GoalScope,
+    current: { readonly scope: GoalScope },
+    definition: SkillDefinition,
+    goalId: string,
+    inputs: Readonly<Record<string, unknown>>,
+    invocationId: string,
+  ): Promise<SkillPreconditionDecision> {
+    const now = Date.now()
+    const materializedInputs: Record<string, unknown> = {}
+    for (const input of definition.inputs) {
+      materializedInputs[input.name] = Object.hasOwn(inputs, input.name) ? inputs[input.name] : input.default
+    }
+    for (const [key, value] of Object.entries(inputs)) {
+      if (!Object.hasOwn(materializedInputs, key)) {
+        materializedInputs[key] = value
+      }
+    }
+    const base: SkillPreconditionDecision = {
+      ownerScopeDigest: acceptanceDigest(scope),
+      currentScopeDigest: acceptanceDigest(current.scope),
+      goalId,
+      sourceGoalId: definition.source.goal.id,
+      ...(definition.workflowFamily === undefined ? {} : { workflowFamily: definition.workflowFamily }),
+      allowedTools: this.#allowed,
+      inputs: materializedInputs,
+      now,
+    }
+    const delivery = this.ctx.get('assistantDelivery', false) as AssistantDeliveryService | undefined
+    const policy = this.ctx.get('assistantPolicy', false) as AssistantPolicyService | undefined
+
+    if (definition.preconditions === 'clean-git-worktree-and-policy-grant') {
+      let cleanGitWorktree = false
+      try {
+        const wsStat = await lstat(scope.workspace)
+        if (wsStat.isDirectory() && !wsStat.isSymbolicLink()) {
+          const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
+            cwd: scope.workspace,
+            shell: false,
+            timeout: 5000,
+          })
+          cleanGitWorktree = stdout.trim() === ''
+        }
+      } catch {
+        cleanGitWorktree = false
+      }
+      base.cleanGitWorktree = cleanGitWorktree
+      base.policyGrantValid = policy?.evaluateAgent(exec.agent, action, resource).effect === 'allow'
+    } else if (definition.preconditions === 'calendar-window-and-route-binding') {
+      const owner = exec.agent ? delivery?.preferencePrincipalForAgent(exec.agent) : undefined
+      let ownerRouteBound = owner !== undefined && delivery !== undefined
+      if (ownerRouteBound && materializedInputs.owner_route_id !== undefined) {
+        if (typeof materializedInputs.owner_route_id !== 'string' || materializedInputs.owner_route_id.trim().length === 0) {
+          ownerRouteBound = false
+        } else {
+          ownerRouteBound = delivery?.validateOwnerRoute?.({
+            authorityId: materializedInputs.owner_route_id,
+            principalId: scope.principalId,
+            workspace: scope.workspace,
+            agentPreset: scope.preset,
+          }) !== undefined
+        }
+      }
+      let calendarWindowValid = true
+      if (materializedInputs.window_start !== undefined || materializedInputs.window_end !== undefined) {
+        const start = materializedInputs.window_start
+        const end = materializedInputs.window_end
+        calendarWindowValid = (start === undefined || (Number.isSafeInteger(start) && (start as number) >= 0 && now >= (start as number)))
+          && (end === undefined || (Number.isSafeInteger(end) && (end as number) >= 0 && now <= (end as number)))
+          && (start === undefined || end === undefined || (end as number) >= (start as number))
+      } else if (materializedInputs.not_before !== undefined || materializedInputs.not_after !== undefined) {
+        const before = materializedInputs.not_before
+        const after = materializedInputs.not_after
+        calendarWindowValid = (before === undefined || (Number.isSafeInteger(before) && now >= (before as number)))
+          && (after === undefined || (Number.isSafeInteger(after) && now <= (after as number)))
+      }
+      base.ownerRouteBound = ownerRouteBound
+      base.calendarWindowValid = calendarWindowValid
+    } else if (definition.preconditions === 'authenticated-inbox-and-idempotency-key') {
+      const owner = exec.agent ? delivery?.preferencePrincipalForAgent(exec.agent) : undefined
+      let authenticatedSource = owner !== undefined
+      if (authenticatedSource && materializedInputs.owner_route_id !== undefined) {
+        if (typeof materializedInputs.owner_route_id !== 'string' || materializedInputs.owner_route_id.trim().length === 0) {
+          authenticatedSource = false
+        } else {
+          authenticatedSource = delivery?.validateOwnerRoute?.({
+            authorityId: materializedInputs.owner_route_id,
+            principalId: scope.principalId,
+            workspace: scope.workspace,
+            agentPreset: scope.preset,
+          }) !== undefined
+        }
+      }
+      const idempotencyKeyPresent = typeof invocationId === 'string'
+        && invocationId.trim().length > 0
+        && invocationId.length <= 256
+        && (materializedInputs.idempotency_key === undefined
+          || (typeof materializedInputs.idempotency_key === 'string' && materializedInputs.idempotency_key.trim().length > 0))
+      base.authenticatedSource = authenticatedSource
+      base.idempotencyKeyPresent = idempotencyKeyPresent
+    } else if (definition.preconditions === 'wiki-vault-revision-and-owner-scope') {
+      base.vaultRevisionCurrent = base.ownerScopeDigest === base.currentScopeDigest
+        && (materializedInputs.expected_revision === undefined
+          || (Number.isSafeInteger(materializedInputs.expected_revision) && (materializedInputs.expected_revision as number) >= 1))
+    } else if (definition.preconditions === 'workspace-manifest-and-isolation-grant') {
+      let workspaceCleanOrScoped = false
+      try {
+        const wsStat = await lstat(scope.workspace)
+        workspaceCleanOrScoped = wsStat.isDirectory() && !wsStat.isSymbolicLink()
+        if (workspaceCleanOrScoped && materializedInputs.manifest_path !== undefined) {
+          if (typeof materializedInputs.manifest_path !== 'string' || materializedInputs.manifest_path.trim().length === 0) {
+            workspaceCleanOrScoped = false
+          } else {
+            const probe = await probeWorkspacePathContainment(scope.workspace, materializedInputs.manifest_path)
+            workspaceCleanOrScoped = probe.contained && !probe.isSymlink && probe.exists && probe.isRegularFile
+          }
+        }
+      } catch {
+        workspaceCleanOrScoped = false
+      }
+      let isolationGrantValid = policy?.evaluateAgent(exec.agent, action, resource).effect === 'allow'
+      if (isolationGrantValid && materializedInputs.grant_id !== undefined) {
+        if (typeof materializedInputs.grant_id !== 'string' || materializedInputs.grant_id.trim().length === 0) {
+          isolationGrantValid = false
+        } else {
+          const isolation = this.ctx.get('assistantIsolation' as never, false) as {
+            discover?: (agent: Agent | undefined) => Promise<readonly { readonly id: string }[]>
+            hasGrant?: (id: string) => boolean
+            listGrants?: () => readonly { readonly id: string }[]
+          } | undefined
+          if (typeof isolation?.discover === 'function') {
+            try {
+              const grants = await isolation.discover(exec.agent)
+              isolationGrantValid = Array.isArray(grants) && grants.some(grant => grant.id === materializedInputs.grant_id)
+            } catch {
+              isolationGrantValid = false
+            }
+          } else if (typeof isolation?.hasGrant === 'function') {
+            try {
+              isolationGrantValid = isolation.hasGrant(materializedInputs.grant_id) === true
+            } catch {
+              isolationGrantValid = false
+            }
+          } else if (typeof isolation?.listGrants === 'function') {
+            try {
+              const grants = isolation.listGrants()
+              isolationGrantValid = Array.isArray(grants) && grants.some(grant => grant.id === materializedInputs.grant_id)
+            } catch {
+              isolationGrantValid = false
+            }
+          } else {
+            isolationGrantValid = false
+          }
+        }
+      }
+      base.workspaceCleanOrScoped = workspaceCleanOrScoped
+      base.isolationGrantValid = isolationGrantValid
+    }
+
+    if (definition.preconditionPlan !== undefined) {
+      const probeCache = new Map<string, PreconditionPathProbeResult>()
+      for (const check of definition.preconditionPlan.checks) {
+        if (check.kind === 'path-exists' || check.kind === 'path-absent' || check.kind === 'path-regular-file') {
+          const hasInput = check.inputName !== undefined && Object.hasOwn(materializedInputs, check.inputName)
+          const targetPath = hasInput ? materializedInputs[check.inputName!] : check.path
+          if (typeof targetPath === 'string' && targetPath.trim().length > 0 && !probeCache.has(targetPath)) {
+            probeCache.set(targetPath, await probeWorkspacePathContainment(scope.workspace, targetPath))
+          }
+        }
+      }
+      base.preconditionPlan = definition.preconditionPlan
+      base.pathProbe = path => probeCache.get(path) ?? { contained: false, isSymlink: false, exists: false, isRegularFile: false }
+    }
+    return base
   }
 }
