@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { constants } from 'node:fs'
+import { constants, writeFileSync } from 'node:fs'
 import { access, chmod, lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises'
 import { cpus as osCpus, tmpdir } from 'node:os'
 import { join, win32 } from 'node:path'
@@ -88,6 +88,7 @@ export interface WindowsJobSpec {
   readonly maxOutputBytes: number
   readonly networkMode: 'none' | 'outbound-https'
   readonly controlOnStdin: boolean
+  readonly cancelFilePath?: string
   readonly limits: WindowsJobObjectLimits
 }
 
@@ -422,9 +423,15 @@ export async function runWindowsJobProcess(
         await chmod(specDir, 0o700)
       }
       const specPath = join(specDir, `winjob-spec-${Date.now()}-${Math.random().toString(16).slice(2)}.json`)
+      const cancelFilePath = `${specPath}.cancel`
+      const runnerSpec: WindowsJobSpec = {
+        ...spec,
+        controlOnStdin: false,
+        cancelFilePath,
+      }
       const handle = await open(specPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(process.platform), 0o600)
       try {
-        await handle.writeFile(JSON.stringify(spec), 'utf8')
+        await handle.writeFile(JSON.stringify(runnerSpec), 'utf8')
       } finally {
         await handle.close()
       }
@@ -439,6 +446,7 @@ export async function runWindowsJobProcess(
         let abortRequested = false
         let grace: NodeJS.Timeout | undefined
 
+        const systemDrive = win32.parse(spec.env.SystemRoot ?? 'C:\\Windows').root.replace(/\\$/u, '') || 'C:'
         let child: ReturnType<typeof spawn>
         try {
           child = spawnImpl(invocation.command, [...invocation.args], {
@@ -446,11 +454,14 @@ export async function runWindowsJobProcess(
             env: {
               SystemRoot: spec.env.SystemRoot,
               WINDIR: spec.env.WINDIR,
+              SystemDrive: systemDrive,
+              COMSPEC: spec.env.COMSPEC,
+              PATHEXT: spec.env.PATHEXT,
               PATH: spec.env.PATH,
               TEMP: input.tmpPath,
               TMP: input.tmpPath,
             },
-            stdio: ['pipe', 'pipe', 'pipe'],
+            stdio: ['ignore', 'pipe', 'pipe'],
             detached: false,
             windowsHide: true,
           })
@@ -472,15 +483,14 @@ export async function runWindowsJobProcess(
         const requestCancel = (): void => {
           if (abortRequested || settled) return
           abortRequested = true
-          try { child.stdin?.write('cancel\n') } catch {}
-          try { child.stdin?.end() } catch {}
+          try { writeFileSync(cancelFilePath, 'cancel\n', { flag: 'wx' }) } catch {}
           grace = setTimeout(() => {
             try { child.kill('SIGKILL') } catch {}
             settle({
               status: 'unknown',
               quiescent: false,
               stdout: '',
-              stderr: '',
+              stderr: stderr.toString('utf8').slice(0, 4096),
               artifacts: [],
               reason: 'cancelled-close-unconfirmed',
             })
@@ -566,7 +576,7 @@ export async function runWindowsJobProcess(
               status: 'unknown',
               quiescent: false,
               stdout: '',
-              stderr: '',
+              stderr: stderr.toString('utf8').slice(0, 4096),
               artifacts: [],
               reason: 'windows-job-invalid-envelope',
             })

@@ -185,7 +185,7 @@ describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
       checkAcl: () => ({ ownerSid: 'S-1-5-21-1000', protectedDacl: true, allowsNonOwner: false }),
     })).not.toThrow()
 
-    // Fail-closed when platform is win32 (or expectedOwnerSid is required) and checkAcl is omitted on Linux
+    // Fail-closed when platform is win32 (or expectedOwnerSid is required) and checkAcl is omitted
     if (process.platform !== 'win32') {
       expect(() => verifyWindowsPrivatePath(file, {
         platform: 'win32',
@@ -194,10 +194,14 @@ describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
       expect(() => verifyWindowsPrivatePath(file, {
         platform: 'win32',
       })).toThrow(/Windows ACL inspection unavailable/)
+      expect(() => verifyWindowsPrivatePath(file, {
+        expectedOwnerSid: 'S-1-5-21-1000',
+      })).toThrow(/Windows ACL inspection unavailable/)
+    } else {
+      expect(() => verifyWindowsPrivatePath(file, {
+        expectedOwnerSid: 'S-1-5-21-1000',
+      })).toThrow(/overly permissive|SID mismatch/)
     }
-    expect(() => verifyWindowsPrivatePath(file, {
-      expectedOwnerSid: 'S-1-5-21-1000',
-    })).toThrow(/Windows ACL inspection unavailable/)
   })
 
   it('parses Windows security descriptor owner SID, protected DACL, and ACE allow/deny entries fail-closed', () => {

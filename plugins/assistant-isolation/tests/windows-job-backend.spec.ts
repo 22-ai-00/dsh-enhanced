@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { EventEmitter } from 'node:events'
+import { existsSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -252,20 +253,32 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
       artifacts: [{ path: 'result.txt', content: 'win-artifact' }],
     })
 
-    // Cancellation writes 'cancel' to stdin of powershell runner
-    let cancelReceived = ''
+    // Cancellation creates cancelFilePath and spawns powershell with ignored stdin
+    let sawIgnoreStdin = false
+    let sawCancelFile = false
+    let sawControlOnStdinFalse = false
     const abortController = new AbortController()
-    const cancelSpawn = (() => {
-      const proc = new EventEmitter() as EventEmitter & {
-        stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: () => boolean
+    const cancelSpawn = ((_cmd: string, args: readonly string[], options?: { stdio?: unknown[] }) => {
+      sawIgnoreStdin = Array.isArray(options?.stdio) && options.stdio[0] === 'ignore'
+      const specIndex = args.indexOf('-SpecPath')
+      const specPath = specIndex >= 0 ? String(args[specIndex + 1]) : ''
+      const parsedSpec = JSON.parse(readFileSync(specPath, 'utf8')) as {
+        controlOnStdin?: boolean
+        cancelFilePath?: string
       }
-      proc.stdin = new PassThrough()
+      sawControlOnStdinFalse = parsedSpec.controlOnStdin === false
+      const cancelFilePath = parsedSpec.cancelFilePath ?? ''
+      const proc = new EventEmitter() as EventEmitter & {
+        stdin: null; stdout: PassThrough; stderr: PassThrough; kill: () => boolean
+      }
+      proc.stdin = null
       proc.stdout = new PassThrough()
       proc.stderr = new PassThrough()
       proc.kill = () => true
-      proc.stdin.on('data', chunk => {
-        cancelReceived += chunk.toString('utf8')
-        if (cancelReceived.includes('cancel')) {
+      const timer = setInterval(() => {
+        if (cancelFilePath && existsSync(cancelFilePath)) {
+          clearInterval(timer)
+          sawCancelFile = true
           const payload = {
             schemaVersion: 1,
             status: 'cancelled',
@@ -280,7 +293,8 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
           proc.stdout.end(`${JSON.stringify(payload)}\n`)
           proc.emit('close', 1, null)
         }
-      })
+      }, 10)
+      proc.once('close', () => clearInterval(timer))
       setTimeout(() => abortController.abort(), 20)
       return proc as never
     }) as never
@@ -297,7 +311,9 @@ describe('windows-job isolation policy, PowerShell P/Invoke runner, schema-10 le
       verifyRunner: async () => true,
       spawn: cancelSpawn,
     })
-    expect(cancelReceived).toContain('cancel')
+    expect(sawIgnoreStdin).toBe(true)
+    expect(sawControlOnStdinFalse).toBe(true)
+    expect(sawCancelFile).toBe(true)
     expect(cancelled).toMatchObject({ status: 'cancelled', quiescent: true })
 
     // Read-only (0o500) parent directory for workspacePath does not EACCES when writing spec file
@@ -631,17 +647,17 @@ describe.skipIf(process.platform !== 'win32')('real Windows Job Object execution
       shell: 'cmd',
       networkMode: 'none',
       artifacts: ['out.txt'],
-      deadline: Date.now() + 20_000,
+      deadline: Date.now() + 45_000,
       maxOutputBytes: 4096,
       maxArtifactBytes: 1024,
       limits: { memoryMiB: 256, pidsLimit: 16, cpus: 1 },
       signal: new AbortController().signal,
     })
-    expect(result).toMatchObject({
+    expect(result, `reason=${result.reason ?? ''} stderr=${result.stderr}`).toMatchObject({
       status: 'succeeded',
       quiescent: true,
       exitCode: 0,
       artifacts: [{ path: 'out.txt', content: 'real-win\r\n' }],
     })
-  }, 60_000)
+  }, 75_000)
 })

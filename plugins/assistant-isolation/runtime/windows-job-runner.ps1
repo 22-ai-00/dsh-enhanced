@@ -241,7 +241,8 @@ namespace DshIsolation {
       long jobTime100Ns,
       uint cpuRate,
       uint uiRestrictionsFlags,
-      bool controlOnStdin
+      bool controlOnStdin,
+      string cancelFilePath
     ) {
       var outcome = new RunOutcome();
       IntPtr hJob = IntPtr.Zero;
@@ -252,6 +253,12 @@ namespace DshIsolation {
       PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
 
       try {
+        if (!string.IsNullOrEmpty(cancelFilePath) && File.Exists(cancelFilePath)) {
+          outcome.Status = "cancelled";
+          outcome.Quiescent = true;
+          outcome.Reason = "cancelled";
+          return outcome;
+        }
         hJob = CreateJobObjectW(IntPtr.Zero, null);
         if (hJob == IntPtr.Zero) {
           throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
@@ -492,13 +499,28 @@ namespace DshIsolation {
             }
           });
 
-          uint waited = WaitForSingleObject(pi.hProcess, (uint)Math.Max(1, timeoutMs));
-          if (waited != WAIT_OBJECT_0) {
-            lock (ioLock) {
-              if (stopReason == null) stopReason = "timed-out";
+          long waitDeadlineTicks = DateTime.UtcNow.Ticks + (long)Math.Max(1, timeoutMs) * 10000L;
+          uint waited = WaitForSingleObject(pi.hProcess, 0);
+          while (waited != WAIT_OBJECT_0) {
+            if (!string.IsNullOrEmpty(cancelFilePath) && File.Exists(cancelFilePath)) {
+              lock (ioLock) {
+                if (stopReason == null) stopReason = "cancelled";
+              }
+              TerminateJobObject(hJob, 1);
+              WaitForSingleObject(pi.hProcess, (uint)Math.Max(500, closeGraceMs));
+              break;
             }
-            TerminateJobObject(hJob, 1);
-            WaitForSingleObject(pi.hProcess, (uint)Math.Max(500, closeGraceMs));
+            long remainingMs = (waitDeadlineTicks - DateTime.UtcNow.Ticks) / 10000L;
+            if (remainingMs <= 0) {
+              lock (ioLock) {
+                if (stopReason == null) stopReason = "timed-out";
+              }
+              TerminateJobObject(hJob, 1);
+              WaitForSingleObject(pi.hProcess, (uint)Math.Max(500, closeGraceMs));
+              break;
+            }
+            uint sliceMs = (uint)Math.Min(25L, remainingMs);
+            waited = WaitForSingleObject(pi.hProcess, sliceMs);
           }
           cancelCts.Cancel();
 
@@ -569,7 +591,7 @@ namespace DshIsolation {
 }
 '@
 
-Add-Type -TypeDefinition $csharp -Language CSharp
+Add-Type -TypeDefinition $csharp -Language CSharp -IgnoreWarnings
 
 $specRaw = Get-Content -LiteralPath $SpecPath -Raw -Encoding UTF8
 $spec = ConvertFrom-Json -InputObject $specRaw
@@ -610,7 +632,8 @@ $outcome = [DshIsolation.JobRunner]::Execute(
   [long]$spec.limits.perJobUserTimeLimit100Ns,
   [uint32]$spec.limits.cpuRate,
   [uint32]$spec.limits.uiRestrictionsFlags,
-  ([bool]$spec.controlOnStdin)
+  ([bool]$spec.controlOnStdin),
+  [string]$spec.cancelFilePath
 )
 
 $payload = @{
@@ -634,5 +657,5 @@ try {
 } catch {
   $json = ConvertTo-Json -InputObject $payload -Compress
 }
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding ($false)
 [Console]::Out.WriteLine($json)
