@@ -170,7 +170,7 @@ async function fixture(options: { maxPending?: number; maxExtractions?: number; 
   }
   const storedCursor = (feed: 'delivery' | 'evaluation') => {
     const ledger = new LearningStore(config.databasePath, { authorityId: config.authorityId,
-      configDigest: growthObjectDigest(config), maxExtractions: config.maxExtractions })
+      configDigest: growthObjectDigest(validateLearningConfig(config)), maxExtractions: config.maxExtractions })
     try { return ledger.cursor(growthObjectDigest([config.authorityId, config.owner]), feed) }
     finally { ledger.close() }
   }
@@ -483,9 +483,10 @@ test('startup retirement inspection outage preserves an unknown request, paused 
   inspection.mockRestore()
 })
 
-async function workItemFixture(options: { reviewFlag?: boolean; adoptionFlag?: boolean; readerMissing?: boolean; feedback?: string; redacted?: boolean } = {}) {
+async function workItemFixture(options: { reviewFlag?: boolean; adoptionFlag?: boolean; readerMissing?: boolean; feedback?: string; redacted?: boolean; omitWorkItemFlag?: boolean; workItemExperiences?: boolean } = {}) {
   const f = await fixture()
-  f.config.workItemExperiences = true
+  if (options.workItemExperiences !== undefined) f.config.workItemExperiences = options.workItemExperiences
+  else if (!options.omitWorkItemFlag) f.config.workItemExperiences = true
   let withdrawn = false, missing = options.readerMissing === true, version = 1
   const canonical = () => ({ triggerOutcomeId: 'unrelated-trigger',
     projection: { subjectKind: 'work-item', subjectRef: 'background-one', disposition: withdrawn ? 'remove' : 'upsert',
@@ -558,16 +559,39 @@ test('work-item worker report cannot be laundered into an owner quotation', asyn
 })
 
 
-test('work-item false preserves legacy config digest and only strict true expands frozen authority', async () => {
+test('work-item defaults to true when omitted, preserves explicit false with distinct digest, and freezes grant authority', async () => {
   const f = await fixture()
-  const legacy = validateLearningConfig(f.config)
-  expect(validateLearningConfig({ ...f.config, workItemExperiences: false })).toEqual(legacy)
-  expect(growthObjectDigest(validateLearningConfig({ ...f.config, workItemExperiences: false }))).toBe(growthObjectDigest(legacy))
-  expect(validateLearningConfig({ ...f.config, workItemExperiences: true }).workItemExperiences).toBe(true)
-  for (const flag of ['true', 1, null, undefined]) expect(() => validateLearningConfig({ ...f.config, workItemExperiences: flag })).toThrow()
+  const defaulted = validateLearningConfig(f.config)
+  expect(defaulted.workItemExperiences).toBe(true)
+  expect(validateLearningConfig({ ...f.config, workItemExperiences: undefined }).workItemExperiences).toBe(true)
+  expect(growthObjectDigest(defaulted)).toBe(growthObjectDigest(validateLearningConfig({ ...f.config, workItemExperiences: true })))
+  const optedOut = validateLearningConfig({ ...f.config, workItemExperiences: false })
+  expect(optedOut.workItemExperiences).toBe(false)
+  expect(validateLearningConfig(optedOut)).toEqual(optedOut)
+  expect(growthObjectDigest(optedOut)).not.toBe(growthObjectDigest(defaulted))
+  for (const flag of ['true', 1, null]) expect(() => validateLearningConfig({ ...f.config, workItemExperiences: flag })).toThrow()
+  f.config.workItemExperiences = false
   const runtime = f.create(); await runtime.close()
   f.config.workItemExperiences = true
   expect(() => f.create()).toThrow(/immutable grant/)
+})
+
+test('default-on workItemExperiences extracts background work-item experiences when omitted and honors false opt-out', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const defaulted = await workItemFixture({ omitWorkItemFlag: true })
+  expect('workItemExperiences' in defaulted.config).toBe(false)
+  const runtime = defaulted.create(); await defaulted.tick()
+  expect(defaulted.extract).toHaveBeenCalledOnce()
+  expect(defaulted.verifier.reviewMemoryLearning).toHaveBeenCalledOnce()
+  expect(defaulted.memory.adoptReviewedLearning).toHaveBeenCalledOnce()
+  expect(runtime.health().counts.adopted).toBe(1)
+
+  const optedOut = await workItemFixture({ workItemExperiences: false })
+  const optedOutRuntime = optedOut.create(); await optedOut.tick()
+  expect(optedOut.extract).not.toHaveBeenCalled()
+  expect(optedOut.verifier.reviewMemoryLearning).not.toHaveBeenCalled()
+  expect(optedOut.memory.adoptReviewedLearning).not.toHaveBeenCalled()
+  expect(optedOutRuntime.health().remainingExtractions).toBe(optedOut.config.maxExtractions)
 })
 
 test('work-item correction during paid extraction blocks review and adoption without refund or retry', async () => {

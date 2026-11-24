@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-dreaming
 
-默认关闭、owner 显式启用的"做梦/突发奇想"插件。启用后它以低频率、确定性随机、
+条件式默认启用的"做梦/突发奇想"插件：在缺少 `scope`/`databasePath`/`provider`/`model`/`budgetId`/`budgetAmount` 等必填前提时保持安全休眠（`enabled: false`，零写入）；一旦配置齐备且未显式禁用或退役（`enabled: false` / `retired: true`），默认解析为 `enabled: true` 自动激活。启用后它以低频率、确定性随机、
 空闲感知的方式回顾**已认证的历史投影**（可信任务投影、owner 目标、活动技能，以及可选
 `personalMemory` 提供的严格非敏感 `private` 摘要），在随机时刻让一个冻结的单工具
 Agent 产生少量结构化 idea，并只写入插件私有的 SQLite 账本。
@@ -60,11 +60,11 @@ Agent，并把
   调用 `Math.random`。
 - 权限摘要：文件系统仅读写配置指定的绝对私有 SQLite（`0600`）及其目录（`0700`）；网络仅经 Host 已注册的 `llm` route 发起有界模型请求（`notifyOwner: true` 时经 Delivery 通知通道）；**子进程、凭据存储、浏览器、安装脚本：无。**
 
-## 配置（全部默认关；未知字段拒绝）
+## 配置（前提齐备时默认开启，缺省时安全休眠；未知字段拒绝）
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `enabled` | `false` | 关闭时不注册 automation、不打开数据库、零写入。 |
+| `enabled` | 条件默认（前提齐备且未 `retired` 时 `true`，否则 `false`） | 显式设为 `false` 时强制关闭（即使前提齐备也不注册 automation、不打开数据库、零写入）；显式 `true` 时若缺前提则 fail-closed 拒绝加载。 |
 | `retired` | `false` | owner 暂停开关：`enabled: true` 且 `retired: true` 时加载即把 system automation 收敛为 paused、不注册执行器（账本照常打开并执行保留期），用于暂停后再关闭/卸载。必须同时 `enabled: true`；`enabled: false` 时保留 `retired: true` 会 fail-closed 报错（disabled 路径无法 pause，不能让 owner 误以为已退役）。去掉该标志后的下一次加载用新的 reconcile key 恢复 active。 |
 | `scope` | 无 | `workspace/preset/principalId/ownerRouteId`；启用时必填。 |
 | `databasePath` | 无 | 私有 SQLite 绝对规范路径；启用时必填，目录不可组/全局可写。 |
@@ -91,8 +91,7 @@ provider/model 对、budget 对、`maxNotificationsPerDay <= maxDreamsPerDay`、
 
 ## 安装与启用（真实部署）
 
-插件默认关闭：安装后 `enabled: false`，不注册 automation、不打开 SQLite、零写入、
-零模型调用。
+裸安装（无完整 `scope`、`provider`/`model` 与 `budgetId`/`budgetAmount`）时，`enabled` 解析为 `false` 保持安全休眠：不注册 automation、不打开 SQLite、零写入、零模型调用；补齐全部前提后（即使省略 `enabled`）自动解析为 `enabled: true`（显式 `enabled: false` 可随时停用，`retired: true` 可按既定 owner 流程安全暂停退役）。
 
 1. 安装 bundle（npm 发布后）或把本地打包 tarball 装进目标 profile：
 

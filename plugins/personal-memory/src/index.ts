@@ -1,11 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { PersonalMemoryService } from './service.js'
-import type { Config } from './service.js'
+import { Config, PersonalMemoryService } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-personal-memory'
-export { PersonalMemoryService, version }
-export type { Config }
+export { Config, PersonalMemoryService, version }
 export * from './types.js'
 export { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
 

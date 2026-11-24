@@ -95,8 +95,26 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
       const policy = ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
       await policy; await new Promise(resolve => setImmediate(resolve))
       expect(ctx.get('personalMemory', false)).toBeDefined()
+      expect(ctx.personalMemory.automaticLearningStatus()).toEqual({
+        enabled: true,
+        mode: 'default-pending-grant',
+        configured: false,
+      })
       await policy.dispose(); await new Promise(resolve => setImmediate(resolve))
       expect(ctx.get('personalMemory', false)).toBeUndefined()
     } finally { await ctx.fiber.dispose(); rmSync(root, { recursive: true, force: true }) }
+  })
+
+  test('enables automaticLearning by default in Config and supports explicit true/false opt-out and invalid rejection', () => {
+    expect(entrypoint.Config({ databasePath: '/unused/memory.sqlite' }).automaticLearning).toBe(true)
+    expect(entrypoint.Config({ databasePath: '/unused/memory.sqlite', automaticLearning: true }).automaticLearning).toBe(true)
+    expect(entrypoint.Config({ databasePath: '/unused/memory.sqlite', automaticLearning: false }).automaticLearning).toBe(false)
+    for (const invalid of ['true', 123, null, {}]) {
+      const validation = entrypoint.Config['~standard'].validate({
+        databasePath: '/unused/memory.sqlite',
+        automaticLearning: invalid,
+      })
+      expect(validation).toHaveProperty('issues')
+    }
   })
 })

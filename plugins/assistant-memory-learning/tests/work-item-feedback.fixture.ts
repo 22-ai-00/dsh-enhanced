@@ -205,6 +205,7 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
   await ctx.plugin(AgentLoop, { agents: [] }).await()
   const deliveryConfig: DeliveryConfig = { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
     defaultWorkspace: workspace, defaultAgentPreset: 'primary', agentProvider: 'local', agentModel: 'scripted', agentMaxAutoContinuationTurns: 0,
+    attentionAttachOverCap: false, attentionEnforce: false,
     ownerRoutes: [{ id: scope.authorityId, conversation, principal, workspace, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }] }
   const evaluationConfig={databasePath:join(root,'evaluation.sqlite'),projectionIntervalMs:0}
   let evaluationFork=ctx.plugin(AssistantEvaluationService,evaluationConfig);await evaluationFork.await()
@@ -303,7 +304,7 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
     const adoption=options.grants?validateMemoryLearningAdoptionGrant(options.grants.adoption)
       :validateMemoryLearningAdoptionGrant({authorityId:'adoption-grant',owner,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),expiresAt:review.expiresAt,maxMutations:1,maxTotalContentBytes:4096,maxRecordTtlMs:120000,kinds:['experience'],operations:['add'],...(workItemExperiences?{workItemExperiences:true}:{})})
     reviewConfiguration=review;adoptionConfiguration=adoption
-    verifierFork=ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,memoryReviews:review});await verifierFork.await()
+    verifierFork=ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,requireAcceptance:false,memoryReviews:review});await verifierFork.await()
     memoryFork=ctx.plugin(PersonalMemoryService,{databasePath:join(root,'memory.sqlite'),automaticLearning:adoption,toolEvidence:false,reconcileIntervalMs:0});await memoryFork.await()
     learningConfig=options.grants?validateLearningConfig(options.grants.learning)
       :validateLearningConfig({databasePath:join(root,'learning.sqlite'),authorityId:'learning-grant',owner,expiresAt:review.expiresAt,maxExtractions:1,maxPending:4,lookbackMs:60000,policy:'Learn one bounded task-specific experience; owner testimony is not an independent success proof.',maxInputBytes:32768,maxOutputTokens:512,timeoutMs:5000,budgetId:'learning-budget',budgetAmount:1,scanBudgetId:'scan-budget',scanBudgetAmount:1,reviewAuthorityId:review.authorityId,reviewAuthorityDigest:growthObjectDigest(review),adoptionAuthorityId:adoption.authorityId,adoptionGrantDigest:growthObjectDigest(adoption),workItemExperiences:true})
@@ -314,7 +315,7 @@ export async function workItemLearningFixture(options: { replyEnabled?:boolean; 
   const remountMemoryStack=async()=>{
     if(!learningConfig||!reviewConfiguration||!adoptionConfiguration)throw new Error('learning grants not initialized')
     await learningFork?.dispose();await memoryFork?.dispose();await verifierFork?.dispose()
-    verifierFork=ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,memoryReviews:reviewConfiguration});await verifierFork.await()
+    verifierFork=ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,requireAcceptance:false,memoryReviews:reviewConfiguration});await verifierFork.await()
     memoryFork=ctx.plugin(PersonalMemoryService,{databasePath:join(root,'memory.sqlite'),automaticLearning:adoptionConfiguration,toolEvidence:false,reconcileIntervalMs:0});await memoryFork.await()
     learningFork=ctx.plugin(AssistantMemoryLearningService,learningConfig);await learningFork.await()
   }

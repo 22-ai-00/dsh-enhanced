@@ -67,8 +67,8 @@ import {
 
 export interface Config {
   databasePath: string
-  /** Optional immutable finite Host grant; never accepted from a model tool. */
-  automaticLearning?: MemoryLearningAdoptionGrant
+  /** Default-on (`true` awaits owner-signed grant), explicit `false` opt-out, or finite signed Host grant; never accepted from a model tool. */
+  automaticLearning?: boolean | MemoryLearningAdoptionGrant
   approvalMode?: 'delivery-or-headless' | 'delivery-required'
   maxContentBytes?: number
   maxRecordsPerIdentity?: number
@@ -132,13 +132,14 @@ export class PersonalMemoryError extends Error {
   }
 }
 
-const configSchema = Schema.object({
+const baseConfigSchema = Schema.object({
   databasePath: Schema.string().required(),
   automaticLearning: Schema.transform(Schema.any(), (value, options) => {
-    if (value === undefined) return undefined
+    if (value === undefined || value === true) return true
+    if (value === false) return false
     try { return validateMemoryLearningAdoptionGrant(value) }
     catch (error) { throw new Schema.ValidationError(String(error), options ?? { path: ['automaticLearning'] }) }
-  }),
+  }).default(true),
   approvalMode: Schema.union(['delivery-or-headless', 'delivery-required'] as const)
     .default('delivery-required'),
   maxContentBytes: Schema.number().step(1).min(1).default(4_096),
@@ -159,7 +160,18 @@ const configSchema = Schema.object({
     .max(2_147_483_647)
     .default(15_000),
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
+})
+
+const configSchema = Schema.transform(Schema.any(), (value, options) => {
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && Object.hasOwn(value, 'automaticLearning')
+    && (value as { automaticLearning?: unknown }).automaticLearning === null) {
+    throw new Schema.ValidationError('personal-memory: automaticLearning cannot be null', options ?? { path: ['automaticLearning'] })
+  }
+  return baseConfigSchema(value)
 }) as Schema<Config>
+
+export const Config: Schema<Config> = configSchema
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -210,8 +222,9 @@ export class PersonalMemoryService extends Service {
       maxRecordsPerIdentity: config.maxRecordsPerIdentity,
     })
     try {
-      this.learning = config.automaticLearning === undefined ? undefined
-        : new MemoryLearningService(ctx, this.memoryStore, config.automaticLearning)
+      this.learning = typeof config.automaticLearning === 'object' && config.automaticLearning !== null
+        ? new MemoryLearningService(ctx, this.memoryStore, config.automaticLearning)
+        : undefined
     } catch (error) {
       this.memoryStore.close()
       throw error
@@ -316,16 +329,38 @@ export class PersonalMemoryService extends Service {
     }))
   }
 
+  automaticLearningStatus(): Readonly<{
+    enabled: boolean
+    mode: 'signed-grant' | 'default-pending-grant' | 'disabled'
+    configured: boolean
+  }> {
+    this.assertActive()
+    const automaticLearning = this.config.automaticLearning
+    if (typeof automaticLearning === 'object' && automaticLearning !== null) {
+      return Object.freeze({ enabled: true, mode: 'signed-grant', configured: true })
+    }
+    if (automaticLearning === false) {
+      return Object.freeze({ enabled: false, mode: 'disabled', configured: false })
+    }
+    return Object.freeze({ enabled: true, mode: 'default-pending-grant', configured: false })
+  }
+
+  private learningUnavailableError(): Error {
+    return this.config.automaticLearning === false
+      ? new Error('personal-memory: automatic learning is disabled')
+      : new Error('personal-memory: automatic learning is enabled by default and requires an owner-signed adoption grant')
+  }
+
   /** Host-only: candidates never provide approval flags, namespace, trust or a grant. */
   adoptReviewedLearning(input: { request: MemoryLearningReviewRequest }) {
     this.assertActive()
-    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    if (!this.learning) throw this.learningUnavailableError()
     return this.learning.adopt(input.request)
   }
 
   lookupLearningAdoption(input: { request: MemoryLearningReviewRequest }) {
     this.assertActive()
-    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    if (!this.learning) throw this.learningUnavailableError()
     return this.learning.lookup(input.request)
   }
 
@@ -337,14 +372,14 @@ export class PersonalMemoryService extends Service {
   /** Host-only current managed facts and experiences, suitable for replacement proposals. */
   listLearningTargets(input: { owner: MemoryLearningOwner; limit?: number }) {
     this.assertActive()
-    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    if (!this.learning) throw this.learningUnavailableError()
     return this.learning.listTargets(input)
   }
 
   /** Host-only read of the current adoption grant and its remaining budget. */
   inspectLearningAdoptionAvailability(input: { owner: MemoryLearningOwner }) {
     this.assertActive()
-    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    if (!this.learning) throw this.learningUnavailableError()
     return this.learning.inspectAvailability(input)
   }
 

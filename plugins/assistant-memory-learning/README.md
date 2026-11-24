@@ -1,8 +1,8 @@
 # Assistant Memory Learning
 
-普通任务驱动的持久事实与经验学习：前台对话可形成事实与经验；显式开启 `workItemExperiences` 并配置相应有限授权后，后台 WorkItem 的认证主人结果反馈也可形成经验。一次 owner 配置与有限授权后，原生 Automations 发现来源，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
+普通任务驱动的持久事实与经验学习：前台对话可形成事实与经验；`workItemExperiences` 默认开启（`true`，可显式设 `false` 关闭），在配置相应有限授权后，后台 WorkItem 的认证主人结果反馈也可形成经验。一次 owner 配置与有限授权后，原生 Automations 发现来源，原生 Agent 提取候选，独立 Verifier 重读来源审查，Personal Memory 在授权范围内采用。后续任务沿 Memory 的动态检索与 System Prompt seam 使用已采用记录。无需逐条调用捕获或批准工具。
 
-验证基线以仓库[兼容性基线](../../docs/compatibility.md)为准（DSH、Cordis、Node.js 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory）。安装本包不会启用其他 bundle。发布 patch 默认禁用，必须先配置下述 owner/grants 和预算，再启用该稳定行。
+验证基线以仓库[兼容性基线](../../docs/compatibility.md)为准（DSH、Cordis、Node.js 与同批 Delivery、Evaluation、Automations、Policy、Verifier、Memory）。安装本包不会启用其他 bundle。发布 patch 默认激活该稳定行，在未提供 owner 绑定与有限授权前以 fail-closed `awaiting-owner-binding` 休眠态挂载（不打开 SQLite、不注册 Automations 执行器）；也可显式配置 `enabled: false` 关闭。
 
 ```sh
 dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning
@@ -10,20 +10,21 @@ dsh plugin --profile assistant add @dsh-enhanced/assistant-memory-learning
 
 ## 配置与授权
 
-`Config` 是同步 Standard-Schema；部署值缺失、未知字段、路径或预算不合法时，在打开数据库前拒绝。除 `model`、`workItemExperiences` 可省略外，所有字段必填：
+`Config` 是同步 Standard-Schema：允许空配置（`undefined` / `{}` / `{ enabled: false }`）以 fail-closed `awaiting-owner-binding` 或显式停用状态安全挂载（零数据库写入、零调度注册）；一旦传入路径/授权字段但缺失必填项、未知字段、路径或预算不合法，在打开数据库前拒绝。精简 owner 绑定必填 10 项（`databasePath`、`authorityId`、`owner`、`expiresAt`、`budgetId`、`scanBudgetId`、`reviewAuthorityId`、`reviewAuthorityDigest`、`adoptionAuthorityId`、`adoptionGrantDigest`），其余 9 项运行调优参数及 `workItemExperiences` 均提供安全有界默认值（显式传入时仍严格校验范围）：
 
 | 字段 | 含义与边界 |
 | --- | --- |
+| `enabled` | 可选布尔开关，默认 `true`；设为 `false` 时直接以停用态挂载，不打开数据库也不注册 Automations。 |
 | `databasePath` | 工作区外的绝对规范路径；父目录当前 UID 私有 `0700`，数据库与 WAL/SHM 为私有 `0600`，拒绝软链与多链接。 |
 | `authorityId`, `owner` | 本轮提取授权 ID 和 Delivery 的准确 owner lineage。`owner` 包含 route `authorityId/authorityHash`、`principalId`、`principalRecordId/principalVersion`、`workspace/agentPreset`；提取授权 ID 可以与 route ID 不同。不能由模型或 task text 提供。 |
-| `expiresAt`, `maxExtractions` | 有限到期时间戳和授权生命周期内最多 1–10,000 次提取 admission；同一数据库授权配置不可变，失败/unknown 不返还额度，不自动续期。 |
-| `maxPending`, `lookbackMs` | 最多 1–1,000 个待处理意图；来源窗口 1 秒至 365 天。背压时不推进游标。事实按 completion 时间发现；经验按后来到达的 objective 时间发现。 |
-| `policy` | owner 的学习规则，非空且最多 8 KiB；验收与授权仍由 Host 服务拥有。 |
-| `maxInputBytes`, `maxOutputTokens`, `timeoutMs` | 提取输入总字节 4–128 KiB、单轮输出 1–8,192 token、单轮期限 1–300 秒。一个任务最多提取一条候选或明确 noop。 |
-| `budgetId/budgetAmount`, `scanBudgetId/scanBudgetAmount` | 原生 Automations 的学习、扫描预算 ID 和每次 reservation（1–10,000,000 整数）。Policy 中须配置有限 `automation-runs` budgets；不启用 unbudgeted execution。 |
+| `expiresAt`, `maxExtractions` | 有限到期时间戳和授权生命周期内最多 1–10,000 次提取 admission（省略时默认 1,000）；同一数据库授权配置不可变，失败/unknown 不返还额度，不自动续期。 |
+| `maxPending`, `lookbackMs` | 最多 1–1,000 个待处理意图（默认 64）；来源窗口 1 秒至 365 天（默认 7 天）。背压时不推进游标。事实按 completion 时间发现；经验按后来到达的 objective 时间发现。 |
+| `policy` | owner 的学习规则，非空且最多 8 KiB（提供安全默认规则）；验收与授权仍由 Host 服务拥有。 |
+| `maxInputBytes`, `maxOutputTokens`, `timeoutMs` | 提取输入总字节 4–128 KiB（默认 65,536）、单轮输出 1–8,192 token（默认 2,048）、单轮期限 1–300 秒（默认 60,000 ms）。一个任务最多提取一条候选或明确 noop。 |
+| `budgetId/budgetAmount`, `scanBudgetId/scanBudgetAmount` | 原生 Automations 的学习、扫描预算 ID 和每次 reservation（1–10,000,000 整数，默认 1）。Policy 中须配置有限 `automation-runs` budgets；不启用 unbudgeted execution。 |
 | `reviewAuthorityId/reviewAuthorityDigest` | Verifier `memoryReviews` 的准确独立授权 ID 和 `growthObjectDigest(validateMemoryReviewConfig(config))`。 |
 | `adoptionAuthorityId/adoptionGrantDigest` | Memory `automaticLearning` 的准确采用授权 ID 和 `growthObjectDigest(validateMemoryLearningAdoptionGrant(grant))`。 |
-| `workItemExperiences` | 可选严格布尔开关。缺失或 `false` 规范化为缺失，保留原配置指纹；只有 `true` 开启后台结果经验。该值冻结在授权配置中。已有数据库不能扩权或重置 `grant_record`；开启时显式配置新授权及新数据库，保留旧库、历史与已用额度。独立 review/adoption grant 同样必须显式开启此能力，并提供准确新指纹。 |
+| `workItemExperiences` | 可选严格布尔开关，默认 `true` 开启后台结果经验；显式设为 `false` 保留在规范配置与指纹中以关闭后台提取。该值冻结在授权配置中。已有数据库不能扩权或重置 `grant_record`；切换开关时显式配置新授权及新数据库，保留旧库、历史与已用额度。独立 review/adoption grant 同样必须明确开启此能力，并提供准确新指纹。 |
 | `model` | 可选显式 `{provider,model,reasoningEffort?}` 覆盖；省略时继承触发任务已冻结的模型。每项快照持久化供应与完整配置指纹，重启不换模型。 |
 
 先通过 Delivery 当前 route 查询准确 owner；给 Verifier 设置其 `memoryReviews`，给 Memory 设置 `automaticLearning`，再把两份验证后配置的指纹写入本包。采用 grant 可分别限制 kinds、operations、总记录数/字节和 TTL；本包的提取 admission、Verifier 的 review admission 与 Memory 的 mutation quota 是三份独立、不可自动扩大或返还的授权。额度探针只读；不足或指纹不匹配时停止新的付费提取。

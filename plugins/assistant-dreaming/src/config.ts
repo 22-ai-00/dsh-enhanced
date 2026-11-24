@@ -107,7 +107,8 @@ const fields = new Set([
   'reasoningEffort', 'retentionDays',
 ])
 
-const boundedText = (max: number) => Schema.string().min(1).max(max)
+const BOUNDED_TEXT_PATTERN = /^[^\s\p{Cc}](?:[^\p{Cc}]*[^\s\p{Cc}])?$/u
+const boundedText = (max: number) => Schema.string().min(1).max(max).pattern(BOUNDED_TEXT_PATTERN)
 
 const scopeSchema = Schema.object({
   workspace: boundedText(4_096).required(),
@@ -159,25 +160,57 @@ const schema = Schema.object({
   retentionDays: Schema.natural().min(1).max(365).default(90),
 }).default(undefined as never)
 
-export const Config = new Proxy(schema, {
-  apply(target, thisArg, argumentsList: [unknown]) {
-    const value = argumentsList[0]
-    if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) {
-      throw new Error('assistant-dreaming: config must be an object')
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && BOUNDED_TEXT_PATTERN.test(value)
+}
+
+function isCanonicalAbsolutePath(value: unknown): value is string {
+  return isNonEmptyString(value) && isAbsolute(value) && resolve(value) === value
+}
+
+export function hasCompleteDreamingPrerequisites(value: Partial<DreamingConfig> | undefined): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const scope = value.scope
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return false
+  if (!isCanonicalAbsolutePath(scope.workspace)
+    || !isNonEmptyString(scope.preset)
+    || !isNonEmptyString(scope.principalId)
+    || !isNonEmptyString(scope.ownerRouteId)) return false
+  if (!isCanonicalAbsolutePath(value.databasePath)) return false
+  if (!isNonEmptyString(value.provider) || !isNonEmptyString(value.model)) return false
+  if (!isNonEmptyString(value.budgetId)) return false
+  if (!Number.isSafeInteger(value.budgetAmount) || (value.budgetAmount as number) < 1 || (value.budgetAmount as number) > 10_000_000) return false
+  return true
+}
+
+function parseDreamingConfigInput(value: unknown): DreamingConfig | undefined {
+  if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+    throw new Error('assistant-dreaming: config must be an object')
+  }
+  if (value !== undefined) {
+    for (const key of Object.keys(value as object)) {
+      if (!fields.has(key)) throw new Error(`assistant-dreaming: unknown config field: ${key}`)
     }
-    if (value !== undefined) {
-      for (const key of Object.keys(value as object)) {
-        if (!fields.has(key)) throw new Error(`assistant-dreaming: unknown config field: ${key}`)
-      }
-    }
-    return Reflect.apply(target, thisArg, argumentsList) as DreamingConfig
-  },
+  }
+  const rawEnabled = value !== undefined ? (value as Record<string, unknown>).enabled : undefined
+  const parsed = schema(value) as DreamingConfig | undefined
+  if (parsed && rawEnabled === undefined && parsed.retired !== true && hasCompleteDreamingPrerequisites(parsed)) {
+    return { ...parsed, enabled: true }
+  }
+  return parsed
+}
+
+export const Config = Schema.transform(Schema.any(), (value, options) => {
+  try { return parseDreamingConfigInput(value) }
+  catch (error) { throw new Schema.ValidationError(error instanceof Error ? error.message : String(error), options ?? { path: [] }) }
 }) as Schema<DreamingConfig>
 
 export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDreamingConfig> {
+  const rawEnabled = input && typeof input === 'object' && !Array.isArray(input) ? input.enabled : undefined
   const config = (Config(input) ?? {}) as DreamingConfig
+  const enabled = rawEnabled ?? (config.retired !== true && hasCompleteDreamingPrerequisites(config))
   const normalized: NormalizedDreamingConfig = Object.freeze({
-    enabled: config.enabled ?? false,
+    enabled,
     retired: config.retired ?? false,
     scope: config.scope ? Object.freeze({ ...config.scope }) : null,
     databasePath: config.databasePath ?? null,
@@ -208,6 +241,11 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
   })
   if (normalized.enabled) {
     if (!normalized.scope) throw new Error('assistant-dreaming: enabled requires an explicit owner scope')
+    if (!isNonEmptyString(normalized.scope.preset)
+      || !isNonEmptyString(normalized.scope.principalId)
+      || !isNonEmptyString(normalized.scope.ownerRouteId)) {
+      throw new Error('assistant-dreaming: enabled requires explicit scope.preset, scope.principalId and scope.ownerRouteId')
+    }
     // The frozen workspace becomes an Automations definition field, so it must
     // already be the canonical absolute path that definition normalization
     // accepts; reject it at load time instead of failing reconciliation later.
@@ -218,10 +256,10 @@ export function normalizeConfig(input?: DreamingConfig): Readonly<NormalizedDrea
       || resolve(normalized.databasePath) !== normalized.databasePath) {
       throw new Error('assistant-dreaming: enabled requires a canonical absolute databasePath')
     }
-    if (normalized.provider === null || normalized.model === null) {
+    if (!isNonEmptyString(normalized.provider) || !isNonEmptyString(normalized.model)) {
       throw new Error('assistant-dreaming: enabled requires an explicit provider and model')
     }
-    if (normalized.budgetId === null || normalized.budgetAmount === null) {
+    if (!isNonEmptyString(normalized.budgetId) || normalized.budgetAmount === null) {
       throw new Error('assistant-dreaming: enabled requires a budgetId and budgetAmount pair')
     }
   }

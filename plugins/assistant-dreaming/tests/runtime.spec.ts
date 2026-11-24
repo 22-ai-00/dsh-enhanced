@@ -982,4 +982,58 @@ describe('cold start, pre-gates, personalMemory recall and owner idea transition
       'dream.acknowledge', 'dream.acknowledge', 'dream.validate', 'dream.retire', 'dream.reject',
     ])
   })
+
+  test('activates by default when enabled is omitted on complete prerequisites and stays dormant on explicit enabled: false', async () => {
+    const workspace = root()
+    const databasePath = join(workspace, 'default-on-dream.sqlite')
+    const { ctx, fakes } = fakeContext()
+    const evidenceRef = acceptanceDigest(fakes.projection!).slice(0, 64)
+    fakes.agents.create = (dreamingAgents({
+      workspace, preset: 'primary', evidenceRef, summary: 'Default-on dreaming idea',
+    }).create) as never
+    const policy = makePolicyMock()
+    ctx.provide('assistantPolicy' as never, policy.service as never)
+
+    // Complete prerequisites without specifying `enabled`.
+    const { enabled: _omitted, ...completeWithoutEnabled } = enabledConfig(workspace, databasePath, {
+      runProbabilityPpm: 1_000_000,
+      lotteryWindow: 500_000,
+    }) as unknown as Record<string, unknown>
+    await ctx.plugin(AssistantDreamingService, completeWithoutEnabled as never)
+    expect(ctx.assistantDreaming.health()).toMatchObject({ enabled: true, scheduler: 'active' })
+    expect(fakes.automations.reconciles).toHaveLength(1)
+    expect(fakes.automations.executors).toHaveLength(1)
+
+    await fakes.automations.executors[0]!.execute(executorInput(fakes, 'occ-default-on'))
+    const ideas = ctx.assistantDreaming.inspectIdeas()
+    expect(ideas).toHaveLength(1)
+    expect(ideas[0]!.summary).toBe('Default-on dreaming idea')
+
+    // Fail-closed owner validation and retire() bounds remain enforced.
+    ctx.assistantDreaming.acknowledgeIdea({ ideaId: ideas[0]!.id, principalId: 'owner-1' })
+    ctx.assistantDreaming.transitionIdea({ ideaId: ideas[0]!.id, transition: 'validate' })
+    expect(ctx.assistantDreaming.inspectValidatedIdeas()).toHaveLength(1)
+    expect(policy.authorizeCalls).toHaveLength(2)
+    ctx.assistantDreaming.retire()
+    expect(fakes.automations.currentStatus).toBe('paused')
+    expect(fakes.automations.executors).toHaveLength(0)
+    expect(ctx.assistantDreaming.health().scheduler).toBe('dormant')
+
+    // Explicit `enabled: false` stays dormant with zero DB writes even with complete prerequisites.
+    const optedOutDb = join(workspace, 'opted-out-dream.sqlite')
+    const optedOut = fakeContext()
+    await optedOut.ctx.plugin(AssistantDreamingService, {
+      ...completeWithoutEnabled,
+      databasePath: optedOutDb,
+      enabled: false,
+    } as never)
+    expect(optedOut.ctx.assistantDreaming.health()).toMatchObject({
+      enabled: false,
+      scheduler: 'dormant',
+      counts: { runs: 0, ideas: 0, recorded: 0 },
+    })
+    expect(optedOut.fakes.automations.reconciles).toHaveLength(0)
+    expect(optedOut.fakes.automations.executors).toHaveLength(0)
+    expect(existsSync(optedOutDb)).toBe(false)
+  })
 })

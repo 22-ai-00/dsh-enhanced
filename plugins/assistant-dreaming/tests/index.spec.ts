@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'vitest'
-import plugin, { AssistantDreamingService, Config, name, version, normalizeConfig } from '../src/index.ts'
+import plugin, { AssistantDreamingService, Config, hasCompleteDreamingPrerequisites, name, version, normalizeConfig } from '../src/index.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -111,5 +111,123 @@ describe('dsh-enhanced-assistant-dreaming entrypoint', () => {
     // rejected rather than silently ignored.
     expect(() => normalizeConfig({ ...base, apiKeyEnv: 'DREAM_API_KEY' } as never))
       .toThrow(/unknown config field: apiKeyEnv/u)
+  })
+
+  test('auto-enables when prerequisites are complete and enabled is omitted, while preserving explicit false opt-out', () => {
+    const completeWithoutEnabled = {
+      scope: { workspace: '/tmp/ws', preset: 'standard', principalId: 'owner-1', ownerRouteId: 'route-1' },
+      databasePath: '/tmp/dream.sqlite',
+      provider: 'p',
+      model: 'm',
+      budgetId: 'b',
+      budgetAmount: 1,
+    }
+    expect(Config(completeWithoutEnabled).enabled).toBe(true)
+    expect(Config['~standard'].validate(completeWithoutEnabled)).toMatchObject({ value: { enabled: true } })
+    expect(normalizeConfig(completeWithoutEnabled)).toMatchObject({ enabled: true, retired: false })
+
+    // Explicit opt-out stays disabled even when all prerequisites are complete.
+    expect(Config({ ...completeWithoutEnabled, enabled: false }).enabled).toBe(false)
+    expect(normalizeConfig({ ...completeWithoutEnabled, enabled: false }).enabled).toBe(false)
+
+    // Incomplete prerequisites stay dormant when enabled is omitted.
+    expect(normalizeConfig({ databasePath: '/tmp/dream.sqlite' }).enabled).toBe(false)
+    expect(normalizeConfig({
+      scope: { workspace: 'relative/ws', preset: 'standard', principalId: 'owner-1', ownerRouteId: 'route-1' },
+      databasePath: '/tmp/dream.sqlite', provider: 'p', model: 'm', budgetId: 'b', budgetAmount: 1,
+    }).enabled).toBe(false)
+
+    // retired without explicit enabled still fails closed.
+    expect(() => normalizeConfig({ ...completeWithoutEnabled, retired: true })).toThrow(/retired requires enabled/u)
+  })
+
+  test('rejects whitespace-only strings in prerequisites, schema validation, and explicit enabled configs', () => {
+    const complete = {
+      scope: { workspace: '/tmp/ws', preset: 'standard', principalId: 'owner-1', ownerRouteId: 'route-1' },
+      databasePath: '/tmp/dream.sqlite',
+      provider: 'p',
+      model: 'm',
+      budgetId: 'b',
+      budgetAmount: 1,
+    }
+    const cases: Array<Record<string, unknown>> = [
+      { ...complete, scope: { ...complete.scope, preset: '   ' } },
+      { ...complete, scope: { ...complete.scope, principalId: '\t\n' } },
+      { ...complete, scope: { ...complete.scope, ownerRouteId: '   ' } },
+      { ...complete, provider: '   ' },
+      { ...complete, model: '\t\n' },
+      { ...complete, budgetId: '   ' },
+    ]
+    for (const invalid of cases) {
+      expect(hasCompleteDreamingPrerequisites(invalid as never)).toBe(false)
+      expect(Config['~standard'].validate(invalid)).toHaveProperty('issues')
+      expect(() => Config(invalid as never)).toThrow()
+      expect(() => normalizeConfig(invalid as never)).toThrow()
+      expect(() => normalizeConfig({ ...invalid, enabled: true } as never)).toThrow()
+    }
+    expect(() => normalizeConfig({ ...complete, activeHours: { timezone: '   ', startMinute: 0, endMinute: 60 } })).toThrow()
+    expect(() => normalizeConfig({ ...complete, reasoningEffort: '\t\n' })).toThrow()
+  })
+
+  test('rejects control characters and outer whitespace across all bounded text config fields', () => {
+    const valid = {
+      scope: { workspace: '/tmp/ws', preset: 'standard', principalId: 'owner-1', ownerRouteId: 'route-1' },
+      databasePath: '/tmp/dream.sqlite',
+      provider: 'openai',
+      model: 'gpt-4o',
+      reasoningEffort: 'medium',
+      budgetId: 'budget-1',
+      budgetAmount: 1,
+      activeHours: { timezone: 'UTC', startMinute: 60, endMinute: 120 },
+    }
+    expect(normalizeConfig(valid).enabled).toBe(true)
+    expect(normalizeConfig({
+      ...valid,
+      scope: { ...valid.scope, workspace: '/tmp/my workspace' },
+      model: 'gpt 4o',
+    }).enabled).toBe(true)
+
+    const badValues = [' primary ', '\u00a0gpt-4o\u00a0', 'bad\nval', 'bad\x00val', 'bad\x7fval']
+    const mutators: Array<(bad: string) => Record<string, unknown>> = [
+      bad => ({ ...valid, scope: { ...valid.scope, workspace: `${valid.scope.workspace}${bad}` } }),
+      bad => ({ ...valid, scope: { ...valid.scope, preset: bad } }),
+      bad => ({ ...valid, scope: { ...valid.scope, principalId: bad } }),
+      bad => ({ ...valid, scope: { ...valid.scope, ownerRouteId: bad } }),
+      bad => ({ ...valid, databasePath: `${valid.databasePath}${bad}` }),
+      bad => ({ ...valid, budgetId: bad }),
+      bad => ({ ...valid, provider: bad }),
+      bad => ({ ...valid, model: bad }),
+      bad => ({ ...valid, reasoningEffort: bad }),
+      bad => ({ ...valid, activeHours: { ...valid.activeHours, timezone: bad } }),
+    ]
+    for (const leading of [' /tmp/ws', '\u00a0/tmp/ws']) {
+      for (const candidate of [
+        { ...valid, scope: { ...valid.scope, workspace: leading } },
+        { ...valid, databasePath: leading },
+      ]) {
+        expect(Config['~standard'].validate(candidate)).toHaveProperty('issues')
+        expect(() => Config(candidate as never)).toThrow()
+        expect(() => normalizeConfig(candidate as never)).toThrow()
+      }
+    }
+    for (const mutate of mutators) {
+      for (const bad of badValues) {
+        const candidate = mutate(bad)
+        expect(Config['~standard'].validate(candidate)).toHaveProperty('issues')
+        expect(() => Config(candidate as never)).toThrow()
+        expect(() => normalizeConfig(candidate as never)).toThrow()
+        expect(() => normalizeConfig({ ...candidate, enabled: true } as never)).toThrow()
+      }
+    }
+    for (const bad of badValues) {
+      expect(hasCompleteDreamingPrerequisites({
+        ...valid,
+        scope: { ...valid.scope, preset: bad },
+      } as never)).toBe(false)
+      expect(hasCompleteDreamingPrerequisites({
+        ...valid,
+        databasePath: `/tmp/${bad}`,
+      } as never)).toBe(false)
+    }
   })
 })

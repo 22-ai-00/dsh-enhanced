@@ -25,7 +25,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 - 原生 Permission selector 的 `workspace-write` / `danger-full-access` 和官方组件提供的 `auto` 由 Harness 管理。Policy 不动态添加原生 Auto；助手 `/permission auto` 使用独立的项目 reviewer 与工作区沙箱。无用户设置的新安装默认仍为 `danger-full-access`，已有兼容的静态默认与会话记录保留。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
-- Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
+- Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源；内嵌 `personalMemory` 默认以 `automaticLearning: true` 开启自动学习（在绑定 owner 签发的有限采用授权前保持 fail-closed，可通过 `personalMemory.automaticLearning: false` 显式关闭，或传入完整 `MemoryLearningAdoptionGrant` 激活采用）。
 - meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；启动不依赖同步构造或 YAML 行序碰巧成功。
 
 需要收紧时可添加显式 deny，或使用安装器的 `--agent-tools disable` 移除托管的 foreground grant；先在测试 profile 使用 `--dump-config` 检查最终 patch。

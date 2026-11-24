@@ -187,11 +187,136 @@ test('current owner and Policy remain required; stored review alone gives no mut
     mutation: { op: 'remove', id: adopted.record.id, expectedVersion: 1 } } })).toThrow('owner changed')
 })
 
-test('the mounted Config validates adoption bounds before acquiring a database', async () => {
-  const f = await fixture()
-  const result = PersonalMemoryService.Config['~standard'].validate({ databasePath: '/unused/memory.sqlite',
-    automaticLearning: { ...f.grant, maxMutations: 0 } })
-  expect(result).not.toBeInstanceOf(Promise)
-  expect(result).toHaveProperty('issues')
-  expect(PersonalMemoryService.inject).toEqual(['assistantPolicy'])
-})
+  test('the mounted Config validates adoption bounds before acquiring a database', async () => {
+    const f = await fixture()
+    const result = PersonalMemoryService.Config['~standard'].validate({ databasePath: '/unused/memory.sqlite',
+      automaticLearning: { ...f.grant, maxMutations: 0 } })
+    expect(result).not.toBeInstanceOf(Promise)
+    expect(result).toHaveProperty('issues')
+    expect(PersonalMemoryService.inject).toEqual(['assistantPolicy'])
+  })
+
+  test('defaults automaticLearning to enabled fail-closed mode, supports false opt-out while keeping manual proposals working, and binds signed grants', async () => {
+    const f = await fixture()
+    expect(f.service.automaticLearningStatus()).toEqual({
+      enabled: true,
+      mode: 'signed-grant',
+      configured: true,
+    })
+
+    const defaultRoot = await mkdtemp(join(tmpdir(), 'memory-learning-default-'))
+    const defaultCtx = new Context()
+    cleanups.push(async () => { await defaultCtx.fiber.restart(); await rm(defaultRoot, { recursive: true, force: true }) })
+    new AssistantPolicyService(defaultCtx, {
+      databasePath: join(defaultRoot, 'policy.sqlite'),
+      rules: [{
+        id: 'allow-manual',
+        effect: 'allow',
+        subject: { kind: 'agent', id: '*', workspace: '*' },
+        actions: ['propose', 'search'],
+        resource: { kind: 'memory', id: '*' },
+        context: { initiators: ['foreground'] },
+      }],
+    })
+    const defaultSvc = new PersonalMemoryService(defaultCtx, {
+      databasePath: join(defaultRoot, 'memory.sqlite'),
+      reconcileIntervalMs: 0,
+      toolEvidence: false,
+    })
+    expect(defaultSvc.automaticLearningStatus()).toEqual({
+      enabled: true,
+      mode: 'default-pending-grant',
+      configured: false,
+    })
+    expect(() => defaultSvc.adoptReviewedLearning({ request: f.request })).toThrow(/requires an owner-signed adoption grant/)
+    expect(() => defaultSvc.listLearningTargets({ owner: f.owner })).toThrow(/requires an owner-signed adoption grant/)
+    expect(() => defaultSvc.inspectLearningAdoptionAvailability({ owner: f.owner })).toThrow(/requires an owner-signed adoption grant/)
+
+    const trueCtx = new Context()
+    cleanups.push(async () => { await trueCtx.fiber.restart() })
+    new AssistantPolicyService(trueCtx, { databasePath: join(defaultRoot, 'policy-true.sqlite'), rules: [] })
+    const explicitTrue = new PersonalMemoryService(trueCtx, {
+      databasePath: join(defaultRoot, 'memory-true.sqlite'),
+      automaticLearning: true,
+      reconcileIntervalMs: 0,
+      toolEvidence: false,
+    })
+    expect(explicitTrue.automaticLearningStatus()).toEqual({
+      enabled: true,
+      mode: 'default-pending-grant',
+      configured: false,
+    })
+
+    const disabledCtx = new Context()
+    cleanups.push(async () => { await disabledCtx.fiber.restart() })
+    new AssistantPolicyService(disabledCtx, {
+      databasePath: join(defaultRoot, 'policy-disabled.sqlite'),
+      rules: [{
+        id: 'allow-manual',
+        effect: 'allow',
+        subject: { kind: 'agent', id: '*', workspace: '*' },
+        actions: ['propose', 'search'],
+        resource: { kind: 'memory', id: '*' },
+        context: { initiators: ['foreground'] },
+      }],
+    })
+    const disabledSvc = new PersonalMemoryService(disabledCtx, {
+      databasePath: join(defaultRoot, 'memory-disabled.sqlite'),
+      automaticLearning: false,
+      approvalMode: 'delivery-or-headless',
+      reconcileIntervalMs: 0,
+      toolEvidence: false,
+    })
+    expect(disabledSvc.automaticLearningStatus()).toEqual({
+      enabled: false,
+      mode: 'disabled',
+      configured: false,
+    })
+    expect(() => disabledSvc.adoptReviewedLearning({ request: f.request })).toThrow(/disabled/)
+    expect(() => disabledSvc.lookupLearningAdoption({ request: f.request })).toThrow(/disabled/)
+    expect(() => disabledSvc.listLearningTargets({ owner: f.owner })).toThrow(/disabled/)
+    expect(() => disabledSvc.inspectLearningAdoptionAvailability({ owner: f.owner })).toThrow(/disabled/)
+    const disabledAgentSessionId = SessionId('memory-disabled-session')
+    const disabledSession = Session.create(disabledAgentSessionId, [], {
+      version: SESSION_FORMAT_VERSION,
+      id: disabledAgentSessionId,
+      createdAt: Date.now(),
+      isSeeded: false,
+      cwd: defaultRoot,
+      agentPreset: 'assistant',
+    })
+    const disabledAgent: Agent = {
+      id: disabledAgentSessionId,
+      session: disabledSession,
+      options: {},
+      inbox: createInboxStub(),
+      ctx: disabledCtx,
+      status: 'idle',
+      model: { current: () => ({ provider: 'test-provider', model: 'test-model' }), select: () => {} },
+      cancel() {},
+      whenIdle: async () => {},
+      runMaintenance: task => task(new AbortController().signal),
+      send() {},
+      followup() {},
+      steer() {},
+      inject() {},
+    }
+    const manualProposal = disabledSvc.propose(disabledAgent, {
+      idempotencyKey: 'manual-while-auto-disabled',
+      principal: f.owner.principalId,
+      mutation: {
+        op: 'add',
+        identity: { owner: 'user', scope: 'user-global' },
+        entry: {
+          kind: 'fact',
+          content: 'Manual memory still works when automaticLearning is false.',
+          sensitivity: 'private',
+          trust: 'user-confirmed',
+          confidence: 0.9,
+          provenance: { source: 'owner-manual', observedAt: Date.now() },
+        },
+      },
+    })
+    expect(manualProposal.status).toBe('pending')
+    expect(disabledSvc.search(disabledAgent, { query: 'Manual memory' })).toEqual([])
+  })

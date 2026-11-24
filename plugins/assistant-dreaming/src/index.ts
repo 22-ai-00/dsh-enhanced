@@ -19,7 +19,7 @@ export {
   type DreamingHealth,
   type TransitionIdeaInput,
 } from './runtime.js'
-export { Config, normalizeConfig, type DreamingConfig, type DreamingScopeConfig, type NormalizedDreamingConfig } from './config.js'
+export { Config, hasCompleteDreamingPrerequisites, normalizeConfig, type DreamingConfig, type DreamingScopeConfig, type NormalizedDreamingConfig } from './config.js'
 export {
   decideTrigger,
   evaluateDraw,

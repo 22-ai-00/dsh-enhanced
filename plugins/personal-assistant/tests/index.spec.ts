@@ -70,6 +70,11 @@ describe('personal-assistant core meta-bundle', () => {
     })
     expect(ctx.assistantPolicy.health()).toMatchObject({ emergencyStop: false })
     expect(ctx.personalMemory.health()).toMatchObject({ activeRecords: 0 })
+    expect(ctx.personalMemory.automaticLearningStatus()).toEqual({
+      enabled: true,
+      mode: 'default-pending-grant',
+      configured: false,
+    })
     expect(ctx.personalWiki.health()).toMatchObject({ pages: 0 })
     expect(ctx.assistantAutomations.health()).toMatchObject({ activeAutomations: 0 })
     expect(ctx.assistantPolicy.evaluate({
@@ -85,5 +90,62 @@ describe('personal-assistant core meta-bundle', () => {
       context: { initiator: 'external' },
     })).toMatchObject({ effect: 'deny', reasonCode: 'default-deny' })
     await ctx.fiber.restart()
+  })
+
+  test('supports personalMemory.automaticLearning false opt-out and signed grant pass-through', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-learning-'))
+    roots.push(root)
+
+    const disabledCtx = new Context()
+    await apply(disabledCtx, {
+      assistantPolicy: { databasePath: join(root, 'policy-disabled.sqlite'), rules: [], budgets: [] },
+      personalMemory: { databasePath: join(root, 'memory-disabled.sqlite'), automaticLearning: false, reconcileIntervalMs: 0 },
+      personalWiki: { vaultRoot: join(root, 'vault-disabled'), databasePath: join(root, 'wiki-disabled.sqlite') },
+      assistantAutomations: { databasePath: join(root, 'automations-disabled.sqlite'), runsPath: join(root, 'runs-disabled'), schedulerEnabled: false },
+    })
+    expect(disabledCtx.personalMemory.automaticLearningStatus()).toEqual({
+      enabled: false,
+      mode: 'disabled',
+      configured: false,
+    })
+    await disabledCtx.fiber.restart()
+
+    const grantedCtx = new Context()
+    const owner = {
+      authorityId: 'owner-route',
+      authorityHash: 'a'.repeat(64),
+      principalId: 'lark/app/tenant/owner',
+      principalRecordId: 'owner-row',
+      principalVersion: 1,
+      workspace: root,
+      agentPreset: 'primary',
+    }
+    await apply(grantedCtx, {
+      assistantPolicy: { databasePath: join(root, 'policy-granted.sqlite'), rules: [], budgets: [] },
+      personalMemory: {
+        databasePath: join(root, 'memory-granted.sqlite'),
+        reconcileIntervalMs: 0,
+        automaticLearning: {
+          authorityId: 'adopt-grant',
+          owner,
+          reviewAuthorityId: 'review-grant',
+          reviewAuthorityDigest: 'b'.repeat(64),
+          expiresAt: Date.now() + 60_000,
+          maxMutations: 5,
+          maxTotalContentBytes: 4096,
+          maxRecordTtlMs: 60_000,
+          kinds: ['fact', 'experience'],
+          operations: ['add', 'replace', 'remove'],
+        },
+      },
+      personalWiki: { vaultRoot: join(root, 'vault-granted'), databasePath: join(root, 'wiki-granted.sqlite') },
+      assistantAutomations: { databasePath: join(root, 'automations-granted.sqlite'), runsPath: join(root, 'runs-granted'), schedulerEnabled: false },
+    })
+    expect(grantedCtx.personalMemory.automaticLearningStatus()).toEqual({
+      enabled: true,
+      mode: 'signed-grant',
+      configured: true,
+    })
+    await grantedCtx.fiber.restart()
   })
 })

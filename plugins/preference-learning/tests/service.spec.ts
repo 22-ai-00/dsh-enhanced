@@ -1489,4 +1489,176 @@ describe('preference learning service', () => {
     ctx.assistantPreferenceLearning.forgetScope(reactivated.scope, 'dynamic-overlay-forget')
     expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target }))).toBe('')
   })
+
+  test('defaults enabled and autonomousT1Enabled to true with only databasePath, activating across restart and respecting /learning + exposure-correction rollback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'preference-default-on-')); roots.push(root)
+    const databasePath = join(root, 'preferences.sqlite')
+    const ctx = new Context(); contexts.push(ctx)
+    const turns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(NativeToolExecutor)
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      rules: [
+        {
+          id: 'allow-pref-agent',
+          effect: 'allow',
+          subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
+          actions: ['review', 'activate', 'rollback', 'snapshot'],
+          resource: { kind: '*', id: '*' },
+        },
+        {
+          id: 'allow-pref-host',
+          effect: 'allow',
+          subject: { kind: 'background', id: HOST_RECOVERY_BACKGROUND_ID, workspace: '/work/alpha', principal: 'owner:lark:123' },
+          actions: ['inspect', 'activate', 'rollback', 'maintain'],
+          resource: { kind: 'preference', id: '*' },
+          context: { initiators: ['background'] },
+        },
+      ],
+    })
+    await ctx.plugin(AssistantDeliveryService, {
+      databasePath: join(root, 'delivery.sqlite'),
+      spoolPath: join(root, 'spool'),
+      schedulerEnabled: false,
+      defaultWorkspace: '/work/alpha',
+      defaultAgentPreset: 'primary',
+      agentProvider: 'test',
+      agentModel: 'test',
+    })
+    const delivery = ctx.get('assistantDelivery') as AssistantDeliveryService
+    vi.spyOn(delivery, 'currentPreferenceTurn').mockImplementation(target => turns.get(target))
+    vi.spyOn(delivery, 'preferencePrincipalForAgent').mockImplementation(target => Object.freeze({
+      scope: Object.freeze({ workspace: '/work/alpha', preset: 'primary' }),
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      bindingId: 'binding-owner',
+      bindingVersion: 1,
+      bindingGeneration: 1,
+      sessionId: String(target.session.id),
+    }))
+
+    // Mount with ONLY `{ databasePath }`: omitted `enabled` and `autonomousT1Enabled` both default to `true`.
+    const prefFiber = await ctx.plugin(PreferenceLearningService, { databasePath })
+    expect(ctx.assistantPreferenceLearning.health()).toMatchObject({ enabled: true, ready: true, active: 0 })
+
+    const reg = (delivery as unknown as {
+      preferenceFeedbackSink?: { registration: Readonly<DeliveryPreferenceRegistration> }
+    }).preferenceFeedbackSink!.registration
+    const now = Date.now()
+    // 2 typed-feedback signals trigger autonomous T1 activation without manual activate().
+    const batch1Cursor = admissionCursor()
+    reg.append([
+      feedbackEvent('default-on-typed-1', { interpretationTrust: 'typed-feedback', occurredAt: now, admissionCursor: batch1Cursor }),
+      feedbackEvent('default-on-typed-2', { interpretationTrust: 'typed-feedback', occurredAt: now + 1, admissionCursor: batch1Cursor }),
+    ])
+    const target = agent()
+    turns.set(target, Object.freeze({
+      bindingId: 'binding-owner', bindingVersion: 1, sourceEventId: 'default-on-ev',
+      sourceInboxId: 'default-on-inbox', turn: 1,
+      scope: Object.freeze({ workspace: '/work/alpha', preset: 'primary' }),
+      principalId: 'owner:lark:123', principalLineage: OWNER_LINEAGE, sessionId: String(target.session.id),
+    }))
+    expect(ctx.assistantPreferenceLearning.review(target).activeOverlay).toContain('bullet lists')
+    expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target }))).toContain('bullet lists')
+
+    // Exposure-correction rollback automatically clears the active overlay on explicit contrary feedback.
+    reg.append([{
+      ...completionEvent(1, {
+        sessionId: String(target.session.id),
+        sourceEventId: 'default-on-ev',
+        sourceInboxId: 'default-on-inbox',
+        replyOutboxId: 'default-on-outbox',
+      }),
+      occurredAt: now + 2,
+      admissionCursor: admissionCursor(),
+    }])
+    reg.append([
+      feedbackEvent('default-on-correction', {
+        candidateValue: 'prose',
+        interpretationTrust: 'explicit-selection',
+        occurredAt: now + 3,
+        admissionCursor: admissionCursor(),
+        exposureTarget: { sourceInboxId: 'default-on-inbox', sourceOutboxId: 'default-on-outbox' },
+      }),
+    ])
+    expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target }))).toContain('prose over lists')
+    expect(ctx.assistantPreferenceLearning.review(target).hypotheses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ candidateValue: 'bullets', effectState: 'rolled-back' }),
+      expect.objectContaining({ candidateValue: 'prose', effectState: 'active' }),
+    ]))
+
+    // /learning pause -> resume -> rollback -> forget bounds work under default-on config.
+    const control = reg.control!
+    expect(await control({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      admissionCursor: admissionCursor(),
+      action: 'pause',
+      occurredAt: now + 3,
+      idempotencyKey: 'default-on-pause',
+    })).toMatchObject({ outcome: 'applied', state: { mode: 'paused' } })
+    expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target }))).toBe('')
+    expect(await control({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      admissionCursor: admissionCursor(),
+      action: 'resume',
+      occurredAt: now + 4,
+      idempotencyKey: 'default-on-resume',
+    })).toMatchObject({ outcome: 'applied', state: { mode: 'active' } })
+    expect(await control({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      admissionCursor: admissionCursor(),
+      action: 'rollback',
+      preferenceKey: 'response.structure',
+      occurredAt: now + 5,
+      idempotencyKey: 'default-on-rollback',
+    })).toMatchObject({ outcome: 'applied' })
+    expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent: target }))).toBe('')
+    expect(await control({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      admissionCursor: admissionCursor(),
+      action: 'forget',
+      occurredAt: now + 6,
+      idempotencyKey: 'default-on-forget',
+    })).toMatchObject({ outcome: 'applied', state: { signals: 0, hypotheses: 0 } })
+
+    // Restart with `autonomousT1Enabled: false` opt-out creates a shadow hypothesis without activating,
+    // then restarting with omitted `autonomousT1Enabled` (default true) auto-activates via activateReadyScopes().
+    await prefFiber.dispose()
+    await ctx.plugin(PreferenceLearningService, { databasePath, autonomousT1Enabled: false })
+    const regOptOut = (delivery as unknown as {
+      preferenceFeedbackSink?: { registration: Readonly<DeliveryPreferenceRegistration> }
+    }).preferenceFeedbackSink!.registration
+    const batch3Cursor = admissionCursor()
+    regOptOut.append([
+      feedbackEvent('shadow-across-restart-1', { interpretationTrust: 'typed-feedback', occurredAt: now + 10, admissionCursor: batch3Cursor }),
+      feedbackEvent('shadow-across-restart-2', { interpretationTrust: 'typed-feedback', occurredAt: now + 11, admissionCursor: batch3Cursor }),
+    ])
+    expect(ctx.assistantPreferenceLearning.review(target).activeOverlay).toBeUndefined()
+
+    await ctx.fiber.restart()
+    const restarted = new Context(); contexts.push(restarted)
+    await restarted.plugin(SystemPrompt)
+    await restarted.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy-restarted.sqlite'),
+      rules: [{
+        id: 'allow-restarted-agent',
+        effect: 'allow',
+        subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
+        actions: ['review'],
+        resource: { kind: '*', id: '*' },
+      }],
+    })
+    await restarted.plugin(PreferenceLearningService, { databasePath })
+    expect(restarted.assistantPreferenceLearning.health().active).toBe(1)
+  })
 })

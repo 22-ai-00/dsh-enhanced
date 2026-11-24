@@ -25,6 +25,23 @@ export interface LearningConfig {
   workItemExperiences?: boolean
   model?: LearningModel
 }
+export type LearningConfigInput = Pick<LearningConfig,
+  'databasePath' | 'authorityId' | 'owner' | 'expiresAt' | 'budgetId' | 'scanBudgetId'
+  | 'reviewAuthorityId' | 'reviewAuthorityDigest' | 'adoptionAuthorityId' | 'adoptionGrantDigest'>
+  & Partial<Pick<LearningConfig,
+    'maxExtractions' | 'maxPending' | 'lookbackMs' | 'policy' | 'maxInputBytes' | 'maxOutputTokens'
+    | 'timeoutMs' | 'budgetAmount' | 'scanBudgetAmount' | 'workItemExperiences' | 'model'>>
+export type DormantLearningServiceConfig = Readonly<{
+  enabled: boolean
+  configured: false
+  workItemExperiences: boolean
+}>
+export type LearningServiceConfig =
+  | (LearningConfigInput & { enabled?: boolean })
+  | { enabled?: boolean; configured?: false; workItemExperiences?: boolean }
+export type ParsedLearningServiceConfig =
+  | DormantLearningServiceConfig
+  | (LearningConfig & { enabled?: false })
 export type LearningCursor = OwnerForegroundTaskSourceCursor | Readonly<{ scopeKey: string; watermark: number }>
 /** Feed metadata only. Source text/model are frozen later, once reply is readable. */
 interface LearningIntentBase {
