@@ -615,15 +615,19 @@ jobs:
       - name: Test Windows cross-platform package suites
         shell: pwsh
         run: |
+          Write-Host "::notice::Running @dsh-enhanced/dsh-rsi-cli Windows suite"
           pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
           if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/dsh-rsi-cli Windows suite failed with exit code $LASTEXITCODE" }
 
+          Write-Host "::notice::Running @dsh-enhanced/assistant-isolation Windows suite"
           pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/index.spec.ts tests/controller-startup.spec.ts tests/grant-discovery.spec.ts tests/scoped-presentation.spec.ts tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/linux-repository-admission-ledger.spec.ts tests/workspace.spec.ts tests/cross-platform-config.spec.ts tests/windows-job-backend.spec.ts
           if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-isolation Windows suite failed with exit code $LASTEXITCODE" }
 
+          Write-Host "::notice::Running @dsh-enhanced/assistant-actions Windows suite"
           pnpm --filter @dsh-enhanced/assistant-actions exec vitest run --testTimeout=15000 tests/broker-protocol.spec.ts tests/github-http.spec.ts tests/github.spec.ts tests/repository-event-observation.spec.ts tests/repository-readback.spec.ts tests/verified-delivery.spec.ts tests/compensation-service.spec.ts tests/broker-core.spec.ts tests/broker-ledger.spec.ts tests/broker-ledger-migration.spec.ts tests/broker-peer-linux.spec.ts tests/service.spec.ts tests/broker-protocol-v2.spec.ts tests/broker-policy-wp08.spec.ts tests/broker-peer-cross-platform.spec.ts tests/broker-transport.spec.ts
           if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-actions Windows suite failed with exit code $LASTEXITCODE" }
 
+          Write-Host "::notice::Running Windows cross-platform root tests"
           pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts tests/root-test-sequencer.spec.ts tests/require-pnpm-publish.spec.ts
           if ($LASTEXITCODE -ne 0) { throw "Windows cross-platform root tests failed with exit code $LASTEXITCODE" }
 

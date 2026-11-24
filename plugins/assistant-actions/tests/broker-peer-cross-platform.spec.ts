@@ -14,9 +14,11 @@ import {
   parseMacosXucredBuffer,
 } from '../src/broker-peer-macos.ts'
 import {
+  copyWindowsAceBytes,
   createWindowsAclInspectorFromRawApi,
   createWindowsBindingFromRawApi,
   createWindowsPeerInspector,
+  decodeWindowsWideString,
   inspectWindowsPeerCredentials,
   isWindowsNamedPipePath,
   normalizeWindowsPipePath,
@@ -310,5 +312,36 @@ describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
       daclPresent: 1,
       aces: [makeAce(5, 0x1f01ff, ownerSidBytes)],
     })).toEqual({ ownerSid: 'S-1-5-32-544', protectedDacl: true, allowsNonOwner: true })
+  })
+
+  it('decodes UTF-16LE SID strings via koffi.decode.string16 and copies ACE bytes without aliasing', () => {
+    expect(decodeWindowsWideString(null)).toBeUndefined()
+    expect(decodeWindowsWideString(undefined)).toBeUndefined()
+
+    const utf16Sid = Buffer.from('S-1-5-21-1000-2000-3000-1001\0', 'utf16le')
+    expect(decodeWindowsWideString(utf16Sid)).toBe('S-1-5-21-1000-2000-3000-1001')
+
+    expect(copyWindowsAceBytes(null)).toBeUndefined()
+    const tooSmallAce = Buffer.alloc(8)
+    tooSmallAce.writeUInt16LE(7, 2)
+    expect(copyWindowsAceBytes(tooSmallAce)).toBeUndefined()
+
+    const aceSource = Buffer.alloc(16)
+    aceSource.writeUInt8(0, 0)
+    aceSource.writeUInt8(0, 1)
+    aceSource.writeUInt16LE(16, 2)
+    aceSource.writeUInt32LE(0x1f01ff, 4)
+    aceSource.writeUInt32LE(0xdeadbeef, 8)
+    aceSource.writeUInt32LE(0xcafebabe, 12)
+
+    const copied = copyWindowsAceBytes(aceSource)
+    expect(copied).toBeDefined()
+    expect(copied!.equals(aceSource)).toBe(true)
+
+    // Mutate source after copying to prove copied ACE does not alias native memory
+    aceSource.fill(0)
+    expect(copied!.readUInt16LE(2)).toBe(16)
+    expect(copied!.readUInt32LE(8)).toBe(0xdeadbeef)
+    expect(copied!.readUInt32LE(12)).toBe(0xcafebabe)
   })
 })

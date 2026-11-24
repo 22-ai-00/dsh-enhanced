@@ -159,6 +159,24 @@ export function createWindowsBindingFromRawApi(api: WindowsRawNativeApi): Window
   }
 }
 
+export function decodeWindowsWideString(
+  ptr: unknown,
+  koffiImpl: typeof koffiModule = require('koffi') as typeof koffiModule,
+): string | undefined {
+  if (!ptr) return undefined
+  return koffiImpl.decode.string16(ptr)
+}
+
+export function copyWindowsAceBytes(
+  acePtr: unknown,
+  koffiImpl: typeof koffiModule = require('koffi') as typeof koffiModule,
+): Buffer | undefined {
+  if (!acePtr) return undefined
+  const aceSize = koffiImpl.decode(acePtr, 2, 'uint16') as number
+  if (!Number.isSafeInteger(aceSize) || aceSize < 8 || aceSize > 65_535) return undefined
+  return Buffer.from(koffiImpl.decode(acePtr, 'uint8', aceSize))
+}
+
 function loadBinding(): WindowsNativePeerBinding | undefined {
   if (binding || bindingFailed) return binding
   if (process.platform !== 'win32') return undefined
@@ -190,8 +208,7 @@ function loadBinding(): WindowsNativePeerBinding | undefined {
       convertSidToStringSidW: (sidPtr, out) => ConvertSidToStringSidW(sidPtr, out) as number,
       readWideStringAndFree: ptr => {
         try {
-          if (!ptr) return undefined
-          return koffi.decode(ptr, 'str16') as string
+          return decodeWindowsWideString(ptr, koffi)
         } finally {
           if (ptr) try { LocalFree(ptr) } catch { /* ignore */ }
         }
@@ -348,17 +365,11 @@ function loadAclInspector(): ((path: string) => WindowsAclInspection | undefined
       getSecurityDescriptorDacl: (sd, presentOut, daclOut, defaultedOut) => GetSecurityDescriptorDacl(sd, presentOut, daclOut, defaultedOut) as number,
       getAclInformation: (dacl, buf, len, cls) => GetAclInformation(dacl, buf, len, cls) as number,
       getAce: (dacl, idx, aceOut) => GetAce(dacl, idx, aceOut) as number,
-      readAceBytes: acePtr => {
-        if (!acePtr) return undefined
-        const aceSize = koffi.decode(acePtr, 2, 'uint16') as number
-        if (!Number.isSafeInteger(aceSize) || aceSize < 8 || aceSize > 65_535) return undefined
-        return Buffer.from(koffi.view(acePtr, aceSize))
-      },
+      readAceBytes: acePtr => copyWindowsAceBytes(acePtr, koffi),
       convertSidToStringSidW: (sidPtr, out) => ConvertSidToStringSidW(sidPtr, out) as number,
       readWideStringAndFree: ptr => {
         try {
-          if (!ptr) return undefined
-          return koffi.decode(ptr, 'str16') as string
+          return decodeWindowsWideString(ptr, koffi)
         } finally {
           if (ptr) try { LocalFree(ptr) } catch { /* ignore */ }
         }
