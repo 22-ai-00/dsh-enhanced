@@ -20,13 +20,13 @@ Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 与 Release 的 L
 pnpm release:status
 ```
 
-在 `dev` 准备下一次整体发版时，默认读取已记录版本并把补丁位加一，例如 `0.1.0 → 0.1.1`：
+在 `dev` 准备下一次整体发版时，当 `release-manifest.json` 中 `pending` 为 `null`（如 `current: "0.1.83"`、`pending: null` 准备替代发布 `0.1.84`），默认读取已记录版本并把补丁位加一，例如 `0.1.83 → 0.1.84`：
 
 ```sh
 pnpm release:prepare
 ```
 
-需要主动升级主版本或次版本时可以显式指定，而且指定值必须高于当前记录：
+若 `pending` 仍非 `null`（上一次待发布版本未完成记录），则须使用 `pnpm release:supersede <version>` 显式替换；需要主动升级主版本或次版本时也可向 `release:prepare` 显式指定更高版本：
 
 ```sh
 pnpm release:prepare 0.2.0
@@ -66,11 +66,11 @@ pnpm release:publish
 pnpm release:record
 ```
 
-该命令复用发布前的完整一致性校验，然后更新 `current`、追加 `history` 并清空 `pending`。CI 的 publish job 只有 `contents: read`，账本 job 才有 `contents: write` 且不接触 `NPM_TOKEN`、不安装依赖；它只提交 `release-manifest.json`，并且在 npm 发布前和账本推送前都会重新确认 `origin/main` 未前进。注意：当前 `release.yml` 的 `record` job 在 `publish` 返回成功后即更新账本，**尚未内置自动化的全包 npm registry 读回门禁**，因此 `release-manifest.json` 推进本身不证明所有 40 个包已在公共 npm 可安装。
+该命令复用发布前的完整一致性校验，然后更新 `current`、追加 `history` 并清空 `pending`。CI 的 `publish` job 只有 `contents: read`；在 `publish` 与 `record` 之间，[`.github/workflows/release.yml`](../.github/workflows/release.yml) 内置了无特权的 `verify-npm` 门禁 job（`needs: publish`，且 `record` 声明 `needs: [publish, verify-npm]`），它会检出精确 tag 提交、校验 `HEAD` 等于 `needs.publish.outputs.source_commit`，并执行 `node ./scripts/verify-npm-release.mjs --tag "${RELEASE_TAG}" --verify-tarball` 对全部 40 个可发布包逐一校验 npm packument 版本、`dist-tags.latest` 与 `dist.tarball` 可达性（`HEAD`/`GET` 带指数退避重试）；只有全部 40 个包读回通过后，`record` job（`contents: write`，不接触 `NPM_TOKEN`、不安装依赖，仅提交 `release-manifest.json` 并在发布前与推送前重检 `origin/main` 未前进）才会更新账本并推送 `main`。
 
 按下述 immutable tag ruleset 部署后，release tag 会稳定指向实际发布的源码提交；workflow 自身不会创建或移动 tag，账本记录位于其后的独立提交。
 
-发布后必须逐包核对 npm 上的精确版本、dist-tag 与完整 40 包集合，再从公开 tag 下载安装资产并核对摘要；若发现任一包缺失或 404，不得宣称发布完成，也不可移动/删除旧 tag 重试，须按下方失败协议修复后以更高版本替代。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。最后将 `main` 的发布账本记录同步回 `dev`。
+虽然 `verify-npm` 已在记账前强制完成全量 40 包 npm 读回与 tarball 探测，发布后仍须从公开 tag 下载安装资产并核对摘要；若任何发布步骤中途失败或出现部分发布，不得宣称发布完成，也不可移动/删除旧 tag 重试，须按下方失败协议修复后以更高版本替代（如用 `0.1.84` 取代不完整的 `0.1.83`）。在隔离的临时 Home 验证公开包安装与配置加载，不修改现有生产 Home；完整 supervised 安装仍须完成真实身份配对及必要的模型、预算和构建环境设置，轻量安装测试不替代该授权流程。发布完成后，最终用户可通过 CLI（`dsh-rsi upgrade [--check|--dry-run|--yes]`，以及 `dsh-rsi enable|disable`）或 Web（`owner-console`）/飞书（`lark-channel`）自然语言指令触发 `upgradeAssistantAndRecover` 完成全量核心/插件升级（默认开启 `allowNonEmptyHistoryMigration: true`）、`doctor` 健康检查与受管服务重启恢复。最后将 `main` 的发布账本记录同步回 `dev`。
 
 涉及 Linux supervised 安装或依赖布局的修改，还须在安装器实际生成的 hoisted profile 上验证私有授权运行时准备，覆盖支持的 Node 22 和当前开发 Node。使用完整 supervised 包集合、真实安装元数据与锁文件，通过安装器的 Host peer 解析入口执行 `--prepare-authorities`，或在同一解析上下文中分别调用运行时与资源准备函数；核验独立程序可运行、重复准备不更换内容或身份。此检查不绑定 owner、不签发任务授权、不启动 Host，也不替代所选隔离后端的完整源码构建及 supervised 就绪验收。仅通过 core 激活或模拟 setup 返回值，不能证明该准备步骤可用。
 
