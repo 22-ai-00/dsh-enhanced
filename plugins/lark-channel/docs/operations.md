@@ -9,6 +9,8 @@
 /stop               # 停止正在执行的任务，保留 session
 /new                # 停止旧任务并原子切换到空白 session；/clear 同义
 /compact            # 宿主提供原生命令时压缩当前上下文
+/version            # 查看助手、Host、插件版本与自迭代演进统计；/autonomy version 同义
+/autonomy enable    # active owner 开启整体助手自迭代能力（disable / upgrade 同理）
 /model              # 打开模型选择卡片
 /model use <route>  # 使用 provider/model 文字 route
 /model reset        # 恢复部署默认模型

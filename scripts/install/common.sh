@@ -871,7 +871,16 @@ dsh_enhanced_ensure_rsi_cli() {
     dsh_enhanced_fail 1 'dsh-rsi 已安装但不在 PATH；请把 npm global bin 目录加入 PATH。'
     return $?
   fi
-  printf 'dsh-rsi 已就绪：%s\n' "$(dsh-rsi version 2>/dev/null || printf 'unknown')"
+  local rsi_version=''
+  rsi_version="$(dsh-rsi --version 2>/dev/null || true)"
+  if [[ -z "$rsi_version" ]]; then
+    rsi_version="$(dsh-rsi version --short 2>/dev/null || true)"
+  fi
+  if [[ -z "$rsi_version" ]]; then
+    rsi_version="$(dsh-rsi version 2>/dev/null || true)"
+    rsi_version="${rsi_version%%$'\n'*}"
+  fi
+  printf 'dsh-rsi 已就绪：%s\n' "${rsi_version:-unknown}"
 }
 
 dsh_enhanced_require_existing_runtime() {

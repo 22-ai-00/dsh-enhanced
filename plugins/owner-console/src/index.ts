@@ -13,10 +13,23 @@ export {
   type OwnerConsoleControlResult,
 } from './autonomy-control.js'
 export {
+  formatOwnerConsoleVersionSummary,
   parseOwnerSelfIterationCommand,
+  parseOwnerVersionQuery,
   type OwnerSelfIterationAction,
+  type OwnerVersionQueryIntent,
   type ParsedOwnerSelfIterationCommand,
+  type ParsedOwnerVersionQuery,
 } from './nl-control.js'
+export {
+  collectOwnerConsoleVersionInfo,
+  type CollectOwnerConsoleVersionOptions,
+} from './version-info.js'
+export type {
+  AssistantVersionPluginEntry,
+  AssistantVersionReport,
+  OwnerConsoleVersionReport,
+} from './typert.js'
 
 /** The console only reads Host state in this slice; no peer service is required. */
 export const inject = ['typert']

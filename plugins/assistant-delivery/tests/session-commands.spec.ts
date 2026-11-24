@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { parseDeliveryCommand, parseOwnerSelfIterationCommand } from '../src/session-commands.ts'
+import {
+  parseDeliveryCommand,
+  parseOwnerSelfIterationCommand,
+  parseOwnerVersionQuery,
+} from '../src/session-commands.ts'
 
 describe('Delivery slash command grammar', () => {
   test.each([
@@ -63,5 +67,55 @@ describe('Owner self-iteration NL and /autonomy command parser', () => {
     '/autonomy enable now',
   ])('rejects non-command or ambiguous input %j', text => {
     expect(parseOwnerSelfIterationCommand(text)).toBeUndefined()
+  })
+})
+
+describe('Owner version and self-iteration-count query parser', () => {
+  test.each([
+    ['/version', 'version'],
+    ['  /version  ', 'version'],
+    ['/autonomy version', 'autonomy-version'],
+    ['/AUTONOMY VERSION', 'autonomy-version'],
+    ['/Autonomy   Version', 'autonomy-version'],
+    ['查看版本', 'natural-language'],
+    ['查看版本？', 'natural-language'],
+    ['版本信息。', 'natural-language'],
+    ['当前版本!', 'natural-language'],
+    ['助手版本！', 'natural-language'],
+    ['查看自迭代次数', 'natural-language'],
+    ['自迭代次数', 'natural-language'],
+    ['自己迭代了多少次？', 'natural-language'],
+    ['迭代了多少次?', 'natural-language'],
+    ['进化了多少次？', 'natural-language'],
+    ['assistant version', 'natural-language'],
+    ['Assistant Version?', 'natural-language'],
+    ['self-iteration count', 'natural-language'],
+    ['self iteration count.', 'natural-language'],
+  ] as const)('matches %j as kind %s', (text, kind) => {
+    expect(parseOwnerVersionQuery(text)).toEqual({
+      action: 'versionInfo',
+      kind,
+      sourceText: text,
+    })
+  })
+
+  test.each([
+    '',
+    '   ',
+    '/VERSION',
+    '/version foo',
+    '/autonomy version extra',
+    '/autonomy enable',
+    '开启自迭代',
+    '关闭自迭代',
+    '升级整体助手',
+    '查看版本？？',
+    '自己迭代了多少次！！',
+    '如果查看版本会怎么样',
+    '为什么自己迭代了多少次？',
+    '今天北京天气怎么样？',
+    '请问这个版本支持图片吗',
+  ])('rejects invalid or multi-clause input %j', text => {
+    expect(parseOwnerVersionQuery(text)).toBeUndefined()
   })
 })

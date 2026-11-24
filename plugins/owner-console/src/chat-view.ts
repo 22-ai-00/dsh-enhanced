@@ -18,7 +18,7 @@ import {
   type ChatSessionSnapshot, type PermissionCatalog, type SpeechRecognitionLike,
 } from './chat.js'
 import { ModelRouteSelects, resolveEffectiveModelCatalog } from './model-route-ui.js'
-import { parseOwnerSelfIterationCommand } from './nl-control.js'
+import { formatOwnerConsoleVersionSummary, parseOwnerSelfIterationCommand, parseOwnerVersionQuery } from './nl-control.js'
 import type { AssistantChatContext, OwnerConsoleModelCatalog } from './typert.js'
 import {
   accent, backdropImageStyle, backdropStyle, border, borderStrong, buttonStyle, caption, danger,
@@ -1293,9 +1293,11 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   const [cancelling, setCancelling] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [notice, setNotice] = useState<ChatNotice>()
+  const [localMessages, setLocalMessages] = useState<readonly ChatMessage[]>([])
   const [listening, setListening] = useState(false)
   const [atBottom, setAtBottom] = useState(true)
   const forceNewRef = useRef(false)
+  const localSeqRef = useRef(0)
   const activeSessionIdRef = useRef<string | undefined>(undefined)
   const recognition = useRef<SpeechRecognitionLike | null>(null)
   const log = useRef<HTMLDivElement | null>(null)
@@ -1415,6 +1417,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     setPendingPermission(undefined)
     setPermissionNotice('')
     setLocalSelection(undefined)
+    setLocalMessages([])
     setModelSwitching(false)
     setLoadingOlder(false)
     setAtBottom(true)
@@ -1479,9 +1482,10 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   }, [runtime])
 
   const messages = chatMessages(window.entries)
+  const displayMessages = localMessages.length === 0 ? messages : [...messages, ...localMessages]
   const pending = pendingUserMessages(window.entries, snapshot.pendingSubmissions, inbox, snapshot.running === true)
   const streaming = streamingAssistantText(window.entries)
-  const lastAssistant = [...messages].reverse().find(message => message.kind === 'assistant')
+  const lastAssistant = [...displayMessages].reverse().find(message => message.kind === 'assistant')
   const voiceAvailable = runtime.voiceAvailable()
   const speakAvailable = runtime.speakAvailable()
 
@@ -1489,7 +1493,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   useEffect(() => {
     const node = log.current
     if (node !== null && stick.current) node.scrollTop = node.scrollHeight
-  }, [messages, pending.transcript, pending.queued, streaming, snapshot.running, binding])
+  }, [messages, localMessages, pending.transcript, pending.queued, streaming, snapshot.running, binding])
 
   useEffect(() => () => {
     const active = recognition.current
@@ -1531,6 +1535,45 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
         if (!alive.current) return
         setSending(false)
         setNotice({ tone: 'error', text: error instanceof Error ? error.message : '自迭代控制请求失败，稍后重试。' })
+      })
+      return
+    }
+    const parsedVersion = filesValue.length === 0 ? parseOwnerVersionQuery(textValue) : undefined
+    if (parsedVersion !== undefined && typeof runtime.versionInfo === 'function') {
+      setSending(true)
+      setNotice(undefined)
+      void runtime.versionInfo().then(result => {
+        if (!alive.current) return
+        setSending(false)
+        if (!result.ok) {
+          setNotice({ tone: 'error', text: remoteFailureSummary(result.error) })
+          return
+        }
+        const seqBase = (messages.at(-1)?.seq ?? 0) + (++localSeqRef.current) * 2
+        const userMsg: ChatMessage = {
+          kind: 'user',
+          key: `local-version-user-${seqBase}`,
+          seq: seqBase,
+          text: textValue.trim(),
+        }
+        const assistantMsg: ChatMessage = {
+          kind: 'assistant',
+          key: `local-version-assistant-${seqBase + 1}`,
+          seq: seqBase + 1,
+          text: formatOwnerConsoleVersionSummary(result.value),
+        }
+        setLocalMessages(prev => [...prev, userMsg, assistantMsg])
+        stick.current = true
+        setAtBottom(true)
+        if (log.current !== null) log.current.scrollTop = log.current.scrollHeight
+        if (clearDraftOnSuccess) {
+          setDraft('')
+          setFiles([])
+        }
+      }, (error: unknown) => {
+        if (!alive.current) return
+        setSending(false)
+        setNotice({ tone: 'error', text: error instanceof Error ? error.message : '版本信息查询失败，稍后重试。' })
       })
       return
     }
@@ -1617,6 +1660,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
     if (sending || modelSwitching) return
     setNotice(undefined)
     setLocalSelection(undefined)
+    setLocalMessages([])
     forgetChatSession(runtime.storage())
     forceNewRef.current = true
     setAttempt(v => v + 1)
@@ -1786,7 +1830,7 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   const caps = assistantCtx?.capabilities
   const hasMetadata = caps?.memory === true || caps?.wiki === true || caps?.feishuConnected === true
 
-  const hasTranscriptItems = messages.length > 0 || pending.transcript.length > 0 || pending.queued.length > 0
+  const hasTranscriptItems = displayMessages.length > 0 || pending.transcript.length > 0 || pending.queued.length > 0
   const isWelcome = state.phase === 'ready' && !hasTranscriptItems && streaming === '' && snapshot.running !== true && window.hasMore !== true
 
   let transcriptContent: unknown
@@ -1883,10 +1927,10 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
           disabled: loadingOlder,
           onClick: loadOlder,
         }, loadingOlder ? '正在载入更早的消息…' : '载入更早的消息')) : null,
-      ...messages.map((message, index) => jsx(ChatMessageRow, {
+      ...displayMessages.map((message, index) => jsx(ChatMessageRow, {
         message,
         onCopy: (value: string) => copyTextToClipboard(value, setNotice),
-        ...(message.kind === 'error'
+        ...(index < messages.length && message.kind === 'error'
           ? {
             authRecovery: {
               activeProvider: activeModelProvider,

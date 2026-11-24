@@ -77,11 +77,18 @@ import {
   learningDispatchRecoveryCode,
   parseDeliveryCommand,
   parseOwnerSelfIterationCommand,
+  parseOwnerVersionQuery,
   permissionDispatchRecoveryCode,
   type ParsedDeliveryCommand,
   type ParsedOwnerSelfIterationCommand,
+  type ParsedOwnerVersionQuery,
   type PermissionDispatchRecovery,
 } from './session-commands.js'
+import {
+  collectDeliveryVersionReport,
+  formatAssistantVersionSummary,
+  type AssistantVersionReport,
+} from './version-query.js'
 import { DeliveryStoreError } from './store.js'
 import { SessionLeaseUnavailable } from './session-lease-runtime.js'
 import type { DeliverySessionLeases, SessionExecutionLease } from './session-lease-runtime.js'
@@ -217,6 +224,11 @@ interface DshDeliveryRuntimeOptions {
     envelope: Readonly<InboundEnvelope>,
     command: Readonly<ParsedOwnerSelfIterationCommand>,
   ): Promise<'forbidden' | 'unavailable' | import('./service.js').OwnerSelfIterationControlResult>
+  dispatchVersionQuery?(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    query: Readonly<ParsedOwnerVersionQuery>,
+  ): Promise<AssistantVersionReport>
   /** Durably reserve the exact terminal reply authorization before permission state can change. */
   authorizePermissionReply(
     binding: Readonly<ConversationBinding>,
@@ -259,6 +271,7 @@ const ownerSelfIterationUsage = [
   '- /autonomy enable（或「开启自迭代」）',
   '- /autonomy disable（或「关闭自迭代」）',
   '- /autonomy upgrade（或「升级整体助手」）',
+  '- /autonomy version（或 /version：查看助手版本与自迭代统计）',
 ].join('\n')
 
 function formatOwnerSelfIterationResult(
@@ -3778,6 +3791,55 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     return { outcome: 'processed' }
   }
 
+  private async runVersionQuery(
+    query: Readonly<ParsedOwnerVersionQuery>,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    if (query.kind !== 'natural-language' && (envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '版本查询命令不接受文件、图片或其他附件；本次未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    const checkAuthorized = (): boolean | InboundNotProcessedResult => {
+      try {
+        return this.options.isInboundAuthorized(binding, envelope)
+      } catch {
+        return { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: true }
+      }
+    }
+    const preAuth = checkAuthorized()
+    if (preAuth !== true) {
+      return preAuth === false
+        ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+        : preAuth
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+    const report = this.options.dispatchVersionQuery !== undefined
+      ? await this.options.dispatchVersionQuery(binding, envelope, query)
+      : await collectDeliveryVersionReport({ ctx: this.ctx })
+    signal.throwIfAborted()
+    const postAuth = checkAuthorized()
+    if (postAuth !== true) {
+      return postAuth === false
+        ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+        : postAuth
+    }
+    this.options.replyCommand(binding, envelope.eventId, {
+      text: formatAssistantVersionSummary(report),
+      format: 'plain',
+    })
+    return { outcome: 'processed' }
+  }
+
   private sessionHelp(native: readonly CommandDescriptor[]): string {
     const lines = [
       '会话命令：',
@@ -3789,6 +3851,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /feedback：提交结构化偏好；回复自动化结果可记录 achieved/partial/not-achieved；不进入模型。',
       '- /learning：查看、导出、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
       '- /autonomy：开启、关闭或升级整体助手自迭代能力；不进入模型。',
+      '- /version：查看当前助手、Host、插件版本与自迭代演进统计；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
     const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))
@@ -4112,6 +4175,19 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         signal,
         markDispatching,
       )
+    }
+    const versionQuery = parseOwnerVersionQuery(envelope.text)
+    if (
+      versionQuery !== undefined
+      && (versionQuery.kind !== 'natural-language' || (envelope.attachments?.length ?? 0) === 0)
+    ) {
+      return await this.runVersionQuery(versionQuery, binding, envelope, signal, markDispatching)
+    }
+    if (sessionCommand?.name === 'version') {
+      return this.replySessionCommand(binding, envelope, {
+        text: '/version 不接受参数。发送 /help 查看用法。',
+        format: 'plain',
+      }, signal, markDispatching)
     }
     const rawSelfIterationCommand = parseOwnerSelfIterationCommand(envelope.text)
     const isAutonomyCommand = envelope.kind === 'command' && /^\/autonomy(?:[\t ]|$)/iu.test(envelope.text)

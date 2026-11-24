@@ -283,6 +283,7 @@ export function buildWenyaoSystemPrompt(workspace: string, capabilities: Assista
     workspaceLine,
     capabilityLine,
     '当 Owner 要求开启自迭代、关闭/停用自迭代或升级整体助手并恢复正常状态（如「开启自迭代」「关闭自迭代」「升级整体助手」「/autonomy enable|disable|upgrade」）时，可调用 `owner_console_self_iteration_control` 工具执行并反馈真实结果与健康状态。',
+    '当 Owner 询问整体助手版本、DSH 宿主或插件版本、以及自己迭代/进化了多少次时，可调用 `owner_console_version_info` 工具读取只读版本与自迭代统计并准确回答。',
     '只陈述真实观察到的环境与已启用的能力，不虚构未开启的能力，并始终遵循 Owner 的权限策略与有限预算边界。',
   ].join('\n')
 }

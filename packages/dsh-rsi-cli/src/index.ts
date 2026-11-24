@@ -43,6 +43,7 @@ import {
   type ServiceActionOutcome,
 } from './services.ts'
 import { version as VERSION } from './version.ts'
+import { collectVersionReport, formatVersionReport } from './version-report.ts'
 import {
   MaintenanceError,
   listDeadLetters,
@@ -97,6 +98,13 @@ export {
 } from './upgrade.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
+export {
+  collectVersionReport,
+  formatVersionReport,
+  type AssistantVersionPluginEntry,
+  type AssistantVersionReport,
+  type CollectVersionReportOptions,
+} from './version-report.ts'
 
 export interface UpgradeAndRecoverOptions {
   readonly dshHome: string
@@ -656,14 +664,18 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
   maintenance 运维结算：列出并结算死信、列出并暂停系统自有 automation（写 receipt）
-  version     打印 dsh-rsi 版本
+  version     查看助手 / Host / 核心与自演进插件版本及只读自迭代演进统计（支持 --json / --short）
 
 全局选项：
+  -V, --version       顶层调用时仅打印 CLI 版本号（update / upgrade 中 --version <v> 仍用于指定目标版本）
   --dsh-home <path>   指定 DSH home（默认取 $DSH_HOME，否则 ~/.dsh；安装器经 DSH_HOME 环境变量接收）
   --profile <name>    仅操作单个 profile（purge/reinstall 的 purge 阶段默认全量）
   --dry-run           只打印将执行的动作，不做任何修改
   --yes               purge/reinstall 跳过交互确认（reinstall 时同时透传给安装器）
-  --json              status / doctor / upgrade / growth-report / enable / disable 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+  --json              status / doctor / upgrade / growth-report / enable / disable / version 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+
+version 选项：
+  --short             仅输出简洁版本号（与 --json 互斥）
 
 growth-report 选项：
   --since <时长>      统计窗口（如 24h、7d、14d、30d、2w；默认 7d，范围 1h..365d）
@@ -711,6 +723,9 @@ purge 选项：
   --remove-host       同时卸载全局 @deepseek-ai/dsh（仅限全量 purge；默认保留）
 
 示例：
+  dsh-rsi --version
+  dsh-rsi version
+  dsh-rsi version --json
   dsh-rsi status
   dsh-rsi doctor
   dsh-rsi restart --profile web
@@ -750,8 +765,12 @@ interface ParsedArgs {
   /** update：dsh-rsi 自身的目标版本或 dist-tag。 */
   targetVersion?: string
   dshVersion?: string
-  /** status / doctor：以 JSON 格式输出诊断结果。 */
+  /** status / doctor / version：以 JSON 格式输出诊断或版本报告。 */
   json: boolean
+  /** version：仅输出简洁版本号。 */
+  short: boolean
+  /** 顶层 --version / -V 标志。 */
+  versionFlag: boolean
   /** open / web-url：等待服务输出 live Web URL 的秒数。 */
   waitSeconds?: number
   /** open：不拉起系统浏览器，仅输出授权 URL 与提示。 */
@@ -777,7 +796,8 @@ const KNOWN_COMMANDS = new Set([
   'enable', 'disable', 'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait', '--registry', '--since', '--now'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--dsh-version', '--wait', '--registry', '--since', '--now'])
+const VERSION_FLAGS = new Set(['--short'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
 const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped', '--allow-non-empty-history-migration'])
@@ -832,6 +852,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     errorsOnly: false,
     all: false,
     json: false,
+    short: false,
+    versionFlag: false,
     noBrowser: false,
     check: false,
     confirmDshHomeStopped: false,
@@ -842,6 +864,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!
     if (!commandSeen) {
+      if (token === '--version' || token === '-V') {
+        result.versionFlag = true
+        continue
+      }
       if (VALUE_OPTIONS.has(token)) {
         const value = argv[++i]
         if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
@@ -852,6 +878,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         if (token === '--dry-run') result.dryRun = true
         else if (token === '--yes') result.yes = true
         else result.help = true
+        continue
+      }
+      if (VERSION_FLAGS.has(token)) {
+        result.short = true
         continue
       }
       if (LOGS_FLAGS.has(token)) {
@@ -901,6 +931,18 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       continue
     }
     // 其它命令保持既有的严格解析。
+    if (token === '--version') {
+      if (result.command !== 'upgrade') {
+        throw new PurgeError('--version 仅适用于顶层调用或 update / upgrade 命令')
+      }
+      const value = argv[++i]
+      if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
+      assignValueOption(result, token, value)
+      continue
+    }
+    if (token === '-V') {
+      throw new PurgeError('-V 仅适用于顶层调用')
+    }
     if (VALUE_OPTIONS.has(token)) {
       const value = argv[++i]
       if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
@@ -911,6 +953,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       if (token === '--dry-run') result.dryRun = true
       else if (token === '--yes') result.yes = true
       else result.help = true
+      continue
+    }
+    if (VERSION_FLAGS.has(token)) {
+      result.short = true
       continue
     }
     if (LOGS_FLAGS.has(token)) {
@@ -943,6 +989,24 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
   }
+  if (result.versionFlag) {
+    if (commandSeen) {
+      throw new PurgeError('--version / -V 作为顶层参数时不能与子命令同时使用')
+    }
+    if (result.json) {
+      throw new PurgeError('--version / -V 与 --json 不能同时使用（需要结构化信息请用 dsh-rsi version --json）')
+    }
+    if (result.short) {
+      throw new PurgeError('--version / -V 与 --short 不能同时使用')
+    }
+    result.command = 'version'
+  }
+  if (result.short && result.command !== 'version') {
+    throw new PurgeError(`--short 仅适用于 version 命令（收到：${result.command}）`)
+  }
+  if (result.short && result.json) {
+    throw new PurgeError('--short 与 --json 不能同时使用')
+  }
   if (
     result.json
     && result.command !== 'status'
@@ -951,8 +1015,9 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     && result.command !== 'growth-report'
     && result.command !== 'enable'
     && result.command !== 'disable'
+    && result.command !== 'version'
   ) {
-    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report / enable / disable 命令（收到：${result.command}）`)
+    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report / enable / disable / version 命令（收到：${result.command}）`)
   }
   if ((result.since !== undefined || result.nowMs !== undefined) && result.command !== 'growth-report') {
     throw new PurgeError(`--since 与 --now 仅适用于 growth-report 命令（收到：${result.command}）`)
@@ -1481,9 +1546,18 @@ export async function main(
     switch (args.command) {
       case 'maintenance':
         return runMaintenance(args.dshHome, args.passthrough)
-      case 'version':
-        process.stdout.write(`${VERSION}\n`)
+      case 'version': {
+        if (args.versionFlag || args.short) {
+          process.stdout.write(`${VERSION}\n`)
+          return 0
+        }
+        const report = await collectVersionReport({
+          dshHome: args.dshHome,
+          ...(args.profile !== undefined ? { profile: args.profile } : {}),
+        })
+        process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatVersionReport(report)}\n`)
         return 0
+      }
       case 'status': {
         const platform = deps.platform ?? process.platform
         const snapshot = await collectStatus(args.dshHome, homedir(), platform)

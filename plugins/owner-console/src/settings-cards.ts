@@ -7,7 +7,7 @@ import type { OwnerSelfIterationAction } from './nl-control.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
 import {
   AUTONOMY_TIER_DEFAULTS,
-  type AssistantChatContext, type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction,
+  type AssistantChatContext, type AssistantVersionReport, type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction,
   type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
   type GrowthDataState, type IntakeAgreementAvailability,
   type OwnerConsoleAssistantOverview, type OwnerConsoleControlActionResult, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
@@ -176,6 +176,7 @@ export type ConsoleRemote = Readonly<{
   promoteFeishuQrOwner?(sessionId: string, confirmed: boolean): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   restartProfile?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
   controlSelfIteration?(action: OwnerSelfIterationAction, confirmed: boolean): Promise<RemoteResult<OwnerConsoleControlActionResult>>
+  versionInfo?(): Promise<RemoteResult<AssistantVersionReport>>
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
   registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>

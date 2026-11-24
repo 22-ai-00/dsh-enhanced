@@ -127,6 +127,10 @@ Calendar v4 读取默认关闭；每页响应上限为 1 MiB，超限请求失�
 /stop               # 停止当前任务，保留 session
 /new                # 停止旧任务并切换到空白 session；/clear 同义
 /compact            # 宿主支持时压缩当前上下文
+/version            # 查看助手、Host、插件版本与自迭代演进统计；/autonomy version 同义（也支持“查看版本”“自己迭代了多少次？”）
+/autonomy enable    # active owner 开启整体助手自迭代能力
+/autonomy disable   # active owner 关闭整体助手自迭代能力
+/autonomy upgrade   # active owner 升级整体助手并恢复
 /model              # 打开 provider/model/effort 选择卡片
 /model use <route>  # 文字方式切换模型
 /model reset        # 恢复部署默认模型

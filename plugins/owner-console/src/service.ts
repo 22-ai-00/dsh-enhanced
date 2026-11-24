@@ -4,7 +4,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { isMap, isSeq, type YAMLMap } from 'yaml'
 import type { OwnerConsoleConfig } from './index.js'
 import { handleOwnerConsoleControlAction } from './autonomy-control.js'
-import type { OwnerSelfIterationAction } from './nl-control.js'
+import { formatOwnerConsoleVersionSummary, type OwnerSelfIterationAction } from './nl-control.js'
 import {
   boundedConfig, configFacts, findEntry, hasControlChars, isAppId, isEntryId, isEnvName, isProjectBundle,
   isProjectPackage, isSecretRef, isSingleLineCommand,
@@ -27,10 +27,11 @@ import {
 } from './autonomy-setup.js'
 import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.js'
 import type {
-  AssistantChatContext, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
+  AssistantChatContext, AssistantVersionReport, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
   AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleControlActionResult, OwnerConsoleGrowthReport,
   OwnerConsoleModelCatalog, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
+import { collectOwnerConsoleVersionInfo } from './version-info.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
 import {
   applyDoctorRepair, configureFeishuEasy, inspectSetupDoctor, PLACEHOLDER_LARK_APP_ID, triggerProfileRestart,
@@ -88,6 +89,7 @@ export class OwnerConsoleService extends TypertRemoteService {
     this.restartProfileFn = restartProfileFn
     this.installAssistantPromptScope()
     this.installSelfIterationControlTool()
+    this.installVersionInfoTool()
     this.installModelCatalogInvalidation()
     this.installFeishuQrDisposal()
   }
@@ -173,6 +175,80 @@ export class OwnerConsoleService extends TypertRemoteService {
               toolDef,
               (execution: { agent?: unknown }) => this.isAuthorizedOwnerAgent(execution.agent),
               { denialReason: 'owner-console: self-iteration control requires an authorized owner session' },
+            )
+            if (typeof disposePolicy === 'function') disposers.push(disposePolicy)
+          } catch {
+            // assistantPolicy preauthorization is optional when policy service is absent.
+          }
+        }
+        return () => {
+          for (const dispose of disposers.splice(0).reverse()) {
+            try { dispose() } catch { /* ignore */ }
+          }
+        }
+      })
+    } catch {
+      // Ignore if test Context stub lacks inject(); Host runtime always supplies it.
+    }
+  }
+
+  private installVersionInfoTool(): void {
+    try {
+      this.host.inject(['tools' as never], (toolCtx: unknown) => {
+        const tools = (toolCtx as { tools?: { register?: (def: unknown, opts?: unknown) => () => void } }).tools
+        if (typeof tools?.register !== 'function') return () => {}
+        const toolDef = defineTool({
+          name: 'owner_console_version_info',
+          description: 'Read-only query returning assistant version, DSH Host version, installed core/evolved plugins, and self-iteration statistics.',
+          parameters: {},
+          output: {
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ok: { type: 'boolean', required: true },
+                error: { type: 'string' },
+                summary: { type: 'string' },
+                report: { type: 'object', additionalProperties: true },
+              },
+            },
+            render: (_args, value) => [{
+              type: 'text',
+              text: typeof value.summary === 'string' ? value.summary : JSON.stringify(value),
+            }],
+          },
+          execute: async (_args, exec) => {
+            if (!this.isAuthorizedOwnerAgent(exec.agent)) {
+              return {
+                ok: false,
+                error: 'owner-console: version info requires an authorized owner session',
+              }
+            }
+            const report = await this.versionInfo()
+            return {
+              ok: true,
+              report: JSON.parse(JSON.stringify(report)) as Record<string, never>,
+              summary: formatOwnerConsoleVersionSummary(report),
+            }
+          },
+        })
+        const disposers: Array<() => void> = []
+        const disposeTool = tools.register(toolDef, {
+          when: (activation: { agent?: unknown }) => this.isAuthorizedOwnerAgent(activation.agent),
+        })
+        if (typeof disposeTool === 'function') disposers.push(disposeTool)
+        const policy = (toolCtx as {
+          assistantPolicy?: {
+            registerPreauthorizedTool?: (ctx: unknown, def: unknown, predicate: (exec: { agent?: unknown }) => boolean, opts?: unknown) => () => void
+          }
+        }).assistantPolicy
+        if (typeof policy?.registerPreauthorizedTool === 'function') {
+          try {
+            const disposePolicy = policy.registerPreauthorizedTool(
+              toolCtx,
+              toolDef,
+              (execution: { agent?: unknown }) => this.isAuthorizedOwnerAgent(execution.agent),
+              { denialReason: 'owner-console: version info requires an authorized owner session' },
             )
             if (typeof disposePolicy === 'function') disposers.push(disposePolicy)
           } catch {
@@ -1238,6 +1314,11 @@ export class OwnerConsoleService extends TypertRemoteService {
       ...(result.reason === undefined ? {} : { reason: result.reason }),
       ...(result.note === undefined ? {} : { note: result.note }),
     })
+  }
+
+  /** Read-only assistant/Host/plugin version & self-iteration statistics (`dsh-rsi/version/v1`). */
+  async versionInfo(): Promise<AssistantVersionReport> {
+    return collectOwnerConsoleVersionInfo(this.host)
   }
 }
 

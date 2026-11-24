@@ -6,7 +6,17 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
-import { main, parseArgs, upgradeAssistantAndRecover, version } from '../src/index.ts'
+import {
+  collectVersionReport,
+  formatVersionReport,
+  main,
+  parseArgs,
+  upgradeAssistantAndRecover,
+  version,
+  type AssistantVersionPluginEntry,
+  type AssistantVersionReport,
+  type CollectVersionReportOptions,
+} from '../src/index.ts'
 
 describe('capability probe', () => {
   test('仅精确 --capabilities 返回只读 JSON，不调用服务依赖', async () => {
@@ -111,6 +121,27 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['doctor', '--wait', '5'], { HOME: '/h' })).toThrow(/仅适用于 open 与 web-url/)
   })
 
+  test('顶层 --version / -V 与 version --short / --json / update --version 路由解析', () => {
+    expect(parseArgs(['--version'], { HOME: '/h' })).toMatchObject({ command: 'version', versionFlag: true })
+    expect(parseArgs(['-V'], { HOME: '/h' })).toMatchObject({ command: 'version', versionFlag: true })
+    expect(parseArgs(['version'], { HOME: '/h' })).toMatchObject({ command: 'version', short: false, json: false })
+    expect(parseArgs(['version', '--short'], { HOME: '/h' })).toMatchObject({ command: 'version', short: true })
+    expect(parseArgs(['version', '--json', '--dsh-home', '/x', '--profile', 'web'], { HOME: '/h' })).toMatchObject({
+      command: 'version', json: true, dshHome: '/x', profile: 'web',
+    })
+    expect(parseArgs(['update', '--version', '0.1.83'], { HOME: '/h' })).toMatchObject({
+      command: 'update', targetVersion: '0.1.83',
+    })
+
+    expect(() => parseArgs(['version', '--short', '--json'], { HOME: '/h' })).toThrow(/--short 与 --json 不能同时使用/)
+    expect(() => parseArgs(['status', '--short'], { HOME: '/h' })).toThrow(/--short 仅适用于 version/)
+    expect(() => parseArgs(['--version', '--json'], { HOME: '/h' })).toThrow(/不能同时使用/)
+    expect(() => parseArgs(['--version', 'status'], { HOME: '/h' })).toThrow(/不能与子命令同时使用/)
+    expect(() => parseArgs(['status', '--version'], { HOME: '/h' })).toThrow(/--version 仅适用于顶层调用/)
+    expect(() => parseArgs(['status', '-V'], { HOME: '/h' })).toThrow(/-V 仅适用于顶层调用/)
+    expect(() => parseArgs(['version', '--bogus'], { HOME: '/h' })).toThrow(/无法识别/)
+  })
+
   test('--help 输出无重复 maintenance 行且列出 open 与 --json', async () => {
     let helpText = ''
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
@@ -124,6 +155,8 @@ describe('parseArgs', () => {
       expect(helpText).toContain('open ')
       expect(helpText).toContain('--json')
       expect(helpText).toContain('--wait')
+      expect(helpText).toContain('--short')
+      expect(helpText).toContain('-V, --version')
     } finally {
       out.mockRestore()
     }
@@ -151,6 +184,48 @@ describe('parseArgs', () => {
     expect(doctorJson.schemaVersion).toBe(1)
     expect(Array.isArray(doctorJson.checks)).toBe(true)
     expect(doctorJson.agentTools).toBeTruthy()
+  })
+
+  test('main 执行 --version / -V / version --short / version --json / version 文本', async () => {
+    const captureMain = async (argv: string[]) => {
+      let stdout = ''
+      const out = vi.spyOn(process.stdout, 'write').mockImplementation(chunk => {
+        stdout += String(chunk)
+        return true
+      })
+      try {
+        const code = await main(argv, { DSH_HOME: '/does/not/exist-dsh-home' })
+        return { code, stdout }
+      } finally {
+        out.mockRestore()
+      }
+    }
+
+    for (const argv of [['--version'], ['-V'], ['version', '--short']]) {
+      const res = await captureMain(argv)
+      expect(res.code).toBe(0)
+      expect(res.stdout).toBe(`${version}\n`)
+    }
+
+    const jsonRes = await captureMain(['version', '--json'])
+    expect(jsonRes.code).toBe(0)
+    const parsed = JSON.parse(jsonRes.stdout) as AssistantVersionReport
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed.protocol).toBe('dsh-rsi/version/v1')
+    expect(parsed.assistant.version).toBe(version)
+    expect(parsed.selfIteration.dataState).toBe('no-data')
+
+    const textRes = await captureMain(['version'])
+    expect(textRes.code).toBe(0)
+    expect(textRes.stdout).toContain(`dsh-enhanced v${version}`)
+    expect(textRes.stdout).toContain('no-data')
+
+    // Ensure re-exported helpers & types are wired cleanly
+    const opts: CollectVersionReportOptions = { dshHome: '/does/not/exist-dsh-home', runningVersion: null }
+    const directReport = await collectVersionReport(opts)
+    const entryCheck: readonly AssistantVersionPluginEntry[] = directReport.plugins.core
+    expect(entryCheck).toEqual([])
+    expect(formatVersionReport(directReport)).toContain(`dsh-enhanced v${version}`)
   })
 })
 
@@ -208,6 +283,30 @@ describe('standalone installation smoke test', () => {
         { cwd: tmp, encoding: 'utf8' },
       )
       expect(capabilitiesOut).toBe('{"capabilities":["macos-launchd-ownership-v1"]}\n')
+
+      const verOut = execFileSync(
+        process.execPath,
+        [join(tmp, 'bin', 'dsh-rsi.js'), '--version'],
+        { cwd: tmp, encoding: 'utf8' },
+      )
+      expect(verOut).toBe(`${version}\n`)
+
+      const shortOut = execFileSync(
+        process.execPath,
+        [join(tmp, 'bin', 'dsh-rsi.js'), 'version', '--short'],
+        { cwd: tmp, encoding: 'utf8' },
+      )
+      expect(shortOut).toBe(`${version}\n`)
+
+      const verJsonOut = execFileSync(
+        process.execPath,
+        [join(tmp, 'bin', 'dsh-rsi.js'), 'version', '--json', '--dsh-home', join(tmp, 'absent-home')],
+        { cwd: tmp, encoding: 'utf8' },
+      )
+      const parsedVerJson = JSON.parse(verJsonOut) as AssistantVersionReport
+      expect(parsedVerJson.protocol).toBe('dsh-rsi/version/v1')
+      expect(parsedVerJson.schemaVersion).toBe(1)
+      expect(parsedVerJson.selfIteration.dataState).toBe('no-data')
     } finally {
       rmSync(tmp, { recursive: true, force: true })
     }

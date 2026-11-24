@@ -13,7 +13,7 @@
 - DSH / Agent / Agent Presets / LLM / Session（peer 范围 `>=0.2.2-rc.5 <0.3.0`）
 - `@deepseek-ai/dsh-attachment`：仅图片入站路径需要的可选 Host service
 - `@deepseek-ai/dsh-user-questions`：定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
-- `@deepseek-ai/dsh-commands`：可选 Host command service；按当前命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-commands`：可选 Host command service；按当前命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/version`、`/autonomy`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
 - `@deepseek-ai/dsh-goal`：可选原生目标服务；启用 `agentGoalContinuationTimeoutMs` 时还须由 Host 挂载同版本 `dsh-goal-round-driver`，仅安装服务不产生自动续跑
 - `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.1.0`
@@ -269,6 +269,8 @@ Session 续约间隔取有效 lease 的约三分之一，有效期限使用 `min
 - `/compact`：仅在当前 DSH command service/preset 实际发布时出现；通过原生命令面执行，不交给模型。
 - `/feedback`：提交固定枚举的响应偏好，或对 exact Automation 结果提交任务目标状态；在 Delivery 本地处理，不恢复 Agent、不交给模型。
 - `/learning`：查看状态或 content-free T1 摘要、导出版本化稳定 JSON、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
+- `/autonomy`（含 `/autonomy enable`、`/autonomy disable`、`/autonomy upgrade` 与自然语言启停/升级指令）：由 active owner 触发整体助手自迭代启停与升级恢复；不恢复 Agent、不交给模型。
+- `/version`（别名 `/autonomy version` 及简洁自然语言如“查看版本”“自己迭代了多少次？”）：已授权成员只读查看当前 `dsh-enhanced`、Host、插件概览与自迭代演进统计（`dsh-rsi/version/v1`）；优先委托 `ownerConsole.versionInfo()`，未挂载时使用只读兜底采集器，不恢复 Agent、不交给模型。
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 

@@ -81,9 +81,18 @@ export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLe
 export type { EngineeringReportRef, EngineeringNode, EngineeringRootInput, EngineeringContinuationInput, WorkItemEngineeringMaterial, OwnerWorkItemEngineeringManifest, OwnerWorkItemEngineeringContextLocator, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextReadInput, OwnerWorkItemEngineeringContextPage, OwnerWorkItemEngineeringContext, OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'
 export {
   parseOwnerSelfIterationCommand,
+  parseOwnerVersionQuery,
   type OwnerSelfIterationAction,
+  type OwnerVersionQueryKind,
   type ParsedOwnerSelfIterationCommand,
+  type ParsedOwnerVersionQuery,
 } from './session-commands.js'
+export {
+  collectDeliveryVersionReport,
+  formatAssistantVersionSummary,
+  type AssistantVersionPluginEntry,
+  type AssistantVersionReport,
+} from './version-query.js'
 export type {
   OwnerSelfIterationControlHandler,
   OwnerSelfIterationControlRequest,

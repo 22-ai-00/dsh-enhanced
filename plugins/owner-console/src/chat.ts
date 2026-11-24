@@ -11,7 +11,7 @@
 
 import type { OwnerSelfIterationAction } from './nl-control.js'
 import type {
-  AssistantChatContext, OwnerConsoleControlActionResult, OwnerConsoleModelCatalog, OwnerConsoleWriteResult,
+  AssistantChatContext, AssistantVersionReport, OwnerConsoleControlActionResult, OwnerConsoleModelCatalog, OwnerConsoleWriteResult,
 } from './typert.js'
 
 /** One Host snapshot/read face (`getSnapshot` + `subscribe`). */
@@ -277,6 +277,7 @@ export type ChatRuntime = Readonly<{
   selectSessionModel?(sessionId: string, provider: string, model: string, reasoningEffort: string): Promise<RemoteResult<unknown>>
   subscribeRefresh?(listener: () => void): () => void
   controlSelfIteration?(action: OwnerSelfIterationAction, confirmed: boolean): Promise<RemoteResult<OwnerConsoleControlActionResult>>
+  versionInfo?(): Promise<RemoteResult<AssistantVersionReport>>
 }>
 
 /** localStorage key for the panel's dedicated chat Session (browser-local only). */

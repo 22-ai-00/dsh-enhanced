@@ -72,7 +72,7 @@ describe('dsh-enhanced-owner-console', () => {
     const source = readFileSync(new URL('../src/service.ts', import.meta.url), 'utf8')
     const asyncMethods = [...source.matchAll(/^  async ([A-Za-z][A-Za-z0-9]*)\(/gmu)]
       .map(match => match[1]!).sort()
-    expect(asyncMethods).toHaveLength(36)
+    expect(asyncMethods).toHaveLength(37)
     expect(TYPERT.invocations.map(invocation => invocation.method).sort()).toEqual(asyncMethods)
   })
 
@@ -124,6 +124,7 @@ describe('dsh-enhanced-owner-console', () => {
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/promoteFeishuQrOwner')).toEqual(['sessionId', 'confirmed'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/restartProfile')).toEqual(['confirmed'])
     expect(wires('@dsh-enhanced/owner-console#ownerConsole/controlSelfIteration')).toEqual(['action', 'confirmed'])
+    expect(wires('@dsh-enhanced/owner-console#ownerConsole/versionInfo')).toEqual([])
   })
 
   it('reports absent entries, strict providers and no fabricated connection', async () => {

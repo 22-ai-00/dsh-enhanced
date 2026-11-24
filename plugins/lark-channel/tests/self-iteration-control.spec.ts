@@ -670,4 +670,200 @@ describe('Lark self-iteration NL & slash controls', () => {
     expect(sends.at(-1)?.text).toBe('delegated:disableSelfIteration:true')
     await ctx.fiber.restart()
   })
+
+  test('LarkChannelService routes DM and @bot group /version, /autonomy version, and NL queries without waking LLM (with and without ownerConsole)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-service-version-query-'))
+    roots.push(root)
+    const ctx = new Context()
+    const workspace = join(root, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      rules: [
+        { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'],
+          resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
+        { id: 'owner', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-a/ou_owner' },
+          actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'linked', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-a/ou_linked' },
+          actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'reply-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace, principal: 'lark/primary-bot/tenant-a/ou_owner' },
+          actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+        { id: 'reply-linked', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace, principal: 'lark/primary-bot/tenant-a/ou_linked' },
+          actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+      ],
+    })
+    const llmRequests: unknown[] = []
+    ctx.provide('agents' as never, {
+      create: async (opts: { sessionId: string; meta?: { cwd?: string; agentPreset?: string }; setup?: (agentCtx: Context, agent?: unknown) => Promise<unknown> }) => {
+        const id = opts.sessionId
+        const session = {
+          id,
+          header: { id, cwd: opts.meta?.cwd ?? workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+          append: () => {},
+          snapshotEvents: () => [],
+          deriveMessages: () => [],
+        }
+        const agent = {
+          id, ctx, session,
+          model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+          status: 'idle', whenIdle: async () => {},
+          runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+          cancel: () => {},
+        }
+        await opts.setup?.(ctx, agent)
+        return { agent, dispose: async () => {} }
+      },
+      resume: vi.fn(async () => { throw new Error('LLM should not wake for version queries') }),
+    } as never)
+    ctx.provide('sessions' as never, { list: async () => [], flush: async () => true } as never)
+    ctx.provide('llm' as never, { complete: async (req: unknown) => { llmRequests.push(req); return {} } } as never)
+
+    await ctx.plugin(AssistantDeliveryService, {
+      databasePath: join(root, 'delivery.sqlite'),
+      spoolPath: join(root, 'spool'),
+      defaultWorkspace: workspace,
+      defaultAgentPreset: 'primary',
+      schedulerEnabled: false,
+    })
+
+    const sends: Array<{ text: string }> = []
+    const transport: LarkTransport = {
+      subscribe: () => () => {},
+      connect: async () => {},
+      disconnect: async () => {},
+      addReaction: async () => 'reaction-1',
+      createProgress: async () => ({ cotId: 'cot-1', messageId: 'om_cot' }),
+      writeProgress: async () => {},
+      send: async (_chatId, input) => {
+        sends.push({ text: 'text' in input ? input.text : JSON.stringify(input) })
+        return { messageId: `om_out_${sends.length}` }
+      },
+    }
+    const service = new LarkChannelService(ctx, {
+      enabled: true,
+      account: 'primary-bot',
+      tenant: 'tenant-a',
+      appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET',
+    }, {
+      env: { LARK_APP_SECRET: 'secret-value' },
+      createTransport: () => transport,
+      writeLifecycleMarker: () => {},
+    })
+    await service.whenReady()
+
+    const delivery = ctx.assistantDelivery
+    const ownerPrincipal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' }
+    const ownerPairing = delivery.issuePairing('test', ownerPrincipal)
+    delivery.confirmPairing({ challengeId: ownerPairing.challenge.id, principal: ownerPrincipal, code: ownerPairing.code })
+
+    const linkedPrincipal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_linked' }
+    const linkedPairing = delivery.issuePairing('test', linkedPrincipal)
+    delivery.confirmPairing({ challengeId: linkedPairing.challenge.id, principal: linkedPrincipal, code: linkedPairing.code })
+
+    const inboundConfig: LarkInboundConfig = {
+      account: 'primary-bot',
+      tenant: 'tenant-a',
+      requireMentionInGroups: true,
+      maxTextBytes: 4096,
+      staleAfterMs: 300_000,
+    }
+    const drive = async () => {
+      await delivery.tick()
+      await delivery.whenIdle()
+      await delivery.tick()
+      await delivery.whenIdle()
+    }
+    const now = Date.now()
+
+    // 1. Standalone (without ownerConsole): DM /version & NL self-iteration query + @bot group linked /autonomy version
+    const cases: Array<{ id: string; chatType: 'p2p' | 'group'; sender: string; content: string; mentioned: boolean }> = [
+      { id: 'om_ver_dm', chatType: 'p2p', sender: 'ou_owner', content: '/version', mentioned: false },
+      { id: 'om_ver_nl_dm', chatType: 'p2p', sender: 'ou_owner', content: '自己迭代了多少次？', mentioned: false },
+      { id: 'om_ver_group_linked', chatType: 'group', sender: 'ou_linked', content: '@_user_1 /autonomy version', mentioned: true },
+      { id: 'om_ver_group_nl_owner', chatType: 'group', sender: 'ou_owner', content: '@_user_1 查看版本', mentioned: true },
+    ]
+    for (const [index, entry] of cases.entries()) {
+      const normalized = normalizeLarkMessage(inboundConfig, {
+        messageId: entry.id,
+        chatId: entry.chatType === 'p2p' ? `oc_dm_${entry.sender}` : 'oc_group',
+        chatType: entry.chatType,
+        senderId: entry.sender,
+        content: entry.content,
+        rawContentType: 'text',
+        resources: [],
+        mentionAll: false,
+        mentionedBot: entry.mentioned,
+        createTime: now + index,
+      }, now + index)
+      expect(normalized.outcome).toBe('accept')
+      if (normalized.outcome === 'accept') await delivery.acceptInbound(normalized.envelope)
+      await drive()
+      const reply = sends.at(-1)?.text ?? ''
+      expect(reply).toContain('助手版本：dsh-enhanced v')
+      expect(reply).toContain('自迭代演进统计')
+      expect(reply).not.toContain('自迭代控制服务尚未启用')
+    }
+
+    // 2. With ownerConsole.versionInfo registered: delegates cleanly
+    const versionInfo = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      protocol: 'dsh-rsi/version/v1' as const,
+      generatedAt: now + 100,
+      assistant: { name: 'dsh-enhanced' as const, version: '0.1.83' },
+      host: { packageName: '@deepseek-ai/dsh' as const, boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
+      profile: 'lark',
+      plugins: { state: 'ok' as const, coreCount: 36, evolvedCount: 2, activeEvolvedCount: 2, core: [], evolved: [] },
+      selfIteration: {
+        dataState: 'data' as const,
+        totalIterations: 11,
+        workItemsTotal: 4,
+        workItemsSettled: 3,
+        growthUsageJobsTotal: 2,
+        dreamingRuns: 1,
+        recoveryRuns: 1,
+        goalStrategyRuns: 1,
+        candidatesGenerated: 2,
+        candidatesAdopted: 1,
+        pluginsCreated: 1,
+        pluginsRevised: 0,
+        taskVerificationsDone: 1,
+        rollbacks: 0,
+        evolutionRulesAdopted: 2,
+        associationParamVersion: 4,
+        associationProfileAdoptions: 2,
+        evaluationAttentionTuningAdoptions: 1,
+        evaluationLooseningDecisionsAdopted: 1,
+        activeMemories: 9,
+        activePreferenceOverlays: 2,
+        workflowCandidatesPromoted: 1,
+        skillDeployments: 1,
+        selfUpgrades: 1,
+        backupSnapshotsCount: 2,
+      },
+    }))
+    ctx.provide('ownerConsole' as never, { versionInfo } as never)
+
+    const delegated = normalizeLarkMessage(inboundConfig, {
+      messageId: 'om_ver_delegated',
+      chatId: 'oc_dm_ou_owner',
+      chatType: 'p2p',
+      senderId: 'ou_owner',
+      content: '/version',
+      rawContentType: 'text',
+      resources: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: now + 20,
+    }, now + 20)
+    expect(delegated.outcome).toBe('accept')
+    if (delegated.outcome === 'accept') await delivery.acceptInbound(delegated.envelope)
+    await drive()
+
+    expect(versionInfo).toHaveBeenCalledOnce()
+    expect(sends.at(-1)?.text).toContain('累计自迭代次数：11')
+    expect(sends.at(-1)?.text).toContain('核心插件 36 个')
+    expect(llmRequests).toEqual([])
+    await ctx.fiber.restart()
+  })
 })

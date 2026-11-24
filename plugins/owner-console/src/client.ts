@@ -227,6 +227,9 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
               },
             }
           : {}),
+        ...(typeof remote.versionInfo === 'function'
+          ? { versionInfo: () => remote.versionInfo!() }
+          : {}),
         selectSessionModel: async (sessionId, provider, model, reasoningEffort) => {
           const sessionRemote = (() => {
             try {

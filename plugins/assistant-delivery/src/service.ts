@@ -114,7 +114,12 @@ import {
   parseDeliveryCommand,
   type OwnerSelfIterationAction,
   type ParsedOwnerSelfIterationCommand,
+  type ParsedOwnerVersionQuery,
 } from './session-commands.js'
+import {
+  collectDeliveryVersionReport,
+  type AssistantVersionReport,
+} from './version-query.js'
 import { deliveryT1PreferenceKeys, deliveryT1PreferenceValues } from './learning-command.js'
 import {
   assertReplyReplayAllowed,
@@ -1711,6 +1716,8 @@ export class AssistantDeliveryService extends Service {
           this.dispatchLearningCommand(binding, envelope, action, preferenceKey),
         dispatchOwnerSelfIterationCommand: (binding, envelope, command) =>
           this.dispatchOwnerSelfIterationCommand(binding, envelope, command),
+        dispatchVersionQuery: (binding, envelope, query) =>
+          this.dispatchVersionQuery(binding, envelope, query),
         authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
@@ -4143,6 +4150,49 @@ export class AssistantDeliveryService extends Service {
       }
     }
     return 'unavailable'
+  }
+
+  async dispatchVersionQuery(
+    _binding?: Readonly<ConversationBinding>,
+    _envelope?: Readonly<InboundEnvelope>,
+    _query?: Readonly<ParsedOwnerVersionQuery>,
+  ): Promise<AssistantVersionReport> {
+    this.assertActive()
+    const ownerConsole = this.context.get('ownerConsole' as never) as Readonly<{
+      versionInfo?: () => Promise<AssistantVersionReport>
+    }> | undefined
+    let delegationDiagnostic: string | undefined
+    if (typeof ownerConsole?.versionInfo === 'function') {
+      try {
+        const delegated = await ownerConsole.versionInfo()
+        const record = delegated as unknown as Record<string, unknown> | undefined
+        if (
+          record !== undefined
+          && record !== null
+          && typeof record === 'object'
+          && !Array.isArray(record)
+          && record.schemaVersion === 1
+          && record.protocol === 'dsh-rsi/version/v1'
+          && typeof record.assistant === 'object' && record.assistant !== null && !Array.isArray(record.assistant)
+          && typeof record.host === 'object' && record.host !== null && !Array.isArray(record.host)
+          && typeof record.plugins === 'object' && record.plugins !== null && !Array.isArray(record.plugins)
+          && typeof record.selfIteration === 'object' && record.selfIteration !== null && !Array.isArray(record.selfIteration)
+        ) {
+          return delegated
+        }
+        delegationDiagnostic = 'ownerConsole.versionInfo returned unexpected payload; used standalone delivery collector'
+      } catch (error) {
+        delegationDiagnostic = `ownerConsole.versionInfo failed (${error instanceof Error ? error.message : String(error)}); used standalone delivery collector`
+      }
+    }
+    return await collectDeliveryVersionReport({
+      ctx: this.context,
+      configDatabasePath: this.config.databasePath,
+      ...(this.config.inProcessReload?.profilePath === undefined
+        ? {}
+        : { inProcessProfilePath: this.config.inProcessReload.profilePath }),
+      ...(delegationDiagnostic === undefined ? {} : { extraDiagnostics: [delegationDiagnostic] }),
+    })
   }
 
   private completedPreferenceEvents(

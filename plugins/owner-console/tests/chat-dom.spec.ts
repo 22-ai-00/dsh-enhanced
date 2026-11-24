@@ -1275,4 +1275,99 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
     expect(controlSelfIteration).toHaveBeenCalledTimes(1)
     expect(fake.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: '今天北京天气怎么样？' }], 'queue', undefined)
   })
+
+  it('dispatches /version, /autonomy version, and concise NL version/iteration queries locally without calling SessionFace.prompt and preserves draft on error', async () => {
+    const sampleReport = {
+      schemaVersion: 1 as const,
+      protocol: 'dsh-rsi/version/v1' as const,
+      generatedAt: 1_800_000_000_000,
+      dshHome: '/tmp/dsh-test',
+      assistant: { name: 'dsh-enhanced' as const, version: '0.1.83', cliVersion: '0.1.83' },
+      host: { packageName: '@deepseek-ai/dsh' as const, boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
+      profile: 'web',
+      profiles: ['web'],
+      plugins: {
+        state: 'ok' as const,
+        coreCount: 1,
+        evolvedCount: 1,
+        activeEvolvedCount: 1,
+        core: [{ name: '@dsh-enhanced/owner-console', version: '0.1.83', kind: 'core' as const, installKind: 'npm' as const, enabled: true }],
+        evolved: [{ name: 'daily-brief', version: '1.0.0', kind: 'evolved' as const, installKind: 'adopted' as const, enabled: true }],
+      },
+      selfIteration: {
+        dataState: 'data' as const,
+        totalIterations: 12,
+        workItemsTotal: 5,
+        workItemsSettled: 4,
+        growthUsageJobsTotal: 3,
+        dreamingRuns: 2,
+        recoveryRuns: 1,
+        goalStrategyRuns: 1,
+        candidatesGenerated: 4,
+        candidatesAdopted: 2,
+        pluginsCreated: 1,
+        pluginsRevised: 0,
+        taskVerificationsDone: 3,
+        rollbacks: 0,
+        evolutionRulesAdopted: 1,
+        associationParamVersion: 2,
+        associationProfileAdoptions: 1,
+        evaluationAttentionTuningAdoptions: 1,
+        evaluationLooseningDecisionsAdopted: 1,
+        activeMemories: 7,
+        activePreferenceOverlays: 2,
+        workflowCandidatesPromoted: 1,
+        skillDeployments: 1,
+        selfUpgrades: 0,
+        backupSnapshotsCount: 2,
+      },
+    }
+
+    let shouldFail = false
+    const versionInfo = vi.fn(async () => {
+      if (shouldFail) {
+        return { ok: false as const, error: { code: 'probe-failed', message: '版本账本暂不可读' } }
+      }
+      return { ok: true as const, value: sampleReport }
+    })
+
+    const fake = harness({ versionInfo }, [])
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+
+    await fillMessage('/version')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(1)
+    expect(fake.prompt).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('0.1.83')
+    expect(container.textContent).toContain('12')
+
+    await fillMessage('/autonomy version')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(2)
+
+    await fillMessage('查看版本')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(3)
+
+    await fillMessage('自己迭代了多少次？')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(4)
+    expect(fake.prompt).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('daily-brief')
+
+    // RPC error displays alert notice and keeps user draft intact
+    shouldFail = true
+    await fillMessage('自迭代次数？')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(5)
+    expect(container.textContent).toContain('版本账本暂不可读')
+    const textarea = container.querySelector('textarea') as HTMLTextAreaElement
+    expect(textarea.value).toBe('自迭代次数？')
+
+    // Ordinary prose still goes to SessionFace.prompt
+    await fillMessage('请帮我总结一下今天的日程安排')
+    await click(byLabel('发送消息'))
+    expect(versionInfo).toHaveBeenCalledTimes(5)
+    expect(fake.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: '请帮我总结一下今天的日程安排' }], 'queue', undefined)
+  })
 })

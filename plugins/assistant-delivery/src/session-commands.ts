@@ -170,3 +170,62 @@ export function parseOwnerSelfIterationCommand(
   const action = ownerSelfIterationExactPhrases[normalized]
   return action === undefined ? undefined : Object.freeze({ action, sourceText: text })
 }
+
+export type OwnerVersionQueryKind = 'version' | 'autonomy-version' | 'natural-language'
+
+export interface ParsedOwnerVersionQuery {
+  readonly action: 'versionInfo'
+  readonly kind: OwnerVersionQueryKind
+  readonly sourceText: string
+}
+
+const ownerVersionQueryExactPhrases: ReadonlySet<string> = new Set([
+  '查看版本',
+  '版本信息',
+  '当前版本',
+  '助手版本',
+  '查看当前版本',
+  '查看助手版本',
+  '现在什么版本',
+  '目前什么版本',
+  '当前什么版本',
+  '查看自迭代次数',
+  '自迭代次数',
+  '自己迭代了多少次',
+  '自迭代了多少次',
+  '迭代了多少次',
+  '进化了多少次',
+  '查看迭代次数',
+  '查看进化次数',
+  '进化次数',
+  'assistant version',
+  'self-iteration count',
+  'self iteration count',
+  'version info',
+  'current version',
+])
+
+/**
+ * Deterministic closed-set parser for read-only assistant version and
+ * self-iteration-count queries (`/version`, `/autonomy version`, and concise NL).
+ */
+export function parseOwnerVersionQuery(text: string): ParsedOwnerVersionQuery | undefined {
+  if (typeof text !== 'string') return undefined
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+
+  if (/^\/version$/u.test(trimmed)) {
+    return Object.freeze({ action: 'versionInfo', kind: 'version', sourceText: text })
+  }
+  if (/^\/autonomy[\t ]+version$/iu.test(trimmed)) {
+    return Object.freeze({ action: 'versionInfo', kind: 'autonomy-version', sourceText: text })
+  }
+
+  const normalized = trimmed
+    .replace(/[?？。.!！]$/u, '')
+    .trim()
+    .replace(/[\t ]+/gu, ' ')
+    .toLowerCase()
+  if (!ownerVersionQueryExactPhrases.has(normalized)) return undefined
+  return Object.freeze({ action: 'versionInfo', kind: 'natural-language', sourceText: text })
+}

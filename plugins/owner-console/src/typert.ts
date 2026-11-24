@@ -229,6 +229,77 @@ export const OwnerConsoleControlActionResultSchema = z.object({
 }).readonly()
 export type OwnerConsoleControlActionResult = Readonly<z.infer<typeof OwnerConsoleControlActionResultSchema>>
 
+export const AssistantVersionPluginEntrySchema = z.object({
+  name: z.string().min(1).max(200),
+  version: z.string().min(1).max(128).nullable(),
+  kind: z.enum(['core', 'evolved']),
+  installKind: z.enum(['npm', 'local', 'adopted']).optional(),
+  enabled: z.boolean().optional(),
+}).readonly()
+export type AssistantVersionPluginEntry = Readonly<z.infer<typeof AssistantVersionPluginEntrySchema>>
+
+const nullableVersionCount = z.number().int().nonnegative().nullable()
+
+export const OwnerConsoleVersionReportSchema = z.object({
+  schemaVersion: z.literal(1),
+  protocol: z.literal('dsh-rsi/version/v1'),
+  generatedAt: z.number().int().nonnegative(),
+  dshHome: z.string().max(4_096).nullable().optional(),
+  assistant: z.object({
+    name: z.literal('dsh-enhanced'),
+    version: z.string().min(1).max(128),
+    cliVersion: z.string().min(1).max(128).optional(),
+  }).readonly(),
+  host: z.object({
+    packageName: z.literal('@deepseek-ai/dsh'),
+    boundVersion: z.string().min(1).max(128).nullable(),
+    boundStatus: z.string().min(1).max(64),
+    runningVersion: z.string().min(1).max(128).nullable(),
+  }).readonly(),
+  profile: z.string().min(1).max(128).nullable().optional(),
+  profiles: z.array(z.string().min(1).max(128)).max(64).readonly().optional(),
+  plugins: z.object({
+    state: z.enum(['ok', 'zero', 'unavailable']),
+    coreCount: z.number().int().nonnegative(),
+    evolvedCount: z.number().int().nonnegative(),
+    activeEvolvedCount: z.number().int().nonnegative(),
+    core: z.array(AssistantVersionPluginEntrySchema).max(256).readonly(),
+    evolved: z.array(AssistantVersionPluginEntrySchema).max(256).readonly(),
+  }).readonly(),
+  selfIteration: z.object({
+    dataState: z.enum(['no-data', 'zero', 'data']),
+    totalIterations: nullableVersionCount,
+    workItemsTotal: nullableVersionCount,
+    workItemsSettled: nullableVersionCount,
+    growthUsageJobsTotal: nullableVersionCount,
+    dreamingRuns: nullableVersionCount,
+    recoveryRuns: nullableVersionCount,
+    goalStrategyRuns: nullableVersionCount,
+    candidatesGenerated: nullableVersionCount,
+    candidatesAdopted: nullableVersionCount,
+    pluginsCreated: nullableVersionCount,
+    pluginsRevised: nullableVersionCount,
+    taskVerificationsDone: nullableVersionCount,
+    rollbacks: nullableVersionCount,
+    evolutionRulesAdopted: nullableVersionCount,
+    associationParamVersion: nullableVersionCount,
+    associationProfileAdoptions: nullableVersionCount,
+    evaluationAttentionTuningAdoptions: nullableVersionCount,
+    evaluationLooseningDecisionsAdopted: nullableVersionCount,
+    activeMemories: nullableVersionCount,
+    activePreferenceOverlays: nullableVersionCount,
+    workflowCandidatesPromoted: nullableVersionCount,
+    skillDeployments: nullableVersionCount,
+    selfUpgrades: nullableVersionCount,
+    backupSnapshotsCount: nullableVersionCount,
+  }).readonly(),
+  extensions: z.record(z.string(), z.unknown()).optional(),
+  inspectedLedgers: z.array(z.string().min(1).max(4_096)).max(256).readonly().optional(),
+  diagnostics: z.array(z.string().min(1).max(1_024)).max(128).readonly().optional(),
+}).readonly()
+export type OwnerConsoleVersionReport = Readonly<z.infer<typeof OwnerConsoleVersionReportSchema>>
+export type AssistantVersionReport = OwnerConsoleVersionReport
+
 /** Strict wire snapshot for official Feishu/Lark OAuth 2.0 Device Authorization onboarding.
  * Never carries `device_code` or `client_secret` across the Host/Web boundary. */
 export const FeishuQrOnboardingSnapshotSchema = z.object({
@@ -1218,6 +1289,14 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#OwnerConsoleControlActionResult', () => OwnerConsoleControlActionResultSchema),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1202, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/versionInfo',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'versionInfo',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleVersionReport', () => OwnerConsoleVersionReportSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1280, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },
