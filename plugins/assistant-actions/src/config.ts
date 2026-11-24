@@ -2,7 +2,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { isWindowsNamedPipePath } from './broker-peer-windows.js'
-import { normalizeBrokerGrantProjection } from './broker-protocol.js'
+import { isCanonicalWorkspacePath, normalizeBrokerGrantProjection } from './broker-protocol.js'
 import { normalizeActionGrantProjection, type ActionBrokerGrantProjection } from './broker-protocol-v2.js'
 import type { BrokerPlatform, BrokerTransportKind } from './broker-transport.js'
 import type { ActionGrant, CommitRequest, CompensationRequest, ExternalActionGrantMirror, VerifiedDeliveryRequest } from './types.js'
@@ -256,7 +256,7 @@ export function validateConfig(input: Config): ValidatedConfig {
         || !Number.isSafeInteger(grant.rollback.maxTotalBytes) || grant.rollback.maxTotalBytes < 1 || grant.rollback.maxTotalBytes > 64 * 1024 * 1024))
       || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
       || !/^[0-9a-f]{64}$/.test(grant.principalDigest) || !text(grant.principalRecordId) || !Number.isSafeInteger(grant.principalVersion) || grant.principalVersion < 1
-      || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || !text(grant.agentPreset)
+      || !isCanonicalWorkspacePath(grant.workspace) || !text(grant.agentPreset)
       || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(grant.repository) || grant.repository.length > 256
       || !text(grant.branch) || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(grant.branch) || grant.branch.includes('..') || grant.branch.startsWith('refs/')
       || grant.branch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))

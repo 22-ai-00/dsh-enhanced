@@ -16,6 +16,7 @@ import {
   brokerRequestDigest,
   canonicalBrokerJson,
   createBrokerGrantProjection,
+  isCanonicalWorkspacePath,
   normalizeBrokerGrantAuthority,
   type BrokerClientRequest,
   type BrokerGrantAuthorityUnsigned,
@@ -171,7 +172,7 @@ function equal(left: unknown, right: unknown): boolean { return canonicalBrokerJ
 function owner(value: unknown): ExternalGitHubGrant['owner'] {
   const input = exact(value, ['principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'preset', 'bindingId', 'bindingVersion', 'bindingGeneration'])
   const workspace = text(input.workspace)
-  if (!isAbsolute(workspace) || normalize(workspace) !== workspace) fail('invalid-input')
+  if (!isCanonicalWorkspacePath(workspace)) fail('invalid-input')
   return Object.freeze({ principalDigest: digest(input.principalDigest), principalRecordId: text(input.principalRecordId), principalVersion: integer(input.principalVersion, 1), workspace, preset: text(input.preset), bindingId: text(input.bindingId), bindingVersion: integer(input.bindingVersion, 1), bindingGeneration: integer(input.bindingGeneration, 1) })
 }
 

@@ -1,5 +1,12 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject, randomBytes, randomUUID, sign, verify } from 'node:crypto'
-import { isAbsolute, resolve } from 'node:path'
+import { posix, win32 } from 'node:path'
+
+export function isCanonicalWorkspacePath(value: string): boolean {
+  if (value.length < 1 || value.length > 4096 || /[\p{Cc}]/u.test(value)) return false
+  if (!value.includes('\\') && posix.isAbsolute(value) && posix.resolve(value) === value && value !== '/') return true
+  if (/^[A-Za-z]:\\/u.test(value) && win32.isAbsolute(value) && win32.resolve(value) === value && win32.parse(value).root !== value) return true
+  return false
+}
 
 export const GITHUB_BROKER_PROTOCOL = 'assistant-actions/github-broker/v1' as const
 export const GITHUB_BROKER_REQUEST_MAX_BYTES = 8 * 1024 * 1024
@@ -346,7 +353,7 @@ export function normalizeBrokerGrantAuthority(value: unknown): BrokerGrantAuthor
   const input = exactOptional(value, ['protocol', 'id', 'revision', 'clientKeyId', 'owner', 'sessionId', 'destination', 'credentialId', 'expiresAt', 'maxActions', 'maxTotalBytes', 'maxCostUnits', 'allowedOperations', 'allowedInspectKinds', 'client', 'source', 'policyEpoch', 'emergencyEpoch'], ['verifiedDelivery'], 'broker grant')
   if (input.protocol !== 'assistant-actions/external-github-grant/v1') reject('wrong-protocol', 'broker grant protocol is invalid')
   const normalizedOwner = owner(input.owner)
-  if (!isAbsolute(normalizedOwner.workspace) || resolve(normalizedOwner.workspace) !== normalizedOwner.workspace || normalizedOwner.workspace === '/') reject('invalid-message', 'broker grant workspace is invalid')
+  if (!isCanonicalWorkspacePath(normalizedOwner.workspace)) reject('invalid-message', 'broker grant workspace is invalid')
   const rawDestination = grantDestination(input.destination, 'broker grant destination')
   const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch, ...(rawDestination.baseBranch === undefined ? {} : { baseBranch: rawDestination.baseBranch }) })
   if (!Array.isArray(rawDestination.paths) || rawDestination.paths.length < 1 || rawDestination.paths.length > 128 || !rawDestination.paths.every(validPath) || new Set(rawDestination.paths).size !== rawDestination.paths.length) reject('invalid-message', 'broker grant paths are invalid')
@@ -387,7 +394,7 @@ export function normalizeBrokerGrantProjection(value: unknown): BrokerGrantProje
   const verifiedDelivery = input.verifiedDelivery === undefined ? undefined : deliveryMetadata(input.verifiedDelivery, 'broker grant projection verified delivery')
   if (verifiedDelivery !== undefined && !input.allowedOperations.includes('commit')) reject('invalid-message', 'broker grant projection verified delivery requires commit authority')
   const normalizedOwner = owner(input.owner)
-  if (!isAbsolute(normalizedOwner.workspace) || resolve(normalizedOwner.workspace) !== normalizedOwner.workspace || normalizedOwner.workspace === '/') reject('invalid-message', 'broker grant projection workspace is invalid')
+  if (!isCanonicalWorkspacePath(normalizedOwner.workspace)) reject('invalid-message', 'broker grant projection workspace is invalid')
   return Object.freeze({ id: text(input.id, 'broker grant projection id'), revision: integer(input.revision, 'broker grant projection revision', 1), grantDigest: digest(input.grantDigest, 'broker grant projection digest'), owner: normalizedOwner, sessionId: text(input.sessionId, 'broker grant projection sessionId'), destination: Object.freeze({ ...normalizedDestination, paths: Object.freeze([...rawDestination.paths]) }) as BrokerGrantProjection['destination'], expiresAt: integer(input.expiresAt, 'broker grant projection expiresAt', 1), maxActions: integer(input.maxActions, 'broker grant projection maxActions', 1, 10_000), maxTotalBytes: integer(input.maxTotalBytes, 'broker grant projection maxTotalBytes', 1, 64 * 1024 * 1024), source: dataSource(input.source), maxCostUnits: integer(input.maxCostUnits, 'broker grant projection maxCostUnits'), allowedOperations: Object.freeze([...input.allowedOperations]) as BrokerGrantProjection['allowedOperations'], allowedInspectKinds: Object.freeze([...input.allowedInspectKinds]) as BrokerGrantProjection['allowedInspectKinds'], ...(verifiedDelivery === undefined ? {} : { verifiedDelivery }) })
 }
 
@@ -438,7 +445,7 @@ function budget(value: unknown): BrokerBudget {
 function owner(value: unknown): BrokerRequestIntent['owner'] {
   const input = exact(value, ['principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'preset', 'bindingId', 'bindingVersion', 'bindingGeneration'], 'request.owner')
   const workspace = text(input.workspace, 'request.owner.workspace', 4096)
-  if (!isAbsolute(workspace) || resolve(workspace) !== workspace || workspace === '/') reject('invalid-message', 'request owner workspace is invalid')
+  if (!isCanonicalWorkspacePath(workspace)) reject('invalid-message', 'request owner workspace is invalid')
   return Object.freeze({ principalDigest: digest(input.principalDigest, 'request.owner.principalDigest'), principalRecordId: text(input.principalRecordId, 'request.owner.principalRecordId'), principalVersion: integer(input.principalVersion, 'request.owner.principalVersion', 1), workspace, preset: text(input.preset, 'request.owner.preset'), bindingId: text(input.bindingId, 'request.owner.bindingId'), bindingVersion: integer(input.bindingVersion, 'request.owner.bindingVersion', 1), bindingGeneration: integer(input.bindingGeneration, 'request.owner.bindingGeneration', 1) })
 }
 function commitPayload(value: unknown): BrokerCommitPayload {

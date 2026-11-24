@@ -182,4 +182,33 @@ describe('Action Broker Protocol v2 (broker-protocol-v2.ts)', () => {
       kind: 'http', operation: 'fetch', destination: 'https://example.com/@me', method: 'GET', grantId: 'g1', idempotencyKey: 'k1',
     }).kind).toBe('http')
   })
+
+  it('accepts canonical POSIX and Windows workspaces across v2 grants and envelopes while rejecting invalid paths', () => {
+    for (const validWorkspace of ['/workspace', 'C:\\workspace']) {
+      const base = sampleGrant()
+      const normalized = normalizeActionGrantAuthority({
+        ...base,
+        owner: { ...base.owner, workspace: validWorkspace },
+      })
+      expect(normalized.owner.workspace).toBe(validWorkspace)
+      const httpEnv = validateBrokerActionRequest({
+        kind: 'http', operation: 'fetch', destination: 'https://api.example.test/health', method: 'GET', workspace: validWorkspace, grantId: 'g1', idempotencyKey: 'k1',
+      })
+      expect(httpEnv.kind === 'http' && httpEnv.workspace).toBe(validWorkspace)
+    }
+    expect(validateBrokerActionRequest({
+      kind: 'shell', operation: 'exec', command: ['C:\\Windows\\System32\\cmd.exe', '/c', 'echo'], cwd: 'C:\\workspace', grantId: 'g5', idempotencyKey: 'k5',
+    }).kind).toBe('shell')
+
+    for (const invalidWorkspace of ['/', 'C:\\', 'C:/workspace', 'C:\\workspace\\', '\\\\server\\share\\dir', '/workspace/', '/workspace/../etc', 'workspace']) {
+      const base = sampleGrant()
+      expect(() => normalizeActionGrantAuthority({
+        ...base,
+        owner: { ...base.owner, workspace: invalidWorkspace },
+      })).toThrowError(/workspace is invalid/)
+      expect(() => validateBrokerActionRequest({
+        kind: 'http', operation: 'fetch', destination: 'https://api.example.test/health', method: 'GET', workspace: invalidWorkspace, grantId: 'g1', idempotencyKey: 'k1',
+      })).toThrowError(/invalid http workspace/)
+    }
+  })
 })

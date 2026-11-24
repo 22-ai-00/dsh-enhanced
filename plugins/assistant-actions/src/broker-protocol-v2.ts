@@ -1,5 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject, randomBytes, randomUUID, sign, verify } from 'node:crypto'
-import { isAbsolute, resolve } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { validateStrictHttpUrl } from './guards/http-guard.js'
 import {
   normalizeBrokerWp08Constraints,
@@ -11,6 +11,7 @@ import {
   BrokerProtocolError,
   brokerDigest,
   canonicalBrokerJson,
+  isCanonicalWorkspacePath,
   normalizeBrokerInspectObservation,
   type BrokerCommitPayload,
   type BrokerDataSource,
@@ -579,10 +580,14 @@ function containsCredentialShapedValue(value: unknown): boolean {
   return false
 }
 
+function isAbsoluteCrossPlatform(value: string): boolean {
+  return (!value.includes('\\') && posix.isAbsolute(value)) || (/^[A-Za-z]:\\/u.test(value) && win32.isAbsolute(value))
+}
+
 function owner(value: unknown): BrokerRequestIntent['owner'] {
   const input = exact(value, ['principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'preset', 'bindingId', 'bindingVersion', 'bindingGeneration'], 'request.owner')
   const workspace = text(input.workspace, 'request.owner.workspace', 4096)
-  if (!isAbsolute(workspace) || resolve(workspace) !== workspace || workspace === '/') reject('invalid-message', 'request owner workspace is invalid')
+  if (!isCanonicalWorkspacePath(workspace)) reject('invalid-message', 'request owner workspace is invalid')
   return Object.freeze({
     principalDigest: digest(input.principalDigest, 'request.owner.principalDigest'),
     principalRecordId: text(input.principalRecordId, 'request.owner.principalRecordId'),
@@ -754,12 +759,12 @@ function normalizeActionGrantDestination(domain: BrokerActionDomain, value: unkn
   )
   if (input.classification !== 'shell-command' || input.allowNetwork !== false) reject('invalid-message', 'shell grant destination is invalid')
   const allowedCwds = stringList(input.allowedCwds, 'shell.allowedCwds', 1, 64, 1_024)
-  if (allowedCwds.some(cwd => !isAbsolute(cwd))) reject('invalid-message', 'shell.allowedCwds must be absolute paths')
+  if (allowedCwds.some(cwd => !isAbsoluteCrossPlatform(cwd))) reject('invalid-message', 'shell.allowedCwds must be absolute paths')
   if (!Array.isArray(input.allowedCommands) || input.allowedCommands.length < 1 || input.allowedCommands.length > 64) reject('invalid-message', 'shell.allowedCommands invalid')
   const allowedCommands = Object.freeze(input.allowedCommands.map((cmd, idx) => {
     const c = exactOptional(cmd, ['executable', 'maxArgs'], ['executableSha256', 'allowedArgPrefixes', 'allowArgsPattern'], `shell.allowedCommands[${idx}]`)
     const executable = text(c.executable, `shell.allowedCommands[${idx}].executable`, 1_024)
-    if (!isAbsolute(executable)) reject('invalid-message', 'shell executable must be absolute')
+    if (!isAbsoluteCrossPlatform(executable)) reject('invalid-message', 'shell executable must be absolute')
     const executableSha256 = c.executableSha256 === undefined ? undefined : digest(c.executableSha256, 'shell.executableSha256')
     let allowedArgPrefixes: readonly (readonly string[])[] | undefined
     if (c.allowedArgPrefixes !== undefined) {
@@ -846,7 +851,7 @@ function normalizeActionRequestDestination(domain: BrokerActionDomain, value: un
   if (input.classification !== 'shell-command') reject('invalid-message', 'shell request destination is invalid')
   const executable = text(input.executable, 'request.destination.executable', 1_024)
   const cwd = text(input.cwd, 'request.destination.cwd', 1_024)
-  if (!isAbsolute(executable) || !isAbsolute(cwd)) reject('invalid-message', 'shell destination paths must be absolute')
+  if (!isAbsoluteCrossPlatform(executable) || !isAbsoluteCrossPlatform(cwd)) reject('invalid-message', 'shell destination paths must be absolute')
   return Object.freeze({ classification: 'shell-command', executable, cwd })
 }
 
@@ -995,7 +1000,7 @@ function normalizePayloadV2(domain: BrokerActionDomain, operation: ActionBrokerO
   const input = exactOptional(value, ['executable', 'args', 'cwd', 'timeoutMs'], ['env', 'stdin'], 'shell payload')
   const executable = text(input.executable, 'shell.executable', 1_024)
   const cwd = text(input.cwd, 'shell.cwd', 1_024)
-  if (!isAbsolute(executable) || !isAbsolute(cwd)) reject('invalid-message', 'shell executable and cwd must be absolute')
+  if (!isAbsoluteCrossPlatform(executable) || !isAbsoluteCrossPlatform(cwd)) reject('invalid-message', 'shell executable and cwd must be absolute')
   if (!Array.isArray(input.args) || input.args.length > 128) reject('invalid-message', 'shell.args invalid')
   const args = Object.freeze(input.args.map((arg, idx) => {
     if (typeof arg !== 'string' || Buffer.byteLength(arg, 'utf8') > 4_096 || /[\p{Cc}]/u.test(arg)) reject('invalid-message', `shell.args[${idx}] invalid`)
@@ -1858,7 +1863,7 @@ export function validateBrokerActionRequest(value: unknown): BrokerActionEnvelop
     const method = text(input.method ?? 'GET', 'http.method', 16)
     if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) reject('invalid-message', 'invalid http method')
     const workspace = input.workspace === undefined ? undefined : text(input.workspace, 'http.workspace', 4_096)
-    if (workspace !== undefined && (!isAbsolute(workspace) || resolve(workspace) !== workspace)) reject('invalid-message', 'invalid http workspace')
+    if (workspace !== undefined && !isCanonicalWorkspacePath(workspace)) reject('invalid-message', 'invalid http workspace')
     const headers = input.headers === undefined ? undefined : stringRecord(input.headers, 'http.headers', 32, 4_096)
     const body = input.body === undefined ? undefined : (() => {
       if (typeof input.body !== 'string' || Buffer.byteLength(input.body, 'utf8') > 4 * 1024 * 1024) reject('invalid-message', 'invalid http body')
@@ -1950,9 +1955,9 @@ export function validateBrokerActionRequest(value: unknown): BrokerActionEnvelop
     if (op !== 'exec' && op !== 'shell.exec') reject('invalid-message', 'invalid shell action operation')
     if (!Array.isArray(input.command) || input.command.length < 1 || input.command.length > 128) reject('invalid-message', 'shell.command must be a non-empty array')
     const command = Object.freeze(input.command.map((item, idx) => text(item, `shell.command[${idx}]`, 4_096)))
-    if (!isAbsolute(command[0]!)) reject('invalid-message', 'shell command executable must be absolute')
+    if (!isAbsoluteCrossPlatform(command[0]!)) reject('invalid-message', 'shell command executable must be absolute')
     const cwd = text(input.cwd, 'shell.cwd', 4_096)
-    if (!isAbsolute(cwd)) reject('invalid-message', 'shell cwd must be absolute')
+    if (!isAbsoluteCrossPlatform(cwd)) reject('invalid-message', 'shell cwd must be absolute')
     const env = input.env === undefined ? undefined : stringRecord(input.env, 'shell.env', 64, 4_096)
     const timeoutMs = input.timeoutMs === undefined ? undefined : integer(input.timeoutMs, 'shell.timeoutMs', 1, 300_000)
     return Object.freeze({

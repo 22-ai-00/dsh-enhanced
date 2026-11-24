@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BrokerFrameDecoder, GITHUB_BROKER_PROTOCOL, GITHUB_BROKER_REQUEST_MAX_BYTES,
   brokerDigest, brokerGrantAuthorityDigest, brokerRequestDigest, brokerWireRequestDigest, canonicalBrokerJson, createBrokerAdminRequest, createBrokerAdminResponse, createBrokerGrantProjection,
-  createBrokerClientRequest, createBrokerServerHello, createBrokerServerResponse, encodeBrokerFrame,
+  createBrokerClientRequest, createBrokerServerHello, createBrokerServerResponse, encodeBrokerFrame, isCanonicalWorkspacePath,
   verifyBrokerAdminRequest, verifyBrokerAdminResponse, verifyBrokerClientRequest, verifyBrokerServerHello, verifyBrokerServerResponse,
   type BrokerAdminEndpoint, type BrokerEndpoint, type BrokerRequestIntent,
 } from '../src/broker-protocol.ts'
@@ -225,6 +225,31 @@ describe('broker action authentication', () => {
 
   it('rejects a frame whose request payload exceeds 8 MiB', () => {
     expect(() => encodeBrokerFrame({ body: 'x'.repeat(GITHUB_BROKER_REQUEST_MAX_BYTES) }, GITHUB_BROKER_REQUEST_MAX_BYTES)).toThrowError(/exceeds/)
+  })
+
+  it('accepts canonical POSIX and Windows workspaces while rejecting non-canonical, root, UNC, and relative paths', () => {
+    const signedHello = hello()
+    for (const validWorkspace of ['/workspace', 'C:\\workspace', 'D:\\work\\repo']) {
+      expect(isCanonicalWorkspacePath(validWorkspace)).toBe(true)
+      const req = createBrokerClientRequest(
+        { ...intent(), owner: { ...intent().owner, workspace: validWorkspace } },
+        signedHello,
+        client,
+        'client-key-1',
+        clientKeys.privateKey,
+      )
+      expect(req.owner.workspace).toBe(validWorkspace)
+    }
+    for (const invalidWorkspace of ['/', 'C:\\', 'C:/workspace', 'C:\\workspace\\', '\\\\server\\share\\dir', '/workspace/', '/workspace/../etc', 'workspace']) {
+      expect(isCanonicalWorkspacePath(invalidWorkspace)).toBe(false)
+      expect(() => createBrokerClientRequest(
+        { ...intent(), owner: { ...intent().owner, workspace: invalidWorkspace } },
+        signedHello,
+        client,
+        'client-key-1',
+        clientKeys.privateKey,
+      )).toThrowError(/workspace is invalid/)
+    }
   })
 })
 
