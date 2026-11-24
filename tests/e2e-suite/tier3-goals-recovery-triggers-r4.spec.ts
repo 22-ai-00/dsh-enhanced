@@ -1410,6 +1410,97 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
       ])
     }
 
+    // 3b. Sparse-ledger cross-collector parity (sibling b.sqlite isolation under --profile a & empty dream_runs)
+    const wsSparseA = await workspaces.create('t3-gr12-sparse-a-')
+    await mkdir(join(wsSparseA.dshHome, 'profiles', 'a'), { recursive: true, mode: 0o700 })
+    await mkdir(join(wsSparseA.dshHome, 'profiles', 'b'), { recursive: true, mode: 0o700 })
+    const execSparseSql = async (baseHome: string, rel: string, sql: string) => {
+      const full = join(baseHome, rel)
+      await mkdir(join(full, '..'), { recursive: true, mode: 0o700 })
+      const db = new DatabaseSync(full)
+      try {
+        db.exec(sql)
+      } finally {
+        db.close()
+      }
+    }
+    await execSparseSql(
+      wsSparseA.dshHome,
+      'assistant-dreaming/a.sqlite',
+      "CREATE TABLE dream_runs (id TEXT PRIMARY KEY) STRICT; INSERT INTO dream_runs VALUES ('da1');",
+    )
+    await execSparseSql(
+      wsSparseA.dshHome,
+      'assistant-dreaming/b.sqlite',
+      "CREATE TABLE dream_runs (id TEXT PRIMARY KEY) STRICT; INSERT INTO dream_runs VALUES ('db1'), ('db2'), ('db3'), ('db4'), ('db5');",
+    )
+    await execSparseSql(
+      wsSparseA.dshHome,
+      'assistant-work-items/b.sqlite',
+      "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('wb1', 'ready'), ('wb2', 'open');",
+    )
+    await execSparseSql(
+      wsSparseA.dshHome,
+      'assistant-evolution/b.sqlite',
+      "CREATE TABLE evolution_rules (id TEXT PRIMARY KEY) STRICT; INSERT INTO evolution_rules VALUES ('eb1'), ('eb2');",
+    )
+
+    const cliSparseARes = await runDshRsiInProcess(['version', '--json', '--dsh-home', wsSparseA.dshHome, '--profile', 'a'])
+    expect(cliSparseARes.exitCode).toBe(0)
+    const cliSparseA = JSON.parse(cliSparseARes.stdout) as Record<string, unknown>
+
+    const ctxSparseA = harness.createContext()
+    await harness.mountPlugin(ctxSparseA, TypertRegistry)
+    harness.provideMockService(ctxSparseA, 'profileContext', {
+      home: wsSparseA.dshHome,
+      dir: join(wsSparseA.dshHome, 'profiles', 'a'),
+      name: 'a',
+    })
+    applyOwner(ctxSparseA, configOwner({ feishuAppId: '' }))
+    const ownerSvcSparseA = ctxSparseA.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
+    const ownerSparseA = await ownerSvcSparseA.versionInfo()
+    const deliverySparseA = await collectDelivery({ ctx: ctxSparseA, dshHome: wsSparseA.dshHome, profile: 'a' })
+
+    expect(cliSparseA.selfIteration).toEqual(ownerSparseA.selfIteration)
+    expect(deliverySparseA.selfIteration).toEqual(ownerSparseA.selfIteration)
+    expect((ownerSparseA.selfIteration as Record<string, unknown>).dreamingRuns).toBe(1)
+    expect((ownerSparseA.selfIteration as Record<string, unknown>).workItemsTotal).toBeNull()
+    expect((ownerSparseA.selfIteration as Record<string, unknown>).evolutionRulesAdopted).toBeNull()
+    expect((ownerSparseA.selfIteration as Record<string, unknown>).candidatesGenerated).toBeNull()
+    expect((ownerSparseA.selfIteration as Record<string, unknown>).rollbacks).toBeNull()
+    expect(cliSparseA.inspectedLedgers).toEqual(ownerSparseA.inspectedLedgers)
+    expect(deliverySparseA.inspectedLedgers).toEqual(ownerSparseA.inspectedLedgers)
+    expect(Array.isArray(ownerSparseA.inspectedLedgers)).toBe(true)
+    expect((ownerSparseA.inspectedLedgers as string[]).some(p => p.endsWith('a.sqlite'))).toBe(true)
+    expect((ownerSparseA.inspectedLedgers as string[]).some(p => p.endsWith('b.sqlite'))).toBe(false)
+
+    const wsSparseEmpty = await workspaces.create('t3-gr12-sparse-empty-')
+    await execSparseSql(
+      wsSparseEmpty.dshHome,
+      'assistant-dreaming/state.sqlite',
+      'CREATE TABLE dream_runs (id TEXT PRIMARY KEY) STRICT;',
+    )
+
+    const cliEmptyRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', wsSparseEmpty.dshHome])
+    expect(cliEmptyRes.exitCode).toBe(0)
+    const cliEmpty = JSON.parse(cliEmptyRes.stdout) as Record<string, unknown>
+
+    const ctxEmpty = harness.createContext()
+    await harness.mountPlugin(ctxEmpty, TypertRegistry)
+    harness.provideMockService(ctxEmpty, 'profileContext', { home: wsSparseEmpty.dshHome })
+    applyOwner(ctxEmpty, configOwner({ feishuAppId: '' }))
+    const ownerSvcEmpty = ctxEmpty.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
+    const ownerEmpty = await ownerSvcEmpty.versionInfo()
+    const deliveryEmpty = await collectDelivery({ ctx: ctxEmpty, dshHome: wsSparseEmpty.dshHome })
+
+    expect(cliEmpty.selfIteration).toEqual(ownerEmpty.selfIteration)
+    expect(deliveryEmpty.selfIteration).toEqual(ownerEmpty.selfIteration)
+    expect((ownerEmpty.selfIteration as Record<string, unknown>).dataState).toBe('zero')
+    expect((ownerEmpty.selfIteration as Record<string, unknown>).totalIterations).toBe(0)
+    expect((ownerEmpty.selfIteration as Record<string, unknown>).dreamingRuns).toBe(0)
+    expect((ownerEmpty.selfIteration as Record<string, unknown>).candidatesGenerated).toBeNull()
+    expect((ownerEmpty.selfIteration as Record<string, unknown>).rollbacks).toBeNull()
+
     // 4. Verify scripts/install/common.sh dsh_enhanced_ensure_rsi_cli probe against real bin/dsh-rsi.js
     const shimBin = join(ws.root, 'real-bin')
     await mkdir(shimBin, { recursive: true, mode: 0o700 })

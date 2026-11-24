@@ -1405,8 +1405,8 @@ export async function collectOwnerConsoleVersionInfo(
         break
       }
     }
-    candidatesGenerated = addCounter(candidatesGenerated, unlinkedApCount)
     if (sawActivationPlansTable) {
+      candidatesGenerated = addCounter(candidatesGenerated, unlinkedApCount)
       rollbacks = addCounter(rollbacks, rollbackApCount)
     }
 

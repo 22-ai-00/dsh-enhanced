@@ -640,4 +640,39 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
       try { chmodSync(roWalDir, 0o700) } catch { /* ignore */ }
     }
   })
+
+  it('keeps candidatesGenerated and rollbacks null on sparse $DSH_HOME with only assistant-dreaming/state.sqlite (empty and populated)', async () => {
+    const home = makeTempDir('oc-version-sparse-dream-')
+    const dreamDb = join(home, 'assistant-dreaming', 'state.sqlite')
+    createSqlite(dreamDb, 'CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT;')
+
+    const ctxEmpty = new Context()
+    ctxEmpty.provide('profileContext' as never, { home } as never)
+    const emptyReport = await collectOwnerConsoleVersionInfo(ctxEmpty, { now: 1_700_000_000_600 })
+    expect(OwnerConsoleVersionReportSchema.safeParse(emptyReport).success).toBe(true)
+    expect(emptyReport.selfIteration.dataState).toBe('zero')
+    expect(emptyReport.selfIteration.totalIterations).toBe(0)
+    expect(emptyReport.selfIteration.dreamingRuns).toBe(0)
+    expect(emptyReport.selfIteration.candidatesGenerated).toBeNull()
+    expect(emptyReport.selfIteration.candidatesAdopted).toBeNull()
+    expect(emptyReport.selfIteration.rollbacks).toBeNull()
+
+    const db = new DatabaseSync(dreamDb)
+    try {
+      db.exec("INSERT INTO dream_runs VALUES ('dr-sparse-1', 'completed');")
+    } finally {
+      db.close()
+    }
+
+    const ctxPopulated = new Context()
+    ctxPopulated.provide('profileContext' as never, { home } as never)
+    const populatedReport = await collectOwnerConsoleVersionInfo(ctxPopulated, { now: 1_700_000_000_700 })
+    expect(OwnerConsoleVersionReportSchema.safeParse(populatedReport).success).toBe(true)
+    expect(populatedReport.selfIteration.dataState).toBe('data')
+    expect(populatedReport.selfIteration.totalIterations).toBe(1)
+    expect(populatedReport.selfIteration.dreamingRuns).toBe(1)
+    expect(populatedReport.selfIteration.candidatesGenerated).toBeNull()
+    expect(populatedReport.selfIteration.candidatesAdopted).toBeNull()
+    expect(populatedReport.selfIteration.rollbacks).toBeNull()
+  })
 })
