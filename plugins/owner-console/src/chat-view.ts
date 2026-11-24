@@ -18,6 +18,7 @@ import {
   type ChatSessionSnapshot, type PermissionCatalog, type SpeechRecognitionLike,
 } from './chat.js'
 import { ModelRouteSelects, resolveEffectiveModelCatalog } from './model-route-ui.js'
+import { parseOwnerSelfIterationCommand } from './nl-control.js'
 import type { AssistantChatContext, OwnerConsoleModelCatalog } from './typert.js'
 import {
   accent, backdropImageStyle, backdropStyle, border, borderStrong, buttonStyle, caption, danger,
@@ -1499,6 +1500,40 @@ export function OwnerConsoleChat({ runtime, onOpenSettings }: OwnerConsoleChatPr
   const submitPayload = (textValue: string, filesValue: readonly Blob[], clearDraftOnSuccess: boolean) => {
     if (binding === undefined || sending) return
     if (textValue.trim() === '' && filesValue.length === 0) return
+    const parsedControl = filesValue.length === 0 ? parseOwnerSelfIterationCommand(textValue) : undefined
+    if (parsedControl !== undefined && typeof runtime.controlSelfIteration === 'function') {
+      setSending(true)
+      setNotice(undefined)
+      void runtime.controlSelfIteration(parsedControl.action, true).then(result => {
+        if (!alive.current) return
+        setSending(false)
+        if (!result.ok) {
+          setNotice({ tone: 'error', text: remoteFailureSummary(result.error) })
+          return
+        }
+        const value = result.value
+        if (!value.ok) {
+          setNotice({ tone: 'error', text: value.error ?? value.reason ?? value.note ?? '自迭代控制操作未完成。' })
+          return
+        }
+        const label = value.state === 'enabled'
+          ? '已开启整体自迭代能力'
+          : value.state === 'disabled'
+            ? '已关闭整体自迭代能力'
+            : '已完成整体助手升级与恢复检查'
+        const detail = value.note ? `：${value.note}` : ''
+        setNotice({ tone: 'info', text: `${label}${detail}` })
+        if (clearDraftOnSuccess) {
+          setDraft('')
+          setFiles([])
+        }
+      }, (error: unknown) => {
+        if (!alive.current) return
+        setSending(false)
+        setNotice({ tone: 'error', text: error instanceof Error ? error.message : '自迭代控制请求失败，稍后重试。' })
+      })
+      return
+    }
     setSending(true)
     setNotice(undefined)
     void sendChatMessage({

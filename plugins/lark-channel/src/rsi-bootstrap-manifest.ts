@@ -12,7 +12,7 @@ import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { createRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { createRsiOrdinaryUseLearningSetup, type RsiOrdinaryUseLearningSetup } from './rsi-ordinary-use-learning.js'
-import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
+import { compileRsiPersonalAssistantOptions, SELF_ITERATION_MANAGED_ROW_IDS } from './rsi-profile.js'
 import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
 import type { LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import { compileRsiLinuxSourceBuild, type RsiLinuxSourceBuildPreparation } from './rsi-linux-source-build.js'
@@ -51,6 +51,8 @@ export interface RsiBootstrapManifestInput<Build extends RsiBootstrapSourceBuild
   /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
   intakeProvider?: string
   intakeModel?: string
+  /** Explicit owner-authorized in-place upgrade mode. */
+  upgradeExistingOwner?: boolean
   runnerStates?: RsiLinuxRunnerStates
   git: Pin
   now: number
@@ -205,8 +207,11 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     if (typeof id !== 'string' || rows.has(id)) fail('target effective rows have duplicate or invalid ids')
     rows.set(id, entry)
   }
+  const upgrading = input.upgradeExistingOwner === true
   const installedRepairable = [...rows.entries()].flatMap(([id, entry]) => {
-    if (entry.get('disabled') === true && id !== 'dsh-enhanced-assistant-memory-learning') return []
+    const allowDisabled = id === 'dsh-enhanced-assistant-memory-learning'
+      || (upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
+    if (entry.get('disabled') === true && !allowDisabled) return []
     const name = entry.get('name')
     if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
       if (id.startsWith('dsh-enhanced-')) fail(`installed plugin row ${id} has no package name`)
@@ -231,24 +236,24 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   let ordinaryUseLearning: RsiOrdinaryUseLearningSetup | undefined
   if (input.enableOrdinaryUseLearning === true) {
     const proactive = rows.get('dsh-enhanced-assistant-proactive')
-    if (!proactive || proactive.get('disabled') === true || proactive.get('name') !== '@dsh-enhanced/assistant-proactive') {
+    if (!proactive || (!upgrading && proactive.get('disabled') === true) || proactive.get('name') !== '@dsh-enhanced/assistant-proactive') {
       fail('ordinary-use learning requires an enabled installed assistant-proactive bundle')
     }
     const workItems = rows.get('dsh-enhanced-assistant-work-items')
-    if (!workItems || workItems.get('disabled') === true || workItems.get('name') !== '@dsh-enhanced/assistant-work-items') {
+    if (!workItems || (!upgrading && workItems.get('disabled') === true) || workItems.get('name') !== '@dsh-enhanced/assistant-work-items') {
       fail('ordinary-use learning requires an enabled installed assistant-work-items bundle')
     }
     ordinaryUseLearning = createRsiOrdinaryUseLearningSetup({ deliveryConfig,
       intakeProvider: input.intakeProvider, intakeModel: input.intakeModel, llmProviders: llmProviderIds(rows) })
     const proactiveConfig = proactive.has('config')
       ? plain(rowConfig(proactive, 'assistant-proactive'), 'assistant-proactive config') : {}
-    if (proactiveConfig.intakeEvaluation !== undefined
+    if (!upgrading && proactiveConfig.intakeEvaluation !== undefined
       && !isDeepStrictEqual(proactiveConfig.intakeEvaluation, ordinaryUseLearning.intakeEvaluation)) {
       fail('existing assistant-proactive intake evaluation differs from the frozen fresh-install setup')
     }
     const workItemsConfig = workItems.has('config')
       ? plain(rowConfig(workItems, 'assistant-work-items'), 'assistant-work-items config') : {}
-    if (workItemsConfig.enabled !== true) {
+    if (workItemsConfig.enabled !== true && !(upgrading && workItemsConfig.enabled === false)) {
       fail('ordinary-use learning requires assistant-work-items.enabled: true (run dsh-plugin-setup preset recommended first)')
     }
     const ledger = workItemsConfig.intakeLedger
@@ -291,7 +296,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   if (!isMap(memoryConfig)) fail('effective embedded Personal Memory is missing')
   const learner = rows.get('dsh-enhanced-assistant-memory-learning')
   if (input.skipMemoryLearning !== true && (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
-    || learner.get('disabled') === true && learner.has('config'))) fail('effective memory learner must be the installed unconfigured bundle')
+    || input.upgradeExistingOwner !== true && learner.get('disabled') === true && learner.has('config'))) fail('effective memory learner must be the installed unconfigured bundle')
   const policy = plain(mapping(rowConfig(personal, 'personal assistant').get('assistantPolicy', true) as Node | undefined, 'assistantPolicy'), 'assistantPolicy')
   let reviewLimit = 7
   const budgets = (policy.budgets as unknown[] | undefined) ?? []
@@ -347,8 +352,12 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
   const memoryLearning = input.skipMemoryLearning === true ? undefined : createRsiMemoryLearningSetup({ installationId: installation,
     stateRoot: state, owner: reviewOwner, now: input.now, expiresAt: input.expiresAt,
     workItemExperiences: ordinaryUseLearning !== undefined })
-  if (memoryLearning !== undefined && learner !== undefined && learner.get('disabled') !== true) {
-    if (!learner.has('config') || !isDeepStrictEqual(plain(rowConfig(learner, 'memory learner'), 'memory learner'), memoryLearning.learning)) {
+  if (memoryLearning !== undefined && learner !== undefined && (learner.get('disabled') === false || learner.has('config'))) {
+    const currentLearner = learner.has('config') ? plain(rowConfig(learner, 'memory learner'), 'memory learner') : undefined
+    if (currentLearner === undefined) fail('existing memory learner config differs from frozen owner grant')
+    const sameOwnerGrant = currentLearner.authorityId === memoryLearning.learning.authorityId
+      && isDeepStrictEqual(currentLearner.owner, memoryLearning.learning.owner)
+    if (input.upgradeExistingOwner === true ? !sameOwnerGrant : !isDeepStrictEqual(currentLearner, memoryLearning.learning)) {
       fail('existing memory learner config differs from frozen owner grant')
     }
   }
@@ -385,7 +394,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
       usageLearning: { enabled: true, databasePath: join(state, 'growth.sqlite'), scanBudgetId: `rsi-discovery-${installation}`,
         scanBudgetAmount: 1 },
       pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: input.source.repository,
-        maxPlansPerWake: 1, offline: true, planTtlMs: day } },
+        maxPlansPerWake: 1, offline: true, planTtlMs: day, allowCreation: false, allowRevision: false } },
     sourceReviews: { authorityId: `source-reviews-${installation}`, expiresAt: input.expiresAt, maxReviews: 1000,
       repository: input.source.baseline.remote, git: { ...input.git }, decisionRoot: releaseConfig.reviewDecisionRoot,
       plugins: [...input.plugins], owner: reviewOwner, reviewerPrincipal: `rsi-independent-reviewer-${installation}`,
@@ -453,6 +462,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
         manifest, scope: { workspace: scope.workspace, preset: scope.preset, principal: scope.principalId },
         budgetIds: { reviews: manifest.growthDriver.budgetId!, discovery: manifest.growthDriver.usageLearning!.scanBudgetId!,
           source: manifest.controlPlane.sourceJobs!.budgetId, observations: manifest.controlPlane.taskObservations!.budgetId },
+        ...(input.upgradeExistingOwner ? { upgradeExistingOwner: true } : {}),
       })), services: ['personalMemory', 'assistantPolicy', 'assistantAutomations'] },
     ...(memoryLearning === undefined ? [] : [{ entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
       configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] }]),
@@ -464,7 +474,9 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     const proactiveRow = rows.get('dsh-enhanced-assistant-proactive')!
     const proactiveRaw = proactiveRow.has('config')
       ? rawLoaderConfig(proactiveRow.get('config', true) as Node, 'assistant-proactive') : null
-    const proactiveFinal = { ...(record(proactiveRaw) ? proactiveRaw : {}),
+    const proactiveBase = record(proactiveRaw) ? proactiveRaw : {}
+    const proactiveFinal = { ...proactiveBase,
+      ...(upgrading && proactiveBase.enabled === false ? { enabled: true } : {}),
       intakeEvaluation: ordinaryUseLearning.intakeEvaluation }
     const workItemsRow = rows.get('dsh-enhanced-assistant-work-items')!
     const workItemsRaw = workItemsRow.has('config')
@@ -473,6 +485,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput<RsiB
     const ledger = record(workItemsBase.intakeLedger) ? workItemsBase.intakeLedger : {}
     const evaluation = record(ledger.evaluation) ? ledger.evaluation : {}
     const workItemsFinal = { ...workItemsBase,
+      ...(upgrading && workItemsBase.enabled === false ? { enabled: true } : {}),
       intakeLedger: { ...ledger, evaluation: { ...evaluation, enabled: true } } }
     manifest.controlPlane.runtimeObserver!.targets.push(
       { entryId: 'dsh-enhanced-assistant-proactive', module: '@dsh-enhanced/assistant-proactive',

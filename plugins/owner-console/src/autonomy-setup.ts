@@ -368,7 +368,7 @@ export function ensureVerifierDefaults(
   if (!verifierCfgNode.has('requireAcceptance')) {
     const req = typeof runtimeVerifierCfg?.['requireAcceptance'] === 'boolean'
       ? runtimeVerifierCfg['requireAcceptance']
-      : false
+      : true
     verifierCfgNode.set('requireAcceptance', createPlainNode(doc, req))
   }
 }
@@ -1124,7 +1124,7 @@ export function normalizeProfileSlug(profileName: string): string {
   return profileName.replace(/[^A-Za-z0-9._-]/gu, '-') || 'default'
 }
 
-/** Mirror exact normalization applied by personal-memory / assistant-verifier / assistant-memory-learning
+/** Mirror exact normalization applied by personal-memory / assistant-verifier
  * before hashing (`workItemExperiences !== true` is omitted, and `databasePath` is resolved to absolute). */
 export function normalizeMemoryGrantForDigest(
   cfg: Readonly<Record<string, unknown>>,
@@ -1132,6 +1132,22 @@ export function normalizeMemoryGrantForDigest(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...cfg }
   if (out['workItemExperiences'] !== true) delete out['workItemExperiences']
+  if (resolvedDatabasePath !== undefined) out['databasePath'] = resolvedDatabasePath
+  return out
+}
+
+/** Mirror exact normalization applied by assistant-memory-learning `validateLearningConfig`
+ * before hashing (`enabled` is deleted, explicit `false` is preserved, omitted defaults to `true`,
+ * and `databasePath` is resolved to absolute). */
+export function normalizeLearningConfigForDigest(
+  cfg: Readonly<Record<string, unknown>>,
+  resolvedDatabasePath?: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...cfg }
+  delete out['enabled']
+  if (typeof out['workItemExperiences'] !== 'boolean') {
+    out['workItemExperiences'] = true
+  }
   if (resolvedDatabasePath !== undefined) out['databasePath'] = resolvedDatabasePath
   return out
 }
@@ -1386,7 +1402,7 @@ export function inspectMemoryLearningGrantConflicts(
 
   const normalizedAdoptCfg = normalizeMemoryGrantForDigest(adoptCfg)
   const normalizedReviewCfg = normalizeMemoryGrantForDigest(reviewCfg)
-  const normalizedMemCfg = normalizeMemoryGrantForDigest(memCfg, dbPaths?.memoryLearningDbPath)
+  const normalizedMemCfg = normalizeLearningConfigForDigest(memCfg, dbPaths?.memoryLearningDbPath)
   const adoptDigest = adoptId !== null ? canonicalObjectDigest(normalizedAdoptCfg) : null
   const reviewDigest = reviewId !== null ? canonicalObjectDigest(normalizedReviewCfg) : null
 
@@ -1776,6 +1792,7 @@ export async function applyAutonomyWizardSetup(
       const candidateDbPath = gen <= 1
         ? baseMemoryDbPath
         : resolveScopedDbTarget(paths.canonicalHome!, 'assistant-memory-learning', `${profileSlug}-g${gen}.sqlite`, undefined)
+      const workItemExperiences = typeof input.workItemExperiences === 'boolean' ? input.workItemExperiences : true
       const candidateReviewConfig = {
         authorityId: candidateReviewId,
         owner: learningOwner,
@@ -1786,7 +1803,7 @@ export async function applyAutonomyWizardSetup(
         maxOutputTokens: 2048,
         timeoutMs: 60_000,
         model: modelRef,
-        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+        ...(workItemExperiences ? { workItemExperiences: true } : {}),
       }
       const candidateReviewDigest = canonicalObjectDigest(candidateReviewConfig)
       const candidateAdoptionConfig = {
@@ -1800,7 +1817,7 @@ export async function applyAutonomyWizardSetup(
         maxRecordTtlMs: 90 * DAY_MS,
         kinds: ['fact', 'experience'],
         operations: ['add', 'replace', 'remove'],
-        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+        ...(workItemExperiences ? { workItemExperiences: true } : {}),
       }
       const candidateAdoptionDigest = canonicalObjectDigest(candidateAdoptionConfig)
       const candidateLearningConfig = {
@@ -1824,7 +1841,7 @@ export async function applyAutonomyWizardSetup(
         adoptionAuthorityId: candidateAdoptId,
         adoptionGrantDigest: candidateAdoptionDigest,
         model: modelRef,
-        ...(input.workItemExperiences ? { workItemExperiences: true } : {}),
+        workItemExperiences,
       }
       return {
         extractAuthId: candidateExtractId,
@@ -1841,7 +1858,7 @@ export async function applyAutonomyWizardSetup(
 
     const normalizedExistingAdopt = normalizeMemoryGrantForDigest(existingAdoptCfg)
     const normalizedExistingReview = normalizeMemoryGrantForDigest(existingReviewCfg)
-    const normalizedExistingMem = normalizeMemoryGrantForDigest(existingMemCfg, baseMemoryDbPath)
+    const normalizedExistingMem = normalizeLearningConfigForDigest(existingMemCfg, baseMemoryDbPath)
 
     const hasGenerationCollision = (bundle: ReturnType<typeof buildMemoryGrantBundle>, gen: number): boolean => {
       const storedAdopt = storedAdoptGrants.get(bundle.adoptAuthId)

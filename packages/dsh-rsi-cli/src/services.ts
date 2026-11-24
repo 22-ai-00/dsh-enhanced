@@ -1,6 +1,5 @@
-import { readFile, rm, stat } from 'node:fs/promises'
-import { open } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, open, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { inspectLaunchdDefinition, inspectLoadedLaunchd, oldPidExited, type LaunchdDefinition } from './launchd-service.ts'
 import { withLaunchdProfileLock } from './launchd-lock.ts'
@@ -299,6 +298,102 @@ export async function inspectManagedService(
     exists = false
   }
   return { managed, definitionPath, foreign: exists && !managed }
+}
+
+function unquoteSystemdValue(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed
+      .slice(1, -1)
+      .replace(/\\(["\\])/gu, '$1')
+      .replaceAll('%%', '%')
+  }
+  return trimmed.replaceAll('%%', '%')
+}
+
+async function canonicalExistingOrResolved(targetPath: string): Promise<string> {
+  const resolved = resolve(targetPath)
+  try {
+    return await realpath(resolved)
+  } catch {
+    return resolved
+  }
+}
+
+/**
+ * Verify that an existing Linux systemd unit belongs strictly to `dshHome` and `profile`
+ * by checking its `DSH_HOME` environment assignment and `WorkingDirectory`.
+ */
+export async function systemdUnitMatchesDshHome(
+  unitPath: string,
+  dshHome: string,
+  profile: string,
+): Promise<boolean> {
+  try {
+    const meta = await lstat(unitPath)
+    if (!meta.isFile() || meta.isSymbolicLink()) return false
+  } catch {
+    return false
+  }
+  let source: string
+  try {
+    source = await readFile(unitPath, 'utf8')
+  } catch {
+    return false
+  }
+  const canonicalHome = await canonicalExistingOrResolved(dshHome)
+  const expectedWorkingDir = join(canonicalHome, 'profiles', profile)
+  let matchedDshHome = false
+  let matchedWorkingDir = false
+
+  for (const rawLine of source.split(/\r?\n/u)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue
+    if (line.startsWith('WorkingDirectory=')) {
+      const wd = unquoteSystemdValue(line.slice('WorkingDirectory='.length))
+      if (!wd) return false
+      const canonicalWd = await canonicalExistingOrResolved(wd)
+      if (canonicalWd !== expectedWorkingDir) return false
+      matchedWorkingDir = true
+    } else if (line.startsWith('Environment=')) {
+      const envRaw = line.slice('Environment='.length).trim()
+      const entries = envRaw.startsWith('"') && envRaw.endsWith('"')
+        ? [unquoteSystemdValue(envRaw)]
+        : envRaw.split(/\s+/u).map(unquoteSystemdValue)
+      for (const entry of entries) {
+        if (!entry.startsWith('DSH_HOME=')) continue
+        const envHome = entry.slice('DSH_HOME='.length)
+        if (!envHome) return false
+        const canonicalEnvHome = await canonicalExistingOrResolved(envHome)
+        if (canonicalEnvHome !== canonicalHome) return false
+        matchedDshHome = true
+      }
+    }
+  }
+
+  return matchedDshHome || matchedWorkingDir
+}
+
+/**
+ * Inspect whether a managed service exists specifically for `dshHome` + `profile`.
+ * On Linux, units belonging to a different `DSH_HOME` are treated as non-matching (`managed: false, foreign: false`)
+ * so isolated operations never touch another Home's systemd daemon.
+ */
+export async function inspectManagedServiceForDshHome(
+  platform: NodeJS.Platform,
+  home: string,
+  profile: string,
+  dshHome: string,
+  runner: CommandRunner = defaultRunner,
+): Promise<ManagedServicePresence> {
+  const presence = await inspectManagedService(platform, home, profile, dshHome, runner)
+  if (platform === 'linux' && presence.managed) {
+    const matches = await systemdUnitMatchesDshHome(presence.definitionPath, dshHome, profile)
+    if (!matches) {
+      return { managed: false, definitionPath: presence.definitionPath, foreign: false }
+    }
+  }
+  return presence
 }
 
 /**

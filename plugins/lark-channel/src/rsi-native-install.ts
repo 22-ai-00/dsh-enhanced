@@ -128,10 +128,15 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
       || oldBuild.backend !== 'macos-seatbelt')) {
       fail('frozen Docker installation plan cannot be resumed with native backend')
     }
-    if (old && (old.schemaVersion !== 1 || old.dshHome !== input.dshHome || old.profile !== input.profile
+    const upgrading = input.upgradeExistingOwner === true
+    if (old && !upgrading && (old.schemaVersion !== 1 || old.dshHome !== input.dshHome || old.profile !== input.profile
       || typeof old.beforePatch !== 'string' || typeof old.beforeEffective !== 'string' || typeof old.afterPlist !== 'string'
       || old.sourceCommit !== source.sourceCommit || !isDeepStrictEqual(old.executor, executor)
       || old.observerKeyDigest !== observerKeyDigest)) fail('frozen native installation inputs changed')
+    if (old && upgrading && (old.schemaVersion !== 1 || old.dshHome !== input.dshHome || old.profile !== input.profile
+      || !isDeepStrictEqual(old.executor, executor) || old.observerKeyDigest !== observerKeyDigest)) {
+      fail('frozen native installation identity changed')
+    }
     const targetPatch = await optional(patchPath, false)
     if (targetPatch === null) fail('target profile patch is missing')
     const effective = ports.dump(input.profile, input.dshHome), snapshot = await ports.snapshot(effective, input.dshHome)
@@ -141,38 +146,47 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
     const now = old?.now ?? ports.now(), expiresAt = old?.expiresAt ?? now + 365 * 86_400_000
     if (expiresAt <= ports.now()) fail('native grant expired; reinstall does not renew it')
     const storedOrdinary = old?.compiled.manifest.ordinaryUseLearning?.intakeEvaluation
-    if (old && input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
+    if (old && !upgrading && input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
       fail('frozen native installation cannot be expanded with ordinary-use learning; install a fresh profile instead')
     }
     const storedRevision = old?.compiled.manifest.pluginRevision
-    if (old && input.enableRevision === true && storedRevision === undefined) {
+    if (old && !upgrading && input.enableRevision === true && storedRevision === undefined) {
       fail('frozen native installation cannot be expanded with plugin revision; install a fresh profile instead')
     }
     if (old && input.enableRevision === false && storedRevision !== undefined) {
       fail('frozen native installation cannot drop plugin revision; install a fresh profile instead')
     }
-    // A retry preserves exactly the frozen opt-in and evaluator route.
-    const enableOrdinaryUseLearning = old ? storedOrdinary !== undefined : input.enableOrdinaryUseLearning === true
-    const enableRevision = old ? storedRevision !== undefined : (input.enableRevision ?? true)
-    const intakeProvider = storedOrdinary?.provider ?? input.intakeProvider
-    const intakeModel = storedOrdinary?.model ?? input.intakeModel
+    const enableOrdinaryUseLearning = upgrading
+      ? (input.enableOrdinaryUseLearning === true || storedOrdinary !== undefined)
+      : (old ? storedOrdinary !== undefined : input.enableOrdinaryUseLearning === true)
+    const enableRevision = upgrading
+      ? (input.enableRevision ?? (storedRevision !== undefined))
+      : (old ? storedRevision !== undefined : (input.enableRevision ?? true))
+    const intakeProvider = upgrading
+      ? (input.intakeProvider ?? storedOrdinary?.provider)
+      : (storedOrdinary?.provider ?? input.intakeProvider)
+    const intakeModel = upgrading
+      ? (input.intakeModel ?? storedOrdinary?.model)
+      : (storedOrdinary?.model ?? input.intakeModel)
     const compiled = ports.compile({ dshHome: input.dshHome, targetProfile: input.profile,
-      targetPatch: old?.beforePatch ?? targetPatch, targetEffective: old?.beforeEffective ?? effective,
+      targetPatch: upgrading ? targetPatch : (old?.beforePatch ?? targetPatch),
+      targetEffective: upgrading ? effective : (old?.beforeEffective ?? effective),
       owner, resources, source, sourceBuild: build.sourceBuild, creationBuild, executor, now, expiresAt, observer,
       enableOrdinaryUseLearning, enableRevision,
+      ...(upgrading ? { upgradeExistingOwner: true } : {}),
       ...(intakeProvider !== undefined ? { intakeProvider } : {}),
       ...(intakeModel !== undefined ? { intakeModel } : {}) })
-    if (old && !isDeepStrictEqual(old.compiled, compiled)) fail('native compiled grant differs from the frozen plan')
+    if (old && !upgrading && !isDeepStrictEqual(old.compiled, compiled)) fail('native compiled grant differs from the frozen plan')
     const currentPlist = await optional(paths.plistPath, false)
     if (currentPlist !== null) ports.validatePlist(currentPlist, serviceInput)
     const state = ports.inspect(serviceInput)
     if (state.registered && currentPlist === null) fail('loaded service has no restorable plist')
-    const afterPlist = old?.afterPlist ?? createLaunchAgent({ ...paths, dshHome: input.dshHome, profile: input.profile,
+    const afterPlist = (!upgrading && old?.afterPlist) ? old.afterPlist : createLaunchAgent({ ...paths, dshHome: input.dshHome, profile: input.profile,
       profileDirectory: profileRoot, nodePath: await realpath(process.execPath), dshPath: executor.path,
       path: [...new Set([dirname(await realpath(process.execPath)), dirname(executor.path),
         ...(process.env.PATH ?? '').split(':').filter(value => value.startsWith('/')), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'])].join(':') })
     ports.validatePlist(afterPlist, serviceInput)
-    const plan: Plan = old ?? { schemaVersion: 1, dshHome: input.dshHome, profile: input.profile, now, expiresAt,
+    const plan: Plan = (old && !upgrading) ? old : { schemaVersion: 1, dshHome: input.dshHome, profile: input.profile, now, expiresAt,
       beforePatch: targetPatch, beforeEffective: effective, beforePlist: currentPlist, registered: state.registered,
       afterPlist, compiled, owner, observerKeyDigest, sourceCommit: source.sourceCommit, executor }
     if (![plan.beforePatch, compiled.targetPatch].includes(targetPatch)
@@ -181,7 +195,7 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
     if (!inventory.schedulerEnabled && inventory.records.length && !input.ackExistingAutomations) fail('existing active or paused Automations require --ack-existing-automations')
     const planBytes = JSON.stringify(plan), planDigest = digest(planBytes), journalBytes = await optional(journalPath)
     let attempt = { beforePatch: targetPatch, beforePlist: currentPlist, registered: state.registered }
-    if (journalBytes !== null) {
+    if (journalBytes !== null && !upgrading) {
       const previous = JSON.parse(journalBytes) as Journal
       if (previous.schemaVersion !== 1 || previous.planDigest !== planDigest
         || !['prepared', 'applied', 'ready', 'rolled-back'].includes(previous.stage)
@@ -194,9 +208,19 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
         attempt = { beforePatch: previous.beforePatch, beforePlist: previous.beforePlist, registered: previous.registered }
       }
     }
-    await immutable(planPath, planBytes)
-    await immutable(manifestPath, JSON.stringify(compiled.manifest))
-    await immutable(compiled.manifest.controlPlane.trustPath, JSON.stringify(compiled.trust))
+    const previousPlan = upgrading ? await optional(planPath) : null
+    const previousManifest = upgrading ? await optional(manifestPath) : null
+    const previousTrust = upgrading ? await optional(compiled.manifest.controlPlane.trustPath) : null
+    const previousJournal = upgrading ? await optional(journalPath) : null
+    if (upgrading) {
+      await atomic(planPath, planBytes)
+      await atomic(manifestPath, JSON.stringify(compiled.manifest))
+      await atomic(compiled.manifest.controlPlane.trustPath, JSON.stringify(compiled.trust))
+    } else {
+      await immutable(planPath, planBytes)
+      await immutable(manifestPath, JSON.stringify(compiled.manifest))
+      await immutable(compiled.manifest.controlPlane.trustPath, JSON.stringify(compiled.trust))
+    }
     const journal = (stage: Journal['stage']) => atomic(journalPath, JSON.stringify({ schemaVersion: 1, planDigest, stage, ...attempt }))
     await journal('prepared')
     // A failed or interrupted attempt restores exact original bytes. No grant,
@@ -208,8 +232,20 @@ export async function installNativeRsiOwnerDeployment(input: RsiInstallInput,
       if (patch !== plan.beforePatch && patch !== compiled.targetPatch
         || plist !== plan.beforePlist && plist !== plan.afterPlist) fail('rollback conflicts with external changes; retain journal')
       await atomic(patchPath, attempt.beforePatch); await atomic(paths.plistPath, attempt.beforePlist)
+      if (upgrading && previousPlan !== null) {
+        await atomic(planPath, previousPlan)
+        if (previousManifest !== null) await atomic(manifestPath, previousManifest)
+        if (previousTrust !== null) await atomic(compiled.manifest.controlPlane.trustPath, previousTrust)
+        if (previousJournal !== null) {
+          await atomic(journalPath, previousJournal)
+        } else {
+          await atomic(journalPath, JSON.stringify({
+            schemaVersion: 1, planDigest: digest(previousPlan), stage: 'rolled-back', ...attempt,
+          }))
+        }
+      }
       if (attempt.registered) await ports.start(serviceInput, recovery)
-      await journal('rolled-back')
+      if (!(upgrading && previousPlan !== null)) await journal('rolled-back')
     }
     try {
       await ports.stop(serviceInput, signal)

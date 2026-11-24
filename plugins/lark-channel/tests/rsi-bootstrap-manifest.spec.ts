@@ -458,4 +458,75 @@ describe('ordinary-use RSI manifest factory', () => {
         .toThrow('existing assistant-work-items intake evaluation is disabled')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
+
+  linuxRunnerTest('allows upgradeExistingOwner when assistant-memory-learning has disabled: true with owner config, while keeping !upgradeExistingOwner and foreign configs fail-closed', async () => {
+    const { root, input } = await fixture()
+    try {
+      const initial = createRsiBootstrapManifest(input)
+      const compiled = await compileRsiProfiles({
+        manifest: initial, dshHome: input.dshHome, targetPatch: '[]\n',
+        targetEffective: input.targetEffective, coordinatorPatch: '[]\n',
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner,
+      })
+      const effectiveRows = parse(input.targetEffective) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+      const patchRows = parse(compiled.targetPatch) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+      const disabledActive = stringify(effectiveRows.map(row => {
+        const patched = patchRows.find(p => p.id === row.id)
+        const merged = patched ? { ...row, ...patched } : { ...row }
+        if (merged.id === 'dsh-enhanced-assistant-memory-learning') merged.disabled = true
+        return merged
+      }))
+
+      // !upgradeExistingOwner still fails closed
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: disabledActive }))
+        .toThrow('effective memory learner must be the installed unconfigured bundle')
+
+      // upgradeExistingOwner: true succeeds for matching owner config
+      const upgraded = createRsiBootstrapManifest({
+        ...input, targetEffective: disabledActive, upgradeExistingOwner: true,
+      })
+      const upgradedProfiles = await compileRsiProfiles({
+        manifest: upgraded, dshHome: input.dshHome, targetPatch: compiled.targetPatch,
+        targetEffective: disabledActive, coordinatorPatch: compiled.coordinatorPatch,
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner,
+        upgradeExistingOwner: true,
+      })
+      const finalRows = parse(upgradedProfiles.targetPatch) as Array<{ id: string; disabled?: boolean }>
+      expect(finalRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+
+      // Foreign config with disabled: true still fails closed even under upgradeExistingOwner: true
+      const foreignRows = parse(disabledActive) as Array<{ id: string; config?: Record<string, unknown> }>
+      foreignRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
+      expect(() => createRsiBootstrapManifest({
+        ...input, targetEffective: stringify(foreignRows), upgradeExistingOwner: true,
+      })).toThrow('existing memory learner config differs from frozen owner grant')
+
+      // disabled === undefined with config (after /autonomy disable -> /autonomy enable) succeeds on both bare retry and upgradeExistingOwner,
+      // while disabled === false without config remains rejected
+      const deletedDisabledRows = parse(disabledActive) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+      delete deletedDisabledRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.disabled
+      const deletedDisabledEffective = stringify(deletedDisabledRows)
+      await expect(compileRsiProfiles({
+        manifest: initial, dshHome: input.dshHome, targetPatch: compiled.targetPatch,
+        targetEffective: deletedDisabledEffective, coordinatorPatch: compiled.coordinatorPatch,
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner,
+      })).resolves.toMatchObject({ targetPatch: expect.any(String) })
+      await expect(compileRsiProfiles({
+        manifest: upgraded, dshHome: input.dshHome, targetPatch: compiled.targetPatch,
+        targetEffective: deletedDisabledEffective, coordinatorPatch: compiled.coordinatorPatch,
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner,
+        upgradeExistingOwner: true,
+      })).resolves.toMatchObject({ targetPatch: expect.any(String) })
+
+      const enabledWithoutConfigRows = parse(disabledActive) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+      const learnerNoConfig = enabledWithoutConfigRows.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!
+      learnerNoConfig.disabled = false
+      delete learnerNoConfig.config
+      await expect(compileRsiProfiles({
+        manifest: initial, dshHome: input.dshHome, targetPatch: compiled.targetPatch,
+        targetEffective: stringify(enabledWithoutConfigRows), coordinatorPatch: compiled.coordinatorPatch,
+        coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner,
+      })).rejects.toThrow('memory learner must be the inactive installed bundle or exact current learning configuration')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
 })

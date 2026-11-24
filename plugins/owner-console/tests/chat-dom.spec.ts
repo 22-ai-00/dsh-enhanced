@@ -1255,4 +1255,24 @@ describe('文鳐 dedicated assistant dialog & slot compatibility', () => {
     expect(postReplyRecoveries.every(node => node.querySelectorAll('button').length === 0)).toBe(true)
     expect(postReplyRecoveries[1]!.textContent).toContain('后续对话已恢复正常')
   })
+
+  it('dispatches concise NL self-iteration controls via runtime.controlSelfIteration while keeping ordinary messages on SessionFace.prompt', async () => {
+    const controlSelfIteration = vi.fn(async (action: string, confirmed: boolean) => ({
+      ok: true as const,
+      value: { ok: true, action: action as 'disableSelfIteration', state: 'disabled' as const, note: confirmed ? '已关闭自迭代' : '' },
+    }))
+    const fake = harness({ controlSelfIteration }, [])
+    await render(createElement(OwnerConsoleChat, { runtime: fake.runtime, onOpenSettings: vi.fn() }))
+
+    await fillMessage('关闭自迭代')
+    await click(byLabel('发送消息'))
+    expect(controlSelfIteration).toHaveBeenCalledExactlyOnceWith('disableSelfIteration', true)
+    expect(fake.prompt).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('已关闭整体自迭代能力')
+
+    await fillMessage('今天北京天气怎么样？')
+    await click(byLabel('发送消息'))
+    expect(controlSelfIteration).toHaveBeenCalledTimes(1)
+    expect(fake.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'text', text: '今天北京天气怎么样？' }], 'queue', undefined)
+  })
 })

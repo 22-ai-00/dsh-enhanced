@@ -1,15 +1,126 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { lstat, open, readFile, realpath, rename, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { type AssistantDeliveryService, DeliveryAdapterRegistryStoppedError } from '@dsh-enhanced/assistant-delivery'
+import {
+  type AssistantDeliveryService,
+  DeliveryAdapterRegistryStoppedError,
+  type OwnerSelfIterationControlRequest,
+  type OwnerSelfIterationControlResult,
+} from '@dsh-enhanced/assistant-delivery'
+import { isMap, isScalar, isSeq, parseDocument, type YAMLMap } from 'yaml'
 import { LarkDeliveryAdapter } from './adapter.js'
 import { Config } from './config.js'
 import { createOfficialLarkTransport, type OfficialLarkTransportOptions } from './sdk.js'
+import { withDshHomeLifecycleLock } from './setup.js'
 import type { LarkChannelHealth, LarkTransport } from './types.js'
+
+const execFileAsync = promisify(execFile)
+const requireOptionalPeer = createRequire(import.meta.url)
+
+const SELF_ITERATION_TOGGLE_SPECS = [
+  { rowId: 'dsh-enhanced-assistant-work-items', pkgName: '@dsh-enhanced/assistant-work-items' },
+  { rowId: 'dsh-enhanced-assistant-proactive', pkgName: '@dsh-enhanced/assistant-proactive' },
+  { rowId: 'dsh-enhanced-assistant-growth-driver', pkgName: '@dsh-enhanced/assistant-growth-driver' },
+  { rowId: 'dsh-enhanced-assistant-dreaming', pkgName: '@dsh-enhanced/assistant-dreaming' },
+  { rowId: 'dsh-enhanced-assistant-memory-learning', pkgName: '@dsh-enhanced/assistant-memory-learning' },
+  { rowId: 'dsh-enhanced-assistant-association', pkgName: '@dsh-enhanced/assistant-association' },
+  { rowId: 'dsh-enhanced-assistant-evaluation', pkgName: '@dsh-enhanced/assistant-evaluation' },
+  { rowId: 'dsh-enhanced-assistant-evolution', pkgName: '@dsh-enhanced/assistant-evolution' },
+  { rowId: 'dsh-enhanced-preference-learning', pkgName: '@dsh-enhanced/preference-learning' },
+] as const
+
+const SELF_ITERATION_TOGGLE_BY_ID = new Map<string, (typeof SELF_ITERATION_TOGGLE_SPECS)[number]>(
+  SELF_ITERATION_TOGGLE_SPECS.map(spec => [spec.rowId, spec]),
+)
+const SELF_ITERATION_TOGGLE_BY_PKG = new Map<string, (typeof SELF_ITERATION_TOGGLE_SPECS)[number]>(
+  SELF_ITERATION_TOGGLE_SPECS.map(spec => [spec.pkgName, spec]),
+)
+
+const PROTECTED_CONTROL_ROW_IDS = new Set([
+  'dsh-enhanced-assistant-web-owner',
+  'dsh-enhanced-owner-console',
+  'dsh-enhanced-lark-channel',
+  'dsh-enhanced-assistant-delivery',
+  'dsh-enhanced-personal-assistant',
+  'dsh-enhanced-assistant-policy',
+  'dsh-enhanced-assistant-goals',
+])
+
+const PROTECTED_CONTROL_PACKAGE_NAMES = new Set([
+  '@dsh-enhanced/assistant-web-owner',
+  '@dsh-enhanced/owner-console',
+  '@dsh-enhanced/lark-channel',
+  '@dsh-enhanced/assistant-delivery',
+  '@dsh-enhanced/personal-assistant',
+  '@dsh-enhanced/assistant-policy',
+  '@dsh-enhanced/assistant-goals',
+])
+
+const DREAMING_REQUIRED_STRING_FIELDS = ['provider', 'model', 'budgetId'] as const
+const DREAMING_REQUIRED_SCOPE_FIELDS = ['preset', 'principalId', 'ownerRouteId'] as const
+const DREAMING_MAX_BUDGET_AMOUNT = 10_000_000
+const PATCH_CUSTOM_TAGS = [
+  { tag: '!js', resolve: (value: string) => value },
+  { tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value },
+]
+
+function isYamlJsTag(tag: string | undefined): boolean {
+  return tag === '!js' || tag === 'tag:yaml.org,2002:js'
+}
+
+function isNonEmptyPlainStringNode(node: unknown): boolean {
+  if (isScalar(node)) {
+    if (isYamlJsTag(node.tag)) return false
+    return typeof node.value === 'string' && node.value.trim().length > 0
+  }
+  return typeof node === 'string' && node.trim().length > 0
+}
+
+function isCanonicalAbsolutePathOrJsNode(node: unknown): boolean {
+  if (isScalar(node)) {
+    if (isYamlJsTag(node.tag)) {
+      return typeof node.value === 'string' && node.value.trim().length > 0
+    }
+    const val = node.value
+    return typeof val === 'string' && val.length >= 1 && isAbsolute(val) && resolve(val) === val
+  }
+  return typeof node === 'string' && node.length >= 1 && isAbsolute(node) && resolve(node) === node
+}
+
+function hasDreamingRequiredFields(config: YAMLMap): boolean {
+  const scopeNode = config.get('scope', true)
+  if (!isMap(scopeNode)) return false
+  if (!isCanonicalAbsolutePathOrJsNode(scopeNode.get('workspace', true))) return false
+  for (const subKey of DREAMING_REQUIRED_SCOPE_FIELDS) {
+    if (!isNonEmptyPlainStringNode(scopeNode.get(subKey, true))) return false
+  }
+  if (!isCanonicalAbsolutePathOrJsNode(config.get('databasePath', true))) return false
+  for (const field of DREAMING_REQUIRED_STRING_FIELDS) {
+    if (!isNonEmptyPlainStringNode(config.get(field, true))) return false
+  }
+  const budgetNode = config.get('budgetAmount', true)
+  const budgetAmount = isScalar(budgetNode)
+    ? (isYamlJsTag(budgetNode.tag) ? undefined : budgetNode.value)
+    : budgetNode
+  return typeof budgetAmount === 'number'
+    && Number.isSafeInteger(budgetAmount)
+    && budgetAmount >= 1
+    && budgetAmount <= DREAMING_MAX_BUDGET_AMOUNT
+}
 
 export interface LarkChannelServiceOptions {
   env?: Readonly<Record<string, string | undefined>>
   createTransport?: (options: OfficialLarkTransportOptions) => LarkTransport
   writeLifecycleMarker?: (marker: LarkLifecycleMarker) => void
+  dshHome?: string
+  profile?: string
+  runUpgrade?: (
+    options: Readonly<{ dshHome: string; profile: string }>,
+  ) => Promise<OwnerSelfIterationControlResult>
 }
 
 export type LarkLifecycleMarker = 'lark-channel: connected' | 'lark-channel: disconnected'
@@ -109,6 +220,11 @@ export class LarkChannelService extends Service {
     }
     const createTransport = options.createTransport ?? createOfficialLarkTransport
     const lifecycleMarker = options.writeLifecycleMarker ?? writeLarkLifecycleMarker
+    if (typeof (delivery as { registerOwnerSelfIterationHandler?: unknown }).registerOwnerSelfIterationHandler === 'function') {
+      ctx.effect(() => delivery.registerOwnerSelfIterationHandler!(
+        request => this.handleOwnerSelfIterationControl(ctx, delivery, request, options),
+      ), 'lark-channel.self-iteration-control')
+    }
     if (config.credentialHandle !== undefined) {
       const credentials = ctx.get('credentialsKeychain') as CredentialLeaseService | undefined
       if (credentials === undefined) {
@@ -292,6 +408,279 @@ export class LarkChannelService extends Service {
   private assertCalendarAccess(calendarId: string): void {
     if (!this.allowedCalendarIds.has(calendarId)) {
       throw new Error('lark-channel: Calendar ID is not explicitly authorized')
+    }
+  }
+
+  private async handleOwnerSelfIterationControl(
+    ctx: Context,
+    delivery: AssistantDeliveryService,
+    request: Readonly<OwnerSelfIterationControlRequest>,
+    options: LarkChannelServiceOptions,
+  ): Promise<OwnerSelfIterationControlResult> {
+    const ownerConsole = ctx.get('ownerConsole' as never) as Readonly<{
+      controlSelfIteration?: (
+        action: OwnerSelfIterationControlRequest['action'],
+        confirmed: boolean,
+      ) => Promise<Readonly<{
+        ok: boolean
+        state?: 'enabled' | 'disabled' | 'upgraded'
+        error?: string
+        reason?: string
+        note?: string
+        message?: string
+      }>>
+      handleControlAction?: (req: Readonly<Record<string, unknown>>) => Promise<OwnerSelfIterationControlResult>
+    }> | undefined
+    if (typeof ownerConsole?.controlSelfIteration === 'function') {
+      const result = await ownerConsole.controlSelfIteration(request.action, true)
+      const message = result.note ?? result.message
+      return {
+        ok: result.ok,
+        ...(result.state === undefined ? {} : { state: result.state }),
+        ...(result.error === undefined ? {} : { error: result.error }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
+        ...(message === undefined ? {} : { message }),
+      }
+    }
+    if (typeof ownerConsole?.handleControlAction === 'function') {
+      return await ownerConsole.handleControlAction(Object.freeze({
+        ownerAuthorized: true,
+        action: request.action,
+      }))
+    }
+    const env = options.env ?? process.env
+    const reloadProfilePath = (delivery as unknown as { config?: { inProcessReload?: { profilePath?: string } } })
+      .config?.inProcessReload?.profilePath
+    const inferred = typeof reloadProfilePath === 'string' && isAbsolute(reloadProfilePath)
+      && basename(dirname(reloadProfilePath)) === 'profiles'
+      ? { dshHome: dirname(dirname(reloadProfilePath)), profile: basename(reloadProfilePath) }
+      : undefined
+    const dshHome = options.dshHome ?? env.DSH_HOME ?? inferred?.dshHome
+    const profile = options.profile ?? env.DSH_PROFILE ?? inferred?.profile
+    if (!dshHome || !isAbsolute(dshHome) || !profile || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)) {
+      return {
+        ok: false,
+        error: '未配置有效的 DSH_HOME 或 profile，且当前未加载 ownerConsole；本次自迭代控制未执行。',
+        reason: 'control-target-unconfigured',
+      }
+    }
+    if (request.action === 'enableSelfIteration' || request.action === 'disableSelfIteration') {
+      return await applySelfIterationProfileToggle({
+        dshHome,
+        profile,
+        enable: request.action === 'enableSelfIteration',
+      })
+    }
+    if (typeof options.runUpgrade === 'function') {
+      return await options.runUpgrade({ dshHome, profile })
+    }
+    return await runDefaultAssistantUpgrade({ dshHome, profile, env })
+  }
+}
+
+async function atomicWriteControlPatch(path: string, value: string): Promise<void> {
+  const temporary = join(dirname(path),
+    `.cordis.patch.yml.lark-control-${process.pid}-${randomBytes(8).toString('hex')}`)
+  let created = false
+  try {
+    const file = await open(temporary, 'wx', 0o600)
+    created = true
+    try {
+      await file.chmod(0o600)
+      await file.writeFile(value, 'utf8')
+      await file.sync()
+    } finally {
+      await file.close()
+    }
+    await rename(temporary, path)
+    const dir = await open(dirname(path), 'r')
+    try { await dir.sync() }
+    finally { await dir.close() }
+  } catch (error) {
+    if (created) await rm(temporary, { force: true })
+    throw error
+  }
+}
+
+async function assertRealNonSymlinkDirectory(targetPath: string, label: string): Promise<void> {
+  const st = await lstat(targetPath)
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(`${label} 必须是真实目录（禁止符号链接）：${targetPath}`)
+  }
+}
+
+async function assertRealNonSymlinkFile(targetPath: string, label: string): Promise<void> {
+  const st = await lstat(targetPath)
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`${label} 必须是普通文件（禁止符号链接）：${targetPath}`)
+  }
+}
+
+/** Toggle Contract 1 self-iteration rows in `cordis.patch.yml` while leaving protected rows & ownerRoutes intact. */
+export async function applySelfIterationProfileToggle(input: Readonly<{
+  dshHome: string
+  profile: string
+  enable: boolean
+}>): Promise<OwnerSelfIterationControlResult> {
+  if (!isAbsolute(input.dshHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile)) {
+    return { ok: false, error: '无效的 dshHome 或 profile。', reason: 'invalid-target' }
+  }
+  const resolvedHome = resolve(input.dshHome)
+  try {
+    await assertRealNonSymlinkDirectory(resolvedHome, 'dshHome')
+    const canonicalHome = await realpath(resolvedHome)
+    return await withDshHomeLifecycleLock(canonicalHome, async () => {
+      const profilesDir = join(canonicalHome, 'profiles')
+      await assertRealNonSymlinkDirectory(profilesDir, 'profiles 目录')
+      const profileDir = join(profilesDir, input.profile)
+      await assertRealNonSymlinkDirectory(profileDir, `profile 目录 (${input.profile})`)
+      const patchPath = join(profileDir, 'cordis.patch.yml')
+      await assertRealNonSymlinkFile(patchPath, 'cordis.patch.yml')
+      const source = await readFile(patchPath, 'utf8')
+      const document = parseDocument(source, { uniqueKeys: true, customTags: PATCH_CUSTOM_TAGS })
+      if (document.errors.length > 0 || !isSeq(document.contents)) {
+        return { ok: false, error: '目标 profile 的 cordis.patch.yml 格式无效，已中止修改。', reason: 'invalid-patch' }
+      }
+      const rowsToToggle: Array<{ row: YAMLMap; rowId: string }> = []
+      const seen = new Set<YAMLMap>()
+      const collectRow = (candidate: unknown) => {
+        if (!isMap(candidate) || seen.has(candidate)) return
+        const id = candidate.get('id')
+        const name = candidate.get('name')
+        if (typeof id === 'string' && PROTECTED_CONTROL_ROW_IDS.has(id)) return
+        if (typeof name === 'string' && PROTECTED_CONTROL_PACKAGE_NAMES.has(name)) return
+        const spec = (typeof id === 'string' ? SELF_ITERATION_TOGGLE_BY_ID.get(id) : undefined)
+          ?? (typeof name === 'string' ? SELF_ITERATION_TOGGLE_BY_PKG.get(name) : undefined)
+        if (spec === undefined) return
+        seen.add(candidate)
+        rowsToToggle.push({ row: candidate, rowId: spec.rowId })
+      }
+      for (const item of document.contents.items) {
+        collectRow(item)
+        if (isMap(item)) {
+          const inserted = item.get('insert', true)
+          if (isSeq(inserted)) {
+            for (const sub of inserted.items) collectRow(sub)
+          }
+        }
+      }
+      let updatedCount = 0
+      for (const { row, rowId } of rowsToToggle) {
+        updatedCount += 1
+        const cfg = row.get('config', true)
+        if (input.enable) {
+          row.delete('disabled')
+          if (isMap(cfg)) {
+            const cfgMap = cfg as YAMLMap
+            if (rowId === 'dsh-enhanced-assistant-dreaming') {
+              if (hasDreamingRequiredFields(cfgMap)) {
+                cfgMap.set('enabled', true)
+              }
+              if (cfgMap.has('retired')) {
+                cfgMap.delete('retired')
+              }
+            } else if (cfgMap.get('enabled') === false || rowId === 'dsh-enhanced-assistant-work-items') {
+              cfgMap.set('enabled', true)
+            }
+          } else if (rowId === 'dsh-enhanced-assistant-work-items') {
+            row.set('config', document.createNode({ enabled: true }))
+          }
+        } else {
+          row.set('disabled', true)
+          if (isMap(cfg)) {
+            if (rowId === 'dsh-enhanced-assistant-work-items' || cfg.has('enabled')) {
+              (cfg as YAMLMap).set('enabled', false)
+            }
+          } else if (rowId === 'dsh-enhanced-assistant-work-items') {
+            row.set('config', document.createNode({ enabled: false }))
+          }
+        }
+      }
+      if (updatedCount === 0) {
+        return { ok: false, error: '目标 profile 中未找到可切换的自迭代组件配置。', reason: 'no-toggle-targets' }
+      }
+      await assertRealNonSymlinkFile(patchPath, 'cordis.patch.yml')
+      await atomicWriteControlPatch(patchPath, document.toString({ lineWidth: 0 }))
+      return {
+        ok: true,
+        state: input.enable ? 'enabled' : 'disabled',
+        message: input.enable
+          ? `已开启 profile ${input.profile} 的自迭代能力（更新 ${updatedCount} 项配置，受保护交互与路由保持不变）。`
+          : `已关闭 profile ${input.profile} 的自迭代能力（更新 ${updatedCount} 项配置，受保护交互与路由保持可用）。`,
+      }
+    })
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      reason: 'toggle-failed',
+    }
+  }
+}
+
+async function runDefaultAssistantUpgrade(input: Readonly<{
+  dshHome: string
+  profile: string
+  env: Readonly<Record<string, string | undefined>>
+}>): Promise<OwnerSelfIterationControlResult> {
+  try {
+    const cliPath = requireOptionalPeer.resolve('@dsh-enhanced/dsh-rsi-cli')
+    const cliMod = await import(cliPath) as {
+      upgradeAssistantAndRecover?: (opts: Record<string, unknown>) => Promise<{
+        ok: boolean
+        healthy?: boolean
+        upgraded?: boolean
+        restarted?: boolean
+        error?: string
+      }>
+    }
+    if (typeof cliMod.upgradeAssistantAndRecover === 'function') {
+      const outcome = await cliMod.upgradeAssistantAndRecover({
+        dshHome: input.dshHome,
+        profile: input.profile,
+        yes: true,
+        env: input.env,
+      })
+      if (outcome.ok && outcome.healthy !== false) {
+        return {
+          ok: true,
+          state: 'upgraded',
+          message: `已完成 profile ${input.profile} 的整体助手升级、健康检查与恢复。`,
+        }
+      }
+      return {
+        ok: false,
+        error: outcome.error ?? '升级或健康检查未通过，服务未处于健康就绪状态。',
+        reason: 'upgrade-unhealthy',
+      }
+    }
+  } catch {
+    // Fall back to invoking `dsh-rsi` CLI executable when programmatic import is unavailable.
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      'dsh-rsi',
+      ['upgrade', '--profile', input.profile, '--dsh-home', input.dshHome, '--yes', '--json'],
+      { env: input.env as NodeJS.ProcessEnv, timeout: 120_000 },
+    )
+    const parsed = JSON.parse(stdout.trim() || '{}') as { ok?: boolean; healthy?: boolean; error?: string }
+    if (parsed.ok === true && parsed.healthy !== false) {
+      return {
+        ok: true,
+        state: 'upgraded',
+        message: `已完成 profile ${input.profile} 的整体助手升级、健康检查与恢复。`,
+      }
+    }
+    return {
+      ok: false,
+      error: parsed.error ?? 'dsh-rsi upgrade 未返回健康就绪状态。',
+      reason: 'upgrade-failed',
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      reason: 'upgrade-command-failed',
     }
   }
 }

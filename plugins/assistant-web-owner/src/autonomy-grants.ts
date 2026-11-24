@@ -998,7 +998,9 @@ function resolveExistingModuleState(patchState: ProfileBundleState, effectiveSta
   const growthCfg = mergedRowConfig(patchState, effectiveState, 'dsh-enhanced-assistant-growth-driver').config
   const growth = growthCfg.enabled === true
   const usageLearning = asPlainObject(growthCfg.usageLearning)?.enabled === true
-  const workItemExperiences = learningCfg?.workItemExperiences === true
+  const workItemExperiences = typeof learningCfg?.authorityId === 'string'
+    ? learningCfg.workItemExperiences !== false
+    : learningCfg?.workItemExperiences === true
 
   return { memoryLearning, dreaming, growth, usageLearning, workItemExperiences }
 }
@@ -1230,7 +1232,7 @@ export function compileWebOwnerAutonomyGrants(
       adoptionAuthorityId,
       adoptionGrantDigest,
       model: modelCheck.route,
-      ...(workItemExperiences ? { workItemExperiences: true } : {}),
+      workItemExperiences,
     })
 
     const memoryPolicy = validators.policy.buildWebOwnerMemoryPolicyGrants({
@@ -1452,7 +1454,7 @@ export function compileWebOwnerAutonomyGrants(
       verifierCfgMap.set('profiles', plainNode(Array.isArray(mergedVerifierCfg.profiles) ? mergedVerifierCfg.profiles : []))
     }
     if (!verifierCfgMap.has('requireAcceptance')) {
-      verifierCfgMap.set('requireAcceptance', plainNode(typeof mergedVerifierCfg.requireAcceptance === 'boolean' ? mergedVerifierCfg.requireAcceptance : false))
+      verifierCfgMap.set('requireAcceptance', plainNode(typeof mergedVerifierCfg.requireAcceptance === 'boolean' ? mergedVerifierCfg.requireAcceptance : true))
     }
     if (compiledReviews) {
       verifierCfgMap.set('memoryReviews', plainNode(compiledReviews))

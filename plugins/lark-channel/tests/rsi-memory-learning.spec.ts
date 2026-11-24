@@ -8,13 +8,14 @@ const owner: MemoryLearningOwner = { authorityId: 'owner-route', authorityHash: 
 
 function setup(): RsiMemoryLearningSetup {
   const reviews = { authorityId: 'memory-review', owner, expiresAt: 300_000, maxReviews: 3,
+    workItemExperiences: true,
     policy: 'Independently check evidence.', maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 1000 }
   const adoption = { authorityId: 'memory-adopt', owner, reviewAuthorityId: reviews.authorityId,
     reviewAuthorityDigest: growthObjectDigest(reviews), expiresAt: 300_000, maxMutations: 3,
-    maxTotalContentBytes: 8192, maxRecordTtlMs: 60_000,
+    maxTotalContentBytes: 8192, maxRecordTtlMs: 60_000, workItemExperiences: true,
     kinds: ['fact', 'experience'] as const, operations: ['add', 'replace', 'remove'] as const }
   return { learning: { databasePath: '/tmp/rsi-memory.sqlite', authorityId: 'memory-extract', owner,
-    expiresAt: 200_000, maxExtractions: 3, maxPending: 2, lookbackMs: 60_000,
+    expiresAt: 200_000, maxExtractions: 3, maxPending: 2, lookbackMs: 60_000, workItemExperiences: true,
     policy: 'Extract owner evidence only.', maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 1000,
     budgetId: 'memory-extract-budget', budgetAmount: 1, scanBudgetId: 'memory-scan-budget', scanBudgetAmount: 1,
     reviewAuthorityId: reviews.authorityId, reviewAuthorityDigest: growthObjectDigest(reviews),
@@ -73,9 +74,14 @@ describe('RSI memory learning setup admission', () => {
   })
 
   test('adds the work-item experience flag consistently to the learning, review and adoption grants', () => {
-    const legacy = createRsiMemoryLearningSetup({ installationId: 'legacy', stateRoot: '/tmp/state',
+    const defaulted = createRsiMemoryLearningSetup({ installationId: 'defaulted', stateRoot: '/tmp/state',
       owner, now: 100_000, expiresAt: 300_000 })
-    for (const grant of [legacy.learning, legacy.reviews, legacy.adoption]) expect(grant).not.toHaveProperty('workItemExperiences')
+    for (const grant of [defaulted.learning, defaulted.reviews, defaulted.adoption]) expect(grant.workItemExperiences).toBe(true)
+    const optedOut = createRsiMemoryLearningSetup({ installationId: 'opted-out', stateRoot: '/tmp/state',
+      owner, now: 100_000, expiresAt: 300_000, workItemExperiences: false })
+    expect(optedOut.learning.workItemExperiences).toBe(false)
+    for (const grant of [optedOut.reviews, optedOut.adoption]) expect(grant).not.toHaveProperty('workItemExperiences')
+    expect(validateRsiMemoryLearningSetup(structuredClone(optedOut), owner, 100_000)).toEqual(optedOut)
     const optedIn = createRsiMemoryLearningSetup({ installationId: 'opted-in', stateRoot: '/tmp/state',
       owner, now: 100_000, expiresAt: 300_000, workItemExperiences: true })
     expect(optedIn.learning.workItemExperiences).toBe(true)

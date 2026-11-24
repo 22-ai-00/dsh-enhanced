@@ -265,6 +265,10 @@ describe('web-owner RSI autonomy grants', () => {
       { readEffectiveSource: () => f.effective },
     )
     expect(second.grants.patch).toBe(first.grants.patch)
+    expect(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-memory-learning').workItemExperiences).toBe(false)
+    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-verifier').memoryReviews, 'workItemExperiences')).toBe(false)
+    expect(Object.hasOwn(rowConfig(first.grants.patch, 'dsh-enhanced-personal-assistant').personalMemory.automaticLearning, 'workItemExperiences')).toBe(false)
+    expect(rowConfig(first.grants.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(true)
 
     // Pause dreaming without mentioning memoryLearning/growth -> preserves both and retains dream.* foreground rules.
     const paused = await applyWebOwnerAutonomySetup(
@@ -516,5 +520,46 @@ describe('web-owner RSI autonomy grants', () => {
     expect(deliveryCfg.databasePath).toBeTruthy()
     expect(deliveryCfg.spoolPath).toBeTruthy()
     expect(Array.isArray(deliveryCfg.ownerRoutes) && deliveryCfg.ownerRoutes.length > 0).toBe(true)
+  })
+
+  test('defaults assistant-verifier requireAcceptance to true while preserving explicit false opt-out', async () => {
+    const f = await createWebAutonomyFixture()
+    const effDoc = parseDocument(f.effective, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] })
+    const effRows = effDoc.toJS() as Array<{ id?: string; config?: Record<string, unknown> }>
+    const verifierIdx = effRows.findIndex(r => r.id === 'dsh-enhanced-assistant-verifier')
+    if (verifierIdx >= 0) {
+      effDoc.deleteIn([verifierIdx, 'config', 'requireAcceptance'])
+    }
+    const verifierWithoutFlagEffective = effDoc.toString()
+    const basePatch = [
+      '- id: dsh-enhanced-assistant-web-owner',
+      '  name: "@dsh-enhanced/assistant-web-owner"',
+      '  config:',
+      '    principal: { account: web, tenant: local, user: operator }',
+      `    workspace: ${f.workspace}`,
+      '    preset: standard',
+      '',
+    ].join('\n')
+    const compiledDefault = compileWebOwnerAutonomyGrants(
+      { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
+      basePatch,
+      verifierWithoutFlagEffective,
+    )
+    expect(rowConfig(compiledDefault.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(true)
+
+    const optOutPatch = [
+      basePatch.trimEnd(),
+      '- id: dsh-enhanced-assistant-verifier',
+      '  name: "@dsh-enhanced/assistant-verifier"',
+      '  config:',
+      '    requireAcceptance: false',
+      '',
+    ].join('\n')
+    const compiledOptOut = compileWebOwnerAutonomyGrants(
+      { dshHome: f.dshHome, profile: 'web', memoryLearning: true, dailyBudget: 4 },
+      optOutPatch,
+      verifierWithoutFlagEffective,
+    )
+    expect(rowConfig(compiledOptOut.patch, 'dsh-enhanced-assistant-verifier').requireAcceptance).toBe(false)
   })
 })

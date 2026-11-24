@@ -95,7 +95,7 @@ export function createRsiMemoryLearningSetup(input: {
 }): RsiMemoryLearningSetup {
   const { installationId: installation, stateRoot: state, owner, now, expiresAt } = input
   const day = 86_400_000
-  const workItemExperiences = input.workItemExperiences === true
+  const workItemExperiences = input.workItemExperiences ?? true
   const experience = workItemExperiences ? { workItemExperiences: true as const } : {}
   const { validateLearningConfig, validateMemoryReviewConfig, validateMemoryLearningAdoptionGrant } = getRsiMemoryLearningValidators()
   const memoryReview = validateMemoryReviewConfig({ authorityId: `memory-review-${installation}`,
@@ -110,7 +110,7 @@ export function createRsiMemoryLearningSetup(input: {
   return validateRsiMemoryLearningSetup({
     learning: validateLearningConfig({ databasePath: join(state, 'memory-learning.sqlite'),
       authorityId: `memory-extract-${installation}`, owner: owner, expiresAt: expiresAt,
-      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day, ...experience,
+      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day, workItemExperiences,
       policy: 'Extract only explicit owner facts or experience grounded in a trusted owner objective and canonical outcome. Do not infer success from a reply. Prefer noop when evidence is insufficient.',
       maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000,
       budgetId: `rsi-memory-learning-${installation}`, budgetAmount: 1,

@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { PurgeError } from './purge.ts'
 import { prepareHostUpdatePlan, prepareInstallHostEnvironment } from './install-host.ts'
 import { resolveDshHome, TRANSACTION_SUFFIX } from './paths.ts'
+import { formatUpgradeReport, runUpgrade } from './upgrade.ts'
 
 const INSTALL_BASE_URL = 'https://raw.githubusercontent.com/22-ai-00/dsh-enhanced'
 const DEFAULT_PENDING_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -20,6 +21,7 @@ export interface InstallExecutor {
    * prepares or verifies the Home-bound runtime before invoking the installer. */
   prepareHost?: typeof prepareInstallHostEnvironment
   prepareHostUpdate?: typeof prepareHostUpdatePlan
+  runTransactionalUpgrade?: typeof runUpgrade
   download: (url: string) => Promise<string>
   runInherited: (
     command: string,
@@ -31,6 +33,7 @@ export interface InstallExecutor {
 export const defaultExecutor: InstallExecutor = {
   prepareHost: prepareInstallHostEnvironment,
   prepareHostUpdate: prepareHostUpdatePlan,
+  runTransactionalUpgrade: runUpgrade,
   async download(url: string): Promise<string> {
     const response = await fetch(url, { redirect: 'follow' })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -240,11 +243,28 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
         process.stdout.write('现有 Home 未绑定私有 Host；保留当前 Host，仅升级插件集合。\n')
       } else {
         const plan = await executor.prepareHostUpdate({ dshHome: home, selector })
-        if (plan.originalRuntime.version.startsWith('0.1.') && plan.candidateRuntime.version.startsWith('0.2.')) {
-          throw new PurgeError('DSH 0.1 → 0.2 跨 ABI 自动升级尚未支持；未修改原 Home 或插件。请保留原安装，在新的 DSH_HOME 中安装并验证新版，勿先替换旧 profile 的插件。')
-        }
-        if (process.platform === 'darwin' && plan.status === 'update') {
-          throw new PurgeError('macOS 尚不支持受管 Host 跨版本更新；未修改原 Home 或插件。请保留当前 Host，或在新的 DSH_HOME 中安装并验证目标版本。')
+        const isCrossAbi = plan.originalRuntime.version.startsWith('0.1.') && plan.candidateRuntime.version.startsWith('0.2.')
+        const isMacHostUpdate = process.platform === 'darwin' && plan.status === 'update'
+        if (isCrossAbi || isMacHostUpdate) {
+          const upgradeFn = executor.runTransactionalUpgrade ?? runUpgrade
+          const targetProfile = value('--profile')
+          const { report, exitCode } = await upgradeFn({
+            dshHome: home,
+            ...(targetProfile !== undefined ? { profile: targetProfile } : {}),
+            action: 'apply',
+            dshVersion: plan.candidateRuntime.version,
+            confirmDshHomeStopped: passthrough.includes('--confirm-dsh-home-stopped'),
+            allowNonEmptyHistoryMigration: passthrough.includes('--allow-non-empty-history-migration'),
+            platform: process.platform,
+            env,
+          })
+          process.stdout.write(formatUpgradeReport(report))
+          if (exitCode !== 0 || !report.ok) {
+            throw new PurgeError(
+              report.execution?.error ?? report.readiness.blockedReasons[0] ?? '受管 Host 事务升级失败。',
+            )
+          }
+          return 0
         }
         env = { ...env, DSH_ENHANCED_HOST_SELECTOR_VALIDATED: '1' }
         if (plan.status === 'update') {

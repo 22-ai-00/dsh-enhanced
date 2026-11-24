@@ -57,8 +57,10 @@ function inside(base: string, path: string): boolean {
   return part === '' || (part !== '..' && !part.startsWith(`..${sep}`) && !isAbsolute(part))
 }
 export function isSupportedReceiptVersion(version: string): boolean {
-  const match = /^0\.1\.5(?:-rc\.([0-9]{1,6}))?$/u.exec(version)
-  return (version === '0.2.0-rc.2' || version === '0.2.1-rc.2' || version === '0.2.2-rc.1' || version === '0.2.2-rc.3' || version === '0.2.2-rc.5') || match !== null && (match[1] === undefined || Number(match[1]) >= 3)
+  const match15 = /^0\.1\.5(?:-rc\.([0-9]{1,6}))?$/u.exec(version)
+  if (match15 !== null) return match15[1] === undefined || Number(match15[1]) >= 3
+  if (/^0\.1\.(?:[6-9]|[1-9]\d{1,5})(?:-rc\.[0-9]{1,6})?$/u.test(version)) return true
+  return version === '0.2.0-rc.2' || version === '0.2.1-rc.2' || version === '0.2.2-rc.1' || version === '0.2.2-rc.3' || version === '0.2.2-rc.5'
 }
 export function isSupportedCandidateVersion(version: string): boolean {
   return version === '0.2.2-rc.5'

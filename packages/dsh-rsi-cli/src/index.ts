@@ -1,9 +1,10 @@
 import { homedir } from 'node:os'
-import { lstat, open, readdir, realpath } from 'node:fs/promises'
+import { chmod, lstat, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
+import { isMap, isScalar, isSeq, parseDocument, type Document, type YAMLMap } from 'yaml'
 import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus } from './diagnose.ts'
 import { collectLiveDoctorReport, formatLiveDoctorReport } from './doctor-live.ts'
@@ -14,10 +15,19 @@ import {
   parseGrowthSince,
 } from './growth-report.ts'
 import { openWebProfile } from './open.ts'
-import { formatUpgradeReport, runUpgrade, validateRegistryUrl, type UpgradeAction, type UpgradeDeps } from './upgrade.ts'
-import { resolveDshHome } from './paths.ts'
+import {
+  defaultVerifyHealth,
+  formatUpgradeReport,
+  runUpgrade,
+  validateRegistryUrl,
+  type UpgradeAction,
+  type UpgradeDeps,
+  type UpgradeReport,
+} from './upgrade.ts'
+import { profilesDirectory, resolveDshHome, systemdUnitName } from './paths.ts'
 import { hasPendingHostRecovery, runInstall } from './install.ts'
-import { findRunningProfiles } from './run.ts'
+import { inspectLaunchdDefinition, inspectLoadedLaunchd } from './launchd-service.ts'
+import { defaultRunner, findRunningProfiles, type CommandRunner } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import { assertFrozenCliUpdateVersion, assertFrozenUpdateArgs, detectFrozenOwner, runFrozenOwnerUpdate } from './program-update.ts'
 import { formatWebUrlResult, resolveManagedWebUrl, waitForManagedWebUrl } from './weburl.ts'
@@ -26,6 +36,7 @@ import {
   controlManagedService,
   formatLogs,
   formatServiceOutcomes,
+  inspectManagedServiceForDshHome,
   managedServiceProcessIds,
   resolveTargetProfiles,
   type ServiceAction,
@@ -87,6 +98,536 @@ export {
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 
+export interface UpgradeAndRecoverOptions {
+  readonly dshHome: string
+  readonly profile?: string
+  readonly yes?: boolean
+  readonly dryRun?: boolean
+  readonly dshVersion?: string
+  readonly targetVersion?: string
+  readonly registryUrl?: string
+  readonly allowNonEmptyHistoryMigration?: boolean
+  readonly confirmDshHomeStopped?: boolean
+  readonly platform?: NodeJS.Platform
+  readonly osHome?: string
+  readonly env?: NodeJS.ProcessEnv
+}
+
+export interface UpgradeAndRecoverDeps {
+  readonly runUpgrade?: (opts: Record<string, unknown>) => Promise<{ ok: boolean; ready?: boolean; error?: string; [k: string]: unknown }>
+  readonly runDoctor?: (opts: Record<string, unknown>) => Promise<{ ok: boolean; ready?: boolean; error?: string; [k: string]: unknown }>
+  readonly restartService?: (opts: Record<string, unknown>) => Promise<{ ok: boolean; restarted?: boolean; error?: string; [k: string]: unknown }>
+}
+
+const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+
+const TOGGLEABLE_SELF_ITERATION_SLUGS = new Set([
+  'assistant-work-items',
+  'assistant-proactive',
+  'assistant-growth-driver',
+  'assistant-dreaming',
+  'assistant-memory-learning',
+  'assistant-association',
+  'assistant-evaluation',
+  'assistant-evolution',
+  'preference-learning',
+])
+
+const PROTECTED_SELF_ITERATION_SLUGS = new Set([
+  'assistant-web-owner',
+  'owner-console',
+  'lark-channel',
+  'assistant-delivery',
+  'personal-assistant',
+  'assistant-policy',
+  'assistant-goals',
+])
+
+const DREAMING_REQUIRED_STRING_FIELDS = [
+  'provider',
+  'model',
+  'budgetId',
+] as const
+
+const DREAMING_REQUIRED_SCOPE_FIELDS = [
+  'preset',
+  'principalId',
+  'ownerRouteId',
+] as const
+
+const DREAMING_MAX_BUDGET_AMOUNT = 10_000_000
+
+function isYamlJsTag(tag: string | undefined): boolean {
+  return tag === '!js' || tag === 'tag:yaml.org,2002:js'
+}
+
+function isNonEmptyPlainStringNode(node: unknown): boolean {
+  if (isScalar(node)) {
+    if (isYamlJsTag(node.tag)) return false
+    return typeof node.value === 'string' && node.value.trim().length > 0
+  }
+  return typeof node === 'string' && node.trim().length > 0
+}
+
+function isCanonicalAbsolutePathOrJsNode(node: unknown): boolean {
+  if (isScalar(node)) {
+    if (isYamlJsTag(node.tag)) {
+      return typeof node.value === 'string' && node.value.trim().length > 0
+    }
+    const val = node.value
+    return typeof val === 'string' && val.length >= 1 && isAbsolute(val) && resolve(val) === val
+  }
+  return typeof node === 'string' && node.length >= 1 && isAbsolute(node) && resolve(node) === node
+}
+
+function extractPatchRowSlug(row: YAMLMap): { id?: string; slug?: string } {
+  const rawId = row.get('id')
+  const rawName = row.get('name')
+  const id = typeof rawId === 'string' ? rawId : undefined
+  const name = typeof rawName === 'string' ? rawName : undefined
+  if (name && name.startsWith('@dsh-enhanced/')) {
+    return { ...(id ? { id } : {}), slug: name.slice('@dsh-enhanced/'.length) }
+  }
+  if (id && id.startsWith('dsh-enhanced-')) {
+    return { id, slug: id.slice('dsh-enhanced-'.length) }
+  }
+  return id ? { id } : {}
+}
+
+function dreamingHasAllRequiredFields(config: YAMLMap): boolean {
+  const scopeNode = config.get('scope', true)
+  if (!isMap(scopeNode)) return false
+  if (!isCanonicalAbsolutePathOrJsNode(scopeNode.get('workspace', true))) return false
+  for (const subKey of DREAMING_REQUIRED_SCOPE_FIELDS) {
+    if (!isNonEmptyPlainStringNode(scopeNode.get(subKey, true))) return false
+  }
+  if (!isCanonicalAbsolutePathOrJsNode(config.get('databasePath', true))) return false
+  for (const field of DREAMING_REQUIRED_STRING_FIELDS) {
+    if (!isNonEmptyPlainStringNode(config.get(field, true))) return false
+  }
+  const budgetNode = config.get('budgetAmount', true)
+  const budgetAmount = isScalar(budgetNode)
+    ? (isYamlJsTag(budgetNode.tag) ? undefined : budgetNode.value)
+    : budgetNode
+  return typeof budgetAmount === 'number'
+    && Number.isSafeInteger(budgetAmount)
+    && budgetAmount >= 1
+    && budgetAmount <= DREAMING_MAX_BUDGET_AMOUNT
+}
+
+function applySelfIterationRowToggle(doc: Document, row: YAMLMap, mode: 'enable' | 'disable'): string | undefined {
+  const { id, slug } = extractPatchRowSlug(row)
+  if (!slug || PROTECTED_SELF_ITERATION_SLUGS.has(slug) || !TOGGLEABLE_SELF_ITERATION_SLUGS.has(slug)) {
+    return undefined
+  }
+  if (mode === 'disable') {
+    row.set('disabled', true)
+    const config = row.get('config', true)
+    if (isMap(config)) {
+      if (slug === 'assistant-work-items' || config.has('enabled')) {
+        config.set('enabled', false)
+      }
+    } else if (slug === 'assistant-work-items') {
+      row.set('config', doc.createNode({ enabled: false }))
+    }
+  } else {
+    row.delete('disabled')
+    const config = row.get('config', true)
+    if (isMap(config)) {
+      if (slug === 'assistant-dreaming') {
+        if (dreamingHasAllRequiredFields(config)) config.set('enabled', true)
+        if (config.has('retired')) config.delete('retired')
+      } else if (config.get('enabled') === false || slug === 'assistant-work-items') {
+        config.set('enabled', true)
+      }
+    } else if (slug === 'assistant-work-items') {
+      row.set('config', doc.createNode({ enabled: true }))
+    }
+  }
+  return id ?? `dsh-enhanced-${slug}`
+}
+
+async function isValidPatchProfileDir(profileDir: string): Promise<boolean> {
+  const dirMeta = await lstat(profileDir).catch(() => undefined)
+  if (!dirMeta || !dirMeta.isDirectory() || dirMeta.isSymbolicLink()) return false
+  for (const marker of ['package.json', 'cordis.patch.yml']) {
+    const markerMeta = await lstat(join(profileDir, marker)).catch(() => undefined)
+    if (markerMeta && markerMeta.isFile() && !markerMeta.isSymbolicLink()) return true
+  }
+  return false
+}
+
+async function resolveToggleTargetProfiles(dshHome: string, requestedProfile?: string): Promise<string[]> {
+  const profilesDir = profilesDirectory(dshHome)
+  const profilesMeta = await lstat(profilesDir).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new PurgeError(`${dshHome} 下没有任何 profile`)
+    }
+    throw error
+  })
+  if (!profilesMeta.isDirectory() || profilesMeta.isSymbolicLink()) {
+    throw new PurgeError(`profiles 目录非普通目录：${profilesDir}`)
+  }
+  if (requestedProfile !== undefined) {
+    if (!PROFILE_NAME_RE.test(requestedProfile)) {
+      throw new PurgeError(`非法的 profile 名称：${requestedProfile}`)
+    }
+    const profileDir = join(profilesDir, requestedProfile)
+    if (!(await isValidPatchProfileDir(profileDir))) {
+      throw new PurgeError(`指定 profile 不存在：${requestedProfile}`)
+    }
+    return [requestedProfile]
+  }
+  let entries: string[]
+  try {
+    entries = await readdir(profilesDir)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new PurgeError(`${dshHome} 下没有任何 profile`)
+    }
+    throw error
+  }
+  const found: string[] = []
+  for (const entry of entries.sort()) {
+    if (entry.startsWith('.') || entry === 'node_modules' || !PROFILE_NAME_RE.test(entry)) continue
+    if (await isValidPatchProfileDir(join(profilesDir, entry))) found.push(entry)
+  }
+  if (found.length === 0) {
+    throw new PurgeError(`${dshHome} 下没有任何 profile`)
+  }
+  return found
+}
+
+async function toggleSelfIterationForProfile(
+  dshHome: string,
+  profile: string,
+  mode: 'enable' | 'disable',
+  dryRun: boolean,
+): Promise<readonly string[]> {
+  const profilesDir = profilesDirectory(dshHome)
+  const profilesMeta = await lstat(profilesDir).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new PurgeError(`profile ${profile} 缺少 profiles 目录：${profilesDir}`)
+    }
+    throw error
+  })
+  if (!profilesMeta.isDirectory() || profilesMeta.isSymbolicLink()) {
+    throw new PurgeError(`profiles 目录非普通目录：${profilesDir}`)
+  }
+  const profileDir = join(profilesDir, profile)
+  const profileMeta = await lstat(profileDir).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new PurgeError(`profile ${profile} 不存在：${profileDir}`)
+    }
+    throw error
+  })
+  if (!profileMeta.isDirectory() || profileMeta.isSymbolicLink()) {
+    throw new PurgeError(`profile 目录非普通目录：${profileDir}`)
+  }
+  const patchPath = join(profileDir, 'cordis.patch.yml')
+  const patchMeta = await lstat(patchPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new PurgeError(`profile ${profile} 缺少 cordis.patch.yml：${patchPath}`)
+    }
+    throw error
+  })
+  if (!patchMeta.isFile() || patchMeta.isSymbolicLink()) {
+    throw new PurgeError(`cordis.patch.yml 非普通文件：${patchPath}`)
+  }
+  const raw = await readFile(patchPath, 'utf8')
+  const doc = parseDocument(raw, {
+    customTags: [
+      { tag: '!js', resolve: (value: string) => value },
+      { tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value },
+    ],
+  })
+  if (doc.errors.length > 0) {
+    throw new PurgeError(`cordis.patch.yml YAML 语法错误：${doc.errors[0]!.message}`)
+  }
+  if (doc.contents === null) {
+    return []
+  }
+  if (!isSeq(doc.contents)) {
+    throw new PurgeError('cordis.patch.yml 根结构必须为序列')
+  }
+  const toggledIds: string[] = []
+  for (const item of doc.contents.items) {
+    if (!isMap(item)) continue
+    const toggled = applySelfIterationRowToggle(doc, item, mode)
+    if (toggled !== undefined) {
+      toggledIds.push(toggled)
+      continue
+    }
+    const insertNode = item.get('insert', true)
+    if (isSeq(insertNode)) {
+      for (const nested of insertNode.items) {
+        if (!isMap(nested)) continue
+        const nestedToggled = applySelfIterationRowToggle(doc, nested, mode)
+        if (nestedToggled !== undefined) toggledIds.push(nestedToggled)
+      }
+    }
+  }
+  if (!dryRun) {
+    const nextText = doc.toString({ lineWidth: 0 })
+    if (nextText !== raw) {
+      const fileMode = patchMeta.mode & 0o777
+      const tmpPath = `${patchPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+      try {
+        await writeFile(tmpPath, nextText, { encoding: 'utf8', mode: fileMode })
+        await chmod(tmpPath, fileMode)
+        await rename(tmpPath, patchPath)
+      } catch (error) {
+        await rm(tmpPath, { force: true })
+        throw error
+      }
+    }
+  }
+  return toggledIds
+}
+
+async function isManagedProfileRunning(
+  platform: NodeJS.Platform,
+  osHome: string,
+  dshHome: string,
+  profile: string,
+  runner: CommandRunner,
+): Promise<boolean> {
+  if (platform === 'darwin') {
+    const checked = await inspectLaunchdDefinition(osHome, dshHome, profile, runner)
+    if (!checked.definition) return false
+    return inspectLoadedLaunchd(checked.definition, dshHome, runner).running
+  }
+  const found = await managedServiceProcessIds(platform, osHome, [profile], runner)
+  if (found.pids.length > 0) return true
+  const active = runner('systemctl', ['--user', 'is-active', systemdUnitName(profile)])
+  return active.stdout.trim() === 'active'
+}
+
+/**
+ * Execute unified upgrade, health check (`doctor`), and managed service recovery in strict order.
+ */
+export async function upgradeAssistantAndRecover(
+  options: UpgradeAndRecoverOptions,
+  deps?: UpgradeAndRecoverDeps,
+): Promise<{
+  readonly ok: boolean
+  readonly healthy: boolean
+  readonly upgraded?: boolean
+  readonly restarted?: boolean
+  readonly error?: string
+}> {
+  if (!options.dshHome || !isAbsolute(options.dshHome)) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: false,
+      restarted: false,
+      error: `DSH_HOME 必须是绝对路径：${options.dshHome}`,
+    }
+  }
+
+  const platform = options.platform ?? process.platform
+  const osHome = options.osHome ?? homedir()
+  const env = options.env ?? process.env
+  const action: UpgradeAction = options.dryRun ? 'dry-run' : options.yes === false ? 'check' : 'apply'
+  const isApply = action === 'apply'
+
+  const upgradeOpts: Record<string, unknown> = {
+    dshHome: options.dshHome,
+    ...(options.profile !== undefined ? { profile: options.profile } : {}),
+    action,
+    ...(options.registryUrl !== undefined ? { registryUrl: options.registryUrl } : {}),
+    ...(options.dshVersion !== undefined ? { dshVersion: options.dshVersion } : {}),
+    ...(options.targetVersion !== undefined ? { targetVersion: options.targetVersion } : {}),
+    allowNonEmptyHistoryMigration: options.allowNonEmptyHistoryMigration ?? true,
+    ...(options.confirmDshHomeStopped !== undefined
+      ? { confirmDshHomeStopped: options.confirmDshHomeStopped }
+      : {}),
+    platform,
+    osHome,
+    env,
+  }
+
+  const runUpgradeFn = deps?.runUpgrade ?? (async (opts: Record<string, unknown>) => {
+    const res = await runUpgrade({
+      dshHome: opts.dshHome as string,
+      ...(typeof opts.profile === 'string' ? { profile: opts.profile } : {}),
+      action: opts.action as UpgradeAction,
+      ...(typeof opts.registryUrl === 'string' ? { registryUrl: opts.registryUrl } : {}),
+      ...(typeof opts.dshVersion === 'string' ? { dshVersion: opts.dshVersion } : {}),
+      ...(typeof opts.targetVersion === 'string' ? { targetVersion: opts.targetVersion } : {}),
+      ...(typeof opts.allowNonEmptyHistoryMigration === 'boolean'
+        ? { allowNonEmptyHistoryMigration: opts.allowNonEmptyHistoryMigration }
+        : {}),
+      ...(typeof opts.confirmDshHomeStopped === 'boolean'
+        ? { confirmDshHomeStopped: opts.confirmDshHomeStopped }
+        : {}),
+      platform: opts.platform as NodeJS.Platform,
+      osHome: opts.osHome as string,
+      env: opts.env as NodeJS.ProcessEnv,
+    })
+    return {
+      ok: res.report.ok,
+      ready: res.report.ready,
+      ...(res.report.execution?.error ?? res.report.readiness.blockedReasons[0]
+        ? { error: res.report.execution?.error ?? res.report.readiness.blockedReasons[0] }
+        : {}),
+    }
+  })
+
+  let upRes: { ok: boolean; ready?: boolean; error?: string; [k: string]: unknown }
+  try {
+    upRes = await runUpgradeFn(upgradeOpts)
+  } catch (error) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: false,
+      restarted: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  if (!upRes.ok) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: false,
+      restarted: false,
+      error: upRes.error ?? '升级失败',
+    }
+  }
+
+  const doctorOpts: Record<string, unknown> = {
+    dshHome: options.dshHome,
+    ...(options.profile !== undefined ? { profile: options.profile } : {}),
+    platform,
+    home: osHome,
+    env,
+  }
+
+  const runDoctorFn = deps?.runDoctor ?? (async (opts: Record<string, unknown>) => {
+    const report = await collectLiveDoctorReport({
+      dshHome: opts.dshHome as string,
+      ...(typeof opts.profile === 'string' ? { profile: opts.profile } : {}),
+      platform: opts.platform as NodeJS.Platform,
+      home: opts.home as string,
+      env: opts.env as NodeJS.ProcessEnv,
+    })
+    const firstFail = report.checks.find(c => c.status === 'fail')?.summary
+    return {
+      ok: report.ok,
+      ready: report.ok,
+      ...(firstFail ? { error: firstFail } : {}),
+    }
+  })
+
+  let docRes: { ok: boolean; ready?: boolean; error?: string; [k: string]: unknown }
+  try {
+    docRes = await runDoctorFn(doctorOpts)
+  } catch (error) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: isApply,
+      restarted: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  if (!docRes.ok || docRes.ready === false) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: isApply,
+      restarted: false,
+      error: docRes.error ?? '健康检查未通过',
+    }
+  }
+
+  if (!isApply) {
+    return {
+      ok: true,
+      healthy: true,
+      upgraded: false,
+      restarted: false,
+    }
+  }
+
+  const restartOpts: Record<string, unknown> = {
+    dshHome: options.dshHome,
+    ...(options.profile !== undefined ? { profile: options.profile } : {}),
+    dryRun: false,
+    platform,
+    home: osHome,
+  }
+
+  const restartServiceFn = deps?.restartService ?? (async (opts: Record<string, unknown>) => {
+    const canonicalHome = await realpath(options.dshHome).catch(() => options.dshHome)
+    const targetProfiles = await resolveTargetProfiles(
+      opts.dshHome as string,
+      typeof opts.profile === 'string' ? opts.profile : undefined,
+    )
+    let restartedAny = false
+    for (const prof of targetProfiles) {
+      const presence = await inspectManagedServiceForDshHome(platform, osHome, prof, canonicalHome)
+      if (presence.foreign) {
+        return {
+          ok: false,
+          restarted: false,
+          error: `服务定义非本工具受管：${presence.definitionPath}`,
+        }
+      }
+      if (!presence.managed) continue
+      const outcome = await controlManagedService(
+        platform,
+        osHome,
+        prof,
+        'restart',
+        undefined,
+        Boolean(opts.dryRun),
+        canonicalHome,
+      )
+      if (outcome.errors.length > 0) {
+        return {
+          ok: false,
+          restarted: false,
+          error: outcome.errors.join('；'),
+        }
+      }
+      restartedAny = true
+    }
+    return { ok: true, restarted: restartedAny }
+  })
+
+  let restartRes: { ok: boolean; restarted?: boolean; error?: string; [k: string]: unknown }
+  try {
+    restartRes = await restartServiceFn(restartOpts)
+  } catch (error) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: true,
+      restarted: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  if (!restartRes.ok) {
+    return {
+      ok: false,
+      healthy: false,
+      upgraded: true,
+      restarted: false,
+      error: restartRes.error ?? '服务重启失败',
+    }
+  }
+
+  return {
+    ok: true,
+    healthy: true,
+    upgraded: true,
+    restarted: restartRes.restarted ?? true,
+  }
+}
+
 const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 / 彻底卸载工具（v${VERSION}）
 
 用法：
@@ -108,7 +649,9 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   web-url     解析受管服务当前有效的带 token Web 授权 URL（支持 --wait <秒>）
   open        打开 Web UI 与「文鳐」Owner Console（自动读取私有 Host、等待/启动并打开浏览器）
   update      升级全局 dsh-rsi 自身；加 --all 再升级整套插件集合（原地升级，保留数据）
-  upgrade     检查版本/ledger 迁移就绪（--check）、预览（--dry-run）或事务化升级（--yes，支持失败自动回滚）
+  upgrade     检查版本/ledger 迁移就绪（默认或 --check）、预览（--dry-run）或事务化升级与服务恢复（--yes，支持失败自动回滚）
+  enable      开启 profile 的全套自迭代插件开关（原地安全更新 cordis.patch.yml，保留受保护服务与路由）
+  disable     关闭 profile 的自迭代插件开关（保留受保护基础服务与对话控制入口）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
@@ -120,7 +663,7 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   --profile <name>    仅操作单个 profile（purge/reinstall 的 purge 阶段默认全量）
   --dry-run           只打印将执行的动作，不做任何修改
   --yes               purge/reinstall 跳过交互确认（reinstall 时同时透传给安装器）
-  --json              status / doctor / upgrade / growth-report 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
+  --json              status / doctor / upgrade / growth-report / enable / disable 输出结构化 JSON（doctor 报告中隐藏 token 与密钥值）
 
 growth-report 选项：
   --since <时长>      统计窗口（如 24h、7d、14d、30d、2w；默认 7d，范围 1h..365d）
@@ -219,6 +762,8 @@ interface ParsedArgs {
   registry?: string
   /** upgrade：调用方确认目标 DSH_HOME 已停服。 */
   confirmDshHomeStopped: boolean
+  /** upgrade：允许迁移非空 creation / revision 历史账本。 */
+  allowNonEmptyHistoryMigration: boolean
   /** growth-report：窗口规格（如 7d、14d）。 */
   since?: string
   /** growth-report：显式参考时钟毫秒时间戳。 */
@@ -229,13 +774,13 @@ interface ParsedArgs {
 
 const KNOWN_COMMANDS = new Set([
   'status', 'doctor', 'growth-report', 'open', 'start', 'stop', 'restart', 'logs', 'web-url', 'update', 'upgrade',
-  'install', 'reinstall', 'purge', 'version', 'maintenance',
+  'enable', 'disable', 'install', 'reinstall', 'purge', 'version', 'maintenance',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
 const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version', '--dsh-version', '--wait', '--registry', '--since', '--now'])
 const LOGS_FLAGS = new Set(['--errors-only'])
 const UPDATE_FLAGS = new Set(['--all'])
-const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped'])
+const UPGRADE_FLAGS = new Set(['--check', '--confirm-dsh-home-stopped', '--allow-non-empty-history-migration'])
 const DIAGNOSE_FLAGS = new Set(['--json'])
 const OPEN_FLAGS = new Set(['--no-browser'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
@@ -290,6 +835,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     noBrowser: false,
     check: false,
     confirmDshHomeStopped: false,
+    allowNonEmptyHistoryMigration: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -318,6 +864,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       }
       if (UPGRADE_FLAGS.has(token)) {
         if (token === '--check') result.check = true
+        else if (token === '--allow-non-empty-history-migration') result.allowNonEmptyHistoryMigration = true
         else result.confirmDshHomeStopped = true
         continue
       }
@@ -376,6 +923,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     if (UPGRADE_FLAGS.has(token)) {
       if (token === '--check') result.check = true
+      else if (token === '--allow-non-empty-history-migration') result.allowNonEmptyHistoryMigration = true
       else result.confirmDshHomeStopped = true
       continue
     }
@@ -395,8 +943,16 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
   }
-  if (result.json && result.command !== 'status' && result.command !== 'doctor' && result.command !== 'upgrade' && result.command !== 'growth-report') {
-    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report 命令（收到：${result.command}）`)
+  if (
+    result.json
+    && result.command !== 'status'
+    && result.command !== 'doctor'
+    && result.command !== 'upgrade'
+    && result.command !== 'growth-report'
+    && result.command !== 'enable'
+    && result.command !== 'disable'
+  ) {
+    throw new PurgeError(`--json 仅适用于 status 与 doctor / upgrade / growth-report / enable / disable 命令（收到：${result.command}）`)
   }
   if ((result.since !== undefined || result.nowMs !== undefined) && result.command !== 'growth-report') {
     throw new PurgeError(`--since 与 --now 仅适用于 growth-report 命令（收到：${result.command}）`)
@@ -409,6 +965,9 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
   }
   if (result.confirmDshHomeStopped && result.command !== 'upgrade') {
     throw new PurgeError(`--confirm-dsh-home-stopped 仅适用于 upgrade 命令（收到：${result.command}）`)
+  }
+  if (result.allowNonEmptyHistoryMigration && result.command !== 'upgrade') {
+    throw new PurgeError(`--allow-non-empty-history-migration 仅适用于 upgrade 命令（收到：${result.command}）`)
   }
   if (result.check && result.yes) {
     throw new PurgeError('--check 与 --yes 不能同时使用')
@@ -887,7 +1446,7 @@ async function runMaintenance(dshHome: string, tokens: readonly string[]): Promi
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
-  deps: MainDeps & { platform?: NodeJS.Platform; macHostProcessesStopped?: typeof assertMacHostProcessesStopped;
+  deps: MainDeps & { platform?: NodeJS.Platform; osHome?: string; macHostProcessesStopped?: typeof assertMacHostProcessesStopped;
     detectFrozenOwner?: typeof detectFrozenOwner; frozenUpdate?: typeof runFrozenOwnerUpdate;
     upgrade?: typeof runUpgrade; upgradeDeps?: UpgradeDeps;
     freshExec?: (bin: string, argv: readonly string[], env: NodeJS.ProcessEnv) => number } = {},
@@ -1015,8 +1574,87 @@ export async function main(
         // 任一 profile 解析出错时退出 1，但仍尽量打印成功的 URL。
         return entries.some(entry => entry.errors.length > 0) ? 1 : 0
       }
+      case 'enable':
+      case 'disable': {
+        const mode = args.command as 'enable' | 'disable'
+        const state = mode === 'enable' ? 'enabled' : 'disabled'
+        try {
+          if (!isAbsolute(args.dshHome)) {
+            throw new PurgeError(`DSH_HOME 必须是绝对路径：${args.dshHome}`)
+          }
+          const resolvedHome = resolve(args.dshHome)
+          const homeMeta = await lstat(resolvedHome).catch((error) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              throw new PurgeError(`DSH_HOME 不存在：${resolvedHome}`)
+            }
+            throw error
+          })
+          if (!homeMeta.isDirectory() || homeMeta.isSymbolicLink()) {
+            throw new PurgeError(`DSH_HOME 非普通目录：${resolvedHome}`)
+          }
+          const canonicalHome = await realpath(resolvedHome)
+          const targetProfiles = await resolveToggleTargetProfiles(canonicalHome, args.profile)
+          const toggledIdsSet = new Set<string>()
+          for (const profile of targetProfiles) {
+            const ids = await toggleSelfIterationForProfile(canonicalHome, profile, mode, args.dryRun)
+            for (const id of ids) toggledIdsSet.add(id)
+          }
+          const toggledIds = [...toggledIdsSet]
+          if (!args.dryRun) {
+            const platform = deps.platform ?? process.platform
+            const osHome = deps.osHome ?? homedir()
+            const runner = deps.upgradeDeps?.runner ?? defaultRunner
+            const inspectFn = deps.upgradeDeps?.inspectService ?? inspectManagedServiceForDshHome
+            const controlFn = deps.upgradeDeps?.controlService ?? controlManagedService
+            const isRunningFn = deps.upgradeDeps?.isServiceRunning
+              ?? ((plat, homeDir, homePath, prof, cmdRunner) => isManagedProfileRunning(plat, homeDir, homePath, prof, cmdRunner))
+            for (const profile of targetProfiles) {
+              const presence = await inspectFn(platform, osHome, profile, canonicalHome, runner)
+              if (presence.foreign || !presence.managed) continue
+              const running = await isRunningFn(platform, osHome, canonicalHome, profile, runner)
+              if (!running) continue
+              const outcome = await controlFn(platform, osHome, profile, 'restart', runner, false, canonicalHome)
+              if (outcome.errors.length > 0) {
+                throw new PurgeError(`切换自迭代后重启服务 ${profile} 失败：${outcome.errors.join('；')}`)
+              }
+            }
+          }
+          const selectedProfile = args.profile ?? targetProfiles[0]
+          if (args.json) {
+            process.stdout.write(`${JSON.stringify({
+              ok: true,
+              state,
+              profile: selectedProfile,
+              profiles: targetProfiles,
+              dshHome: args.dshHome,
+              dryRun: args.dryRun,
+              toggledIds,
+            }, null, 2)}\n`)
+          } else {
+            process.stdout.write(
+              `${args.dryRun ? '[dry-run] ' : ''}已${mode === 'enable' ? '开启' : '关闭'}自迭代（profile=${targetProfiles.join(', ')}，切换 ${toggledIds.length} 项）\n`,
+            )
+          }
+          return 0
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (args.json) {
+            process.stdout.write(`${JSON.stringify({
+              ok: false,
+              command: mode,
+              state,
+              ...(args.profile !== undefined ? { profile: args.profile } : {}),
+              dshHome: args.dshHome,
+              error: message,
+            }, null, 2)}\n`)
+            return 1
+          }
+          throw error instanceof PurgeError ? error : new PurgeError(message)
+        }
+      }
       case 'upgrade': {
         const platform = deps.platform ?? process.platform
+        const osHome = deps.osHome ?? homedir()
         const action: UpgradeAction = args.dryRun ? 'dry-run' : args.check ? 'check' : args.yes ? 'apply' : 'check'
         const { report, exitCode } = await (deps.upgrade ?? runUpgrade)(
           {
@@ -1026,14 +1664,113 @@ export async function main(
             ...(args.registry !== undefined ? { registryUrl: args.registry } : {}),
             ...(args.dshVersion !== undefined ? { dshVersion: args.dshVersion } : {}),
             ...(args.targetVersion !== undefined ? { targetVersion: args.targetVersion } : {}),
+            allowNonEmptyHistoryMigration: args.allowNonEmptyHistoryMigration,
             confirmDshHomeStopped: args.confirmDshHomeStopped,
             platform,
+            osHome,
             env,
           },
           deps.upgradeDeps,
         )
-        process.stdout.write(args.json ? `${JSON.stringify(report, null, 2)}\n` : formatUpgradeReport(report))
-        return exitCode
+        let finalReport: UpgradeReport = report
+        let finalExitCode = exitCode
+        const canManageServices = !deps.upgrade || Boolean(deps.upgradeDeps?.controlService)
+        if (action === 'apply' && finalReport.ok && finalReport.mode !== 'frozen-linux-systemd' && canManageServices) {
+          const canonicalHome = finalReport.dshHome
+          const runner = deps.upgradeDeps?.runner ?? defaultRunner
+          const inspectFn = deps.upgradeDeps?.inspectService ?? inspectManagedServiceForDshHome
+          const controlFn = deps.upgradeDeps?.controlService ?? controlManagedService
+          const isRunningFn = deps.upgradeDeps?.isServiceRunning
+            ?? ((plat, homeDir, homePath, prof, cmdRunner) => isManagedProfileRunning(plat, homeDir, homePath, prof, cmdRunner))
+          try {
+            const targetProfiles = args.profile !== undefined
+              ? [args.profile]
+              : finalReport.packages.profiles.length > 0
+                ? finalReport.packages.profiles.map(p => p.profile)
+                : await resolveTargetProfiles(canonicalHome, args.profile)
+
+            const managedProfiles: string[] = []
+            for (const prof of targetProfiles) {
+              const presence = await inspectFn(platform, osHome, prof, canonicalHome, runner)
+              if (presence.foreign) {
+                throw new Error(`服务定义非本工具受管：${presence.definitionPath}`)
+              }
+              if (presence.managed) {
+                managedProfiles.push(prof)
+              }
+            }
+
+            for (const prof of managedProfiles) {
+              const running = await isRunningFn(platform, osHome, canonicalHome, prof, runner)
+              const alreadyRestartedByUpgrade = Boolean(finalReport.execution?.executed)
+                && !args.confirmDshHomeStopped
+                && running
+              if (!alreadyRestartedByUpgrade) {
+                const svcAction: ServiceAction = running ? 'restart' : 'start'
+                const outcome = await controlFn(platform, osHome, prof, svcAction, runner, false, canonicalHome)
+                if (outcome.errors.length > 0) {
+                  throw new Error(`升级后启动服务 ${prof} 失败：${outcome.errors.join('；')}`)
+                }
+              }
+            }
+
+            if (managedProfiles.length > 0 || Boolean(deps.upgradeDeps?.doctor)) {
+              const health = deps.upgradeDeps?.doctor
+                ? await deps.upgradeDeps.doctor({
+                  dshHome: canonicalHome,
+                  ...(args.profile !== undefined ? { profile: args.profile } : {}),
+                  platform,
+                  home: osHome,
+                  env,
+                  runner,
+                })
+                : deps.upgradeDeps?.verifyHealth
+                  ? await deps.upgradeDeps.verifyHealth({
+                    dshHome: canonicalHome,
+                    ...(args.profile !== undefined ? { profile: args.profile } : {}),
+                    profiles: targetProfiles,
+                    runner,
+                    platform,
+                    osHome,
+                    env,
+                  })
+                  : await defaultVerifyHealth({
+                    dshHome: canonicalHome,
+                    ...(args.profile !== undefined ? { profile: args.profile } : {}),
+                    profiles: targetProfiles,
+                    runner,
+                    platform,
+                    osHome,
+                    env,
+                  })
+              if (!health.ok) {
+                throw new Error(`服务启动后就绪诊断失败：${health.error ?? 'unknown'}`)
+              }
+            }
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error)
+            finalExitCode = 1
+            finalReport = {
+              ...finalReport,
+              ok: false,
+              ready: false,
+              execution: {
+                executed: finalReport.execution?.executed ?? false,
+                dryRun: false,
+                ...(finalReport.execution?.backupDir ? { backupDir: finalReport.execution.backupDir } : {}),
+                ...(finalReport.execution?.delegatedScript ? { delegatedScript: finalReport.execution.delegatedScript } : {}),
+                healthCheckPassed: false,
+                rolledBack: finalReport.execution?.rolledBack ?? false,
+                ...(finalReport.execution?.rollbackSucceeded !== undefined
+                  ? { rollbackSucceeded: finalReport.execution.rollbackSucceeded }
+                  : {}),
+                error: errMsg,
+              },
+            }
+          }
+        }
+        process.stdout.write(args.json ? `${JSON.stringify(finalReport, null, 2)}\n` : formatUpgradeReport(finalReport))
+        return finalExitCode
       }
       case 'update': {
         const platform = deps.platform ?? process.platform

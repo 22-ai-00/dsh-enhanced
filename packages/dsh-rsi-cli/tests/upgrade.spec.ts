@@ -632,4 +632,415 @@ overrides:
       '--registry', 'https://registry.npmjs.org',
     ])
   })
+
+  test('migrates non-empty SQLite creation/revision ledgers when allowNonEmptyHistoryMigration=true, backs up and rolls back ledgers, and rejects corrupt DB or relative dshHome', async () => {
+    const f = await createHomeFixture({ hostVersion: '0.1.9', enhancedVersion: '0.1.73' })
+    const cpDir = join(f.dshHome, 'plugin-control-plane')
+    await mkdir(cpDir, { recursive: true })
+    const dbPath = join(cpDir, `${f.profile}.sqlite`)
+    const db = new DatabaseSync(dbPath)
+    db.exec(`
+      CREATE TABLE source_plans (id TEXT PRIMARY KEY);
+      CREATE TABLE source_creation_verifications (plan_id TEXT PRIMARY KEY);
+      CREATE TABLE source_revision_sources (plan_id TEXT PRIMARY KEY);
+      INSERT INTO source_plans (id) VALUES ('plan-1');
+      INSERT INTO source_creation_verifications (plan_id) VALUES ('plan-1');
+      INSERT INTO source_revision_sources (plan_id) VALUES ('plan-1');
+    `)
+    db.close()
+
+    const baseDeps = (healthOk: boolean, mutateDb = false): UpgradeDeps => ({
+      fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({
+        status: 'ready',
+        bindingPath: f.hostPath,
+        version: '0.1.9',
+        dshPath: '/bin/dsh',
+        issues: [],
+      }),
+      scanProcesses: async () => ({ processes: [] }),
+      upgradeHost: async ({ dshHome, targetVersion }) => {
+        await writeFile(join(dshHome, '.dsh-rsi-host.json'), JSON.stringify({
+          schemaVersion: 1, cacheRoot: join(f.root, 'host-cache'), version: targetVersion, receiptDigest: 'b'.repeat(64),
+        }, null, 2), { mode: 0o600 })
+      },
+      upgradeProfilePackages: async () => {
+        if (mutateDb) {
+          const mutDb = new DatabaseSync(dbPath)
+          mutDb.exec("DELETE FROM source_plans; INSERT INTO source_plans (id) VALUES ('corrupted-mid-upgrade');")
+          mutDb.close()
+        }
+      },
+      verifyHealth: async () => healthOk ? { ok: true } : { ok: false, error: 'post-upgrade doctor failed' },
+    })
+
+    // 1. Relative dshHome fails closed cleanly without inspecting relative disk paths.
+    const relRes = await runUpgrade(
+      { dshHome: 'relative/dsh-home', profile: f.profile, action: 'check', osHome: f.osHome, platform: 'linux' },
+      baseDeps(true),
+    )
+    expect(relRes.exitCode).toBe(1)
+    expect(relRes.report.ok).toBe(false)
+    expect(relRes.report.ready).toBe(false)
+    expect(relRes.report.readiness.blockedReasons.join('\n')).toContain('绝对路径')
+
+    // 2. Failed health check restores SQLite ledger rows byte-for-byte on rollback.
+    const rbRes = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        allowNonEmptyHistoryMigration: true,
+        confirmDshHomeStopped: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      baseDeps(false, true),
+    )
+    expect(rbRes.exitCode).toBe(1)
+    expect(rbRes.report.execution?.rolledBack).toBe(true)
+    expect(rbRes.report.execution?.rollbackSucceeded).toBe(true)
+    const verifyRbDb = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      expect((verifyRbDb.prepare('SELECT id FROM source_plans').all() as Array<{ id: string }>).map(r => r.id)).toEqual(['plan-1'])
+    } finally {
+      verifyRbDb.close()
+    }
+
+    // 3. Successful migration preserves all rows intact.
+    const okRes = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        allowNonEmptyHistoryMigration: true,
+        confirmDshHomeStopped: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      baseDeps(true, false),
+    )
+    expect(okRes.exitCode).toBe(0)
+    expect(okRes.report.ok).toBe(true)
+    expect(okRes.report.readiness.ledgersOk).toBe(true)
+    const verifyOkDb = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      expect((verifyOkDb.prepare('SELECT COUNT(*) AS n FROM source_plans').get() as { n: number }).n).toBe(1)
+      expect((verifyOkDb.prepare('SELECT COUNT(*) AS n FROM source_creation_verifications').get() as { n: number }).n).toBe(1)
+      expect((verifyOkDb.prepare('SELECT COUNT(*) AS n FROM source_revision_sources').get() as { n: number }).n).toBe(1)
+    } finally {
+      verifyOkDb.close()
+    }
+
+    // 4. Corrupt SQLite ledger still fails closed even with allowNonEmptyHistoryMigration=true.
+    await writeFile(dbPath, 'not-a-valid-sqlite-database', { mode: 0o600 })
+    const corruptRes = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'check',
+        allowNonEmptyHistoryMigration: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      baseDeps(true),
+    )
+    expect(corruptRes.exitCode).toBe(1)
+    expect(corruptRes.report.readiness.ledgersOk).toBe(false)
+  })
+
+  test('unbound Home (boundHostStatus=missing) upgrades packages online without calling defaultUpgradeHost and blocks explicit --dsh-version', async () => {
+    const f = await createHomeFixture({ enhancedVersion: '0.1.73' })
+    await rm(f.hostPath, { force: true })
+
+    let pkgUpgradedTo: string | undefined
+    const res = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        confirmDshHomeStopped: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({
+          status: 'missing',
+          bindingPath: f.hostPath,
+          issues: [],
+        }),
+        upgradeProfilePackages: async ({ targetVersion }) => {
+          pkgUpgradedTo = targetVersion
+        },
+        verifyHealth: async () => ({ ok: true }),
+      },
+    )
+    expect(res.exitCode).toBe(0)
+    expect(res.report.ok).toBe(true)
+    expect(res.report.packages.boundHost.status).toBe('missing')
+    expect(res.report.packages.boundHost.upgradeAvailable).toBe(false)
+    expect(pkgUpgradedTo).toBe('0.1.84')
+
+    const explicitDshRes = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        dshVersion: '0.2.2-rc.5',
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({
+          status: 'missing',
+          bindingPath: f.hostPath,
+          issues: [],
+        }),
+      },
+    )
+    expect(explicitDshRes.exitCode).toBe(1)
+    expect(explicitDshRes.report.readiness.ok).toBe(false)
+    expect(explicitDshRes.report.readiness.blockedReasons.join('\n')).toContain('没有私有 Host 绑定')
+  })
+
+  test('resolves custom !js dshHomePath(...) and name-only plugin-control-plane/assistant-verifier ledger rows, and rejects escaping dshHomePath', async () => {
+    const f = await createHomeFixture({ hostVersion: '0.2.2-rc.5', enhancedVersion: '0.1.73' })
+    const customDir = join(f.dshHome, 'custom-ledgers')
+    await mkdir(customDir, { recursive: true })
+    const customDbPath = join(customDir, 'cp-custom.sqlite')
+    const db = new DatabaseSync(customDbPath)
+    db.exec(`
+      CREATE TABLE source_plans (id TEXT PRIMARY KEY);
+      INSERT INTO source_plans (id) VALUES ('plan-custom-1');
+    `)
+    db.close()
+
+    await writeFile(
+      join(f.profileDir, 'cordis.patch.yml'),
+      `- name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    databasePath: !js dshHomePath('custom-ledgers', 'cp-custom.sqlite')\n`,
+      { mode: 0o600 },
+    )
+
+    const deps = (healthOk: boolean, mutateDb = false): UpgradeDeps => ({
+      fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+      inspectBoundHost: async () => ({
+        status: 'ready',
+        bindingPath: f.hostPath,
+        version: '0.2.2-rc.5',
+        dshPath: '/bin/dsh',
+        issues: [],
+      }),
+      scanProcesses: async () => ({ processes: [] }),
+      upgradeProfilePackages: async () => {
+        if (mutateDb) {
+          const mut = new DatabaseSync(customDbPath)
+          mut.exec("DELETE FROM source_plans; INSERT INTO source_plans (id) VALUES ('mutated');")
+          mut.close()
+        }
+      },
+      verifyHealth: async () => healthOk ? { ok: true } : { ok: false, error: 'custom ledger doctor fail' },
+    })
+
+    // 1. Blocked when allowNonEmptyHistoryMigration is false.
+    const blocked = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'check',
+        allowNonEmptyHistoryMigration: false,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      deps(true),
+    )
+    expect(blocked.exitCode).toBe(1)
+    expect(blocked.report.readiness.ledgersOk).toBe(false)
+    expect(blocked.report.readiness.profiles[0]?.creationLedgerStatus).toBe('non-empty')
+
+    // 2. Backed up and rolled back when allowNonEmptyHistoryMigration is true and verifyHealth fails.
+    const rb = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'apply',
+        allowNonEmptyHistoryMigration: true,
+        confirmDshHomeStopped: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      deps(false, true),
+    )
+    expect(rb.exitCode).toBe(1)
+    expect(rb.report.execution?.rolledBack).toBe(true)
+    const verifyDb = new DatabaseSync(customDbPath, { readOnly: true })
+    try {
+      expect((verifyDb.prepare('SELECT id FROM source_plans').all() as Array<{ id: string }>).map(r => r.id)).toEqual(['plan-custom-1'])
+    } finally {
+      verifyDb.close()
+    }
+
+    // 3. Path traversal in dshHomePath fails closed.
+    await writeFile(
+      join(f.profileDir, 'cordis.patch.yml'),
+      `- name: "@dsh-enhanced/assistant-verifier"\n  config:\n    databasePath: !js dshHomePath('..', 'outside.sqlite')\n`,
+      { mode: 0o600 },
+    )
+    const traversal = await runUpgrade(
+      {
+        dshHome: f.dshHome,
+        profile: f.profile,
+        action: 'check',
+        allowNonEmptyHistoryMigration: true,
+        osHome: f.osHome,
+        platform: 'linux',
+      },
+      deps(true),
+    )
+    expect(traversal.exitCode).toBe(1)
+    expect(traversal.report.readiness.ledgersOk).toBe(false)
+  })
+
+  test('dsh-rsi upgrade --yes recovers stopped/confirm-stopped/already-current managed services and runs post-start doctor (fail-closed on failure)', async () => {
+    const f = await createHomeFixture({ hostVersion: '0.2.2-rc.5', enhancedVersion: '0.1.84' })
+    const runUpgradeCli = async (argv: string[], upgradeDeps: UpgradeDeps) => {
+      const chunks: string[] = []
+      const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+        chunks.push(String(chunk))
+        return true
+      })
+      try {
+        const code = await main(argv, { DSH_HOME: f.dshHome }, {
+          platform: 'linux',
+          osHome: f.osHome,
+          upgradeDeps,
+        })
+        return { code, report: JSON.parse(chunks.join('')) as { ok: boolean; ready: boolean; execution?: { error?: string; healthCheckPassed?: boolean } } }
+      } finally {
+        spy.mockRestore()
+      }
+    }
+
+    // 1. Already current (0.1.84 -> 0.1.84) with stopped managed service -> starts service & runs post-start doctor.
+    const events1: string[] = []
+    const res1 = await runUpgradeCli(
+      ['upgrade', '--yes', '--json', '--dsh-home', f.dshHome, '--profile', f.profile],
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, '.config/systemd/user/dsh-profile-web.service'), foreign: false }),
+        isServiceRunning: async () => false,
+        controlService: async (_plat, _home, profile, action) => {
+          events1.push(`control:${profile}:${action}`)
+          return { profile, actions: [action], messages: [], errors: [] }
+        },
+        verifyHealth: async () => {
+          events1.push('verifyHealth')
+          return { ok: true }
+        },
+        doctor: async () => {
+          events1.push('doctor')
+          return { ok: true }
+        },
+      },
+    )
+    expect(res1.code).toBe(0)
+    expect(res1.report.ok).toBe(true)
+    expect(events1).toEqual(['verifyHealth', 'control:web:start', 'doctor'])
+
+    // 2. Newer version with --confirm-dsh-home-stopped -> upgrades, starts service, and runs post-start doctor.
+    await writeFile(join(f.enhancedDir, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/assistant-web-owner', version: '0.1.83' }), { mode: 0o600 })
+    const events2: string[] = []
+    const res2 = await runUpgradeCli(
+      ['upgrade', '--yes', '--confirm-dsh-home-stopped', '--json', '--dsh-home', f.dshHome, '--profile', f.profile],
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, '.config/systemd/user/dsh-profile-web.service'), foreign: false }),
+        isServiceRunning: async () => false,
+        upgradeProfilePackages: async () => { events2.push('upgradePkg') },
+        controlService: async (_plat, _home, profile, action) => {
+          events2.push(`control:${profile}:${action}`)
+          return { profile, actions: [action], messages: [], errors: [] }
+        },
+        verifyHealth: async () => {
+          events2.push('verifyHealth')
+          return { ok: true }
+        },
+        doctor: async () => {
+          events2.push('doctor')
+          return { ok: true }
+        },
+      },
+    )
+    expect(res2.code).toBe(0)
+    expect(res2.report.ok).toBe(true)
+    expect(events2).toEqual(['upgradePkg', 'verifyHealth', 'control:web:start', 'doctor'])
+
+    // 3. Post-start doctor failure fails closed (exit 1, report.ok=false).
+    const res3 = await runUpgradeCli(
+      ['upgrade', '--yes', '--confirm-dsh-home-stopped', '--json', '--dsh-home', f.dshHome, '--profile', f.profile],
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, '.config/systemd/user/dsh-profile-web.service'), foreign: false }),
+        isServiceRunning: async () => false,
+        upgradeProfilePackages: async () => {},
+        controlService: async (_plat, _home, profile, action) => ({ profile, actions: [action], messages: [], errors: [] }),
+        verifyHealth: async () => ({ ok: true }),
+        doctor: async () => ({ ok: false, error: 'post-start doctor unhealthy' }),
+      },
+    )
+    expect(res3.code).toBe(1)
+    expect(res3.report.ok).toBe(false)
+    expect(res3.report.execution?.healthCheckPassed).toBe(false)
+    expect(res3.report.execution?.error).toContain('post-start doctor unhealthy')
+
+    // 4. Service start error fails closed (exit 1, report.ok=false).
+    const res4 = await runUpgradeCli(
+      ['upgrade', '--yes', '--confirm-dsh-home-stopped', '--json', '--dsh-home', f.dshHome, '--profile', f.profile],
+      {
+        fetch: makeRegistryFetch('0.1.84', '0.2.2-rc.5'),
+        inspectBoundHost: async () => ({ status: 'ready', bindingPath: f.hostPath, version: '0.2.2-rc.5', dshPath: '/bin/dsh', issues: [] }),
+        inspectService: async () => ({ managed: true, definitionPath: join(f.osHome, '.config/systemd/user/dsh-profile-web.service'), foreign: false }),
+        isServiceRunning: async () => false,
+        upgradeProfilePackages: async () => {},
+        controlService: async (_plat, _home, profile, action) => ({ profile, actions: [action], messages: [], errors: ['systemctl failed'] }),
+        verifyHealth: async () => ({ ok: true }),
+      },
+    )
+    expect(res4.code).toBe(1)
+    expect(res4.report.ok).toBe(false)
+    expect(res4.report.execution?.error).toContain('systemctl failed')
+  })
+
+  test('rejects symlink dshHome in runUpgrade without traversing symlink target', async () => {
+    const f = await createHomeFixture()
+    const symHome = join(f.root, 'sym-dsh-home')
+    await symlink(f.dshHome, symHome)
+
+    for (const action of ['check', 'dry-run', 'apply'] as const) {
+      const res = await runUpgrade(
+        {
+          dshHome: symHome,
+          profile: f.profile,
+          action,
+          targetVersion: '0.2.0',
+          confirmDshHomeStopped: true,
+          osHome: f.osHome,
+          platform: 'linux',
+        },
+        {
+          fetch: makeRegistryFetch('0.2.0', '0.2.2-rc.5'),
+          scanProcesses: async () => ({ processes: [] }),
+        },
+      )
+      expect(res.exitCode).toBe(1)
+      expect(res.report.ok).toBe(false)
+      expect(res.report.ready).toBe(false)
+      expect(res.report.dshHome).toBe(symHome)
+      expect(res.report.readiness.blockedReasons.join('\n')).toContain('symlink')
+    }
+  })
 })

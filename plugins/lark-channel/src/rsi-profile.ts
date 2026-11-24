@@ -46,6 +46,17 @@ const coordinatorBundleNames = new Map([
   ['dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane'],
 ])
 const rsiPrefix = 'rsi-setup-'
+export const SELF_ITERATION_MANAGED_ROW_IDS: ReadonlySet<string> = new Set([
+  'dsh-enhanced-assistant-work-items',
+  'dsh-enhanced-assistant-proactive',
+  'dsh-enhanced-assistant-growth-driver',
+  'dsh-enhanced-assistant-dreaming',
+  'dsh-enhanced-assistant-memory-learning',
+  'dsh-enhanced-assistant-association',
+  'dsh-enhanced-assistant-evaluation',
+  'dsh-enhanced-assistant-evolution',
+  'dsh-enhanced-preference-learning',
+])
 
 function fail(message: string): never { throw new Error(`rsi setup: ${message}`) }
 function map(value: Node | undefined, label: string): YAMLMap { if (!isMap(value)) fail(`${label} must be a YAML mapping`); return value }
@@ -74,9 +85,9 @@ function baseRows(value: string): Map<string, string> {
   return result
 }
 function row(rows: YAMLSeq, id: string): YAMLMap | undefined { return rows.items.find(item => isMap(item) && item.get('id') === id) as YAMLMap | undefined }
-function required(rows: YAMLSeq, id: string, label = 'profile'): YAMLMap {
+function required(rows: YAMLSeq, id: string, label = 'profile', allowDisabled = false): YAMLMap {
   const result = row(rows, id); if (!result) fail(`${label} row ${id} is missing`)
-  if (result.get('disabled') === true) fail(`${label} row ${id} is disabled`)
+  if (result.get('disabled') === true && !allowDisabled) fail(`${label} row ${id} is disabled`)
   return result
 }
 function config(item: YAMLMap, id: string): YAMLMap { return map(item.get('config', true) as Node | undefined, `${id} config`) }
@@ -90,12 +101,15 @@ function profile(value: string, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) fail(`invalid ${label}`)
   return value
 }
-function cloneEffectiveConfig(out: Rows, effective: Rows, id: string, allowMissing = false): YAMLMap {
-  const entry = required(effective.rows, id, 'effective profile')
+function cloneEffectiveConfig(out: Rows, effective: Rows, id: string, allowMissing = false, allowDisabled = false): YAMLMap {
+  const entry = required(effective.rows, id, 'effective profile', allowDisabled)
   const source = allowMissing && !entry.has('config') ? map(out.document.createNode({}), `${id} config`) : config(entry, id)
   let destination = row(out.rows, id)
   if (!destination) { destination = map(out.document.createNode({ id }), `${id} override`); out.rows.add(destination) }
-  if (destination.get('disabled') === true) fail(`profile row ${id} is disabled`)
+  if (destination.get('disabled') === true) {
+    if (!allowDisabled) fail(`profile row ${id} is disabled`)
+    destination.set('disabled', false)
+  }
   // Preserve YAML tags (notably !!js dshHomePath) by retaining the source node.
   destination.set('config', source)
   return source
@@ -268,12 +282,18 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
 function configurePersonal(document: Document, personal: YAMLMap, manifest: RsiSetupManifest,
   scope: { workspace: string; preset: string; principal: string },
   budgetIds: { reviews: string; discovery: string; source: string; observations: string },
-  memory?: RsiMemoryLearningSetup, creation?: RsiPluginCreationSetup): void {
+  memory?: RsiMemoryLearningSetup, creation?: RsiPluginCreationSetup, upgradeExistingOwner = false): void {
   if (memory) {
     const personalMemory = map(personal.get('personalMemory', true) as Node | undefined, 'personalMemory config')
     const existing = personalMemory.get('automaticLearning', true) as Node | undefined
-    if (existing !== undefined && !isDeepStrictEqual(nodeJson(existing), memory.adoption)) {
-      fail('existing memory adoption grant differs from the frozen owner grant')
+    if (existing !== undefined) {
+      const parsed = nodeJson(existing) as { authorityId?: unknown; owner?: unknown } | null
+      const sameOwnerGrant = parsed !== null && typeof parsed === 'object'
+        && parsed.authorityId === memory.adoption.authorityId
+        && isDeepStrictEqual(parsed.owner, memory.adoption.owner)
+      if (upgradeExistingOwner ? !sameOwnerGrant : !isDeepStrictEqual(parsed, memory.adoption)) {
+        fail('existing memory adoption grant differs from the frozen owner grant')
+      }
     }
     replaceNode(document, personalMemory, 'automaticLearning', memory.adoption)
   }
@@ -286,6 +306,7 @@ export function compileRsiPersonalAssistantOptions(input: {
   manifest: RsiSetupManifest
   scope: { workspace: string; preset: string; principal: string }
   budgetIds: { reviews: string; discovery: string; source: string; observations: string }
+  upgradeExistingOwner?: boolean
 }): Record<string, unknown> {
   const document = parseDocument(JSON.stringify(input.effectiveConfig), { uniqueKeys: true })
   const personal = map(document.contents ?? undefined, 'personal assistant options')
@@ -295,7 +316,7 @@ export function compileRsiPersonalAssistantOptions(input: {
   validatedRevision(input.manifest, input.manifest.sourceReviews.owner, creation)
   if (creation) same(input.scope, { workspace: creation.capabilities.owner.workspace,
     preset: creation.capabilities.owner.agentPreset, principal: creation.capabilities.owner.principalId }, 'creation Policy scope')
-  configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory, creation)
+  configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory, creation, input.upgradeExistingOwner === true)
   return json(personal, 'personal assistant options')
 }
 
@@ -303,11 +324,12 @@ export function compileRsiPersonalAssistantOptions(input: {
  * Read-only profile compiler. The caller owns private manifest I/O, lifecycle locks,
  * atomic writes and post-write DSH composition checks.
  */
-export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; dshHome: string; targetPatch: string; targetEffective: string; coordinatorPatch: string; coordinatorEffective: string; coordinatorBase: string; owner: ActiveLarkOwnerBinding }): Promise<{ targetPatch: string; coordinatorPatch: string }> {
+export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; dshHome: string; targetPatch: string; targetEffective: string; coordinatorPatch: string; coordinatorEffective: string; coordinatorBase: string; owner: ActiveLarkOwnerBinding; upgradeExistingOwner?: boolean }): Promise<{ targetPatch: string; coordinatorPatch: string }> {
   assertManifest(input.manifest); absolute(input.dshHome, 'dshHome')
+  const upgrading = input.upgradeExistingOwner === true
   const target = parse(input.targetPatch, 'target patch'), effective = parse(input.targetEffective, 'target effective config')
   const coordinator = parse(input.coordinatorPatch, 'coordinator patch'), coordinatorEffective = parse(input.coordinatorEffective, 'coordinator effective config')
-  for (const id of targetBundles) required(effective.rows, id, 'target effective profile')
+  for (const id of targetBundles) required(effective.rows, id, 'target effective profile', upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
   const standaloneAutomations = row(effective.rows, 'dsh-enhanced-assistant-automations')
   if (standaloneAutomations && standaloneAutomations.get('disabled') !== true) fail('ambiguous standalone and embedded Automations providers')
   const jobs = input.manifest.controlPlane.sourceJobs
@@ -355,10 +377,15 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     if (learnerRows.length !== 1) fail('memory learner row is missing or duplicate')
     const learner = learnerRows[0] as YAMLMap
     const currentLearnerConfig = learner.get('config', true) as Node | undefined
+    const learnerJson = isMap(currentLearnerConfig) ? (currentLearnerConfig as YAMLMap).toJSON() as { authorityId?: unknown; owner?: unknown } : undefined
+    const sameOwnerLearner = isMap(currentLearnerConfig) && learnerJson !== undefined
+      && learnerJson.authorityId === memory.learning.authorityId
+      && isDeepStrictEqual(learnerJson.owner, memory.learning.owner)
     if (learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
-      || !(learner.get('disabled') === true && !learner.has('config')
-        || learner.get('disabled') === false && isMap(currentLearnerConfig)
-          && isDeepStrictEqual((currentLearnerConfig as YAMLMap).toJSON(), memory.learning))) {
+      || !((learner.get('disabled') === true || learner.get('disabled') === undefined) && !learner.has('config')
+        || (upgrading
+          ? (learner.get('disabled') === false || learner.get('disabled') === undefined || learner.get('disabled') === true) && sameOwnerLearner
+          : (learner.get('disabled') === false || learner.get('disabled') === undefined) && isMap(currentLearnerConfig) && isDeepStrictEqual(learnerJson, memory.learning)))) {
       fail('memory learner must be the inactive installed bundle or exact current learning configuration')
     }
     const standalone = row(effective.rows, 'dsh-enhanced-personal-memory')
@@ -370,14 +397,20 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   }
   const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
   configurePersonal(target.document, personal, input.manifest, owner,
-    budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory, creation)
+    budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory, creation, input.upgradeExistingOwner === true)
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
   if (memory) {
     const existing = verifier.get('memoryReviews', true) as Node | undefined
-    if (existing !== undefined && !isDeepStrictEqual(nodeJson(existing), memory.reviews)) {
-      fail('existing memory review grant differs from the frozen owner grant')
+    if (existing !== undefined) {
+      const parsed = nodeJson(existing) as { authorityId?: unknown; owner?: unknown } | null
+      const sameOwnerGrant = parsed !== null && typeof parsed === 'object'
+        && parsed.authorityId === memory.reviews.authorityId
+        && isDeepStrictEqual(parsed.owner, memory.reviews.owner)
+      if (input.upgradeExistingOwner === true ? !sameOwnerGrant : !isDeepStrictEqual(parsed, memory.reviews)) {
+        fail('existing memory review grant differs from the frozen owner grant')
+      }
     }
     replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
   }
@@ -399,17 +432,19 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     replaceNode(target.document, learner, 'config', memory.learning)
   }
   if (ordinary) {
-    const proactiveEntry = required(effective.rows, 'dsh-enhanced-assistant-proactive', 'target effective profile')
+    const proactiveEntry = required(effective.rows, 'dsh-enhanced-assistant-proactive', 'target effective profile', upgrading)
     if (proactiveEntry.get('name') !== '@dsh-enhanced/assistant-proactive') fail('assistant-proactive row has a different package')
-    const proactive = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-proactive', true)
+    const proactive = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-proactive', true, upgrading)
+    if (upgrading && proactive.get('enabled') === false) proactive.set('enabled', true)
     const currentEvaluation = proactive.get('intakeEvaluation', true) as Node | undefined
-    if (currentEvaluation !== undefined && !isDeepStrictEqual(nodeJson(currentEvaluation), ordinary.intakeEvaluation)) {
+    if (!upgrading && currentEvaluation !== undefined && !isDeepStrictEqual(nodeJson(currentEvaluation), ordinary.intakeEvaluation)) {
       fail('existing assistant-proactive intake evaluation differs from the frozen fresh-install setup')
     }
     replaceNode(target.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation)
-    const workItemsEntry = required(effective.rows, 'dsh-enhanced-assistant-work-items', 'target effective profile')
+    const workItemsEntry = required(effective.rows, 'dsh-enhanced-assistant-work-items', 'target effective profile', upgrading)
     if (workItemsEntry.get('name') !== '@dsh-enhanced/assistant-work-items') fail('assistant-work-items row has a different package')
-    const workItems = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-work-items', true)
+    const workItems = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-work-items', true, upgrading)
+    if (upgrading && workItems.get('enabled') === false) workItems.set('enabled', true)
     if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
     const ledgerNode = workItems.get('intakeLedger', true) as Node | undefined
     const ledger = ledgerNode === undefined ? map(target.document.createNode({}), 'assistant-work-items intakeLedger') : map(ledgerNode, 'assistant-work-items intakeLedger')
@@ -425,7 +460,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     }
     evaluation.set('enabled', true)
   }
-  cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true)
+  cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true, upgrading)
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-plugin-control-plane')
   // Native review authorities share immutable runtime descriptors in memory.

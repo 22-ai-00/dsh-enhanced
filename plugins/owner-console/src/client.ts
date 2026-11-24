@@ -218,6 +218,15 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           ? remote.modelCatalog(force)
           : Promise.resolve({ ok: false as const }),
         subscribeRefresh: listener => subscribeConsoleRefresh(remote, listener),
+        ...(typeof remote.controlSelfIteration === 'function'
+          ? {
+              controlSelfIteration: async (action, confirmed) => {
+                const result = await remote.controlSelfIteration!(action, confirmed)
+                if (result.ok && result.value.ok) notifyConsoleRefresh(remote)
+                return result
+              },
+            }
+          : {}),
         selectSessionModel: async (sessionId, provider, model, reasoningEffort) => {
           const sessionRemote = (() => {
             try {

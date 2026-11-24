@@ -242,7 +242,7 @@ describe('runInstall（薄委托）', () => {
     expect(code).toBe(3)
   })
 
-  test.each([false, true])('upgrade fences cross-ABI changes before delegating the cohort (legacy=%s)', async legacy => {
+  test.each([false, true])('upgrade delegates cross-ABI (0.1->0.2) or darwin Host update transactionally and keeps 0.2->0.2 on Linux installer (legacy=%s)', async legacy => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-test-')))
     try {
       const home = join(root, 'home')
@@ -264,20 +264,68 @@ describe('runInstall（薄委托）', () => {
         expect(JSON.parse(await readFile(planPath, 'utf8'))).toEqual(plan)
         return 0
       })
+      const runTransactionalUpgrade = vi.fn(async () => ({
+        report: {
+          schemaVersion: 1 as const,
+          command: 'upgrade' as const,
+          action: 'apply' as const,
+          ok: true,
+          ready: true,
+          dshHome: home,
+          mode: (process.platform === 'darwin' ? 'macos-launchd' : 'standard-local') as 'macos-launchd' | 'standard-local',
+          frozenSystemd: { detected: false, profiles: [] },
+          packages: {
+            cliPackageVersion: '0.1.83',
+            upgradeAvailable: true,
+            boundHost: { status: 'ready' as const, installedVersion: plan.originalRuntime.version, targetVersion: '0.2.0-rc.2', upgradeAvailable: true },
+            profiles: [],
+          },
+          registry: { url: 'https://registry.npmjs.org', checked: false, status: 'skipped' as const },
+          readiness: { ok: true, bindingOk: true, ledgersOk: true, profiles: [], blockedReasons: [] },
+          plan: { canExecute: true, steps: [], rollbackSupported: true, backupFiles: [] },
+          execution: { executed: true, dryRun: false, healthCheckPassed: true, rolledBack: false },
+        },
+        exitCode: 0,
+      }))
       const prepareHostUpdate = vi.fn(async () => plan)
       const install = runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
-        passthrough: ['--operation', 'upgrade'], dshHome: home,
+        passthrough: ['--operation', 'upgrade', '--allow-non-empty-history-migration'], dshHome: home,
         executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
           ({ ...environment, DSH_HOME: home, DSH_ENHANCED_HOST_BIN: '/hosts/old' }),
-        prepareHostUpdate },
+        prepareHostUpdate,
+        runTransactionalUpgrade },
       })
       if (legacy || process.platform === 'darwin') {
-        await expect(install).rejects.toThrow(legacy ? '跨 ABI 自动升级尚未支持' : 'macOS 尚不支持受管 Host 跨版本更新')
+        expect(await install).toBe(0)
+        expect(runTransactionalUpgrade).toHaveBeenCalledWith(expect.objectContaining({
+          dshHome: home,
+          action: 'apply',
+          dshVersion: '0.2.0-rc.2',
+          allowNonEmptyHistoryMigration: true,
+        }))
         expect(runInherited).not.toHaveBeenCalled()
+
+        const failingUpgrade = vi.fn(async () => ({
+          report: {
+            ...(await runTransactionalUpgrade.mock.results[0]!.value).report,
+            ok: false,
+            ready: false,
+            execution: { executed: true, dryRun: false, rolledBack: true, rollbackSucceeded: true, error: '事务回滚测试' },
+          },
+          exitCode: 1,
+        }))
+        await expect(runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+          passthrough: ['--operation', 'upgrade'], dshHome: home,
+          executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
+            ({ ...environment, DSH_HOME: home, DSH_ENHANCED_HOST_BIN: '/hosts/old' }),
+          prepareHostUpdate,
+          runTransactionalUpgrade: failingUpgrade },
+        })).rejects.toThrow('事务回滚测试')
         expect(await readFile(join(home, '.dsh-rsi-host.json'), 'utf8')).toBe('{}')
         return
       }
       expect(await install).toBe(0)
+      expect(runTransactionalUpgrade).not.toHaveBeenCalled()
       expect(prepareHostUpdate).toHaveBeenCalledWith({ dshHome: home, selector: 'latest' })
       await expect(readFile(planPath)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(runInherited).toHaveBeenCalledTimes(1)

@@ -49,7 +49,9 @@ export function normalizeLarkMessage(
   if (input.resources.length > 10) throw new Error('lark-channel: message has too many attachment descriptors')
   const normalizedText = content(input.content, config.maxTextBytes)
   if (normalizedText.length === 0 && input.resources.length === 0) return { outcome: 'ignore', reason: 'empty-content' }
-  const text = normalizedText
+  const text = input.chatType === 'group' && input.mentionedBot
+    ? (normalizedText.replace(/^(?:@_user_\d+\s+)+/u, '').trim() || normalizedText)
+    : normalizedText
   const account = key(config.account, 'account')
   const tenant = key(config.tenant, 'tenant')
   const eventId = providerCapability(input.messageId, 'messageId')

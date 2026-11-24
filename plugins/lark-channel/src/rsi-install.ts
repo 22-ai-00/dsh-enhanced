@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
-import { access, lstat, mkdir, readFile, realpath } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { access, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -23,7 +23,7 @@ import { prepareLinuxRsiCreationBuildEnvironment, readLinuxRsiCreationBuildEnvir
   RsiLinuxCreationBuildUnavailableError, type LinuxRsiCreationBuildEnvironment } from './rsi-linux-creation-build.js'
 import { discoverLinuxCgroupRoots, RsiLinuxCgroupUnavailableError } from './rsi-linux-cgroup-roots.js'
 import { prepareRsiLinuxRunnerStates, type RsiLinuxRunnerStates } from './rsi-linux-runner-states.js'
-import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration, type RsiOwnerConfigurationContext } from './rsi-bootstrap.js'
+import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration, verifyExistingRsiOwnerConfiguration, type RsiOwnerConfigurationContext } from './rsi-bootstrap.js'
 import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from './rsi-install-inputs.js'
 import { captureRsiSystemdUnitProperties, readRsiSystemdUnitProperties } from './rsi-systemd-bootstrap.js'
 import { configureRsiSetupLocked, rsiSetupPorts, type RsiSetupPorts } from './rsi-setup.js'
@@ -49,10 +49,70 @@ export interface RsiInstallInput { dshHome: string; profile: string; sourceRepos
   enableRevision?: boolean | undefined
   /** Explicit evaluator route when the composition has no Delivery agentProvider/agentModel. */
   intakeProvider?: string | undefined
-  intakeModel?: string | undefined }
+  intakeModel?: string | undefined
+  /** Explicit owner-authorized in-place upgrade/reconfiguration mode. */
+  upgradeExistingOwner?: boolean | undefined }
 export type RsiInstallResult = { mode: 'not-ready'; reason: string } | { mode: 'ready'; profiles: readonly string[]; manifestPath: string }
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false }
+}
+async function snapshotPrivateConfigTree(root: string): Promise<Map<string, Buffer>> {
+  const entries = new Map<string, Buffer>()
+  const walk = async (directory: string): Promise<void> => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, item.name)
+      const stat = await lstat(path)
+      if (stat.isDirectory()) {
+        await io.directory(path)
+        await walk(path)
+      } else if (stat.isFile()) {
+        if (stat.nlink !== 1 || await realpath(path) !== path) fail(`unsafe config file: ${path}`)
+        entries.set(path, await io.readStable(path, 2_097_152, true))
+      } else {
+        fail(`unsafe config entry: ${path}`)
+      }
+    }
+  }
+  await io.directory(root)
+  await walk(root)
+  return entries
+}
+async function atomicWritePrivateConfigFile(path: string, bytes: Buffer): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const temporary = `${path}.${randomUUID()}.tmp`
+  const descriptor = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try { await descriptor.writeFile(bytes); await descriptor.sync() }
+  finally { await descriptor.close() }
+  try { await rename(temporary, path); await io.syncDirectory(dirname(path)) }
+  catch (error) {
+    await unlink(temporary).catch(() => {})
+    throw error
+  }
+}
+async function restorePrivateConfigTree(root: string, snapshot: ReadonlyMap<string, Buffer>): Promise<void> {
+  const dirs = new Set<string>([root])
+  const walk = async (directory: string): Promise<void> => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, item.name)
+      const stat = await lstat(path)
+      if (stat.isDirectory()) {
+        dirs.add(path)
+        await walk(path)
+      } else if (stat.isFile() && !snapshot.has(path)) {
+        await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error })
+      }
+    }
+  }
+  await walk(root)
+  for (const [path, bytes] of snapshot) {
+    const current = await exists(path) ? await io.readStable(path, 2_097_152, true).catch(() => null) : null
+    if (current === null || !current.equals(bytes)) {
+      await atomicWritePrivateConfigFile(path, bytes)
+    }
+  }
+  for (const directory of [...dirs].sort((left, right) => right.length - left.length)) {
+    await io.syncDirectory(directory)
+  }
 }
 /** Stable per-target name, including for a maximum-length target profile. */
 export function rsiCoordinatorProfile(profile: string): string {
@@ -491,9 +551,15 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       throw error
     }
     const { resources, runtime, source, build, release } = prepared
+    const upgrading = input.upgradeExistingOwner === true
     let targetEffective = ports.setup.dump(input.profile, input.dshHome)
     let installed: Awaited<ReturnType<typeof collectRsiInstalledInputs>>
-    try { installed = await ports.collect({ dshHome: input.dshHome, targetProfile: input.profile, targetEffective, resources, source }) }
+    try {
+      installed = await ports.collect({
+        dshHome: input.dshHome, targetProfile: input.profile, targetEffective, resources, source,
+        ...(upgrading ? { includeDisabledManagedRows: true } : {}),
+      })
+    }
     catch (error) {
       signal.throwIfAborted()
       if (error instanceof RsiInstalledInputsUnavailableError) return { mode: 'not-ready', reason: error.message }
@@ -516,7 +582,10 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
         // availability before any new owner or source preflight can fail.
         for (const profile of recoveryRunning) await ports.setup.start(profile,input.dshHome)
         targetEffective = ports.setup.dump(input.profile,input.dshHome)
-        installed = await ports.collect({dshHome:input.dshHome,targetProfile:input.profile,targetEffective,resources,source})
+        installed = await ports.collect({
+          dshHome: input.dshHome, targetProfile: input.profile, targetEffective, resources, source,
+          ...(upgrading ? { includeDisabledManagedRows: true } : {}),
+        })
       }
     }
     const profiles = { targetPatch: (await io.readStable(join(input.dshHome, 'profiles', pair[0], 'cordis.patch.yml'), 2_097_152)).toString('utf8'),
@@ -533,27 +602,36 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     let intakeProvider = input.intakeProvider, intakeModel = input.intakeModel
     let previousManifest: RsiSetupManifest | undefined
     if (await exists(storedManifest)) {
-      // A retry reuses the original installation's finite terms, never renews them.
+      // A retry or upgrade reuses the original installation's finite terms, never renews them.
       const previous = JSON.parse((await io.readStable(storedManifest, 2_097_152, true)).toString('utf8')) as RsiSetupManifest
       previousManifest = previous
       const host = JSON.parse((await io.readStable(join(resources.configRoot,'host-authority.json'), 2_097_152, true)).toString('utf8')) as { grant: { notBefore: number } }
       now = host.grant.notBefore; expiresAt = previous.sourceReviews.expiresAt
-      // Replaying a legacy installation must not silently add a new authority.
+      // Replaying or upgrading a legacy installation must not silently add a new creation authority.
       enableCreation = previous.pluginCreation !== undefined
       const storedOrdinary = previous.ordinaryUseLearning?.intakeEvaluation
-      if (input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
+      if (!upgrading && input.enableOrdinaryUseLearning === true && storedOrdinary === undefined) {
         fail('existing installation cannot be expanded with ordinary-use learning; install a fresh profile instead')
       }
-      // A retry preserves exactly the stored opt-in and route, like enableRevision.
-      enableOrdinaryUseLearning = storedOrdinary !== undefined
-      if (storedOrdinary !== undefined) { intakeProvider = storedOrdinary.provider; intakeModel = storedOrdinary.model }
+      enableOrdinaryUseLearning = upgrading
+        ? (input.enableOrdinaryUseLearning === true || storedOrdinary !== undefined)
+        : storedOrdinary !== undefined
+      if (upgrading) {
+        intakeProvider = input.intakeProvider ?? storedOrdinary?.provider
+        intakeModel = input.intakeModel ?? storedOrdinary?.model
+      } else if (storedOrdinary !== undefined) {
+        intakeProvider = storedOrdinary.provider
+        intakeModel = storedOrdinary.model
+      }
       // A skip decision is likewise frozen: an existing installation that already
       // issued memory-learning grants must not drop or renew them, while an
       // interrupted skip retry keeps the memory-learning chain absent.
       if (input.skipMemoryLearning === true && previous.memoryLearning !== undefined) {
         fail('existing installation cannot drop memory learning; reinstall a fresh profile to change the decision')
       }
-      skipMemoryLearning = previous.memoryLearning === undefined
+      skipMemoryLearning = upgrading
+        ? (input.skipMemoryLearning === true || (previous.memoryLearning === undefined && !enableOrdinaryUseLearning))
+        : previous.memoryLearning === undefined
     }
     const manifest = createRsiBootstrapManifest({ dshHome: input.dshHome, targetProfile: pair[0], coordinatorProfile: pair[1],
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
@@ -562,15 +640,23 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       ...(previousManifest ? { enableRevision: previousManifest.pluginRevision !== undefined } : {}),
       enableOrdinaryUseLearning,
       skipMemoryLearning,
+      ...(upgrading ? { upgradeExistingOwner: true } : {}),
       ...(intakeProvider !== undefined ? { intakeProvider } : {}),
       ...(intakeModel !== undefined ? { intakeModel } : {}),
       git: installed.git, now, expiresAt, plugins: installed.plugins,
       observerTargets: installed.observerTargets, hostDeploymentInputs: installed.hostDeploymentInputs })
-    if (previousManifest && !isDeepStrictEqual(previousManifest, manifest)) fail('existing manifest differs before stopping Hosts')
+    if (previousManifest && !upgrading && !isDeepStrictEqual(previousManifest, manifest)) fail('existing manifest differs before stopping Hosts')
     if (previousManifest) {
-      const compiledPatches = await ports.setup.compile({ manifest, dshHome: input.dshHome,
-        ...profiles, owner: binding })
-      await inspectRsiOwnerConfiguration({ manifest, resources, patches: compiledPatches, signal })
+      if (upgrading) {
+        await verifyExistingRsiOwnerConfiguration({
+          resources, dshHome: input.dshHome, targetProfile: pair[0],
+          observerKeyPath: previousManifest.controlPlane.runtimeObserver!.keyPath, signal,
+        })
+      } else {
+        const compiledPatches = await ports.setup.compile({ manifest, dshHome: input.dshHome,
+          ...profiles, owner: binding })
+        await inspectRsiOwnerConfiguration({ manifest, resources, patches: compiledPatches, signal })
+      }
     }
     const inventories = await captureRsiAutomationInventories(ports.setup.automationInventory,
       targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile)
@@ -590,6 +676,7 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     }
     const running = new Set<string>()
     let applied = false
+    let configSnapshot: Map<string, Buffer> | undefined
     try {
       for (const profile of [...pair].reverse()) if (await ports.stop(input, profile, installed.systemctl, signal)) running.add(profile)
       signal.throwIfAborted()
@@ -600,11 +687,13 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
         targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile))) fail('Automation inventory changed while stopping Hosts')
       const unitProperties = await ports.capture({ dshHome: input.dshHome, profile: pair[0] },
         { systemctl: { ...installed.systemctl, interpreter: null }, environment: manifest.serviceEnvironment!.target, signal })
+      if (upgrading) configSnapshot = await snapshotPrivateConfigTree(resources.configRoot)
       const configuration = await ports.prepareOwner({ manifest, resources, runtime, source, releaseBuild: release.releaseBuild,
-        executor: installed.executor, systemctl: installed.systemctl, unitProperties, policies: installed.policies, now }, { binding, profiles, signal })
+        executor: installed.executor, systemctl: installed.systemctl, unitProperties, policies: installed.policies, now },
+        { binding, profiles, signal, upgradeExistingOwner: upgrading })
       const args = { dshHome: input.dshHome, manifestPath: configuration.manifestPath, apply: true, rollback: false,
         start: false, confirmStopped: true, help: false, ackExistingAutomations: input.ackExistingAutomations === true,
-        expectedAutomationInventories: inventories }
+        expectedAutomationInventories: inventories, upgradeExistingOwner: upgrading }
       const deploymentPorts: RsiSetupPorts = { ...ports.setup, async validateServiceUnits(value, environment) {
         await ports.setup.validateServiceUnits(value, environment)
         const current = await ports.readUnit({ dshHome: input.dshHome, profile: pair[0] },
@@ -623,6 +712,9 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       return { mode: 'ready', profiles: pair, manifestPath: configuration.manifestPath }
     } catch (error) {
       if (!applied) {
+        if (configSnapshot !== undefined) {
+          await restorePrivateConfigTree(resources.configRoot, configSnapshot)
+        }
         // Restore availability only when all profile bytes and the unit are still
         // the original deployment. Unknown outcomes retain stopped services.
         const unchanged = await Promise.all(pair.map(async (profile,index) => {

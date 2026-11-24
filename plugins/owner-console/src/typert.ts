@@ -212,6 +212,23 @@ export type FeishuQrOwnerBinding = typeof FEISHU_QR_OWNER_BINDINGS[number]
 export const PROFILE_RESTART_MODES = ['desktop-app', 'managed-service', 'manual'] as const
 export type ProfileRestartMode = typeof PROFILE_RESTART_MODES[number]
 
+export const OWNER_SELF_ITERATION_ACTIONS = [
+  'enableSelfIteration',
+  'disableSelfIteration',
+  'upgradeAssistantAndRecover',
+] as const
+
+export const OwnerConsoleControlActionResultSchema = z.object({
+  ok: z.boolean(),
+  action: z.enum(OWNER_SELF_ITERATION_ACTIONS).optional(),
+  state: z.enum(['enabled', 'disabled', 'upgraded']).optional(),
+  healthy: z.boolean().optional(),
+  error: z.string().max(1_024).optional(),
+  reason: z.string().max(1_024).optional(),
+  note: z.string().max(2_048).optional(),
+}).readonly()
+export type OwnerConsoleControlActionResult = Readonly<z.infer<typeof OwnerConsoleControlActionResultSchema>>
+
 /** Strict wire snapshot for official Feishu/Lark OAuth 2.0 Device Authorization onboarding.
  * Never carries `device_code` or `client_secret` across the Host/Web boundary. */
 export const FeishuQrOnboardingSnapshotSchema = z.object({
@@ -1190,6 +1207,17 @@ export const TYPERT = {
       ],
       result: codec('@dsh-enhanced/owner-console#write', () => WRITE_RESULT),
       sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1178, column: 3 },
+    },
+    {
+      id: '@dsh-enhanced/owner-console#ownerConsole/controlSelfIteration',
+      service: 'ownerConsole', namespace: 'ownerConsole', method: 'controlSelfIteration',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'action', wire: 'action', source: 'json', codec: codec('owner-console#selfIterationAction', () => z.enum(OWNER_SELF_ITERATION_ACTIONS)) },
+        { name: 'confirmed', wire: 'confirmed', source: 'json', codec: codec('owner-console#selfIterationConfirmed', () => z.boolean()) },
+      ],
+      result: codec('@dsh-enhanced/owner-console#OwnerConsoleControlActionResult', () => OwnerConsoleControlActionResultSchema),
+      sourceLocation: { file: 'plugins/owner-console/src/typert.ts', line: 1202, column: 3 },
     },
   ],
   model: { services: [], events: [], objects: [] },

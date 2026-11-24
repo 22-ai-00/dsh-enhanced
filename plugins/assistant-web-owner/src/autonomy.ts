@@ -192,6 +192,7 @@ function materializeAutonomyProfile(input: AutonomyProfileInput, source: string,
     { slug: 'assistant-goals', pathKeys: ['databasePath'], label: 'Goals databasePath', subdir: 'assistant-goals', filename: `${input.profile}.sqlite`, createIfMissing: true },
     { slug: 'assistant-dreaming', pathKeys: ['databasePath'], label: 'Dreaming databasePath', subdir: 'assistant-dreaming', filename: `${input.profile}.sqlite`, createIfMissing: true },
     { slug: 'assistant-memory-learning', pathKeys: ['databasePath'], label: 'Memory learning databasePath', subdir: 'assistant-memory-learning', filename: `${input.profile}.sqlite`, createIfMissing: true },
+    { slug: 'assistant-association', pathKeys: ['databasePath'], label: 'Association databasePath', subdir: 'assistant-association', filename: `${input.profile}.sqlite`, createIfMissing: true },
     { slug: 'assistant-work-items', pathKeys: ['databasePath'], label: 'Work-items databasePath', subdir: 'assistant-work-items', filename: `${input.profile}.sqlite`, createIfMissing: true },
     { slug: 'assistant-growth-driver', pathKeys: ['usageLearning', 'databasePath'], label: 'Growth usage databasePath', subdir: 'assistant-growth-driver', filename: `${input.profile}-usage.sqlite`, createIfMissing: false },
   ] as const

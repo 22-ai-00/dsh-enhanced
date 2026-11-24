@@ -1,14 +1,15 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { parse, stringify } from 'yaml'
 import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { assertRsiMemoryScanActivation, installRsiOwnerDeployment, preflightRsiOwnerReadiness, RsiOwnerPreflightUnavailableError, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
-import { RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
+import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
+import { applySelfIterationProfileToggle } from '../src/service.js'
 import { LinuxRsiRuntimeUnavailableError } from '../src/rsi-linux-runtime-bootstrap.js'
 import { linuxRuntimeDigest } from '@dsh-enhanced/assistant-isolation'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
@@ -355,7 +356,7 @@ describe.skipIf(process.platform !== 'linux')('automatic owner deployment', () =
       execution: { ...record.definition.execution, catalogDigest: 'a'.repeat(64) } } })).toThrow('memory scan activation')
     expect(() => check({ ...record, definition: { ...record.definition,
       execution: { ...record.definition.execution, activationNonce: 'b'.repeat(64) } } })).toThrow('memory scan activation')
-  })
+  }, 120_000)
   test('applies real owner/profile/authority transaction, starts coordinator first, and preserves frozen installation on retry', async () => {
     const f = await fixture()
     const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>
@@ -568,4 +569,319 @@ process.exit(first ? 9 : 0);
     expect((await installRsiOwnerDeployment({...f.input,ackExistingAutomations:true},f.ports)).mode).toBe('ready')
     expect(active[0]).toMatchObject({id:'recovery:supervised-growth',version:2})
   },120_000)
+
+  test('upgradeExistingOwner upgrades an existing owner deployment in place while preserving owner, bindings, and ledgers', async () => {
+    const f = await fixture()
+    const first = await installRsiOwnerDeployment(f.input, f.ports)
+    expect(first.mode).toBe('ready')
+    const manifestPath = join(f.f.input.resources.configRoot, 'manifest.json')
+    const firstManifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      sourceReviews: { owner: unknown; expiresAt: number }
+      controlPlane: { sourceJobs: { authorityId: string } }
+      ordinaryUseLearning?: unknown
+    }
+    const ledgerPath = join(f.f.input.resources.stateRoot, 'revision-review-runner', 'ledger.sqlite')
+    const ledgerBefore = await readFile(ledgerPath)
+
+    // Bare retry without upgradeExistingOwner still fails closed
+    await expect(installRsiOwnerDeployment({ ...f.input, enableOrdinaryUseLearning: true }, f.ports))
+      .rejects.toThrow('existing installation cannot be expanded with ordinary-use learning')
+
+    // Upgrade the installed profile bundles (adding assistant-proactive & assistant-work-items) and run upgradeExistingOwner
+    const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
+    originalRows.push(
+      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: {} },
+      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+    )
+    f.originals[f.profile] = stringify(originalRows)
+    const baseCollect = f.ports.collect
+    f.ports.collect = vi.fn(async value => {
+      const collected = await baseCollect(value)
+      const added = ['assistant-proactive', 'assistant-work-items'] as const
+      const extraInputs = added.flatMap(plugin => [
+        `node_modules/@dsh-enhanced/${plugin}/package.json`,
+        `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`,
+        `node_modules/@dsh-enhanced/${plugin}/lib/index.js`,
+      ])
+      const samplePolicy = collected.policies[0]!
+      const extraPolicies = added.map(plugin => ({
+        ...samplePolicy,
+        candidateId: plugin,
+        packageName: `@dsh-enhanced/${plugin}`,
+        packagePath: `plugins/${plugin}`,
+        capabilities: [plugin],
+      }))
+      return {
+        ...collected,
+        plugins: [...collected.plugins, ...added],
+        hostDeploymentInputs: [...collected.hostDeploymentInputs, ...extraInputs],
+        policies: [...collected.policies, ...extraPolicies],
+      }
+    })
+
+    // Explicit upgradeExistingOwner succeeds and preserves owner identity, expiry, and SQLite ledgers
+    const upgraded = await installRsiOwnerDeployment({
+      ...f.input,
+      enableOrdinaryUseLearning: true,
+      intakeProvider: 'deepseek-official',
+      intakeModel: 'deepseek-chat',
+      upgradeExistingOwner: true,
+    }, f.ports)
+    expect(upgraded.mode).toBe('ready')
+    const secondManifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      sourceReviews: { owner: unknown; expiresAt: number }
+      controlPlane: { sourceJobs: { authorityId: string } }
+      ordinaryUseLearning?: { intakeEvaluation: { provider: string; model: string } }
+    }
+    expect(secondManifest.sourceReviews.owner).toEqual(firstManifest.sourceReviews.owner)
+    expect(secondManifest.sourceReviews.expiresAt).toBe(firstManifest.sourceReviews.expiresAt)
+    expect(secondManifest.controlPlane.sourceJobs.authorityId).toBe(firstManifest.controlPlane.sourceJobs.authorityId)
+    expect(secondManifest.ordinaryUseLearning?.intakeEvaluation).toMatchObject({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })
+    expect(await readFile(ledgerPath)).toEqual(ledgerBefore)
+    const rows = parse(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')) as Array<{
+      id: string; config?: Record<string, any> }>
+    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.config?.workItemExperiences).toBe(true)
+    expect(rows.find(row => row.id === 'dsh-enhanced-assistant-proactive')?.config?.intakeEvaluation).toMatchObject({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })
+    const effectiveAfter = parse(f.ports.setup.dump(f.profile, f.home)) as Array<{
+      id: string; config?: Record<string, any> }>
+    const delivery = effectiveAfter.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config!
+    expect(delivery.ownerRoutes).toHaveLength(1)
+  }, 120_000)
+
+  test('upgradeExistingOwner rolls back configRoot when ports.configure fails after prepareOwner, then retries cleanly', async () => {
+    const f = await fixture()
+    const first = await installRsiOwnerDeployment(f.input, f.ports)
+    expect(first.mode).toBe('ready')
+    const configRoot = f.f.input.resources.configRoot
+    const configBefore = await hashTree(configRoot)
+    const manifestPath = join(configRoot, 'manifest.json')
+    const bootstrapPath = join(configRoot, 'bootstrap.json')
+    const manifestBefore = await readFile(manifestPath, 'utf8')
+    const bootstrapBefore = await readFile(bootstrapPath, 'utf8')
+    const targetPatchBefore = await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')
+    const coordinatorPatchBefore = await readFile(join(f.home, 'profiles', f.coordinator, 'cordis.patch.yml'), 'utf8')
+
+    // Prepare upgraded bundles for the failed upgrade attempt
+    const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
+    originalRows.push(
+      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: {} },
+      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+    )
+    f.originals[f.profile] = stringify(originalRows)
+    const baseCollect = f.ports.collect
+    f.ports.collect = vi.fn(async value => {
+      const collected = await baseCollect(value)
+      const added = ['assistant-proactive', 'assistant-work-items'] as const
+      const extraInputs = added.flatMap(plugin => [
+        `node_modules/@dsh-enhanced/${plugin}/package.json`,
+        `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`,
+        `node_modules/@dsh-enhanced/${plugin}/lib/index.js`,
+      ])
+      const samplePolicy = collected.policies[0]!
+      const extraPolicies = added.map(plugin => ({
+        ...samplePolicy,
+        candidateId: plugin,
+        packageName: `@dsh-enhanced/${plugin}`,
+        packagePath: `plugins/${plugin}`,
+        capabilities: [plugin],
+      }))
+      return {
+        ...collected,
+        plugins: [...collected.plugins, ...added],
+        hostDeploymentInputs: [...collected.hostDeploymentInputs, ...extraInputs],
+        policies: [...collected.policies, ...extraPolicies],
+      }
+    })
+
+    const originalConfigure = f.ports.configure
+    let prepareCount = 0
+    const originalPrepareOwner = f.ports.prepareOwner
+    f.ports.prepareOwner = vi.fn(async (...args: Parameters<RsiInstallPorts['prepareOwner']>) => {
+      prepareCount += 1
+      return await originalPrepareOwner(...args)
+    })
+    f.ports.configure = vi.fn(async () => {
+      throw new Error('INJECTED_CONFIGURE_FAILURE')
+    })
+
+    const startsBeforeFail = f.starts.length
+    await expect(installRsiOwnerDeployment({
+      ...f.input,
+      enableOrdinaryUseLearning: true,
+      intakeProvider: 'deepseek-official',
+      intakeModel: 'deepseek-chat',
+      upgradeExistingOwner: true,
+    }, f.ports)).rejects.toThrow('INJECTED_CONFIGURE_FAILURE')
+
+    expect(prepareCount).toBe(1)
+    expect(await readFile(manifestPath, 'utf8')).toBe(manifestBefore)
+    expect(await readFile(bootstrapPath, 'utf8')).toBe(bootstrapBefore)
+    expect(await hashTree(configRoot)).toBe(configBefore)
+    expect(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'), 'utf8')).toBe(targetPatchBefore)
+    expect(await readFile(join(f.home, 'profiles', f.coordinator, 'cordis.patch.yml'), 'utf8')).toBe(coordinatorPatchBefore)
+    expect(f.starts.slice(startsBeforeFail)).toEqual([f.coordinator, f.profile])
+
+    // Subsequent upgrade retry succeeds cleanly
+    f.ports.configure = originalConfigure
+    const retried = await installRsiOwnerDeployment({
+      ...f.input,
+      enableOrdinaryUseLearning: true,
+      intakeProvider: 'deepseek-official',
+      intakeModel: 'deepseek-chat',
+      upgradeExistingOwner: true,
+    }, f.ports)
+    expect(retried.mode).toBe('ready')
+    expect(JSON.parse(await readFile(manifestPath, 'utf8')).ordinaryUseLearning?.intakeEvaluation).toMatchObject({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })
+  }, 120_000)
+
+  test('upgradeExistingOwner succeeds when assistant-memory-learning was temporarily disabled via /autonomy disable', async () => {
+    const f = await fixture()
+    const first = await installRsiOwnerDeployment(f.input, f.ports)
+    expect(first.mode).toBe('ready')
+
+    // Simulate /autonomy disable setting disabled: true while retaining owner config on disk
+    const patchPath = join(f.home, 'profiles', f.profile, 'cordis.patch.yml')
+    const patchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    const learner = patchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+    learner.disabled = true
+    await writeFile(patchPath, stringify(patchRows), { mode: 0o600 })
+
+    // Bare retry without upgradeExistingOwner still fails closed
+    await expect(installRsiOwnerDeployment(f.input, f.ports))
+      .rejects.toThrow('effective memory learner must be the installed unconfigured bundle')
+
+    // Explicit upgradeExistingOwner succeeds and re-enables the owner's learner grant
+    const upgraded = await installRsiOwnerDeployment({ ...f.input, upgradeExistingOwner: true }, f.ports)
+    expect(upgraded.mode).toBe('ready')
+    const finalPatchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean }>
+    expect(finalPatchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+  }, 120_000)
+
+  test('accepts disabled === undefined with config after /autonomy disable -> /autonomy enable on bare retry and upgradeExistingOwner', async () => {
+    const f = await fixture()
+    // Match real plugins/assistant-memory-learning/cordis.patch.yml where base omits `disabled`
+    const baseRows = parse(f.originals[f.profile]!) as Array<{ id: string; disabled?: boolean }>
+    delete baseRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled
+    f.originals[f.profile] = stringify(baseRows)
+
+    const first = await installRsiOwnerDeployment(f.input, f.ports)
+    expect(first.mode).toBe('ready')
+
+    const toggleOff = await applySelfIterationProfileToggle({ dshHome: f.home, profile: f.profile, enable: false })
+    expect(toggleOff).toMatchObject({ ok: true, state: 'disabled' })
+    const toggleOn = await applySelfIterationProfileToggle({ dshHome: f.home, profile: f.profile, enable: true })
+    expect(toggleOn).toMatchObject({ ok: true, state: 'enabled' })
+
+    const patchPath = join(f.home, 'profiles', f.profile, 'cordis.patch.yml')
+    const patchRows = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: unknown }>
+    const learnerRow = patchRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!
+    expect(learnerRow.disabled).toBeUndefined()
+    expect(learnerRow.config).toBeDefined()
+
+    // Bare retry detects cordis.patch.yml digest change before stopping Hosts; explicit upgradeExistingOwner succeeds
+    await expect(installRsiOwnerDeployment(f.input, f.ports)).rejects.toThrow('owner receipt digest changed')
+    await expect(installRsiOwnerDeployment({ ...f.input, upgradeExistingOwner: true }, f.ports)).resolves.toMatchObject({ mode: 'ready' })
+  }, 120_000)
+
+  test('upgradeExistingOwner succeeds after real /autonomy disable with enableOrdinaryUseLearning and real collectRsiInstalledInputs', async () => {
+    const f = await fixture()
+    const profileRoot = join(f.home, 'profiles', f.profile)
+    const writeInstalledFile = async (path: string, value: string, mode = 0o600) => {
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, value, { mode })
+      await chmod(path, mode)
+    }
+
+    // Populate real installed package descriptors + DSH/systemctl bins so real collectRsiInstalledInputs runs
+    const version = f.f.input.source.version
+    const allPlugins = ['personal-assistant', 'assistant-goals', 'assistant-growth-driver',
+      'assistant-memory-learning', 'hello', 'assistant-proactive', 'assistant-work-items',
+      'assistant-evaluation', 'personal-memory']
+    for (const name of allPlugins) {
+      const pkgRoot = join(profileRoot, 'node_modules', '@dsh-enhanced', name)
+      await writeInstalledFile(join(pkgRoot, 'package.json'), JSON.stringify({
+        name: `@dsh-enhanced/${name}`, version, main: './lib/index.js',
+        exports: { '.': { default: './lib/index.js' }, './package.json': './package.json' },
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+      }))
+      await writeInstalledFile(join(pkgRoot, 'cordis.patch.yml'), `- insert:\n    - id: dsh-enhanced-${name}\n      name: '@dsh-enhanced/${name}'\n`)
+      await writeInstalledFile(join(pkgRoot, 'lib', 'index.js'), 'export default {}\n')
+    }
+    const dshRoot = join(f.f.root, 'real-dsh')
+    const binDir = join(f.f.root, 'real-bin')
+    await mkdir(binDir, { recursive: true })
+    await symlink('/usr/bin/true', join(binDir, 'systemctl'))
+    await writeInstalledFile(join(dshRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: f.f.input.executor.version, bin: { dsh: 'lib/bin.js' },
+    }))
+    await writeInstalledFile(join(dshRoot, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 0o700)
+    await symlink(join(dshRoot, 'lib', 'bin.js'), join(binDir, 'dsh'))
+
+    // Add delivery route model, assistant-proactive, assistant-work-items, and an enabled evaluation row to the profile
+    const originalRows = parse(f.originals[f.profile]!) as Array<{ id: string; name?: string; config?: Record<string, unknown> }>
+    const deliveryRow = originalRows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+    deliveryRow.config = { ...deliveryRow.config, agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }
+    originalRows.push(
+      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: { enabled: true } },
+      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+    )
+    f.originals[f.profile] = stringify(originalRows)
+    const patchPath = join(profileRoot, 'cordis.patch.yml')
+    await writeInstalledFile(patchPath, stringify([
+      { id: 'dsh-enhanced-assistant-evaluation', name: '@dsh-enhanced/assistant-evaluation', config: { enabled: true } },
+      { id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive', config: { enabled: true } },
+      { id: 'dsh-enhanced-assistant-work-items', name: '@dsh-enhanced/assistant-work-items', config: { enabled: true, intakeLedger: { enabled: true } } },
+    ]))
+
+    f.ports.collect = vi.fn(async value => {
+      const collected = await collectRsiInstalledInputs({
+        ...value,
+        source: { ...value.source, origin: undefined } as typeof value.source,
+        environment: { PATH: `${binDir}:/usr/bin:/bin` },
+      })
+      return {
+        ...collected,
+        executor: f.f.input.executor,
+        git: f.f.input.manifest.sourceReviews.git,
+        systemctl: f.f.input.systemctl,
+      }
+    })
+
+    const first = await installRsiOwnerDeployment({ ...f.input, enableOrdinaryUseLearning: true }, f.ports)
+    expect(first.mode).toBe('ready')
+
+    // Real /autonomy disable toggles all Contract 1 rows (work-items, proactive, growth-driver, memory-learning, evaluation)
+    const toggleOff = await applySelfIterationProfileToggle({ dshHome: f.home, profile: f.profile, enable: false })
+    expect(toggleOff).toMatchObject({ ok: true, state: 'disabled' })
+    const disabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
+      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items', 'dsh-enhanced-assistant-evaluation']) {
+      expect(disabledPatch.find(row => row.id === id)?.disabled).toBe(true)
+    }
+    expect(disabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(false)
+
+    // Bare retry without upgradeExistingOwner still fails closed
+    await expect(installRsiOwnerDeployment(f.input, f.ports)).rejects.toThrow()
+
+    // Explicit upgradeExistingOwner: true succeeds cleanly using real collectRsiInstalledInputs!
+    const upgraded = await installRsiOwnerDeployment({ ...f.input, upgradeExistingOwner: true }, f.ports)
+    expect(upgraded.mode).toBe('ready')
+    const finalPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
+      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+      expect(finalPatch.find(row => row.id === id)?.disabled).toBe(false)
+    }
+    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-proactive')?.config?.enabled).toBe(true)
+    expect(finalPatch.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')?.config?.enabled).toBe(true)
+  }, 120_000)
 })

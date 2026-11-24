@@ -124,7 +124,7 @@ describe('private managed DSH runtime', () => {
     expect(f.counts()).toEqual({ viewCount: 1, installCount: 1 })
   })
 
-  test.each(['0.1.5-rc.3', '0.1.5', '0.2.0-rc.2', '0.2.2-rc.3'])('reads a verified legacy %s receipt without selecting it for a new install', async legacyVersion => {
+  test.each(['0.1.5-rc.3', '0.1.5', '0.1.9', '0.2.0-rc.2', '0.2.2-rc.3'])('reads a verified legacy %s receipt without selecting it for a new install', async legacyVersion => {
     const f = await fixture()
     const current = await prepareManagedHostRuntime({ root: f.root }, f.ports)
     const legacyRoot = join(f.root, legacyVersion)

@@ -16,9 +16,12 @@ import { PersonalMemoryService, validateMemoryLearningAdoptionGrant } from '../.
 import {
   applyAutonomyWizardSetup,
   canonicalObjectDigest,
+  ensureVerifierDefaults,
   inspectAutonomyWizardStatus,
+  normalizeLearningConfigForDigest,
   ownerRouteAuthorityHashLocal,
 } from '../src/autonomy-setup.js'
+import { parseDocument } from 'yaml'
 import { applyFeishuVaultConfig } from '../src/doctor-repair.js'
 import { OwnerConsoleService } from '../src/service.js'
 import { AUTONOMY_TIER_DEFAULTS, TYPERT } from '../src/typert.js'
@@ -316,7 +319,7 @@ describe('autonomy-setup wizard', () => {
     } as never)
     expect(verifierRow.config['databasePath']).toBe("dshHomePath('assistant-verifier/verification.sqlite')")
     expect(parsedVerifier.tickIntervalMs).toBe(5000)
-    expect(parsedVerifier.requireAcceptance).toBe(false)
+    expect(parsedVerifier.requireAcceptance).toBe(true)
     const reviewCfg = verifierRow.config['memoryReviews'] as Record<string, unknown>
     const adoptCfg = (paRow.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
     const learnCfg = memRow.config
@@ -1009,5 +1012,217 @@ describe('autonomy-setup wizard', () => {
     expect(learnerCfg['authorityId']).toBe('web-memory-extract-web-g2')
     expect(String(learnerCfg['databasePath'])).toContain(join('assistant-memory-learning', 'web-g2.sqlite'))
     expect(() => validateLearningConfig(learnerCfg)).not.toThrow()
+  })
+
+  it('preserves explicit requireAcceptance: false opt-out in ensureVerifierDefaults', () => {
+    const doc = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config:\n    requireAcceptance: false\n')
+    const cfgNode = doc.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(doc, cfgNode, { requireAcceptance: true })
+    expect(cfgNode.get('requireAcceptance')).toBe(false)
+
+    const docFromRuntime = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config: {}\n')
+    const runtimeCfgNode = docFromRuntime.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(docFromRuntime, runtimeCfgNode, { requireAcceptance: false })
+    expect(runtimeCfgNode.get('requireAcceptance')).toBe(false)
+
+    const docDefault = parseDocument('- id: dsh-enhanced-assistant-verifier\n  config: {}\n')
+    const defaultCfgNode = docDefault.getIn([0, 'config']) as import('yaml').YAMLMap
+    ensureVerifierDefaults(docDefault, defaultCfgNode, undefined)
+    expect(defaultCfgNode.get('requireAcceptance')).toBe(true)
+  })
+
+  it('preserves workItemExperiences: false without false configDigest rotation on re-application', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_work_item_exp_false', 1)
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '      budgets: []',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '    assistantAutomations:',
+      "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
+      '      schedulerEnabled: true',
+      '      allowUnbudgetedExecution: false',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-primary',
+      '        conversation: { channel: web, account: web, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: web, tenant: local, user: operator }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+
+    const { host } = createHostContext({
+      profileDir,
+      dshHome,
+      profileName: 'web',
+      llmProviders: [{ id: 'super-relay', name: 'Super Relay' }],
+    })
+
+    const fixedNow = 1_760_000_600_000
+    const first = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: false,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: fixedNow,
+    })
+    expect(first.applied).toBe(true)
+
+    const rowsAfterFirst = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
+    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
+    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
+
+    expect(learnCfg['workItemExperiences']).toBe(false)
+    expect(Object.hasOwn(reviewCfg, 'workItemExperiences')).toBe(false)
+    expect(Object.hasOwn(adoptCfg, 'workItemExperiences')).toBe(false)
+
+    const validatedLearn = validateLearningConfig(learnCfg)
+    expect(validatedLearn.workItemExperiences).toBe(false)
+    const runtimeDigest = canonicalObjectDigest(validatedLearn)
+
+    // Seed MemoryLearning grant_record with the exact runtime digest from validateLearningConfig.
+    mkdirSync(join(dshHome, 'assistant-memory-learning'), { recursive: true })
+    const learningDb = new DatabaseSync(join(dshHome, 'assistant-memory-learning', 'web.sqlite'))
+    try {
+      learningDb.exec(`CREATE TABLE grant_record (authority_id TEXT PRIMARY KEY, config_digest TEXT NOT NULL, max_extractions INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0) STRICT`)
+      learningDb.prepare(`INSERT INTO grant_record VALUES (?, ?, ?, 0)`).run(
+        String(learnCfg['authorityId']),
+        runtimeDigest,
+        Number(learnCfg['maxExtractions']),
+      )
+    } finally {
+      learningDb.close()
+    }
+    expect(canonicalObjectDigest(normalizeLearningConfigForDigest(learnCfg))).toBe(runtimeDigest)
+
+    // Second apply with same fixedNow must stay at g1 (no false -g2 rotation).
+    const second = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: false,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: fixedNow,
+    })
+    expect(second.applied).toBe(true)
+    const rowsAfterSecond = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
+    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    expect(learnCfgSecond['authorityId']).toBe('web-memory-extract-web')
+    expect(learnCfgSecond['workItemExperiences']).toBe(false)
+  })
+
+  it('normalizes omitted/undefined workItemExperiences to true without false -g2 grant rotation', async () => {
+    const { root, dshHome, profileDir, workspace } = createTempProfile()
+    dirs.push(root)
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const deliveryDb = join(dshHome, 'assistant-delivery', 'state.sqlite')
+    seedDeliveryOwnerSqlite(deliveryDb, 'web', 'principal_work_item_exp_undef', 1)
+    writeFileSync(patchPath, [
+      '- id: dsh-enhanced-personal-assistant',
+      '  name: "@dsh-enhanced/personal-assistant"',
+      '  config:',
+      '    assistantPolicy:',
+      "      databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')",
+      '      rules: []',
+      '      budgets: []',
+      '    personalMemory:',
+      "      databasePath: !!js dshHomePath('personal-memory/memory.sqlite')",
+      '    assistantAutomations:',
+      "      databasePath: !!js dshHomePath('assistant-automations/state.sqlite')",
+      '      schedulerEnabled: true',
+      '      allowUnbudgetedExecution: false',
+      '- id: dsh-enhanced-assistant-delivery',
+      '  name: "@dsh-enhanced/assistant-delivery"',
+      '  config:',
+      "    databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')",
+      '    ownerRoutes:',
+      '      - id: owner-web-primary',
+      '        conversation: { channel: web, account: web, tenant: local, kind: dm, chat: owner-primary }',
+      '        principal: { channel: web, account: web, tenant: local, user: operator }',
+      `        workspace: ${workspace}`,
+      '        agentPreset: standard',
+      '        policyRef: owner-dm',
+      '        minimumGeneration: 1',
+      '',
+    ].join('\n'), 'utf8')
+
+    const { host } = createHostContext({
+      profileDir,
+      dshHome,
+      profileName: 'web',
+      llmProviders: [{ id: 'super-relay', name: 'Super Relay' }],
+    })
+
+    const fixedNow = 1_760_000_700_000
+    const first = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: undefined as unknown as boolean,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: fixedNow,
+    })
+    expect(first.applied).toBe(true)
+
+    const rowsAfterFirst = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
+    const learnCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    const reviewCfg = rowsAfterFirst.find(r => r.id === 'dsh-enhanced-assistant-verifier')!.config['memoryReviews'] as Record<string, unknown>
+    const adoptCfg = (rowsAfterFirst.find(r => r.id === 'dsh-enhanced-personal-assistant')!.config['personalMemory'] as Record<string, unknown>)['automaticLearning'] as Record<string, unknown>
+
+    expect(learnCfg['authorityId']).toBe('web-memory-extract-web')
+    expect(learnCfg['workItemExperiences']).toBe(true)
+    expect(reviewCfg['workItemExperiences']).toBe(true)
+    expect(adoptCfg['workItemExperiences']).toBe(true)
+
+    const second = await applyAutonomyWizardSetup(host, {
+      action: 'enable',
+      tier: 'conservative',
+      provider: 'super-relay',
+      model: 'auto_model/alwaysday1',
+      reasoningEffort: '',
+      enableMemoryLearning: true,
+      enableDreaming: false,
+      enableGrowth: false,
+      workItemExperiences: undefined as unknown as boolean,
+      customBudget: AUTONOMY_TIER_DEFAULTS.conservative,
+      now: fixedNow,
+    })
+    expect(second.applied).toBe(true)
+    const rowsAfterSecond = parse(readFileSync(patchPath, 'utf8'), { customTags: [CUSTOM_JS_TAG] }) as Array<{ id: string; config: Record<string, any> }>
+    const learnCfgSecond = rowsAfterSecond.find(r => r.id === 'dsh-enhanced-assistant-memory-learning')!.config
+    expect(learnCfgSecond['authorityId']).toBe('web-memory-extract-web')
+    expect(learnCfgSecond['workItemExperiences']).toBe(true)
   })
 })

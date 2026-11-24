@@ -564,4 +564,18 @@ describe('RSI dual profile setup transaction', () => {
       platform.mockRestore()
     }
   })
+
+  test('parses --upgrade-owner with --install-owner and rejects invalid combinations', () => {
+    const parsed = parseRsiSetupArgs([
+      '--install-owner', '--upgrade-owner', '--profile', 'web', '--dsh-home', '/tmp/home',
+      '--enable-ordinary-use-learning', '--intake-provider', 'deepseek-official', '--intake-model', 'deepseek-chat',
+    ])
+    expect(parsed.installOwner).toBe(true)
+    expect(parsed.upgradeOwner).toBe(true)
+    expect(parsed.enableOrdinaryUseLearning).toBe(true)
+    expect(() => parseRsiSetupArgs(['--upgrade-owner', '--profile', 'web', '--dsh-home', '/tmp/home']))
+      .toThrow('--upgrade-owner requires --install-owner')
+    expect(() => parseRsiSetupArgs(['--wait-owner-dm', '--install-owner', '--upgrade-owner', '--profile', 'web', '--dsh-home', '/tmp/home']))
+      .toThrow('cannot be combined')
+  })
 })

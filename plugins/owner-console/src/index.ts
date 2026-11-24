@@ -6,6 +6,17 @@ import { TYPERT } from './typert.js'
 
 export const name = 'dsh-enhanced-owner-console'
 export { version }
+export {
+  handleOwnerConsoleControlAction,
+  type OwnerConsoleControlDeps,
+  type OwnerConsoleControlRequest,
+  type OwnerConsoleControlResult,
+} from './autonomy-control.js'
+export {
+  parseOwnerSelfIterationCommand,
+  type OwnerSelfIterationAction,
+  type ParsedOwnerSelfIterationCommand,
+} from './nl-control.js'
 
 /** The console only reads Host state in this slice; no peer service is required. */
 export const inject = ['typert']

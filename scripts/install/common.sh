@@ -25,6 +25,7 @@ DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
   # preferences without forcing a personal deployment to opt into the
   # Health/Heartbeat/Recovery operations stack.
   'preference-learning'
+  'assistant-association'
 )
 
 DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
@@ -5459,7 +5460,7 @@ NODE
     for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
     case "$scenario" in
     web)
-      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-association assistant-evaluation assistant-verifier assistant-work-items assistant-proactive event-triggers assistant-skills assistant-growth-driver assistant-evolution; do dsh_enhanced_append_slug "$slug"; done
       ;;
     autonomy)
       for slug in assistant-delivery assistant-goals assistant-web-owner owner-console assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_enhanced_append_slug "$slug"; done

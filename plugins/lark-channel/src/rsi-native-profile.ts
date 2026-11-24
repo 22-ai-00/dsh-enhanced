@@ -15,6 +15,7 @@ import { createRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi
 import { createRsiPluginRevisionSetup, type RsiPluginRevisionSetup } from './rsi-plugin-revision.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
+import { SELF_ITERATION_MANAGED_ROW_IDS } from './rsi-profile.js'
 
 const day = 86_400_000
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -40,6 +41,8 @@ export interface NativeRsiProfileInput {
   /** Explicit evaluator route; otherwise the composed Delivery agentProvider/agentModel is used. */
   intakeProvider?: string
   intakeModel?: string
+  /** Explicit owner-authorized in-place upgrade mode. */
+  upgradeExistingOwner?: boolean
 }
 export interface NativeRsiSetupManifest {
   schemaVersion: 1; kind: 'native-plugin-learning'; targetProfile: string
@@ -82,36 +85,75 @@ function plain(node: YAMLMap, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} is not an object`)
   return value as Record<string, any>
 }
+function sameAuthorityOwnerGrant(existing: unknown, expected: { authorityId: string; owner: unknown }): boolean {
+  if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) return false
+  if (typeof expected.authorityId !== 'string' || !expected.authorityId
+    || expected.owner === null || typeof expected.owner !== 'object' || Array.isArray(expected.owner)) return false
+  const record = existing as { authorityId?: unknown; owner?: unknown }
+  return record.authorityId === expected.authorityId && isDeepStrictEqual(record.owner, expected.owner)
+}
+function sameVerificationAuthorityGrant(existing: unknown, expected: unknown): boolean {
+  if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) return false
+  if (expected === null || typeof expected !== 'object' || Array.isArray(expected)) return false
+  const existingRecord = existing as { authority?: unknown; publicKey?: unknown }
+  const expectedRecord = expected as { authority?: unknown; publicKey?: unknown }
+  if (typeof expectedRecord.publicKey !== 'string' || !expectedRecord.publicKey
+    || existingRecord.publicKey !== expectedRecord.publicKey) return false
+  if (existingRecord.authority === null || typeof existingRecord.authority !== 'object' || Array.isArray(existingRecord.authority)) return false
+  if (expectedRecord.authority === null || typeof expectedRecord.authority !== 'object' || Array.isArray(expectedRecord.authority)) return false
+  const existingAuth = existingRecord.authority as Record<string, unknown>
+  const expectedAuth = expectedRecord.authority as Record<string, unknown>
+  if (typeof expectedAuth.protocol !== 'string' || !expectedAuth.protocol
+    || typeof expectedAuth.authorityId !== 'string' || !expectedAuth.authorityId
+    || typeof expectedAuth.keyId !== 'string' || !expectedAuth.keyId
+    || typeof expectedAuth.namePrefix !== 'string' || !expectedAuth.namePrefix
+    || !Number.isSafeInteger(expectedAuth.expiresAt)) return false
+  return existingAuth.protocol === expectedAuth.protocol
+    && existingAuth.authorityId === expectedAuth.authorityId
+    && existingAuth.keyId === expectedAuth.keyId
+    && existingAuth.namePrefix === expectedAuth.namePrefix
+    && existingAuth.expiresAt === expectedAuth.expiresAt
+    && (expectedAuth.owner === undefined ? existingAuth.owner === undefined : isDeepStrictEqual(existingAuth.owner, expectedAuth.owner))
+}
 function setExact(document: Document, node: YAMLMap, key: string, value: unknown, label: string): void {
   if (node.has(key) && !isDeepStrictEqual((node.get(key, true) as Node).toJSON(), value)) fail(`${label} conflicts with native grant`)
   node.set(key, document.createNode(value))
 }
-function upsert(document: Document, sequence: YAMLSeq, value: Record<string, unknown>, label: string): void {
+function upsert(document: Document, sequence: YAMLSeq, value: Record<string, unknown>, label: string, replace = false): void {
+  const index = sequence.items.findIndex(item => isMap(item) && item.get('id') === value.id)
   const matches = sequence.items.filter(item => isMap(item) && item.get('id') === value.id)
-  if (matches.length > 1 || matches.length === 1 && !isDeepStrictEqual((matches[0] as YAMLMap).toJSON(), value)) fail(`${label} conflicts with native grant`)
-  if (!matches.length) sequence.add(document.createNode(value))
+  if (matches.length > 1 || matches.length === 1 && !replace && !isDeepStrictEqual((matches[0] as YAMLMap).toJSON(), value)) fail(`${label} conflicts with native grant`)
+  if (index < 0) sequence.add(document.createNode(value))
+  else if (replace) sequence.items[index] = document.createNode(value)
 }
-function copyConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typeof parseRows>, key: keyof typeof managed): YAMLMap {
-  const effectiveConfig = effectiveRow(effective.byId, key)
+function copyConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typeof parseRows>,
+  key: keyof typeof managed, allowDisabled = false): YAMLMap {
+  const effectiveConfig = effectiveRow(effective.byId, key, allowDisabled)
   const source = key === 'growth' && !effectiveConfig.has('config')
     ? mapping(out.document.createNode({}), 'growth config') : options(effectiveConfig, key)
   let row = out.byId.get(ids[key])
   if (!row) { row = mapping(out.document.createNode({ id: ids[key] }), key); out.rows.add(row); out.byId.set(ids[key], row) }
-  if (row.get('name') !== undefined && row.get('name') !== managed[key] || row.get('disabled') === true) fail(`${key} patch override differs`)
+  if (row.get('name') !== undefined && row.get('name') !== managed[key]
+    || (row.get('disabled') === true && !allowDisabled)) fail(`${key} patch override differs`)
+  if (row.get('disabled') === true && allowDisabled) row.set('disabled', false)
   // Retain !!js scalars and unrelated effective options verbatim.
   row.set('config', source.clone())
   return options(row, key)
 }
 /** Copy one optional ordinary-use row by exact id and package; never guess its location. */
 function copyNamedConfig(out: ReturnType<typeof parseRows>, effective: ReturnType<typeof parseRows>,
-  id: string, name: string, label: string): YAMLMap {
+  id: string, name: string, label: string, allowDisabled = false): YAMLMap {
   const source = effective.byId.get(id)
-  if (!source || source.get('name') !== name || source.get('disabled') === true) fail(`${label} bundle missing or disabled`)
+  if (!source || source.get('name') !== name || (source.get('disabled') === true && !allowDisabled)) {
+    fail(`${label} bundle missing or disabled`)
+  }
   const sourceConfig = source.get('config', true) as Node | undefined
   if (sourceConfig !== undefined && !isMap(sourceConfig)) fail(`${label} config must be a mapping`)
   let row = out.byId.get(id)
   if (!row) { row = mapping(out.document.createNode({ id }), label); out.rows.add(row); out.byId.set(id, row) }
-  if (row.get('name') !== undefined && row.get('name') !== name || row.get('disabled') === true) fail(`${label} patch override differs`)
+  if (row.get('name') !== undefined && row.get('name') !== name
+    || (row.get('disabled') === true && !allowDisabled)) fail(`${label} patch override differs`)
+  if (row.get('disabled') === true && allowDisabled) row.set('disabled', false)
   row.set('config', sourceConfig === undefined ? out.document.createNode({}) : sourceConfig.clone())
   return options(row, label)
 }
@@ -185,8 +227,11 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   if (input.enableOrdinaryUseLearning !== undefined && typeof input.enableOrdinaryUseLearning !== 'boolean'
     || input.intakeProvider !== undefined && typeof input.intakeProvider !== 'string'
     || input.intakeModel !== undefined && typeof input.intakeModel !== 'string') fail('ordinary-use learning inputs are invalid')
+  const upgrading = input.upgradeExistingOwner === true
   const effective = parseRows(input.targetEffective, 'effective profile'), out = parseRows(input.targetPatch, 'target patch')
-  for (const key of Object.keys(managed) as (keyof typeof managed)[]) effectiveRow(effective.byId, key, key === 'memory')
+  for (const key of Object.keys(managed) as (keyof typeof managed)[]) {
+    effectiveRow(effective.byId, key, key === 'memory' || (upgrading && SELF_ITERATION_MANAGED_ROW_IDS.has(ids[key])))
+  }
   for (const [id, row] of effective.byId) if (id.startsWith('dsh-enhanced-')) {
     const name = row.get('name')
     if (typeof name !== 'string' || id !== `dsh-enhanced-${name.replace(/^@dsh-enhanced\//u, '')}` || !name.startsWith('@dsh-enhanced/')) fail(`bundle ${id} package identity differs`)
@@ -220,8 +265,18 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   const memory = createRsiMemoryLearningSetup({ installationId: installation, stateRoot: resources.stateRoot,
     owner, now: input.now, expiresAt: input.expiresAt, workItemExperiences: ordinary !== undefined })
   const currentLearner = effectiveRow(effective.byId, 'memory', true)
-  if (currentLearner.get('disabled') !== true && !isDeepStrictEqual(plain(options(currentLearner, 'memory'), 'memory'), memory.learning)) fail('existing memory learner grant differs')
-  const growthCurrent = effectiveRow(effective.byId, 'growth')
+  if (upgrading) {
+    if (currentLearner.has('config')) {
+      const currentConfig = plain(options(currentLearner, 'memory'), 'memory')
+      if (!sameAuthorityOwnerGrant(currentConfig, memory.learning)) fail('existing memory learner grant differs')
+    } else if (currentLearner.get('disabled') !== true) {
+      fail('existing memory learner grant differs')
+    }
+  } else if (currentLearner.get('disabled') !== true
+    && !isDeepStrictEqual(plain(options(currentLearner, 'memory'), 'memory'), memory.learning)) {
+    fail('existing memory learner grant differs')
+  }
+  const growthCurrent = effectiveRow(effective.byId, 'growth', upgrading)
   const growth: AssistantGrowthDriverConfig = { enabled: true, intervalMs: 0, maxReviewsPerWake: 1, minRepeatedSuccesses: 2,
     budgetId: `rsi-reviews-${installation}`, budgetAmount: 1, ...chooseModel(growthCurrent.has('config') ? options(growthCurrent, 'growth') : mapping(out.document.createNode({}), 'growth')),
     scope, workflowOwnerAnchored: { enabled: true },
@@ -273,12 +328,24 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
     [memory.learning.scanBudgetId, limits.memoryScans, 'subject']] as const) {
     if (subject === 'workspace' && budgets.items.some(item => isMap(item) && item.get('id') !== id
       && item.get('metric') === 'automation-runs' && item.get('scope') === 'workspace' && item.get('periodMs') === day)) fail('workspace memory budget conflicts')
-    upsert(out.document, budgets, { id, metric: 'automation-runs', limit, periodMs: day, scope: subject }, 'Policy budget')
+    upsert(out.document, budgets, { id, metric: 'automation-runs', limit, periodMs: day, scope: subject }, 'Policy budget', upgrading)
   }
   const rules = sequence(policy.get('rules', true) as Node | undefined, 'policy rules')
   const policyScope = { workspace: owner.workspace, principal: owner.principalId, preset: owner.agentPreset }
-  const add = (id: string, subject: string, action: string, kind: string, resource: string, initiator = 'background') =>
-    upsert(out.document, rules, rule(policyScope, id, subject, action, kind, resource, initiator), 'Policy rule')
+  const add = (id: string, subject: string, action: string, kind: string, resource: string, initiator = 'background') => {
+    const nextRule = rule(policyScope, id, subject, action, kind, resource, initiator)
+    if (upgrading) {
+      const existingRule = rules.items.find(item => isMap(item) && item.get('id') === nextRule.id) as YAMLMap | undefined
+      if (existingRule !== undefined) {
+        const existingSubject = existingRule.get('subject', true)
+        const subjectJson = isMap(existingSubject) ? existingSubject.toJSON() as { workspace?: unknown; principal?: unknown } : undefined
+        if (!subjectJson || subjectJson.workspace !== owner.workspace || subjectJson.principal !== owner.principalId) {
+          fail('Policy rule conflicts with native grant')
+        }
+      }
+    }
+    upsert(out.document, rules, nextRule, 'Policy rule', upgrading)
+  }
   for (const [id, subject, automation] of [['usage', 'assistant-growth-usage', 'usage-*'],
     ['source', 'plugin-control-plane-source', 'source-job-*'], ['memory-scan', 'assistant-memory-learning', 'memory-scan-*'],
     ['memory-job', 'assistant-memory-learning', 'memory-learning:*']] as const) {
@@ -290,14 +357,23 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   for (const tool of ['growth_*', 'plugin_source_*'] as const) add(tool, owner.agentPreset, 'execute', 'tool', tool)
   add('created-tools', owner.agentPreset, 'execute', 'tool', `evolved_${creation.creation.namePrefix.replaceAll('-', '_')}*`, 'external')
   add('verified-workflows', owner.agentPreset, 'draft', 'evolution', 'verified-workflows')
+  const setGrant = (node: YAMLMap, key: string, expected: { authorityId: string; owner: unknown }, label: string) => {
+    if (node.has(key)) {
+      const parsed = (node.get(key, true) as Node).toJSON()
+      if (upgrading ? !sameAuthorityOwnerGrant(parsed, expected) : !isDeepStrictEqual(parsed, expected)) {
+        fail(`${label} conflicts with native grant`)
+      }
+    }
+    node.set(key, out.document.createNode(expected))
+  }
   const embeddedMemory = mapping(personal.get('personalMemory', true) as Node | undefined, 'personalMemory')
-  setExact(out.document, embeddedMemory, 'automaticLearning', memory.adoption, 'memory adoption')
+  setGrant(embeddedMemory, 'automaticLearning', memory.adoption, 'memory adoption')
   const verifier = copyConfig(out, effective, 'verifier')
-  setExact(out.document, verifier, 'memoryReviews', memory.reviews, 'memory review')
-  setExact(out.document, verifier, 'creationReviews', creation.reviews, 'creation review')
+  setGrant(verifier, 'memoryReviews', memory.reviews, 'memory review')
+  setGrant(verifier, 'creationReviews', creation.reviews, 'creation review')
   if (revision) {
-    setExact(out.document, verifier, 'revisionReviews', revision.reviews, 'revision review')
-    setExact(out.document, verifier, 'revisionRegressions', revision.regressions, 'revision regression')
+    setGrant(verifier, 'revisionReviews', revision.reviews, 'revision review')
+    setGrant(verifier, 'revisionRegressions', revision.regressions, 'revision regression')
   } else if (verifier.has('revisionReviews') || verifier.has('revisionRegressions')) {
     fail('existing revision review grant differs')
   }
@@ -305,22 +381,65 @@ export function compileNativeRsiProfile(input: NativeRsiProfileInput): NativeRsi
   if (!out.byId.has(ids.memory)) { out.rows.add(learner); out.byId.set(ids.memory, learner) }
   if (learner.get('name') !== undefined && learner.get('name') !== managed.memory) fail('learner patch package differs')
   learner.set('name', managed.memory); learner.set('disabled', false)
-  setExact(out.document, learner, 'config', memory.learning, 'memory learner')
-  const growthRow = copyConfig(out, effective, 'growth')
-  if (growthRow.has('pluginSourceProposals') && !isDeepStrictEqual((growthRow.get('pluginSourceProposals', true) as Node).toJSON(), growth.pluginSourceProposals)) fail('existing source proposal grant differs')
+  setGrant(learner, 'config', memory.learning, 'memory learner')
+  const growthRow = copyConfig(out, effective, 'growth', upgrading)
+  if (growthRow.has('pluginSourceProposals')) {
+    if (upgrading) {
+      if (growthRow.has('scope') && !isDeepStrictEqual((growthRow.get('scope', true) as Node).toJSON(), growth.scope)) {
+        fail('existing source proposal grant differs')
+      }
+      if (growthRow.has('budgetId') && growthRow.get('budgetId') !== growth.budgetId) {
+        fail('existing source proposal grant differs')
+      }
+    } else if (!isDeepStrictEqual((growthRow.get('pluginSourceProposals', true) as Node).toJSON(), growth.pluginSourceProposals)) {
+      fail('existing source proposal grant differs')
+    }
+  }
   out.byId.get(ids.growth)!.set('config', out.document.createNode(growth))
   const controlRow = copyConfig(out, effective, 'control')
   for (const key of ['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceAdoptions', 'creationVerifications',
     'creationCapabilities', 'revisionVerifications', 'revisionRegressions'] as const) {
-    if (controlRow.has(key) && !isDeepStrictEqual((controlRow.get(key, true) as Node).toJSON(), control[key as keyof ControlPlaneConfig])) fail(`existing ${key} grant differs`)
+    if (!controlRow.has(key)) continue
+    if (key === 'sourceApprovals' || key === 'sourceReleases' || key === 'sourceAdoptions') {
+      fail(`existing ${key} grant differs`)
+    }
+    const existingGrant = (controlRow.get(key, true) as Node).toJSON() as Record<string, unknown> | null
+    const expectedGrant = control[key as keyof ControlPlaneConfig] as Record<string, unknown> | undefined
+    if (!upgrading || expectedGrant === undefined) {
+      if (!isDeepStrictEqual(existingGrant, expectedGrant)) fail(`existing ${key} grant differs`)
+      continue
+    }
+    if (key === 'sourceJobs') {
+      const expectedJobs = control.sourceJobs!
+      if (!existingGrant || typeof existingGrant !== 'object' || Array.isArray(existingGrant)
+        || existingGrant.authorityId !== expectedJobs.authorityId
+        || existingGrant.ownerRouteId !== expectedJobs.ownerRouteId
+        || existingGrant.principalId !== expectedJobs.principalId
+        || existingGrant.workspace !== expectedJobs.workspace
+        || existingGrant.preset !== expectedJobs.preset) {
+        fail(`existing ${key} grant differs`)
+      }
+    } else if (key === 'creationVerifications' || key === 'revisionVerifications' || key === 'revisionRegressions') {
+      if (!sameVerificationAuthorityGrant(existingGrant, expectedGrant)) {
+        fail(`existing ${key} grant differs`)
+      }
+    } else if (!sameAuthorityOwnerGrant(existingGrant, expectedGrant as { authorityId: string; owner: unknown })) {
+      fail(`existing ${key} grant differs`)
+    }
   }
   out.byId.get(ids.control)!.set('config', out.document.createNode(control))
   if (ordinary) {
     const proactive = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-proactive',
-      '@dsh-enhanced/assistant-proactive', 'assistant-proactive')
-    setExact(out.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation, 'intake evaluation')
+      '@dsh-enhanced/assistant-proactive', 'assistant-proactive', upgrading)
+    if (upgrading) {
+      if (proactive.get('enabled') === false) proactive.set('enabled', true)
+      proactive.set('intakeEvaluation', out.document.createNode(ordinary.intakeEvaluation))
+    } else {
+      setExact(out.document, proactive, 'intakeEvaluation', ordinary.intakeEvaluation, 'intake evaluation')
+    }
     const workItems = copyNamedConfig(out, effective, 'dsh-enhanced-assistant-work-items',
-      '@dsh-enhanced/assistant-work-items', 'assistant-work-items')
+      '@dsh-enhanced/assistant-work-items', 'assistant-work-items', upgrading)
+    if (upgrading && workItems.get('enabled') === false) workItems.set('enabled', true)
     if (workItems.get('enabled') !== true) fail('ordinary-use learning requires assistant-work-items.enabled: true')
     const ledger = workItems.get('intakeLedger', true) as Node | undefined
     if (ledger !== undefined && !isMap(ledger)) fail('assistant-work-items intakeLedger must be a mapping')

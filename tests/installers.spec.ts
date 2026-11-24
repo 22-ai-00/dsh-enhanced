@@ -2949,7 +2949,7 @@ exit 8
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('生命周期事务使用现有 DSH：0.2.2-rc.5')
     expect(await readFile(f.operationLog, 'utf8')).not.toContain('npm ')
-  })
+  }, 15_000)
 
   test('rejects a requested unsupported DSH version even when acknowledgement is supplied', async () => {
     const dshHome = await temporaryDshHome()

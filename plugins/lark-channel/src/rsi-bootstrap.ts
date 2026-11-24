@@ -1,6 +1,6 @@
 import { constants, type BigIntStats } from 'node:fs'
-import { lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises'
-import { createHash, randomBytes } from 'node:crypto'
+import { lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { pathToFileURL } from 'node:url'
@@ -10,9 +10,9 @@ import { ControlPlaneStore, controlPlaneSchemaVersion } from '@dsh-enhanced/plug
 import { compileRsiAuthorityConfigs, type RsiAuthorityConfigInput } from './rsi-authority-config.js'
 import { compileRsiProfiles } from './rsi-profile.js'
 import { validateRsiAuthorities } from './rsi-setup.js'
-import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
+import { prepareRsiAuthorityResources, type RsiAuthorityResources } from './rsi-authority-resources.js'
 import { prepareRsiAuthorityRuntime, RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES } from './rsi-authority-runtime.js'
-import { readRsiHostUpdateOverlayChain, type RsiOwnerOverlay } from './rsi-host-update.js'
+import { readRsiHostUpdateOverlayChain, rsiHostUpdateOverlayDigest, signRsiHostUpdateOverlay, type RsiOwnerOverlay } from './rsi-host-update.js'
 import { readRsiSourceMaintenance } from './rsi-source-maintenance.js'
 import { rsiBuildResources as io } from './rsi-build.js'
 
@@ -22,6 +22,7 @@ export interface RsiOwnerConfigurationContext {
   binding: ActiveLarkOwnerBinding
   profiles: Profiles
   signal?: AbortSignal
+  upgradeExistingOwner?: boolean
 }
 export interface RsiOwnerConfiguration {
   schemaVersion: 1
@@ -66,6 +67,65 @@ async function verifyOwnerChangeReceipts(overlay: Extract<RsiOwnerOverlay,
   if (hash(await privateFile(join(home, '.rsi-setup-journal.json'))) !== after.journalDigest
     || hash(await privateFile(join(home, 'rsi-creation-builds', profile, 'bootstrap.json'), 65_536))
       !== after.creationReceiptDigest) fail('signed owner change receipts changed')
+}
+
+async function atomicWritePrivate(path: string, bytes: string | Buffer): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  const descriptor = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try { await descriptor.writeFile(bytes); await descriptor.sync() }
+  finally { await descriptor.close() }
+  try { await rename(temporary, path); await io.syncDirectory(dirname(path)) }
+  catch (error) {
+    await unlink(temporary).catch(() => {})
+    throw error
+  }
+}
+
+/** Verify existing bootstrap receipt, overlay chain, and persisted config files before mutating. */
+export async function verifyExistingRsiOwnerConfiguration(input: {
+  resources: RsiAuthorityResources
+  dshHome: string
+  targetProfile: string
+  observerKeyPath: string
+  signal: AbortSignal
+}): Promise<{
+  bootstrapSource: string
+  receipt: Receipt
+  overlay: ReturnType<typeof readRsiHostUpdateOverlayChain>
+  effective: Receipt | RsiOwnerOverlay
+}> {
+  input.signal.throwIfAborted()
+  const { resources, dshHome, targetProfile, observerKeyPath, signal } = input
+  const bootstrapSource = (await privateFile(join(resources.configRoot, 'bootstrap.json'))).toString('utf8')
+  const receipt = JSON.parse(bootstrapSource) as Receipt
+  const overlayPath = join(resources.configRoot, 'host-update-overlays.json')
+  const overlay = readRsiHostUpdateOverlayChain({
+    source: await exists(overlayPath) ? (await privateFile(overlayPath)).toString('utf8') : undefined,
+    resources, dshHome, profile: targetProfile, bootstrapSource,
+  })
+  const effective = overlay.latest ?? receipt
+  if (receipt.schemaVersion !== 1 || !effective.files || typeof effective.files !== 'object'
+    || Array.isArray(effective.files) || Object.keys(effective.files).length > 512) {
+    fail('existing owner receipt differs before stopping Hosts')
+  }
+  const roots = [resources.configRoot, resources.stateRoot, resources.registry.root]
+  for (const [path, digest] of Object.entries(effective.files)) {
+    signal.throwIfAborted()
+    if (!roots.some(root => within(path, root)) || !/^[a-f0-9]{64}$/u.test(digest)
+      || hash(await privateFile(path)) !== digest) {
+      fail('existing configuration changed before stopping Hosts')
+    }
+  }
+  const key = await privateFile(observerKeyPath, 32)
+  if (key.length !== 32 || hash(key) !== receipt.observerKeyDigest) {
+    fail('observer identity changed before stopping Hosts')
+  }
+  const ownerChange = overlay.records.findLast(record => record.kind === 'rsi-owner-repair-overlay'
+    || record.kind === 'rsi-owner-program-update-overlay')
+  if (ownerChange?.kind === 'rsi-owner-repair-overlay' || ownerChange?.kind === 'rsi-owner-program-update-overlay') {
+    await verifyOwnerChangeReceipts(ownerChange, dshHome, targetProfile)
+  }
+  return { bootstrapSource, receipt, overlay, effective }
 }
 
 /** Read-only retry admission before either Host is stopped. */
@@ -193,7 +253,7 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
       database.close()
       await rememberSqliteSidecars?.()
     }
-    const patches = await compileRsiProfiles({ manifest, dshHome: home, ...context.profiles, owner: context.binding })
+    const patches = await compileRsiProfiles({ manifest, dshHome: home, ...context.profiles, owner: context.binding, upgradeExistingOwner: context.upgradeExistingOwner === true })
     await validateRsiAuthorities(manifest, context.binding, manifest.serviceEnvironment?.target)
     for (const phase of Object.keys(runtime.releaseAdapters) as Array<keyof typeof runtime.releaseAdapters>) {
       signal.throwIfAborted()
@@ -210,6 +270,9 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     return patches
   }
   if (await exists(receiptPath)) {
+    if (context.upgradeExistingOwner === true) {
+      return reconfigureRsiOwnerConfiguration(input, context)
+    }
     const bootstrapSource = (await privateFile(receiptPath)).toString('utf8')
     const receipt = JSON.parse(bootstrapSource) as Receipt
     const overlay = readRsiHostUpdateOverlayChain({ source: await exists(overlayPath)
@@ -316,6 +379,163 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     for (const entry of ownedDirectories.reverse()) {
       try { const stat = await lstat(entry.path); if (stat.dev === entry.dev && stat.ino === entry.ino) await rmdir(entry.path) } catch {}
     }
+    throw error
+  }
+}
+
+/**
+ * Owner-authorized in-place upgrade/reconfiguration transition.
+ * Verifies existing bootstrap receipt, overlay chain, and SQLite control ledger
+ * integrity before mutating, preserves `control.sqlite` and observer identity
+ * intact, and atomically updates `manifest.json`, authority configs, and receipt/overlay
+ * with full backup/rollback on error.
+ */
+export async function reconfigureRsiOwnerConfiguration(input: RsiAuthorityConfigInput,
+  context: RsiOwnerConfigurationContext): Promise<RsiOwnerConfiguration> {
+  const signal = AbortSignal.any([context.signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+  signal.throwIfAborted()
+  const { manifest, resources } = input
+  if (context.binding.status !== 'active' || context.binding.owner.status !== 'active'
+    || context.binding.owner.role !== 'owner' || context.binding.conversation.kind !== 'dm'
+    || !isDeepStrictEqual(context.binding.principal, context.binding.owner.principal)) fail('active owner DM binding is required')
+  const observer = manifest.controlPlane.runtimeObserver
+  if (!observer) fail('runtime observer is required')
+  const home = dirname(dirname(observer.profilePath))
+  if (observer.profilePath !== join(home, 'profiles', manifest.targetProfile)
+    || resources.root !== join(home, 'rsi-authorities', manifest.targetProfile)) fail('installation paths differ')
+  const actualResources = await prepareRsiAuthorityResources({ dshHome: home, profile: manifest.targetProfile, signal })
+  if (!isDeepStrictEqual(actualResources, resources)) fail('signing resources differ from the installation')
+  const runtime = await prepareRsiAuthorityRuntime({ dshHome: home, profile: manifest.targetProfile, signal })
+  if (!isDeepStrictEqual(runtime, input.runtime)) fail('authority runtime differs from the installation')
+  const compiled = compileRsiAuthorityConfigs(input)
+  const manifestPath = join(resources.configRoot, 'manifest.json')
+  const receiptPath = join(resources.configRoot, 'bootstrap.json')
+  const overlayPath = join(resources.configRoot, 'host-update-overlays.json')
+  const files = { ...compiled.files }
+  if (Object.hasOwn(files, manifestPath) || Object.hasOwn(files, receiptPath) || Object.hasOwn(files, overlayPath)) fail('reserved configuration path')
+  files[manifestPath] = json(manifest)
+  if (Object.keys(files).length > 64 || Object.entries(files).some(([path, value]) =>
+    !within(path, resources.configRoot) || typeof value !== 'string' || Buffer.byteLength(value) > 2_097_152)) fail('configuration output exceeds its bounds')
+  if (!within(observer.keyPath, resources.configRoot) || Object.hasOwn(files, observer.keyPath)
+    || [manifestPath, receiptPath, overlayPath].includes(observer.keyPath)) fail('observer key must have a separate private configuration path')
+  const ledgerPath = join(manifest.controlPlane.statePath, 'control.sqlite')
+  if (!within(ledgerPath, resources.stateRoot) || !within(observer.socketPath, resources.stateRoot)) fail('runtime state must stay in the installation state root')
+
+  const readSourceMaintenance = async () => {
+    const path = join(home, 'rsi-sources', manifest.targetProfile, 'maintenance.json')
+    if (!await exists(path)) return []
+    const maintained = await readRsiSourceMaintenance({ logicalHome: home, physicalHome: home,
+      profile: manifest.targetProfile, signal })
+    if (maintained.workspace.repository !== manifest.controlPlane.sourceJobs?.repository
+      || !isDeepStrictEqual(maintained.workspace.baseline, manifest.controlPlane.sourceJobs.baseline)) {
+      fail('source maintenance differs from owner configuration')
+    }
+    return maintained.records
+  }
+  const sourceMaintenance = await readSourceMaintenance()
+  const directories = [...new Set([...compiled.directories, dirname(ledgerPath), dirname(observer.keyPath),
+    ...Object.keys(files).map(dirname)])].sort((left, right) => left.length - right.length || left.localeCompare(right))
+  const roots = [resources.configRoot, resources.stateRoot, resources.registry.root]
+  if (directories.some(path => !roots.some(root => path === root || within(path, root)))) fail('generated directory is outside prepared resources')
+  const expectedFiles = Object.fromEntries(Object.entries(files).sort(([left], [right]) => left.localeCompare(right)).map(([path, value]) => [path, hash(value)]))
+  const result: RsiOwnerConfiguration = { schemaVersion: 1, manifestPath, manifestDigest: hash(files[manifestPath]!),
+    targetProfile: manifest.targetProfile, coordinatorProfile: manifest.coordinatorProfile }
+
+  const existing = await verifyExistingRsiOwnerConfiguration({
+    resources, dshHome: home, targetProfile: manifest.targetProfile, observerKeyPath: observer.keyPath, signal,
+  })
+  for (const directory of directories) {
+    signal.throwIfAborted()
+    await mkdir(directory, { mode: 0o700 }).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error })
+    await io.directory(directory)
+  }
+  await privateFile(ledgerPath, 268_435_456)
+  const database = new DatabaseSync(ledgerPath, { readOnly: true })
+  try {
+    const row = database.prepare('PRAGMA user_version').get() as { user_version: number }
+    if (row.user_version !== controlPlaneSchemaVersion) fail('control ledger schema differs from the installed runtime')
+    const stored = database.prepare('SELECT record_json FROM source_maintenance WHERE repository=? ORDER BY sequence')
+      .all(manifest.controlPlane.sourceJobs!.repository).map(row => JSON.parse(String(row.record_json)) as unknown)
+    if (!isDeepStrictEqual(stored, sourceMaintenance)
+      || !isDeepStrictEqual(await readSourceMaintenance(), sourceMaintenance)) fail('source maintenance ledger differs from retained history')
+  } finally {
+    database.close()
+  }
+
+  const managedPaths = new Set([...Object.keys(existing.effective.files), ...Object.keys(files), receiptPath, overlayPath])
+  const backups = new Map<string, Buffer | null>()
+  for (const path of managedPaths) {
+    if (!within(path, resources.configRoot)) fail(`managed path outside config root: ${path}`)
+    backups.set(path, await exists(path) ? await privateFile(path) : null)
+  }
+
+  try {
+    for (const [path, bytes] of Object.entries(files)) {
+      signal.throwIfAborted()
+      await atomicWritePrivate(path, bytes)
+    }
+    for (const oldPath of Object.keys(existing.effective.files)) {
+      if (!Object.hasOwn(files, oldPath)) {
+        await unlink(oldPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error })
+      }
+    }
+    const patches = await compileRsiProfiles({ manifest, dshHome: home, ...context.profiles, owner: context.binding, upgradeExistingOwner: true })
+    await validateRsiAuthorities(manifest, context.binding, manifest.serviceEnvironment?.target)
+    for (const phase of Object.keys(runtime.releaseAdapters) as Array<keyof typeof runtime.releaseAdapters>) {
+      signal.throwIfAborted()
+      const adapter = await import(pathToFileURL(runtime.releaseAdapters[phase].path).href) as {
+        inspectLocalReleaseAdapterConfiguration?: (environment: Record<string, string>, phase: string) => unknown
+      }
+      if (typeof adapter.inspectLocalReleaseAdapterConfiguration !== 'function') fail('installed release adapter lacks configuration inspection')
+      const actual = adapter.inspectLocalReleaseAdapterConfiguration(manifest.serviceEnvironment!.target, phase)
+      const expected = compiled.trust.releaseAdapters![phase]!
+      if (!isDeepStrictEqual(actual, { id: expected.id, phase, executablePath: expected.path,
+        authority: expected.authority, keyId: expected.keyId })) fail('release adapter configuration differs from trust')
+    }
+    signal.throwIfAborted()
+    if (existing.overlay.records.length > 0) {
+      const runtimeReceiptDigest = hash(await privateFile(join(home,
+        'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), RSI_AUTHORITY_RUNTIME_RECEIPT_MAX_BYTES))
+      const hostPrivateKey = (await privateFile(resources.identities.host.keyPath)).toString('utf8')
+      const patchDigests = { [manifest.targetProfile]: hash(patches.targetPatch),
+        [manifest.coordinatorProfile]: hash(patches.coordinatorPatch) }
+      const nextOverlay = signRsiHostUpdateOverlay({
+        schemaVersion: 1, kind: 'rsi-host-update-overlay',
+        transactionId: `owner-upgrade-${randomUUID()}`, dshHome: home,
+        targetProfile: manifest.targetProfile, installationId: resources.installationId,
+        currentPlanId: 'owner-upgrade', activationId: `owner-upgrade-${randomUUID()}`,
+        sequence: existing.overlay.records.length + 1,
+        previousDigest: rsiHostUpdateOverlayDigest(existing.overlay.latest!),
+        bootstrapDigest: hash(existing.bootstrapSource),
+        files: expectedFiles, patches: patchDigests, runtimeReceiptDigest,
+        planDigest: hash(json({ files: expectedFiles, patches: patchDigests })), result,
+        issuedAt: Math.max(Date.now(), existing.overlay.latest!.issuedAt),
+        authority: resources.identities.host.authority, keyId: resources.identities.host.keyId,
+      }, hostPrivateKey, resources, existing.bootstrapSource, existing.overlay.records)
+      await atomicWritePrivate(overlayPath, json({
+        schemaVersion: 1, kind: 'rsi-host-update-overlays',
+        records: [...existing.overlay.records, nextOverlay],
+      }))
+    } else {
+      const nextReceipt: Receipt = {
+        schemaVersion: 1,
+        planDigest: hash(json({ files: expectedFiles, patches })),
+        files: expectedFiles,
+        observerKeyDigest: existing.receipt.observerKeyDigest,
+        result,
+      }
+      await atomicWritePrivate(receiptPath, json(nextReceipt))
+    }
+    for (const path of [...directories].reverse()) await io.syncDirectory(path)
+    return result
+  } catch (error) {
+    for (const [path, original] of backups) {
+      try {
+        if (original === null) await unlink(path).catch(err => { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err })
+        else await atomicWritePrivate(path, original)
+      } catch {}
+    }
+    for (const path of [...directories].reverse()) await io.syncDirectory(path).catch(() => {})
     throw error
   }
 }

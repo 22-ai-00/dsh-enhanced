@@ -187,6 +187,10 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     }, null, 2))
 
     writeFileSync(patchPath, [
+      '- id: dsh-enhanced-assistant-isolation',
+      "  name: '@dsh-enhanced/assistant-isolation'",
+      '  config:',
+      '    backend: linux-native',
       '- id: dsh-enhanced-assistant-policy',
       "  name: '@dsh-enhanced/assistant-policy'",
       '  config:',
@@ -2042,10 +2046,11 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
     // !!js databasePath MUST be resolved to a valid absolute path (never leaked as raw "dshHomePath(...)" string!)
     expect(String(memCfg['databasePath'])).not.toContain('dshHomePath(')
     expect(memCfg['databasePath']).toBe(join(canonicalHome, 'assistant-memory-learning', 'desktop.sqlite'))
-    // workItemExperiences: false stripped consistently before digesting
+    // workItemExperiences: false stripped on adoptCfg/reviewCfg, preserved on memCfg to match validateLearningConfig
     expect(Object.hasOwn(adoptCfg, 'workItemExperiences')).toBe(false)
     expect(Object.hasOwn(reviewCfg, 'workItemExperiences')).toBe(false)
-    expect(Object.hasOwn(memCfg, 'workItemExperiences')).toBe(false)
+    expect(memCfg['workItemExperiences']).toBe(false)
+    expect(validateLearningConfig(memCfg as never).workItemExperiences).toBe(false)
 
     // All three configs pass real plugin schema validators!
     expect(() => validateMemoryReviewConfig(reviewCfg as never)).not.toThrow()
@@ -2367,5 +2372,67 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
 
     const after = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform: 'darwin', env: {}, now: 3004 })
     expect(after.issues.some(i => i.id === 'lark-linked-not-primary-owner')).toBe(false)
+  })
+
+  it('validates assistant-isolation backend against platform across Linux, macOS, Windows, and unsupported OSes', async () => {
+    const prober = new CodingToolProber(async () => ({ stdout: '', stderr: '', exitCode: 1, errorCode: 'ENOENT' }))
+
+    const runCase = async (platform: NodeJS.Platform, backend?: string) => {
+      const { dshHome, profileDir, patchPath } = makeTempHome()
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+        name: 'profile-desktop',
+        bundles: { '@dsh-enhanced/assistant-isolation': true },
+      }, null, 2))
+      const patchLines = [
+        '- id: dsh-enhanced-assistant-isolation',
+        "  name: '@dsh-enhanced/assistant-isolation'",
+        ...(backend === undefined ? [] : ['  config:', `    backend: ${JSON.stringify(backend)}`]),
+      ]
+      writeFileSync(patchPath, `${patchLines.join('\n')}\n`, 'utf8')
+      const status = baseStatus({
+        bundles: [
+          { name: '@dsh-enhanced/assistant-isolation', installed: true, enabled: true, removable: true, rows: [{ rowId: 'dsh-enhanced-assistant-isolation', moduleName: '@dsh-enhanced/assistant-isolation' }] },
+        ],
+      })
+      const host = makeHost(dshHome, profileDir, 'desktop')
+      const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform })
+      return { host, status, report }
+    }
+
+    for (const [platform, backend] of [
+      ['darwin', 'auto'],
+      ['darwin', undefined],
+      ['darwin', 'macos-seatbelt'],
+      ['win32', 'auto'],
+      ['win32', undefined],
+      ['win32', 'windows-job'],
+    ] as const) {
+      const { report } = await runCase(platform, backend)
+      expect(report.issues.some(i => i.id === 'unsupported-platform-isolation')).toBe(false)
+    }
+
+    for (const [platform, backend] of [
+      ['linux', 'macos-seatbelt'],
+      ['linux', ' auto '],
+      ['win32', 'linux-native'],
+      ['freebsd', 'auto'],
+    ] as const) {
+      const { host, status, report } = await runCase(platform, backend)
+      expect(report.issues.some(i => i.id === 'unsupported-platform-isolation')).toBe(true)
+
+      const toggledOff: string[] = []
+      const manager = {
+        setBundleEnabled: vi.fn(async (pkg: string, enabled: boolean) => {
+          if (!enabled) toggledOff.push(pkg)
+          return { changed: true, application: 'restart-required', target: pkg }
+        }),
+      } as unknown as PluginManagerService
+      const repair = await applyDoctorRepair({
+        host, status, descriptors: [], settings: undefined, manager, prober,
+        issueIds: ['unsupported-platform-isolation'], platform, now: 12345,
+      })
+      expect(repair.applied).toBe(true)
+      expect(toggledOff).toContain('@dsh-enhanced/assistant-isolation')
+    }
   })
 })

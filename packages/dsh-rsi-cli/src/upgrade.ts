@@ -1,7 +1,7 @@
 import { constants, existsSync } from 'node:fs'
 import { access, chmod, cp, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { isMap, isScalar, parseDocument } from 'yaml'
 import { collectLiveDoctorReport, type LiveDoctorReport } from './doctor-live.ts'
@@ -15,7 +15,7 @@ import { detectFrozenOwner, runFrozenOwnerUpdate, type FrozenOwner, type Program
 import { defaultRunner, type CommandRunner } from './run.ts'
 import {
   controlManagedService,
-  inspectManagedService,
+  inspectManagedServiceForDshHome,
   managedServiceProcessIds,
   type ManagedServicePresence,
   type ServiceActionOutcome,
@@ -113,6 +113,7 @@ export interface UpgradeOptions {
   readonly registryUrl?: string
   readonly dshVersion?: string
   readonly targetVersion?: string
+  readonly allowNonEmptyHistoryMigration?: boolean
   readonly confirmDshHomeStopped?: boolean
   readonly platform?: NodeJS.Platform
   readonly osHome?: string
@@ -155,6 +156,14 @@ export interface UpgradeDeps {
     platform: NodeJS.Platform
     osHome: string
     env: NodeJS.ProcessEnv
+  }) => Promise<UpgradeHealthResult>
+  readonly doctor?: (input: {
+    dshHome: string
+    profile?: string
+    platform: NodeJS.Platform
+    home: string
+    env: NodeJS.ProcessEnv
+    runner: CommandRunner
   }) => Promise<UpgradeHealthResult>
   readonly controlService?: (
     platform: NodeJS.Platform,
@@ -307,7 +316,54 @@ async function readProfilePatchText(dshHome: string, profile: string): Promise<{
   }
 }
 
-function extractConfiguredDbPaths(patchText: string): string[] {
+function resolveDshHomePathExpression(expr: string, dshHome: string): string {
+  const trimmed = expr.trim()
+  const match = /^dshHomePath\(([\s\S]+)\)$/u.exec(trimmed)
+  if (!match) {
+    throw new Error(`无效的 dshHomePath 表达式：${expr}`)
+  }
+  let rest = match[1]!.trim()
+  if (!rest) {
+    throw new Error(`dshHomePath 表达式不能为空：${expr}`)
+  }
+  const segments: string[] = []
+  while (rest.length > 0) {
+    const argMatch = /^(?:'([^'\\]*)'|"([^"\\]*)")\s*(?:,\s*([\s\S]*))?$/u.exec(rest)
+    if (!argMatch) {
+      throw new Error(`dshHomePath 仅支持静态字面量路径参数：${expr}`)
+    }
+    const literal = argMatch[1] ?? argMatch[2] ?? ''
+    if (!literal || literal.includes('\\') || literal.includes('\0') || /[\r\n]/u.test(literal) || literal.startsWith('/')) {
+      throw new Error(`dshHomePath 包含非法路径片段：${expr}`)
+    }
+    for (const seg of literal.split('/')) {
+      if (!seg || seg === '.' || seg === '..') {
+        throw new Error(`dshHomePath 包含越界或空路径片段：${expr}`)
+      }
+      segments.push(seg)
+    }
+    if (argMatch[3] === undefined) break
+    rest = argMatch[3].trim()
+    if (!rest) {
+      throw new Error(`dshHomePath 包含尾部多余逗号：${expr}`)
+    }
+  }
+  const root = resolve(dshHome)
+  const resolved = resolve(root, ...segments)
+  if (!resolved.startsWith(root + sep)) {
+    throw new Error(`dshHomePath 路径越界：${expr}`)
+  }
+  return resolved
+}
+
+function isLedgerPluginRow(obj: Record<string, unknown>): boolean {
+  return obj.id === 'dsh-enhanced-plugin-control-plane'
+    || obj.id === 'dsh-enhanced-assistant-verifier'
+    || obj.name === '@dsh-enhanced/plugin-control-plane'
+    || obj.name === '@dsh-enhanced/assistant-verifier'
+}
+
+function extractConfiguredDbPaths(patchText: string, dshHome: string): string[] {
   const doc = parseDocument(patchText, {
     customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
   })
@@ -325,18 +381,29 @@ function extractConfiguredDbPaths(patchText: string): string[] {
       return
     }
     const obj = node as Record<string, unknown>
-    if (typeof obj.databasePath === 'string' && !obj.databasePath.includes('dshHomePath(')) {
-      paths.add(obj.databasePath)
+    if (typeof obj.databasePath === 'string') {
+      const dbSpec = obj.databasePath.trim()
+      if (dbSpec.startsWith('dshHomePath(')) {
+        paths.add(resolveDshHomePathExpression(dbSpec, dshHome))
+      } else if (!dbSpec.includes('dshHomePath(')) {
+        paths.add(obj.databasePath)
+      } else {
+        throw new Error(`无效的 dshHomePath 表达式：${obj.databasePath}`)
+      }
     }
     for (const child of Object.values(obj)) collect(child, depth + 1)
   }
-  for (const row of value) {
+  const visitRow = (row: unknown) => {
     const obj = asObject(row)
-    if (!obj) continue
-    if (obj.id === 'dsh-enhanced-plugin-control-plane' || obj.id === 'dsh-enhanced-assistant-verifier') {
+    if (!obj) return
+    if (isLedgerPluginRow(obj)) {
       collect(obj.config, 0)
     }
+    if (Array.isArray(obj.insert)) {
+      for (const nested of obj.insert) visitRow(nested)
+    }
   }
+  for (const row of value) visitRow(row)
   return [...paths]
 }
 
@@ -376,7 +443,11 @@ function mergeLedgerStatus(current: LedgerStatus, next: LedgerStatus): LedgerSta
   return rank[next] > rank[current] ? next : current
 }
 
-async function inspectProfileLedgerReadiness(dshHome: string, profile: string): Promise<ProfileLedgerReadiness> {
+async function inspectProfileLedgerReadiness(
+  dshHome: string,
+  profile: string,
+  allowNonEmptyHistoryMigration = false,
+): Promise<ProfileLedgerReadiness> {
   const issues: string[] = []
   let creationLedgerStatus: LedgerStatus = 'absent'
   let revisionLedgerStatus: LedgerStatus = 'absent'
@@ -387,7 +458,7 @@ async function inspectProfileLedgerReadiness(dshHome: string, profile: string): 
     issues.push(patch.error)
   } else if (patch.text !== undefined) {
     try {
-      configuredDbPaths = extractConfiguredDbPaths(patch.text)
+      configuredDbPaths = extractConfiguredDbPaths(patch.text, dshHome)
     } catch (error) {
       issues.push(error instanceof Error ? error.message : String(error))
     }
@@ -432,7 +503,7 @@ async function inspectProfileLedgerReadiness(dshHome: string, profile: string): 
       }
       if (sawCreationTable) {
         creationLedgerStatus = mergeLedgerStatus(creationLedgerStatus, hasCreationRows ? 'non-empty' : 'empty')
-        if (hasCreationRows) {
+        if (hasCreationRows && !allowNonEmptyHistoryMigration) {
           issues.push(`检测到非空 creation 账本（暂不支持自动迁移）：${dbPath}`)
         }
       }
@@ -458,7 +529,7 @@ async function inspectProfileLedgerReadiness(dshHome: string, profile: string): 
       }
       if (sawRevisionTable) {
         revisionLedgerStatus = mergeLedgerStatus(revisionLedgerStatus, hasRevisionRows ? 'non-empty' : 'empty')
-        if (hasRevisionRows) {
+        if (hasRevisionRows && !allowNonEmptyHistoryMigration) {
           issues.push(`检测到非空 revision 账本（暂不支持自动迁移）：${dbPath}`)
         }
       }
@@ -471,11 +542,11 @@ async function inspectProfileLedgerReadiness(dshHome: string, profile: string): 
     }
   }
 
+  const nonEmptyAllowed = allowNonEmptyHistoryMigration === true
   const ledgerReady = issues.length === 0
-    && creationLedgerStatus !== 'non-empty'
     && creationLedgerStatus !== 'corrupt'
-    && revisionLedgerStatus !== 'non-empty'
     && revisionLedgerStatus !== 'corrupt'
+    && (nonEmptyAllowed || (creationLedgerStatus !== 'non-empty' && revisionLedgerStatus !== 'non-empty'))
 
   return {
     profile,
@@ -796,7 +867,7 @@ async function defaultUpgradeHost(input: {
   await writeTextAtomically(plan.bindingPath, plan.candidateBindingSource, 0o600)
 }
 
-async function defaultVerifyHealth(input: {
+export async function defaultVerifyHealth(input: {
   dshHome: string
   profile?: string
   profiles: readonly string[]
@@ -836,6 +907,17 @@ interface ProfileBackupRecord {
   readonly hasEnhancedModules: boolean
 }
 
+interface LedgerBackupRecord {
+  readonly src: string
+  readonly dst: string
+  readonly walSrc: string
+  readonly walDst: string
+  readonly hadWal: boolean
+  readonly shmSrc: string
+  readonly shmDst: string
+  readonly hadShm: boolean
+}
+
 async function copyIfRegularFile(src: string, dst: string): Promise<boolean> {
   try {
     const meta = await lstat(src)
@@ -849,10 +931,24 @@ async function copyIfRegularFile(src: string, dst: string): Promise<boolean> {
   }
 }
 
+async function restoreRegularFileFromBackup(src: string, dst: string): Promise<void> {
+  const meta = await lstat(src)
+  const tmp = `${dst}.rollback-${process.pid}-${Date.now()}`
+  try {
+    await cp(src, tmp, { force: true })
+    await chmod(tmp, meta.mode & 0o777)
+    await rename(tmp, dst)
+  } catch (error) {
+    await rm(tmp, { force: true })
+    throw error
+  }
+}
+
 async function createUpgradeBackup(dshHome: string, profiles: readonly string[]): Promise<{
   backupDir: string
   hadHostBinding: boolean
   profileBackups: ProfileBackupRecord[]
+  ledgerBackups: LedgerBackupRecord[]
   backupFiles: string[]
 }> {
   const stamp = `${new Date().toISOString().replace(/[:.]/gu, '-')}-${process.pid}`
@@ -864,6 +960,12 @@ async function createUpgradeBackup(dshHome: string, profiles: readonly string[])
   const hostBindingDst = join(backupDir, '.dsh-rsi-host.json')
   const hadHostBinding = await copyIfRegularFile(hostBindingSrc, hostBindingDst)
   if (hadHostBinding) backupFiles.push(hostBindingSrc)
+
+  const ledgerBackupDir = join(backupDir, 'ledgers')
+  let createdLedgerBackupDir = false
+  const seenLedgerPaths = new Set<string>()
+  const ledgerBackups: LedgerBackupRecord[] = []
+  let ledgerIndex = 0
 
   const profileBackups: ProfileBackupRecord[] = []
   for (const profile of profiles) {
@@ -895,9 +997,42 @@ async function createUpgradeBackup(dshHome: string, profiles: readonly string[])
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
     profileBackups.push({ profile, profileDir, backupDir: profBackupDir, files: backedFiles, hasEnhancedModules })
+
+    let configuredDbPaths: string[] = []
+    const patch = await readProfilePatchText(dshHome, profile)
+    if (patch.text !== undefined) {
+      try {
+        configuredDbPaths = extractConfiguredDbPaths(patch.text, dshHome)
+      } catch {
+        configuredDbPaths = []
+      }
+    }
+    for (const dbPath of candidateLedgerPaths(dshHome, profile, configuredDbPaths)) {
+      if (seenLedgerPaths.has(dbPath)) continue
+      seenLedgerPaths.add(dbPath)
+      const ledgerMeta = await lstat(dbPath).catch(() => undefined)
+      if (!ledgerMeta || !ledgerMeta.isFile() || ledgerMeta.isSymbolicLink()) continue
+      if (!createdLedgerBackupDir) {
+        await mkdir(ledgerBackupDir, { recursive: true, mode: 0o700 })
+        createdLedgerBackupDir = true
+      }
+      const id = ledgerIndex++
+      const dst = join(ledgerBackupDir, `ledger-${id}.sqlite`)
+      if (!(await copyIfRegularFile(dbPath, dst))) continue
+      backupFiles.push(dbPath)
+      const walSrc = `${dbPath}-wal`
+      const walDst = `${dst}-wal`
+      const hadWal = await copyIfRegularFile(walSrc, walDst)
+      if (hadWal) backupFiles.push(walSrc)
+      const shmSrc = `${dbPath}-shm`
+      const shmDst = `${dst}-shm`
+      const hadShm = await copyIfRegularFile(shmSrc, shmDst)
+      if (hadShm) backupFiles.push(shmSrc)
+      ledgerBackups.push({ src: dbPath, dst, walSrc, walDst, hadWal, shmSrc, shmDst, hadShm })
+    }
   }
 
-  return { backupDir, hadHostBinding, profileBackups, backupFiles }
+  return { backupDir, hadHostBinding, profileBackups, ledgerBackups, backupFiles }
 }
 
 async function restoreUpgradeBackup(
@@ -920,9 +1055,7 @@ async function restoreUpgradeBackup(
         const src = join(item.backupDir, fileName)
         const dst = join(item.profileDir, fileName)
         if (item.files.includes(fileName)) {
-          const meta = await lstat(src)
-          await cp(src, dst, { force: true })
-          await chmod(dst, meta.mode & 0o777)
+          await restoreRegularFileFromBackup(src, dst)
         } else {
           await rm(dst, { force: true })
         }
@@ -936,6 +1069,20 @@ async function restoreUpgradeBackup(
           force: true,
           verbatimSymlinks: true,
         })
+      }
+    }
+
+    for (const ledger of backup.ledgerBackups) {
+      await restoreRegularFileFromBackup(ledger.dst, ledger.src)
+      if (ledger.hadWal) {
+        await restoreRegularFileFromBackup(ledger.walDst, ledger.walSrc)
+      } else {
+        await rm(ledger.walSrc, { force: true })
+      }
+      if (ledger.hadShm) {
+        await restoreRegularFileFromBackup(ledger.shmDst, ledger.shmSrc)
+      } else {
+        await rm(ledger.shmSrc, { force: true })
       }
     }
     return true
@@ -966,34 +1113,52 @@ export async function runUpgrade(
   const upgradeProfileFn = deps.upgradeProfilePackages ?? defaultUpgradeProfilePackages
   const verifyHealthFn = deps.verifyHealth ?? defaultVerifyHealth
   const controlServiceFn = deps.controlService ?? controlManagedService
-  const inspectServiceFn = deps.inspectService ?? inspectManagedService
+  const inspectServiceFn = deps.inspectService ?? inspectManagedServiceForDshHome
   const scanProcessesFn = deps.scanProcesses ?? scanRunningProfiles
 
+  const blockedReasons: string[] = []
+  const homeIsAbsolute = isAbsolute(options.dshHome)
+  let homeUsable = homeIsAbsolute
   let canonicalHome = options.dshHome
-  if (existsSync(options.dshHome)) {
+  if (!homeIsAbsolute) {
+    blockedReasons.push(`DSH_HOME 必须是绝对路径：${options.dshHome}`)
+  } else {
     try {
-      canonicalHome = await realpath(options.dshHome)
-    } catch {
-      canonicalHome = options.dshHome
+      const homeMeta = await lstat(options.dshHome)
+      if (homeMeta.isSymbolicLink()) {
+        homeUsable = false
+        blockedReasons.push(`dshHome must not be a symlink：${options.dshHome}`)
+      } else if (!homeMeta.isDirectory()) {
+        homeUsable = false
+        blockedReasons.push(`DSH_HOME 非普通目录：${options.dshHome}`)
+      } else {
+        canonicalHome = await realpath(options.dshHome)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        homeUsable = false
+        blockedReasons.push(`无法检查 DSH_HOME：${options.dshHome}`)
+      }
     }
   }
 
   const registryUrl = validateRegistryUrl(options.registryUrl ?? env.npm_config_registry ?? DEFAULT_REGISTRY_URL)
-  const blockedReasons: string[] = []
 
   // 1. Detect frozen Linux systemd owner mode cleanly.
   let frozenOwner: FrozenOwner | undefined
   let frozenError: string | undefined
-  try {
-    frozenOwner = await detectFrozen(canonicalHome)
-  } catch (error) {
-    frozenError = error instanceof Error ? error.message : String(error)
-    blockedReasons.push(frozenError)
+  if (homeUsable) {
+    try {
+      frozenOwner = await detectFrozen(canonicalHome)
+    } catch (error) {
+      frozenError = error instanceof Error ? error.message : String(error)
+      blockedReasons.push(frozenError)
+    }
   }
 
-  const discoveredProfiles = await listProfiles(canonicalHome)
+  const discoveredProfiles = homeUsable ? await listProfiles(canonicalHome) : []
   let targetProfiles = discoveredProfiles
-  if (options.profile !== undefined) {
+  if (options.profile !== undefined && homeUsable) {
     if (!discoveredProfiles.includes(options.profile)) {
       blockedReasons.push(`指定 profile 不存在：${options.profile}`)
       targetProfiles = []
@@ -1008,7 +1173,7 @@ export async function runUpgrade(
   let mode: UpgradeMode = 'standard-local'
   if (frozenOwner) {
     mode = 'frozen-linux-systemd'
-  } else if (platform === 'darwin') {
+  } else if (platform === 'darwin' && homeUsable) {
     for (const profile of targetProfiles) {
       const launchdDef = await inspectLaunchdDefinition(osHome, canonicalHome, profile, runner)
       if (launchdDef.exists) {
@@ -1019,13 +1184,15 @@ export async function runUpgrade(
   }
 
   // 2. Inspect .dsh-rsi-host.json binding integrity.
-  const fileIntegrity = await checkBoundHostFileIntegrity(canonicalHome)
+  const fileIntegrity = homeUsable
+    ? await checkBoundHostFileIntegrity(canonicalHome)
+    : { status: 'missing' as BoundHostStatus }
   let boundHostStatus: BoundHostStatus = fileIntegrity.status
   let boundHostVersion: string | undefined
   let boundHostPath: string | undefined
   let boundHostError: string | undefined = fileIntegrity.error
 
-  if (fileIntegrity.status === 'ready') {
+  if (homeUsable && fileIntegrity.status === 'ready') {
     try {
       const inspected = await inspectHost(canonicalHome, deps.installHostPorts)
       if (inspected.status === 'ready') {
@@ -1060,9 +1227,10 @@ export async function runUpgrade(
   const installedEnhancedVersion = allInstalledVersions[0] ?? CLI_VERSION
 
   // 4. Inspect profile & creation/revision ledger readiness.
+  const allowNonEmptyHistoryMigration = Boolean(options.allowNonEmptyHistoryMigration)
   const profileReadiness: ProfileLedgerReadiness[] = []
   for (const profile of targetProfiles) {
-    const ledger = await inspectProfileLedgerReadiness(canonicalHome, profile)
+    const ledger = await inspectProfileLedgerReadiness(canonicalHome, profile, allowNonEmptyHistoryMigration)
     profileReadiness.push(ledger)
     if (!ledger.ledgerReady) {
       blockedReasons.push(...ledger.issues.map(issue => `[${profile}] ${issue}`))
@@ -1085,6 +1253,9 @@ export async function runUpgrade(
     blockedReasons.push(`无效的 Host 目标版本号：${options.dshVersion}`)
   } else if (explicitDshVersion && !isSupportedCandidateVersion(explicitDshVersion) && !deps.upgradeHost) {
     blockedReasons.push(`不支持的 Host 目标版本 ${explicitDshVersion}：当前仅支持已验证基线 ${FROZEN_DSH_SELECTOR}`)
+  }
+  if (explicitDshVersion && boundHostStatus === 'missing' && !deps.upgradeHost) {
+    blockedReasons.push('现有 Home 没有私有 Host 绑定；不能用 --dsh-version 修改全局 Host。')
   }
 
   const shouldCheckRegistry = typeof fetchImpl === 'function'
@@ -1120,7 +1291,7 @@ export async function runUpgrade(
   const enhancedUpgradeAvailable = semverIsNewer(targetEnhancedVersion, installedEnhancedVersion)
   const hostUpgradeAvailable = boundHostStatus === 'ready'
     ? semverIsNewer(targetDshVersion, boundHostVersion)
-    : Boolean(targetDshVersion && boundHostStatus === 'missing')
+    : false
 
   const readinessOk = blockedReasons.length === 0 && bindingOk && ledgersOk
 
@@ -1311,7 +1482,8 @@ export async function runUpgrade(
   }
 
   // Nothing newer to install unless explicit version override was passed.
-  const hostNeedsWork = Boolean(targetDshVersion && (hostUpgradeAvailable || options.dshVersion))
+  const hostNeedsWork = (boundHostStatus === 'ready' || Boolean(deps.upgradeHost && options.dshVersion))
+    && Boolean(targetDshVersion && (hostUpgradeAvailable || options.dshVersion))
     && targetDshVersion !== boundHostVersion
   const profilesNeedingWork = profileSummaries.filter((summary) => {
     const hasNpm = Object.keys(summary.installedVersions).length > 0 && summary.installKinds.includes('npm')

@@ -64,7 +64,7 @@ const owner = {
 const manifest = (): RsiSetupManifest => ({ schemaVersion: 1, targetProfile: 'target', coordinatorProfile: 'coordinator',
   controlPlane: { catalogPath: '/tmp/catalog.json', statePath: '/tmp/state', trustPath: '/tmp/trust.json',
     sourceJobs: { authorityId: 'authority', expiresAt: Date.now() + 60_000, maxSubmissions: 1, repository: '/tmp/repository', ownerRouteId: 'owner-route', principalId: 'lark/account/tenant/owner', workspace: '/tmp/rsi-workspace', preset: 'primary', budgetId: 'source', budgetAmount: 1 } },
-  growthDriver: { enabled: true, intervalMs: 0, budgetId: 'review', budgetAmount: 1, scope: { workspace: '/tmp/rsi-workspace', preset: 'primary', principalId: 'lark/account/tenant/owner', ownerRouteId: 'owner-route' }, usageLearning: { enabled: true, databasePath: '/tmp/growth.sqlite', scanBudgetId: 'discovery', scanBudgetAmount: 1 }, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: '/tmp/repository', offline: true } },
+  growthDriver: { enabled: true, intervalMs: 0, budgetId: 'review', budgetAmount: 1, scope: { workspace: '/tmp/rsi-workspace', preset: 'primary', principalId: 'lark/account/tenant/owner', ownerRouteId: 'owner-route' }, usageLearning: { enabled: true, databasePath: '/tmp/growth.sqlite', scanBudgetId: 'discovery', scanBudgetAmount: 1 }, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: '/tmp/repository', offline: true, allowCreation: false, allowRevision: false } },
   sourceReviews: { authorityId: 'review', expiresAt: Date.now() + 60_000, maxReviews: 1, repository: '/tmp/repository', git: { path: '/tmp/git', sha256: 'a'.repeat(64) }, decisionRoot: '/not-a-private-existing-directory', plugins: ['lark-channel'], owner: { authorityId: 'owner-route', authorityHash: ownerRouteAuthorityHash({ id: 'owner-route', conversation: owner.conversation, principal: owner.principal, workspace: owner.workspace, agentPreset: owner.agentPreset, policyRef: owner.policyRef, minimumGeneration: 1 }), principalId: 'lark/account/tenant/owner', principalRecordId: 'principal-record', principalVersion: 1, workspace: '/tmp/rsi-workspace', agentPreset: 'primary' }, reviewerPrincipal: 'reviewer', policy: 'independent', maxChangedFiles: 1, maxInputBytes: 4096, maxOutputTokens: 1, timeoutMs: 1000 },
   coordinator: { budgetId: 'coordinator', budgetAmount: 1, timeoutMs: 1000 }, limits: { periodMs: 60_000, reviews: 1, discovery: 1, source: 1, observations: 1, coordinator: 1 },
 })
@@ -277,6 +277,7 @@ describe('RSI profile compiler', () => {
       const memoryManifest = structuredClone(value)
       memoryManifest.memoryLearning = { learning: { databasePath: join(root, 'learning.sqlite'), authorityId: 'memory-extract',
         owner: memoryOwner, expiresAt: memoryReviews.expiresAt, maxExtractions: 3, maxPending: 2, lookbackMs: 60_000,
+        workItemExperiences: false,
         policy: 'Extract only owner evidence.', maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 1000,
         budgetId: 'memory-extract-budget', budgetAmount: 1, scanBudgetId: 'memory-scan-budget', scanBudgetAmount: 1,
         reviewAuthorityId: memoryReviews.authorityId, reviewAuthorityDigest: growthObjectDigest(memoryReviews),

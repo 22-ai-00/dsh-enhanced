@@ -9,7 +9,10 @@
  * so the Host service shapes are declared locally and resolved through `ctx.get()`.
  */
 
-import type { AssistantChatContext, OwnerConsoleModelCatalog, OwnerConsoleWriteResult } from './typert.js'
+import type { OwnerSelfIterationAction } from './nl-control.js'
+import type {
+  AssistantChatContext, OwnerConsoleControlActionResult, OwnerConsoleModelCatalog, OwnerConsoleWriteResult,
+} from './typert.js'
 
 /** One Host snapshot/read face (`getSnapshot` + `subscribe`). */
 export type Observable<T> = Readonly<{
@@ -273,6 +276,7 @@ export type ChatRuntime = Readonly<{
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   selectSessionModel?(sessionId: string, provider: string, model: string, reasoningEffort: string): Promise<RemoteResult<unknown>>
   subscribeRefresh?(listener: () => void): () => void
+  controlSelfIteration?(action: OwnerSelfIterationAction, confirmed: boolean): Promise<RemoteResult<OwnerConsoleControlActionResult>>
 }>
 
 /** localStorage key for the panel's dedicated chat Session (browser-local only). */

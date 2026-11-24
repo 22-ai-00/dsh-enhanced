@@ -21,7 +21,7 @@ import {
   ensureConfigMap, ensurePatchRow, ensureVerifierDefaults, externalPrincipalId, findPatchRow,
   formatGrantIdWithGeneration, getPatchRowConfig, getPatchRowConfigNode, getPersonalAndPolicyConfigs,
   inspectMemoryLearningGrantConflicts, inspectOwnerRoute, jsDshHomeScalar, mergeDescriptorConfig,
-  normalizeMemoryGrantForDigest, normalizeProfileSlug, readConfigMap, readPatchDocument, resolveProfilePaths,
+  normalizeLearningConfigForDigest, normalizeMemoryGrantForDigest, normalizeProfileSlug, readConfigMap, readPatchDocument, resolveProfilePaths,
   resolveScopedDbTarget, strOrNull, upsertById, yamlNodeToJs, type AutonomyHostContext, type ProfilePaths,
 } from './autonomy-setup.js'
 
@@ -739,16 +739,41 @@ export async function inspectSetupDoctor(input: InspectSetupDoctorInput): Promis
     input.status.bundles,
     seq,
   )
-  if (platform !== 'linux' && isolationEnabled) {
+  const isolationCfg = mergeDescriptorConfig(
+    input.descriptors,
+    'dsh-enhanced-assistant-isolation',
+    seq ? getPatchRowConfig(seq, 'dsh-enhanced-assistant-isolation') : {},
+  )
+  const rawIsolationBackend = isolationCfg['backend']
+  const isolationBackend = rawIsolationBackend === undefined
+    ? 'auto'
+    : (typeof rawIsolationBackend === 'string' ? rawIsolationBackend : '__invalid__')
+  const expectedPlatformByBackend: Readonly<Record<string, NodeJS.Platform>> = {
+    'linux-native': 'linux',
+    'macos-seatbelt': 'darwin',
+    'windows-job': 'win32',
+  }
+  const autoSupportedPlatforms = new Set<NodeJS.Platform>(['linux', 'darwin', 'win32'])
+  const expectedPlatform = Object.hasOwn(expectedPlatformByBackend, isolationBackend)
+    ? expectedPlatformByBackend[isolationBackend]
+    : undefined
+  const isolationPlatformUnsupported = isolationEnabled && (
+    isolationBackend === 'auto'
+      ? !autoSupportedPlatforms.has(platform)
+      : expectedPlatform !== undefined
+        ? platform !== expectedPlatform
+        : true
+  )
+  if (isolationPlatformUnsupported) {
     coveredPackages.add('@dsh-enhanced/assistant-isolation')
     issues.push({
       id: 'unsupported-platform-isolation',
       severity: 'error',
       category: 'plugins',
-      title: '@dsh-enhanced/assistant-isolation 仅支持 Linux 环境',
-      detail: `当前系统为 ${platform}，\`assistant-isolation\` 仅支持 \`linux-native\` 后端并会在启动时报错；停用该插件即可消除异常。`,
+      title: '@dsh-enhanced/assistant-isolation 后端与当前系统不兼容',
+      detail: `当前系统为 ${platform}，配置的隔离后端为 \`${isolationBackend}\`（支持平台：auto 支持 linux/darwin/win32，linux-native 仅支持 linux，macos-seatbelt 仅支持 darwin，windows-job 仅支持 win32）；停用该插件或调整 backend 配置即可消除异常。`,
       autoFixable: mutatable,
-      fixLabel: '停用 Linux 专用隔离插件',
+      fixLabel: '停用不兼容的隔离插件',
     })
   }
 
@@ -1402,7 +1427,7 @@ export async function applyDoctorRepair(input: ApplyDoctorRepairInput): Promise<
         const resolvedMemDbPath = shouldRotateMemDb
           ? nextMemDbPath!
           : (conflict.memoryLearningDbPath ?? (typeof memCfg['databasePath'] === 'string' && isAbsolute(memCfg['databasePath']) ? memCfg['databasePath'] : undefined))
-        const nextMem = normalizeMemoryGrantForDigest({
+        const nextMem = normalizeLearningConfigForDigest({
           ...memCfg,
           authorityId: newExtractId,
           ...(newReviewId !== null ? { reviewAuthorityId: newReviewId } : {}),

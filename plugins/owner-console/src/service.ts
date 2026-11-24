@@ -1,7 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { isMap, isSeq, type YAMLMap } from 'yaml'
 import type { OwnerConsoleConfig } from './index.js'
+import { handleOwnerConsoleControlAction } from './autonomy-control.js'
+import type { OwnerSelfIterationAction } from './nl-control.js'
 import {
   boundedConfig, configFacts, findEntry, hasControlChars, isAppId, isEntryId, isEnvName, isProjectBundle,
   isProjectPackage, isSecretRef, isSingleLineCommand,
@@ -25,8 +28,8 @@ import {
 import { detectFrozenSystemdProfile, SelfUpgradeProber } from './upgrade-probe.js'
 import type {
   AssistantChatContext, AutonomyBudgetLimits, AutonomyBudgetTier, AutonomySetupAction,
-  AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleGrowthReport, OwnerConsoleModelCatalog,
-  SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
+  AutonomySetupStatus, FeishuQrOnboardingSnapshot, OwnerConsoleControlActionResult, OwnerConsoleGrowthReport,
+  OwnerConsoleModelCatalog, SelfUpgradePreview, SelfUpgradeStatus, SetupDoctorReport,
 } from './typert.js'
 import { readOwnerConsoleGrowthReport } from './growth-report.js'
 import {
@@ -84,8 +87,107 @@ export class OwnerConsoleService extends TypertRemoteService {
     this.feishuQr = feishuQr
     this.restartProfileFn = restartProfileFn
     this.installAssistantPromptScope()
+    this.installSelfIterationControlTool()
     this.installModelCatalogInvalidation()
     this.installFeishuQrDisposal()
+  }
+
+  private isAuthorizedOwnerAgent(agent: unknown): boolean {
+    if (this.resolveWenyaoSessionId(agent) !== '') return true
+    const delivery = this.host.get('assistantDelivery' as never) as { canRequestRestart?: (agent: unknown) => boolean } | undefined
+    try {
+      if (typeof delivery?.canRequestRestart === 'function' && delivery.canRequestRestart(agent) === true) {
+        return true
+      }
+    } catch {
+      // Ignore delivery inspection failure.
+    }
+    return false
+  }
+
+  private installSelfIterationControlTool(): void {
+    try {
+      this.host.inject(['tools' as never], (toolCtx: unknown) => {
+        const tools = (toolCtx as { tools?: { register?: (def: unknown, opts?: unknown) => () => void } }).tools
+        if (typeof tools?.register !== 'function') return () => {}
+        const toolDef = defineTool({
+          name: 'owner_console_self_iteration_control',
+          description: 'Owner-authorized overall assistant self-iteration control (enableSelfIteration, disableSelfIteration, or upgradeAssistantAndRecover).',
+          parameters: {
+            action: {
+              type: 'string',
+              enum: ['enableSelfIteration', 'disableSelfIteration', 'upgradeAssistantAndRecover'],
+              required: true,
+            },
+            confirmDshHomeStopped: { type: 'boolean' },
+          },
+          output: {
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                ok: { type: 'boolean', required: true },
+                action: { type: 'string' },
+                state: { type: 'string' },
+                healthy: { type: 'boolean' },
+                error: { type: 'string' },
+                reason: { type: 'string' },
+                note: { type: 'string' },
+              },
+            },
+            render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+          },
+          execute: async (args, exec) => {
+            const authorized = this.isAuthorizedOwnerAgent(exec.agent)
+            const res = await handleOwnerConsoleControlAction(this.host, {
+              ownerAuthorized: authorized,
+              action: args.action,
+              ...(args.confirmDshHomeStopped === undefined ? {} : { confirmDshHomeStopped: args.confirmDshHomeStopped }),
+            })
+            if (res.ok) this.catalogReader.invalidate()
+            return {
+              ok: res.ok,
+              ...(res.action === undefined ? {} : { action: res.action }),
+              ...(res.state === undefined ? {} : { state: res.state }),
+              ...(res.healthy === undefined ? {} : { healthy: res.healthy }),
+              ...(res.error === undefined ? {} : { error: res.error }),
+              ...(res.reason === undefined ? {} : { reason: res.reason }),
+              ...(res.note === undefined ? {} : { note: res.note }),
+            }
+          },
+        })
+        const disposers: Array<() => void> = []
+        const disposeTool = tools.register(toolDef, {
+          when: (activation: { agent?: unknown }) => this.isAuthorizedOwnerAgent(activation.agent),
+        })
+        if (typeof disposeTool === 'function') disposers.push(disposeTool)
+        const policy = (toolCtx as {
+          assistantPolicy?: {
+            registerPreauthorizedTool?: (ctx: unknown, def: unknown, predicate: (exec: { agent?: unknown }) => boolean, opts?: unknown) => () => void
+          }
+        }).assistantPolicy
+        if (typeof policy?.registerPreauthorizedTool === 'function') {
+          try {
+            const disposePolicy = policy.registerPreauthorizedTool(
+              toolCtx,
+              toolDef,
+              (execution: { agent?: unknown }) => this.isAuthorizedOwnerAgent(execution.agent),
+              { denialReason: 'owner-console: self-iteration control requires an authorized owner session' },
+            )
+            if (typeof disposePolicy === 'function') disposers.push(disposePolicy)
+          } catch {
+            // assistantPolicy preauthorization is optional when policy service is absent.
+          }
+        }
+        return () => {
+          for (const dispose of disposers.splice(0).reverse()) {
+            try { dispose() } catch { /* ignore */ }
+          }
+        }
+      })
+    } catch {
+      // Ignore if test Context stub lacks inject(); Host runtime always supplies it.
+    }
   }
 
   private installFeishuQrDisposal(): void {
@@ -1107,6 +1209,34 @@ export class OwnerConsoleService extends TypertRemoteService {
     return this.restartProfileFn({
       host: this.host,
       confirmed,
+    })
+  }
+
+  /** Owner-authorized control for enabling, disabling, or upgrading & recovering overall assistant self-iteration (requires confirmation). */
+  async controlSelfIteration(action: OwnerSelfIterationAction, confirmed: boolean): Promise<OwnerConsoleControlActionResult> {
+    if (confirmed !== true) {
+      return Object.freeze({
+        ok: false,
+        ...(action === 'enableSelfIteration' || action === 'disableSelfIteration' || action === 'upgradeAssistantAndRecover'
+          ? { action }
+          : {}),
+        error: '需要 Owner 明确确认后才能执行整体自迭代控制操作',
+        reason: 'confirmation required',
+      })
+    }
+    const result = await handleOwnerConsoleControlAction(this.host, {
+      ownerAuthorized: true,
+      action,
+    })
+    if (result.ok) this.catalogReader.invalidate()
+    return Object.freeze({
+      ok: result.ok,
+      ...(result.action === undefined ? {} : { action: result.action }),
+      ...(result.state === undefined ? {} : { state: result.state }),
+      ...(result.healthy === undefined ? {} : { healthy: result.healthy }),
+      ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
+      ...(result.note === undefined ? {} : { note: result.note }),
     })
   }
 }

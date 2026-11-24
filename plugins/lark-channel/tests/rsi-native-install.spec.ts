@@ -1,9 +1,14 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parse, stringify } from 'yaml'
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
+import { compileNativeRsiProfile } from '../src/rsi-native-profile.ts'
 import { installNativeRsiOwnerDeployment, type NativeRsiInstallPorts } from '../src/rsi-native-install.ts'
+import { applySelfIterationProfileToggle } from '../src/service.ts'
 import { launchAgentPaths } from '../src/launchd.ts'
 
 const homes: string[] = []
@@ -292,5 +297,199 @@ describe('native pluginRevision transaction and runner directory preparation', (
       vi.doUnmock('../src/rsi-install-inputs.js')
       vi.resetModules()
     }
+  })
+
+  test('upgradeExistingOwner upgrades with real compileNativeRsiProfile and rollback restores native-journal.json for bare retry', async () => {
+    const home = await mkdtemp(join(await realpath(tmpdir()), 'ni-upg-'))
+    homes.push(home)
+    const dshHome = join(home, '.dsh')
+    const profile = 'web'
+    const profileRoot = join(dshHome, 'profiles', profile)
+    const workspace = join(home, 'w')
+    const sourceRoot = join(home, 's')
+    const release = join(home, 'r')
+    for (const dir of [dshHome, join(dshHome, 'profiles'), profileRoot, workspace, sourceRoot, release]) {
+      await mkdir(dir, { recursive: true, mode: 0o700 })
+      await chmod(dir, 0o700)
+    }
+    const resources = await prepareRsiAuthorityResources({ dshHome, profile })
+    for (const name of ['creation-review-runner', 'creation-adoption-runner', 'revision-review-runner', 'revision-regression-runner']) {
+      await mkdir(join(resources.stateRoot, name), { mode: 0o700 })
+    }
+    const patchPath = join(profileRoot, 'cordis.patch.yml')
+    await writeFile(patchPath, "- id: custom-row\n  name: custom-package\n  config: { keep: true }\n", { mode: 0o600 })
+
+    const principal = { channel: 'lark' as const, account: 'account', tenant: 'tenant', user: 'owner' }
+    const conversation = { channel: 'lark' as const, account: 'account', tenant: 'tenant', kind: 'dm' as const, chat: 'chat' }
+    const owner = {
+      id: 'binding', conversation, principal, workspace, agentPreset: 'primary', sessionId: 'session',
+      generation: 1, policyRef: 'owner-policy', status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1,
+      owner: { id: 'principal-record', principal, role: 'owner' as const, status: 'active' as const, createdAt: 1, updatedAt: 1, version: 1 },
+    }
+    const baseRow = (name: string, config: object, extra = {}) => ({ id: `dsh-enhanced-${name}`, name: `@dsh-enhanced/${name}`, config, ...extra })
+    const baseRows = [
+      baseRow('personal-assistant', {
+        assistantPolicy: { databasePath: join(home, 'policy.sqlite'), budgets: [], rules: [] },
+        assistantAutomations: { databasePath: join(home, 'automations.sqlite'), runsPath: join(home, 'runs'),
+          schedulerEnabled: false, allowUnbudgetedExecution: false },
+        personalMemory: { databasePath: join(home, 'memory.sqlite') },
+      }),
+      baseRow('assistant-delivery', { defaultWorkspace: workspace, defaultAgentPreset: 'primary', ownerRoutes: [],
+        agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' }),
+      baseRow('assistant-verifier', { databasePath: join(home, 'verifier.sqlite') }),
+      baseRow('assistant-growth-driver', { provider: 'owner-provider', model: 'owner-model' }),
+      { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
+      baseRow('plugin-control-plane', {}),
+      baseRow('lark-channel', { enabled: true }),
+      baseRow('assistant-proactive', {}),
+      baseRow('assistant-work-items', { enabled: true, mode: 'observe', intakeLedger: { enabled: true } }),
+    ]
+
+    const runtimeRoot = join(dshHome, 'rsi-native-runtimes', profile, 'runtime')
+    const runtime = {
+      schemaVersion: 1 as const,
+      platform: `darwin-${process.arch}` as 'darwin-arm64' | 'darwin-x64',
+      nodePath: join(runtimeRoot, 'bin', 'node'),
+      nodeSha256: 'a'.repeat(64),
+      roots: [{ path: runtimeRoot, dev: 1, ino: 2, sha256: 'b'.repeat(64) }],
+      modulesPath: join(runtimeRoot, 'node_modules'),
+      versions: { node: 'v24.22.0', typescript: '5.9.3', cordis: '3.0.0', tools: '1.0.0', systemPrompt: '1.0.0' },
+    }
+    const executorPath = join(home, 'dsh')
+    const executorBytes = '#!/bin/sh\nexit 0\n'
+    await writeFile(executorPath, executorBytes, { mode: 0o500 })
+    const executor = {
+      id: 'dsh', version: '1', path: executorPath,
+      sha256: createHash('sha256').update(executorBytes).digest('hex'), environmentAllowlist: [],
+    }
+    const state = {
+      registered: false,
+      now: 1_800_000_000_000,
+      sourceCommit: 'b'.repeat(40),
+      failReady: false,
+    }
+    const paths = launchAgentPaths({ dshHome, profile, home })
+    const dumpEffective = () => {
+      const currentPatch = parse(readFileSync(patchPath, 'utf8')) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, unknown> }>
+      const patchMap = new Map(currentPatch.map(row => [row.id, row]))
+      const baseIds = new Set(baseRows.map(row => row.id))
+      return stringify([
+        ...baseRows.map(row => {
+          const patched = patchMap.get(row.id)
+          return patched ? { ...row, ...patched } : row
+        }),
+        ...currentPatch.filter(row => !baseIds.has(row.id)),
+      ])
+    }
+    const ports: NativeRsiInstallPorts = {
+      home,
+      now: () => state.now,
+      prepare: vi.fn(async () => ({
+        source: {
+          schemaVersion: 1 as const, version: '0.1.84',
+          origin: { kind: 'local-head' as const, locator: home, ref: 'HEAD' },
+          sourceCommit: state.sourceCommit, repository: sourceRoot,
+          baseline: { ref: 'refs/dsh-source/repairs', remote: release, targetBranch: 'repairs', initialCommit: state.sourceCommit },
+        },
+        resources,
+        build: {
+          schemaVersion: 2 as const,
+          sourceBuild: { backend: 'macos-seatbelt' as const, runtime, timeoutMs: 60_000 as const,
+            outputBytes: 1_048_576 as const, versioning: 'patch' as const },
+        },
+        creationBuild: { schemaVersion: 2 as const, backend: 'macos-seatbelt' as const, sourceCommit: state.sourceCommit, runtime },
+        executor,
+      }) as unknown as Awaited<ReturnType<NativeRsiInstallPorts['prepare']>>),
+      compile: vi.fn(value => compileNativeRsiProfile(value)),
+      dump: vi.fn(dumpEffective),
+      snapshot: vi.fn(async () => ({ bindings: [owner] }) as unknown as Awaited<ReturnType<NativeRsiInstallPorts['snapshot']>>),
+      inventory: vi.fn(async () => ({
+        databasePath: join(dshHome, 'automations.sqlite'), schedulerEnabled: false, records: [],
+      }) as unknown as Awaited<ReturnType<NativeRsiInstallPorts['inventory']>>),
+      inspect: vi.fn(() => ({ registered: state.registered, pid: state.registered ? 1234 : 0 })),
+      validatePlist: vi.fn(),
+      stop: vi.fn(async () => { state.registered = false }),
+      start: vi.fn(async () => { state.registered = true }),
+      ready: vi.fn(async () => { if (state.failReady) throw new Error('injected native upgrade readiness failure') }),
+    }
+
+    // 1. Fresh install with enableRevision: false & enableOrdinaryUseLearning: false
+    const first = await installNativeRsiOwnerDeployment({ dshHome, profile, enableRevision: false }, ports)
+    expect(first.mode).toBe('ready')
+    const planPath = join(resources.configRoot, 'native-plan.json')
+    const manifestPath = join(resources.configRoot, 'native-manifest.json')
+    const trustPath = join(resources.configRoot, 'native-trust.json')
+    const journalPath = join(resources.configRoot, 'native-journal.json')
+    const planBeforeRollback = await readFile(planPath, 'utf8')
+    const manifestBeforeRollback = await readFile(manifestPath, 'utf8')
+    const trustBeforeRollback = await readFile(trustPath, 'utf8')
+    const journalBeforeRollback = await readFile(journalPath, 'utf8')
+    const patchBeforeRollback = await readFile(patchPath, 'utf8')
+    const plistBeforeRollback = await readFile(paths.plistPath, 'utf8')
+
+    // 2. Bare retry expanding ordinary-use learning without upgradeExistingOwner fails closed
+    await expect(installNativeRsiOwnerDeployment({ dshHome, profile, enableOrdinaryUseLearning: true }, ports))
+      .rejects.toThrow('cannot be expanded with ordinary-use learning')
+
+    // 3. Upgrade failure during readiness rolls back plan, manifest, trust, journal, patch, and plist cleanly
+    state.failReady = true
+    state.sourceCommit = 'c'.repeat(40)
+    await expect(installNativeRsiOwnerDeployment({
+      dshHome, profile, enableOrdinaryUseLearning: true, enableRevision: true, upgradeExistingOwner: true,
+    }, ports)).rejects.toThrow('injected native upgrade readiness failure')
+
+    expect(await readFile(planPath, 'utf8')).toBe(planBeforeRollback)
+    expect(await readFile(manifestPath, 'utf8')).toBe(manifestBeforeRollback)
+    expect(await readFile(trustPath, 'utf8')).toBe(trustBeforeRollback)
+    expect(await readFile(journalPath, 'utf8')).toBe(journalBeforeRollback)
+    expect(await readFile(patchPath, 'utf8')).toBe(patchBeforeRollback)
+    expect(await readFile(paths.plistPath, 'utf8')).toBe(plistBeforeRollback)
+    expect(state.registered).toBe(true)
+
+    // 4. Subsequent bare retry (with original sourceCommit and failReady cleared) succeeds without journal mismatch!
+    state.failReady = false
+    state.sourceCommit = 'b'.repeat(40)
+    await expect(installNativeRsiOwnerDeployment({ dshHome, profile }, ports)).resolves.toMatchObject({ mode: 'ready' })
+
+    // 5. Explicit upgradeExistingOwner: true succeeds and updates grants & sourceCommit
+    state.sourceCommit = 'c'.repeat(40)
+    const upgraded = await installNativeRsiOwnerDeployment({
+      dshHome, profile, enableOrdinaryUseLearning: true, enableRevision: true,
+      intakeProvider: 'deepseek-official', intakeModel: 'deepseek-chat', upgradeExistingOwner: true,
+    }, ports)
+    expect(upgraded.mode).toBe('ready')
+    const upgradedManifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    expect(upgradedManifest.now).toBe(1_800_000_000_000)
+    expect(upgradedManifest.expiresAt).toBe(1_800_000_000_000 + 365 * 86_400_000)
+    expect(upgradedManifest.ordinaryUseLearning.intakeEvaluation).toMatchObject({
+      provider: 'deepseek-official', model: 'deepseek-chat',
+    })
+    expect(upgradedManifest.pluginRevision).toBeDefined()
+    expect(JSON.parse(await readFile(journalPath, 'utf8')).stage).toBe('ready')
+
+    // 6. Real /autonomy disable disables all Contract 1 rows (growth, memory, proactive, work-items);
+    //    bare retry fails closed, while upgradeExistingOwner: true upgrades and re-enables cleanly
+    const toggleOff = await applySelfIterationProfileToggle({ dshHome, profile, enable: false })
+    expect(toggleOff).toMatchObject({ ok: true, state: 'disabled' })
+    const disabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
+      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+      expect(disabledPatch.find(row => row.id === id)?.disabled).toBe(true)
+    }
+    expect(disabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(false)
+
+    await expect(installNativeRsiOwnerDeployment({ dshHome, profile }, ports)).rejects.toThrow()
+
+    const afterDisableUpgrade = await installNativeRsiOwnerDeployment({
+      dshHome, profile, enableOrdinaryUseLearning: true, enableRevision: true, upgradeExistingOwner: true,
+    }, ports)
+    expect(afterDisableUpgrade.mode).toBe('ready')
+    const reenabledPatch = parse(await readFile(patchPath, 'utf8')) as Array<{ id: string; disabled?: boolean; config?: Record<string, unknown> }>
+    for (const id of ['dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning',
+      'dsh-enhanced-assistant-proactive', 'dsh-enhanced-assistant-work-items']) {
+      expect(reenabledPatch.find(row => row.id === id)?.disabled).toBe(false)
+    }
+    expect(reenabledPatch.find(row => row.id === 'dsh-enhanced-assistant-work-items')?.config?.enabled).toBe(true)
+    expect(reenabledPatch.find(row => row.id === 'dsh-enhanced-assistant-growth-driver')?.config?.enabled).toBe(true)
   })
 })

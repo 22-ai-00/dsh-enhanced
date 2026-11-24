@@ -179,7 +179,7 @@ describe('frozen target configuration scanner retirement derivation', () => {
           targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] },
         foregroundDeployments: { attestorJournalPath: join(root, 'attestor.sqlite') },
         taskObservations: { ...f.task, policy: { ...f.task.policy, expiresAt } } },
-      growthDriver: { ...f.growth, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: root, offline: true } },
+      growthDriver: { ...f.growth, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: root, offline: true, allowCreation: false, allowRevision: false } },
       sourceReviews: { authorityId: 'reviews', expiresAt, maxReviews: 1, repository: join(root, 'review-remote'),
         git: { path: join(root, 'git'), sha256: 'a'.repeat(64) }, decisionRoot, plugins: ['lark-channel'], owner: f.owner,
         reviewerPrincipal: 'reviewer', policy: 'independent', maxChangedFiles: 1, maxInputBytes: 4096, maxOutputTokens: 1, timeoutMs: 1000 },

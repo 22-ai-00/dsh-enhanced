@@ -317,4 +317,149 @@ describe('native owner learning profile', () => {
         .toMatchObject({ automationStatus: 'active' })
     } finally { await runtime.close(); await ctx.fiber.restart() }
   })
+
+  test('upgradeExistingOwner upgrades owner-owned native grants and ordinary-use settings while failing closed on foreign owners', async () => {
+    const input = await fixture()
+    const rows = parse(input.targetEffective) as Array<{ id: string; name?: string; config?: Record<string, any> }>
+    rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config = {
+      ...rows.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config,
+      agentProvider: 'deepseek-official',
+      agentModel: 'deepseek-v4-flash',
+    }
+    rows.push({ id: 'dsh-enhanced-assistant-proactive', name: '@dsh-enhanced/assistant-proactive' })
+    rows.push({
+      id: 'dsh-enhanced-assistant-work-items',
+      name: '@dsh-enhanced/assistant-work-items',
+      config: { enabled: true, mode: 'observe', intakeLedger: { enabled: true } },
+    })
+    const initialEffective = stringify(rows)
+    const initial = compileNativeRsiProfile({
+      ...input,
+      targetEffective: initialEffective,
+      enableOrdinaryUseLearning: false,
+      enableRevision: false,
+    })
+
+    const patchMap = new Map(
+      (parse(initial.targetPatch) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>)
+        .map(row => [row.id, row]),
+    )
+    const upgradedEffective = stringify(
+      (parse(initialEffective) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>).map(row => {
+        const patched = patchMap.get(row.id)
+        return patched ? { ...row, ...patched } : row
+      }),
+    )
+
+    // Without upgradeExistingOwner, expanding ordinaryUseLearning + revision + intakeProvider fails closed
+    expect(() => compileNativeRsiProfile({
+      ...input,
+      targetPatch: initial.targetPatch,
+      targetEffective: upgradedEffective,
+      enableOrdinaryUseLearning: true,
+      enableRevision: true,
+      intakeProvider: 'deepseek-official',
+      intakeModel: 'deepseek-chat',
+    })).toThrow(/conflicts with native grant|differs/)
+
+    // With upgradeExistingOwner: true, owner-owned grants upgrade cleanly
+    const upgraded = compileNativeRsiProfile({
+      ...input,
+      targetPatch: initial.targetPatch,
+      targetEffective: upgradedEffective,
+      enableOrdinaryUseLearning: true,
+      enableRevision: true,
+      intakeProvider: 'deepseek-official',
+      intakeModel: 'deepseek-chat',
+      upgradeExistingOwner: true,
+    })
+    expect(upgraded.manifest.ordinaryUseLearning?.intakeEvaluation).toMatchObject({
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })
+    expect(upgraded.manifest.memoryLearning.learning.workItemExperiences).toBe(true)
+    expect(upgraded.manifest.pluginRevision).toBeDefined()
+    expect(upgraded.manifest.growthDriver.pluginSourceProposals?.allowRevision).toBe(true)
+
+    // Even when memory-learning was temporarily disabled via /autonomy disable (disabled: true + config), upgradeExistingOwner succeeds for same owner
+    const disabledEffectiveRows = parse(upgradedEffective) as Array<{ id: string; disabled?: boolean; config?: Record<string, any> }>
+    disabledEffectiveRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.disabled = true
+    const afterDisableUpgrade = compileNativeRsiProfile({
+      ...input,
+      targetPatch: initial.targetPatch,
+      targetEffective: stringify(disabledEffectiveRows),
+      enableOrdinaryUseLearning: true,
+      upgradeExistingOwner: true,
+    })
+    const finalRows = parse(afterDisableUpgrade.targetPatch) as Array<{ id: string; disabled?: boolean }>
+    expect(finalRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
+
+    // Foreign owner grant still fails closed even when upgradeExistingOwner: true
+    const foreignRows = parse(upgradedEffective) as Array<{ id: string; config?: Record<string, any> }>
+    foreignRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')!.config!.authorityId = 'foreign-authority'
+    expect(() => compileNativeRsiProfile({
+      ...input,
+      targetPatch: initial.targetPatch,
+      targetEffective: stringify(foreignRows),
+      upgradeExistingOwner: true,
+    })).toThrow('existing memory learner grant differs')
+
+    // Foreign creationVerifications, revisionVerifications, and revisionRegressions fail closed under upgradeExistingOwner: true
+    const upgradedPatchMap = new Map(
+      (parse(upgraded.targetPatch) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>)
+        .map(row => [row.id, row]),
+    )
+    const upgradedRevisionEffective = (parse(initialEffective) as Array<{ id: string; name?: string; disabled?: boolean; config?: Record<string, any> }>).map(row => {
+      const patched = upgradedPatchMap.get(row.id)
+      return patched ? { ...row, ...patched } : row
+    })
+    for (const grantKey of ['creationVerifications', 'revisionVerifications', 'revisionRegressions'] as const) {
+      const forgedAuthId = structuredClone(upgradedRevisionEffective)
+      const cp = forgedAuthId.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config!
+      cp[grantKey].authority.authorityId = `FOREIGN-${grantKey}`
+      expect(() => compileNativeRsiProfile({
+        ...input,
+        targetPatch: upgraded.targetPatch,
+        targetEffective: stringify(forgedAuthId),
+        enableOrdinaryUseLearning: true,
+        enableRevision: true,
+        upgradeExistingOwner: true,
+      })).toThrow(`existing ${grantKey} grant differs`)
+
+      const forgedNestedOwner = structuredClone(upgradedRevisionEffective)
+      const cpNested = forgedNestedOwner.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config!
+      cpNested[grantKey].authority.owner = { authorityId: 'FOREIGN-OWNER' }
+      cpNested[grantKey].publicKey = 'FOREIGN-PUBLIC-KEY'
+      expect(() => compileNativeRsiProfile({
+        ...input,
+        targetPatch: upgraded.targetPatch,
+        targetEffective: stringify(forgedNestedOwner),
+        enableOrdinaryUseLearning: true,
+        enableRevision: true,
+        upgradeExistingOwner: true,
+      })).toThrow(`existing ${grantKey} grant differs`)
+
+      const forgedKeyOnly = structuredClone(upgradedRevisionEffective)
+      forgedKeyOnly.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config![grantKey].publicKey = 'FOREIGN-PUBLIC-KEY'
+      expect(() => compileNativeRsiProfile({
+        ...input,
+        targetPatch: upgraded.targetPatch,
+        targetEffective: stringify(forgedKeyOnly),
+        enableOrdinaryUseLearning: true,
+        enableRevision: true,
+        upgradeExistingOwner: true,
+      })).toThrow(`existing ${grantKey} grant differs`)
+
+      const nonObjectGrant = structuredClone(upgradedRevisionEffective)
+      nonObjectGrant.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config![grantKey] = 'invalid'
+      expect(() => compileNativeRsiProfile({
+        ...input,
+        targetPatch: upgraded.targetPatch,
+        targetEffective: stringify(nonObjectGrant),
+        enableOrdinaryUseLearning: true,
+        enableRevision: true,
+        upgradeExistingOwner: true,
+      })).toThrow(`existing ${grantKey} grant differs`)
+    }
+  })
 })

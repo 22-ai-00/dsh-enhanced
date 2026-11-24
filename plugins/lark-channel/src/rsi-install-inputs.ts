@@ -9,6 +9,7 @@ import { OWNER_REPAIR_PROTECTED_PLUGIN_DENYLIST, resolveLocalExecutable, runtime
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
+import { SELF_ITERATION_MANAGED_ROW_IDS } from './rsi-profile.js'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { Pin } from './rsi-authority-runtime.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
@@ -142,6 +143,8 @@ export interface RsiInstalledInputsRequest {
   resources: RsiAuthorityResources
   source: RsiSourceWorkspace
   environment?: NodeJS.ProcessEnv
+  /** Include temporarily disabled Contract 1 managed rows during owner-authorized upgrades. */
+  includeDisabledManagedRows?: boolean
 }
 export interface RsiInstalledInputs {
   dsh: InstalledRsiDsh
@@ -178,7 +181,9 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     rows.set(id, row)
     // The learning bundle ships disabled without configuration. Owner setup
     // enables this one exact installed row after its grants are frozen.
-    if (row.get('disabled') === true && id !== learnerId) continue
+    const allowDisabled = id === learnerId
+      || (input.includeDisabledManagedRows === true && SELF_ITERATION_MANAGED_ROW_IDS.has(id))
+    if (row.get('disabled') === true && !allowDisabled) continue
     if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
       if (id.startsWith('dsh-enhanced-')) fail(`installed ${id} has no package name`)
       continue
@@ -205,7 +210,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   }
   const learner = rows.get(learnerId)
   if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
-    || learner.get('disabled') === true && learner.has('config')) fail('installed memory learning row must be the unconfigured bundle entry')
+    || input.includeDisabledManagedRows !== true && learner.get('disabled') === true && learner.has('config')) fail('installed memory learning row must be the unconfigured bundle entry')
   const personal = rows.get('dsh-enhanced-personal-assistant')
   const personalConfig = personal?.get('config', true)
   if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant'

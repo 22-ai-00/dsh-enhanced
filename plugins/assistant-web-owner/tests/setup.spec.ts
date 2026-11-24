@@ -168,6 +168,53 @@ describe('local Web owner profile setup', () => {
     }
   })
 
+  test('scopes assistant-association databasePath under $DSH_HOME, preserves explicit/valid paths, rejects escapes, and is byte-idempotent', async () => {
+    const { input, effective } = await fixture()
+    const fakeHome = await mkdtemp(join(tmpdir(), 'web-owner-assoc-home-')); roots.push(fakeHome)
+    const fakeDshGlobal = join(fakeHome, '.dsh'); await mkdir(fakeDshGlobal, { recursive: true })
+    const savedHome = process.env.HOME
+    process.env.HOME = fakeHome
+    try {
+      const assocNoDbEffective = effective + [
+        '- id: dsh-enhanced-assistant-association',
+        '  name: "@dsh-enhanced/assistant-association"',
+        '  config:',
+        '    enabled: true',
+        '',
+      ].join('\n')
+      const planMissing = prepareWebOwnerProfile(input, '[]', assocNoDbEffective)
+      const rowsMissing = parseDocument(planMissing.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
+      expect(rowsMissing.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath)
+        .toBe(join(input.dshHome, 'assistant-association', 'web.sqlite'))
+      expect(prepareWebOwnerProfile(input, planMissing.patch, planMissing.patch).patch).toBe(planMissing.patch)
+
+      const assocGlobalEffective = effective + [
+        '- id: dsh-enhanced-assistant-association',
+        '  name: "@dsh-enhanced/assistant-association"',
+        '  config:',
+        `    databasePath: ${join(fakeDshGlobal, 'assistant-association.sqlite')}`,
+        '',
+      ].join('\n')
+      const planGlobal = prepareWebOwnerProfile(input, '[]', assocGlobalEffective)
+      const rowsGlobal = parseDocument(planGlobal.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
+      expect(rowsGlobal.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath)
+        .toBe(join(input.dshHome, 'assistant-association', 'web.sqlite'))
+
+      const explicitValidPath = join(input.dshHome, 'custom-assoc', 'custom.sqlite')
+      const explicitSource = `- id: dsh-enhanced-assistant-association\n  name: "@dsh-enhanced/assistant-association"\n  config:\n    databasePath: ${explicitValidPath}\n`
+      const planExplicit = prepareWebOwnerProfile(input, explicitSource, assocNoDbEffective)
+      const rowsExplicit = parseDocument(planExplicit.patch, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (v: string) => v }] }).toJS() as Array<{ id: string; config?: Record<string, any> }>
+      expect(rowsExplicit.find(r => r.id === 'dsh-enhanced-assistant-association')?.config?.databasePath).toBe(explicitValidPath)
+      expect(prepareWebOwnerProfile(input, planExplicit.patch, planExplicit.patch).patch).toBe(planExplicit.patch)
+
+      const escapedPatch = `- id: dsh-enhanced-assistant-association\n  config:\n    databasePath: /outside/assistant-association.sqlite\n`
+      expect(() => prepareWebOwnerProfile(input, escapedPatch, assocNoDbEffective)).toThrow(/within DSH_HOME/u)
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedHome
+    }
+  })
+
   test('dsh-web-owner-setup --help links cleanly with only web-scenario dependencies', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'web-owner-setup-web-only-'))
     try {

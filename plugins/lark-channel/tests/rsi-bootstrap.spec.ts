@@ -371,4 +371,55 @@ describe.skipIf(process.platform !== 'linux')('owner configuration preparation',
       expect(await readdir(join(f.input.resources.stateRoot, 'release', 'pr'))).toEqual([])
     } finally { await f.cleanup() }
   }, 120_000)
+
+  test('upgradeExistingOwner reconfigures manifest and receipt while preserving SQLite ledger and observer key', async () => {
+    const f = await rsiBootstrapFixture()
+    try {
+      await prepareRsiOwnerConfiguration(f.input, f)
+      const ledgerPath = join(f.input.manifest.controlPlane.statePath, 'control.sqlite')
+      const { DatabaseSync } = await import('node:sqlite')
+      const dbBefore = new DatabaseSync(ledgerPath)
+      const userVersionBefore = dbBefore.prepare('PRAGMA user_version').get() as { user_version: number }
+      dbBefore.close()
+      const keyPath = f.input.manifest.controlPlane.runtimeObserver!.keyPath
+      const keyBefore = await readFile(keyPath)
+      const keyStatBefore = await lstat(keyPath)
+
+      const upgradedManifest = structuredClone(f.input.manifest)
+      upgradedManifest.limits.reviews += 1
+      const nextResult = await prepareRsiOwnerConfiguration(
+        { ...f.input, manifest: upgradedManifest },
+        { ...f, upgradeExistingOwner: true },
+      )
+      expect(nextResult.manifestDigest).toBe(createHash('sha256').update(`${JSON.stringify(upgradedManifest, null, 2)}\n`).digest('hex'))
+      const nextPatches = await compileRsiProfiles({
+        manifest: upgradedManifest,
+        dshHome: dirname(dirname(f.input.resources.root)),
+        ...f.profiles,
+        owner: f.binding,
+      })
+      await expect(inspectRsiOwnerConfiguration({
+        manifest: upgradedManifest,
+        resources: f.input.resources,
+        patches: nextPatches,
+        signal: new AbortController().signal,
+      })).resolves.toBeUndefined()
+      expect(await readFile(keyPath)).toEqual(keyBefore)
+      expect((await lstat(keyPath)).ino).toBe(keyStatBefore.ino)
+      const dbAfter = new DatabaseSync(ledgerPath, { readOnly: true })
+      const userVersionAfter = dbAfter.prepare('PRAGMA user_version').get() as { user_version: number }
+      dbAfter.close()
+      expect(userVersionAfter).toEqual(userVersionBefore)
+
+      // Fails closed before mutating when existing files are tampered
+      const approvalPath = upgradedManifest.controlPlane.sourceApprovals!.configPath
+      const originalApproval = await readFile(approvalPath, 'utf8')
+      await writeFile(approvalPath, '{"tampered":true}\n', { mode: 0o600 })
+      await expect(prepareRsiOwnerConfiguration(
+        { ...f.input, manifest: f.input.manifest },
+        { ...f, upgradeExistingOwner: true },
+      )).rejects.toThrow('existing configuration changed before stopping Hosts')
+      await writeFile(approvalPath, originalApproval, { mode: 0o600 })
+    } finally { await f.cleanup() }
+  }, 120_000)
 })

@@ -3,13 +3,14 @@ import { jsx } from 'react/jsx-runtime'
 import { KAI_FONT, QUIET_PHRASE } from './art.js'
 import { WENYAO_ICON_DATA_URI, WENYAO_SEAL_DATA_URI } from './artwork.js'
 import { CUSTOM_MODEL_OPTION, ModelRouteSelects, resolveEffectiveModelCatalog, resolveEffortOptions, cascadeModelChange } from './model-route-ui.js'
+import type { OwnerSelfIterationAction } from './nl-control.js'
 import { componentState, DEPENDENCY_BUNDLES, missingRemedy, repairPatch, type ComponentState } from './state.js'
 import {
   AUTONOMY_TIER_DEFAULTS,
   type AssistantChatContext, type AutonomyBudgetLimits, type AutonomyBudgetTier, type AutonomySetupAction,
   type AutonomySetupStatus, type CodingToolProbe, type FeishuQrOnboardingSnapshot, type FeishuQrOwnerBinding,
   type GrowthDataState, type IntakeAgreementAvailability,
-  type OwnerConsoleAssistantOverview, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
+  type OwnerConsoleAssistantOverview, type OwnerConsoleControlActionResult, type OwnerConsoleGrowthReport, type OwnerConsoleIntakeAgreement,
   type OwnerConsoleIntakeAgreementHistory, type OwnerConsoleModelCatalog, type OwnerConsoleStatus,
   type OwnerConsoleTrendSnapshotItem, type OwnerConsoleTrendSnapshots, type OwnerConsoleWriteResult,
   type SelfUpgradePreview, type SelfUpgradeStatus, type SetupDoctorIssue, type SetupDoctorReport,
@@ -174,6 +175,7 @@ export type ConsoleRemote = Readonly<{
   cancelFeishuQrOnboarding?(sessionId: string): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   promoteFeishuQrOwner?(sessionId: string, confirmed: boolean): Promise<RemoteResult<FeishuQrOnboardingSnapshot>>
   restartProfile?(confirmed: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>
+  controlSelfIteration?(action: OwnerSelfIterationAction, confirmed: boolean): Promise<RemoteResult<OwnerConsoleControlActionResult>>
   modelCatalog?(force: boolean): Promise<RemoteResult<OwnerConsoleModelCatalog>>
   assistantChatContext?(): Promise<RemoteResult<AssistantChatContext>>
   registerAssistantSession?(sessionId: string, makeActive: boolean): Promise<RemoteResult<OwnerConsoleWriteResult>>

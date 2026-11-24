@@ -6,11 +6,13 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { isMap, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from 'yaml'
 import { afterEach, describe, expect, test } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { DeliveryStore } from '../plugins/assistant-delivery/lib/store.js'
 import { EvaluationStore } from '../plugins/assistant-evaluation/lib/index.js'
 import { applyDogfoodPluginPreset } from '../plugins/assistant-policy/lib/plugin-setup.js'
 import { applyWebOwnerAutonomySetup } from '../plugins/assistant-web-owner/lib/index.js'
 import { prepareWebOwnerProfile } from '../plugins/assistant-web-owner/src/setup.ts'
+import { AssistantWorkItemsService, ConfigSchema as WorkItemsConfigSchema } from '../plugins/assistant-work-items/lib/index.js'
 import { collectGrowthReport } from '../packages/dsh-rsi-cli/lib/index.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -214,6 +216,10 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     )
     expect(secondPass.skipped.filter(s => s.id === 'dsh-enhanced-assistant-memory-learning')).toEqual([])
     expect(secondPass.skipped.filter(s => s.reason === 'not installed')).toEqual([])
+    expect(secondPass.skipped).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      reason: expect.stringMatching(/originBindingId/u),
+    })
 
     const finalDump = (await buildMergedEffectiveDump(cohort, patchPath)).seq.toJSON() as Array<{
       id: string
@@ -229,24 +235,31 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
       notificationOutcomesEnabled: true,
       intakeAttentionAgreementEnabled: true,
       intakeEvaluationAgreementEnabled: true,
-      attentionTuningAutoAdopt: false,
-      attentionLooseningEnabled: false,
-      attentionOwnerQuestionDeliveryEnabled: false,
+      attentionTuningAutoAdopt: true,
+      attentionLooseningEnabled: true,
     })
-    expect(byId.get('dsh-enhanced-assistant-work-items')?.config).toMatchObject({
+    const wiCfg = byId.get('dsh-enhanced-assistant-work-items')?.config
+    expect(wiCfg).toMatchObject({
       enabled: true,
       mode: 'observe',
-      intakeLedger: { enabled: true, evaluation: { admit: { enabled: false } } },
+      intakeLedger: { enabled: true, evaluation: { enabled: true } },
     })
+    expect((wiCfg?.['intakeLedger'] as { evaluation?: { admit?: unknown } } | undefined)?.evaluation?.admit).toBeUndefined()
+    const wiService = new AssistantWorkItemsService(new Context(), WorkItemsConfigSchema({
+      ...wiCfg,
+      databasePath: join(dshHome, 'assistant-work-items', 'state.sqlite'),
+      workRoot: join(dshHome, 'assistant-work-items', 'work'),
+    }))
+    expect(wiService.intakeAdmissionMode()).toBe('disabled')
     expect(byId.get('dsh-enhanced-assistant-memory-learning')?.disabled).toBe(false)
     expect(byId.get('dsh-enhanced-assistant-memory-learning')?.config).toMatchObject({
       workItemExperiences: true,
     })
     expect(byId.get('dsh-enhanced-assistant-association')?.config).toMatchObject({
       enabled: true,
-      dreaming: { enabled: false },
-      intakeSignal: { enabled: false },
-      webLearning: { enabled: false },
+      dreaming: { enabled: true },
+      intakeSignal: { enabled: true },
+      webLearning: { enabled: true },
     })
 
     // Step 5: Initialize the configured SQLite ledgers (as Host boot does) and verify `growth-report` has zero `no-data` sections!
@@ -277,5 +290,76 @@ describe('macOS dogfood profile end-to-end closed loop', () => {
     expect(report.notifications.state).toBe('zero')
     expect(report.suppliers.state).toBe('zero')
     expect(report.memoryLaneGate.status).toBe('collecting')
+  })
+
+  test('enables intakeLedger.evaluation.admit.enabled and boots AssistantWorkItemsService cleanly when originBindingId is configured in cordis.patch.yml', async () => {
+    const dshHome = await createTempHome()
+    await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+    const example = JSON.parse(await readFile(exampleProfilePath, 'utf8')) as { installedCohort: string[] }
+    const cohort = example.installedCohort
+    const patchPath = join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    await writeFile(patchPath, [
+      '- id: dsh-enhanced-assistant-work-items',
+      '  config:',
+      '    enabled: false',
+      '    mode: observe',
+      '    intakeSourceId: work-items/v1',
+      '    intakeLedger:',
+      '      enabled: false',
+      '      evaluation:',
+      '        enabled: true',
+      '        admit:',
+      '          originBindingId: binding-origin-1',
+      '',
+    ].join('\n'), { mode: 0o600 })
+
+    const presetResult = await applyDogfoodPluginPreset(
+      { dshHome, profile: 'web' },
+      { readDump: async () => (await buildMergedEffectiveDump(cohort, patchPath)).seq },
+    )
+    expect(presetResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'enabled',
+      from: false,
+      to: true,
+    })
+    expect(presetResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'intakeLedger.enabled',
+      from: false,
+      to: true,
+    })
+    expect(presetResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'intakeLedger.evaluation.admit.enabled',
+      from: undefined,
+      to: true,
+    })
+    expect(presetResult.skipped.some(s => s.id === 'dsh-enhanced-assistant-work-items' && s.reason.includes('originBindingId'))).toBe(false)
+
+    const finalDump = (await buildMergedEffectiveDump(cohort, patchPath)).seq.toJSON() as Array<{
+      id: string
+      config?: Record<string, unknown>
+    }>
+    const wiCfg = finalDump.find(r => r.id === 'dsh-enhanced-assistant-work-items')?.config
+    expect(wiCfg).toMatchObject({
+      enabled: true,
+      mode: 'observe',
+      intakeLedger: {
+        enabled: true,
+        evaluation: {
+          admit: {
+            enabled: true,
+            originBindingId: 'binding-origin-1',
+          },
+        },
+      },
+    })
+    const wiService = new AssistantWorkItemsService(new Context(), WorkItemsConfigSchema({
+      ...wiCfg,
+      databasePath: join(dshHome, 'assistant-work-items', 'state.sqlite'),
+      workRoot: join(dshHome, 'assistant-work-items', 'work'),
+    }))
+    expect(wiService.intakeAdmissionMode()).toBe('observe')
   })
 })

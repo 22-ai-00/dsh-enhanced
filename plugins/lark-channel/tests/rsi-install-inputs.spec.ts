@@ -226,4 +226,59 @@ describe('installed owner setup input capture', () => {
         resources: data.resources, source: data.source, environment: data.environment })).rejects.toThrow('different providers')
     } finally { await data.cleanup() }
   })
+
+  test.skipIf(process.platform !== 'linux')('includeDisabledManagedRows retains disabled Contract 1 managed bundles while keeping unrelated disabled bundles excluded', async () => {
+    const data = await fixture()
+    try {
+      for (const name of ['assistant-growth-driver', 'assistant-proactive', 'assistant-work-items', 'assistant-evaluation']) {
+        const packageRoot = join(data.profile, 'node_modules', '@dsh-enhanced', name)
+        await file(join(packageRoot, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${name}`, version: '0.1.48',
+          main: './lib/entry.js', exports: { '.': { default: './lib/entry.js' }, './package.json': './package.json' }, dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+        await file(join(packageRoot, 'cordis.patch.yml'), `- insert:\n    - id: dsh-enhanced-${name}\n      name: '@dsh-enhanced/${name}'\n`)
+        await file(join(packageRoot, 'lib', 'entry.js'), 'export default {}\n')
+      }
+      const effectiveWithDisabledManaged = `${data.effective}- id: dsh-enhanced-assistant-growth-driver
+  name: '@dsh-enhanced/assistant-growth-driver'
+  disabled: true
+  config:
+    enabled: false
+- id: dsh-enhanced-assistant-proactive
+  name: '@dsh-enhanced/assistant-proactive'
+  disabled: true
+- id: dsh-enhanced-assistant-work-items
+  name: '@dsh-enhanced/assistant-work-items'
+  disabled: true
+  config:
+    enabled: false
+- id: dsh-enhanced-assistant-evaluation
+  name: '@dsh-enhanced/assistant-evaluation'
+  disabled: true
+`
+        .replace("name: '@dsh-enhanced/assistant-health'", "name: '@dsh-enhanced/assistant-health'\n  disabled: true")
+        .replace("name: '@dsh-enhanced/assistant-memory-learning'\n  disabled: true",
+          "name: '@dsh-enhanced/assistant-memory-learning'\n  disabled: true\n  config:\n    authorityId: existing")
+
+      // Without includeDisabledManagedRows, disabled learner with config fails closed
+      await expect(collectRsiInstalledInputs({
+        dshHome: data.home, targetProfile: 'target', targetEffective: effectiveWithDisabledManaged,
+        resources: data.resources, source: data.source, environment: data.environment,
+      })).rejects.toThrow('unconfigured bundle entry')
+
+      // With includeDisabledManagedRows: true, Contract 1 repairable bundles are retained while unrelated disabled bundles & protected bundles are excluded
+      const collected = await collectRsiInstalledInputs({
+        dshHome: data.home, targetProfile: 'target', targetEffective: effectiveWithDisabledManaged,
+        resources: data.resources, source: data.source, environment: data.environment,
+        includeDisabledManagedRows: true,
+      })
+      expect(collected.plugins).toEqual([
+        'personal-assistant',
+        'assistant-memory-learning',
+        'assistant-growth-driver',
+        'assistant-proactive',
+        'assistant-work-items',
+      ])
+      expect(collected.plugins).not.toContain('assistant-health')
+      expect(collected.plugins).not.toContain('assistant-evaluation')
+    } finally { await data.cleanup() }
+  })
 })

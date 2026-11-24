@@ -192,4 +192,28 @@ describe('Lark inbound normalization', () => {
       resources: [{ type: 'image', fileKey: 'https://example.invalid/private' }],
     }), 100_100)).toThrow(/resource\.fileKey/i)
   })
+
+  test('strips leading Feishu mention placeholder tokens in mentioned group messages', () => {
+    const slash = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, content: '@_user_1 /autonomy disable',
+    }), 100_100)
+    expect(slash).toMatchObject({
+      outcome: 'accept',
+      envelope: { kind: 'command', text: '/autonomy disable' },
+    })
+    const nl = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, content: '@_user_1 @_user_2 关闭自迭代',
+    }), 100_100)
+    expect(nl).toMatchObject({
+      outcome: 'accept',
+      envelope: { kind: 'text', text: '关闭自迭代' },
+    })
+    const bareMention = normalizeLarkMessage(config, message({
+      chatType: 'group', mentionedBot: true, content: '@_user_1',
+    }), 100_100)
+    expect(bareMention).toMatchObject({
+      outcome: 'accept',
+      envelope: { kind: 'text', text: '@_user_1' },
+    })
+  })
 })
