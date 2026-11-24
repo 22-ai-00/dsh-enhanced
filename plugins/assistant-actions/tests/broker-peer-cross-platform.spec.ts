@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createConnection, createServer, type Socket } from 'node:net'
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -28,9 +29,14 @@ afterEach(async () => {
 })
 
 async function socketPair(): Promise<{ serverSocket: Socket; clientSocket: Socket; close: () => Promise<void> }> {
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'peer-xplat-')))
-  roots.push(dir)
-  const sockPath = join(dir, 'test.sock')
+  let sockPath: string
+  if (process.platform === 'win32') {
+    sockPath = `\\\\.\\pipe\\peer-xplat-${randomUUID()}`
+  } else {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'peer-xplat-')))
+    roots.push(dir)
+    sockPath = join(dir, 'test.sock')
+  }
   let accepted: Socket | undefined
   const server = createServer(sock => { accepted = sock })
   await new Promise<void>(resolve => server.listen(sockPath, resolve))

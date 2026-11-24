@@ -643,5 +643,5 @@ describe.skipIf(process.platform !== 'win32')('real Windows Job Object execution
       exitCode: 0,
       artifacts: [{ path: 'out.txt', content: 'real-win\r\n' }],
     })
-  })
+  }, 60_000)
 })

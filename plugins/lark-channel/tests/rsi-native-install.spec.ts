@@ -1,7 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse, stringify } from 'yaml'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -300,7 +299,7 @@ describe('native pluginRevision transaction and runner directory preparation', (
   })
 
   test('upgradeExistingOwner upgrades with real compileNativeRsiProfile and rollback restores native-journal.json for bare retry', async () => {
-    const home = await mkdtemp(join(await realpath(tmpdir()), 'ni-upg-'))
+    const home = await mkdtemp(join(await realpath('/tmp'), 'ni-upg-'))
     homes.push(home)
     const dshHome = join(home, '.dsh')
     const profile = 'web'

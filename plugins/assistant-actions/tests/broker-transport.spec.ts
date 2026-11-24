@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { createConnection, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -59,29 +59,40 @@ describe('Broker Transport Abstraction (broker-transport.ts)', () => {
   })
 
   it('validates Windows named pipe endpoints and runs full server-client handshake over simulated windows-pipe & darwin adapters', async () => {
-    const dir = await realpath(await mkdtemp(join(tmpdir(), 'transport-sim-')))
-    roots.push(dir)
-    const sockDir = join(dir, 'sock')
-    await mkdir(sockDir, { mode: 0o700 })
-    await chmod(sockDir, 0o700)
-
-    const pipeToSock = new Map<string, string>([
-      ['\\\\.\\pipe\\dsh-sim-action', join(sockDir, 'sim-action.sock')],
-      ['\\\\.\\pipe\\dsh-sim-admin', join(sockDir, 'sim-admin.sock')],
-    ])
+    const isWin = process.platform === 'win32'
+    const actionPipePath = isWin ? `\\\\.\\pipe\\dsh-sim-action-${process.pid}-${randomUUID()}` : '\\\\.\\pipe\\dsh-sim-action'
+    const adminPipePath = isWin ? `\\\\.\\pipe\\dsh-sim-admin-${process.pid}-${randomUUID()}` : '\\\\.\\pipe\\dsh-sim-admin'
     const winPeer: BrokerPeerCredentialInspector = () => ({ uid: 0, gid: 0, pid: process.pid, sid: 'S-1-5-21-1000' })
-    const listenSim = async (server: Server, pipePath: string): Promise<void> => {
-      const sock = pipeToSock.get(pipePath)!
-      await new Promise<void>((resolve, reject) => {
-        server.once('error', reject)
-        server.once('listening', resolve)
-        server.listen(sock)
-      })
-    }
-    const connectSim = (pipePath: string): Socket => createConnection({ path: pipeToSock.get(pipePath)! })
 
-    const serverAdapter = createWindowsPipeTransportAdapter(winPeer, { listen: listenSim, connect: connectSim })
-    const clientAdapter = createWindowsPipeTransportAdapter(winPeer, { listen: listenSim, connect: connectSim })
+    let serverAdapter: ReturnType<typeof createWindowsPipeTransportAdapter>
+    let clientAdapter: ReturnType<typeof createWindowsPipeTransportAdapter>
+    if (isWin) {
+      serverAdapter = createWindowsPipeTransportAdapter(winPeer)
+      clientAdapter = createWindowsPipeTransportAdapter(winPeer)
+    } else {
+      const dir = await realpath(await mkdtemp(join(tmpdir(), 'transport-sim-')))
+      roots.push(dir)
+      const sockDir = join(dir, 'sock')
+      await mkdir(sockDir, { mode: 0o700 })
+      await chmod(sockDir, 0o700)
+
+      const pipeToSock = new Map<string, string>([
+        [actionPipePath, join(sockDir, 'sim-action.sock')],
+        [adminPipePath, join(sockDir, 'sim-admin.sock')],
+      ])
+      const listenSim = async (server: Server, pipePath: string): Promise<void> => {
+        const sock = pipeToSock.get(pipePath)!
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject)
+          server.once('listening', resolve)
+          server.listen(sock)
+        })
+      }
+      const connectSim = (pipePath: string): Socket => createConnection({ path: pipeToSock.get(pipePath)! })
+
+      serverAdapter = createWindowsPipeTransportAdapter(winPeer, { listen: listenSim, connect: connectSim })
+      clientAdapter = createWindowsPipeTransportAdapter(winPeer, { listen: listenSim, connect: connectSim })
+    }
 
     // Invalid UNC/traversal pipe rejected
     expect(() => serverAdapter.validateEndpointPath('\\\\remote\\pipe\\x')).toThrow(/named pipe/)
@@ -114,8 +125,8 @@ describe('Broker Transport Abstraction (broker-transport.ts)', () => {
     }
 
     const server = await startGitHubBrokerServer({
-      actionSocketPath: '\\\\.\\pipe\\dsh-sim-action',
-      adminSocketPath: '\\\\.\\pipe\\dsh-sim-admin',
+      actionSocketPath: actionPipePath,
+      adminSocketPath: adminPipePath,
       instanceId: 'broker-win-sim',
       generation: 1,
       serverPrivateKey: serverKeys.privateKey,
@@ -166,7 +177,7 @@ describe('Broker Transport Abstraction (broker-transport.ts)', () => {
     const intent = { ...intentBase, budget: { ...intentBase.budget, bytes: brokerPayloadBytes(sampleReq) } }
 
     const res = await requestGitHubBroker({
-      socketPath: '\\\\.\\pipe\\dsh-sim-action',
+      socketPath: actionPipePath,
       serverPublicKey: serverKeys.publicKey,
       clientPrivateKey: clientKeys.privateKey,
       clientKeyId: 'client-win',
