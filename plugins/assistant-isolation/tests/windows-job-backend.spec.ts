@@ -643,7 +643,7 @@ describe.skipIf(process.platform !== 'win32')('real Windows Job Object execution
     const result = await runWindowsJobProcess({
       workspacePath: ws,
       tmpPath: tmp,
-      command: 'echo real-win> out.txt && echo ok',
+      command: '(echo real-win)> out.txt && echo ok',
       shell: 'cmd',
       networkMode: 'none',
       artifacts: ['out.txt'],
