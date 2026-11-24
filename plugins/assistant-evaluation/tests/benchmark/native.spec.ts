@@ -31,6 +31,8 @@ describe('native AgentLoop benchmark plan', () => {
     (value: NativeBenchmarkConfig) => { value.model.maxOutputTokens = value.budget.outputTokens + 1 },
     (value: NativeBenchmarkConfig) => { value.model.temperature = 3 },
     (value: NativeBenchmarkConfig) => { value.variants[1]!.role = 'baseline' },
+    (value: NativeBenchmarkConfig) => { (value.variants[1] as { planning?: unknown }).planning = 'yes' },
+    (value: NativeBenchmarkConfig) => { (value.variants[1] as { growth?: unknown }).growth = 1 },
   ])('rejects unsupported bounded input before the adapter factory runs', async mutate => {
     const input = config(); mutate(input); let called = false
     expect(() => createNativeBenchmarkExecutor(input, async () => { called = true; throw new Error('should not run') })).toThrow()
@@ -159,5 +161,86 @@ describe('native AgentLoop benchmark plan', () => {
     const executor = createNativeBenchmarkExecutor(input, async () => ({ adapter: new GoodAdapter(), inputTokenUpperBound: () => 4, dispose: () => { disposed = true; throw new Error('dispose failed') } }))
     await expect(executor.execute({ planId: plan.id, dataset: plan.dataset, cell, task: plan.cases[0]!, variant: plan.variants.find(item => item.id === cell.variantId)!, budget: plan.budget, signal: new AbortController().signal })).rejects.toThrow('cleanup failed')
     expect(disposed).toBe(true)
+  })
+
+  it('clamps Call 2+ maxTokens to remaining output budget and rejects cumulative input/cost overruns', async () => {
+    const input = config()
+    input.variants = [
+      { id: 'baseline', role: 'baseline', persona: 'Answer JSON.' },
+      { id: 'candidate', role: 'candidate', persona: 'Answer JSON carefully.', planning: true },
+    ]
+    input.model.maxOutputTokens = 20
+    input.budget.outputTokens = 25
+    input.budget.inputTokens = 100
+    input.budget.costUsdMicros = 1_000
+
+    const plan = nativeBenchmarkPlan(input)
+    const cell = benchmarkSchedule(plan).find(c => c.variantId === 'candidate')!
+    const task = developmentCorpus[0]!
+    const seenMaxTokens: Array<number | undefined> = []
+
+    class TwoTurnClampAdapter extends LlmAdapter {
+      private turn = 0
+      override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        seenMaxTokens.push(options.maxTokens)
+        this.turn++
+        const text = this.turn === 1
+          ? 'Plan: verify qa-summary, qa-correction, release-rule.'
+          : JSON.stringify({ answer: task.acceptance.answer, citations: task.acceptance.citations })
+        const outTok = this.turn === 1 ? 15 : 10 // 15 used on Call 1 -> remaining 10 (< maxOutputTokens 20!)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'usage', usage: { inputTokens: 10, outputTokens: outTok } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    const okExecutor = createNativeBenchmarkExecutor(input, async () => ({
+      adapter: new TwoTurnClampAdapter(),
+      inputTokenUpperBound: () => 20,
+      dispose() {},
+    }))
+    const res = await okExecutor.execute({
+      planId: plan.id,
+      dataset: plan.dataset,
+      cell,
+      task: plan.cases[0]!,
+      variant: plan.variants.find(v => v.id === cell.variantId)!,
+      budget: plan.budget,
+      signal: new AbortController().signal,
+    })
+    expect(res.verdict).toBe('achieved')
+    expect(seenMaxTokens).toEqual([20, 10])
+    expect(res.metrics).toMatchObject({ inputTokens: 20, outputTokens: 25, toolCalls: 0 })
+
+    // Now test cumulative inputTokens preflight overrun on Turn 2
+    const tightInput = config()
+    tightInput.variants = input.variants
+    tightInput.budget.inputTokens = 30
+    tightInput.budget.outputTokens = 40
+    const tightPlan = nativeBenchmarkPlan(tightInput)
+    const tightCell = benchmarkSchedule(tightPlan).find(c => c.variantId === 'candidate')!
+    const failExecutor = createNativeBenchmarkExecutor(tightInput, async () => ({
+      adapter: new TwoTurnClampAdapter(),
+      inputTokenUpperBound: () => 20, // Call 1: 10 actual + Call 2 upper 20 = 30 (ok); wait: make upper 25 so 10 + 25 > 30!
+      dispose() {},
+    }))
+    // Test with upper=25 -> 10 + 25 > 30 on Turn 2 preflight
+    const overrunExecutor = createNativeBenchmarkExecutor(tightInput, async () => ({
+      adapter: new TwoTurnClampAdapter(),
+      inputTokenUpperBound: () => 25,
+      dispose() {},
+    }))
+    await expect(overrunExecutor.execute({
+      planId: tightPlan.id,
+      dataset: tightPlan.dataset,
+      cell: tightCell,
+      task: tightPlan.cases[0]!,
+      variant: tightPlan.variants.find(v => v.id === tightCell.variantId)!,
+      budget: tightPlan.budget,
+      signal: new AbortController().signal,
+    })).rejects.toThrow('input budget preflight failed')
+    void failExecutor
   })
 })

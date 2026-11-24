@@ -12,8 +12,13 @@ import {
 } from './store.js'
 import { registerEvaluationTools } from './tools.js'
 import {
+  defaultAttentionTuningParameters,
+  isAttentionLoosening,
   normalizeAttentionCohort,
+  normalizeAttentionTuningParameters,
+  normalizeIntakeRuleUpdates,
   type AttentionCohort,
+  type AttentionIntakeRuleUpdate,
   type AttentionLooseningGrantResult,
   type AttentionLooseningOptions,
   type AttentionLooseningStatus,
@@ -310,7 +315,16 @@ Use this workflow only to assess whether an already-finished task met its object
 
 Never claim that execution success proves objective success. Never invent evidence, write Memory, approve Evolution, change an Automation, or treat the assessment as owner feedback. If no assessable outcome exists, stop without creating one.`
 
-const configSchema = Schema.object({
+const explicitConfigInputs = new WeakMap<object, Record<string, unknown>>()
+
+function snapshotExplicitInput(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(raw)) out[key] = value
+  return out
+}
+
+const baseConfigSchema = Schema.object({
   databasePath: Schema.string().required(),
   maxQueryLimit: Schema.number().step(1).min(1).max(500).default(100),
   maxReviewOutcomes: Schema.number().step(1).min(1).max(50).default(20),
@@ -329,13 +343,13 @@ const configSchema = Schema.object({
   projectionTimeoutMs: Schema.number().step(1).min(100).max(300_000).default(2_000),
   projectionRetryBaseMs: Schema.number().step(1).min(1).max(3_600_000).default(1_000),
   projectionRetryMaxMs: Schema.number().step(1).min(1).max(86_400_000).default(3_600_000),
-  notificationOutcomesEnabled: Schema.boolean().default(false),
+  notificationOutcomesEnabled: Schema.boolean().default(true),
   notificationResponseWindowMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
   notificationObservationHorizonMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(2_592_000_000),
   notificationSyncBatchSize: Schema.number().step(1).min(1).max(500).default(100),
   notificationSyncIntervalMs: Schema.number().step(1).min(0).max(86_400_000).default(60_000),
-  attentionTuningAutoAdopt: Schema.boolean().default(false),
-  intakeAttentionAgreementEnabled: Schema.boolean().default(false),
+  attentionTuningAutoAdopt: Schema.boolean().default(true),
+  intakeAttentionAgreementEnabled: Schema.boolean().default(true),
   intakeAttentionAgreementPersistIntervalMs: Schema.number().step(1).min(60_000).max(604_800_000),
   attentionTuningCohorts: Schema.array(Schema.object({
     lane: Schema.string().required(),
@@ -347,16 +361,52 @@ const configSchema = Schema.object({
   attentionTuningRegressionMarginPpm: Schema.number().step(1).min(0).max(1_000_000).default(100_000),
   attentionTuningObservationMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
   attentionTuningEvaluationWindowMs: Schema.number().step(1).min(60_000).max(31_536_000_000).default(604_800_000),
-  attentionLooseningEnabled: Schema.boolean().default(false),
+  attentionLooseningEnabled: Schema.boolean().default(true),
   attentionLooseningReplayWindowMs: Schema.number().step(1).min(3_600_000).max(31_536_000_000).default(2_592_000_000),
-  attentionOwnerQuestionDeliveryEnabled: Schema.boolean().default(false),
+  attentionOwnerQuestionDeliveryEnabled: Schema.boolean().default(true),
   attentionOwnerQuestionOwner: Schema.union([Schema.object({
     ownerRouteId: Schema.string().required(),
     principalId: Schema.string().required(),
   })]),
   attentionOwnerQuestionNoticeTtlMs: Schema.number().step(1).min(60_000).max(2_592_000_000).default(86_400_000),
-  intakeEvaluationAgreementEnabled: Schema.boolean().default(false),
+  intakeEvaluationAgreementEnabled: Schema.boolean().default(true),
   intakeEvaluationFeedBatchSize: Schema.number().step(1).min(1).max(500).default(100),
+}) as Schema<Config>
+
+const configSchema = new Proxy(baseConfigSchema, {
+  apply(target, thisArg, argArray) {
+    const raw = argArray[0]
+    const parsed = Reflect.apply(target, thisArg, argArray) as Config
+    if (parsed !== null && typeof parsed === 'object') {
+      const explicit = explicitConfigInputs.get(raw as object) ?? snapshotExplicitInput(raw)
+      if (explicit !== undefined) explicitConfigInputs.set(parsed, explicit)
+    }
+    return parsed
+  },
+  get(target, prop, receiver) {
+    if (prop === '~standard') {
+      const std = Reflect.get(target, prop, target) as {
+        version: number
+        vendor: string
+        validate: (value: unknown, options?: unknown) => unknown
+      }
+      return {
+        ...std,
+        validate(value: unknown, options?: unknown) {
+          const result = std.validate(value, options) as { value?: unknown } | Promise<{ value?: unknown }>
+          const attach = (res: { value?: unknown }) => {
+            if (res && typeof res === 'object' && res.value !== null && typeof res.value === 'object') {
+              const explicit = explicitConfigInputs.get(value as object) ?? snapshotExplicitInput(value)
+              if (explicit !== undefined) explicitConfigInputs.set(res.value as object, explicit)
+            }
+            return res
+          }
+          return result instanceof Promise ? result.then(attach) : attach(result)
+        },
+      }
+    }
+    return Reflect.get(target, prop, receiver)
+  },
 }) as Schema<Config>
 
 export type AssistantEvaluationErrorCode =
@@ -642,10 +692,25 @@ function projectionFailureCode(error: unknown): string {
     : 'projection-failed'
 }
 
+export interface AttentionLooseningConsumerEvent {
+  readonly scope?: EvaluationScope
+  readonly cohort?: AttentionCohort
+  readonly action: 'loosening-adopted' | 'rolled-back' | 'tightened' | 'manual-emit'
+  readonly version?: number
+  readonly workItemsMode?: 'observe' | 'auto'
+  readonly intakeRuleUpdates?: readonly AttentionIntakeRuleUpdate[]
+  readonly interruptionCostDelta?: number
+  readonly minimumUtilityDelta?: number
+  readonly quietExtensionMinutes?: number
+  readonly muted?: boolean
+  readonly parameters?: AttentionTuningParameters
+}
+
 export class AssistantEvaluationService extends Service implements TrustedEvaluationRegistrationOwner {
   static Config = configSchema
   private readonly store: EvaluationStore
   private readonly config: Required<Config>
+  private readonly ownerQuestionDeliveryActive: boolean
   private readonly now: () => number
   private projector: TrustedEvaluationProjector | undefined
   private automationBinding: TrustedProducerBinding<TrustedAutomationEvaluationProducer> | undefined
@@ -668,6 +733,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private ownerQuestionReply: Readonly<{ source: object; registration: OwnerQuestionReplyRegistration; dispose: () => void }> | undefined
   private readonly activeOwnerQuestionReplies = new WeakSet<object>()
   private readonly attentionCohorts: readonly AttentionCohort[]
+  private readonly looseningListeners = new Set<(event: AttentionLooseningConsumerEvent) => void>()
+  private readonly tuningChangeListeners = new Set<(event: AttentionLooseningConsumerEvent) => void>()
   private active = true
 
   constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
@@ -676,6 +743,55 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.config = configSchema(input) as Required<Config>
     } catch (error) {
       throw new Error(`assistant-evaluation: invalid configuration: ${String(error)}`, { cause: error })
+    }
+    const fiberRaw = (ctx as unknown as {
+      fiber?: { rawConfig?: unknown; runtime?: { Config?: unknown } }
+    }).fiber
+    const explicitInput = (explicitConfigInputs.get(input as object)
+      ?? (fiberRaw?.rawConfig !== null
+        && typeof fiberRaw?.rawConfig === 'object'
+        && !Array.isArray(fiberRaw.rawConfig)
+        ? explicitConfigInputs.get(fiberRaw.rawConfig as object)
+        : undefined)
+      ?? (fiberRaw?.runtime?.Config === configSchema
+        && fiberRaw.rawConfig !== null
+        && typeof fiberRaw.rawConfig === 'object'
+        && !Array.isArray(fiberRaw.rawConfig)
+          ? fiberRaw.rawConfig
+          : (input !== null && typeof input === 'object' && !Array.isArray(input) ? input : {}))) as Record<string, unknown>
+    if (explicitInput['notificationOutcomesEnabled'] === false) {
+      if (explicitInput['intakeAttentionAgreementEnabled'] === true) {
+        throw new Error('assistant-evaluation: intakeAttentionAgreementEnabled requires notificationOutcomesEnabled')
+      }
+      if (explicitInput['attentionTuningAutoAdopt'] === true) {
+        throw new Error('assistant-evaluation: attentionTuningAutoAdopt requires notificationOutcomesEnabled')
+      }
+      if (explicitInput['attentionLooseningEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionLooseningEnabled requires attentionTuningAutoAdopt')
+      }
+      if (explicitInput['attentionOwnerQuestionDeliveryEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
+      }
+      this.config.intakeAttentionAgreementEnabled = false
+      this.config.attentionTuningAutoAdopt = false
+      this.config.attentionLooseningEnabled = false
+      this.config.attentionOwnerQuestionDeliveryEnabled = false
+    }
+    if (!this.config.attentionTuningAutoAdopt) {
+      if (explicitInput['attentionLooseningEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionLooseningEnabled requires attentionTuningAutoAdopt')
+      }
+      if (explicitInput['attentionOwnerQuestionDeliveryEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
+      }
+      this.config.attentionLooseningEnabled = false
+      this.config.attentionOwnerQuestionDeliveryEnabled = false
+    }
+    if (!this.config.attentionLooseningEnabled) {
+      if (explicitInput['attentionOwnerQuestionDeliveryEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
+      }
+      this.config.attentionOwnerQuestionDeliveryEnabled = false
     }
     if (this.config.maxReviewOutcomes > this.config.maxQueryLimit) {
       throw new Error('assistant-evaluation: maxReviewOutcomes must not exceed maxQueryLimit')
@@ -707,10 +823,17 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (this.config.attentionOwnerQuestionDeliveryEnabled && !this.config.attentionLooseningEnabled) {
       throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
     }
-    if (this.config.attentionOwnerQuestionDeliveryEnabled && (typeof this.config.attentionOwnerQuestionOwner?.ownerRouteId !== 'string'
-      || this.config.attentionOwnerQuestionOwner.ownerRouteId.length === 0 || typeof this.config.attentionOwnerQuestionOwner.principalId !== 'string'
-      || this.config.attentionOwnerQuestionOwner.principalId.length === 0)) {
-      throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionOwnerQuestionOwner')
+    const hasOwner = typeof this.config.attentionOwnerQuestionOwner?.ownerRouteId === 'string'
+      && this.config.attentionOwnerQuestionOwner.ownerRouteId.length > 0
+      && typeof this.config.attentionOwnerQuestionOwner?.principalId === 'string'
+      && this.config.attentionOwnerQuestionOwner.principalId.length > 0
+    if (this.config.attentionOwnerQuestionDeliveryEnabled && !hasOwner) {
+      if (explicitInput['attentionOwnerQuestionDeliveryEnabled'] === true) {
+        throw new Error('assistant-evaluation: attentionOwnerQuestionDeliveryEnabled requires attentionOwnerQuestionOwner')
+      }
+      this.ownerQuestionDeliveryActive = false
+    } else {
+      this.ownerQuestionDeliveryActive = this.config.attentionOwnerQuestionDeliveryEnabled
     }
     if (this.config.attentionTuningMuteRatePpm < this.config.attentionTuningNegativeRatePpm) {
       throw new Error('assistant-evaluation: attentionTuningMuteRatePpm must not be below attentionTuningNegativeRatePpm')
@@ -811,7 +934,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     bindNotificationFacts(currentDelivery)
     ctx.inject(['assistantDelivery' as never], deliveryCtx => bindNotificationFacts(deliveryCtx.get('assistantDelivery' as never) as unknown))
-    if (this.config.attentionOwnerQuestionDeliveryEnabled) {
+    if (this.ownerQuestionDeliveryActive) {
       this.bindOwnerQuestionWithdrawal(currentDelivery)
       ctx.inject(['assistantDelivery' as never], deliveryCtx => this.bindOwnerQuestionWithdrawal(deliveryCtx.get('assistantDelivery' as never) as unknown))
       this.bindOwnerQuestionReply(currentDelivery)
@@ -865,6 +988,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       this.workItemsBinding?.dispose()
       toolsBinding?.dispose()
       skillBinding?.dispose()
+      this.looseningListeners.clear()
+      this.tuningChangeListeners.clear()
       await Promise.allSettled(this.activeProjections.values())
       this.store.close()
     }, 'assistant-evaluation.database')
@@ -1445,11 +1570,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw new AssistantEvaluationError('invalid-input', 'intake attention agreement window is invalid')
     }
     const { scope } = canonicalEvaluationScope(input.scope)
-    return this.#intakeAttentionAgreement(scope, from, to)
+    return this.intakeAttentionAgreement(scope, from, to)
   }
 
   /** Shared read model for the ad hoc inspect and the E1 persistence snapshot. */
-  #intakeAttentionAgreement(scope: EvaluationScope, from: number, to: number): IntakeAttentionAgreement {
+  private intakeAttentionAgreement(scope: EvaluationScope, from: number, to: number): IntakeAttentionAgreement {
     const heads = this.store.notifications.workItemHeads(scope, from, to, INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT)
     const workItems = this.ctx.get('assistantWorkItems' as never) as unknown
     return computeIntakeAttentionAgreement({ scope, fromNotifiedAt: from, toNotifiedAt: to, records: heads.records,
@@ -1491,7 +1616,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const from = Math.max(0, to - this.config.defaultSummaryWindowMs)
     if (to <= from) return Object.freeze({ recorded: false, replayed: false, reason: 'outside-window' as const })
     this.intakeAgreementPersistCursor = scopeKey
-    const agreement = this.#intakeAttentionAgreement(scope, from, to)
+    const agreement = this.intakeAttentionAgreement(scope, from, to)
     if (agreement.scanned === 0) return Object.freeze({ recorded: false, replayed: false, reason: 'no-work-item-notifications' as const, scope })
     const snapshot = createIntakeAttentionAgreementSnapshot({ agreement, computedAt: now,
       windowMs: this.config.defaultSummaryWindowMs, scanLimit: INTAKE_ATTENTION_AGREEMENT_SCAN_LIMIT })
@@ -1692,7 +1817,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
   }
 
-  #attentionPolicy(): AttentionTuningPolicy {
+  private attentionPolicy(): AttentionTuningPolicy {
     return Object.freeze({
       minSample: this.config.attentionTuningMinSample,
       negativeRatePpm: this.config.attentionTuningNegativeRatePpm,
@@ -1701,18 +1826,18 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     })
   }
 
-  #looseningOptions(): AttentionLooseningOptions | undefined {
+  private looseningOptions(): AttentionLooseningOptions | undefined {
     if (!this.config.attentionLooseningEnabled) return undefined
     return Object.freeze({
       replayWindowMs: this.config.attentionLooseningReplayWindowMs,
       ...(this.config.intakeEvaluationAgreementEnabled ? { includeIntakeEvaluations: true } : {}),
-      ...(this.config.attentionOwnerQuestionDeliveryEnabled
+      ...(this.ownerQuestionDeliveryActive
         ? { ownerQuestionReplyLoop: Object.freeze({ noticeTtlMs: this.config.attentionOwnerQuestionNoticeTtlMs }) }
         : {}),
     })
   }
 
-  #attentionCohort(input: unknown): AttentionCohort {
+  private attentionCohort(input: unknown): AttentionCohort {
     let cohort: AttentionCohort
     try {
       cohort = normalizeAttentionCohort(input)
@@ -1726,7 +1851,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     return cohort
   }
 
-  #tuningCohorts(): readonly AttentionCohort[] {
+  private tuningCohorts(): readonly AttentionCohort[] {
     if (!this.config.intakeEvaluationAgreementEnabled) return this.attentionCohorts
     const merged = [...this.attentionCohorts]
     for (const candidate of this.store.attention.intakeCohorts()) {
@@ -1735,6 +1860,184 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       }
     }
     return Object.freeze(merged)
+  }
+
+  private notifyTuningConsumers(event: AttentionLooseningConsumerEvent): void {
+    if (event.action === 'loosening-adopted' || event.action === 'manual-emit') {
+      for (const listener of this.looseningListeners) {
+        try {
+          listener(event)
+        } catch (error) {
+          this.ctx.logger.warn(`assistant-evaluation: loosening consumer listener failed: ${String(error)}`)
+        }
+      }
+    }
+    for (const listener of this.tuningChangeListeners) {
+      try {
+        listener(event)
+      } catch (error) {
+        this.ctx.logger.warn(`assistant-evaluation: tuning change listener failed: ${String(error)}`)
+      }
+    }
+  }
+
+  /** Subscribe to WP22 loosening adoptions and manual consumer emissions. */
+  onAttentionLooseningAdopted(cb: (event: AttentionLooseningConsumerEvent) => void): () => void {
+    this.assertActive()
+    if (typeof cb !== 'function') {
+      throw new AssistantEvaluationError('invalid-input', 'onAttentionLooseningAdopted callback must be a function')
+    }
+    this.looseningListeners.add(cb)
+    return () => { this.looseningListeners.delete(cb) }
+  }
+
+  /** Subscribe to all WP22 tuning transitions (loosening adoption, tightening, and rollback). */
+  onAttentionTuningChanged(cb: (event: AttentionLooseningConsumerEvent) => void): () => void {
+    this.assertActive()
+    if (typeof cb !== 'function') {
+      throw new AssistantEvaluationError('invalid-input', 'onAttentionTuningChanged callback must be a function')
+    }
+    this.tuningChangeListeners.add(cb)
+    return () => { this.tuningChangeListeners.delete(cb) }
+  }
+
+  /** Host-internal WP22 consumer broadcast for `workItemsMode` / `intakeRuleUpdates` adoption. */
+  emitLooseningToConsumers(input: Record<string, unknown>): AttentionLooseningConsumerEvent {
+    this.assertActive()
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      throw new AssistantEvaluationError('invalid-input', 'emitLooseningToConsumers input must be an object')
+    }
+    const allowedKeys = new Set([
+      'workItemsMode', 'intakeRuleUpdates', 'scope', 'cohort', 'version', 'parameters', 'action',
+      'interruptionCostDelta', 'minimumUtilityDelta', 'quietExtensionMinutes', 'muted',
+    ])
+    for (const key of Object.keys(input)) {
+      if (!allowedKeys.has(key)) {
+        throw new AssistantEvaluationError('invalid-input', `emitLooseningToConsumers contains unknown field ${key}`)
+      }
+    }
+    const actionRaw = input['action'] ?? 'manual-emit'
+    if (actionRaw !== 'loosening-adopted' && actionRaw !== 'rolled-back' && actionRaw !== 'tightened' && actionRaw !== 'manual-emit') {
+      throw new AssistantEvaluationError('invalid-input', 'emitLooseningToConsumers action is invalid')
+    }
+    let workItemsMode: 'observe' | 'auto' | undefined
+    if (input['workItemsMode'] !== undefined) {
+      if (input['workItemsMode'] !== 'observe' && input['workItemsMode'] !== 'auto') {
+        throw new AssistantEvaluationError('invalid-input', "workItemsMode must be 'observe' or 'auto'")
+      }
+      workItemsMode = input['workItemsMode']
+    }
+    const readBoundedOverlayInt = (key: 'interruptionCostDelta' | 'minimumUtilityDelta' | 'quietExtensionMinutes', max: number): number | undefined => {
+      const value = input[key]
+      if (value === undefined) return undefined
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > max) {
+        throw new AssistantEvaluationError('invalid-input', `${key} must be an integer between 0 and ${max}`)
+      }
+      return value
+    }
+    const interruptionCostDelta = readBoundedOverlayInt('interruptionCostDelta', 100)
+    const minimumUtilityDelta = readBoundedOverlayInt('minimumUtilityDelta', 100)
+    const quietExtensionMinutes = readBoundedOverlayInt('quietExtensionMinutes', 120)
+    let muted: boolean | undefined
+    if (input['muted'] !== undefined) {
+      if (typeof input['muted'] !== 'boolean') {
+        throw new AssistantEvaluationError('invalid-input', 'muted must be a boolean')
+      }
+      muted = input['muted']
+    }
+    const intakeRuleUpdates = input['intakeRuleUpdates'] === undefined
+      ? undefined
+      : normalizeIntakeRuleUpdates(input['intakeRuleUpdates'])
+    const scope = input['scope'] === undefined ? undefined : canonicalEvaluationScope(input['scope'] as EvaluationScope).scope
+    const cohort = input['cohort'] === undefined ? undefined : normalizeAttentionCohort(input['cohort'])
+    const hasOverlayParam = interruptionCostDelta !== undefined
+      || minimumUtilityDelta !== undefined
+      || quietExtensionMinutes !== undefined
+      || muted !== undefined
+    const parameters = input['parameters'] !== undefined
+      ? normalizeAttentionTuningParameters(input['parameters'])
+      : hasOverlayParam
+        ? normalizeAttentionTuningParameters({
+          ...defaultAttentionTuningParameters,
+          ...(interruptionCostDelta === undefined ? {} : { interruptionCostDelta }),
+          ...(minimumUtilityDelta === undefined ? {} : { minimumUtilityDelta }),
+          ...(quietExtensionMinutes === undefined ? {} : { quietExtensionMinutes }),
+          ...(muted === undefined ? {} : { muted }),
+          ...(workItemsMode === undefined ? {} : { workItemsMode }),
+          ...(intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates }),
+        })
+        : undefined
+    const version = input['version']
+    if (version !== undefined && (!Number.isSafeInteger(version) || (version as number) < 0)) {
+      throw new AssistantEvaluationError('invalid-input', 'version must be a non-negative integer')
+    }
+    const event: AttentionLooseningConsumerEvent = Object.freeze({
+      action: actionRaw,
+      ...(scope === undefined ? {} : { scope }),
+      ...(cohort === undefined ? {} : { cohort }),
+      ...(version === undefined ? {} : { version: version as number }),
+      ...(workItemsMode === undefined ? {} : { workItemsMode }),
+      ...(intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates }),
+      ...(interruptionCostDelta === undefined ? {} : { interruptionCostDelta }),
+      ...(minimumUtilityDelta === undefined ? {} : { minimumUtilityDelta }),
+      ...(quietExtensionMinutes === undefined ? {} : { quietExtensionMinutes }),
+      ...(muted === undefined ? {} : { muted }),
+      ...(parameters === undefined ? {} : { parameters }),
+    })
+    this.notifyTuningConsumers(event)
+    return event
+  }
+
+  private emitTickConsumerDelta(
+    scope: EvaluationScope,
+    cohort: AttentionCohort,
+    prev: AttentionTuningCurrent,
+    next: AttentionTuningCurrent,
+    result: AttentionTuningTickAction,
+  ): void {
+    if (result.action === 'loosening-adopted') {
+      const event: AttentionLooseningConsumerEvent = Object.freeze({
+        scope,
+        cohort,
+        action: 'loosening-adopted',
+        version: result.version,
+        ...(next.parameters.workItemsMode === undefined ? {} : { workItemsMode: next.parameters.workItemsMode }),
+        ...(next.parameters.intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates: next.parameters.intakeRuleUpdates }),
+        parameters: next.parameters,
+      })
+      this.notifyTuningConsumers(event)
+      return
+    }
+    if (result.action !== 'rolled-back' && result.action !== 'adopted') return
+    const prevMode = prev.parameters.workItemsMode ?? 'observe'
+    const nextMode = next.parameters.workItemsMode ?? 'observe'
+    const workItemsMode = prevMode !== nextMode ? nextMode : undefined
+    const prevRules = prev.parameters.intakeRuleUpdates ?? []
+    const nextRules = next.parameters.intakeRuleUpdates ?? []
+    const nextById = new Map(nextRules.map(rule => [rule.ruleId, rule]))
+    const revertedRules: AttentionIntakeRuleUpdate[] = []
+    for (const rule of nextRules) revertedRules.push(rule)
+    for (const prevRule of prevRules) {
+      if (!nextById.has(prevRule.ruleId)) {
+        revertedRules.push(Object.freeze({
+          ruleId: prevRule.ruleId,
+          ...(prevRule.enabled === false ? { enabled: true } : {}),
+          ...(prevRule.mode === 'auto' ? { mode: 'observe' as const } : {}),
+        }))
+      }
+    }
+    const rulesChanged = JSON.stringify(prevRules) !== JSON.stringify(nextRules)
+    if (workItemsMode === undefined && !rulesChanged) return
+    const event: AttentionLooseningConsumerEvent = Object.freeze({
+      scope,
+      cohort,
+      action: result.action === 'rolled-back' ? 'rolled-back' : 'tightened',
+      version: next.version,
+      ...(workItemsMode === undefined ? {} : { workItemsMode }),
+      ...(rulesChanged ? { intakeRuleUpdates: Object.freeze(revertedRules) } : {}),
+      parameters: next.parameters,
+    })
+    this.notifyTuningConsumers(event)
   }
 
   /**
@@ -1748,8 +2051,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   reconcileAttentionTuning(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }>[] {
     this.assertActive()
     if (!this.config.attentionTuningAutoAdopt) return Object.freeze([])
-    const policy = this.#attentionPolicy()
-    const loosening = this.#looseningOptions()
+    const policy = this.attentionPolicy()
+    const loosening = this.looseningOptions()
     const includeIntake = this.config.intakeEvaluationAgreementEnabled
     const options = {
       observationMs: this.config.attentionTuningObservationMs, evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
@@ -1757,11 +2060,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       ...(loosening === undefined ? {} : { loosening }),
     }
     const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionTuningTickAction }[] = []
-    for (const cohort of this.#tuningCohorts()) {
+    for (const cohort of this.tuningCohorts()) {
       for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         let scopeKey: string
         try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
-        results.push({ scopeKey, cohort, result: this.store.attention.tick(scope, cohort, policy, options) })
+        const prev = this.store.attention.current(scope, cohort)
+        const result = this.store.attention.tick(scope, cohort, policy, options)
+        results.push({ scopeKey, cohort, result })
+        const next = this.store.attention.current(scope, cohort)
+        this.emitTickConsumerDelta(scope, cohort, prev, next, result)
       }
     }
     return Object.freeze(results)
@@ -1774,13 +2081,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   currentAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionTuningCurrent | undefined {
     this.assertActive()
     if (!this.config.attentionTuningAutoAdopt) return undefined
-    return this.store.attention.current(input.scope, this.#attentionCohort(input.cohort))
+    return this.store.attention.current(input.scope, this.attentionCohort(input.cohort))
   }
 
   /** Versions, durable observation state and recent events for one cohort. */
   attentionTuningStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionTuningStatus {
     this.assertActive()
-    return this.store.attention.status(input.scope, this.#attentionCohort(input.cohort))
+    return this.store.attention.status(input.scope, this.attentionCohort(input.cohort))
   }
 
   /**
@@ -1789,22 +2096,45 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    * it, a single-parameter loosening is sealed as a proposal for the next
    * tick's holdout replay and grant check.
    */
-  requestAttentionTuning(input: { scope: EvaluationScope; cohort: AttentionCohort; parameters: AttentionTuningParameters }): AttentionTuningRequestResult {
+  requestAttentionTuning(input: {
+    scope?: EvaluationScope
+    cohort: AttentionCohort
+    parameters: AttentionTuningParameters
+    reason?: string
+  }): AttentionTuningRequestResult {
     this.assertActive()
+    if (input.scope === undefined && !this.config.attentionLooseningEnabled) {
+      if (!this.config.attentionTuningAutoAdopt) {
+        return Object.freeze({ status: 'rejected' as const, reason: 'auto-adoption-disabled' as const })
+      }
+      const raw = input.parameters as unknown as Record<string, unknown> | null | undefined
+      if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+        const hasNegativeDelta = ['interruptionCostDelta', 'minimumUtilityDelta', 'quietExtensionMinutes']
+          .some(key => typeof raw[key] === 'number' && (raw[key] as number) < 0)
+        if (hasNegativeDelta) {
+          return Object.freeze({ status: 'rejected' as const, reason: 'loosening-requires-holdout' as const })
+        }
+        const normalized = normalizeAttentionTuningParameters(input.parameters)
+        if (isAttentionLoosening(defaultAttentionTuningParameters, normalized)) {
+          return Object.freeze({ status: 'rejected' as const, reason: 'loosening-requires-holdout' as const })
+        }
+      }
+    }
     const includeIntake = this.config.intakeEvaluationAgreementEnabled
-    return this.store.attention.request(input.scope, this.#attentionCohort(input.cohort), input.parameters, {
+    const loosening = this.looseningOptions()
+    return this.store.attention.request(input.scope as EvaluationScope, this.attentionCohort(input.cohort), input.parameters, {
       enabled: this.config.attentionTuningAutoAdopt,
       observationMs: this.config.attentionTuningObservationMs,
       evaluationWindowMs: this.config.attentionTuningEvaluationWindowMs,
       ...(includeIntake ? { includeIntakeEvaluations: true } : {}),
-      ...(this.#looseningOptions() === undefined ? {} : { loosening: this.#looseningOptions()! }),
+      ...(loosening === undefined ? {} : { loosening }),
     })
   }
 
   /** Record an owner one-time loosening pre-authorization for one cohort. */
   grantAttentionLoosening(input: { scope: EvaluationScope; cohort: AttentionCohort; grant: unknown }): AttentionLooseningGrantResult {
     this.assertActive()
-    const cohort = this.#attentionCohort(input.cohort)
+    const cohort = this.attentionCohort(input.cohort)
     if (!this.config.attentionLooseningEnabled) return Object.freeze({ status: 'rejected', reason: 'loosening-disabled' })
     return this.store.attention.grant(input.scope, cohort, input.grant)
   }
@@ -1812,11 +2142,11 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   /** Active grant with used/remaining quota, sealed proposals with decisions, and recorded owner questions. */
   attentionLooseningStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionLooseningStatus & Readonly<{ enabled: boolean }> {
     this.assertActive()
-    const status = this.store.attention.looseningStatus(input.scope, this.#attentionCohort(input.cohort))
+    const status = this.store.attention.looseningStatus(input.scope, this.attentionCohort(input.cohort))
     return Object.freeze({ enabled: this.config.attentionLooseningEnabled, ...status })
   }
 
-  #ownerQuestionDelivery(): OwnerQuestionDeliveryPort | undefined {
+  private ownerQuestionDelivery(): OwnerQuestionDeliveryPort | undefined {
     const delivery = this.ctx.get('assistantDelivery' as never) as unknown as Partial<OwnerQuestionDeliveryPort> | undefined
     return isOwnerQuestionDeliveryPort(delivery) ? delivery : undefined
   }
@@ -1832,7 +2162,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       protocol: OWNER_NOTIFICATION_WITHDRAWAL_PROTOCOL,
       authority: 'assistantEvaluation' as const,
       sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
-      isWithdrawn: (idempotencyKey: string) => this.#ownerQuestionWithdrawn(idempotencyKey),
+      isWithdrawn: (idempotencyKey: string) => this.ownerQuestionWithdrawn(idempotencyKey),
     })
     this.activeOwnerQuestionWithdrawals.add(registration)
     let handle: unknown
@@ -1881,7 +2211,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       authority: 'assistantEvaluation' as const,
       sourceId: ATTENTION_OWNER_QUESTION_SOURCE_ID,
       idempotencyKeyPrefix: attentionOwnerQuestionIdempotencyKey(''),
-      consume: (input: OwnerQuestionReplyInput) => this.#consumeOwnerQuestionReply(input),
+      consume: (input: OwnerQuestionReplyInput) => this.consumeOwnerQuestionReply(input),
     })
     this.activeOwnerQuestionReplies.add(registration)
     let unregister: unknown
@@ -1918,8 +2248,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    * so a stale "authorize-once" never reaches the Agent. Storage errors are
    * `transient` and leave Delivery's Inbox pending for a bounded retry.
    */
-  #consumeOwnerQuestionReply(input: OwnerQuestionReplyInput): OwnerQuestionReplyOutcome {
-    if (!this.active || !this.config.attentionOwnerQuestionDeliveryEnabled) return 'ignored'
+  private consumeOwnerQuestionReply(input: OwnerQuestionReplyInput): OwnerQuestionReplyOutcome {
+    if (!this.active || !this.ownerQuestionDeliveryActive) return 'ignored'
     if (typeof input?.idempotencyKey !== 'string' || typeof input.text !== 'string') return 'ignored'
     const prefix = attentionOwnerQuestionIdempotencyKey('')
     if (!input.idempotencyKey.startsWith(prefix)) return 'ignored'
@@ -1928,7 +2258,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     if (choice === undefined || questionId.length === 0) return 'ignored'
     try {
       const includeIntake = this.config.intakeEvaluationAgreementEnabled
-      for (const cohort of this.#tuningCohorts()) {
+      for (const cohort of this.tuningCohorts()) {
         for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
           const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
           if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
@@ -1952,13 +2282,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    * a key this service did not issue, is withdrawn. A storage error throws so
    * Delivery holds the notice (bounded by its expiry) rather than sending.
    */
-  #ownerQuestionWithdrawn(idempotencyKey: string): boolean {
-    if (!this.active || !this.config.attentionOwnerQuestionDeliveryEnabled) return true
+  private ownerQuestionWithdrawn(idempotencyKey: string): boolean {
+    if (!this.active || !this.ownerQuestionDeliveryActive) return true
     const prefix = attentionOwnerQuestionIdempotencyKey('')
     if (typeof idempotencyKey !== 'string' || !idempotencyKey.startsWith(prefix)) return true
     const questionId = idempotencyKey.slice(prefix.length)
     const includeIntake = this.config.intakeEvaluationAgreementEnabled
-    for (const cohort of this.#tuningCohorts()) {
+    for (const cohort of this.tuningCohorts()) {
       for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         const latest = this.store.attention.latestOwnerQuestion(scope, cohort)
         if (latest === undefined || latest === 'unverifiable' || latest.questionId !== questionId) continue
@@ -1987,12 +2317,12 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    */
   reconcileAttentionOwnerQuestions(): readonly Readonly<{ scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }>[] {
     this.assertActive()
-    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze([])
+    if (!this.ownerQuestionDeliveryActive) return Object.freeze([])
     const owner = this.config.attentionOwnerQuestionOwner
     const ttl = this.config.attentionOwnerQuestionNoticeTtlMs
     const includeIntake = this.config.intakeEvaluationAgreementEnabled
     const results: { scopeKey: string; cohort: AttentionCohort; result: AttentionOwnerQuestionTickAction }[] = []
-    for (const cohort of this.#tuningCohorts()) {
+    for (const cohort of this.tuningCohorts()) {
       for (const scope of this.store.attention.scopes(cohort, includeIntake)) {
         let scopeKey: string
         try { scopeKey = canonicalEvaluationScope(scope).scopeKey } catch { continue }
@@ -2003,7 +2333,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (latest === 'unverifiable') { push({ action: 'unverifiable' }); continue }
         const { questionId, question } = latest
         if (this.store.attentionQuestions.delivery(questionId) !== undefined) continue
-        const delivery = this.#ownerQuestionDelivery()
+        const delivery = this.ownerQuestionDelivery()
         // Without Delivery no Outbox lookup is possible, so no terminal row is written either.
         if (delivery === undefined) { push({ action: 'deferred', questionId, reason: 'delivery-unavailable' }); continue }
         this.bindOwnerQuestionWithdrawal(delivery)
@@ -2097,8 +2427,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    */
   recordAttentionOwnerQuestionReply(input: { scope: EvaluationScope; cohort: AttentionCohort; questionId: string; choice: unknown }): AttentionOwnerQuestionReplyResult {
     this.assertActive()
-    const cohort = this.#attentionCohort(input.cohort)
-    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
+    const cohort = this.attentionCohort(input.cohort)
+    if (!this.ownerQuestionDeliveryActive) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
     const latest = this.store.attention.latestOwnerQuestion(input.scope, cohort)
     if (latest === undefined || latest === 'unverifiable' || latest.questionId !== input.questionId) {
       return Object.freeze({ status: 'rejected', reason: 'unknown-question' })
@@ -2121,8 +2451,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
    */
   applyAttentionOwnerQuestionReply(input: { scope: EvaluationScope; cohort: AttentionCohort; questionId: string; choice: unknown }): AttentionOwnerQuestionApplyResult {
     this.assertActive()
-    const cohort = this.#attentionCohort(input.cohort)
-    if (!this.config.attentionOwnerQuestionDeliveryEnabled) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
+    const cohort = this.attentionCohort(input.cohort)
+    if (!this.ownerQuestionDeliveryActive) return Object.freeze({ status: 'rejected', reason: 'delivery-disabled' })
     return this.store.attention.applyOwnerQuestionReply(input.scope, cohort, input.questionId, input.choice,
       { noticeTtlMs: this.config.attentionOwnerQuestionNoticeTtlMs })
   }
@@ -2130,7 +2460,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   /** Per-question delivery decisions and recorded replies for one cohort. */
   attentionOwnerQuestionStatus(input: { scope: EvaluationScope; cohort: AttentionCohort }): AttentionOwnerQuestionStatus {
     this.assertActive()
-    return this.store.attentionQuestions.status(input.scope, this.#attentionCohort(input.cohort), this.config.attentionOwnerQuestionDeliveryEnabled)
+    return this.store.attentionQuestions.status(input.scope, this.attentionCohort(input.cohort), this.ownerQuestionDeliveryActive)
   }
 
   limits(): EvaluationLimits {

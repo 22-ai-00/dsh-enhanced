@@ -71,7 +71,7 @@ function worker(occurrenceId: string): Agent {
   return { ctx: { get: () => Object.freeze({ mode: 'production', automationId: 'worker', occurrenceId }) } } as unknown as Agent
 }
 
-async function setup(options: { native?: boolean; automatic?: boolean; provider?: boolean; enabled?: boolean; mode?: 'active' | 'observe' } = {}) {
+async function setup(options: { native?: boolean; automatic?: boolean; provider?: boolean; enabled?: boolean; mode?: 'active' | 'observe'; intakeLedger?: Config['intakeLedger'] } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'work-items-scheduler-'))
   const ctx = new Context(); fixtures.push({ ctx, root })
   let ownerVersion = 1
@@ -110,7 +110,8 @@ async function setup(options: { native?: boolean; automatic?: boolean; provider?
   }
   const config: Config = { enabled: options.enabled ?? true, mode: options.mode ?? 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: 'worker',
     scope: { workspace: root, preset: 'primary', principalId: 'owner:one', ownerRouteId: 'route', expiresAt: Date.now() + 86_400_000 },
-    admission: { allowedKinds: ['review'], maxOpenItems: 100, maxAdmitsPerHour: 100, cooldownMs: 0 }, limits: { waitingResumeMs: 60_000 } }
+    admission: { allowedKinds: ['review'], maxOpenItems: 100, maxAdmitsPerHour: 100, cooldownMs: 0 }, limits: { waitingResumeMs: 60_000 },
+    ...(options.intakeLedger === undefined ? {} : { intakeLedger: options.intakeLedger }) }
   const consumer = ctx.plugin(AssistantWorkItemsService, config); await consumer
   const service = ctx.assistantWorkItems
   return { ctx, root, config, consumer, provider, policy, service, automationConfig,
@@ -227,7 +228,10 @@ describe('native scheduler-driven waiting continuation', () => {
     expect(fixture.service.health().schedulerWake.subscribed).toBe(false)
   })
 
-  test.each([{ enabled: false, mode: 'active' as const }, { enabled: true, mode: 'observe' as const }])('disabled/observe never subscribe or acquire a ledger during native wake: %j', async options => {
+  test.each([
+    { enabled: false, mode: 'active' as const },
+    { enabled: true, mode: 'observe' as const, intakeLedger: { enabled: false } },
+  ])('disabled or observe-without-evaluation never subscribe or acquire a ledger during native wake: %j', async options => {
     const fixture = await setup(options)
     const peer = fixture.ctx.get('assistantAutomations' as never) as unknown as SchedulerPeer
     expect(peer.listeners.size).toBe(0)
@@ -366,7 +370,7 @@ test('schema 7 migration preserves every historical row and real keyset queries 
   const data = () => ['work_item', 'work_item_event', 'work_item_claim', 'work_item_report', 'work_item_outcome', 'work_item_dispatch', 'work_item_follow']
     .map(table => raw.prepare(`SELECT * FROM ${table}`).all())
   const before = data()
-  raw.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
+  raw.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
   const queries: string[] = []
   const original = DatabaseSync.prototype.prepare
   const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
@@ -375,7 +379,7 @@ test('schema 7 migration preserves every historical row and real keyset queries 
   })
   const store = new WorkItemStore(fixture.config.databasePath!)
   try {
-    expect(store.stats().schemaVersion).toBe(13)
+    expect(store.stats().schemaVersion).toBe(14)
     expect(data()).toEqual(before)
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + 60_001)
     store.listDueWaitingResumes(10)
@@ -397,7 +401,7 @@ test.each(['table', 'trigger'] as const)('rejects sqliteXshadow %s before a vers
   fixture.service.close()
   const raw = new DatabaseSync(fixture.config.databasePath!)
   try {
-    raw.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
+    raw.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TABLE work_item_continuation; DROP INDEX work_item_dispatch_waiting_due_idx; DROP INDEX work_item_claim_active_item_idx; PRAGMA user_version = 7; UPDATE work_item_schema_meta SET value = '7' WHERE key = 'schema_version';")
     if (kind === 'table') raw.exec('CREATE TABLE sqliteXshadow (value TEXT)')
     else raw.exec("CREATE TRIGGER sqliteXshadow AFTER UPDATE ON work_item_schema_meta BEGIN UPDATE work_item SET title = 'corrupted by foreign trigger'; END")
     expect(raw.prepare("SELECT type FROM sqlite_schema WHERE name = 'sqliteXshadow'").get()).toEqual({ type: kind })

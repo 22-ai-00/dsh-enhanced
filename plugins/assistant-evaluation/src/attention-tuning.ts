@@ -22,6 +22,14 @@ export const ATTENTION_TUNING_PROTOCOL = 'assistant-evaluation/attention-tuning/
 
 export interface AttentionCohort { readonly lane: string; readonly sourceId: string }
 
+export interface AttentionIntakeRuleUpdate {
+  readonly ruleId: string
+  readonly enabled?: boolean
+  readonly mode?: 'observe' | 'auto'
+  readonly confidenceThresholdPpm?: number
+  readonly minUtility?: number
+}
+
 /** Overlay deltas on a consumer's own profile. Every field only ever makes notifications rarer. */
 export interface AttentionTuningParameters {
   /** Added to the profile's interruption cost (lowers utility). */
@@ -32,10 +40,14 @@ export interface AttentionTuningParameters {
   readonly quietExtensionMinutes: number
   /** Disables the noisy rule for this cohort entirely. */
   readonly muted: boolean
+  /** Optional WP22 work-items admission mode target (`observe` -> `auto`). */
+  readonly workItemsMode?: 'observe' | 'auto'
+  /** Optional WP22 per-rule intake overrides. */
+  readonly intakeRuleUpdates?: readonly AttentionIntakeRuleUpdate[]
 }
 
 export type AttentionTuningNumericParameter = 'interruptionCostDelta' | 'minimumUtilityDelta' | 'quietExtensionMinutes'
-export type AttentionTuningParameter = AttentionTuningNumericParameter | 'muted'
+export type AttentionTuningParameter = AttentionTuningNumericParameter | 'muted' | 'workItemsMode' | 'intakeRuleUpdates'
 
 /** Fixed code constants; neither configuration nor a request can widen them. */
 export const attentionTuningBounds: Readonly<Record<AttentionTuningNumericParameter, Readonly<{ min: number; max: number; step: number }>>> = Object.freeze({
@@ -45,7 +57,7 @@ export const attentionTuningBounds: Readonly<Record<AttentionTuningNumericParame
 })
 
 /** Fixed single-step order: cheapest reversible lever first, mute last. */
-export const attentionTuningOrder: readonly AttentionTuningParameter[] = Object.freeze(['interruptionCostDelta', 'minimumUtilityDelta', 'quietExtensionMinutes', 'muted'])
+export const attentionTuningOrder: readonly (AttentionTuningNumericParameter | 'muted')[] = Object.freeze(['interruptionCostDelta', 'minimumUtilityDelta', 'quietExtensionMinutes', 'muted'])
 
 export const defaultAttentionTuningParameters: AttentionTuningParameters = Object.freeze({
   interruptionCostDelta: 0, minimumUtilityDelta: 0, quietExtensionMinutes: 0, muted: false,
@@ -74,8 +86,8 @@ export interface AttentionTuningPolicy {
 
 export interface AttentionTuningChange {
   readonly parameter: AttentionTuningParameter
-  readonly from: number | boolean
-  readonly to: number | boolean
+  readonly from: number | boolean | 'observe' | 'auto' | readonly AttentionIntakeRuleUpdate[]
+  readonly to: number | boolean | 'observe' | 'auto' | readonly AttentionIntakeRuleUpdate[]
 }
 
 export type AttentionTuningProposal =
@@ -311,21 +323,95 @@ export function normalizeAttentionCohort(input: unknown): AttentionCohort {
   return Object.freeze({ lane: identifier(record.lane, 'cohort.lane', 64), sourceId: identifier(record.sourceId, 'cohort.sourceId', 256) })
 }
 
+const INTAKE_RULE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+const MAX_INTAKE_RULE_UPDATES = 32
+const OPTIONAL_TUNING_FIELDS: ReadonlySet<string> = new Set(['workItemsMode', 'intakeRuleUpdates'])
+
+export function normalizeIntakeRuleUpdates(input: unknown): readonly AttentionIntakeRuleUpdate[] {
+  if (!Array.isArray(input) || input.length > MAX_INTAKE_RULE_UPDATES) {
+    invalid(`intakeRuleUpdates must be an array of at most ${MAX_INTAKE_RULE_UPDATES} rules`)
+  }
+  const seen = new Set<string>()
+  const normalized: AttentionIntakeRuleUpdate[] = []
+  for (const entry of input) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      invalid('intakeRuleUpdates entries must be objects')
+    }
+    const record = entry as Record<string, unknown>
+    for (const key of Object.keys(record)) {
+      if (!['ruleId', 'enabled', 'mode', 'confidenceThresholdPpm', 'minUtility'].includes(key)) {
+        invalid(`intakeRuleUpdates entry has unknown field ${key}`)
+      }
+    }
+    const ruleId = record['ruleId']
+    if (typeof ruleId !== 'string' || !INTAKE_RULE_ID_PATTERN.test(ruleId)) {
+      invalid('intakeRuleUpdates.ruleId is invalid')
+    }
+    if (seen.has(ruleId)) invalid(`intakeRuleUpdates contains duplicate ruleId ${ruleId}`)
+    seen.add(ruleId)
+    const enabled = record['enabled']
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      invalid('intakeRuleUpdates.enabled must be a boolean')
+    }
+    const mode = record['mode']
+    if (mode !== undefined && mode !== 'observe' && mode !== 'auto') {
+      invalid("intakeRuleUpdates.mode must be 'observe' or 'auto'")
+    }
+    const confidenceThresholdPpm = record['confidenceThresholdPpm']
+    if (confidenceThresholdPpm !== undefined && (typeof confidenceThresholdPpm !== 'number'
+      || !Number.isSafeInteger(confidenceThresholdPpm) || confidenceThresholdPpm < 0 || confidenceThresholdPpm > 1_000_000)) {
+      invalid('intakeRuleUpdates.confidenceThresholdPpm must be an integer in [0, 1000000]')
+    }
+    const minUtility = record['minUtility']
+    if (minUtility !== undefined && (typeof minUtility !== 'number' || !Number.isFinite(minUtility))) {
+      invalid('intakeRuleUpdates.minUtility must be a finite number')
+    }
+    normalized.push(Object.freeze({
+      ruleId,
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(mode === undefined ? {} : { mode }),
+      ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+      ...(minUtility === undefined ? {} : { minUtility }),
+    }))
+  }
+  normalized.sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0))
+  return Object.freeze(normalized)
+}
+
 /** Strict shape check only; bounds and step alignment are judged separately so a request can be recorded. */
 export function normalizeAttentionTuningParameters(input: unknown): AttentionTuningParameters {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) invalid('parameters must be an object')
   const record = input as Record<string, unknown>
-  const keys = Object.keys(record).sort()
-  if (stable(keys) !== stable([...attentionTuningOrder].sort())) invalid('parameters must name exactly the tunable fields')
+  const keys = Object.keys(record)
+  for (const key of keys) {
+    if (!(attentionTuningOrder as readonly string[]).includes(key) && !OPTIONAL_TUNING_FIELDS.has(key)) {
+      invalid('parameters must name exactly the tunable fields')
+    }
+  }
+  for (const baseKey of attentionTuningOrder) {
+    if (!(baseKey in record)) invalid('parameters must name exactly the tunable fields')
+  }
   for (const key of ['interruptionCostDelta', 'minimumUtilityDelta', 'quietExtensionMinutes'] as const) {
     if (!Number.isSafeInteger(record[key])) invalid(`${key} must be an integer`)
   }
   if (typeof record.muted !== 'boolean') invalid('muted must be a boolean')
-  return Object.freeze({
+  let workItemsMode: 'observe' | 'auto' | undefined
+  if (record.workItemsMode !== undefined) {
+    if (record.workItemsMode !== 'observe' && record.workItemsMode !== 'auto') {
+      invalid("workItemsMode must be 'observe' or 'auto'")
+    }
+    workItemsMode = record.workItemsMode
+  }
+  const intakeRuleUpdates = record.intakeRuleUpdates === undefined
+    ? undefined
+    : normalizeIntakeRuleUpdates(record.intakeRuleUpdates)
+  return deepFreeze({
     interruptionCostDelta: record.interruptionCostDelta as number,
     minimumUtilityDelta: record.minimumUtilityDelta as number,
     quietExtensionMinutes: record.quietExtensionMinutes as number,
     muted: record.muted as boolean,
+    ...(workItemsMode === undefined ? {} : { workItemsMode }),
+    ...(intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates }),
   })
 }
 
@@ -336,16 +422,50 @@ export function clampAttentionTuning(input: AttentionTuningParameters): Attentio
     const value = Math.min(max, Math.max(min, Math.trunc(input[key])))
     return min + Math.floor((value - min) / step) * step
   }
-  return Object.freeze({
+  const workItemsMode = input.workItemsMode === 'observe' || input.workItemsMode === 'auto'
+    ? input.workItemsMode
+    : undefined
+  const intakeRuleUpdates = input.intakeRuleUpdates === undefined
+    ? undefined
+    : normalizeIntakeRuleUpdates(input.intakeRuleUpdates)
+  return deepFreeze({
     interruptionCostDelta: clamp('interruptionCostDelta'),
     minimumUtilityDelta: clamp('minimumUtilityDelta'),
     quietExtensionMinutes: clamp('quietExtensionMinutes'),
     muted: input.muted === true,
+    ...(workItemsMode === undefined ? {} : { workItemsMode }),
+    ...(intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates }),
   })
 }
 
 export function withinAttentionTuningBounds(input: AttentionTuningParameters): boolean {
   return stable(clampAttentionTuning(input)) === stable(input)
+}
+
+function rulesTighterOrEqual(
+  aRules: readonly AttentionIntakeRuleUpdate[] | undefined,
+  bRules: readonly AttentionIntakeRuleUpdate[] | undefined,
+): boolean {
+  const aMap = new Map((aRules ?? []).map(r => [r.ruleId, r]))
+  const bMap = new Map((bRules ?? []).map(r => [r.ruleId, r]))
+  const ids = new Set([...aMap.keys(), ...bMap.keys()])
+  for (const id of ids) {
+    const a = aMap.get(id)
+    const b = bMap.get(id)
+    const aEnabled = a?.enabled ?? true
+    const bEnabled = b?.enabled ?? true
+    if (aEnabled && !bEnabled) return false
+    const aMode = a?.mode ?? 'observe'
+    const bMode = b?.mode ?? 'observe'
+    if (aMode === 'auto' && bMode === 'observe') return false
+    const aConf = a?.confidenceThresholdPpm ?? 0
+    const bConf = b?.confidenceThresholdPpm ?? 0
+    if (aConf < bConf) return false
+    const aUtil = a?.minUtility ?? Number.NEGATIVE_INFINITY
+    const bUtil = b?.minUtility ?? Number.NEGATIVE_INFINITY
+    if (aUtil < bUtil) return false
+  }
+  return true
 }
 
 /** True when any field would make notifications more frequent than `current`. */
@@ -354,6 +474,8 @@ export function isAttentionLoosening(current: AttentionTuningParameters, next: A
     || next.minimumUtilityDelta < current.minimumUtilityDelta
     || next.quietExtensionMinutes < current.quietExtensionMinutes
     || (current.muted && !next.muted)
+    || ((current.workItemsMode ?? 'observe') === 'observe' && next.workItemsMode === 'auto')
+    || !rulesTighterOrEqual(next.intakeRuleUpdates, current.intakeRuleUpdates)
 }
 
 function atLeastRate(numerator: number, denominator: number, ratePpm: number): boolean {
@@ -418,6 +540,8 @@ export function attentionTighterOrEqual(a: AttentionTuningParameters, b: Attenti
     && a.minimumUtilityDelta >= b.minimumUtilityDelta
     && a.quietExtensionMinutes >= b.quietExtensionMinutes
     && (a.muted || !b.muted)
+    && ((a.workItemsMode ?? 'observe') === 'observe' || b.workItemsMode === 'auto')
+    && rulesTighterOrEqual(a.intakeRuleUpdates, b.intakeRuleUpdates)
 }
 
 export interface AttentionLooseningChange extends AttentionTuningChange {
@@ -427,10 +551,24 @@ export interface AttentionLooseningChange extends AttentionTuningChange {
 
 /** One parameter moved toward the default by whole grid steps, or an unmute; anything else is undefined. */
 export function attentionLooseningChange(current: AttentionTuningParameters, next: AttentionTuningParameters): AttentionLooseningChange | undefined {
-  const changed = attentionTuningOrder.filter(key => current[key] !== next[key])
+  const changed: AttentionTuningParameter[] = attentionTuningOrder.filter(key => current[key] !== next[key])
+  if ((current.workItemsMode ?? 'observe') !== (next.workItemsMode ?? 'observe')) changed.push('workItemsMode')
+  if (stable(current.intakeRuleUpdates ?? []) !== stable(next.intakeRuleUpdates ?? [])) changed.push('intakeRuleUpdates')
   if (changed.length !== 1) return undefined
   const parameter = changed[0]!
   if (parameter === 'muted') return current.muted && !next.muted ? Object.freeze({ parameter, from: true, to: false, steps: 1 }) : undefined
+  if (parameter === 'workItemsMode') {
+    const from = current.workItemsMode ?? 'observe'
+    const to = next.workItemsMode ?? 'observe'
+    return from === 'observe' && to === 'auto' ? Object.freeze({ parameter, from, to, steps: 1 }) : undefined
+  }
+  if (parameter === 'intakeRuleUpdates') {
+    const from = current.intakeRuleUpdates ?? Object.freeze([])
+    const to = next.intakeRuleUpdates ?? Object.freeze([])
+    return !rulesTighterOrEqual(to, from) && rulesTighterOrEqual(from, to)
+      ? deepFreeze({ parameter, from, to, steps: 1 })
+      : undefined
+  }
   const delta = current[parameter] - next[parameter]
   const { step } = attentionTuningBounds[parameter]
   if (delta <= 0 || delta % step !== 0) return undefined
@@ -563,10 +701,22 @@ export function attentionGrantExceeded(grant: AttentionLooseningGrant | undefine
 
 /** Single-step tightening check for an explicit request. */
 function singleStep(current: AttentionTuningParameters, next: AttentionTuningParameters): AttentionTuningChange | undefined {
-  const changed = attentionTuningOrder.filter(key => current[key] !== next[key])
+  const changed: AttentionTuningParameter[] = attentionTuningOrder.filter(key => current[key] !== next[key])
+  if ((current.workItemsMode ?? 'observe') !== (next.workItemsMode ?? 'observe')) changed.push('workItemsMode')
+  if (stable(current.intakeRuleUpdates ?? []) !== stable(next.intakeRuleUpdates ?? [])) changed.push('intakeRuleUpdates')
   if (changed.length !== 1) return undefined
   const parameter = changed[0]!
   if (parameter === 'muted') return { parameter, from: current.muted, to: next.muted }
+  if (parameter === 'workItemsMode') {
+    const from = current.workItemsMode ?? 'observe'
+    const to = next.workItemsMode ?? 'observe'
+    return from === 'auto' && to === 'observe' ? { parameter, from, to } : undefined
+  }
+  if (parameter === 'intakeRuleUpdates') {
+    const from = current.intakeRuleUpdates ?? Object.freeze([])
+    const to = next.intakeRuleUpdates ?? Object.freeze([])
+    return rulesTighterOrEqual(to, from) && !rulesTighterOrEqual(from, to) ? { parameter, from, to } : undefined
+  }
   if (next[parameter] - current[parameter] !== attentionTuningBounds[parameter].step) return undefined
   return { parameter, from: current[parameter], to: next[parameter] }
 }

@@ -7,6 +7,7 @@ import {
   type IntakeEvaluationDecision,
   type IntakeEvaluationInspection,
   type IntakeEvaluationLevel,
+  type IntakeEvaluationMode,
   type IntakeModelEvaluator,
   type WorkItemIntakeEvaluationRecord,
 } from './intake-evaluation.ts'
@@ -121,6 +122,10 @@ export class WorkItemIntakeEvaluationRuntime {
   readonly #log: (message: string) => void
   readonly #now: () => number
   readonly #setTimer: ((ms: number, callback: () => void) => () => void) | undefined
+  readonly #mode: () => IntakeEvaluationMode
+  readonly #ruleEnabled: (ruleId: string) => boolean
+  readonly #ruleMode: ((ruleId: string) => IntakeEvaluationMode | undefined) | undefined
+  readonly #ruleThresholds: ((ruleId: string) => Readonly<{ confidenceThresholdPpm?: number; minUtility?: number }> | undefined) | undefined
   readonly #texts = new Map<string, HeldText>()
   /** Held texts already queued under the current Policy version (cleared when it moves). */
   readonly #enqueued = new Set<string>()
@@ -141,12 +146,33 @@ export class WorkItemIntakeEvaluationRuntime {
     log: (message: string) => void
     now?: () => number
     setTimer?: (ms: number, callback: () => void) => () => void
+    mode?: () => IntakeEvaluationMode
+    ruleEnabled?: (ruleId: string) => boolean
+    ruleMode?: (ruleId: string) => IntakeEvaluationMode | undefined
+    ruleThresholds?: (ruleId: string) => Readonly<{ confidenceThresholdPpm?: number; minUtility?: number }> | undefined
   }) {
     this.#config = options.config
     this.#store = options.store
     this.#log = options.log
     this.#now = options.now ?? (() => Date.now())
     this.#setTimer = options.setTimer
+    this.#mode = options.mode ?? (() => 'observe')
+    this.#ruleEnabled = options.ruleEnabled ?? (() => true)
+    this.#ruleMode = options.ruleMode
+    this.#ruleThresholds = options.ruleThresholds
+  }
+
+  /** Re-match held texts after live rule enable/mode updates without restarting. */
+  reconcileRules(): void {
+    if (this.#closed) return
+    this.#enqueued.clear()
+    this.#purgeDisabledRules()
+    if (this.#registration !== undefined) {
+      const store = this.#store()
+      const policy = readPolicy(this.#registration)
+      if (store !== undefined && policy !== undefined) this.#cleanStaleEvalQueue(store, policy)
+      if (this.#texts.size > 0) this.#refresh()
+    }
   }
 
   /** One supplier at a time; the returned disposer drops the queue (persisted results stay). */
@@ -164,7 +190,10 @@ export class WorkItemIntakeEvaluationRuntime {
       evaluator: request => evaluate(request),
       // An unreadable Policy maps to a version no candidate carries, so nothing runs.
       policyVersion: () => readPolicy(registration)?.version ?? '\0unavailable',
-      mode: () => 'observe',
+      mode: this.#mode,
+      ruleEnabled: this.#ruleEnabled,
+      ...(this.#ruleMode === undefined ? {} : { ruleMode: this.#ruleMode }),
+      ...(this.#ruleThresholds === undefined ? {} : { ruleThresholds: this.#ruleThresholds }),
       now: this.#now,
       ...(this.#setTimer === undefined ? {} : { setTimer: this.#setTimer }),
       timeoutMs: this.#config.timeoutMs,
@@ -174,6 +203,7 @@ export class WorkItemIntakeEvaluationRuntime {
       maxPending: MAX_HELD_TEXTS * MAX_RULES,
       maxRetained: MAX_HELD_TEXTS * MAX_RULES,
     })
+    this.#rehydrate()
     let live = true
     return () => {
       if (!live) return
@@ -182,7 +212,7 @@ export class WorkItemIntakeEvaluationRuntime {
       this.#registration = undefined
       this.#queue = undefined
       this.#version = undefined
-      // Without a supplier nothing can evaluate the held texts; do not keep bodies around.
+      // Without a supplier nothing can evaluate the held texts; do not keep bodies around in memory.
       this.#texts.clear()
       this.#enqueued.clear()
       this.#unpersisted.clear()
@@ -196,12 +226,37 @@ export class WorkItemIntakeEvaluationRuntime {
    */
   observe(record: WorkItemIntakeRecord, text: string): void {
     try {
-      if (this.#closed || this.#queue === undefined) return
+      if (this.#closed) return
       if (record.decision !== 'stored' || record.strength !== 'inferred') return
       if (!authenticatesIntakeText(text, record.contentDigest)) return
       const id = candidateIdOf(record.source, record.sourceEventId)
+      const registered = this.#queue !== undefined
+      let evictCandidate: { readonly id: string; readonly held: HeldText; readonly allRulesPersisted: boolean } | undefined
+      if (registered && !this.#texts.has(id) && this.#texts.size >= MAX_HELD_TEXTS) {
+        evictCandidate = this.#findEvictionCandidate()
+        if (evictCandidate === undefined) { this.#skipped++; return }
+      }
+      const store = this.#store()
+      if (store !== undefined) {
+        if (evictCandidate?.allRulesPersisted) {
+          try { store.releaseIntakeStagingSourceText(evictCandidate.held.source, evictCandidate.held.sourceEventId) } catch { /* best-effort */ }
+        }
+        const staged = store.upsertIntakeStaging({
+          source: record.source,
+          sourceEventId: record.sourceEventId,
+          sourceText: text,
+        })
+        if (!staged.stored) {
+          if (staged.reason === 'buffer-full') this.#skipped++
+          return
+        }
+      }
+      if (!registered) return
+      if (evictCandidate !== undefined) {
+        this.#texts.delete(evictCandidate.id)
+        this.#enqueued.delete(evictCandidate.id)
+      }
       const held: HeldText = Object.freeze({ source: record.source, sourceEventId: record.sourceEventId, text, digest: record.contentDigest! })
-      if (!this.#texts.has(id) && !this.#makeRoom()) { this.#skipped++; return }
       this.#texts.delete(id)
       this.#texts.set(id, held)
       // Queues this text (and any held text not yet queued under the current Policy).
@@ -222,6 +277,8 @@ export class WorkItemIntakeEvaluationRuntime {
       const texts = new Map(this.#texts)
       const decisions = await queue.runDue()
       const persisted = decisions.flatMap(decision => this.#persist(decision, texts))
+      if (this.#queue === queue) this.#purgeDisabledRules()
+      this.#persistPendingProgress(queue, texts)
       // A Policy change during the run left entries awaiting re-match; queue them now for the next run.
       if (this.#queue === queue) this.#refresh()
       else {
@@ -273,32 +330,139 @@ export class WorkItemIntakeEvaluationRuntime {
   #refresh(): void {
     const registration = this.#registration
     if (registration === undefined) return
+    this.#purgeDisabledRules()
     const policy = readPolicy(registration)
     if (policy === undefined) { this.#lastError = 'policy-unavailable'; return }
     if (this.#lastError === 'policy-unavailable') this.#lastError = null
     const refresh = ++this.#refreshes
     for (const entry of this.#unpersisted.values()) if (entry.retryAt <= refresh) this.#persist(entry.decision)
-    if (policy.version !== this.#version) { this.#version = policy.version; this.#enqueued.clear() }
+    const store = this.#store()
+    if (policy.version !== this.#version) {
+      this.#version = policy.version
+      this.#enqueued.clear()
+      if (store !== undefined) this.#cleanStaleEvalQueue(store, policy)
+    }
+    const activeEnabledRuleIds = this.#activeEnabledRuleIds(policy)
     for (const [id, held] of this.#texts) {
-      if (!this.#enqueued.has(id) && this.#enqueue(held, policy)) this.#enqueued.add(id)
+      if (!this.#enqueued.has(id) && this.#enqueue(held, policy, activeEnabledRuleIds)) this.#enqueued.add(id)
+    }
+  }
+
+  #rehydrate(): void {
+    const store = this.#store()
+    if (store === undefined) return
+    try {
+      const policy = this.#registration === undefined ? undefined : readPolicy(this.#registration)
+      if (policy !== undefined) this.#cleanStaleEvalQueue(store, policy)
+      const staged = store.listIntakeStagingWithSourceText(MAX_HELD_TEXTS)
+      for (const entry of staged) {
+        if (this.#texts.size >= MAX_HELD_TEXTS) break
+        if (!authenticatesIntakeText(entry.text, entry.contentDigest)) continue
+        const id = candidateIdOf(entry.source, entry.sourceEventId)
+        if (this.#texts.has(id)) continue
+        this.#texts.set(id, Object.freeze({
+          source: entry.source,
+          sourceEventId: entry.sourceEventId,
+          text: entry.text,
+          digest: entry.contentDigest,
+        }))
+      }
+      if (this.#texts.size > 0) {
+        this.#refresh()
+        void this.run()
+      }
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
+  #purgeDisabledRules(): void {
+    const queue = this.#queue
+    if (queue === undefined) return
+    const purged = queue.purgeDisabledRules()
+    if (purged.length === 0) return
+    const store = this.#store()
+    if (store === undefined) return
+    for (const item of purged) {
+      const held = this.#texts.get(item.candidateId)
+      if (held === undefined) continue
+      try {
+        store.deleteIntakeEvalQueue(held.source, held.sourceEventId, item.ruleId, item.policyVersion)
+      } catch (error) {
+        this.#fail(error)
+      }
+    }
+  }
+
+  #persistPendingProgress(queue: InferredIntakeEvaluationQueue, texts: ReadonlyMap<string, HeldText>): void {
+    const store = this.#store()
+    if (store === undefined) return
+    try {
+      for (const entry of queue.pendingProgress()) {
+        if (!this.#ruleEnabled(entry.ruleId)) continue
+        const held = texts.get(entry.candidateId)
+        if (held === undefined) continue
+        if (store.getIntakeEvaluation(held.source, held.sourceEventId, entry.ruleId, entry.policyVersion) !== undefined) continue
+        store.upsertIntakeEvalQueue({
+          source: held.source,
+          sourceEventId: held.sourceEventId,
+          ruleId: entry.ruleId,
+          policyVersion: entry.policyVersion,
+          ceiling: entry.ceiling,
+          attempts: entry.attempts,
+          failures: entry.failures,
+          nextAt: entry.nextAt,
+        })
+      }
+    } catch (error) {
+      this.#fail(error)
     }
   }
 
   /** `false` when the text could not be fully queued and must be retried on the next refresh. */
-  #enqueue(held: HeldText, policy: WorkItemIntakeEvaluationPolicy): boolean {
+  #enqueue(held: HeldText, policy: WorkItemIntakeEvaluationPolicy, activeEnabledRuleIds?: ReadonlySet<string>): boolean {
     const queue = this.#queue
     const store = this.#store()
     if (queue === undefined || store === undefined) return false
     const candidateId = candidateIdOf(held.source, held.sourceEventId)
+    const enabledRuleIds = activeEnabledRuleIds ?? this.#activeEnabledRuleIds(policy)
+    try {
+      store.deleteStaleIntakeEvalQueueForEvent(held.source, held.sourceEventId, policy.version, enabledRuleIds)
+    } catch (error) {
+      this.#fail(error)
+    }
     let complete = true
     for (const rule of policy.rules) {
+      if (!this.#ruleEnabled(rule.ruleId)) continue
       const candidate = Object.freeze({
         candidateId, ruleId: rule.ruleId, strength: 'inferred' as const, policyVersion: policy.version,
         sourceText: held.text, sourceDigest: held.digest, ceiling: rule.ceiling,
       })
       const stored = store.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version)
+      const queued = stored === undefined
+        ? store.getIntakeEvalQueue(held.source, held.sourceEventId, rule.ruleId, policy.version)
+        : undefined
+      const progress = queued !== undefined && queued.ceiling === rule.ceiling
+        ? { attempts: queued.attempts, failures: queued.failures, nextAt: queued.nextAt }
+        : undefined
       // A persisted result re-seeds the queue so the same row and rule is never evaluated twice.
-      const result = queue.enqueue(candidate, stored === undefined ? undefined : priorOf(candidateId, stored, held.text))
+      const result = queue.enqueue(candidate, stored === undefined ? undefined : priorOf(candidateId, stored, held.text), progress)
+      if (stored === undefined && result.state === 'queued' && queued === undefined) {
+        try {
+          store.upsertIntakeEvalQueue({
+            source: held.source,
+            sourceEventId: held.sourceEventId,
+            ruleId: rule.ruleId,
+            policyVersion: policy.version,
+            ceiling: rule.ceiling,
+            attempts: 0,
+            failures: 0,
+            nextAt: this.#now(),
+          })
+        } catch (error) {
+          this.#fail(error)
+        }
+      }
       if (result.state === 'decided' && !result.decision.reasons.includes('source-unauthenticated')) this.#persist(result.decision)
       else if (result.state === 'rejected') {
         complete = false
@@ -344,22 +508,41 @@ export class WorkItemIntakeEvaluationRuntime {
     }
   }
 
+  #activeEnabledRuleIds(policy: WorkItemIntakeEvaluationPolicy): ReadonlySet<string> {
+    const enabled = new Set<string>()
+    for (const rule of policy.rules) {
+      if (this.#ruleEnabled(rule.ruleId)) enabled.add(rule.ruleId)
+    }
+    return enabled
+  }
+
+  #cleanStaleEvalQueue(store: WorkItemStore, policy: WorkItemIntakeEvaluationPolicy): void {
+    try {
+      store.deleteIntakeEvalQueueNotMatchingPolicy(policy.version, this.#activeEnabledRuleIds(policy))
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
   /**
-   * Evict the oldest held text whose every current rule already has a
+   * Find the oldest held text whose every enabled current rule already has a
    * persisted row. A decision settled in the queue but not yet written (an
    * in-flight run persists only when it returns) does not count, so its
    * text stays held until the result is on disk.
    */
-  #makeRoom(): boolean {
-    if (this.#texts.size < MAX_HELD_TEXTS) return true
+  #findEvictionCandidate(): { readonly id: string; readonly held: HeldText; readonly allRulesPersisted: boolean } | undefined {
     const policy = this.#registration === undefined ? undefined : readPolicy(this.#registration)
     const store = this.#store()
-    if (policy === undefined || store === undefined) return false
+    if (policy === undefined || store === undefined) return undefined
+    const enabledRules = policy.rules.filter(rule => this.#ruleEnabled(rule.ruleId))
     for (const [id, held] of this.#texts) {
-      const persisted = policy.rules.every(rule => store.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version) !== undefined)
-      if (persisted) { this.#texts.delete(id); this.#enqueued.delete(id); return true }
+      const persisted = enabledRules.every(rule => store.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version) !== undefined)
+      if (persisted) {
+        const allRulesPersisted = policy.rules.every(rule => store.getIntakeEvaluation(held.source, held.sourceEventId, rule.ruleId, policy.version) !== undefined)
+        return { id, held, allRulesPersisted }
+      }
     }
-    return false
+    return undefined
   }
 
   /** `repeated` suppresses the log line for a retry that failed with the same message as before. */

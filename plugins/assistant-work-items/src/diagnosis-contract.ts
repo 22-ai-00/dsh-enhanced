@@ -49,13 +49,20 @@ export function diagnosisToolDigest(schemas: readonly { name: string }[]): strin
   return acceptanceDigest(sorted)
 }
 export function diagnosisConfigurationDigest(config: NormalizedConfig, schemas: readonly { name: string }[]): string {
-  // Foreground historical reads confer no diagnosis execution authority. Keep
-  // the existing activation digest unchanged when that separate surface toggles.
+  // Foreground historical reads and non-diagnosis R3 defaults confer no
+  // diagnosis execution authority. Keep the existing activation digest
+  // unchanged when those separate surfaces toggle or default on.
   const executionConfig = { ...config }
   delete executionConfig.ownerRecall
   delete executionConfig.ownerReportFeedback
   delete executionConfig.ownerReplyContinuation
   delete executionConfig.ownerContinuation
+  delete executionConfig.intakeLedger
+  delete executionConfig.follows
+  delete executionConfig.acceptanceAutoSettle
+  delete executionConfig.acceptanceBindWorkerRun
+  delete executionConfig.acceptanceVerdictGate
+  delete executionConfig.acceptanceHoldReport
   return acceptanceDigest({ config: executionConfig, promptVersion: DIAGNOSIS_PROMPT_VERSION, prompt: DIAGNOSIS_PROMPT, schemas: [...schemas].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) })
 }
 export interface DiagnosisActivation {

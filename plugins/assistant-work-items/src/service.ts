@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { WorkItemEngineeringTargets, type WorkItemEngineeringMaterial } from './engineering-context.js'
 import type { Context } from '@deepseek-ai/cordis'
@@ -74,6 +74,8 @@ import type {
   WorkItemObservedItemInspection,
   WorkItemIntakeEvaluationFeedOptions,
   WorkItemIntakeEvaluationFeedPage,
+  WorkItemIntakeRuleUpdate,
+  WorkItemIntakeTuningUpdate,
   WorkItemChangeEvent,
   WorkItemHostInspectScope,
   WorkItemSummaryForHost,
@@ -208,6 +210,10 @@ const WORKER_RUN_DRIFT_WARN_AFTER = 5
 const HELD_REPORT_RELEASE_LIMIT = 10
 /** Meta cursor: last fully-noticed Policy configuration digest. */
 const POLICY_NOTICE_VERSION_META = 'policy.notice.version'
+/** Meta override: live WP22/WP21 intake admission mode & rule tuning overrides. */
+const INTAKE_TUNING_OVERRIDE_META = 'intake.tuning.override/v1'
+const INTAKE_RULE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+const MAX_INTAKE_RULE_OVERRIDES = 64
 /** Bound one wake's Policy-notice paging; an incomplete pass retries next wake. */
 const POLICY_NOTICE_PAGE_LIMIT = 10
 /**
@@ -276,8 +282,22 @@ export class AssistantWorkItemsService extends Service {
   private workItemsFollowDegraded: WorkItemFollowDegradedReason | null = null
   private workItemsComponents: Components | undefined
   private workItemsClosed = false
-  private workItemsIntakeObserver: Readonly<{ protocol: 1; observe: (signal: WorkItemIntakeInput) => void; acceptsSourceText?: true }> | undefined
+  private workItemsIntakeObserver: Readonly<{
+    protocol: 1
+    observe: (signal: WorkItemIntakeInput) => void
+    acceptsSourceText?: true
+    readonly acceptsIntakeObjective?: true
+    readonly originBindingId?: string
+    readonly maxObjectiveBytes?: number
+    readonly acceptanceObjective?: string
+  }> | undefined
   private workItemsEventIntakeObserver: PeerEventTriggersIntakeObserver | undefined
+  /** Live WP22/WP21 mode override (takes precedence over static `admit.mode` when validated). */
+  private workItemsIntakeModeOverride: 'observe' | 'auto' | undefined
+  /** Raw persisted mode override read from SQLite meta (even if in-memory `'auto'` was withheld by `!allowAuto`). */
+  private workItemsPersistedIntakeMode: 'observe' | 'auto' | undefined
+  /** Live WP22/WP21 per-rule tuning overrides (`ruleId` -> update). */
+  private readonly workItemsIntakeRuleOverrides = new Map<string, WorkItemIntakeRuleUpdate>()
   /** Present only when `intakeLedger.evaluation` is enabled. */
   private readonly workItemsIntakeEvaluation: WorkItemIntakeEvaluationRuntime | undefined
   /** Present only when `intakeLedger.evaluation.admit` is enabled. */
@@ -329,19 +349,51 @@ export class AssistantWorkItemsService extends Service {
     this.workItemsIntakeEvaluation = intakeEvaluation === undefined ? undefined : new WorkItemIntakeEvaluationRuntime({
       config: intakeEvaluation,
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
+      mode: () => this.effectiveIntakeAdmitMode() === 'auto' ? 'auto' : 'observe',
+      ruleEnabled: ruleId => this.workItemsIntakeRuleOverrides.get(ruleId)?.enabled !== false,
+      ruleMode: ruleId => this.workItemsIntakeRuleOverrides.get(ruleId)?.mode,
+      ruleThresholds: ruleId => {
+        const override = this.workItemsIntakeRuleOverrides.get(ruleId)
+        if (override === undefined || (override.confidenceThresholdPpm === undefined && override.minUtility === undefined)) {
+          return undefined
+        }
+        return Object.freeze({
+          ...(override.confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm: override.confidenceThresholdPpm }),
+          ...(override.minUtility === undefined ? {} : { minUtility: override.minUtility }),
+        })
+      },
       log: message => ctx.logger.debug(message),
     })
     this.workItemsIntakeAdmission = intakeEvaluation?.admit === undefined ? undefined : new WorkItemIntakeAdmissionBridge({
       config: intakeEvaluation.admit,
+      mode: () => this.effectiveIntakeAdmitMode() === 'auto' ? 'auto' : 'observe',
+      ruleState: ruleId => {
+        const override = this.workItemsIntakeRuleOverrides.get(ruleId)
+        if (override === undefined) return undefined
+        return Object.freeze({
+          enabled: override.enabled !== false,
+          ...(override.mode === undefined ? {} : { mode: override.mode }),
+          ...(override.confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm: override.confidenceThresholdPpm }),
+          ...(override.minUtility === undefined ? {} : { minUtility: override.minUtility }),
+        })
+      },
       maxPerRun: intakeEvaluation.maxPerRun,
       store: () => this.workItemsClosed ? undefined : this.workItemsComponents?.store,
       // The public Host path, so an admitted item wakes its worker like any decision.
       admit: decision => this.admitDecision(decision),
       hint: (source, sourceEventId) => {
-        const hint = this.workItemsIntakeHints.get(this.intakeHintKey(source, sourceEventId))
-        if (hint?.objective === undefined) return undefined
-        return Object.freeze({ objective: hint.objective,
-          ...(hint.acceptance === undefined ? {} : { acceptance: hint.acceptance }) })
+        const memoryHint = this.workItemsIntakeHints.get(this.intakeHintKey(source, sourceEventId))
+        const stagedHint = (memoryHint?.objective === undefined || memoryHint?.acceptance === undefined) && !this.workItemsClosed
+          ? this.workItemsComponents?.store.readIntakeStagingHint(source, sourceEventId)
+          : undefined
+        const objective = memoryHint?.objective ?? stagedHint?.objective
+        const acceptance = memoryHint?.acceptance ?? stagedHint?.acceptance
+        if (objective === undefined) return undefined
+        return Object.freeze({ objective,
+          ...(acceptance === undefined ? {} : { acceptance }) })
+      },
+      onSettled: (source, sourceEventId) => {
+        this.workItemsIntakeHints.delete(this.intakeHintKey(source, sourceEventId))
       },
       log: message => ctx.logger.debug(message),
     })
@@ -402,22 +454,33 @@ export class AssistantWorkItemsService extends Service {
         }
         const evaluation = this.workItemsIntakeEvaluation
         const admit = this.workItemsConfig.intakeLedger?.evaluation?.admit
-        const autoAdmit = admit?.mode === 'auto'
-        const observer = Object.freeze({ protocol: 1 as const, observe: (signal: WorkItemIntakeInput): void => {
-          if (this.workItemsClosed || this.workItemsIntakeObserver !== observer) return
-          try {
-            if (evaluation === undefined) { this.recordIntake(signal); return }
-            // The transient text never reaches the ledger: it is split off here and only hashed or held in memory.
-            const { sourceText, ...metadata } = signal as WorkItemIntakeInput & { sourceText?: unknown }
-            this.recordIntake(metadata, typeof sourceText === 'string' ? sourceText : undefined)
-          } catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
-        }, ...(evaluation === undefined ? {} : { acceptsSourceText: true as const }),
-        ...(autoAdmit ? {
-          acceptsIntakeObjective: true as const,
-          originBindingId: admit.originBindingId,
-          maxObjectiveBytes: Math.min(MAX_INTAKE_OBJECTIVE_BYTES, this.workItemsConfig.admission.maxBriefBytes),
-          ...(admit.acceptanceObjective === undefined ? {} : { acceptanceObjective: admit.acceptanceObjective }),
-        } : {}) })
+        const observerBase: Record<string, unknown> = {
+          protocol: 1 as const,
+          observe: (signal: WorkItemIntakeInput): void => {
+            if (this.workItemsClosed || this.workItemsIntakeObserver !== observer) return
+            try {
+              if (evaluation === undefined) { this.recordIntake(signal); return }
+              // The transient text never reaches the ledger: it is split off here and only hashed or sealed in staging.
+              const { sourceText, ...metadata } = signal as WorkItemIntakeInput & { sourceText?: unknown }
+              this.recordIntake(metadata, typeof sourceText === 'string' ? sourceText : undefined)
+            } catch (error) { intakeCtx.logger.debug(`assistant-work-items: intake observation not recorded: ${describe(error)}`) }
+          },
+        }
+        if (evaluation !== undefined) {
+          observerBase['acceptsSourceText'] = true as const
+        }
+        if (admit !== undefined) {
+          Object.defineProperty(observerBase, 'acceptsIntakeObjective', {
+            enumerable: true,
+            get: (() => (this.shouldAcceptIntakeObjective() ? true : undefined)) as () => true,
+          })
+          observerBase['originBindingId'] = admit.originBindingId
+          observerBase['maxObjectiveBytes'] = Math.min(MAX_INTAKE_OBJECTIVE_BYTES, this.workItemsConfig.admission.maxBriefBytes)
+          if (admit.acceptanceObjective !== undefined) {
+            observerBase['acceptanceObjective'] = admit.acceptanceObjective
+          }
+        }
+        const observer = Object.freeze(observerBase) as NonNullable<AssistantWorkItemsService['workItemsIntakeObserver']>
         this.workItemsIntakeObserver = observer
         let unregister: () => void
         try { unregister = peer.registerInboundIntakeObserver(observer) }
@@ -457,6 +520,224 @@ export class AssistantWorkItemsService extends Service {
           unregister()
           if (this.workItemsEventIntakeObserver === observer) this.workItemsEventIntakeObserver = undefined
         }, 'assistant-work-items.event-triggers-intake-observer')
+      })
+      ctx.inject(['assistantEvaluation' as never], evalCtx => {
+        if (this.workItemsClosed || !this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined) return
+        const evalPeer = evalCtx.get('assistantEvaluation' as never) as unknown as {
+          onAttentionTuningChanged?: (cb: (event: Record<string, unknown>) => void) => () => void
+          onAttentionLooseningAdopted?: (cb: (event: Record<string, unknown>) => void) => () => void
+          currentAttentionTuning?: (input: unknown) => {
+            version?: number
+            parameters?: { workItemsMode?: unknown; intakeRuleUpdates?: unknown }
+          } | undefined
+          attentionTuningStatus?: (input: unknown) => {
+            current?: {
+              version?: number
+              parameters?: { workItemsMode?: unknown; intakeRuleUpdates?: unknown }
+            }
+            versions?: readonly {
+              version?: number
+              parameters?: { workItemsMode?: unknown; intakeRuleUpdates?: unknown }
+            }[]
+            events?: readonly {
+              kind?: string
+              fromVersion?: number
+              toVersion?: number
+              detail?: Record<string, unknown>
+            }[]
+          } | undefined
+        } | undefined
+        if (evalPeer === undefined) return
+
+        const applyEvaluationTuningPayload = (payload: Record<string, unknown>): void => {
+          if (this.workItemsClosed) return
+          const action = payload['action']
+          const rawParams = payload['parameters']
+          const params = rawParams !== null && typeof rawParams === 'object' && !Array.isArray(rawParams)
+            ? rawParams as Record<string, unknown>
+            : undefined
+          const rawScope = payload['scope']
+          if (this.workItemsConfig.scope !== null && rawScope !== null && typeof rawScope === 'object' && !Array.isArray(rawScope)) {
+            const eventScope = rawScope as Record<string, unknown>
+            if ((typeof eventScope['workspace'] === 'string' && resolve(eventScope['workspace']) !== resolve(this.workItemsConfig.scope.workspace))
+              || (typeof eventScope['preset'] === 'string' && eventScope['preset'] !== this.workItemsConfig.scope.preset)) {
+              return
+            }
+          }
+          const rawCohort = payload['cohort']
+          const cohortLane = rawCohort !== null && typeof rawCohort === 'object' && !Array.isArray(rawCohort)
+            ? (rawCohort as Record<string, unknown>)['lane']
+            : undefined
+          if (rawCohort !== undefined && cohortLane !== 'intake') return
+
+          if ((action === 'rolled-back' || action === 'tightened' || action === 'loosening-adopted')
+            && cohortLane === 'intake'
+            && params !== undefined && rawScope !== undefined && rawCohort !== undefined && typeof payload['version'] === 'number') {
+            const paramMode = params['workItemsMode'] === 'observe' || params['workItemsMode'] === 'auto'
+              ? params['workItemsMode']
+              : undefined
+            const hadAutoMode = this.workItemsIntakeModeOverride === 'auto' || this.workItemsPersistedIntakeMode === 'auto'
+            const targetMode: 'observe' | 'auto' | undefined = paramMode !== undefined
+              ? paramMode
+              : (action === 'rolled-back' || action === 'tightened') && hadAutoMode
+                ? 'observe'
+                : undefined
+            const targetRules = Array.isArray(params['intakeRuleUpdates'])
+              ? params['intakeRuleUpdates'] as readonly WorkItemIntakeRuleUpdate[]
+              : []
+            const shouldReconcileRules = Array.isArray(payload['intakeRuleUpdates'])
+              || this.workItemsIntakeRuleOverrides.size > 0
+              || targetRules.length > 0
+            if (targetMode === undefined && !shouldReconcileRules) return
+            try {
+              this.reconcileEvaluationIntakeTuning({
+                ...(targetMode === undefined ? {} : { workItemsMode: targetMode }),
+                ...(shouldReconcileRules ? { replaceRules: targetRules } : {}),
+                downgradeDisallowedAuto: true,
+              })
+            } catch (error) {
+              evalCtx.logger.warn(`assistant-work-items: failed to reconcile evaluation intake tuning: ${describe(error)}`)
+            }
+            return
+          }
+
+          let workItemsMode: 'observe' | 'auto' | undefined =
+            payload['workItemsMode'] === 'observe' || payload['workItemsMode'] === 'auto'
+              ? payload['workItemsMode']
+              : undefined
+          if (workItemsMode === undefined && (action === 'rolled-back' || action === 'tightened') && this.workItemsIntakeModeOverride === 'auto') {
+            workItemsMode = 'observe'
+          }
+          const intakeRuleUpdates = Array.isArray(payload['intakeRuleUpdates'])
+            ? payload['intakeRuleUpdates'] as readonly WorkItemIntakeRuleUpdate[]
+            : undefined
+          if (workItemsMode === undefined && intakeRuleUpdates === undefined) return
+          try {
+            this.applyIntakeTuning({
+              ...(workItemsMode === undefined ? {} : { workItemsMode }),
+              ...(intakeRuleUpdates === undefined ? {} : { intakeRuleUpdates }),
+            })
+          } catch (error) {
+            evalCtx.logger.warn(`assistant-work-items: failed to adopt evaluation intake tuning: ${describe(error)}`)
+          }
+        }
+
+        let unsubscribe: (() => void) | undefined
+        if (typeof evalPeer.onAttentionTuningChanged === 'function') {
+          unsubscribe = evalPeer.onAttentionTuningChanged(event => {
+            if (event !== null && typeof event === 'object') applyEvaluationTuningPayload(event)
+          })
+        } else if (typeof evalPeer.onAttentionLooseningAdopted === 'function') {
+          unsubscribe = evalPeer.onAttentionLooseningAdopted(event => {
+            if (event !== null && typeof event === 'object') applyEvaluationTuningPayload(event)
+          })
+        }
+        if (unsubscribe !== undefined) {
+          evalCtx.effect(() => unsubscribe, 'assistant-work-items.evaluation-tuning')
+        }
+
+        if (this.workItemsConfig.scope !== null
+          && (typeof evalPeer.currentAttentionTuning === 'function' || typeof evalPeer.attentionTuningStatus === 'function')) {
+          const scope = { workspace: this.workItemsConfig.scope.workspace, preset: this.workItemsConfig.scope.preset }
+          const intakeCohort = { lane: 'intake', sourceId: 'assistant-work-items' }
+          try {
+            const current = typeof evalPeer.currentAttentionTuning === 'function'
+              ? evalPeer.currentAttentionTuning({ scope, cohort: intakeCohort })
+              : undefined
+            const status = typeof evalPeer.attentionTuningStatus === 'function'
+              ? evalPeer.attentionTuningStatus({ scope, cohort: intakeCohort })
+              : undefined
+            const events = status?.events ?? []
+            const versions = status?.versions ?? []
+            const versionParams = new Map<number, { workItemsMode?: unknown; intakeRuleUpdates?: unknown }>()
+            for (const v of versions) {
+              if (typeof v.version === 'number' && v.parameters !== undefined) {
+                versionParams.set(v.version, v.parameters)
+              }
+            }
+            const versionEvents = events.filter(e => e.kind === 'adopted' || e.kind === 'rolled-back')
+            const latestVersionEvent = versionEvents.at(-1)
+            let modeRolledBack = false
+            let rulesRolledBack = false
+            for (const event of versionEvents) {
+              if (event.kind === 'rolled-back') {
+                const rolledFromParams = event.fromVersion !== undefined ? versionParams.get(event.fromVersion) : undefined
+                const rolledToParams = event.toVersion !== undefined ? versionParams.get(event.toVersion) : undefined
+                if (rolledFromParams === undefined
+                  || rolledFromParams.workItemsMode === 'auto'
+                  || rolledFromParams.workItemsMode === 'observe'
+                  || rolledFromParams.workItemsMode !== rolledToParams?.workItemsMode) {
+                  modeRolledBack = true
+                }
+                const fromRules = Array.isArray(rolledFromParams?.intakeRuleUpdates) ? rolledFromParams.intakeRuleUpdates : undefined
+                const toRules = Array.isArray(rolledToParams?.intakeRuleUpdates) ? rolledToParams.intakeRuleUpdates : undefined
+                if (rolledFromParams === undefined
+                  || (fromRules !== undefined && fromRules.length > 0)
+                  || JSON.stringify(fromRules ?? []) !== JSON.stringify(toRules ?? [])) {
+                  rulesRolledBack = true
+                }
+              } else if (event.kind === 'adopted') {
+                const change = (event.detail as Record<string, unknown> | undefined)?.['change'] as { parameter?: unknown } | undefined
+                const fromParams = event.fromVersion !== undefined ? versionParams.get(event.fromVersion) : undefined
+                const toParams = event.toVersion !== undefined ? versionParams.get(event.toVersion) : undefined
+                if (change?.parameter === 'workItemsMode'
+                  || (change?.parameter === undefined && toParams !== undefined && toParams.workItemsMode !== fromParams?.workItemsMode)) {
+                  modeRolledBack = toParams?.workItemsMode !== 'auto'
+                }
+                if (change?.parameter === 'intakeRuleUpdates'
+                  || (change?.parameter === undefined && toParams !== undefined
+                    && JSON.stringify(toParams.intakeRuleUpdates ?? []) !== JSON.stringify(fromParams?.intakeRuleUpdates ?? []))) {
+                  rulesRolledBack = false
+                }
+              }
+            }
+            const evalEverManagedRules = versions.some(
+              v => Array.isArray(v.parameters?.intakeRuleUpdates) && v.parameters.intakeRuleUpdates.length > 0,
+            )
+
+            const authoritative = current ?? (latestVersionEvent !== undefined ? status?.current : undefined)
+            if (authoritative !== undefined) {
+              const params = (authoritative.parameters ?? {}) as Record<string, unknown>
+              const evalMode = params['workItemsMode'] === 'observe' || params['workItemsMode'] === 'auto'
+                ? params['workItemsMode']
+                : undefined
+              const evalRules = Array.isArray(params['intakeRuleUpdates'])
+                ? params['intakeRuleUpdates'] as readonly WorkItemIntakeRuleUpdate[]
+                : undefined
+
+              const latestChangeParam = latestVersionEvent?.kind === 'adopted'
+                ? ((latestVersionEvent.detail as Record<string, unknown> | undefined)?.['change'] as { parameter?: unknown } | undefined)?.parameter
+                : undefined
+
+              const hadAutoModeOverride = this.workItemsIntakeModeOverride === 'auto' || this.workItemsPersistedIntakeMode === 'auto'
+              const needsModeRevert = (modeRolledBack || evalMode === 'observe' || latestChangeParam === 'workItemsMode')
+                && hadAutoModeOverride
+                && evalMode !== 'auto'
+              const needsRulesReconcile = (rulesRolledBack || latestChangeParam === 'intakeRuleUpdates' || evalEverManagedRules)
+                && (this.workItemsIntakeRuleOverrides.size > 0 || (evalRules?.length ?? 0) > 0)
+
+              if (needsModeRevert || needsRulesReconcile) {
+                const targetMode: 'observe' | 'auto' | undefined = needsModeRevert
+                  ? (evalMode ?? 'observe')
+                  : (typeof authoritative.version === 'number' && authoritative.version > 0 ? evalMode : undefined)
+                const targetRules = needsRulesReconcile ? (evalRules ?? []) : undefined
+                try {
+                  this.reconcileEvaluationIntakeTuning({
+                    ...(targetMode === undefined ? {} : { workItemsMode: targetMode }),
+                    ...(targetRules === undefined ? {} : { replaceRules: targetRules }),
+                    downgradeDisallowedAuto: true,
+                  })
+                } catch (error) {
+                  evalCtx.logger.warn(`assistant-work-items: failed to reconcile evaluation intake tuning on connect: ${describe(error)}`)
+                }
+              } else if (typeof authoritative.version === 'number' && authoritative.version > 0 && authoritative.parameters !== undefined) {
+                applyEvaluationTuningPayload(authoritative.parameters as unknown as Record<string, unknown>)
+              }
+            }
+          } catch {
+            // Unconfigured cohort or inactive evaluation tuning; keep existing local state.
+          }
+        }
       })
     }
     if (this.workItemsConfig.enabled && this.workItemsConfig.follows?.eventTriggers === true) {
@@ -499,7 +780,10 @@ export class AssistantWorkItemsService extends Service {
         const unregister = peer.onSchedulerWake(() => {
           if (!active) return
           this.workItemsOnSchedulerWake()
-          if (!this.workItemsClosed) void this.workItemsIntakeEvaluation?.run().then(() => this.runIntakeAdmission())
+          if (!this.workItemsClosed) {
+            try { this.workItemsComponents?.store.pruneIntakeStaging(Date.now()) } catch { /* best-effort */ }
+            void this.workItemsIntakeEvaluation?.run().then(() => this.runIntakeAdmission())
+          }
         })
         const remove = () => {
           if (!active) return
@@ -1459,10 +1743,21 @@ export class AssistantWorkItemsService extends Service {
       fail('invalid-input', 'intake objective exceeds the configured admission brief limit')
     }
     const acceptance = intakeAcceptanceOf(input)
-    const result = this.workItemsAvailable().store.recordIntake(candidate)
-    this.rememberIntakeHint(result.record.source, result.record.sourceEventId, objective, acceptance)
-    // `sourceText` is the authenticated text the content digest covers; with
-    // evaluation off it is ignored, with it on it is held in memory only.
+    const store = this.workItemsAvailable().store
+    const result = store.recordIntake(candidate)
+    if (objective !== undefined || acceptance !== undefined) {
+      this.rememberIntakeHint(result.record.source, result.record.sourceEventId, objective, acceptance)
+      if (result.record.decision === 'stored' && result.record.strength === 'inferred') {
+        store.upsertIntakeStaging({
+          source: result.record.source,
+          sourceEventId: result.record.sourceEventId,
+          ...(objective === undefined ? {} : { objective }),
+          ...(acceptance === undefined ? {} : { acceptance }),
+        })
+      }
+    }
+    // `sourceText` is the authenticated text the content digest covers; when
+    // evaluation is registered it is AEAD-sealed in bounded staging.
     if (sourceText !== undefined) this.workItemsIntakeEvaluation?.observe(result.record, sourceText)
     return result
   }
@@ -1528,6 +1823,309 @@ export class AssistantWorkItemsService extends Service {
     const evaluation = this.workItemsIntakeEvaluation
     if (evaluation === undefined || this.workItemsClosed) fail('disabled', 'intake evaluation is disabled')
     return evaluation.register(registration)
+  }
+
+  /** Host-only: effective intake admission mode (`disabled`, `observe`, or `auto`). */
+  intakeAdmissionMode(): 'disabled' | 'observe' | 'auto' {
+    return this.effectiveIntakeAdmitMode()
+  }
+
+  /**
+   * Host-only (WP21/WP22): switch live intake admission mode between
+   * `observe` and `auto` without restarting the service. Persists across
+   * restarts and revalidates active/kind preconditions fail-closed.
+   */
+  setIntakeAdmissionMode(mode: 'observe' | 'auto'): 'observe' | 'auto' {
+    const applied = this.applyIntakeTuning({ workItemsMode: mode })
+    if (applied.mode === 'disabled') fail('disabled', 'intake admission is disabled')
+    return applied.mode
+  }
+
+  private parseIntakeRuleUpdates(
+    rawRules: unknown,
+    admit: unknown,
+    downgradeDisallowedAuto = false,
+  ): readonly WorkItemIntakeRuleUpdate[] {
+    if (!Array.isArray(rawRules) || rawRules.length > MAX_INTAKE_RULE_OVERRIDES) {
+      fail('invalid-input', `intakeRuleUpdates must be an array of at most ${MAX_INTAKE_RULE_OVERRIDES} rules`)
+    }
+    const seen = new Set<string>()
+    const parsedRules: WorkItemIntakeRuleUpdate[] = []
+    for (const entry of rawRules) {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) {
+        fail('invalid-input', 'intakeRuleUpdates entries must be plain objects')
+      }
+      const record = entry as Record<string, unknown>
+      for (const key of Object.keys(record)) {
+        if (!['ruleId', 'enabled', 'mode', 'confidenceThresholdPpm', 'minUtility'].includes(key)) {
+          fail('invalid-input', `intakeRuleUpdates entry contains unknown field ${key}`)
+        }
+      }
+      const ruleId = record['ruleId']
+      if (typeof ruleId !== 'string' || !INTAKE_RULE_ID.test(ruleId)) {
+        fail('invalid-input', 'intakeRuleUpdates.ruleId is invalid')
+      }
+      if (seen.has(ruleId)) fail('invalid-input', `intakeRuleUpdates contains duplicate ruleId ${ruleId}`)
+      seen.add(ruleId)
+      const enabled = record['enabled']
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        fail('invalid-input', 'intakeRuleUpdates.enabled must be a boolean')
+      }
+      let mode = record['mode'] as 'observe' | 'auto' | undefined
+      if (mode !== undefined && mode !== 'observe' && mode !== 'auto') {
+        fail('invalid-input', "intakeRuleUpdates.mode must be 'observe' or 'auto'")
+      }
+      if (mode === 'auto') {
+        if (downgradeDisallowedAuto) {
+          if (admit === undefined || !this.canEnableAutoAdmission()) mode = undefined
+        } else {
+          if (admit === undefined) fail('disabled', 'intake admission is disabled')
+          this.assertCanEnableAutoAdmission()
+        }
+      }
+      const confidenceThresholdPpm = record['confidenceThresholdPpm']
+      if (confidenceThresholdPpm !== undefined && (typeof confidenceThresholdPpm !== 'number'
+        || !Number.isSafeInteger(confidenceThresholdPpm) || confidenceThresholdPpm < 0 || confidenceThresholdPpm > 1_000_000)) {
+        fail('invalid-input', 'intakeRuleUpdates.confidenceThresholdPpm must be an integer between 0 and 1000000')
+      }
+      const minUtility = record['minUtility']
+      if (minUtility !== undefined && (typeof minUtility !== 'number' || !Number.isFinite(minUtility))) {
+        fail('invalid-input', 'intakeRuleUpdates.minUtility must be a finite number')
+      }
+      parsedRules.push(Object.freeze({
+        ruleId,
+        ...(enabled === undefined ? {} : { enabled }),
+        ...(mode === undefined ? {} : { mode }),
+        ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+        ...(minUtility === undefined ? {} : { minUtility }),
+      }))
+    }
+    return parsedRules
+  }
+
+  private reconcileEvaluationIntakeTuning(options: {
+    workItemsMode?: 'observe' | 'auto'
+    replaceRules?: readonly WorkItemIntakeRuleUpdate[]
+    downgradeDisallowedAuto?: boolean
+  }): void {
+    if (!this.workItemsConfig.enabled || this.workItemsClosed || this.workItemsConfig.intakeLedger === undefined) {
+      fail('disabled', 'the work-item intake ledger is disabled')
+    }
+    const admit = this.workItemsConfig.intakeLedger.evaluation?.admit
+    const downgradeDisallowedAuto = options.downgradeDisallowedAuto ?? true
+    let resolvedMode = options.workItemsMode
+    if (resolvedMode === 'auto' && (admit === undefined || !this.canEnableAutoAdmission())) {
+      if (downgradeDisallowedAuto) {
+        resolvedMode = 'observe'
+      } else {
+        if (admit === undefined) fail('disabled', 'intake admission is disabled')
+        this.assertCanEnableAutoAdmission()
+      }
+    }
+    const parsedRules = options.replaceRules === undefined
+      ? undefined
+      : this.parseIntakeRuleUpdates(options.replaceRules, admit, downgradeDisallowedAuto)
+
+    const store = this.workItemsAvailable().store
+    const prevMode = this.workItemsIntakeModeOverride
+    const prevPersistedMode = this.workItemsPersistedIntakeMode
+    const prevRules = new Map(this.workItemsIntakeRuleOverrides)
+    if (resolvedMode !== undefined) {
+      this.workItemsIntakeModeOverride = admit !== undefined ? resolvedMode : (resolvedMode === 'observe' ? 'observe' : undefined)
+    }
+    this.workItemsPersistedIntakeMode = this.workItemsIntakeModeOverride
+    if (parsedRules !== undefined) {
+      this.workItemsIntakeRuleOverrides.clear()
+      for (const rule of parsedRules) {
+        this.workItemsIntakeRuleOverrides.set(rule.ruleId, rule)
+      }
+    }
+    const serialized = JSON.stringify({
+      ...(this.workItemsIntakeModeOverride === undefined ? {} : { workItemsMode: this.workItemsIntakeModeOverride }),
+      rules: [...this.workItemsIntakeRuleOverrides.values()],
+    })
+    try {
+      store.setMeta(INTAKE_TUNING_OVERRIDE_META, serialized)
+    } catch (error) {
+      this.workItemsIntakeModeOverride = prevMode
+      this.workItemsPersistedIntakeMode = prevPersistedMode
+      this.workItemsIntakeRuleOverrides.clear()
+      for (const [k, v] of prevRules) this.workItemsIntakeRuleOverrides.set(k, v)
+      throw error
+    }
+    this.workItemsIntakeEvaluation?.reconcileRules()
+  }
+
+  /**
+   * Host-only (WP22/WP21): apply live `observe -> auto` / `auto -> observe`
+   * transitions and per-rule tuning overrides without restarting.
+   */
+  applyIntakeTuning(update: WorkItemIntakeTuningUpdate): Readonly<{
+    mode: 'disabled' | 'observe' | 'auto'
+    rules: readonly WorkItemIntakeRuleUpdate[]
+  }> {
+    if (!this.workItemsConfig.enabled || this.workItemsClosed || this.workItemsConfig.intakeLedger === undefined) {
+      fail('disabled', 'the work-item intake ledger is disabled')
+    }
+    if (update === null || typeof update !== 'object' || Array.isArray(update)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(update))) {
+      fail('invalid-input', 'intake tuning update must be a plain object')
+    }
+    const raw = update as unknown as Record<string, unknown>
+    for (const key of Object.keys(raw)) {
+      if (key !== 'workItemsMode' && key !== 'intakeRuleUpdates') {
+        fail('invalid-input', `intake tuning update contains unknown field ${key}`)
+      }
+    }
+    const nextMode = raw['workItemsMode']
+    if (nextMode !== undefined && nextMode !== 'observe' && nextMode !== 'auto') {
+      fail('invalid-input', "workItemsMode must be 'observe' or 'auto'")
+    }
+    const admit = this.workItemsConfig.intakeLedger.evaluation?.admit
+    if (nextMode !== undefined && admit === undefined) {
+      fail('disabled', 'intake admission is disabled')
+    }
+    if (nextMode === 'auto') this.assertCanEnableAutoAdmission()
+
+    const rawRules = raw['intakeRuleUpdates']
+    const parsedRules = rawRules === undefined ? [] : this.parseIntakeRuleUpdates(rawRules, admit)
+
+    const store = this.workItemsAvailable().store
+    const prevMode = this.workItemsIntakeModeOverride
+    const prevPersistedMode = this.workItemsPersistedIntakeMode
+    const prevRules = new Map(this.workItemsIntakeRuleOverrides)
+    if (nextMode !== undefined) this.workItemsIntakeModeOverride = nextMode
+    this.workItemsPersistedIntakeMode = this.workItemsIntakeModeOverride
+    for (const rule of parsedRules) {
+      const prior = this.workItemsIntakeRuleOverrides.get(rule.ruleId)
+      const merged: WorkItemIntakeRuleUpdate = Object.freeze({
+        ruleId: rule.ruleId,
+        ...(rule.enabled !== undefined ? { enabled: rule.enabled } : prior?.enabled !== undefined ? { enabled: prior.enabled } : {}),
+        ...(rule.mode !== undefined ? { mode: rule.mode } : prior?.mode !== undefined ? { mode: prior.mode } : {}),
+        ...(rule.confidenceThresholdPpm !== undefined ? { confidenceThresholdPpm: rule.confidenceThresholdPpm } : prior?.confidenceThresholdPpm !== undefined ? { confidenceThresholdPpm: prior.confidenceThresholdPpm } : {}),
+        ...(rule.minUtility !== undefined ? { minUtility: rule.minUtility } : prior?.minUtility !== undefined ? { minUtility: prior.minUtility } : {}),
+      })
+      this.workItemsIntakeRuleOverrides.set(rule.ruleId, merged)
+    }
+    if (this.workItemsIntakeRuleOverrides.size > MAX_INTAKE_RULE_OVERRIDES) {
+      this.workItemsIntakeModeOverride = prevMode
+      this.workItemsPersistedIntakeMode = prevPersistedMode
+      this.workItemsIntakeRuleOverrides.clear()
+      for (const [k, v] of prevRules) this.workItemsIntakeRuleOverrides.set(k, v)
+      fail('invalid-input', `at most ${MAX_INTAKE_RULE_OVERRIDES} intake rule overrides may be active`)
+    }
+    const serialized = JSON.stringify({
+      ...(this.workItemsIntakeModeOverride === undefined ? {} : { workItemsMode: this.workItemsIntakeModeOverride }),
+      rules: [...this.workItemsIntakeRuleOverrides.values()],
+    })
+    try {
+      store.setMeta(INTAKE_TUNING_OVERRIDE_META, serialized)
+    } catch (error) {
+      this.workItemsIntakeModeOverride = prevMode
+      this.workItemsPersistedIntakeMode = prevPersistedMode
+      this.workItemsIntakeRuleOverrides.clear()
+      for (const [k, v] of prevRules) this.workItemsIntakeRuleOverrides.set(k, v)
+      throw error
+    }
+    this.workItemsIntakeEvaluation?.reconcileRules()
+    return this.intakeTuning()
+  }
+
+  /** Host-only read-only view of current effective intake admission mode and rule overrides. */
+  intakeTuning(): Readonly<{
+    mode: 'disabled' | 'observe' | 'auto'
+    rules: readonly WorkItemIntakeRuleUpdate[]
+  }> {
+    return Object.freeze({
+      mode: this.effectiveIntakeAdmitMode(),
+      rules: Object.freeze([...this.workItemsIntakeRuleOverrides.values()]),
+    })
+  }
+
+  private effectiveIntakeAdmitMode(): 'disabled' | 'observe' | 'auto' {
+    if (!this.workItemsConfig.enabled || this.workItemsClosed) return 'disabled'
+    const admit = this.workItemsConfig.intakeLedger?.evaluation?.admit
+    if (admit === undefined) return 'disabled'
+    return this.workItemsIntakeModeOverride ?? admit.mode
+  }
+
+  private shouldAcceptIntakeObjective(): boolean {
+    if (!this.canEnableAutoAdmission()) return false
+    if (this.effectiveIntakeAdmitMode() === 'auto') return true
+    for (const rule of this.workItemsIntakeRuleOverrides.values()) {
+      if (rule.enabled !== false && rule.mode === 'auto') return true
+    }
+    return false
+  }
+
+  private canEnableAutoAdmission(): boolean {
+    if (!this.workItemsConfig.enabled || this.workItemsClosed) return false
+    const admit = this.workItemsConfig.intakeLedger?.evaluation?.admit
+    if (admit === undefined) return false
+    if (!isActive(this.workItemsConfig) || this.workItemsConfig.diagnosis !== undefined) return false
+    if (!this.workItemsConfig.admission.allowedKinds.includes(admit.kind)) return false
+    if (this.workItemsConfig.scope === null || this.workItemsConfig.scope.expiresAt <= Date.now()) return false
+    return true
+  }
+
+  private assertCanEnableAutoAdmission(): void {
+    const admit = this.workItemsConfig.intakeLedger?.evaluation?.admit
+    if (!this.workItemsConfig.enabled || this.workItemsClosed || admit === undefined) {
+      fail('disabled', 'intake admission is disabled')
+    }
+    if (!isActive(this.workItemsConfig) || this.workItemsConfig.diagnosis !== undefined) {
+      fail('invalid-state', 'intake admission auto mode requires an enabled active intake without diagnosis')
+    }
+    if (!this.workItemsConfig.admission.allowedKinds.includes(admit.kind)) {
+      fail('kind-rejected', 'intakeLedger.evaluation.admit.kind must be one of admission.allowedKinds')
+    }
+    if (this.workItemsConfig.scope === null || this.workItemsConfig.scope.expiresAt <= Date.now()) {
+      fail('owner-route-expired', 'intake admission auto mode requires a non-expired owner scope')
+    }
+  }
+
+  private restoreIntakeTuningOverride(store: WorkItemStore): void {
+    const raw = store.meta(INTAKE_TUNING_OVERRIDE_META)
+    if (raw === null) return
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return
+      const record = parsed as Record<string, unknown>
+      const allowAuto = this.canEnableAutoAdmission()
+      const mode = record['workItemsMode']
+      if (mode === 'observe' || mode === 'auto') this.workItemsPersistedIntakeMode = mode
+      if (mode === 'observe') this.workItemsIntakeModeOverride = 'observe'
+      else if (mode === 'auto' && allowAuto) this.workItemsIntakeModeOverride = 'auto'
+
+      const rules = record['rules']
+      if (Array.isArray(rules)) {
+        for (const entry of rules.slice(0, MAX_INTAKE_RULE_OVERRIDES)) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+          const r = entry as Record<string, unknown>
+          const ruleId = r['ruleId']
+          if (typeof ruleId !== 'string' || !INTAKE_RULE_ID.test(ruleId)) continue
+          const enabled = typeof r['enabled'] === 'boolean' ? r['enabled'] : undefined
+          const ruleMode = r['mode'] === 'observe' ? 'observe'
+            : (r['mode'] === 'auto' && allowAuto ? 'auto' : undefined)
+          const confidenceThresholdPpm = typeof r['confidenceThresholdPpm'] === 'number'
+            && Number.isSafeInteger(r['confidenceThresholdPpm']) && r['confidenceThresholdPpm'] >= 0 && r['confidenceThresholdPpm'] <= 1_000_000
+            ? r['confidenceThresholdPpm'] : undefined
+          const minUtility = typeof r['minUtility'] === 'number' && Number.isFinite(r['minUtility'])
+            ? r['minUtility'] : undefined
+          this.workItemsIntakeRuleOverrides.set(ruleId, Object.freeze({
+            ruleId,
+            ...(enabled === undefined ? {} : { enabled }),
+            ...(ruleMode === undefined ? {} : { mode: ruleMode }),
+            ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+            ...(minUtility === undefined ? {} : { minUtility }),
+          }))
+        }
+      }
+      this.workItemsIntakeEvaluation?.reconcileRules()
+    } catch {
+      this.ctx.logger.warn('assistant-work-items: persisted intake tuning override is malformed and was ignored')
+    }
   }
 
   /** Host-only drive of one bounded evaluation run; the scheduler wake calls the same path. */
@@ -1598,7 +2196,7 @@ export class AssistantWorkItemsService extends Service {
     const admission = entry.admission
     const observeReason = admission.outcome === 'would-admit'
       ? (this.workItemsIntakeAdmission?.observeReasonOf(admission)
-        ?? (this.workItemsConfig.intakeLedger?.evaluation?.admit?.mode === 'auto' ? 'missing-acceptance' : 'configured-observe'))
+        ?? (this.effectiveIntakeAdmitMode() === 'auto' ? 'missing-acceptance' : 'configured-observe'))
       : null
     return Object.freeze({
       source: admission.source,
@@ -1619,8 +2217,7 @@ export class AssistantWorkItemsService extends Service {
 
   /** Host-only read-only status overview of intake counts, pending queue and recent admission outcomes. */
   inspectIntakeQueue(options: { limit?: number } = {}): WorkItemIntakeQueueStatus {
-    const admitConfig = this.workItemsConfig.intakeLedger?.evaluation?.admit
-    const configuredMode: WorkItemIntakeQueueStatus['mode'] = admitConfig?.mode ?? 'disabled'
+    const configuredMode: WorkItemIntakeQueueStatus['mode'] = this.effectiveIntakeAdmitMode()
     if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
       return Object.freeze({
         enabled: false,
@@ -1678,7 +2275,7 @@ export class AssistantWorkItemsService extends Service {
     if (!this.workItemsConfig.enabled || this.workItemsConfig.intakeLedger === undefined || this.workItemsClosed) {
       return Object.freeze([])
     }
-    const configuredMode: 'observe' | 'auto' = this.workItemsConfig.intakeLedger.evaluation?.admit?.mode ?? 'observe'
+    const configuredMode: 'observe' | 'auto' = this.effectiveIntakeAdmitMode() === 'auto' ? 'auto' : 'observe'
     const store = this.workItemsAvailable().store
     const rows = store.listRecentIntakeAdmissions({ outcome: 'would-admit', limit: options.limit ?? 50 })
     return Object.freeze(rows.map(entry => {
@@ -2413,6 +3010,7 @@ export class AssistantWorkItemsService extends Service {
     try {
       diagnosisHistory = store.readCanonicalMeta('diagnosis.activation/v1') !== undefined
       if (diagnosisHistory && !config.diagnosis && isActive(config)) fail('invalid-state', 'a diagnosis ledger cannot be silently activated as a generic worker')
+      this.restoreIntakeTuningOverride(store)
     } catch (error) { store.close(); throw error }
     this.workItemsHasDiagnosisHistory = diagnosisHistory
     const ledger = new WorkItemLedger({ store, workspace, limits: config.limits, ...(config.diagnosis || diagnosisHistory ? { diagnosis: true } : {}) })

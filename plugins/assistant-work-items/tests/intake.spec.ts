@@ -157,12 +157,16 @@ describe('per-source opt-in', () => {
     expect(classifyIntake(input({ kind: 'event', addressed: false }), off)).toMatchObject({ decision: 'stored' })
   })
 
-  test('config opt-ins are per source, default off and validated', async () => {
+  test('config opt-ins are per source, ledger/evaluation default on, and validated', async () => {
     const paths = await location()
     const base = { databasePath: paths.databasePath, workRoot: paths.workRoot }
-    expect(normalizeConfig(base).intakeLedger).toBeUndefined()
+    expect(normalizeConfig(base).intakeLedger).toMatchObject({
+      enabled: true,
+      sources: {},
+      evaluation: { enabled: true },
+    })
     expect(normalizeConfig({ ...base, intakeLedger: { enabled: false, sources: { 'lark-channel': { unaddressedGroupMessages: true } } } }).intakeLedger).toBeUndefined()
-    expect(normalizeConfig({ ...base, intakeLedger: { enabled: true, sources: { 'lark-channel': { unaddressedGroupMessages: true } } } }).intakeLedger)
+    expect(normalizeConfig({ ...base, intakeLedger: { enabled: true, sources: { 'lark-channel': { unaddressedGroupMessages: true } }, evaluation: { enabled: false } } }).intakeLedger)
       .toEqual({ enabled: true, sources: { 'lark-channel': { unaddressedGroupMessages: true, unsubscribedEvents: false } } })
     expect(() => normalizeConfig({ ...base, intakeLedger: { enabled: true, sources: { 'Lark': {} } } })).toThrow(/source ids/)
     expect(() => normalizeConfig({ ...base, intakeLedger: { enabled: true, sources: { lark: { everything: true } } } } as unknown as Config)).toThrow(/unknown field/)
@@ -183,12 +187,12 @@ describe('per-source opt-in', () => {
 })
 
 describe('durable intake ledger', () => {
-  test('is off by default and opens no file when the plugin is disabled', async () => {
+  test('opens no file when the plugin is disabled and fails closed when intakeLedger is explicitly off', async () => {
     const paths = await location()
-    const disabled = open({ databasePath: paths.databasePath, workRoot: paths.workRoot, intakeLedger: { enabled: true } })
+    const disabled = open({ enabled: false, databasePath: paths.databasePath, workRoot: paths.workRoot, intakeLedger: { enabled: true } })
     expect(() => disabled.recordIntake(input())).toThrow(/disabled/)
     expect(await readdir(paths.root)).toEqual([])
-    const ledgerOff = open({ enabled: true, mode: 'observe', databasePath: paths.databasePath, workRoot: paths.workRoot })
+    const ledgerOff = open({ enabled: true, mode: 'observe', databasePath: paths.databasePath, workRoot: paths.workRoot, intakeLedger: { enabled: false } })
     expect(() => ledgerOff.recordIntake(input())).toThrow(/intake ledger is disabled/)
     // "Cannot tell" is never read as "not admitted from intake".
     expect(() => disabled.inspectIntakeProvenance('any-item')).toThrow(/intake ledger is disabled/)
@@ -204,7 +208,7 @@ describe('durable intake ledger', () => {
     expect(service.health().openItems).toBe(0)
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats()).toMatchObject({ schemaVersion: 13, items: 0, dispatches: 0 })
+      expect(store.stats()).toMatchObject({ schemaVersion: 14, items: 0, dispatches: 0 })
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
@@ -295,18 +299,18 @@ describe('schema 10 migration', () => {
     open(config).recordIntake(input())
     services.splice(0).forEach(service => service.close())
     const db = new DatabaseSync(config.databasePath)
-    db.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    db.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     db.close()
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.stats().schemaVersion).toBe(14)
       expect(store.countIntake()).toEqual({ stored: 0, duplicate: 0, filtered: 0 })
     } finally {
       store.close()
     }
     const raw = new DatabaseSync(config.databasePath)
     try {
-      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '13' })
+      expect(raw.prepare("SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'").get()).toEqual({ value: '14' })
     } finally {
       raw.close()
     }
@@ -321,7 +325,7 @@ describe('schema 10 migration', () => {
     db.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake schema differs/)
     const again = new DatabaseSync(config.databasePath)
-    again.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    again.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     again.exec("CREATE TRIGGER work_item_intake_no_update AFTER UPDATE ON work_item_schema_meta BEGIN SELECT 1; END")
     again.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/unexpected schema object/)
@@ -333,7 +337,7 @@ describe('schema 10 migration', () => {
     services.splice(0).forEach(service => service.close())
     const db = new DatabaseSync(config.databasePath)
     // The exact current shape, planted under schema 9, is still drift.
-    db.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TRIGGER work_item_intake_no_update; DROP TRIGGER work_item_intake_no_delete; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
+    db.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TRIGGER work_item_intake_no_update; DROP TRIGGER work_item_intake_no_delete; UPDATE work_item_schema_meta SET value = '9' WHERE key = 'schema_version'; PRAGMA user_version = 9;")
     db.close()
     expect(() => new WorkItemStore(config.databasePath)).toThrow(/intake object before schema 10/)
     const again = new DatabaseSync(config.databasePath)

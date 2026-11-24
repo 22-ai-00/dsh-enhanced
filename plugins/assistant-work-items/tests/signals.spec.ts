@@ -664,7 +664,9 @@ test('admits a genuine delivery failure during claim without disturbing the clai
     originBindingId: 'binding-origin-1',
   })
   expect(automations.calls).toHaveLength(1)
-  expect(tools.registered).toHaveLength(4)
+  expect(tools.registered.map(t => (t as { name: string }).name)).toEqual([
+    'work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report', 'work_item_list', 'work_item_recall',
+  ])
 
   // Claiming occurrence `occ-1` sweeps first, admits the real delivery failure,
   // and then still returns the claim for `occ-1`.

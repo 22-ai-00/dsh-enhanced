@@ -133,47 +133,54 @@ async function concurrentlyMigrate(path: string): Promise<MigrationWorkerResult[
   }
 }
 
-function seedLegacyVersion(path: string, version: 1 | 2 | 3 | 5): void {
+function seedLegacyVersion(path: string, version: 1 | 2 | 3 | 5 | 6): void {
   new PolicyLedger({ path }).close()
   const database = new DatabaseSync(path)
   database.exec('PRAGMA foreign_keys = OFF')
-  if (version <= 3) database.exec('DROP TABLE approval_idempotency_tombstones')
-  database.exec('DROP INDEX approval_dispatches_pending_idx')
-  database.exec('ALTER TABLE approval_dispatches RENAME TO approval_dispatches_v6')
   database.exec(`
-    CREATE TABLE approval_dispatches (
-      proposal_id TEXT PRIMARY KEY,
-      source_id TEXT NOT NULL,
-      binding_id TEXT NOT NULL,
-      workspace TEXT NOT NULL,
-      principal TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued')),
-      payload_hash TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      enqueued_at INTEGER,
-      version INTEGER NOT NULL DEFAULT 1,
-      proposal_version INTEGER NOT NULL,
-      FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
-    ) STRICT;
-    INSERT INTO approval_dispatches(
-      proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
-      created_at, enqueued_at, version, proposal_version
-    )
-    SELECT proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
-           created_at, enqueued_at, version, proposal_version
-    FROM approval_dispatches_v6;
-    DROP TABLE approval_dispatches_v6;
-    CREATE INDEX approval_dispatches_pending_idx
-      ON approval_dispatches(state, created_at, proposal_id);
+    DROP TABLE IF EXISTS policy_leases;
+    DROP TABLE IF EXISTS policy_commit_heads;
+    DROP TABLE IF EXISTS policy_idempotency_bindings;
   `)
-  if (version === 2) {
-    database.exec('ALTER TABLE approval_dispatches DROP COLUMN proposal_version')
-  }
-  if (version === 1) {
+  if (version <= 3) database.exec('DROP TABLE approval_idempotency_tombstones')
+  if (version <= 5) {
+    database.exec('DROP INDEX approval_dispatches_pending_idx')
+    database.exec('ALTER TABLE approval_dispatches RENAME TO approval_dispatches_v6')
     database.exec(`
-      DROP TABLE approval_dispatches;
-      ALTER TABLE approval_proposals DROP COLUMN diff_text;
+      CREATE TABLE approval_dispatches (
+        proposal_id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        workspace TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued')),
+        payload_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        enqueued_at INTEGER,
+        version INTEGER NOT NULL DEFAULT 1,
+        proposal_version INTEGER NOT NULL,
+        FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
+      ) STRICT;
+      INSERT INTO approval_dispatches(
+        proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
+        created_at, enqueued_at, version, proposal_version
+      )
+      SELECT proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
+             created_at, enqueued_at, version, proposal_version
+      FROM approval_dispatches_v6;
+      DROP TABLE approval_dispatches_v6;
+      CREATE INDEX approval_dispatches_pending_idx
+        ON approval_dispatches(state, created_at, proposal_id);
     `)
+    if (version === 2) {
+      database.exec('ALTER TABLE approval_dispatches DROP COLUMN proposal_version')
+    }
+    if (version === 1) {
+      database.exec(`
+        DROP TABLE approval_dispatches;
+        ALTER TABLE approval_proposals DROP COLUMN diff_text;
+      `)
+    }
   }
   database.prepare(`UPDATE schema_meta SET value = ? WHERE key = 'schema-version'`).run(String(version))
   database.exec(`PRAGMA user_version = ${version}`)
@@ -201,7 +208,7 @@ describe('policy ledger', () => {
     `).all() as { name: string }[]
     database.close()
 
-    expect(version.user_version).toBe(6)
+    expect(version.user_version).toBe(7)
     expect(dispatchColumns.map(column => column.name)).toEqual([
       'proposal_id',
       'route_version',
@@ -228,6 +235,9 @@ describe('policy ledger', () => {
       'budget_periods',
       'budget_reservations',
       'emergency_state',
+      'policy_commit_heads',
+      'policy_idempotency_bindings',
+      'policy_leases',
       'schema_meta',
     ])
   })
@@ -322,7 +332,7 @@ describe('policy ledger', () => {
       .get() as { count: number }
     migrated.close()
 
-    expect(version.user_version).toBe(6)
+    expect(version.user_version).toBe(7)
     expect(proposal.diff_text).toBeNull()
     expect(dispatches.count).toBe(0)
   })
@@ -452,7 +462,7 @@ describe('policy ledger', () => {
       ORDER BY id
     `).all() as Array<{ id: string; diff_text: string | null }>
     inspected.close()
-    expect(schema.user_version).toBe(6)
+    expect(schema.user_version).toBe(7)
     expect(dispatch).toEqual({
       route_version: 1,
       binding_version: null,
@@ -471,7 +481,50 @@ describe('policy ledger', () => {
     ])
   })
 
-  test.each([0, 1, 2, 3, 5] as const)(
+  test('migrates v6 databases to v7 while preserving existing data', async () => {
+    const path = await temporaryDatabase()
+    seedLegacyVersion(path, 6)
+    const legacy = new DatabaseSync(path)
+    legacy.prepare(`
+      INSERT INTO emergency_state(singleton, enabled, reason, actor, updated_at, version)
+      VALUES (1, 1, 'maintenance', 'owner:v6', 1234, 1)
+    `).run()
+    legacy.close()
+
+    const ledger = new PolicyLedger({ path, now: () => 5_000 })
+    expect(ledger.getEmergencyStop()).toEqual({
+      enabled: true,
+      reason: 'maintenance',
+      actor: 'owner:v6',
+      updatedAt: 1234,
+      version: 1,
+    })
+    expect(ledger.revokeLease('lease-v7-test', { actor: 'owner:v6', reason: 'test' })).toMatchObject({
+      leaseId: 'lease-v7-test',
+      revoked: true,
+      alreadyRevoked: false,
+    })
+    ledger.close()
+
+    const migrated = new DatabaseSync(path)
+    const schema = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
+    const meta = migrated.prepare("SELECT value FROM schema_meta WHERE key = 'schema-version'").get() as { value: string }
+    const tables = migrated.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'policy_%'
+      ORDER BY name
+    `).all() as { name: string }[]
+    migrated.close()
+    expect(schema.user_version).toBe(7)
+    expect(meta.value).toBe('7')
+    expect(tables.map(t => t.name)).toEqual([
+      'policy_commit_heads',
+      'policy_idempotency_bindings',
+      'policy_leases',
+    ])
+  })
+
+  test.each([0, 1, 2, 3, 5, 6] as const)(
     'serializes two process openers while migrating schema v%s',
     async version => {
       const path = await temporaryDatabase()
@@ -483,7 +536,7 @@ describe('policy ledger', () => {
       const schema = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
       const journal = migrated.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
       migrated.close()
-      expect(schema.user_version).toBe(6)
+      expect(schema.user_version).toBe(7)
       expect(journal.journal_mode).toBe('wal')
     },
   )
@@ -572,7 +625,7 @@ describe('policy ledger', () => {
     `).all() as Array<{ name: string; dflt_value: string | null }>)
       .find(column => column.name === 'intent_hash')
     migrated.close()
-    expect(schema.user_version).toBe(6)
+    expect(schema.user_version).toBe(7)
     expect(tombstone.intent_hash).toBe('legacy-v4-unbound')
     expect(intentColumn?.dflt_value).toBeNull()
   })

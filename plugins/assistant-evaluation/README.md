@@ -77,14 +77,14 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `maxEvidenceRefs` | `32` | 每条 outcome 的证据引用数上限。 |
 | `defaultSummaryWindowMs` | 30 天 | 未指定起点时的默认汇总窗口。 |
 | `maxSummaryWindowMs` | 365 天 | 单次汇总允许的最大窗口。 |
-| `notificationOutcomesEnabled` | `false` | WP22：在既有 projection tick 上同步 Delivery 通知结果事实。 |
+| `notificationOutcomesEnabled` | `true` | WP22：在既有 projection tick 上同步 Delivery 通知结果事实。 |
 | `notificationResponseWindowMs` | 1 天 | 已发出且无反应的通知超过此窗口记为 `expired-unhandled`。 |
 | `notificationObservationHorizonMs` | 30 天 | 已知通知自通知时间起在此期间内被重查，以吸收迟到回复、更正与撤回；有效值至少为响应窗口的两倍。超出观察期的通知不再被扫描（按 `occurred_at` 范围索引）。 |
 | `notificationSyncBatchSize` | `100` | 每次同步新摄入与重查的条数上限（最大 500）。 |
 | `notificationSyncIntervalMs` | 60 秒 | 定时器驱动的通知同步最小间隔（projection tick 更频繁，同步按此节流；`0` 表示每个 tick）。 |
-| `intakeAttentionAgreementEnabled` | `false` | WP22：开放只读 `inspectIntakeAttentionAgreement`（WP20 intake 判断与通知结果的吻合度）；要求 `notificationOutcomesEnabled`，不改变任何发送行为。 |
+| `intakeAttentionAgreementEnabled` | `true` | WP22：开放只读 `inspectIntakeAttentionAgreement`（WP20 intake 判断与通知结果的吻合度）；要求 `notificationOutcomesEnabled`，不改变任何发送行为。 |
 | `intakeAttentionAgreementPersistIntervalMs` | 未设置（关） | WP22 E1：按该 interval bucket 把吻合度追加为不可改快照；要求同时开启 `notificationOutcomesEnabled` 与 `intakeAttentionAgreementEnabled`，范围 60s–7d；只观察、不发送、不授权。 |
-| `attentionTuningAutoAdopt` | `false` | WP22 切片 2：按 cohort 有界自动采用收紧类注意力参数并在回归时回退；要求 `notificationOutcomesEnabled`。 |
+| `attentionTuningAutoAdopt` | `true` | WP22 切片 2：按 cohort 有界自动采用收紧类注意力参数并在回归时回退；要求 `notificationOutcomesEnabled`。 |
 | `attentionTuningCohorts` | `[{ lane: owner-notification, sourceId: assistant-proactive/v1 }]` | 可调 cohort（`lane` + `sourceId`），最多 16 个。 |
 | `attentionTuningMinSample` | `20` | 提议与回归判断所需的最少已判定通知数（最小 5）。 |
 | `attentionTuningNegativeRatePpm` | `600000` | 负向率（rejected + expired-unhandled）达到此值时收紧一步。 |
@@ -92,12 +92,12 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 | `attentionTuningRegressionMarginPpm` | `100000` | 观察期负向率高于采用依据负向率加此余量时回退。 |
 | `attentionTuningObservationMs` | 7 天 | 采用后的观察期，持久化，重启后继续。 |
 | `attentionTuningEvaluationWindowMs` | 7 天 | 提议所用证据的回看窗口（且不早于上一次版本变化）。 |
-| `attentionLooseningEnabled` | `false` | WP22 切片 3：放宽请求的密封留出重放与 owner 一次性授权；要求 `attentionTuningAutoAdopt`。 |
+| `attentionLooseningEnabled` | `true` | WP22 切片 3：放宽请求的密封留出重放与 owner 一次性授权；要求 `attentionTuningAutoAdopt`。 |
 | `attentionLooseningReplayWindowMs` | 30 天 | 放宽提议冻结的留出重放回看窗口。 |
-| `attentionOwnerQuestionDeliveryEnabled` | `false` | WP22 切片 4/5：最新 owner 问题经 Delivery 至多投递一次，并注册回复消费者把 exact 回复应用到授权/提议；要求 `attentionLooseningEnabled` 与 `attentionOwnerQuestionOwner`。 |
+| `attentionOwnerQuestionDeliveryEnabled` | `true` | WP22 切片 4/5：默认开启（未配置 `attentionOwnerQuestionOwner` 时在运行期安全降级为不投递；显式设为 `true` 则仍要求配置 `attentionOwnerQuestionOwner`）。最新 owner 问题经 Delivery 至多投递一次，并注册回复消费者把 exact 回复应用到授权/提议；要求 `attentionLooseningEnabled` 与 `attentionOwnerQuestionOwner`。 |
 | `attentionOwnerQuestionOwner` | 无 | 问题投递使用的 owner 路由 id 与外部 principal id。 |
 | `attentionOwnerQuestionNoticeTtlMs` | 1 天 | 未投递问题的过期时间、通知有效期，也是授权回复创建的一次性授权有效期。 |
-| `intakeEvaluationAgreementEnabled` | `false` | WP22（schema 19）：在同步 tick 上按持久游标从 WorkItems `listIntakeEvaluationFeed` 增量同步 WP20 `wouldAccept` 判断、与通知/主人反馈及撤回关联记录到 canonical 状态，并向 `intake` cohort 的密封留出重放与有界放宽供数。默认关闭、零跨插件读取与写表。 |
+| `intakeEvaluationAgreementEnabled` | `true` | WP22（schema 19）：在同步 tick 上按持久游标从 WorkItems `listIntakeEvaluationFeed` 增量同步 WP20 `wouldAccept` 判断、与通知/主人反馈及撤回关联记录到 canonical 状态，并向 `intake` cohort 的密封留出重放与有界放宽供数。 |
 | `intakeEvaluationFeedBatchSize` | `100` | 每次同步从 WorkItems `listIntakeEvaluationFeed` 拉取的页大小上限（1–500）。 |
 
 ## 权限与数据边界

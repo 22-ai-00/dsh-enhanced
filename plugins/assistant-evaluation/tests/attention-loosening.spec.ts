@@ -175,17 +175,15 @@ describe('attention loosening service', () => {
       f.clock.now += 1
       return { f, rejected, tick: f.sync(), tuning: f.evaluation.attentionTuningStatus({ scope, cohort }) }
     }
-    const absent = run(undefined)
+    const onByDefault = run(undefined)
     const off = run(false)
-    expect(absent.rejected).toEqual({ status: 'rejected', reason: 'loosening-requires-holdout' })
-    expect(off.rejected).toEqual(absent.rejected)
-    expect(off.tick).toEqual(absent.tick)
-    expect(off.tuning).toEqual(absent.tuning)
-    expect(absent.tick).toMatchObject([{ result: { action: 'adopted', version: 2 } }])
+    expect(onByDefault.rejected).toMatchObject({ status: 'proposed' })
+    expect(off.rejected).toEqual({ status: 'rejected', reason: 'loosening-requires-holdout' })
+    expect(off.tick).toMatchObject([{ result: { action: 'adopted', version: 2 } }])
     expect(off.f.grant()).toEqual({ status: 'rejected', reason: 'loosening-disabled' })
     expect(off.f.status()).toEqual({ enabled: false, grant: null, proposals: [], questions: [] })
     expect(() => new AssistantEvaluationService(new Context(), {
-      databasePath: ':memory:', notificationOutcomesEnabled: true, attentionLooseningEnabled: true,
+      databasePath: ':memory:', notificationOutcomesEnabled: true, attentionTuningAutoAdopt: false, attentionLooseningEnabled: true,
     })).toThrow(/requires attentionTuningAutoAdopt/)
   })
 

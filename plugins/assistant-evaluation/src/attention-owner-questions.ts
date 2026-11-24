@@ -89,6 +89,8 @@ const parameterLabels: Readonly<Record<AttentionTuningParameter, string>> = Obje
   minimumUtilityDelta: 'notice threshold offset',
   quietExtensionMinutes: 'quiet-hours extension (minutes)',
   muted: 'mute',
+  workItemsMode: 'work-items admission mode',
+  intakeRuleUpdates: 'intake rule updates',
 })
 
 const exceededLabels: Readonly<Record<AttentionGrantExceeded, string>> = Object.freeze({
@@ -100,8 +102,10 @@ const exceededLabels: Readonly<Record<AttentionGrantExceeded, string>> = Object.
   'step-too-large': 'the change is larger than the grant allows',
 })
 
-function valueText(value: number | boolean): string {
-  return typeof value === 'boolean' ? (value ? 'on' : 'off') : String(value)
+function valueText(value: number | boolean | string | readonly unknown[]): string {
+  if (typeof value === 'boolean') return value ? 'on' : 'off'
+  if (Array.isArray(value)) return `${value.length} rule${value.length === 1 ? '' : 's'}`
+  return String(value)
 }
 
 /**

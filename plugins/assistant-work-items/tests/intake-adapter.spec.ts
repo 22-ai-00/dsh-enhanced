@@ -148,12 +148,16 @@ describe('intake ledger through the inbound adapter path', () => {
     }
   })
 
-  test('the disabled default registers no observer and writes no ledger row', async () => {
-    const f = await fixture(null)
+  test('when intakeLedger is explicitly disabled, registers no observer and writes no ledger row (R3 default registers)', async () => {
+    const f = await fixture({ enabled: false })
     await f.transport.emit({})
     expect(f.ledger()).toEqual([])
     expect(f.inbox().map(row => row['event_id'])).toEqual(['om_1'])
     expect(f.ctx.assistantWorkItems.ownsInboundIntakeObserver({ protocol: 1, observe: () => {} })).toBe(false)
+
+    const def = await fixture(null)
+    await def.transport.emit({ messageId: 'om_default' })
+    expect(def.ledger()).toHaveLength(1)
   })
 
   test('stops observing once WorkItems is disposed', async () => {

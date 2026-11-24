@@ -391,7 +391,7 @@ const settlementSchema = Schema.object({
 })
 
 const foregroundFailureSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean(),
   kind: Schema.string().default('foreground-repair'),
   includeTimedOut: Schema.boolean().default(true),
   maxCandidatesPerSweep: Schema.number().step(1).min(1).max(100).default(10),
@@ -405,7 +405,7 @@ const sourcesSchema = Schema.object({
 
 /** Synchronous Standard-Schema validator used by DSH before construction. */
 export const ConfigSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
   mode: Schema.union(['observe', 'active'] as const).default('observe'),
   databasePath: Schema.string().required(),
   workRoot: Schema.string().required(),
@@ -418,34 +418,34 @@ export const ConfigSchema = Schema.object({
   delivery: deliverySchema,
   sources: sourcesSchema,
   settlement: settlementSchema,
-  ownerReplyContinuation: Schema.boolean().default(false),
-  ownerReportFeedback: Schema.boolean().default(false),
+  ownerReplyContinuation: Schema.boolean(),
+  ownerReportFeedback: Schema.boolean(),
   intakeLedger: Schema.object({
-    enabled: Schema.boolean().default(false),
+    enabled: Schema.boolean().default(true),
     sources: Schema.dict(Schema.object({
       unaddressedGroupMessages: Schema.boolean().default(false),
       unsubscribedEvents: Schema.boolean().default(false),
     })),
     evaluation: Schema.object({
-      enabled: Schema.boolean().default(false),
+      enabled: Schema.boolean().default(true),
       timeoutMs: Schema.number().step(1), maxConsecutiveFailures: Schema.number().step(1),
       maxPerRun: Schema.number().step(1), maxCallsPerHour: Schema.number().step(1),
-      admit: Schema.object({
-        enabled: Schema.boolean().default(false),
-        mode: Schema.union(['observe', 'auto'] as const).default('observe'),
+      admit: Schema.union([Schema.const(undefined), Schema.object({
+        enabled: Schema.boolean().default(true),
+        mode: Schema.union(['observe', 'auto'] as const),
         kind: Schema.string(), originBindingId: Schema.string(), maxPerHour: Schema.number().step(1),
         acceptanceObjective: Schema.string(),
-      }),
+      })]),
     }),
   }),
-  follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean().default(false), acceptHeadRef: Schema.boolean().default(false) }) }),
+  follows: Schema.object({ eventTriggers: Schema.object({ enabled: Schema.boolean(), acceptHeadRef: Schema.boolean().default(false) }) }),
   acceptance: Schema.object({
-    autoSettle: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
-    bindWorkerRun: Schema.object({ enabled: Schema.boolean().default(false), maxPerTick: Schema.number().step(1) }),
-    verdictGate: Schema.object({ enabled: Schema.boolean().default(false) }),
-    holdReport: Schema.object({ enabled: Schema.boolean().default(false), holdTimeoutMs: Schema.number().step(1) }),
+    autoSettle: Schema.object({ enabled: Schema.boolean(), maxPerTick: Schema.number().step(1) }),
+    bindWorkerRun: Schema.object({ enabled: Schema.boolean(), maxPerTick: Schema.number().step(1) }),
+    verdictGate: Schema.object({ enabled: Schema.boolean() }),
+    holdReport: Schema.object({ enabled: Schema.boolean(), holdTimeoutMs: Schema.number().step(1) }),
   }),
-  ownerRecall: Schema.object({ enabled: Schema.boolean().default(false), linkedAliases: Schema.array(Schema.string()) }),
+  ownerRecall: Schema.object({ enabled: Schema.boolean(), linkedAliases: Schema.array(Schema.string()) }),
   ownerReportRouting: Schema.object({ linkedFallback: Schema.array(Schema.string()), prefer: Schema.union(['origin', 'recent'] as const) }),
   ownerContinuation: Schema.object({
     enabled: Schema.boolean().default(false), automationId: Schema.string(), allowedTools: Schema.array(Schema.string()),
@@ -588,22 +588,23 @@ function normalizeDelivery(raw: DeliveryConfig | undefined): readonly WorkItemRe
   return Object.freeze(statuses)
 }
 
-function normalizeSources(raw: SourcesConfig | undefined): NormalizedSources {
+function normalizeSources(raw: SourcesConfig | undefined, enabled: boolean, mode: 'observe' | 'active', allowedKinds: readonly string[]): NormalizedSources {
   const value = raw === undefined ? {} : plainObject(raw, 'sources')
   rejectUnknown(value, SOURCES_KEYS, 'sources')
   const foreground = value['foregroundFailures'] === undefined
     ? {}
     : plainObject(value['foregroundFailures'], 'sources.foregroundFailures')
   rejectUnknown(foreground, FOREGROUND_FAILURE_KEYS, 'sources.foregroundFailures')
-  const enabled = foreground['enabled'] ?? false
-  if (typeof enabled !== 'boolean') fail('invalid-input', 'sources.foregroundFailures.enabled must be a boolean')
   const kind = text(foreground['kind'] ?? 'foreground-repair', 'sources.foregroundFailures.kind', 64)
   if (!KIND.test(kind)) fail('invalid-input', 'sources.foregroundFailures.kind has an invalid shape')
+  const defaultEnabled = enabled && (mode === 'observe' || allowedKinds.includes(kind))
+  const fgEnabled = foreground['enabled'] ?? defaultEnabled
+  if (typeof fgEnabled !== 'boolean') fail('invalid-input', 'sources.foregroundFailures.enabled must be a boolean')
   const includeTimedOut = foreground['includeTimedOut'] ?? true
   if (typeof includeTimedOut !== 'boolean') fail('invalid-input', 'sources.foregroundFailures.includeTimedOut must be a boolean')
   return Object.freeze({
     foregroundFailures: Object.freeze({
-      enabled,
+      enabled: fgEnabled,
       kind,
       includeTimedOut,
       maxCandidatesPerSweep: integer(foreground['maxCandidatesPerSweep'] ?? 10, 'sources.foregroundFailures.maxCandidatesPerSweep', 1, 100),
@@ -656,15 +657,16 @@ export function anySourceEnabled(config: NormalizedConfig): boolean {
  * Unknown fields anywhere fail closed, paths must be absolute, and an
  * `enabled: true` + `mode: 'active'` deployment must name its worker
  * automation, owner scope and at least one admitted kind. The default
- * deployment is `enabled: false`, `mode: 'observe'`: it writes only local
- * observation rows and never calls automations or delivery.
+ * deployment is `enabled: true`, `mode: 'observe'` with `intakeLedger` and
+ * `intakeLedger.evaluation` enabled (auto-transition ready); active-scoped
+ * capabilities default on when their preconditions hold.
  */
 export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig {
   const value = plainObject(raw, 'config')
   rejectUnknown(value, TOP_LEVEL_KEYS, 'config')
-  const ownerReportFeedback = value['ownerReportFeedback']
-  if (ownerReportFeedback !== undefined && typeof ownerReportFeedback !== 'boolean') fail('invalid-input', 'ownerReportFeedback must be a boolean')
-  const enabled = value['enabled'] ?? false
+  const rawOwnerReportFeedback = value['ownerReportFeedback']
+  if (rawOwnerReportFeedback !== undefined && typeof rawOwnerReportFeedback !== 'boolean') fail('invalid-input', 'ownerReportFeedback must be a boolean')
+  const enabled = value['enabled'] ?? true
   if (typeof enabled !== 'boolean') fail('invalid-input', 'enabled must be a boolean')
   const mode = value['mode'] ?? 'observe'
   if (mode !== 'observe' && mode !== 'active') fail('invalid-input', "mode must be 'observe' or 'active'")
@@ -679,13 +681,13 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   if (workerAutomationId !== null && !AUTOMATION_ID.test(workerAutomationId)) {
     fail('invalid-input', 'workerAutomationId has an invalid shape')
   }
-  const scope = normalizeScope(value['scope'] as ScopeConfig | undefined, now, ownerReportFeedback === true)
+  const scope = normalizeScope(value['scope'] as ScopeConfig | undefined, now, rawOwnerReportFeedback === true)
   const admission = normalizeAdmission(value['admission'] as AdmissionConfig | undefined, mode)
   const limits = normalizeLimits(value['limits'] as LimitsConfig | undefined)
   const notifyOn = normalizeDelivery(value['delivery'] as DeliveryConfig | undefined)
-  const sources = normalizeSources(value['sources'] as SourcesConfig | undefined)
+  const sources = normalizeSources(value['sources'] as SourcesConfig | undefined, enabled, mode, admission.allowedKinds)
   const settlement = normalizeSettlement(value['settlement'] as SettlementConfig | undefined)
-  const diagnosis = normalizeDiagnosis(value['diagnosis'] as DiagnosisConfig | undefined, scope, now, ownerReportFeedback === true)
+  const diagnosis = normalizeDiagnosis(value['diagnosis'] as DiagnosisConfig | undefined, scope, now, rawOwnerReportFeedback === true)
   if (diagnosis && (!enabled || mode !== 'active' || !sources.foregroundFailures.enabled)) fail('invalid-input', 'diagnosis requires active enabled intake and foreground failure source')
   if (enabled && mode === 'active' && (workerAutomationId === null || scope === null)) {
     fail('invalid-input', "an active work-item deployment requires workerAutomationId and scope")
@@ -696,10 +698,11 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const ownerRecall = value['ownerRecall'] === undefined ? {} : plainObject(value['ownerRecall'], 'ownerRecall')
   rejectUnknown(ownerRecall, ['enabled', 'linkedAliases'], 'ownerRecall')
   if (ownerRecall['enabled'] !== undefined && typeof ownerRecall['enabled'] !== 'boolean') fail('invalid-input', 'ownerRecall.enabled must be a boolean')
-  if (ownerRecall['enabled'] === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
+  const ownerRecallEnabled = ownerRecall['enabled'] ?? (enabled && mode === 'active' && scope !== null && workerAutomationId !== null)
+  if (ownerRecallEnabled === true && (!enabled || mode !== 'active' || scope === null || workerAutomationId === null)) {
     fail('invalid-input', 'ownerRecall requires an enabled active worker and complete scope')
   }
-  const linkedAliases = normalizeLinkedAliases(ownerRecall['linkedAliases'], ownerRecall['enabled'] === true, scope)
+  const linkedAliases = normalizeLinkedAliases(ownerRecall['linkedAliases'], ownerRecallEnabled === true, scope)
   const ownerReportRouting = value['ownerReportRouting'] === undefined ? {} : plainObject(value['ownerReportRouting'], 'ownerReportRouting')
   rejectUnknown(ownerReportRouting, ['linkedFallback', 'prefer'], 'ownerReportRouting')
   const linkedFallback = normalizeLinkedAliases(ownerReportRouting['linkedFallback'],
@@ -708,24 +711,28 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   const reportPrefer = ownerReportRouting['prefer']
   if (reportPrefer !== undefined && reportPrefer !== 'origin' && reportPrefer !== 'recent') fail('invalid-input', "ownerReportRouting.prefer must be 'origin' or 'recent'")
   if (reportPrefer === 'recent' && linkedFallback === undefined) fail('invalid-input', "ownerReportRouting.prefer 'recent' requires a non-empty linkedFallback")
-  const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, ownerReportFeedback === true)
+  const ownerContinuation = normalizeOwnerContinuation(value['ownerContinuation'], scope, workerAutomationId, now, rawOwnerReportFeedback === true)
   if (ownerContinuation && !admission.allowedKinds.includes('owner-continuation')) fail('invalid-input', 'ownerContinuation requires owner-continuation in admission.allowedKinds')
-  if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecall['enabled'] !== true)) {
+  if (ownerContinuation && (!enabled || mode !== 'active' || ownerRecallEnabled !== true)) {
     fail('invalid-input', 'ownerContinuation requires active intake and ownerRecall')
   }
+  const ownerReportFeedback = rawOwnerReportFeedback ?? (ownerContinuation !== undefined)
   if (ownerReportFeedback === true && !ownerContinuation) fail('invalid-input', 'ownerReportFeedback requires configured ownerContinuation')
-  const ownerReplyContinuation = value['ownerReplyContinuation']
-  if (ownerReplyContinuation !== undefined && typeof ownerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
+  const rawOwnerReplyContinuation = value['ownerReplyContinuation']
+  if (rawOwnerReplyContinuation !== undefined && typeof rawOwnerReplyContinuation !== 'boolean') fail('invalid-input', 'ownerReplyContinuation must be a boolean')
+  const ownerReplyContinuation = rawOwnerReplyContinuation ?? (ownerContinuation !== undefined)
   if (ownerReplyContinuation === true && !ownerContinuation) fail('invalid-input', 'ownerReplyContinuation requires active ownerContinuation authorization')
-  const intakeLedger = normalizeIntakeLedger(value['intakeLedger'])
+  const intakeLedger = normalizeIntakeLedger(value['intakeLedger'], {
+    enabled, mode, diagnosis: diagnosis !== undefined, allowedKinds: admission.allowedKinds,
+  })
   const intakeAdmit = intakeLedger?.evaluation?.admit
   if (intakeAdmit?.mode === 'auto') {
     if (!enabled || mode !== 'active' || diagnosis) fail('invalid-input', 'intakeLedger.evaluation.admit auto mode requires an enabled active intake without diagnosis')
     if (!admission.allowedKinds.includes(intakeAdmit.kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind must be one of admission.allowedKinds')
   }
-  const follows = normalizeFollows(value['follows'])
+  const follows = normalizeFollows(value['follows'], enabled && scope !== null)
   if (follows?.eventTriggers === true && (!enabled || scope === null)) fail('invalid-input', 'follows.eventTriggers requires an enabled intake with an owner scope')
-  const acceptance = normalizeAcceptance(value['acceptance'])
+  const acceptance = normalizeAcceptance(value['acceptance'], { enabled, mode, diagnosis: diagnosis !== undefined })
   const acceptanceAutoSettle = acceptance.autoSettle
   if (acceptanceAutoSettle && (!enabled || mode !== 'active')) fail('invalid-input', 'acceptance.autoSettle requires an enabled active intake')
   const acceptanceBindWorkerRun = acceptance.bindWorkerRun
@@ -749,7 +756,7 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
     sources,
     settlement,
     ...(diagnosis === undefined ? {} : { diagnosis }),
-    ...(ownerRecall['enabled'] === true ? { ownerRecall: Object.freeze({ enabled: true as const, ...(linkedAliases ? { linkedAliases } : {}) }) } : {}),
+    ...(ownerRecallEnabled === true ? { ownerRecall: Object.freeze({ enabled: true as const, ...(linkedAliases ? { linkedAliases } : {}) }) } : {}),
     ...(linkedFallback === undefined ? {} : { ownerReportRouting: Object.freeze({ linkedFallback, ...(reportPrefer === 'recent' ? { prefer: 'recent' as const } : {}) }) }),
     ...(ownerContinuation === undefined ? {} : { ownerContinuation }),
     ...(ownerReplyContinuation === true ? { ownerReplyContinuation: true as const } : {}),
@@ -763,51 +770,51 @@ export function normalizeConfig(raw: Config, now = Date.now()): NormalizedConfig
   })
 }
 
-/** Absent or disabled acceptance passes normalize to `undefined`. */
-function normalizeAcceptance(raw: unknown): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }>; verdictGate?: true;
+interface IntakeAdmitContext {
+  readonly enabled: boolean
+  readonly mode: 'observe' | 'active'
+  readonly diagnosis: boolean
+  readonly allowedKinds: readonly string[]
+}
+
+/** Absent or disabled acceptance passes normalize to `undefined`; active mode enables them by default. */
+function normalizeAcceptance(raw: unknown, context: Pick<IntakeAdmitContext, 'enabled' | 'mode' | 'diagnosis'>): Readonly<{ autoSettle?: Readonly<{ maxPerTick: number }>; bindWorkerRun?: Readonly<{ maxPerTick: number }>; verdictGate?: true;
   holdReport?: Readonly<{ holdTimeoutMs: number }> }> {
-  if (raw === undefined) return {}
-  const value = plainObject(raw, 'acceptance')
+  const value = raw === undefined ? {} : plainObject(raw, 'acceptance')
   rejectUnknown(value, ['autoSettle', 'bindWorkerRun', 'verdictGate', 'holdReport'], 'acceptance')
+  const defaultActive = context.enabled && context.mode === 'active'
   const pass = (key: 'autoSettle' | 'bindWorkerRun'): Readonly<{ maxPerTick: number }> | undefined => {
-    if (value[key] === undefined) return undefined
-    const section = plainObject(value[key], `acceptance.${key}`)
+    const section = value[key] === undefined ? {} : plainObject(value[key], `acceptance.${key}`)
     rejectUnknown(section, ['enabled', 'maxPerTick'], `acceptance.${key}`)
-    const enabled = section['enabled'] ?? false
+    const enabled = section['enabled'] ?? defaultActive
     if (typeof enabled !== 'boolean') fail('invalid-input', `acceptance.${key}.enabled must be a boolean`)
     if (!enabled) return undefined
     return Object.freeze({ maxPerTick: integer(section['maxPerTick'] ?? 5, `acceptance.${key}.maxPerTick`, 1, 10) })
   }
   const autoSettle = pass('autoSettle'), bindWorkerRun = pass('bindWorkerRun')
-  let verdictGate = false
-  if (value['verdictGate'] !== undefined) {
-    const section = plainObject(value['verdictGate'], 'acceptance.verdictGate')
-    rejectUnknown(section, ['enabled'], 'acceptance.verdictGate')
-    const gate = section['enabled'] ?? false
-    if (typeof gate !== 'boolean') fail('invalid-input', 'acceptance.verdictGate.enabled must be a boolean')
-    verdictGate = gate
-  }
+  const verdictSection = value['verdictGate'] === undefined ? {} : plainObject(value['verdictGate'], 'acceptance.verdictGate')
+  rejectUnknown(verdictSection, ['enabled'], 'acceptance.verdictGate')
+  const verdictGate = verdictSection['enabled'] ?? defaultActive
+  if (typeof verdictGate !== 'boolean') fail('invalid-input', 'acceptance.verdictGate.enabled must be a boolean')
   let holdReport: Readonly<{ holdTimeoutMs: number }> | undefined
-  if (value['holdReport'] !== undefined) {
-    const section = plainObject(value['holdReport'], 'acceptance.holdReport')
-    rejectUnknown(section, ['enabled', 'holdTimeoutMs'], 'acceptance.holdReport')
-    const hold = section['enabled'] ?? false
-    if (typeof hold !== 'boolean') fail('invalid-input', 'acceptance.holdReport.enabled must be a boolean')
-    // One minute to one day: a verifier outage releases the report unverified, never holds it forever.
-    if (hold) holdReport = Object.freeze({ holdTimeoutMs: integer(section['holdTimeoutMs'] ?? 1_800_000, 'acceptance.holdReport.holdTimeoutMs', 60_000, 86_400_000) })
-  }
+  const holdSection = value['holdReport'] === undefined ? {} : plainObject(value['holdReport'], 'acceptance.holdReport')
+  rejectUnknown(holdSection, ['enabled', 'holdTimeoutMs'], 'acceptance.holdReport')
+  const holdDefault = defaultActive && !context.diagnosis && autoSettle !== undefined && bindWorkerRun !== undefined
+  const hold = holdSection['enabled'] ?? holdDefault
+  if (typeof hold !== 'boolean') fail('invalid-input', 'acceptance.holdReport.enabled must be a boolean')
+  // One minute to one day: a verifier outage releases the report unverified, never holds it forever.
+  if (hold) holdReport = Object.freeze({ holdTimeoutMs: integer(holdSection['holdTimeoutMs'] ?? 1_800_000, 'acceptance.holdReport.holdTimeoutMs', 60_000, 86_400_000) })
   return { ...(autoSettle === undefined ? {} : { autoSettle }), ...(bindWorkerRun === undefined ? {} : { bindWorkerRun }),
     ...(verdictGate ? { verdictGate: true as const } : {}), ...(holdReport === undefined ? {} : { holdReport }) }
 }
 
-/** Absent or all-disabled follow sources normalize to `undefined`. */
-function normalizeFollows(raw: unknown): NormalizedFollows | undefined {
-  if (raw === undefined) return undefined
-  const value = plainObject(raw, 'follows')
+/** Disabled follow sources normalize to `undefined`; enabled scoped deployments default `eventTriggers` on. */
+function normalizeFollows(raw: unknown, defaultEventTriggers: boolean): NormalizedFollows | undefined {
+  const value = raw === undefined ? {} : plainObject(raw, 'follows')
   rejectUnknown(value, FOLLOWS_KEYS, 'follows')
   const source = value['eventTriggers'] === undefined ? {} : plainObject(value['eventTriggers'], 'follows.eventTriggers')
   rejectUnknown(source, FOLLOW_SOURCE_KEYS, 'follows.eventTriggers')
-  const eventTriggers = source['enabled'] ?? false
+  const eventTriggers = source['enabled'] ?? defaultEventTriggers
   if (typeof eventTriggers !== 'boolean') fail('invalid-input', 'follows.eventTriggers.enabled must be a boolean')
   const acceptHeadRef = source['acceptHeadRef'] ?? false
   if (typeof acceptHeadRef !== 'boolean') fail('invalid-input', 'follows.eventTriggers.acceptHeadRef must be a boolean')
@@ -815,12 +822,11 @@ function normalizeFollows(raw: unknown): NormalizedFollows | undefined {
   return Object.freeze(acceptHeadRef ? { eventTriggers, eventTriggersAcceptHeadRef: true as const } : { eventTriggers })
 }
 
-/** Absent or disabled ledgers normalize to `undefined`; opt-ins default off. */
-function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined {
-  if (raw === undefined) return undefined
-  const value = plainObject(raw, 'intakeLedger')
+/** Disabled ledgers normalize to `undefined`; defaults to enabled with opt-in per-source filters off. */
+function normalizeIntakeLedger(raw: unknown, context: IntakeAdmitContext): NormalizedIntakeLedger | undefined {
+  const value = raw === undefined ? {} : plainObject(raw, 'intakeLedger')
   rejectUnknown(value, INTAKE_LEDGER_KEYS, 'intakeLedger')
-  const enabled = value['enabled'] ?? false
+  const enabled = value['enabled'] ?? true
   if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.enabled must be a boolean')
   const rawSources = value['sources'] === undefined ? {} : plainObject(value['sources'], 'intakeLedger.sources')
   const ids = Object.keys(rawSources)
@@ -838,17 +844,16 @@ function normalizeIntakeLedger(raw: unknown): NormalizedIntakeLedger | undefined
     }
     sources[id] = Object.freeze(policy as unknown as WorkItemIntakeSourcePolicy)
   }
-  const evaluation = normalizeIntakeEvaluation(value['evaluation'])
+  const evaluation = normalizeIntakeEvaluation(value['evaluation'], context)
   if (!enabled) return undefined
   return Object.freeze({ enabled: true as const, sources: Object.freeze(sources), ...(evaluation === undefined ? {} : { evaluation }) })
 }
 
-/** Absent or disabled evaluation normalizes to `undefined`; limits default small. */
-function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluation | undefined {
-  if (raw === undefined) return undefined
-  const value = plainObject(raw, 'intakeLedger.evaluation')
+/** Disabled evaluation normalizes to `undefined`; defaults to enabled with bounded limits. */
+function normalizeIntakeEvaluation(raw: unknown, context: IntakeAdmitContext): NormalizedIntakeEvaluation | undefined {
+  const value = raw === undefined ? {} : plainObject(raw, 'intakeLedger.evaluation')
   rejectUnknown(value, INTAKE_EVALUATION_KEYS, 'intakeLedger.evaluation')
-  const enabled = value['enabled'] ?? false
+  const enabled = value['enabled'] ?? true
   if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.evaluation.enabled must be a boolean')
   const normalized = Object.freeze({
     enabled: true as const,
@@ -857,23 +862,25 @@ function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluation | u
     maxPerRun: integer(value['maxPerRun'] ?? 5, 'intakeLedger.evaluation.maxPerRun', 1, 50),
     maxCallsPerHour: integer(value['maxCallsPerHour'] ?? 20, 'intakeLedger.evaluation.maxCallsPerHour', 1, 1_000),
   })
-  const admit = normalizeIntakeAdmit(value['admit'])
+  const admit = normalizeIntakeAdmit(value['admit'], context)
   if (!enabled) return undefined
   return admit === undefined ? normalized : Object.freeze({ ...normalized, admit })
 }
 
-/** Absent or disabled admission normalizes to `undefined`; enabled needs a kind and binding. */
-function normalizeIntakeAdmit(raw: unknown): NormalizedIntakeAdmit | undefined {
+/** Absent or disabled admission normalizes to `undefined`; supplied object defaults enabled and auto when eligible. */
+function normalizeIntakeAdmit(raw: unknown, context: IntakeAdmitContext): NormalizedIntakeAdmit | undefined {
   if (raw === undefined) return undefined
   const value = plainObject(raw, 'intakeLedger.evaluation.admit')
   rejectUnknown(value, INTAKE_ADMIT_KEYS, 'intakeLedger.evaluation.admit')
-  const enabled = value['enabled'] ?? false
+  const enabled = value['enabled'] ?? true
   if (typeof enabled !== 'boolean') fail('invalid-input', 'intakeLedger.evaluation.admit.enabled must be a boolean')
   if (!enabled) return undefined
-  const mode = value['mode'] ?? 'observe'
-  if (mode !== 'observe' && mode !== 'auto') fail('invalid-input', "intakeLedger.evaluation.admit.mode must be 'observe' or 'auto'")
   const kind = text(value['kind'] ?? 'intake-inferred', 'intakeLedger.evaluation.admit.kind', 64)
   if (!KIND.test(kind)) fail('invalid-input', 'intakeLedger.evaluation.admit.kind has an invalid shape')
+  const defaultMode: 'observe' | 'auto' = (context.enabled && context.mode === 'active' && !context.diagnosis && context.allowedKinds.includes(kind))
+    ? 'auto' : 'observe'
+  const mode = value['mode'] ?? defaultMode
+  if (mode !== 'observe' && mode !== 'auto') fail('invalid-input', "intakeLedger.evaluation.admit.mode must be 'observe' or 'auto'")
   const originBindingId = text(value['originBindingId'], 'intakeLedger.evaluation.admit.originBindingId', 256)
   if (!BINDING_ID.test(originBindingId)) fail('invalid-input', 'intakeLedger.evaluation.admit.originBindingId has an invalid shape')
   let acceptanceObjective: string | undefined

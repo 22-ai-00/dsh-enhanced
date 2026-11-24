@@ -98,11 +98,13 @@ describe('intake admission config', () => {
     intakeLedger: { enabled: true, evaluation: { enabled: true, ...(admit === undefined ? {} : { admit }) } }, ...overrides,
   } as Config, 1_700_000_000_000)
 
-  test('absent or disabled admit normalizes away; enabled defaults to observe', () => {
+  test('absent or disabled admit normalizes away; enabled defaults to auto when active kind is allowlisted else observe', () => {
     expect(base(undefined).intakeLedger?.evaluation?.admit).toBeUndefined()
     expect(base({ enabled: false, mode: 'auto' }).intakeLedger?.evaluation?.admit).toBeUndefined()
     expect(base({ enabled: true, originBindingId: 'binding-1' }).intakeLedger?.evaluation?.admit)
       .toEqual({ enabled: true, mode: 'observe', kind: 'intake-inferred', originBindingId: 'binding-1', maxPerHour: 5 })
+    expect(base({ enabled: true, kind: 'triage', originBindingId: 'binding-1' }).intakeLedger?.evaluation?.admit)
+      .toEqual({ enabled: true, mode: 'auto', kind: 'triage', originBindingId: 'binding-1', maxPerHour: 5 })
   })
 
   test('auto needs an active intake, an allowed kind and a binding; unknown keys are rejected', () => {
@@ -454,25 +456,25 @@ describe('schema 12 migration', () => {
     return path
   }
 
-  test('schema 11 upgrades additively through 13 and keeps its rows', async () => {
-    const path = await downgraded("DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
+  test('schema 11 upgrades additively through 14 and keeps its rows', async () => {
+    const path = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
     const store = new WorkItemStore(path)
     try {
-      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.stats().schemaVersion).toBe(14)
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
       expect(store.pendingIntakeAdmissions(10)).toEqual([])
     } finally {
       store.close()
     }
-    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
+    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 14 }])
   })
 
   test('an admission object under schema 11 or a drifted admission table fails closed', async () => {
-    const early = await downgraded("DROP TRIGGER work_item_intake_admission_no_update; DROP TRIGGER work_item_intake_admission_no_delete; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
+    const early = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TRIGGER work_item_intake_admission_no_update; DROP TRIGGER work_item_intake_admission_no_delete; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
     expect(() => new WorkItemStore(early)).toThrow(/intake admission object before schema 12/)
     expect(rows(early, 'PRAGMA user_version')).toEqual([{ user_version: 11 }])
     // Its append-only triggers alone are already an unknown object at schema 11.
-    const triggers = await downgraded("UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
+    const triggers = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; UPDATE work_item_schema_meta SET value = '11' WHERE key = 'schema_version'; PRAGMA user_version = 11;")
     expect(() => new WorkItemStore(triggers)).toThrow(/unexpected schema object/)
     const drifted = await downgraded('DROP TABLE work_item_intake_admission; CREATE TABLE work_item_intake_admission (source TEXT) STRICT;')
     expect(() => new WorkItemStore(drifted)).toThrow(/intake admission schema differs/)
@@ -491,7 +493,7 @@ describe('schema 13 migration', () => {
     expect(provenance?.admission).toEqual(record)
     fixture.store.close()
     const db = new DatabaseSync(fixture.config.databasePath)
-    db.exec("DROP INDEX work_item_intake_admission_item_idx; UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version'; PRAGMA user_version = 12;")
+    db.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP INDEX work_item_intake_admission_item_idx; UPDATE work_item_schema_meta SET value = '12' WHERE key = 'schema_version'; PRAGMA user_version = 12;")
     db.close()
     return { path: fixture.config.databasePath, itemId: record!.itemId!, provenance }
   }
@@ -500,25 +502,25 @@ describe('schema 13 migration', () => {
 
   test('a fresh database has the partial item index and the provenance read uses it', async () => {
     const fixture = await allowing()
-    expect(fixture.store.stats().schemaVersion).toBe(13)
+    expect(fixture.store.stats().schemaVersion).toBe(14)
     expect(rows(fixture.config.databasePath, "SELECT sql FROM sqlite_schema WHERE name = 'work_item_intake_admission_item_idx'"))
       .toEqual([{ sql: expect.stringMatching(/ON work_item_intake_admission\(item_id\) WHERE item_id IS NOT NULL$/u) }])
     expect(plan(fixture.config.databasePath)).toContain('USING INDEX work_item_intake_admission_item_idx')
   })
 
-  test('schema 12 upgrades additively to 13: rows are kept and provenance reads the same', async () => {
+  test('schema 12 upgrades additively to 14: rows are kept and provenance reads the same', async () => {
     const { path, itemId, provenance } = await schema12WithAdmission()
     expect(plan(path)).not.toContain('work_item_intake_admission_item_idx')
     const store = new WorkItemStore(path)
     try {
-      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.stats().schemaVersion).toBe(14)
       expect(store.intakeProvenance(itemId)).toEqual(provenance)
       expect(store.countIntakeAdmissions()).toMatchObject({ admitted: 1 })
     } finally {
       store.close()
     }
-    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
-    expect(rows(path, "SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'")).toEqual([{ value: '13' }])
+    expect(rows(path, 'PRAGMA user_version')).toEqual([{ user_version: 14 }])
+    expect(rows(path, "SELECT value FROM work_item_schema_meta WHERE key = 'schema_version'")).toEqual([{ value: '14' }])
     expect(plan(path)).toContain('USING INDEX work_item_intake_admission_item_idx')
   })
 
@@ -562,7 +564,7 @@ describe('schema 13 migration', () => {
     // reading 13 straight away would return without waiting.
     expect(performance.now() - started).toBeGreaterThan(500)
     try {
-      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.stats().schemaVersion).toBe(14)
       expect(store.intakeProvenance(itemId)).toEqual(provenance)
     } finally {
       store.close()

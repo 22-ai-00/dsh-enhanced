@@ -104,10 +104,12 @@ async function fixture(overrides:Partial<Config>={}) {
     replaceDelivery:()=>{currentDelivery={...delivery}},replaceAutomations:()=>{currentAutomations={...automations}},revoke:()=>{active=false},diagnosis,counts:()=>({ordinary,typed})}
 }
 
-test('feedback is independent, default-off and digest-compatible, with unchanged past execution deadlines',async()=>{
+test('feedback is independent, defaults on with ownerContinuation, and is digest-compatible with unchanged past execution deadlines',async()=>{
   const f=await fixture()
   try {
-    expect(f.config.ownerReplyContinuation).toBeUndefined()
+    expect(f.config.ownerReplyContinuation).toBe(true)
+    const replyOff=normalizeConfig({...f.raw,ownerReplyContinuation:false},f.base.now())
+    expect(replyOff.ownerReplyContinuation).toBeUndefined()
     const off=normalizeConfig({...f.raw,ownerReportFeedback:false},f.base.now())
     expect(off.ownerReportFeedback).toBeUndefined()
     expect(continuationConfigurationDigest(off,f.schemas)).toBe(continuationConfigurationDigest(f.config,f.schemas))
@@ -196,7 +198,7 @@ test('the final local read rejects report mutation or service disposal inside th
 })
 
 test('metadata can be typed before quiescence in feedback-only mode without granting continuation',async()=>{
-  const f=await fixture()
+  const f=await fixture({ownerReplyContinuation:false})
   let consumer:WorkItemOwnerReplies|undefined
   try {
     const dispatch=new WorkItemDispatch({config:f.config,store:f.base.store,ledger:f.base.ledger,delivery:f.delivery,automations:undefined,

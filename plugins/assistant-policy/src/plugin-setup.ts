@@ -142,6 +142,7 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['usageLearning.scanBudgetAmount', 'number'],
   ])],
   ['dsh-enhanced-assistant-memory-learning', new Map<string, KnownType>([
+    ['enabled', 'boolean'],
     ['databasePath', 'path'],
     ['workItemExperiences', 'boolean'],
     ['maxExtractions', 'number'],
@@ -192,10 +193,21 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['acceptance.holdReport.holdTimeoutMs', 'number'],
   ])],
   ['dsh-enhanced-assistant-delivery', new Map<string, KnownType>([
+    ['attentionEnforce', 'boolean'],
     ['attentionAttachOverCap', 'boolean'],
+    ['inProcessReload.enabled', 'boolean'],
     ['naturalFeedback.coverage', 'boolean'],
     ['naturalFeedback.mixedIntent', 'boolean'],
     ['ownerReportRouting.orderAcrossLanes', 'boolean'],
+  ])],
+  ['dsh-enhanced-assistant-evolution', new Map<string, KnownType>([
+    ['autonomousRollback', 'boolean'],
+    ['databasePath', 'path'],
+  ])],
+  ['dsh-enhanced-assistant-verifier', new Map<string, KnownType>([
+    ['requireAcceptance', 'boolean'],
+    ['tickIntervalMs', 'number'],
+    ['databasePath', 'path'],
   ])],
   ['dsh-enhanced-preference-learning', new Map<string, KnownType>([
     ['enabled', 'boolean'],
@@ -322,6 +334,12 @@ const knownOptionalKeys: ReadonlyMap<string, ReadonlyMap<string, KnownType>> = n
     ['webLearning.nodeTtlMs', 'number'],
     ['webLearning.budgetId', 'string'],
     ['webLearning.budgetAmount', 'number'],
+  ])],
+  ['dsh-enhanced-personal-memory', new Map<string, KnownType>([
+    ['automaticLearning', 'boolean'],
+  ])],
+  ['dsh-enhanced-personal-assistant', new Map<string, KnownType>([
+    ['personalMemory.automaticLearning', 'boolean'],
   ])],
 ])
 
@@ -1146,8 +1164,14 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-evaluation',
-    purpose: 'sync Delivery notification outcome facts into the evaluation ledger (WP22)',
-    set: [['notificationOutcomesEnabled', true]],
+    purpose: 'sync Delivery notification outcome facts, record intake agreement, auto-adopt bounded attention tightening and enable holdout-verified loosening (WP22)',
+    set: [
+      ['notificationOutcomesEnabled', true],
+      ['intakeAttentionAgreementEnabled', true],
+      ['intakeEvaluationAgreementEnabled', true],
+      ['attentionTuningAutoAdopt', true],
+      ['attentionLooseningEnabled', true],
+    ],
   },
   {
     id: 'dsh-enhanced-event-triggers',
@@ -1182,13 +1206,13 @@ export const recommendedPluginPreset: readonly PresetItem[] = Object.freeze([
 ])
 
 /**
- * Dogfood profile preset for daily ordinary-use validation of the memory /
- * preference lane on macOS (or Linux):
+ * Dogfood profile preset for daily ordinary-use validation on macOS (or Linux):
  * - Turns on preference-learning T1 overlay + Delivery natural owner feedback +
- *   Evaluation outcome & intake agreement recording (for `dsh-rsi growth-report`).
- * - Keeps proactive / work-items strictly in `observe` mode (no auto-admit, no
- *   attention parameter auto-adoption or loosening) until scorecard sample size
- *   and memory-lane acceptance pass.
+ *   Evaluation outcome, intake agreement, bounded auto-adopt and holdout-verified
+ *   loosening (with exact-parent rollback safety).
+ * - Enables work-items intake ledger & admission, proactive intake evaluation
+ *   (when rules/provider/model are configured), event-triggers polling, and
+ *   assistant-association S3/S4 capabilities per R3 defaults.
  */
 export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   {
@@ -1204,25 +1228,38 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-evaluation',
-    purpose: 'record notification outcomes and intake agreement while keeping attention auto-adopt and loosening strictly off',
+    purpose: 'record notification outcomes and intake agreement, auto-adopt bounded tightening and enable holdout-verified loosening (WP22)',
     set: [
       ['notificationOutcomesEnabled', true],
       ['intakeAttentionAgreementEnabled', true],
       ['intakeEvaluationAgreementEnabled', true],
-      ['attentionTuningAutoAdopt', false],
-      ['attentionLooseningEnabled', false],
-      ['attentionOwnerQuestionDeliveryEnabled', false],
+      ['attentionTuningAutoAdopt', true],
+      ['attentionLooseningEnabled', true],
     ],
   },
   {
     id: 'dsh-enhanced-assistant-work-items',
-    purpose: 'pin work-items and intake ledger strictly to observe mode (admit disabled) during memory-lane validation',
+    purpose: 'enable work-items intake ledger while keeping existing active/observe mode intact',
     whenInstalled: true,
-    set: [['enabled', true], ['mode', 'observe'], ['intakeLedger.enabled', true], ['intakeLedger.evaluation.admit.enabled', false]],
+    set: [['enabled', true], ['intakeLedger.enabled', true]],
   },
   {
     id: 'dsh-enhanced-assistant-work-items',
-    purpose: 'enable inferred intake evaluation in observe mode when owner rules and model route are already configured',
+    purpose: 'enable bounded intake admission when an explicit owner originBindingId is already configured',
+    whenInstalled: true,
+    requires: [
+      {
+        plugin: 'dsh-enhanced-assistant-work-items',
+        key: 'intakeLedger.evaluation.admit.originBindingId',
+        validate: nonEmptyText,
+        reason: 'assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId',
+      },
+    ],
+    set: [['intakeLedger.evaluation.admit.enabled', true]],
+  },
+  {
+    id: 'dsh-enhanced-assistant-work-items',
+    purpose: 'enable inferred intake evaluation when owner rules and model route are already configured',
     whenInstalled: true,
     requires: intakeEvaluationAuthorization,
     set: [['intakeLedger.evaluation.enabled', true]],
@@ -1241,7 +1278,7 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-proactive',
-    purpose: 'enable observe-only intake evaluation when owner rules and model route are already configured',
+    purpose: 'enable intake evaluation when owner rules and model route are already configured',
     whenInstalled: true,
     requires: intakeEvaluationAuthorization,
     set: [['intakeEvaluation.enabled', true]],
@@ -1259,7 +1296,7 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-dreaming',
-    purpose: 'scope assistant-dreaming databasePath to $DSH_HOME while keeping dreaming dormant during memory-lane validation',
+    purpose: 'scope assistant-dreaming databasePath to $DSH_HOME and enable dreaming once owner scope, model route and budget are declared',
     whenInstalled: true,
     set: [],
     resolveSet: scopedDatabaseResolver({
@@ -1271,9 +1308,9 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-event-triggers',
-    purpose: 'keep event-triggers poller off during memory-lane validation so proactive stays strictly observational',
+    purpose: 'enable event-triggers poller per R3 defaults so configured triggers run without a second switch',
     whenInstalled: true,
-    set: [['pollerEnabled', false]],
+    set: [['pollerEnabled', true]],
   },
   {
     id: 'dsh-enhanced-assistant-memory-learning',
@@ -1290,13 +1327,13 @@ export const dogfoodPluginPreset: readonly PresetItem[] = Object.freeze([
   },
   {
     id: 'dsh-enhanced-assistant-association',
-    purpose: 'enable local in-memory associative recall and scope databasePath to $DSH_HOME while keeping S3/S4 autonomous extensions disabled',
+    purpose: 'enable local associative recall, S3 dreaming/intakeSignal, S4 webLearning and scope databasePath to $DSH_HOME per R3 defaults',
     whenInstalled: true,
     set: [
       ['enabled', true],
-      ['dreaming.enabled', false],
-      ['intakeSignal.enabled', false],
-      ['webLearning.enabled', false],
+      ['dreaming.enabled', true],
+      ['intakeSignal.enabled', true],
+      ['webLearning.enabled', true],
     ],
     resolveSet: scopedDatabaseResolver({
       id: 'dsh-enhanced-assistant-association',

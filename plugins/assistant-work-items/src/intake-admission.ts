@@ -27,6 +27,8 @@ import { WorkItemError } from './types.ts'
 export interface WorkItemIntakeAdmissionHint {
   readonly objective: WorkItemIntakeObjective
   readonly acceptance?: WorkItemIntakeAcceptance
+  readonly confidencePpm?: number
+  readonly utility?: number
 }
 
 export type WorkItemIntakeAdmissionOutcome = 'would-admit' | 'admitted' | 'replayed' | 'refused'
@@ -90,17 +92,32 @@ export function intakeDecisionFor(record: WorkItemIntakeEvaluationRecord, config
 export class WorkItemIntakeAdmissionBridge {
   static readonly MAX_OBSERVE_REASONS = 1_024
   readonly #config: NormalizedIntakeAdmit
+  readonly #mode: () => 'observe' | 'auto'
+  readonly #ruleState: ((ruleId: string) => Readonly<{
+    enabled: boolean
+    mode?: 'observe' | 'auto'
+    confidenceThresholdPpm?: number
+    minUtility?: number
+  }> | undefined) | undefined
   readonly #maxPerRun: number
   readonly #store: () => WorkItemStore | undefined
   readonly #admit: (decision: WorkItemExecuteDecision) => WorkItemDecisionAdmitResult
   readonly #log: (message: string) => void
   readonly #now: () => number
   readonly #hint: ((source: string, sourceEventId: string) => WorkItemIntakeAdmissionHint | undefined) | undefined
+  readonly #onSettled: ((source: string, sourceEventId: string) => void) | undefined
   readonly #observeReasons = new Map<string, WorkItemIntakeObserveReason>()
   #lastError: string | null = null
 
   constructor(options: {
     config: NormalizedIntakeAdmit
+    mode?: () => 'observe' | 'auto'
+    ruleState?: (ruleId: string) => Readonly<{
+      enabled: boolean
+      mode?: 'observe' | 'auto'
+      confidenceThresholdPpm?: number
+      minUtility?: number
+    }> | undefined
     maxPerRun: number
     store: () => WorkItemStore | undefined
     admit: (decision: WorkItemExecuteDecision) => WorkItemDecisionAdmitResult
@@ -109,18 +126,23 @@ export class WorkItemIntakeAdmissionBridge {
     /**
      * Producer hint for the objective/acceptance of one candidate. When this
      * option is absent (direct component use), the historical auto behavior is
-     * unchanged; the WorkItems service always supplies it, so production auto
-     * admission requires an acceptance handle and otherwise records observe.
+     * unchanged; the WorkItems service always supplies it (reading in-memory
+     * cache with encrypted SQLite staging fallback on restart), so production
+     * auto admission requires an acceptance handle and otherwise records observe.
      */
     hint?: (source: string, sourceEventId: string) => WorkItemIntakeAdmissionHint | undefined
+    onSettled?: (source: string, sourceEventId: string) => void
   }) {
     this.#config = options.config
+    this.#mode = options.mode ?? (() => this.#config.mode)
+    this.#ruleState = options.ruleState
     this.#maxPerRun = options.maxPerRun
     this.#store = options.store
     this.#admit = options.admit
     this.#log = options.log
     this.#now = options.now ?? (() => Date.now())
     this.#hint = options.hint
+    this.#onSettled = options.onSettled
   }
 
   /** One bounded pass over accepting evaluations without an admission row; never throws. */
@@ -147,7 +169,8 @@ export class WorkItemIntakeAdmissionBridge {
     if (record.outcome !== 'would-admit') return undefined
     const existing = this.#observeReasons.get(this.#reasonKey(record))
     if (existing !== undefined) return existing
-    return this.#config.mode === 'observe' ? 'configured-observe' : 'missing-acceptance'
+    const effectiveMode = this.#ruleState?.(record.ruleId)?.mode ?? this.#mode()
+    return effectiveMode === 'observe' ? 'configured-observe' : 'missing-acceptance'
   }
 
   #reasonKey(record: Pick<WorkItemIntakeAdmissionRecord, 'source' | 'sourceEventId' | 'ruleId' | 'policyVersion'>): string {
@@ -167,20 +190,39 @@ export class WorkItemIntakeAdmissionBridge {
 
   /** `undefined` leaves the row pending for the next wake (a transient storage failure). */
   #decide(store: WorkItemStore, evaluation: WorkItemIntakeEvaluationRecord): WorkItemIntakeAdmissionRecord | undefined {
+    const ruleOverride = this.#ruleState?.(evaluation.ruleId)
+    if (ruleOverride?.enabled === false) return undefined
+    const effectiveMode = ruleOverride?.mode ?? this.#mode()
     const decisionId = intakeDecisionIdFor(evaluation)
     const key = { source: evaluation.source, sourceEventId: evaluation.sourceEventId, ruleId: evaluation.ruleId, policyVersion: evaluation.policyVersion, decisionId }
-    if (this.#config.mode === 'observe') {
+    if (effectiveMode === 'observe') {
       const written = store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
       this.#rememberObserveReason(key, 'configured-observe')
+      this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
       return written
     }
     const hint = this.#hint?.(evaluation.source, evaluation.sourceEventId)
+    if (ruleOverride !== undefined && hint !== undefined) {
+      const belowConfidence = ruleOverride.confidenceThresholdPpm !== undefined
+        && hint.confidencePpm !== undefined
+        && hint.confidencePpm < ruleOverride.confidenceThresholdPpm
+      const belowUtility = ruleOverride.minUtility !== undefined
+        && hint.utility !== undefined
+        && hint.utility < ruleOverride.minUtility
+      if (belowConfidence || belowUtility) {
+        const written = store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
+        this.#rememberObserveReason(key, 'configured-observe')
+        this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
+        return written
+      }
+    }
     if (this.#hint !== undefined && (hint?.objective === undefined || hint.acceptance === undefined)) {
       // Auto without both an objective and a real verifier contract handle fails
       // closed to observe; an append-only row guarantees replays never bypass it.
       const reason: WorkItemIntakeObserveReason = hint?.objective === undefined ? 'missing-objective' : 'missing-acceptance'
       const written = store.recordIntakeAdmission({ ...key, mode: 'observe', outcome: 'would-admit', reasonCode: null, itemId: null })
       this.#rememberObserveReason(key, reason)
+      this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
       return written
     }
     const budget = Math.max(0, this.#config.maxPerHour - store.countIntakeAdmitted(this.#now() - HOUR_MS))
@@ -190,11 +232,29 @@ export class WorkItemIntakeAdmissionBridge {
     } catch (error) {
       // A storage fault or a closing service may clear; anything else is a final refusal under its code.
       if (!(error instanceof WorkItemError) || DEFERRED.has(error.code)) { this.#fail(error); return undefined }
-      return store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: 'refused', reasonCode: error.code, itemId: null })
+      const written = store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: 'refused', reasonCode: error.code, itemId: null })
+      this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
+      return written
     }
-    if (result.outcome === 'refused') return store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: 'refused', reasonCode: result.reasonCode, itemId: null })
+    if (result.outcome === 'refused') {
+      const written = store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: 'refused', reasonCode: result.reasonCode, itemId: null })
+      this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
+      return written
+    }
     // A crash before this write re-runs the same decision id next wake and records `replayed`.
-    return store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: result.outcome, reasonCode: null, itemId: result.item.id })
+    const written = store.recordIntakeAdmission({ ...key, mode: 'auto', outcome: result.outcome, reasonCode: null, itemId: result.item.id })
+    this.#pruneIfSettled(store, evaluation.source, evaluation.sourceEventId)
+    return written
+  }
+
+  #pruneIfSettled(store: WorkItemStore, source: string, sourceEventId: string): void {
+    try {
+      if (store.pruneIntakeStagingAfterAdmission(source, sourceEventId)) {
+        this.#onSettled?.(source, sourceEventId)
+      }
+    } catch {
+      // Best-effort cleanup; expired/settled staging will also be pruned on wake.
+    }
   }
 
   #fail(error: unknown): void {

@@ -4,6 +4,7 @@ import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-policy'
 export { AssistantPolicyService, Config, version }
+export { compilePolicy, evaluatePolicy } from './evaluator.js'
 export {
   APPROVAL_REVIEWERS,
   approvalReviewerOf,
@@ -17,7 +18,7 @@ export type { HumanApprovalAnswerer } from './approval-routing.js'
 export { isAutoReviewEscalation } from './auto-review.js'
 export type { AutoReviewAssessment, AutoReviewConfig } from './auto-review.js'
 export { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
-export type { NativeFullReviewerReconciliation, OwnerRequestedChangeContext, OwnerRequestedChangeInput, PolicyBudgetConfig, PolicyHostConfiguration, PrincipalAuthorizationOptions } from './service.js'
+export type { AuthorizationOptions, NativeFullReviewerReconciliation, OwnerRequestedChangeContext, OwnerRequestedChangeInput, PolicyBudgetConfig, PolicyHostConfiguration, PolicyPreDispatchRollbackInput, PrincipalAuthorizationOptions } from './service.js'
 export { principalPartitionScope } from './service.js'
 export { APPROVAL_DISPLAY_BUDGET } from './ledger.js'
 export { ApprovalSettlementConflict, validateApprovalSettlement } from './settlement.js'
@@ -47,6 +48,8 @@ export type {
   BudgetReservationResult,
   ApprovalProposalSnapshot,
   EmergencyStopState,
+  LeaseState,
+  PreDispatchRollbackInput,
 } from './ledger.js'
 export {
   AUTONOMY_BUDGET_TIERS,
@@ -89,12 +92,15 @@ export {
   isIntakeEvaluationLevel,
   isIntakeRulePresetTier,
   isValidIntakeRuleId,
+  mergeIntakeRuleUpdates,
+  normalizeIntakeRuleUpdates,
   resolveIntakeEvaluationPresetRules,
   type IntakeEvaluationLevel,
   type IntakeEvaluationPresetResolutionInput,
   type IntakeEvaluationRuleSpec,
   type IntakePresetRuleId,
   type IntakePresetSourceKind,
+  type IntakeRuleOverrideUpdate,
   type IntakeRulePresetEntry,
   type IntakeRulePresetTier,
 } from './intake-presets.js'

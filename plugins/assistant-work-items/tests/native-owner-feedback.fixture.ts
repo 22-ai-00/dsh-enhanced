@@ -167,6 +167,7 @@ export async function feedbackFixture(options: { replyEnabled?:boolean; holdSumm
   await ctx.plugin(AgentLoop, { agents: [] }).await()
   const deliveryConfig: DeliveryConfig = { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
     defaultWorkspace: root, defaultAgentPreset: 'primary', agentProvider: 'local', agentModel: 'scripted', agentMaxAutoContinuationTurns: 0,
+    attentionAttachOverCap: false, attentionEnforce: false,
     ownerRoutes: [{ id: scope.authorityId, conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }] }
   const evaluationConfig={databasePath:join(root,'evaluation.sqlite'),projectionIntervalMs:0}
   let evaluationFork=ctx.plugin(AssistantEvaluationService,evaluationConfig);await evaluationFork.await()
@@ -174,7 +175,7 @@ export async function feedbackFixture(options: { replyEnabled?:boolean; holdSumm
   operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
   const pairing = ctx.assistantDelivery.issuePairing('test', principal); ctx.assistantDelivery.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
   let adapterContext: DeliveryAdapterContext | undefined
-  const registerAdapter = async () => ctx.assistantDelivery.registerAdapter({channel:'web',account:'browser',capabilities:{reconcileUnknownSend:false,receipts:[],formats:['plain','markdown']},start:async context=>{adapterContext=context},send:async intent=>{const providerMessageId=`local-provider-${sent.length+1}`;sent.push({providerMessageId,intent});return {outcome:'accepted',providerMessageId}}})
+  const registerAdapter = async () => ctx.assistantDelivery.registerAdapter({channel:'web',account:'browser',capabilities:{reconcileUnknownSend:false,receipts:[],formats:['plain','markdown'],textAttachments:true},start:async context=>{adapterContext=context},send:async intent=>{const providerMessageId=`local-provider-${sent.length+1}`;sent.push({providerMessageId,intent});return {outcome:'accepted',providerMessageId}}})
   await registerAdapter()
   const originalCreate=ctx.agents.create.bind(ctx.agents)
   if(options.holdDispose) {

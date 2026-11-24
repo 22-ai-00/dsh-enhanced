@@ -10,6 +10,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import proactive, {
   Config,
+  DEFAULT_PROACTIVE_PROFILES,
   normalizeProactiveIntakeRouteInput,
   parseTerminalGoalChanged,
   planProactiveIntakeRoute,
@@ -261,11 +262,11 @@ describe('assistant-proactive goal unsubscribe lifecycle & intake routing helper
       await ctx.plugin(proactive, { databasePath: ':memory:', profiles: [coalesceProfile] })
       const service = ctx.assistantProactive
 
-      // Preserves --dump-config / empty Config default shape and routes cleanly without enabled evaluator
+      // Preserves --dump-config / empty Config R3 default shape and routes cleanly without configured model route
       expect(Config({})).toEqual({
         databasePath: expect.any(String),
-        intakeEvaluation: { enabled: false, rules: [] },
-        profiles: [],
+        intakeEvaluation: { enabled: true, rules: [] },
+        profiles: DEFAULT_PROACTIVE_PROFILES.map(profile => ({ ...profile })),
       })
       expect(service.routeIntakeObservation({
         source: 'event-triggers',

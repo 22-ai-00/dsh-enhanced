@@ -336,19 +336,17 @@ describe('event-triggers follow source', () => {
     expect(readStore(fx.root).outcomes(admitted.item.id)).toHaveLength(1)
   })
 
-  test('flag off registers nothing and never reads Event Triggers', async () => {
-    for (const follows of [undefined, false]) {
-      const fx = await fixture({ follows: follows as boolean | undefined })
-      if (follows === undefined) {
-        // Absent config keeps the prior normalized shape exactly.
-        expect('follows' in normalizeConfig(config(fx.root, undefined))).toBe(false)
-      }
-      expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })))).toBe('invalid-input')
-      // Hosts may still register their own source under that name.
-      const dispose = fx.service.registerThreadSource({ source: 'event-triggers', generation: 'host', resolve: () => undefined })
-      dispose()
-      expect(fx.state.reads).toBe(0)
-    }
+  test('flag off registers nothing and never reads Event Triggers; scoped deployment defaults eventTriggers on', async () => {
+    const fxDefault = await fixture({ follows: undefined })
+    expect(normalizeConfig(config(fxDefault.root, undefined)).follows).toEqual({ eventTriggers: true })
+
+    const fx = await fixture({ follows: false })
+    expect('follows' in normalizeConfig(config(fx.root, false))).toBe(false)
+    expect(errorCode(() => fx.service.admit(signal({ follows: [{ kind: 'event-triggers', ref: refFor(fx.state, 'deploy-hook') }] })))).toBe('invalid-input')
+    // Hosts may still register their own source under that name.
+    const dispose = fx.service.registerThreadSource({ source: 'event-triggers', generation: 'host', resolve: () => undefined })
+    dispose()
+    expect(fx.state.reads).toBe(0)
   })
 
   test('without the Event Triggers service the source stays unregistered', async () => {
@@ -455,6 +453,7 @@ describe('event-triggers follow @head alias', () => {
 describe('event-triggers follow config and helpers', () => {
   test('validates follows config and requires an enabled scoped intake', () => {
     const root = '/tmp/work-items-event-follow-config'
+    expect(normalizeConfig(config(root, undefined)).follows).toEqual({ eventTriggers: true })
     expect(normalizeConfig(config(root, true)).follows).toEqual({ eventTriggers: true })
     expect(normalizeConfig(config(root, false)).follows).toBeUndefined()
     expect(normalizeConfig(config(root, true, false)).follows).toEqual({ eventTriggers: true })

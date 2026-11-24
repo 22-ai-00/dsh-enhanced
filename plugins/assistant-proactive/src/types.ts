@@ -47,6 +47,46 @@ export interface OpportunityEvaluation {
   decision: Readonly<OpportunityDecision>
 }
 
+/** Optional runtime telemetry supplied to OpportunityEngine.evaluate for WP12 dynamic utility. */
+export interface ProactiveRuntimeContext {
+  /** True when the owner is currently in an active turn or an agent is running. */
+  readonly userActive?: boolean
+  /** Elapsed ms since last known owner interaction (>= 0). */
+  readonly idleDurationMs?: number
+  /** Recent owner-facing notification count in the rolling window (>= 0). */
+  readonly recentNotificationCount?: number
+  /** Explicit urgency signal in [0, 1_000_000] ppm; when omitted, derived from remaining TTL. */
+  readonly urgencyPpm?: number
+  /** Historical acceptance rate in [0, 1_000_000] ppm. */
+  readonly acceptanceRatePpm?: number
+  /** Sample count accompanying acceptanceRatePpm (>= 0). */
+  readonly acceptanceSamples?: number
+}
+
+/** Internal/test signal bundle passed into computeDynamicUtility. */
+export interface ProactiveDynamicSignals extends ProactiveRuntimeContext {
+  /** Remaining TTL in ms (`expiresAt - now`); values in [0, URGENCY_WINDOW_MS) add urgency bonus. */
+  readonly remainingTtlMs?: number
+  /** Durable accepted feedback count in local history (>= 0). */
+  readonly acceptedCount?: number
+  /** Durable rejected feedback count in local history (>= 0). */
+  readonly rejectedCount?: number
+  /** Tighten-only overlay delta already folded into `profile.interruptionCost`; never undercut by idle discount. */
+  readonly overlayInterruptionCostDelta?: number
+}
+
+/** Deterministic integer breakdown of WP12 dynamic utility & interruption cost. */
+export interface ProactiveDynamicUtilityBreakdown {
+  readonly baseUtility: number
+  readonly baseInterruptionCost: number
+  readonly effectiveInterruptionCost: number
+  readonly activityAdjustment: number
+  readonly frequencyPenalty: number
+  readonly urgencyBonus: number
+  readonly acceptanceAdjustment: number
+  readonly effectiveUtility: number
+}
+
 export type ProactiveDraftState = 'queued' | 'running' | 'draft' | 'failed' | 'cancelled' | 'unknown'
 
 export interface ProactiveDraftFilter {

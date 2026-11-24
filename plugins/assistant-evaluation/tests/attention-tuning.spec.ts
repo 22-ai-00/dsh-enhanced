@@ -73,6 +73,7 @@ function setup(options: { path?: string; autoAdopt?: boolean; source?: FactSourc
     databasePath: options.path ?? ':memory:', projectionIntervalMs: 0,
     notificationOutcomesEnabled: true, notificationResponseWindowMs: hour, notificationSyncBatchSize: 500,
     attentionTuningAutoAdopt: options.autoAdopt ?? true, attentionTuningObservationMs: day,
+    attentionLooseningEnabled: false,
   }, { now: () => clock.now })
   const sync = () => {
     while (evaluation.reconcileNotificationOutcomes().ingested > 0) { /* drain */ }

@@ -482,6 +482,10 @@ describe('plugin setup: assembly preset guards', () => {
       { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.coverage', from: undefined, to: true },
       { id: 'dsh-enhanced-assistant-delivery', key: 'naturalFeedback.mixedIntent', from: undefined, to: true },
       { id: 'dsh-enhanced-assistant-evaluation', key: 'notificationOutcomesEnabled', from: false, to: true },
+      { id: 'dsh-enhanced-assistant-evaluation', key: 'intakeAttentionAgreementEnabled', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-evaluation', key: 'intakeEvaluationAgreementEnabled', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-evaluation', key: 'attentionTuningAutoAdopt', from: undefined, to: true },
+      { id: 'dsh-enhanced-assistant-evaluation', key: 'attentionLooseningEnabled', from: undefined, to: true },
       { id: 'dsh-enhanced-event-triggers', key: 'pollerEnabled', from: false, to: true },
     ])
     expect(result.skipped.map(skip => skip.id)).toEqual([
@@ -730,25 +734,27 @@ describe('plugin setup: CLI', () => {
       })
     }
 
-    // Verify `preset dogfood` and `applyDogfoodPluginPreset` enable preference/evaluation observation and pin proactive/work-items/event-triggers strictly to observe mode.
+    // Verify `preset dogfood` and `applyDogfoodPluginPreset` enable full R3 capabilities across evaluation/work-items/proactive/event-triggers/association.
     const homeDogfood = await temporaryHome()
-    const dogfoodBundles = `${assemblyBundles.replace('    mode: observe\n', '    mode: active\n    enabled: true\n').replace('    enabled: false\n    mode: active', '    mode: active').replace('    pollerEnabled: false\n', '    pollerEnabled: true\n')}
+    const dogfoodBundles = `${assemblyBundles.replace('    mode: observe\n', '    mode: active\n    enabled: true\n').replace('    enabled: false\n    mode: active', '    mode: active').replace('    pollerEnabled: false\n', '    pollerEnabled: false\n')}
 - id: dsh-enhanced-preference-learning
   name: '@dsh-enhanced/preference-learning'
   config:
     enabled: false
     autonomousT1Enabled: false
 `
+
     const dogfoodIo = memoryIo([], false)
     await runPluginSetup(['preset', 'dogfood', '--yes', '--dsh-home', homeDogfood, '--profile', 'web'], dogfoodIo, {
       readDump: dumpFixture(dogfoodBundles),
     })
     expect(dogfoodIo.output).toContain('dsh-enhanced-preference-learning.enabled: false -> true')
     expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.intakeEvaluationAgreementEnabled: (unset) -> true')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.attentionLooseningEnabled: (unset) -> false')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.mode: "active" -> "observe"')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.intakeLedger.evaluation.admit.enabled: (unset) -> false')
-    expect(dogfoodIo.output).toContain('dsh-enhanced-event-triggers.pollerEnabled: true -> false')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-evaluation.attentionLooseningEnabled: (unset) -> true')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-assistant-work-items.intakeLedger.enabled: (unset) -> true')
+    expect(dogfoodIo.output).not.toContain('dsh-enhanced-assistant-work-items.intakeLedger.evaluation.admit.enabled')
+    expect(dogfoodIo.output).toContain('skipped dsh-enhanced-assistant-work-items: waiting for explicit configuration: assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId')
+    expect(dogfoodIo.output).toContain('dsh-enhanced-event-triggers.pollerEnabled: false -> true')
 
     const homeDogfoodApi = await temporaryHome()
     const apiResult = await applyDogfoodPluginPreset(
@@ -757,14 +763,64 @@ describe('plugin setup: CLI', () => {
     )
     expect(apiResult.changed).toBe(true)
     expect(apiResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'intakeLedger.enabled',
+      from: undefined,
+      to: true,
+    })
+    expect(apiResult.changes.some(c => c.id === 'dsh-enhanced-assistant-work-items' && c.key === 'intakeLedger.evaluation.admit.enabled')).toBe(false)
+    expect(apiResult.skipped).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      reason: 'waiting for explicit configuration: assistant-work-items.intakeLedger.evaluation.admit.originBindingId is not configured; automatic admission requires an explicit owner originBindingId',
+    })
+    expect(await profilePatch(homeDogfoodApi)).not.toContain('admit')
+    expect(apiResult.changes).toContainEqual({
       id: 'dsh-enhanced-event-triggers',
       key: 'pollerEnabled',
-      from: true,
-      to: false,
+      from: false,
+      to: true,
     })
+
+    // When originBindingId is explicitly present in cordis.patch.yml, dogfood preset enables admit.enabled.
+    const homeDogfoodBound = await temporaryHome()
+    await writeFile(join(homeDogfoodBound, 'profiles', 'web', 'cordis.patch.yml'), [
+      '- id: dsh-enhanced-assistant-work-items',
+      '  config:',
+      '    enabled: false',
+      '    mode: observe',
+      '    intakeLedger:',
+      '      evaluation:',
+      '        enabled: false',
+      '        admit:',
+      '          originBindingId: binding-origin-1',
+      '',
+    ].join('\n'), 'utf8')
+    const boundResult = await applyDogfoodPluginPreset(
+      { dshHome: homeDogfoodBound, profile: 'web' },
+      { readDump: dumpFixture(dogfoodBundles) },
+    )
+    expect(boundResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'enabled',
+      from: false,
+      to: true,
+    })
+    expect(boundResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'intakeLedger.enabled',
+      from: undefined,
+      to: true,
+    })
+    expect(boundResult.changes).toContainEqual({
+      id: 'dsh-enhanced-assistant-work-items',
+      key: 'intakeLedger.evaluation.admit.enabled',
+      from: undefined,
+      to: true,
+    })
+    expect(boundResult.skipped.filter(s => s.id === 'dsh-enhanced-assistant-work-items')).toEqual([])
   })
 
-  test('sets S3 assistant-association nested keys without --force and pins S3/S4 flags off in dogfood preset', async () => {
+  test('sets S3 assistant-association nested keys without --force and enables S3/S4 flags in dogfood preset', async () => {
     const home = await temporaryHome()
     const assocBundle = `
 - id: dsh-enhanced-assistant-association
@@ -772,11 +828,11 @@ describe('plugin setup: CLI', () => {
   config:
     enabled: false
     dreaming:
-      enabled: true
+      enabled: false
     intakeSignal:
-      enabled: true
+      enabled: false
     webLearning:
-      enabled: true
+      enabled: false
 `
     const dumpOpts = { readDump: dumpFixture(assocBundle) }
     const s3Settings: ReadonlyArray<readonly [string, string]> = [
@@ -823,14 +879,14 @@ describe('plugin setup: CLI', () => {
     expect(dogfoodResult.changes).toEqual(
       expect.arrayContaining([
         { id: 'dsh-enhanced-assistant-association', key: 'enabled', from: false, to: true },
-        { id: 'dsh-enhanced-assistant-association', key: 'dreaming.enabled', from: true, to: false },
-        { id: 'dsh-enhanced-assistant-association', key: 'intakeSignal.enabled', from: true, to: false },
-        { id: 'dsh-enhanced-assistant-association', key: 'webLearning.enabled', from: true, to: false },
+        { id: 'dsh-enhanced-assistant-association', key: 'dreaming.enabled', from: false, to: true },
+        { id: 'dsh-enhanced-assistant-association', key: 'intakeSignal.enabled', from: false, to: true },
+        { id: 'dsh-enhanced-assistant-association', key: 'webLearning.enabled', from: false, to: true },
       ]),
     )
   })
 
-  test('sets S4 assistant-association webLearning keys including string[] arrays without --force while dogfood preset keeps webLearning.enabled false', async () => {
+  test('sets S4 assistant-association webLearning keys including string[] arrays without --force while dogfood preset keeps webLearning.enabled true', async () => {
     const home = await temporaryHome()
     const assocS4Bundle = `
 - id: dsh-enhanced-assistant-association
@@ -894,17 +950,75 @@ describe('plugin setup: CLI', () => {
     expect(patchText).toContain('budgetId: web-budget-1')
 
     const homeDogfood = await temporaryHome()
-    const enabledBundle = assocS4Bundle.replace('    webLearning:\n      enabled: false', '    webLearning:\n      enabled: true')
     const dogfoodResult = await applyDogfoodPluginPreset(
       { dshHome: homeDogfood, profile: 'web' },
-      { readDump: dumpFixture(enabledBundle) },
+      { readDump: dumpFixture(assocS4Bundle) },
     )
     expect(dogfoodResult.changes).toContainEqual({
       id: 'dsh-enhanced-assistant-association',
       key: 'webLearning.enabled',
-      from: true,
-      to: false,
+      from: false,
+      to: true,
     })
-    expect(await profilePatch(homeDogfood)).toContain('enabled: false')
+    expect(await profilePatch(homeDogfood)).toContain('enabled: true')
+  })
+
+  test('sets memory-learning enabled and personal-memory/personal-assistant automaticLearning without --force', async () => {
+    const home = await temporaryHome()
+    const memoryBundle = `
+- id: dsh-enhanced-assistant-memory-learning
+  name: '@dsh-enhanced/assistant-memory-learning'
+  config: {}
+- id: dsh-enhanced-personal-memory
+  name: '@dsh-enhanced/personal-memory'
+  config:
+    databasePath: /tmp/pm.sqlite
+- id: dsh-enhanced-personal-assistant
+  name: '@dsh-enhanced/personal-assistant'
+  config:
+    personalMemory:
+      databasePath: /tmp/pa-pm.sqlite
+`
+    const dumpOpts = { readDump: dumpFixture(memoryBundle) }
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'assistant-memory-learning',
+      key: 'enabled',
+      value: 'true',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'personal-memory',
+      key: 'automaticLearning',
+      value: 'false',
+    }, dumpOpts)
+    await setPluginConfigValue({
+      dshHome: home,
+      profile: 'web',
+      plugin: 'personal-assistant',
+      key: 'personalMemory.automaticLearning',
+      value: 'false',
+    }, dumpOpts)
+
+    const patchText = await profilePatch(home)
+    expect(patchText).toContain('dsh-enhanced-assistant-memory-learning')
+    expect(patchText).toContain('enabled: true')
+    expect(patchText).toContain('dsh-enhanced-personal-memory')
+    expect(patchText).toContain('automaticLearning: false')
+    expect(patchText).toContain('dsh-enhanced-personal-assistant')
+  })
+
+  test('coerces R3/F12/F14 optional keys for delivery, evolution, and verifier without --force', () => {
+    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'attentionEnforce', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-delivery', 'inProcessReload.enabled', 'false', undefined)).toBe(false)
+    expect(coerceConfigValue('dsh-enhanced-assistant-evolution', 'autonomousRollback', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-evolution', 'databasePath', '/var/lib/dsh/evolution.sqlite', undefined)).toBe('/var/lib/dsh/evolution.sqlite')
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-evolution', 'databasePath', 'relative.sqlite', undefined)).toThrow('canonical absolute path')
+    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'requireAcceptance', 'true', undefined)).toBe(true)
+    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'tickIntervalMs', '2500', undefined)).toBe(2500)
+    expect(coerceConfigValue('dsh-enhanced-assistant-verifier', 'databasePath', '/var/lib/dsh/verifier.sqlite', undefined)).toBe('/var/lib/dsh/verifier.sqlite')
+    expect(() => coerceConfigValue('dsh-enhanced-assistant-verifier', 'tickIntervalMs', 'not-a-number', undefined)).toThrow('expects a number')
   })
 })

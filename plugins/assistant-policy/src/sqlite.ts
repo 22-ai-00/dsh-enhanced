@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const policySchemaVersion = 6
+export const policySchemaVersion = 7
 
 export const legacyApprovalIntentHash = 'legacy-v4-unbound'
 
@@ -171,9 +171,42 @@ function migrate(database: DatabaseSync): void {
           details_json TEXT NOT NULL
         ) STRICT;
 
-        INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
+        CREATE TABLE policy_leases (
+          lease_id TEXT PRIMARY KEY,
+          uses INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+          revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+          revoked_at INTEGER,
+          revoked_by TEXT,
+          revocation_reason TEXT,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE policy_commit_heads (
+          scope_key TEXT PRIMARY KEY,
+          commit_digest TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE policy_idempotency_bindings (
+          idempotency_key TEXT PRIMARY KEY,
+          intent_hash TEXT NOT NULL CHECK (
+            length(intent_hash) = 64 AND intent_hash NOT GLOB '*[^0-9a-f]*'
+          ),
+          commit_digest TEXT,
+          predecessor_digest TEXT,
+          lease_id TEXT,
+          rule_id TEXT,
+          outcome TEXT NOT NULL CHECK (outcome IN ('allow', 'deny')),
+          reason_code TEXT NOT NULL,
+          budget_id TEXT,
+          budget_amount REAL,
+          budget_principal TEXT,
+          created_at INTEGER NOT NULL
+        ) STRICT;
+
+        INSERT INTO schema_meta(key, value) VALUES ('schema-version', '7');
       `)
-      version = 6
+      version = 7
     }
 
     if (version === 1) {
@@ -372,6 +405,44 @@ function migrate(database: DatabaseSync): void {
         `)
       }
       version = 6
+    }
+
+    if (version === 6) {
+      database.exec(`
+        CREATE TABLE policy_leases (
+          lease_id TEXT PRIMARY KEY,
+          uses INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+          revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+          revoked_at INTEGER,
+          revoked_by TEXT,
+          revocation_reason TEXT,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE policy_commit_heads (
+          scope_key TEXT PRIMARY KEY,
+          commit_digest TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+        CREATE TABLE policy_idempotency_bindings (
+          idempotency_key TEXT PRIMARY KEY,
+          intent_hash TEXT NOT NULL CHECK (
+            length(intent_hash) = 64 AND intent_hash NOT GLOB '*[^0-9a-f]*'
+          ),
+          commit_digest TEXT,
+          predecessor_digest TEXT,
+          lease_id TEXT,
+          rule_id TEXT,
+          outcome TEXT NOT NULL CHECK (outcome IN ('allow', 'deny')),
+          reason_code TEXT NOT NULL,
+          budget_id TEXT,
+          budget_amount REAL,
+          budget_principal TEXT,
+          created_at INTEGER NOT NULL
+        ) STRICT;
+      `)
+      version = 7
     }
 
     if (version !== policySchemaVersion) {

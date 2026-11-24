@@ -302,7 +302,7 @@ async function fixture(options: { holdSummary?: boolean; holdDispose?: boolean; 
     const authority={kind:'runner' as const,id:'continuation-read-result',executable:process.execPath,
       fixedArgs:['-e',"process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))"],timeoutMs:5_000,maxOutputBytes:1024}
     const compiled=createVerifierAuthorities({authorities:[authority]})
-    await ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,authorities:[authority],profiles:withProfile?[{
+    await ctx.plugin(AssistantVerifierService,{databasePath:join(root,'verifier.sqlite'),tickIntervalMs:0,requireAcceptance:false,authorities:[authority],profiles:withProfile?[{
       id:'continuation-result',version:1,scope:{workspace:root,preset:'primary'},owner:{principalRecordId:owner.principalRecordId,principalVersion:owner.principalVersion},
       taskKind:'automation-run',objective,validityMs:60_000,bounds:{maxDurationMs:5_000,maxEvidenceBytes:4096},
       criteria:[{id:'result',kind:'process-behavior',authority:{id:authority.id,digest:compiled[0]!.digest},artifactPath:'verified-result.txt',stdin:'',expectedStdout:'verified',expectedExitCode:0}],

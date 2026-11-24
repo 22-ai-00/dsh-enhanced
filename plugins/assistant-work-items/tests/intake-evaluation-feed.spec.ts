@@ -252,8 +252,8 @@ describe('listIntakeEvaluationFeed (WP22)', () => {
     }
     expect(seenSeq).toEqual(seenKeyset)
 
-    // Determinism across repeated reads and clean schema 13 check
-    expect(f.store.stats().schemaVersion).toBe(13)
+    // Determinism across repeated reads and clean schema 14 check
+    expect(f.store.stats().schemaVersion).toBe(14)
     expect(f.store.listIntakeEvaluationFeed({ limit: 5000 }).items.map(i => i.id))
       .toEqual(f.store.listIntakeEvaluationFeed({ limit: 50 }).items.map(i => i.id))
   })
@@ -386,10 +386,10 @@ describe('listIntakeEvaluationFeed (WP22)', () => {
     expect(page2.items.map(i => i.sourceEventId)).toEqual(['svc-ev-3'])
     expect(page2.hasMore).toBe(false)
 
-    // Schema stays strictly at 13 on disk
+    // Schema stays strictly at 14 on disk
     const db = new DatabaseSync(activeCfg.databasePath, { readOnly: true })
     try {
-      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 13 })
+      expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
     } finally {
       db.close()
     }

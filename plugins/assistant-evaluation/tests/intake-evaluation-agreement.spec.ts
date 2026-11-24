@@ -320,9 +320,9 @@ function setupService(options: {
 }
 
 describe('WP20 would-accept feed -> WP22 evaluation agreement & loosening', () => {
-  test('disabled-by-default parity: zero feed reads, zero SQLite writes, undefined summaries and intake cohort isolated', () => {
+  test('disabled parity: zero feed reads, zero SQLite writes, undefined summaries and intake cohort isolated', () => {
     const f = setupService({
-      config: { notificationOutcomesEnabled: true, attentionTuningAutoAdopt: true },
+      config: { notificationOutcomesEnabled: true, attentionTuningAutoAdopt: true, intakeEvaluationAgreementEnabled: false },
     })
     f.workItems.add({
       eventId: 'ev-off-1', evaluatedAt: 1_000, recordedAt: 1_000, wouldAccept: true, itemId: 'wi-off',

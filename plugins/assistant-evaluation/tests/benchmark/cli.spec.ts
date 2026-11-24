@@ -41,6 +41,17 @@ describe('benchmark operator commands', () => {
     expect(result.planDigest).toMatch(/^[a-f0-9]{64}$/u)
     await expect(benchmarkCli(['plan', '--config', file, '--output', outputFile], output.io)).rejects.toThrow('already exists')
   })
+  it('lists the families-v1 suite without leaking scenarios or oracle acceptance and confirms doctor readiness', async () => {
+    const output = capture()
+    expect(await benchmarkCli(['corpus', '--suite', 'families-v1'], output.io)).toBe(0)
+    const corpus = JSON.parse(output.chunks.join(''))
+    expect(corpus.dataset).toMatchObject({ id: 'dsh-task-families', version: '2', split: 'development' })
+    expect(corpus.tasks).toHaveLength(9)
+    expect(corpus.tasks.every((task: Record<string, unknown>) => !('acceptance' in task) && !('scenario' in task))).toBe(true)
+    output.chunks.length = 0
+    expect(await benchmarkCli(['doctor', '--suite', 'families-v1'], output.io)).toBe(0)
+    expect(JSON.parse(output.chunks.join('')).ready).toBe(true)
+  })
   it('lists the Memory suite and distinguishes observed limits from enforced maxima', async () => {
     const output = capture()
     expect(await benchmarkCli(['corpus', '--suite', 'memory-v1'], output.io)).toBe(0)

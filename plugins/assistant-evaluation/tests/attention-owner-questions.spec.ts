@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantEvaluationService } from '../src/service.ts'
+import { AssistantEvaluationService, Config as EvaluationConfig } from '../src/service.ts'
+import * as evaluationPlugin from '../src/index.ts'
 import type { OwnerQuestionReplyInput } from '../src/service.ts'
 import { migrateEvaluationDatabase } from '../src/sqlite.ts'
 import { defaultAttentionTuningParameters, type AttentionTuningParameters } from '../src/attention-tuning.ts'
@@ -288,7 +289,7 @@ describe('attention owner question delivery', () => {
 
   test('configuration requires slice 3 and an owner route', () => {
     const base = { databasePath: ':memory:', projectionIntervalMs: 0, notificationOutcomesEnabled: true, attentionTuningAutoAdopt: true }
-    expect(() => new AssistantEvaluationService(new Context(), { ...base, attentionOwnerQuestionDeliveryEnabled: true, attentionOwnerQuestionOwner: owner }))
+    expect(() => new AssistantEvaluationService(new Context(), { ...base, attentionLooseningEnabled: false, attentionOwnerQuestionDeliveryEnabled: true, attentionOwnerQuestionOwner: owner }))
       .toThrow('attentionOwnerQuestionDeliveryEnabled requires attentionLooseningEnabled')
     expect(() => new AssistantEvaluationService(new Context(), { ...base, attentionLooseningEnabled: true, attentionOwnerQuestionDeliveryEnabled: true }))
       .toThrow('attentionOwnerQuestionDeliveryEnabled requires attentionOwnerQuestionOwner')
@@ -799,5 +800,58 @@ describe('attention owner question reply loop', () => {
     const other = withQuestion(g)
     expect(g.deliver()).toMatchObject([{ result: { action: 'queued', questionId: other } }])
     expect(delivery.reply(other, 'authorize-once')).toBe('not-registered')
+  })
+
+  test('R3 defaults: ctx.plugin and pre-parsed Config mount cleanly without owner, activate delivery when owner is supplied, cascade upstream disables, and still reject explicit delivery without owner', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-eval-r3-defaults-')); directories.push(dir)
+    const parsedDefault = EvaluationConfig({ databasePath: join(dir, 'schema.sqlite') })
+    expect(parsedDefault.attentionOwnerQuestionDeliveryEnabled).toBe(true)
+
+    // 1. Direct constructor with minimal config and with pre-parsed Config({ databasePath })
+    const ctxDirect = new Context(); contexts.push(ctxDirect)
+    const directSvc = new AssistantEvaluationService(ctxDirect, { databasePath: join(dir, 'direct.sqlite') })
+    expect(directSvc.health()).toMatchObject({ ready: true })
+
+    const ctxParsed = new Context(); contexts.push(ctxParsed)
+    const parsedSvc = new AssistantEvaluationService(ctxParsed, parsedDefault)
+    expect(parsedSvc.health()).toMatchObject({ ready: true })
+
+    // 2. ctx.plugin(AssistantEvaluationService, { databasePath }) & ctx.plugin(module, { databasePath })
+    const ctxSvc = new Context(); contexts.push(ctxSvc)
+    await ctxSvc.plugin(AssistantEvaluationService, { databasePath: join(dir, 'svc.sqlite') }).await()
+    expect(ctxSvc.assistantEvaluation.health()).toMatchObject({ ready: true })
+
+    const ctxMod = new Context(); contexts.push(ctxMod)
+    await ctxMod.plugin(evaluationPlugin, { databasePath: join(dir, 'mod.sqlite') }).await()
+    expect(ctxMod.assistantEvaluation.health()).toMatchObject({ ready: true })
+
+    // 3. With attentionOwnerQuestionOwner provided, delivery defaults to true and registers withdrawal/reply ports
+    const delivery = new FakeDelivery()
+    const ctxWithOwner = new Context(); contexts.push(ctxWithOwner)
+    delivery.ctx = ctxWithOwner
+    ctxWithOwner.provide('assistantDelivery' as never, delivery as never)
+    await ctxWithOwner.plugin(AssistantEvaluationService, {
+      databasePath: join(dir, 'owner.sqlite'),
+      projectionIntervalMs: 0,
+      notificationSyncIntervalMs: 0,
+      attentionOwnerQuestionOwner: owner,
+    }).await()
+    expect(delivery.withdrawals.size).toBe(1)
+    expect(delivery.replyConsumers.size).toBe(1)
+
+    // 4. Upstream notificationOutcomesEnabled: false via ctx.plugin cascades cleanly to defaulted downstream flags
+    const ctxCascade = new Context(); contexts.push(ctxCascade)
+    await ctxCascade.plugin(AssistantEvaluationService, {
+      databasePath: join(dir, 'cascade.sqlite'),
+      notificationOutcomesEnabled: false,
+    }).await()
+    expect(ctxCascade.assistantEvaluation.health()).toMatchObject({ ready: true })
+
+    // 5. Explicit attentionOwnerQuestionDeliveryEnabled: true without owner still throws
+    const ctxExplicitThrow = new Context(); contexts.push(ctxExplicitThrow)
+    expect(() => new AssistantEvaluationService(ctxExplicitThrow, {
+      databasePath: join(dir, 'throw.sqlite'),
+      attentionOwnerQuestionDeliveryEnabled: true,
+    })).toThrow(/requires attentionOwnerQuestionOwner/u)
   })
 })

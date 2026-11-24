@@ -3,7 +3,15 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import proactive, { AssistantProactiveService, Config, name, version } from '../src/index.ts'
+import proactive, {
+  AssistantProactiveService,
+  Config,
+  DEFAULT_PROACTIVE_PROFILES,
+  DISABLED_INTAKE_EVALUATION_HEALTH,
+  name,
+  UNCONFIGURED_INTAKE_EVALUATION_HEALTH,
+  version,
+} from '../src/index.ts'
 import type { OpportunityInput, OpportunityProfile } from '../src/types.ts'
 const contexts: Context[] = []
 afterEach(async () => { for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose() })
@@ -258,5 +266,119 @@ describe('assistant-proactive bundle and owner access', () => {
       preset: scope.preset,
     })
     expect(accepted).toMatchObject({ id: evaluated.decision.id, state: 'closed', feedback: 'accepted' })
+  })
+
+  it('provides bounded R3 defaults for profiles and intakeEvaluation while preserving explicit overrides', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    const agent = { id: 'agent', session: { header: { cwd: scope.workspace, agentPreset: scope.preset } } } as unknown as Agent
+    const principal = () => ({ principalId: scope.principalId, principalLineage: { principalRecordId: scope.principalRecordId, principalVersion: 1 }, scope: { workspace: scope.workspace, preset: scope.preset } })
+    ctx.provide('agents' as never, { get: () => agent } as never)
+    ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: principal } as never)
+    ctx.provide('assistantPolicy' as never, { evaluateAgent: () => ({ effect: 'allow' }), authorizeAgent: () => ({ effect: 'allow' }) } as never)
+
+    // Omitting profiles & intakeEvaluation mounts cleanly without delivery/preparation/llm peers
+    await ctx.plugin(AssistantProactiveService, { databasePath: ':memory:' })
+    const service = ctx.assistantProactive
+    expect(service.intakeEvaluationHealth()).toEqual(UNCONFIGURED_INTAKE_EVALUATION_HEALTH)
+    expect(() => service.assertProfile(DEFAULT_PROACTIVE_PROFILES[0]!.id)).not.toThrow()
+    expect(service.availableProfiles(agent)).toEqual([
+      expect.objectContaining({
+        id: DEFAULT_PROACTIVE_PROFILES[0]!.id,
+        mode: DEFAULT_PROACTIVE_PROFILES[0]!.mode,
+      }),
+    ])
+
+    // Explicit intakeEvaluation: { enabled: false } stays disabled; explicit { provider, model } defaults balanced rules
+    const disabledCtx = new Context()
+    contexts.push(disabledCtx)
+    await disabledCtx.plugin(AssistantProactiveService, { databasePath: ':memory:', intakeEvaluation: { enabled: false }, profiles: [profile] })
+    expect(disabledCtx.assistantProactive.intakeEvaluationHealth()).toEqual(DISABLED_INTAKE_EVALUATION_HEALTH)
+    expect(() => disabledCtx.assistantProactive.assertProfile(DEFAULT_PROACTIVE_PROFILES[0]!.id)).toThrow('configured active')
+
+    const routeCtx = new Context()
+    contexts.push(routeCtx)
+    await routeCtx.plugin(AssistantProactiveService, {
+      databasePath: ':memory:',
+      intakeEvaluation: { provider: 'local-script', model: 'scripted-evaluator' },
+    })
+    expect(routeCtx.assistantProactive.intakeEvaluationHealth()).toMatchObject({
+      enabled: true,
+      registered: false,
+      readiness: 'unavailable',
+      lastError: null,
+      provider: 'local-script',
+      model: 'scripted-evaluator',
+    })
+    expect(routeCtx.assistantProactive.intakeEvaluationHealth().policyVersion).toMatch(/^v1-[0-9a-f]{64}$/u)
+  })
+
+  it('reads host activity & evaluation telemetry safely and survives throwing/stub peers', async () => {
+    const baseProfile: OpportunityProfile = {
+      ...profile,
+      expectedBenefit: 50,
+      executionCost: 0,
+      interruptionCost: 10,
+      possibleLoss: 0,
+      minimumUtility: 1,
+    } // base utility = 40
+
+    // Active agent turn reduces utility by MAX_ACTIVITY_PENALTY (15 -> 25)
+    const activeCtx = new Context()
+    contexts.push(activeCtx)
+    const activeAgent = {
+      id: 'active-session',
+      status: 'running',
+      session: { header: { cwd: scope.workspace, agentPreset: scope.preset } },
+    } as unknown as Agent
+    activeCtx.provide('agents' as never, { get: () => activeAgent, list: () => [activeAgent] } as never)
+    await activeCtx.plugin(AssistantProactiveService, { databasePath: ':memory:', profiles: [baseProfile] })
+    const activeResult = activeCtx.assistantProactive.evaluate({
+      ...opportunity(),
+      sessionId: 'active-session',
+      expiresAt: Date.now() + 3_600_000,
+    })
+    expect(activeResult.decision.utility).toBe(25)
+
+    // Throwing/malformed peer telemetry fails open cleanly without crashing evaluate
+    const brokenCtx = new Context()
+    contexts.push(brokenCtx)
+    brokenCtx.provide('agents' as never, {
+      currentInitiator: () => { throw new Error('broken agents') },
+      get: () => { throw new Error('broken get') },
+    } as never)
+    brokenCtx.provide('assistantEvaluation' as never, {
+      listTrustedTaskLearningProjections: () => { throw new Error('broken projections') },
+      notificationOutcomeSummary: () => ({ total: Number.NaN, outcomes: { accepted: -5, rejected: 'bad' } }),
+      currentAttentionTuning: () => { throw new Error('broken tuning') },
+    } as never)
+    await brokenCtx.plugin(AssistantProactiveService, { databasePath: ':memory:', profiles: [baseProfile] })
+    const brokenResult = brokenCtx.assistantProactive.evaluate({
+      ...opportunity(),
+      expiresAt: Date.now() + 3_600_000,
+    })
+    expect(brokenResult.decision.utility).toBe(40)
+
+    // Evaluation summary telemetry drives frequency penalty + acceptance bonus when available
+    const telemetryCtx = new Context()
+    contexts.push(telemetryCtx)
+    const now = Date.now()
+    telemetryCtx.provide('assistantEvaluation' as never, {
+      listTrustedTaskLearningProjections: () => ({ items: [{ receipt: { objective: { occurredAt: now - 3_600_000 } } }] }),
+      notificationOutcomeSummary: ({ fromNotifiedAt }: { fromNotifiedAt: number }) =>
+        now - fromNotifiedAt <= 3_700_000
+          ? { total: 2, outcomes: { accepted: 0, rejected: 0 } } // 2 recent -> -10 frequency penalty
+          : { total: 10, outcomes: { accepted: 10, rejected: 0 } }, // 100% acceptance -> +15 bonus
+    } as never)
+    await telemetryCtx.plugin(AssistantProactiveService, { databasePath: ':memory:', profiles: [baseProfile] })
+    const telemetryResult = telemetryCtx.assistantProactive.evaluate({
+      ...opportunity(),
+      expiresAt: now + 3_600_000,
+    })
+    // base 40 + idle discount(+10) - frequency(-10) + acceptance(+15) = 55
+    expect(telemetryResult.decision.utility).toBe(55)
+
+    // Invalid explicit runtimeContext still fails closed
+    expect(() => telemetryCtx.assistantProactive.evaluate(opportunity(), { urgencyPpm: 2_000_000 })).toThrow(/invalid runtime context/)
   })
 })

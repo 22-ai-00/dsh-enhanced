@@ -29,11 +29,11 @@ function sql(path: string, fn: (db: DatabaseSync) => void) {const db = new Datab
 test('schema 8 upgrades additively to 9 and a cold reopen preserves complete continuation bytes and parent history', async () => {
   const f = await harness(), parent = await readyItem(f), before = {item:f.store.findItemById(parent.id),reports:f.store.reports(parent.id),outcomes:f.store.outcomes(parent.id)}
   f.store.close()
-  sql(f.config.databasePath,db => {db.exec("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TRIGGER work_item_continuation_no_update; DROP TRIGGER work_item_continuation_no_delete; DROP TABLE work_item_continuation; UPDATE work_item_schema_meta SET value='8' WHERE key='schema_version'; PRAGMA user_version=8;")})
+  sql(f.config.databasePath,db => {db.exec("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake; DROP TRIGGER work_item_continuation_no_update; DROP TRIGGER work_item_continuation_no_delete; DROP TABLE work_item_continuation; UPDATE work_item_schema_meta SET value='8' WHERE key='schema_version'; PRAGMA user_version=8;")})
   const upgraded = new WorkItemStore(f.config.databasePath,{now:f.now})
   const item = child(f,parent), frozen = record(parent,item)
   try {
-    expect(upgraded.stats().schemaVersion).toBe(13)
+    expect(upgraded.stats().schemaVersion).toBe(14)
     upgraded.admitItem(item,{kind:'admitted',actor:'admission'},dispatch(item),[],undefined,frozen)
     expect(upgraded.getContinuation(item.id)).toEqual({...frozen,inputBytes:Buffer.byteLength(frozen.inputText,'utf8')})
     expect({item:upgraded.findItemById(parent.id),reports:upgraded.reports(parent.id),outcomes:upgraded.outcomes(parent.id)}).toEqual(before)
@@ -229,6 +229,7 @@ test('a real frozen continuation rejects hidden raw TEXT tails before wake while
     claim(f,parent.id)
     f.ledger.report({itemId:parent.id,runId:`occ-${parent.id}`,status:'ready',summary:'parent\0report😀',artifactPaths:[],idempotencyKey:'sealed-parent'})
     const config=normalizeConfig({enabled:true,mode:'active',databasePath:f.config.databasePath,workRoot:f.config.workRoot,intakeSourceId:f.config.intakeSourceId,workerAutomationId:f.config.workerAutomationId!,scope:f.config.scope!,ownerRecall:{enabled:true},
+      acceptance:{holdReport:{enabled:false}},
       admission:{...f.config.admission,allowedKinds:[...f.config.admission.allowedKinds,'owner-continuation']},ownerContinuation:{enabled:true,automationId:'continuation-worker',allowedTools:['work_item_claim','work_item_report','work_item_read_context','execute'],
         budgetId:'continuation-budget',budgetAmount:1,maxModelCalls:8,maxToolCalls:20,maxOutputTokens:256,timeoutMs:15000,expiresAt:f.now()+3600000}},f.now())
     const owner=receipt({authorityId:config.scope!.ownerRouteId,principalId:config.scope!.principalId,workspace:config.scope!.workspace,agentPreset:config.scope!.preset})

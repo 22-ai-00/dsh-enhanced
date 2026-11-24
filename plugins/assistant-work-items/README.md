@@ -18,7 +18,7 @@ dsh plugin --profile web add @dsh-enhanced/assistant-work-items
 dsh --profile web --dump-config
 ```
 
-Patch 默认 `enabled: false`、`mode: observe`，安装后不创建目录、不打开数据库、不调用模型、不发消息。启用 active 模式必须同时显式给出 `workerAutomationId`、`scope`（完整 owner 五元组）和至少一个 `admission.allowedKinds`，否则配置校验失败关闭。
+Patch 默认 `enabled: true`、`mode: observe`，并默认开启 `intakeLedger.enabled: true` 与 `intakeLedger.evaluation.enabled: true`（不唤醒 worker、不发消息，且已就绪接收 WP22/WP21 实时模式切换）；传入 `enabled: false` 时才完全关闭打开目录与数据库。启用 active 模式必须同时显式给出 `workerAutomationId`、`scope`（完整 owner 五元组）和至少一个 `admission.allowedKinds`，否则配置校验失败关闭。
 
 ### 只读前台失败诊断（显式启用）
 
@@ -52,9 +52,9 @@ diagnosis:
 
 诊断模式拒绝公共 `admit(...)` 与 `registerSignalSource(...)`，不接受来源替换或影子同名来源。以下注册示例、通用 worker 手工准备与 lease 自动恢复说明仅适用于未启用 diagnosis 的通用模式。
 
-### 主人会话中的任务召回（显式启用）
+### 主人会话中的任务召回（在 active+scope 部署下默认开启）
 
-在完整的 active 配置中加入 `ownerRecall: { enabled: true }`，并让主人的前台 preset 包含 `work_item_list`、`work_item_recall`，即可在新会话中查找后台工作项及其已有结论。默认关闭；开启时仍须配置完整的 `scope` 和 `workerAutomationId`。这两个工具供当前已认证主人使用，后台 worker 继续通过自己的 occurrence 认领、读报告和汇报。
+在完整的 active 配置（含完整 `scope` 和 `workerAutomationId`）下 `ownerRecall.enabled` 默认开启（可通过 `ownerRecall: { enabled: false }` 显式关闭），并让主人的前台 preset 包含 `work_item_list`、`work_item_recall`，即可在新会话中查找后台工作项及其已有结论。这两个工具供当前已认证主人使用，后台 worker 继续通过自己的 occurrence 认领、读报告和汇报。
 
 跨渠道只读别名：须由主人在 `ownerRecall.linkedAliases` 中逐个列出允许的 Delivery `linked` principal id（Delivery 规范形式 `channel/account/tenant/user`，各段按 `encodeURIComponent` 编码，例如 `@` 写作 `%40`；按字节精确、区分大小写比较，空白、非 ASCII 或其他非规范写法在配置时即拒绝；最多 8 个、去重、不得为 owner 本人；未配置即不接受任何别名，也不会向 Delivery 查询别名回执或以别名调用 Policy）。Delivery 侧的 link 本身不构成授权。若 Delivery 提供 `inspectOwnerAliasRoute`，已 link 到当前 owner 且 principal id 在该名单中的 `linked` principal（例如 Lark 主人关联的 Telegram 账号）在精确 owner 校验失败时，可以只用 `work_item_list`、`work_item_recall`（`inspect-work-items`）读取同一主人的工作项；列表、正文、报告和游标都按根 owner 的 principal record/version 与 binding 代次过滤，与主人本人看到的一致。别名回执（`assistant-delivery/owner-alias-receipt/v1`）不进入 v2 owner 槽位，`receiptVersion` 存在、根身份或 scope 不符、alias 与 root 相同、Session 不符、别名 principal 不在名单内（`linked alias is not allowlisted by the owner`，在 Policy 求值之前拒绝）、或调用证明不是别名协议都拒绝。每次观察（Policy 评估前后、authorize 之后、回调前后）都重新向 Delivery 取回执并比对摘要，解除关联或 owner 版本变化会使进行中的读取以 `owner/call changed` 失败；owner 版本变化后旧版本工作项对主人和别名同样不可见。`work_item_continue`（`continue-work-items`）、审批、worker 认领/汇报等变更仍只接受精确 owner 或 worker 身份。Policy 以别名 Agent 为主体求值，别名与主人共享 preset 和 workspace：对已列入名单的别名，若主人的 `inspect-work-items` 规则未写 `principal` 匹配，别名也会命中该规则；只有主人规则限定了 `principal` 时，才须为别名 principal 单独授权。未列入名单的 linked 账号不再因此类规则获得读取。别名读取按 principal 单独计费：命中的 `inspect-work-items` 规则必须带 `budget`（否则 `linked alias read requires a budgeted Policy rule`，在扣费前拒绝），扣费改走 Policy `authorizeAgentForPrincipal`，落在该别名 principal 自己的预算分区（同一 budgetId 的 limit/period，独立计数），返回的 `budgetPrincipal` 须等于别名 principal；主人自己的额度不受别名读取影响，每个别名各自有界（名单至多 8 个）。不设跨分区总上限，同一 budget 的总消耗至多为 `(1 + 名单长度) × limit`（≤ 9 份）；需要更紧总量时为别名单独写带 `principal` 的规则与更小的 budget。Policy 缺少该方法时别名读取一律拒绝（`linked alias reads require per-principal Policy budgets`），精确 owner 路径不变。撤销 owner 会使其所有 link 失效（Delivery 解除 `linked_to_id`）；同一 owner record 重新激活后须重新 link，别名才能再次读取。原生 Web owner 以别名身份加入不在此范围。
 
@@ -449,9 +449,9 @@ worker 仍由原生 Automations/AgentLoop 执行。认领后，`work_item_read_c
 
 每个子项最多执行一次；`waiting` 不产生自动重试。未知派发或未确认的执行占槽等待处置。新的待派发项使用已有 scheduler wake 有界检查，前一 occurrence 真正停止后才继续。报告后原生最终工具 guard 拒绝更多工具效果，仍可生成简短结束语。暂停、删除或更改已建立的 worker/配置不会自动重新启用。
 
-### 回复报告后自动继续（显式启用）
+### 回复报告后自动继续（配置 ownerContinuation 时默认开启）
 
-在上述完整配置中另加 `ownerReplyContinuation: true`，主人可以直接回复已经发到渠道的工作项终态报告。Delivery 必须具有 `workItemReplyProtocolVersion() === 1` 的接口，并单独允许真实外部主人的 `continue-work-items-from-reply` 操作：
+在已启用 `ownerContinuation` 的完整配置中 `ownerReplyContinuation` 默认开启（可通过 `ownerReplyContinuation: false` 关闭），主人可以直接回复已经发到渠道的工作项终态报告。Delivery 必须具有 `workItemReplyProtocolVersion() === 1` 的接口，并单独允许真实外部主人的 `continue-work-items-from-reply` 操作：
 
 ```yaml
 - id: owner-report-reply
@@ -475,9 +475,9 @@ Delivery schema 29 保存真实报告关联、回复原文与回复序列；Work
 
 此入口覆盖同一渠道的报告回复，不实现运行中指令插入、任意跨信道身份合并（仅有上文的 linked 别名只读查询）、多对多 Thread 订阅（目前仅有上文 `follows` 的单项跟随与 event-triggers 被动来源）或长期自主成长。Provider 接受报告不等于用户已读或任务已独立验收。
 
-### 主人评价报告结果（显式启用）
+### 主人评价报告结果（配置 ownerContinuation 时默认开启）
 
-`ownerReportFeedback: true` 将已认证主人对真实工作项报告的明确结果反馈写入 Evaluation 的 `work-item` 主人评价。默认关闭；要求已有 `ownerContinuation` 配置来核对封存计划，但不要求 `ownerReplyContinuation`。它使用独立的外部 Policy 操作 `feedback-work-items`，资源为配置中的 continuation automation；录入评价不认领、续办任务，也不消耗新的 worker 执行额度。
+在已启用 `ownerContinuation` 的配置中 `ownerReportFeedback` 默认开启（可通过 `ownerReportFeedback: false` 关闭），将已认证主人对真实工作项报告的明确结果反馈写入 Evaluation 的 `work-item` 主人评价；它要求已有 `ownerContinuation` 配置来核对封存计划，但不要求 `ownerReplyContinuation`。它使用独立的外部 Policy 操作 `feedback-work-items`，资源为配置中的 continuation automation；录入评价不认领、续办任务，也不消耗新的 worker 执行额度。
 
 ```yaml
 - id: owner-work-item-feedback
@@ -505,9 +505,9 @@ Host 批量来源接口 `withOwnerWorkItemFeedbackTargetsFence(capabilities, cal
 
 这一切片引入时 WorkItems 使用 schema 9（现为 schema 13，见下节 intake 账本）；Delivery schema 30 保存独占评价意图，Evaluation schema 13 保存新的 canonical 工作项主人结果。原有 settlement 行继续作为 objective unknown 的审计材料，不回填为主人评价。备份与恢复须一致保留相关账本；这一切片不自动触发 Growth、创建/采用候选或调用模型。
 
-## 确定性 intake 账本（显式启用）
+## 确定性 intake 账本（默认开启）
 
-WP20 第 1 阶段：Host 为每条入站条目按 `(source, sourceEventId)` 记录一次确定性决策，供后续评估切片使用。它只是审计账本，不准入工作项、不派发、不通知，也不调用模型。
+WP20 第 1 阶段：Host 为每条入站条目按 `(source, sourceEventId)` 记录一次确定性决策，供后续评估切片使用。它只是审计账本，不准入工作项、不派发、不通知，也不调用模型。可通过 `intakeLedger: { enabled: false }` 关闭。
 
 ```ts
 const { record, replayed } = ctx.assistantWorkItems.recordIntake({
@@ -548,9 +548,9 @@ observe 只写 intake 账本：不写 Delivery inbox/outbox，不改变 adapter 
 
 adapter 可另传规范化正文 `text`（≤65,536 UTF-16 码元）；Delivery 仅在 observer 声明 `acceptsSourceText: true` 且 `sha256(text) === contentDigest` 时以 `sourceText` 转交，否则丢弃。正文只在内存中流转，Delivery 与账本都不落盘。
 
-### inferred 评估运行时（WP20 第 3 阶段，显式启用）
+### inferred 评估运行时（WP20 第 3 阶段，默认开启）
 
-`intakeLedger.evaluation.enabled: true` 时，observer 声明接收正文，WorkItems 把 `stored`+`inferred` 行的认证正文暂存内存（最多 256 条），Host 注册唯一评估器后按规则评估：
+`intakeLedger.evaluation.enabled` 默认为 `true`（可通过 `enabled: false` 关闭），observer 声明接收正文，WorkItems 把 `stored`+`inferred` 行的认证正文通过 AES-256-GCM 密文暂存于有界暂存表 `work_item_intake_staging`（最多 256 条 / 8 MiB / 7 天 TTL，密钥以 `0o600` 原子保存在 `${databasePath}.intake-seal.key`，SQLite 与 WAL 中绝不存原文），待评估重试/退避进度保存在 `work_item_intake_eval_queue`（schema 14），Host 注册唯一评估器后按规则评估并支持跨重启续评：
 
 ```ts
 ctx.assistantWorkItems.registerIntakeEvaluator({
@@ -571,9 +571,9 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 - 局限：重启后尚未落定的候选需要重新收到正文才能评估；暂存满且无可驱逐项时跳过新候选（计入 `skipped`）；尚无内置 Policy 规则源，规则与上限由 Host supplier 提供。
 - 升级：schema 10 自动升级到 11；更新的 schema 或结构漂移 fail closed。
 
-### inferred 评估准入（WP21 第 3 片，显式启用）
+### inferred 评估准入（WP21 第 3 片，提供 `originBindingId` 时默认开启）
 
-`intakeLedger.evaluation.admit.enabled: true` 时，评估结果为 accept 的候选交给 `admitDecision`。只处理 `inferred` 候选；`addressed`/`subscribed` 不经此路径。未配置时行为不变。
+配置 `intakeLedger.evaluation.admit`（须提供 `originBindingId`）时，`admit.enabled` 默认 `true`，且在 `active` 非诊断且 `kind` 位于 `allowedKinds` 内时 `admit.mode` 默认 `auto`，否则为 `observe`。支持通过 `setIntakeAdmissionMode(...)` / `applyIntakeTuning(...)` 在不重启的前提下实时切换 `observe ↔ auto` 及按规则开关/调优（持久保存在 `work_item_schema_meta` 并在重启时按激活前提 fail-closed 重验）。`objective` 与 `acceptance` handle 随 `sourceText` 一并经 AES-256-GCM 密封暂存于 schema 14 的 `work_item_intake_staging`（最多 256 条 / 8 MiB / 7 天 TTL，准入结清后自动清理），跨重启不再退回 `would-admit`；若密文被篡改、密钥缺失、摘要不符或 TTL 过期则 fail-closed 退回 `would-admit`。只处理 `inferred` 候选；`addressed`/`subscribed` 不经此路径。未配置 `admit` 时行为不变。
 
 - 驱动：只在已有 scheduler wake 上、评估一轮之后运行（不新增 Loop/计时器），也可由 Host 调 `runIntakeAdmission()`；每轮最多 `evaluation.maxPerRun` 条。
 - `mode: observe`（默认）：只记一行 `would-admit`，不建工作项；之后切到 `auto` 也不追溯准入这些行。
@@ -594,27 +594,27 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
-| `enabled` | `false` | 总开关；关闭时不创建任何目录、文件或数据库 |
+| `enabled` | `true` | 总开关；设为 `false` 时不创建任何目录、文件或数据库 |
 | `mode` | `observe` | `observe` 只记录观察行；`active` 才唤醒 worker、发通知 |
 | `ownerContinuation` | 关闭 | 单独启用、独立 automation ID、显式工具范围与有限执行预算；见主人续办旧任务 |
-| `ownerReplyContinuation` | `false` | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
-| `ownerReportFeedback` | `false` | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
-| `intakeLedger.enabled` | `false` | 显式启用确定性 intake 账本；接受 Host 调用 `recordIntake`，并经 `assistantDelivery.registerInboundIntakeObserver` 与可选 `eventTriggers.registerIntakeObserver` 接入元数据观察（observe 可用，无外部副作用） |
+| `ownerReplyContinuation` | 上下文默认（配置 `ownerContinuation` 时为 `true`，否则 `false`） | 将已授权主人的真实报告回复持久转交续办；要求已启用 ownerContinuation 和独立外部 Policy 授权 |
+| `ownerReportFeedback` | 上下文默认（配置 `ownerContinuation` 时为 `true`，否则 `false`） | 认证报告结果反馈；要求 ownerContinuation，独立 `feedback-work-items` 授权，不要求回复续办，不取得新执行额度 |
+| `intakeLedger.enabled` | `true` | 确定性 intake 账本；接受 Host 调用 `recordIntake`，并经 `assistantDelivery.registerInboundIntakeObserver` 与可选 `eventTriggers.registerIntakeObserver` 接入元数据观察（observe 可用，无外部副作用） |
 | `intakeLedger.sources.<id>.unaddressedGroupMessages` | `false` | 该来源未寄址群消息以元数据进入账本（否则 filtered）；最多 32 个来源 |
 | `intakeLedger.sources.<id>.unsubscribedEvents` | `false` | 该来源未订阅事件以元数据进入账本（否则 filtered） |
-| `intakeLedger.evaluation.enabled` | `false` | inferred 候选的模型评估（仅 observe，需 Host 注册评估器）；关闭时不接收正文、不写评估行 |
+| `intakeLedger.evaluation.enabled` | `true` | inferred 候选的模型评估（需 Host 注册评估器）；关闭时不接收正文、不写评估行 |
 | `intakeLedger.evaluation.timeoutMs` / `maxConsecutiveFailures` | `30000` / `3` | 单次调用超时；连续失败达到次数后记 `unavailable` |
 | `intakeLedger.evaluation.maxPerRun` / `maxCallsPerHour` | `5` / `20` | 每轮与每小时的调用上限 |
-| `intakeLedger.evaluation.admit.enabled` / `mode` | `false` / `observe` | 仅 inferred 候选：评估 accept 后 `observe` 记 would-admit，`auto` 经 `admitDecision` 准入（需 enabled active） |
+| `intakeLedger.evaluation.admit.enabled` / `mode` | 未配置 `admit` 时不启用；配置时 `enabled: true`，`active` 非诊断且 `kind` 在 `allowedKinds` 内时 `mode: auto`，否则 `observe` | 仅 inferred 候选：评估 accept 后 `observe` 记 would-admit，`auto` 经 `admitDecision` 准入（支持运行时 `observe ↔ auto` 实时切换与跨重启持久化） |
 | `intakeLedger.evaluation.admit.kind` / `originBindingId` | `intake-inferred` / 必填 | 准入 mandate 的 kind（auto 须在 `allowedKinds` 内）与报告发往的 origin binding |
 | `intakeLedger.evaluation.admit.maxPerHour` | `5` | 滑动一小时准入上限（1–100） |
-| `follows.eventTriggers.enabled` | `false` | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>@<configDigest>`，序号须等于当前全局 high water，摘要须等于该 trigger 当前配置）；要求 enabled intake 与完整 scope |
+| `follows.eventTriggers.enabled` | 上下文默认（`enabled` 且有完整 `scope` 时为 `true`，否则 `false`） | 有 `eventTriggers` 服务时注册 `event-triggers` follow 来源（ref `<triggerId>@<afterSequence>@<configDigest>`，序号须等于当前全局 high water，摘要须等于该 trigger 当前配置）；要求 enabled intake 与完整 scope |
 | `follows.eventTriggers.acceptHeadRef` | `false` | 另接受 `<triggerId>@head`，准入时同步改写为当前 high water 与配置摘要的三段式 ref 后入库；仅在 `enabled` 时生效 |
-| `acceptance.autoSettle.enabled` / `maxPerTick` | `false` / `5` | 在既有 scheduler wake 上自动读回已执行绑定项的 verifier 回执并记判定（每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
-| `acceptance.verdictGate.enabled` | `false` | 让独立验收判定改变工作项状态：not-achieved/unknown/needs-attention 把已执行 `ready` 项转入 `blocked`（`acceptance-*` 原因），achieved 保持 `ready`；需 enabled active；见独立验收绑定 |
-| `acceptance.bindWorkerRun.enabled` / `maxPerTick` | `false` / `5` | 在既有 scheduler wake 上把已 dispatch 的未绑定项晚绑定到其 worker run 冻结的 `automation-run` 合同（事件行，不进 mandate digest；每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
-| `acceptance.holdReport.enabled` / `holdTimeoutMs` | `false` / `1800000` | 执行型工作项的 `ready` 报告等待当前代次验收，包括绑定尚未到达时；通过正常发送，阻断改发 blocked，超时（60s–24h）标记 result unverified；需 enabled active 无 diagnosis，并配合 autoSettle 与 bindWorkerRun；见独立验收绑定 |
-| `ownerRecall.enabled` | `false` | 显式启用当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
+| `acceptance.autoSettle.enabled` / `maxPerTick` | 上下文默认（`enabled` 且 `active` 时为 `true`，否则 `false`） / `5` | 在既有 scheduler wake 上自动读回已执行绑定项的 verifier 回执并记判定（每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
+| `acceptance.verdictGate.enabled` | 上下文默认（`enabled` 且 `active` 时为 `true`，否则 `false`） | 让独立验收判定改变工作项状态：not-achieved/unknown/needs-attention 把已执行 `ready` 项转入 `blocked`（`acceptance-*` 原因），achieved 保持 `ready`；需 enabled active；见独立验收绑定 |
+| `acceptance.bindWorkerRun.enabled` / `maxPerTick` | 上下文默认（`enabled` 且 `active` 时为 `true`，否则 `false`） / `5` | 在既有 scheduler wake 上把已 dispatch 的未绑定项晚绑定到其 worker run 冻结的 `automation-run` 合同（事件行，不进 mandate digest；每次 wake 至多 1–10 项，需 enabled active）；见独立验收绑定 |
+| `acceptance.holdReport.enabled` / `holdTimeoutMs` | 上下文默认（`enabled` 且 `active` 非诊断且 `autoSettle`/`bindWorkerRun` 开启时为 `true`，否则 `false`） / `1800000` | 执行型工作项的 `ready` 报告等待当前代次验收，包括绑定尚未到达时；通过正常发送，阻断改发 blocked，超时（60s–24h）标记 result unverified；需 enabled active 无 diagnosis，并配合 autoSettle 与 bindWorkerRun；见独立验收绑定 |
+| `ownerRecall.enabled` | 上下文默认（`enabled` 且 `active` 且有完整 `scope` 与 `workerAutomationId` 时为 `true`，否则 `false`） | 当前主人前台任务查询；要求 enabled active、完整 scope、worker automation 与独立 `inspect-work-items` 授权 |
 | `ownerRecall.linkedAliases` | 未设置 | 主人显式允许的 Delivery `linked` principal id 名单（规范 `channel/account/tenant/user` 形式，≤8，去重，不含 owner）；未设置时跨渠道别名读取一律拒绝；要求 `ownerRecall.enabled`；别名读取另需带 `budget` 的 `inspect-work-items` 规则及 Policy `authorizeAgentForPrincipal`（按别名 principal 独立计费） |
 | `ownerReportRouting.linkedFallback` | 未设置 | origin binding 不可用时可接收终端报告只读通知的 Delivery `linked` principal id 有序名单（规范形式，≤8，去重，不含 owner）；要求 enabled active、完整 scope 与 worker；回复不能续办 |
 | `ownerReportRouting.prefer` | `'origin'` | `'recent'` 时按主人最近入站的别名信道发送终端报告（需要 `linkedFallback`）；origin 无更新入站或别名不合格时回落 origin；改道的报告走 background lane，失去 `ownerReplyContinuation`/`ownerReportFeedback` |
@@ -636,7 +636,7 @@ ctx.assistantWorkItems.registerIntakeEvaluator({
 | `limits.maxReportBytes` | `16384` | 单条报告 summary UTF-8 上限（256 B–64 KiB） |
 | `limits.waitingResumeMs` | `300000` | `waiting` 报告后延迟重新唤醒 worker 的时间（60 秒–1 小时） |
 | `delivery.notifyOn` | `[ready, blocked, failed]` | 触发 owner 通知的终态报告状态 |
-| `sources.foregroundFailures.enabled` | `false` | 是否武装内置的 owner foreground 失败来源；关闭时扫描是 no-op |
+| `sources.foregroundFailures.enabled` | 上下文默认（`enabled` 且为 `observe` 或 `kind` 在 `allowedKinds` 内时为 `true`，否则 `false`） | 是否武装内置的 owner foreground 失败来源；关闭时扫描是 no-op |
 | `sources.foregroundFailures.kind` | `foreground-repair` | 该来源准入的工作项 kind；active 模式必须在 `admission.allowedKinds` 内 |
 | `sources.foregroundFailures.includeTimedOut` | `true` | 通用模式接收 `timed-out`；diagnosis 模式允许已 disposed 的 `configured-timeout` 诊断候选 |
 | `sources.foregroundFailures.maxCandidatesPerSweep` | `10` | 单次扫描最多读取的候选数（1–100） |

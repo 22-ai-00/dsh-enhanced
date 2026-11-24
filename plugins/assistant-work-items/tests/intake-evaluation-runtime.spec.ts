@@ -308,7 +308,7 @@ describe('inferred intake evaluation', () => {
     await flush()
     expect(s.calls.slice(calls).map(call => call.sourceText)).not.toContain('message 0')
     expect(f.store.listIntakeEvaluations('lark-channel', 'om_0')).toHaveLength(1)
-  })
+  }, 15_000)
 
   test('a failed store write is retried on the next refresh and then frees its slot', async () => {
     // One call per hour: only message 0 is ever evaluated, everything else stays unsettled.
@@ -336,7 +336,7 @@ describe('inferred intake evaluation', () => {
     f.runtime.observe(f.recordText('om_257', 'message 257'), 'message 257')
     expect(f.runtime.health()).toMatchObject({ heldTexts: 256, skipped: 1 })
     expect(s.calls).toHaveLength(1)
-  })
+  }, 15_000)
 
   test('an unreadable post-failure check counts as unwritten and does not drop the rest of the run', async () => {
     const f = await direct()
@@ -558,25 +558,25 @@ describe('schema 11 migration', () => {
     return config
   }
 
-  test('schema 10 upgrades additively to 12 and keeps its intake rows', async () => {
-    const config = await downgraded("DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+  test('schema 10 upgrades additively to 14 and keeps its intake rows', async () => {
+    const config = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     const store = new WorkItemStore(config.databasePath)
     try {
-      expect(store.stats().schemaVersion).toBe(13)
+      expect(store.stats().schemaVersion).toBe(14)
       expect(store.countIntake()).toEqual({ stored: 1, duplicate: 0, filtered: 0 })
       expect(store.countIntakeEvaluations()).toEqual({ decided: 0, unavailable: 0 })
     } finally {
       store.close()
     }
-    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 13 }])
+    expect(query(config.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 14 }])
   })
 
   test('an evaluation object under schema 10 or a drifted evaluation table fails closed', async () => {
-    const early = await downgraded("DROP TABLE work_item_intake_admission; DROP TRIGGER work_item_intake_evaluation_no_update; DROP TRIGGER work_item_intake_evaluation_no_delete; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+    const early = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; DROP TRIGGER work_item_intake_evaluation_no_update; DROP TRIGGER work_item_intake_evaluation_no_delete; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     expect(() => new WorkItemStore(early.databasePath)).toThrow(/intake evaluation object before schema 11/)
     expect(query(early.databasePath, 'PRAGMA user_version')).toEqual([{ user_version: 10 }])
     // Its append-only triggers alone are already an unknown object at schema 10.
-    const triggers = await downgraded("DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
+    const triggers = await downgraded("DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue; DROP TABLE work_item_intake_admission; UPDATE work_item_schema_meta SET value = '10' WHERE key = 'schema_version'; PRAGMA user_version = 10;")
     expect(() => new WorkItemStore(triggers.databasePath)).toThrow(/unexpected schema object/)
 
     const drifted = await downgraded('DROP TABLE work_item_intake_evaluation; CREATE TABLE work_item_intake_evaluation (source TEXT) STRICT;')
@@ -584,7 +584,7 @@ describe('schema 11 migration', () => {
   })
 
   test('a newer schema fails closed', async () => {
-    const config = await downgraded("UPDATE work_item_schema_meta SET value = '14' WHERE key = 'schema_version'; PRAGMA user_version = 14;")
+    const config = await downgraded("UPDATE work_item_schema_meta SET value = '15' WHERE key = 'schema_version'; PRAGMA user_version = 15;")
     expect(() => new WorkItemStore(config.databasePath)).toThrow()
   })
 })

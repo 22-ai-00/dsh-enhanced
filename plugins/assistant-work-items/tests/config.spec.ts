@@ -4,8 +4,9 @@ const base = { databasePath: '/private/owner-recall/state.sqlite', workRoot: '/p
 const active = { ...base, enabled: true, mode: 'active' as const, workerAutomationId: 'worker',
   scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route', expiresAt: 2_000 },
   admission: { allowedKinds: ['repair'] } }
-test('owner recall defaults off and only explicitly enabled active deployments opt in', () => {
+test('owner recall defaults off in observe mode, defaults on in active scoped mode, and accepts explicit opt-out', () => {
   expect(normalizeConfig(base, 1_000)).not.toHaveProperty('ownerRecall')
+  expect(normalizeConfig(active, 1_000).ownerRecall).toEqual({ enabled: true })
   expect(normalizeConfig({ ...active, ownerRecall: { enabled: false } }, 1_000)).not.toHaveProperty('ownerRecall')
   expect(normalizeConfig({ ...active, ownerRecall: { enabled: true } }, 1_000).ownerRecall).toEqual({ enabled: true })
 })
@@ -115,4 +116,31 @@ test('separate continuation settings do not rewrite the existing diagnosis execu
   const { diagnosisConfigurationDigest } = await import('../src/diagnosis-contract.ts')
   expect(diagnosisConfigurationDigest(normalizeConfig({ ...resumable, ownerContinuation: continuation }, 1000), []))
     .toBe(diagnosisConfigurationDigest(normalizeConfig(resumable, 1000), []))
+})
+
+test('intakeLedger.evaluation.admit stays undefined when omitted, fails closed without originBindingId, and defaults enabled: true when bound', () => {
+  const omitted = ConfigSchema(base)
+  expect(omitted.intakeLedger?.enabled).toBe(true)
+  expect(omitted.intakeLedger?.evaluation?.enabled).toBe(true)
+  expect(omitted.intakeLedger?.evaluation?.admit).toBeUndefined()
+
+  const bound = ConfigSchema({ ...base, intakeLedger: { evaluation: { admit: { originBindingId: 'b-1' } } } })
+  expect(bound.intakeLedger?.evaluation?.admit?.enabled).toBe(true)
+  expect(bound.intakeLedger?.evaluation?.admit?.originBindingId).toBe('b-1')
+
+  expect(() => normalizeConfig({
+    ...active,
+    intakeLedger: { evaluation: { admit: { enabled: true } } },
+  } as never, 1_000)).toThrow('intakeLedger.evaluation.admit.originBindingId')
+
+  const normalized = normalizeConfig({
+    ...active,
+    admission: { allowedKinds: ['intake-inferred'] },
+    intakeLedger: { evaluation: { admit: { originBindingId: 'b-1' } } },
+  }, 1_000)
+  expect(normalized.intakeLedger?.evaluation?.admit).toMatchObject({
+    enabled: true,
+    mode: 'auto',
+    originBindingId: 'b-1',
+  })
 })

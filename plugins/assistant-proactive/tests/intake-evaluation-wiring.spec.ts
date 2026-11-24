@@ -5,7 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import proactive, { DISABLED_INTAKE_EVALUATION_HEALTH, type IntakeEvaluationConfig } from '../src/index.ts'
+import proactive, {
+  DISABLED_INTAKE_EVALUATION_HEALTH, UNCONFIGURED_INTAKE_EVALUATION_HEALTH,
+  type IntakeEvaluationConfig,
+} from '../src/index.ts'
 
 // WP20 stage 3 production assembly: the real assistant-work-items service and
 // this plugin are mounted in one Cordis context, the LLM is a scripted service
@@ -168,22 +171,26 @@ describe('intake evaluation production wiring', () => {
     expect(JSON.parse(calls[0]!.messages[0]!.content[0]!.text)).toMatchObject({ ruleId: 'triage', ceiling: 'notify', sourceText: TEXT })
   })
 
-  it('defaults off: no registration, no model call and no evaluation row', async () => {
+  it('defaults enabled with unavailable health when provider/model are unconfigured, and supports explicit disable', async () => {
     const ctx = new Context(); contexts.push(ctx)
     const delivery = deliveryPeer()
     ctx.provide('assistantDelivery' as never, delivery.peer as never)
     const { llm, calls } = scriptedLlm(() => jsonOutput({ ruleId: 'triage', level: 'digest', quotes: ['build is red'] }))
     ctx.provide('llm' as never, llm as never)
     const workItems = await mountWorkItems(ctx, { enabled: true, timeoutMs: 5_000, maxConsecutiveFailures: 3, maxPerRun: 5, maxCallsPerHour: 20 })
-    const { service } = await mountProactive(ctx, undefined)
+    const { fiber, service } = await mountProactive(ctx, undefined)
 
-    expect(service.intakeEvaluationHealth()).toEqual(DISABLED_INTAKE_EVALUATION_HEALTH)
+    expect(service.intakeEvaluationHealth()).toEqual(UNCONFIGURED_INTAKE_EVALUATION_HEALTH)
     expect(workItems.intakeEvaluationHealth()).toMatchObject({ enabled: true, registered: false })
     delivery.deliver(inbound())
     await flush()
     expect(calls).toHaveLength(0)
     expect(workItems.intakeEvaluations('lark-channel', 'om_1')).toEqual([])
     expect(workItems.intakeEvaluationHealth()).toMatchObject({ registered: false, persisted: { decided: 0, unavailable: 0 } })
+
+    await fiber.dispose()
+    const disabled = await mountProactive(ctx, { enabled: false })
+    expect(disabled.service.intakeEvaluationHealth()).toEqual(DISABLED_INTAKE_EVALUATION_HEALTH)
   })
 
   it('stays loaded and reports unavailable when WorkItems evaluation is disabled', async () => {
@@ -192,7 +199,7 @@ describe('intake evaluation production wiring', () => {
     ctx.provide('assistantDelivery' as never, delivery.peer as never)
     const { llm, calls } = scriptedLlm(() => jsonOutput({ ruleId: 'triage', level: 'digest', quotes: ['build is red'] }))
     ctx.provide('llm' as never, llm as never)
-    const workItems = await mountWorkItems(ctx, undefined)
+    const workItems = await mountWorkItems(ctx, { enabled: false })
     const { service } = await mountProactive(ctx, producerConfig())
 
     await vi.waitFor(() => expect(service.intakeEvaluationHealth().lastError).toMatch(/intake evaluation is disabled/u))

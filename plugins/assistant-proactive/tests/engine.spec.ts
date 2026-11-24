@@ -2,7 +2,20 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { OpportunityEngine, validateProfile } from '../src/engine.ts'
+import {
+  computeDynamicUtility,
+  MAX_ACCEPTANCE_BONUS,
+  MAX_ACCEPTANCE_PENALTY,
+  MAX_ACTIVITY_PENALTY,
+  MAX_FREQUENCY_PENALTY,
+  MAX_IDLE_DISCOUNT,
+  MAX_URGENCY_BONUS,
+  OpportunityEngine,
+  RECENT_NOTIFICATION_WINDOW_MS,
+  URGENCY_WINDOW_MS,
+  validateProfile,
+} from '../src/engine.ts'
+import { attentionOverlay } from '../src/attention-tuning.ts'
 import type { OpportunityInput, OpportunityProfile } from '../src/types.ts'
 
 const roots: string[] = []
@@ -116,4 +129,234 @@ it('rechecks low utility after quiet hours and rejection while another event is 
   engine.evaluate(input(2)); engine.feedback(first.id, scope, 'rejected'); now += 1000
   expect(engine.evaluate(input(2))).toMatchObject({ disposition: 'consume', decision: { reason: 'rejected-cooldown' } })
   engine.close()
+})
+
+describe('WP12 dynamic context-aware utility & interruption cost', () => {
+  it('computes all 4 bounded dimensions deterministically while staying neutral at cold start', () => {
+    const base = profile({ interruptionCost: 12 }) // base utility = 100 - 10 - 12 - 5 = 73
+    expect(computeDynamicUtility(base)).toEqual({
+      baseUtility: 73,
+      baseInterruptionCost: 12,
+      effectiveInterruptionCost: 12,
+      activityAdjustment: 0,
+      frequencyPenalty: 0,
+      urgencyBonus: 0,
+      acceptanceAdjustment: 0,
+      effectiveUtility: 73,
+    })
+
+    // 1. User activity penalty vs extended idle discount (bounded & floored at 0; never cuts overlay delta)
+    expect(computeDynamicUtility(base, { userActive: true })).toMatchObject({
+      activityAdjustment: MAX_ACTIVITY_PENALTY,
+      effectiveInterruptionCost: 12 + MAX_ACTIVITY_PENALTY,
+      effectiveUtility: 73 - MAX_ACTIVITY_PENALTY,
+    })
+    expect(computeDynamicUtility(base, { idleDurationMs: 30_000 })).toMatchObject({
+      activityAdjustment: MAX_ACTIVITY_PENALTY,
+      effectiveInterruptionCost: 27,
+    })
+    expect(computeDynamicUtility(base, { idleDurationMs: 120_000 })).toMatchObject({
+      activityAdjustment: 0,
+      effectiveInterruptionCost: 12,
+    })
+    expect(computeDynamicUtility(base, { idleDurationMs: 3_600_000 })).toMatchObject({
+      activityAdjustment: -MAX_IDLE_DISCOUNT,
+      effectiveInterruptionCost: 2,
+      effectiveUtility: 83,
+    })
+    expect(computeDynamicUtility(base, { userActive: true, idleDurationMs: 3_600_000 })).toMatchObject({
+      activityAdjustment: MAX_ACTIVITY_PENALTY,
+      effectiveInterruptionCost: 27,
+    })
+    // Floored at 0 when base interruptionCost < MAX_IDLE_DISCOUNT
+    expect(computeDynamicUtility(profile({ interruptionCost: 3 }), { idleDurationMs: 3_600_000 })).toMatchObject({
+      activityAdjustment: -3,
+      effectiveInterruptionCost: 0,
+    })
+    // Overlay delta is never reduced by idle discount
+    expect(computeDynamicUtility(profile({ mode: 'remind', interruptionCost: 45 }), {
+      idleDurationMs: 3_600_000,
+      overlayInterruptionCostDelta: 40,
+    })).toMatchObject({
+      baseInterruptionCost: 5,
+      activityAdjustment: -5,
+      effectiveInterruptionCost: 40,
+    })
+
+    // 2. Notification frequency penalty (escalating, capped)
+    expect(computeDynamicUtility(base, { recentNotificationCount: 0 }).frequencyPenalty).toBe(0)
+    expect(computeDynamicUtility(base, { recentNotificationCount: 3 })).toMatchObject({
+      frequencyPenalty: 15,
+      effectiveInterruptionCost: 27,
+      effectiveUtility: 58,
+    })
+    expect(computeDynamicUtility(base, { recentNotificationCount: 50 })).toMatchObject({
+      frequencyPenalty: MAX_FREQUENCY_PENALTY,
+      effectiveInterruptionCost: 52,
+      effectiveUtility: 33,
+    })
+
+    // 3. Urgency / TTL remaining (finite window, unbounded/long = 0, explicit urgencyPpm)
+    expect(computeDynamicUtility(base, { remainingTtlMs: URGENCY_WINDOW_MS }).urgencyBonus).toBe(0)
+    expect(computeDynamicUtility(base, { remainingTtlMs: -1 }).urgencyBonus).toBe(0)
+    expect(computeDynamicUtility(base, { remainingTtlMs: URGENCY_WINDOW_MS / 2 }).urgencyBonus).toBe(MAX_URGENCY_BONUS / 2)
+    expect(computeDynamicUtility(base, { urgencyPpm: 1_000_000 }).urgencyBonus).toBe(MAX_URGENCY_BONUS)
+
+    // 4. Historical acceptance rate (Laplace-smoothed, cold-start neutral, bounded)
+    expect(computeDynamicUtility(base, { acceptedCount: 0, rejectedCount: 0 }).acceptanceAdjustment).toBe(0)
+    expect(computeDynamicUtility(base, { acceptedCount: 3, rejectedCount: 3 }).acceptanceAdjustment).toBe(0)
+    expect(computeDynamicUtility(base, { acceptedCount: 20, rejectedCount: 0 }).acceptanceAdjustment).toBe(MAX_ACCEPTANCE_BONUS)
+    expect(computeDynamicUtility(base, { acceptedCount: 0, rejectedCount: 20 }).acceptanceAdjustment).toBe(-MAX_ACCEPTANCE_PENALTY)
+    expect(computeDynamicUtility(base, { acceptanceRatePpm: 1_000_000, acceptanceSamples: 20 }).acceptanceAdjustment).toBe(MAX_ACCEPTANCE_BONUS)
+  })
+
+  it('rejects malformed or out-of-range ProactiveRuntimeContext inputs fail-closed', () => {
+    const engine = new OpportunityEngine(':memory:', [profile()], { now: () => 2_000 })
+    const badContexts: unknown[] = [
+      null,
+      [],
+      new Date(),
+      { unknownKey: 1 },
+      { userActive: 'yes' },
+      { idleDurationMs: -1 },
+      { idleDurationMs: Number.NaN },
+      { idleDurationMs: Number.POSITIVE_INFINITY },
+      { idleDurationMs: 1.5 },
+      { recentNotificationCount: -2 },
+      { urgencyPpm: -1 },
+      { urgencyPpm: 1_000_001 },
+      { acceptanceRatePpm: 1_000_001 },
+      { acceptanceSamples: -1 },
+    ]
+    for (const bad of badContexts) {
+      expect(() => computeDynamicUtility(profile(), bad as never)).toThrow(/invalid/)
+      expect(() => engine.evaluate(input(), undefined, bad as never)).toThrow(/invalid runtime context/)
+    }
+    engine.close()
+  })
+
+  it('persists rolling notification frequency & acceptance feedback across SQLite reopen and suppresses bursts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'proactive-dynamic-'))
+    roots.push(root)
+    const path = join(root, 'engine.sqlite')
+    let now = 10_000_000
+    const burstProfile = profile({
+      expectedBenefit: 35,
+      executionCost: 5,
+      interruptionCost: 5,
+      possibleLoss: 5,
+      minimumUtility: 15,
+      maxDecisionsPerGoal: 20,
+      maxExecutionsPerGoal: 20,
+      rejectionCooldownMs: 1_000,
+    }) // base utility = 20
+
+    const first = new OpportunityEngine(path, [burstProfile], { now: () => now })
+    const d1 = first.evaluate(input(1))
+    expect(d1.disposition).toBe('execute')
+    expect(d1.decision.utility).toBe(20) // 0 prior notifications
+
+    const d2 = first.evaluate(input(2))
+    expect(d2.disposition).toBe('execute')
+    expect(d2.decision.utility).toBe(15) // 1 prior notification -> -5
+
+    // 2 prior notifications -> -10 => utility = 10 < minimumUtility(15) => suppressed
+    const d3 = first.evaluate(input(3))
+    expect(d3).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'below-threshold', utility: 10 } })
+    first.close()
+
+    // Reopen across process restart: rolling window still remembers 2 emitted notifications (not the suppressed one)
+    const second = new OpportunityEngine(path, [burstProfile], { now: () => now })
+    const d4 = second.evaluate(input(4))
+    expect(d4).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'below-threshold', utility: 10 } })
+
+    // Another scope stays isolated
+    const otherScope = { ...scope, workspace: '/workspace-other' }
+    expect(second.evaluate(input(1, 'other-ws-1', { scope: otherScope })).decision.utility).toBe(20)
+
+    // Advance past rolling 1h window: old burst ages out, and accepted feedback boosts utility cleanly
+    second.feedback(d1.decision.id, scope, 'accepted')
+    second.feedback(d2.decision.id, scope, 'accepted')
+    now += RECENT_NOTIFICATION_WINDOW_MS + 10_000
+    const afterWindow = second.evaluate(input(5))
+    expect(afterWindow.disposition).toBe('execute')
+    expect(afterWindow.decision.utility).toBeGreaterThan(20)
+
+    // Subsequent rejections reduce utility after cooldown expires
+    second.feedback(afterWindow.decision.id, scope, 'rejected')
+    now += 2_000
+    const nextGoal = second.evaluate(input(6, 'd-6', { goalId: 'goal-b' }))
+    expect(nextGoal.decision.utility).toBeLessThan(afterWindow.decision.utility)
+    second.close()
+  })
+
+  it('never lets high urgency or acceptance bypass expired, quiet-hours, cooldown, rejected-cooldown, muted, or budget gates', () => {
+    let now = Date.UTC(2026, 0, 1, 23, 30)
+    const gatedProfile = profile({
+      mode: 'remind',
+      expectedBenefit: 50,
+      executionCost: 5,
+      interruptionCost: 5,
+      possibleLoss: 5,
+      minimumUtility: 1,
+      cooldownMs: 30_000,
+      rejectionCooldownMs: 60_000,
+      maxDecisionsPerGoal: 10,
+      maxExecutionsPerGoal: 0,
+      maxRemindersPerGoal: 2,
+      quietHours: { timezone: 'UTC', startMinute: 23 * 60, endMinute: 60 },
+    })
+    const engine = new OpportunityEngine(':memory:', [gatedProfile], { now: () => now })
+
+    // Expired at TTL=0 even with maximum urgencyPpm & acceptanceRatePpm
+    expect(engine.evaluate(input(1, 'exp', { expiresAt: now }), undefined, {
+      urgencyPpm: 1_000_000,
+      acceptanceRatePpm: 1_000_000,
+      acceptanceSamples: 50,
+    })).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'expired' } })
+
+    // Quiet hours still defers despite imminent TTL and 100% acceptance
+    expect(engine.evaluate(input(2, 'qh', { expiresAt: now + 60_000 }), undefined, {
+      urgencyPpm: 1_000_000,
+      acceptanceRatePpm: 1_000_000,
+      acceptanceSamples: 50,
+    })).toMatchObject({ disposition: 'defer', decision: { reason: 'quiet-hours' } })
+
+    // Attention-muted still suppresses despite maximum urgency
+    now = Date.UTC(2026, 0, 2, 2, 0)
+    const muted = attentionOverlay({ version: 1, digest: 'a'.repeat(64), parameters: { interruptionCostDelta: 0, minimumUtilityDelta: 0, quietExtensionMinutes: 0, muted: true } })
+    expect(engine.evaluate(input(3, 'muted', { expiresAt: now + 60_000 }), muted, {
+      urgencyPpm: 1_000_000,
+      acceptanceRatePpm: 1_000_000,
+      acceptanceSamples: 50,
+    })).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'attention-muted' } })
+
+    // Overlay interruptionCostDelta stays tighten-only even with extended idle
+    now += 31_000
+    const strictOverlay = attentionOverlay({ version: 2, digest: 'b'.repeat(64), parameters: { interruptionCostDelta: 30, minimumUtilityDelta: 0, quietExtensionMinutes: 0, muted: false } })
+    const overlaid = engine.evaluate(input(4, 'ov', { expiresAt: Number.MAX_SAFE_INTEGER }), strictOverlay, { idleDurationMs: 3_600_000 })
+    // Base utility = 35; overlay(+30) -> 5; idle discount only removes base interruptionCost(5) -> 10
+    expect(overlaid.decision).toMatchObject({ mode: 'remind', reason: 'reminder', utility: 10 })
+
+    // Cooldown cannot be bypassed by urgency
+    expect(engine.evaluate(input(5, 'cd', { expiresAt: now + 10_000 }), undefined, {
+      urgencyPpm: 1_000_000,
+    })).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'cooldown' } })
+
+    // Second reminder succeeds once cooldown passes, then budget cannot be bypassed by urgency
+    now += 31_000
+    expect(engine.evaluate(input(6, 'r2', { expiresAt: now + 10_000 }))).toMatchObject({ disposition: 'consume', decision: { mode: 'remind', reason: 'reminder' } })
+    now += 31_000
+    expect(engine.evaluate(input(7, 'bd', { expiresAt: now + 10_000 }), undefined, {
+      urgencyPpm: 1_000_000,
+    })).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'budget' } })
+
+    // Rejected-cooldown cannot be bypassed on a fresh goal wait
+    engine.feedback(overlaid.decision.id, scope, 'rejected')
+    expect(engine.evaluate(input(8, 'rej', { expiresAt: now + 10_000 }), undefined, {
+      urgencyPpm: 1_000_000,
+    })).toMatchObject({ disposition: 'consume', decision: { mode: 'suppress', reason: 'rejected-cooldown' } })
+
+    engine.close()
+  })
 })

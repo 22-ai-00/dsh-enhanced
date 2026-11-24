@@ -124,11 +124,50 @@ export const DISABLED_INTAKE_EVALUATION_HEALTH: ProactiveIntakeEvaluationHealth 
   provider: null, model: null, consecutiveFailures: 0, callsInWindow: 0, budgetExhausted: false,
 })
 
+export const UNCONFIGURED_INTAKE_EVALUATION_LAST_ERROR = 'configuration-incomplete: provider and model are required'
+
+export function unconfiguredIntakeEvaluationHealth(
+  provider: string | null = null,
+  model: string | null = null,
+): ProactiveIntakeEvaluationHealth {
+  return Object.freeze({
+    enabled: true,
+    registered: false,
+    policyVersion: null,
+    lastError: UNCONFIGURED_INTAKE_EVALUATION_LAST_ERROR,
+    readiness: 'unavailable' as const,
+    provider,
+    model,
+    consecutiveFailures: 0,
+    callsInWindow: 0,
+    budgetExhausted: false,
+  })
+}
+
+export const UNCONFIGURED_INTAKE_EVALUATION_HEALTH: ProactiveIntakeEvaluationHealth =
+  unconfiguredIntakeEvaluationHealth(null, null)
+
 export type IntakeEvaluationErrorCode =
-  | 'invalid-request' | 'stale-policy' | 'unknown-rule' | 'ceiling-mismatch'
+  | 'invalid-request' | 'stale-policy' | 'unknown-rule' | 'rule-disabled' | 'ceiling-mismatch'
   | 'llm-unavailable' | 'budget-exhausted' | 'circuit-open' | 'cancelled' | 'timeout'
   | 'provider-error' | 'stream-invalid' | 'input-too-large' | 'output-invalid'
   | 'output-too-large' | 'quote-not-in-source' | 'quote-missing' | 'quote-bound-exceeded'
+
+export interface ProactiveIntakeRuleUpdate {
+  readonly ruleId: string
+  readonly enabled?: boolean
+  readonly mode?: 'observe' | 'auto'
+  readonly confidenceThresholdPpm?: number
+  readonly minUtility?: number
+}
+
+export interface ProactiveIntakeRuleOverride {
+  readonly ruleId: string
+  readonly enabled: boolean
+  readonly mode?: 'observe' | 'auto'
+  readonly confidenceThresholdPpm?: number
+  readonly minUtility?: number
+}
 
 /** A producer-side failure; WorkItems records every throw as a failed attempt and backs off. */
 export class IntakeEvaluationError extends Error {
@@ -287,6 +326,92 @@ export function normalizeIntakeEvaluation(raw: unknown): NormalizedIntakeEvaluat
 }
 
 /**
+ * Service-level resolution for R3 default-enabled intakeEvaluation:
+ * - Omitted or `enabled: true` without `provider`/`model` stays healthy in `'unavailable'` readiness.
+ * - Explicit `enabled: false` stays `'disabled'`.
+ * - Malformed explicit fields still fail closed.
+ */
+export function resolveServiceIntakeEvaluation(raw: unknown): {
+  readonly config?: NormalizedIntakeEvaluation
+  readonly health: ProactiveIntakeEvaluationHealth
+} {
+  if (raw === undefined || raw === null) {
+    return { health: UNCONFIGURED_INTAKE_EVALUATION_HEALTH }
+  }
+  const value = plainObject(raw, 'intakeEvaluation')
+  rejectUnknown(value, CONFIG_KEYS, 'intakeEvaluation')
+  const enabled = value['enabled'] ?? true
+  if (typeof enabled !== 'boolean') fail('intakeEvaluation.enabled must be a boolean')
+  if (!enabled) return { health: DISABLED_INTAKE_EVALUATION_HEALTH }
+
+  const rawProvider = value['provider']
+  const rawModel = value['model']
+  const provider = rawProvider === undefined || rawProvider === null
+    ? null
+    : routeId(rawProvider, 'intakeEvaluation.provider')
+  const model = rawModel === undefined || rawModel === null
+    ? null
+    : routeId(rawModel, 'intakeEvaluation.model')
+
+  const rawPreset = value['preset']
+  let preset: IntakeEvaluationPreset | undefined
+  if (rawPreset !== undefined && rawPreset !== null) {
+    if (typeof rawPreset !== 'string' || !(INTAKE_EVALUATION_PRESETS as readonly string[]).includes(rawPreset)) {
+      fail(`intakeEvaluation.preset must be one of ${INTAKE_EVALUATION_PRESETS.join(', ')}`)
+    }
+    preset = rawPreset as IntakeEvaluationPreset
+  }
+
+  const rawRules = value['rules']
+  if (rawRules !== undefined && rawRules !== null) {
+    if (!Array.isArray(rawRules) || rawRules.length > MAX_INTAKE_EVALUATION_RULES) {
+      fail(`intakeEvaluation.rules must be an array of up to ${MAX_INTAKE_EVALUATION_RULES} rules`)
+    }
+    const seen = new Set<string>()
+    for (const entry of rawRules) {
+      const rule = plainObject(entry, 'intakeEvaluation.rules[]')
+      rejectUnknown(rule, RULE_KEYS, 'intakeEvaluation.rules[]')
+      const ruleId = rule['ruleId']
+      if (typeof ruleId !== 'string' || !POLICY_ID.test(ruleId)) fail('intakeEvaluation.rules[].ruleId has an invalid shape')
+      if (seen.has(ruleId)) fail(`intakeEvaluation.rules repeats ruleId ${ruleId}`)
+      if (!isLevel(rule['ceiling'])) fail(`intakeEvaluation.rules[] ceiling must be one of ${INTAKE_EVALUATION_LEVELS.join(', ')}`)
+      seen.add(ruleId)
+    }
+  }
+
+  optionalInteger(value['maxCallsPerHour'], 'intakeEvaluation.maxCallsPerHour', 1, 1_000, 20)
+  optionalInteger(value['timeoutMs'], 'intakeEvaluation.timeoutMs', 1_000, 600_000, 30_000)
+  optionalInteger(value['maxConsecutiveFailures'], 'intakeEvaluation.maxConsecutiveFailures', 1, 10, 3)
+
+  if (provider === null || model === null) {
+    return { health: unconfiguredIntakeEvaluationHealth(provider, model) }
+  }
+
+  const hasExplicitRules = Array.isArray(rawRules) && rawRules.length > 0
+  const effectiveInput: Record<string, unknown> = {
+    ...value,
+    enabled: true,
+    ...(preset === undefined && !hasExplicitRules ? { preset: 'balanced' } : {}),
+  }
+  const normalized = normalizeIntakeEvaluation(effectiveInput)!
+  return {
+    config: normalized,
+    health: Object.freeze({
+      enabled: true,
+      registered: false,
+      policyVersion: intakeEvaluationPolicy(normalized).version,
+      lastError: null,
+      readiness: 'unavailable' as const,
+      provider: normalized.provider,
+      model: normalized.model,
+      consecutiveFailures: 0,
+      callsInWindow: 0,
+      budgetExhausted: false,
+    }),
+  }
+}
+
+/**
  * The stable Policy snapshot: the version digests the normalized rules and the
  * frozen provider/model, so a config change re-queues every held text.
  */
@@ -322,11 +447,15 @@ const COUNTED_FAILURES: ReadonlySet<IntakeEvaluationErrorCode> = new Set([
  * runtime while the LLM and WorkItems services are both active; the runtime
  * owns queueing, timeout enforcement, failure accounting and persistence.
  */
+const MAX_INTAKE_RULE_OVERRIDES = 32
+const RULE_UPDATE_KEYS = ['ruleId', 'enabled', 'mode', 'confidenceThresholdPpm', 'minUtility'] as const
+
 export class IntakeEvaluationProducer {
   readonly #config: NormalizedIntakeEvaluation
   readonly #policy: IntakeEvaluationPolicy
   readonly #now: () => number
   readonly #calls: number[] = []
+  readonly #ruleOverrides = new Map<string, ProactiveIntakeRuleOverride>()
   #llm: LlmRuntime | undefined
   #registered = false
   #failures = 0
@@ -342,6 +471,107 @@ export class IntakeEvaluationProducer {
   get policy(): IntakeEvaluationPolicy { return this.#policy }
 
   get config(): NormalizedIntakeEvaluation { return this.#config }
+
+  #parseIntakeRuleUpdates(updates: readonly unknown[]): ProactiveIntakeRuleUpdate[] {
+    if (!Array.isArray(updates) || updates.length > MAX_INTAKE_RULE_OVERRIDES) {
+      throw new Error(`assistant-proactive: intakeRuleUpdates must be an array of at most ${MAX_INTAKE_RULE_OVERRIDES} rules`)
+    }
+    const seen = new Set<string>()
+    const parsed: ProactiveIntakeRuleUpdate[] = []
+    for (const entry of updates) {
+      const record = plainObject(entry, 'intake rule update')
+      rejectUnknown(record, RULE_UPDATE_KEYS, 'intake rule update')
+      const ruleId = record['ruleId']
+      if (typeof ruleId !== 'string' || !POLICY_ID.test(ruleId)) {
+        throw new Error('assistant-proactive: intakeRuleUpdates.ruleId is invalid')
+      }
+      if (seen.has(ruleId)) {
+        throw new Error(`assistant-proactive: intakeRuleUpdates repeats ruleId ${ruleId}`)
+      }
+      seen.add(ruleId)
+      const enabled = record['enabled']
+      if (enabled !== undefined && typeof enabled !== 'boolean') {
+        throw new Error('assistant-proactive: intakeRuleUpdates.enabled must be a boolean')
+      }
+      const mode = record['mode']
+      if (mode !== undefined && mode !== 'observe' && mode !== 'auto') {
+        throw new Error('assistant-proactive: intakeRuleUpdates.mode must be "observe" or "auto"')
+      }
+      const confidenceThresholdPpm = record['confidenceThresholdPpm']
+      if (confidenceThresholdPpm !== undefined && (typeof confidenceThresholdPpm !== 'number'
+        || !Number.isSafeInteger(confidenceThresholdPpm) || confidenceThresholdPpm < 0 || confidenceThresholdPpm > 1_000_000)) {
+        throw new Error('assistant-proactive: intakeRuleUpdates.confidenceThresholdPpm must be an integer between 0 and 1000000')
+      }
+      const minUtility = record['minUtility']
+      if (minUtility !== undefined && (typeof minUtility !== 'number' || !Number.isFinite(minUtility))) {
+        throw new Error('assistant-proactive: intakeRuleUpdates.minUtility must be a finite number')
+      }
+      parsed.push(Object.freeze({
+        ruleId,
+        ...(enabled === undefined ? {} : { enabled }),
+        ...(mode === undefined ? {} : { mode }),
+        ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+        ...(minUtility === undefined ? {} : { minUtility }),
+      }))
+    }
+    return parsed
+  }
+
+  /**
+   * WP22 live rule overrides (`enabled`, `mode`, thresholds) without bumping
+   * `policy().version` or inventing ceilings.
+   */
+  applyIntakeRuleUpdates(updates: readonly unknown[]): readonly ProactiveIntakeRuleOverride[] {
+    const parsed = this.#parseIntakeRuleUpdates(updates)
+    const staged = new Map(this.#ruleOverrides)
+    for (const item of parsed) {
+      const prior = staged.get(item.ruleId)
+      const enabled = item.enabled ?? prior?.enabled ?? true
+      const mode = item.mode ?? prior?.mode
+      const confidenceThresholdPpm = item.confidenceThresholdPpm ?? prior?.confidenceThresholdPpm
+      const minUtility = item.minUtility ?? prior?.minUtility
+      staged.set(item.ruleId, Object.freeze({
+        ruleId: item.ruleId,
+        enabled,
+        ...(mode === undefined ? {} : { mode }),
+        ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+        ...(minUtility === undefined ? {} : { minUtility }),
+      }))
+    }
+    if (staged.size > MAX_INTAKE_RULE_OVERRIDES) {
+      throw new Error(`assistant-proactive: at most ${MAX_INTAKE_RULE_OVERRIDES} intake rule overrides may be active`)
+    }
+    this.#ruleOverrides.clear()
+    for (const [key, value] of staged) this.#ruleOverrides.set(key, value)
+    return this.intakeRuleOverrides()
+  }
+
+  /**
+   * Authoritative replacement of Evaluation-managed intake rule overrides
+   * without bumping `policy().version`: clears removed rules and reverted fields.
+   */
+  reconcileIntakeRuleUpdates(updates: readonly unknown[]): readonly ProactiveIntakeRuleOverride[] {
+    const parsed = this.#parseIntakeRuleUpdates(updates)
+    const next = new Map<string, ProactiveIntakeRuleOverride>()
+    for (const item of parsed) {
+      next.set(item.ruleId, Object.freeze({
+        ruleId: item.ruleId,
+        enabled: item.enabled ?? true,
+        ...(item.mode === undefined ? {} : { mode: item.mode }),
+        ...(item.confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm: item.confidenceThresholdPpm }),
+        ...(item.minUtility === undefined ? {} : { minUtility: item.minUtility }),
+      }))
+    }
+    this.#ruleOverrides.clear()
+    for (const [key, value] of next) this.#ruleOverrides.set(key, value)
+    return this.intakeRuleOverrides()
+  }
+
+  intakeRuleOverrides(): readonly ProactiveIntakeRuleOverride[] {
+    return Object.freeze(
+      [...this.#ruleOverrides.values()].sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0)),
+    )
+  }
 
   /** The exact Host-only registration WorkItems accepts. */
   registration(): IntakeWorkItemsRegistration {
@@ -392,6 +622,9 @@ export class IntakeEvaluationProducer {
    */
   async evaluate(raw: unknown): Promise<IntakeEvaluationVerdict> {
     const request = readIntakeModelRequest(raw, this.#policy)
+    if (this.#ruleOverrides.get(request.ruleId)?.enabled === false) {
+      throw new IntakeEvaluationError('rule-disabled', `rule ${request.ruleId} is disabled by live tuning`)
+    }
     const llm = this.#llm
     if (llm === undefined) throw new IntakeEvaluationError('llm-unavailable', 'the LLM service is not active')
     if (request.signal.aborted) throw new IntakeEvaluationError('cancelled', 'the request signal is already aborted')

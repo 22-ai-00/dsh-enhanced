@@ -26,7 +26,8 @@ async function fixture() {
   const f=await harness(),generic=await readyItem(f)
   vi.spyOn(Date,'now').mockImplementation(f.now)
   const raw:Config={enabled:true,mode:'active',databasePath:f.config.databasePath,workRoot:f.config.workRoot,intakeSourceId:f.config.intakeSourceId,
-    workerAutomationId:f.config.workerAutomationId!,scope:f.config.scope!,ownerRecall:{enabled:true},ownerReplyContinuation:true,
+    workerAutomationId:f.config.workerAutomationId!,scope:f.config.scope!,ownerRecall:{enabled:true},ownerReplyContinuation:true,ownerReportFeedback:false,
+    acceptance:{holdReport:{enabled:false}},
     admission:{...f.config.admission,allowedKinds:[...f.config.admission.allowedKinds,'owner-continuation']},ownerContinuation:{enabled:true,
       automationId:'continuation-worker',allowedTools:['work_item_claim','work_item_report','work_item_read_context','marker'],budgetId:'continuations',budgetAmount:1,
       maxModelCalls:8,maxToolCalls:20,maxOutputTokens:256,timeoutMs:15000,expiresAt:f.now()+3600000}}

@@ -1,4 +1,5 @@
-import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
+import { chmodSync, closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
@@ -65,13 +66,14 @@ import type {
   WorkItemIntakeEvaluationFeedPage,
 } from './types.ts'
 import { CLAIMABLE_STATES, OPEN_STATES, TERMINAL_REPORT_STATUSES, TERMINAL_STATES, WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL, WorkItemError } from './types.ts'
-import type { WorkItemIntakeCandidate, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
-import type { WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
+import type { WorkItemIntakeAcceptance, WorkItemIntakeCandidate, WorkItemIntakeObjective, WorkItemIntakeRecord, WorkItemIntakeResult, WorkItemIntakeSignals } from './intake.ts'
+import { MAX_INTAKE_OBJECTIVE_BYTES } from './intake.ts'
+import type { IntakeEvaluationLevel, WorkItemIntakeEvaluationRecord } from './intake-evaluation.ts'
 import { intakeEvaluationFeedIdFor } from './intake-evaluation.ts'
 import type { WorkItemIntakeAdmissionRecord } from './intake-admission.ts'
 
-const SCHEMA_VERSION = 13
-const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_intake_admission', 'work_item_intake_evaluation', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
+const SCHEMA_VERSION = 14
+const WORK_ITEM_TABLE_NAMES = ['work_item', 'work_item_claim', 'work_item_continuation', 'work_item_dispatch', 'work_item_event', 'work_item_follow', 'work_item_intake', 'work_item_intake_admission', 'work_item_intake_eval_queue', 'work_item_intake_evaluation', 'work_item_intake_staging', 'work_item_outcome', 'work_item_report', 'work_item_schema_meta']
 const CONTINUATION_TABLE = `CREATE TABLE work_item_continuation (
   item_id TEXT PRIMARY KEY REFERENCES work_item(id) ON DELETE RESTRICT,
   parent_item_id TEXT NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
@@ -172,6 +174,48 @@ const INTAKE_ADMISSION_TRIGGERS = [
   ['work_item_intake_admission_no_delete', `CREATE TRIGGER work_item_intake_admission_no_delete BEFORE DELETE ON work_item_intake_admission BEGIN SELECT RAISE(ABORT, 'intake admission is append-only'); END`],
 ] as const
 const INTAKE_ADMISSION_SCHEMA = `${INTAKE_ADMISSION_TABLE};\n${INTAKE_ADMISSION_ADMITTED_INDEX};\n${INTAKE_ADMISSION_TRIGGERS.map(([,sql]) => sql+';').join('\n')}`
+/**
+ * Bounded, AEAD-sealed staging for transient intake payloads (`sourceText`,
+ * `objective`, `acceptance`) across restarts (schema 14). Ciphertext is sealed
+ * with AES-256-GCM bound via AAD to `(source, source_event_id, content_digest)`.
+ * Never stores raw plaintext in SQLite or WAL.
+ */
+const INTAKE_STAGING_TABLE = `CREATE TABLE work_item_intake_staging (
+  source TEXT NOT NULL, source_event_id TEXT NOT NULL,
+  content_digest TEXT,
+  has_source_text INTEGER NOT NULL CHECK(has_source_text IN (0, 1)),
+  has_objective INTEGER NOT NULL CHECK(has_objective IN (0, 1)),
+  has_acceptance INTEGER NOT NULL CHECK(has_acceptance IN (0, 1)),
+  key_id TEXT NOT NULL,
+  iv BLOB NOT NULL, auth_tag BLOB NOT NULL, ciphertext BLOB NOT NULL,
+  payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0),
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  PRIMARY KEY(source, source_event_id),
+  FOREIGN KEY(source, source_event_id) REFERENCES work_item_intake(source, source_event_id)
+) STRICT, WITHOUT ROWID`
+const INTAKE_STAGING_EVICT_INDEX = `CREATE INDEX work_item_intake_staging_evict_idx
+  ON work_item_intake_staging(updated_at, expires_at)`
+/** Persisted pending evaluation retry/backoff progress across restarts (schema 14). */
+const INTAKE_EVAL_QUEUE_TABLE = `CREATE TABLE work_item_intake_eval_queue (
+  source TEXT NOT NULL, source_event_id TEXT NOT NULL,
+  rule_id TEXT NOT NULL, policy_version TEXT NOT NULL,
+  ceiling TEXT NOT NULL CHECK(ceiling IN ('ignore', 'digest', 'notify', 'accept')),
+  attempts INTEGER NOT NULL CHECK(attempts >= 0),
+  failures INTEGER NOT NULL CHECK(failures >= 0),
+  next_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY(source, source_event_id, rule_id, policy_version),
+  FOREIGN KEY(source, source_event_id) REFERENCES work_item_intake(source, source_event_id)
+) STRICT, WITHOUT ROWID`
+const INTAKE_STAGING_SCHEMA = `${INTAKE_STAGING_TABLE};\n${INTAKE_STAGING_EVICT_INDEX};\n${INTAKE_EVAL_QUEUE_TABLE}`
+export const MAX_INTAKE_STAGING_ENTRIES = 256
+export const MAX_INTAKE_STAGING_BYTES = 8 * 1024 * 1024
+export const DEFAULT_INTAKE_STAGING_TTL_MS = 7 * 24 * 3_600_000
+export const MAX_INTAKE_EVAL_QUEUE_ENTRIES = 4_096
+const MAX_STAGING_SOURCE_TEXT_UNITS = 65_536
+const INTAKE_SEAL_KEY_SUFFIX = '.intake-seal.key'
+const INTAKE_SEAL_AAD_VERSION = 'work-items/intake-staging/v1'
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u
+const ACCEPTANCE_CONTRACT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
 const EVALUATION_LEVELS: readonly string[] = ['ignore', 'digest', 'notify', 'accept']
 /** Only TEXT fields represented in continuationItemBasis; body/display text is excluded. */
 const CONTINUATION_ITEM_TEXT_COLUMNS = ['id','dedup_key','source_id','kind','external_id','origin_binding_id','workspace','agent_preset',
@@ -459,6 +503,9 @@ function validateSchema(database: DatabaseSync): void {
   if (version >= 1 && version <= 12 && objects.some(row => String(row['name']) === 'work_item_intake_admission_item_idx')) {
     fail('storage', 'work-item database contains the intake admission item index before schema 13')
   }
+  if (version >= 1 && version <= 13 && objects.some(row => String(row['name']).startsWith('work_item_intake_staging') || String(row['name']).startsWith('work_item_intake_eval_queue'))) {
+    fail('storage', 'work-item database contains an intake staging object before schema 14')
+  }
   if (version === 0) {
     if (objects.length !== 0) fail('storage', 'new work-item database is not empty')
     if (!migrateStep(database, 0, `
@@ -531,8 +578,9 @@ function validateSchema(database: DatabaseSync): void {
       ${INTAKE_EVALUATION_SCHEMA};
       ${INTAKE_ADMISSION_SCHEMA};
       ${INTAKE_ADMISSION_ITEM_INDEX};
-      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '13');
-      PRAGMA user_version = 13;
+      ${INTAKE_STAGING_SCHEMA};
+      INSERT INTO work_item_schema_meta(key, value) VALUES ('schema_version', '14');
+      PRAGMA user_version = 14;
     `)) return validateSchema(database)
     return
   }
@@ -660,6 +708,12 @@ function validateSchema(database: DatabaseSync): void {
       UPDATE work_item_schema_meta SET value = '13' WHERE key = 'schema_version';
       PRAGMA user_version = 13;`)) return validateSchema(database)
   }
+  if (version >= 1 && version <= 13) {
+    // Additive only: bounded AEAD staging + persisted evaluation queue; no row moves.
+    if (!migrateStep(database, 13, `${INTAKE_STAGING_SCHEMA};
+      UPDATE work_item_schema_meta SET value = '14' WHERE key = 'schema_version';
+      PRAGMA user_version = 14;`)) return validateSchema(database)
+  }
   if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) fail('storage', `unsupported work-item schema version ${String(version)}`)
   const expected = JSON.stringify(WORK_ITEM_TABLE_NAMES)
   const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name").all() as Row[]).map(row => String(row['name']))
@@ -680,6 +734,11 @@ function validateSchema(database: DatabaseSync): void {
     ['work_item_intake_admission_item_idx', INTAKE_ADMISSION_ITEM_INDEX], ...INTAKE_ADMISSION_TRIGGERS]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
     if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake admission schema differs')
+  }
+  for (const [name, sql] of [['work_item_intake_staging', INTAKE_STAGING_TABLE], ['work_item_intake_staging_evict_idx', INTAKE_STAGING_EVICT_INDEX],
+    ['work_item_intake_eval_queue', INTAKE_EVAL_QUEUE_TABLE]]) {
+    const row = database.prepare('SELECT sql FROM sqlite_schema WHERE name = ?').get(name!) as Row | undefined
+    if (typeof row?.['sql'] !== 'string' || row['sql'].replace(/\s+/gu, ' ').trim() !== sql!.replace(/\s+/gu, ' ').trim()) fail('storage', 'intake staging schema differs')
   }
   for (const [name, sql] of [['work_item_dispatch_waiting_due_idx', WAITING_RESUME_DUE_INDEX], ['work_item_claim_active_item_idx', ACTIVE_CLAIM_ITEM_INDEX]]) {
     const row = database.prepare('SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?').get('index', name!) as Row | undefined
@@ -1271,6 +1330,63 @@ export interface WorkItemExecutionMetrics {
   readonly claimExpiries?: number
 }
 
+export interface WorkItemIntakeStagingHint {
+  readonly objective?: WorkItemIntakeObjective
+  readonly acceptance?: WorkItemIntakeAcceptance
+}
+
+export interface WorkItemIntakeStagingSourceText {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly contentDigest: string
+  readonly text: string
+}
+
+export interface WorkItemIntakeEvalQueueEntry {
+  readonly source: string
+  readonly sourceEventId: string
+  readonly ruleId: string
+  readonly policyVersion: string
+  readonly ceiling: IntakeEvaluationLevel
+  readonly attempts: number
+  readonly failures: number
+  readonly nextAt: number
+  readonly updatedAt: number
+}
+
+interface StagingPlaintext {
+  readonly sourceText?: string
+  readonly objective?: WorkItemIntakeObjective
+  readonly acceptance?: WorkItemIntakeAcceptance
+}
+
+const sha256Hex = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex')
+
+function isValidStagingSourceText(text: unknown, contentDigest: string | null): text is string {
+  return typeof text === 'string' && text.length <= MAX_STAGING_SOURCE_TEXT_UNITS
+    && typeof contentDigest === 'string' && sha256Hex(text) === contentDigest
+}
+
+function isValidStagingObjective(value: unknown, contentDigest: string | null): value is WorkItemIntakeObjective {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  const text = record['text'], digest = record['digest']
+  if (typeof text !== 'string' || text.length === 0 || !text.isWellFormed()
+    || text.includes('\u0000') || Buffer.byteLength(text, 'utf8') > MAX_INTAKE_OBJECTIVE_BYTES) return false
+  if (typeof digest !== 'string' || !SHA256_HEX_PATTERN.test(digest)) return false
+  if (sha256Hex(text) !== digest || contentDigest !== digest) return false
+  return true
+}
+
+function isValidStagingAcceptance(value: unknown): value is WorkItemIntakeAcceptance {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record).sort()
+  if (keys.length !== 2 || keys[0] !== 'contractDigest' || keys[1] !== 'contractId') return false
+  return typeof record['contractId'] === 'string' && ACCEPTANCE_CONTRACT_ID_PATTERN.test(record['contractId'])
+    && typeof record['contractDigest'] === 'string' && SHA256_HEX_PATTERN.test(record['contractDigest'])
+}
+
 /**
  * Single-writer SQLite ledger.
  *
@@ -1279,15 +1395,18 @@ export interface WorkItemExecutionMetrics {
  * upgrades are bounded to the single-writer upgrade boundary at open time.
  */
 export class WorkItemStore {
+  readonly #path: string
   readonly #database: DatabaseSync
   readonly #statements = new Map<string, ReturnType<DatabaseSync['prepare']>>()
   readonly #now: () => number
   readonly #settleWindowMs: number
+  #sealKey: Buffer | undefined
   #closed = false
   #pendingChanges: WorkItemChangeEvent[] | undefined
   readonly #changeListeners = new Set<(event: WorkItemChangeEvent) => void>()
 
   constructor(path: string, options: { now?: () => number; settleWindowMs?: number } = {}) {
+    this.#path = path
     this.#now = options.now ?? (() => Date.now())
     const settleWindowMs = options.settleWindowMs ?? DEFAULT_SETTLE_WINDOW_MS
     if (!Number.isSafeInteger(settleWindowMs) || settleWindowMs <= 0) fail('invalid-input', 'settleWindowMs must be a positive integer')
@@ -1509,6 +1628,8 @@ export class WorkItemStore {
         .run(record.source, record.sourceEventId, ruleId, policyVersion, record.sourceDigest, record.mode, record.status,
           record.level, record.proposedLevel, record.ceiling, JSON.stringify(spans), JSON.stringify([...record.reasons]),
           record.wouldAccept ? 1 : 0, record.attempts, record.decidedAt, this.#now())
+      this.#statement('DELETE FROM work_item_intake_eval_queue WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?')
+        .run(record.source, record.sourceEventId, ruleId, policyVersion)
       return Object.freeze({ record: this.getIntakeEvaluation(record.source, record.sourceEventId, ruleId, policyVersion)!, replayed: false })
     })
   }
@@ -1606,6 +1727,554 @@ export class WorkItemStore {
       WHERE e.would_accept = 1 AND NOT EXISTS (SELECT 1 FROM work_item_intake_admission a
         WHERE a.source = e.source AND a.source_event_id = e.source_event_id AND a.rule_id = e.rule_id AND a.policy_version = e.policy_version)`).get() as Row
     return Number(row['count'])
+  }
+
+  /** Count accepting evaluations for one intake event still awaiting admission; read-only. */
+  countPendingIntakeAdmissionsFor(source: string, sourceEventId: string): number {
+    const row = this.#statement(`SELECT COUNT(*) AS count FROM work_item_intake_evaluation e
+      WHERE e.source = ? AND e.source_event_id = ? AND e.would_accept = 1
+        AND NOT EXISTS (SELECT 1 FROM work_item_intake_admission a
+          WHERE a.source = e.source AND a.source_event_id = e.source_event_id AND a.rule_id = e.rule_id AND a.policy_version = e.policy_version)`)
+      .get(source, sourceEventId) as Row
+    return Number(row['count'])
+  }
+
+  /** Count pending/backoff evaluations in the queue for one intake event; read-only. */
+  countPendingIntakeEvalQueueFor(source: string, sourceEventId: string): number {
+    const row = this.#statement('SELECT COUNT(*) AS count FROM work_item_intake_eval_queue WHERE source = ? AND source_event_id = ?')
+      .get(source, sourceEventId) as Row
+    return Number(row['count'])
+  }
+
+  /** Whether any rule has already admitted or replayed a work item for one intake event; read-only. */
+  hasIntakeAdmittedFor(source: string, sourceEventId: string): boolean {
+    const row = this.#statement(`SELECT 1 AS hit FROM work_item_intake_admission
+      WHERE source = ? AND source_event_id = ? AND outcome IN ('admitted', 'replayed') LIMIT 1`)
+      .get(source, sourceEventId) as Row | undefined
+    return row !== undefined
+  }
+
+  #sealKeyId(key: Buffer): string {
+    return createHash('sha256').update(key).digest('hex').slice(0, 16)
+  }
+
+  #stagingAad(source: string, sourceEventId: string, contentDigest: string | null): Buffer {
+    return Buffer.from(JSON.stringify([INTAKE_SEAL_AAD_VERSION, source, sourceEventId, contentDigest]), 'utf8')
+  }
+
+  #readSealKey(): { readonly ok: true; readonly key: Buffer } | { readonly ok: false; readonly reason: 'seal-key-missing' | 'seal-key-invalid' } {
+    if (this.#path === MEMORY_DATABASE) {
+      return this.#sealKey === undefined
+        ? { ok: false, reason: 'seal-key-missing' }
+        : { ok: true, key: this.#sealKey }
+    }
+    const keyPath = `${this.#path}${INTAKE_SEAL_KEY_SUFFIX}`
+    try {
+      lstatSync(keyPath)
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+        return { ok: false, reason: 'seal-key-missing' }
+      }
+      return { ok: false, reason: 'seal-key-invalid' }
+    }
+    try {
+      privateFile(keyPath)
+      const bytes = readFileSync(keyPath)
+      if (bytes.byteLength !== 32) return { ok: false, reason: 'seal-key-invalid' }
+      return { ok: true, key: bytes }
+    } catch {
+      return { ok: false, reason: 'seal-key-invalid' }
+    }
+  }
+
+  #ensureSealKey(): Buffer {
+    if (this.#path === MEMORY_DATABASE) {
+      this.#sealKey ??= randomBytes(32)
+      return this.#sealKey
+    }
+    const existing = this.#readSealKey()
+    if (existing.ok) return existing.key
+    if (existing.reason === 'seal-key-invalid') fail('storage', 'intake staging seal key is invalid')
+    const keyPath = `${this.#path}${INTAKE_SEAL_KEY_SUFFIX}`
+    const tmpPath = `${keyPath}.tmp.${process.pid}.${randomBytes(6).toString('hex')}`
+    const key = randomBytes(32)
+    let fd: number | undefined
+    try {
+      fd = openSync(tmpPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
+      writeSync(fd, key)
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = undefined
+      chmodSync(tmpPath, 0o600)
+      try {
+        linkSync(tmpPath, keyPath)
+      } catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+          const raced = this.#readSealKey()
+          if (raced.ok) return raced.key
+          fail('storage', 'intake staging seal key is invalid')
+        }
+        if (error && typeof error === 'object' && 'code' in error && (error.code === 'EXDEV' || error.code === 'EPERM')) {
+          renameSync(tmpPath, keyPath)
+        } else {
+          throw error
+        }
+      }
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd) } catch { /* ignore */ }
+      }
+      try { unlinkSync(tmpPath) } catch { /* ignore */ }
+    }
+    const verified = this.#readSealKey()
+    if (!verified.ok) fail('storage', 'intake staging seal key could not be verified')
+    return verified.key
+  }
+
+  #sealStagingPayload(source: string, sourceEventId: string, contentDigest: string | null, payload: StagingPlaintext): {
+    readonly keyId: string; readonly iv: Buffer; readonly authTag: Buffer; readonly ciphertext: Buffer
+  } {
+    const key = this.#ensureSealKey()
+    const iv = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', key, iv)
+    cipher.setAAD(this.#stagingAad(source, sourceEventId, contentDigest))
+    const plaintext = JSON.stringify({
+      ...(payload.sourceText === undefined ? {} : { sourceText: payload.sourceText }),
+      ...(payload.objective === undefined ? {} : { objective: payload.objective }),
+      ...(payload.acceptance === undefined ? {} : { acceptance: payload.acceptance }),
+    })
+    const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+    const authTag = cipher.getAuthTag()
+    return { keyId: this.#sealKeyId(key), iv, authTag, ciphertext }
+  }
+
+  #unsealStagingRow(row: Row, now: number):
+    | { readonly ok: true; readonly payload: StagingPlaintext; readonly contentDigest: string | null }
+    | { readonly ok: false; readonly reason: 'expired' | 'seal-key-missing' | 'integrity-failed' } {
+    const expiresAt = optNumber(row['expires_at'])
+    if (expiresAt === null || expiresAt <= now) return { ok: false, reason: 'expired' }
+    const source = String(row['source'])
+    const sourceEventId = String(row['source_event_id'])
+    const contentDigest = optString(row['content_digest'])
+    const intake = this.getIntake(source, sourceEventId)
+    if (intake === undefined || intake.contentDigest !== contentDigest) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    const iv = row['iv']
+    const authTag = row['auth_tag']
+    const ciphertext = row['ciphertext']
+    if (!(iv instanceof Uint8Array) || iv.byteLength !== 12
+      || !(authTag instanceof Uint8Array) || authTag.byteLength !== 16
+      || !(ciphertext instanceof Uint8Array)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    const keyRead = this.#readSealKey()
+    if (!keyRead.ok) {
+      return { ok: false, reason: keyRead.reason === 'seal-key-missing' ? 'seal-key-missing' : 'integrity-failed' }
+    }
+    if (this.#sealKeyId(keyRead.key) !== String(row['key_id'])) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    let parsed: unknown
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', keyRead.key, iv)
+      decipher.setAuthTag(authTag)
+      decipher.setAAD(this.#stagingAad(source, sourceEventId, contentDigest))
+      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+      parsed = JSON.parse(plaintext) as unknown
+    } catch {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    const record = parsed as Record<string, unknown>
+    const hasSourceText = Number(row['has_source_text']) === 1
+    const hasObjective = Number(row['has_objective']) === 1
+    const hasAcceptance = Number(row['has_acceptance']) === 1
+    const sourceText = record['sourceText']
+    const objective = record['objective']
+    const acceptance = record['acceptance']
+    if (hasSourceText !== (sourceText !== undefined)
+      || hasObjective !== (objective !== undefined)
+      || hasAcceptance !== (acceptance !== undefined)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    if (sourceText !== undefined && !isValidStagingSourceText(sourceText, contentDigest)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    if (objective !== undefined && !isValidStagingObjective(objective, contentDigest)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    if (acceptance !== undefined && !isValidStagingAcceptance(acceptance)) {
+      return { ok: false, reason: 'integrity-failed' }
+    }
+    return {
+      ok: true,
+      contentDigest,
+      payload: Object.freeze({
+        ...(sourceText === undefined ? {} : { sourceText }),
+        ...(objective === undefined ? {} : { objective: Object.freeze({ text: objective.text, digest: objective.digest }) }),
+        ...(acceptance === undefined ? {} : { acceptance: Object.freeze({ contractId: acceptance.contractId, contractDigest: acceptance.contractDigest }) }),
+      }),
+    }
+  }
+
+  #deleteExpiredStaging(now: number): number {
+    const expired = this.#statement('DELETE FROM work_item_intake_staging WHERE expires_at <= ?').run(now)
+    const settledQueue = this.#statement(`DELETE FROM work_item_intake_eval_queue AS q
+      WHERE EXISTS (SELECT 1 FROM work_item_intake_evaluation e
+        WHERE e.source = q.source AND e.source_event_id = q.source_event_id
+          AND e.rule_id = q.rule_id AND e.policy_version = q.policy_version)
+        OR NOT EXISTS (SELECT 1 FROM work_item_intake_staging s
+          WHERE s.source = q.source AND s.source_event_id = q.source_event_id AND s.has_source_text = 1)`).run()
+    return Number(expired.changes) + Number(settledQueue.changes)
+  }
+
+  /**
+   * Persist or merge AEAD-sealed transient intake payloads (`sourceText`,
+   * `objective`, `acceptance`) under strict count, byte and TTL bounds.
+   * Never stores raw plaintext in SQLite or WAL.
+   */
+  upsertIntakeStaging(input: {
+    readonly source: string
+    readonly sourceEventId: string
+    readonly sourceText?: string
+    readonly objective?: WorkItemIntakeObjective
+    readonly acceptance?: WorkItemIntakeAcceptance
+    readonly ttlMs?: number
+  }): Readonly<{ stored: boolean; reason?: 'buffer-full' | 'invalid-intake' | 'integrity-failed' }> {
+    if (this.#closed) fail('storage', 'work-item store is closed')
+    const now = this.#now()
+    const ttlMs = input.ttlMs ?? DEFAULT_INTAKE_STAGING_TTL_MS
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) fail('invalid-input', 'intake staging ttlMs must be a positive integer')
+    return this.#transaction(() => {
+      const intake = this.getIntake(input.source, input.sourceEventId)
+      if (intake === undefined || intake.decision !== 'stored') {
+        return Object.freeze({ stored: false, reason: 'invalid-intake' as const })
+      }
+      if (input.sourceText !== undefined && !isValidStagingSourceText(input.sourceText, intake.contentDigest)) {
+        return Object.freeze({ stored: false, reason: 'integrity-failed' as const })
+      }
+      if (input.objective !== undefined && !isValidStagingObjective(input.objective, intake.contentDigest)) {
+        return Object.freeze({ stored: false, reason: 'integrity-failed' as const })
+      }
+      if (input.acceptance !== undefined && !isValidStagingAcceptance(input.acceptance)) {
+        return Object.freeze({ stored: false, reason: 'integrity-failed' as const })
+      }
+      this.#deleteExpiredStaging(now)
+      const existingRow = this.#statement('SELECT * FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?')
+        .get(input.source, input.sourceEventId) as Row | undefined
+      let prior: StagingPlaintext = {}
+      let createdAt = now
+      if (existingRow !== undefined) {
+        createdAt = Number(existingRow['created_at'])
+        const unsealed = this.#unsealStagingRow(existingRow, now)
+        if (!unsealed.ok) {
+          if (unsealed.reason === 'integrity-failed') return Object.freeze({ stored: false, reason: 'integrity-failed' as const })
+        } else {
+          prior = unsealed.payload
+        }
+      }
+      const nextSourceText = input.sourceText !== undefined ? input.sourceText : prior.sourceText
+      const nextObjective = input.objective !== undefined ? input.objective : prior.objective
+      const nextAcceptance = input.acceptance !== undefined ? input.acceptance : prior.acceptance
+      const merged: StagingPlaintext = {
+        ...(nextSourceText === undefined ? {} : { sourceText: nextSourceText }),
+        ...(nextObjective === undefined ? {} : { objective: nextObjective }),
+        ...(nextAcceptance === undefined ? {} : { acceptance: nextAcceptance }),
+      }
+      if (merged.sourceText === undefined && merged.objective === undefined && merged.acceptance === undefined) {
+        return Object.freeze({ stored: false, reason: 'invalid-intake' as const })
+      }
+      const sealed = this.#sealStagingPayload(input.source, input.sourceEventId, intake.contentDigest, merged)
+      const payloadBytes = sealed.ciphertext.byteLength
+      const usage = () => this.#statement(`SELECT COUNT(*) AS cnt, COALESCE(SUM(payload_bytes), 0) AS bytes
+        FROM work_item_intake_staging WHERE NOT (source = ? AND source_event_id = ?)`)
+        .get(input.source, input.sourceEventId) as Row
+      let current = usage()
+      while (Number(current['cnt']) >= MAX_INTAKE_STAGING_ENTRIES || Number(current['bytes']) + payloadBytes > MAX_INTAKE_STAGING_BYTES) {
+        const evictable = this.#statement(`SELECT s.source, s.source_event_id FROM work_item_intake_staging s
+          WHERE NOT (s.source = ? AND s.source_event_id = ?)
+            AND NOT EXISTS (SELECT 1 FROM work_item_intake_eval_queue q
+              WHERE q.source = s.source AND q.source_event_id = s.source_event_id)
+            AND (s.has_source_text = 0 OR EXISTS (SELECT 1 FROM work_item_intake_evaluation e
+              WHERE e.source = s.source AND e.source_event_id = s.source_event_id))
+            AND ((s.has_objective = 0 AND s.has_acceptance = 0) OR NOT EXISTS (
+              SELECT 1 FROM work_item_intake_evaluation e
+              WHERE e.source = s.source AND e.source_event_id = s.source_event_id AND e.would_accept = 1
+                AND NOT EXISTS (SELECT 1 FROM work_item_intake_admission a
+                  WHERE a.source = e.source AND a.source_event_id = e.source_event_id AND a.rule_id = e.rule_id AND a.policy_version = e.policy_version)))
+          ORDER BY s.updated_at ASC, s.source ASC, s.source_event_id ASC LIMIT 1`).get(input.source, input.sourceEventId) as Row | undefined
+        if (evictable === undefined) {
+          return Object.freeze({ stored: false, reason: 'buffer-full' as const })
+        }
+        this.#statement('DELETE FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?')
+          .run(String(evictable['source']), String(evictable['source_event_id']))
+        current = usage()
+      }
+      this.#statement(`INSERT INTO work_item_intake_staging(
+          source, source_event_id, content_digest, has_source_text, has_objective, has_acceptance,
+          key_id, iv, auth_tag, ciphertext, payload_bytes, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, source_event_id) DO UPDATE SET
+          content_digest = excluded.content_digest,
+          has_source_text = excluded.has_source_text,
+          has_objective = excluded.has_objective,
+          has_acceptance = excluded.has_acceptance,
+          key_id = excluded.key_id,
+          iv = excluded.iv,
+          auth_tag = excluded.auth_tag,
+          ciphertext = excluded.ciphertext,
+          payload_bytes = excluded.payload_bytes,
+          updated_at = excluded.updated_at,
+          expires_at = excluded.expires_at`)
+        .run(
+          input.source, input.sourceEventId, intake.contentDigest,
+          merged.sourceText === undefined ? 0 : 1,
+          merged.objective === undefined ? 0 : 1,
+          merged.acceptance === undefined ? 0 : 1,
+          sealed.keyId, sealed.iv, sealed.authTag, sealed.ciphertext,
+          payloadBytes, createdAt, now, now + ttlMs,
+        )
+      return Object.freeze({ stored: true })
+    })
+  }
+
+  /**
+   * Read and authenticate persisted `(objective, acceptance)` handles for one
+   * staged intake row. Fails closed to `undefined` on missing key, expiry,
+   * tamper, or content-digest mismatch.
+   */
+  readIntakeStagingHint(source: string, sourceEventId: string): WorkItemIntakeStagingHint | undefined {
+    if (this.#closed) return undefined
+    const row = this.#statement('SELECT * FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?')
+      .get(source, sourceEventId) as Row | undefined
+    if (row === undefined) return undefined
+    if (Number(row['has_objective']) === 0 && Number(row['has_acceptance']) === 0) return undefined
+    const unsealed = this.#unsealStagingRow(row, this.#now())
+    if (!unsealed.ok) return undefined
+    const { objective, acceptance } = unsealed.payload
+    if (objective === undefined && acceptance === undefined) return undefined
+    return Object.freeze({
+      ...(objective === undefined ? {} : { objective }),
+      ...(acceptance === undefined ? {} : { acceptance }),
+    })
+  }
+
+  /** Rehydrate valid staged source texts for pending/retained evaluation across restarts. */
+  listIntakeStagingWithSourceText(limit = MAX_INTAKE_STAGING_ENTRIES): readonly WorkItemIntakeStagingSourceText[] {
+    if (this.#closed) return Object.freeze([])
+    const now = this.#now()
+    const bounded = Math.max(1, Math.min(Math.trunc(limit), MAX_INTAKE_STAGING_ENTRIES))
+    const rows = this.#statement(`SELECT s.* FROM work_item_intake_staging s
+      WHERE s.has_source_text = 1 AND s.expires_at > ?
+      ORDER BY (EXISTS (SELECT 1 FROM work_item_intake_eval_queue q
+        WHERE q.source = s.source AND q.source_event_id = s.source_event_id)) DESC, s.updated_at ASC
+      LIMIT ?`).all(now, bounded) as Row[]
+    const entries: WorkItemIntakeStagingSourceText[] = []
+    for (const row of rows) {
+      const unsealed = this.#unsealStagingRow(row, now)
+      if (!unsealed.ok || unsealed.payload.sourceText === undefined || unsealed.contentDigest === null) continue
+      entries.push(Object.freeze({
+        source: String(row['source']),
+        sourceEventId: String(row['source_event_id']),
+        contentDigest: unsealed.contentDigest,
+        text: unsealed.payload.sourceText,
+      }))
+    }
+    return Object.freeze(entries)
+  }
+
+  /** Evict `sourceText` from staging once its evaluations are persisted, keeping pending admission/eval hints if any. */
+  releaseIntakeStagingSourceText(source: string, sourceEventId: string): void {
+    if (this.#closed) return
+    const now = this.#now()
+    this.#transaction(() => {
+      const row = this.#statement('SELECT * FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?')
+        .get(source, sourceEventId) as Row | undefined
+      if (row === undefined) return
+      const hasPending = this.countPendingIntakeAdmissionsFor(source, sourceEventId) > 0
+        || this.countPendingIntakeEvalQueueFor(source, sourceEventId) > 0
+      if (!hasPending || (Number(row['has_objective']) === 0 && Number(row['has_acceptance']) === 0)) {
+        this.#statement('DELETE FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?').run(source, sourceEventId)
+        return
+      }
+      const unsealed = this.#unsealStagingRow(row, now)
+      if (!unsealed.ok || (unsealed.payload.objective === undefined && unsealed.payload.acceptance === undefined)) {
+        this.#statement('DELETE FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?').run(source, sourceEventId)
+        return
+      }
+      const sealed = this.#sealStagingPayload(source, sourceEventId, unsealed.contentDigest, {
+        ...(unsealed.payload.objective === undefined ? {} : { objective: unsealed.payload.objective }),
+        ...(unsealed.payload.acceptance === undefined ? {} : { acceptance: unsealed.payload.acceptance }),
+      })
+      this.#statement(`UPDATE work_item_intake_staging
+        SET has_source_text = 0, key_id = ?, iv = ?, auth_tag = ?, ciphertext = ?, payload_bytes = ?, updated_at = ?
+        WHERE source = ? AND source_event_id = ?`)
+        .run(sealed.keyId, sealed.iv, sealed.authTag, sealed.ciphertext, sealed.ciphertext.byteLength, now, source, sourceEventId)
+    })
+  }
+
+  /**
+   * Strip `objective`/`acceptance` from staging once `(source, sourceEventId)`
+   * has no pending admissions, no pending eval-queue rows, and either no
+   * staged `sourceText` or an already-admitted item. Returns whether hints settled.
+   */
+  pruneIntakeStagingAfterAdmission(source: string, sourceEventId: string): boolean {
+    if (this.#closed) return false
+    const now = this.#now()
+    return this.#transaction(() => {
+      if (this.countPendingIntakeAdmissionsFor(source, sourceEventId) > 0) return false
+      if (this.countPendingIntakeEvalQueueFor(source, sourceEventId) > 0) return false
+      const row = this.#statement('SELECT * FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?')
+        .get(source, sourceEventId) as Row | undefined
+      if (row === undefined) return true
+      const hasSourceText = Number(row['has_source_text']) === 1
+      if (hasSourceText && !this.hasIntakeAdmittedFor(source, sourceEventId)) return false
+      if (Number(row['has_objective']) === 0 && Number(row['has_acceptance']) === 0) return true
+      if (!hasSourceText) {
+        this.#statement('DELETE FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?').run(source, sourceEventId)
+        return true
+      }
+      const unsealed = this.#unsealStagingRow(row, now)
+      if (!unsealed.ok || unsealed.payload.sourceText === undefined) {
+        this.#statement('DELETE FROM work_item_intake_staging WHERE source = ? AND source_event_id = ?').run(source, sourceEventId)
+        return true
+      }
+      const sealed = this.#sealStagingPayload(source, sourceEventId, unsealed.contentDigest, {
+        sourceText: unsealed.payload.sourceText,
+      })
+      this.#statement(`UPDATE work_item_intake_staging
+        SET has_objective = 0, has_acceptance = 0, key_id = ?, iv = ?, auth_tag = ?, ciphertext = ?, payload_bytes = ?, updated_at = ?
+        WHERE source = ? AND source_event_id = ?`)
+        .run(sealed.keyId, sealed.iv, sealed.authTag, sealed.ciphertext, sealed.ciphertext.byteLength, now, source, sourceEventId)
+      return true
+    })
+  }
+
+  /** Prune expired staging rows and settled eval-queue entries. */
+  pruneIntakeStaging(now = this.#now()): number {
+    if (this.#closed) return 0
+    return this.#transaction(() => this.#deleteExpiredStaging(now))
+  }
+
+  /** Persist or advance pending evaluation retry/backoff state across restarts. */
+  upsertIntakeEvalQueue(entry: Omit<WorkItemIntakeEvalQueueEntry, 'updatedAt'>): boolean {
+    if (this.#closed) fail('storage', 'work-item store is closed')
+    const now = this.#now()
+    return this.#transaction(() => {
+      const existing = this.#statement(`SELECT 1 FROM work_item_intake_eval_queue
+        WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`)
+        .get(entry.source, entry.sourceEventId, entry.ruleId, entry.policyVersion) as Row | undefined
+      if (existing === undefined) {
+        const count = Number((this.#statement('SELECT COUNT(*) AS count FROM work_item_intake_eval_queue').get() as Row)['count'])
+        if (count >= MAX_INTAKE_EVAL_QUEUE_ENTRIES) return false
+      }
+      this.#statement(`INSERT INTO work_item_intake_eval_queue(
+          source, source_event_id, rule_id, policy_version, ceiling, attempts, failures, next_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, source_event_id, rule_id, policy_version) DO UPDATE SET
+          ceiling = excluded.ceiling,
+          attempts = excluded.attempts,
+          failures = excluded.failures,
+          next_at = excluded.next_at,
+          updated_at = excluded.updated_at`)
+        .run(entry.source, entry.sourceEventId, entry.ruleId, entry.policyVersion, entry.ceiling,
+          entry.attempts, entry.failures, entry.nextAt, now)
+      return true
+    })
+  }
+
+  getIntakeEvalQueue(source: string, sourceEventId: string, ruleId: string, policyVersion: string): WorkItemIntakeEvalQueueEntry | undefined {
+    const row = this.#statement(`SELECT * FROM work_item_intake_eval_queue
+      WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`)
+      .get(source, sourceEventId, ruleId, policyVersion) as Row | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({
+      source: String(row['source']),
+      sourceEventId: String(row['source_event_id']),
+      ruleId: String(row['rule_id']),
+      policyVersion: String(row['policy_version']),
+      ceiling: String(row['ceiling']) as IntakeEvaluationLevel,
+      attempts: Number(row['attempts']),
+      failures: Number(row['failures']),
+      nextAt: Number(row['next_at']),
+      updatedAt: Number(row['updated_at']),
+    })
+  }
+
+  deleteIntakeEvalQueue(source: string, sourceEventId: string, ruleId: string, policyVersion: string): void {
+    if (this.#closed) return
+    this.#statement(`DELETE FROM work_item_intake_eval_queue
+      WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`)
+      .run(source, sourceEventId, ruleId, policyVersion)
+  }
+
+  /**
+   * Purge stale `work_item_intake_eval_queue` rows for one intake event that
+   * belong to superseded policy versions or rules removed/disabled in the
+   * active policy.
+   */
+  deleteStaleIntakeEvalQueueForEvent(
+    source: string,
+    sourceEventId: string,
+    activePolicyVersion: string,
+    activeEnabledRuleIds?: ReadonlySet<string>,
+  ): number {
+    if (this.#closed) return 0
+    return this.#transaction(() => {
+      let deleted = Number(this.#statement(`DELETE FROM work_item_intake_eval_queue
+        WHERE source = ? AND source_event_id = ? AND policy_version <> ?`)
+        .run(source, sourceEventId, activePolicyVersion).changes)
+      if (activeEnabledRuleIds !== undefined) {
+        if (activeEnabledRuleIds.size === 0) {
+          deleted += Number(this.#statement(`DELETE FROM work_item_intake_eval_queue
+            WHERE source = ? AND source_event_id = ?`).run(source, sourceEventId).changes)
+        } else {
+          const rows = this.#statement(`SELECT rule_id, policy_version FROM work_item_intake_eval_queue
+            WHERE source = ? AND source_event_id = ?`).all(source, sourceEventId) as Row[]
+          for (const row of rows) {
+            const ruleId = String(row['rule_id'])
+            if (!activeEnabledRuleIds.has(ruleId)) {
+              deleted += Number(this.#statement(`DELETE FROM work_item_intake_eval_queue
+                WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`)
+                .run(source, sourceEventId, ruleId, String(row['policy_version'])).changes)
+            }
+          }
+        }
+      }
+      return deleted
+    })
+  }
+
+  /**
+   * Purge `work_item_intake_eval_queue` rows whose policy version is not
+   * `activePolicyVersion` or whose rule is absent/disabled in the active policy.
+   */
+  deleteIntakeEvalQueueNotMatchingPolicy(
+    activePolicyVersion: string,
+    activeEnabledRuleIds: ReadonlySet<string>,
+  ): number {
+    if (this.#closed) return 0
+    return this.#transaction(() => {
+      let deleted = Number(this.#statement('DELETE FROM work_item_intake_eval_queue WHERE policy_version <> ?')
+        .run(activePolicyVersion).changes)
+      if (activeEnabledRuleIds.size === 0) {
+        deleted += Number(this.#statement('DELETE FROM work_item_intake_eval_queue').run().changes)
+      } else {
+        const rows = this.#statement('SELECT source, source_event_id, rule_id FROM work_item_intake_eval_queue').all() as Row[]
+        for (const row of rows) {
+          const ruleId = String(row['rule_id'])
+          if (!activeEnabledRuleIds.has(ruleId)) {
+            deleted += Number(this.#statement(`DELETE FROM work_item_intake_eval_queue
+              WHERE source = ? AND source_event_id = ? AND rule_id = ? AND policy_version = ?`)
+              .run(String(row['source']), String(row['source_event_id']), ruleId, activePolicyVersion).changes)
+          }
+        }
+      }
+      return deleted
+    })
   }
 
   /** Recent intake admission outcomes joined with evaluation and intake metadata; read-only. */

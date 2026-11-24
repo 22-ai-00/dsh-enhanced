@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { redactAuditValue } from './redaction.js'
 import { legacyApprovalIntentHash, openPolicyDatabase, PolicyDatabaseError } from './sqlite.js'
+import type { DecisionReasonCode } from './types.js'
 
 export type PolicyLedgerErrorCode =
   | 'budget-exhausted'
@@ -239,6 +240,105 @@ export interface ApprovalDispatchResult {
   enqueuedAt: number
   version: number
   replayed: boolean
+}
+
+export interface LeaseState {
+  leaseId: string
+  uses: number
+  revoked: boolean
+  revokedAt: number | undefined
+  revokedBy: string | undefined
+  revocationReason: string | undefined
+  updatedAt: number
+}
+
+export interface PolicyLedgerEvaluationSnapshot {
+  nowMs: number
+  leaseUses: Record<string, number>
+  revokedLeaseIds: string[]
+  spentCostMicrosByRule: Record<string, number>
+  commitHead: string | undefined
+  idempotencyBinding: {
+    intentHash: string
+    commitDigest: string | undefined
+    predecessorDigest: string | undefined
+    outcome: 'allow' | 'deny'
+    reasonCode: string
+    ruleId: string | undefined
+  } | undefined
+}
+
+export interface StatefulAuthorizationInput {
+  intentHash: string
+  idempotencyKey?: string
+  ruleId: string | undefined
+  reasonCode: DecisionReasonCode
+  requestedCostMicros?: number
+  lease?: {
+    leaseId: string
+    secondaryLeaseIds?: readonly string[]
+    revokedAliasLeaseIds?: readonly string[]
+    expiresAtMs?: number
+    maxUses?: number
+    revoked?: boolean
+  }
+  monetaryCostCap?: {
+    ruleId: string
+    capMicros: number
+    estimatedCostMicros: number
+  }
+  resource: { kind: string; id: string }
+  commitDigest?: string
+  predecessorDigest?: string
+  requirePredecessorMatch?: boolean
+  budget?: {
+    id: string
+    scope: string
+    metric: string
+    limit: number
+    amount: number
+    periodMs: number
+    idempotencyKey: string
+    principal?: string
+  }
+}
+
+export type StatefulAuthorizationResult =
+  | { ok: true; replayed: boolean; reasonCode: DecisionReasonCode; ruleId: string | undefined; decisionId?: string }
+  | { ok: false; reasonCode: DecisionReasonCode; ruleId?: string | undefined }
+
+export interface PreDispatchRollbackInput {
+  readonly idempotencyKey: string
+  readonly decisionId?: string | undefined
+  readonly ruleId?: string | undefined
+  readonly leaseId?: string | undefined
+  readonly estimatedCostMicros?: number | undefined
+  readonly commitDigest?: string | undefined
+}
+
+interface PendingPreDispatchRollback {
+  readonly idempotencyKey: string
+  readonly decisionId: string
+  readonly intentHash: string
+  readonly ruleId: string | undefined
+  readonly leaseIds: readonly string[]
+  readonly requestedCostMicros: number | undefined
+  readonly monetaryCostCap: { readonly scope: string; readonly estimatedCostMicros: number } | undefined
+  readonly budget: {
+    readonly scope: string
+    readonly metric: string
+    readonly periodStart: number
+    readonly periodMs: number
+    readonly amount: number
+    readonly idempotencyKey: string
+    readonly createdByTx: boolean
+  } | undefined
+  readonly commitHead: {
+    readonly scopeKey: string
+    readonly commitDigest: string
+    readonly hadPrevious: boolean
+    readonly previousDigest: string | undefined
+  } | undefined
 }
 
 export interface AuditInput {
@@ -545,6 +645,7 @@ function requirePeriod(value: number): void {
 export class PolicyLedger {
   readonly #database: DatabaseSync
   readonly #now: () => number
+  readonly #pendingPreDispatchRollbacks = new Map<string, PendingPreDispatchRollback>()
   #closed = false
 
   constructor(options: PolicyLedgerOptions) {
@@ -562,7 +663,16 @@ export class PolicyLedger {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    this.#pendingPreDispatchRollbacks.clear()
     this.#database.close()
+  }
+
+  #recordPendingRollback(entry: PendingPreDispatchRollback): void {
+    if (this.#pendingPreDispatchRollbacks.size >= 10_000) {
+      const oldest = this.#pendingPreDispatchRollbacks.keys().next().value
+      if (oldest !== undefined) this.#pendingPreDispatchRollbacks.delete(oldest)
+    }
+    this.#pendingPreDispatchRollbacks.set(entry.idempotencyKey, entry)
   }
 
   #transaction<T>(operation: () => T): T {
@@ -1658,5 +1768,636 @@ export class PolicyLedger {
     const row = this.#database.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM audit_events')
       .get() as { sequence: number }
     return { lastAuditSequence: row.sequence }
+  }
+
+  #leaseStateFromRow(row: {
+    lease_id: string
+    uses: number
+    revoked: number
+    revoked_at: number | null
+    revoked_by: string | null
+    revocation_reason: string | null
+    updated_at: number
+  }): LeaseState {
+    return Object.freeze({
+      leaseId: row.lease_id,
+      uses: row.uses,
+      revoked: row.revoked === 1,
+      revokedAt: row.revoked_at ?? undefined,
+      revokedBy: row.revoked_by ?? undefined,
+      revocationReason: row.revocation_reason ?? undefined,
+      updatedAt: row.updated_at,
+    })
+  }
+
+  getLeaseState(leaseId: string): LeaseState | undefined {
+    requireBoundedText(leaseId, 'leaseId', 256)
+    if (leaseId.trim() !== leaseId) {
+      throw new PolicyLedgerError('invalid-input', 'leaseId must be trimmed')
+    }
+    const row = this.#database.prepare(`
+      SELECT lease_id, uses, revoked, revoked_at, revoked_by, revocation_reason, updated_at
+      FROM policy_leases WHERE lease_id = ?
+    `).get(leaseId) as {
+      lease_id: string
+      uses: number
+      revoked: number
+      revoked_at: number | null
+      revoked_by: string | null
+      revocation_reason: string | null
+      updated_at: number
+    } | undefined
+    return row === undefined ? undefined : this.#leaseStateFromRow(row)
+  }
+
+  revokeLease(
+    leaseId: string,
+    options: { actor?: string; reason?: string } = {},
+  ): LeaseState & { alreadyRevoked: boolean } {
+    requireBoundedText(leaseId, 'leaseId', 256)
+    if (leaseId.trim() !== leaseId) {
+      throw new PolicyLedgerError('invalid-input', 'leaseId must be trimmed')
+    }
+    for (let index = 0; index < leaseId.length; index++) {
+      const code = leaseId.charCodeAt(index)
+      if (code < 0x20 || code === 0x7f) {
+        throw new PolicyLedgerError('invalid-input', 'leaseId must not contain control characters')
+      }
+    }
+    if (options.actor !== undefined) requireBoundedText(options.actor, 'actor', textLimits.id)
+    if (options.reason !== undefined) requireBoundedText(options.reason, 'reason', textLimits.reason)
+
+    return this.#transaction(() => {
+      const existing = this.#database.prepare(`
+        SELECT lease_id, uses, revoked, revoked_at, revoked_by, revocation_reason, updated_at
+        FROM policy_leases WHERE lease_id = ?
+      `).get(leaseId) as {
+        lease_id: string
+        uses: number
+        revoked: number
+        revoked_at: number | null
+        revoked_by: string | null
+        revocation_reason: string | null
+        updated_at: number
+      } | undefined
+      if (existing !== undefined && existing.revoked === 1) {
+        return Object.freeze({ ...this.#leaseStateFromRow(existing), alreadyRevoked: true })
+      }
+      const now = this.#now()
+      const actor = options.actor ?? 'system'
+      const reason = options.reason ?? null
+      this.#database.prepare(`
+        INSERT INTO policy_leases(
+          lease_id, uses, revoked, revoked_at, revoked_by, revocation_reason, updated_at
+        ) VALUES (?, 0, 1, ?, ?, ?, ?)
+        ON CONFLICT(lease_id) DO UPDATE SET
+          revoked = 1,
+          revoked_at = excluded.revoked_at,
+          revoked_by = excluded.revoked_by,
+          revocation_reason = excluded.revocation_reason,
+          updated_at = excluded.updated_at
+      `).run(leaseId, now, actor, reason, now)
+      const updated = this.#database.prepare(`
+        SELECT lease_id, uses, revoked, revoked_at, revoked_by, revocation_reason, updated_at
+        FROM policy_leases WHERE lease_id = ?
+      `).get(leaseId) as {
+        lease_id: string
+        uses: number
+        revoked: number
+        revoked_at: number | null
+        revoked_by: string | null
+        revocation_reason: string | null
+        updated_at: number
+      }
+      return Object.freeze({ ...this.#leaseStateFromRow(updated), alreadyRevoked: false })
+    })
+  }
+
+  getCommitHead(resource: { kind: string; id: string }): string | undefined {
+    requireBoundedText(resource.kind, 'resource.kind', textLimits.action)
+    requireBoundedText(resource.id, 'resource.id', textLimits.resourceId)
+    const scopeKey = JSON.stringify([resource.kind, resource.id])
+    const row = this.#database.prepare(`
+      SELECT commit_digest FROM policy_commit_heads WHERE scope_key = ?
+    `).get(scopeKey) as { commit_digest: string } | undefined
+    return row?.commit_digest
+  }
+
+  getEvaluationSnapshot(input: {
+    leaseIds?: readonly string[]
+    costCapRuleIds?: readonly string[]
+    resource?: { kind: string; id: string }
+    idempotencyKey?: string
+  }): PolicyLedgerEvaluationSnapshot {
+    const leaseUses: Record<string, number> = {}
+    const revokedLeaseIds: string[] = []
+    const uniqueLeaseIds = Array.from(new Set(input.leaseIds ?? []))
+      .filter(id => typeof id === 'string' && id.length > 0)
+    if (uniqueLeaseIds.length > 0) {
+      const placeholders = uniqueLeaseIds.map(() => '?').join(', ')
+      const rows = this.#database.prepare(`
+        SELECT lease_id, uses, revoked FROM policy_leases WHERE lease_id IN (${placeholders})
+      `).all(...uniqueLeaseIds) as Array<{ lease_id: string; uses: number; revoked: number }>
+      for (const row of rows) {
+        leaseUses[row.lease_id] = row.uses
+        if (row.revoked === 1) revokedLeaseIds.push(row.lease_id)
+      }
+    }
+
+    const spentCostMicrosByRule: Record<string, number> = {}
+    const uniqueCostCapRuleIds = Array.from(new Set(input.costCapRuleIds ?? []))
+      .filter(id => typeof id === 'string' && id.length > 0)
+    if (uniqueCostCapRuleIds.length > 0) {
+      const scopeToRuleId = new Map<string, string>(
+        uniqueCostCapRuleIds.map(ruleId => [JSON.stringify(['wp08-cost-cap/v1', ruleId]), ruleId]),
+      )
+      const scopes = Array.from(scopeToRuleId.keys())
+      const placeholders = scopes.map(() => '?').join(', ')
+      const costRows = this.#database.prepare(`
+        SELECT scope, spent_amount FROM budget_periods
+        WHERE metric = 'monetary_cost_micros' AND period_start = 0 AND period_ms = 0
+          AND scope IN (${placeholders})
+      `).all(...scopes) as Array<{ scope: string; spent_amount: number }>
+      for (const row of costRows) {
+        const ruleId = scopeToRuleId.get(row.scope)
+        if (ruleId !== undefined) {
+          spentCostMicrosByRule[ruleId] = Math.trunc(row.spent_amount)
+        }
+      }
+    }
+
+    let commitHead: string | undefined
+    if (input.resource !== undefined) {
+      const scopeKey = JSON.stringify([input.resource.kind, input.resource.id])
+      const headRow = this.#database.prepare(`
+        SELECT commit_digest FROM policy_commit_heads WHERE scope_key = ?
+      `).get(scopeKey) as { commit_digest: string } | undefined
+      commitHead = headRow?.commit_digest
+    }
+
+    let idempotencyBinding: PolicyLedgerEvaluationSnapshot['idempotencyBinding']
+    if (input.idempotencyKey !== undefined && input.idempotencyKey.trim() !== '') {
+      const row = this.#database.prepare(`
+        SELECT intent_hash, commit_digest, predecessor_digest, outcome, reason_code, rule_id
+        FROM policy_idempotency_bindings WHERE idempotency_key = ?
+      `).get(input.idempotencyKey) as {
+        intent_hash: string
+        commit_digest: string | null
+        predecessor_digest: string | null
+        outcome: 'allow' | 'deny'
+        reason_code: string
+        rule_id: string | null
+      } | undefined
+      if (row !== undefined) {
+        idempotencyBinding = {
+          intentHash: row.intent_hash,
+          commitDigest: row.commit_digest ?? undefined,
+          predecessorDigest: row.predecessor_digest ?? undefined,
+          outcome: row.outcome,
+          reasonCode: row.reason_code,
+          ruleId: row.rule_id ?? undefined,
+        }
+      }
+    }
+
+    return {
+      nowMs: this.#now(),
+      leaseUses,
+      revokedLeaseIds,
+      spentCostMicrosByRule,
+      commitHead,
+      idempotencyBinding,
+    }
+  }
+
+  authorizeStatefulTransition(input: StatefulAuthorizationInput): StatefulAuthorizationResult {
+    return this.#transaction(() => {
+      const now = this.#now()
+
+      const leaseCheckIds = input.lease === undefined
+        ? []
+        : Array.from(new Set([
+            input.lease.leaseId,
+            ...(input.lease.revokedAliasLeaseIds ?? []),
+            ...(input.lease.secondaryLeaseIds ?? []),
+          ])).filter(id => id.length > 0)
+      const leaseConsumeIds = input.lease === undefined
+        ? []
+        : Array.from(new Set([
+            input.lease.leaseId,
+            ...(input.lease.secondaryLeaseIds ?? []),
+          ])).filter(id => id.length > 0)
+
+      if (input.idempotencyKey !== undefined) {
+        const existing = this.#database.prepare(`
+          SELECT intent_hash, outcome, reason_code, rule_id
+          FROM policy_idempotency_bindings WHERE idempotency_key = ?
+        `).get(input.idempotencyKey) as {
+          intent_hash: string
+          outcome: 'allow' | 'deny'
+          reason_code: string
+          rule_id: string | null
+        } | undefined
+        if (existing !== undefined) {
+          if (existing.intent_hash !== input.intentHash) {
+            return { ok: false, reasonCode: 'idempotency-conflict' }
+          }
+          if (input.lease !== undefined) {
+            const placeholders = leaseCheckIds.map(() => '?').join(', ')
+            const revokedRow = leaseCheckIds.length === 0
+              ? undefined
+              : this.#database.prepare(`
+                  SELECT 1 AS revoked FROM policy_leases WHERE lease_id IN (${placeholders}) AND revoked = 1 LIMIT 1
+                `).get(...leaseCheckIds) as { revoked: number } | undefined
+            if (revokedRow !== undefined || input.lease.revoked === true) {
+              return { ok: false, reasonCode: 'lease-revoked', ruleId: input.ruleId }
+            }
+            if (input.lease.expiresAtMs !== undefined && now >= input.lease.expiresAtMs) {
+              return { ok: false, reasonCode: 'lease-expired', ruleId: input.ruleId }
+            }
+          }
+          this.#pendingPreDispatchRollbacks.delete(input.idempotencyKey)
+          return {
+            ok: true,
+            replayed: true,
+            reasonCode: existing.reason_code as DecisionReasonCode,
+            ruleId: existing.rule_id ?? undefined,
+          }
+        }
+      }
+
+      if (input.lease !== undefined) {
+        const placeholders = leaseCheckIds.map(() => '?').join(', ')
+        const leaseRows = leaseCheckIds.length === 0
+          ? []
+          : this.#database.prepare(`
+              SELECT lease_id, uses, revoked FROM policy_leases WHERE lease_id IN (${placeholders})
+            `).all(...leaseCheckIds) as Array<{ lease_id: string; uses: number; revoked: number }>
+        if (leaseRows.some(row => row.revoked === 1) || input.lease.revoked === true) {
+          return { ok: false, reasonCode: 'lease-revoked', ruleId: input.ruleId }
+        }
+        if (input.lease.expiresAtMs !== undefined && now >= input.lease.expiresAtMs) {
+          return { ok: false, reasonCode: 'lease-expired', ruleId: input.ruleId }
+        }
+        const used = leaseRows.reduce((max, row) => Math.max(max, row.uses), 0)
+        if (input.lease.maxUses !== undefined && used >= input.lease.maxUses) {
+          return { ok: false, reasonCode: 'lease-exhausted', ruleId: input.ruleId }
+        }
+      }
+
+      let costCapScope: string | undefined
+      if (input.monetaryCostCap !== undefined) {
+        const { ruleId, capMicros, estimatedCostMicros } = input.monetaryCostCap
+        if (
+          !Number.isSafeInteger(capMicros) || capMicros < 0
+          || !Number.isSafeInteger(estimatedCostMicros) || estimatedCostMicros < 0
+        ) {
+          return { ok: false, reasonCode: 'monetary-cost-invalid', ruleId: input.ruleId }
+        }
+        costCapScope = JSON.stringify(['wp08-cost-cap/v1', ruleId])
+        const costRow = this.#database.prepare(`
+          SELECT spent_amount FROM budget_periods
+          WHERE scope = ? AND metric = 'monetary_cost_micros' AND period_start = 0 AND period_ms = 0
+        `).get(costCapScope) as { spent_amount: number } | undefined
+        const spent = costRow === undefined ? 0 : Math.trunc(costRow.spent_amount)
+        if (!Number.isSafeInteger(spent) || spent < 0) {
+          return { ok: false, reasonCode: 'monetary-cost-invalid', ruleId: input.ruleId }
+        }
+        if (spent > capMicros || estimatedCostMicros > capMicros - spent) {
+          return { ok: false, reasonCode: 'monetary-cost-exceeded', ruleId: input.ruleId }
+        }
+      }
+
+      const scopeKey = JSON.stringify([input.resource.kind, input.resource.id])
+      let previousCommitHeadRow: { commit_digest: string } | undefined
+      if (input.commitDigest !== undefined || input.predecessorDigest !== undefined || input.requirePredecessorMatch) {
+        const headRow = this.#database.prepare(`
+          SELECT commit_digest FROM policy_commit_heads WHERE scope_key = ?
+        `).get(scopeKey) as { commit_digest: string } | undefined
+        previousCommitHeadRow = headRow
+        if (headRow !== undefined) {
+          if (input.predecessorDigest === undefined) {
+            return { ok: false, reasonCode: 'predecessor-digest-missing', ruleId: input.ruleId }
+          }
+          if (input.predecessorDigest !== headRow.commit_digest) {
+            return { ok: false, reasonCode: 'predecessor-digest-mismatch', ruleId: input.ruleId }
+          }
+          if (input.commitDigest !== undefined && input.commitDigest === headRow.commit_digest) {
+            return { ok: false, reasonCode: 'commit-digest-mismatch', ruleId: input.ruleId }
+          }
+        } else if (
+          input.commitDigest !== undefined
+          && input.predecessorDigest !== undefined
+          && input.commitDigest === input.predecessorDigest
+        ) {
+          return { ok: false, reasonCode: 'commit-digest-mismatch', ruleId: input.ruleId }
+        }
+      }
+
+      let budgetRollback: PendingPreDispatchRollback['budget']
+      if (input.budget !== undefined) {
+        const b = input.budget
+        requireText(b.scope, 'scope')
+        requireText(b.metric, 'metric')
+        requireText(b.idempotencyKey, 'idempotencyKey')
+        requirePositive(b.limit, 'limit')
+        requirePositive(b.amount, 'amount')
+        requirePeriod(b.periodMs)
+
+        const existingRes = this.#database.prepare(`
+          SELECT id, idempotency_key, scope, metric, period_start, period_ms,
+                 amount, actual_amount, status
+          FROM budget_reservations WHERE idempotency_key = ?
+        `).get(b.idempotencyKey) as ReservationRow | undefined
+        if (existingRes !== undefined) {
+          const sameInput = existingRes.scope === b.scope
+            && existingRes.metric === b.metric
+            && existingRes.period_ms === b.periodMs
+            && existingRes.amount === b.amount
+          if (!sameInput) {
+            return { ok: false, reasonCode: 'idempotency-conflict' }
+          }
+          if (existingRes.status === 'released') {
+            throw new PolicyLedgerError('invalid-state', 'cannot finalize a released reservation')
+          }
+          if (existingRes.status === 'reserved') {
+            this.#database.prepare(`
+              UPDATE budget_periods
+              SET reserved_amount = reserved_amount - ?, spent_amount = spent_amount + ?, version = version + 1
+              WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+            `).run(existingRes.amount, existingRes.amount, existingRes.scope, existingRes.metric, existingRes.period_start, existingRes.period_ms)
+            this.#database.prepare(`
+              UPDATE budget_reservations
+              SET status = 'finalized', actual_amount = ?, updated_at = ?, version = version + 1
+              WHERE id = ?
+            `).run(existingRes.amount, now, existingRes.id)
+            budgetRollback = {
+              scope: existingRes.scope,
+              metric: existingRes.metric,
+              periodStart: existingRes.period_start,
+              periodMs: existingRes.period_ms,
+              amount: existingRes.amount,
+              idempotencyKey: existingRes.idempotency_key,
+              createdByTx: false,
+            }
+          }
+        } else {
+          const periodStart = Math.floor(now / b.periodMs) * b.periodMs
+          this.#database.prepare(`
+            INSERT INTO budget_periods(
+              scope, metric, period_start, period_ms, limit_amount, reserved_amount, spent_amount
+            ) VALUES (?, ?, ?, ?, ?, 0, 0)
+            ON CONFLICT(scope, metric, period_start, period_ms) DO NOTHING
+          `).run(b.scope, b.metric, periodStart, b.periodMs, b.limit)
+
+          const period = this.#database.prepare(`
+            SELECT limit_amount, reserved_amount, spent_amount
+            FROM budget_periods
+            WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+          `).get(b.scope, b.metric, periodStart, b.periodMs) as unknown as PeriodRow
+          if (period.limit_amount !== b.limit) {
+            throw new PolicyLedgerError('idempotency-conflict', 'budget limit changed within an active period')
+          }
+          if (period.reserved_amount + period.spent_amount + b.amount > period.limit_amount) {
+            return { ok: false, reasonCode: 'budget-exhausted' }
+          }
+          const reservationId = randomUUID()
+          this.#database.prepare(`
+            INSERT INTO budget_reservations(
+              id, idempotency_key, scope, metric, period_start, period_ms,
+              amount, actual_amount, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'finalized', ?, ?)
+          `).run(reservationId, b.idempotencyKey, b.scope, b.metric, periodStart, b.periodMs, b.amount, b.amount, now, now)
+          this.#database.prepare(`
+            UPDATE budget_periods
+            SET spent_amount = spent_amount + ?, version = version + 1
+            WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+          `).run(b.amount, b.scope, b.metric, periodStart, b.periodMs)
+          budgetRollback = {
+            scope: b.scope,
+            metric: b.metric,
+            periodStart,
+            periodMs: b.periodMs,
+            amount: b.amount,
+            idempotencyKey: b.idempotencyKey,
+            createdByTx: true,
+          }
+        }
+      }
+
+      if (input.monetaryCostCap !== undefined && costCapScope !== undefined && input.monetaryCostCap.estimatedCostMicros > 0) {
+        this.#database.prepare(`
+          INSERT INTO budget_periods(
+            scope, metric, period_start, period_ms, limit_amount, reserved_amount, spent_amount
+          ) VALUES (?, 'monetary_cost_micros', 0, 0, ?, 0, ?)
+          ON CONFLICT(scope, metric, period_start, period_ms) DO UPDATE SET
+            spent_amount = budget_periods.spent_amount + excluded.spent_amount,
+            version = budget_periods.version + 1
+        `).run(costCapScope, Number.MAX_SAFE_INTEGER, input.monetaryCostCap.estimatedCostMicros)
+      }
+
+      if (input.lease !== undefined) {
+        const upsertLease = this.#database.prepare(`
+          INSERT INTO policy_leases(lease_id, uses, revoked, updated_at)
+          VALUES (?, 1, 0, ?)
+          ON CONFLICT(lease_id) DO UPDATE SET
+            uses = policy_leases.uses + 1,
+            updated_at = excluded.updated_at
+        `)
+        for (const leaseId of leaseConsumeIds) {
+          upsertLease.run(leaseId, now)
+        }
+      }
+
+      if (input.commitDigest !== undefined) {
+        this.#database.prepare(`
+          INSERT INTO policy_commit_heads(scope_key, commit_digest, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(scope_key) DO UPDATE SET
+            commit_digest = excluded.commit_digest,
+            updated_at = excluded.updated_at
+        `).run(scopeKey, input.commitDigest, now)
+      }
+
+      if (input.idempotencyKey !== undefined) {
+        this.#database.prepare(`
+          INSERT INTO policy_idempotency_bindings(
+            idempotency_key, intent_hash, commit_digest, predecessor_digest,
+            lease_id, rule_id, outcome, reason_code, budget_id, budget_amount,
+            budget_principal, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'allow', ?, ?, ?, ?, ?)
+        `).run(
+          input.idempotencyKey,
+          input.intentHash,
+          input.commitDigest ?? null,
+          input.predecessorDigest ?? null,
+          input.lease?.leaseId ?? null,
+          input.ruleId ?? null,
+          input.reasonCode,
+          input.budget?.id ?? null,
+          input.budget?.amount ?? null,
+          input.budget?.principal ?? null,
+          now,
+        )
+        const decisionId = randomUUID()
+        this.#recordPendingRollback({
+          idempotencyKey: input.idempotencyKey,
+          decisionId,
+          intentHash: input.intentHash,
+          ruleId: input.ruleId,
+          leaseIds: Object.freeze([...leaseConsumeIds]),
+          requestedCostMicros: input.requestedCostMicros,
+          monetaryCostCap: input.monetaryCostCap !== undefined && costCapScope !== undefined
+            ? { scope: costCapScope, estimatedCostMicros: input.monetaryCostCap.estimatedCostMicros }
+            : undefined,
+          budget: budgetRollback,
+          commitHead: input.commitDigest !== undefined
+            ? {
+                scopeKey,
+                commitDigest: input.commitDigest,
+                hadPrevious: previousCommitHeadRow !== undefined,
+                previousDigest: previousCommitHeadRow?.commit_digest,
+              }
+            : undefined,
+        })
+        return { ok: true, replayed: false, reasonCode: input.reasonCode, ruleId: input.ruleId, decisionId }
+      }
+
+      return { ok: true, replayed: false, reasonCode: input.reasonCode, ruleId: input.ruleId }
+    })
+  }
+
+  rollbackPreDispatchTransition(input: PreDispatchRollbackInput): boolean {
+    if (typeof input.idempotencyKey !== 'string') {
+      throw new PolicyLedgerError('invalid-input', 'idempotencyKey must be a string')
+    }
+    requireBoundedText(input.idempotencyKey, 'idempotencyKey', 256)
+    if (input.idempotencyKey.trim() !== input.idempotencyKey) {
+      throw new PolicyLedgerError('invalid-input', 'idempotencyKey must be trimmed')
+    }
+
+    const pending = this.#pendingPreDispatchRollbacks.get(input.idempotencyKey)
+    if (pending === undefined) return false
+
+    if (input.decisionId !== undefined && input.decisionId !== pending.decisionId) return false
+    if (input.ruleId !== undefined && input.ruleId !== pending.ruleId) return false
+    if (input.leaseId !== undefined && !pending.leaseIds.includes(input.leaseId)) return false
+    if (input.estimatedCostMicros !== undefined && input.estimatedCostMicros !== pending.requestedCostMicros) return false
+    if (input.commitDigest !== undefined && input.commitDigest !== pending.commitHead?.commitDigest) return false
+
+    return this.#transaction(() => {
+      if (this.#pendingPreDispatchRollbacks.get(input.idempotencyKey) !== pending) {
+        return false
+      }
+
+      const bindingRow = this.#database.prepare(`
+        SELECT intent_hash, outcome FROM policy_idempotency_bindings WHERE idempotency_key = ?
+      `).get(pending.idempotencyKey) as { intent_hash: string; outcome: string } | undefined
+      if (bindingRow === undefined || bindingRow.intent_hash !== pending.intentHash || bindingRow.outcome !== 'allow') {
+        this.#pendingPreDispatchRollbacks.delete(pending.idempotencyKey)
+        return false
+      }
+
+      if (pending.commitHead !== undefined) {
+        const currentHead = this.#database.prepare(`
+          SELECT commit_digest FROM policy_commit_heads WHERE scope_key = ?
+        `).get(pending.commitHead.scopeKey) as { commit_digest: string } | undefined
+        if (currentHead?.commit_digest !== pending.commitHead.commitDigest) {
+          return false
+        }
+      }
+
+      if (pending.budget !== undefined) {
+        const resRow = this.#database.prepare(`
+          SELECT status, amount FROM budget_reservations WHERE idempotency_key = ?
+        `).get(pending.budget.idempotencyKey) as { status: string; amount: number } | undefined
+        if (resRow === undefined || resRow.status !== 'finalized' || resRow.amount !== pending.budget.amount) {
+          return false
+        }
+      }
+
+      const now = this.#now()
+      this.#database.prepare(`
+        DELETE FROM policy_idempotency_bindings WHERE idempotency_key = ? AND intent_hash = ?
+      `).run(pending.idempotencyKey, pending.intentHash)
+
+      if (pending.leaseIds.length > 0) {
+        const decLease = this.#database.prepare(`
+          UPDATE policy_leases
+          SET uses = MAX(0, uses - 1), updated_at = ?
+          WHERE lease_id = ? AND uses > 0
+        `)
+        for (const leaseId of pending.leaseIds) {
+          decLease.run(now, leaseId)
+        }
+      }
+
+      if (pending.monetaryCostCap !== undefined && pending.monetaryCostCap.estimatedCostMicros > 0) {
+        this.#database.prepare(`
+          UPDATE budget_periods
+          SET spent_amount = MAX(0, spent_amount - ?), version = version + 1
+          WHERE scope = ? AND metric = 'monetary_cost_micros' AND period_start = 0 AND period_ms = 0
+        `).run(pending.monetaryCostCap.estimatedCostMicros, pending.monetaryCostCap.scope)
+      }
+
+      if (pending.budget !== undefined) {
+        if (pending.budget.createdByTx) {
+          this.#database.prepare(`
+            DELETE FROM budget_reservations WHERE idempotency_key = ? AND status = 'finalized'
+          `).run(pending.budget.idempotencyKey)
+          this.#database.prepare(`
+            UPDATE budget_periods
+            SET spent_amount = MAX(0, spent_amount - ?), version = version + 1
+            WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+          `).run(
+            pending.budget.amount,
+            pending.budget.scope,
+            pending.budget.metric,
+            pending.budget.periodStart,
+            pending.budget.periodMs,
+          )
+        } else {
+          this.#database.prepare(`
+            UPDATE budget_reservations
+            SET status = 'reserved', actual_amount = NULL, updated_at = ?, version = version + 1
+            WHERE idempotency_key = ? AND status = 'finalized'
+          `).run(now, pending.budget.idempotencyKey)
+          this.#database.prepare(`
+            UPDATE budget_periods
+            SET reserved_amount = reserved_amount + ?, spent_amount = MAX(0, spent_amount - ?), version = version + 1
+            WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+          `).run(
+            pending.budget.amount,
+            pending.budget.amount,
+            pending.budget.scope,
+            pending.budget.metric,
+            pending.budget.periodStart,
+            pending.budget.periodMs,
+          )
+        }
+      }
+
+      if (pending.commitHead !== undefined) {
+        if (pending.commitHead.hadPrevious && pending.commitHead.previousDigest !== undefined) {
+          this.#database.prepare(`
+            UPDATE policy_commit_heads
+            SET commit_digest = ?, updated_at = ?
+            WHERE scope_key = ? AND commit_digest = ?
+          `).run(
+            pending.commitHead.previousDigest,
+            now,
+            pending.commitHead.scopeKey,
+            pending.commitHead.commitDigest,
+          )
+        } else {
+          this.#database.prepare(`
+            DELETE FROM policy_commit_heads WHERE scope_key = ? AND commit_digest = ?
+          `).run(pending.commitHead.scopeKey, pending.commitHead.commitDigest)
+        }
+      }
+
+      this.#pendingPreDispatchRollbacks.delete(pending.idempotencyKey)
+      return true
+    })
   }
 }

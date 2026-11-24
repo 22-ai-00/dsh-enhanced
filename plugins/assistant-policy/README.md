@@ -221,7 +221,7 @@ $bin preset dogfood --yes
 | `assistant-dreaming` | 将缺失或全局 `~/.dsh` 的 `databasePath` 设为 `$DSH_HOME/assistant-dreaming/<profile>.sqlite`；仅当全部授权齐备时启用 `enabled: true` | 缺少 `retired!=true`、完整 `scope.{workspace,preset,principalId,ownerRouteId}`、`$DSH_HOME` `databasePath`、`provider`/`model` 或 `budgetId`/`budgetAmount` 时 fail-closed 保持休眠 |
 | `assistant-delivery` | `attentionAttachOverCap: true` | 无 |
 | `assistant-delivery` | `naturalFeedback.coverage: true`、`naturalFeedback.mixedIntent: true`（自然结果同义/带原因与结果+续办混合意图） | 无；仍要求认证主人、准确报告回复与既有 work-item 反馈/续办授权 |
-| `assistant-evaluation` | `notificationOutcomesEnabled: true` | 无 |
+| `assistant-evaluation` | `notificationOutcomesEnabled: true`、`intakeAttentionAgreementEnabled: true`、`intakeEvaluationAgreementEnabled: true`、`attentionTuningAutoAdopt: true`、`attentionLooseningEnabled: true` | 无 |
 | `event-triggers` | `pollerEnabled: true` | 无 |
 | `assistant-memory-learning` | `workItemExperiences: true` | `assistant-verifier.memoryReviews.workItemExperiences` 与 `personal-assistant.personalMemory.automaticLearning.workItemExperiences` 已由 owner 显式开启（新签名授权）；预设不生成授权 |
 | `assistant-growth-driver` | 不写入（manual） | `usageLearning.workItemFailures` 需要签名的 `workItemAuthorities` pin；预设不发明、不扩展现有授权 |
@@ -238,14 +238,14 @@ const result = await applyRecommendedPluginPreset({ dshHome, profile }, { dryRun
 
 安装脚本可用 `scripts/install/common.sh` 中的 `dsh_enhanced_apply_plugin_preset <profile> <dsh_home> <dry_run> [preset]`。全新 managed supervised 安装会在 owner 学习配置生成后隐式再应用一次 `recommended`（幂等；显式 `--plugin-preset skip`、引导中选择否或已有 profile 的显式配置优先），其他场景不隐式调用。
 
-### dogfood 预设（记忆与偏好通道日常自用）
+### dogfood 预设（R3 全量自迭代日常自用）
 
-`preset dogfood`（编程入口 `applyDogfoodPluginPreset(target, options)` / `applyPluginPreset({ ...target, preset: 'dogfood' }, options)`，完整安装与授权闭环见 [`docs/examples/dogfood-macos.profile.json`](../../docs/examples/dogfood-macos.profile.json)）面向日常对话纵向验收记忆与偏好进化通道。在 `--scenario web` 下传入 `--plugin-preset dogfood` 时，安装器会自动补齐 `preference-learning`、`assistant-evaluation`、`assistant-verifier`、`assistant-memory-learning`、`assistant-work-items` 与 `assistant-association` 6 个顶层包；运行 `dsh-rsi open --profile web` 打开并新建一次会话建立首个真实 owner 会话绑定后，可在「文鳐」控制台向导签发三权记忆授权并重启一次 Host，或停机运行 profile 内的 `dsh-web-owner-setup --autonomy-setup --enable-memory-learning --work-item-experiences` + `$bin preset dogfood --profile web --yes` 后再 `dsh-rsi open --profile web` 启动：
+`preset dogfood`（编程入口 `applyDogfoodPluginPreset(target, options)` / `applyPluginPreset({ ...target, preset: 'dogfood' }, options)`，参考 [`docs/examples/dogfood-macos.profile.json`](../../docs/examples/dogfood-macos.profile.json)）面向日常对话验收全套 R3 自迭代与进化能力（保留有界回滚与既有签名授权边界）：
 
-- 打开 `preference-learning`、`assistant-delivery` 自然反馈（`naturalFeedback.coverage` / `mixedIntent` 与 `attentionAttachOverCap`）及 `assistant-evaluation` 结果与吻合度记录（`notificationOutcomesEnabled`、`intakeAttentionAgreementEnabled`、`intakeEvaluationAgreementEnabled`，固定 `attentionTuningAutoAdopt: false`、`attentionLooseningEnabled: false`）；
-- 开启本地 `assistant-association` 联想召回（`enabled: true`、`localOnly: true`、Hebbian 与 WP22 参数自调参；显式固定 S3 `dreaming.enabled: false`、`intakeSignal.enabled: false` 与 S4 `webLearning.enabled: false`），并将数据库路径规范化至 `$DSH_HOME/assistant-association/<profile>.sqlite`；
+- 打开 `preference-learning`、`assistant-delivery` 自然反馈（`naturalFeedback.coverage` / `mixedIntent` 与 `attentionAttachOverCap`）及 `assistant-evaluation` 全套 WP22 闭环（`notificationOutcomesEnabled`、`intakeAttentionAgreementEnabled`、`intakeEvaluationAgreementEnabled`、`attentionTuningAutoAdopt`、`attentionLooseningEnabled`，均保留精确父版本回退）；
+- 开启 `assistant-association` 联想召回及 S3/S4 自演化能力（`enabled: true`、`dreaming.enabled: true`、`intakeSignal.enabled: true`、`webLearning.enabled: true`），并将数据库路径规范化至 `$DSH_HOME/assistant-association/<profile>.sqlite`；
 - 在 owner 已有签名学习授权与 `workItemExperiences` 许可时打开 `assistant-memory-learning` 的 `workItemExperiences: true`（前台对话记忆学习在授权后已默认运行）；
-- 强制把主动通道固定在只观察模式：`assistant-work-items` 固定 `mode: 'observe'`、`intakeLedger.enabled: true`、`intakeLedger.evaluation.admit.enabled: false`，`assistant-proactive` 在已有规则与路由时开启 `intakeEvaluation.enabled: true`（不开启自动准入或注意力放宽），`event-triggers.pollerEnabled: false`。预登记 14 天验收口径见[当前状态](../../docs/rsi-status.md)。
+- 启用 `assistant-work-items`（`enabled: true`、`intakeLedger.enabled: true`，并在已显式配置 `intakeLedger.evaluation.admit.originBindingId` 时启用 `intakeLedger.evaluation.admit.enabled: true`）、`assistant-proactive`（已有规则与路由时开启 `intakeEvaluation.enabled: true`）以及 `event-triggers.pollerEnabled: true`。
 
 ## WP20 可选 `inferred` intake 规则预设
 

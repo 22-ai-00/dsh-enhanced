@@ -69,7 +69,7 @@ describe('intake attention agreement (WP22, read-only)', () => {
     expect(evaluation.inspectIntakeAttentionAgreement({ scope })).toBeUndefined()
     expect(provenance?.reads).toEqual([])
     expect(() => new AssistantEvaluationService(new Context(), { databasePath: ':memory:', projectionIntervalMs: 0,
-      intakeAttentionAgreementEnabled: true })).toThrow(/requires notificationOutcomesEnabled/u)
+      notificationOutcomesEnabled: false, intakeAttentionAgreementEnabled: true })).toThrow(/requires notificationOutcomesEnabled/u)
   })
 
   test('joins intake-admitted items to their notification outcomes and separates non-intake items', () => {

@@ -163,12 +163,13 @@ export async function replyFixture(options: { holdSummary?: boolean; holdDispose
   await ctx.plugin(AgentLoop, { agents: [] }).await()
   const deliveryConfig: DeliveryConfig = { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
     defaultWorkspace: root, defaultAgentPreset: 'primary', agentProvider: 'local', agentModel: 'scripted', agentMaxAutoContinuationTurns: 0,
+    attentionAttachOverCap: false, attentionEnforce: false,
     ownerRoutes: [{ id: scope.authorityId, conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }] }
   let deliveryFork=ctx.plugin(AssistantDeliveryService,deliveryConfig);await deliveryFork.await()
   operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
   const pairing = ctx.assistantDelivery.issuePairing('test', principal); ctx.assistantDelivery.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
   let adapterContext: DeliveryAdapterContext | undefined
-  const registerAdapter = async () => ctx.assistantDelivery.registerAdapter({channel:'web',account:'browser',capabilities:{reconcileUnknownSend:false,receipts:[],formats:['plain','markdown']},start:async context=>{adapterContext=context},send:async intent=>{const providerMessageId=`local-provider-${sent.length+1}`;sent.push({providerMessageId,intent});return {outcome:'accepted',providerMessageId}}})
+  const registerAdapter = async () => ctx.assistantDelivery.registerAdapter({channel:'web',account:'browser',capabilities:{reconcileUnknownSend:false,receipts:[],formats:['plain','markdown'],textAttachments:true},start:async context=>{adapterContext=context},send:async intent=>{const providerMessageId=`local-provider-${sent.length+1}`;sent.push({providerMessageId,intent});return {outcome:'accepted',providerMessageId}}})
   await registerAdapter()
   const originalCreate=ctx.agents.create.bind(ctx.agents)
   if(options.holdDispose) {

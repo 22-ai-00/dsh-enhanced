@@ -55,10 +55,10 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
     expect(ConfigSchema).toBe(AssistantWorkItemsService.Config)
   })
 
-  test('defaults to disabled observe mode', async () => {
+  test('defaults to enabled observe mode with passive intake ledger and evaluation ready', async () => {
     const paths = await location()
     const config = normalizeConfig({ databasePath: paths.databasePath, workRoot: paths.workRoot }, Date.now())
-    expect(config.enabled).toBe(false)
+    expect(config.enabled).toBe(true)
     expect(config.mode).toBe('observe')
     expect(config.intakeSourceId).toBe('work-items/v1')
     expect(config.workerAutomationId).toBeNull()
@@ -66,7 +66,13 @@ describe('dsh-enhanced-assistant-work-items entrypoint', () => {
     expect(config.admission).toMatchObject({ allowedKinds: [], maxOpenItems: 8, maxAdmitsPerHour: 4 })
     expect(config.limits).toMatchObject({ leaseMs: 900_000, maxAttempts: 3, maxReportsPerItem: 20, waitingResumeMs: 300_000 })
     expect(config.notifyOn).toEqual(['ready', 'blocked', 'failed'])
+    expect(config.settlement.enabled).toBe(true)
+    expect(config.sources.foregroundFailures.enabled).toBe(true)
+    expect(config.intakeLedger).toMatchObject({ enabled: true, evaluation: { enabled: true } })
     expect(isActive(config)).toBe(false)
+    const disabled = normalizeConfig({ enabled: false, databasePath: paths.databasePath, workRoot: paths.workRoot }, Date.now())
+    expect(disabled.enabled).toBe(false)
+    expect(disabled.sources.foregroundFailures.enabled).toBe(false)
   })
 
   test('rejects a waitingResumeMs outside its bounded range', async () => {

@@ -137,8 +137,9 @@ describe('assistant-proactive intake evaluation config', () => {
   })
 
   it('accepts the documented section through the Loader Config schema and rejects an unknown ceiling', () => {
-    // The Loader schema materializes the disabled section; normalize still treats it as off.
-    expect(Config({}).intakeEvaluation).toMatchObject({ enabled: false, rules: [] })
+    // R3 default: enabled is true in Config; normalizeIntakeEvaluation still treats omitted/false as off.
+    expect(Config({}).intakeEvaluation).toMatchObject({ enabled: true, rules: [] })
+    expect(Config({ intakeEvaluation: { enabled: false } }).intakeEvaluation).toMatchObject({ enabled: false, rules: [] })
     const accepted = Config({ intakeEvaluation: { enabled: true, provider: 'p', model: 'm', rules: [{ ruleId: 'triage', ceiling: 'digest' }] } })
     expect(accepted.intakeEvaluation).toMatchObject({ enabled: true, provider: 'p', model: 'm' })
     expect(() => Config({ intakeEvaluation: { enabled: true, rules: [{ ruleId: 'triage', ceiling: 'execute' }] } } as never)).toThrow()
@@ -353,7 +354,7 @@ describe('assistant-proactive intake evaluation presets', () => {
 
   it('accepts optional preset in Loader Config schema without altering omitted defaults', () => {
     const defaults = Config({})
-    expect(defaults.intakeEvaluation).toEqual({ enabled: false, rules: [] })
+    expect(defaults.intakeEvaluation).toEqual({ enabled: true, rules: [] })
     const configured = Config({
       intakeEvaluation: { enabled: true, preset: 'conservative', provider: 'p', model: 'm' },
     })

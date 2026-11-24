@@ -24,7 +24,7 @@ import {
   HUMAN_APPROVAL_REASON,
   classifyToolRisk,
 } from './tool-risk.js'
-import { compilePolicy, evaluatePolicy } from './evaluator.js'
+import { compilePolicy, evaluatePolicy, matchesRuleScope } from './evaluator.js'
 import {
   PolicyLedger,
   PolicyLedgerError,
@@ -43,14 +43,20 @@ import {
   type BudgetReservationResult,
   type ApprovalProposalSnapshot,
   type EmergencyStopState,
+  type LeaseState,
+  type PreDispatchRollbackInput,
+  type StatefulAuthorizationInput,
 } from './ledger.js'
 import type {
   CompiledPolicy,
   PolicyDecision,
+  PolicyEvaluationState,
   PolicyInitiator,
+  PolicyLease,
   PolicyRequest,
   PolicyResource,
   PolicyRule,
+  PolicySensitivity,
   PolicySubject,
 } from './types.js'
 
@@ -81,11 +87,21 @@ export interface PolicyBudgetReservationInput {
 export interface AuthorizationOptions {
   idempotencyKey?: string
   auditDetails?: unknown
+  destination?: string
+  sensitivity?: PolicySensitivity
+  estimatedCostMicros?: number
+  commitDigest?: string
+  predecessorDigest?: string
+  lease?: PolicyLease
 }
 
 export interface PrincipalAuthorizationOptions extends AuthorizationOptions {
   /** Must equal the principal Delivery bound to this Agent; budgets are charged in its own partition. */
   principal: string
+}
+
+export interface PolicyPreDispatchRollbackInput extends PreDispatchRollbackInput {
+  readonly auditDetails?: unknown
 }
 
 /** Ledger scope of a principal-partitioned budget. Disjoint from global/subject/workspace scopes. */
@@ -159,6 +175,16 @@ const resourceKindSchema = Schema.union([
   '*',
 ] as const)
 const initiatorSchema = Schema.union(['background', 'external', 'foreground'] as const)
+const tokenStringSchema = Schema.string().min(1).pattern(
+  /^[^\s\p{Cc}](?:[^\p{Cc}]*[^\s\p{Cc}])?$/u,
+)
+const sensitivitySchema = Schema.union(['public', 'internal', 'confidential', 'restricted'] as const)
+const leaseSchema = Schema.union([Schema.object({
+  leaseId: tokenStringSchema,
+  expiresAtMs: Schema.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+  maxUses: Schema.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+  revoked: Schema.boolean(),
+})])
 
 const ruleSchema = Schema.object({
   id: Schema.string().min(1).required(),
@@ -181,6 +207,13 @@ const ruleSchema = Schema.object({
     id: Schema.string().min(1).required(),
     amount: Schema.number().min(Number.MIN_VALUE).required(),
   })]),
+  lease: leaseSchema,
+  destinations: Schema.union([Schema.array(tokenStringSchema)]),
+  maxSensitivity: sensitivitySchema,
+  monetaryCostCapMicros: Schema.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+  commitDigest: tokenStringSchema,
+  predecessorDigest: tokenStringSchema,
+  idempotencyKey: tokenStringSchema,
 })
 
 const configSchema = Schema.object({
@@ -270,8 +303,45 @@ function sharedNativeFullUnsettled(): WeakMap<Session, NativeFullUnsettledState>
   return created
 }
 
-function denial(reasonCode: PolicyDecision['reasonCode']): PolicyDecision {
-  return { effect: 'deny', reasonCode, ruleId: undefined }
+function denial(
+  reasonCode: PolicyDecision['reasonCode'],
+  ruleId: string | undefined = undefined,
+): PolicyDecision {
+  return { effect: 'deny', reasonCode, ruleId }
+}
+
+function minDefined(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right
+  if (right === undefined) return left
+  return Math.min(left, right)
+}
+
+function computeRequestIntentHash(request: PolicyRequest, partitionPrincipal?: string): string {
+  return createHash('sha256').update(JSON.stringify([
+    'policy-request-intent-v1',
+    request.subject.kind,
+    request.subject.id,
+    request.subject.workspace ?? null,
+    request.subject.principal ?? null,
+    request.action,
+    request.resource.kind,
+    request.resource.id,
+    request.context.initiator,
+    request.destination ?? null,
+    request.sensitivity ?? null,
+    request.estimatedCostMicros ?? null,
+    request.commitDigest ?? null,
+    request.predecessorDigest ?? null,
+    request.lease === undefined
+      ? null
+      : {
+          leaseId: request.lease.leaseId ?? null,
+          expiresAtMs: request.lease.expiresAtMs ?? null,
+          maxUses: request.lease.maxUses ?? null,
+          revoked: request.lease.revoked ?? null,
+        },
+    partitionPrincipal ?? null,
+  ])).digest('hex')
 }
 
 function compileBudgets(configs: readonly PolicyBudgetConfig[]): ReadonlyMap<string, PolicyBudgetConfig> {
@@ -320,6 +390,7 @@ export class AssistantPolicyService extends Service {
 
   private readonly policy: CompiledPolicy
   private readonly ledger: PolicyLedger
+  private readonly now: () => number
   private readonly budgets: ReadonlyMap<string, PolicyBudgetConfig>
   private readonly toolDefaultEffect: 'deny' | 'allow'
   private readonly configuration: PolicyHostConfiguration
@@ -360,9 +431,10 @@ export class AssistantPolicyService extends Service {
     this.policy = compilePolicy(this.configuration.rules)
     this.budgets = compileBudgets(this.configuration.budgets)
     this.toolDefaultEffect = this.configuration.toolDefaultEffect
+    this.now = options.now ?? Date.now
     this.ledger = new PolicyLedger({
       path: config.databasePath,
-      ...(options.now === undefined ? {} : { now: options.now }),
+      now: this.now,
     })
     registerAutoReviewAnswerer(ctx, this.configuration.autoReview ?? undefined,
       (request, next) => this.humanApprovalRouter.dispatch(request, next))
@@ -768,26 +840,191 @@ export class AssistantPolicyService extends Service {
     return hostConfiguration(this.configuration)
   }
 
+  private buildEvaluationContext(
+    request: PolicyRequest,
+    options?: { skipUseAndHeadChecks?: boolean; idempotencyKey?: string; partitionPrincipal?: string },
+  ): {
+    state: PolicyEvaluationState
+    idempotencyBinding: ReturnType<PolicyLedger['getEvaluationSnapshot']>['idempotencyBinding']
+    intentHash: string
+  } {
+    const leaseIds: string[] = []
+    for (const rule of this.policy.rules) {
+      if (rule.lease !== undefined) {
+        if (rule.lease.leaseId !== undefined) {
+          leaseIds.push(rule.lease.leaseId)
+        } else {
+          leaseIds.push(`rule:${rule.id}`, rule.id)
+        }
+      } else if (request.lease !== undefined && matchesRuleScope(rule, request)) {
+        leaseIds.push(`rule:${rule.id}`, rule.id)
+      }
+    }
+    if (request.lease?.leaseId !== undefined && typeof request.lease.leaseId === 'string' && request.lease.leaseId.length > 0) {
+      leaseIds.push(request.lease.leaseId)
+    }
+    const needsCommitHead = !options?.skipUseAndHeadChecks && (
+      request.commitDigest !== undefined
+      || request.predecessorDigest !== undefined
+      || this.policy.rules.some(rule =>
+        rule.effect === 'allow'
+        && (rule.commitDigest !== undefined || rule.predecessorDigest !== undefined)
+        && matchesRuleScope(rule, request),
+      )
+    )
+    const costCapRuleIds: string[] = []
+    if (!options?.skipUseAndHeadChecks) {
+      for (const rule of this.policy.rules) {
+        if (rule.effect === 'allow' && rule.monetaryCostCapMicros !== undefined && matchesRuleScope(rule, request)) {
+          costCapRuleIds.push(rule.id)
+        }
+      }
+    }
+    const idempotencyKey = options?.idempotencyKey ?? (
+      typeof request.idempotencyKey === 'string' && request.idempotencyKey.trim() !== '' ? request.idempotencyKey : undefined
+    )
+    const snapshot = this.ledger.getEvaluationSnapshot({
+      leaseIds,
+      ...(costCapRuleIds.length === 0 ? {} : { costCapRuleIds }),
+      ...(needsCommitHead ? { resource: request.resource } : {}),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+    })
+    const intentHash = computeRequestIntentHash(request, options?.partitionPrincipal)
+    const idempotencyConflict = snapshot.idempotencyBinding !== undefined
+      && snapshot.idempotencyBinding.intentHash !== intentHash
+
+    const state: PolicyEvaluationState = {
+      nowMs: snapshot.nowMs,
+      ...(options?.skipUseAndHeadChecks ? {} : { leaseUses: snapshot.leaseUses }),
+      ...(!options?.skipUseAndHeadChecks && Object.keys(snapshot.spentCostMicrosByRule).length > 0
+        ? { spentCostMicrosByRule: snapshot.spentCostMicrosByRule }
+        : {}),
+      revokedLeaseIds: snapshot.revokedLeaseIds,
+      ...(!options?.skipUseAndHeadChecks && snapshot.commitHead !== undefined
+        ? { expectedPredecessorDigest: snapshot.commitHead }
+        : {}),
+      ...(idempotencyConflict && idempotencyKey !== undefined
+        ? { usedIdempotencyKeys: [idempotencyKey] }
+        : snapshot.idempotencyBinding !== undefined && idempotencyKey !== undefined
+          ? {
+              intentHash,
+              idempotencyBindings: {
+                [idempotencyKey]: {
+                  intentHash: snapshot.idempotencyBinding.intentHash,
+                  ...(snapshot.idempotencyBinding.commitDigest === undefined
+                    ? {}
+                    : { commitDigest: snapshot.idempotencyBinding.commitDigest }),
+                  ...(snapshot.idempotencyBinding.predecessorDigest === undefined
+                    ? {}
+                    : { predecessorDigest: snapshot.idempotencyBinding.predecessorDigest }),
+                },
+              },
+            }
+          : {}),
+    }
+    return { state, idempotencyBinding: snapshot.idempotencyBinding, intentHash }
+  }
+
+  private evaluateWithContext(
+    request: PolicyRequest,
+    options?: { idempotencyKey?: string; partitionPrincipal?: string },
+  ): {
+    decision: PolicyDecision
+    intentHash: string
+  } {
+    const initialCtx = this.buildEvaluationContext(request, options)
+    const isReplayAllow = initialCtx.idempotencyBinding !== undefined
+      && initialCtx.idempotencyBinding.intentHash === initialCtx.intentHash
+      && initialCtx.idempotencyBinding.outcome === 'allow'
+
+    if (isReplayAllow) {
+      const replayCtx = this.buildEvaluationContext(request, {
+        ...options,
+        skipUseAndHeadChecks: true,
+      })
+      return {
+        decision: evaluatePolicy(this.policy, request, replayCtx.state),
+        intentHash: initialCtx.intentHash,
+      }
+    }
+    return {
+      decision: evaluatePolicy(this.policy, request, initialCtx.state),
+      intentHash: initialCtx.intentHash,
+    }
+  }
+
   evaluate(request: PolicyRequest): PolicyDecision {
     this.assertActive()
     if (this.ledger.getEmergencyStop().enabled) return denial('emergency-stop')
-    return evaluatePolicy(this.policy, request)
+    return this.evaluateWithContext(request).decision
   }
 
   authorize(request: PolicyRequest, options: AuthorizationOptions = {}): PolicyDecision {
-    let decision = this.evaluate(request)
-    if (decision.effect === 'allow' && decision.budget !== undefined) {
-      decision = this.consumeAuthorizationBudget(request.subject, decision, options.idempotencyKey)
-    }
+    this.assertActive()
+    return this.authorizeResolvedRequest(request, options)
+  }
+
+  /**
+   * Atomically reverts a fresh stateful authorization commit when execution
+   * fails strictly pre-dispatch (`!dispatched`). Never reverts replays or
+   * decisions whose bindings do not match the committed transaction.
+   */
+  rollbackPreDispatchAuthorization(input: PolicyPreDispatchRollbackInput): boolean {
+    this.assertActive()
+    const rolledBack = this.ledger.rollbackPreDispatchTransition(input)
     this.ledger.appendAudit({
-      actor: `${request.subject.kind}:${request.subject.id}`,
-      action: request.action,
-      resource: request.resource,
-      outcome: decision.effect === 'allow' ? 'allowed' : 'denied',
-      reasonCode: decision.reasonCode,
-      details: options.auditDetails ?? {},
+      actor: 'assistant-policy',
+      action: 'policy.pre-dispatch.rollback',
+      resource: { kind: 'policy-authorization', id: input.idempotencyKey },
+      outcome: rolledBack ? 'rolled-back' : 'ignored',
+      reasonCode: rolledBack ? 'pre-dispatch-rollback' : 'rollback-not-eligible',
+      details: {
+        idempotencyKey: input.idempotencyKey,
+        ...(input.decisionId === undefined ? {} : { decisionId: input.decisionId }),
+        ...(input.ruleId === undefined ? {} : { ruleId: input.ruleId }),
+        ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+        ...(input.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: input.estimatedCostMicros }),
+        ...(input.commitDigest === undefined ? {} : { commitDigest: input.commitDigest }),
+        ...(input.auditDetails === undefined ? {} : { auditDetails: input.auditDetails }),
+      },
     })
-    return decision
+    return rolledBack
+  }
+
+  revokeLease(leaseId: string, options: { actor?: string; reason?: string } = {}): LeaseState {
+    this.assertActive()
+    const result = this.ledger.revokeLease(leaseId, options)
+    this.ledger.appendAudit({
+      actor: options.actor ?? 'system',
+      action: 'policy.lease.revoke',
+      resource: { kind: 'policy-lease', id: result.leaseId },
+      outcome: result.alreadyRevoked ? 'already-revoked' : 'revoked',
+      reasonCode: 'lease-revoked',
+      details: {
+        leaseId: result.leaseId,
+        alreadyRevoked: result.alreadyRevoked,
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+      },
+    })
+    return Object.freeze({
+      leaseId: result.leaseId,
+      uses: result.uses,
+      revoked: result.revoked,
+      revokedAt: result.revokedAt,
+      revokedBy: result.revokedBy,
+      revocationReason: result.revocationReason,
+      updatedAt: result.updatedAt,
+    })
+  }
+
+  getLeaseState(leaseId: string): LeaseState | undefined {
+    this.assertActive()
+    return this.ledger.getLeaseState(leaseId)
+  }
+
+  getCommitHead(resource: PolicyResource): string | undefined {
+    this.assertActive()
+    return this.ledger.getCommitHead(resource)
   }
 
   /** Read-only declaration lookup for consumers that must prove metric compatibility before reserving. */
@@ -1193,6 +1430,12 @@ export class AssistantPolicyService extends Service {
       action,
       resource,
       context: { initiator: authority?.initiator ?? 'foreground' },
+      ...(options.lease === undefined ? {} : { lease: options.lease }),
+      ...(options.destination === undefined ? {} : { destination: options.destination }),
+      ...(options.sensitivity === undefined ? {} : { sensitivity: options.sensitivity }),
+      ...(options.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: options.estimatedCostMicros }),
+      ...(options.commitDigest === undefined ? {} : { commitDigest: options.commitDigest }),
+      ...(options.predecessorDigest === undefined ? {} : { predecessorDigest: options.predecessorDigest }),
     }, options)
   }
 
@@ -1231,27 +1474,21 @@ export class AssistantPolicyService extends Service {
       action,
       resource,
       context: { initiator: authority?.initiator ?? 'foreground' },
+      ...(options.lease === undefined ? {} : { lease: options.lease }),
+      ...(options.destination === undefined ? {} : { destination: options.destination }),
+      ...(options.sensitivity === undefined ? {} : { sensitivity: options.sensitivity }),
+      ...(options.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: options.estimatedCostMicros }),
+      ...(options.commitDigest === undefined ? {} : { commitDigest: options.commitDigest }),
+      ...(options.predecessorDigest === undefined ? {} : { predecessorDigest: options.predecessorDigest }),
     }
     // Evaluate first so every rule/emergency-stop denial carries exactly the
     // reason `authorizeAgent` would return; only an otherwise-allowed request
     // can fail on the partition principal. Nothing is charged on any denial.
-    let decision = this.evaluate(request)
-    if (decision.effect === 'allow'
-      && (!validPartitionPrincipal(options.principal) || authority?.principal !== options.principal)) {
-      decision = denial('budget-principal-mismatch')
-    } else if (decision.effect === 'allow' && decision.budget !== undefined) {
-      decision = this.consumeAuthorizationBudget(request.subject, decision, options.idempotencyKey, options.principal)
-      if (decision.effect === 'allow') decision = { ...decision, budgetPrincipal: options.principal }
-    }
-    this.ledger.appendAudit({
-      actor: `${request.subject.kind}:${request.subject.id}`,
-      action: request.action,
-      resource: request.resource,
-      outcome: decision.effect === 'allow' ? 'allowed' : 'denied',
-      reasonCode: decision.reasonCode,
-      details: options.auditDetails ?? {},
+    return this.authorizeResolvedRequest(request, options, {
+      requirePartitionPrincipal: true,
+      ...(options.principal === undefined ? {} : { partitionPrincipal: options.principal }),
+      ...(authority?.principal === undefined ? {} : { authorityPrincipal: authority.principal }),
     })
-    return decision
   }
 
   /**
@@ -1262,6 +1499,7 @@ export class AssistantPolicyService extends Service {
     agent: Agent | undefined,
     action: string,
     resource: PolicyResource,
+    options: AuthorizationOptions = {},
   ): PolicyDecision {
     this.assertActive()
     if (agent === undefined) return denial('missing-agent')
@@ -1270,6 +1508,9 @@ export class AssistantPolicyService extends Service {
     const preset = agent.session.header.agentPreset
     if (preset === undefined || preset === '') return denial('missing-agent-preset')
     const authority = this.initiators.get(agent)
+    const effectiveIdempotencyKey = options.idempotencyKey !== undefined && options.idempotencyKey.trim() !== ''
+      ? options.idempotencyKey
+      : undefined
     return this.evaluate({
       subject: {
         kind: 'agent',
@@ -1280,6 +1521,13 @@ export class AssistantPolicyService extends Service {
       action,
       resource,
       context: { initiator: authority?.initiator ?? 'foreground' },
+      ...(options.lease === undefined ? {} : { lease: options.lease }),
+      ...(options.destination === undefined ? {} : { destination: options.destination }),
+      ...(options.sensitivity === undefined ? {} : { sensitivity: options.sensitivity }),
+      ...(options.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: options.estimatedCostMicros }),
+      ...(options.commitDigest === undefined ? {} : { commitDigest: options.commitDigest }),
+      ...(options.predecessorDigest === undefined ? {} : { predecessorDigest: options.predecessorDigest }),
+      ...(effectiveIdempotencyKey === undefined ? {} : { idempotencyKey: effectiveIdempotencyKey }),
     })
   }
 
@@ -1307,28 +1555,202 @@ export class AssistantPolicyService extends Service {
       resource: { kind: 'tool', id: execution.name },
       context: { initiator: authority?.initiator ?? 'foreground' },
     }
-    let decision = this.evaluate(request)
-    if (decision.reasonCode === 'default-deny' && this.toolDefaultEffect === 'allow') {
-      decision = { effect: 'allow', reasonCode: 'tool-default-allow', ruleId: undefined }
+    return this.authorizeResolvedRequest(
+      request,
+      {
+        auditDetails: {
+          callId: execution.callId,
+          rootCallId: execution.rootCallId,
+          arguments: execution.arguments,
+        },
+      },
+      {
+        allowToolDefault: true,
+        budgetIdempotencyKey: `tool:${String(execution.rootCallId)}:${String(execution.callId)}`,
+      },
+    )
+  }
+
+  private authorizeResolvedRequest(
+    request: PolicyRequest,
+    options: AuthorizationOptions,
+    extra: {
+      requirePartitionPrincipal?: boolean
+      partitionPrincipal?: string
+      authorityPrincipal?: string
+      allowToolDefault?: boolean
+      budgetIdempotencyKey?: string
+    } = {},
+  ): PolicyDecision {
+    let decision: PolicyDecision
+    if (this.ledger.getEmergencyStop().enabled) {
+      decision = denial('emergency-stop')
+    } else if (
+      options.idempotencyKey !== undefined
+      && request.idempotencyKey !== undefined
+      && options.idempotencyKey !== request.idempotencyKey
+    ) {
+      decision = denial('idempotency-conflict')
+    } else {
+      const rawEffectiveKey = options.idempotencyKey ?? request.idempotencyKey
+      const effectiveIdempotencyKey = rawEffectiveKey !== undefined && rawEffectiveKey.trim() !== ''
+        ? rawEffectiveKey
+        : undefined
+      const effectiveRequest: PolicyRequest = request.idempotencyKey === undefined && effectiveIdempotencyKey !== undefined
+        ? { ...request, idempotencyKey: effectiveIdempotencyKey }
+        : request
+      const evaluated = this.evaluateWithContext(effectiveRequest, {
+        ...(effectiveIdempotencyKey === undefined ? {} : { idempotencyKey: effectiveIdempotencyKey }),
+        ...(extra.partitionPrincipal === undefined ? {} : { partitionPrincipal: extra.partitionPrincipal }),
+      })
+      decision = evaluated.decision
+      const requestIntentHash = evaluated.intentHash
+
+      if (extra.allowToolDefault && decision.reasonCode === 'default-deny' && this.toolDefaultEffect === 'allow') {
+        decision = { effect: 'allow', reasonCode: 'tool-default-allow', ruleId: undefined }
+      }
+
+      if (decision.effect === 'allow'
+        && extra.requirePartitionPrincipal
+        && (!validPartitionPrincipal(extra.partitionPrincipal) || extra.authorityPrincipal !== extra.partitionPrincipal)) {
+        decision = denial('budget-principal-mismatch')
+      } else if (decision.effect === 'allow') {
+        let budgetInput: StatefulAuthorizationInput['budget']
+        if (decision.budget !== undefined) {
+          const budgetKey = extra.budgetIdempotencyKey ?? effectiveIdempotencyKey
+          if (budgetKey === undefined || budgetKey.trim() === '') {
+            decision = denial('budget-idempotency-required')
+          } else {
+            const budgetConfig = this.budgets.get(decision.budget.id)
+            if (budgetConfig === undefined) {
+              decision = denial('budget-not-configured')
+            } else {
+              let scope: string
+              switch (budgetConfig.scope) {
+                case 'global':
+                  scope = 'global'
+                  break
+                case 'subject':
+                  scope = `${effectiveRequest.subject.kind}:${effectiveRequest.subject.id}`
+                  break
+                case 'workspace':
+                  if (effectiveRequest.subject.workspace === undefined || effectiveRequest.subject.workspace === '') {
+                    throw new AssistantPolicyError('missing-workspace', 'workspace-scoped budget requires a workspace')
+                  }
+                  scope = `workspace:${effectiveRequest.subject.workspace}`
+                  break
+              }
+              if (extra.partitionPrincipal !== undefined) {
+                scope = principalPartitionScope(scope, extra.partitionPrincipal)
+              }
+              budgetInput = {
+                id: decision.budget.id,
+                scope,
+                metric: budgetConfig.metric,
+                limit: budgetConfig.limit,
+                amount: decision.budget.amount,
+                periodMs: budgetConfig.periodMs,
+                idempotencyKey: budgetKey,
+                ...(extra.partitionPrincipal === undefined ? {} : { principal: extra.partitionPrincipal }),
+              }
+            }
+          }
+        }
+
+        if (decision.effect === 'allow') {
+          let leaseInput: StatefulAuthorizationInput['lease']
+          if (decision.lease !== undefined || effectiveRequest.lease !== undefined) {
+            const ruleLeaseKey = decision.ruleId === undefined ? undefined : `rule:${decision.ruleId}`
+            const leaseId = decision.lease !== undefined
+              ? (decision.lease.leaseId ?? ruleLeaseKey!)
+              : (effectiveRequest.lease?.leaseId ?? ruleLeaseKey ?? 'default-allow')
+            const secondaryLeaseIds = decision.lease !== undefined
+              && decision.lease.leaseId === undefined
+              && effectiveRequest.lease?.leaseId !== undefined
+              && effectiveRequest.lease.leaseId !== leaseId
+              ? [effectiveRequest.lease.leaseId]
+              : undefined
+            const revokedAliasLeaseIds = (decision.lease !== undefined && decision.lease.leaseId === undefined)
+              || (decision.lease === undefined && effectiveRequest.lease !== undefined && effectiveRequest.lease.leaseId === undefined)
+              ? (decision.ruleId === undefined ? undefined : [decision.ruleId])
+              : undefined
+            const expiresAtMs = minDefined(decision.lease?.expiresAtMs, effectiveRequest.lease?.expiresAtMs)
+            const maxUses = minDefined(decision.lease?.maxUses, effectiveRequest.lease?.maxUses)
+            const revoked = decision.lease?.revoked === true || effectiveRequest.lease?.revoked === true
+            leaseInput = {
+              leaseId,
+              ...(secondaryLeaseIds === undefined ? {} : { secondaryLeaseIds }),
+              ...(revokedAliasLeaseIds === undefined ? {} : { revokedAliasLeaseIds }),
+              ...(expiresAtMs === undefined ? {} : { expiresAtMs }),
+              ...(maxUses === undefined ? {} : { maxUses }),
+              ...(revoked ? { revoked } : {}),
+            }
+          }
+          const matchedRule = decision.ruleId === undefined
+            ? undefined
+            : this.policy.rules.find(rule => rule.id === decision.ruleId)
+          const monetaryCostCap = matchedRule?.monetaryCostCapMicros !== undefined
+            && effectiveRequest.estimatedCostMicros !== undefined
+            ? {
+                ruleId: matchedRule.id,
+                capMicros: matchedRule.monetaryCostCapMicros,
+                estimatedCostMicros: effectiveRequest.estimatedCostMicros,
+              }
+            : undefined
+          const needsStatefulTx = budgetInput !== undefined
+            || leaseInput !== undefined
+            || monetaryCostCap !== undefined
+            || effectiveRequest.commitDigest !== undefined
+            || effectiveRequest.predecessorDigest !== undefined
+            || effectiveIdempotencyKey !== undefined
+          if (needsStatefulTx) {
+            const txResult = this.ledger.authorizeStatefulTransition({
+              intentHash: requestIntentHash,
+              ...(effectiveIdempotencyKey === undefined ? {} : { idempotencyKey: effectiveIdempotencyKey }),
+              ruleId: decision.ruleId,
+              reasonCode: decision.reasonCode,
+              ...(effectiveRequest.estimatedCostMicros === undefined
+                ? {}
+                : { requestedCostMicros: effectiveRequest.estimatedCostMicros }),
+              ...(leaseInput === undefined ? {} : { lease: leaseInput }),
+              ...(monetaryCostCap === undefined ? {} : { monetaryCostCap }),
+              resource: effectiveRequest.resource,
+              ...(effectiveRequest.commitDigest === undefined ? {} : { commitDigest: effectiveRequest.commitDigest }),
+              ...(effectiveRequest.predecessorDigest === undefined
+                ? {}
+                : { predecessorDigest: effectiveRequest.predecessorDigest }),
+              requirePredecessorMatch: effectiveRequest.commitDigest !== undefined
+                || effectiveRequest.predecessorDigest !== undefined,
+              ...(budgetInput === undefined ? {} : { budget: budgetInput }),
+            })
+            if (!txResult.ok) {
+              decision = denial(txResult.reasonCode, txResult.ruleId)
+            } else {
+              if (extra.partitionPrincipal !== undefined && decision.budget !== undefined) {
+                decision = { ...decision, budgetPrincipal: extra.partitionPrincipal }
+              }
+              if (!txResult.replayed && txResult.decisionId !== undefined) {
+                Object.defineProperty(decision, 'decisionId', {
+                  value: txResult.decisionId,
+                  enumerable: false,
+                  configurable: true,
+                })
+              }
+            }
+          } else if (extra.partitionPrincipal !== undefined && decision.budget !== undefined) {
+            decision = { ...decision, budgetPrincipal: extra.partitionPrincipal }
+          }
+        }
+      }
     }
-    if (decision.effect === 'allow' && decision.budget !== undefined) {
-      decision = this.consumeAuthorizationBudget(
-        request.subject,
-        decision,
-        `tool:${String(execution.rootCallId)}:${String(execution.callId)}`,
-      )
-    }
+
     this.ledger.appendAudit({
       actor: `${request.subject.kind}:${request.subject.id}`,
       action: request.action,
       resource: request.resource,
       outcome: decision.effect === 'allow' ? 'allowed' : 'denied',
       reasonCode: decision.reasonCode,
-      details: {
-        callId: execution.callId,
-        rootCallId: execution.rootCallId,
-        arguments: execution.arguments,
-      },
+      details: options.auditDetails ?? {},
     })
     return decision
   }
@@ -1348,37 +1770,6 @@ export class AssistantPolicyService extends Service {
       details: {},
     })
     return decision
-  }
-
-  private consumeAuthorizationBudget(
-    subject: PolicySubject,
-    decision: PolicyDecision,
-    idempotencyKey: string | undefined,
-    partitionPrincipal?: string,
-  ): PolicyDecision {
-    const charge = decision.budget
-    if (charge === undefined) return decision
-    if (idempotencyKey === undefined || idempotencyKey.trim() === '') {
-      return denial('budget-idempotency-required')
-    }
-    try {
-      const reservation = this.reserveConfiguredBudget({
-        budgetId: charge.id,
-        subject,
-        amount: charge.amount,
-        idempotencyKey,
-      }, partitionPrincipal)
-      this.ledger.finalize(reservation.reservationId, charge.amount)
-      return decision
-    } catch (error) {
-      if (error instanceof PolicyLedgerError && error.code === 'budget-exhausted') {
-        return denial('budget-exhausted')
-      }
-      if (error instanceof AssistantPolicyError && error.code === 'budget-not-configured') {
-        return denial('budget-not-configured')
-      }
-      throw error
-    }
   }
 
   private reserveConfiguredBudget(input: PolicyBudgetReservationInput, partitionPrincipal?: string): BudgetReservationResult {

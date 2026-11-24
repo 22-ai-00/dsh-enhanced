@@ -92,11 +92,20 @@ export type IntakeEnqueueResult =
   | { readonly state: 'decided'; readonly decision: IntakeEvaluationDecision }
   | { readonly state: 'rejected'; readonly reason: 'invalid-candidate' | 'stale-policy' | 'conflict' | 'queue-full' }
 
+export interface IntakeQueueProgress {
+  readonly attempts: number
+  readonly failures: number
+  readonly nextAt: number
+}
+
 export interface IntakeEvaluationOptions {
   readonly evaluator: IntakeModelEvaluator
   /** Current Policy version, read at enqueue, dispatch and completion. */
   readonly policyVersion: () => string
   readonly mode: () => IntakeEvaluationMode
+  readonly ruleEnabled?: (ruleId: string) => boolean
+  readonly ruleMode?: (ruleId: string) => IntakeEvaluationMode | undefined
+  readonly ruleThresholds?: (ruleId: string) => Readonly<{ confidenceThresholdPpm?: number; minUtility?: number }> | undefined
   readonly now?: () => number
   readonly setTimer?: (ms: number, callback: () => void) => () => void
   /** Capped at the 32-bit timer maximum so it never wraps to an immediate timeout. */
@@ -178,6 +187,9 @@ export class InferredIntakeEvaluationQueue {
   readonly #evaluator: IntakeModelEvaluator
   readonly #policyVersion: () => string
   readonly #mode: () => IntakeEvaluationMode
+  readonly #ruleEnabled: (ruleId: string) => boolean
+  readonly #ruleMode: ((ruleId: string) => IntakeEvaluationMode | undefined) | undefined
+  readonly #ruleThresholds: ((ruleId: string) => Readonly<{ confidenceThresholdPpm?: number; minUtility?: number }> | undefined) | undefined
   readonly #now: () => number
   readonly #setTimer: (ms: number, callback: () => void) => () => void
   readonly #timeoutMs: number
@@ -200,6 +212,9 @@ export class InferredIntakeEvaluationQueue {
     this.#evaluator = options.evaluator
     this.#policyVersion = options.policyVersion
     this.#mode = options.mode
+    this.#ruleEnabled = options.ruleEnabled ?? (() => true)
+    this.#ruleMode = options.ruleMode
+    this.#ruleThresholds = options.ruleThresholds
     this.#now = options.now ?? (() => Date.now())
     this.#setTimer = options.setTimer ?? defaultTimer
     this.#timeoutMs = Math.min(positive(options.timeoutMs, 30_000), MAX_TIMER_MS)
@@ -223,7 +238,7 @@ export class InferredIntakeEvaluationQueue {
    * candidate; it is rebuilt from its checked fields, and an inconsistent
    * prior is reported as `prior: 'rejected'` and the candidate is evaluated.
    */
-  enqueue(candidate: InferredIntakeCandidate, prior?: IntakeEvaluationDecision): IntakeEnqueueResult {
+  enqueue(candidate: InferredIntakeCandidate, prior?: IntakeEvaluationDecision, progress?: IntakeQueueProgress): IntakeEnqueueResult {
     const frozen = snapshotCandidate(candidate)
     if (!frozen) return { state: 'rejected', reason: 'invalid-candidate' }
     const version = this.#policyVersion()
@@ -242,11 +257,25 @@ export class InferredIntakeEvaluationQueue {
     }
     // Any existing entry is from an older Policy version: the re-match replaces it.
     const adopted = prior === undefined ? undefined : this.#adoptPrior(frozen, prior)
+    const validProgress = progress !== undefined
+      && Number.isSafeInteger(progress.attempts) && progress.attempts >= 0
+      && Number.isSafeInteger(progress.failures) && progress.failures >= 0
+      && Number.isFinite(progress.nextAt) && progress.nextAt >= 0
+      ? progress : undefined
     const settlesNow = adopted !== undefined || frozen.ceiling === 'ignore'
+      || (validProgress !== undefined && validProgress.failures >= this.#maxFailures)
     if (!settlesNow && this.#pendingCount(version) >= this.#maxPending) return { state: 'rejected', reason: 'queue-full' }
     if (existing) this.#entries.delete(key)
     else if (!this.#makeRoom(version)) return { state: 'rejected', reason: 'queue-full' }
-    const entry: Entry = { candidate: frozen, seq: this.#seq++, state: 'queued', failures: 0, attempts: 0, nextAt: this.#now(), decision: undefined }
+    const entry: Entry = {
+      candidate: frozen,
+      seq: this.#seq++,
+      state: 'queued',
+      failures: validProgress?.failures ?? 0,
+      attempts: validProgress?.attempts ?? 0,
+      nextAt: validProgress?.nextAt ?? this.#now(),
+      decision: undefined,
+    }
     this.#entries.set(key, entry)
     if (adopted) {
       entry.state = 'decided'
@@ -257,6 +286,9 @@ export class InferredIntakeEvaluationQueue {
     if (frozen.ceiling === 'ignore') {
       // Nothing a downgrade-only model could change; do not spend budget.
       return { state: 'decided', decision: this.#settle(entry, 'decided', 'ignore', null, [], ['ceiling-ignore']) }
+    }
+    if (entry.failures >= this.#maxFailures) {
+      return { state: 'decided', decision: this.#settle(entry, 'unavailable', 'ignore', null, [], ['consecutive-failures']) }
     }
     return prior === undefined ? { state: 'queued' } : { state: 'queued', prior: 'rejected' }
   }
@@ -269,7 +301,38 @@ export class InferredIntakeEvaluationQueue {
     const entry = this.#entries.get(keyOf({ candidateId, ruleId }))
     const decision = entry?.state === 'decided' ? entry.decision : undefined
     if (!decision || entry?.candidate.policyVersion !== this.#policyVersion()) return undefined
-    return decision.effect === 'apply' && this.#mode() !== 'auto' ? Object.freeze({ ...decision, effect: 'none' as const }) : decision
+    const mode = this.#effectiveMode(ruleId)
+    return decision.effect === 'apply' && mode !== 'auto' ? Object.freeze({ ...decision, effect: 'none' as const }) : decision
+  }
+
+  pendingProgress(): readonly Readonly<{
+    candidateId: string
+    ruleId: string
+    policyVersion: string
+    ceiling: IntakeEvaluationLevel
+    attempts: number
+    failures: number
+    nextAt: number
+  }>[] {
+    const version = this.#policyVersion()
+    const list: Readonly<{
+      candidateId: string; ruleId: string; policyVersion: string; ceiling: IntakeEvaluationLevel;
+      attempts: number; failures: number; nextAt: number
+    }>[] = []
+    for (const entry of this.#entries.values()) {
+      if (entry.state !== 'decided' && entry.candidate.policyVersion === version) {
+        list.push(Object.freeze({
+          candidateId: entry.candidate.candidateId,
+          ruleId: entry.candidate.ruleId,
+          policyVersion: entry.candidate.policyVersion,
+          ceiling: entry.candidate.ceiling,
+          attempts: entry.attempts,
+          failures: entry.failures,
+          nextAt: entry.nextAt,
+        }))
+      }
+    }
+    return Object.freeze(list)
   }
 
   inspect(): IntakeEvaluationInspection {
@@ -285,6 +348,22 @@ export class InferredIntakeEvaluationQueue {
     return { queued, decided, unavailable, awaitingRematch, callsInWindow: this.#calls.length, budgetExhausted: this.#calls.length >= this.#maxCalls }
   }
 
+  /** Drop any still-queued entries whose rule has been disabled live via tuning. */
+  purgeDisabledRules(): readonly Readonly<{ candidateId: string; ruleId: string; policyVersion: string }>[] {
+    const purged: Readonly<{ candidateId: string; ruleId: string; policyVersion: string }>[] = []
+    for (const [key, entry] of this.#entries) {
+      if (entry.state === 'queued' && !this.#ruleEnabled(entry.candidate.ruleId)) {
+        this.#entries.delete(key)
+        purged.push(Object.freeze({
+          candidateId: entry.candidate.candidateId,
+          ruleId: entry.candidate.ruleId,
+          policyVersion: entry.candidate.policyVersion,
+        }))
+      }
+    }
+    return Object.freeze(purged)
+  }
+
   /**
    * Evaluate up to `maxPerRun` due current-version items sequentially and
    * return the decisions settled in this run. Re-entrant calls return `[]`.
@@ -296,14 +375,16 @@ export class InferredIntakeEvaluationQueue {
       const version = this.#policyVersion()
       const now = this.#now()
       const due = [...this.#entries.values()]
-        .filter(entry => entry.state === 'queued' && entry.candidate.policyVersion === version && entry.nextAt <= now)
+        .filter(entry => entry.state === 'queued' && entry.candidate.policyVersion === version && entry.nextAt <= now
+          && this.#ruleEnabled(entry.candidate.ruleId))
         .sort((a, b) => a.nextAt - b.nextAt || a.seq - b.seq)
         .slice(0, this.#maxPerRun)
       const settled: IntakeEvaluationDecision[] = []
       for (const entry of due) {
-        // Re-check after every await: the entry may have been replaced or the Policy moved on.
+        // Re-check after every await: the entry may have been replaced, disabled, or the Policy moved on.
         if (this.#entries.get(keyOf(entry.candidate)) !== entry || entry.state !== 'queued'
-          || entry.candidate.policyVersion !== this.#policyVersion()) continue
+          || entry.candidate.policyVersion !== this.#policyVersion()
+          || !this.#ruleEnabled(entry.candidate.ruleId)) continue
         this.#pruneCalls()
         if (this.#calls.length >= this.#maxCalls) break
         const decision = await this.#evaluate(entry)
@@ -377,12 +458,20 @@ export class InferredIntakeEvaluationQueue {
       ({ level: 'ignore' as const, proposed, quotes: [], reasons: [reason] })
     let level: unknown
     let read: QuoteRead
+    let confidencePpm: number | undefined
+    let utility: number | undefined
     try {
       if (typeof output !== 'object' || output === null) return ignore(null, 'malformed-output')
       // Read each field exactly once so getters/proxies cannot change answers between checks.
       const record = output as Record<string, unknown>
       level = record.level
       if (!isLevel(level)) return ignore(null, 'malformed-output')
+      if (typeof record.confidencePpm === 'number' && Number.isFinite(record.confidencePpm)) {
+        confidencePpm = record.confidencePpm
+      }
+      if (typeof record.utility === 'number' && Number.isFinite(record.utility)) {
+        utility = record.utility
+      }
       read = this.#readQuotes(record.quotes)
     } catch {
       return ignore(null, 'malformed-output')
@@ -391,6 +480,15 @@ export class InferredIntakeEvaluationQueue {
     const quotes = read.quotes
     if (!quotes.every(q => candidate.sourceText.includes(q))) return ignore(level, 'quote-not-in-source')
     if (level !== 'ignore' && quotes.length === 0) return ignore(level, 'quote-missing')
+    const thresholds = this.#ruleThresholds?.(candidate.ruleId)
+    if (thresholds !== undefined) {
+      if (thresholds.confidenceThresholdPpm !== undefined && confidencePpm !== undefined && confidencePpm < thresholds.confidenceThresholdPpm) {
+        return { level: 'ignore', proposed: level, quotes: [], reasons: ['upgrade-clamped'] }
+      }
+      if (thresholds.minUtility !== undefined && utility !== undefined && utility < thresholds.minUtility) {
+        return { level: 'ignore', proposed: level, quotes: [], reasons: ['upgrade-clamped'] }
+      }
+    }
     if (rank(level) > rank(candidate.ceiling)) {
       return { level: candidate.ceiling, proposed: level, quotes, reasons: ['upgrade-clamped'] }
     }
@@ -449,6 +547,11 @@ export class InferredIntakeEvaluationQueue {
     }
   }
 
+  #effectiveMode(ruleId: string): IntakeEvaluationMode {
+    const mode = this.#ruleMode?.(ruleId) ?? this.#mode()
+    return mode === 'auto' ? 'auto' : 'observe'
+  }
+
   #build(
     candidate: InferredIntakeCandidate,
     attempts: number,
@@ -457,7 +560,7 @@ export class InferredIntakeEvaluationQueue {
     proposedLevel: IntakeEvaluationLevel | null,
     quotes: readonly string[],
     reasons: readonly IntakeEvaluationReason[],
-    mode: IntakeEvaluationMode = this.#mode() === 'auto' ? 'auto' : 'observe',
+    mode: IntakeEvaluationMode = this.#effectiveMode(candidate.ruleId),
     decidedAt: number = this.#now(),
   ): IntakeEvaluationDecision {
     return Object.freeze({

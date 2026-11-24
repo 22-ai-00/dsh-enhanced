@@ -220,3 +220,104 @@ export function resolveIntakeEvaluationPresetRules(
   )
   return Object.freeze(sorted)
 }
+
+export interface IntakeRuleOverrideUpdate {
+  readonly ruleId: string
+  readonly enabled?: boolean
+  readonly mode?: 'observe' | 'auto'
+  readonly confidenceThresholdPpm?: number
+  readonly minUtility?: number
+}
+
+const RULE_OVERRIDE_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  'ruleId',
+  'enabled',
+  'mode',
+  'confidenceThresholdPpm',
+  'minUtility',
+])
+
+export function normalizeIntakeRuleUpdates(
+  raw: unknown,
+  maxRules = MAX_INTAKE_EVALUATION_RULES,
+): readonly IntakeRuleOverrideUpdate[] {
+  if (!Array.isArray(raw) || raw.length > maxRules) {
+    throw new Error(`assistant-policy: intakeRuleUpdates must be an array of at most ${maxRules} rules`)
+  }
+  const seen = new Set<string>()
+  const normalized: IntakeRuleOverrideUpdate[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const entry = plainObject(raw[i], `intakeRuleUpdates[${i}]`)
+    for (const key of Object.keys(entry)) {
+      if (!RULE_OVERRIDE_ALLOWED_KEYS.has(key)) {
+        throw new Error(`assistant-policy: intakeRuleUpdates[${i}] contains unknown field ${key}`)
+      }
+    }
+    const ruleId = entry['ruleId']
+    if (!isValidIntakeRuleId(ruleId)) {
+      throw new Error(`assistant-policy: intakeRuleUpdates[${i}].ruleId has an invalid shape`)
+    }
+    if (seen.has(ruleId)) {
+      throw new Error(`assistant-policy: intakeRuleUpdates repeats ruleId ${ruleId}`)
+    }
+    seen.add(ruleId)
+    const enabled = entry['enabled']
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      throw new Error(`assistant-policy: intakeRuleUpdates[${i}].enabled must be a boolean`)
+    }
+    const mode = entry['mode']
+    if (mode !== undefined && mode !== 'observe' && mode !== 'auto') {
+      throw new Error(`assistant-policy: intakeRuleUpdates[${i}].mode must be "observe" or "auto"`)
+    }
+    const confidenceThresholdPpm = entry['confidenceThresholdPpm']
+    if (confidenceThresholdPpm !== undefined && (typeof confidenceThresholdPpm !== 'number'
+      || !Number.isSafeInteger(confidenceThresholdPpm) || confidenceThresholdPpm < 0 || confidenceThresholdPpm > 1_000_000)) {
+      throw new Error(`assistant-policy: intakeRuleUpdates[${i}].confidenceThresholdPpm must be an integer between 0 and 1000000`)
+    }
+    const minUtility = entry['minUtility']
+    if (minUtility !== undefined && (typeof minUtility !== 'number' || !Number.isFinite(minUtility))) {
+      throw new Error(`assistant-policy: intakeRuleUpdates[${i}].minUtility must be a finite number`)
+    }
+    normalized.push(Object.freeze({
+      ruleId,
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(mode === undefined ? {} : { mode }),
+      ...(confidenceThresholdPpm === undefined ? {} : { confidenceThresholdPpm }),
+      ...(minUtility === undefined ? {} : { minUtility }),
+    }))
+  }
+  normalized.sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0))
+  return Object.freeze(normalized)
+}
+
+export function mergeIntakeRuleUpdates(
+  base: readonly IntakeRuleOverrideUpdate[],
+  updates: readonly IntakeRuleOverrideUpdate[],
+  maxRules = MAX_INTAKE_EVALUATION_RULES,
+): readonly IntakeRuleOverrideUpdate[] {
+  const checkedUpdates = normalizeIntakeRuleUpdates(updates, maxRules)
+  const byRule = new Map<string, IntakeRuleOverrideUpdate>()
+  for (const item of normalizeIntakeRuleUpdates(base, maxRules)) {
+    byRule.set(item.ruleId, item)
+  }
+  for (const next of checkedUpdates) {
+    const prior = byRule.get(next.ruleId)
+    byRule.set(next.ruleId, Object.freeze({
+      ruleId: next.ruleId,
+      ...(next.enabled !== undefined ? { enabled: next.enabled } : prior?.enabled !== undefined ? { enabled: prior.enabled } : {}),
+      ...(next.mode !== undefined ? { mode: next.mode } : prior?.mode !== undefined ? { mode: prior.mode } : {}),
+      ...(next.confidenceThresholdPpm !== undefined
+        ? { confidenceThresholdPpm: next.confidenceThresholdPpm }
+        : prior?.confidenceThresholdPpm !== undefined ? { confidenceThresholdPpm: prior.confidenceThresholdPpm } : {}),
+      ...(next.minUtility !== undefined
+        ? { minUtility: next.minUtility }
+        : prior?.minUtility !== undefined ? { minUtility: prior.minUtility } : {}),
+    }))
+  }
+  if (byRule.size > maxRules) {
+    throw new Error(`assistant-policy: merged intake rule overrides exceed maximum of ${maxRules}`)
+  }
+  return Object.freeze(
+    [...byRule.values()].sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0)),
+  )
+}

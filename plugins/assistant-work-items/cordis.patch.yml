@@ -4,8 +4,12 @@
       inject:
         - assistantPolicy
       config:
-        enabled: false
+        enabled: true
         mode: observe
         databasePath: !!js dshHomePath('assistant-work-items/state.sqlite')
         workRoot: !!js dshHomePath('assistant-work-items/work')
         intakeSourceId: work-items/v1
+        intakeLedger:
+          enabled: true
+          evaluation:
+            enabled: true

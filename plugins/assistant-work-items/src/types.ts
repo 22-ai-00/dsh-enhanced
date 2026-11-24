@@ -960,6 +960,21 @@ export interface WorkItemIntakeQueueStatus {
   readonly recent: readonly WorkItemIntakeAdmissionInspection[]
 }
 
+/** WP22/WP21 per-rule live tuning update for intake evaluation and admission. */
+export interface WorkItemIntakeRuleUpdate {
+  readonly ruleId: string
+  readonly enabled?: boolean
+  readonly mode?: 'observe' | 'auto'
+  readonly confidenceThresholdPpm?: number
+  readonly minUtility?: number
+}
+
+/** WP22/WP21 live intake tuning update applied without restarting the service. */
+export interface WorkItemIntakeTuningUpdate {
+  readonly workItemsMode?: 'observe' | 'auto'
+  readonly intakeRuleUpdates?: readonly WorkItemIntakeRuleUpdate[]
+}
+
 export const WORK_ITEM_INTAKE_EVALUATION_FEED_PROTOCOL = 'work-items/intake-evaluation-feed/v1' as const
 
 export interface WorkItemIntakeEvaluationFeedOptions {

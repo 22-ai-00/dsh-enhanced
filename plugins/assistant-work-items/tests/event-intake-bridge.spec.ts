@@ -120,7 +120,7 @@ describe('event-triggers -> assistant-work-items Cordis intake bridge', () => {
     const ctx = new Context()
     contexts.push(ctx)
 
-    // 1. Default-off when intakeLedger is disabled registers no observer.
+    // 1. Explicitly disabled intakeLedger registers no observer (R3 default is enabled).
     let fake!: FakeEventTriggers
     let eventFork = await ctx.plugin({ name: 'fake-event-triggers', apply(child) { fake = new FakeEventTriggers(child) } })
     const disabledWi = await ctx.plugin(AssistantWorkItemsService, {
@@ -128,20 +128,21 @@ describe('event-triggers -> assistant-work-items Cordis intake bridge', () => {
       mode: 'observe',
       databasePath: join(root, 'disabled.sqlite'),
       workRoot: join(root, 'disabled-work'),
+      intakeLedger: { enabled: false },
     } as Config)
     expect(fake.registrations).toBe(0)
     fake.emit(makeObservation('evt-off', 'ignored when ledger disabled'))
     expect(readIntakeRows(join(root, 'disabled.sqlite'))).toEqual([])
     await disabledWi.dispose()
 
-    // 2. Opted-in intakeLedger registers on existing eventTriggers provider.
+    // 2. Default-on intakeLedger registers on existing eventTriggers provider (with evaluation explicitly disabled to test metadata-only mode).
     const dbPath = join(root, 'enabled.sqlite')
     const wiFork = await ctx.plugin(AssistantWorkItemsService, {
       enabled: true,
       mode: 'observe',
       databasePath: dbPath,
       workRoot: join(root, 'enabled-work'),
-      intakeLedger: { enabled: true },
+      intakeLedger: { enabled: true, evaluation: { enabled: false } },
     } as Config)
     expect(fake.registrations).toBe(1)
     expect(fake.observers.size).toBe(1)

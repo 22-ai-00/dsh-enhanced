@@ -18,6 +18,7 @@ export {
 }
 export type { ConfigType as AssistantEvaluationConfig }
 export type {
+  AttentionLooseningConsumerEvent,
   EvaluationHostScope,
   IntakeAttentionAgreementPersistReason,
   IntakeAttentionAgreementPersistResult,
@@ -106,6 +107,7 @@ export {
   normalizeAttentionCohort,
   normalizeAttentionLooseningGrant,
   normalizeAttentionTuningParameters,
+  normalizeIntakeRuleUpdates,
   proposeAttentionTuning,
   replayAttentionLoosening,
   withinAttentionTuningBounds,
@@ -115,6 +117,7 @@ export type {
   AttentionCohortStats,
   AttentionGrantExceeded,
   AttentionHoldoutSeal,
+  AttentionIntakeRuleUpdate,
   AttentionLooseningChange,
   AttentionLooseningDecision,
   AttentionLooseningGrant,

@@ -13,6 +13,7 @@ import { classifyIntake, intakeAcceptanceOf, intakeObjectiveOf } from '../src/in
 import { WorkItemIntakeAdmissionBridge } from '../src/intake-admission.ts'
 import { settleAcceptance } from '../src/acceptance-binding.ts'
 import { AssistantWorkItemsService } from '../src/service.ts'
+import { WorkItemStore } from '../src/store.ts'
 import { claim, harness, PRESET, report, type Harness } from './fixtures.ts'
 
 const roots: string[] = []
@@ -226,7 +227,7 @@ describe('inferred intake carries objective and real acceptance', () => {
       .toThrow(/objectiveDigest/u)
   })
 
-  test('a restart loses the in-memory hint and auto fails closed to observe', async () => {
+  test('a restart preserves the encrypted intake hint so auto still admits seamlessly', async () => {
     const root = await mkdtemp(join(tmpdir(), 'work-items-intake-restart-')); roots.push(root)
     await writeFile(join(root, 'report.md'), 'Verified\n')
     const { service: verifier, prepare } = await verifierSetup(root)
@@ -267,8 +268,16 @@ describe('inferred intake carries objective and real acceptance', () => {
     const secondCtx = new Context(); contexts.push(secondCtx)
     const second = make(secondCtx)
     try {
-      expect(second.runIntakeAdmission()).toMatchObject([{ mode: 'observe', outcome: 'would-admit', itemId: null }])
-      expect(second.intakeAdmissions('lark-channel', 'om-restart')).toMatchObject([{ outcome: 'would-admit', itemId: null }])
+      const records = second.runIntakeAdmission()
+      expect(records).toMatchObject([{ mode: 'auto', outcome: 'admitted', itemId: expect.stringMatching(/^wi-/u) }])
+      expect(second.intakeAdmissions('lark-channel', 'om-restart')).toMatchObject([{ outcome: 'admitted', itemId: records[0]!.itemId }])
+      expect(second.runIntakeAdmission()).toEqual([])
+      const store = new WorkItemStore(join(root, 'items.sqlite'))
+      try {
+        const item = store.findItemById(records[0]!.itemId!)
+        expect(item).toMatchObject({ brief: text, kind: 'review' })
+        expect(item?.authority?.mandate?.acceptance).toMatchObject({ contractId: handle.contractId, contractDigest: handle.contractDigest })
+      } finally { store.close() }
     } finally { second.close() }
   })
 

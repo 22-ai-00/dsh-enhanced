@@ -1280,9 +1280,19 @@ describe('work-item admission authority revalidation', () => {
     } finally { db.close() }
   }
 
-  const autoSettle = (maxPerTick?: number): Partial<Config> => ({ acceptance: { autoSettle: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) } } })
+  const autoSettle = (maxPerTick?: number): Partial<Config> => ({ acceptance: {
+    autoSettle: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) },
+    bindWorkerRun: { enabled: false },
+    verdictGate: { enabled: false },
+    holdReport: { enabled: false },
+  } })
 
-  const verdictGate = (): Partial<Config> => ({ acceptance: { autoSettle: { enabled: true }, verdictGate: { enabled: true } } })
+  const verdictGate = (): Partial<Config> => ({ acceptance: {
+    autoSettle: { enabled: true },
+    bindWorkerRun: { enabled: false },
+    verdictGate: { enabled: true },
+    holdReport: { enabled: false },
+  } })
 
   function blockedEvents(fixture: { root: string }, itemId: string): Array<Record<string, unknown>> {
     const db = new DatabaseSync(join(fixture.root, 'state', 'state.sqlite'), { readOnly: true })
@@ -1292,7 +1302,7 @@ describe('work-item admission authority revalidation', () => {
     } finally { db.close() }
   }
 
-  test('acceptance.verdictGate is off by default: a not-achieved verdict leaves the item ready', async () => {
+  test('acceptance.verdictGate can be explicitly disabled (R3 defaults on in active mode): a not-achieved verdict leaves the item ready', async () => {
     const fixture = await serviceHarness({ extra: autoSettle() })
     const peer = new FakeVerifierPeer(fixture.ctx)
     const { contract, itemId } = await executedBound(fixture, peer, 'gate-off-1', 'occ-1')
@@ -1471,14 +1481,15 @@ describe('work-item admission authority revalidation', () => {
       scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 } } satisfies Config
     expect(normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: true } } }, Date.now()).acceptanceVerdictGate).toBe(true)
     expect(normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: false } } }, Date.now()).acceptanceVerdictGate).toBeUndefined()
-    expect(normalizeConfig({ ...base, acceptance: { verdictGate: {} } }, Date.now()).acceptanceVerdictGate).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: { verdictGate: {} } }, Date.now()).acceptanceVerdictGate).toBe(true)
+    expect(normalizeConfig({ ...base, mode: 'observe', acceptance: { verdictGate: {} } }, Date.now()).acceptanceVerdictGate).toBeUndefined()
     expect(errorCode(() => normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: 'yes' } } } as never, Date.now()))).toBe('invalid-input')
     expect(errorCode(() => normalizeConfig({ ...base, acceptance: { verdictGate: { enabled: true, maxPerTick: 1 } } } as never, Date.now()))).toBe('invalid-input')
     expect(() => normalizeConfig({ ...base, mode: 'observe', acceptance: { verdictGate: { enabled: true } } }, Date.now())).toThrow(/acceptance\.verdictGate requires/u)
   })
 
-  test('acceptance auto-settle is off by default: a scheduler wake reads no verifier and records nothing', async () => {
-    const fixture = await serviceHarness()
+  test('acceptance auto-settle can be explicitly disabled (R3 defaults on in active mode): a scheduler wake reads no verifier and records nothing', async () => {
+    const fixture = await serviceHarness({ extra: { acceptance: { autoSettle: { enabled: false }, bindWorkerRun: { enabled: false }, verdictGate: { enabled: false }, holdReport: { enabled: false } } } })
     const peer = new FakeVerifierPeer(fixture.ctx)
     const { contract, itemId } = await executedBound(fixture, peer, 'auto-off-1', 'occ-1')
     peer.tasks.set(contract.id, { contract, state: 'done', reason: null, receipt: serviceReceipt(contract) })
@@ -1599,7 +1610,8 @@ describe('work-item admission authority revalidation', () => {
       scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 } } satisfies Config
     expect(normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toEqual({ maxPerTick: 5 })
     expect(normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: false, maxPerTick: 3 } } }, Date.now()).acceptanceAutoSettle).toBeUndefined()
-    expect(normalizeConfig({ ...base, acceptance: {} }, Date.now()).acceptanceAutoSettle).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: {} }, Date.now()).acceptanceAutoSettle).toEqual({ maxPerTick: 5 })
+    expect(normalizeConfig({ ...base, mode: 'observe', acceptance: {} }, Date.now()).acceptanceAutoSettle).toBeUndefined()
     for (const maxPerTick of [0, 11, 1.5]) {
       expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true, maxPerTick } } }, Date.now()))).toBe('invalid-input')
     }
@@ -1611,6 +1623,8 @@ describe('work-item admission authority revalidation', () => {
   const bindWorkerRun = (maxPerTick?: number): Partial<Config> => ({ acceptance: {
     autoSettle: { enabled: true },
     bindWorkerRun: { enabled: true, ...(maxPerTick === undefined ? {} : { maxPerTick }) },
+    verdictGate: { enabled: false },
+    holdReport: { enabled: false },
   } })
 
   function plainDecision(decisionId: string) {
@@ -1652,7 +1666,7 @@ describe('work-item admission authority revalidation', () => {
     } finally { db.close() }
   }
 
-  test('acceptance.bindWorkerRun is off by default: a wake reads no worker-run handle and binds nothing', async () => {
+  test('acceptance.bindWorkerRun can be explicitly disabled (R3 defaults on in active mode): a wake reads no worker-run handle and binds nothing', async () => {
     const fixture = await serviceHarness({ extra: autoSettle() })
     const peer = new FakeVerifierPeer(fixture.ctx)
     const { itemId, occurrenceId } = admitPlain(fixture, 'bind-off-1')
@@ -2442,7 +2456,8 @@ describe('work-item admission authority revalidation', () => {
     expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceBindWorkerRun).toEqual({ maxPerTick: 5 })
     expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true, maxPerTick: 2 } } }, Date.now())).toMatchObject({ acceptanceBindWorkerRun: { maxPerTick: 2 } })
     expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: false, maxPerTick: 3 } } }, Date.now()).acceptanceBindWorkerRun).toBeUndefined()
-    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toBeUndefined()
+    expect(normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toEqual({ maxPerTick: 5 })
+    expect(normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: false }, bindWorkerRun: { enabled: true } } }, Date.now()).acceptanceAutoSettle).toBeUndefined()
     for (const maxPerTick of [0, 11, 1.5]) {
       expect(errorCode(() => normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true, maxPerTick } } }, Date.now()))).toBe('invalid-input')
     }
@@ -2602,6 +2617,7 @@ describe('work-item admission authority revalidation', () => {
   const holdReport = (holdTimeoutMs?: number): Partial<Config> => ({ acceptance: {
     autoSettle: { enabled: true },
     bindWorkerRun: { enabled: true },
+    verdictGate: { enabled: false },
     holdReport: { enabled: true, ...(holdTimeoutMs === undefined ? {} : { holdTimeoutMs }) },
   } })
 
@@ -2609,7 +2625,7 @@ describe('work-item admission authority revalidation', () => {
     return readStore(fixture).reports(itemId).at(-1)?.deliveryState ?? null
   }
 
-  test('acceptance.holdReport is off by default: a bound ready report is sent immediately', async () => {
+  test('acceptance.holdReport can be explicitly disabled (R3 defaults on in non-diagnosis active mode): a bound ready report is sent immediately', async () => {
     const fixture = await serviceHarness({ extra: autoSettle() })
     const peer = new FakeVerifierPeer(fixture.ctx)
     const { itemId } = await executedBound(fixture, peer, 'hold-off-1', 'occ-1')
@@ -2831,7 +2847,7 @@ describe('work-item admission authority revalidation', () => {
     const { first, child, continuationSettings } = await persistedReplyReport(required)
     first.service.close()
 
-    const second = await serviceHarness({ root: first.root, extra: continuationSettings })
+    const second = await serviceHarness({ root: first.root, extra: { ...continuationSettings, acceptance: { holdReport: { enabled: false } } } })
     expect(second.config.acceptanceHoldReport).toBeUndefined()
     second.automations?.wake()
     if (!required) {
@@ -3151,9 +3167,9 @@ describe('work-item admission authority revalidation', () => {
       .toEqual({ holdTimeoutMs: 1_800_000 })
     expect(normalizeConfig({ ...base, acceptance: { ...opens, holdReport: { enabled: false, holdTimeoutMs: 60_000 } } }, Date.now())
       .acceptanceHoldReport).toBeUndefined()
-    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true }, holdReport: { enabled: true } } } as never, Date.now())))
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: true }, bindWorkerRun: { enabled: false }, holdReport: { enabled: true } } } as never, Date.now())))
       .toBe('invalid-input')
-    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { bindWorkerRun: { enabled: true }, holdReport: { enabled: true } } } as never, Date.now())))
+    expect(errorCode(() => normalizeConfig({ ...base, acceptance: { autoSettle: { enabled: false }, bindWorkerRun: { enabled: true }, holdReport: { enabled: true } } } as never, Date.now())))
       .toBe('invalid-input')
     expect(errorCode(() => normalizeConfig({ ...base, acceptance: { ...opens, holdReport: { enabled: true, maxPerTick: 1 } } } as never, Date.now())))
       .toBe('invalid-input')
@@ -3192,6 +3208,7 @@ describe('work-item store projection', () => {
     // Downgrade the claim table to the previous on-disk shape, then reopen.
     const raw = new DatabaseSync(fixture.config.databasePath)
     raw.exec(`
+      DROP TABLE work_item_intake_staging; DROP TABLE work_item_intake_eval_queue;
       DROP TABLE work_item_intake_admission; DROP TABLE work_item_intake_evaluation; DROP TABLE work_item_intake;
       DROP TABLE work_item_continuation;
       ALTER TABLE work_item_claim RENAME TO work_item_claim_v2;
@@ -3230,7 +3247,7 @@ describe('work-item store projection', () => {
     closers.push(() => reopened.close())
     expect(reopened.findClaimByRun('run-1')).toMatchObject({ claimId: 1, itemId: admitted.item.id, state: 'active' })
     expect(reopened.findItemById(admitted.item.id)).toMatchObject({ state: 'claimed', owner: { generation: 2 } })
-    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 13, outcomes: 0, pendingOutcomes: 0 })
+    expect(reopened.stats()).toMatchObject({ items: 1, schemaVersion: 14, outcomes: 0, pendingOutcomes: 0 })
   })
 })
 
@@ -3286,7 +3303,7 @@ describe('work-item service identity and tools', () => {
   })
 
   test('claim and report end to end through the frozen automation identity', async () => {
-    const fixture = await serviceHarness()
+    const fixture = await serviceHarness({ extra: { acceptance: { holdReport: { enabled: false } } } })
     fixture.service.admit(signal())
     expect(fixture.automations?.calls).toHaveLength(1)
     const claim = fixture.service.claim(workerAgent('occ-1'))
@@ -3366,8 +3383,8 @@ describe('work-item service identity and tools', () => {
     }))).toBeUndefined()
   })
 
-  test('registers the four model tools and executes claim and report', async () => {
-    const fixture = await serviceHarness()
+  test('registers the four model tools (plus two owner recall tools under R3 default) and executes claim and report', async () => {
+    const fixture = await serviceHarness({ extra: { ownerRecall: { enabled: false }, acceptance: { holdReport: { enabled: false } } } })
     fixture.service.admit(signal())
     const tools = fixture.tools.registered
     expect(tools.map(tool => tool.name)).toEqual(['work_item_claim', 'work_item_report', 'work_item_status', 'work_item_read_report'])
@@ -3981,6 +3998,7 @@ describe('durable work-item tool preauthorization', () => {
       const serviceFiber = await ctx.plugin(AssistantWorkItemsService, {
         enabled: true, mode: 'active', databasePath: join(root, 'items.sqlite'), workRoot: join(root, 'work'), workerAutomationId: WORKER,
         scope: { workspace: WORKSPACE, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: ROUTE, expiresAt: Date.now() + 3_600_000 },
+        ownerRecall: { enabled: false },
         admission: { allowedKinds: ['review'] },
       })
       const old = ctx.get('assistantPolicy' as never) as unknown as PreauthorizationPolicyPeer

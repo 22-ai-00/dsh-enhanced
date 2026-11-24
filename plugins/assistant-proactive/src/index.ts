@@ -8,17 +8,24 @@ import Schema from '@deepseek-ai/schemastery'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { OpportunityEngine, validateProfile } from './engine.js'
+import {
+  ACTIVE_IDLE_THRESHOLD_MS, computeDynamicUtility, IDLE_DISCOUNT_FULL_MS, IDLE_DISCOUNT_START_MS,
+  MAX_ACCEPTANCE_BONUS, MAX_ACCEPTANCE_PENALTY, MAX_ACTIVITY_PENALTY, MAX_FREQUENCY_PENALTY,
+  MAX_IDLE_DISCOUNT, MAX_URGENCY_BONUS, OpportunityEngine, PENALTY_PER_RECENT_NOTIFICATION,
+  RECENT_NOTIFICATION_WINDOW_MS, URGENCY_WINDOW_MS, validateProfile, validateRuntimeContext,
+} from './engine.js'
 import type {
   OpportunityDecision, OpportunityInput, OpportunityProfile, OpportunityScope,
   ProactiveAttentionQuestionFilter, ProactiveAttentionQuestionInspection, ProactiveAttentionQuestionResolveResult,
   ProactiveDraftFilter, ProactiveDraftInspection, ProactiveOpportunityFilter, ProactiveOpportunityInspection,
+  ProactiveRuntimeContext,
 } from './types.js'
 import { reminderText, reminderExpiresAt } from './reminder.js'
 import { attentionOverlay, proactiveAttentionCohort, tuneProfile, type AttentionOverlay } from './attention-tuning.js'
 import {
-  DISABLED_INTAKE_EVALUATION_HEALTH, IntakeEvaluationProducer, normalizeIntakeEvaluation,
+  IntakeEvaluationProducer, resolveServiceIntakeEvaluation,
   type IntakeEvaluationConfig, type IntakeWorkItemsRegistration, type ProactiveIntakeEvaluationHealth,
+  type ProactiveIntakeRuleOverride, type ProactiveIntakeRuleUpdate,
 } from './intake-evaluation.js'
 import {
   parseTerminalGoalChanged,
@@ -44,20 +51,57 @@ import { version } from './version.js'
 const MAX_GOAL_UNSUBSCRIBE_HOOKS = 64
 const MAX_REMEMBERED_GOAL_UNSUBSCRIBES = 4_096
 const MAX_PENDING_GOAL_CHANGE_SIGNALS = 256
+const MAX_TRACKED_ACTIVITY_SCOPES = 1_024
+const ACCEPTANCE_SUMMARY_WINDOW_MS = 30 * 24 * 3_600_000
+
+/**
+ * Bounded R3 default opportunity profile. Uses `mode: 'execute'` without
+ * `preparation` so `assertProfile` and doctor checks succeed cleanly even
+ * before `assistantDelivery` or preparation credentials are configured;
+ * actual wake execution remains gated by Goals' owner/policy/budget/verifier checks.
+ */
+export const DEFAULT_PROACTIVE_PROFILES: readonly OpportunityProfile[] = Object.freeze([
+  validateProfile({
+    id: 'default',
+    mode: 'execute',
+    expectedBenefit: 80,
+    successPpm: 850_000,
+    executionCost: 10,
+    interruptionCost: 10,
+    possibleLoss: 5,
+    minimumUtility: 10,
+    mergeWindowMs: 5_000,
+    cooldownMs: 60_000,
+    rejectionCooldownMs: 3_600_000,
+    maxDecisionsPerGoal: 20,
+    maxExecutionsPerGoal: 3,
+    maxRemindersPerGoal: 0,
+  }),
+])
 
 export const name = 'dsh-enhanced-assistant-proactive'
-export { version, OpportunityEngine, validateProfile, attentionOverlay, tuneProfile, proactiveAttentionCohort }
+export {
+  version, OpportunityEngine, validateProfile, validateRuntimeContext, computeDynamicUtility,
+  attentionOverlay, tuneProfile, proactiveAttentionCohort,
+  RECENT_NOTIFICATION_WINDOW_MS, URGENCY_WINDOW_MS, ACTIVE_IDLE_THRESHOLD_MS,
+  IDLE_DISCOUNT_START_MS, IDLE_DISCOUNT_FULL_MS, MAX_ACTIVITY_PENALTY, MAX_IDLE_DISCOUNT,
+  PENALTY_PER_RECENT_NOTIFICATION, MAX_FREQUENCY_PENALTY, MAX_URGENCY_BONUS,
+  MAX_ACCEPTANCE_BONUS, MAX_ACCEPTANCE_PENALTY,
+}
 export {
   DISABLED_INTAKE_EVALUATION_HEALTH, INTAKE_EVALUATION_LEVELS, INTAKE_EVALUATION_PRESETS,
   IntakeEvaluationError, IntakeEvaluationProducer, intakeEvaluationPolicy, MAX_INTAKE_EVALUATION_QUOTES,
   MAX_INTAKE_EVALUATION_RULES, MAX_INTAKE_EVALUATION_QUOTE_CHARS, MAX_INTAKE_SOURCE_TEXT,
-  normalizeIntakeEvaluation, resolveIntakeEvaluationPresetRules,
+  normalizeIntakeEvaluation, resolveIntakeEvaluationPresetRules, resolveServiceIntakeEvaluation,
+  UNCONFIGURED_INTAKE_EVALUATION_HEALTH, UNCONFIGURED_INTAKE_EVALUATION_LAST_ERROR,
+  unconfiguredIntakeEvaluationHealth,
 } from './intake-evaluation.js'
 export type {
   IntakeEvaluationConfig, IntakeEvaluationErrorCode, IntakeEvaluationLevel, IntakeEvaluationPolicy,
   IntakeEvaluationPreset, IntakeEvaluationRule, IntakeEvaluationRuleConfig, IntakeEvaluationVerdict,
   IntakeModelRequest, IntakeWorkItemsRegistration, NormalizedIntakeEvaluation,
   ProactiveIntakeEvaluationHealth, ProactiveIntakeEvaluationReadiness,
+  ProactiveIntakeRuleOverride, ProactiveIntakeRuleUpdate,
 } from './intake-evaluation.js'
 export type { AttentionOverlay }
 export * from './goal-lifecycle.js'
@@ -98,11 +142,11 @@ export interface Config {
 const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max).required()
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-proactive.sqlite')),
-  // WP20 stage 3 producer: off by default. Enabling it names the frozen
-  // provider/model and the Host rules; assistant-work-items must also enable
-  // its own intakeLedger.evaluation for the registration to be accepted.
+  // WP20 stage 3 / R3 producer: enabled by default. Without a configured
+  // provider/model it remains cleanly unavailable without failing startup;
+  // assistant-work-items must also enable its own intakeLedger.evaluation.
   intakeEvaluation: Schema.object({
-    enabled: Schema.boolean().default(false),
+    enabled: Schema.boolean().default(true),
     preset: Schema.union(['conservative', 'balanced']),
     rules: Schema.array(Schema.object({
       ruleId: Schema.string().required(),
@@ -122,7 +166,7 @@ export const Config: Schema<Config> = Schema.object({
     mergeWindowMs: integer(), cooldownMs: integer(), rejectionCooldownMs: integer(),
     quietHours: Schema.union([Schema.object({ timezone: Schema.string().required(), startMinute: integer(1439), endMinute: integer(1439) })]),
     maxDecisionsPerGoal: integer(), maxExecutionsPerGoal: integer(), maxRemindersPerGoal: integer(),
-  })).default([]),
+  })).default(DEFAULT_PROACTIVE_PROFILES.map(profile => ({ ...profile }))),
 })
 declare module '@deepseek-ai/cordis' { interface Context { assistantProactive: AssistantProactiveService } }
 
@@ -132,8 +176,9 @@ export class AssistantProactiveService extends Service {
   readonly #preparations: PreparationRuntime
   readonly #engine: OpportunityEngine
   readonly #profiles = new Map<string, OpportunityProfile>()
-  /** Present only when intakeEvaluation is explicitly enabled; otherwise the plugin is byte-identical to before. */
   readonly #intakeEvaluation: IntakeEvaluationProducer | undefined
+  readonly #intakeEvaluationHealth: ProactiveIntakeEvaluationHealth
+  readonly #lastOwnerActivityByScope = new Map<string, number>()
   readonly #goalUnsubscribeHooks = new Set<ProactiveGoalUnsubscribeHook>()
   readonly #emittedGoalUnsubscribes = new Set<string>()
   readonly #pendingGoalChanges = new Map<string, TerminalGoalChangeSignal>()
@@ -141,10 +186,11 @@ export class AssistantProactiveService extends Service {
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantProactive')
-    const intakeEvaluation = normalizeIntakeEvaluation(config.intakeEvaluation)
-    const producer = intakeEvaluation === undefined ? undefined : new IntakeEvaluationProducer({ config: intakeEvaluation })
+    const resolvedIntake = resolveServiceIntakeEvaluation(config.intakeEvaluation)
+    const producer = resolvedIntake.config === undefined ? undefined : new IntakeEvaluationProducer({ config: resolvedIntake.config })
     this.#intakeEvaluation = producer
-    for (const input of config.profiles ?? []) {
+    this.#intakeEvaluationHealth = resolvedIntake.health
+    for (const input of config.profiles ?? DEFAULT_PROACTIVE_PROFILES) {
       const profile = validateProfile(input)
       if (this.#profiles.has(profile.id)) throw new Error('assistant-proactive: duplicate profile')
       this.#profiles.set(profile.id, profile)
@@ -217,9 +263,74 @@ export class AssistantProactiveService extends Service {
       producer.markRegistered(true)
       runtime.effect(() => () => { producer.markRegistered(false); unregister() }, 'assistant-proactive.intake-evaluation')
     })
+    ctx.inject(['assistantEvaluation'] as never, evalCtx => {
+      if (!this.#active) return
+      const evaluation = evalCtx.get('assistantEvaluation' as never) as unknown as {
+        onAttentionTuningChanged?: (cb: (event: Record<string, unknown>) => void) => () => void
+        onAttentionLooseningAdopted?: (cb: (event: Record<string, unknown>) => void) => () => void
+      } | undefined
+      const applyEvent = (event: unknown): void => {
+        if (!this.#active || event === null || typeof event !== 'object') return
+        const payload = event as Record<string, unknown>
+        const action = payload['action']
+        const rawParams = payload['parameters']
+        const params = rawParams !== null && typeof rawParams === 'object' && !Array.isArray(rawParams)
+          ? rawParams as Record<string, unknown>
+          : undefined
+        const rawCohort = payload['cohort']
+        const cohortLane = rawCohort !== null && typeof rawCohort === 'object' && !Array.isArray(rawCohort)
+          ? (rawCohort as Record<string, unknown>)['lane']
+          : undefined
+        if (rawCohort !== undefined && cohortLane !== 'intake') return
+        if ((action === 'loosening-adopted' || action === 'rolled-back' || action === 'tightened')
+          && cohortLane === 'intake'
+          && params !== undefined && payload['scope'] !== undefined && rawCohort !== undefined
+          && typeof payload['version'] === 'number') {
+          const targetRules = Array.isArray(params['intakeRuleUpdates'])
+            ? params['intakeRuleUpdates'] as readonly unknown[]
+            : []
+          try {
+            producer.reconcileIntakeRuleUpdates(targetRules)
+          } catch (error) {
+            evalCtx.logger.warn(`assistant-proactive: failed to reconcile intakeRuleUpdates from evaluation: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          return
+        }
+        const updates = payload['intakeRuleUpdates']
+        if (!Array.isArray(updates) || updates.length === 0) return
+        try {
+          producer.applyIntakeRuleUpdates(updates)
+        } catch (error) {
+          evalCtx.logger.warn(`assistant-proactive: failed to apply intakeRuleUpdates from evaluation: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      let unsubscribe: (() => void) | undefined
+      if (typeof evaluation?.onAttentionTuningChanged === 'function') {
+        unsubscribe = evaluation.onAttentionTuningChanged(applyEvent)
+      } else if (typeof evaluation?.onAttentionLooseningAdopted === 'function') {
+        unsubscribe = evaluation.onAttentionLooseningAdopted(applyEvent)
+      }
+      if (unsubscribe !== undefined) {
+        evalCtx.effect(() => unsubscribe, 'assistant-proactive.evaluation-tuning')
+      }
+    })
   }
   /** Host-only read-only readiness/health for operators and doctor; grants nothing. */
-  intakeEvaluationHealth = (): ProactiveIntakeEvaluationHealth => this.#intakeEvaluation?.health() ?? DISABLED_INTAKE_EVALUATION_HEALTH
+  intakeEvaluationHealth = (): ProactiveIntakeEvaluationHealth => this.#intakeEvaluation?.health() ?? this.#intakeEvaluationHealth
+  /** Host-only live rule overrides (`enabled`, `mode`, thresholds) without bumping `policy().version`. */
+  applyIntakeRuleUpdates = (updates: readonly ProactiveIntakeRuleUpdate[]): readonly ProactiveIntakeRuleOverride[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return this.#intakeEvaluation?.applyIntakeRuleUpdates(updates) ?? Object.freeze([])
+  }
+  /** Host-only authoritative rule override reconciliation without bumping `policy().version`. */
+  reconcileIntakeRuleUpdates = (updates: readonly ProactiveIntakeRuleUpdate[]): readonly ProactiveIntakeRuleOverride[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return this.#intakeEvaluation?.reconcileIntakeRuleUpdates(updates) ?? Object.freeze([])
+  }
+  intakeRuleOverrides = (): readonly ProactiveIntakeRuleOverride[] => {
+    if (!this.#active) throw new Error('assistant-proactive: disposed')
+    return this.#intakeEvaluation?.intakeRuleOverrides() ?? Object.freeze([])
+  }
   assertProfile = (profileId: string): void => {
     if (!this.#active || !this.#profiles.has(profileId)) throw new Error('assistant-proactive: configured active opportunity profile required')
     if (this.#profiles.get(profileId)!.preparation && !this.#preparations.available()) throw new Error('assistant-proactive: preparation services unavailable')
@@ -246,10 +357,11 @@ export class AssistantProactiveService extends Service {
       return true
     } catch { return false }
   }
-  evaluate = (input: OpportunityInput) => {
+  evaluate = (input: OpportunityInput, runtimeContext?: ProactiveRuntimeContext) => {
     this.assertProfile(input.profileId)
+    const resolvedContext = this.#resolveRuntimeContext(input, runtimeContext)
     const overlay = this.#configuredProfileMode(input.profileId) === 'remind' ? this.#attentionOverlay(input.scope) : undefined
-    const evaluation = this.#engine.evaluate(input, overlay)
+    const evaluation = this.#engine.evaluate(input, overlay, resolvedContext)
     const decision = evaluation.decision
     if (evaluation.disposition === 'consume' && decision.mode === 'remind' && decision.state === 'decided') {
       const delivery = this.#notificationPort()
@@ -271,6 +383,153 @@ export class AssistantProactiveService extends Service {
       }
     }
     return evaluation
+  }
+  #recordOwnerActivity(workspace: string, preset: string, at = Date.now()): void {
+    if (!Number.isSafeInteger(at) || at < 0) return
+    const key = `${workspace}\0${preset}`
+    if (!this.#lastOwnerActivityByScope.has(key) && this.#lastOwnerActivityByScope.size >= MAX_TRACKED_ACTIVITY_SCOPES) {
+      const oldest = this.#lastOwnerActivityByScope.keys().next().value
+      if (oldest !== undefined) this.#lastOwnerActivityByScope.delete(oldest)
+    }
+    const previous = this.#lastOwnerActivityByScope.get(key)
+    if (previous === undefined || at > previous) this.#lastOwnerActivityByScope.set(key, at)
+  }
+  #resolveRuntimeContext(input: OpportunityInput, explicit?: ProactiveRuntimeContext): ProactiveRuntimeContext | undefined {
+    const checked = validateRuntimeContext(explicit)
+    const now = Date.now()
+    const scopeKeyParts = { workspace: input.scope.workspace, preset: input.scope.preset }
+
+    let userActive = checked?.userActive
+    let latestActivityAt: number | undefined
+    const noteActivity = (candidate: unknown) => {
+      if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0 && candidate <= now) {
+        if (latestActivityAt === undefined || candidate > latestActivityAt) latestActivityAt = candidate
+      }
+    }
+
+    if (userActive === undefined || checked?.idleDurationMs === undefined) {
+      noteActivity(this.#lastOwnerActivityByScope.get(`${scopeKeyParts.workspace}\0${scopeKeyParts.preset}`))
+      try {
+        const agents = this.ctx.get('agents') as unknown as {
+          currentInitiator?: () => unknown
+          get?: (id: string) => unknown
+          list?: () => unknown[]
+          turnBoundaryOf?: (session: unknown) => { openTurnStartSeq?: unknown }
+        } | undefined
+        if (agents) {
+          const candidates: unknown[] = []
+          try { const initiator = agents.currentInitiator?.(); if (initiator) candidates.push(initiator) } catch {}
+          try { const bySession = agents.get?.(input.sessionId); if (bySession) candidates.push(bySession) } catch {}
+          try { const listed = agents.list?.(); if (Array.isArray(listed)) candidates.push(...listed) } catch {}
+          for (const candidate of candidates) {
+            if (!candidate || typeof candidate !== 'object') continue
+            const agentObj = candidate as {
+              id?: unknown
+              status?: unknown
+              lastActivityAt?: unknown
+              session?: { header?: { cwd?: unknown; agentPreset?: unknown } }
+            }
+            const cwd = agentObj.session?.header?.cwd
+            const preset = agentObj.session?.header?.agentPreset
+            const matchesScope = (cwd === undefined || cwd === scopeKeyParts.workspace)
+              && (preset === undefined || preset === scopeKeyParts.preset)
+              && (cwd !== undefined || preset !== undefined || agentObj.id === input.sessionId)
+            if (!matchesScope) continue
+            noteActivity(agentObj.lastActivityAt)
+            if (userActive === undefined) {
+              if (typeof agentObj.status === 'string' && agentObj.status.length > 0
+                && !['idle', 'stopped', 'disposed', 'closed'].includes(agentObj.status)) {
+                userActive = true
+              } else if (agentObj.session && typeof agents.turnBoundaryOf === 'function') {
+                try {
+                  const boundary = agents.turnBoundaryOf(agentObj.session)
+                  if (typeof boundary?.openTurnStartSeq === 'number' && Number.isSafeInteger(boundary.openTurnStartSeq) && boundary.openTurnStartSeq >= 0) {
+                    userActive = true
+                  }
+                } catch {}
+              }
+            }
+          }
+        }
+      } catch {
+        // Optional agents telemetry failure must never block evaluation.
+      }
+    }
+
+    let recentNotificationCount = checked?.recentNotificationCount
+    let acceptanceRatePpm = checked?.acceptanceRatePpm
+    let acceptanceSamples = checked?.acceptanceSamples
+    try {
+      const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as {
+        listTrustedTaskLearningProjections?: (query: unknown) => { items?: readonly { receipt?: { objective?: { occurredAt?: unknown } } }[] }
+        notificationOutcomeSummary?: (query: unknown) => { total?: unknown; outcomes?: Record<string, unknown> }
+      } | undefined
+      if (evaluation) {
+        if (checked?.idleDurationMs === undefined && userActive !== true && typeof evaluation.listTrustedTaskLearningProjections === 'function') {
+          try {
+            const feed = evaluation.listTrustedTaskLearningProjections({ scope: scopeKeyParts, limit: 1 })
+            noteActivity(feed?.items?.[0]?.receipt?.objective?.occurredAt)
+          } catch {}
+        }
+        if (recentNotificationCount === undefined && typeof evaluation.notificationOutcomeSummary === 'function') {
+          try {
+            const recent = evaluation.notificationOutcomeSummary({
+              scope: scopeKeyParts,
+              fromNotifiedAt: Math.max(0, now - RECENT_NOTIFICATION_WINDOW_MS),
+              toNotifiedAt: now + 1,
+            })
+            if (typeof recent?.total === 'number' && Number.isSafeInteger(recent.total) && recent.total >= 0) {
+              recentNotificationCount = recent.total
+            }
+          } catch {}
+        }
+        if (acceptanceRatePpm === undefined && typeof evaluation.notificationOutcomeSummary === 'function') {
+          try {
+            const history = evaluation.notificationOutcomeSummary({
+              scope: scopeKeyParts,
+              fromNotifiedAt: Math.max(0, now - ACCEPTANCE_SUMMARY_WINDOW_MS),
+              toNotifiedAt: now + 1,
+            })
+            const accepted = history?.outcomes?.['accepted']
+            const rejected = history?.outcomes?.['rejected']
+            if (typeof accepted === 'number' && Number.isSafeInteger(accepted) && accepted >= 0
+              && typeof rejected === 'number' && Number.isSafeInteger(rejected) && rejected >= 0) {
+              const total = accepted + rejected
+              if (total > 0) {
+                acceptanceSamples = Math.min(1_000_000, total)
+                acceptanceRatePpm = Math.floor((accepted * 1_000_000) / total)
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      // Optional Evaluation telemetry failure must never block evaluation.
+    }
+
+    const idleDurationMs = checked?.idleDurationMs !== undefined
+      ? checked.idleDurationMs
+      : userActive !== true && latestActivityAt !== undefined
+        ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, now - latestActivityAt))
+        : undefined
+    const urgencyPpm = checked?.urgencyPpm
+
+    if (userActive === undefined
+      && idleDurationMs === undefined
+      && recentNotificationCount === undefined
+      && urgencyPpm === undefined
+      && acceptanceRatePpm === undefined
+      && acceptanceSamples === undefined) {
+      return undefined
+    }
+    return {
+      ...(userActive === undefined ? {} : { userActive }),
+      ...(idleDurationMs === undefined ? {} : { idleDurationMs }),
+      ...(recentNotificationCount === undefined ? {} : { recentNotificationCount }),
+      ...(urgencyPpm === undefined ? {} : { urgencyPpm }),
+      ...(acceptanceRatePpm === undefined ? {} : { acceptanceRatePpm }),
+      ...(acceptanceSamples === undefined ? {} : { acceptanceSamples }),
+    }
   }
   #configuredProfileMode(profileId: string): OpportunityProfile['mode'] | undefined { return this.#profiles.get(profileId)?.mode }
   /**
@@ -612,7 +871,9 @@ export class AssistantProactiveService extends Service {
     return [...unique.values()]
   }
   inspect = (agent: Agent | undefined, goalId?: string) => {
-    return this.#engine.list(this.#scope(agent, false), goalId).map(this.#formatOpportunity)
+    const scope = this.#scope(agent, false)
+    this.#recordOwnerActivity(scope.workspace, scope.preset)
+    return this.#engine.list(scope, goalId).map(this.#formatOpportunity)
   }
   /** Host-only read-only draft inspection for owner operator surfaces (zero execution authority). */
   inspectDrafts = (filter: ProactiveDraftFilter = {}): readonly ProactiveDraftInspection[] => {
@@ -702,10 +963,12 @@ export class AssistantProactiveService extends Service {
       }
     }
     if (existing.state === 'closed' && existing.feedback === mappedDecision) {
+      this.#recordOwnerActivity(existing.scope.workspace, existing.scope.preset)
       if (mappedDecision === 'rejected') this.#preparations.store.cancel(existing.id)
       return existing
     }
     const resolved = this.#engine.feedback(existing.id, existing.scope, mappedDecision)
+    this.#recordOwnerActivity(existing.scope.workspace, existing.scope.preset)
     if (mappedDecision === 'rejected') this.#preparations.store.cancel(existing.id)
     return resolved
   }
@@ -805,6 +1068,7 @@ export class AssistantProactiveService extends Service {
     if (!evaluation || typeof evaluation.applyAttentionOwnerQuestionReply !== 'function') {
       return Object.freeze({ status: 'rejected', reason: 'evaluation-unavailable' })
     }
+    this.#recordOwnerActivity(scope.workspace, scope.preset)
     return Object.freeze(evaluation.applyAttentionOwnerQuestionReply({
       scope: { workspace: scope.workspace, preset: scope.preset },
       cohort: { ...proactiveAttentionCohort },
@@ -813,7 +1077,13 @@ export class AssistantProactiveService extends Service {
     }))
   }
   reconcilePreparations = (): Promise<void> => this.#preparations.tick()
-  feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => { const decision = this.#engine.feedback(id, this.#scope(agent, true), feedback); if (feedback === 'rejected') this.#preparations.store.cancel(id); return decision }
+  feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => {
+    const scope = this.#scope(agent, true)
+    const decision = this.#engine.feedback(id, scope, feedback)
+    this.#recordOwnerActivity(scope.workspace, scope.preset)
+    if (feedback === 'rejected') this.#preparations.store.cancel(id)
+    return decision
+  }
 }
 export function apply(ctx: Context, config: Config = {}): void { new AssistantProactiveService(ctx, config) }
 export default { name, Config, apply }
