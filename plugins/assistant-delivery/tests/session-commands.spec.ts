@@ -82,6 +82,8 @@ describe('Owner version and self-iteration-count query parser', () => {
     ['版本信息。', 'natural-language'],
     ['当前版本!', 'natural-language'],
     ['助手版本！', 'natural-language'],
+    ['现在是什么版本？', 'natural-language'],
+    ['当前是什么版本', 'natural-language'],
     ['查看自迭代次数', 'natural-language'],
     ['自迭代次数', 'natural-language'],
     ['自己迭代了多少次？', 'natural-language'],

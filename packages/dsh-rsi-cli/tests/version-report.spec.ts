@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -732,5 +732,108 @@ describe('collectVersionReport & formatVersionReport', () => {
         enabled: true,
       },
     ])
+  })
+
+  test('拒绝硬链接越界账本与附属文件、支持 --profile 控制面查询与 prepared-revise，且严格截断超长诊断与超量插件', async () => {
+    const root = await createTempDir()
+    const dshHome = join(root, 'dsh-home')
+    const outsideDir = join(root, 'outside')
+    await mkdir(join(dshHome, 'assistant-work-items'), { recursive: true })
+    await mkdir(join(dshHome, 'assistant-dreaming'), { recursive: true })
+    await mkdir(join(dshHome, 'plugin-control-plane'), { recursive: true })
+    await mkdir(outsideDir, { recursive: true })
+
+    // Hardlink escape .sqlite -> nlink === 2 must be rejected
+    const outsideDb = join(outsideDir, 'hardlinked.sqlite')
+    execSqlite(outsideDb, `CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT); INSERT INTO work_item VALUES ('hl-1', 'settled');`)
+    await link(outsideDb, join(dshHome, 'assistant-work-items', 'state.sqlite'))
+
+    // Hardlink escape -wal sidecar -> nlink === 2 must be rejected
+    const dreamDb = join(dshHome, 'assistant-dreaming', 'state.sqlite')
+    execSqlite(dreamDb, `CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT); INSERT INTO dream_runs VALUES ('d-hl', 'completed');`)
+    const outsideWal = join(outsideDir, 'evil.wal')
+    await writeFile(outsideWal, '', 'utf8')
+    await link(outsideWal, `${dreamDb}-wal`)
+
+    // Control-plane with minimal activation_plans & prepared-revise (profile does not list plugin-control-plane)
+    execSqlite(
+      join(dshHome, 'plugin-control-plane', 'control.sqlite'),
+      `CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT NOT NULL, mode TEXT, status TEXT NOT NULL);
+       CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT NOT NULL, status TEXT NOT NULL);
+       INSERT INTO source_plans VALUES
+         ('sp-c1', '@dsh-enhanced/evolved-alpha', 'create', 'release-complete'),
+         ('sp-r1', '@dsh-enhanced/assistant-work-items', 'prepared-revise', 'release-complete');
+       INSERT INTO activation_plans VALUES ('ap-1', 'web', 'activated');`,
+    )
+
+    // >256 plugins + oversized name (>200) + oversized diagnostics (>128)
+    const manyPlugins: Array<{ slug: string; version: string }> = [
+      { slug: `oversized-${'p'.repeat(210)}`, version: `1.0.0-${'v'.repeat(150)}` },
+    ]
+    for (let i = 0; i < 260; i += 1) {
+      manyPlugins.push({ slug: `core-plug-${String(i).padStart(3, '0')}`, version: '0.1.83' })
+    }
+    await createProfileSkeleton(
+      dshHome,
+      'web',
+      manyPlugins,
+      `- id: dsh-enhanced-assistant-work-items
+  name: "@dsh-enhanced/assistant-work-items"
+  config:
+    enabled: true
+`,
+    )
+    // >128 diagnostics & >1024-char diagnostic path using valid nested subdirs (<255B per segment)
+    const nestedSegments = Array.from({ length: 12 }, (_, idx) => `seg-${String(idx).padStart(2, '0')}-${'x'.repeat(90)}`)
+    const longDiagDir = join(dshHome, 'assistant-recovery', ...nestedSegments)
+    await mkdir(longDiagDir, { recursive: true })
+    const longDiagDb = join(longDiagDir, 'corrupt.sqlite')
+    await writeFile(longDiagDb, 'corrupt-bytes', 'utf8')
+    await writeFile(join(dshHome, 'assistant-recovery', 'state.sqlite'), 'corrupt-bytes', 'utf8')
+    await writeFile(join(dshHome, 'assistant-recovery', 'recovery.sqlite'), 'corrupt-bytes', 'utf8')
+    await writeFile(join(dshHome, 'assistant-recovery', 'web.sqlite'), 'corrupt-bytes', 'utf8')
+    const escapeEntries = Array.from({ length: 124 }, (_, idx) =>
+      `- id: dsh-enhanced-assistant-skills-${idx}\n  name: "@dsh-enhanced/assistant-skills"\n  config:\n    databasePath: !js dshHomePath('..', 'outside-${idx}', 'db.sqlite')`,
+    ).join('\n')
+    await createProfileSkeleton(
+      dshHome,
+      'web',
+      manyPlugins,
+      `- id: dsh-enhanced-assistant-work-items
+  name: "@dsh-enhanced/assistant-work-items"
+  config:
+    databasePath: !js dshHomePath('assistant-work-items', 'state.sqlite')
+- id: dsh-enhanced-assistant-recovery
+  name: "@dsh-enhanced/assistant-recovery"
+  config:
+    databasePath: !js dshHomePath('assistant-recovery', ${[...nestedSegments, 'corrupt.sqlite'].map(s => `'${s}'`).join(', ')})
+${escapeEntries}
+`,
+    )
+
+    const beforeWiStat = await stat(join(dshHome, 'assistant-work-items', 'state.sqlite'))
+    expect(beforeWiStat.nlink).toBe(2)
+
+    const report = await collectVersionReport({
+      dshHome,
+      profile: 'web',
+      now: -42,
+      runningVersion: null,
+    })
+
+    expect(report.generatedAt).toBeGreaterThanOrEqual(0)
+    expect(report.selfIteration.workItemsTotal).toBeNull()
+    expect(report.selfIteration.dreamingRuns).toBeNull()
+    expect(report.selfIteration.pluginsCreated).toBe(1)
+    expect(report.selfIteration.pluginsRevised).toBe(1)
+    expect(report.selfIteration.candidatesAdopted).toBe(3)
+    expect(report.plugins.core.length).toBeLessThanOrEqual(256)
+    expect(report.plugins.coreCount).toBe(261)
+    expect(report.plugins.core.every(p => p.name.length >= 1 && p.name.length <= 200)).toBe(true)
+    expect(report.plugins.core.every(p => p.version === null || (p.version.length >= 1 && p.version.length <= 128))).toBe(true)
+    expect(report.plugins.evolved.map(p => p.name)).toEqual(['@dsh-enhanced/evolved-alpha'])
+    expect(report.diagnostics!.length).toBe(128)
+    expect(report.diagnostics!.every(d => d.length >= 1 && d.length <= 1024)).toBe(true)
+    expect(report.diagnostics!.some(d => d.includes('硬链接'))).toBe(true)
   })
 })

@@ -181,14 +181,18 @@ export interface ParsedOwnerVersionQuery {
 
 const ownerVersionQueryExactPhrases: ReadonlySet<string> = new Set([
   '查看版本',
+  '查看版本信息',
   '版本信息',
   '当前版本',
   '助手版本',
   '查看当前版本',
   '查看助手版本',
   '现在什么版本',
+  '现在是什么版本',
   '目前什么版本',
   '当前什么版本',
+  '当前是什么版本',
+  '助手是什么版本',
   '查看自迭代次数',
   '自迭代次数',
   '自己迭代了多少次',

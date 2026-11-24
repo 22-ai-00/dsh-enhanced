@@ -1257,12 +1257,18 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
       expect((report.host as { boundVersion: string | null }).boundVersion).toBe('0.2.2-rc.5')
       expect(report.selfIteration).toMatchObject({
         dataState: 'data',
+        totalIterations: 3,
         pluginsCreated: 1,
         pluginsRevised: 1,
         selfUpgrades: 2,
         backupSnapshotsCount: 2,
       })
     }
+    const cliTotal = (cliReport.selfIteration as { totalIterations: number | null }).totalIterations
+    const ownerTotal = (ownerReport.selfIteration as { totalIterations: number | null }).totalIterations
+    const deliveryTotal = (deliveryReport.selfIteration as { totalIterations: number | null }).totalIterations
+    expect(cliTotal).toBe(ownerTotal)
+    expect(deliveryTotal).toBe(ownerTotal)
 
     // 4. Verify scripts/install/common.sh dsh_enhanced_ensure_rsi_cli probe against real bin/dsh-rsi.js
     const shimBin = join(ws.root, 'real-bin')

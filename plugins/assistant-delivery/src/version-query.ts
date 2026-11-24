@@ -147,6 +147,24 @@ function nonNegIntOrNull(value: unknown): number | null {
   return Math.trunc(value)
 }
 
+function truncateText(raw: string, maxLen: number): string {
+  if (raw.length <= maxLen) return raw
+  if (maxLen <= 1) return raw.slice(0, maxLen)
+  let cut = maxLen - 1
+  const lastCode = raw.charCodeAt(cut - 1)
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff && cut > 1) {
+    cut -= 1
+  }
+  return `${raw.slice(0, cut)}…`
+}
+
+function boundNonEmptyString(raw: unknown, maxLen: number): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  return truncateText(trimmed, maxLen)
+}
+
 function cleanAbsolutePath(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
@@ -459,6 +477,61 @@ function countQuery(db: DatabaseSync, sql: string, ...params: Array<string | num
   return nonNegIntOrNull(row?.n) ?? 0
 }
 
+function isAbsentOrZeroRegularFile(sidecarPath: string): boolean {
+  try {
+    const st = lstatSync(sidecarPath)
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1 && st.size === 0
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function isAbsentFile(sidecarPath: string): boolean {
+  try {
+    lstatSync(sidecarPath)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function isAbsentOrRegularFile(sidecarPath: string): boolean {
+  try {
+    const st = lstatSync(sidecarPath)
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function canPreferImmutable(realTarget: string): boolean {
+  return isAbsentOrZeroRegularFile(`${realTarget}-wal`) && isAbsentFile(`${realTarget}-shm`)
+}
+
+function canFallbackImmutable(realTarget: string): boolean {
+  return isAbsentOrZeroRegularFile(`${realTarget}-wal`) && isAbsentOrRegularFile(`${realTarget}-shm`)
+}
+
+function tryOpenReadOnlySqlite(
+  openTarget: string,
+): { ok: true; db: DatabaseSync } | { ok: false; integrityFailed: boolean; error?: unknown } {
+  let db: DatabaseSync | undefined
+  try {
+    db = new DatabaseSync(openTarget, { readOnly: true })
+    const check = db.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
+    if (!check || Object.values(check)[0] !== 'ok') {
+      db.close()
+      return { ok: false, integrityFailed: true }
+    }
+    return { ok: true, db }
+  } catch (error) {
+    if (db) {
+      try { db.close() } catch { /* ignore */ }
+    }
+    return { ok: false, integrityFailed: false, error }
+  }
+}
+
 function withReadOnlySqlite<T>(
   dbPath: string,
   boundary: ResolvedBoundary,
@@ -468,13 +541,22 @@ function withReadOnlySqlite<T>(
   fn: (db: DatabaseSync, realPath: string) => T,
 ): T | undefined {
   if (!boundary.dshHome || !boundary.canonicalDshHome || boundary.homeUnsafe) return undefined
-  if (!existsSync(dbPath)) return undefined
   const target = resolve(dbPath)
   let realTarget: string
   try {
-    const st = lstatSync(target)
+    let st
+    try {
+      st = lstatSync(target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
     if (!st.isFile() || st.isSymbolicLink()) {
       diagnostics.push(`skipped non-regular or symlink sqlite ledger: ${basename(target)}`)
+      return undefined
+    }
+    if (st.nlink !== 1) {
+      diagnostics.push(`skipped hardlink sqlite ledger: ${basename(target)}`)
       return undefined
     }
     realTarget = realpathSync(target)
@@ -490,33 +572,79 @@ function withReadOnlySqlite<T>(
   if (seenRealPaths.has(realTarget)) return undefined
   seenRealPaths.add(realTarget)
 
+  if (!isAbsentOrRegularFile(`${realTarget}-wal`) || !isAbsentOrRegularFile(`${realTarget}-shm`)) {
+    diagnostics.push(`skipped unsafe sqlite sidecar: ${relative(boundary.canonicalDshHome, realTarget)}`)
+    return undefined
+  }
+
+  const immutableUri = pathToFileURL(realTarget)
+  immutableUri.search = 'mode=ro&immutable=1'
+  const ledgerRel = relative(boundary.canonicalDshHome, realTarget)
+
   let db: DatabaseSync | undefined
-  try {
-    let check: Record<string, unknown> | undefined
-    try {
-      db = new DatabaseSync(realTarget, { readOnly: true })
-      check = db.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
-    } catch {
-      try { db?.close() } catch { /* ignore */ }
-      const immutableUri = `${pathToFileURL(realTarget).href}?mode=ro&immutable=1`
-      db = new DatabaseSync(immutableUri, { readOnly: true })
-      check = db.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
+  if (canPreferImmutable(realTarget)) {
+    const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
+    if (immutableRes.ok) {
+      db = immutableRes.db
+    } else if (immutableRes.integrityFailed) {
+      diagnostics.push(`sqlite quick_check failed: ${ledgerRel}`)
+      return undefined
+    } else {
+      const plainRes = tryOpenReadOnlySqlite(realTarget)
+      if (plainRes.ok) {
+        db = plainRes.db
+      } else if (plainRes.integrityFailed) {
+        diagnostics.push(`sqlite quick_check failed: ${ledgerRel}`)
+        return undefined
+      } else {
+        const err = plainRes.error ?? immutableRes.error
+        diagnostics.push(
+          `sqlite read failed (${ledgerRel}): ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return undefined
+      }
     }
-    if (!check || Object.values(check)[0] !== 'ok') {
-      diagnostics.push(`sqlite quick_check failed: ${relative(boundary.canonicalDshHome, realTarget)}`)
+  } else {
+    const primaryRes = tryOpenReadOnlySqlite(realTarget)
+    if (primaryRes.ok) {
+      db = primaryRes.db
+    } else if (primaryRes.integrityFailed) {
+      diagnostics.push(`sqlite quick_check failed: ${ledgerRel}`)
+      return undefined
+    } else if (canFallbackImmutable(realTarget)) {
+      const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
+      if (immutableRes.ok) {
+        db = immutableRes.db
+      } else if (immutableRes.integrityFailed) {
+        diagnostics.push(`sqlite quick_check failed: ${ledgerRel}`)
+        return undefined
+      } else {
+        const err = immutableRes.error ?? primaryRes.error
+        diagnostics.push(
+          `sqlite read failed (${ledgerRel}): ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return undefined
+      }
+    } else {
+      diagnostics.push(
+        `sqlite read failed (${ledgerRel}): ${primaryRes.error instanceof Error ? primaryRes.error.message : String(primaryRes.error)}`,
+      )
       return undefined
     }
-    inspectedLedgers.push(relative(boundary.canonicalDshHome, realTarget))
+  }
+
+  try {
+    inspectedLedgers.push(ledgerRel)
     return fn(db, realTarget)
   } catch (error) {
     diagnostics.push(
-      `sqlite read failed (${relative(boundary.canonicalDshHome, realTarget)}): `
+      `sqlite read failed (${ledgerRel}): `
       + (error instanceof Error ? error.message : String(error)),
     )
     return undefined
   } finally {
     try {
-      db?.close()
+      db.close()
     } catch {
       // Ignore close failures on read-only handles.
     }
@@ -565,7 +693,7 @@ function collectSqliteDirs(dir: string, boundary: ResolvedBoundary): string[] {
     if (!realDir.startsWith(`${boundary.canonicalDshHome}${sep}`)) return []
     const results: string[] = []
     for (const entry of readdirSync(realDir, { withFileTypes: true })) {
-      if (entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith('.sqlite')) {
+      if ((entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith('.sqlite')) {
         results.push(join(realDir, entry.name))
       }
     }
@@ -673,32 +801,47 @@ function scanProfileYamlPackageNames(boundary: ResolvedBoundary): Set<string> {
 function readNodeModulesPackages(
   dir: string,
   boundary: ResolvedBoundary,
-): Map<string, { version: string | null }> {
-  const found = new Map<string, { version: string | null }>()
+): Map<string, { version: string | null; installKind: 'npm' | 'local' }> {
+  const found = new Map<string, { version: string | null; installKind: 'npm' | 'local' }>()
   if (!boundary.dshHome || !boundary.canonicalDshHome || boundary.homeUnsafe) return found
   const scopeDir = join(dir, '@dsh-enhanced')
   if (!existsSync(scopeDir)) return found
+  const pnpmStoreRoot = resolve(dir, '.pnpm')
   try {
     const st = lstatSync(scopeDir)
     if (!st.isDirectory() || st.isSymbolicLink()) return found
     const realScope = realpathSync(scopeDir)
     if (!realScope.startsWith(`${boundary.canonicalDshHome}${sep}`)) return found
     for (const entry of readdirSync(realScope, { withFileTypes: true })) {
-      if (entry.isSymbolicLink() || !entry.isDirectory()) continue
-      const pkgRaw = readBoundedRegularFile(
-        join(realScope, entry.name, 'package.json'),
-        boundary,
-        MAX_PACKAGE_JSON_BYTES,
-      )
-      if (pkgRaw === undefined) continue
+      if (entry.name.startsWith('.') || entry.name.startsWith('@')) continue
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+      const entryPath = join(realScope, entry.name)
+      let pkgDir = entryPath
+      let installKind: 'npm' | 'local' = 'npm'
+      if (entry.isSymbolicLink()) {
+        try {
+          pkgDir = realpathSync(entryPath)
+          const dirStat = lstatSync(pkgDir)
+          if (!dirStat.isDirectory()) continue
+          installKind = (pkgDir === pnpmStoreRoot || pkgDir.startsWith(`${pnpmStoreRoot}${sep}`))
+            ? 'npm'
+            : 'local'
+        } catch {
+          continue
+        }
+      }
+      const pkgJsonPath = join(pkgDir, 'package.json')
       try {
-        const parsed = JSON.parse(pkgRaw) as { name?: unknown; version?: unknown }
+        const pkgStat = lstatSync(pkgJsonPath)
+        if (!pkgStat.isFile() || pkgStat.isSymbolicLink()) continue
+        if (pkgStat.size < 0 || pkgStat.size > MAX_PACKAGE_JSON_BYTES) continue
+        const parsed = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as { name?: unknown; version?: unknown }
         const pkgName = textOrNull(parsed.name)
-        if (pkgName !== null) {
-          found.set(pkgName, { version: textOrNull(parsed.version) })
+        if (pkgName !== null && pkgName.startsWith('@dsh-enhanced/')) {
+          found.set(pkgName, { version: textOrNull(parsed.version), installKind })
         }
       } catch {
-        // Ignore malformed package.json.
+        // Ignore unreadable or malformed package.json.
       }
     }
   } catch {
@@ -738,7 +881,9 @@ export async function collectDeliveryVersionReport(
   const inspectedLedgers: string[] = []
   const seenRealPaths = new Set<string>()
   const boundary = resolveBoundary(ctx, options, diagnostics)
-  const generatedAt = options.now ?? Date.now()
+  const generatedAt = typeof options.now === 'number' && Number.isFinite(options.now) && options.now >= 0
+    ? Math.trunc(options.now)
+    : Date.now()
 
   const hostMeta = readBoundHostMetadata(boundary)
   const runningVersion = readRunningHostVersion()
@@ -819,7 +964,7 @@ export async function collectDeliveryVersionReport(
             name: pkgName,
             version: info.version,
             kind: 'core',
-            installKind: 'npm',
+            installKind: info.installKind,
           })
         }
       }
@@ -917,7 +1062,7 @@ export async function collectDeliveryVersionReport(
         pluginsCreated = pluginsCreated ?? 0
         pluginsRevised = pluginsRevised ?? 0
         const createdRows = db.prepare(
-          "SELECT id, plugin_name FROM source_plans WHERE mode = 'create' AND status = 'release-complete'",
+          "SELECT id, plugin_name FROM source_plans WHERE (mode IS NULL OR mode = 'create') AND status = 'release-complete'",
         ).all() as Array<{ id?: unknown; plugin_name?: unknown }>
         for (const row of createdRows) {
           const id = textOrNull(row.id)
@@ -937,7 +1082,7 @@ export async function collectDeliveryVersionReport(
           }
         }
         const revisedRows = db.prepare(
-          "SELECT id FROM source_plans WHERE mode = 'modify' AND status = 'release-complete'",
+          "SELECT id FROM source_plans WHERE mode IN ('modify', 'prepared-revise') AND status = 'release-complete'",
         ).all() as Array<{ id?: unknown }>
         for (const row of revisedRows) {
           const id = textOrNull(row.id)
@@ -958,22 +1103,36 @@ export async function collectDeliveryVersionReport(
         )
       }
 
-      // Creation capability journal: adoptions (plan_id, status, certificate_json)
+      // Creation capability journal: adoptions (plan_id, status, certificate_json, receipt_json)
       if (hasTable(db, 'adoptions') && hasColumn(db, 'adoptions', 'status') && hasColumn(db, 'adoptions', 'certificate_json')) {
         pluginsCreated = pluginsCreated ?? 0
+        const hasReceipt = hasColumn(db, 'adoptions', 'receipt_json')
         const rows = db.prepare(
-          "SELECT plan_id, status, certificate_json FROM adoptions WHERE status IN ('authorized', 'active')",
-        ).all() as Array<{ plan_id?: unknown; status?: unknown; certificate_json?: unknown }>
+          `SELECT plan_id, status, certificate_json${hasReceipt ? ', receipt_json' : ''} FROM adoptions WHERE status IN ('authorized', 'active')`,
+        ).all() as Array<{ plan_id?: unknown; status?: unknown; certificate_json?: unknown; receipt_json?: unknown }>
         for (const row of rows) {
           const planId = textOrNull(row.plan_id)
           if (planId) createdPlanIds.add(planId)
           if (typeof row.certificate_json === 'string') {
             try {
               const cert = rec(JSON.parse(row.certificate_json))
-              const pluginName = textOrNull(cert['packageName'])
+              const planObj = rec(cert['plan'])
+              let receiptObj: Record<string, unknown> = {}
+              if (typeof row.receipt_json === 'string') {
+                try {
+                  receiptObj = rec(JSON.parse(row.receipt_json))
+                } catch {
+                  receiptObj = {}
+                }
+              }
+              const pluginName = textOrNull(planObj['name'])
+                ?? textOrNull(cert['packageName'])
                 ?? textOrNull(cert['pluginName'])
                 ?? textOrNull(cert['name'])
-              const ver = textOrNull(cert['version']) ?? textOrNull(cert['pluginVersion'])
+              const ver = textOrNull(receiptObj['version'])
+                ?? textOrNull(planObj['version'])
+                ?? textOrNull(cert['version'])
+                ?? textOrNull(cert['pluginVersion'])
               if (pluginName) {
                 evolvedNames.add(pluginName)
                 pluginSourceAvailable = true
@@ -1003,16 +1162,17 @@ export async function collectDeliveryVersionReport(
         }
       }
       if (hasTable(db, 'entries') && hasColumn(db, 'entries', 'name') && hasColumn(db, 'entries', 'revision')) {
-        const entryRows = db.prepare('SELECT name FROM entries').all() as Array<{ name?: unknown }>
+        const entryRows = db.prepare('SELECT name, revision FROM entries').all() as Array<{ name?: unknown; revision?: unknown }>
         for (const row of entryRows) {
           const pluginName = textOrNull(row.name)
+          const revNum = nonNegIntOrNull(row.revision)
           if (pluginName) {
             evolvedNames.add(pluginName)
             pluginSourceAvailable = true
             const existing = pluginMap.get(pluginName)
             pluginMap.set(pluginName, {
               name: pluginName,
-              version: existing?.version ?? null,
+              version: existing?.version ?? (revNum !== null ? `v${revNum}` : null),
               kind: 'evolved',
               installKind: 'adopted',
               ...(existing?.enabled === undefined ? {} : { enabled: existing.enabled }),
@@ -1029,18 +1189,6 @@ export async function collectDeliveryVersionReport(
         taskVerificationsDone = addMetric(
           taskVerificationsDone,
           countQuery(db, "SELECT COUNT(*) AS n FROM acceptance_jobs WHERE state = 'done'"),
-        )
-      }
-      if (hasTable(db, 'verifications') && hasColumn(db, 'verifications', 'state')) {
-        taskVerificationsDone = addMetric(
-          taskVerificationsDone,
-          countQuery(db, "SELECT COUNT(*) AS n FROM verifications WHERE state IN ('done', 'approved', 'passed', 'verified')"),
-        )
-      }
-      if (hasTable(db, 'reviews') && hasColumn(db, 'reviews', 'state')) {
-        taskVerificationsDone = addMetric(
-          taskVerificationsDone,
-          countQuery(db, "SELECT COUNT(*) AS n FROM reviews WHERE state = 'approved'"),
         )
       }
 
@@ -1340,10 +1488,13 @@ export async function collectDeliveryVersionReport(
   const corePlugins: AssistantVersionPluginEntry[] = []
   const evolvedPlugins: AssistantVersionPluginEntry[] = []
   for (const entry of pluginMap.values()) {
+    const boundedName = boundNonEmptyString(entry.name, 200)
+    if (boundedName === undefined) continue
+    const boundedVer = entry.version === null ? null : boundNonEmptyString(entry.version, 128) ?? null
     const isEvolved = entry.kind === 'evolved' || evolvedNames.has(entry.name)
     const finalized: AssistantVersionPluginEntry = {
-      name: entry.name,
-      version: entry.version,
+      name: boundedName,
+      version: boundedVer,
       kind: isEvolved ? 'evolved' : 'core',
       ...(entry.installKind === undefined ? {} : { installKind: isEvolved ? 'adopted' : entry.installKind }),
       ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
@@ -1384,51 +1535,86 @@ export async function collectDeliveryVersionReport(
     backupSnapshotsCount,
   ]
   const hasAnySource = numericMetrics.some(value => value !== null)
-  const totalIterations = !hasAnySource
-    ? null
-    : (workItemsTotal ?? 0)
-      + (growthUsageJobsTotal ?? 0)
-      + (dreamingRuns ?? 0)
-      + (recoveryRuns ?? 0)
-      + (goalStrategyRuns ?? 0)
-      + Math.max(
-        candidatesGenerated ?? 0,
-        (candidatesAdopted ?? 0) + (pluginsCreated ?? 0) + (pluginsRevised ?? 0),
-      )
-      + (taskVerificationsDone ?? 0)
-      + (selfUpgrades ?? 0)
-
-  const hasNonZero = totalIterations !== null && (
-    totalIterations > 0 || numericMetrics.some(value => value !== null && value > 0)
-  )
+  const hasNonZero = numericMetrics.some(value => value !== null && value > 0)
   const dataState: 'no-data' | 'zero' | 'data' = !hasAnySource
     ? 'no-data'
     : (hasNonZero ? 'data' : 'zero')
+
+  const iterationDriversSum =
+    (workItemsTotal ?? 0)
+    + (growthUsageJobsTotal ?? 0)
+    + (dreamingRuns ?? 0)
+    + (recoveryRuns ?? 0)
+    + (goalStrategyRuns ?? 0)
+    + (evolutionRulesAdopted ?? 0)
+    + (associationProfileAdoptions ?? 0)
+    + (evaluationAttentionTuningAdoptions ?? 0)
+    + (evaluationLooseningDecisionsAdopted ?? 0)
+    + (selfUpgrades ?? 0)
+  const totalIterations: number | null = dataState === 'no-data'
+    ? null
+    : iterationDriversSum > 0
+      ? iterationDriversSum
+      : dataState === 'data'
+        ? Math.max(
+            candidatesGenerated ?? 0,
+            candidatesAdopted ?? 0,
+            pluginsCreated ?? 0,
+            pluginsRevised ?? 0,
+            activeMemories ?? 0,
+            activePreferenceOverlays ?? 0,
+            workflowCandidatesPromoted ?? 0,
+            skillDeployments ?? 0,
+            taskVerificationsDone ?? 0,
+            1,
+          )
+        : 0
+
+  const boundedDshHome = boundary.dshHome === null
+    ? undefined
+    : truncateText(boundary.canonicalDshHome ?? boundary.dshHome, 4_096)
+  const boundedAssistantVersion = boundNonEmptyString(assistantVersion, 128) ?? '0.0.0'
+  const boundedBoundVersion = boundNonEmptyString(hostMeta.boundVersion, 128) ?? null
+  const boundedBoundStatus = boundNonEmptyString(hostMeta.boundStatus, 64) ?? 'unknown'
+  const boundedRunningVersion = boundNonEmptyString(runningVersion, 128) ?? null
+  const boundedProfile = boundNonEmptyString(boundary.profile, 128)
+  const boundedProfiles = boundary.profiles
+    .map(p => boundNonEmptyString(p, 128))
+    .filter((p): p is string => p !== undefined)
+    .slice(0, 64)
+  const boundedInspectedLedgers = inspectedLedgers
+    .map(entry => boundNonEmptyString(entry, 4_096))
+    .filter((entry): entry is string => entry !== undefined)
+    .slice(0, 256)
+  const boundedDiagnostics = diagnostics
+    .map(entry => boundNonEmptyString(entry, 1_024))
+    .filter((entry): entry is string => entry !== undefined)
+    .slice(0, 128)
 
   return {
     schemaVersion: 1,
     protocol: 'dsh-rsi/version/v1',
     generatedAt,
-    ...(boundary.dshHome === null ? {} : { dshHome: boundary.dshHome }),
+    ...(boundedDshHome === undefined ? {} : { dshHome: boundedDshHome }),
     assistant: {
       name: 'dsh-enhanced',
-      version: assistantVersion,
+      version: boundedAssistantVersion,
     },
     host: {
       packageName: '@deepseek-ai/dsh',
-      boundVersion: hostMeta.boundVersion,
-      boundStatus: hostMeta.boundStatus,
-      runningVersion,
+      boundVersion: boundedBoundVersion,
+      boundStatus: boundedBoundStatus,
+      runningVersion: boundedRunningVersion,
     },
-    ...(boundary.profile === null ? {} : { profile: boundary.profile }),
-    ...(boundary.profiles.length === 0 ? {} : { profiles: boundary.profiles }),
+    ...(boundedProfile === undefined ? {} : { profile: boundedProfile }),
+    ...(boundedProfiles.length === 0 ? {} : { profiles: boundedProfiles }),
     plugins: {
       state: pluginsState,
       coreCount: corePlugins.length,
       evolvedCount: evolvedPlugins.length,
       activeEvolvedCount,
-      core: corePlugins,
-      evolved: evolvedPlugins,
+      core: corePlugins.slice(0, 256),
+      evolved: evolvedPlugins.slice(0, 256),
     },
     selfIteration: {
       dataState,
@@ -1457,8 +1643,8 @@ export async function collectDeliveryVersionReport(
       selfUpgrades,
       backupSnapshotsCount,
     },
-    ...(inspectedLedgers.length === 0 ? {} : { inspectedLedgers }),
-    ...(diagnostics.length === 0 ? {} : { diagnostics }),
+    ...(boundedInspectedLedgers.length === 0 ? {} : { inspectedLedgers: boundedInspectedLedgers }),
+    ...(boundedDiagnostics.length === 0 ? {} : { diagnostics: boundedDiagnostics }),
   }
 }
 

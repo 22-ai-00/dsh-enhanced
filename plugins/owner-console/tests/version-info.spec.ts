@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -565,5 +565,79 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
     expect(longReport.plugins.core[0]!.version!.length).toBeLessThanOrEqual(128)
     expect(OwnerConsoleVersionReportSchema.safeParse(longReport).success).toBe(true)
     expect(typertCodec.safeParse(longReport).success).toBe(true)
+  })
+
+  it('reads stopped writable WAL DBs with zero -wal/-shm sidecars, fails closed on 0555 uncheckpointed -wal, rejects hardlinks, and handles prepared-revise', async () => {
+    const root = makeTempDir('oc-version-wal-sec-')
+    const home = join(root, 'dsh-home')
+    const outsideDir = join(root, 'outside')
+    const wiDir = join(home, 'assistant-work-items')
+    const gdDir = join(home, 'assistant-growth-driver')
+    const liveDir = join(home, 'assistant-dreaming')
+    const roWalDir = join(home, 'assistant-recovery')
+    const hlDir = join(home, 'assistant-evolution')
+    const cpDir = join(home, 'plugin-control-plane')
+    for (const d of [outsideDir, wiDir, gdDir, liveDir, roWalDir, hlDir, cpDir]) {
+      mkdirSync(d, { recursive: true })
+    }
+
+    // 1. Cleanly stopped writable (0o700) WAL DB (no sidecars)
+    const wiDbPath = join(wiDir, 'state.sqlite')
+    createSqlite(wiDbPath, "PRAGMA journal_mode = WAL; CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT); INSERT INTO work_item VALUES ('w1', 'settled');")
+    try { unlinkSync(`${wiDbPath}-wal`) } catch { /* ignore */ }
+    try { unlinkSync(`${wiDbPath}-shm`) } catch { /* ignore */ }
+    chmodSync(wiDir, 0o700)
+    const wiMtimeBefore = statSync(wiDbPath).mtimeMs
+
+    // 2. Cleanly stopped writable (0o700) WAL DB with 0-byte -wal and no -shm
+    const gdDbPath = join(gdDir, 'usage.sqlite')
+    createSqlite(gdDbPath, "PRAGMA journal_mode = WAL; CREATE TABLE usage_jobs (id TEXT PRIMARY KEY, state TEXT); INSERT INTO usage_jobs VALUES ('u1', 'reviewed');")
+    try { unlinkSync(`${gdDbPath}-shm`) } catch { /* ignore */ }
+    writeFileSync(`${gdDbPath}-wal`, '', 'utf8')
+    chmodSync(gdDir, 0o700)
+
+    // 3. Live uncheckpointed WAL DB
+    const liveDbPath = join(liveDir, 'state.sqlite')
+    const liveWriter = new DatabaseSync(liveDbPath)
+    liveWriter.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE dream_runs (id TEXT PRIMARY KEY); INSERT INTO dream_runs VALUES ('d1');")
+
+    // 4. 0555 dir with uncheckpointed non-empty -wal (no -shm) -> must fail closed (null + diagnostic)
+    const roWalDbPath = join(roWalDir, 'recovery.sqlite')
+    createSqlite(roWalDbPath, "CREATE TABLE recovery_runs (id TEXT PRIMARY KEY); INSERT INTO recovery_runs VALUES ('r1');")
+    writeFileSync(`${roWalDbPath}-wal`, 'non-empty-wal-frames', 'utf8')
+    chmodSync(roWalDir, 0o555)
+
+    // 5. Hardlink escape (.sqlite with nlink === 2) -> must fail closed (null + diagnostic)
+    const evilOutside = join(outsideDir, 'evil-hardlink.sqlite')
+    createSqlite(evilOutside, "CREATE TABLE evolution_rules (id TEXT PRIMARY KEY); INSERT INTO evolution_rules VALUES ('er-hl');")
+    linkSync(evilOutside, join(hlDir, 'evolution.sqlite'))
+
+    // 6. source_plans prepared-revise on core plugin must NOT move it to evolved[]
+    createSqlite(
+      join(cpDir, 'control.sqlite'),
+      "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT); INSERT INTO source_plans VALUES ('sp-rev', '@dsh-enhanced/assistant-work-items', 'prepared-revise', 'release-complete');",
+    )
+
+    const ctx = new Context()
+    ctx.provide('profileContext' as never, { home, name: 'web' } as never)
+
+    try {
+      const report = await collectOwnerConsoleVersionInfo(ctx, { now: 1_700_000_000_500 })
+      expect(OwnerConsoleVersionReportSchema.safeParse(report).success).toBe(true)
+      expect(readdirSync(wiDir).sort()).toEqual(['state.sqlite'])
+      expect(statSync(wiDbPath).mtimeMs).toBe(wiMtimeBefore)
+      expect(readdirSync(gdDir).sort()).toEqual(['usage.sqlite', 'usage.sqlite-wal'])
+      expect(report.selfIteration.workItemsTotal).toBe(1)
+      expect(report.selfIteration.growthUsageJobsTotal).toBe(1)
+      expect(report.selfIteration.dreamingRuns).toBe(1)
+      expect(report.selfIteration.recoveryRuns).toBeNull()
+      expect(report.selfIteration.evolutionRulesAdopted).toBeNull()
+      expect(report.selfIteration.pluginsRevised).toBe(1)
+      expect(report.plugins.evolved).toEqual([])
+      expect(report.diagnostics?.some(d => d.includes('hardlink'))).toBe(true)
+    } finally {
+      liveWriter.close()
+      try { chmodSync(roWalDir, 0o700) } catch { /* ignore */ }
+    }
   })
 })

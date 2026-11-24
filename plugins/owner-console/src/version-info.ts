@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -193,6 +193,61 @@ function findLoaderPathProp(
   return undefined
 }
 
+function isAbsentOrZeroRegularFile(sidecarPath: string): boolean {
+  try {
+    const st = lstatSync(sidecarPath)
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1 && st.size === 0
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function isAbsentFile(sidecarPath: string): boolean {
+  try {
+    lstatSync(sidecarPath)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function isAbsentOrRegularFile(sidecarPath: string): boolean {
+  try {
+    const st = lstatSync(sidecarPath)
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+}
+
+function canPreferImmutable(realTarget: string): boolean {
+  return isAbsentOrZeroRegularFile(`${realTarget}-wal`) && isAbsentFile(`${realTarget}-shm`)
+}
+
+function canFallbackImmutable(realTarget: string): boolean {
+  return isAbsentOrZeroRegularFile(`${realTarget}-wal`) && isAbsentOrRegularFile(`${realTarget}-shm`)
+}
+
+function tryOpenReadOnlySqlite(
+  openTarget: string,
+): { ok: true; db: DatabaseSync } | { ok: false; integrityFailed: boolean; error?: unknown } {
+  let handle: DatabaseSync | undefined
+  try {
+    handle = new DatabaseSync(openTarget, { readOnly: true })
+    const check = handle.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
+    if (!check || Object.values(check)[0] !== 'ok') {
+      handle.close()
+      return { ok: false, integrityFailed: true }
+    }
+    return { ok: true, db: handle }
+  } catch (error) {
+    if (handle) {
+      try { handle.close() } catch { /* ignore */ }
+    }
+    return { ok: false, integrityFailed: false, error }
+  }
+}
+
 function withReadOnlySqlite<T>(
   dbPath: string | undefined,
   boundary: SqlitePathBoundary,
@@ -201,16 +256,26 @@ function withReadOnlySqlite<T>(
   diagnostics: string[],
   fn: (db: DatabaseSync, realTarget: string) => T,
 ): T | undefined {
-  if (!dbPath || !existsSync(dbPath)) return undefined
+  if (!dbPath) return undefined
   const target = resolve(dbPath)
   let realTarget: string
   try {
-    const st = lstatSync(target)
+    let st
+    try {
+      st = lstatSync(target)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
     if (st.isSymbolicLink()) {
       diagnostics.push(`skipped symlink ledger: ${target}`)
       return undefined
     }
     if (!st.isFile()) return undefined
+    if (st.nlink !== 1) {
+      diagnostics.push(`skipped hardlink ledger: ${target}`)
+      return undefined
+    }
     realTarget = realpathSync(target)
     if (!isWithinBoundary(target, realTarget, boundary)) {
       diagnostics.push(`skipped out-of-bounds ledger: ${target}`)
@@ -224,47 +289,70 @@ function withReadOnlySqlite<T>(
   if (seenGroupPaths.has(realTarget)) return undefined
   seenGroupPaths.add(realTarget)
 
-  const openAndVerify = (targetOrUri: string): DatabaseSync => {
-    const handle = new DatabaseSync(targetOrUri, { readOnly: true })
-    try {
-      const check = handle.prepare('PRAGMA quick_check').get() as Record<string, unknown> | undefined
-      if (!check || Object.values(check)[0] !== 'ok') {
-        throw new Error('PRAGMA quick_check did not return ok')
+  if (!isAbsentOrRegularFile(`${realTarget}-wal`) || !isAbsentOrRegularFile(`${realTarget}-shm`)) {
+    diagnostics.push(`skipped unsafe sqlite sidecar: ${target}`)
+    return undefined
+  }
+
+  const immutableUri = pathToFileURL(realTarget)
+  immutableUri.search = 'mode=ro&immutable=1'
+
+  let db: DatabaseSync | undefined
+  if (canPreferImmutable(realTarget)) {
+    const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
+    if (immutableRes.ok) {
+      db = immutableRes.db
+    } else if (immutableRes.integrityFailed) {
+      diagnostics.push(`sqlite quick_check failed (${realTarget})`)
+      return undefined
+    } else {
+      const plainRes = tryOpenReadOnlySqlite(realTarget)
+      if (plainRes.ok) {
+        db = plainRes.db
+      } else if (plainRes.integrityFailed) {
+        diagnostics.push(`sqlite quick_check failed (${realTarget})`)
+        return undefined
+      } else {
+        const err = plainRes.error ?? immutableRes.error
+        diagnostics.push(`failed to open ledger (${realTarget}): ${err instanceof Error ? err.message : String(err)}`)
+        return undefined
       }
-      return handle
-    } catch (err) {
-      try { handle.close() } catch { /* ignore */ }
-      throw err
+    }
+  } else {
+    const primaryRes = tryOpenReadOnlySqlite(realTarget)
+    if (primaryRes.ok) {
+      db = primaryRes.db
+    } else if (primaryRes.integrityFailed) {
+      diagnostics.push(`sqlite quick_check failed (${realTarget})`)
+      return undefined
+    } else if (canFallbackImmutable(realTarget)) {
+      const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
+      if (immutableRes.ok) {
+        db = immutableRes.db
+      } else if (immutableRes.integrityFailed) {
+        diagnostics.push(`sqlite quick_check failed (${realTarget})`)
+        return undefined
+      } else {
+        const err = immutableRes.error ?? primaryRes.error
+        diagnostics.push(`failed to open ledger (${realTarget}): ${err instanceof Error ? err.message : String(err)}`)
+        return undefined
+      }
+    } else {
+      diagnostics.push(
+        `failed to open ledger (${realTarget}): ${primaryRes.error instanceof Error ? primaryRes.error.message : String(primaryRes.error)}`,
+      )
+      return undefined
     }
   }
 
-  let db: DatabaseSync | undefined
   try {
-    try {
-      db = openAndVerify(realTarget)
-    } catch (openErr) {
-      const walPath = `${realTarget}-wal`
-      let canUseImmutable = false
-      try {
-        canUseImmutable = !existsSync(walPath) || statSync(walPath).size === 0
-      } catch {
-        canUseImmutable = false
-      }
-      if (!canUseImmutable) {
-        diagnostics.push(`failed to open ledger (${realTarget}): ${openErr instanceof Error ? openErr.message : String(openErr)}`)
-        return undefined
-      }
-      const immutableUri = `${pathToFileURL(realTarget).href}?mode=ro&immutable=1`
-      db = openAndVerify(immutableUri)
-    }
-
     inspectedLedgers.add(realTarget)
     return fn(db, realTarget)
   } catch (error) {
     diagnostics.push(`failed to inspect ledger (${realTarget}): ${error instanceof Error ? error.message : String(error)}`)
     return undefined
   } finally {
-    try { db?.close() } catch { /* ignore */ }
+    try { db.close() } catch { /* ignore */ }
   }
 }
 
@@ -354,8 +442,8 @@ function inspectUpgradeHistoryAndBackups(
   if (existsSync(historyPath)) {
     try {
       const st = lstatSync(historyPath)
-      if (st.isSymbolicLink()) {
-        diagnostics.push(`skipped symlink upgrade history: ${historyPath}`)
+      if (st.isSymbolicLink() || st.nlink !== 1) {
+        diagnostics.push(`skipped symlink or hardlink upgrade history: ${historyPath}`)
       } else if (st.isFile()) {
         const realHistory = realpathSync(historyPath)
         if (!isWithinBoundary(historyPath, realHistory, boundary)) {
@@ -545,7 +633,7 @@ export async function collectOwnerConsoleVersionInfo(
       if (trimmed.startsWith('@dsh-enhanced/') && !existing.name.startsWith('@dsh-enhanced/')) {
         existing.name = boundedName
       }
-      if (boundedVersion !== undefined && (existing.version === null || existing.version === 'created')) {
+      if (boundedVersion !== undefined && (existing.version === null || existing.version === 'created' || /^v\d+$/u.test(existing.version))) {
         existing.version = boundedVersion
       }
       if (patch.enabled !== undefined) {
@@ -635,12 +723,13 @@ export async function collectOwnerConsoleVersionInfo(
               ).all() as Array<{ id?: unknown; mode?: unknown; plugin_name?: unknown }>
               for (const row of rows) {
                 const pid = typeof row.id === 'string' ? row.id : ''
+                const isRevisionMode = row.mode === 'modify' || row.mode === 'prepared-revise'
                 if (pid !== '') {
-                  if (row.mode === 'create') createdPlanIds.add(pid)
-                  else if (row.mode === 'modify') revisedPlanIds.add(pid)
+                  if (isRevisionMode) revisedPlanIds.add(pid)
+                  else createdPlanIds.add(pid)
                 }
-                if (typeof row.plugin_name === 'string' && row.plugin_name.trim() !== '') {
-                  upsertEvolved(row.plugin_name, { version: 'adopted' })
+                if (!isRevisionMode && typeof row.plugin_name === 'string' && row.plugin_name.trim() !== '') {
+                  upsertEvolved(row.plugin_name, { version: null })
                 }
               }
             }
@@ -721,10 +810,19 @@ export async function collectOwnerConsoleVersionInfo(
                 const cert = parseJsonObject(row.certificate_json)
                 const plan = rec(cert['plan'])
                 const receipt = parseJsonObject(row.receipt_json)
-                const capName = typeof plan['name'] === 'string' ? plan['name'].trim() : ''
+                const capName = (typeof plan['name'] === 'string' && plan['name'].trim() !== '' ? plan['name'].trim() : undefined)
+                  ?? (typeof cert['packageName'] === 'string' && cert['packageName'].trim() !== '' ? cert['packageName'].trim() : undefined)
+                  ?? (typeof cert['pluginName'] === 'string' && cert['pluginName'].trim() !== '' ? cert['pluginName'].trim() : undefined)
+                  ?? (typeof cert['name'] === 'string' && cert['name'].trim() !== '' ? cert['name'].trim() : '')
                 const capVer = typeof receipt['version'] === 'string' && receipt['version'].trim() !== ''
                   ? receipt['version'].trim()
-                  : 'created'
+                  : typeof plan['version'] === 'string' && plan['version'].trim() !== ''
+                    ? plan['version'].trim()
+                    : typeof cert['version'] === 'string' && cert['version'].trim() !== ''
+                      ? cert['version'].trim()
+                      : typeof cert['pluginVersion'] === 'string' && cert['pluginVersion'].trim() !== ''
+                        ? cert['pluginVersion'].trim()
+                        : 'v1'
                 if (capName !== '') {
                   upsertEvolved(capName, { version: capVer, enabled: st === 'active' })
                 }
@@ -773,7 +871,7 @@ export async function collectOwnerConsoleVersionInfo(
                   const revNum = typeof er.revision === 'number' && Number.isFinite(er.revision) ? Math.trunc(er.revision) : null
                   const curPlan = typeof er.current_plan_id === 'string' ? er.current_plan_id : ''
                   upsertEvolved(ename, {
-                    version: revNum !== null ? `rev.${revNum}` : 'revised',
+                    version: revNum !== null ? `v${revNum}` : null,
                     enabled: curPlan !== '' && activeRevisionPlanIds.has(curPlan),
                   })
                 }
@@ -1466,6 +1564,10 @@ export async function collectOwnerConsoleVersionInfo(
       + (dreamingRuns ?? 0)
       + (recoveryRuns ?? 0)
       + (goalStrategyRuns ?? 0)
+      + (evolutionRulesAdopted ?? 0)
+      + (associationProfileAdoptions ?? 0)
+      + (evaluationAttentionTuningAdoptions ?? 0)
+      + (evaluationLooseningDecisionsAdopted ?? 0)
       + (selfUpgrades ?? 0)
     if (engineSum > 0) {
       totalIterations = engineSum
@@ -1475,8 +1577,10 @@ export async function collectOwnerConsoleVersionInfo(
         candidatesAdopted ?? 0,
         pluginsCreated ?? 0,
         pluginsRevised ?? 0,
-        evolutionRulesAdopted ?? 0,
         activeMemories ?? 0,
+        activePreferenceOverlays ?? 0,
+        workflowCandidatesPromoted ?? 0,
+        skillDeployments ?? 0,
         taskVerificationsDone ?? 0,
         1,
       )

@@ -116,6 +116,28 @@ function withTrailingSep(dirPath: string): string {
   return dirPath.endsWith(sep) ? dirPath : `${dirPath}${sep}`
 }
 
+function truncateText(raw: string, maxLen: number): string {
+  if (raw.length <= maxLen) return raw
+  if (maxLen <= 1) return raw.slice(0, maxLen)
+  let cut = maxLen - 1
+  const lastCode = raw.charCodeAt(cut - 1)
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff && cut > 1) {
+    cut -= 1
+  }
+  return `${raw.slice(0, cut)}…`
+}
+
+function boundNonEmptyString(raw: unknown, maxLen: number): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  return truncateText(trimmed, maxLen)
+}
+
+function nonNegInt(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null
+}
+
 function isWithinHome(target: string, dshHome: string, canonicalHome: string): boolean {
   return target === dshHome
     || target.startsWith(withTrailingSep(dshHome))
@@ -222,8 +244,8 @@ async function collectPatchDbPaths(
     diagnostics.push(`无法访问配置 ${patchPath}：${error instanceof Error ? error.message : String(error)}`)
     return
   }
-  if (!st.isFile() || st.isSymbolicLink()) {
-    diagnostics.push(`跳过非普通配置文件：${patchPath}`)
+  if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) {
+    diagnostics.push(`跳过非普通、符号链接或硬链接配置文件：${patchPath}`)
     return
   }
   const realPatch = await realpath(patchPath).catch(() => undefined)
@@ -336,13 +358,13 @@ function hasColumn(db: DatabaseSync, tableName: string, columnName: string): boo
 function queryCount(db: DatabaseSync, sql: string, ...params: Array<string | number>): number {
   const row = db.prepare(sql).get(...params) as { cnt?: unknown } | undefined
   const val = row?.cnt
-  return typeof val === 'number' && Number.isFinite(val) ? val : 0
+  return typeof val === 'number' && Number.isFinite(val) && val >= 0 ? Math.trunc(val) : 0
 }
 
 async function isAbsentOrZeroRegularFile(sidecarPath: string): Promise<boolean> {
   try {
     const st = await lstat(sidecarPath)
-    return st.isFile() && !st.isSymbolicLink() && st.size === 0
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1 && st.size === 0
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
   }
@@ -360,7 +382,7 @@ async function isAbsentFile(sidecarPath: string): Promise<boolean> {
 async function isAbsentOrRegularFile(sidecarPath: string): Promise<boolean> {
   try {
     const st = await lstat(sidecarPath)
-    return st.isFile() && !st.isSymbolicLink()
+    return st.isFile() && !st.isSymbolicLink() && st.nlink === 1
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
   }
@@ -420,6 +442,10 @@ async function openReadOnlyDbs(
     }
     if (!st.isFile() || st.isSymbolicLink()) {
       diagnostics.push(`跳过非普通账本文件：${target}`)
+      continue
+    }
+    if (st.nlink !== 1) {
+      diagnostics.push(`跳过硬链接账本文件：${target}`)
       continue
     }
     const realTarget = await realpath(target).catch(() => undefined)
@@ -544,8 +570,8 @@ async function readUpgradeHistory(
     diagnostics.push(`无法访问升级历史文件 ${historyPath}：${error instanceof Error ? error.message : String(error)}`)
     return { count: null }
   }
-  if (!st.isFile() || st.isSymbolicLink()) {
-    diagnostics.push(`跳过非普通升级历史文件：${historyPath}`)
+  if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) {
+    diagnostics.push(`跳过非普通、符号链接或硬链接升级历史文件：${historyPath}`)
     return { count: null }
   }
   const realHistory = await realpath(historyPath).catch(() => undefined)
@@ -650,7 +676,9 @@ async function readInstallIntentSafe(
 }
 
 export async function collectVersionReport(options?: CollectVersionReportOptions): Promise<AssistantVersionReport> {
-  const generatedAt = options?.now ?? Date.now()
+  const generatedAt = typeof options?.now === 'number' && Number.isFinite(options.now) && options.now >= 0
+    ? Math.trunc(options.now)
+    : Date.now()
   const dshHome = resolve(options?.dshHome ?? resolveDshHome())
   if (options?.profile !== undefined && !PROFILE_NAME_RE.test(options.profile)) {
     throw new PurgeError(`--profile 名称格式无效：${options.profile}`)
@@ -847,12 +875,10 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'verification.sqlite'))
       addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'state.sqlite'))
     }
-    if (allowFamily('controlPlane')) {
-      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'control.sqlite'))
-      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'state.sqlite'))
-      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'creation-adoptions.sqlite'))
-      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'revision-adoptions.sqlite'))
-    }
+    dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'control.sqlite'))
+    dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'state.sqlite'))
+    dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'creation-adoptions.sqlite'))
+    dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'revision-adoptions.sqlite'))
 
     for (const prof of profNames) {
       if (allowFamily('workItems')) dbMap.workItems.add(join(dshHome, 'assistant-work-items', `${prof}.sqlite`))
@@ -877,14 +903,12 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       if (allowFamily('verifier')) {
         addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', `${prof}.sqlite`))
       }
-      if (allowFamily('controlPlane')) {
-        dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}.sqlite`))
-        dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-creation-adoptions.sqlite`))
-        dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-revision-adoptions.sqlite`))
-        dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'control.sqlite'))
-        dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'creation-adoptions.sqlite'))
-        dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'revision-adoptions.sqlite'))
-      }
+      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}.sqlite`))
+      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-creation-adoptions.sqlite`))
+      dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-revision-adoptions.sqlite`))
+      dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'control.sqlite'))
+      dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'creation-adoptions.sqlite'))
+      dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'revision-adoptions.sqlite'))
     }
   }
 
@@ -1219,7 +1243,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
           const row = db.prepare('SELECT MAX(active_version) AS max_ver FROM assoc_param_profile_heads').get() as {
             max_ver?: unknown
           } | undefined
-          const maxVer = typeof row?.max_ver === 'number' && Number.isFinite(row.max_ver) ? row.max_ver : 0
+          const maxVer = nonNegInt(row?.max_ver) ?? 0
           associationParamVersion = associationParamVersion === null ? maxVer : Math.max(associationParamVersion, maxVer)
         }
         if (hasTable(db, 'assoc_param_profile_events')) {
@@ -1296,27 +1320,46 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
         if (hasTable(db, 'adoptions') && !hasTable(db, 'entries') && !hasColumn(db, 'adoptions', 'parent_plan_id')) {
           sawCreationAdoptions = true
           const hasCertJson = hasColumn(db, 'adoptions', 'certificate_json')
-          const rows = db.prepare(
-            hasCertJson
-              ? 'SELECT plan_id, status, certificate_json FROM adoptions'
-              : 'SELECT plan_id, status FROM adoptions',
-          ).all() as Array<{
+          const hasReceiptJson = hasColumn(db, 'adoptions', 'receipt_json')
+          const cols = [
+            'plan_id',
+            'status',
+            ...(hasCertJson ? ['certificate_json'] : []),
+            ...(hasReceiptJson ? ['receipt_json'] : []),
+          ]
+          const rows = db.prepare(`SELECT ${cols.join(', ')} FROM adoptions`).all() as Array<{
             plan_id?: string
             status?: string
             certificate_json?: string
+            receipt_json?: string
           }>
           for (const row of rows) {
             if (typeof row.plan_id !== 'string') continue
             const cert = parseJsonObject(row.certificate_json)
+            const receipt = parseJsonObject(row.receipt_json)
             const planObj = cert.plan && typeof cert.plan === 'object' && !Array.isArray(cert.plan)
               ? cert.plan as Record<string, unknown>
               : undefined
-            const name = typeof planObj?.name === 'string' && planObj.name.trim().length > 0
+            const rawName = typeof planObj?.name === 'string' && planObj.name.trim().length > 0
               ? planObj.name.trim()
-              : row.plan_id
-            const ver = typeof planObj?.version === 'string' && planObj.version.trim().length > 0
-              ? planObj.version.trim()
-              : 'v1'
+              : typeof cert.packageName === 'string' && cert.packageName.trim().length > 0
+                ? cert.packageName.trim()
+                : typeof cert.pluginName === 'string' && cert.pluginName.trim().length > 0
+                  ? cert.pluginName.trim()
+                  : typeof cert.name === 'string' && cert.name.trim().length > 0
+                    ? cert.name.trim()
+                    : row.plan_id
+            const name = boundNonEmptyString(rawName, 200) ?? 'evolved-capability'
+            const rawVer = typeof receipt.version === 'string' && receipt.version.trim().length > 0
+              ? receipt.version.trim()
+              : typeof planObj?.version === 'string' && planObj.version.trim().length > 0
+                ? planObj.version.trim()
+                : typeof cert.version === 'string' && cert.version.trim().length > 0
+                  ? cert.version.trim()
+                  : typeof cert.pluginVersion === 'string' && cert.pluginVersion.trim().length > 0
+                    ? cert.pluginVersion.trim()
+                    : 'v1'
+            const ver = boundNonEmptyString(rawVer, 128) ?? null
             const enabled = row.status === 'active'
             const entry: MutableEvolvedEntry = {
               name,
@@ -1400,13 +1443,16 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
             : null
           const parentEntry = parentPlanId ? evolvedByPlanId.get(parentPlanId) : undefined
           if (parentEntry) {
-            if (revVersion !== null) parentEntry.version = revVersion
+            if (revVersion !== null && (parentEntry.version === null || /^v\d+$/u.test(parentEntry.version))) {
+              parentEntry.version = revVersion
+            }
             if (currentStatus === 'active') parentEntry.enabled = true
             upsertEvolvedByName(parentEntry.name, parentEntry)
           } else {
-            const name = typeof row.name === 'string' && row.name.trim().length > 0
+            const rawName = typeof row.name === 'string' && row.name.trim().length > 0
               ? row.name.trim()
               : (parentPlanId ?? row.entry_id ?? 'evolved-capability')
+            const name = boundNonEmptyString(rawName, 200) ?? 'evolved-capability'
             upsertEvolvedByName(name, {
               name,
               version: revVersion ?? 'v1',
@@ -1457,6 +1503,14 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
           }
         }
 
+        const activatedActIds = new Set<string>()
+        if (hasActivationPlans) {
+          const actStatusRows = db.prepare("SELECT id FROM activation_plans WHERE status = 'activated'").all() as Array<{ id?: string }>
+          for (const row of actStatusRows) {
+            if (typeof row.id === 'string') activatedActIds.add(row.id)
+          }
+        }
+
         if (hasSourcePlans) {
           sawControlSourcePlans = true
           const hasMode = hasColumn(db, 'source_plans', 'mode')
@@ -1484,6 +1538,17 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
               } else {
                 if (!linkedActId || !createdPlanIds.has(linkedActId)) {
                   createdPlanIds.add(linkedActId ?? sp.id)
+                }
+                const pkgName = boundNonEmptyString(sp.plugin_name, 200)
+                if (pkgName !== undefined) {
+                  const existing = evolvedByName.get(pkgName)
+                  const isActEnabled = activatedActIds.has(linkedActId ?? sp.id)
+                  upsertEvolvedByName(pkgName, {
+                    name: pkgName,
+                    version: existing?.version ?? null,
+                    enabled: existing?.enabled === true || isActEnabled,
+                    installKind: 'adopted',
+                  })
                 }
               }
               if (!hasSourceAdoptions || !linkedSourceIds.has(sp.id)) {
@@ -1554,10 +1619,13 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
                 return ps?.disabled === true || ps?.configEnabled === false
               })
             const enabled = act.status === 'activated' && !watchClosedByPlan.has(act.id) && !patchDisabled
+            const boundedPkgName = boundNonEmptyString(pkgName, 200)
+            if (boundedPkgName === undefined) continue
+            const boundedPkgVer = boundNonEmptyString(pkgVer, 128) ?? evolvedByName.get(boundedPkgName)?.version ?? null
             // Latest row wins for the same package name
-            evolvedByName.set(pkgName, {
-              name: pkgName,
-              version: pkgVer,
+            evolvedByName.set(boundedPkgName, {
+              name: boundedPkgName,
+              version: boundedPkgVer,
               enabled,
               installKind: 'adopted',
             })
@@ -1616,27 +1684,37 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   const core: AssistantVersionPluginEntry[] = [...coreByName.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(entry => {
+    .map((entry): AssistantVersionPluginEntry | undefined => {
+      const boundedName = boundNonEmptyString(entry.name, 200)
+      if (!boundedName) return undefined
+      const boundedVer = entry.version === null ? null : boundNonEmptyString(entry.version, 128) ?? null
       const defined = entry.enabledStates.filter((v): v is boolean => v !== undefined)
       const enabled = defined.length > 0 ? defined.some(Boolean) : undefined
       return Object.freeze({
-        name: entry.name,
-        version: entry.version,
+        name: boundedName,
+        version: boundedVer,
         kind: 'core' as const,
         installKind: entry.installKind,
         ...(enabled !== undefined ? { enabled } : {}),
       })
     })
+    .filter((entry): entry is AssistantVersionPluginEntry => entry !== undefined)
 
   const evolved: AssistantVersionPluginEntry[] = [...evolvedByName.values()]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(entry => Object.freeze({
-      name: entry.name,
-      version: entry.version,
-      kind: 'evolved' as const,
-      installKind: entry.installKind,
-      enabled: entry.enabled,
-    }))
+    .map((entry): AssistantVersionPluginEntry | undefined => {
+      const boundedName = boundNonEmptyString(entry.name, 200)
+      if (!boundedName) return undefined
+      const boundedVer = entry.version === null ? null : boundNonEmptyString(entry.version, 128) ?? null
+      return Object.freeze({
+        name: boundedName,
+        version: boundedVer,
+        kind: 'evolved' as const,
+        installKind: entry.installKind,
+        enabled: entry.enabled,
+      })
+    })
+    .filter((entry): entry is AssistantVersionPluginEntry => entry !== undefined)
 
   const coreCount = core.length
   const evolvedCount = evolved.length
@@ -1779,21 +1857,35 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     dataState = 'zero'
   }
 
-  const iterationDrivers: Array<number | null> = [
-    workItemsTotalVal,
-    growthUsageJobsTotalVal,
-    dreamingRunsVal,
-    recoveryRunsVal,
-    goalStrategyRunsVal,
-    evolutionRulesAdoptedVal,
-    associationProfileAdoptionsVal,
-    evaluationAttentionTuningAdoptionsVal,
-    evaluationLooseningDecisionsAdoptedVal,
-    selfUpgradesVal,
-  ]
+  const iterationDriversSum =
+    (workItemsTotalVal ?? 0)
+    + (growthUsageJobsTotalVal ?? 0)
+    + (dreamingRunsVal ?? 0)
+    + (recoveryRunsVal ?? 0)
+    + (goalStrategyRunsVal ?? 0)
+    + (evolutionRulesAdoptedVal ?? 0)
+    + (associationProfileAdoptionsVal ?? 0)
+    + (evaluationAttentionTuningAdoptionsVal ?? 0)
+    + (evaluationLooseningDecisionsAdoptedVal ?? 0)
+    + (selfUpgradesVal ?? 0)
   const totalIterations = dataState === 'no-data'
     ? null
-    : iterationDrivers.reduce<number>((sum, val) => sum + (val ?? 0), 0)
+    : iterationDriversSum > 0
+      ? iterationDriversSum
+      : dataState === 'data'
+        ? Math.max(
+            candidatesGeneratedVal ?? 0,
+            candidatesAdoptedVal ?? 0,
+            pluginsCreatedVal ?? 0,
+            pluginsRevisedVal ?? 0,
+            activeMemoriesVal ?? 0,
+            activePreferenceOverlaysVal ?? 0,
+            workflowCandidatesPromotedVal ?? 0,
+            skillDeploymentsVal ?? 0,
+            taskVerificationsDoneVal ?? 0,
+            1,
+          )
+        : 0
 
   const extensions: Record<string, unknown> = {}
   const installIntent = homeExists ? await readInstallIntentSafe(dshHome, canonicalHome) : undefined
@@ -1816,31 +1908,51 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     extensions.latestUpgrade = upgradeHistory.latestEntry
   }
 
+  const boundedDshHome = truncateText(dshHome, 4_096)
+  const boundedAssistantVersion = boundNonEmptyString(VERSION, 128) ?? '0.0.0'
+  const boundedBoundVersion = boundNonEmptyString(boundVersion, 128) ?? null
+  const boundedBoundStatus = boundNonEmptyString(boundStatus, 64) ?? 'unknown'
+  const boundedRunningVersion = boundNonEmptyString(runningVersion, 128) ?? null
+  const boundedProfile = boundNonEmptyString(activeProfile, 128) ?? null
+  const boundedProfiles = discoveredProfiles
+    .map(p => boundNonEmptyString(p, 128))
+    .filter((p): p is string => p !== undefined)
+    .slice(0, 64)
+  const boundedInspectedLedgers = [...inspected]
+    .sort()
+    .map(entry => boundNonEmptyString(entry, 4_096))
+    .filter((entry): entry is string => entry !== undefined)
+    .slice(0, 256)
+  const boundedDiagnostics = diagnostics
+    .map(entry => boundNonEmptyString(entry, 1_024))
+    .filter((entry): entry is string => entry !== undefined)
+    .slice(0, 128)
+
   return Object.freeze({
     schemaVersion: 1,
     protocol: 'dsh-rsi/version/v1',
     generatedAt,
-    dshHome,
+    dshHome: boundedDshHome,
     assistant: Object.freeze({
       name: 'dsh-enhanced' as const,
-      version: VERSION,
-      cliVersion: VERSION,
+      version: boundedAssistantVersion,
+      cliVersion: boundedAssistantVersion,
     }),
     host: Object.freeze({
       packageName: '@deepseek-ai/dsh' as const,
-      boundVersion,
-      boundStatus,
-      runningVersion,
+      boundVersion: boundedBoundVersion,
+      boundStatus: boundedBoundStatus,
+      runningVersion: boundedRunningVersion,
     }),
-    profile: activeProfile,
-    profiles: Object.freeze([...discoveredProfiles]),
+    profile: boundedProfile,
+    profiles: Object.freeze(boundedProfiles),
     plugins: Object.freeze({
       state: pluginsState,
       coreCount,
       evolvedCount,
       activeEvolvedCount,
-      core: Object.freeze(core),
-      evolved: Object.freeze(evolved),
+      core: Object.freeze(core.slice(0, 256)),
+      evolved: Object.freeze(evolved.slice(0, 256)),
     }),
     selfIteration: Object.freeze({
       dataState,
@@ -1870,8 +1982,8 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       backupSnapshotsCount: backupSnapshotsCountVal,
     }),
     ...(Object.keys(extensions).length > 0 ? { extensions: Object.freeze(extensions) } : {}),
-    inspectedLedgers: Object.freeze([...inspected].sort()),
-    diagnostics: Object.freeze([...diagnostics]),
+    inspectedLedgers: Object.freeze(boundedInspectedLedgers),
+    diagnostics: Object.freeze(boundedDiagnostics),
   })
 }
 

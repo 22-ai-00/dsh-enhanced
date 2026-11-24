@@ -3,7 +3,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createServer } from 'node:http'
-import { chmod, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, readdir, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
@@ -943,18 +943,44 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect(upg.targetVersion).toBe('0.1.84')
     })
 
-    test('T2-F26-02: Read-only SQLite safety enforces symlink boundary, mode=ro&immutable=1, zero sidecars, corrupt DB isolation & dataState=zero', async () => {
+    test('T2-F26-02: Read-only SQLite safety enforces symlink & hardlink boundaries, writable/0555 zero sidecars, fail-closed uncheckpointed 0555 WAL, corrupt DB isolation & dataState=zero', async () => {
       const ws = await workspaces.create('f26-sqlite-sec-')
       const cli = await loadDshRsiCli()
       const ownerMod = await loadOwnerConsole()
+      const deliveryVerMod = await loadPackageModule('assistant-delivery/version-query')
       const collectCli = getExportFn<(opts: Record<string, unknown>) => Promise<{
-        selfIteration: { dataState: string; totalIterations: number | null; workItemsTotal: number | null; dreamingRuns: number | null }
+        selfIteration: {
+          dataState: string
+          totalIterations: number | null
+          workItemsTotal: number | null
+          growthUsageJobsTotal: number | null
+          dreamingRuns: number | null
+          evolutionRulesAdopted: number | null
+        }
         diagnostics?: readonly string[]
       }>>(cli, 'collectVersionReport')
       const collectOwner = getExportFn<(ctx: unknown, opts?: Record<string, unknown>) => Promise<{
-        selfIteration: { dataState: string; totalIterations: number | null; workItemsTotal: number | null; dreamingRuns: number | null }
+        selfIteration: {
+          dataState: string
+          totalIterations: number | null
+          workItemsTotal: number | null
+          growthUsageJobsTotal: number | null
+          dreamingRuns: number | null
+          evolutionRulesAdopted: number | null
+        }
         diagnostics?: readonly string[]
       }>>(ownerMod, 'collectOwnerConsoleVersionInfo')
+      const collectDelivery = getExportFn<(opts: Record<string, unknown>) => Promise<{
+        selfIteration: {
+          dataState: string
+          totalIterations: number | null
+          workItemsTotal: number | null
+          growthUsageJobsTotal: number | null
+          dreamingRuns: number | null
+          evolutionRulesAdopted: number | null
+        }
+        diagnostics?: readonly string[]
+      }>>(deliveryVerMod, 'collectDeliveryVersionReport')
 
       // 1. Empty tables -> dataState='zero' & totalIterations=0
       const zeroHome = join(ws.root, 'zero-home')
@@ -966,13 +992,20 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       expect(zeroCli.selfIteration.dataState).toBe('zero')
       expect(zeroCli.selfIteration.totalIterations).toBe(0)
 
-      // 2. Symlink escape, chmod 0555 WAL DB (no -wal/-shm sidecars), and corrupt sibling DB
+      // 2. Cleanly stopped writable (0o700) WAL DB -> zero -wal/-shm sidecars & unchanged mtimeMs across ALL 3 collectors
       const wiDir = join(ws.dshHome, 'assistant-work-items')
       await mkdir(wiDir, { recursive: true, mode: 0o700 })
-      const wiDb = new DatabaseSync(join(wiDir, 'state.sqlite'))
+      const wiDbPath = join(wiDir, 'state.sqlite')
+      const wiDb = new DatabaseSync(wiDbPath)
       wiDb.exec("PRAGMA journal_mode = WAL; CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled');")
       wiDb.close()
+      await unlink(`${wiDbPath}-wal`).catch(() => {})
+      await unlink(`${wiDbPath}-shm`).catch(() => {})
+      const wiFilesBefore = (await readdir(wiDir)).sort()
+      expect(wiFilesBefore).toEqual(['state.sqlite'])
+      const wiMtimeBefore = (await stat(wiDbPath)).mtimeMs
 
+      // 3. Symlink escape, hardlink escape (nlink === 2), 0555 dir with uncheckpointed non-empty -wal, and corrupt DB
       const outsideDb = join(ws.root, 'outside-evil.sqlite')
       const outConn = new DatabaseSync(outsideDb)
       outConn.exec("CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('evil', 'completed');")
@@ -980,25 +1013,66 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
       await mkdir(join(ws.dshHome, 'assistant-dreaming'), { recursive: true, mode: 0o700 })
       await symlink(outsideDb, join(ws.dshHome, 'assistant-dreaming', 'state.sqlite'))
 
+      const outsideHardlinkDb = join(ws.root, 'outside-hardlink.sqlite')
+      const hlConn = new DatabaseSync(outsideHardlinkDb)
+      hlConn.exec("CREATE TABLE evolution_rules (id TEXT PRIMARY KEY, status TEXT) STRICT; INSERT INTO evolution_rules VALUES ('hl-1', 'active');")
+      hlConn.close()
+      await mkdir(join(ws.dshHome, 'assistant-evolution'), { recursive: true, mode: 0o700 })
+      await link(outsideHardlinkDb, join(ws.dshHome, 'assistant-evolution', 'evolution.sqlite'))
+
+      const gdDir = join(ws.dshHome, 'assistant-growth-driver')
+      await mkdir(gdDir, { recursive: true, mode: 0o700 })
+      const gdDbPath = join(gdDir, 'usage.sqlite')
+      const gdConn = new DatabaseSync(gdDbPath)
+      gdConn.exec("CREATE TABLE usage_jobs (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO usage_jobs VALUES ('u1', 'reviewed');")
+      gdConn.close()
+      await writeFile(`${gdDbPath}-wal`, 'uncheckpointed-wal-payload', 'utf8')
+
       await mkdir(join(ws.dshHome, 'assistant-recovery'), { recursive: true, mode: 0o700 })
       await writeFile(join(ws.dshHome, 'assistant-recovery', 'recovery.sqlite'), 'not-a-valid-sqlite-file', { mode: 0o600 })
 
-      const wiFilesBefore = (await readdir(wiDir)).sort()
-      await chmod(wiDir, 0o555)
+      await chmod(gdDir, 0o555)
       try {
-        const cliReport = await collectCli({ dshHome: ws.dshHome })
-        expect(cliReport.selfIteration.workItemsTotal).toBe(1)
-        expect(cliReport.selfIteration.dreamingRuns).toBeNull()
-        expect((cliReport.diagnostics ?? []).length).toBeGreaterThanOrEqual(2)
+        // First pass: writable (0o700) stopped WAL wiDir across all 3 collectors
+        const cliWritable = await collectCli({ dshHome: ws.dshHome })
+        expect((await readdir(wiDir)).sort()).toEqual(['state.sqlite'])
+        expect((await stat(wiDbPath)).mtimeMs).toBe(wiMtimeBefore)
 
-        const ctx = harness.createContext()
-        harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, name: 'web' })
-        const ownerReport = await collectOwner(ctx)
-        expect(ownerReport.selfIteration.workItemsTotal).toBe(1)
-        expect(ownerReport.selfIteration.dreamingRuns).toBeNull()
-        expect((ownerReport.diagnostics ?? []).length).toBeGreaterThanOrEqual(2)
+        const ctxWritable = harness.createContext()
+        harness.provideMockService(ctxWritable, 'profileContext', { home: ws.dshHome, name: 'web' })
+        const ownerWritable = await collectOwner(ctxWritable)
+        expect((await readdir(wiDir)).sort()).toEqual(['state.sqlite'])
+        expect((await stat(wiDbPath)).mtimeMs).toBe(wiMtimeBefore)
+
+        const deliveryWritable = await collectDelivery({ ctx: ctxWritable, dshHome: ws.dshHome, profile: 'web' })
+        expect((await readdir(wiDir)).sort()).toEqual(['state.sqlite'])
+        expect((await stat(wiDbPath)).mtimeMs).toBe(wiMtimeBefore)
+
+        for (const rep of [cliWritable, ownerWritable, deliveryWritable]) {
+          expect(rep.selfIteration.workItemsTotal).toBe(1)
+          expect(rep.selfIteration.growthUsageJobsTotal).toBeNull()
+          expect(rep.selfIteration.dreamingRuns).toBeNull()
+          expect(rep.selfIteration.evolutionRulesAdopted).toBeNull()
+          expect((rep.diagnostics ?? []).length).toBeGreaterThanOrEqual(4)
+        }
+
+        // Second pass: 0555 clean WAL wiDir across all 3 collectors
+        await chmod(wiDir, 0o555)
+        try {
+          const cliRo = await collectCli({ dshHome: ws.dshHome })
+          const ownerRo = await collectOwner(ctxWritable)
+          const deliveryRo = await collectDelivery({ ctx: ctxWritable, dshHome: ws.dshHome, profile: 'web' })
+          for (const rep of [cliRo, ownerRo, deliveryRo]) {
+            expect(rep.selfIteration.workItemsTotal).toBe(1)
+            expect(rep.selfIteration.growthUsageJobsTotal).toBeNull()
+            expect(rep.selfIteration.dreamingRuns).toBeNull()
+            expect(rep.selfIteration.evolutionRulesAdopted).toBeNull()
+          }
+        } finally {
+          await chmod(wiDir, 0o700)
+        }
       } finally {
-        await chmod(wiDir, 0o700)
+        await chmod(gdDir, 0o700)
       }
       const wiFilesAfter = (await readdir(wiDir)).sort()
       expect(wiFilesAfter).toEqual(wiFilesBefore)
@@ -1077,10 +1151,48 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
         ownerMod,
         'collectOwnerConsoleVersionInfo',
       )
+      const cliMod = await loadDshRsiCli()
+      const collectCli = getExportFn<(opts?: Record<string, unknown>) => Promise<Record<string, unknown>>>(
+        cliMod,
+        'collectVersionReport',
+      )
+      const deliveryVerMod = await loadPackageModule('assistant-delivery/version-query')
+      const collectDelivery = getExportFn<(opts: Record<string, unknown>) => Promise<Record<string, unknown>>>(
+        deliveryVerMod,
+        'collectDeliveryVersionReport',
+      )
+
+      // Seed >256 plugins & >128 diagnostics on disk so CLI & Delivery also exercise wire-contract bounding
+      for (let i = 0; i < 260; i += 1) {
+        const pDir = join(profileDir, 'node_modules', '@dsh-enhanced', `bound-plug-${String(i).padStart(3, '0')}`)
+        await mkdir(pDir, { recursive: true, mode: 0o700 })
+        await writeFile(
+          join(pDir, 'package.json'),
+          JSON.stringify({ name: `@dsh-enhanced/bound-plug-${String(i).padStart(3, '0')}`, version: `0.1.${i}` }),
+          'utf8',
+        )
+      }
+      await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true }), 'utf8')
+      const longEvolvedName = `@dsh-enhanced/${'evolved-long-'.repeat(20)}`
+      await mkdir(join(ws.dshHome, 'plugin-control-plane'), { recursive: true, mode: 0o700 })
+      const cpDb = new DatabaseSync(join(ws.dshHome, 'plugin-control-plane', 'control.sqlite'))
+      cpDb.exec(`CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-long', '${longEvolvedName}', 'create', 'release-complete');`)
+      cpDb.close()
+
       const boundedReport = await collectOwner(ctxBounds, { now: -10 })
+      const boundedCli = await collectCli({ dshHome: ws.dshHome, profile: 'web', now: -10, runningVersion: null })
+      const boundedDelivery = await collectDelivery({
+        ctx: ctxBounds,
+        dshHome: ws.dshHome,
+        profile: 'web',
+        now: -10,
+        extraDiagnostics: Array.from({ length: 135 }, (_, idx) => `extra-${idx}-${'z'.repeat(1_200)}`),
+      })
       const typertCodec = TYPERT.invocations.find(i => i.method === 'versionInfo')!.result.create()
-      expect(ReportSchema.safeParse(boundedReport).success).toBe(true)
-      expect(typertCodec.safeParse(boundedReport).success).toBe(true)
+      for (const rep of [boundedReport, boundedCli, boundedDelivery]) {
+        expect(ReportSchema.safeParse(rep).success).toBe(true)
+        expect(typertCodec.safeParse(rep).success).toBe(true)
+      }
     })
 
     test('T2-F26-04: assistant-delivery & lark-channel reject invalid /version forms, attachments & unauthorized principals', async () => {

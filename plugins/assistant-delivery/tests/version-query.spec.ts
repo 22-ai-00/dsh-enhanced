@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { DatabaseSync } from 'node:sqlite'
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -296,12 +296,12 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     expect(s.skillDeployments).toBe(1)
     expect(s.selfUpgrades).toBe(2)
     expect(s.backupSnapshotsCount).toBe(2)
-    expect(s.totalIterations).toBe(19)
+    expect(s.totalIterations).toBe(15)
 
     const summary = formatAssistantVersionSummary(report)
     expect(summary).toContain('@dsh-enhanced/evolved-tool-a')
     expect(summary).toContain('0.2.2-rc.5')
-    expect(summary).toContain('累计自迭代次数：19')
+    expect(summary).toContain('累计自迭代次数：15')
   })
 
   test('falls back to Cordis health() and assistantPreferenceLearning slot when SQLite files are absent', async () => {
@@ -332,5 +332,116 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     expect(report.selfIteration.activePreferenceOverlays).toBe(2)
     expect(report.selfIteration.workflowCandidatesPromoted).toBe(2)
     expect(report.selfIteration.rollbacks).toBe(2)
+  })
+
+  test('reads stopped writable WAL DBs with zero sidecars, fails closed on 0555 uncheckpointed WAL, rejects hardlinks, supports symlinked local plugins & schema bounds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'delivery-version-wal-sec-'))
+    roots.push(root)
+    const home = join(root, 'dsh-home')
+    const outsideDir = join(root, 'outside')
+    const localCheckout = join(root, 'local-checkout')
+    const wiDir = join(home, 'assistant-work-items')
+    const gdDir = join(home, 'assistant-growth-driver')
+    const liveDir = join(home, 'assistant-dreaming')
+    const roWalDir = join(home, 'assistant-recovery')
+    const hlDir = join(home, 'assistant-evolution')
+    const cpDir = join(home, 'plugin-control-plane')
+    const scopeDir = join(home, 'profiles', 'lark', 'node_modules', '@dsh-enhanced')
+    for (const d of [outsideDir, localCheckout, wiDir, gdDir, liveDir, roWalDir, hlDir, cpDir, scopeDir]) {
+      await mkdir(d, { recursive: true })
+    }
+
+    // 1. Cleanly stopped writable (0o700) WAL DB (no sidecars)
+    const wiDbPath = join(wiDir, 'state.sqlite')
+    const wiDb = new DatabaseSync(wiDbPath)
+    wiDb.exec("PRAGMA journal_mode = WAL; CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled');")
+    wiDb.close()
+    await unlink(`${wiDbPath}-wal`).catch(() => {})
+    await unlink(`${wiDbPath}-shm`).catch(() => {})
+    await chmod(wiDir, 0o700)
+    const wiMtimeBefore = (await stat(wiDbPath)).mtimeMs
+
+    // 2. Cleanly stopped writable (0o700) WAL DB with 0-byte -wal and no -shm
+    const gdDbPath = join(gdDir, 'usage.sqlite')
+    const gdDb = new DatabaseSync(gdDbPath)
+    gdDb.exec("PRAGMA journal_mode = WAL; CREATE TABLE usage_jobs (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO usage_jobs VALUES ('u1', 'reviewed');")
+    gdDb.close()
+    await unlink(`${gdDbPath}-shm`).catch(() => {})
+    await writeFile(`${gdDbPath}-wal`, '', 'utf8')
+    await chmod(gdDir, 0o700)
+
+    // 3. Live uncheckpointed WAL DB
+    const liveDbPath = join(liveDir, 'state.sqlite')
+    const liveWriter = new DatabaseSync(liveDbPath)
+    liveWriter.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
+
+    // 4. 0555 dir with uncheckpointed non-empty -wal -> must fail closed (null)
+    const roWalDbPath = join(roWalDir, 'state.sqlite')
+    const roDb = new DatabaseSync(roWalDbPath)
+    roDb.exec("CREATE TABLE recovery_runs (id TEXT PRIMARY KEY, status TEXT) STRICT; INSERT INTO recovery_runs VALUES ('r1', 'succeeded');")
+    roDb.close()
+    await writeFile(`${roWalDbPath}-wal`, 'uncheckpointed-frames', 'utf8')
+    await chmod(roWalDir, 0o555)
+
+    // 5. Hardlink escape (.sqlite with nlink === 2) -> must fail closed (null)
+    const outsideDb = join(outsideDir, 'evil.sqlite')
+    const outConn = new DatabaseSync(outsideDb)
+    outConn.exec("CREATE TABLE evolution_rules (id TEXT PRIMARY KEY, status TEXT) STRICT; INSERT INTO evolution_rules VALUES ('er1', 'active');")
+    outConn.close()
+    await link(outsideDb, join(hlDir, 'evolution.sqlite'))
+
+    // 6. prepared-revise + cert.plan.name + receipt_json
+    const cpDb = new DatabaseSync(join(cpDir, 'control.sqlite'))
+    cpDb.exec("CREATE TABLE source_plans (id TEXT PRIMARY KEY, mode TEXT NOT NULL, status TEXT NOT NULL, plugin_name TEXT NOT NULL) STRICT; INSERT INTO source_plans VALUES ('sp-rev', 'prepared-revise', 'release-complete', '@dsh-enhanced/assistant-delivery');")
+    cpDb.close()
+    const caDb = new DatabaseSync(join(cpDir, 'creation-adoptions.sqlite'))
+    caDb.exec(`CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT NOT NULL, certificate_json TEXT NOT NULL, receipt_json TEXT NOT NULL) STRICT; INSERT INTO adoptions VALUES ('sp-c1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-from-plan"}}', '{"version":"0.2.0"}');`)
+    caDb.close()
+
+    // 7. Symlinked local package in node_modules + >256 plugins + oversized names/diagnostics + negative now
+    await writeFile(join(localCheckout, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/local-symlinked', version: '0.1.83' }), 'utf8')
+    await symlink(localCheckout, join(scopeDir, 'local-symlinked'))
+    for (let i = 0; i < 260; i += 1) {
+      const pDir = join(scopeDir, `plug-${String(i).padStart(3, '0')}`)
+      await mkdir(pDir, { recursive: true })
+      await writeFile(join(pDir, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/plug-${String(i).padStart(3, '0')}`, version: '0.1.83' }), 'utf8')
+    }
+    const longPluginName = `@dsh-enhanced/${'x'.repeat(210)}`
+    const ctx = new Context()
+    ctx.provide('loader' as never, {
+      entries: () => [
+        { options: { name: longPluginName } },
+      ],
+    } as never)
+
+    try {
+      const report = await collectDeliveryVersionReport({
+        ctx,
+        dshHome: home,
+        profile: 'lark',
+        now: -5,
+        extraDiagnostics: Array.from({ length: 135 }, (_, idx) => `diag-${idx}-${'d'.repeat(1_200)}`),
+      })
+      expect(report.generatedAt).toBeGreaterThanOrEqual(0)
+      expect(await readdir(wiDir)).toEqual(['state.sqlite'])
+      expect((await stat(wiDbPath)).mtimeMs).toBe(wiMtimeBefore)
+      expect((await readdir(gdDir)).sort()).toEqual(['usage.sqlite', 'usage.sqlite-wal'])
+      expect(report.selfIteration.workItemsTotal).toBe(1)
+      expect(report.selfIteration.growthUsageJobsTotal).toBe(1)
+      expect(report.selfIteration.dreamingRuns).toBe(1)
+      expect(report.selfIteration.recoveryRuns).toBeNull()
+      expect(report.selfIteration.evolutionRulesAdopted).toBeNull()
+      expect(report.selfIteration.pluginsRevised).toBe(1)
+      expect(report.plugins.coreCount).toBeGreaterThan(256)
+      expect(report.plugins.core.length).toBeLessThanOrEqual(256)
+      expect(report.plugins.core.every(p => p.name.length >= 1 && p.name.length <= 200)).toBe(true)
+      expect(report.plugins.core.some(p => p.name === '@dsh-enhanced/local-symlinked' && p.installKind === 'local' && p.version === '0.1.83')).toBe(true)
+      expect(report.plugins.evolved.find(p => p.name === '@dsh-enhanced/evolved-from-plan')).toMatchObject({ version: '0.2.0', enabled: true })
+      expect(report.diagnostics!.length).toBeLessThanOrEqual(128)
+      expect(report.diagnostics!.every(d => d.length >= 1 && d.length <= 1024)).toBe(true)
+    } finally {
+      liveWriter.close()
+      await chmod(roWalDir, 0o700).catch(() => {})
+    }
   })
 })
