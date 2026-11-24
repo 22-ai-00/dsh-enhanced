@@ -15,7 +15,8 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 9
+const defaultSchemaVersion = 9
+const maxSchemaVersion = 10
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -70,7 +71,28 @@ type GrantRow = { id: string; digest: string; revision: number; expires_at: numb
 type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string | null; backend_kind: IsolationJob['backend']; linux_contract_json: string | null; linux_intent_json: string | null; linux_resources_json: string | null; native_resource_id: string | null; native_nonce: string | null; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null; migrated: number }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
-function open(path: string): DatabaseSync {
+function ensureSchema10(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE;')
+  try {
+    const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+    if (version >= 10) { database.exec('COMMIT'); return }
+    if (version !== 9) fail('schema')
+    database.exec(`
+      CREATE TABLE isolation_jobs_v10 (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT UNIQUE, backend_kind TEXT NOT NULL CHECK(backend_kind IN ('docker','macos-seatbelt','linux-native','windows-job')), native_resource_id TEXT UNIQUE, native_nonce TEXT, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, linux_contract_json TEXT, linux_intent_json TEXT, linux_resources_json TEXT, migrated INTEGER NOT NULL DEFAULT 0 CHECK(migrated IN (0,1)), CHECK((backend_kind='docker' AND container_name IS NOT NULL AND native_resource_id IS NULL AND native_nonce IS NULL) OR (backend_kind='macos-seatbelt' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib=0 AND reserved_workspace_inodes=0 AND linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL) OR (backend_kind='windows-job' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib>=0 AND reserved_workspace_inodes=0 AND linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL) OR (backend_kind='linux-native' AND container_name IS NULL AND native_resource_id IS NOT NULL AND native_nonce IS NOT NULL AND reserved_memory_mib>0 AND reserved_workspace_inodes>0 AND reserved_storage_bytes>0 AND linux_contract_json IS NOT NULL)), CHECK(backend_kind='linux-native' OR (linux_contract_json IS NULL AND linux_intent_json IS NULL AND linux_resources_json IS NULL)), UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      INSERT INTO isolation_jobs_v10 (id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json,linux_contract_json,linux_intent_json,linux_resources_json,migrated) SELECT id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,backend_kind,native_resource_id,native_nonce,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,status,version,created_at,updated_at,result_json,dispatch_attempted,creation_witness_json,artifact_binding_json,linux_contract_json,linux_intent_json,linux_resources_json,migrated FROM isolation_jobs;
+      DROP TABLE isolation_jobs; ALTER TABLE isolation_jobs_v10 RENAME TO isolation_jobs;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      CREATE INDEX IF NOT EXISTS isolation_artifact_contract ON isolation_jobs(json_extract(artifact_binding_json, '$.admission.contractId')) WHERE artifact_binding_json IS NOT NULL;
+      UPDATE schema_meta SET value='10' WHERE key='schema-version'; PRAGMA user_version=10; COMMIT;`)
+  } catch (error) {
+    try { database.exec('ROLLBACK') } catch {}
+    throw error
+  }
+}
+
+function open(path: string, targetSchema: 9 | 10 = defaultSchemaVersion): DatabaseSync {
+  if (targetSchema !== 9 && targetSchema !== 10) fail('invalid-input', 'unsupported target ledger schema')
   if (path !== ':memory:' && !isAbsolute(path)) fail('invalid-path', 'isolation ledger path must be absolute')
   if (path !== ':memory:') { mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); chmodSync(dirname(path), 0o700) }
   const database = new DatabaseSync(path, { enableForeignKeyConstraints: true })
@@ -81,7 +103,7 @@ function open(path: string): DatabaseSync {
       if (row.journal_mode.toLowerCase() !== 'wal') fail('schema', 'isolation ledger refused WAL')
     }
     const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-    if (version > schemaVersion) fail('schema-too-new')
+    if (version > maxSchemaVersion) fail('schema-too-new')
     if (version === 0) database.exec(`PRAGMA auto_vacuum = INCREMENTAL; VACUUM; BEGIN IMMEDIATE;
       CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
       INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
@@ -129,9 +151,11 @@ function open(path: string): DatabaseSync {
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       UPDATE schema_meta SET value='9' WHERE key='schema-version'; PRAGMA user_version=9; COMMIT;`)
     database.exec("CREATE INDEX IF NOT EXISTS isolation_artifact_contract ON isolation_jobs(json_extract(artifact_binding_json, '$.admission.contractId')) WHERE artifact_binding_json IS NOT NULL")
-    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, schemaVersion].includes(version)) fail('schema')
+    if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(version)) fail('schema')
+    if (targetSchema === 10 && version < 10) ensureSchema10(database)
+    const currentVersion = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
     const marker = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-    if (marker?.value !== '9' || (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 9) fail('schema')
+    if ((currentVersion !== 9 && currentVersion !== 10) || (targetSchema === 10 && currentVersion !== 10) || marker?.value !== String(currentVersion)) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -141,7 +165,9 @@ function open(path: string): DatabaseSync {
 export class IsolationLedger {
   readonly #database: DatabaseSync
   readonly #now: () => number
-  constructor(path: string, { now = Date.now }: { now?: () => number } = {}) { this.#database = open(path); this.#now = now }
+  constructor(path: string, { now = Date.now, schemaVersion = 9 }: { now?: () => number; schemaVersion?: 9 | 10 } = {}) {
+    this.#database = open(path, schemaVersion); this.#now = now
+  }
   #transaction<T>(operation: () => T, rolledBack?: (error: unknown) => void): T {
     this.#database.exec('BEGIN IMMEDIATE')
     try { const value = operation(); this.#database.exec('COMMIT'); return value }
@@ -171,6 +197,7 @@ export class IsolationLedger {
     if (!text(row.id) || !text(row.grant_id) || !safePositive(row.grant_revision) || !text(row.session_id) || !text(row.idempotency_key) || !text(row.request_digest) || !positiveTime(row.deadline) || !safePositive(row.reserved_duration_ms) || !safeTime(row.reserved_memory_mib) || !safeTime(row.reserved_workspace_inodes) || !safeTime(row.reserved_storage_bytes) || !safePositive(row.version) || !safeTime(row.created_at) || !safeTime(row.updated_at) || row.updated_at < row.created_at || !['prepared', 'running', 'succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(row.status)) fail('schema')
     if (!((row.backend_kind === 'docker' && text(row.container_name) && row.native_resource_id === null && row.native_nonce === null)
       || (row.backend_kind === 'macos-seatbelt' && row.container_name === null && text(row.native_resource_id) && text(row.native_nonce) && row.reserved_memory_mib === 0 && row.reserved_workspace_inodes === 0)
+      || (row.backend_kind === 'windows-job' && row.container_name === null && text(row.native_resource_id) && text(row.native_nonce) && row.reserved_memory_mib >= 0 && row.reserved_workspace_inodes === 0)
       || (row.backend_kind === 'linux-native' && row.container_name === null && row.native_resource_id === `linux-${row.id}` && /^[a-f0-9]{32}$/u.test(row.native_nonce ?? '') && row.reserved_memory_mib > 0 && row.reserved_workspace_inodes > 0 && row.reserved_storage_bytes > 0))) fail('schema')
     if (![0, 1].includes(row.dispatch_attempted) || ![0, 1].includes(row.migrated)) fail('schema')
     let binding: IsolationArtifactBinding | undefined
@@ -232,7 +259,7 @@ export class IsolationLedger {
     })
   }
   prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget; artifactBinding?: IsolationArtifactBinding; backend: IsolationJob['backend']; linuxContract?: LinuxExecutionContract }): { job: IsolationJob; created: boolean } {
-    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10, 11, 12, 13].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget', 'artifactBinding', 'backend', 'linuxContract']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs)) || (input.backend !== 'macos-seatbelt' && input.backend !== 'linux-native') || (input.backend === 'macos-seatbelt' && input.resourceReservation !== undefined)) fail('invalid-input')
+    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10, 11, 12, 13].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget', 'artifactBinding', 'backend', 'linuxContract']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs)) || (input.backend !== 'macos-seatbelt' && input.backend !== 'linux-native' && input.backend !== 'windows-job') || (input.backend === 'macos-seatbelt' && input.resourceReservation !== undefined)) fail('invalid-input')
     let linuxContract: LinuxExecutionContract | undefined
     if (input.backend === 'linux-native') {
       try { linuxContract = validateLinuxExecutionContract(input.linuxContract) } catch { fail('invalid-input', 'Linux contract required') }
@@ -248,11 +275,16 @@ export class IsolationLedger {
     } else if (input.linuxContract !== undefined) fail('invalid-input')
     const binding = input.artifactBinding === undefined ? undefined : artifactBinding(input.artifactBinding)
     const reservation = input.resourceReservation === undefined ? undefined : input.resourceReservation
-    if (reservation !== undefined && (!reservation || typeof reservation !== 'object' || Object.keys(reservation).length !== 4 || !onlyKeys(reservation, ['memoryMiB', 'workspaceInodes', 'maxMemoryMiB', 'maxWorkspaceInodes']) || !safePositive(reservation.memoryMiB) || !safePositive(reservation.workspaceInodes) || !safePositive(reservation.maxMemoryMiB) || !safePositive(reservation.maxWorkspaceInodes) || reservation.memoryMiB > reservation.maxMemoryMiB || reservation.workspaceInodes > reservation.maxWorkspaceInodes)) fail('invalid-input', 'invalid resource reservation')
+    if (reservation !== undefined && (!reservation || typeof reservation !== 'object' || Object.keys(reservation).length !== 4 || !onlyKeys(reservation, ['memoryMiB', 'workspaceInodes', 'maxMemoryMiB', 'maxWorkspaceInodes']) || !safePositive(reservation.memoryMiB)
+      || (input.backend === 'windows-job' ? reservation.workspaceInodes !== 0 : !safePositive(reservation.workspaceInodes))
+      || !safePositive(reservation.maxMemoryMiB)
+      || (input.backend === 'windows-job' ? !safeTime(reservation.maxWorkspaceInodes) : !safePositive(reservation.maxWorkspaceInodes))
+      || reservation.memoryMiB > reservation.maxMemoryMiB || reservation.workspaceInodes > reservation.maxWorkspaceInodes)) fail('invalid-input', 'invalid resource reservation')
     const storage = input.storageBudget
     if (storage !== undefined && (!storage || typeof storage !== 'object' || !onlyKeys(storage, ['maxStateBytes', 'maxJobRecords', 'reservedBytes', 'observation']) || ![3, 4].includes(Object.keys(storage).length) || !safePositive(storage.maxStateBytes) || !safePositive(storage.maxJobRecords) || !safePositive(storage.reservedBytes) || (storage.observation !== undefined && (!storage.observation || typeof storage.observation !== 'object' || Object.keys(storage.observation).length !== 2 || !onlyKeys(storage.observation, ['bytes', 'observedAt']) || !safeTime(storage.observation.bytes) || !safeTime(storage.observation.observedAt))))) fail('invalid-input', 'invalid storage budget')
     const who = identity(input.identity); const controller = this.#authority(input.authority)
     if (input.backend === 'linux-native' && !controller) fail('invalid-input', 'Linux writes require controller authority')
+    if (input.backend === 'windows-job') ensureSchema10(this.#database)
     let refusal: Error | undefined, insertAttempted = false
     function refuse(code: IsolationLedgerErrorCode, message?: string): never { refusal = new IsolationLedgerError(code, message); throw refusal }
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const existing = this.#database.prepare('SELECT * FROM isolation_jobs WHERE principal_digest=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=? AND session_id=? AND grant_id=? AND idempotency_key=?').get(who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.grantId, input.idempotencyKey) as JobRow | undefined
@@ -269,7 +301,7 @@ export class IsolationLedger {
       if (usage.runs >= current.max_runs || input.durationMs > current.max_total_duration_ms || usage.duration > current.max_total_duration_ms - input.durationMs) refuse('unauthorized', 'grant budget exhausted')
       if (reservation) {
         const occupied = "migrated=0 AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0))"
-        const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND (reserved_memory_mib = 0 OR reserved_workspace_inodes = 0)`).get() as { count: number }
+        const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND (reserved_memory_mib = 0 OR (backend_kind != 'windows-job' AND reserved_workspace_inodes = 0))`).get() as { count: number }
         if (!safeTime(legacy.count)) fail('unauthorized', 'active legacy job has no resource reservation')
         if (legacy.count > 0) refuse('unauthorized', 'active legacy job has no resource reservation')
         const resources = this.#database.prepare(`SELECT COALESCE(SUM(reserved_memory_mib), 0) AS memory, COALESCE(SUM(reserved_workspace_inodes), 0) AS inodes FROM isolation_jobs WHERE ${occupied}`).get() as { memory: number; inodes: number }
@@ -399,7 +431,7 @@ export class IsolationLedger {
       const job = this.#job(jobId)
       if (!job) fail('not-found')
       if (job.version !== expectedVersion) fail('conflict')
-      if (job.backend !== 'macos-seatbelt' || !job.dispatchAttempted || job.requestDigest !== binding.requestDigest
+      if ((job.backend !== 'macos-seatbelt' && job.backend !== 'windows-job') || !job.dispatchAttempted || job.requestDigest !== binding.requestDigest
         || job.nativeNonce !== binding.nonce || job.nativeResourceId !== binding.nativeResourceId) fail('invalid-state')
       if (job.result?.quiescent && equal(job.result, value)) return job
       if (!['prepared', 'running', 'unknown'].includes(job.status)) fail('invalid-state')
@@ -493,7 +525,7 @@ export class IsolationLedger {
   }
   findNativeVerifierJob(principalDigest: string, stateRoot: string, key: string): IsolationJob | undefined {
     if (!text(principalDigest) || !text(stateRoot) || !text(key)) fail('invalid-input')
-    const row = this.#database.prepare("SELECT * FROM isolation_jobs WHERE backend_kind='macos-seatbelt' AND principal_digest=? AND workspace=? AND idempotency_key=? AND grant_id='verification' AND agent_preset='verification'").get(principalDigest, stateRoot, key) as JobRow | undefined
+    const row = this.#database.prepare("SELECT * FROM isolation_jobs WHERE backend_kind IN ('macos-seatbelt','windows-job') AND principal_digest=? AND workspace=? AND idempotency_key=? AND grant_id='verification' AND agent_preset='verification'").get(principalDigest, stateRoot, key) as JobRow | undefined
     return row ? this.#decodeJob(row) : undefined
   }
   revoke(grantId: string, revision: number, reason: string): void {

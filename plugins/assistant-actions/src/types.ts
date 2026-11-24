@@ -27,6 +27,30 @@ export interface ActionGrant extends ActionIdentity {
  * grant and is rechecked by the broker on every request.
  */
 export type ExternalActionGrantMirror = import('./broker-protocol.js').BrokerGrantProjection
+export type ExternalBrokerActionGrantMirror = import('./broker-protocol-v2.js').ActionBrokerGrantProjection
+
+export interface GeneralizedActionExecutionInput {
+  readonly grantId: string
+  readonly idempotencyKey: string
+  readonly domain: import('./broker-protocol-v2.js').BrokerActionDomain
+  readonly operation: import('./broker-protocol-v2.js').ActionBrokerOperation
+  readonly destination: import('./broker-protocol-v2.js').ActionRequestDestination
+  readonly payload: import('./broker-protocol-v2.js').ActionBrokerPayload
+  readonly sensitivity?: import('./broker-policy.js').BrokerSensitivity
+  readonly estimatedCostMicros?: number
+  readonly commitDigest?: string
+  readonly predecessorDigest?: string
+  readonly credentialToken?: string
+}
+
+export interface GeneralizedActionExecutionResult {
+  readonly actionId: string
+  readonly status: 'succeeded' | 'failed' | 'unknown'
+  readonly domain: import('./broker-protocol-v2.js').BrokerActionDomain
+  readonly operation: import('./broker-protocol-v2.js').ActionBrokerOperation
+  readonly result?: import('./broker-protocol-v2.js').ActionBrokerSuccessResult
+  readonly reason?: string
+}
 export interface VerifiedDeliveryRequest {
   grantId: string
   idempotencyKey: string

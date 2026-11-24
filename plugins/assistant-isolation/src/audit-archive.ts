@@ -3,8 +3,9 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync,
   linkSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeSync,
 } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { canonicalAbsolutePath, hasPrivateMode, isPosixOwnershipEnforced, isPrivateDirectoryStats, isPrivateFileStats, matchesOwnerUid, noFollowFlag } from './fs-ownership.js'
 
 export const ISOLATION_AUDIT_ARCHIVE_PROTOCOL = 'dsh-isolation-audit-archive/v1' as const
 
@@ -35,7 +36,7 @@ export interface IsolationAuditArchiveManifest {
   readonly count: number
   readonly firstSequence: number
   readonly lastSequence: number
-  readonly ledgerSchema: 6 | 7 | 8 | 9
+  readonly ledgerSchema: 6 | 7 | 8 | 9 | 10
   readonly previousDigest: string | null
   readonly protocol: typeof ISOLATION_AUDIT_ARCHIVE_PROTOCOL
   readonly snapshotThroughSequence: number
@@ -119,26 +120,36 @@ function sameInode(left: { dev: bigint | number; ino: bigint | number }, right: 
 }
 
 function secureDirectory(path: string, label: string): SecureDirectory {
-  if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path || path === '/' || /[\p{Cc}]/u.test(path)) fail('invalid-path', `${label} must be an absolute normalized directory`)
+  if (!canonicalAbsolutePath(path)) fail('invalid-path', `${label} must be an absolute normalized directory`)
   let descriptor: number | undefined
   try {
     const entry = lstatSync(path, { bigint: true })
-    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== BigInt(process.getuid?.() ?? -1) || (entry.mode & 0o7777n) !== 0o700n || realpathSync.native(path) !== path) fail('invalid-path', `${label} must be a canonical private owned directory`)
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    if (!isPrivateDirectoryStats(entry, process.platform, process.getuid?.(), 0o700) || realpathSync.native(path) !== path) fail('invalid-path', `${label} must be a canonical private owned directory`)
+    if (!isPosixOwnershipEnforced()) {
+      const after = lstatSync(path, { bigint: true })
+      if (!sameInode(entry, after)) fail('invalid-path', `${label} changed while being opened`)
+      return { path, descriptor: -1, device: after.dev, inode: after.ino }
+    }
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | noFollowFlag())
     const opened = fstatSync(descriptor, { bigint: true }); const after = lstatSync(path, { bigint: true })
-    if (!opened.isDirectory() || opened.uid !== entry.uid || (opened.mode & 0o7777n) !== 0o700n || !sameInode(entry, opened) || !sameInode(opened, after)) fail('invalid-path', `${label} changed while being opened`)
+    if (!opened.isDirectory() || opened.uid !== entry.uid || !hasPrivateMode(opened.mode, 0o7777, 0o700) || !sameInode(entry, opened) || !sameInode(opened, after)) fail('invalid-path', `${label} changed while being opened`)
     return { path, descriptor, device: opened.dev, inode: opened.ino }
   } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor)
+    if (descriptor !== undefined && descriptor >= 0) closeSync(descriptor)
     if (error instanceof IsolationAuditArchiveError) throw error
     fail('invalid-path', `${label} is unavailable`)
   }
 }
-function closeDirectory(directory: SecureDirectory): void { closeSync(directory.descriptor) }
+function closeDirectory(directory: SecureDirectory): void { if (directory.descriptor >= 0) closeSync(directory.descriptor) }
 function stillSameDirectory(directory: SecureDirectory): void {
   try {
-    const opened = fstatSync(directory.descriptor, { bigint: true }); const linked = lstatSync(directory.path, { bigint: true })
-    if (!sameInode(opened, linked) || opened.dev !== directory.device || opened.ino !== directory.inode) fail('invalid-path', 'archive directory changed during operation')
+    const linked = lstatSync(directory.path, { bigint: true })
+    if (directory.descriptor >= 0) {
+      const opened = fstatSync(directory.descriptor, { bigint: true })
+      if (!sameInode(opened, linked) || opened.dev !== directory.device || opened.ino !== directory.inode) fail('invalid-path', 'archive directory changed during operation')
+    } else if (linked.dev !== directory.device || linked.ino !== directory.inode) {
+      fail('invalid-path', 'archive directory changed during operation')
+    }
   } catch (error) { if (error instanceof IsolationAuditArchiveError) throw error; fail('invalid-path', 'archive directory changed during operation') }
 }
 function disjoint(left: string, right: string): boolean {
@@ -151,10 +162,10 @@ function inspectPrivateFile(path: string, label: string, maximum = Number.MAX_SA
   let descriptor: number | undefined
   try {
     const before = lstatSync(path, { bigint: true })
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== BigInt(process.getuid?.() ?? -1) || (before.mode & 0o7777n) !== 0o600n || before.size > BigInt(maximum)) fail('invalid-archive', `${label} must be one bounded private owned regular file`)
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    if (!isPrivateFileStats(before, process.platform, process.getuid?.(), 0o600) || before.size > BigInt(maximum)) fail('invalid-archive', `${label} must be one bounded private owned regular file`)
+    descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
     const opened = fstatSync(descriptor, { bigint: true }); const after = lstatSync(path, { bigint: true })
-    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== before.uid || (opened.mode & 0o7777n) !== 0o600n || opened.size !== before.size || !sameInode(before, opened) || !sameInode(opened, after)) fail('invalid-archive', `${label} changed while being opened`)
+    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== before.uid || !hasPrivateMode(opened.mode, 0o7777, 0o600) || opened.size !== before.size || !sameInode(before, opened) || !sameInode(opened, after)) fail('invalid-archive', `${label} changed while being opened`)
     return { descriptor, size: Number(opened.size) }
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor)
@@ -180,12 +191,11 @@ function mutableControlFileIdentity(path: string): ControlFileIdentity {
   let descriptor: number | undefined
   try {
     const before = lstatSync(path, { bigint: true })
-    const owner = BigInt(process.getuid?.() ?? -1)
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== owner || (before.mode & 0o7777n) !== 0o600n) fail('invalid-archive', 'archive control database must be one private owned regular file')
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    if (!isPrivateFileStats(before, process.platform, process.getuid?.(), 0o600)) fail('invalid-archive', 'archive control database must be one private owned regular file')
+    descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
     const opened = fstatSync(descriptor, { bigint: true }); const after = lstatSync(path, { bigint: true })
-    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== owner || (opened.mode & 0o7777n) !== 0o600n
-      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || after.uid !== owner || (after.mode & 0o7777n) !== 0o600n
+    if (!opened.isFile() || opened.nlink !== 1n || !matchesOwnerUid(opened.uid) || !hasPrivateMode(opened.mode, 0o7777, 0o600)
+      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || !matchesOwnerUid(after.uid) || !hasPrivateMode(after.mode, 0o7777, 0o600)
       || !sameInode(before, opened) || !sameInode(opened, after)) fail('invalid-archive', 'archive control database changed while being opened')
     return { path, device: opened.dev, inode: opened.ino, owner: opened.uid }
   } catch (error) {
@@ -196,7 +206,7 @@ function mutableControlFileIdentity(path: string): ControlFileIdentity {
 function validateLockedControlPath(identity: ControlFileIdentity): void {
   try {
     const linked = lstatSync(identity.path, { bigint: true })
-    if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n || linked.uid !== identity.owner || (linked.mode & 0o7777n) !== 0o600n
+    if (!linked.isFile() || linked.isSymbolicLink() || linked.nlink !== 1n || linked.uid !== identity.owner || !hasPrivateMode(linked.mode, 0o7777, 0o600)
       || linked.dev !== identity.device || linked.ino !== identity.inode) fail('invalid-archive', 'archive control database changed while locked')
   } catch (error) {
     if (error instanceof IsolationAuditArchiveError) throw error
@@ -207,13 +217,13 @@ function validateLockedControlPath(identity: ControlFileIdentity): void {
 function decodeManifest(value: unknown): IsolationAuditArchiveManifest {
   const keys = ['archiveInstanceId', 'count', 'firstSequence', 'lastSequence', 'ledgerSchema', 'previousDigest', 'protocol', 'snapshotThroughSequence', 'sourceStateRootDigest', 'type', 'version']
   if (!plain(value) || !exactKeys(value, keys) || typeof value.archiveInstanceId !== 'string' || !ARCHIVE_INSTANCE_ID.test(value.archiveInstanceId) || typeof value.sourceStateRootDigest !== 'string' || !DIGEST.test(value.sourceStateRootDigest) || !safeNatural(value.count) || value.count > MAX_BATCH_SIZE
-    || !safePositive(value.firstSequence) || !safeNatural(value.lastSequence) || ![6, 7, 8, 9].includes(value.ledgerSchema as number)
+    || !safePositive(value.firstSequence) || !safeNatural(value.lastSequence) || ![6, 7, 8, 9, 10].includes(value.ledgerSchema as number)
     || (value.previousDigest !== null && (typeof value.previousDigest !== 'string' || !DIGEST.test(value.previousDigest)))
     || value.protocol !== ISOLATION_AUDIT_ARCHIVE_PROTOCOL || !safeNatural(value.snapshotThroughSequence) || value.type !== 'manifest' || value.version !== 1) fail('invalid-archive', 'invalid audit archive manifest')
   if (value.count === 0) {
     if (value.firstSequence !== 1 || value.lastSequence !== 0 || value.snapshotThroughSequence !== 0 || value.previousDigest !== null) fail('invalid-archive', 'invalid audit archive genesis manifest')
   } else if (value.lastSequence !== value.firstSequence + value.count - 1 || value.lastSequence > value.snapshotThroughSequence) fail('invalid-archive', 'inconsistent audit archive manifest bounds')
-  return freeze({ archiveInstanceId: value.archiveInstanceId, count: value.count, firstSequence: value.firstSequence, lastSequence: value.lastSequence, ledgerSchema: value.ledgerSchema as 6 | 7 | 8 | 9, previousDigest: value.previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence: value.snapshotThroughSequence, sourceStateRootDigest: value.sourceStateRootDigest, type: 'manifest', version: 1 })
+  return freeze({ archiveInstanceId: value.archiveInstanceId, count: value.count, firstSequence: value.firstSequence, lastSequence: value.lastSequence, ledgerSchema: value.ledgerSchema as 6 | 7 | 8 | 9 | 10, previousDigest: value.previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence: value.snapshotThroughSequence, sourceStateRootDigest: value.sourceStateRootDigest, type: 'manifest', version: 1 })
 }
 function decodeRecord(value: unknown): IsolationAuditArchiveRecord {
   const keys = ['action', 'detail', 'grantId', 'jobId', 'occurredAt', 'sequence']
@@ -338,10 +348,10 @@ function ensureControlFile(directory: SecureDirectory): ControlFileIdentity {
   const path = join(directory.path, CONTROL_FILE)
   if (!existsSync(path)) {
     let descriptor: number | undefined
-    try { descriptor = openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); fchmodSync(descriptor, 0o600); fsyncSync(descriptor) }
+    try { descriptor = openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600); fchmodSync(descriptor, 0o600); fsyncSync(descriptor) }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') fail('io', 'cannot create archive control database') }
     finally { if (descriptor !== undefined) closeSync(descriptor) }
-    fsyncSync(directory.descriptor)
+    if (directory.descriptor >= 0) fsyncSync(directory.descriptor)
   }
   return mutableControlFileIdentity(path)
 }
@@ -353,16 +363,16 @@ function recoverTemporaryPublications(directory: SecureDirectory): void {
     const temporaryPath = join(directory.path, name)
     let temporary
     try { temporary = lstatSync(temporaryPath, { bigint: true }) } catch { continue }
-    if (!temporary.isFile() || temporary.isSymbolicLink() || temporary.uid !== BigInt(process.getuid?.() ?? -1) || (temporary.mode & 0o7777n) !== 0o600n || (temporary.nlink !== 1n && temporary.nlink !== 2n)) fail('invalid-archive', `unsafe archive temporary file ${name}`)
+    if (!temporary.isFile() || temporary.isSymbolicLink() || !matchesOwnerUid(temporary.uid) || !hasPrivateMode(temporary.mode, 0o7777, 0o600) || (temporary.nlink !== 1n && temporary.nlink !== 2n)) fail('invalid-archive', `unsafe archive temporary file ${name}`)
     if (temporary.nlink === 2n) {
       const targetName = `${ARCHIVE_PREFIX}${match[1]!}${ARCHIVE_SUFFIX}`
       const targetPath = join(directory.path, targetName)
       let target
       try { target = lstatSync(targetPath, { bigint: true }) } catch { fail('invalid-archive', `archive temporary hardlink ${name} has no matching target`) }
-      if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 2n || target.uid !== temporary.uid || (target.mode & 0o7777n) !== 0o600n || !sameInode(temporary, target)) fail('invalid-archive', `archive temporary hardlink ${name} does not match its target`)
+      if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 2n || target.uid !== temporary.uid || !hasPrivateMode(target.mode, 0o7777, 0o600) || !sameInode(temporary, target)) fail('invalid-archive', `archive temporary hardlink ${name} does not match its target`)
       let descriptor: number | undefined
       try {
-        descriptor = openSync(temporaryPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+        descriptor = openSync(temporaryPath, constants.O_RDONLY | noFollowFlag())
         const opened = fstatSync(descriptor, { bigint: true }); const after = lstatSync(temporaryPath, { bigint: true })
         if (!sameInode(temporary, opened) || !sameInode(opened, after) || opened.nlink !== 2n) fail('invalid-archive', `archive temporary hardlink ${name} changed while being opened`)
         const content = readFileSync(descriptor)
@@ -372,7 +382,7 @@ function recoverTemporaryPublications(directory: SecureDirectory): void {
     try { unlinkSync(temporaryPath); changed = true } catch { fail('io', `cannot remove archive temporary file ${name}`) }
     if (temporary.nlink === 2n) { const final = inspectPrivateFile(join(directory.path, `${ARCHIVE_PREFIX}${match[1]!}${ARCHIVE_SUFFIX}`), 'recovered archive file', MAX_ARCHIVE_FILE_BYTES); closeSync(final.descriptor) }
   }
-  if (changed) fsyncSync(directory.descriptor)
+  if (changed && directory.descriptor >= 0) fsyncSync(directory.descriptor)
 }
 function beginArchiveControl(directory: SecureDirectory, sourceStateRootDigest: string): ArchiveControl {
   // All open/close based checks on the main control inode must happen before
@@ -411,15 +421,13 @@ function validateLedgerFile(state: SecureDirectory): { path: string; descriptor:
     // may grow between stat and open. Identity (device/inode/owner/mode/link
     // count) must still be stable: a replacement remains invalid-source.
     const before = lstatSync(path, { bigint: true })
-    const owner = BigInt(process.getuid?.() ?? -1)
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== owner
-      || (before.mode & 0o7777n) !== 0o600n) fail('invalid-source', 'isolation ledger must be one private owned regular file')
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    if (!isPrivateFileStats(before, process.platform, process.getuid?.(), 0o600)) fail('invalid-source', 'isolation ledger must be one private owned regular file')
+    descriptor = openSync(path, constants.O_RDONLY | noFollowFlag())
     const opened = fstatSync(descriptor, { bigint: true })
     const after = lstatSync(path, { bigint: true })
-    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== owner || (opened.mode & 0o7777n) !== 0o600n
-      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || after.uid !== owner
-      || (after.mode & 0o7777n) !== 0o600n || !sameInode(before, opened) || !sameInode(opened, after)) {
+    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== before.uid || !hasPrivateMode(opened.mode, 0o7777, 0o600)
+      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || after.uid !== before.uid
+      || !hasPrivateMode(after.mode, 0o7777, 0o600) || !sameInode(before, opened) || !sameInode(opened, after)) {
       fail('invalid-source', 'isolation ledger changed while being opened')
     }
     return { path, descriptor }
@@ -432,7 +440,7 @@ function validateLedgerFile(state: SecureDirectory): { path: string; descriptor:
 function validateLedgerSnapshot(database: DatabaseSync): number {
   const userVersion = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
   const schema = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
-  if (userVersion !== 7 && userVersion !== 8 && userVersion !== 9 || schema?.value !== String(userVersion)) fail('invalid-source', 'isolation ledger schema 7, 8 or 9 is required')
+  if ((userVersion !== 7 && userVersion !== 8 && userVersion !== 9 && userVersion !== 10) || schema?.value !== String(userVersion)) fail('invalid-source', 'isolation ledger schema 7, 8, 9 or 10 is required')
   const highWater = (database.prepare("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='isolation_audit'), 0) AS sequence").get() as { sequence?: unknown }).sequence
   if (!safeNatural(highWater)) fail('invalid-source', 'isolation audit high-water is invalid')
   const bounds = database.prepare('SELECT COUNT(*) AS count, COALESCE(MIN(sequence), 0) AS first_sequence, COALESCE(MAX(sequence), 0) AS last_sequence FROM isolation_audit').get() as { count?: unknown; first_sequence?: unknown; last_sequence?: unknown }
@@ -466,7 +474,7 @@ function rowRecord(row: AuditRow, expectedSequence: number): IsolationAuditArchi
   return freeze({ action: row.action, detail: row.detail, grantId: row.grant_id, jobId: row.job_id, occurredAt: row.occurred_at, sequence: row.sequence }) as IsolationAuditArchiveRecord
 }
 function recordsEqual(left: IsolationAuditArchiveRecord, right: IsolationAuditArchiveRecord): boolean { return canonical(left) === canonical(right) }
-function makeManifest(archiveInstanceId: string, sourceStateRootDigest: string, firstSequence: number, lastSequence: number, count: number, snapshotThroughSequence: number, previousDigest: string | null, ledgerSchema: 7 | 8 | 9): IsolationAuditArchiveManifest {
+function makeManifest(archiveInstanceId: string, sourceStateRootDigest: string, firstSequence: number, lastSequence: number, count: number, snapshotThroughSequence: number, previousDigest: string | null, ledgerSchema: 7 | 8 | 9 | 10): IsolationAuditArchiveManifest {
   return freeze({ archiveInstanceId, count, firstSequence, lastSequence, ledgerSchema, previousDigest, protocol: ISOLATION_AUDIT_ARCHIVE_PROTOCOL, snapshotThroughSequence, sourceStateRootDigest, type: 'manifest', version: 1 })
 }
 function encodeFile(manifest: IsolationAuditArchiveManifest, records: readonly IsolationAuditArchiveRecord[]): Buffer {
@@ -484,13 +492,13 @@ function publish(directory: SecureDirectory, content: Buffer): { name: string; c
   const temporaryName = `.${ARCHIVE_PREFIX}${contentDigest}.${process.pid}.${randomUUID()}.tmp`; const temporary = join(directory.path, temporaryName)
   let descriptor: number | undefined; let linked = false
   try {
-    descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+    descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollowFlag(), 0o600)
     fchmodSync(descriptor, 0o600)
     let offset = 0; while (offset < content.length) offset += writeSync(descriptor, content, offset, content.length - offset)
     fsyncSync(descriptor)
     const staged = fstatSync(descriptor, { bigint: true })
     const stagedPath = lstatSync(temporary, { bigint: true })
-    if (!staged.isFile() || staged.uid !== BigInt(process.getuid?.() ?? -1) || (staged.mode & 0o7777n) !== 0o600n || staged.nlink !== 1n || staged.size !== BigInt(content.length) || !sameInode(staged, stagedPath)) fail('io', 'unsafe archive temporary file')
+    if (!staged.isFile() || !matchesOwnerUid(staged.uid) || !hasPrivateMode(staged.mode, 0o7777, 0o600) || staged.nlink !== 1n || staged.size !== BigInt(content.length) || !sameInode(staged, stagedPath)) fail('io', 'unsafe archive temporary file')
     closeSync(descriptor); descriptor = undefined
     try {
       linkSync(temporary, target); linked = true
@@ -501,7 +509,7 @@ function publish(directory: SecureDirectory, content: Buffer): { name: string; c
       if (!readPrivateFile(target, `archive file ${name}`, MAX_ARCHIVE_FILE_BYTES).equals(content)) fail('conflict', `conflicting archive target ${name}`)
     }
     unlinkSync(temporary)
-    fsyncSync(directory.descriptor)
+    if (directory.descriptor >= 0) fsyncSync(directory.descriptor)
     if (linked) { const final = inspectPrivateFile(target, `archive file ${name}`, MAX_ARCHIVE_FILE_BYTES); closeSync(final.descriptor) }
     stillSameDirectory(directory)
     return { name, created: linked, digest: contentDigest }
@@ -537,7 +545,7 @@ export function archiveIsolationAudit(options: { stateRoot: string; archiveDirec
     const existing = verifyArchive(archive, controlLock, true, true, controlLock.file)
     const snapshot = openLedgerSnapshot(state); database = snapshot.database; ledgerDescriptor = snapshot.descriptor; transaction = true
     const highWater = snapshot.highWater
-    const ledgerSchema = (database.prepare('PRAGMA user_version').get() as { user_version: 7 | 8 | 9 }).user_version
+    const ledgerSchema = (database.prepare('PRAGMA user_version').get() as { user_version: 7 | 8 | 9 | 10 }).user_version
     if (existing.verification.highestSequence > highWater || existing.verification.snapshotThroughSequence > highWater) fail('conflict', 'archive does not match this isolation ledger')
     let archivedIndex = 0
     for (const file of existing.files) for (const record of file.records) {

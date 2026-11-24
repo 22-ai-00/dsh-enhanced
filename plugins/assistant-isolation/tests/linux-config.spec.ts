@@ -15,7 +15,7 @@ function runtime(): LinuxRuntime {
     modulesPath: `${path}/node_modules`, storePath: `${path}/store`, cachePath: `${path}/cache`,
     versions: { node: 'v22.23.2', pnpm: '11.7.0', typescript: '6.0.3', cordis: '4.0.5', tools: '0.2.1-rc.2', systemPrompt: '0.2.1-rc.2' } }
 }
-const native = (): Config => ({ backend: 'linux-native', stateRoot: '/var/tmp/dsh-native-config', linux: { runtime: runtime(),
+const native = (): Config & { linux: NonNullable<Config['linux']> } => ({ backend: 'linux-native', stateRoot: '/var/tmp/dsh-native-config', linux: { runtime: runtime(),
   cgroupRoots: { mode: 'v1', cpu: `/sys/fs/cgroup/cpu,cpuacct/dsh-native/uid-${uid}`,
     memory: `/sys/fs/cgroup/memory/dsh-native/uid-${uid}`, pids: `/sys/fs/cgroup/pids/dsh-native/uid-${uid}`,
     freezer: `/sys/fs/cgroup/freezer/dsh-native/uid-${uid}` } } })
@@ -27,7 +27,8 @@ function synchronous(value: unknown) {
 }
 
 test('rejects a legacy or missing backend synchronously without any Docker lookup', () => {
-  expect(synchronous({}).issues).toBeDefined()
+  if (process.platform === 'linux') expect(synchronous({}).issues).toBeDefined()
+  expect(synchronous({ backend: 'linux-native' }).issues).toBeDefined()
   expect(synchronous({ backend: 'docker', image: 'sha256:' + 'a'.repeat(64) }).issues).toBeDefined()
   expect(synchronous({ backend: 'arbitrary' }).issues).toBeDefined()
 })
@@ -49,7 +50,7 @@ describe.skipIf(process.platform !== 'linux' || uid === 0)('public Linux configu
       const input = native()
       input.linux.cgroupRoots = { mode: 'v2', unified }
       expect(synchronous(input).issues).toBeUndefined()
-      expect(validateConfig(input).linux.cgroupRoots).toEqual({ mode: 'v2', unified })
+      expect(validateConfig(input).linux?.cgroupRoots).toEqual({ mode: 'v2', unified })
     }
   })
 

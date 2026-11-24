@@ -132,9 +132,9 @@ function makeNode(
 }
 
 describe('dreaming config & authorization / idle gate', () => {
-  test('defaults to disabled with spec defaults and normalizes overrides cleanly', () => {
+  test('defaults to enabled with spec defaults and normalizes overrides and explicit opt-out cleanly', () => {
     expect(DEFAULT_ASSOCIATION_DREAMING_CONFIG).toEqual({
-      enabled: false,
+      enabled: true,
       intervalMs: 3_600_000,
       idleMinMs: 1_800_000,
       maxPairsPerRun: 16,
@@ -143,6 +143,9 @@ describe('dreaming config & authorization / idle gate', () => {
       nodeTtlMs: 30 * 86_400_000,
       allowModelSynthesis: false,
     })
+
+    expect(normalizeAssociationDreamingConfig().enabled).toBe(true)
+    expect(normalizeAssociationDreamingConfig({ enabled: false }).enabled).toBe(false)
 
     const normalized = normalizeAssociationDreamingConfig({
       enabled: true,
@@ -177,11 +180,11 @@ describe('dreaming config & authorization / idle gate', () => {
       evaluate: () => ({ effect: 'allow', reasonCode: 'rule-allow', ruleId: 'allow-dream' }),
     }
 
-    // 1. Disabled by default
+    // 1. Explicitly disabled opt-out
     expect(
       canRunDreaming({
         scope,
-        config: DEFAULT_ASSOCIATION_DREAMING_CONFIG,
+        config: normalizeAssociationDreamingConfig({ enabled: false }),
         policy: allowPolicy,
         lastActivityAt: idleActivityAt,
         nowMs,
@@ -450,7 +453,7 @@ describe('dreaming config & authorization / idle gate', () => {
       const disabledRes = runDreamingPass({
         db,
         scope,
-        config: DEFAULT_ASSOCIATION_DREAMING_CONFIG,
+        config: normalizeAssociationDreamingConfig({ enabled: false }),
         policy: countingPolicy,
         delivery: countingDelivery,
         lastActivityAt: baseTime,

@@ -494,6 +494,7 @@ export class AssistantAssociationService extends Service {
           this.active &&
           this.assocConfig.enabled &&
           this.assocConfig.webLearning.enabled &&
+          this.assocConfig.webLearning.allowedDomains.length > 0 &&
           !this.writeQueue?.hasPendingWithdrawals
         ) {
           this.trackBackgroundTask(

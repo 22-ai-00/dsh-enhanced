@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, realpathSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { canonicalAbsolutePath, isPrivateDirectoryStats, matchesOwnerUid } from './fs-ownership.js'
 import type { IsolationGrant } from './types.js'
 
 export type IsolationGrantDiagnosticReason =
@@ -38,11 +39,11 @@ function unavailable(reason: Extract<IsolationGrantDiagnosticReason, 'database-m
 function validate(input: { stateRoot: string; grant: IsolationGrant; now?: number }): { stateRoot: string; grant: IsolationGrant; now: number } {
   const grantKeys = ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'expiresAt', 'maxRuns', 'maxTotalDurationMs']
   if (input === null || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype || Object.keys(input).some(key => key !== 'stateRoot' && key !== 'grant' && key !== 'now')
-    || typeof input.stateRoot !== 'string' || !isAbsolute(input.stateRoot) || resolve(input.stateRoot) !== input.stateRoot || input.stateRoot === '/' || /[\p{Cc}]/u.test(input.stateRoot)
+    || !canonicalAbsolutePath(input.stateRoot)
     || !input.grant || typeof input.grant !== 'object' || Object.getPrototypeOf(input.grant) !== Object.prototype || Object.keys(input.grant).length !== grantKeys.length || grantKeys.some(key => !Object.hasOwn(input.grant, key))) throw new Error('invalid isolation grant diagnostic input')
   const grant = input.grant
   if (typeof grant.id !== 'string' || !TEXT.test(grant.id) || !positive(grant.revision) || typeof grant.principalDigest !== 'string' || !DIGEST.test(grant.principalDigest) || typeof grant.principalRecordId !== 'string' || !TEXT.test(grant.principalRecordId)
-    || !positive(grant.principalVersion) || typeof grant.workspace !== 'string' || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || /[\p{Cc}]/u.test(grant.workspace)
+    || !positive(grant.principalVersion) || !canonicalAbsolutePath(grant.workspace)
     || typeof grant.agentPreset !== 'string' || !TEXT.test(grant.agentPreset) || !positive(grant.expiresAt) || !positive(grant.maxRuns) || !positive(grant.maxTotalDurationMs)) throw new Error('invalid isolation grant diagnostic input')
   const now = input.now ?? Date.now()
   if (!timestamp(now)) throw new Error('invalid isolation grant diagnostic clock')
@@ -57,10 +58,9 @@ export function inspectIsolationGrant(input: { stateRoot: string; grant: Isolati
   if (!existsSync(path) && !existsSync(stateRoot)) return unavailable('database-missing')
   try {
     const root = lstatSync(stateRoot)
-    if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(stateRoot) !== stateRoot
-      || root.uid !== process.getuid?.() || (root.mode & 0o077) !== 0) return unavailable('database-unavailable')
+    if (realpathSync(stateRoot) !== stateRoot || !isPrivateDirectoryStats(root)) return unavailable('database-unavailable')
     const file = lstatSync(path)
-    if (!file.isFile() || file.isSymbolicLink() || file.uid !== process.getuid?.()) return unavailable('database-unavailable')
+    if (!file.isFile() || file.isSymbolicLink() || !matchesOwnerUid(file.uid)) return unavailable('database-unavailable')
   } catch {
     return existsSync(stateRoot) ? unavailable('database-unavailable') : unavailable('database-missing')
   }
@@ -70,7 +70,7 @@ export function inspectIsolationGrant(input: { stateRoot: string; grant: Isolati
     database = new DatabaseSync(path, { readOnly: true })
     database.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=250; BEGIN;'); transaction = true
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== 7 && version !== 8 && version !== 9) return unavailable('schema-unsupported')
+    if (version !== 7 && version !== 8 && version !== 9 && version !== 10) return unavailable('schema-unsupported')
     const schema = database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value?: unknown } | undefined
     if (schema?.value !== String(version)) return unavailable('schema-unsupported')
     const row = database.prepare('SELECT revision, expires_at, max_runs, max_total_duration_ms, revoked, principal_digest, principal_record_id, principal_version, workspace, agent_preset FROM isolation_grants WHERE id=?').get(grant.id) as Record<string, unknown> | undefined

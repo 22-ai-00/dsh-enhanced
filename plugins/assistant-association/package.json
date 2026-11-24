@@ -53,7 +53,8 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
+    "@dsh-enhanced/assistant-isolation": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",

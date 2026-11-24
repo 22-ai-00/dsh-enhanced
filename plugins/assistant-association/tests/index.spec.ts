@@ -48,9 +48,19 @@ describe('assistant-association config & core indexing', () => {
     expect(cfg.minItems).toBe(5)
     expect(cfg.maxContextTokens).toBe(400)
     expect(cfg.maxHops).toBe(2)
-    expect(cfg.dreaming.enabled).toBe(false)
-    expect(cfg.intakeSignal.enabled).toBe(false)
-    expect(cfg.webLearning.enabled).toBe(false)
+    expect(cfg.dreaming.enabled).toBe(true)
+    expect(cfg.intakeSignal.enabled).toBe(true)
+    expect(cfg.webLearning.enabled).toBe(true)
+
+    const optedOut = normalizeConfig({
+      databasePath: ':memory:',
+      dreaming: { enabled: false },
+      intakeSignal: { enabled: false },
+      webLearning: { enabled: false },
+    })
+    expect(optedOut.dreaming.enabled).toBe(false)
+    expect(optedOut.intakeSignal.enabled).toBe(false)
+    expect(optedOut.webLearning.enabled).toBe(false)
 
     expect(() => Config({ unknownField: 1 } as never)).toThrow(/unknown config field/)
     expect(() => Config({ holdoutRateBps: 999 })).toThrow()

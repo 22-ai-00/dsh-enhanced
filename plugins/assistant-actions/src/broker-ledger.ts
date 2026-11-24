@@ -3,6 +3,14 @@ import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, realpa
 import type { BigIntStats } from 'node:fs'
 import { basename, dirname, isAbsolute, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { verifyWindowsPrivatePath, type WindowsAclInspection } from './broker-peer-windows.js'
+import {
+  evaluateBrokerWp08Constraints,
+  type BrokerSensitivity,
+  type BrokerWp08Constraints,
+  type BrokerWp08RequestContext,
+  type BrokerWp08UsageState,
+} from './broker-policy.js'
 import {
   brokerGrantAuthorityDigest,
   brokerRequestDigest,
@@ -10,12 +18,27 @@ import {
   createBrokerGrantProjection,
   normalizeBrokerGrantAuthority,
   type BrokerClientRequest,
-  type BrokerGrantProjection,
   type BrokerGrantAuthorityUnsigned,
+  type BrokerGrantProjection,
   type BrokerSuccessResult,
 } from './broker-protocol.js'
+import {
+  ACTION_GRANT_PROTOCOL,
+  actionBrokerRequestDigest,
+  actionGrantAuthorityDigest,
+  actionScopeKey,
+  normalizeActionGrantAuthority,
+  resolveWp08DestinationString,
+  type ActionBrokerClientRequest,
+  type ActionBrokerGrantAuthorityUnsigned,
+  type ActionBrokerOperation,
+  type ActionBrokerSuccessResult,
+  type BrokerActionDomain,
+  type GitHubGrantDestinationV2,
+  type GitHubRequestDestinationV2,
+} from './broker-protocol-v2.js'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const MAX_RECORDS = 10_000
 const MAX_GRANTS = 1_000
 const DIGEST = /^[0-9a-f]{64}$/u
@@ -27,14 +50,20 @@ export type BrokerInspectKind = 'repository' | 'branch' | 'file' | 'pull-request
 export interface ExternalGitHubGrant extends BrokerGrantAuthorityUnsigned {
   digest: string
 }
-
 export type ExternalGitHubGrantUnsigned = Omit<ExternalGitHubGrant, 'digest'>
+
+export interface ExternalActionGrant extends ActionBrokerGrantAuthorityUnsigned {
+  digest: string
+}
+export type ExternalActionGrantUnsigned = Omit<ExternalActionGrant, 'digest'>
+export type AnyExternalBrokerGrant = ExternalGitHubGrant | ExternalActionGrant
+
 export type ExternalGrantMirror = BrokerGrantProjection
 export interface BrokerAuthority { ownerId: string; fence: number; generation: number }
 export interface BrokerLedgerOutcome {
   status: BrokerTerminalStatus
   dispatched: boolean
-  result: BrokerSuccessResult | null
+  result: ActionBrokerSuccessResult | null
   error: { code: string } | null
   completedAt: number
 }
@@ -51,10 +80,19 @@ export interface BrokerLedgerRecord {
   grantRevision: number
   grantDigest: string
   requestDigest: string
-  operation: 'commit' | 'pull-request' | 'inspect'
+  domain: BrokerActionDomain
+  operation: ActionBrokerOperation
   repository: string
   branch: string
   expectedHeadOid: string | null
+  destinationKey: string
+  scopeKey: string
+  sensitivity: BrokerSensitivity
+  estimatedCostMicros: number
+  commitDigest: string | null
+  predecessorDigest: string | null
+  idempotencyKey: string | null
+  leaseId: string | null
   payloadDigest: string
   budgetReservationId: string
   bytes: number
@@ -93,11 +131,29 @@ type MetaRow = { instance_id: string; generation: number; controller_fence: numb
 type GrantRow = { id: string; revision: number; digest: string; grant_json: string; revoked: number; created_at: number }
 type RequestRow = {
   action_id: string; request_id: string; client_key_id: string; owner_json: string; session_id: string; agent_id: string; root_call_id: string; call_id: string; grant_id: string; grant_revision: number; grant_digest: string
-  request_digest: string; operation: string; repository: string; branch: string; expected_head_oid: string | null; payload_digest: string; budget_reservation_id: string; bytes: number; cost_units: number
+  request_digest: string; domain: string; operation: string; repository: string; branch: string; expected_head_oid: string | null; destination_key: string; scope_key: string; sensitivity: string
+  estimated_cost_micros: number; commit_digest: string | null; predecessor_digest: string | null; idempotency_key: string | null; lease_id: string | null
+  payload_digest: string; budget_reservation_id: string; bytes: number; cost_units: number
   deadline: number; policy_epoch: number; emergency_epoch: number; generation: number; status: string; version: number; dispatched_at: number | null; result_json: string | null
 }
 type CredentialLeaseRow = { action_id: string; credential_id: string; purpose: string; status: string; issued_at: number; expires_at: number; settled_at: number | null; version: number }
 type AdminNonceRow = { admin_key_id: string; nonce_digest: string; request_digest: string; expires_at: number }
+
+const V3_OPERATIONS = new Set<string>([
+  'commit', 'pull-request', 'inspect',
+  'http.request',
+  'lark.send-message', 'lark.reply-message', 'lark.read-messages',
+  'calendar.list-events', 'calendar.get-event', 'calendar.create-event', 'calendar.update-event', 'calendar.delete-event',
+  'shell.exec',
+])
+
+const V3_LEASE_PURPOSES = new Set<string>([
+  'github.commit', 'github.pull-request', 'github.inspect',
+  'http.request',
+  'lark.send-message', 'lark.reply-message', 'lark.read-messages',
+  'calendar.list-events', 'calendar.get-event', 'calendar.create-event', 'calendar.update-event', 'calendar.delete-event',
+  'shell.exec',
+])
 
 function fail(code: BrokerLedgerError['code']): never { throw new BrokerLedgerError(code) }
 function plain(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.getOwnPropertySymbols(value).length === 0 }
@@ -118,12 +174,19 @@ function owner(value: unknown): ExternalGitHubGrant['owner'] {
   if (!isAbsolute(workspace) || normalize(workspace) !== workspace) fail('invalid-input')
   return Object.freeze({ principalDigest: digest(input.principalDigest), principalRecordId: text(input.principalRecordId), principalVersion: integer(input.principalVersion, 1), workspace, preset: text(input.preset), bindingId: text(input.bindingId), bindingVersion: integer(input.bindingVersion, 1), bindingGeneration: integer(input.bindingGeneration, 1) })
 }
+
 function normalizeGrantUnsigned(value: unknown): ExternalGitHubGrantUnsigned {
   try {
-    const grant = normalizeBrokerGrantAuthority(value)
-    return grant
+    return normalizeBrokerGrantAuthority(value)
   } catch { return fail('invalid-input') }
 }
+
+function normalizeActionGrantUnsigned(value: unknown): ExternalActionGrantUnsigned {
+  try {
+    return normalizeActionGrantAuthority(value)
+  } catch { return fail('invalid-input') }
+}
+
 export function externalGrantMirror(grant: ExternalGitHubGrantUnsigned): ExternalGrantMirror {
   return createBrokerGrantProjection(normalizeGrantUnsigned(grant))
 }
@@ -138,52 +201,196 @@ export function normalizeBrokerGrant(value: unknown): ExternalGitHubGrant {
   return Object.freeze({ ...normalized, digest: expected })
 }
 
+export function actionGrantDigest(grant: ExternalActionGrantUnsigned): string {
+  return actionGrantAuthorityDigest(normalizeActionGrantUnsigned(grant))
+}
+export function withActionGrantDigest(grant: ExternalActionGrantUnsigned): ExternalActionGrant {
+  const normalized = normalizeActionGrantUnsigned(grant)
+  return Object.freeze({ ...normalized, digest: actionGrantDigest(normalized) })
+}
+export function normalizeActionGrant(value: unknown): ExternalActionGrant {
+  if (!plain(value) || !Object.hasOwn(value, 'digest')) fail('invalid-input')
+  const { digest: claimed, ...unsigned } = value
+  const normalized = normalizeActionGrantUnsigned(unsigned)
+  const expected = actionGrantDigest(normalized)
+  if (digest(claimed) !== expected) fail('invalid-input')
+  return Object.freeze({ ...normalized, digest: expected })
+}
+
+function normalizeAnyGrant(value: unknown): AnyExternalBrokerGrant {
+  if (plain(value) && value.protocol === ACTION_GRANT_PROTOCOL) return normalizeActionGrant(value)
+  return normalizeBrokerGrant(value)
+}
+
 function sameNode(left: BigIntStats, right: BigIntStats): boolean { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.gid === right.gid && left.mode === right.mode && left.nlink === right.nlink }
 function safeAncestorChain(value: string, uid: number, gid: number): void {
   let cursor = value, leaf = true
   for (;;) {
-    const stat = lstatSync(cursor, { bigint: true }), mode = Number(stat.mode & 0o7777n), owner = Number(stat.uid), group = Number(stat.gid)
-    const stickyRoot = owner === 0 && (mode & 0o1000) !== 0 && (mode & 0o022) !== 0
-    if (realpathSync(cursor) !== cursor || stat.isSymbolicLink() || !stat.isDirectory() || !stickyRoot && (mode & 0o022) !== 0
-      || leaf && (owner !== uid || group !== gid || mode !== 0o700)) fail('unsafe-file')
+    const stat = lstatSync(cursor, { bigint: true }), mode = Number(stat.mode & 0o7777n), ownerUid = Number(stat.uid), group = Number(stat.gid)
+    const stickyRoot = ownerUid === 0 && (mode & 0o1000) !== 0 && (mode & 0o022) !== 0
+    if (realpathSync(cursor) !== cursor || stat.isSymbolicLink() || !stat.isDirectory() || (!stickyRoot && (mode & 0o022) !== 0)
+      || (leaf && (ownerUid !== uid || group !== gid || mode !== 0o700))) fail('unsafe-file')
     const parent = dirname(cursor); if (parent === cursor) return
     cursor = parent; leaf = false
   }
 }
-function privateFile(value: string): void { const stat = lstatSync(value, { bigint: true }); if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || Number(stat.mode & 0o7777n) !== 0o600 || (process.geteuid?.() !== undefined && stat.uid !== BigInt(process.geteuid()))) fail('unsafe-file') }
+function privateFile(value: string, platform: NodeJS.Platform, checkWindowsAcl?: (path: string) => WindowsAclInspection | undefined): void {
+  if (platform === 'win32') {
+    try { verifyWindowsPrivatePath(value, { platform, ...(checkWindowsAcl === undefined ? {} : { checkAcl: checkWindowsAcl }) }) } catch { fail('unsafe-file') }
+    return
+  }
+  const stat = lstatSync(value, { bigint: true })
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || Number(stat.mode & 0o7777n) !== 0o600 || (process.geteuid?.() !== undefined && stat.uid !== BigInt(process.geteuid()))) fail('unsafe-file')
+}
 function exists(value: string): boolean { try { lstatSync(value); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error } }
-interface PinnedDatabasePath { sqlitePath: string; parentDescriptor: number; fileDescriptor: number; parent: BigIntStats; file: BigIntStats }
-function prepareDatabasePath(value: string): PinnedDatabasePath {
+
+interface PinnedDatabasePath {
+  sqlitePath: string
+  platform: NodeJS.Platform
+  parentDescriptor?: number
+  fileDescriptor?: number
+  parent?: BigIntStats
+  file?: BigIntStats
+}
+
+function prepareDatabasePath(
+  value: string,
+  platform: NodeJS.Platform = process.platform,
+  checkWindowsAcl?: (path: string) => WindowsAclInspection | undefined,
+): PinnedDatabasePath {
   if (!isAbsolute(value) || normalize(value) !== value) fail('unsafe-file')
+  if (platform === 'win32') {
+    try {
+      const parentPath = dirname(value)
+      verifyWindowsPrivatePath(parentPath, { platform, ...(checkWindowsAcl === undefined ? {} : { checkAcl: checkWindowsAcl }) })
+      if (!exists(value)) {
+        const created = openSync(value, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR)
+        closeSync(created)
+      }
+      verifyWindowsPrivatePath(value, { platform, ...(checkWindowsAcl === undefined ? {} : { checkAcl: checkWindowsAcl }) })
+      return { sqlitePath: value, platform }
+    } catch {
+      fail('unsafe-file')
+    }
+  }
+
   const uid = process.geteuid?.(), gid = process.getegid?.()
-  if (process.platform !== 'linux' || uid === undefined || gid === undefined) fail('unsafe-file')
+  if ((platform !== 'linux' && platform !== 'darwin') || uid === undefined || gid === undefined) fail('unsafe-file')
   const parentPath = dirname(value); safeAncestorChain(parentPath, uid, gid)
   let parentDescriptor: number | undefined, fileDescriptor: number | undefined
   try {
     parentDescriptor = openSync(parentPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
     const parent = fstatSync(parentDescriptor, { bigint: true }), visibleParent = lstatSync(parentPath, { bigint: true })
     if (!parent.isDirectory() || !sameNode(parent, visibleParent)) fail('unsafe-file')
-    const anchored = "/proc/self/fd/" + parentDescriptor + "/" + basename(value)
-    if (!exists(value)) { const created = openSync(anchored, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); closeSync(created) }
+    const anchored = platform === 'linux' ? `/proc/self/fd/${parentDescriptor}/${basename(value)}` : value
+    if (!exists(value)) {
+      const created = openSync(anchored, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
+      closeSync(created)
+    }
     fileDescriptor = openSync(anchored, constants.O_RDWR | constants.O_NOFOLLOW)
     const file = fstatSync(fileDescriptor, { bigint: true }), visibleFile = lstatSync(value, { bigint: true })
     if (!file.isFile() || file.nlink !== 1n || Number(file.mode & 0o7777n) !== 0o600 || file.uid !== BigInt(uid) || !sameNode(file, visibleFile)) fail('unsafe-file')
-    return { sqlitePath: anchored, parentDescriptor, fileDescriptor, parent, file }
-  } catch (error) { if (fileDescriptor !== undefined) closeSync(fileDescriptor); if (parentDescriptor !== undefined) closeSync(parentDescriptor); throw error }
+    return { sqlitePath: anchored, platform, parentDescriptor, fileDescriptor, parent, file }
+  } catch (error) {
+    if (fileDescriptor !== undefined) closeSync(fileDescriptor)
+    if (parentDescriptor !== undefined) closeSync(parentDescriptor)
+    throw error
+  }
 }
+
 function pinnedPathMatches(databasePath: string, pinned: PinnedDatabasePath): boolean {
+  if (pinned.platform === 'win32') return exists(databasePath)
+  if (pinned.parentDescriptor === undefined || pinned.fileDescriptor === undefined || !pinned.parent || !pinned.file) return false
   try {
     const parent = fstatSync(pinned.parentDescriptor, { bigint: true }), visibleParent = lstatSync(dirname(databasePath), { bigint: true })
     const file = fstatSync(pinned.fileDescriptor, { bigint: true }), visibleFile = lstatSync(databasePath, { bigint: true })
     return sameNode(parent, pinned.parent) && sameNode(parent, visibleParent) && sameNode(file, pinned.file) && sameNode(file, visibleFile)
   } catch { return false }
 }
+
+const REQUESTS_V3_DDL = [
+  "CREATE TABLE requests (",
+  "action_id TEXT PRIMARY KEY,",
+  "request_id TEXT NOT NULL,",
+  "client_key_id TEXT NOT NULL,",
+  "owner_json TEXT NOT NULL,",
+  "session_id TEXT NOT NULL,",
+  "agent_id TEXT NOT NULL,",
+  "root_call_id TEXT NOT NULL,",
+  "call_id TEXT NOT NULL,",
+  "grant_id TEXT NOT NULL,",
+  "grant_revision INTEGER NOT NULL,",
+  "grant_digest TEXT NOT NULL,",
+  "request_digest TEXT NOT NULL,",
+  "domain TEXT NOT NULL DEFAULT 'github' CHECK(domain IN ('github','http','lark','calendar','shell')),",
+  "operation TEXT NOT NULL CHECK(operation IN ('commit','pull-request','inspect','http.request','lark.send-message','lark.reply-message','lark.read-messages','calendar.list-events','calendar.get-event','calendar.create-event','calendar.update-event','calendar.delete-event','shell.exec')),",
+  "repository TEXT NOT NULL,",
+  "branch TEXT NOT NULL,",
+  "expected_head_oid TEXT,",
+  "destination_key TEXT NOT NULL DEFAULT '',",
+  "scope_key TEXT NOT NULL DEFAULT '',",
+  "sensitivity TEXT NOT NULL DEFAULT 'internal' CHECK(sensitivity IN ('public','internal','confidential','restricted')),",
+  "estimated_cost_micros INTEGER NOT NULL DEFAULT 0 CHECK(estimated_cost_micros>=0),",
+  "commit_digest TEXT,",
+  "predecessor_digest TEXT,",
+  "idempotency_key TEXT,",
+  "lease_id TEXT,",
+  "payload_digest TEXT NOT NULL,",
+  "budget_reservation_id TEXT NOT NULL,",
+  "bytes INTEGER NOT NULL CHECK(bytes>=0),",
+  "cost_units INTEGER NOT NULL CHECK(cost_units>=0),",
+  "deadline INTEGER NOT NULL CHECK(deadline>=1),",
+  "policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0),",
+  "emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0),",
+  "generation INTEGER NOT NULL CHECK(generation>=1),",
+  "status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')),",
+  "version INTEGER NOT NULL CHECK(version>=1),",
+  "dispatched_at INTEGER,",
+  "result_json TEXT,",
+  "UNIQUE(client_key_id,request_id),",
+  "UNIQUE(client_key_id,action_id),",
+  "UNIQUE(client_key_id,budget_reservation_id),",
+  "FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision),",
+  "CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)),",
+  "CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared'),",
+  "CHECK((domain='github' AND operation IN ('commit','pull-request'))=(expected_head_oid IS NOT NULL))",
+  ") STRICT",
+].join(' ')
+
+const CREDENTIAL_LEASES_V3_DDL = [
+  "CREATE TABLE credential_leases (",
+  "action_id TEXT PRIMARY KEY,",
+  "credential_id TEXT NOT NULL,",
+  "purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.pull-request','github.inspect','http.request','lark.send-message','lark.reply-message','lark.read-messages','calendar.list-events','calendar.get-event','calendar.create-event','calendar.update-event','calendar.delete-event','shell.exec')),",
+  "status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')),",
+  "issued_at INTEGER NOT NULL,",
+  "expires_at INTEGER NOT NULL,",
+  "settled_at INTEGER,",
+  "version INTEGER NOT NULL,",
+  "FOREIGN KEY(action_id) REFERENCES requests(action_id),",
+  "CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))",
+  ") STRICT",
+].join(' ')
+
+const V3_INDEXES_DDL = [
+  'CREATE INDEX requests_grant_budget ON requests(grant_id,dispatched_at,status)',
+  'CREATE INDEX requests_status ON requests(status)',
+  'CREATE INDEX requests_pr_occupancy ON requests(repository,branch,expected_head_oid,operation,status)',
+  'CREATE INDEX requests_lease_usage ON requests(grant_id,lease_id,status)',
+  'CREATE UNIQUE INDEX requests_idempotency_v2 ON requests(client_key_id,grant_id,idempotency_key) WHERE idempotency_key IS NOT NULL',
+].join(';')
+
 interface OpenedDatabase { database: DatabaseSync; parentDescriptor?: number }
-function openDatabase(databasePath: string, instanceId: string, beforeOpen?: () => void): OpenedDatabase {
-  const pinned = databasePath === ':memory:' ? undefined : prepareDatabasePath(databasePath)
+function openDatabase(
+  databasePath: string,
+  instanceId: string,
+  options: { beforeOpen?: () => void; platform?: NodeJS.Platform; checkWindowsAcl?: (path: string) => WindowsAclInspection | undefined } = {},
+): OpenedDatabase {
+  const platform = options.platform ?? process.platform
+  const pinned = databasePath === ':memory:' ? undefined : prepareDatabasePath(databasePath, platform, options.checkWindowsAcl)
   let database: DatabaseSync | undefined
   try {
-    beforeOpen?.()
+    options.beforeOpen?.()
     database = new DatabaseSync(pinned?.sqlitePath ?? databasePath, { enableForeignKeyConstraints: true })
     if (pinned && !pinnedPathMatches(databasePath, pinned)) fail('unsafe-file')
     database.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
@@ -195,26 +402,37 @@ function openDatabase(databasePath: string, instanceId: string, beforeOpen?: () 
         'CREATE TABLE controller (singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL CHECK(fence>=1), generation INTEGER NOT NULL CHECK(generation>=1), expires_at INTEGER NOT NULL CHECK(expires_at>=0)) STRICT',
         'CREATE TABLE grants (id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=1), digest TEXT NOT NULL, grant_json TEXT NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), created_at INTEGER NOT NULL CHECK(created_at>=0), PRIMARY KEY(id,revision), UNIQUE(digest)) STRICT, WITHOUT ROWID',
         'CREATE TABLE grant_heads (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), FOREIGN KEY(id,revision) REFERENCES grants(id,revision)) STRICT',
-        "CREATE TABLE requests (action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, client_key_id TEXT NOT NULL, owner_json TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT NOT NULL, root_call_id TEXT NOT NULL, call_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, grant_digest TEXT NOT NULL, request_digest TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('commit','pull-request','inspect')), repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT, payload_digest TEXT NOT NULL, budget_reservation_id TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>=0), cost_units INTEGER NOT NULL CHECK(cost_units>=0), deadline INTEGER NOT NULL CHECK(deadline>=1), policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0), emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=1), status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')), version INTEGER NOT NULL CHECK(version>=1), dispatched_at INTEGER, result_json TEXT, UNIQUE(client_key_id,request_id), UNIQUE(client_key_id,action_id), UNIQUE(client_key_id,budget_reservation_id), FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision), CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)), CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared'), CHECK((operation IN ('commit','pull-request'))=(expected_head_oid IS NOT NULL))) STRICT",
-        "CREATE TABLE credential_leases (action_id TEXT PRIMARY KEY, credential_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.pull-request','github.inspect')), status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')), issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, settled_at INTEGER, version INTEGER NOT NULL, FOREIGN KEY(action_id) REFERENCES requests(action_id), CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))) STRICT",
+        REQUESTS_V3_DDL,
+        CREDENTIAL_LEASES_V3_DDL,
         'CREATE TABLE admin_nonces (admin_key_id TEXT NOT NULL, nonce_digest TEXT NOT NULL, request_digest TEXT NOT NULL, expires_at INTEGER NOT NULL CHECK(expires_at>=1), PRIMARY KEY(admin_key_id,nonce_digest)) STRICT, WITHOUT ROWID',
         'CREATE TABLE audit (sequence INTEGER PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT NOT NULL, revision INTEGER, recorded_at INTEGER NOT NULL, previous_digest TEXT NOT NULL, digest TEXT NOT NULL UNIQUE) STRICT',
-        'CREATE INDEX requests_grant_budget ON requests(grant_id,dispatched_at,status)',
-        'CREATE INDEX requests_status ON requests(status)',
-        "CREATE INDEX requests_pr_occupancy ON requests(repository,branch,expected_head_oid,operation,status)",
+        V3_INDEXES_DDL,
       ].join(';'))
       database.prepare('INSERT INTO meta VALUES(1,?,0,0,0,0,0,0,0)').run(instanceId)
-      database.exec('PRAGMA user_version=2; COMMIT')
+      database.exec('PRAGMA user_version=3; COMMIT')
     }
-    if (version === 1) {
+    if (version === 1 || version === 2) {
       try {
-        database.exec("BEGIN IMMEDIATE; ALTER TABLE credential_leases RENAME TO credential_leases_v1; ALTER TABLE requests RENAME TO requests_v1; CREATE TABLE requests (action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, client_key_id TEXT NOT NULL, owner_json TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT NOT NULL, root_call_id TEXT NOT NULL, call_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, grant_digest TEXT NOT NULL, request_digest TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('commit','pull-request','inspect')), repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT, payload_digest TEXT NOT NULL, budget_reservation_id TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>=0), cost_units INTEGER NOT NULL CHECK(cost_units>=0), deadline INTEGER NOT NULL CHECK(deadline>=1), policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0), emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=1), status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')), version INTEGER NOT NULL CHECK(version>=1), dispatched_at INTEGER, result_json TEXT, UNIQUE(client_key_id,request_id), UNIQUE(client_key_id,action_id), UNIQUE(client_key_id,budget_reservation_id), FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision), CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)), CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared'), CHECK((operation IN ('commit','pull-request'))=(expected_head_oid IS NOT NULL))) STRICT; INSERT INTO requests SELECT * FROM requests_v1; CREATE TABLE credential_leases (action_id TEXT PRIMARY KEY, credential_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.pull-request','github.inspect')), status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')), issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, settled_at INTEGER, version INTEGER NOT NULL, FOREIGN KEY(action_id) REFERENCES requests(action_id), CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))) STRICT; INSERT INTO credential_leases SELECT * FROM credential_leases_v1; DROP TABLE credential_leases_v1; DROP TABLE requests_v1; CREATE INDEX requests_grant_budget ON requests(grant_id,dispatched_at,status); CREATE INDEX requests_status ON requests(status); CREATE INDEX requests_pr_occupancy ON requests(repository,branch,expected_head_oid,operation,status); PRAGMA user_version=2; COMMIT")
+        database.exec([
+          'BEGIN IMMEDIATE',
+          'ALTER TABLE credential_leases RENAME TO credential_leases_legacy',
+          'ALTER TABLE requests RENAME TO requests_legacy',
+          REQUESTS_V3_DDL,
+          "INSERT INTO requests(action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,domain,operation,repository,branch,expected_head_oid,destination_key,scope_key,sensitivity,estimated_cost_micros,commit_digest,predecessor_digest,idempotency_key,lease_id,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json) SELECT action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,'github',operation,repository,branch,expected_head_oid,'','','internal',0,NULL,NULL,NULL,NULL,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json FROM requests_legacy",
+          CREDENTIAL_LEASES_V3_DDL,
+          'INSERT INTO credential_leases SELECT * FROM credential_leases_legacy',
+          'DROP TABLE credential_leases_legacy',
+          'DROP TABLE requests_legacy',
+          V3_INDEXES_DDL,
+          'PRAGMA user_version=3',
+          'COMMIT',
+        ].join(';'))
       } catch {
         try { database.exec('ROLLBACK') } catch {}
         fail('schema')
       }
     }
-    if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION) fail('schema')
+    if (version !== 0 && version !== 1 && version !== 2 && version !== SCHEMA_VERSION) fail('schema')
     const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
     if (!equal(tables, ['admin_nonces', 'audit', 'controller', 'credential_leases', 'grant_heads', 'grants', 'meta', 'requests'])) fail('schema')
     const schemas = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ sql: string }>
@@ -226,46 +444,100 @@ function openDatabase(databasePath: string, instanceId: string, beforeOpen?: () 
       credential_leases: ['action_id', 'credential_id', 'purpose', 'status', 'issued_at', 'expires_at', 'settled_at', 'version'],
       grant_heads: ['id', 'revision', 'revoked'], grants: ['id', 'revision', 'digest', 'grant_json', 'revoked', 'created_at'],
       meta: ['singleton', 'instance_id', 'generation', 'controller_fence', 'control_version', 'policy_epoch', 'emergency_epoch', 'stopped', 'draining'],
-      requests: ['action_id', 'request_id', 'client_key_id', 'owner_json', 'session_id', 'agent_id', 'root_call_id', 'call_id', 'grant_id', 'grant_revision', 'grant_digest', 'request_digest', 'operation', 'repository', 'branch', 'expected_head_oid', 'payload_digest', 'budget_reservation_id', 'bytes', 'cost_units', 'deadline', 'policy_epoch', 'emergency_epoch', 'generation', 'status', 'version', 'dispatched_at', 'result_json'],
+      requests: [
+        'action_id', 'request_id', 'client_key_id', 'owner_json', 'session_id', 'agent_id', 'root_call_id', 'call_id',
+        'grant_id', 'grant_revision', 'grant_digest', 'request_digest', 'domain', 'operation', 'repository', 'branch',
+        'expected_head_oid', 'destination_key', 'scope_key', 'sensitivity', 'estimated_cost_micros', 'commit_digest',
+        'predecessor_digest', 'idempotency_key', 'lease_id', 'payload_digest', 'budget_reservation_id', 'bytes',
+        'cost_units', 'deadline', 'policy_epoch', 'emergency_epoch', 'generation', 'status', 'version', 'dispatched_at', 'result_json',
+      ],
     }
     for (const [table, expected] of Object.entries(expectedColumns)) {
       const columns = (database.prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid").all(table) as Array<{ name: string }>).map(row => row.name)
       if (!equal(columns, expected)) fail('schema')
     }
     const indexes = (database.prepare("SELECT name FROM sqlite_schema WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
-    if (!indexes.includes('requests_grant_budget') || !indexes.includes('requests_status') || !indexes.includes('requests_pr_occupancy')) fail('schema')
+    if (!indexes.includes('requests_grant_budget') || !indexes.includes('requests_status') || !indexes.includes('requests_pr_occupancy') || !indexes.includes('requests_lease_usage') || !indexes.includes('requests_idempotency_v2')) fail('schema')
     if ((database.prepare('PRAGMA quick_check').get() as { quick_check: string }).quick_check !== 'ok') fail('schema')
     if (databasePath !== ':memory:') {
       if (!pinned || !pinnedPathMatches(databasePath, pinned)) fail('unsafe-file')
-      privateFile(databasePath)
-      for (const suffix of ['-wal', '-shm']) if (exists(databasePath + suffix)) {
-        const anchored = pinned.sqlitePath + suffix
-        chmodSync(anchored, 0o600); privateFile(databasePath + suffix)
-        const anchoredStat = lstatSync(anchored, { bigint: true }), visibleStat = lstatSync(databasePath + suffix, { bigint: true })
-        if (!sameNode(anchoredStat, visibleStat)) fail('unsafe-file')
+      privateFile(databasePath, platform, options.checkWindowsAcl)
+      if (platform !== 'win32') {
+        for (const suffix of ['-wal', '-shm']) if (exists(databasePath + suffix)) {
+          const anchored = pinned.sqlitePath + suffix
+          chmodSync(anchored, 0o600); privateFile(databasePath + suffix, platform)
+          const anchoredStat = lstatSync(anchored, { bigint: true }), visibleStat = lstatSync(databasePath + suffix, { bigint: true })
+          if (!sameNode(anchoredStat, visibleStat)) fail('unsafe-file')
+        }
+        safeAncestorChain(dirname(databasePath), Number(pinned.parent!.uid), Number(pinned.parent!.gid))
+        if (!pinnedPathMatches(databasePath, pinned)) fail('unsafe-file')
       }
-      safeAncestorChain(dirname(databasePath), Number(pinned.parent.uid), Number(pinned.parent.gid))
-      if (!pinnedPathMatches(databasePath, pinned)) fail('unsafe-file')
-      closeSync(pinned.fileDescriptor)
+      if (pinned.fileDescriptor !== undefined) closeSync(pinned.fileDescriptor)
     }
-    return { database, ...(pinned ? { parentDescriptor: pinned.parentDescriptor } : {}) }
-  } catch (error) { database?.close(); if (pinned) { try { closeSync(pinned.fileDescriptor) } catch {}; try { closeSync(pinned.parentDescriptor) } catch {} } throw error }
+    return { database, ...(pinned?.parentDescriptor !== undefined ? { parentDescriptor: pinned.parentDescriptor } : {}) }
+  } catch (error) {
+    database?.close()
+    if (pinned) {
+      if (pinned.fileDescriptor !== undefined) try { closeSync(pinned.fileDescriptor) } catch {}
+      if (pinned.parentDescriptor !== undefined) try { closeSync(pinned.parentDescriptor) } catch {}
+    }
+    throw error
+  }
 }
 
-export function brokerPayloadBytes(request: BrokerClientRequest): number { return Buffer.byteLength(canonicalBrokerJson(request.payload), 'utf8') }
-export const brokerLedgerRequestDigest = brokerRequestDigest
-function outcome(value: unknown, record?: Pick<BrokerLedgerRecord, 'operation' | 'repository' | 'branch' | 'expectedHeadOid'>): BrokerLedgerOutcome {
+export function brokerPayloadBytes(request: BrokerClientRequest | ActionBrokerClientRequest): number {
+  return Buffer.byteLength(canonicalBrokerJson(request.payload), 'utf8')
+}
+
+export function brokerLedgerRequestDigest(request: BrokerClientRequest | ActionBrokerClientRequest): string {
+  if ('domain' in request) return actionBrokerRequestDigest(request)
+  return brokerRequestDigest(request)
+}
+
+function outcome(value: unknown, record?: Pick<BrokerLedgerRecord, 'domain' | 'operation' | 'repository' | 'branch' | 'expectedHeadOid'>): BrokerLedgerOutcome {
   const input = exact(value, ['status', 'dispatched', 'result', 'error', 'completedAt'])
   if (!['succeeded', 'failed', 'unknown'].includes(String(input.status)) || typeof input.dispatched !== 'boolean') fail('invalid-input')
   const status = input.status as BrokerTerminalStatus
   if (status === 'succeeded') {
     if (!input.dispatched || input.error !== null || !plain(input.result)) fail('invalid-input')
-    if (record && (input.result.operation !== record.operation || input.result.repository !== record.repository || input.result.branch !== record.branch || record.operation === 'commit' && input.result.parentOid !== record.expectedHeadOid || record.operation === 'pull-request' && input.result.expectedHeadOid !== record.expectedHeadOid)) fail('state')
+    if (record) {
+      if (record.domain === 'github') {
+        const res = input.result as BrokerSuccessResult
+        if (res.operation !== record.operation || res.repository !== record.repository || res.branch !== record.branch || (record.operation === 'commit' && 'parentOid' in res && res.parentOid !== record.expectedHeadOid) || (record.operation === 'pull-request' && 'expectedHeadOid' in res && res.expectedHeadOid !== record.expectedHeadOid)) fail('state')
+      } else {
+        if (input.result.domain !== record.domain || input.result.operation !== record.operation) fail('state')
+      }
+    }
   } else {
     if (input.result !== null || !plain(input.error) || Object.keys(input.error).length !== 1 || typeof input.error.code !== 'string' || !/^[a-z0-9][a-z0-9-]{0,127}$/u.test(input.error.code)) fail('invalid-input')
     if (status === 'unknown' && !input.dispatched) fail('invalid-input')
   }
-  return Object.freeze({ status, dispatched: input.dispatched, result: input.result as BrokerSuccessResult | null, error: input.error as { code: string } | null, completedAt: integer(input.completedAt, 1) })
+  return Object.freeze({ status, dispatched: input.dispatched, result: input.result as ActionBrokerSuccessResult | null, error: input.error as { code: string } | null, completedAt: integer(input.completedAt, 1) })
+}
+
+function isV2Grant(grant: AnyExternalBrokerGrant): grant is ExternalActionGrant {
+  return grant.protocol === ACTION_GRANT_PROTOCOL
+}
+
+function leasePurposeFor(domain: BrokerActionDomain, operation: ActionBrokerOperation): string {
+  if (domain === 'github') {
+    return operation === 'commit' ? 'github.commit' : operation === 'pull-request' ? 'github.pull-request' : 'github.inspect'
+  }
+  return operation
+}
+
+function wp08ConstraintsFor(grant: AnyExternalBrokerGrant): BrokerWp08Constraints | undefined {
+  if (!isV2Grant(grant)) return undefined
+  if (grant.lease === undefined && grant.destinations === undefined && grant.maxSensitivity === undefined && grant.monetaryCostCapMicros === undefined && grant.commitDigest === undefined) {
+    return undefined
+  }
+  return {
+    ...(grant.lease === undefined ? {} : { lease: grant.lease }),
+    ...(grant.destinations === undefined ? {} : { destinations: grant.destinations }),
+    ...(grant.maxSensitivity === undefined ? {} : { maxSensitivity: grant.maxSensitivity }),
+    ...(grant.monetaryCostCapMicros === undefined ? {} : { monetaryCostCapMicros: grant.monetaryCostCapMicros }),
+    ...(grant.commitDigest === undefined ? {} : { commitDigest: grant.commitDigest }),
+  }
 }
 
 export class ExternalBrokerLedger {
@@ -273,11 +545,22 @@ export class ExternalBrokerLedger {
   readonly #parentDescriptor: number | undefined
   readonly #now: () => number
   #closed = false
-  constructor(databasePath: string, instanceId: string, options: { now?: () => number; beforeDatabaseOpen?: () => void } = {}) {
+  constructor(
+    databasePath: string,
+    instanceId: string,
+    options: { now?: () => number; beforeDatabaseOpen?: () => void; platform?: NodeJS.Platform; checkWindowsAcl?: (path: string) => WindowsAclInspection | undefined } = {},
+  ) {
     text(instanceId, 128)
-    if (!plain(options) || Object.keys(options).some(key => !['now', 'beforeDatabaseOpen'].includes(key)) || options.now !== undefined && typeof options.now !== 'function' || options.beforeDatabaseOpen !== undefined && typeof options.beforeDatabaseOpen !== 'function') fail('invalid-input')
+    if (!plain(options) || Object.keys(options).some(key => !['now', 'beforeDatabaseOpen', 'platform', 'checkWindowsAcl'].includes(key))
+      || (options.now !== undefined && typeof options.now !== 'function')
+      || (options.beforeDatabaseOpen !== undefined && typeof options.beforeDatabaseOpen !== 'function')
+      || (options.checkWindowsAcl !== undefined && typeof options.checkWindowsAcl !== 'function')) fail('invalid-input')
     this.#now = options.now ?? Date.now
-    const opened = openDatabase(databasePath, instanceId, options.beforeDatabaseOpen)
+    const opened = openDatabase(databasePath, instanceId, {
+      ...(options.beforeDatabaseOpen === undefined ? {} : { beforeOpen: options.beforeDatabaseOpen }),
+      ...(options.platform === undefined ? {} : { platform: options.platform }),
+      ...(options.checkWindowsAcl === undefined ? {} : { checkWindowsAcl: options.checkWindowsAcl }),
+    })
     this.#database = opened.database; this.#parentDescriptor = opened.parentDescriptor
     try { this.#validateStored(instanceId) } catch (error) { this.#database.close(); if (this.#parentDescriptor !== undefined) closeSync(this.#parentDescriptor); throw error }
   }
@@ -291,20 +574,45 @@ export class ExternalBrokerLedger {
     if (!row || row.owner_id !== ownerId || row.fence !== fence || row.generation !== generation || row.expires_at <= now || this.#meta().generation !== generation) fail('controller')
     return Object.freeze({ ownerId, fence, generation })
   }
-  #grant(row: GrantRow): ExternalGitHubGrant { try { const grant = normalizeBrokerGrant(json(row.grant_json)); if (grant.id !== row.id || grant.revision !== row.revision || grant.digest !== row.digest || ![0, 1].includes(row.revoked) || !Number.isSafeInteger(row.created_at)) fail('schema'); return grant } catch { return fail('schema') } }
+  #grant(row: GrantRow): AnyExternalBrokerGrant {
+    try {
+      const grant = normalizeAnyGrant(json(row.grant_json))
+      if (grant.id !== row.id || grant.revision !== row.revision || grant.digest !== row.digest || ![0, 1].includes(row.revoked) || !Number.isSafeInteger(row.created_at)) fail('schema')
+      return grant
+    } catch { return fail('schema') }
+  }
   #head(id: string): (GrantRow & { head_revoked: number }) | undefined { const row = this.#database.prepare('SELECT g.*,h.revoked AS head_revoked FROM grant_heads h JOIN grants g ON g.id=h.id AND g.revision=h.revision WHERE h.id=?').get(id) as (GrantRow & { head_revoked: number }) | undefined; if (row && row.revoked !== row.head_revoked) fail('schema'); return row }
   #row(row: RequestRow): BrokerLedgerRecord {
     try {
       const status = row.status as BrokerRequestStatus
       if (!['prepared', 'dispatched', 'succeeded', 'failed', 'unknown'].includes(status)) fail('schema')
       const terminal = ['succeeded', 'failed', 'unknown'].includes(status)
-      if (terminal !== (row.result_json !== null) || status === 'prepared' && row.dispatched_at !== null || status === 'dispatched' && row.dispatched_at === null) fail('schema')
-      const record: BrokerLedgerRecord = { actionId: text(row.action_id), requestId: text(row.request_id), clientKeyId: text(row.client_key_id), owner: owner(json(row.owner_json)), sessionId: text(row.session_id), agentId: text(row.agent_id), rootCallId: text(row.root_call_id), callId: text(row.call_id), grantId: text(row.grant_id), grantRevision: integer(row.grant_revision, 1), grantDigest: digest(row.grant_digest), requestDigest: digest(row.request_digest), operation: row.operation as BrokerLedgerRecord['operation'], repository: text(row.repository), branch: text(row.branch), expectedHeadOid: row.expected_head_oid, payloadDigest: digest(row.payload_digest), budgetReservationId: text(row.budget_reservation_id), bytes: integer(row.bytes), costUnits: integer(row.cost_units), deadline: integer(row.deadline, 1), policyEpoch: integer(row.policy_epoch), emergencyEpoch: integer(row.emergency_epoch), generation: integer(row.generation, 1), status, version: integer(row.version, 1) }
-      if (!['commit', 'pull-request', 'inspect'].includes(record.operation) || (['commit', 'pull-request'].includes(record.operation)) !== (record.expectedHeadOid !== null) || record.expectedHeadOid !== null && !/^[0-9a-f]{40,128}$/u.test(record.expectedHeadOid)) fail('schema')
+      if (terminal !== (row.result_json !== null) || (status === 'prepared' && row.dispatched_at !== null) || (status === 'dispatched' && row.dispatched_at === null)) fail('schema')
+      const domain = row.domain as BrokerActionDomain
+      if (!['github', 'http', 'lark', 'calendar', 'shell'].includes(domain) || !V3_OPERATIONS.has(row.operation)) fail('schema')
+      const record: BrokerLedgerRecord = {
+        actionId: text(row.action_id), requestId: text(row.request_id), clientKeyId: text(row.client_key_id), owner: owner(json(row.owner_json)),
+        sessionId: text(row.session_id), agentId: text(row.agent_id), rootCallId: text(row.root_call_id), callId: text(row.call_id),
+        grantId: text(row.grant_id), grantRevision: integer(row.grant_revision, 1), grantDigest: digest(row.grant_digest), requestDigest: digest(row.request_digest),
+        domain, operation: row.operation as ActionBrokerOperation, repository: row.repository, branch: row.branch, expectedHeadOid: row.expected_head_oid,
+        destinationKey: row.destination_key, scopeKey: row.scope_key, sensitivity: row.sensitivity as BrokerSensitivity,
+        estimatedCostMicros: integer(row.estimated_cost_micros), commitDigest: row.commit_digest, predecessorDigest: row.predecessor_digest,
+        idempotencyKey: row.idempotency_key, leaseId: row.lease_id,
+        payloadDigest: digest(row.payload_digest), budgetReservationId: text(row.budget_reservation_id), bytes: integer(row.bytes), costUnits: integer(row.cost_units),
+        deadline: integer(row.deadline, 1), policyEpoch: integer(row.policy_epoch), emergencyEpoch: integer(row.emergency_epoch), generation: integer(row.generation, 1),
+        status, version: integer(row.version, 1),
+      }
+      if (domain === 'github') {
+        if (!['commit', 'pull-request', 'inspect'].includes(record.operation) || (['commit', 'pull-request'].includes(record.operation)) !== (record.expectedHeadOid !== null) || (record.expectedHeadOid !== null && !/^[0-9a-f]{40,128}$/u.test(record.expectedHeadOid))) fail('schema')
+      }
       const grantRow = this.#database.prepare('SELECT * FROM grants WHERE id=? AND revision=?').get(record.grantId, record.grantRevision) as GrantRow | undefined
       if (!grantRow) fail('schema')
       const grant = this.#grant(grantRow)
-      if (grant.digest !== record.grantDigest || grant.clientKeyId !== record.clientKeyId || !equal(grant.owner, record.owner) || grant.sessionId !== record.sessionId || grant.destination.repository !== record.repository || grant.destination.branch !== record.branch || grant.policyEpoch !== record.policyEpoch || grant.emergencyEpoch !== record.emergencyEpoch) fail('schema')
+      if (grant.digest !== record.grantDigest || grant.clientKeyId !== record.clientKeyId || !equal(grant.owner, record.owner) || grant.sessionId !== record.sessionId || grant.policyEpoch !== record.policyEpoch || grant.emergencyEpoch !== record.emergencyEpoch) fail('schema')
+      if (domain === 'github') {
+        const dest = grant.destination as GitHubGrantDestinationV2
+        if (dest.repository !== record.repository || dest.branch !== record.branch) fail('schema')
+      }
       if (terminal) {
         record.outcome = outcome(json(row.result_json!), record)
         if (record.outcome.dispatched !== (row.dispatched_at !== null)) fail('schema')
@@ -331,10 +639,11 @@ export class ExternalBrokerLedger {
       for (const controller of controllers) { text(controller.owner_id); integer(controller.fence, 1); integer(controller.generation, 1); integer(controller.expires_at) }
       const leases = this.#database.prepare('SELECT * FROM credential_leases').all() as CredentialLeaseRow[]
       for (const lease of leases) {
-        const action = rows.find(row => row.action_id === text(lease.action_id)); if (!action || text(lease.credential_id, 128) !== this.#grant(this.#database.prepare('SELECT * FROM grants WHERE id=? AND revision=?').get(action.grant_id, action.grant_revision) as GrantRow).credentialId) fail('schema')
-        if (!['github.commit', 'github.pull-request', 'github.inspect'].includes(lease.purpose) || lease.purpose !== (action.operation === 'commit' ? 'github.commit' : action.operation === 'pull-request' ? 'github.pull-request' : 'github.inspect') || !['active', 'completed', 'failed', 'revoked'].includes(lease.status)) fail('schema')
+        const action = rows.find(row => row.action_id === text(lease.action_id))
+        if (!action || text(lease.credential_id, 128) !== this.#grant(this.#database.prepare('SELECT * FROM grants WHERE id=? AND revision=?').get(action.grant_id, action.grant_revision) as GrantRow).credentialId) fail('schema')
+        if (!V3_LEASE_PURPOSES.has(lease.purpose) || lease.purpose !== leasePurposeFor(action.domain as BrokerActionDomain, action.operation as ActionBrokerOperation) || !['active', 'completed', 'failed', 'revoked'].includes(lease.status)) fail('schema')
         const issuedAt = integer(lease.issued_at); const expiresAt = integer(lease.expires_at, 1); integer(lease.version, 1)
-        if (expiresAt <= issuedAt || (lease.status === 'active') !== (lease.settled_at === null) || lease.status === 'active' && action.status !== 'dispatched' || lease.status === 'completed' && action.status !== 'succeeded') fail('schema')
+        if (expiresAt <= issuedAt || (lease.status === 'active') !== (lease.settled_at === null) || (lease.status === 'active' && action.status !== 'dispatched') || (lease.status === 'completed' && action.status !== 'succeeded')) fail('schema')
         if (lease.settled_at !== null) integer(lease.settled_at)
       }
       const nonces = this.#database.prepare('SELECT * FROM admin_nonces').all() as AdminNonceRow[]
@@ -367,9 +676,9 @@ export class ExternalBrokerLedger {
     this.#database.prepare("UPDATE credential_leases SET status='revoked',settled_at=?,version=version+1 WHERE status='active'").run(now)
   }
 
-  syncGrants(values: readonly ExternalGitHubGrant[], policyEpoch: number, authority: BrokerAuthority): BrokerControlMutation {
+  syncGrants(values: readonly AnyExternalBrokerGrant[], policyEpoch: number, authority: BrokerAuthority): BrokerControlMutation {
     if (!Array.isArray(values) || values.length > MAX_GRANTS) fail('invalid-input')
-    const grants = values.map(normalizeBrokerGrant); if (new Set(grants.map(grant => grant.id)).size !== grants.length) fail('invalid-input')
+    const grants = values.map(normalizeAnyGrant); if (new Set(grants.map(grant => grant.id)).size !== grants.length) fail('invalid-input')
     const nextEpoch = integer(policyEpoch); const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
     try {
       this.#authority(authority, now); const meta = this.#meta(); if (nextEpoch < meta.policy_epoch || grants.some(grant => grant.policyEpoch !== nextEpoch || grant.emergencyEpoch !== meta.emergency_epoch)) fail('grant')
@@ -392,56 +701,162 @@ export class ExternalBrokerLedger {
       const snapshot = this.#snapshot(); this.#database.exec('COMMIT'); return Object.freeze({ ...snapshot, abortActionIds: Object.freeze([...abort]) })
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
-  grant(id: string): ExternalGitHubGrant | undefined { const row = this.#head(text(id)); return row && !row.head_revoked ? this.#grant(row) : undefined }
+  grant(id: string): ExternalGitHubGrant | undefined {
+    const row = this.#head(text(id))
+    if (!row || row.head_revoked) return undefined
+    const parsed = this.#grant(row)
+    return isV2Grant(parsed) ? undefined : parsed
+  }
+  anyGrant(id: string): AnyExternalBrokerGrant | undefined {
+    const row = this.#head(text(id))
+    return row && !row.head_revoked ? this.#grant(row) : undefined
+  }
 
-  #checkRequest(request: BrokerClientRequest, grant: ExternalGitHubGrant, meta: MetaRow, now: number): number {
+  #wp08Usage(grant: AnyExternalBrokerGrant, excludeActionId?: string): BrokerWp08UsageState {
+    const leaseId = isV2Grant(grant) ? grant.lease?.leaseId : undefined
+    const leaseRow = (leaseId
+      ? this.#database.prepare("SELECT COUNT(*) AS uses FROM requests WHERE lease_id=? AND action_id!=? AND (status='prepared' OR dispatched_at IS NOT NULL)").get(leaseId, excludeActionId ?? '')
+      : this.#database.prepare("SELECT COUNT(*) AS uses FROM requests WHERE grant_id=? AND action_id!=? AND (status='prepared' OR dispatched_at IS NOT NULL)").get(grant.id, excludeActionId ?? '')) as { uses: number }
+    const costRow = this.#database.prepare("SELECT COALESCE(SUM(estimated_cost_micros),0) AS spent FROM requests WHERE grant_id=? AND action_id!=? AND (status='prepared' OR dispatched_at IS NOT NULL)").get(grant.id, excludeActionId ?? '') as { spent: number }
+    const lastCommit = this.#database.prepare("SELECT commit_digest FROM requests WHERE grant_id=? AND status='succeeded' AND commit_digest IS NOT NULL ORDER BY rowid DESC LIMIT 1").get(grant.id) as { commit_digest: string } | undefined
+    return {
+      leaseUses: leaseRow.uses,
+      spentCostMicros: costRow.spent,
+      ...(lastCommit?.commit_digest ? { lastSettledCommitDigest: lastCommit.commit_digest } : {}),
+    }
+  }
+
+  #checkWp08(grant: AnyExternalBrokerGrant, reqContext: BrokerWp08RequestContext, now: number, excludeActionId?: string): void {
+    const constraints = wp08ConstraintsFor(grant)
+    const usage = this.#wp08Usage(grant, excludeActionId)
+    const evaluation = evaluateBrokerWp08Constraints(constraints, reqContext, usage, now)
+    if (!evaluation.allowed) {
+      if (evaluation.reasonCode === 'cost-cap-exceeded' || evaluation.reasonCode === 'lease-exhausted') fail('limit')
+      if (evaluation.reasonCode === 'invalid-input') fail('invalid-input')
+      fail('grant')
+    }
+  }
+
+  #checkRequest(request: BrokerClientRequest | ActionBrokerClientRequest, grant: AnyExternalBrokerGrant, meta: MetaRow, now: number): number {
     if (meta.stopped || meta.draining) fail('stopped')
+    const isV2 = 'domain' in request
+    if (!isV2 && isV2Grant(grant)) fail('grant')
+    if (isV2 && !isV2Grant(grant)) fail('grant')
     if (request.clientKeyId !== grant.clientKeyId || request.grantRevision !== grant.revision || request.grantDigest !== grant.digest || !equal(request.owner, grant.owner) || request.sessionId !== grant.sessionId || !equal(request.source, grant.source)
       || !equal(request.client, grant.client)
-      || request.broker.kind !== 'github-broker' || request.broker.instanceId !== meta.instance_id || request.broker.generation !== meta.generation
-      || request.destination.classification !== 'github-repository' || request.destination.repository !== grant.destination.repository || request.destination.branch !== grant.destination.branch || request.destination.baseBranch !== grant.destination.baseBranch
+      || request.broker.instanceId !== meta.instance_id || request.broker.generation !== meta.generation
       || request.policyEpoch !== grant.policyEpoch || request.policyEpoch !== meta.policy_epoch || request.emergencyEpoch !== grant.emergencyEpoch || request.emergencyEpoch !== meta.emergency_epoch
-      || request.deadline <= now || request.deadline > grant.expiresAt || grant.expiresAt <= now || !grant.allowedOperations.includes(request.operation)) fail('grant')
-    if (request.operation === 'commit') { if (!('files' in request.payload) || request.payload.files.some(file => !grant.destination.paths.includes(file.path))) fail('grant') }
-    else if (request.operation === 'pull-request') { if (!grant.destination.baseBranch || grant.destination.baseBranch === grant.destination.branch || !('expectedHeadOid' in request.payload)) fail('grant') }
-    else if (!('kind' in request.payload) || !grant.allowedInspectKinds.includes(request.payload.kind) || request.payload.kind === 'file' && (!request.payload.path || !grant.destination.paths.includes(request.payload.path))) fail('grant')
-    const bytes = brokerPayloadBytes(request)
-    const costUnits = request.operation === 'inspect' && 'kind' in request.payload && ['checks', 'reviews'].includes(request.payload.kind) ? 2 : 1
-    if (request.budget.actions !== 1 || request.budget.bytes !== bytes || request.budget.costMetric !== 'github-api-units' || request.budget.maxCostUnits !== costUnits || bytes > grant.maxTotalBytes || costUnits > grant.maxCostUnits) fail('limit')
+      || request.deadline <= now || request.deadline > grant.expiresAt || grant.expiresAt <= now) fail('grant')
+
+    if (!isV2 && !isV2Grant(grant)) {
+      if (request.broker.kind !== 'github-broker' || request.destination.classification !== 'github-repository'
+        || request.destination.repository !== grant.destination.repository || request.destination.branch !== grant.destination.branch || request.destination.baseBranch !== grant.destination.baseBranch
+        || !grant.allowedOperations.includes(request.operation)) fail('grant')
+      if (request.operation === 'commit') { if (!('files' in request.payload) || request.payload.files.some(file => !grant.destination.paths.includes(file.path))) fail('grant') }
+      else if (request.operation === 'pull-request') { if (!grant.destination.baseBranch || grant.destination.baseBranch === grant.destination.branch || !('expectedHeadOid' in request.payload)) fail('grant') }
+      else if (!('kind' in request.payload) || !grant.allowedInspectKinds.includes(request.payload.kind) || (request.payload.kind === 'file' && (!request.payload.path || !grant.destination.paths.includes(request.payload.path)))) fail('grant')
+      const bytes = brokerPayloadBytes(request)
+      const costUnits = request.operation === 'inspect' && 'kind' in request.payload && ['checks', 'reviews'].includes(request.payload.kind) ? 2 : 1
+      if (request.budget.actions !== 1 || request.budget.bytes !== bytes || request.budget.costMetric !== 'github-api-units' || request.budget.maxCostUnits !== costUnits || bytes > grant.maxTotalBytes || costUnits > grant.maxCostUnits) fail('limit')
+      return bytes
+    }
+
+    const req2 = request as ActionBrokerClientRequest
+    const grant2 = grant as ExternalActionGrant
+    if (req2.domain !== grant2.domain || !grant2.allowedOperations.includes(req2.operation)) fail('grant')
+    if (req2.domain === 'github') {
+      const gDest = grant2.destination as GitHubGrantDestinationV2
+      const rDest = req2.destination as GitHubRequestDestinationV2
+      if (rDest.repository !== gDest.repository || rDest.branch !== gDest.branch || rDest.baseBranch !== gDest.baseBranch) fail('grant')
+      if (req2.operation === 'commit') {
+        if (!('files' in req2.payload) || req2.payload.files.some(file => !gDest.paths.includes(file.path))) fail('grant')
+      } else if (req2.operation === 'pull-request') {
+        if (!gDest.baseBranch || gDest.baseBranch === gDest.branch || !('expectedHeadOid' in req2.payload)) fail('grant')
+      } else if (!('kind' in req2.payload) || !(grant2.allowedInspectKinds ?? []).includes(req2.payload.kind) || (req2.payload.kind === 'file' && (!req2.payload.path || !gDest.paths.includes(req2.payload.path)))) {
+        fail('grant')
+      }
+    }
+    const bytes = brokerPayloadBytes(req2)
+    if (req2.budget.actions !== 1 || req2.budget.bytes !== bytes || bytes > grant2.maxTotalBytes || req2.budget.maxCostUnits > grant2.maxCostUnits) fail('limit')
+    const destinationString = resolveWp08DestinationString(req2.domain, req2.destination, req2.payload)
+    const estimatedCostMicros = req2.estimatedCostMicros ?? req2.budget.estimatedCostMicros ?? 0
+    this.#checkWp08(grant2, {
+      destination: destinationString,
+      sensitivity: req2.source.classification,
+      estimatedCostMicros,
+      ...(req2.commitDigest === undefined ? {} : { commitDigest: req2.commitDigest }),
+      ...(req2.predecessorDigest === undefined ? {} : { predecessorDigest: req2.predecessorDigest }),
+      ...(req2.idempotencyKey === undefined ? {} : { idempotencyKey: req2.idempotencyKey }),
+    }, now, req2.actionId)
     return bytes
   }
-  prepare(request: BrokerClientRequest, authority: BrokerAuthority): { record: BrokerLedgerRecord; created: boolean } {
+
+  prepare(request: BrokerClientRequest | ActionBrokerClientRequest, authority: BrokerAuthority): { record: BrokerLedgerRecord; created: boolean } {
     const now = this.#time(); const requestDigest = brokerLedgerRequestDigest(request); this.#database.exec('BEGIN IMMEDIATE')
     try {
       const existing = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(request.actionId) as RequestRow | undefined
       if (existing) {
         const record = this.#row(existing)
         if (record.requestDigest !== requestDigest || record.clientKeyId !== request.clientKeyId) fail('conflict')
-        // Exact terminal history is immutable readback and remains available
-        // after grant expiry/revocation or controller handover. A nonterminal
-        // row can still advance, so it must pass the current fence and grant.
         if (!record.outcome) { this.#authority(authority, now); const current = this.#head(request.grantId); if (!current || current.revoked || current.head_revoked) fail('grant'); this.#checkRequest(request, this.#grant(current), this.#meta(), now) }
         this.#database.exec('COMMIT'); return { record, created: false }
+      }
+      if ('domain' in request && request.idempotencyKey !== undefined) {
+        const idemExisting = this.#database.prepare('SELECT * FROM requests WHERE client_key_id=? AND grant_id=? AND idempotency_key=?').get(request.clientKeyId, request.grantId, request.idempotencyKey) as RequestRow | undefined
+        if (idemExisting) {
+          const record = this.#row(idemExisting)
+          if (record.requestDigest !== requestDigest) fail('conflict')
+          if (!record.outcome) { this.#authority(authority, now); const current = this.#head(request.grantId); if (!current || current.revoked || current.head_revoked) fail('grant'); this.#checkRequest(request, this.#grant(current), this.#meta(), now) }
+          this.#database.exec('COMMIT'); return { record, created: false }
+        }
       }
       this.#authority(authority, now); const meta = this.#meta()
       const head = this.#head(request.grantId); if (!head || head.revoked || head.head_revoked) fail('grant'); const grant = this.#grant(head); const bytes = this.#checkRequest(request, grant, meta, now)
       const collision = this.#database.prepare('SELECT request_digest FROM requests WHERE client_key_id=? AND (request_id=? OR budget_reservation_id=?)').get(request.clientKeyId, request.requestId, request.budget.reservationId) as { request_digest: string } | undefined
       if (collision) fail('conflict')
       const count = (this.#database.prepare('SELECT COUNT(*) AS count FROM requests').get() as { count: number }).count; if (count >= MAX_RECORDS) fail('limit')
-      if (request.operation === 'pull-request') {
-        const occupied = this.#database.prepare("SELECT 1 FROM requests r JOIN grants g ON g.id=r.grant_id AND g.revision=r.grant_revision WHERE r.repository=? AND r.branch=? AND r.operation='pull-request' AND json_extract(g.grant_json,'$.destination.baseBranch')=? AND (r.status IN ('prepared','dispatched','unknown') OR (r.status='succeeded' AND r.expected_head_oid=?)) LIMIT 1").get(grant.destination.repository, grant.destination.branch, grant.destination.baseBranch!, 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : '')
-        if (occupied) fail('conflict')
+
+      const domain: BrokerActionDomain = 'domain' in request ? request.domain : 'github'
+      if (domain === 'github') {
+        const gDest = grant.destination as GitHubGrantDestinationV2
+        if (request.operation === 'pull-request') {
+          const occupied = this.#database.prepare("SELECT 1 FROM requests r JOIN grants g ON g.id=r.grant_id AND g.revision=r.grant_revision WHERE r.repository=? AND r.branch=? AND r.operation='pull-request' AND json_extract(g.grant_json,'$.destination.baseBranch')=? AND (r.status IN ('prepared','dispatched','unknown') OR (r.status='succeeded' AND r.expected_head_oid=?)) LIMIT 1").get(gDest.repository, gDest.branch, gDest.baseBranch!, 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : '')
+          if (occupied) fail('conflict')
+        }
+        if (request.operation === 'commit' && 'expectedHeadOid' in request.payload
+          && this.#database.prepare("SELECT 1 FROM requests WHERE operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(gDest.repository, gDest.branch, request.payload.expectedHeadOid)) fail('conflict')
       }
-      if (request.operation === 'commit' && 'expectedHeadOid' in request.payload
-        && this.#database.prepare("SELECT 1 FROM requests WHERE operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(grant.destination.repository, grant.destination.branch, request.payload.expectedHeadOid)) fail('conflict')
+
       const used = this.#database.prepare("SELECT COUNT(*) AS actions,COALESCE(SUM(bytes),0) AS bytes,COALESCE(SUM(cost_units),0) AS cost FROM requests WHERE grant_id=? AND (status='prepared' OR dispatched_at IS NOT NULL)").get(grant.id) as { actions: number; bytes: number; cost: number }
       const costUnits = request.budget.maxCostUnits
       if (used.actions + 1 > grant.maxActions || used.bytes + bytes > grant.maxTotalBytes || used.cost + costUnits > grant.maxCostUnits) fail('limit')
-      this.#database.prepare('INSERT INTO requests(action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,operation,repository,branch,expected_head_oid,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,NULL)').run(request.actionId, request.requestId, request.clientKeyId, canonicalBrokerJson(request.owner), request.sessionId, request.agentId, request.rootCallId, request.callId, grant.id, grant.revision, grant.digest, requestDigest, request.operation, grant.destination.repository, grant.destination.branch, (request.operation === 'commit' || request.operation === 'pull-request') && 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : null, request.payloadDigest, request.budget.reservationId, bytes, costUnits, request.deadline, request.policyEpoch, request.emergencyEpoch, meta.generation, 'prepared')
-      this.#audit('request-prepared', request.actionId, 1, now); const row = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(request.actionId) as RequestRow
+
+      const repository = domain === 'github' ? (grant.destination as GitHubGrantDestinationV2).repository : ''
+      const branch = domain === 'github' ? (grant.destination as GitHubGrantDestinationV2).branch : ''
+      const expectedHeadOid = domain === 'github' && (request.operation === 'commit' || request.operation === 'pull-request') && 'expectedHeadOid' in request.payload
+        ? request.payload.expectedHeadOid
+        : null
+      const destinationKey = 'domain' in request ? resolveWp08DestinationString(domain, request.destination, request.payload) : `${repository}#${branch}`
+      const scopeKey = 'domain' in request ? actionScopeKey(domain, request.destination) : `${repository}#${branch}`
+      const sensitivity = request.source.classification
+      const estimatedCostMicros = 'domain' in request ? (request.estimatedCostMicros ?? request.budget.estimatedCostMicros ?? 0) : 0
+      const commitDigest = 'domain' in request ? (request.commitDigest ?? null) : null
+      const predecessorDigest = 'domain' in request ? (request.predecessorDigest ?? null) : null
+      const idempotencyKey = 'domain' in request ? (request.idempotencyKey ?? null) : null
+      const leaseId = isV2Grant(grant) ? (grant.lease?.leaseId ?? null) : null
+
+      this.#database.prepare('INSERT INTO requests(action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,domain,operation,repository,branch,expected_head_oid,destination_key,scope_key,sensitivity,estimated_cost_micros,commit_digest,predecessor_digest,idempotency_key,lease_id,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,NULL)').run(
+        request.actionId, request.requestId, request.clientKeyId, canonicalBrokerJson(request.owner), request.sessionId, request.agentId, request.rootCallId, request.callId,
+        grant.id, grant.revision, grant.digest, requestDigest, domain, request.operation, repository, branch, expectedHeadOid,
+        destinationKey, scopeKey, sensitivity, estimatedCostMicros, commitDigest, predecessorDigest, idempotencyKey, leaseId,
+        request.payloadDigest, request.budget.reservationId, bytes, costUnits, request.deadline, request.policyEpoch, request.emergencyEpoch, meta.generation, 'prepared',
+      )
+      this.#audit('request-prepared', request.actionId, 1, now)
+      const row = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(request.actionId) as RequestRow
       this.#database.exec('COMMIT'); return { record: this.#row(row), created: true }
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
+
   dispatch(actionId: string, version: number, requestDigestValue: string, credentialId: string, leaseExpiresAt: number, authority: BrokerAuthority): BrokerLedgerRecord {
     const id = text(actionId); const expected = integer(version, 1); const expectedDigest = digest(requestDigestValue); const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -450,14 +865,23 @@ export class ExternalBrokerLedger {
       if (record.status !== 'prepared' || record.version !== expected || record.requestDigest !== expectedDigest || record.deadline <= now || record.generation !== meta.generation || record.policyEpoch !== meta.policy_epoch || record.emergencyEpoch !== meta.emergency_epoch) fail('state')
       const head = this.#head(record.grantId); if (!head || head.revoked || head.head_revoked || head.revision !== record.grantRevision || head.digest !== record.grantDigest) fail('grant'); const grant = this.#grant(head)
       if (grant.expiresAt <= now || grant.credentialId !== credentialId || leaseExpiresAt <= now || leaseExpiresAt > record.deadline || leaseExpiresAt > grant.expiresAt) fail('grant')
-      if (record.operation === 'commit' && this.#database.prepare("SELECT 1 FROM requests WHERE action_id!=? AND operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(id, record.repository, record.branch, record.expectedHeadOid)) fail('conflict')
+      this.#checkWp08(grant, {
+        ...(record.destinationKey ? { destination: record.destinationKey } : {}),
+        sensitivity: record.sensitivity,
+        estimatedCostMicros: record.estimatedCostMicros,
+        ...(record.commitDigest ? { commitDigest: record.commitDigest } : {}),
+        ...(record.predecessorDigest ? { predecessorDigest: record.predecessorDigest } : {}),
+        ...(record.idempotencyKey ? { idempotencyKey: record.idempotencyKey } : {}),
+      }, now, record.actionId)
+      if (record.domain === 'github' && record.operation === 'commit' && this.#database.prepare("SELECT 1 FROM requests WHERE action_id!=? AND operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(id, record.repository, record.branch, record.expectedHeadOid)) fail('conflict')
       const changed = this.#database.prepare("UPDATE requests SET status='dispatched',version=version+1,dispatched_at=? WHERE action_id=? AND status='prepared' AND version=? AND request_digest=?").run(now, id, expected, expectedDigest)
       if (changed.changes !== 1) fail('state')
-      this.#database.prepare("INSERT INTO credential_leases VALUES(?,?,?,'active',?,?,NULL,1)").run(id, credentialId, record.operation === 'commit' ? 'github.commit' : record.operation === 'pull-request' ? 'github.pull-request' : 'github.inspect', now, leaseExpiresAt)
+      this.#database.prepare("INSERT INTO credential_leases VALUES(?,?,?,'active',?,?,NULL,1)").run(id, credentialId, leasePurposeFor(record.domain, record.operation), now, leaseExpiresAt)
       this.#audit('request-dispatched', id, expected + 1, now); const updated = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(id) as RequestRow
       this.#database.exec('COMMIT'); return this.#row(updated)
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
+
   settle(actionId: string, version: number, requestDigestValue: string, value: BrokerLedgerOutcome, authority: BrokerAuthority): BrokerLedgerRecord {
     const id = text(actionId); const expected = integer(version, 1); const expectedDigest = digest(requestDigestValue); const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -465,7 +889,7 @@ export class ExternalBrokerLedger {
       if (record.requestDigest !== expectedDigest) fail('conflict')
       if (record.outcome) { this.#database.exec('COMMIT'); return record }
       if (record.version !== expected || !['prepared', 'dispatched'].includes(record.status)) fail('state')
-      const normalized = outcome(value, record); if (record.status === 'prepared' && normalized.dispatched || record.status === 'dispatched' && !normalized.dispatched) fail('state')
+      const normalized = outcome(value, record); if ((record.status === 'prepared' && normalized.dispatched) || (record.status === 'dispatched' && !normalized.dispatched)) fail('state')
       const changed = this.#database.prepare('UPDATE requests SET status=?,version=version+1,result_json=? WHERE action_id=? AND version=? AND status=?').run(normalized.status, canonicalBrokerJson(normalized), id, expected, record.status)
       if (changed.changes !== 1) fail('state')
       if (record.status === 'dispatched') this.#database.prepare("UPDATE credential_leases SET status=?,settled_at=?,version=version+1 WHERE action_id=? AND status='active'").run(normalized.status === 'succeeded' ? 'completed' : 'failed', now, id)

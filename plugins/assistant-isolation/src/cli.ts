@@ -3,21 +3,24 @@ import { probeLinuxIsolationRuntime } from './probe.js'
 import { randomUUID } from 'node:crypto'
 import { constants, lstatSync, realpathSync } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { canonicalAbsolutePath, isPrivateDirectoryStats, isPrivateFileStats, matchesOwnerUid, hasPrivateMode, noFollowFlag } from './fs-ownership.js'
 import { IsolationLedger, IsolationLedgerError } from './ledger.js'
 import { reconcileLinuxJob } from './linux-job-recovery.js'
+import { reconcileNativeReceiptJob } from './native-job-recovery.js'
 import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js'
 import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
 import { archiveIsolationAudit, verifyIsolationAuditArchive } from './audit-archive.js'
 
 function privateLedger(stateRoot: string): string {
-  if (!isAbsolute(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
+  if (!canonicalAbsolutePath(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
   const root = lstatSync(stateRoot)
   const file = join(stateRoot, 'ledger.sqlite')
   const database = lstatSync(file)
-  if (!root.isDirectory() || root.uid !== process.getuid?.() || (root.mode & 0o077) !== 0
-    || !database.isFile() || database.isSymbolicLink() || database.uid !== root.uid || database.nlink !== 1 || (database.mode & 0o077) !== 0) throw new Error('private owned ledger required')
+  if (!isPrivateDirectoryStats(root) || !isPrivateFileStats(database, process.platform, root.uid)) {
+    throw new Error('private owned ledger required')
+  }
   return file
 }
 
@@ -43,7 +46,7 @@ export async function revokeIsolationGrant(stateRoot: string, grantId: string, r
       if (page.length === 0) break
       cursor = page.at(-1)!.id
       for (const job of page) {
-        if (job.grantId !== grantId || job.backend !== 'linux-native') continue
+        if (job.grantId !== grantId || (job.backend !== 'linux-native' && job.backend !== 'macos-seatbelt' && job.backend !== 'windows-job')) continue
         nativeSeen = true
         // A live service owns cancellation and cleanup. Claiming never steals
         // its lease or rewrites expiry; only an idle ledger permits CLI cleanup.
@@ -56,7 +59,10 @@ export async function revokeIsolationGrant(stateRoot: string, grantId: string, r
             timer.unref()
           }
         }
-        if (authority) await reconcileLinuxJob(ledger, authority, job, join(stateRoot, 'linux-executions'), abort.signal)
+        if (authority) {
+          if (job.backend === 'linux-native') await reconcileLinuxJob(ledger, authority, job, join(stateRoot, 'linux-executions'), abort.signal)
+          else await reconcileNativeReceiptJob(ledger, authority, job, stateRoot, { signal: abort.signal })
+        }
       }
     }
     if (!nativeSeen) return { revoked: true }
@@ -66,7 +72,7 @@ export async function revokeIsolationGrant(stateRoot: string, grantId: string, r
       const page = ledger.recoverable(cursor)
       if (page.length === 0) break
       cursor = page.at(-1)!.id
-      nativeRetained += page.filter(job => job.backend === 'linux-native' && job.grantId === grantId).length
+      nativeRetained += page.filter(job => (job.backend === 'linux-native' || job.backend === 'macos-seatbelt' || job.backend === 'windows-job') && job.grantId === grantId).length
     }
     return { revoked: true, nativeResourcesQuiescent: nativeRetained === 0, nativeRetained }
   } finally {
@@ -98,7 +104,10 @@ export async function reconcileIsolation(stateRoot: string,
         counts.checked++
         const combined = AbortSignal.any([signal, abort.signal, AbortSignal.timeout(30_000)])
         const released = job.backend === 'linux-native'
-          && await reconcileLinuxJob(ledger, controller, job, join(stateRoot, 'linux-executions'), combined)
+          ? await reconcileLinuxJob(ledger, controller, job, join(stateRoot, 'linux-executions'), combined)
+          : (job.backend === 'macos-seatbelt' || job.backend === 'windows-job')
+            ? await reconcileNativeReceiptJob(ledger, controller, job, stateRoot, { signal: combined })
+            : false
         if (released) counts.released++
         else counts.retained++
       }
@@ -133,10 +142,10 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   try {
     if (command === 'probe-native') {
       if (!stateRoot || grantId !== undefined || revision !== undefined || extra.length > 0) throw new Error('usage: dsh-isolation probe-native /absolute/runtime-config.json')
-      const file = await open(stateRoot, constants.O_RDONLY | constants.O_NOFOLLOW)
+      const file = await open(stateRoot, constants.O_RDONLY | noFollowFlag())
       try {
         const stat = await file.stat()
-        if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.nlink !== 1 || stat.mode & 0o022 || stat.size > 65_536) throw new Error('native probe config must be a bounded owned regular file')
+        if (!stat.isFile() || !matchesOwnerUid(stat.uid) || stat.nlink !== 1 || !hasPrivateMode(stat.mode, 0o022, 0) || stat.size > 65_536) throw new Error('native probe config must be a bounded owned regular file')
         const text = await file.readFile('utf8')
         const after = await file.stat()
         if (Buffer.byteLength(text) !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.mtimeMs) throw new Error('native probe config changed while reading')

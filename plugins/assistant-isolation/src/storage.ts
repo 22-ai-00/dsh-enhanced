@@ -1,5 +1,6 @@
 import { lstat, opendir, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isPrivateDirectoryStats, matchesOwnerUid } from './fs-ownership.js'
 import type { IsolationControllerAuthority, IsolationLedger } from './ledger.js'
 import { validateStoragePolicy } from './storage-policy.js'
 import { retainLinuxExecutionResult } from './linux-execution.js'
@@ -11,7 +12,7 @@ export async function observeStorage(root: string): Promise<IsolationStorageObse
   let bytes = 0; let entries = 0
   try {
     const owner = await lstat(root)
-    if (await realpath(root) !== root || !owner.isDirectory() || owner.uid !== process.getuid?.() || (owner.mode & 0o077) !== 0) return undefined
+    if (await realpath(root) !== root || !isPrivateDirectoryStats(owner)) return undefined
     const visit = async (path: string): Promise<void> => {
       if (++entries > 50_000 || Date.now() - started > 2000) throw new Error('storage observation limit')
       let stat
@@ -19,8 +20,9 @@ export async function observeStorage(root: string): Promise<IsolationStorageObse
         if ((error as NodeJS.ErrnoException).code === 'ENOENT' && path !== root) return
         throw error
       }
-      if (stat.uid !== owner.uid || stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) throw new Error('untrusted storage entry')
-      bytes += Math.max(stat.size, stat.blocks * 512)
+      if (!matchesOwnerUid(stat.uid, process.platform, owner.uid) || stat.isSymbolicLink() || (!stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1))) throw new Error('untrusted storage entry')
+      const blockBytes = typeof stat.blocks === 'number' && Number.isFinite(stat.blocks) ? stat.blocks * 512 : 0
+      bytes += Math.max(stat.size, blockBytes)
       if (!Number.isSafeInteger(bytes)) throw new Error('storage observation overflow')
       if (stat.isDirectory()) for await (const entry of await opendir(path)) await visit(join(path, entry.name))
     }
@@ -37,7 +39,7 @@ async function cleanStaging(root: string, id: string, fenced: () => boolean): Pr
   try {
     for (const path of [root, parent, target]) {
       const stat = await lstat(path)
-      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || await realpath(path) !== path) return false
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !matchesOwnerUid(stat.uid) || await realpath(path) !== path) return false
     }
     if (!fenced()) return false
     // Host-owned parents; worker processes never mount or write this tree.

@@ -34,7 +34,7 @@ export interface AssociationIntakeSignalNormalizedConfig {
 
 export const DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG: AssociationIntakeSignalNormalizedConfig =
   Object.freeze({
-    enabled: false,
+    enabled: true,
     minScore: 0.75,
     maxSignalsPerHour: 10,
     cooldownMs: 3_600_000,
@@ -71,7 +71,7 @@ export function normalizeAssociationIntakeSignalConfig(
       : DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.sourceId
 
   return Object.freeze({
-    enabled: raw?.enabled === true,
+    enabled: raw?.enabled ?? DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG.enabled,
     minScore,
     maxSignalsPerHour,
     cooldownMs,

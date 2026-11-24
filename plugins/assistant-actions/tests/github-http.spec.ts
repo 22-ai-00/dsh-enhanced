@@ -243,12 +243,12 @@ it('projects every inspect response onto a strict allowlist and drops raw or cre
     })
     await expect(inspectGitHub({ grant: scopedGrant, kind: 'checks', pullRequestNumber: 7, token: 'only-at-server', signal }, transport)).resolves.toEqual({
       observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: scopedGrant.branch, sha: expectedHeadOid, repo: { full_name: scopedGrant.repository } },
-        base: { ref: 'main', repo: { full_name: scopedGrant.repository } }, untrusted: true }, headOid: expectedHeadOid,
+        base: { ref: 'main', repo: { full_name: scopedGrant.repository } } }, headOid: expectedHeadOid,
       items: [{ id: 2, name: 'CI', app: { id: 7 }, head_sha: expectedHeadOid, status: 'completed', conclusion: 'success' }], truncated: false, untrusted: true },
     })
     await expect(inspectGitHub({ grant: scopedGrant, kind: 'reviews', pullRequestNumber: 7, token: 'only-at-server', signal }, transport)).resolves.toEqual({
       observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: scopedGrant.branch, sha: expectedHeadOid, repo: { full_name: scopedGrant.repository } },
-        base: { ref: 'main', repo: { full_name: scopedGrant.repository } }, untrusted: true }, headOid: expectedHeadOid,
+        base: { ref: 'main', repo: { full_name: scopedGrant.repository } } }, headOid: expectedHeadOid,
       items: [{ id: 3, user: { id: 42 }, commit_id: expectedHeadOid, state: 'APPROVED', submitted_at: '2026-01-01T00:00:00Z' }], truncated: false, untrusted: true },
     })
   } finally { await close(server) }

@@ -1,7 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -306,14 +307,39 @@ function seedGoalNode(
 }
 
 describe('assistant-association S4 Cordis/Service integration', () => {
-  test('default disabled, Policy deny, emergency stop, and invalid route produce 0 runner calls and 0 nodes', async () => {
+  test('default-on empty-whitelist, explicit opt-out, Policy deny, emergency stop, and invalid route produce 0 runner calls and 0 nodes', async () => {
     const now = Date.now()
     const runnerSpy = vi.fn(async () => {
       throw new Error('runner must not be called when gated')
     })
 
-    // 1. Default webLearning.enabled = false
-    const disabledStack = await setupFullStack({ allowWebLearnRule: true })
+    // 1a. Default webLearning.enabled = true with empty allowedDomains fails closed
+    const defaultStack = await setupFullStack({ allowWebLearnRule: true })
+    seedGoalNode(defaultStack.assoc, defaultStack.scope, {
+      id: 'a:g-s4-default-empty',
+      title: 'CgroupDelegation',
+      body: 'Investigate CgroupDelegation behavior.',
+      updatedAt: now - 3_600_000,
+    })
+    const resDefaultEmpty = await defaultStack.assoc.runWebLearningNow(defaultStack.scope, {
+      now,
+      ignoreIdle: true,
+      runner: runnerSpy as unknown as WebLearningRunner,
+    })
+    expect(resDefaultEmpty.ran).toBe(false)
+    expect(resDefaultEmpty.status).toBe('skipped')
+    expect(resDefaultEmpty.reason).toBe('empty-whitelist')
+    expect(runnerSpy).not.toHaveBeenCalled()
+    expect(defaultStack.assoc.store!.countActiveNodes()).toBe(1)
+
+    // 1b. Explicit webLearning.enabled = false opts out cleanly
+    const disabledStack = await setupFullStack({
+      allowWebLearnRule: true,
+      webLearning: {
+        enabled: false,
+        allowedDomains: ['docs.example.com'],
+      },
+    })
     seedGoalNode(disabledStack.assoc, disabledStack.scope, {
       id: 'a:g-s4-disabled',
       title: 'CgroupDelegation',
@@ -399,7 +425,15 @@ describe('assistant-association S4 Cordis/Service integration', () => {
 
   test('subprocess & in-process modes produce low-trust web nodes, hot-path injection, assoc_read sourceUrl/fetchedAt, and allowLowTrust=false hiding', async () => {
     const now = Date.now()
-    const root = await mkdtemp(join(tmpdir(), 'assoc-s4-subproc-'))
+    const resolvedTmp = await realpath(tmpdir())
+    const runnerTemp = process.env.RUNNER_TEMP ? await realpath(process.env.RUNNER_TEMP) : ''
+    const nonTmpBase =
+      resolve(resolvedTmp) !== '/tmp'
+        ? resolvedTmp
+        : runnerTemp && resolve(runnerTemp) !== '/tmp'
+          ? runnerTemp
+          : dirname(fileURLToPath(import.meta.url))
+    const root = await realpath(await mkdtemp(join(nonTmpBase, 'assoc-s4-subproc-')))
     cleanups.push(async () => {
       await rm(root, { recursive: true, force: true })
     })
@@ -407,9 +441,11 @@ describe('assistant-association S4 Cordis/Service integration', () => {
     // Confirm production worker path resolves cleanly
     expect(existsSync(resolveWebLearningWorkerEntryPath())).toBe(true)
 
-    // Real subprocess child wrapper that asserts empty 0o700 cwd + stripped env and invokes executeWebLearningPlan
+    // Real subprocess child wrapper in a sibling non-/tmp dir that asserts empty 0o700 cwd, isolated HOME/TMPDIR, and stripped secrets
     const workerModuleUrl = new URL('../src/web-learning-worker.ts', import.meta.url).href
-    const subprocWrapperPath = join(root, 'subproc-wrapper.mjs')
+    const scriptsDir = join(root, 'scripts')
+    await mkdir(scriptsDir, { recursive: true })
+    const subprocWrapperPath = join(scriptsDir, 'subproc-wrapper.mjs')
     await writeFile(
       subprocWrapperPath,
       [
@@ -418,11 +454,12 @@ describe('assistant-association S4 Cordis/Service integration', () => {
         "let raw = ''",
         "for await (const chunk of process.stdin) raw += chunk",
         'const plan = JSON.parse(raw)',
-        'const mode = statSync(process.cwd()).mode & 0o777',
-        'const entries = readdirSync(process.cwd())',
-        'const leakedSecrets = ["DEEPSEEK_API_KEY","GITHUB_TOKEN","OPENAI_API_KEY","HOME","DSH_HOME","COOKIE"].filter(k => k in process.env)',
-        'if (mode !== 0o700 || entries.length !== 0 || leakedSecrets.length !== 0) {',
-        '  throw new Error(`isolation failure: mode=${mode} entries=${entries.length} leaked=${leakedSecrets.join(",")}`)',
+        'const cwd = process.cwd()',
+        'const mode = statSync(cwd).mode & 0o777',
+        'const entries = readdirSync(cwd)',
+        'const leakedSecrets = ["DEEPSEEK_API_KEY","GITHUB_TOKEN","OPENAI_API_KEY","DSH_HOME","COOKIE","NODE_OPTIONS"].filter(k => k in process.env)',
+        'if (mode !== 0o700 || entries.length !== 0 || leakedSecrets.length !== 0 || process.env.HOME !== cwd || process.env.TMPDIR !== cwd) {',
+        '  throw new Error(`isolation failure: mode=${mode} entries=${entries.length} leaked=${leakedSecrets.join(",")} home=${process.env.HOME} tmpdir=${process.env.TMPDIR} cwd=${cwd}`)',
         '}',
         'const out = await executeWebLearningPlan(plan, {',
         '  lookup: async () => [{ address: "93.184.216.34", family: 4 }],',

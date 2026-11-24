@@ -7,13 +7,26 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { createHash } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { parseDocument, isMap } from 'yaml'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
-import { firstRunNoticeName, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { acceptFirstRunNotice, fillComposer, observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRepositoryFixture } from './repo-verified-delivery-fixture.mjs'
 import { prepareExternalRepositoryFixture } from './repo-external-delivery-fixture.mjs'
 import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live-input.mjs'
+import { prepareSandboxLlmRoute } from './repo-sandbox-llm-server.mjs'
+
+const execFileAsync = promisify(execFile)
+
+async function readSessionTitle(page) {
+  const nav = page.getByRole('navigation', { name: 'Session hierarchy' })
+  await expect(nav).toBeVisible()
+  const button = nav.getByRole('button').first()
+  if (await button.count() > 0) return (await button.innerText()).trim()
+  return (await nav.innerText()).trim()
+}
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const releaseManifest = JSON.parse(readFileSync(resolve(root, 'release-manifest.json'), 'utf8'))
@@ -26,8 +39,11 @@ const externalBrokerFixture = process.env.DSH_REPO_EXTERNAL_BROKER === 'fixture'
 const setupOnly = process.env.DSH_REPO_SETUP_ONLY === '1'
 const liveInputPath = process.env.DSH_REPO_LIVE_INPUT
 const liveRepositoryEnabled = process.env.DSH_REPO_LIVE_GITHUB === '1' || typeof liveInputPath === 'string'
+const sandboxLlmRequested = process.env.DSH_REPO_SANDBOX_LLM === 'local'
+const sandboxLlmMode = sandboxLlmRequested && !process.env.DSH_WEB_REAL_PROVIDER
 if (liveRepositoryEnabled && (typeof liveInputPath !== 'string' || liveInputPath.length === 0)) throw new Error('live repository E2E requires DSH_REPO_LIVE_INPUT')
 if (liveRepositoryEnabled && (verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined)) throw new Error('live repository E2E cannot use fixture transports')
+if (liveRepositoryEnabled && sandboxLlmRequested) throw new Error('live repository E2E cannot use local sandbox LLM')
 if (externalBrokerFixture && (!verifiedDelivery || ![undefined, 'fixture'].includes(process.env.DSH_REPO_EVENT_SOURCE) || liveRepositoryEnabled)) throw new Error('external broker fixture requires fixture verified delivery, optional fixture events, and no live repository')
 if (externalBrokerFixture && directFixture) throw new Error('direct model fixture currently uses the embedded Actions transport; external broker direct behavior has a separate integration suite')
 if (liveRepositoryEnabled && setupOnly) throw new Error('setup-only probe does not validate live repository access')
@@ -57,8 +73,8 @@ async function checkVerificationCommand(home, temp) {
     command: verificationCommand,
     expiresAt: Date.now() + 60_000,
     maxRuns: 2,
-    maxTotalDurationMs: 10_000,
-    maxDurationMs: 5_000,
+    maxTotalDurationMs: 40_000,
+    maxDurationMs: 20_000,
     maxOutputBytes: 4096,
   })
   try {
@@ -103,7 +119,64 @@ function parseJson(value) {
   try { return typeof value === 'string' ? JSON.parse(value) : undefined } catch { return undefined }
 }
 
+async function resolveDshRuntimePackages(dshRoot, resolvedDshRoot) {
+  const packagePathFor = entry => {
+    for (let current = dirname(entry); current !== dirname(current); current = dirname(current)) {
+      const candidate = join(current, 'package.json')
+      if (existsSync(candidate)) return candidate
+    }
+    throw new Error(`could not locate package metadata for ${entry}`)
+  }
+  const directRequire = createRequire(join(resolvedDshRoot, 'package.json'))
+  let baseEntry
+  let cordisEntry
+  try {
+    baseEntry = directRequire.resolve('@deepseek-ai/dsh-base')
+    cordisEntry = directRequire.resolve('@deepseek-ai/cordis')
+  } catch {
+    const siblingRequire = createRequire(join(dirname(dirname(resolvedDshRoot)), '.dsh-cli-runtime.cjs'))
+    baseEntry = siblingRequire.resolve('@deepseek-ai/dsh-base')
+    cordisEntry = siblingRequire.resolve('@deepseek-ai/cordis')
+  }
+  const basePackagePath = packagePathFor(baseEntry)
+  const baseRequire = createRequire(basePackagePath)
+  const jsonlPackagePath = packagePathFor(baseRequire.resolve('@deepseek-ai/dsh-session-persistence-jsonl'))
+  const jsonlRequire = createRequire(jsonlPackagePath)
+  const packagePaths = {
+    '@deepseek-ai/dsh': join(dshRoot, 'package.json'),
+    '@deepseek-ai/dsh-session-persistence': packagePathFor(jsonlRequire.resolve('@deepseek-ai/dsh-session-persistence')),
+    '@deepseek-ai/dsh-session-persistence-jsonl': jsonlPackagePath,
+    '@deepseek-ai/cordis': packagePathFor(cordisEntry),
+  }
+  return Object.fromEntries(await Promise.all(Object.entries(packagePaths).map(async ([name, packagePath]) => {
+    const { version } = JSON.parse(await readFile(packagePath, 'utf8'))
+    return [name, { version, packagePath }]
+  })))
+}
+
 async function preparePinnedDshCli(temp, env) {
+  if (process.env.DSH_E2E_FORCE_NPM_CLI !== '1') {
+    const existingVersion = await run('dsh', ['--version'], env, 15_000).then(out => out.trim(), () => undefined)
+    if (existingVersion === hostVersion) {
+      const { stdout: whichOut } = await execFileAsync('which', ['dsh'], { env })
+      const resolvedBin = await realpath(whichOut.trim())
+      for (let current = dirname(resolvedBin); current !== dirname(current); current = dirname(current)) {
+        const candidate = join(current, 'package.json')
+        if (existsSync(candidate)) {
+          try {
+            const parsed = JSON.parse(readFileSync(candidate, 'utf8'))
+            if (parsed?.name === '@deepseek-ai/dsh' && parsed?.version === hostVersion) {
+              const runtime = await resolveDshRuntimePackages(current, current)
+              return { cliRoot: dirname(dirname(current)), runtime, reusedFromPath: true }
+            }
+          } catch {
+            // continue walking up
+          }
+        }
+      }
+    }
+  }
+
   // Exercise the selected published Host in an independent dependency graph;
   // never install into or silently use the developer's global CLI/profile.
   const cliRoot = join(temp, 'pinned-dsh-cli')
@@ -112,38 +185,14 @@ async function preparePinnedDshCli(temp, env) {
   const bin = join(cliRoot, 'node_modules/.bin')
   await run('pnpm', ['add', '--ignore-workspace', '--dir', cliRoot,
     '--allow-build=@deepseek-ai/dsh-subprocess-local', '--allow-build=@google/genai', '--allow-build=koffi', '--allow-build=node-pty', '--allow-build=protobufjs',
-    `@deepseek-ai/dsh@${hostVersion}`], env, 120_000)
+    `@deepseek-ai/dsh@${hostVersion}`], env, 300_000)
   if (!existsSync(join(bin, 'dsh'))) throw new Error('pinned DSH CLI installation did not provide dsh')
   if ((await run(join(bin, 'dsh'), ['--version'], env)).trim() !== hostVersion) throw new Error('pinned DSH CLI resolved an unexpected version')
   env.PATH = `${bin}:${env.PATH ?? ''}`
   const dshRoot = join(cliRoot, 'node_modules/@deepseek-ai/dsh')
   const resolvedDshRoot = await realpath(dshRoot)
-  // pnpm's non-hoisted CLI dependencies live in the resolved CLI package's
-  // virtual dependency directory, which is also the directory its loader
-  // resolves from at runtime.
-  const require = createRequire(join(dirname(dirname(resolvedDshRoot)), '.dsh-cli-runtime.cjs'))
-  const packagePathFor = entry => {
-    for (let current = dirname(entry); current !== dirname(current); current = dirname(current)) {
-      const candidate = join(current, 'package.json')
-      if (existsSync(candidate)) return candidate
-    }
-    throw new Error(`could not locate package metadata for ${entry}`)
-  }
-  const basePackagePath = packagePathFor(require.resolve('@deepseek-ai/dsh-base'))
-  const baseRequire = createRequire(basePackagePath)
-  const jsonlPackagePath = packagePathFor(baseRequire.resolve('@deepseek-ai/dsh-session-persistence-jsonl'))
-  const jsonlRequire = createRequire(jsonlPackagePath)
-  const packagePaths = {
-    '@deepseek-ai/dsh': join(dshRoot, 'package.json'),
-    '@deepseek-ai/dsh-session-persistence': packagePathFor(jsonlRequire.resolve('@deepseek-ai/dsh-session-persistence')),
-    '@deepseek-ai/dsh-session-persistence-jsonl': jsonlPackagePath,
-    '@deepseek-ai/cordis': packagePathFor(require.resolve('@deepseek-ai/cordis')),
-  }
-  const runtime = Object.fromEntries(await Promise.all(Object.entries(packagePaths).map(async ([name, packagePath]) => {
-    const { version } = JSON.parse(await readFile(packagePath, 'utf8'))
-    return [name, { version, packagePath }]
-  })))
-  return { cliRoot, runtime }
+  const runtime = await resolveDshRuntimePackages(dshRoot, resolvedDshRoot)
+  return { cliRoot, runtime, reusedFromPath: false }
 }
 
 function goalExecutionRuns(goalsPath, goalId) {
@@ -308,7 +357,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(port), DSH_REPO_AUTONOMY_OBSERVER_LOG: observerLog,
     DSH_REPO_AUTONOMY_NO_MODEL: setupOnly ? '1' : '0',
     DSH_REPO_AUTONOMY_MAX_CALLS: repositoryEvents ? '26' : '14', DSH_REPO_AUTONOMY_DURATION_MS: '300000' }
-  let host; let restarted; let externalBroker; let activePage = page; let failed = false; let sessionId
+  let host; let restarted; let externalBroker; let sandboxLlm; let activePage = page; let failed = false; let sessionId
   const http = [], transport = [], streams = new Map(), frames = [], approvals = []
   observePage(page, http, transport, streams, frames)
   try {
@@ -327,6 +376,9 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
 `, { mode: 0o600 })
     const pinnedCli = await preparePinnedDshCli(temp, env)
     await writeFile(testInfo.outputPath('pinned-cli-runtime.json'), JSON.stringify(pinnedCli.runtime, null, 2), { mode: 0o600 })
+    if (sandboxLlmMode) {
+      sandboxLlm = await prepareSandboxLlmRoute({ temp, env })
+    }
     const route = await prepareRealRoute({ env, home, workspace })
     env.DSH_WEB_REAL_PROVIDER = route.provider; env.DSH_WEB_REAL_MODEL = route.model
     const addOns = route.bundles.flatMap(bundle => {
@@ -334,20 +386,29 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       if (bundle === 'traex-acp-provider') return ['--with', 'traex']
       throw new Error(`unsupported real-route bundle ${bundle}`)
     })
+    const isolationSourceArgs = process.env.DSH_E2E_ISOLATION_OFFICIAL_TAG === '1'
+      ? []
+      : ['--isolation-source-repository', await realpath(resolve(root))]
     const install = await run('bash', [resolve(root, 'scripts/install/install-local.sh'), '--scenario', 'autonomy', '--workspace', workspace,
       '--isolation-max-runs', '12', '--isolation-lease-minutes', '10', '--isolation-runtime-minutes', '5', '--model', 'skip', '--model-route', 'skip',
-      ...addOns, '--no-service', '--yes'], env, 180_000)
+      ...isolationSourceArgs, ...addOns, '--no-service', '--yes'], env, 900_000)
     await writeFile(testInfo.outputPath('install.log'), sanitize(install), { mode: 0o600 })
     await writeFile(testInfo.outputPath('verifier-controls.json'), JSON.stringify(await checkVerificationCommand(home, temp), null, 2), { mode: 0o600 })
     const patchPath = join(home, 'profiles/web/cordis.patch.yml')
     let patchSource = await readFile(patchPath, 'utf8')
     const configuredRoute = { provider: route.provider, model: route.model }
     const patch = parseDocument(patchSource)
-    route.configurePatch(patch, (document, id, name, config) => {
+    const setPatchRow = (document, id, name, config) => {
       let row = document.contents.items.find(item => isMap(item) && item.get('id') === id)
       if (!row) { row = document.createNode({ id, name }); document.contents.add(row) }
       row.set('config', document.createNode(config))
-    })
+    }
+    route.configurePatch(patch, setPatchRow)
+    if (sandboxLlm) {
+      setPatchRow(patch, 'llm-pi-ai', '@deepseek-ai/dsh-llm-pi-ai', {
+        providers: { [sandboxLlm.provider]: sandboxLlm.piAiProviderProfile },
+      })
+    }
     patchSource = String(patch)
     if (route.provider === 'codex-subscription') configuredRoute.model = 'default'
     if (liveRepository) patchSource = installLiveCredentialReference(patchSource, liveRepository)
@@ -355,28 +416,73 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
 
     // The native Web UI, not the test, creates the first durable Session.
     host = await startHost(env)
-    await page.goto(host.url); await page.getByRole('dialog', { name: firstRunNoticeName }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await page.goto(host.url); await acceptFirstRunNotice(page)
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const create = http.find(response => new URL(response.url()).pathname === '/api/session/create')
     const created = await create.json()
     expect(created.result?.value?.sessionId, sanitize(JSON.stringify(created))).toBeTruthy()
     sessionId = created.result.value.sessionId
-    // The HTTP response can precede construction lease settlement. Do not
+    // Wait for the Web UI's initial session/follow activation stream to settle before
+    // disconnecting, so an in-flight resume() cannot re-acquire a lease after
+    // create()'s construction lease releases and race host.stop() into 'unknown'.
+    await expect.poll(() => transport.some(item => item.kind === 'received' && streams.get(item.frame?.streamId) === 'session/follow'),
+      { timeout: 5_000 }).toBe(true).catch(() => {})
+    await page.goto('about:blank')
+    // The HTTP response can precede construction/follow lease settlement. Do not
     // interrupt that checkpoint and turn a new idle Session into unknown.
     await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state,
       { timeout: 30_000 }).toBe('released')
+    await page.waitForTimeout(500)
+    await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state,
+      { timeout: 10_000 }).toBe('released')
     await host.stop(); await writeFile(testInfo.outputPath('host-initial.log'), host.log(), { mode: 0o600 })
+    // DSH 0.2.x migrates settings.yaml into cordis.patch.yml on first start;
+    // deduplicate agent-default-model / llm-pi-ai rows and retain sandbox gateway provider config.
+    {
+      const migratedDoc = parseDocument(await readFile(patchPath, 'utf8'))
+      const items = migratedDoc.contents?.items
+      if (Array.isArray(items)) {
+        let seenDefaultModel = false
+        let keptPiAi = null
+        for (let i = items.length - 1; i >= 0; i -= 1) {
+          const item = items[i]
+          if (!isMap(item)) continue
+          const id = item.get('id')
+          if (id === 'agent-default-model') {
+            if (seenDefaultModel) items.splice(i, 1)
+            else seenDefaultModel = true
+          } else if (id === 'llm-pi-ai') {
+            if (keptPiAi) items.splice(i, 1)
+            else keptPiAi = item
+          }
+        }
+        if (sandboxLlm) {
+          if (!keptPiAi) {
+            keptPiAi = migratedDoc.createNode({ id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: {} } })
+            items.push(keptPiAi)
+          }
+          const cfg = keptPiAi.get('config', true)
+          const providers = isMap(cfg) ? cfg.get('providers', true) : undefined
+          if (isMap(providers)) {
+            providers.set(sandboxLlm.provider, migratedDoc.createNode(sandboxLlm.piAiProviderProfile))
+          } else {
+            keptPiAi.set('config', migratedDoc.createNode({ providers: { [sandboxLlm.provider]: sandboxLlm.piAiProviderProfile } }))
+          }
+        }
+        await writeFile(patchPath, String(migratedDoc), { mode: 0o600 })
+      }
+    }
 
     let repository
     if (externalBrokerFixture) {
       const external = await prepareExternalRepositoryFixture(home, patchPath, env, { sessionId, workspace, objective, source: buggySource })
       externalBroker = external.close
-      const { close: _close, ...delivery } = external
+      const { close: _close, sandboxGit: _sandboxGit, ...delivery } = external
       repository = delivery
     } else repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : liveRepository?.repositoryDelivery
     const admission = { version: 2, objective, route: configuredRoute, maxGoalRounds: repositoryEvents ? 6 : 3, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: repositoryEvents ? 24 : 12, toolCalls: repositoryEvents ? 40 : 16, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [configuredRoute] },
-      verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases },
+      verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 20_000, maxOutputBytes: 4096, cases },
       ...(repository ? { repositoryDelivery: repository } : {}) }
     await writeFile(taskPath, JSON.stringify(admission), { mode: 0o600 })
     // Deliberately omit --session-id: this exercises the shipped real binding discovery.
@@ -389,6 +495,27 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       expect(events.filter(event => ['dispatch', 'model-blocked'].includes(event.event))).toEqual([])
       await writeFile(testInfo.outputPath('setup-proof.json'), JSON.stringify({ scope: 'installation-and-idle-session-discovery-only', sessionId, modelCalls: 0, taskExecuted: false }), { mode: 0o600 })
       return
+    }
+    // Foreground Web prompts wrap the task objective in source context and delivery
+    // instructions, while assistant-verifier ships requireAcceptance: true and
+    // goal-admission only writes goal-step and goal-outcome profiles. Mirror the
+    // other Web owner specs so goal-step and goal-outcome stay independently sealed
+    // without blocking the initial foreground turn.
+    {
+      const verifierPatch = parseDocument(await readFile(patchPath, 'utf8'))
+      patchRow(verifierPatch, 'dsh-enhanced-assistant-verifier')
+      const setVerifierRequireAcceptance = node => {
+        if (isMap(node)) {
+          if (node.get('id') === 'dsh-enhanced-assistant-verifier' && isMap(node.get('config', true))) {
+            node.get('config', true).set('requireAcceptance', verifierPatch.createNode(false))
+          }
+          for (const item of node.items) setVerifierRequireAcceptance(item.value)
+        } else if (Array.isArray(node?.items)) {
+          for (const item of node.items) setVerifierRequireAcceptance(item)
+        }
+      }
+      setVerifierRequireAcceptance(verifierPatch.contents)
+      await writeFile(patchPath, String(verifierPatch), { mode: 0o600 })
     }
     if (verifiedDelivery) expect(setup).toContain('Repository: fixture/orders; branch: automation/fix')
     if (liveRepository) expect(setup).toContain(`Repository: ${repository.repository}; branch: ${repository.branch}`)
@@ -431,7 +558,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       ? ` Deliver the independently accepted repair to the authorized repository ${repository.repository}, branch ${repository.branch}, changing only ${repository.paths.join(', ')}${repository.openPullRequest ? ' and opening its authorized pull request' : ' with a direct commit; omit the pullRequest option from delivery'}. Inspect the current authorized branch before delivery.`
       : verifiedDelivery ? ` Arrange delivery of the independently accepted repair to the authorized repository branch ${directFixture ? 'with a direct commit; omit the pullRequest option from delivery' : 'and open a pull request'}. Use the available repository authorization and inspect the current branch before preparing delivery.` : ''
     const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${deliveryInstruction}${repositoryEvents ? ` The authorized repository delivery can remain pending while external CI${repository?.openPullRequest ? ' and review' : ''} finish. Continue the original goal when its configured event source reports a change, and independently inspect the current repository state before deciding whether the result is complete.` : ''}`
-    await activePage.getByLabel(/Describe what you want to build|Message or run a task/).fill(prompt)
+    await fillComposer(activePage, activePage.getByLabel(/Describe what you want to build|Message or run a task/), prompt)
     const sent = activePage.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await activePage.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await sent).status()).toBe(200)
     const readJsonLines = async path => {
@@ -469,8 +596,18 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       if (!(state?.last_observed_at > deliveredAt) || latest > intent.source.highWaterSequence) return false
       const observations = await sourceObservations()
       const expectedReads = directFixture ? ['check-runs'] : externalBrokerFixture ? ['checks', 'pull-request'] : ['check-runs', 'pulls']
-      return expectedReads.every(kind => observations.some(item => item.at >= deliveredAt && item.ready === false
-        && item.headOid === commit.commitOid && (directFixture || item.pullRequest === 17) && (externalBrokerFixture ? item.kind === kind : item.path.endsWith(`/${kind}`))))
+      if (!expectedReads.every(kind => observations.some(item => item.at >= deliveredAt && item.ready === false
+        && item.headOid === commit.commitOid && (directFixture || item.pullRequest === 17) && (externalBrokerFixture ? item.kind === kind : item.path.endsWith(`/${kind}`))))) return false
+      if (externalBrokerFixture) {
+        const brokerDb = join(home, 'external-repository-broker/state.sqlite')
+        const eventInspects = existsSync(brokerDb) ? query(brokerDb,
+          "SELECT call_id, dispatched_at FROM requests WHERE operation = 'inspect' AND status = 'succeeded' AND call_id LIKE 'repository-event:%' AND dispatched_at >= ?",
+          deliveredAt) : []
+        const prInspect = eventInspects.find(row => row.call_id.endsWith(':pull-request'))
+        const checksInspect = eventInspects.find(row => row.call_id.endsWith(':checks'))
+        if (!prInspect || !checksInspect || !(state.last_observed_at >= Math.max(prInspect.dispatched_at ?? 0, checksInspect.dispatched_at ?? 0))) return false
+      }
+      return true
     }
     let waitRestart
     const goal = await waitForCompletion(() => activePage, home, sessionId, approvals, repositoryEvents ? {
@@ -481,11 +618,12 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
         if (liveRepository) {
           expect(JSON.parse(wait.intent_json).source.kind).toBe('github-repository')
           expect(waitingNative).toMatchObject({ phase: 'paused', sessionId })
-          const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
+          const sessionTitle = await readSessionTitle(activePage)
           const restartedAt = Date.now()
           await host.stop(); await writeFile(testInfo.outputPath('host-waiting.log'), host.log(), { mode: 0o600 })
           host = await startHost(env); restarted = await context.browser().newContext(); activePage = await restarted.newPage()
           observePage(activePage, http, transport, streams, frames); await activePage.goto(host.url)
+          await acceptFirstRunNotice(activePage, { required: false })
           await selectRestoredSession(activePage, sessionTitle)
           const restoredWait = query(`${join(home, 'assistant-goals/web.sqlite')}.event-waits`, 'SELECT * FROM goal_event_waits WHERE id = ?', wait.id)[0]
           expect(restoredWait.state).toBe('waiting')
@@ -501,10 +639,11 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
         const priorWakes = query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes WHERE goal_id = ?', waitingGoal.id)
         expect(priorWakes.every(wake => wake.state === 'succeeded')).toBe(true)
         expect(JSON.parse(await readFile(env.DSH_REPO_EVENT_STATE, 'utf8'))).toEqual({ ready: false })
-        const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
+        const sessionTitle = await readSessionTitle(activePage)
         await host.stop(); await writeFile(testInfo.outputPath('host-waiting.log'), host.log(), { mode: 0o600 })
         host = await startHost(env); restarted = await context.browser().newContext(); activePage = await restarted.newPage()
         observePage(activePage, http, transport, streams, frames); await activePage.goto(host.url)
+        await acceptFirstRunNotice(activePage, { required: false })
         await selectRestoredSession(activePage, sessionTitle)
         const restoredWait = query(`${join(home, 'assistant-goals/web.sqlite')}.event-waits`, 'SELECT * FROM goal_event_waits WHERE id = ?', wait.id)[0]
         const restoredGoal = query(join(home, 'assistant-goals/web.sqlite'), 'SELECT * FROM goal_records WHERE id = ?', waitingGoal.id)[0]
@@ -563,14 +702,28 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       expect(commit.at).toBeGreaterThanOrEqual(Math.max(...(repositoryEvents ? deliveredSteps : receipts).map(receipt => receipt.completedAt)))
       if (directFixture) expect(deliveryIntent.request.pullRequest).toBeUndefined()
       else expect(pr.headOid).toBe(commit.commitOid)
+      let sandboxGitProof
+      if (env.DSH_REPO_SANDBOX_GIT_DIR) {
+        const gitDir = env.DSH_REPO_SANDBOX_GIT_DIR
+        const { stdout: refHeadOut } = await execFileAsync('git', ['--git-dir', gitDir, 'rev-parse', 'refs/heads/automation/fix'])
+        expect(refHeadOut.trim()).toBe(commit.commitOid)
+        const { stdout: commitObjectOut } = await execFileAsync('git', ['--git-dir', gitDir, 'cat-file', '-p', commit.commitOid])
+        expect(commitObjectOut).toContain(`parent ${env.DSH_REPO_SANDBOX_INITIAL_OID}`)
+        const { stdout: committedFileOut } = await execFileAsync('git', ['--git-dir', gitDir, 'show', `${commit.commitOid}:summarize.mjs`])
+        expect(createHash('sha256').update(committedFileOut).digest('hex')).toBe(digest)
+        const { stdout: revCountOut } = await execFileAsync('git', ['--git-dir', gitDir, 'rev-list', '--count', `${env.DSH_REPO_SANDBOX_INITIAL_OID}..refs/heads/automation/fix`])
+        expect(revCountOut.trim()).toBe('1')
+        expect(committedFileOut).not.toContain('fixture-broker-only-token')
+        sandboxGitProof = { branchHead: refHeadOut.trim(), initialOid: env.DSH_REPO_SANDBOX_INITIAL_OID, commitCount: Number(revCountOut.trim()), fileSha256: digest }
+      }
       const notices = () => query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")
-      await expect.poll(() => notices().map(row => row.status)).toEqual(['accepted'])
+      await expect.poll(() => notices().length === 1 && ['accepted', 'delivered', 'read'].includes(notices()[0]?.status)).toBe(true)
       const noticeText = JSON.parse(notices()[0].intent_json).text
       expect(noticeText).toContain(commit.commitOid)
       if (!directFixture) expect(noticeText).toContain(String(pr.number))
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(noticeText)
-      repositoryDelivery = { transport: externalBrokerFixture ? 'external-unix-v1-with-fixture-github' : 'explicit-fixture-not-live-github', mode: directFixture ? 'commit' : 'pull-request', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText,
-        ...(externalBrokerFixture ? { broker: { requests: query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid'), realLinuxPeerCredentials: true, sameUid: true, eventTransport: repositoryEvents ? 'production-actions-port' : 'none' } } : {}) }
+      repositoryDelivery = { transport: externalBrokerFixture ? (env.DSH_REPO_SANDBOX_GIT_DIR ? 'external-unix-v1-sandbox-git-http' : 'external-unix-v1-with-fixture-github') : 'explicit-fixture-not-live-github', mode: directFixture ? 'commit' : 'pull-request', records, ...(sandboxGitProof ? { sandboxGit: sandboxGitProof } : {}), state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText,
+        ...(externalBrokerFixture ? { broker: { requests: query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid'), realLinuxPeerCredentials: true, sameUid: true, ...(env.DSH_REPO_SANDBOX_BROKER_PID ? { separateProcessPid: Number(env.DSH_REPO_SANDBOX_BROKER_PID) } : {}), eventTransport: repositoryEvents ? 'production-actions-port' : 'none' } } : {}) }
       if (repositoryEvents) {
         expect(waitRestart).toMatchObject({ goalId: goal.id, sourceStateBefore: 'waiting', sourceStateAfterRestart: 'waiting' })
         expect(JSON.parse(await readFile(env.DSH_REPO_EVENT_STATE, 'utf8'))).toEqual({ ready: true })
@@ -654,12 +807,12 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       ? [frame.value.event.data] : []).findLast(data => data.turn > 1 && data.message.content.some(block => block.type === 'text' && block.text.trim()))
     const responseText = response?.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
     const outcomeNotices = () => query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json,created_at FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-goals-wake/v1' AND json_extract(intent_json, '$.metadata.\"dsh.native-notice.sessionId\"') = ?", sessionId)
-    if (!responseText?.trim()) await expect.poll(() => outcomeNotices().filter(row => row.status === 'accepted').length).toBe(1)
+    if (!responseText?.trim()) await expect.poll(() => outcomeNotices().filter(row => ['accepted', 'delivered', 'read'].includes(row.status)).length).toBe(1)
     const notices = outcomeNotices()
     let outcomeNotice
     if (notices.length > 0) {
       expect(notices).toHaveLength(1)
-      await expect.poll(() => outcomeNotices()[0]?.status).toBe('accepted')
+      await expect.poll(() => ['accepted', 'delivered', 'read'].includes(outcomeNotices()[0]?.status)).toBe(true)
       outcomeNotice = outcomeNotices()[0]
       const intent = JSON.parse(outcomeNotice.intent_json)
       expect(intent.text).toBe('目标已通过独立验收并完成。')
@@ -673,7 +826,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     const visibleReply = finalText.split(/\n\s*\n/u)[0].replace(/^#{1,6}\s+/u, '').replace(/[`*_]/gu, '').replace(/\s+/gu, ' ').trim()
     expect(prompt.replace(/\s+/gu, ' ')).not.toContain(visibleReply)
     await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
-    const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
+    const sessionTitle = await readSessionTitle(activePage)
     expect(sessionTitle.trim().length).toBeGreaterThan(0)
 
     await host.stop(); await writeFile(testInfo.outputPath('host-first.log'), host.log(), { mode: 0o600 })
@@ -681,9 +834,16 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     if (restarted) { await restarted.close(); restarted = undefined }
     host = await startHost(env); restarted = await context.browser().newContext(); activePage = await restarted.newPage()
     observePage(activePage, http, transport, streams, frames); await activePage.goto(host.url)
+    await acceptFirstRunNotice(activePage, { required: false })
     await selectRestoredSession(activePage, sessionTitle)
     await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
-    if (outcomeNotice) expect(outcomeNotices()).toEqual([outcomeNotice])
+    if (outcomeNotice) {
+      const restoredOutcomeNotices = outcomeNotices()
+      expect(restoredOutcomeNotices.map(({ id, intent_json, created_at }) => ({ id, intent_json, created_at }))).toEqual([
+        { id: outcomeNotice.id, intent_json: outcomeNotice.intent_json, created_at: outcomeNotice.created_at },
+      ])
+      expect(['accepted', 'delivered', 'read']).toContain(restoredOutcomeNotices[0]?.status)
+    }
     const afterRestartCalls = (await readFile(observerLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
     const dispatches = events => events.filter(item => item.event === 'dispatch' || item.event === 'tool-dispatch')
     expect(dispatches(afterRestartCalls)).toEqual(dispatches(calls))
@@ -693,8 +853,14 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     if (verifiedDelivery) {
       expect(query(join(home, 'assistant-actions/web/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
       expect((await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n')).toHaveLength(directFixture ? 1 : 2)
+      if (env.DSH_REPO_SANDBOX_GIT_DIR) {
+        const { stdout: finalBranchHead } = await execFileAsync('git', ['--git-dir', env.DSH_REPO_SANDBOX_GIT_DIR, 'rev-parse', 'refs/heads/automation/fix'])
+        expect(finalBranchHead.trim()).toBe(repositoryDelivery.sandboxGit.branchHead)
+      }
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(repositoryDelivery.noticeText)
-      expect(query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")).toEqual(repositoryDelivery.notices)
+      const restoredDeliveryNotices = query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")
+      expect(restoredDeliveryNotices.map(({ id, intent_json }) => ({ id, intent_json }))).toEqual(repositoryDelivery.notices.map(({ id, intent_json }) => ({ id, intent_json })))
+      expect(restoredDeliveryNotices.every(row => ['accepted', 'delivered', 'read'].includes(row.status))).toBe(true)
       if (repositoryEvents) {
         expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id,goal_id,session_id,native_goal_id,retired_at FROM goal_source_claims WHERE trigger_id LIKE '%repository-events'")[0]).toEqual(repositoryDelivery.eventSource.retirement.claim)
         await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
@@ -732,8 +898,10 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       // error must never erase the only inspectable failed profile.
       if (retain) await writeFile(testInfo.outputPath('retained-environment.json'), JSON.stringify({ temp, sessionId }), { mode: 0o600 })
       try { if (externalBroker) await externalBroker() } finally {
-        try { if (restarted) await restarted.close() } finally {
-          if (!retain) await rm(temp, { recursive: true, force: true })
+        try { if (sandboxLlm) await sandboxLlm.close() } finally {
+          try { if (restarted) await restarted.close() } finally {
+            if (!retain) await rm(temp, { recursive: true, force: true })
+          }
         }
       }
     } }

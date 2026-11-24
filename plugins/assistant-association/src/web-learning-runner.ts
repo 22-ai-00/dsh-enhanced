@@ -1,8 +1,21 @@
-import { spawn } from 'node:child_process'
-import { chmod, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
+import { join, posix, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  buildIsolatedSubprocessPlan,
+  createIsolatedSubprocessRunner,
+  resolveIsolationBackend,
+  type IsolatedSubprocessAdapter,
+  type IsolatedSubprocessLimits,
+  type IsolatedSubprocessNetworkMode,
+  type IsolatedSubprocessPlan,
+  type IsolatedSubprocessPlanOptions,
+  type IsolatedSubprocessRequest,
+  type IsolatedSubprocessResult,
+  type IsolationBackendConfig,
+} from '@dsh-enhanced/assistant-isolation'
 import { assertReadOnlyWebToolSurface, sanitizeWebLearningEnv } from './web-fetch.ts'
 import {
   executeWebLearningPlan,
@@ -14,8 +27,17 @@ import {
 const DEFAULT_MAX_STDIN_BYTES = 512 * 1024
 const DEFAULT_MAX_STDOUT_BYTES = 2 * 1024 * 1024
 const DEFAULT_MAX_STDERR_BYTES = 16 * 1024
+const MAX_CROSS_PLATFORM_OUTPUT_BYTES = 4 * 1024 * 1024
+const MAX_CROSS_PLATFORM_DURATION_MS = 300_000
 const DEFAULT_KILL_GRACE_MS = 2_000
 const DEFAULT_TIMEOUT_BUFFER_MS = 250
+const MAX_ISOLATED_READ_ONLY_PATHS = 32
+const DEFAULT_WEB_LEARNING_LIMITS: IsolatedSubprocessLimits = Object.freeze({
+  memoryMiB: 256,
+  pidsLimit: 32,
+  cpus: 1,
+})
+const MACOS_OVERBROAD_ROOTS = new Set(['/', '/Users', '/private', '/System', '/usr'])
 
 export interface WebLearningRunner {
   run(input: WebLearningWorkerInput, signal?: AbortSignal): Promise<WebLearningWorkerOutput>
@@ -30,6 +52,186 @@ export interface SubprocessWebLearningRunnerOptions {
   readonly runnerTimeoutBufferMs?: number
   readonly sourceEnv?: NodeJS.ProcessEnv
   readonly nodeOptions?: readonly string[]
+  readonly backend?: IsolationBackendConfig
+  readonly isolationAdapter?: IsolatedSubprocessAdapter
+  readonly isolatedRunner?: (request: IsolatedSubprocessRequest) => Promise<IsolatedSubprocessResult>
+  readonly network?: IsolatedSubprocessNetworkMode
+  readonly limits?: IsolatedSubprocessLimits
+  readonly readOnlyPaths?: readonly string[]
+}
+
+export interface BuildWebLearningSubprocessRequestOptions
+  extends SubprocessWebLearningRunnerOptions {
+  readonly cwd: string
+  readonly command?: string
+  readonly resolvedCommandPath?: string
+  readonly resolvedWorkerEntryPath?: string
+  readonly selfPath?: string
+  readonly resolvedSelfPath?: string
+  readonly platform?: NodeJS.Platform
+  readonly homeDir?: string
+  readonly resolvedHomeDir?: string
+  readonly serializedInput?: string
+}
+
+export interface BuildWebLearningSubprocessPlanOptions
+  extends BuildWebLearningSubprocessRequestOptions {
+  readonly planOptions?: IsolatedSubprocessPlanOptions
+}
+
+function tryRealpathSync(targetPath: string): string {
+  try {
+    return realpathSync(targetPath)
+  } catch {
+    return targetPath
+  }
+}
+
+async function tryRealpath(targetPath: string): Promise<string> {
+  try {
+    return await realpath(targetPath)
+  } catch {
+    return targetPath
+  }
+}
+
+function resolvePathPlatform(
+  options: Pick<BuildWebLearningSubprocessRequestOptions, 'backend' | 'isolationAdapter' | 'platform'>,
+): NodeJS.Platform {
+  if (options.platform !== undefined) {
+    return options.platform
+  }
+  const adapterPlatform = options.isolationAdapter?.platform
+  const backend = resolveIsolationBackend(
+    options.backend ?? 'auto',
+    adapterPlatform ?? process.platform,
+  )
+  const expectedPlatform: NodeJS.Platform =
+    backend === 'linux-native'
+      ? 'linux'
+      : backend === 'macos-seatbelt'
+        ? 'darwin'
+        : 'win32'
+  const allowHostPaths =
+    options.isolationAdapter !== undefined && process.platform !== expectedPlatform
+  return allowHostPaths ? process.platform : expectedPlatform
+}
+
+function isCanonicalAbsoluteForPlatform(value: string, pathPlatform: NodeJS.Platform): boolean {
+  if (value.length === 0 || /[\p{Cc}]/u.test(value)) return false
+  if (pathPlatform === 'win32') {
+    if (!win32.isAbsolute(value) || win32.resolve(value) !== value) return false
+    return win32.parse(value).root !== value
+  }
+  if (value.includes('\\')) return false
+  return posix.isAbsolute(value) && posix.resolve(value) === value && value !== '/'
+}
+
+function isPathWithinOrEqualForPlatform(
+  candidate: string,
+  root: string,
+  pathPlatform: NodeJS.Platform,
+): boolean {
+  const api = pathPlatform === 'win32' ? win32 : posix
+  const rel = api.relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !api.isAbsolute(rel))
+}
+
+function resolveEffectiveMaxStdoutBytes(requested?: number): number {
+  if (requested === undefined) {
+    return DEFAULT_MAX_STDOUT_BYTES
+  }
+  if (!Number.isSafeInteger(requested) || requested < 1) {
+    throw new Error('web-learning-runner: maxStdoutBytes must be a positive safe integer')
+  }
+  return Math.min(requested, MAX_CROSS_PLATFORM_OUTPUT_BYTES - DEFAULT_MAX_STDERR_BYTES)
+}
+
+function resolveEffectiveReadOnlyPaths(input: {
+  readonly command: string
+  readonly resolvedCommandPath?: string
+  readonly workerEntryPath: string
+  readonly resolvedWorkerEntryPath?: string
+  readonly selfPath: string
+  readonly resolvedSelfPath?: string
+  readonly scratchDir: string
+  readonly extraReadOnlyPaths?: readonly string[]
+  readonly pathPlatform: NodeJS.Platform
+  readonly homeDir?: string
+  readonly resolvedHomeDir?: string
+}): readonly string[] {
+  const api = input.pathPlatform === 'win32' ? win32 : posix
+  const canUseHostFs = input.pathPlatform === process.platform
+
+  const resolvedCommand =
+    input.resolvedCommandPath ?? (canUseHostFs ? tryRealpathSync(input.command) : input.command)
+  const resolvedWorker =
+    input.resolvedWorkerEntryPath ??
+    (canUseHostFs ? tryRealpathSync(input.workerEntryPath) : input.workerEntryPath)
+  const resolvedSelf =
+    input.resolvedSelfPath ?? (canUseHostFs ? tryRealpathSync(input.selfPath) : input.selfPath)
+
+  const homeCandidates: string[] = []
+  const rawHome = input.homeDir ?? (canUseHostFs ? homedir() : undefined)
+  if (rawHome !== undefined && rawHome.length > 0) {
+    homeCandidates.push(rawHome)
+    const realHome = input.resolvedHomeDir ?? (canUseHostFs ? tryRealpathSync(rawHome) : rawHome)
+    if (realHome.length > 0 && realHome !== rawHome) {
+      homeCandidates.push(realHome)
+    }
+  }
+
+  const commandDir = api.dirname(input.command)
+  const realCommandDir = api.dirname(resolvedCommand)
+  const workerDir = api.dirname(input.workerEntryPath)
+  const realWorkerDir = api.dirname(resolvedWorker)
+  const selfDir = api.dirname(input.selfPath)
+  const realSelfDir = api.dirname(resolvedSelf)
+
+  const rawCandidates: string[] = [
+    commandDir,
+    realCommandDir,
+    workerDir,
+    realWorkerDir,
+  ]
+  const workerDirName = api.basename(workerDir)
+  if (workerDirName === 'src' || workerDirName === 'lib') {
+    rawCandidates.push(api.dirname(workerDir))
+  }
+  const realWorkerDirName = api.basename(realWorkerDir)
+  if (realWorkerDirName === 'src' || realWorkerDirName === 'lib') {
+    rawCandidates.push(api.dirname(realWorkerDir))
+  }
+  rawCandidates.push(selfDir, realSelfDir, ...(input.extraReadOnlyPaths ?? []))
+
+  const deduped = new Set<string>()
+  for (const candidate of rawCandidates) {
+    if (typeof candidate !== 'string') continue
+    if (!isCanonicalAbsoluteForPlatform(candidate, input.pathPlatform)) continue
+    if (MACOS_OVERBROAD_ROOTS.has(candidate)) continue
+    if (
+      homeCandidates.some(
+        (home) =>
+          isCanonicalAbsoluteForPlatform(home, input.pathPlatform) &&
+          isPathWithinOrEqualForPlatform(home, candidate, input.pathPlatform),
+      )
+    ) {
+      continue
+    }
+    if (
+      isPathWithinOrEqualForPlatform(input.scratchDir, candidate, input.pathPlatform) ||
+      isPathWithinOrEqualForPlatform(candidate, input.scratchDir, input.pathPlatform)
+    ) {
+      continue
+    }
+    deduped.add(candidate)
+  }
+
+  const result = [...deduped]
+  const maxEntries = result.includes(commandDir)
+    ? MAX_ISOLATED_READ_ONLY_PATHS
+    : MAX_ISOLATED_READ_ONLY_PATHS - 1
+  return result.slice(0, maxEntries)
 }
 
 export function resolveWebLearningWorkerEntryPath(explicitPath?: string): string {
@@ -41,6 +243,100 @@ export function resolveWebLearningWorkerEntryPath(explicitPath?: string): string
     return fileURLToPath(new URL('./web-learning-worker.ts', import.meta.url))
   }
   return fileURLToPath(new URL('./web-learning-worker.js', import.meta.url))
+}
+
+export function buildWebLearningSubprocessRequest(
+  input: WebLearningWorkerInput,
+  options: BuildWebLearningSubprocessRequestOptions,
+  signal?: AbortSignal,
+): IsolatedSubprocessRequest {
+  const pathPlatform = resolvePathPlatform(options)
+  if (!isCanonicalAbsoluteForPlatform(options.cwd, pathPlatform)) {
+    throw new Error('web-learning-runner: canonical absolute scratch cwd required')
+  }
+
+  const maxStdinBytes = options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES
+  const stdin = options.serializedInput ?? JSON.stringify(input)
+  if (Buffer.byteLength(stdin, 'utf8') > maxStdinBytes) {
+    throw new Error(`web-learning-runner: worker input exceeds ${maxStdinBytes} bytes`)
+  }
+
+  const maxStdoutBytes = resolveEffectiveMaxStdoutBytes(options.maxStdoutBytes)
+  const requestedKillGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS
+  const killGraceMs = Math.min(
+    60_000,
+    Math.max(
+      1,
+      Number.isFinite(requestedKillGraceMs)
+        ? Math.floor(requestedKillGraceMs)
+        : DEFAULT_KILL_GRACE_MS,
+    ),
+  )
+  const timeoutBufferMs = options.runnerTimeoutBufferMs ?? DEFAULT_TIMEOUT_BUFFER_MS
+  const rawTimeoutMs = input.budget.maxDurationMs + timeoutBufferMs
+  const timeoutMs = Math.min(
+    MAX_CROSS_PLATFORM_DURATION_MS,
+    Math.max(1, Number.isFinite(rawTimeoutMs) ? Math.floor(rawTimeoutMs) : 1),
+  )
+
+  const command = options.command ?? process.execPath
+  const workerEntryPath = resolveWebLearningWorkerEntryPath(options.workerEntryPath)
+  const selfPath = options.selfPath ?? fileURLToPath(import.meta.url)
+  const args = [...(options.nodeOptions ?? []), workerEntryPath]
+  const sanitizedEnv = sanitizeWebLearningEnv(options.sourceEnv)
+  const network: IsolatedSubprocessNetworkMode = options.network ?? 'outbound-https'
+  const limits: IsolatedSubprocessLimits = options.limits ?? DEFAULT_WEB_LEARNING_LIMITS
+
+  const readOnlyPaths = resolveEffectiveReadOnlyPaths({
+    command,
+    ...(options.resolvedCommandPath !== undefined
+      ? { resolvedCommandPath: options.resolvedCommandPath }
+      : {}),
+    workerEntryPath,
+    ...(options.resolvedWorkerEntryPath !== undefined
+      ? { resolvedWorkerEntryPath: options.resolvedWorkerEntryPath }
+      : {}),
+    selfPath,
+    ...(options.resolvedSelfPath !== undefined
+      ? { resolvedSelfPath: options.resolvedSelfPath }
+      : {}),
+    scratchDir: options.cwd,
+    ...(options.readOnlyPaths !== undefined ? { extraReadOnlyPaths: options.readOnlyPaths } : {}),
+    pathPlatform,
+    ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+    ...(options.resolvedHomeDir !== undefined ? { resolvedHomeDir: options.resolvedHomeDir } : {}),
+  })
+
+  return {
+    command,
+    args,
+    cwd: options.cwd,
+    env: sanitizedEnv,
+    stdin,
+    maxStdinBytes,
+    maxStdoutBytes,
+    maxStderrBytes: DEFAULT_MAX_STDERR_BYTES,
+    timeoutMs,
+    killGraceMs,
+    network,
+    readOnlyPaths,
+    writablePaths: [options.cwd],
+    limits,
+    ...(signal !== undefined ? { signal } : {}),
+  }
+}
+
+export function buildWebLearningSubprocessPlan(
+  input: WebLearningWorkerInput,
+  options: BuildWebLearningSubprocessPlanOptions,
+  signal?: AbortSignal,
+): IsolatedSubprocessPlan {
+  const request = buildWebLearningSubprocessRequest(input, options, signal)
+  return buildIsolatedSubprocessPlan(request, {
+    ...(options.backend !== undefined ? { backend: options.backend } : {}),
+    ...(options.platform !== undefined ? { platform: options.platform } : {}),
+    ...options.planOptions,
+  })
 }
 
 export function createInProcessWebLearningRunner(
@@ -61,10 +357,13 @@ export function createSubprocessWebLearningRunner(
   options?: SubprocessWebLearningRunnerOptions,
 ): WebLearningRunner {
   const maxStdinBytes = options?.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES
-  const maxStdoutBytes = options?.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES
-  const killGraceMs = options?.killGraceMs ?? DEFAULT_KILL_GRACE_MS
-  const timeoutBufferMs = options?.runnerTimeoutBufferMs ?? DEFAULT_TIMEOUT_BUFFER_MS
+  const maxStdoutBytes = resolveEffectiveMaxStdoutBytes(options?.maxStdoutBytes)
   const workerEntryPath = resolveWebLearningWorkerEntryPath(options?.workerEntryPath)
+  const selfPath = fileURLToPath(import.meta.url)
+  const isoRunner = createIsolatedSubprocessRunner({
+    ...(options?.backend !== undefined ? { backend: options.backend } : {}),
+    ...(options?.isolationAdapter !== undefined ? { adapter: options.isolationAdapter } : {}),
+  })
 
   return {
     async run(input: WebLearningWorkerInput, signal?: AbortSignal): Promise<WebLearningWorkerOutput> {
@@ -79,167 +378,100 @@ export function createSubprocessWebLearningRunner(
         throw new Error(`web-learning-runner: worker input exceeds ${maxStdinBytes} bytes`)
       }
 
-      const scratchDir = await mkdtemp(join(options?.tempBaseDir ?? tmpdir(), 'dsh-web-learn-'))
+      const rawScratchDir = await mkdtemp(join(options?.tempBaseDir ?? tmpdir(), 'dsh-web-learn-'))
+      let scratchDir = rawScratchDir
       try {
+        await chmod(rawScratchDir, 0o700)
+        scratchDir = await realpath(rawScratchDir)
         await chmod(scratchDir, 0o700)
 
         if (signal?.aborted) {
           throw new Error('web-learning-runner: aborted before spawning worker subprocess')
         }
 
-        const sanitizedEnv = sanitizeWebLearningEnv(options?.sourceEnv)
-        const args = [...(options?.nodeOptions ?? []), workerEntryPath]
+        const [resolvedCommandPath, resolvedWorkerEntryPath, resolvedSelfPath, resolvedHomeDir] =
+          await Promise.all([
+            tryRealpath(process.execPath),
+            tryRealpath(workerEntryPath),
+            tryRealpath(selfPath),
+            tryRealpath(homedir()),
+          ])
 
-        return await new Promise<WebLearningWorkerOutput>((resolveOutput, rejectOutput) => {
-          const child = spawn(process.execPath, args, {
+        const request = buildWebLearningSubprocessRequest(
+          input,
+          {
+            ...options,
             cwd: scratchDir,
-            env: sanitizedEnv,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            windowsHide: true,
-          })
+            command: process.execPath,
+            resolvedCommandPath,
+            workerEntryPath,
+            resolvedWorkerEntryPath,
+            selfPath,
+            resolvedSelfPath,
+            homeDir: homedir(),
+            resolvedHomeDir,
+            serializedInput,
+          },
+          signal,
+        )
 
-          const stdoutChunks: Buffer[] = []
-          const stderrChunks: Buffer[] = []
-          let stdoutBytes = 0
-          let stderrBytes = 0
-          let exited = false
-          let settled = false
-          let terminating = false
-          let terminationReason: 'timeout' | 'abort' | 'overflow' | undefined
-          let killTimer: ReturnType<typeof setTimeout> | undefined
-          let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+        const result =
+          options?.isolatedRunner !== undefined
+            ? await options.isolatedRunner(request)
+            : await isoRunner.run(request)
 
-          const cleanup = () => {
-            if (deadlineTimer !== undefined) {
-              clearTimeout(deadlineTimer)
-              deadlineTimer = undefined
-            }
-            if (killTimer !== undefined) {
-              clearTimeout(killTimer)
-              killTimer = undefined
-            }
-            signal?.removeEventListener('abort', onAbort)
+        if (result.status === 'cancelled') {
+          throw new Error('web-learning-runner: worker subprocess aborted')
+        }
+        if (!result.sandboxed) {
+          throw new Error(
+            `web-learning-runner: OS sandbox unavailable (${result.reason ?? 'unknown'})`,
+          )
+        }
+        if (result.status === 'timed-out') {
+          const sigSuffix = result.processSignal ? ` (${result.processSignal})` : ''
+          throw new Error(
+            `web-learning-runner: worker subprocess timed out after ${input.budget.maxDurationMs}ms${sigSuffix}`,
+          )
+        }
+        if (result.status === 'output-limit') {
+          if (result.reason === 'stderr-limit') {
+            throw new Error(
+              `web-learning-runner: worker stderr exceeded ${DEFAULT_MAX_STDERR_BYTES} bytes`,
+            )
           }
+          throw new Error(`web-learning-runner: worker stdout exceeded ${maxStdoutBytes} bytes`)
+        }
+        if (
+          result.status !== 'succeeded' ||
+          result.exitCode !== 0 ||
+          result.processSignal !== null
+        ) {
+          const detail = result.stderr.trim() || result.reason || ''
+          throw new Error(
+            `web-learning-runner: worker exited abnormally (code=${String(result.exitCode)}, signal=${String(result.processSignal)})${detail ? `: ${detail}` : ''}`,
+          )
+        }
 
-          const finishWithError = (error: Error) => {
-            if (settled) return
-            settled = true
-            cleanup()
-            rejectOutput(error)
-          }
-
-          const terminateChild = (reason: 'timeout' | 'abort' | 'overflow') => {
-            if (exited || terminating) return
-            terminating = true
-            terminationReason = reason
-            try {
-              child.kill('SIGTERM')
-            } catch {
-              // Ignore kill errors if child already exited.
-            }
-            killTimer = setTimeout(() => {
-              if (!exited) {
-                try {
-                  child.kill('SIGKILL')
-                } catch {
-                  // Ignore SIGKILL error if child exited in the meantime.
-                }
-              }
-            }, Math.max(1, killGraceMs))
-            killTimer.unref?.()
-          }
-
-          const onAbort = () => {
-            terminateChild('abort')
-          }
-
-          signal?.addEventListener('abort', onAbort, { once: true })
-
-          const totalDeadlineMs = Math.max(1, input.budget.maxDurationMs + timeoutBufferMs)
-          deadlineTimer = setTimeout(() => {
-            terminateChild('timeout')
-          }, totalDeadlineMs)
-          deadlineTimer.unref?.()
-
-          child.once('error', error => {
-            exited = true
-            finishWithError(error instanceof Error ? error : new Error(String(error)))
-          })
-
-          child.stdout.on('data', (chunk: Buffer | string) => {
-            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-            if (stdoutBytes + buf.byteLength > maxStdoutBytes) {
-              terminateChild('overflow')
-              return
-            }
-            stdoutBytes += buf.byteLength
-            stdoutChunks.push(buf)
-          })
-
-          child.stderr.on('data', (chunk: Buffer | string) => {
-            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-            const remaining = DEFAULT_MAX_STDERR_BYTES - stderrBytes
-            if (remaining <= 0) return
-            const slice = buf.byteLength > remaining ? buf.subarray(0, remaining) : buf
-            stderrBytes += slice.byteLength
-            stderrChunks.push(slice)
-          })
-
-          child.once('close', (code, sig) => {
-            exited = true
-            const stdoutText = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8')
-            const stderrText = Buffer.concat(stderrChunks, stderrBytes).toString('utf8')
-
-            if (terminationReason === 'abort') {
-              finishWithError(new Error('web-learning-runner: worker subprocess aborted'))
-              return
-            }
-            if (terminationReason === 'timeout') {
-              finishWithError(
-                new Error(
-                  `web-learning-runner: worker subprocess timed out after ${input.budget.maxDurationMs}ms${sig ? ` (${sig})` : ''}`,
-                ),
-              )
-              return
-            }
-            if (terminationReason === 'overflow') {
-              finishWithError(
-                new Error(`web-learning-runner: worker stdout exceeded ${maxStdoutBytes} bytes`),
-              )
-              return
-            }
-            if (code !== 0 || sig !== null) {
-              finishWithError(
-                new Error(
-                  `web-learning-runner: worker exited abnormally (code=${String(code)}, signal=${String(sig)})${stderrText ? `: ${stderrText.trim()}` : ''}`,
-                ),
-              )
-              return
-            }
-
-            try {
-              const parsed = JSON.parse(stdoutText) as WebLearningWorkerOutput
-              if (settled) return
-              settled = true
-              cleanup()
-              resolveOutput(parsed)
-            } catch (error) {
-              finishWithError(
-                new Error(
-                  `web-learning-runner: worker produced invalid JSON stdout: ${error instanceof Error ? error.message : String(error)}`,
-                ),
-              )
-            }
-          })
-
-          child.stdin.on('error', () => {
-            // Child may exit or be killed before consuming stdin; close handler reports outcome.
-          })
-          child.stdin.end(serializedInput, 'utf8')
-        })
+        try {
+          return JSON.parse(result.stdout) as WebLearningWorkerOutput
+        } catch (error) {
+          throw new Error(
+            `web-learning-runner: worker produced invalid JSON stdout: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       } finally {
-        await rm(scratchDir, { recursive: true, force: true })
+        await rm(scratchDir, { recursive: true, force: true }).catch(() => {})
+        if (scratchDir !== rawScratchDir) {
+          await rm(rawScratchDir, { recursive: true, force: true }).catch(() => {})
+        }
       }
     },
   }
+}
+
+export function createSandboxedWebLearningRunner(
+  options?: SubprocessWebLearningRunnerOptions,
+): WebLearningRunner {
+  return createSubprocessWebLearningRunner(options)
 }

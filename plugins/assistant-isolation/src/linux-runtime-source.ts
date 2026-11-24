@@ -36,11 +36,12 @@ function packageConfiguration(value: unknown): void {
 /** Workspace YAML is executable pnpm configuration, even with ignore-scripts.
  * Accept only the reviewed declarative fields, leaving every original byte intact. */
 function workspaceConfiguration(value: unknown): void {
-  const allowed = new Set(['packages', 'catalog', 'linkWorkspacePackages', 'allowBuilds', 'minimumReleaseAgeExclude'])
+  const allowed = new Set(['packages', 'catalog', 'linkWorkspacePackages', 'enableGlobalVirtualStore', 'allowBuilds', 'minimumReleaseAgeExclude'])
   if (!record(value) || Object.keys(value).some(key => !allowed.has(key))) fail('frozen workspace configuration unsupported')
   if (value.catalog !== undefined && (!record(value.catalog) || Object.entries(value.catalog).some(([name, version]) =>
     !PACKAGE.test(name) || typeof version !== 'string' || !EXACT_VERSION.test(version)))) fail('frozen workspace configuration catalog invalid')
   if (value.linkWorkspacePackages !== undefined && typeof value.linkWorkspacePackages !== 'boolean') fail('frozen workspace configuration links invalid')
+  if (value.enableGlobalVirtualStore !== undefined && value.enableGlobalVirtualStore !== false) fail('frozen workspace configuration virtual store invalid')
   if (value.allowBuilds !== undefined && (!record(value.allowBuilds) || Object.entries(value.allowBuilds).some(([name, enabled]) =>
     !PACKAGE.test(name) || typeof enabled !== 'boolean'))) fail('frozen workspace configuration builds invalid')
   if (value.minimumReleaseAgeExclude !== undefined && (!Array.isArray(value.minimumReleaseAgeExclude)
@@ -49,6 +50,117 @@ function workspaceConfiguration(value: unknown): void {
       const split = entry.lastIndexOf('@')
       return split < 1 || !PACKAGE.test(entry.slice(0, split)) || !EXACT_VERSION.test(entry.slice(split + 1))
     }))) fail('frozen workspace configuration release exclusions invalid')
+}
+
+const DISALLOWED_LOCK_VALUE = /(?:git\+|\b(?:https?|ssh|ftp|git|tarball|github|gitlab|bitbucket|file):)/iu
+
+function hasControlOrWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x20 || code === 0x7f) return true
+  }
+  return /\s/u.test(value)
+}
+
+function isRegistryNpmjsTarballUrl(tarball: string): boolean {
+  if (!tarball.startsWith('https://registry.npmjs.org/') || tarball.includes('\\')
+    || tarball.includes('?') || tarball.includes('#') || hasControlOrWhitespace(tarball)) {
+    return false
+  }
+  let url: URL
+  try {
+    url = new URL(tarball)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'registry.npmjs.org' || url.port !== ''
+    || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '' || url.pathname.length <= 1) {
+    return false
+  }
+  const rawSegments = tarball.slice('https://registry.npmjs.org/'.length).split('/')
+  if (rawSegments.length === 0 || rawSegments.some(segment => segment === '' || segment === '.' || segment === '..')) {
+    return false
+  }
+  for (const segment of rawSegments) {
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return false
+    }
+    if (decoded === '' || decoded === '.' || decoded === '..' || decoded.includes('/')
+      || decoded.includes('\\') || hasControlOrWhitespace(decoded)) {
+      return false
+    }
+  }
+  const parsedSegments = url.pathname.slice(1).split('/')
+  return !parsedSegments.includes('..') && !parsedSegments.includes('.')
+}
+
+function validateLockfileNode(value: unknown, allowPackageEntryFields = false): void {
+  if (typeof value === 'string') {
+    if (DISALLOWED_LOCK_VALUE.test(value)) fail('frozen lockfile unsupported resolution')
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) validateLockfileNode(item)
+    return
+  }
+  if (record(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      if (DISALLOWED_LOCK_VALUE.test(key)) fail('frozen lockfile unsupported resolution')
+      if (allowPackageEntryFields && key === 'deprecated') {
+        if (typeof entry !== 'string') fail('frozen lockfile unsupported resolution')
+        continue
+      }
+      if (allowPackageEntryFields && key === 'resolution' && record(entry)) {
+        for (const [resKey, resValue] of Object.entries(entry)) {
+          if (DISALLOWED_LOCK_VALUE.test(resKey)) fail('frozen lockfile unsupported resolution')
+          if (resKey === 'tarball') continue
+          validateLockfileNode(resValue)
+        }
+        continue
+      }
+      validateLockfileNode(entry)
+    }
+  }
+}
+
+function validateLockfileResolutions(parsed: Record<string, unknown>): void {
+  for (const [key, entry] of Object.entries(parsed)) {
+    if (DISALLOWED_LOCK_VALUE.test(key)) fail('frozen lockfile unsupported resolution')
+    if (key !== 'packages') {
+      validateLockfileNode(entry)
+      continue
+    }
+    if (entry === undefined) continue
+    if (!record(entry)) fail('frozen lockfile unsupported resolution')
+    for (const [pkgKey, pkgEntry] of Object.entries(entry)) {
+      if (DISALLOWED_LOCK_VALUE.test(pkgKey)) fail('frozen lockfile unsupported resolution')
+      if (record(pkgEntry)) {
+        if (Object.hasOwn(pkgEntry, 'resolution')) {
+          const resolution = pkgEntry.resolution
+          if (!record(resolution) || Object.hasOwn(resolution, 'directory')
+            || Object.hasOwn(resolution, 'repo') || Object.hasOwn(resolution, 'commit')) {
+            fail('frozen lockfile unsupported resolution')
+          }
+          if (Object.hasOwn(resolution, 'type') && resolution.type !== 'tarball') {
+            fail('frozen lockfile unsupported resolution')
+          }
+          if (Object.hasOwn(resolution, 'tarball')) {
+            if (typeof resolution.tarball !== 'string' || !isRegistryNpmjsTarballUrl(resolution.tarball)) {
+              fail('frozen lockfile unsupported resolution')
+            }
+          } else if (Object.hasOwn(resolution, 'type')) {
+            fail('frozen lockfile unsupported resolution')
+          }
+        }
+        validateLockfileNode(pkgEntry, true)
+      } else {
+        validateLockfileNode(pkgEntry)
+      }
+    }
+  }
 }
 
 /** Copy every caller-owned byte before any asynchronous boundary. No caller digest is trusted. */
@@ -84,17 +196,19 @@ export function copyLinuxRuntimeManifests(source: FrozenLinuxRuntimeSource): Map
     }
   }
   let workspace: { packages?: unknown }
-  try { workspace = parseYaml(decode(sorted.get('pnpm-workspace.yaml')!)) } catch { return fail('frozen workspace inventory invalid') }
+  try { workspace = parseYaml(decode(sorted.get('pnpm-workspace.yaml')!), { maxAliasCount: 0, uniqueKeys: true }) } catch { return fail('frozen workspace inventory invalid') }
   workspaceConfiguration(workspace)
   if (!workspace || !Array.isArray(workspace.packages)
     || workspace.packages.some((pattern: unknown) => !['plugins/*', 'packages/*'].includes(pattern as string))
     || new Set(workspace.packages).size !== workspace.packages.length
     || [...workspaces].some(name => !(workspace.packages as unknown[]).includes(name.split('/')[0] + '/*'))) fail('frozen workspace inventory invalid')
   const lock = decode(sorted.get('pnpm-lock.yaml')!)
-  if (!lock.startsWith("lockfileVersion: '9.0'\n") || /(?:https?:\/\/(?!registry\.npmjs\.org\/)|git\+|\b(?:git|tarball):|(?:^|[\s'"])(?:file:))/imu.test(lock)) fail('frozen lockfile unsupported resolution')
+  if (!lock.startsWith("lockfileVersion: '9.0'\n")) fail('frozen lockfile unsupported resolution')
   let parsed: { settings?: unknown; importers?: Record<string, Record<string, Record<string, { specifier?: string; version?: string }>>> }
-  try { parsed = parseYaml(lock) } catch { return fail('frozen lockfile invalid') }
-  if (!record(parsed) || Object.keys(parsed).some(key => !['lockfileVersion', 'settings', 'catalogs', 'importers', 'packages', 'snapshots'].includes(key))) fail('frozen lockfile configuration unsupported')
+  try { parsed = parseYaml(lock, { maxAliasCount: 0, uniqueKeys: true }) } catch { return fail('frozen lockfile invalid') }
+  if (!record(parsed)) fail('frozen lockfile invalid')
+  validateLockfileResolutions(parsed)
+  if (Object.keys(parsed).some(key => !['lockfileVersion', 'settings', 'catalogs', 'importers', 'packages', 'snapshots'].includes(key))) fail('frozen lockfile configuration unsupported')
   if (parsed.settings !== undefined && (!record(parsed.settings)
     || Object.entries(parsed.settings).some(([key, value]) => !['autoInstallPeers', 'excludeLinksFromLockfile'].includes(key) || typeof value !== 'boolean'))) fail('frozen lockfile configuration settings unsupported')
   if (!parsed?.importers || typeof parsed.importers !== 'object' || !Object.hasOwn(parsed.importers, '.')
@@ -104,8 +218,9 @@ export function copyLinuxRuntimeManifests(source: FrozenLinuxRuntimeSource): Map
     if (!record(groups) || Object.keys(groups).some(key => !['dependencies', 'devDependencies', 'optionalDependencies'].includes(key))) fail('frozen importer configuration unsupported')
     for (const group of ['dependencies', 'devDependencies', 'optionalDependencies']) {
       for (const value of Object.values(groups[group] ?? {})) {
-        if (typeof value?.specifier !== 'string' || typeof value.version !== 'string') fail('frozen dependency invalid')
-        if (/^(?:file:|git\+|github:|https?:)/iu.test(value.specifier)) fail('frozen dependency source unsupported')
+        if (!record(value) || typeof value.specifier !== 'string' || typeof value.version !== 'string') fail('frozen dependency invalid')
+        if (DISALLOWED_LOCK_VALUE.test(value.specifier) || DISALLOWED_LOCK_VALUE.test(value.version)) fail('frozen dependency source unsupported')
+        if (value.specifier.startsWith('link:') && value.specifier !== value.version) fail('frozen dependency source unsupported')
         if (value.version.startsWith('link:')) {
           const target = resolve('/frozen', importer === '.' ? '' : importer, value.version.slice(5))
           if (!target.startsWith('/frozen/') || !workspaces.has(target.slice(8))) fail('frozen workspace link escapes manifests')

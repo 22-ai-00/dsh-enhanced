@@ -1,7 +1,10 @@
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
+import { isWindowsNamedPipePath } from './broker-peer-windows.js'
 import { normalizeBrokerGrantProjection } from './broker-protocol.js'
+import { normalizeActionGrantProjection, type ActionBrokerGrantProjection } from './broker-protocol-v2.js'
+import type { BrokerPlatform, BrokerTransportKind } from './broker-transport.js'
 import type { ActionGrant, CommitRequest, CompensationRequest, ExternalActionGrantMirror, VerifiedDeliveryRequest } from './types.js'
 
 export interface EmbeddedBrokerConfig { mode: 'embedded-compat' }
@@ -26,12 +29,112 @@ export interface ExternalUnixBrokerConfig {
   expectedBrokerPeerGid: number
   minimumBrokerGeneration?: number
 }
-export type BrokerConfig = EmbeddedBrokerConfig | ExternalUnixBrokerConfig
-export interface Config { stateRoot?: string; grants?: ActionGrant[]; externalGrants?: readonly ExternalActionGrantMirror[]; broker?: BrokerConfig }
+
+export interface ExternalMacosBrokerConfig {
+  mode: 'external-macos-v1'
+  actionSocketPath: string
+  brokerId: string
+  brokerPublicKeyPath: string
+  clientKeyId: string
+  clientSigningKeyPath: string
+  clientInstanceId: string
+  clientGeneration: number
+  requestTimeoutMs?: number
+  helloTtlMs?: number
+  expectedSocketUid?: number
+  expectedSocketGid?: number
+  expectedSocketMode?: number
+  expectedSocketParentUid?: number
+  expectedSocketParentGid?: number
+  expectedSocketParentMode?: number
+  expectedBrokerPeerUid: number
+  expectedBrokerPeerGid: number
+  minimumBrokerGeneration?: number
+}
+
+export interface ExternalWindowsBrokerConfig {
+  mode: 'external-windows-v1'
+  pipeName: string
+  actionSocketPath?: string
+  brokerId: string
+  brokerPublicKeyPath: string
+  clientKeyId: string
+  clientSigningKeyPath: string
+  clientInstanceId: string
+  clientGeneration: number
+  requestTimeoutMs?: number
+  helloTtlMs?: number
+  expectedUserSid: string
+  expectedBrokerPeerUid?: number
+  expectedBrokerPeerGid?: number
+  minimumBrokerGeneration?: number
+}
+
+export interface ExternalV2BrokerConfig {
+  mode: 'external-v2'
+  actionSocketPath: string
+  brokerId: string
+  brokerPublicKeyPath: string
+  clientKeyId: string
+  clientSigningKeyPath: string
+  clientInstanceId: string
+  clientGeneration: number
+  requestTimeoutMs?: number
+  helloTtlMs?: number
+  platform?: BrokerPlatform
+  transport?: 'auto' | BrokerTransportKind
+  expectedSocketUid?: number
+  expectedSocketGid?: number
+  expectedSocketMode?: number
+  expectedSocketParentUid?: number
+  expectedSocketParentGid?: number
+  expectedSocketParentMode?: number
+  expectedBrokerPeerUid?: number
+  expectedBrokerPeerGid?: number
+  expectedBrokerPeerSid?: string
+  minimumBrokerGeneration?: number
+}
+
+export type BrokerConfig =
+  | EmbeddedBrokerConfig
+  | ExternalUnixBrokerConfig
+  | ExternalMacosBrokerConfig
+  | ExternalWindowsBrokerConfig
+  | ExternalV2BrokerConfig
+
+export interface Config {
+  stateRoot?: string
+  grants?: ActionGrant[]
+  externalGrants?: readonly ExternalActionGrantMirror[]
+  actionGrants?: readonly ActionBrokerGrantProjection[]
+  externalActionGrants?: readonly ActionBrokerGrantProjection[]
+  broker?: BrokerConfig
+}
+
 type ValidatedExternalUnixBrokerConfig = Required<ExternalUnixBrokerConfig>
+export type ValidatedExternalV2BrokerConfig = Omit<ExternalV2BrokerConfig, 'requestTimeoutMs' | 'helloTtlMs' | 'platform' | 'transport' | 'expectedSocketUid' | 'expectedSocketGid' | 'expectedSocketMode' | 'expectedSocketParentUid' | 'expectedSocketParentGid' | 'expectedSocketParentMode' | 'expectedBrokerPeerUid' | 'expectedBrokerPeerGid' | 'minimumBrokerGeneration'> & {
+  requestTimeoutMs: number
+  helloTtlMs: number
+  platform: BrokerPlatform
+  transport: 'auto' | BrokerTransportKind
+  expectedSocketUid: number
+  expectedSocketGid: number
+  expectedSocketMode: number
+  expectedSocketParentUid: number
+  expectedSocketParentGid: number
+  expectedSocketParentMode: number
+  expectedBrokerPeerUid: number
+  expectedBrokerPeerGid: number
+  minimumBrokerGeneration: number
+}
+
 export type ValidatedConfig =
-  | { stateRoot: string; grants: ActionGrant[]; externalGrants: []; broker: EmbeddedBrokerConfig }
-  | { stateRoot: string; grants: []; externalGrants: ExternalActionGrantMirror[]; broker: ValidatedExternalUnixBrokerConfig }
+  | { stateRoot: string; grants: ActionGrant[]; externalGrants: []; actionGrants: ActionBrokerGrantProjection[]; externalActionGrants: ActionBrokerGrantProjection[]; broker: EmbeddedBrokerConfig }
+  | { stateRoot: string; grants: []; externalGrants: ExternalActionGrantMirror[]; actionGrants: ActionBrokerGrantProjection[]; externalActionGrants: ActionBrokerGrantProjection[]; broker: ValidatedExternalUnixBrokerConfig }
+  | { stateRoot: string; grants: []; externalGrants: ExternalActionGrantMirror[]; actionGrants: ActionBrokerGrantProjection[]; externalActionGrants: ActionBrokerGrantProjection[]; broker: Required<ExternalMacosBrokerConfig> }
+  | { stateRoot: string; grants: []; externalGrants: ExternalActionGrantMirror[]; actionGrants: ActionBrokerGrantProjection[]; externalActionGrants: ActionBrokerGrantProjection[]; broker: Required<Omit<ExternalWindowsBrokerConfig, 'actionSocketPath'>> & { actionSocketPath: string } }
+  | { stateRoot: string; grants: []; externalGrants: ExternalActionGrantMirror[]; actionGrants: ActionBrokerGrantProjection[]; externalActionGrants: ActionBrokerGrantProjection[]; broker: ValidatedExternalV2BrokerConfig }
+
 const positive = (max: number) => Schema.number().step(1).min(1).max(max)
 const externalGrantSchema = Schema.object({
   id: Schema.string().required(), revision: positive(Number.MAX_SAFE_INTEGER).required(), grantDigest: Schema.string().required(),
@@ -46,6 +149,9 @@ const externalGrantSchema = Schema.object({
   allowedInspectKinds: Schema.array(Schema.union(['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'] as const)).required(),
   verifiedDelivery: Schema.object({ ownerRouteId: Schema.string().required(), budgetId: Schema.string().required(), acceptance: Schema.union(['goal-outcome', 'goal-step'] as const) }),
 }) as Schema<ExternalActionGrantMirror>
+
+const actionGrantProjectionSchema = Schema.any() as Schema<ActionBrokerGrantProjection>
+
 export const Config: Schema<Config> = Schema.object({
   stateRoot: Schema.string().default(join(homedir(), '.dsh', 'assistant-actions')),
   grants: Schema.array(Schema.object({
@@ -60,6 +166,8 @@ export const Config: Schema<Config> = Schema.object({
       maxActions: positive(10_000).required(), maxTotalBytes: positive(64 * 1024 * 1024).required() })]),
   })).default([]),
   externalGrants: Schema.array(externalGrantSchema).default([]) as Schema<readonly ExternalActionGrantMirror[]>,
+  actionGrants: Schema.array(actionGrantProjectionSchema).default([]) as Schema<readonly ActionBrokerGrantProjection[]>,
+  externalActionGrants: Schema.array(actionGrantProjectionSchema).default([]) as Schema<readonly ActionBrokerGrantProjection[]>,
   broker: Schema.union([
     Schema.object({ mode: Schema.const('embedded-compat').required() }),
     Schema.object({
@@ -74,8 +182,45 @@ export const Config: Schema<Config> = Schema.object({
       expectedBrokerPeerUid: Schema.number().step(1).min(0).max(0x7fffffff).required(), expectedBrokerPeerGid: Schema.number().step(1).min(0).max(0x7fffffff).required(),
       minimumBrokerGeneration: positive(Number.MAX_SAFE_INTEGER).default(1),
     }),
+    Schema.object({
+      mode: Schema.const('external-macos-v1').required(), actionSocketPath: Schema.string().required(), brokerId: Schema.string().required(),
+      brokerPublicKeyPath: Schema.string().required(), clientKeyId: Schema.string().required(), clientSigningKeyPath: Schema.string().required(),
+      clientInstanceId: Schema.string().required(), clientGeneration: positive(Number.MAX_SAFE_INTEGER).required(),
+      requestTimeoutMs: positive(300_000).default(30_000), helloTtlMs: positive(300_000).default(30_000),
+      expectedSocketUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedSocketGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      expectedSocketMode: Schema.number().step(1).min(0).max(0o777).default(0o600),
+      expectedSocketParentUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedSocketParentGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      expectedSocketParentMode: Schema.number().step(1).min(0).max(0o777).default(0o700),
+      expectedBrokerPeerUid: Schema.number().step(1).min(0).max(0x7fffffff).required(), expectedBrokerPeerGid: Schema.number().step(1).min(0).max(0x7fffffff).required(),
+      minimumBrokerGeneration: positive(Number.MAX_SAFE_INTEGER).default(1),
+    }),
+    Schema.object({
+      mode: Schema.const('external-windows-v1').required(), pipeName: Schema.string().required(), actionSocketPath: Schema.string(), brokerId: Schema.string().required(),
+      brokerPublicKeyPath: Schema.string().required(), clientKeyId: Schema.string().required(), clientSigningKeyPath: Schema.string().required(),
+      clientInstanceId: Schema.string().required(), clientGeneration: positive(Number.MAX_SAFE_INTEGER).required(),
+      requestTimeoutMs: positive(300_000).default(30_000), helloTtlMs: positive(300_000).default(30_000),
+      expectedUserSid: Schema.string().required(),
+      expectedBrokerPeerUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedBrokerPeerGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      minimumBrokerGeneration: positive(Number.MAX_SAFE_INTEGER).default(1),
+    }),
+    Schema.object({
+      mode: Schema.const('external-v2').required(), actionSocketPath: Schema.string().required(), brokerId: Schema.string().required(),
+      brokerPublicKeyPath: Schema.string().required(), clientKeyId: Schema.string().required(), clientSigningKeyPath: Schema.string().required(),
+      clientInstanceId: Schema.string().required(), clientGeneration: positive(Number.MAX_SAFE_INTEGER).required(),
+      requestTimeoutMs: positive(300_000).default(30_000), helloTtlMs: positive(300_000).default(30_000),
+      platform: Schema.union(['auto', 'linux', 'darwin', 'win32'] as const).default('auto'),
+      transport: Schema.union(['auto', 'posix-uds', 'windows-pipe'] as const).default('auto'),
+      expectedSocketUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedSocketGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      expectedSocketMode: Schema.number().step(1).min(0).max(0o777).default(0o600),
+      expectedSocketParentUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedSocketParentGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      expectedSocketParentMode: Schema.number().step(1).min(0).max(0o777).default(0o700),
+      expectedBrokerPeerUid: Schema.number().step(1).min(0).max(0x7fffffff), expectedBrokerPeerGid: Schema.number().step(1).min(0).max(0x7fffffff),
+      expectedBrokerPeerSid: Schema.string(),
+      minimumBrokerGeneration: positive(Number.MAX_SAFE_INTEGER).default(1),
+    }),
   ]).default({ mode: 'embedded-compat' }),
 })
+
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\p{Cc}]/u.test(value)
 export function validPath(value: unknown): value is string {
   return text(value, 1024) && !value.includes('\\') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
@@ -87,9 +232,15 @@ function validateExternalGrant(grant: ExternalActionGrantMirror): void {
     normalizeBrokerGrantProjection(grant)
   } catch { throw new Error('assistant-actions: invalid external grant projection') }
 }
+function validateActionGrantProjection(grant: ActionBrokerGrantProjection): ActionBrokerGrantProjection {
+  try {
+    return normalizeActionGrantProjection(grant)
+  } catch { throw new Error('assistant-actions: invalid action grant projection') }
+}
+
 export function validateConfig(input: Config): ValidatedConfig {
   if (!input || typeof input !== 'object' || Array.isArray(input)
-    || Object.keys(input).some(key => !['stateRoot', 'grants', 'externalGrants', 'broker'].includes(key))) throw new Error('assistant-actions: invalid config')
+    || Object.keys(input).some(key => !['stateRoot', 'grants', 'externalGrants', 'actionGrants', 'externalActionGrants', 'broker'].includes(key))) throw new Error('assistant-actions: invalid config')
   const stateRoot = input.stateRoot ?? join(homedir(), '.dsh', 'assistant-actions')
   if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot || stateRoot === '/') throw new Error('assistant-actions: canonical private state root required')
   const grants = structuredClone(input.grants ?? [])
@@ -97,12 +248,12 @@ export function validateConfig(input: Config): ValidatedConfig {
   for (const grant of grants) {
     if (!grant || ![14, 15, 16, 17].includes(Object.keys(grant).length)
       || Object.keys(grant).some(key => !['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'repoWorkflow', 'verifiedDelivery', 'rollback'].includes(key))
-      || grant.verifiedDelivery !== undefined && (!grant.verifiedDelivery || ![2, 3].includes(Object.keys(grant.verifiedDelivery).length) || Object.keys(grant.verifiedDelivery).some(key => !['ownerRouteId', 'budgetId', 'acceptance'].includes(key)) || grant.verifiedDelivery.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(grant.verifiedDelivery.acceptance) || !text(grant.verifiedDelivery.ownerRouteId, 200) || !text(grant.verifiedDelivery.budgetId, 200))
-      || grant.rollback !== undefined && (!grant.rollback || Object.keys(grant.rollback).length !== 4
+      || (grant.verifiedDelivery !== undefined && (!grant.verifiedDelivery || ![2, 3].includes(Object.keys(grant.verifiedDelivery).length) || Object.keys(grant.verifiedDelivery).some(key => !['ownerRouteId', 'budgetId', 'acceptance'].includes(key)) || (grant.verifiedDelivery.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(grant.verifiedDelivery.acceptance)) || !text(grant.verifiedDelivery.ownerRouteId, 200) || !text(grant.verifiedDelivery.budgetId, 200)))
+      || (grant.rollback !== undefined && (!grant.rollback || Object.keys(grant.rollback).length !== 4
         || Object.keys(grant.rollback).some(key => !['allowRollback', 'budgetId', 'maxActions', 'maxTotalBytes'].includes(key))
         || grant.rollback.allowRollback !== true || !text(grant.rollback.budgetId, 200)
         || !Number.isSafeInteger(grant.rollback.maxActions) || grant.rollback.maxActions < 1 || grant.rollback.maxActions > 10_000
-        || !Number.isSafeInteger(grant.rollback.maxTotalBytes) || grant.rollback.maxTotalBytes < 1 || grant.rollback.maxTotalBytes > 64 * 1024 * 1024)
+        || !Number.isSafeInteger(grant.rollback.maxTotalBytes) || grant.rollback.maxTotalBytes < 1 || grant.rollback.maxTotalBytes > 64 * 1024 * 1024))
       || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
       || !/^[0-9a-f]{64}$/.test(grant.principalDigest) || !text(grant.principalRecordId) || !Number.isSafeInteger(grant.principalVersion) || grant.principalVersion < 1
       || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || !text(grant.agentPreset)
@@ -118,35 +269,149 @@ export function validateConfig(input: Config): ValidatedConfig {
         || grant.repoWorkflow.baseBranch === grant.branch || grant.repoWorkflow.baseBranch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))
         || typeof grant.repoWorkflow.allowBranchCreate !== 'boolean' || typeof grant.repoWorkflow.allowPullRequest !== 'boolean'))) throw new Error('assistant-actions: invalid grant')
   }
+
+  const rawActionGrants = structuredClone(input.actionGrants ?? [])
+  const rawExternalActionGrants = structuredClone(input.externalActionGrants ?? [])
+  if (!Array.isArray(rawActionGrants) || rawActionGrants.length > 1000 || new Set(rawActionGrants.map(g => g.id)).size !== rawActionGrants.length) {
+    throw new Error('assistant-actions: invalid actionGrants')
+  }
+  if (!Array.isArray(rawExternalActionGrants) || rawExternalActionGrants.length > 1000 || new Set(rawExternalActionGrants.map(g => g.id)).size !== rawExternalActionGrants.length) {
+    throw new Error('assistant-actions: invalid externalActionGrants')
+  }
+  const actionGrants = rawActionGrants.map(validateActionGrantProjection)
+  const externalActionGrants = rawExternalActionGrants.map(validateActionGrantProjection)
+
   const rawBroker: BrokerConfig = input.broker === undefined ? { mode: 'embedded-compat' } : structuredClone(input.broker)
   const externalGrants = structuredClone(input.externalGrants ?? [])
   if (!rawBroker || typeof rawBroker !== 'object' || Array.isArray(rawBroker) || !('mode' in rawBroker)) throw new Error('assistant-actions: invalid broker config')
   if (rawBroker.mode === 'embedded-compat') {
-    if (Object.keys(rawBroker).length !== 1 || externalGrants.length !== 0) throw new Error('assistant-actions: external grants require external broker mode')
-    return { stateRoot, grants, externalGrants: [], broker: rawBroker }
+    if (Object.keys(rawBroker).length !== 1 || externalGrants.length !== 0 || externalActionGrants.length !== 0) throw new Error('assistant-actions: external grants require external broker mode')
+    return { stateRoot, grants, externalGrants: [], actionGrants, externalActionGrants: [], broker: rawBroker }
   }
-  if (rawBroker.mode !== 'external-unix-v1'
-    || Object.keys(rawBroker).some(key => !['mode', 'actionSocketPath', 'brokerId', 'brokerPublicKeyPath', 'clientKeyId', 'clientSigningKeyPath', 'clientInstanceId', 'clientGeneration', 'requestTimeoutMs', 'helloTtlMs', 'expectedSocketUid', 'expectedSocketGid', 'expectedSocketMode', 'expectedSocketParentUid', 'expectedSocketParentGid', 'expectedSocketParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'minimumBrokerGeneration'].includes(key))) throw new Error('assistant-actions: invalid external broker config')
-  const broker: ValidatedExternalUnixBrokerConfig = { ...rawBroker, requestTimeoutMs: rawBroker.requestTimeoutMs ?? 30_000, helloTtlMs: rawBroker.helloTtlMs ?? 30_000, expectedSocketMode: rawBroker.expectedSocketMode ?? 0o600,
-    expectedSocketParentUid: rawBroker.expectedSocketParentUid ?? rawBroker.expectedSocketUid, expectedSocketParentGid: rawBroker.expectedSocketParentGid ?? rawBroker.expectedSocketGid, expectedSocketParentMode: rawBroker.expectedSocketParentMode ?? 0o700, minimumBrokerGeneration: rawBroker.minimumBrokerGeneration ?? 1 }
-  if (grants.length !== 0 || !Array.isArray(externalGrants) || externalGrants.length > 1000 || new Set(externalGrants.map(grant => grant.id)).size !== externalGrants.length
-    || !canonicalAbsolute(broker.actionSocketPath) || Buffer.byteLength(broker.actionSocketPath) > 100 || !identifier(broker.brokerId)
-    || !canonicalAbsolute(broker.brokerPublicKeyPath) || !canonicalAbsolute(broker.clientSigningKeyPath) || broker.brokerPublicKeyPath === broker.clientSigningKeyPath
-    || !identifier(broker.clientKeyId) || !identifier(broker.clientInstanceId) || !Number.isSafeInteger(broker.clientGeneration) || broker.clientGeneration < 1
-    || !Number.isSafeInteger(broker.requestTimeoutMs) || broker.requestTimeoutMs < 1 || broker.requestTimeoutMs > 300_000
-    || !Number.isSafeInteger(broker.helloTtlMs) || broker.helloTtlMs < 1 || broker.helloTtlMs > 300_000
-    || !Number.isSafeInteger(broker.expectedSocketUid) || broker.expectedSocketUid < 0 || broker.expectedSocketUid > 0x7fffffff
-    || !Number.isSafeInteger(broker.expectedSocketGid) || broker.expectedSocketGid < 0 || broker.expectedSocketGid > 0x7fffffff
-    || !Number.isSafeInteger(broker.expectedSocketMode) || broker.expectedSocketMode < 0 || broker.expectedSocketMode > 0o777
-    || !Number.isSafeInteger(broker.expectedSocketParentUid) || broker.expectedSocketParentUid < 0 || broker.expectedSocketParentUid > 0x7fffffff
-    || !Number.isSafeInteger(broker.expectedSocketParentGid) || broker.expectedSocketParentGid < 0 || broker.expectedSocketParentGid > 0x7fffffff
-    || !Number.isSafeInteger(broker.expectedSocketParentMode) || broker.expectedSocketParentMode < 0 || broker.expectedSocketParentMode > 0o777
-    || !Number.isSafeInteger(broker.expectedBrokerPeerUid) || broker.expectedBrokerPeerUid < 0 || broker.expectedBrokerPeerUid > 0x7fffffff
-    || !Number.isSafeInteger(broker.expectedBrokerPeerGid) || broker.expectedBrokerPeerGid < 0 || broker.expectedBrokerPeerGid > 0x7fffffff
-    || !Number.isSafeInteger(broker.minimumBrokerGeneration) || broker.minimumBrokerGeneration < 1) throw new Error('assistant-actions: invalid external broker config')
-  const normalizedExternalGrants = externalGrants.map(grant => { validateExternalGrant(grant); return normalizeBrokerGrantProjection(grant) })
-  return { stateRoot, grants: [], externalGrants: normalizedExternalGrants, broker }
+
+  if (rawBroker.mode === 'external-unix-v1') {
+    if (Object.keys(rawBroker).some(key => !['mode', 'actionSocketPath', 'brokerId', 'brokerPublicKeyPath', 'clientKeyId', 'clientSigningKeyPath', 'clientInstanceId', 'clientGeneration', 'requestTimeoutMs', 'helloTtlMs', 'expectedSocketUid', 'expectedSocketGid', 'expectedSocketMode', 'expectedSocketParentUid', 'expectedSocketParentGid', 'expectedSocketParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'minimumBrokerGeneration'].includes(key))) throw new Error('assistant-actions: invalid external broker config')
+    const broker: ValidatedExternalUnixBrokerConfig = { ...rawBroker, requestTimeoutMs: rawBroker.requestTimeoutMs ?? 30_000, helloTtlMs: rawBroker.helloTtlMs ?? 30_000, expectedSocketMode: rawBroker.expectedSocketMode ?? 0o600,
+      expectedSocketParentUid: rawBroker.expectedSocketParentUid ?? rawBroker.expectedSocketUid, expectedSocketParentGid: rawBroker.expectedSocketParentGid ?? rawBroker.expectedSocketGid, expectedSocketParentMode: rawBroker.expectedSocketParentMode ?? 0o700, minimumBrokerGeneration: rawBroker.minimumBrokerGeneration ?? 1 }
+    if (grants.length !== 0 || !Array.isArray(externalGrants) || externalGrants.length > 1000 || new Set(externalGrants.map(grant => grant.id)).size !== externalGrants.length
+      || !canonicalAbsolute(broker.actionSocketPath) || Buffer.byteLength(broker.actionSocketPath) > 100 || !identifier(broker.brokerId)
+      || !canonicalAbsolute(broker.brokerPublicKeyPath) || !canonicalAbsolute(broker.clientSigningKeyPath) || broker.brokerPublicKeyPath === broker.clientSigningKeyPath
+      || !identifier(broker.clientKeyId) || !identifier(broker.clientInstanceId) || !Number.isSafeInteger(broker.clientGeneration) || broker.clientGeneration < 1
+      || !Number.isSafeInteger(broker.requestTimeoutMs) || broker.requestTimeoutMs < 1 || broker.requestTimeoutMs > 300_000
+      || !Number.isSafeInteger(broker.helloTtlMs) || broker.helloTtlMs < 1 || broker.helloTtlMs > 300_000
+      || !Number.isSafeInteger(broker.expectedSocketUid) || broker.expectedSocketUid < 0 || broker.expectedSocketUid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedSocketGid) || broker.expectedSocketGid < 0 || broker.expectedSocketGid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedSocketMode) || broker.expectedSocketMode < 0 || broker.expectedSocketMode > 0o777
+      || !Number.isSafeInteger(broker.expectedSocketParentUid) || broker.expectedSocketParentUid < 0 || broker.expectedSocketParentUid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedSocketParentGid) || broker.expectedSocketParentGid < 0 || broker.expectedSocketParentGid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedSocketParentMode) || broker.expectedSocketParentMode < 0 || broker.expectedSocketParentMode > 0o777
+      || !Number.isSafeInteger(broker.expectedBrokerPeerUid) || broker.expectedBrokerPeerUid < 0 || broker.expectedBrokerPeerUid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedBrokerPeerGid) || broker.expectedBrokerPeerGid < 0 || broker.expectedBrokerPeerGid > 0x7fffffff
+      || !Number.isSafeInteger(broker.minimumBrokerGeneration) || broker.minimumBrokerGeneration < 1) throw new Error('assistant-actions: invalid external broker config')
+    const normalizedExternalGrants = externalGrants.map(grant => { validateExternalGrant(grant); return normalizeBrokerGrantProjection(grant) })
+    return { stateRoot, grants: [], externalGrants: normalizedExternalGrants, actionGrants, externalActionGrants, broker }
+  }
+
+  if (rawBroker.mode === 'external-macos-v1') {
+    if (Object.keys(rawBroker).some(key => !['mode', 'actionSocketPath', 'brokerId', 'brokerPublicKeyPath', 'clientKeyId', 'clientSigningKeyPath', 'clientInstanceId', 'clientGeneration', 'requestTimeoutMs', 'helloTtlMs', 'expectedSocketUid', 'expectedSocketGid', 'expectedSocketMode', 'expectedSocketParentUid', 'expectedSocketParentGid', 'expectedSocketParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'minimumBrokerGeneration'].includes(key))) throw new Error('assistant-actions: invalid external macOS broker config')
+    const socketUid = rawBroker.expectedSocketUid ?? rawBroker.expectedBrokerPeerUid
+    const socketGid = rawBroker.expectedSocketGid ?? rawBroker.expectedBrokerPeerGid
+    const broker = {
+      ...rawBroker,
+      requestTimeoutMs: rawBroker.requestTimeoutMs ?? 30_000,
+      helloTtlMs: rawBroker.helloTtlMs ?? 30_000,
+      expectedSocketUid: socketUid,
+      expectedSocketGid: socketGid,
+      expectedSocketMode: rawBroker.expectedSocketMode ?? 0o600,
+      expectedSocketParentUid: rawBroker.expectedSocketParentUid ?? socketUid,
+      expectedSocketParentGid: rawBroker.expectedSocketParentGid ?? socketGid,
+      expectedSocketParentMode: rawBroker.expectedSocketParentMode ?? 0o700,
+      minimumBrokerGeneration: rawBroker.minimumBrokerGeneration ?? 1,
+    }
+    if (grants.length !== 0 || !Array.isArray(externalGrants) || externalGrants.length > 1000 || new Set(externalGrants.map(g => g.id)).size !== externalGrants.length
+      || !canonicalAbsolute(broker.actionSocketPath) || Buffer.byteLength(broker.actionSocketPath) > 100 || !identifier(broker.brokerId)
+      || !canonicalAbsolute(broker.brokerPublicKeyPath) || !canonicalAbsolute(broker.clientSigningKeyPath) || broker.brokerPublicKeyPath === broker.clientSigningKeyPath
+      || !identifier(broker.clientKeyId) || !identifier(broker.clientInstanceId) || !Number.isSafeInteger(broker.clientGeneration) || broker.clientGeneration < 1
+      || !Number.isSafeInteger(broker.expectedBrokerPeerUid) || broker.expectedBrokerPeerUid < 0 || broker.expectedBrokerPeerUid > 0x7fffffff
+      || !Number.isSafeInteger(broker.expectedBrokerPeerGid) || broker.expectedBrokerPeerGid < 0 || broker.expectedBrokerPeerGid > 0x7fffffff) {
+      throw new Error('assistant-actions: invalid external macOS broker config')
+    }
+    const normalizedExternalGrants = externalGrants.map(grant => { validateExternalGrant(grant); return normalizeBrokerGrantProjection(grant) })
+    return { stateRoot, grants: [], externalGrants: normalizedExternalGrants, actionGrants, externalActionGrants, broker }
+  }
+
+  if (rawBroker.mode === 'external-windows-v1') {
+    if (Object.keys(rawBroker).some(key => !['mode', 'pipeName', 'actionSocketPath', 'brokerId', 'brokerPublicKeyPath', 'clientKeyId', 'clientSigningKeyPath', 'clientInstanceId', 'clientGeneration', 'requestTimeoutMs', 'helloTtlMs', 'expectedUserSid', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'minimumBrokerGeneration'].includes(key))) throw new Error('assistant-actions: invalid external Windows broker config')
+    const pipePath = rawBroker.actionSocketPath ?? rawBroker.pipeName
+    if (grants.length !== 0 || !Array.isArray(externalGrants) || externalGrants.length > 1000 || new Set(externalGrants.map(g => g.id)).size !== externalGrants.length
+      || !isWindowsNamedPipePath(pipePath) || !identifier(rawBroker.brokerId)
+      || !canonicalAbsolute(rawBroker.brokerPublicKeyPath) || !canonicalAbsolute(rawBroker.clientSigningKeyPath) || rawBroker.brokerPublicKeyPath === rawBroker.clientSigningKeyPath
+      || !identifier(rawBroker.clientKeyId) || !identifier(rawBroker.clientInstanceId) || !Number.isSafeInteger(rawBroker.clientGeneration) || rawBroker.clientGeneration < 1
+      || typeof rawBroker.expectedUserSid !== 'string' || !/^S-1-(?:\d+-)*\d+$/u.test(rawBroker.expectedUserSid)) {
+      throw new Error('assistant-actions: invalid external Windows broker config')
+    }
+    const broker = {
+      ...rawBroker,
+      actionSocketPath: pipePath,
+      requestTimeoutMs: rawBroker.requestTimeoutMs ?? 30_000,
+      helloTtlMs: rawBroker.helloTtlMs ?? 30_000,
+      expectedBrokerPeerUid: rawBroker.expectedBrokerPeerUid ?? 0,
+      expectedBrokerPeerGid: rawBroker.expectedBrokerPeerGid ?? 0,
+      minimumBrokerGeneration: rawBroker.minimumBrokerGeneration ?? 1,
+    }
+    const normalizedExternalGrants = externalGrants.map(grant => { validateExternalGrant(grant); return normalizeBrokerGrantProjection(grant) })
+    return { stateRoot, grants: [], externalGrants: normalizedExternalGrants, actionGrants, externalActionGrants, broker }
+  }
+
+  if (rawBroker.mode === 'external-v2') {
+    if (Object.keys(rawBroker).some(key => !['mode', 'actionSocketPath', 'brokerId', 'brokerPublicKeyPath', 'clientKeyId', 'clientSigningKeyPath', 'clientInstanceId', 'clientGeneration', 'requestTimeoutMs', 'helloTtlMs', 'platform', 'transport', 'expectedSocketUid', 'expectedSocketGid', 'expectedSocketMode', 'expectedSocketParentUid', 'expectedSocketParentGid', 'expectedSocketParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'expectedBrokerPeerSid', 'minimumBrokerGeneration'].includes(key))) {
+      throw new Error('assistant-actions: invalid external v2 broker config')
+    }
+    const platformOpt: BrokerPlatform = rawBroker.platform ?? 'auto'
+    const transportOpt: 'auto' | BrokerTransportKind = rawBroker.transport ?? 'auto'
+    const isWinPipe = transportOpt === 'windows-pipe' || (transportOpt === 'auto' && (platformOpt === 'win32' || (platformOpt === 'auto' && process.platform === 'win32')))
+    const uidDefault = process.getuid?.() ?? 0
+    const gidDefault = process.getgid?.() ?? 0
+    const broker: ValidatedExternalV2BrokerConfig = {
+      mode: 'external-v2',
+      actionSocketPath: rawBroker.actionSocketPath,
+      brokerId: rawBroker.brokerId,
+      brokerPublicKeyPath: rawBroker.brokerPublicKeyPath,
+      clientKeyId: rawBroker.clientKeyId,
+      clientSigningKeyPath: rawBroker.clientSigningKeyPath,
+      clientInstanceId: rawBroker.clientInstanceId,
+      clientGeneration: rawBroker.clientGeneration,
+      requestTimeoutMs: rawBroker.requestTimeoutMs ?? 30_000,
+      helloTtlMs: rawBroker.helloTtlMs ?? 30_000,
+      platform: platformOpt,
+      transport: transportOpt,
+      expectedSocketUid: rawBroker.expectedSocketUid ?? uidDefault,
+      expectedSocketGid: rawBroker.expectedSocketGid ?? gidDefault,
+      expectedSocketMode: rawBroker.expectedSocketMode ?? 0o600,
+      expectedSocketParentUid: rawBroker.expectedSocketParentUid ?? rawBroker.expectedSocketUid ?? uidDefault,
+      expectedSocketParentGid: rawBroker.expectedSocketParentGid ?? rawBroker.expectedSocketGid ?? gidDefault,
+      expectedSocketParentMode: rawBroker.expectedSocketParentMode ?? 0o700,
+      expectedBrokerPeerUid: rawBroker.expectedBrokerPeerUid ?? uidDefault,
+      expectedBrokerPeerGid: rawBroker.expectedBrokerPeerGid ?? gidDefault,
+      ...(rawBroker.expectedBrokerPeerSid === undefined ? {} : { expectedBrokerPeerSid: rawBroker.expectedBrokerPeerSid }),
+      minimumBrokerGeneration: rawBroker.minimumBrokerGeneration ?? 1,
+    }
+    if (grants.length !== 0 || !Array.isArray(externalGrants) || externalGrants.length > 1000 || new Set(externalGrants.map(g => g.id)).size !== externalGrants.length
+      || (isWinPipe ? !isWindowsNamedPipePath(broker.actionSocketPath) : (!canonicalAbsolute(broker.actionSocketPath) || Buffer.byteLength(broker.actionSocketPath) > 100))
+      || !identifier(broker.brokerId)
+      || !canonicalAbsolute(broker.brokerPublicKeyPath) || !canonicalAbsolute(broker.clientSigningKeyPath) || broker.brokerPublicKeyPath === broker.clientSigningKeyPath
+      || !identifier(broker.clientKeyId) || !identifier(broker.clientInstanceId) || !Number.isSafeInteger(broker.clientGeneration) || broker.clientGeneration < 1
+      || !Number.isSafeInteger(broker.requestTimeoutMs) || broker.requestTimeoutMs < 1 || broker.requestTimeoutMs > 300_000
+      || !Number.isSafeInteger(broker.helloTtlMs) || broker.helloTtlMs < 1 || broker.helloTtlMs > 300_000) {
+      throw new Error('assistant-actions: invalid external v2 broker config')
+    }
+    const normalizedExternalGrants = externalGrants.map(grant => { validateExternalGrant(grant); return normalizeBrokerGrantProjection(grant) })
+    return { stateRoot, grants: [], externalGrants: normalizedExternalGrants, actionGrants, externalActionGrants, broker }
+  }
+
+  throw new Error('assistant-actions: invalid external broker config')
 }
+
 export function normalizeCommit(value: CommitRequest): CommitRequest {
   if (!value || Object.keys(value).length !== 5 || !text(value.grantId) || !text(value.idempotencyKey)
     || !/^[0-9a-f]{40}$/.test(value.expectedHeadOid) || !text(value.headline, 200)

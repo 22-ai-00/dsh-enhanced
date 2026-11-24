@@ -4,7 +4,22 @@ import { AssistantIsolationService, Config } from './service.js'
 
 export const name = 'dsh-enhanced-assistant-isolation'
 export { version, AssistantIsolationService, Config }
-export { IsolatedVerifierRunner, type LinuxVerifierRunnerConfig as IsolatedVerifierRunnerConfig } from './verifier-runner.js'
+export { type AssistantIsolationServiceOptions } from './service.js'
+export { validateConfig, defaultLimits, type ValidatedConfig, type ValidateConfigOptions, type MacosIsolationConfig, type WindowsIsolationConfig } from './config.js'
+export { resolveIsolationBackend, isSupportedIsolationBackend, isSupportedIsolationBackendConfig, type IsolationBackend, type IsolationBackendConfig } from './platform.js'
+export { IsolatedVerifierRunner, type IsolatedVerifierRunnerConfig, type AutoVerifierRunnerConfig,
+  type MacosSeatbeltVerifierRunnerConfig, type WindowsJobVerifierRunnerConfig } from './verifier-runner.js'
+export { NativeCommandVerifierRunner, type NativeCommandVerifierRunnerConfig } from './native-command-verifier-runner.js'
+export { buildMacosSeatbeltCommandProfile, buildScrubbedMacosEnv, verifyMacosSandboxExec, runMacosSeatbeltCommand,
+  DEFAULT_MACOS_SANDBOX_EXEC, type MacosSeatbeltCommandProfileInput, type MacosSeatbeltCommandInput,
+  type MacosSeatbeltCommandResult, type MacosSeatbeltAdapter } from './macos-command.js'
+export { buildWindowsCommandLine, buildScrubbedWindowsEnv, buildWindowsJobRunnerInvocation, buildWindowsJobSpec,
+  computeWindowsJobLimits, quoteWindowsArg, runWindowsJobProcess, verifyWindowsJobRunner,
+  DEFAULT_WINDOWS_POWERSHELL, DEFAULT_WINDOWS_CMD, WINDOWS_JOB_RUNNER_SCRIPT, WINDOWS_JOB_LIMIT_FLAGS, WINDOWS_JOB_UI_RESTRICTIONS_FLAGS,
+  type WindowsJobObjectLimits, type WindowsJobSpec, type WindowsJobProcessInput, type WindowsJobProcessResult, type WindowsJobAdapter } from './windows-job.js'
+export { buildIsolatedSubprocessPlan, runIsolatedSubprocess, createIsolatedSubprocessRunner, DEFAULT_BWRAP_PATH,
+  type IsolatedSubprocessNetworkMode, type IsolatedSubprocessLimits, type IsolatedSubprocessLimitsEnforced, type IsolatedSubprocessRequest,
+  type IsolatedSubprocessResult, type IsolatedSubprocessPlan, type IsolatedSubprocessPlanOptions, type IsolatedSubprocessAdapter } from './subprocess.js'
 export { runNativeMacProcess, type NativeMacProcessInput, type NativeMacProcessResult, type NativeMacReadRoot } from './native-macos.js'
 export { validateNativeMacRuntime, verifyNativeMacRuntime, hashNativeMacRuntimeTree, nativeMacRuntimeDigest, type NativeMacRuntime } from './native-runtime.js'
 export { NativeMacVerifierRunner, type NativeMacVerifierRunnerConfig } from './native-verifier-runner.js'

@@ -5,7 +5,26 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { afterAll, afterEach, expect, test } from 'vitest'
+import { afterAll, afterEach, expect, test, vi } from 'vitest'
+
+const lstatState = vi.hoisted(() => ({ stripBlocks: false }))
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      const result = await actual.lstat(...args)
+      if (!lstatState.stripBlocks) return result
+      return new Proxy(result, {
+        get(target, prop) {
+          if (prop === 'blocks') return undefined
+          const value = Reflect.get(target, prop)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    },
+  }
+})
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantIsolationService } from '../src/service.ts'
 import { cleanupNativeFixtures, nativeConfigWithRuntime } from './helpers/native-config.js'
@@ -43,6 +62,21 @@ test('observes DB/WAL/staging and refuses symlinks without following them', asyn
     await rm(join(root, 'outside'))
     expect(await observeStorage(root)).toBeDefined()
   } finally { ledger.close() }
+})
+
+test('observeStorage succeeds when stat.blocks is undefined (Windows Node.js behavior)', async () => {
+  const { root, ledger } = await fixture()
+  try {
+    await mkdir(join(root, 'workspaces'), { mode: 0o700 })
+    await writeFile(join(root, 'workspaces', 'win-input'), Buffer.alloc(12_345))
+    lstatState.stripBlocks = true
+    const observed = await observeStorage(root)
+    expect(observed).toBeDefined()
+    expect(observed!.bytes).toBeGreaterThanOrEqual(12_345)
+  } finally {
+    lstatState.stripBlocks = false
+    ledger.close()
+  }
 })
 
 test('default maintenance preserves bodies; opt-in retains unknown staging, identity and budgets', async () => {

@@ -295,7 +295,7 @@ dsh plugin --profile <profile> add @dsh-enhanced/assistant-isolation
 
 Required Host services: `agents`, `tools`, `assistantDelivery`, and `assistantPolicy`. The bundle is independently publishable; installing it does not install or activate peers. Without the services it does not register an execution tool. With no grants it does not execute jobs. The plugin downloads no image and contacts no container daemon.
 
-Linux runtime isolation requires a non-root Linux Host with verified cgroup v1 or unified cgroup v2 delegation (`discoverLinuxCgroupRoots` and `scripts/isolation/prepare-linux-cgroups.mjs --auto` support both standalone `/sys/fs/cgroup/dsh-native/uid-<uid>` and `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`) and the fixed namespace dependencies (unshare, bubblewrap, Python/libseccomp). macOS exposes only the `macos-seatbelt` verifier primitive; `isolation_run` is Linux-only.
+Linux runtime isolation requires a non-root Linux Host with verified cgroup v1 or unified cgroup v2 delegation (`discoverLinuxCgroupRoots` and `scripts/isolation/prepare-linux-cgroups.mjs --auto` support both standalone `/sys/fs/cgroup/dsh-native/uid-<uid>` and `systemd --user` `.../user@<uid>.service/dsh-native/uid-<uid>`) and the fixed namespace dependencies (unshare, bubblewrap, Python/libseccomp). `Config.backend` defaults to `'auto'` (`linux` → `'linux-native'`, `darwin` → `'macos-seatbelt'`, `win32` → `'windows-job'`). On macOS (`macos-seatbelt`) and Windows (`windows-job`), both `isolation_run` and `IsolatedVerifierRunner` run with crash-safe supervisor receipts and OS containment within each platform's authority boundaries (documented below).
 
 ## Configuration
 
@@ -447,7 +447,8 @@ Preparation copies and validates the root manifests, complete lockfile importer
 inventory, workspace manifests, exact cohort version/package manager and workspace
 links; caller-provided hashes are never accepted as evidence. Workspace YAML only
 permits the reviewed declarative `packages`, `catalog`, `linkWorkspacePackages`,
-`allowBuilds` and `minimumReleaseAgeExclude` fields with strict value shapes.
+`enableGlobalVirtualStore` (must be `false` when present), `allowBuilds` and
+`minimumReleaseAgeExclude` fields with strict value shapes.
 Unknown pnpm settings, package-level `pnpm`/`devEngines`/`engines.runtime`, and
 lockfile configuration dependencies are rejected rather than stripped; normal
 `engines.node` constraints remain supported. No source code or
@@ -476,3 +477,12 @@ calling it explicitly performs the existing finite isolation probe. Resources do
 not start Host services, configure owners/grants, renew budgets or run sudo. Linux
 x64/arm64 is required for prepare/read/discovery; importing and freezing manifests
 also work on macOS. Offline fixtures do not establish Linux live readiness.
+
+## Cross-platform backends (`macos-seatbelt`, `windows-job`, and standalone subprocesses)
+
+- **Backend resolution (`resolveIsolationBackend`, `Config.backend`)**: `backend` accepts `'auto' | 'linux-native' | 'macos-seatbelt' | 'windows-job'` (default `'auto'`). `Config` validates synchronously via `validateConfig(input, options?)`, requiring `linux: { runtime, cgroupRoots }` when the resolved backend is `'linux-native'` and allowing optional `macos: { runtime?, readOnlyRoots?, sandboxExecPath? }` and `windows: { powershellPath?, shell?, shellPath? }` blocks on their respective platforms. Canonical Windows `C:\...` state/grant paths are supported only on `windows-job`.
+- **Schema 9 preservation & Schema 10 lazy upgrade**: `IsolationLedger` defaults to schema `9` so sealed Linux runners (`linux-runner-state.ts`, `linux-runner-state-migration.ts`, `linux-repository-runner.ts`) retain exact `PRAGMA user_version = 9` and `sqlite_schema` digests. Preparing a `'windows-job'` row (or opening with `{ schemaVersion: 10 }`) atomically upgrades the ledger to schema `10`; `inspectIsolationGrant` and `archiveIsolationAudit` support schemas `7–10`.
+- **`macos-seatbelt` generic command execution (`runMacosSeatbeltCommand`, `buildMacosSeatbeltCommandProfile`)**: preserves single-process `runNativeMacProcess` and `NativeMacVerifierRunner` unchanged while adding general command execution (`process-fork`, restricted `process-exec`, read-only roots, private workspace/temp containment, `(deny default)` with network denied unless programmatic `allowNetwork: true` is passed, PGID `SIGKILL` cleanup, and crash-safe `receipts/<jobId>.json` in `runtime/native-macos-supervisor.mjs`).
+- **`windows-job` backend (`runWindowsJobProcess`, `runtime/windows-job-runner.ps1`, `runtime/windows-job-supervisor.mjs`)**: uses built-in `powershell.exe` + embedded C# P/Invoke (`kernel32.dll`) to atomically create a Win32 Job Object (`KILL_ON_JOB_CLOSE`, `ACTIVE_PROCESS`, `PROCESS_MEMORY` / `JOB_MEMORY`, `JOB_TIME`, `DIE_ON_UNHANDLED_EXCEPTION`, `JobObjectBasicUIRestrictions`, `JobObjectCpuRateControlInformation`, and **no** breakaway flags), spawn the target suspended (`CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`) with a scrubbed environment (stripping `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` when offline), assign to the Job Object before `ResumeThread`, and prove `ActiveProcesses == 0` quiescence after `TerminateJobObject`. **Boundary note**: a non-privileged Windows user process cannot install kernel WFP/firewall rules without Administrator elevation, so non-admin `windows-job` offline containment relies on scrubbed proxy/network env vars, Job Object UI/process/memory/time limits, and private workspace scoping rather than kernel packet filtering.
+- **Standalone cross-platform subprocess sandbox (`buildIsolatedSubprocessPlan`, `runIsolatedSubprocess`, `createIsolatedSubprocessRunner`)**: ledger-free OS subprocess containment supporting `network: 'none' | 'outbound-https'` (default `'none'`), bounded `stdin`/`stdout`/`stderr`, deadlines, cancellation, and `readOnlyPaths`/`writablePaths` across Linux (`bwrap` with `--unshare-net` when `network === 'none'` and omitting `--unshare-net` when `network === 'outbound-https'`), macOS (`runMacosSeatbeltCommand`), and Windows (`runWindowsJobProcess`). Fails closed when the selected OS sandbox primitive is unavailable and never degrades to unsandboxed `spawn`.
+

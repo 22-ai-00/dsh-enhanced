@@ -1,5 +1,6 @@
 import type { GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import type { LinuxExecutionContract, LinuxExecutionIntent, LinuxExecutionResources } from './linux-execution-contract.js'
+export type { IsolationBackend, IsolationBackendConfig } from './platform.js'
 
 /** Owner identity is attested by the Host, never supplied in a model tool call. */
 export interface IsolationIdentity {
@@ -94,7 +95,7 @@ export interface IsolationJob {
    * Backend that executed the job. 'docker' only identifies legacy historical
    * rows opened from a pre-native ledger; this package can no longer create them.
    */
-  backend: 'docker' | 'macos-seatbelt' | 'linux-native'
+  backend: 'docker' | 'macos-seatbelt' | 'linux-native' | 'windows-job'
   linuxContract?: LinuxExecutionContract
   linuxIntent?: LinuxExecutionIntent
   linuxResources?: LinuxExecutionResources

@@ -7,8 +7,12 @@ import { ActionLedger } from './ledger.js'
 export function revokeActionGrant(root: string, grantId: string, revision: number): void {
   if (!isAbsolute(root) || realpathSync(root) !== root) throw new Error('private canonical root required')
   const dir = lstatSync(root); const path = join(root, 'ledger.sqlite'); const file = lstatSync(path)
-  if (!dir.isDirectory() || dir.uid !== process.getuid?.() || (dir.mode & 0o077) !== 0 || !file.isFile() || file.isSymbolicLink()
-    || file.nlink !== 1 || file.uid !== dir.uid || (file.mode & 0o077) !== 0) throw new Error('private owned ledger required')
+  if (process.platform === 'win32') {
+    if (!dir.isDirectory() || dir.isSymbolicLink() || !file.isFile() || file.isSymbolicLink() || file.nlink !== 1) throw new Error('private owned ledger required')
+  } else {
+    if (!dir.isDirectory() || dir.uid !== process.getuid?.() || (dir.mode & 0o077) !== 0 || !file.isFile() || file.isSymbolicLink()
+      || file.nlink !== 1 || file.uid !== dir.uid || (file.mode & 0o077) !== 0) throw new Error('private owned ledger required')
+  }
   const ledger = new ActionLedger(path)
   try { ledger.revoke(grantId, revision) } finally { ledger.close() }
 }

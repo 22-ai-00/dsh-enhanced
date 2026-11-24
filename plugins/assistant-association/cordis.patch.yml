@@ -19,8 +19,8 @@
         syncIntervalMs: 15000
         allowLowTrust: true
         dreaming:
-          enabled: false
+          enabled: true
         intakeSignal:
-          enabled: false
+          enabled: true
         webLearning:
-          enabled: false
+          enabled: true

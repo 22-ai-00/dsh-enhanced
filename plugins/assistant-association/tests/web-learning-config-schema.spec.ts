@@ -130,7 +130,7 @@ describe('S4 webLearning Config schema & validation', () => {
   test('provides expected defaults, normalizes domains/seeds, and rejects unknown fields', () => {
     expect(WEB_LEARNING_SOURCE_PLUGIN).toBe('assistant-association:web')
     expect(DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG).toEqual({
-      enabled: false,
+      enabled: true,
       allowedDomains: [],
       seedUrls: [],
       allowSubdomains: false,
@@ -153,6 +153,14 @@ describe('S4 webLearning Config schema & validation', () => {
       nodeTtlMs: 14 * 86_400_000,
     })
     expect(KNOWN_WEB_LEARNING_FIELDS.size).toBe(23)
+
+    const defaultNormalized = normalizeConfig({ databasePath: ':memory:' })
+    expect(defaultNormalized.webLearning.enabled).toBe(true)
+    const optedOutNormalized = normalizeConfig({
+      databasePath: ':memory:',
+      webLearning: { enabled: false },
+    })
+    expect(optedOutNormalized.webLearning.enabled).toBe(false)
 
     const cfg = normalizeConfig({
       databasePath: ':memory:',

@@ -39,7 +39,7 @@ import {
 
 export const DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG: AssociationWebLearningNormalizedConfig =
   Object.freeze({
-    enabled: false,
+    enabled: true,
     allowedDomains: Object.freeze([]),
     seedUrls: Object.freeze([]),
     allowSubdomains: false,
@@ -734,7 +734,7 @@ export function normalizeAssociationWebLearningConfig(
     typeof val === 'number' && Number.isFinite(val) && val >= min ? Math.floor(val) : fallback
 
   const normalized: AssociationWebLearningNormalizedConfig = {
-    enabled: src.enabled === true,
+    enabled: src.enabled ?? DEFAULT_ASSOCIATION_WEB_LEARNING_CONFIG.enabled,
     allowedDomains: Object.freeze(dedupedDomains),
     seedUrls: Object.freeze(normalizedSeeds),
     allowSubdomains: src.allowSubdomains === true,

@@ -4110,14 +4110,26 @@ describe('web-learning gates & isolation contracts (T-S4-01, T-S4-02)', () => {
     const runner: WebLearningRunner = { run: runnerSpy }
     const { policy, authorizeCalls } = makeAllowPolicyPeer()
 
-    // 1. Default config is disabled
+    // 1. Default config is enabled with empty whitelist (fail-closed) and supports explicit enabled: false opt-out
     const defaultCfg = normalizeAssociationWebLearningConfig()
-    expect(defaultCfg.enabled).toBe(false)
+    expect(defaultCfg.enabled).toBe(true)
     expect(defaultCfg.allowedDomains).toEqual([])
-    const disabledRes = await runWebLearningPass({
+    const defaultEmptyRes = await runWebLearningPass({
       store,
       scope,
       config: defaultCfg,
+      policy,
+      runner,
+      nowMs,
+    })
+    expect(defaultEmptyRes).toMatchObject({ ran: false, status: 'skipped', reason: 'empty-whitelist' })
+
+    const optedOutCfg = normalizeAssociationWebLearningConfig({ enabled: false })
+    expect(optedOutCfg.enabled).toBe(false)
+    const disabledRes = await runWebLearningPass({
+      store,
+      scope,
+      config: optedOutCfg,
       policy,
       runner,
       nowMs,

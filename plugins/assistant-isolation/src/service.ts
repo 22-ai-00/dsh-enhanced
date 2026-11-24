@@ -5,21 +5,29 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@dsh-enhanced/assistant-delivery'
 import type {} from '@dsh-enhanced/assistant-policy'
+import { fork, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { lstat, mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Config, validateConfig } from './config.js'
+import { isPrivateDirectoryStats } from './fs-ownership.js'
 import { IsolationLedger, IsolationLedgerError, type IsolationControllerAuthority } from './ledger.js'
-import { normalizeRequest } from './workspace.js'
+import { normalizeRequest, stageWorkspace } from './workspace.js'
 import { registerIsolationTools } from './tools.js'
 import { plannedStorageBytes } from './storage-policy.js'
 import { maintainIsolationStorage, observeStorage } from './storage.js'
-import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
+import type { IsolationBackend, IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 import { inspectIsolationGrant } from './diagnostics.js'
 import { linuxExecutionContractDigest, linuxJobResourceReservation, validateLinuxExecutionContract, type LinuxExecutionContract } from './linux-execution-contract.js'
 import { linuxRuntimeDigest, verifyLinuxRuntime } from './linux-runtime.js'
 import { linuxExecutionReceiptBinding, prepareLinuxExecutionIntent, readLinuxExecutionPartialCleanupProof, readLinuxExecutionReceipt, runLinuxExecution } from './linux-execution.js'
 import { reconcileLinuxJob } from './linux-job-recovery.js'
+import { runMacosSeatbeltCommand, verifyMacosSandboxExec, type MacosSeatbeltAdapter } from './macos-command.js'
+import { readNativeReceipt, reconcileNativeReceiptJob, writeNativeReceiptSync } from './native-job-recovery.js'
+import { verifyNativeMacRuntime } from './native-runtime.js'
+import { runWindowsJobProcess, verifyWindowsJobRunner, type WindowsJobAdapter } from './windows-job.js'
 
 export { Config }
 export const isolationPrincipalDigest = (principal: string): string => createHash('sha256').update(principal).digest('hex')
@@ -35,6 +43,16 @@ const isolatedPromptTools = new Set([...isolatedScopeTools, ...preauthorizedScop
 const restrictedScopeSection = 'Environment capability constraint: this authenticated workspace uses isolated execution. Host filesystem and shell tools are unavailable. The user request and explicitly supplied inline files are the only starting material; do not look for a Host project, pre-existing task file, or Host path. isolation_run starts a fresh scratch workspace with no Host project mount and no network. isolation_grants can show an existing finite grant; it cannot create or extend one.'
 const controllerTtlMs = 30_000
 const controllerStartupDeadlineMs = 31_000
+const macosSupervisor = fileURLToPath(new URL('../runtime/native-macos-supervisor.mjs', import.meta.url))
+const windowsSupervisor = fileURLToPath(new URL('../runtime/windows-job-supervisor.mjs', import.meta.url))
+
+export interface AssistantIsolationServiceOptions {
+  platform?: NodeJS.Platform
+  uid?: number
+  allowHostPaths?: boolean
+  macosAdapter?: MacosSeatbeltAdapter
+  windowsAdapter?: WindowsJobAdapter
+}
 
 function waitForControllerRetry(signal: AbortSignal, timeout: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -52,6 +70,8 @@ export class AssistantIsolationService extends Service {
   static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-isolation' }) }
   static Config = Config
   readonly #config: ReturnType<typeof validateConfig>
+  readonly #backend: IsolationBackend
+  readonly #options: AssistantIsolationServiceOptions
   readonly #ledger: IsolationLedger
   readonly #linuxContract: LinuxExecutionContract | undefined
   readonly #executionRoot: string
@@ -66,25 +86,34 @@ export class AssistantIsolationService extends Service {
   #active = true
   #timer: NodeJS.Timeout | undefined
 
-  constructor(ctx: Context, input: Config) {
+  constructor(ctx: Context, input: Config, options: AssistantIsolationServiceOptions = {}) {
     super(ctx, 'assistantIsolation')
-    this.#config = validateConfig(input)
+    this.#options = options
+    const platform = options.platform ?? process.platform
+    const uid = options.uid ?? process.getuid?.()
+    const allowHostPaths = options.allowHostPaths ?? ((options.macosAdapter !== undefined || options.windowsAdapter !== undefined) && process.platform !== platform)
+    this.#config = validateConfig(input, { platform, ...(uid !== undefined ? { uid } : {}), allowHostPaths })
+    this.#backend = this.#config.backend
     const root = this.#config.stateRoot
     mkdirSync(root, { recursive: true, mode: 0o700 })
-    if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('assistant-isolation: private owned state root required')
+    const rootInfo = lstatSync(root)
+    if (realpathSync(root) !== root || !isPrivateDirectoryStats(rootInfo)) throw new Error('assistant-isolation: private owned state root required')
     chmodSync(root, 0o700)
     this.#executionRoot = join(root, 'linux-executions')
-    {
-      const linux = this.#config.linux
+    if (this.#backend === 'linux-native') {
+      const linux = this.#config.linux!
       this.#linuxContract = validateLinuxExecutionContract({ schemaVersion: 1, backend: 'linux-native',
         runtimeDigest: linuxRuntimeDigest(linux.runtime), profile: 'ordinary', limits: this.#config.limits,
         keeperLimits: { memoryMiB: 128, pidsLimit: 64, cpus: 0.5 }, cgroupRoots: linux.cgroupRoots })
       mkdirSync(this.#executionRoot, { recursive: true, mode: 0o700 })
       const native = lstatSync(this.#executionRoot)
-      if (realpathSync(this.#executionRoot) !== this.#executionRoot || !native.isDirectory() || native.isSymbolicLink()
-        || native.uid !== process.getuid?.() || native.mode & 0o077) throw new Error('assistant-isolation: private owned Linux execution root required')
+      if (realpathSync(this.#executionRoot) !== this.#executionRoot || !isPrivateDirectoryStats(native)) throw new Error('assistant-isolation: private owned Linux execution root required')
+    } else {
+      this.#linuxContract = undefined
     }
-    this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
+    this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'), {
+      schemaVersion: this.#backend === 'windows-job' ? 10 : 9,
+    })
     ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) this.#abortStartup() })
     ctx.on('internal/status', fiber => { if (fiber === ctx.fiber && (fiber.state === 5 || fiber.state === 4)) this.#abortStartup() })
     ctx.on('tools/execute', async (execution, next) => {
@@ -142,9 +171,30 @@ export class AssistantIsolationService extends Service {
     }, 5000)
     this.#timer.unref()
     await this.#recover()
-    await verifyLinuxRuntime(this.#config.linux.runtime)
+    await this.#verifyBackendReady()
     this.#recoveryAbort.signal.throwIfAborted()
     this.#registerRuntime()
+  }
+
+  async #verifyBackendReady(): Promise<void> {
+    if (this.#backend === 'linux-native') {
+      await verifyLinuxRuntime(this.#config.linux!.runtime)
+      return
+    }
+    if (this.#backend === 'macos-seatbelt') {
+      if (this.#config.macos?.runtime && !this.#options.macosAdapter) {
+        await verifyNativeMacRuntime(this.#config.macos.runtime)
+      }
+      const sandboxExec = this.#options.macosAdapter?.sandboxExecPath ?? this.#config.macos?.sandboxExecPath
+      if (!await verifyMacosSandboxExec(sandboxExec, this.#options.macosAdapter)) {
+        throw new Error('assistant-isolation: macOS sandbox-exec unavailable')
+      }
+      return
+    }
+    const powershellPath = this.#options.windowsAdapter?.powershellPath ?? this.#config.windows?.powershellPath
+    if (!await verifyWindowsJobRunner(powershellPath, this.#options.windowsAdapter)) {
+      throw new Error('assistant-isolation: Windows Job runner unavailable')
+    }
   }
 
   #registerRuntime(): void {
@@ -216,7 +266,7 @@ export class AssistantIsolationService extends Service {
         if (!this.#active) break
         if (this.#jobs.has(job.id)) continue
         const signal = AbortSignal.any([this.#recoveryAbort.signal, AbortSignal.timeout(30_000)])
-        await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, signal)
+        await this.#reconcileJob(job, signal)
       }
       if (this.#active && Date.now() - this.#lastMaintenance >= 60_000) {
         this.#lastMaintenance = Date.now()
@@ -273,6 +323,20 @@ export class AssistantIsolationService extends Service {
     return Object.freeze(grants)
   }
 
+  async #reconcileJob(job: IsolationJob, signal: AbortSignal): Promise<void> {
+    if (job.backend === 'linux-native') {
+      await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, signal)
+    } else if (job.backend === 'macos-seatbelt' || job.backend === 'windows-job') {
+      const uid = process.getuid?.()
+      await reconcileNativeReceiptJob(this.#ledger, this.#controller(), job, this.#config.stateRoot, {
+        signal,
+        maxOutputBytes: this.#config.limits.maxOutputBytes,
+        platform: process.platform,
+        ...(uid !== undefined ? { uid } : {}),
+      })
+    }
+  }
+
   async #recover(): Promise<void> {
     let cursor = ''
     for (;;) {
@@ -281,9 +345,7 @@ export class AssistantIsolationService extends Service {
       cursor = page.at(-1)!.id
       for (const job of page) {
         if (!this.#active) return
-        // Only the linux-native backend is supported; historical rows from
-        // removed backends cannot be reconciled and stay as historical evidence.
-        await reconcileLinuxJob(this.#ledger, this.#controller(), job, this.#executionRoot, this.#recoveryAbort.signal)
+        await this.#reconcileJob(job, this.#recoveryAbort.signal)
       }
     }
   }
@@ -344,10 +406,14 @@ export class AssistantIsolationService extends Service {
     const identity = this.#identity(agent, request.grantId)
     const producer = this.ctx.get('assistantGoals' as never, false) as { currentArtifactAdmission?(agent: Agent): GoalArtifactAdmission | undefined } | undefined
     const admission = producer?.currentArtifactAdmission?.(agent!)
-    const requestDigest = digest({ request, backend: 'linux-native', contract: linuxExecutionContractDigest(this.#linuxContract!) })
+    const requestDigest = this.#backend === 'linux-native'
+      ? digest({ request, backend: 'linux-native', contract: linuxExecutionContractDigest(this.#linuxContract!) })
+      : this.#backend === 'macos-seatbelt'
+        ? digest({ request, backend: 'macos-seatbelt', macos: this.#config.macos ?? null, limits: this.#config.limits })
+        : digest({ request, backend: 'windows-job', windows: this.#config.windows ?? null, limits: this.#config.limits })
     const existing = this.#ledger.findJobByKey(identity, String(agent!.session.id), request.grantId, request.idempotencyKey)
     if (existing) {
-      if (existing.backend !== this.#config.backend || existing.requestDigest !== requestDigest
+      if (existing.backend !== this.#backend || existing.requestDigest !== requestDigest
         || this.#linuxContract && (!existing.linuxContract || linuxExecutionContractDigest(existing.linuxContract) !== linuxExecutionContractDigest(this.#linuxContract))) {
         throw new IsolationLedgerError('conflict', 'idempotency key has a different request or backend')
       }
@@ -357,20 +423,50 @@ export class AssistantIsolationService extends Service {
       if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
       return structuredClone(result)
     }
-    if (this.#linuxContract) await verifyLinuxRuntime(this.#config.linux!.runtime)
+    if (this.#backend === 'linux-native') await verifyLinuxRuntime(this.#config.linux!.runtime)
+    else await this.#verifyBackendReady()
     const observation = await observeStorage(this.#config.stateRoot)
     signal.throwIfAborted()
     if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
     const resources = this.#linuxContract ? linuxJobResourceReservation(this.#linuxContract) : undefined
-    const prepared = this.#ledger.prepare({ ...(admission ? { artifactBinding: { admission: validateGoalArtifactAdmission(admission), paths: request.artifacts ?? [] } } : {}), identity, sessionId: String(agent!.session.id), grantId: request.grantId,
-      idempotencyKey: request.idempotencyKey, requestDigest, backend: this.#config.backend,
+    const prepared = this.#ledger.prepare({
+      ...(admission ? { artifactBinding: { admission: validateGoalArtifactAdmission(admission), paths: request.artifacts ?? [] } } : {}),
+      identity,
+      sessionId: String(agent!.session.id),
+      grantId: request.grantId,
+      idempotencyKey: request.idempotencyKey,
+      requestDigest,
+      backend: this.#backend,
       ...(this.#linuxContract ? { linuxContract: this.#linuxContract } : {}),
-      resourceReservation: { memoryMiB: resources?.memoryMiB ?? this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
-        workspaceInodes: resources?.workspaceInodes ?? this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
-        maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes },
-      storageBudget: { maxStateBytes: this.#config.storage.maxStateBytes, maxJobRecords: this.#config.storage.maxJobRecords,
-        reservedBytes: resources?.storageBytes ?? plannedStorageBytes(this.#config.limits), ...(observation ? { observation } : {}) },
-      durationMs: request.timeoutMs!, maxActiveJobs: this.#config.maxConcurrentJobs, authority: this.#controller() })
+      ...(this.#backend === 'linux-native'
+        ? {
+            resourceReservation: {
+              memoryMiB: resources!.memoryMiB,
+              workspaceInodes: resources!.workspaceInodes,
+              maxMemoryMiB: this.#config.maxReservedMemoryMiB,
+              maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes,
+            },
+          }
+        : this.#backend === 'windows-job'
+          ? {
+              resourceReservation: {
+                memoryMiB: this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
+                workspaceInodes: 0,
+                maxMemoryMiB: this.#config.maxReservedMemoryMiB,
+                maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes,
+              },
+            }
+          : {}),
+      storageBudget: {
+        maxStateBytes: this.#config.storage.maxStateBytes,
+        maxJobRecords: this.#config.storage.maxJobRecords,
+        reservedBytes: resources?.storageBytes ?? 3 * plannedStorageBytes(this.#config.limits),
+        ...(observation ? { observation } : {}),
+      },
+      durationMs: request.timeoutMs!,
+      maxActiveJobs: this.#config.maxConcurrentJobs,
+      authority: this.#controller(),
+    })
     if (!prepared.created) {
       const current = this.#jobs.get(prepared.job.id)
       const result = current ? await current.done : prepared.job.result ?? {
@@ -439,6 +535,212 @@ export class AssistantIsolationService extends Service {
     }
   }
 
+  async #executeNativeCommand(
+    backend: 'macos-seatbelt' | 'windows-job',
+    initial: IsolationJob,
+    request: IsolationRequest,
+    signal: AbortSignal,
+    authorized: () => boolean,
+    update: (job: IsolationJob) => void,
+  ): Promise<IsolationResult> {
+    let job = initial
+    const current = (next: IsolationJob): void => { job = next; update(next) }
+    let result: IsolationResult = {
+      jobId: job.id,
+      status: 'failed',
+      quiescent: true,
+      stdout: '',
+      stderr: '',
+      artifacts: [],
+      reason: 'preparation-failed',
+    }
+    const workspaceRoot = join(this.#config.stateRoot, 'workspaces', job.id)
+    try {
+      if (!authorized()) throw new Error('authorization-denied-before-create')
+      const workspacePath = await stageWorkspace(this.#config.stateRoot, job.id, request)
+      const tmpPath = join(workspaceRoot, 'tmp')
+      await mkdir(tmpPath, { recursive: true, mode: 0o700 })
+      const receipts = join(this.#config.stateRoot, 'receipts')
+      await mkdir(receipts, { recursive: true, mode: 0o700 })
+      const receiptInfo = await lstat(receipts)
+      if (!isPrivateDirectoryStats(receiptInfo)) throw new Error('invalid native receipt directory')
+      if (!authorized()) throw new Error('authorization-denied-before-create')
+
+      current(this.#ledger.markDispatched(job.id, job.version, this.#controller()))
+
+      const adapter = backend === 'macos-seatbelt' ? this.#options.macosAdapter : this.#options.windowsAdapter
+      if (adapter) {
+        current(this.#ledger.start(job.id, job.version, this.#controller()))
+        let outcome
+        if (backend === 'macos-seatbelt') {
+          const sandboxExecPath = this.#config.macos?.sandboxExecPath
+          outcome = await runMacosSeatbeltCommand({
+            workspacePath,
+            tmpPath,
+            command: request.command,
+            readOnlyRoots: [
+              ...(this.#config.macos?.readOnlyRoots ?? []),
+              ...(this.#config.macos?.runtime ? this.#config.macos.runtime.roots.map(r => r.path) : []),
+            ],
+            workspaceWritable: true,
+            allowNetwork: false,
+            artifacts: request.artifacts ?? [],
+            maxArtifactBytes: this.#config.limits.maxArtifactBytes,
+            deadline: job.deadline,
+            maxOutputBytes: this.#config.limits.maxOutputBytes,
+            ...(sandboxExecPath !== undefined ? { sandboxExecPath } : {}),
+            signal,
+          }, adapter as MacosSeatbeltAdapter)
+        } else {
+          outcome = await runWindowsJobProcess({
+            workspacePath,
+            tmpPath,
+            command: request.command,
+            ...(this.#config.windows?.shell !== undefined ? { shell: this.#config.windows.shell } : {}),
+            ...(this.#config.windows?.shellPath !== undefined ? { shellPath: this.#config.windows.shellPath } : {}),
+            ...(this.#config.windows?.powershellPath !== undefined ? { powershellPath: this.#config.windows.powershellPath } : {}),
+            networkMode: 'none',
+            artifacts: request.artifacts ?? [],
+            maxArtifactBytes: this.#config.limits.maxArtifactBytes,
+            deadline: job.deadline,
+            maxOutputBytes: this.#config.limits.maxOutputBytes,
+            limits: {
+              memoryMiB: this.#config.limits.memoryMiB,
+              pidsLimit: this.#config.limits.pidsLimit,
+              cpus: this.#config.limits.cpus,
+            },
+            signal,
+          }, adapter as WindowsJobAdapter)
+        }
+
+        if (outcome.quiescent) {
+          writeNativeReceiptSync(receipts, {
+            schemaVersion: 1,
+            backend,
+            jobId: job.id,
+            requestDigest: job.requestDigest,
+            nonce: job.nativeNonce!,
+            nativeResourceId: job.nativeResourceId!,
+            closed: true,
+            closedAt: Date.now(),
+            result: { ...outcome, quiescent: true },
+          })
+        }
+      } else {
+        const supervisorPath = backend === 'macos-seatbelt' ? macosSupervisor : windowsSupervisor
+        const supervisorInput = backend === 'macos-seatbelt'
+          ? {
+              workspacePath,
+              tmpPath,
+              command: request.command,
+              readOnlyRoots: [
+                ...(this.#config.macos?.readOnlyRoots ?? []),
+                ...(this.#config.macos?.runtime ? this.#config.macos.runtime.roots.map(r => r.path) : []),
+              ],
+              workspaceWritable: true,
+              allowNetwork: false,
+              artifacts: request.artifacts ?? [],
+              maxArtifactBytes: this.#config.limits.maxArtifactBytes,
+              deadline: job.deadline,
+              maxOutputBytes: this.#config.limits.maxOutputBytes,
+              sandboxExecPath: this.#config.macos?.sandboxExecPath,
+            }
+          : {
+              workspacePath,
+              tmpPath,
+              command: request.command,
+              shell: this.#config.windows?.shell,
+              shellPath: this.#config.windows?.shellPath,
+              powershellPath: this.#config.windows?.powershellPath,
+              networkMode: 'none' as const,
+              artifacts: request.artifacts ?? [],
+              maxArtifactBytes: this.#config.limits.maxArtifactBytes,
+              deadline: job.deadline,
+              maxOutputBytes: this.#config.limits.maxOutputBytes,
+              limits: {
+                memoryMiB: this.#config.limits.memoryMiB,
+                pidsLimit: this.#config.limits.pidsLimit,
+                cpus: this.#config.limits.cpus,
+              },
+            }
+
+        const child = fork(supervisorPath, [], {
+          detached: true,
+          cwd: this.#config.stateRoot,
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        })
+        try {
+          current(this.#ledger.start(job.id, job.version, this.#controller()))
+        } catch (error) {
+          child.disconnect()
+          child.unref()
+          throw error
+        }
+        await this.#waitNativeSupervisor(child, job, receipts, supervisorInput, signal)
+      }
+
+      const settled = await readNativeReceipt(this.#config.stateRoot, job, this.#config.limits.maxOutputBytes, process.platform, process.getuid?.())
+      if (!settled) throw new Error('native execution receipt unavailable')
+      const finalJob = this.#ledger.settleNativeReceipt(job.id, job.version, {
+        requestDigest: job.requestDigest,
+        nonce: job.nativeNonce!,
+        nativeResourceId: job.nativeResourceId!,
+      }, settled, this.#controller())
+      await rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+      return finalJob.result!
+    } catch {
+      if (job.dispatchAttempted) result = { ...result, status: 'unknown', quiescent: false, reason: 'runner-exception-no-replay' }
+      else await rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+      try { return this.#ledger.settle(job.id, job.version, result, this.#controller()).result! }
+      catch { return { ...result, status: 'unknown', quiescent: false, reason: 'settlement-unconfirmed' } }
+    }
+  }
+
+  async #waitNativeSupervisor(
+    child: ChildProcess,
+    job: IsolationJob,
+    receipts: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<'receipt' | 'unconfirmed'> {
+    return await new Promise(resolveOutcome => {
+      let done = false
+      const finish = (value: 'receipt' | 'unconfirmed') => {
+        if (done) return
+        done = true
+        clearTimeout(grace)
+        signal.removeEventListener('abort', cancel)
+        child.removeAllListeners('message')
+        child.removeAllListeners('exit')
+        child.removeAllListeners('error')
+        if (child.connected) child.disconnect()
+        child.unref()
+        resolveOutcome(value)
+      }
+      const cancel = () => { if (child.connected) child.send({ kind: 'cancel' }) }
+      const grace = setTimeout(() => finish('unconfirmed'), Math.max(1, job.deadline - Date.now()) + 8_000)
+      signal.addEventListener('abort', cancel, { once: true })
+      child.on('message', message => {
+        if (message && typeof message === 'object' && 'kind' in message && message.kind === 'receipt') finish('receipt')
+        else if (message && typeof message === 'object' && 'kind' in message && message.kind === 'unconfirmed') finish('unconfirmed')
+      })
+      child.on('exit', () => finish('unconfirmed'))
+      child.on('error', () => finish('unconfirmed'))
+      if (signal.aborted) cancel()
+      child.send({
+        kind: 'command',
+        jobId: job.id,
+        requestDigest: job.requestDigest,
+        nonce: job.nativeNonce,
+        nativeResourceId: job.nativeResourceId,
+        receiptRoot: receipts,
+        input,
+      }, error => {
+        if (error) finish('unconfirmed')
+      })
+    })
+  }
+
   async #execute(agent: Agent, identity: IsolationIdentity, initial: IsolationJob, request: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> {
     let job = initial
     const abort = new AbortController()
@@ -454,6 +756,17 @@ export class AssistantIsolationService extends Service {
     }
     const timer = setInterval(() => { if (!authorized()) abort.abort() }, 250)
     timer.unref()
-    return await this.#executeLinux(job, request, AbortSignal.any([signal, abort.signal]), authorized, next => { job = next })
+    const combinedSignal = AbortSignal.any([signal, abort.signal])
+    try {
+      if (job.backend === 'linux-native') {
+        return await this.#executeLinux(job, request, combinedSignal, authorized, next => { job = next })
+      }
+      if (job.backend === 'macos-seatbelt' || job.backend === 'windows-job') {
+        return await this.#executeNativeCommand(job.backend, job, request, combinedSignal, authorized, next => { job = next })
+      }
+      return { jobId: job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: `unsupported-backend:${job.backend}` }
+    } finally {
+      clearInterval(timer)
+    }
   }
 }

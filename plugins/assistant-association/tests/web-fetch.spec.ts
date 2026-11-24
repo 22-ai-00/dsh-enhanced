@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import type { request as nodeHttpsRequest } from 'node:https'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   assertReadOnlyWebToolSurface,
@@ -35,7 +36,15 @@ afterEach(async () => {
 })
 
 async function makeTempDir(prefix: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), prefix))
+  const resolvedTmp = await realpath(tmpdir())
+  const runnerTemp = process.env.RUNNER_TEMP ? await realpath(process.env.RUNNER_TEMP) : ''
+  const base =
+    resolve(resolvedTmp) !== '/tmp'
+      ? resolvedTmp
+      : runnerTemp && resolve(runnerTemp) !== '/tmp'
+        ? runnerTemp
+        : dirname(fileURLToPath(import.meta.url))
+  const dir = await realpath(await mkdtemp(join(base, prefix)))
   tempDirs.push(dir)
   return dir
 }
@@ -454,10 +463,11 @@ describe('S4 web-fetch & sandbox isolation', () => {
       expect(() => assertReadOnlyWebToolSurface([forbidden])).toThrowError(/forbidden/i)
     }
 
-    // Real subprocess execution of production web-learning-worker.ts
-    const tempRoot = await makeTempDir('s4-runner-root-')
+    // Real OS-sandboxed subprocess execution of production web-learning-worker.ts
+    const scratchBase = await makeTempDir('s4-runner-scratch-')
+    const scriptsDir = await makeTempDir('s4-runner-scripts-')
     const prodRunner = createSubprocessWebLearningRunner({
-      tempBaseDir: tempRoot,
+      tempBaseDir: scratchBase,
       sourceEnv: {
         PATH: process.env.PATH ?? '/usr/bin:/bin',
         LANG: 'C.UTF-8',
@@ -485,14 +495,21 @@ describe('S4 web-fetch & sandbox isolation', () => {
     })
 
     expect(prodOutput.status).toBe('rejected')
-    expect(prodOutput.environmentProof.envKeys).toEqual(['LANG', 'PATH'])
-    expect(prodOutput.environmentProof.cwd.startsWith(tempRoot)).toBe(true)
+    expect(prodOutput.environmentProof.envKeys).toEqual(
+      expect.arrayContaining(['HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']),
+    )
+    expect(
+      prodOutput.environmentProof.envKeys.every((k) =>
+        ['HOME', 'LANG', 'LC_ALL', 'PATH', 'PWD', 'TMPDIR'].includes(k),
+      ),
+    ).toBe(true)
+    expect(prodOutput.environmentProof.cwd.startsWith(scratchBase)).toBe(true)
     // Scratch directory must be cleaned up after completion
     expect(existsSync(prodOutput.environmentProof.cwd)).toBe(false)
-    expect(readdirSync(tempRoot)).toEqual([])
+    expect(readdirSync(scratchBase)).toEqual([])
 
-    // Probe child script verifying inside-process cwd permissions (0o700), emptiness, and zero leaked secrets
-    const probeScriptPath = join(tempRoot, 'probe-worker.mjs')
+    // Probe child script in sibling non-/tmp directory verifying 0o700 cwd, isolated HOME/TMPDIR, and zero leaked secrets
+    const probeScriptPath = join(scriptsDir, 'probe-worker.mjs')
     await writeFile(
       probeScriptPath,
       [
@@ -503,11 +520,12 @@ describe('S4 web-fetch & sandbox isolation', () => {
         'const cwd = process.cwd()',
         'const mode = statSync(cwd).mode & 0o777',
         'const entries = readdirSync(cwd)',
-        'const leaked = ["DEEPSEEK_API_KEY","GITHUB_TOKEN","OPENAI_API_KEY","COOKIE","HOME","DSH_HOME"].filter(k => k in process.env)',
+        'const leaked = ["DEEPSEEK_API_KEY","GITHUB_TOKEN","OPENAI_API_KEY","COOKIE","DSH_HOME","NODE_OPTIONS"].filter(k => k in process.env)',
+        'const envIsolated = process.env.HOME === cwd && process.env.TMPDIR === cwd && process.env.LC_ALL === "C"',
         'process.stdout.write(JSON.stringify({',
         '  runId: input.runId,',
-        '  status: mode === 0o700 && entries.length === 0 && leaked.length === 0 ? "completed" : "rejected",',
-        '  reason: JSON.stringify({ mode, entries, leaked }),',
+        '  status: mode === 0o700 && entries.length === 0 && leaked.length === 0 && envIsolated ? "completed" : "rejected",',
+        '  reason: JSON.stringify({ mode, entries, leaked, envIsolated }),',
         '  startedAt: Date.now(),',
         '  finishedAt: Date.now(),',
         '  requestsUsed: 0, pagesFetched: 0, bytesFetched: 0, pages: [], attempts: [],',
@@ -519,7 +537,7 @@ describe('S4 web-fetch & sandbox isolation', () => {
 
     const probeRunner = createSubprocessWebLearningRunner({
       workerEntryPath: probeScriptPath,
-      tempBaseDir: tempRoot,
+      tempBaseDir: scratchBase,
       sourceEnv: {
         PATH: process.env.PATH ?? '/usr/bin:/bin',
         HOME: '/home/should-not-leak',
@@ -544,11 +562,11 @@ describe('S4 web-fetch & sandbox isolation', () => {
       },
     })
     expect(probeOut.status).toBe('completed')
-    expect(JSON.parse(probeOut.reason)).toEqual({ mode: 0o700, entries: [], leaked: [] })
+    expect(JSON.parse(probeOut.reason)).toEqual({ mode: 0o700, entries: [], leaked: [], envIsolated: true })
     expect(existsSync(probeOut.environmentProof.cwd)).toBe(false)
 
-    // Runaway subprocess ignoring SIGTERM must be SIGKILLed at maxDurationMs + killGraceMs
-    const runawayScriptPath = join(tempRoot, 'runaway-worker.mjs')
+    // Runaway subprocess ignoring SIGTERM inside PID namespace must be terminated at maxDurationMs (+ killGraceMs if escalated)
+    const runawayScriptPath = join(scriptsDir, 'runaway-worker.mjs')
     await writeFile(
       runawayScriptPath,
       [
@@ -559,7 +577,7 @@ describe('S4 web-fetch & sandbox isolation', () => {
     )
     const runawayRunner = createSubprocessWebLearningRunner({
       workerEntryPath: runawayScriptPath,
-      tempBaseDir: tempRoot,
+      tempBaseDir: scratchBase,
       killGraceMs: 100,
       runnerTimeoutBufferMs: 0,
     })
@@ -576,11 +594,12 @@ describe('S4 web-fetch & sandbox isolation', () => {
         maxDurationMs: 700,
         requestTimeoutMs: 700,
       },
-    })).rejects.toThrowError(/timed out.*SIGKILL/i)
+    })).rejects.toThrowError(/timed out.*(?:SIGTERM|SIGKILL)/i)
     expect(Date.now() - started).toBeLessThan(3_000)
-    // Verify only the two test scripts remain in tempRoot (scratch dir deleted)
-    expect(readdirSync(tempRoot).sort()).toEqual(['probe-worker.mjs', 'runaway-worker.mjs'])
-    expect(statSync(tempRoot).isDirectory()).toBe(true)
+    // Verify scratch directory is deleted and only the two test scripts remain in scriptsDir
+    expect(readdirSync(scratchBase)).toEqual([])
+    expect(readdirSync(scriptsDir).sort()).toEqual(['probe-worker.mjs', 'runaway-worker.mjs'])
+    expect(statSync(scratchBase).isDirectory()).toBe(true)
   })
 
   // T-S4-07: Content-Type MIME filter, streaming byte cap, timeout, and HTML extraction

@@ -1,9 +1,12 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { createServer, request as httpRequest, type IncomingMessage, type RequestOptions } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ExternalBrokerCore, type ExternalBrokerCoreConfig } from '../src/broker-core.ts'
+import { inspectGitHub } from '../src/github.ts'
 import { brokerPayloadBytes, withBrokerGrantDigest, type ExternalGitHubGrantUnsigned } from '../src/broker-ledger.ts'
 import { createBrokerAdminRequest, createBrokerClientRequest, createBrokerServerHello, type BrokerAdminIntent, type BrokerOperation, type BrokerRequestIntent } from '../src/broker-protocol.ts'
 
@@ -173,11 +176,83 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
 
   it('requires the exact requested OID for direct commit checks', async () => {
     const { config } = await fixture(), sha = 'd'.repeat(40)
-    const inspect = vi.fn(async () => ({ observed: { repository: 'owner/repository', headOid: sha, items: [], truncated: false, untrusted: true } }))
+    const inspect = vi.fn(async (input: Parameters<typeof inspectGitHub>[0]) => {
+      expect(input.commitOid).toBe(sha)
+      return { observed: { repository: 'owner/repository', headOid: sha, items: [], truncated: false, untrusted: true } }
+    })
     const core = new ExternalBrokerCore(config, { inspect })
     const result = await core.execute(signed(config, 'inspect', { actionId: 'commit-checks-action', callId: 'commit-checks-call', payload: { kind: 'commit-checks', commitOid: sha }, budget: { reservationId: 'commit-checks-reservation', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), new AbortController().signal)
     expect(result).toMatchObject({ status: 'succeeded', result: { operation: 'inspect', kind: 'commit-checks', observed: { repository: 'owner/repository', headOid: sha } } })
+    expect(inspect).toHaveBeenCalledOnce()
     await core.close()
+  })
+
+  it('wires real inspectGitHub through ExternalBrokerCore for checks, reviews, and commit-checks without projection errors', async () => {
+    const { config } = await fixture(), sha = 'd'.repeat(40)
+    const server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/json')
+      if (req.url === '/repos/owner/repository/pulls/7') {
+        res.end(JSON.stringify({
+          number: 7, state: 'open', merged: false,
+          head: { ref: 'main', sha, repo: { full_name: 'owner/repository' } },
+          base: { ref: 'trunk', repo: { full_name: 'owner/repository' } },
+        }))
+        return
+      }
+      if (req.url === `/repos/owner/repository/commits/${sha}/check-runs?per_page=20`) {
+        res.end(JSON.stringify({
+          total_count: 1,
+          check_runs: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: sha, app: { id: 2 } }],
+        }))
+        return
+      }
+      if (req.url === '/repos/owner/repository/pulls/7/reviews?per_page=30') {
+        res.end(JSON.stringify([{ id: 3, state: 'APPROVED', commit_id: sha, user: { id: 4 }, submitted_at: '2026-01-01T00:00:00Z' }]))
+        return
+      }
+      res.statusCode = 404
+      res.end('{}')
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    const baseUrl = new URL(`http://127.0.0.1:${address.port}`)
+    const transport = ((target: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) =>
+      httpRequest(new URL(target.pathname + target.search, baseUrl), options, callback)) as unknown as typeof import('node:https').request
+    const core = new ExternalBrokerCore(config, { inspect: input => inspectGitHub(input, transport) })
+    try {
+      const checksRes = await core.execute(signed(config, 'inspect', {
+        actionId: 'real-checks', callId: 'real-checks',
+        payload: { kind: 'checks', pullRequestNumber: 7 },
+        budget: { reservationId: 'real-checks', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 2 },
+      }), new AbortController().signal)
+      expect(checksRes).toMatchObject({
+        status: 'succeeded', dispatched: true,
+        result: { operation: 'inspect', kind: 'checks', observed: { pullRequest: { number: 7 }, headOid: sha, untrusted: true } },
+      })
+
+      const reviewsRes = await core.execute(signed(config, 'inspect', {
+        actionId: 'real-reviews', callId: 'real-reviews',
+        payload: { kind: 'reviews', pullRequestNumber: 7 },
+        budget: { reservationId: 'real-reviews', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 2 },
+      }), new AbortController().signal)
+      expect(reviewsRes).toMatchObject({
+        status: 'succeeded', dispatched: true,
+        result: { operation: 'inspect', kind: 'reviews', observed: { pullRequest: { number: 7 }, headOid: sha, untrusted: true } },
+      })
+
+      const commitChecksRes = await core.execute(signed(config, 'inspect', {
+        actionId: 'real-commit-checks', callId: 'real-commit-checks',
+        payload: { kind: 'commit-checks', commitOid: sha },
+        budget: { reservationId: 'real-commit-checks', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 },
+      }), new AbortController().signal)
+      expect(commitChecksRes).toMatchObject({
+        status: 'succeeded', dispatched: true,
+        result: { operation: 'inspect', kind: 'commit-checks', observed: { repository: 'owner/repository', headOid: sha, untrusted: true } },
+      })
+    } finally {
+      await core.close()
+      await new Promise<void>((resolve, reject) => server.close(err => err === undefined ? resolve() : reject(err)))
+    }
   })
 
   it.each([

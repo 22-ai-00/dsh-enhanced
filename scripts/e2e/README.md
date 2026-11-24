@@ -9,7 +9,7 @@ These opt-in probes have separate prerequisites and evidence boundaries; they ar
 | Entry / Script | Status | Notes |
 | --- | --- | --- |
 | `node scripts/e2e/linux-native-boundary.mjs` | Active (`linux-native`) | Real Linux namespace + delegated cgroup v1/v2 boundary probe. |
-| `scripts/e2e/repo-autonomy-real.spec.mjs` (`playwright-repo-real.config.mjs` / `playwright-repo-external-events.config.mjs`) | Migrated (`linux-native`, Host `0.2.2-rc.5`) | Sandbox repository E2E (dedicated sandbox repo only; live run pending; see [live-repository-e2e](../../docs/live-repository-e2e.md)). |
+| `scripts/e2e/repo-autonomy-real.spec.mjs` (`playwright-repo-sandbox.config.mjs`, `playwright-repo-real.config.mjs`, `playwright-repo-external-events.config.mjs`, `repo-autonomy-sandbox.spec.mjs`) | Active (`linux-native`, Host `0.2.2-rc.5`) | WP18 standalone sandbox repository E2E (local bare Git + HTTP GitHub + separate-process `ExternalBrokerCore` UDS daemon + optional local OpenAI-compatible HTTP LLM or real model/live GitHub; see [live-repository-e2e](../../docs/live-repository-e2e.md)). |
 | `pnpm test:web-owner`, `test:web-owner:real`, `test:web-owner:real-event`, `test:web-owner:real-skill`, `test:web-owner:real-capture` | Opt-in Web/Playwright | No Docker dependency; require compatible DSH (`release-manifest.json` `pinnedHostVersion`) + Chromium (real routes require provider login). |
 | `node scripts/e2e/session-persistence-compat.mjs`, `replay-endpoint-real-dsh.mjs`, `systemd-readiness-real-dsh.mjs`, `runtime-observer-real-dsh.mjs` | Active real-Host probes | Exercise pinned DSH closure, replay, systemd readiness, and runtime observer contracts. |
 | `node scripts/e2e/npm-{publish-preparation,registry,release-verifier,catalog-admission}-readback.mjs` | Active npm readback probes | Reproducible local readback probes (fixed integrity pins in [fixtures/README.md](fixtures/README.md); see `docs/npm-*.md`). |
@@ -150,6 +150,46 @@ the result without new model or tool dispatches.
 Artifacts use `.cache/repo-autonomy-external-events-e2e/`.
 
 The historical `DSH_REPO_RETAIN_FAILURE=1` diagnostic mode stopped the Host and browser but retained a private profile and original Session, located through `retained-environment.json`. Migration must preserve its default cleanup, explicit private-state retention, and redaction of credentials and model request headers. Retained directories require cleanup after diagnosis.
+
+### Reproducible Linux WP18 Sandbox Commands
+
+Keep `TMPDIR` on a large-volume filesystem such as `/data00/home/$USER/t` and ensure delegated cgroup v1/v2 roots exist on Linux:
+
+1. **Fast automated Vitest sandbox integration spec** (bare Git + HTTP GitHub + separate-process `ExternalBrokerCore` UDS + `linux-native` isolation + stale-SHA/CAS guards, zero external network):
+
+```sh
+mkdir -p /data00/home/$USER/t && export TMPDIR=/data00/home/$USER/t
+pnpm exec vitest run --config scripts/e2e/vitest.sandbox.config.mjs
+```
+
+2. **Playwright setup-only probe** (verifies `local-head` isolation prep, `dsh@0.2.2-rc.5` Host, Chromium launch, and `dsh-web-owner-setup` without model requests):
+
+```sh
+mkdir -p /data00/home/$USER/t && export TMPDIR=/data00/home/$USER/t
+CI=true DSH_REPO_SETUP_ONLY=1 pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
+```
+
+3. **Full Playwright WP18 standalone sandbox repo E2E** (real `dsh` Host, Web UI, `install-local.sh --isolation-source-repository`, `linux-native` verification, separate-process `ExternalBrokerCore` UDS daemon, local bare Git + HTTP GitHub server, EventTriggers restart recovery, and local OpenAI-compatible HTTP LLM server by default):
+
+```sh
+mkdir -p /data00/home/$USER/t && export TMPDIR=/data00/home/$USER/t
+CI=true pnpm exec playwright test --config scripts/e2e/playwright-repo-sandbox.config.mjs
+```
+
+4. **Real-model external-events sandbox E2E** (uses `traex-agent` / `gpt-5.6-terra` by default, or any configured `DSH_WEB_REAL_PROVIDER`, against the local bare Git + HTTP GitHub + separate-process UDS broker):
+
+```sh
+mkdir -p /data00/home/$USER/t && export TMPDIR=/data00/home/$USER/t
+CI=true pnpm exec playwright test --config scripts/e2e/playwright-repo-external-events.config.mjs
+```
+
+5. **Live GitHub repository mode** (requires a dedicated sandbox GitHub repository and `0600` descriptor file per [live-repository-e2e](../../docs/live-repository-e2e.md)):
+
+```sh
+mkdir -p /data00/home/$USER/t && export TMPDIR=/data00/home/$USER/t
+CI=true DSH_REPO_LIVE_GITHUB=1 DSH_REPO_LIVE_INPUT=/abs/path/to/live-repo.json \
+  pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
+```
 
 ## Automatic workflow capture and reuse
 

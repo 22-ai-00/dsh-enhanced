@@ -216,7 +216,7 @@ describe('Slice S3 End-to-End Integration', () => {
       return origAuthorize(req, opts)
     })
 
-    // First verify dreaming defaults disabled
+    // First verify dreaming defaults enabled and supports explicit opt-out
     const ctxDisabled = new Context()
     cleanups.push(async () => {
       await ctxDisabled.fiber.dispose()
@@ -227,6 +227,7 @@ describe('Slice S3 End-to-End Integration', () => {
     await ctxDisabled.plugin(AssistantAssociationService, {
       databasePath: join(root, 'assoc-disabled.sqlite'),
       allowHeadlessScope: true,
+      dreaming: { enabled: false },
     })
     const scopeA = makeHeadlessScope('owner-a', workspace)
     const disabledDream = await ctxDisabled.assistantAssociation.runDreamingNow(scopeA)
@@ -1666,11 +1667,11 @@ describe('Slice S3 End-to-End Integration', () => {
     }
   })
 
-  test('T-S3-08: Config validates S3 nested keys, preserves default-off toggles, and rejects unknown nested keys', () => {
+  test('T-S3-08: Config validates S3 nested keys, preserves default-on toggles with explicit opt-out, and rejects unknown nested keys', () => {
     const defaults = normalizeConfig({ databasePath: ':memory:' })
-    expect(defaults.dreaming.enabled).toBe(false)
-    expect(defaults.intakeSignal.enabled).toBe(false)
-    expect(defaults.webLearning.enabled).toBe(false)
+    expect(defaults.dreaming.enabled).toBe(true)
+    expect(defaults.intakeSignal.enabled).toBe(true)
+    expect(defaults.webLearning.enabled).toBe(true)
     expect(defaults.clustering.minClusterSize).toBe(3)
 
     // Backward-compatible { enabled: false } from dogfoodPluginPreset

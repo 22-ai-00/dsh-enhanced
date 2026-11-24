@@ -95,15 +95,17 @@ function makeNodeRef(
 }
 
 describe('intake-signal gates, schema, and closed 10-key contract', () => {
-  test('defaults to disabled and enforces holdout, node eligibility, score, policy, budget, cooldown, and hourly cap', () => {
+  test('defaults to enabled, supports explicit opt-out, and enforces holdout, node eligibility, score, policy, budget, cooldown, and hourly cap', () => {
     expect(DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG).toEqual({
-      enabled: false,
+      enabled: true,
       minScore: 0.75,
       maxSignalsPerHour: 10,
       cooldownMs: 3_600_000,
       maxSummaryBytes: 1024,
       sourceId: 'assistant-association',
     })
+    expect(normalizeAssociationIntakeSignalConfig().enabled).toBe(true)
+    expect(normalizeAssociationIntakeSignalConfig({ enabled: false }).enabled).toBe(false)
 
     const db = openAssociationDatabase(':memory:')
     try {
@@ -149,7 +151,7 @@ describe('intake-signal gates, schema, and closed 10-key contract', () => {
       const disabledRes = emitAssociationIntakeSignal({
         db,
         scope,
-        config: DEFAULT_ASSOCIATION_INTAKE_SIGNAL_CONFIG,
+        config: normalizeAssociationIntakeSignalConfig({ enabled: false }),
         goalNode,
         targetNode,
         score: 0.95,
@@ -524,7 +526,7 @@ describe('end-to-end integration against real AssistantWorkItemsService & WorkIt
         ownerRouteId: 'route-1',
         expiresAt: Date.now() + 86_400_000,
       },
-      // intakeLedger omitted -> disabled
+      intakeLedger: { enabled: false },
     }
     await ctx.plugin(AssistantWorkItemsService, wiConfig)
     const wiService = ctx.get('assistantWorkItems' as never) as unknown as AssistantWorkItemsService

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, renameSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
+import { runMacosSeatbeltCommand } from '../lib/macos-command.js'
 import { runNativeMacProcess } from '../lib/native-macos.js'
 
 // This trusted process is detached from the Host but retains an IPC liveness
@@ -11,15 +12,17 @@ let disconnected = false
 process.on('disconnect', () => { disconnected = true; abort.abort(); if (!started) process.exit(0) })
 process.on('message', async message => {
   if (message?.kind === 'cancel') { abort.abort(); return }
-  if (started || disconnected || !message || message.kind !== 'start') return
+  if (started || disconnected || !message || (message.kind !== 'start' && message.kind !== 'command')) return
   started = true
-  const { jobId, requestDigest, nonce, nativeResourceId, receiptRoot, input } = message
+  const { kind, jobId, requestDigest, nonce, nativeResourceId, receiptRoot, input } = message
   try {
     if (typeof jobId !== 'string' || !/^[0-9a-f-]{36}$/iu.test(jobId)
       || typeof requestDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(requestDigest)
       || typeof nonce !== 'string' || !/^[0-9a-f-]{36}$/iu.test(nonce)
       || nativeResourceId !== `native-${jobId}` || typeof receiptRoot !== 'string') throw new Error('invalid supervisor envelope')
-    const result = await runNativeMacProcess({ ...input, signal: abort.signal })
+    const result = kind === 'command'
+      ? await runMacosSeatbeltCommand({ ...input, signal: abort.signal })
+      : await runNativeMacProcess({ ...input, signal: abort.signal })
     if (!result.quiescent) { if (process.connected) process.send?.({ kind: 'unconfirmed' }); return }
     const info = lstatSync(receiptRoot)
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) throw new Error('invalid receipt root')
@@ -28,7 +31,7 @@ process.on('message', async message => {
     const file = join(receiptRoot, `${jobId}.json`)
     const temporary = join(receiptRoot, `.${jobId}.${randomUUID()}.tmp`)
     const bytes = Buffer.from(JSON.stringify(receipt))
-    if (bytes.length > 2_000_000) throw new Error('receipt exceeds limit')
+    if (bytes.length > 3_000_000) throw new Error('receipt exceeds limit')
     let fd
     try {
       fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)

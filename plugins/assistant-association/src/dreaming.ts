@@ -46,7 +46,7 @@ export interface AssociationDreamingNormalizedConfig {
 }
 
 export const DEFAULT_ASSOCIATION_DREAMING_CONFIG: AssociationDreamingNormalizedConfig = Object.freeze({
-  enabled: false,
+  enabled: true,
   intervalMs: 3_600_000,
   idleMinMs: 1_800_000,
   maxPairsPerRun: 16,
@@ -91,7 +91,7 @@ export function normalizeAssociationDreamingConfig(
       : DEFAULT_ASSOCIATION_DREAMING_CONFIG.nodeTtlMs
 
   const normalized: AssociationDreamingNormalizedConfig = {
-    enabled: raw?.enabled === true,
+    enabled: raw?.enabled ?? DEFAULT_ASSOCIATION_DREAMING_CONFIG.enabled,
     intervalMs,
     idleMinMs,
     maxPairsPerRun,

@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, expect, test } from 'vitest'
 import { freezeLinuxRuntimeSource, prepareLinuxRuntime, readLinuxRuntime, LinuxRsiRuntimeUnavailableError,
   type FrozenLinuxRuntimeSource } from '../src/native-resources.js'
@@ -146,7 +148,7 @@ test.each([
 
 test('reviewed declarative workspace settings and normal Node engine constraints retain exact receipt bytes', () => {
   const files = manifests()
-  files['pnpm-workspace.yaml'] = 'packages: ["packages/*"]\ncatalog:\n  typescript: 6.0.3\nlinkWorkspacePackages: true\nallowBuilds:\n  esbuild: true\n  protobufjs: false\nminimumReleaseAgeExclude:\n  - "@deepseek-ai/dsh-agent@0.2.1-rc.2"\n'
+  files['pnpm-workspace.yaml'] = 'packages: ["packages/*"]\ncatalog:\n  typescript: 6.0.3\nlinkWorkspacePackages: true\nenableGlobalVirtualStore: false\nallowBuilds:\n  esbuild: true\n  protobufjs: false\nminimumReleaseAgeExclude:\n  - "@deepseek-ai/dsh-agent@0.2.1-rc.2"\n'
   files['package.json'] = JSON.stringify({ ...JSON.parse(files['package.json']!), engines: { node: '^22.19.0 || >=24.0.0' } })
   const copied = copyLinuxRuntimeManifests(sourceOf(files))
   for (const [path, bytes] of Object.entries(files)) expect(copied.get(path)).toEqual(Buffer.from(bytes))
@@ -154,7 +156,126 @@ test('reviewed declarative workspace settings and normal Node engine constraints
     'packages: ["packages/*"]\ncatalog: {typescript: "file:/outside"}\n',
     'packages: ["packages/*"]\nallowBuilds: {esbuild: "yes"}\n',
     'packages: ["packages/*"]\nlinkWorkspacePackages: "/outside"\n',
+    'packages: ["packages/*"]\nenableGlobalVirtualStore: true\n',
+    'packages: ["packages/*"]\nenableGlobalVirtualStore: "false"\n',
+    'packages: ["packages/*"]\nenableGlobalVirtualStore: 0\n',
+    'packages: ["packages/*"]\nenableGlobalVirtualStore: null\n',
+    'packages: ["packages/*"]\nenableGlobalVirtualStore: {}\n',
     'packages: ["packages/*"]\nminimumReleaseAgeExclude: ["../outside"]\n',
   ]) expect(() => copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-workspace.yaml': workspace })))
     .toThrow('workspace configuration')
+})
+
+test('lockfile accepts plain-string package deprecation advisories while rejecting non-registry resolutions', () => {
+  const files = manifests()
+  const baseLock = files['pnpm-lock.yaml']!
+  const withDeprecated = `${baseLock}packages:\n  tldts-core@7.4.20:\n    resolution: {integrity: sha512-C630TWXZCZmLq0F2bW4QqwnaaxCQ/svpAqvJwnC4JvgEM5ohhBnGsEzTLSOXcN+xjz+kEaHS5uoWIw2klnqd0A==}\n    deprecated: Partial release, see https://github.com/remusao/tldts/issues/2735. Use >=7.4.22.\n`
+  const copied = copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-lock.yaml': withDeprecated }))
+  expect(copied.get('pnpm-lock.yaml')).toEqual(Buffer.from(withDeprecated))
+
+  for (const badLock of [
+    `${baseLock}url: https://evil.invalid/a\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: https://evil.invalid/evil.tgz}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: "tarball:https://registry.npmjs.org/evil.tgz"}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc, directory: ../outside}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {repo: https://github.com/evil/repo.git, commit: deadbeef}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {type: git}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {type: tarball}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {type: tarball, tarball: https://evil.invalid/evil.tgz}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc}\n    tarball: git+https://github.com/evil/repo.git\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc}\n    source: file:../outside\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc}\n    deprecated: {url: https://evil.invalid/a}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc}\n    deprecated: [https://evil.invalid/a]\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {integrity: sha512-abc}\n    deprecated: null\n`,
+    `${baseLock}snapshots:\n  evil@1.0.0:\n    deprecated: https://evil.invalid/a\n`,
+  ]) {
+    expect(() => copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-lock.yaml': badLock })))
+      .toThrow('resolution')
+  }
+})
+
+test('lockfile rejects plaintext http, untyped/non-string tarballs, ssh/ftp/vcs schemes, and registry URL smuggling', () => {
+  const files = manifests()
+  const baseLock = files['pnpm-lock.yaml']!
+  const validTarballs = `${baseLock}packages:\n  good@1.0.0:\n    resolution: {tarball: https://registry.npmjs.org/good/-/good-1.0.0.tgz}\n  '@scope/good@1.0.0':\n    resolution: {type: tarball, tarball: https://registry.npmjs.org/@scope/good/-/good-1.0.0.tgz}\n`
+  expect(copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-lock.yaml': validTarballs })).get('pnpm-lock.yaml'))
+    .toEqual(Buffer.from(validTarballs))
+
+  for (const badLock of [
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: http://registry.npmjs.org/evil/-/evil-1.0.0.tgz}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {type: tarball, tarball: http://registry.npmjs.org/evil/-/evil-1.0.0.tgz}\n`,
+    `${baseLock}packages:\n  'http://registry.npmjs.org/evil.tgz':\n    resolution: {integrity: sha512-abc}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 123}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: null}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: true}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: ['https://registry.npmjs.org/a.tgz']}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: {url: 'https://registry.npmjs.org/a.tgz'}}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: ssh://git@evil.com/repo.git}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: ftp://evil.com/pkg.tgz}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: github:evil/repo}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: gitlab:evil/repo}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: bitbucket:evil/repo}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'x:file:../evil.tgz'}\n`,
+    `${baseLock}packages:\n  'evil@github:evil/repo':\n    resolution: {integrity: sha512-abc}\n`,
+    `${baseLock}packages:\n  'evil@ssh://evil.com/repo.git':\n    resolution: {integrity: sha512-abc}\n`,
+    `${baseLock}packages:\n  'evil@ftp://evil.com/pkg.tgz':\n    resolution: {integrity: sha512-abc}\n`,
+    `${baseLock}catalogs:\n  default:\n    evil:\n      specifier: github:evil/repo\n      version: 1.0.0\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/@evil/pkg/../../evil'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/@evil/pkg/%2e%2e/evil'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/@evil/pkg/%2e/evil'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/@evil/pkg/..%2fevil'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/evil.tgz?next=https://evil.com'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/evil.tgz#frag'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://user:pass@registry.npmjs.org/evil.tgz'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org:443/evil.tgz'}\n`,
+    `${baseLock}packages:\n  evil@1.0.0:\n    resolution: {tarball: 'https://registry.npmjs.org/'}\n`,
+    `${baseLock}packages:\n  'evil@https://registry.npmjs.org/@evil/pkg/../../evil':\n    resolution: {integrity: sha512-abc}\n`,
+  ]) {
+    expect(() => copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-lock.yaml': badLock })))
+      .toThrow('resolution')
+  }
+
+  for (const [specifier, versionSpec] of [
+    ['^1.0.0', 'http://registry.npmjs.org/evil.tgz'],
+    ['http://registry.npmjs.org/evil.tgz', '1.0.0'],
+    ['^1.0.0', 'https://registry.npmjs.org/evil.tgz'],
+    ['^1.0.0', 'github:evil/repo'],
+    ['^1.0.0', 'gitlab:evil/repo'],
+    ['^1.0.0', 'bitbucket:evil/repo'],
+    ['^1.0.0', 'ssh://evil.com/repo.git'],
+    ['ssh://evil.com/repo.git', '1.0.0'],
+    ['^1.0.0', 'ftp://evil.com/pkg.tgz'],
+    ['x:file:../evil.tgz', '1.0.0'],
+    ['^1.0.0', 'x:file:../evil.tgz'],
+  ]) {
+    const importerLock = `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      evil:\n        specifier: ${JSON.stringify(specifier)}\n        version: ${JSON.stringify(versionSpec)}\n  packages/fixture: {}\n`
+    expect(() => copyLinuxRuntimeManifests(sourceOf({ ...files, 'pnpm-lock.yaml': importerLock })))
+      .toThrow(/frozen lockfile unsupported resolution|frozen dependency source unsupported/u)
+  }
+})
+
+const repoRoot = realpathSync(fileURLToPath(new URL('../../..', import.meta.url)))
+const hasRepoGit = existsSync(join(repoRoot, '.git'))
+
+test('accepts current repository pnpm-workspace.yaml and preserves exact bytes', async () => {
+  const realWorkspace = await readFile(join(repoRoot, 'pnpm-workspace.yaml'), 'utf8')
+  const files = manifests()
+  files['pnpm-workspace.yaml'] = realWorkspace
+  const copied = copyLinuxRuntimeManifests(sourceOf(files))
+  expect(copied.get('pnpm-workspace.yaml')).toEqual(Buffer.from(realWorkspace))
+})
+
+test.runIf(hasRepoGit)('freezes real repository HEAD manifests without drifting out of sync', async () => {
+  const headPackage = JSON.parse(execFileSync('/usr/bin/git', ['show', 'HEAD:package.json'], {
+    cwd: repoRoot, encoding: 'utf8', stdio: 'pipe',
+  })) as { version: string }
+  const frozen = await freezeLinuxRuntimeSource({
+    kind: 'local-head',
+    repository: repoRoot,
+    version: headPackage.version,
+  })
+  expect(frozen.version).toBe(headPackage.version)
+  expect(frozen.sourceCommit).toMatch(/^[a-f0-9]{40}$/u)
+  expect(frozen.manifests.some(entry => entry.path === 'pnpm-workspace.yaml')).toBe(true)
+  expect(frozen.manifests.some(entry => entry.path === 'pnpm-lock.yaml')).toBe(true)
 })

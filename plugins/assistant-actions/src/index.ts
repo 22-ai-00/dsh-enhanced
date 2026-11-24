@@ -6,12 +6,21 @@ export const name = 'dsh-enhanced-assistant-actions'
 export const inject = ['assistantPolicy', 'assistantDelivery']
 export { AssistantActionsService, Config, version }
 export { validateConfig as validateActionConfig } from './config.js'
-export type { BrokerConfig, EmbeddedBrokerConfig, ExternalUnixBrokerConfig, ValidatedConfig } from './config.js'
+export type {
+  BrokerConfig,
+  EmbeddedBrokerConfig,
+  ExternalUnixBrokerConfig,
+  ExternalMacosBrokerConfig,
+  ExternalWindowsBrokerConfig,
+  ExternalV2BrokerConfig,
+  ValidatedConfig,
+} from './config.js'
 export type { BrokerGrantProjection } from './broker-protocol.js'
+export type { ActionBrokerGrantProjection } from './broker-protocol-v2.js'
 export type * from './types.js'
 export function apply(ctx: Context, config: Config = {}): void {
   const validated = validateConfig(config)
-  if (validated.broker.mode === 'external-unix-v1') {
+  if (validated.broker.mode !== 'embedded-compat') {
     new AssistantActionsService(ctx, validated)
     return
   }

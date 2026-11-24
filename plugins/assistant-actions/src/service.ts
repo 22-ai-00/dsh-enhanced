@@ -15,9 +15,37 @@ import { VerifiedDeliveryRuntime, type DeliveryIntent, type DeliveryOutcome, typ
 import { normalizeRepositoryCommitReadback, normalizeRepositoryReadback, validateRepositoryReadbackRequirements, type RepositoryCommitReadback, type RepositoryReadback, type RepositoryReadbackRequirements } from './repository-readback.js'
 import { ActionLedger, normalizeWorkflow, type RecoveredCompensationRef } from './ledger.js'
 import { commitOnGitHub, createBranchOnGitHub, createCompensatingCommitOnGitHub, createPullRequestOnGitHub, inspectGitHub, readGitHubPreimage } from './github.js'
-import { BrokerClientError, requestGitHubBroker, type GitHubBrokerClientOptions } from './broker-client.js'
+import { BrokerClientError, requestActionBroker, requestGitHubBroker, type ActionBrokerClientOptions, type GitHubBrokerClientOptions } from './broker-client.js'
 import { brokerDigest, canonicalBrokerJson, type BrokerOperation, type BrokerClientRequest, type BrokerServerHello, type BrokerRequestIntent, type BrokerServerResponse } from './broker-protocol.js'
-import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, ExternalActionGrantMirror, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
+import {
+  ACTION_ID_PROTOCOL,
+  resolveWp08DestinationString,
+  type ActionBrokerGrantProjection,
+  type ActionBrokerRequestIntent,
+  type ActionBrokerServerResponse,
+  type BrokerActionDomain,
+  type CalendarActionPayload,
+  type CalendarGrantDestination,
+  type CalendarRequestDestination,
+  type HttpGrantDestination,
+  type HttpRequestDestination,
+  type HttpRequestPayload,
+  type LarkGrantDestination,
+  type LarkReadPayload,
+  type LarkRequestDestination,
+  type LarkSendPayload,
+  type ShellExecPayload,
+  type ShellGrantDestination,
+  type ShellRequestDestination,
+} from './broker-protocol-v2.js'
+import { authorizeAgentWithWp08, isBrokerSensitivity, sensitivityRank, type BrokerPolicyServicePort, type BrokerSensitivity, type BrokerWp08Constraints } from './broker-policy.js'
+import { verifyWindowsPrivatePath } from './broker-peer-windows.js'
+import { createBrokerTransportAdapter, inspectPlatformPeerCredentials } from './broker-transport.js'
+import { executeHttpGuardedAction, HttpGuardError, validateHttpAgainstGrant } from './guards/http-guard.js'
+import { executeLarkGuardedAction, LarkGuardError, validateLarkAgainstGrant } from './guards/lark-guard.js'
+import { executeCalendarGuardedAction, CalendarGuardError, validateCalendarAgainstGrant } from './guards/calendar-guard.js'
+import { executeShellGuardedAction, ShellGuardError, validateShellAgainstGrant, validateShellPolicyAgainstGrant } from './guards/shell-guard.js'
+import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, ExternalActionGrantMirror, GeneralizedActionExecutionInput, GeneralizedActionExecutionResult, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
 
 import { captureExternalDeliveryReceipt, verifyExternalDeliveryReceipt, type ExternalDeliveryReceipt } from './external-delivery-receipt.js'
 import { normalizeRepositoryEventObservationInput, repositoryEventBranchHead, repositoryEventCommitSemanticFingerprint, repositoryEventPendingFingerprint, repositoryEventSemanticFingerprint, type NormalizedRepositoryEventObservationInput, type RepositoryEventObservationInput } from './repository-event-observation.js'
@@ -28,6 +56,7 @@ const principalDigest = (value: string): string => createHash('sha256').update(v
 interface Authorization { identity(): ActionIdentity; authorize(record: ActionRecord): boolean; sessionId: string }
 type Operation = (actionId: string, grant: ActionGrant, token: string, signal: AbortSignal) => Promise<ActionResult>
 type ExternalDispatch = (options: GitHubBrokerClientOptions, intent: BrokerRequestIntent, signal?: AbortSignal) => Promise<BrokerServerResponse>
+type ExternalActionDispatch = (options: ActionBrokerClientOptions, intent: ActionBrokerRequestIntent, signal?: AbortSignal) => Promise<ActionBrokerServerResponse>
 interface ExternalInvocation { callId: string; rootCallId: string }
 interface ExternalBackgroundAuthorization { sessionId: string; agentId: string; current(): void; authorize(actionId: string): boolean }
 type DeliveryGrant = Omit<ActionGrant, 'credentialHandle'>
@@ -77,6 +106,20 @@ function sameAncestorChain(left: readonly KeyDirectoryIdentity[], right: readonl
 }
 
 export function readPinnedKeyFile(path: string, kind: 'private' | 'public', hooks: PinnedKeyReadHooks = {}): KeyObject {
+  if (process.platform === 'win32') {
+    verifyWindowsPrivatePath(path, { platform: 'win32' })
+    hooks.afterAncestorSnapshot?.()
+    hooks.afterFileSnapshot?.()
+    let bytes: Buffer | undefined
+    try {
+      hooks.afterOpen?.()
+      bytes = readFileSync(path)
+      hooks.afterRead?.()
+      const key = kind === 'private' ? createPrivateKey(bytes) : createPublicKey(bytes)
+      if (key.type !== kind || key.asymmetricKeyType !== 'ed25519') throw new Error(`assistant-actions: ${kind} key must be Ed25519`)
+      return key
+    } finally { if (bytes !== undefined) bytes.fill(0) }
+  }
   const expectedUid = process.geteuid?.(), expectedGid = process.getegid?.()
   if (expectedUid === undefined || expectedGid === undefined) throw new Error(`assistant-actions: unsafe ${kind} key platform`)
   const parentPath = dirname(path), ancestors = inspectKeyAncestorChain(parentPath, expectedUid, expectedGid)
@@ -114,18 +157,47 @@ export function readPinnedKeyFile(path: string, kind: 'private' | 'public', hook
 
 declare module '@deepseek-ai/cordis' { interface Context { assistantActions: AssistantActionsService } }
 
+const GENERALIZED_TOOL_DOMAINS: Readonly<Record<string, BrokerActionDomain>> = {
+  action_http_request: 'http',
+  action_lark_action: 'lark',
+  action_calendar_action: 'calendar',
+  action_shell_exec: 'shell',
+}
+const GENERALIZED_TOOL_NAMES = new Set<string>(['action_broker_grants', ...Object.keys(GENERALIZED_TOOL_DOMAINS)])
+
+function ensurePrivateStateRoot(stateRoot: string): void {
+  mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+  const root = lstatSync(stateRoot)
+  if (process.platform === 'win32') {
+    if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(stateRoot) !== stateRoot) {
+      throw new Error('assistant-actions: private owned state root required')
+    }
+    return
+  }
+  if (!root.isDirectory() || root.uid !== process.getuid?.() || realpathSync(stateRoot) !== stateRoot) {
+    throw new Error('assistant-actions: private owned state root required')
+  }
+  chmodSync(stateRoot, 0o700)
+}
+
 /** Trusted Host control plane, never mounted or callable from the offline worker. */
 export class AssistantActionsService extends Service {
   static Config = Config
   readonly #ledger!: ActionLedger
   readonly #authority!: ActionAuthority
   readonly #externalGrants = new Map<string, ExternalActionGrantMirror>()
-  readonly #mode: 'embedded-compat' | 'external-unix-v1'
+  readonly #actionGrants = new Map<string, ActionBrokerGrantProjection>()
+  readonly #wp08Usage = new Map<string, { leaseUses: number; spentCostMicros: number; lastSettledCommitDigest?: string }>()
+  readonly #settledActions = new Map<string, { requestDigest: string; result: GeneralizedActionExecutionResult }>()
+  readonly #pendingActions = new Map<string, { requestDigest: string; done: Promise<GeneralizedActionExecutionResult> }>()
+  readonly #mode: Config['broker'] extends infer B ? B extends { mode: infer M } ? M : never : never
   #externalClient: GitHubBrokerClientOptions | undefined
+  #externalActionClient: ActionBrokerClientOptions | undefined
   readonly #externalFacadeGeneration = randomUUID()
   #externalObservedGeneration: number | undefined
   #externalObservedEpochs: string | undefined
   readonly #externalDispatch: ExternalDispatch
+  readonly #externalActionDispatch: ExternalActionDispatch
   readonly #pending = new Map<string, { abort: AbortController; done: Promise<ActionResult> }>()
   readonly #pendingCompensations = new Map<string, { abort: AbortController; done: Promise<CompensationResult> }>()
   readonly #pendingExternal = new Set<{ abort: AbortController; done: Promise<BrokerServerResponse>; client: GitHubBrokerClientOptions }>()
@@ -133,29 +205,77 @@ export class AssistantActionsService extends Service {
   #active = true
   #verified: VerifiedDeliveryRuntime | undefined
 
-  constructor(ctx: Context, input: Config = {}, private readonly commit = commitOnGitHub, private readonly workflow = workflowTransport, private readonly compensation = compensationTransport, externalDispatch: ExternalDispatch = requestGitHubBroker) {
+  constructor(
+    ctx: Context,
+    input: Config = {},
+    private readonly commit = commitOnGitHub,
+    private readonly workflow = workflowTransport,
+    private readonly compensation = compensationTransport,
+    externalDispatch: ExternalDispatch = requestGitHubBroker,
+    externalActionDispatch: ExternalActionDispatch = requestActionBroker,
+  ) {
     super(ctx, 'assistantActions')
     const config = validateConfig(input)
     this.#mode = config.broker.mode
     this.#externalDispatch = externalDispatch
-    if (config.broker.mode === 'external-unix-v1') {
+    this.#externalActionDispatch = externalActionDispatch
+    for (const grant of config.actionGrants) this.#actionGrants.set(grant.id, grant)
+    for (const grant of config.externalActionGrants) this.#actionGrants.set(grant.id, grant)
+    if (config.broker.mode !== 'embedded-compat') {
       for (const grant of config.externalGrants) this.#externalGrants.set(grant.id, grant)
       const serverPublicKey = readPinnedKeyFile(config.broker.brokerPublicKeyPath, 'public')
       const clientPrivateKey = readPinnedKeyFile(config.broker.clientSigningKeyPath, 'private')
-      this.#externalClient = Object.freeze({
-        socketPath: config.broker.actionSocketPath, serverPublicKey, clientPrivateKey, clientKeyId: config.broker.clientKeyId,
-        source: Object.freeze({ kind: 'assistant-actions-host', instanceId: config.broker.clientInstanceId, generation: config.broker.clientGeneration }),
-        timeoutMs: config.broker.requestTimeoutMs, maxHelloTtlMs: config.broker.helloTtlMs, expectedSocketUid: config.broker.expectedSocketUid,
-        expectedSocketGid: config.broker.expectedSocketGid, expectedSocketMode: config.broker.expectedSocketMode, expectedServerInstanceId: config.broker.brokerId,
-        expectedSocketParentUid: config.broker.expectedSocketParentUid, expectedSocketParentGid: config.broker.expectedSocketParentGid, expectedSocketParentMode: config.broker.expectedSocketParentMode,
-        expectedBrokerPeerUid: config.broker.expectedBrokerPeerUid, expectedBrokerPeerGid: config.broker.expectedBrokerPeerGid,
-        minimumServerGeneration: config.broker.minimumBrokerGeneration,
+      const broker = config.broker
+      const sourceEndpoint = Object.freeze({ kind: 'assistant-actions-host' as const, instanceId: broker.clientInstanceId, generation: broker.clientGeneration })
+      const resolvedPlatform = broker.mode === 'external-macos-v1'
+        ? 'darwin'
+        : broker.mode === 'external-windows-v1'
+          ? 'win32'
+          : broker.mode === 'external-v2'
+            ? broker.platform
+            : 'linux'
+      const resolvedTransport = broker.mode === 'external-windows-v1'
+        ? 'windows-pipe'
+        : broker.mode === 'external-v2'
+          ? broker.transport
+          : 'posix-uds'
+      const peerInspector = inspectPlatformPeerCredentials(resolvedPlatform, 'server')
+      const transportAdapter = createBrokerTransportAdapter({
+        platform: resolvedPlatform,
+        transport: resolvedTransport,
+        role: 'server',
+        inspectPeer: peerInspector,
       })
+      const baseConn = {
+        socketPath: broker.actionSocketPath,
+        serverPublicKey,
+        clientPrivateKey,
+        clientKeyId: broker.clientKeyId,
+        source: sourceEndpoint,
+        timeoutMs: broker.requestTimeoutMs,
+        maxHelloTtlMs: broker.helloTtlMs,
+        expectedServerInstanceId: broker.brokerId,
+        expectedBrokerPeerUid: broker.expectedBrokerPeerUid ?? 0,
+        expectedBrokerPeerGid: broker.expectedBrokerPeerGid ?? 0,
+        minimumServerGeneration: broker.minimumBrokerGeneration,
+        inspectPeerCredentials: peerInspector,
+        platform: resolvedPlatform,
+        transport: transportAdapter,
+        ...('expectedSocketUid' in broker ? {
+          expectedSocketUid: broker.expectedSocketUid,
+          expectedSocketGid: broker.expectedSocketGid,
+          expectedSocketMode: broker.expectedSocketMode,
+          expectedSocketParentUid: broker.expectedSocketParentUid,
+          expectedSocketParentGid: broker.expectedSocketParentGid,
+          expectedSocketParentMode: broker.expectedSocketParentMode,
+        } : {}),
+        ...(broker.mode === 'external-windows-v1' ? { expectedBrokerPeerSid: broker.expectedUserSid } : {}),
+        ...(broker.mode === 'external-v2' && broker.expectedBrokerPeerSid !== undefined ? { expectedBrokerPeerSid: broker.expectedBrokerPeerSid } : {}),
+      }
+      this.#externalClient = Object.freeze(baseConn)
+      this.#externalActionClient = Object.freeze(baseConn)
     } else {
-      mkdirSync(config.stateRoot, { recursive: true, mode: 0o700 })
-      const root = lstatSync(config.stateRoot)
-      if (!root.isDirectory() || root.uid !== process.getuid?.() || realpathSync(config.stateRoot) !== config.stateRoot) throw new Error('assistant-actions: private owned state root required')
-      chmodSync(config.stateRoot, 0o700)
+      ensurePrivateStateRoot(config.stateRoot)
       const ledger = new ActionLedger(join(config.stateRoot, 'ledger.sqlite'))
       this.#ledger = ledger
       try {
@@ -183,17 +303,21 @@ export class AssistantActionsService extends Service {
       await Promise.allSettled([...this.#pendingCompensations.values()].map(operation => operation.done))
       await Promise.allSettled([...this.#pendingExternal].map(operation => operation.done))
       this.#externalClient = undefined
+      this.#externalActionClient = undefined
       if (this.#ledger && this.#authority) try { this.#ledger.releaseController(this.#authority) } finally { this.#ledger.close() }
     }, 'assistant-actions.controller')
     // Configured scopes keep their restricted execution route even after grants
     // expire or are revoked. Only trusted fixed brokers can use Host authority.
     ctx.inject(['tools'], runtime => runtime.on('tools/execute', async (execution, next) => {
       const header = execution.agent?.session.header
-      const scoped = config.broker.mode === 'embedded-compat'
+      const scopedGithub = config.broker.mode === 'embedded-compat'
         ? config.grants.some(grant => grant.workspace === header?.cwd && grant.agentPreset === header?.agentPreset)
         : config.externalGrants.some(grant => grant.owner.workspace === header?.cwd && grant.owner.preset === header?.agentPreset)
+      const scopedAction = [...this.#actionGrants.values()].some(grant => grant.owner.workspace === header?.cwd && grant.owner.preset === header?.agentPreset)
+      const scoped = scopedGithub || scopedAction
       if (header && scoped
         && !['isolation_run', 'isolation_grants', 'goal_context', 'goal_checkpoint'].includes(execution.name)
+        && !this.#allowsGeneralizedToolExecution(execution)
         && !(['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
       return await next()
     }))
@@ -208,11 +332,16 @@ export class AssistantActionsService extends Service {
       }
       this.#pendingCompensationReleases = []
     })
+    const hasGithubGrants = config.broker.mode === 'embedded-compat' ? config.grants.length > 0 : config.externalGrants.length > 0
+    const hasActionGrants = this.#actionGrants.size > 0
     const toolDependencies = config.broker.mode === 'embedded-compat'
       ? ['tools', 'agents', 'assistantPolicy', 'assistantDelivery', 'credentialsKeychain']
       : ['tools', 'agents', 'assistantPolicy', 'assistantDelivery']
     ctx.inject(toolDependencies, runtime => {
-      if (config.broker.mode === 'embedded-compat' ? config.grants.length === 0 : config.externalGrants.length === 0) return
+      if (hasActionGrants) {
+        this.#registerGeneralizedTools(runtime)
+      }
+      if (!hasGithubGrants) return
       const grants = () => config.broker.mode === 'embedded-compat'
         ? config.grants.flatMap(grant => { const current = this.#ledger.grant(grant.id); return current !== undefined && current.expiresAt > Date.now() ? [current] : [] })
         : config.externalGrants.filter(grant => grant.expiresAt > Date.now())
@@ -220,7 +349,7 @@ export class AssistantActionsService extends Service {
         const current: readonly (ActionGrant | ExternalActionGrantMirror)[] = grants()
         return current.flatMap<VisibleGrant>(grant => {
         try {
-          if (config.broker.mode === 'external-unix-v1') {
+          if (config.broker.mode !== 'embedded-compat') {
             const external = grant as ExternalActionGrantMirror
             this.#externalContext(agent, external.id)
             return [{ grantId: external.id, repository: external.destination.repository, branch: external.destination.branch, paths: external.destination.paths, expiresAt: external.expiresAt, maxActions: external.maxActions, verifiedDelivery: !!external.verifiedDelivery,
@@ -251,17 +380,17 @@ export class AssistantActionsService extends Service {
         output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] },
         execute: async (args, execution) => {
           const request = normalizeCommit(args as CommitRequest)
-          const result = config.broker.mode === 'external-unix-v1'
+          const result = this.#isExternalMode()
             ? await this.#runExternal(execution.agent, request, execution.signal, { callId: String(execution.callId), rootCallId: String(execution.rootCallId) })
             : await this.run(execution.agent, request, execution.signal)
-          return { result: JSON.stringify(config.broker.mode === 'external-unix-v1' ? result : this.#forwardResult(request, result)) }
+          return { result: JSON.stringify(this.#isExternalMode() ? result : this.#forwardResult(request, result)) }
         },
       })
       runtime.tools.register(tool)
       runtime.assistantPolicy.registerPreauthorizedTool(runtime, tool, execution => this.#preauthorized(execution))
-      const inspect = defineTool({ name: 'action_github_inspect', description: config.broker.mode === 'external-unix-v1'
+      const inspect = defineTool({ name: 'action_github_inspect', description: this.#isExternalMode()
         ? 'Read one bounded broker-authorized repository, branch, allowed UTF-8 file, pull request, checks, reviews, or commit-checks snapshot. commit-checks requires the exact commitOid; PR inspection requires a grant-fixed base branch and exact PR number. Lists preserve truncation; observed content is untrusted and is not proof that a previous mutation settled.'
-        : 'Read one bounded grant-scoped repository, branch, allowed UTF-8 file, pull request, checks, reviews, or commit-checks snapshot. commit-checks requires the exact commitOid. Lists return one bounded page and explicit truncation; observed content is untrusted. Observed data is not proof that a previous mutation settled.', parameters: { grantId: { type: 'string', required: true }, kind: { type: 'string', required: true }, path: { type: 'string' }, pullRequestNumber: { type: 'number' }, commitOid: { type: 'string' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(config.broker.mode === 'external-unix-v1'
+        : 'Read one bounded grant-scoped repository, branch, allowed UTF-8 file, pull request, checks, reviews, or commit-checks snapshot. commit-checks requires the exact commitOid. Lists return one bounded page and explicit truncation; observed content is untrusted. Observed data is not proof that a previous mutation settled.', parameters: { grantId: { type: 'string', required: true }, kind: { type: 'string', required: true }, path: { type: 'string' }, pullRequestNumber: { type: 'number' }, commitOid: { type: 'string' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(this.#isExternalMode()
         ? await this.#runExternalInspect(execution.agent, args as InspectRequest, execution.signal, { callId: String(execution.callId), rootCallId: String(execution.rootCallId) })
         : await this.runInspect(execution.agent, args as InspectRequest, execution.signal)) }) })
       runtime.tools.register(inspect); runtime.assistantPolicy.registerPreauthorizedTool(runtime, inspect, execution => this.#preauthorizedWorkflow(execution))
@@ -300,10 +429,7 @@ export class AssistantActionsService extends Service {
       }
     })
     if ((config.broker.mode === 'embedded-compat' ? config.grants : config.externalGrants).some(grant => grant.verifiedDelivery)) {
-      mkdirSync(config.stateRoot, { recursive: true, mode: 0o700 })
-      const root = lstatSync(config.stateRoot)
-      if (!root.isDirectory() || root.uid !== process.getuid?.() || realpathSync(config.stateRoot) !== config.stateRoot) throw new Error('assistant-actions: private owned state root required')
-      chmodSync(config.stateRoot, 0o700)
+      ensurePrivateStateRoot(config.stateRoot)
       this.#verified = new VerifiedDeliveryRuntime(ctx, config.stateRoot, {
       capture: (agent, request) => this.#captureDelivery(agent, request), inspect: intent => this.#inspectDelivery(intent),
       deliver: (intent, snapshot, signal) => this.#deliverVerified(intent, snapshot, signal),
@@ -312,10 +438,23 @@ export class AssistantActionsService extends Service {
     }
   }
 
-  get brokerMode(): 'embedded-compat' | 'external-unix-v1' { return this.#mode }
-  health = (): Readonly<{ active: boolean; mode: 'embedded-compat' | 'external-unix-v1'; projectedGrants: number; supportedOperations: readonly BrokerOperation[] | readonly ('commit' | 'branch' | 'pull-request' | 'inspect' | 'compensate' | 'verified-delivery' | 'repository-readback')[] }> => Object.freeze({
-    active: this.#active, mode: this.brokerMode, projectedGrants: this.#mode === 'external-unix-v1' ? this.#externalGrants.size : 0,
-    supportedOperations: Object.freeze(this.#mode === 'external-unix-v1' ? ['commit', 'pull-request', 'inspect', 'verified-delivery', 'repository-readback'] as const : ['commit', 'branch', 'pull-request', 'inspect', 'compensate', 'verified-delivery', 'repository-readback'] as const),
+  #isExternalMode(): boolean { return this.#mode !== 'embedded-compat' }
+
+  get brokerMode(): Config['broker'] extends infer B ? B extends { mode: infer M } ? M : never : never { return this.#mode }
+  health = (): Readonly<{
+    active: boolean
+    mode: Config['broker'] extends infer B ? B extends { mode: infer M } ? M : never : never
+    projectedGrants: number
+    actionGrants: number
+    supportedDomains: readonly BrokerActionDomain[]
+    supportedOperations: readonly BrokerOperation[] | readonly ('commit' | 'branch' | 'pull-request' | 'inspect' | 'compensate' | 'verified-delivery' | 'repository-readback')[]
+  }> => Object.freeze({
+    active: this.#active,
+    mode: this.brokerMode,
+    projectedGrants: this.#isExternalMode() ? this.#externalGrants.size : 0,
+    actionGrants: this.#actionGrants.size,
+    supportedDomains: Object.freeze(['github', 'http', 'lark', 'calendar', 'shell'] as const),
+    supportedOperations: Object.freeze(this.#isExternalMode() ? ['commit', 'pull-request', 'inspect', 'verified-delivery', 'repository-readback'] as const : ['commit', 'branch', 'pull-request', 'inspect', 'compensate', 'verified-delivery', 'repository-readback'] as const),
   })
 
   /**
@@ -380,7 +519,7 @@ export class AssistantActionsService extends Service {
   }
 
   #repositoryEventContext(input: NormalizedRepositoryEventObservationInput): { grant: ExternalActionGrantMirror; authorization: ExternalBackgroundAuthorization; snapshot: string; delivery?: { intent: DeliveryIntent; outcome: DeliveryOutcome } } {
-    if (this.#mode !== 'external-unix-v1' || !this.#active) throw new Error('assistant-actions: repository event broker unavailable')
+    if (!this.#isExternalMode() || !this.#active) throw new Error('assistant-actions: repository event broker unavailable')
     const grant = this.#externalGrants.get(input.grantId)
     if (!grant || grant.revision !== input.grantRevision || grant.grantDigest !== input.grantDigest || grant.expiresAt <= Date.now()
       || grant.destination.repository !== input.repository || grant.destination.branch !== input.branch || grant.destination.baseBranch !== input.baseBranch
@@ -526,7 +665,7 @@ export class AssistantActionsService extends Service {
   }
 
   #identity(agent: Agent | undefined, grantId: string): ActionIdentity {
-    if (this.#mode === 'external-unix-v1') return this.#externalContext(agent, grantId).identity
+    if (this.#isExternalMode()) return this.#externalContext(agent, grantId).identity
     if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
     if (!agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-actions: exact live agent required')
     const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
@@ -710,7 +849,7 @@ export class AssistantActionsService extends Service {
   async #readRepositoryInspection(context: () => RepositoryReadbackContext, kind: InspectRequest['kind'], pullRequestNumber: number | undefined, commitOid: string | undefined, signal: AbortSignal): Promise<unknown> {
     let observed: unknown
     const start = context()
-    if (this.#mode === 'external-unix-v1') {
+    if (this.#isExternalMode()) {
       const grant = this.#externalGrants.get(start.authority.grantId)!
       if (!grant.allowedOperations.includes('inspect') || !grant.allowedInspectKinds.includes(kind)) throw new Error('assistant-actions: repository inspection not granted')
       const authorization = this.#externalDeliveryAuthorization(start.intent)
@@ -739,7 +878,7 @@ export class AssistantActionsService extends Service {
   }
 
   #deliveryGrant(id: string): DeliveryGrant | undefined {
-    if (this.#mode !== 'external-unix-v1') return this.#ledger.grant(id)
+    if (!this.#isExternalMode()) return this.#ledger.grant(id)
     const grant = this.#externalGrants.get(id)
     if (!grant) return undefined
     return { id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId,
@@ -766,7 +905,7 @@ export class AssistantActionsService extends Service {
       || routeReceipt.bindingVersion !== owner.bindingVersion || routeReceipt.generation !== owner.bindingGeneration) throw new Error('assistant-actions: current owner route mismatch')
     const security: DeliverySecurity = { principalId: owner.principalId, identity, sessionId: String(agent!.session.id),
       goalId: current.goalId, ...(typeof nativeGoalId === 'string' && nativeGoalId.length > 0 ? { nativeGoalId } : {}), runId: current.goalExecutionRunId, definitionDigest: current.definition.digest, definitionVersion: current.definition.version,
-      grantId: grant.id, grantRevision: grant.revision, ...(this.#mode === 'external-unix-v1' ? { externalGrantDigest: this.#externalGrants.get(grant.id)!.grantDigest } : {}), ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
+      grantId: grant.id, grantRevision: grant.revision, ...(this.#isExternalMode() ? { externalGrantDigest: this.#externalGrants.get(grant.id)!.grantDigest } : {}), ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
       expiresAt: grant.expiresAt, routeReceipt, ...(grant.verifiedDelivery.acceptance ? { acceptance: grant.verifiedDelivery.acceptance } : {}) }
     this.#deliveryIdentity(security)
     return security
@@ -777,7 +916,7 @@ export class AssistantActionsService extends Service {
       action: 'execute' as const, resource: { kind: 'tool' as const, id: `action:github:${security.grantId}` }, context: { initiator: 'background' as const } }
   }
   #deliveryIdentity(security: DeliverySecurity): ActionIdentity {
-    if (!this.#active || this.#mode !== 'external-unix-v1' && !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
+    if (!this.#active || (!this.#isExternalMode() && !this.#ledger.hasController(this.#authority))) throw new Error('assistant-actions: controller unavailable')
     const grant = this.#deliveryGrant(security.grantId)
     if (!grant?.verifiedDelivery || grant.revision !== security.grantRevision || grant.expiresAt <= Date.now()
       || grant.verifiedDelivery.ownerRouteId !== security.ownerRouteId || grant.verifiedDelivery.budgetId !== security.budgetId
@@ -786,7 +925,7 @@ export class AssistantActionsService extends Service {
     const route = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: security.ownerRouteId, principalId: security.principalId,
       workspace: security.identity.workspace, agentPreset: security.identity.agentPreset })
     if (digest(route) !== digest(security.routeReceipt) || this.ctx.get('assistantPolicy')?.evaluate(this.#deliveryPolicy(security)).effect !== 'allow') throw new Error('assistant-actions: delivery authority changed')
-    if (this.#mode === 'external-unix-v1') {
+    if (this.#isExternalMode()) {
       const external = this.#externalGrants.get(grant.id)!
       const resolved = this.ctx.get('assistantDelivery')?.resolveOwnerRoute(security.ownerRouteId)
       if (security.externalGrantDigest !== external.grantDigest || external.sessionId !== security.sessionId
@@ -894,7 +1033,7 @@ export class AssistantActionsService extends Service {
 
   async #deliverVerified(intent: DeliveryIntent, snapshot: VerifiedFiles, signal: AbortSignal) {
     const security = intent.security, frozen = digest(snapshot)
-    if (this.#mode === 'external-unix-v1') return await this.#deliverExternalVerified(intent, snapshot, signal)
+    if (this.#isExternalMode()) return await this.#deliverExternalVerified(intent, snapshot, signal)
     const authorization: Authorization = { sessionId: security.sessionId,
       identity: () => {
         const current = this.#inspectDelivery(intent)
@@ -918,7 +1057,7 @@ export class AssistantActionsService extends Service {
       if (execution.signal.aborted) return false
       const request = normalizeCommit(execution.arguments as CommitRequest)
       const identity = this.#identity(execution.agent, request.grantId)
-      if (this.#mode === 'external-unix-v1') return this.#allowsExternal(this.#externalGrants.get(request.grantId), identity, request)
+      if (this.#isExternalMode()) return this.#allowsExternal(this.#externalGrants.get(request.grantId), identity, request)
       const grant = this.#ledger.grant(request.grantId)
       return !!grant && !grant.verifiedDelivery && grant.expiresAt > Date.now() && grant.principalDigest === identity.principalDigest
         && grant.principalRecordId === identity.principalRecordId && grant.principalVersion === identity.principalVersion
@@ -948,7 +1087,7 @@ export class AssistantActionsService extends Service {
       const input = execution.arguments
       if (!input || typeof input !== 'object' || Array.isArray(input)) return false
       const request = normalizeWorkflow(execution.name === 'action_github_inspect' ? { ...input, operation: 'inspect', idempotencyKey: 'preauthorization' } : input)
-      if (this.#mode === 'external-unix-v1') return 'operation' in request && this.#allowsExternal(this.#externalGrants.get(request.grantId), this.#identity(execution.agent, request.grantId), request)
+      if (this.#isExternalMode()) return 'operation' in request && this.#allowsExternal(this.#externalGrants.get(request.grantId), this.#identity(execution.agent, request.grantId), request)
       if (!('operation' in request) && this.#ledger.grant(request.grantId)?.verifiedDelivery) return false
       return this.#allows(this.#ledger.grant(request.grantId), this.#identity(execution.agent, request.grantId), request)
     } catch { return false }
@@ -981,13 +1120,13 @@ export class AssistantActionsService extends Service {
 
   run = async (agent: Agent | undefined, input: CommitRequest, signal: AbortSignal): Promise<ActionResult> => {
     const request = normalizeCommit(input)
-    if (this.#mode === 'external-unix-v1') { const callId = `api:${brokerDigest(request.idempotencyKey)}`; return await this.#runExternal(agent, request, signal, { callId, rootCallId: callId }) }
+    if (this.#isExternalMode()) { const callId = `api:${brokerDigest(request.idempotencyKey)}`; return await this.#runExternal(agent, request, signal, { callId, rootCallId: callId }) }
     if (this.#ledger.grant(request.grantId)?.verifiedDelivery) throw new Error('assistant-actions: this grant requires independently verified delivery')
     return await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => await this.commit({ actionId, grant, request, token, signal: combined }))
   }
 
   runCompensation = async (agent: Agent | undefined, input: CompensationRequest, signal: AbortSignal): Promise<CompensationStatus> => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
+    if (this.#isExternalMode()) throw new Error(EXTERNAL_UNSUPPORTED)
     signal.throwIfAborted()
     const request = normalizeCompensation(input)
     const identity = this.#compensationIdentity(agent, request.grantId)
@@ -1008,7 +1147,7 @@ export class AssistantActionsService extends Service {
   }
 
   compensationStatus = (agent: Agent | undefined, input: { grantId: string; actionId: string }): CompensationStatus | { status: 'not-found' } => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
+    if (this.#isExternalMode()) throw new Error(EXTERNAL_UNSUPPORTED)
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2
       || typeof input.grantId !== 'string' || typeof input.actionId !== 'string') throw new Error('assistant-actions: invalid compensation status request')
     const identity = this.#compensationIdentity(agent, input.grantId)
@@ -1175,7 +1314,7 @@ export class AssistantActionsService extends Service {
   }
 
   runBranch = async (agent: Agent | undefined, input: BranchRequest, signal: AbortSignal): Promise<ActionResult> => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
+    if (this.#isExternalMode()) throw new Error(EXTERNAL_UNSUPPORTED)
     const request = normalizeWorkflow(input)
     if (this.#ledger.grant(request.grantId)?.verifiedDelivery) throw new Error('assistant-actions: this grant requires independently verified delivery')
     if (!('baseHeadOid' in request)) throw new Error('assistant-actions: invalid branch request')
@@ -1183,7 +1322,7 @@ export class AssistantActionsService extends Service {
   }
 
   runPullRequest = async (agent: Agent | undefined, input: PullRequestRequest, signal: AbortSignal): Promise<ActionResult> => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
+    if (this.#isExternalMode()) throw new Error(EXTERNAL_UNSUPPORTED)
     const request = normalizeWorkflow(input)
     if (this.#ledger.grant(request.grantId)?.verifiedDelivery) throw new Error('assistant-actions: this grant requires independently verified delivery')
     if (!('title' in request)) throw new Error('assistant-actions: invalid pull request')
@@ -1191,7 +1330,7 @@ export class AssistantActionsService extends Service {
   }
 
   runInspect = async (agent: Agent | undefined, input: InspectRequest, signal: AbortSignal): Promise<{ result: ActionResult; observed?: unknown }> => {
-    if (this.#mode === 'external-unix-v1') { const callId = `api:${randomUUID()}`; return await this.#runExternalInspect(agent, input, signal, { callId, rootCallId: callId }) }
+    if (this.#isExternalMode()) { const callId = `api:${randomUUID()}`; return await this.#runExternalInspect(agent, input, signal, { callId, rootCallId: callId }) }
     // Each read is a distinct, durably charged action, never a synthetic write.
     const request = normalizeWorkflow({ ...input, operation: 'inspect', idempotencyKey: randomUUID() })
     if (!('operation' in request)) throw new Error('assistant-actions: invalid inspection')
@@ -1203,5 +1342,569 @@ export class AssistantActionsService extends Service {
     })
     // A late response after revocation must not release repository content.
     return { result, ...(result.status === 'succeeded' ? { observed } : {}) }
+  }
+
+  #allowsGeneralizedToolExecution(execution: ToolExecution): boolean {
+    if (!GENERALIZED_TOOL_NAMES.has(execution.name)) return false
+    const header = execution.agent?.session.header
+    if (!header || this.#actionGrants.size === 0) return false
+    const now = Date.now()
+    const domain = GENERALIZED_TOOL_DOMAINS[execution.name]
+    const matchingGrant = [...this.#actionGrants.values()].some(grant =>
+      grant.expiresAt > now
+      && grant.owner.workspace === header.cwd
+      && grant.owner.preset === header.agentPreset
+      && (domain === undefined || grant.domain === domain))
+    if (!matchingGrant) return false
+    return this.ctx.get('assistantPolicy')?.evaluateAgent(execution.agent, 'execute', { kind: 'tool', id: execution.name }).effect === 'allow'
+  }
+
+  #registerGeneralizedTools(runtime: Context): void {
+    const tools = runtime.get('tools') as { register(def: unknown): unknown } | undefined
+    if (!tools) return
+    const output = {
+      schema: { type: 'object' as const, additionalProperties: false as const, properties: { result: { type: 'string' as const, required: true as const } } },
+      render: (_args: unknown, value: { result: string }) => [{ type: 'text' as const, text: value.result }],
+    }
+
+    // Never call assistantPolicy.registerPreauthorizedTool for generalized tools
+    // because assistant-policy enforces a strict 9-tool GitHub allowlist.
+    tools.register(defineTool({
+      name: 'action_broker_grants',
+      description: 'List currently owner-authorized generalized action grants (HTTP, Lark, Calendar, Shell). No credentials are returned.',
+      parameters: {},
+      output,
+      execute: async (_args, execution) => ({ result: JSON.stringify(this.listActionGrants(execution.agent)) }),
+    }))
+
+    tools.register(defineTool({
+      name: 'action_http_request',
+      description: 'Execute a bounded, grant-scoped HTTP request through the action broker guard.',
+      parameters: {
+        grantId: { type: 'string', required: true },
+        idempotencyKey: { type: 'string', required: true },
+        method: { type: 'string', required: true },
+        url: { type: 'string', required: true },
+        headers: { type: 'object', additionalProperties: true },
+        body: { type: 'string' },
+        expectedResponseSha256: { type: 'string' },
+      },
+      output,
+      execute: async (args, execution) => {
+        const urlStr = String(args.url ?? '')
+        const parsed = new URL(urlStr)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new Error('assistant-actions: action_http_request URL must use http or https')
+        }
+        return {
+          result: JSON.stringify(await this.executeAction(execution.agent, {
+            grantId: String(args.grantId ?? ''),
+            idempotencyKey: String(args.idempotencyKey ?? ''),
+            domain: 'http',
+            operation: 'http.request',
+            destination: {
+              classification: 'http-endpoint',
+              scheme: parsed.protocol === 'https:' ? 'https' : 'http',
+              host: parsed.hostname.replace(/^\[|\]$/gu, '').toLowerCase(),
+              ...(parsed.port ? { port: Number(parsed.port) } : {}),
+              path: parsed.pathname,
+            },
+            payload: {
+              method: String(args.method ?? 'GET') as HttpRequestPayload['method'],
+              url: urlStr,
+              ...(args.headers && typeof args.headers === 'object' ? { headers: args.headers as Record<string, string> } : {}),
+              ...(typeof args.body === 'string' ? { body: args.body } : {}),
+              ...(typeof args.expectedResponseSha256 === 'string' ? { expectedResponseSha256: args.expectedResponseSha256 } : {}),
+            },
+          }, execution.signal)),
+        }
+      },
+    }))
+
+    tools.register(defineTool({
+      name: 'action_lark_action',
+      description: 'Execute a bounded, grant-scoped Lark messaging action.',
+      parameters: {
+        grantId: { type: 'string', required: true },
+        idempotencyKey: { type: 'string', required: true },
+        operation: { type: 'string', required: true },
+        tenantKey: { type: 'string', required: true },
+        receiveIdType: { type: 'string', required: true },
+        receiveId: { type: 'string', required: true },
+        payload: { type: 'object', required: true, additionalProperties: true },
+      },
+      output,
+      execute: async (args, execution) => ({
+        result: JSON.stringify(await this.executeAction(execution.agent, {
+          grantId: String(args.grantId ?? ''),
+          idempotencyKey: String(args.idempotencyKey ?? ''),
+          domain: 'lark',
+          operation: String(args.operation ?? '') as 'lark.send-message' | 'lark.reply-message' | 'lark.read-messages',
+          destination: {
+            classification: 'lark-workspace',
+            tenantKey: String(args.tenantKey ?? ''),
+            receiveIdType: String(args.receiveIdType ?? '') as 'chat_id' | 'open_id',
+            receiveId: String(args.receiveId ?? ''),
+          },
+          payload: args.payload as unknown as LarkSendPayload | LarkReadPayload,
+        }, execution.signal)),
+      }),
+    }))
+
+    tools.register(defineTool({
+      name: 'action_calendar_action',
+      description: 'Execute a bounded, grant-scoped Calendar read or mutation action.',
+      parameters: {
+        grantId: { type: 'string', required: true },
+        idempotencyKey: { type: 'string', required: true },
+        operation: { type: 'string', required: true },
+        provider: { type: 'string', required: true },
+        calendarId: { type: 'string', required: true },
+        payload: { type: 'object', required: true, additionalProperties: true },
+      },
+      output,
+      execute: async (args, execution) => ({
+        result: JSON.stringify(await this.executeAction(execution.agent, {
+          grantId: String(args.grantId ?? ''),
+          idempotencyKey: String(args.idempotencyKey ?? ''),
+          domain: 'calendar',
+          operation: String(args.operation ?? '') as 'calendar.list-events' | 'calendar.get-event' | 'calendar.create-event' | 'calendar.update-event' | 'calendar.delete-event',
+          destination: {
+            classification: 'calendar-scope',
+            provider: String(args.provider ?? '') as 'lark-calendar' | 'caldav' | 'google-calendar',
+            calendarId: String(args.calendarId ?? ''),
+          },
+          payload: args.payload as unknown as CalendarActionPayload,
+        }, execution.signal)),
+      }),
+    }))
+
+    tools.register(defineTool({
+      name: 'action_shell_exec',
+      description: 'Execute an explicitly allowlisted command with shell: false under a bounded cwd and env.',
+      parameters: {
+        grantId: { type: 'string', required: true },
+        idempotencyKey: { type: 'string', required: true },
+        executable: { type: 'string', required: true },
+        args: { type: 'array', required: true, items: { type: 'string' } },
+        cwd: { type: 'string', required: true },
+        env: { type: 'object', additionalProperties: true },
+        stdin: { type: 'string' },
+        timeoutMs: { type: 'number', required: true },
+      },
+      output,
+      execute: async (args, execution) => {
+        const executable = String(args.executable ?? '')
+        const cwd = String(args.cwd ?? '')
+        return {
+          result: JSON.stringify(await this.executeAction(execution.agent, {
+            grantId: String(args.grantId ?? ''),
+            idempotencyKey: String(args.idempotencyKey ?? ''),
+            domain: 'shell',
+            operation: 'shell.exec',
+            destination: { classification: 'shell-command', executable, cwd },
+            payload: {
+              executable,
+              args: Array.isArray(args.args) ? args.args.map(item => String(item)) : [],
+              cwd,
+              ...(args.env && typeof args.env === 'object' ? { env: args.env as Record<string, string> } : {}),
+              ...(typeof args.stdin === 'string' ? { stdin: args.stdin } : {}),
+              timeoutMs: Number(args.timeoutMs ?? 0),
+            },
+          }, execution.signal)),
+        }
+      },
+    }))
+  }
+
+  #actionContext(agent: Agent | undefined, grantId: string): { grant: ActionBrokerGrantProjection; owner: BrokerRequestIntent['owner'] } {
+    if (!this.#active) throw new Error('assistant-actions: service inactive')
+    if (!agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-actions: exact live agent required')
+    const attestation = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
+    const grant = this.#actionGrants.get(grantId)
+    if (!attestation || !grant || grant.expiresAt <= Date.now() || attestation.sessionId !== String(agent.session.id)
+      || attestation.scope.workspace !== agent.session.header.cwd || attestation.scope.preset !== agent.session.header.agentPreset) {
+      throw new Error('assistant-actions: authenticated owner required')
+    }
+    const owner: BrokerRequestIntent['owner'] = {
+      principalDigest: principalDigest(attestation.principalId),
+      ...attestation.principalLineage,
+      workspace: attestation.scope.workspace,
+      preset: attestation.scope.preset,
+      bindingId: attestation.bindingId,
+      bindingVersion: attestation.bindingVersion,
+      bindingGeneration: attestation.bindingGeneration,
+    }
+    if (digest(owner) !== digest(grant.owner) || grant.sessionId !== String(agent.session.id)) {
+      throw new Error('assistant-actions: action grant projection does not match current owner')
+    }
+    return { grant, owner }
+  }
+
+  listActionGrants = (agent?: Agent): readonly ActionBrokerGrantProjection[] => {
+    const now = Date.now()
+    const out: ActionBrokerGrantProjection[] = []
+    for (const grant of this.#actionGrants.values()) {
+      if (grant.expiresAt <= now) continue
+      if (agent) {
+        try {
+          this.#actionContext(agent, grant.id)
+          out.push(grant)
+        } catch {
+          // Omit grants not owned by this agent
+        }
+      } else {
+        out.push(grant)
+      }
+    }
+    return Object.freeze(out)
+  }
+
+  executeAction = async (
+    agent: Agent | undefined,
+    input: GeneralizedActionExecutionInput,
+    signal: AbortSignal,
+  ): Promise<GeneralizedActionExecutionResult> => {
+    signal.throwIfAborted()
+    const { grant, owner } = this.#actionContext(agent, input.grantId)
+    if (grant.domain !== input.domain || !grant.allowedOperations.includes(input.operation)) {
+      throw new Error('assistant-actions: action operation is not granted')
+    }
+    if (input.sensitivity !== undefined && !isBrokerSensitivity(input.sensitivity)) {
+      throw new Error('assistant-actions: WP08 policy rejected (invalid-input)')
+    }
+    if (input.estimatedCostMicros !== undefined && (!Number.isSafeInteger(input.estimatedCostMicros) || input.estimatedCostMicros < 0 || Object.is(input.estimatedCostMicros, -0))) {
+      throw new Error('assistant-actions: WP08 policy rejected (invalid-input)')
+    }
+    const effectiveSensitivity: BrokerSensitivity = input.sensitivity !== undefined
+      && sensitivityRank(input.sensitivity) > sensitivityRank(grant.source.classification)
+      ? input.sensitivity
+      : grant.source.classification
+    const now = Date.now()
+    const actionId = brokerDigest({
+      protocol: ACTION_ID_PROTOCOL,
+      grantId: grant.id,
+      grantRevision: grant.revision,
+      sessionId: String(agent!.session.id),
+      domain: input.domain,
+      operation: input.operation,
+      idempotencyKey: input.idempotencyKey,
+    })
+    const requestDigest = brokerDigest({
+      grantId: grant.id,
+      grantRevision: grant.revision,
+      domain: input.domain,
+      operation: input.operation,
+      destination: input.destination,
+      payload: input.payload,
+      sensitivity: effectiveSensitivity,
+      estimatedCostMicros: input.estimatedCostMicros ?? null,
+      commitDigest: input.commitDigest ?? null,
+      predecessorDigest: input.predecessorDigest ?? null,
+    })
+
+    if (grant.lease?.revoked === true) {
+      throw new Error('assistant-actions: WP08 policy rejected (lease-revoked)')
+    }
+    if (grant.lease?.expiresAtMs !== undefined && now >= grant.lease.expiresAtMs) {
+      throw new Error('assistant-actions: WP08 policy rejected (lease-expired)')
+    }
+
+    const settled = this.#settledActions.get(actionId)
+    if (settled !== undefined) {
+      if (settled.requestDigest !== requestDigest) {
+        throw new Error('assistant-actions: action idempotency conflict')
+      }
+      return structuredClone(settled.result)
+    }
+    const pendingAction = this.#pendingActions.get(actionId)
+    if (pendingAction !== undefined) {
+      if (pendingAction.requestDigest !== requestDigest) {
+        throw new Error('assistant-actions: action idempotency conflict')
+      }
+      return structuredClone(await pendingAction.done)
+    }
+
+    const done = (async (): Promise<GeneralizedActionExecutionResult> => {
+      const isExternal = this.#isExternalMode() && !!this.#externalActionClient
+      if (input.domain === 'http') {
+        validateHttpAgainstGrant(
+          grant.destination as HttpGrantDestination,
+          input.destination as HttpRequestDestination,
+          input.payload as HttpRequestPayload,
+        )
+      } else if (input.domain === 'lark') {
+        validateLarkAgainstGrant(
+          input.operation as 'lark.send-message' | 'lark.reply-message' | 'lark.read-messages',
+          grant.destination as LarkGrantDestination,
+          input.destination as LarkRequestDestination,
+          input.payload as LarkSendPayload | LarkReadPayload,
+        )
+      } else if (input.domain === 'calendar') {
+        validateCalendarAgainstGrant(
+          input.operation as 'calendar.list-events' | 'calendar.get-event' | 'calendar.create-event' | 'calendar.update-event' | 'calendar.delete-event',
+          grant.destination as CalendarGrantDestination,
+          input.destination as CalendarRequestDestination,
+          input.payload as CalendarActionPayload,
+          now,
+        )
+      } else if (input.domain === 'shell') {
+        if (isExternal) {
+          validateShellPolicyAgainstGrant(
+            grant.destination as ShellGrantDestination,
+            input.destination as ShellRequestDestination,
+            input.payload as ShellExecPayload,
+          )
+        } else {
+          await validateShellAgainstGrant(
+            grant.destination as ShellGrantDestination,
+            input.destination as ShellRequestDestination,
+            input.payload as ShellExecPayload,
+          )
+        }
+      } else {
+        throw new Error('assistant-actions: github domain uses dedicated GitHub methods')
+      }
+
+      const externalPayloadBytes = isExternal && this.#externalActionClient
+        ? Buffer.byteLength(canonicalBrokerJson(input.payload), 'utf8')
+        : undefined
+
+      const destinationStr = resolveWp08DestinationString(input.domain, input.destination, input.payload)
+      const usage = this.#wp08Usage.get(grant.id) ?? { leaseUses: 0, spentCostMicros: 0 }
+      if (input.estimatedCostMicros !== undefined && (!Number.isSafeInteger(input.estimatedCostMicros) || input.estimatedCostMicros < 0 || Object.is(input.estimatedCostMicros, -0))) {
+        throw new Error('assistant-actions: WP08 policy rejected (invalid-input)')
+      }
+      const costDelta = input.estimatedCostMicros !== undefined && Number.isSafeInteger(input.estimatedCostMicros) && input.estimatedCostMicros >= 0 && !Object.is(input.estimatedCostMicros, -0)
+        ? input.estimatedCostMicros
+        : 0
+      const nextSpentCostMicros = usage.spentCostMicros + costDelta
+      if (!Number.isSafeInteger(nextSpentCostMicros) || nextSpentCostMicros < 0) {
+        throw new Error('assistant-actions: WP08 policy rejected (invalid-input)')
+      }
+
+      const constraints: BrokerWp08Constraints | undefined =
+        grant.lease !== undefined || grant.destinations !== undefined || grant.maxSensitivity !== undefined || grant.monetaryCostCapMicros !== undefined || grant.commitDigest !== undefined
+          ? {
+            ...(grant.lease === undefined ? {} : { lease: grant.lease }),
+            ...(grant.destinations === undefined ? {} : { destinations: grant.destinations }),
+            ...(grant.maxSensitivity === undefined ? {} : { maxSensitivity: grant.maxSensitivity }),
+            ...(grant.monetaryCostCapMicros === undefined ? {} : { monetaryCostCapMicros: grant.monetaryCostCapMicros }),
+            ...(grant.commitDigest === undefined ? {} : { commitDigest: grant.commitDigest }),
+          }
+          : undefined
+      const policy = this.ctx.get('assistantPolicy')
+      const policyIdempotencyKey = `action-v2:${actionId}`
+      const policyEval = authorizeAgentWithWp08(
+        policy,
+        agent,
+        'execute',
+        { kind: 'tool', id: `action:${grant.domain}:${grant.id}` },
+        {
+          idempotencyKey: policyIdempotencyKey,
+          destination: destinationStr,
+          sensitivity: effectiveSensitivity,
+          ...(input.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: input.estimatedCostMicros }),
+          ...(input.commitDigest === undefined ? {} : { commitDigest: input.commitDigest }),
+          ...(input.predecessorDigest === undefined ? {} : { predecessorDigest: input.predecessorDigest }),
+        },
+        constraints,
+        usage,
+        now,
+      )
+      if (!policyEval.wp08.allowed) {
+        throw new Error(`assistant-actions: WP08 policy rejected (${policyEval.wp08.reasonCode})`)
+      }
+      if (policyEval.effect !== 'allow') {
+        throw new Error('assistant-actions: external action policy denied')
+      }
+
+      const nextUsage = {
+        leaseUses: usage.leaseUses + 1,
+        spentCostMicros: nextSpentCostMicros,
+        ...(usage.lastSettledCommitDigest ? { lastSettledCommitDigest: usage.lastSettledCommitDigest } : {}),
+      }
+      this.#wp08Usage.set(grant.id, nextUsage)
+
+      const rollbackPolicy = (): void => {
+        const port = policy as Partial<BrokerPolicyServicePort> | undefined
+        if (typeof port?.rollbackPreDispatchAuthorization !== 'function') return
+        port.rollbackPreDispatchAuthorization({
+          idempotencyKey: policyIdempotencyKey,
+          ...(policyEval.policyDecision?.decisionId === undefined ? {} : { decisionId: policyEval.policyDecision.decisionId }),
+          ...(policyEval.policyDecision?.ruleId === undefined ? {} : { ruleId: policyEval.policyDecision.ruleId }),
+          ...(policyEval.policyDecision?.lease?.leaseId === undefined ? {} : { leaseId: policyEval.policyDecision.lease.leaseId }),
+          ...(input.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: input.estimatedCostMicros }),
+          ...(input.commitDigest === undefined ? {} : { commitDigest: input.commitDigest }),
+          auditDetails: { actionId, grantId: grant.id, domain: input.domain, operation: input.operation },
+        })
+      }
+
+      const rollbackUsage = (): void => {
+        const current = this.#wp08Usage.get(grant.id)
+        if (!current) return
+        const rolledUses = Math.max(0, current.leaseUses - 1)
+        const safeCurrentCost = Number.isSafeInteger(current.spentCostMicros) && current.spentCostMicros >= 0 ? current.spentCostMicros : 0
+        const rolledCost = Math.max(0, safeCurrentCost - costDelta)
+        if (rolledUses === 0 && rolledCost === 0 && !current.lastSettledCommitDigest) {
+          this.#wp08Usage.delete(grant.id)
+        } else {
+          this.#wp08Usage.set(grant.id, {
+            leaseUses: rolledUses,
+            spentCostMicros: rolledCost,
+            ...(current.lastSettledCommitDigest ? { lastSettledCommitDigest: current.lastSettledCommitDigest } : {}),
+          })
+        }
+      }
+      const recordSettledDigest = (): void => {
+        if (!input.commitDigest) return
+        const current = this.#wp08Usage.get(grant.id)
+        if (current) {
+          this.#wp08Usage.set(grant.id, { ...current, lastSettledCommitDigest: input.commitDigest })
+        }
+      }
+
+      if (isExternal && this.#externalActionClient) {
+        const client = this.#externalActionClient
+        let res: ActionBrokerServerResponse
+        try {
+          const costMetric = input.domain === 'http' ? 'http-requests'
+            : input.domain === 'lark' ? 'lark-api-calls'
+              : input.domain === 'calendar' ? 'calendar-api-calls'
+                : input.domain === 'shell' ? 'shell-exec-units'
+                  : 'github-api-units'
+          const intent: ActionBrokerRequestIntent = {
+            actionId,
+            grantId: grant.id,
+            grantRevision: grant.revision,
+            grantDigest: grant.grantDigest,
+            domain: input.domain,
+            owner,
+            sessionId: String(agent!.session.id),
+            agentId: String(agent!.id),
+            rootCallId: `api:${actionId}`,
+            callId: `api:${actionId}`,
+            operation: input.operation,
+            source: grant.source,
+            destination: input.destination,
+            payload: input.payload,
+            deadline: Math.min(grant.expiresAt, Date.now() + (client.timeoutMs ?? 30_000)),
+            budget: {
+              reservationId: actionId,
+              actions: 1,
+              bytes: externalPayloadBytes ?? 0,
+              costMetric,
+              maxCostUnits: 1,
+              ...(input.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: input.estimatedCostMicros }),
+            },
+            ...(input.estimatedCostMicros === undefined ? {} : { estimatedCostMicros: input.estimatedCostMicros }),
+            ...(input.commitDigest === undefined ? {} : { commitDigest: input.commitDigest }),
+            ...(input.predecessorDigest === undefined ? {} : { predecessorDigest: input.predecessorDigest }),
+            idempotencyKey: input.idempotencyKey,
+          }
+          res = await this.#externalActionDispatch(client, intent, signal)
+        } catch (error) {
+          const preDispatch = error instanceof BrokerClientError
+            ? !error.postDispatchUnknown
+            : (typeof error !== 'object' || error === null || (
+              (error as { postDispatchUnknown?: unknown }).postDispatchUnknown !== true
+              && (error as { dispatched?: unknown }).dispatched !== true
+            ))
+          if (preDispatch) {
+            rollbackUsage()
+            rollbackPolicy()
+          }
+          throw error
+        }
+        const out: GeneralizedActionExecutionResult = {
+          actionId: res.actionId,
+          status: res.status,
+          domain: input.domain,
+          operation: input.operation,
+          ...(res.result ? { result: res.result } : {}),
+          ...(res.error ? { reason: `external-broker-${res.error.code}` } : {}),
+        }
+        if (!res.dispatched && res.status === 'failed') {
+          rollbackUsage()
+          rollbackPolicy()
+        } else {
+          if (res.status === 'succeeded') recordSettledDigest()
+          this.#settledActions.set(actionId, { requestDigest, result: structuredClone(out) })
+        }
+        return out
+      }
+
+      const remainingMs = Math.max(1, Math.min(30_000, grant.expiresAt - Date.now()))
+      try {
+        let out: GeneralizedActionExecutionResult
+        if (input.domain === 'http') {
+          const result = await executeHttpGuardedAction({
+            grantDestination: grant.destination as HttpGrantDestination,
+            requestDestination: input.destination as HttpRequestDestination,
+            payload: input.payload as HttpRequestPayload,
+            ...(input.credentialToken === undefined ? {} : { token: input.credentialToken }),
+            timeoutMs: remainingMs,
+            signal,
+          })
+          recordSettledDigest()
+          out = { actionId, status: 'succeeded', domain: 'http', operation: input.operation, result }
+        } else if (input.domain === 'lark') {
+          const result = await executeLarkGuardedAction({
+            actionId,
+            operation: input.operation as 'lark.send-message' | 'lark.reply-message' | 'lark.read-messages',
+            grantDestination: grant.destination as LarkGrantDestination,
+            requestDestination: input.destination as LarkRequestDestination,
+            payload: input.payload as LarkSendPayload | LarkReadPayload,
+            token: input.credentialToken ?? '',
+            timeoutMs: remainingMs,
+            signal,
+          })
+          recordSettledDigest()
+          out = { actionId, status: 'succeeded', domain: 'lark', operation: input.operation, result }
+        } else if (input.domain === 'calendar') {
+          const result = await executeCalendarGuardedAction({
+            operation: input.operation as 'calendar.list-events' | 'calendar.get-event' | 'calendar.create-event' | 'calendar.update-event' | 'calendar.delete-event',
+            grantDestination: grant.destination as CalendarGrantDestination,
+            requestDestination: input.destination as CalendarRequestDestination,
+            payload: input.payload as CalendarActionPayload,
+            token: input.credentialToken ?? '',
+            timeoutMs: remainingMs,
+            signal,
+          })
+          recordSettledDigest()
+          out = { actionId, status: 'succeeded', domain: 'calendar', operation: input.operation, result }
+        } else if (input.domain === 'shell') {
+          const result = await executeShellGuardedAction({
+            grantDestination: grant.destination as ShellGrantDestination,
+            requestDestination: input.destination as ShellRequestDestination,
+            payload: input.payload as ShellExecPayload,
+            remainingLeaseMs: remainingMs,
+            signal,
+          })
+          recordSettledDigest()
+          out = { actionId, status: 'succeeded', domain: 'shell', operation: input.operation, result }
+        } else {
+          throw new Error('assistant-actions: github domain uses dedicated GitHub methods')
+        }
+        this.#settledActions.set(actionId, { requestDigest, result: structuredClone(out) })
+        return out
+      } catch (error) {
+        if (
+          (error instanceof HttpGuardError || error instanceof LarkGuardError || error instanceof CalendarGuardError || error instanceof ShellGuardError)
+          && !error.dispatched
+        ) {
+          rollbackUsage()
+          rollbackPolicy()
+        }
+        throw error
+      }
+    })()
+
+    this.#pendingActions.set(actionId, { requestDigest, done })
+    try {
+      return structuredClone(await done)
+    } finally {
+      this.#pendingActions.delete(actionId)
+    }
   }
 }

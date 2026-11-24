@@ -231,17 +231,25 @@ function compensationResultInput(value: unknown): CompensationResult {
 
 function privateFile(path: string): void {
   const stat = lstatSync(path)
+  if (process.platform === 'win32') {
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail('unsafe-file')
+    return
+  }
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || (process.getuid?.() !== undefined && stat.uid !== process.getuid?.())) fail('unsafe-file')
 }
 
 function privateDirectory(path: string): void {
   const stat = lstatSync(path)
+  if (process.platform === 'win32') {
+    if (!stat.isDirectory() || stat.isSymbolicLink()) fail('unsafe-file')
+    return
+  }
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || (process.getuid?.() !== undefined && stat.uid !== process.getuid?.())) fail('unsafe-file')
 }
 
 function preparePath(path: string): void {
   if (!isAbsolute(path)) fail('unsafe-file')
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); chmodSync(dirname(path), 0o700); privateDirectory(dirname(path))
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); if (process.platform !== 'win32') chmodSync(dirname(path), 0o700); privateDirectory(dirname(path))
   let existing = false
   try { lstatSync(path); existing = true } catch (error) {
     if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') fail('unsafe-file')
@@ -249,7 +257,7 @@ function preparePath(path: string): void {
   if (!existing) {
     const descriptor = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); closeSync(descriptor)
   }
-  privateFile(path); chmodSync(path, 0o600); privateFile(path)
+  privateFile(path); if (process.platform !== 'win32') { chmodSync(path, 0o600); privateFile(path) }
 }
 
 function open(path: string): DatabaseSync {

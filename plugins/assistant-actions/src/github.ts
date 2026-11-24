@@ -493,7 +493,6 @@ type PullRequestObservation = {
   merged?: boolean
   head: { ref: string; sha: string; repo: { full_name: string } }
   base: { ref: string; repo: { full_name: string } }
-  untrusted: true
 }
 
 /**
@@ -517,7 +516,6 @@ function pullRequestObservation(value: unknown, grant: ActionGrant, number?: num
     ...(body.merged === undefined ? {} : { merged: body.merged }),
     head: { ref: head.ref as string, sha: head.sha as string, repo: { full_name: headRepository.full_name as string } },
     base: { ref: base.ref as string, repo: { full_name: baseRepository.full_name as string } },
-    untrusted: true,
   }
 }
 
@@ -600,7 +598,7 @@ export async function inspectGitHub(input: { grant: ActionGrant; kind: 'reposito
     if (content.length !== body.size || content.toString('base64') !== encoded || Buffer.from(content.toString('utf8')).compare(content) !== 0 || content.toString('utf8').includes(input.token)) return undefined
     return { observed: { path: body.path, sha: body.sha, content: content.toString('utf8'), untrusted: true } }
   }
-  if (input.kind === 'pull-request') return { observed: pullRequest! }
+  if (input.kind === 'pull-request') return { observed: { ...pullRequest!, untrusted: true } }
   if (input.kind === 'checks' || input.kind === 'reviews') {
     const sha = pullRequest!.head.sha
     const maximum = input.kind === 'checks' ? 20 : 30

@@ -1,84 +1,135 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
-import type { BigIntStats } from 'node:fs'
-import { basename, dirname, isAbsolute, normalize } from 'node:path'
-import type { ActionGrant } from './types.js'
-import { commitOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
+import { isAbsolute, normalize } from 'node:path'
 import {
-  brokerAdminRequestDigest,
+  BrokerCredentialError,
+  normalizeBrokerCredentialSpec,
+  readBrokerCredential,
+  type BrokerCredentialReadHooks,
+  type BrokerCredentialSpec,
+  type BrokerLinuxProtectedFileCredential,
+} from './broker-credentials.js'
+import type { WindowsAclInspection } from './broker-peer-windows.js'
+import {
+  BrokerLedgerError,
+  ExternalBrokerLedger,
+  brokerLedgerRequestDigest,
+  normalizeActionGrant,
+  normalizeBrokerGrant,
+  type AnyExternalBrokerGrant,
+  type BrokerAuthority,
+  type BrokerControlMutation,
+  type BrokerControlSnapshot,
+  type BrokerLedgerOutcome,
+  type BrokerLedgerRecord,
+  type ExternalActionGrant,
+  type ExternalGitHubGrant,
+} from './broker-ledger.js'
+import {
   canonicalBrokerJson,
   normalizeBrokerInspectObservation,
   type BrokerAdminRequest,
   type BrokerAdminResponseUnsigned,
   type BrokerClientRequest,
   type BrokerCommitPayload,
+  type BrokerInspectObservation,
   type BrokerInspectPayload,
   type BrokerPullRequestPayload,
-  type BrokerInspectObservation,
   type BrokerServerResponseUnsigned,
   type BrokerSuccessResult,
 } from './broker-protocol.js'
 import {
-  BrokerLedgerError,
-  ExternalBrokerLedger,
-  brokerLedgerRequestDigest,
-  normalizeBrokerGrant,
-  type BrokerAuthority,
-  type BrokerControlMutation,
-  type BrokerControlSnapshot,
-  type BrokerLedgerOutcome,
-  type BrokerLedgerRecord,
-  type ExternalGitHubGrant,
-} from './broker-ledger.js'
+  ACTION_GRANT_PROTOCOL,
+  type ActionBrokerAdminRequest,
+  type ActionBrokerClientRequest,
+  type ActionBrokerServerResponseUnsigned,
+  type ActionBrokerSuccessResult,
+  type CalendarActionPayload,
+  type CalendarGrantDestination,
+  type CalendarRequestDestination,
+  type GitHubGrantDestinationV2,
+  type HttpGrantDestination,
+  type HttpRequestDestination,
+  type HttpRequestPayload,
+  type LarkGrantDestination,
+  type LarkReadPayload,
+  type LarkRequestDestination,
+  type LarkSendPayload,
+  type ShellExecPayload,
+  type ShellGrantDestination,
+  type ShellRequestDestination,
+} from './broker-protocol-v2.js'
+import { commitOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
+import { CalendarGuardError, executeCalendarGuardedAction, validateCalendarAgainstGrant, type CalendarGuardDeps } from './guards/calendar-guard.js'
+import { HttpGuardError, executeHttpGuardedAction, validateHttpAgainstGrant, type HttpGuardDeps } from './guards/http-guard.js'
+import { LarkGuardError, executeLarkGuardedAction, validateLarkAgainstGrant, type LarkGuardDeps } from './guards/lark-guard.js'
+import { ShellGuardError, executeShellGuardedAction, validateShellAgainstGrant, type ShellGuardDeps } from './guards/shell-guard.js'
+import type { ActionGrant } from './types.js'
 
 type BrokerResponse = Pick<BrokerServerResponseUnsigned, 'status' | 'dispatched' | 'result' | 'error' | 'completedAt'>
+type ActionBrokerResponse = Pick<ActionBrokerServerResponseUnsigned, 'status' | 'dispatched' | 'result' | 'error' | 'completedAt'>
 type BrokerAdminResponse = Pick<BrokerAdminResponseUnsigned, 'status' | 'state' | 'error' | 'completedAt'>
 type GitHubTransport = typeof commitOnGitHub
 type InspectTransport = typeof inspectGitHub
 type PullRequestTransport = typeof createPullRequestOnGitHub
 const FORCED_TEARDOWN_GRACE_MS = 100
 
-export interface BrokerProtectedFileCredential {
-  id: string
-  provider: 'linux-protected-file'
-  path: string
-  maxLeaseMs: number
-}
+export type BrokerProtectedFileCredential = BrokerLinuxProtectedFileCredential
 
 export interface ExternalBrokerCoreConfig {
   instanceId: string
   statePath: string
-  credentials: readonly BrokerProtectedFileCredential[]
+  credentials: readonly BrokerCredentialSpec[]
   grants: readonly ExternalGitHubGrant[]
+  actionGrants?: readonly AnyExternalBrokerGrant[]
   policyEpoch: number
   expectedGeneration?: number
   controllerTtlMs?: number
   credentialMaxBytes?: number
   now?: () => number
+  platform?: NodeJS.Platform
+  checkWindowsAcl?: (path: string) => WindowsAclInspection | undefined
 }
 
 export interface ExternalBrokerCoreTransports {
   commit?: GitHubTransport
   inspect?: InspectTransport
   pullRequest?: PullRequestTransport
+  http?: HttpGuardDeps
+  lark?: LarkGuardDeps
+  calendar?: CalendarGuardDeps
+  shell?: ShellGuardDeps
   /** Deterministic race hook used only by filesystem-boundary tests. */
   beforeCredentialOpen?: () => void | Promise<void>
+  readCredentialOverride?: BrokerCredentialReadHooks['readCredentialOverride']
+  credentialCommandRunner?: BrokerCredentialReadHooks['commandRunner']
 }
 
 export function normalizeExternalBrokerCoreConfig(value: unknown): ExternalBrokerCoreConfig {
-  if (!plain(value) || Object.keys(value).some(key => !['instanceId', 'statePath', 'credentials', 'grants', 'policyEpoch', 'expectedGeneration', 'controllerTtlMs', 'credentialMaxBytes', 'now'].includes(key))) fail('request-invalid')
+  if (!plain(value) || Object.keys(value).some(key => !['instanceId', 'statePath', 'credentials', 'grants', 'actionGrants', 'policyEpoch', 'expectedGeneration', 'controllerTtlMs', 'credentialMaxBytes', 'now', 'platform', 'checkWindowsAcl'].includes(key))) fail('request-invalid')
   const instanceId = text(value.instanceId, 128), statePath = text(value.statePath, 1_024), policyEpoch = integer(value.policyEpoch, 0)
-  if (!isAbsolute(statePath) || normalize(statePath) !== statePath || !Array.isArray(value.credentials) || !Array.isArray(value.grants)) fail('request-invalid')
-  const credentials = value.credentials.map(normalizeCredential)
+  if ((statePath !== ':memory:' && (!isAbsolute(statePath) || normalize(statePath) !== statePath)) || !Array.isArray(value.credentials) || !Array.isArray(value.grants)) fail('request-invalid')
+  if (value.actionGrants !== undefined && !Array.isArray(value.actionGrants)) fail('request-invalid')
+  const platform = typeof value.platform === 'string' ? value.platform as NodeJS.Platform : process.platform
+  const credentials = value.credentials.map(item => normalizeCredential(item, platform))
   if (credentials.length > 256 || new Set(credentials.map(item => item.id)).size !== credentials.length) fail('request-invalid')
-  const grants = value.grants.map(normalizeBrokerGrant)
-  if (grants.length > 1_000 || new Set(grants.map(item => item.id)).size !== grants.length || grants.some(grant => !credentials.some(item => item.id === grant.credentialId))) fail('request-invalid')
-  return Object.freeze({ instanceId, statePath, credentials: Object.freeze(credentials), grants: Object.freeze(grants), policyEpoch,
+  const grants = value.grants.map(grant => plain(grant) && grant.protocol === ACTION_GRANT_PROTOCOL ? normalizeActionGrant(grant) : normalizeBrokerGrant(grant))
+  const actionGrants = (value.actionGrants ?? []).map(grant => plain(grant) && grant.protocol === ACTION_GRANT_PROTOCOL ? normalizeActionGrant(grant) : normalizeBrokerGrant(grant))
+  const allGrants = [...grants, ...actionGrants]
+  if (allGrants.length > 1_000 || new Set(allGrants.map(item => item.id)).size !== allGrants.length || allGrants.some(grant => !credentials.some(item => item.id === grant.credentialId))) fail('request-invalid')
+  return Object.freeze({
+    instanceId,
+    statePath,
+    credentials: Object.freeze(credentials),
+    grants: Object.freeze(grants as readonly ExternalGitHubGrant[]),
+    ...(value.actionGrants === undefined ? {} : { actionGrants: Object.freeze(actionGrants) }),
+    policyEpoch,
     ...(value.expectedGeneration === undefined ? {} : { expectedGeneration: integer(value.expectedGeneration, 1) }),
     ...(value.controllerTtlMs === undefined ? {} : { controllerTtlMs: integer(value.controllerTtlMs, 1_000, 300_000) }),
     ...(value.credentialMaxBytes === undefined ? {} : { credentialMaxBytes: integer(value.credentialMaxBytes, 1, 65_536) }),
-    ...(value.now === undefined ? {} : typeof value.now === 'function' ? { now: value.now as () => number } : fail('request-invalid')) })
+    ...(value.now === undefined ? {} : typeof value.now === 'function' ? { now: value.now as () => number } : fail('request-invalid')),
+    ...(value.platform === undefined ? {} : { platform }),
+    ...(value.checkWindowsAcl === undefined ? {} : typeof value.checkWindowsAcl === 'function' ? { checkWindowsAcl: value.checkWindowsAcl as (path: string) => WindowsAclInspection | undefined } : fail('request-invalid')),
+  })
 }
 
 export class BrokerCoreError extends Error {
@@ -93,6 +144,15 @@ function plain(value: unknown): value is Record<string, unknown> { return value 
 function text(value: unknown, maximum = 4_096): string { if (typeof value !== 'string' || value.length < 1 || value.length > maximum || /[\p{Cc}]/u.test(value)) fail('request-invalid'); return value }
 function integer(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number { if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) fail('request-invalid'); return value }
 function safeCode(error: unknown): BrokerCoreError['code'] {
+  if (error instanceof BrokerCoreError) return error.code
+  if (error instanceof HttpGuardError || error instanceof LarkGuardError || error instanceof CalendarGuardError || error instanceof ShellGuardError) {
+    if (error.code === 'request-invalid') return 'request-invalid'
+    if (error.code === 'target-mismatch' && !error.dispatched) return 'request-invalid'
+    if (error.code === 'grant-invalid') return 'grant-invalid'
+    if (error.code === 'aborted') return 'aborted'
+    if (error.code === 'deadline-exceeded') return 'deadline-exceeded'
+    return 'transport-failed'
+  }
   if (error instanceof BrokerLedgerError) {
     if (error.code === 'conflict') return 'request-conflict'
     if (error.code === 'grant' || error.code === 'limit') return 'grant-invalid'
@@ -125,54 +185,13 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
   })
 }
 
-function normalizeCredential(value: unknown): BrokerProtectedFileCredential {
-  if (!plain(value) || Object.keys(value).length !== 4 || Object.keys(value).some(key => !['id', 'provider', 'path', 'maxLeaseMs'].includes(key)) || value.provider !== 'linux-protected-file') fail('request-invalid')
-  const path = text(value.path, 1_024)
-  if (process.platform !== 'linux' || !isAbsolute(path) || normalize(path) !== path || path === '/') fail('request-invalid')
-  return Object.freeze({ id: text(value.id, 128), provider: 'linux-protected-file', path, maxLeaseMs: integer(value.maxLeaseMs, 1_000, 86_400_000) })
-}
-
-function sameNode(left: BigIntStats, right: BigIntStats): boolean { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.gid === right.gid && left.mode === right.mode && left.nlink === right.nlink }
-async function safeCredentialAncestors(value: string, uid: number, gid: number): Promise<void> {
-  let cursor = value, leaf = true
-  for (;;) {
-    const [canonical, stat] = await Promise.all([realpath(cursor), lstat(cursor, { bigint: true })])
-    const mode = Number(stat.mode & 0o7777n), owner = Number(stat.uid), group = Number(stat.gid), stickyRoot = owner === 0 && (mode & 0o1000) !== 0 && (mode & 0o022) !== 0
-    if (canonical !== cursor || stat.isSymbolicLink() || !stat.isDirectory() || !stickyRoot && (mode & 0o022) !== 0 || leaf && (owner !== uid || group !== gid || mode !== 0o700)) fail('credential-unavailable')
-    const parent = dirname(cursor); if (parent === cursor) return
-    cursor = parent; leaf = false
+function normalizeCredential(value: unknown, platform: NodeJS.Platform): BrokerCredentialSpec {
+  try {
+    return normalizeBrokerCredentialSpec(value, platform)
+  } catch (error) {
+    if (error instanceof BrokerCredentialError) fail(error.code)
+    fail('request-invalid')
   }
-}
-async function readProtectedCredential(credential: BrokerProtectedFileCredential, maximum: number, beforeOpen?: () => void | Promise<void>): Promise<string> {
-  const uid = process.geteuid?.(), gid = process.getegid?.()
-  if (process.platform !== 'linux' || uid === undefined || gid === undefined) fail('credential-unavailable')
-  const parentPath = dirname(credential.path)
-  try { await safeCredentialAncestors(parentPath, uid, gid) } catch { return fail('credential-unavailable') }
-  let parent
-  try { parent = await open(parentPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW) } catch { return fail('credential-unavailable') }
-  let descriptor
-  try {
-    const parentBefore = await parent.stat({ bigint: true }), visibleParent = await lstat(parentPath, { bigint: true })
-    if (!parentBefore.isDirectory() || !sameNode(parentBefore, visibleParent)) fail('credential-unavailable')
-    await beforeOpen?.()
-    descriptor = await open('/proc/self/fd/' + parent.fd + '/' + basename(credential.path), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const pathParent = await lstat(parentPath, { bigint: true })
-    if (!sameNode(parentBefore, await parent.stat({ bigint: true })) || !sameNode(parentBefore, pathParent)) fail('credential-unavailable')
-  } catch { await descriptor?.close().catch(() => undefined); await parent.close().catch(() => undefined); return fail('credential-unavailable') }
-  const bytes = Buffer.alloc(maximum + 1)
-  try {
-    const before = await descriptor.stat({ bigint: true })
-    if (!before.isFile() || before.uid !== BigInt(uid) || before.nlink !== 1n || Number(before.mode & 0o7777n) !== 0o600 || before.size > BigInt(maximum)) fail('credential-unavailable')
-    let offset = 0
-    while (offset < bytes.length) { const read = await descriptor.read(bytes, offset, bytes.length - offset, offset); if (read.bytesRead === 0) break; offset += read.bytesRead }
-    const after = await descriptor.stat({ bigint: true }), visible = await lstat(credential.path, { bigint: true }), parentAfter = await parent.stat({ bigint: true }), visibleParent = await lstat(parentPath, { bigint: true })
-    if (offset > maximum || BigInt(offset) !== after.size || !sameNode(before, after) || !sameNode(after, visible) || !sameNode(parentAfter, visibleParent) || !after.isFile()) fail('credential-unavailable')
-    await safeCredentialAncestors(parentPath, uid, gid)
-    const token = bytes.subarray(0, offset).toString('utf8').replace(/[\r\n]+$/u, '')
-    if (!token || token.includes('\0') || Buffer.from(token, 'utf8').length > maximum || !/^[\x21-\x7e]+$/u.test(token)) fail('credential-unavailable')
-    return token
-  } catch (error) { if (error instanceof BrokerCoreError) throw error; return fail('credential-unavailable') }
-  finally { bytes.fill(0); await descriptor.close().catch(() => undefined); await parent.close().catch(() => undefined) }
 }
 
 function containsSecret(value: unknown, secret: string): boolean {
@@ -188,21 +207,40 @@ function containsCredentialShape(value: unknown): boolean {
   return false
 }
 
-function inspectProjection(payload: BrokerInspectPayload, observed: unknown, grant: ExternalGitHubGrant): BrokerInspectObservation | undefined {
+function inspectProjection(payload: BrokerInspectPayload, observed: unknown, grant: AnyExternalBrokerGrant): BrokerInspectObservation | undefined {
   try {
-    // The protocol normalizer is the single wire DTO boundary.  In particular,
-    // it binds PR number, head, repository, and base branch before an untrusted
-    // GitHub response can enter the signed broker result.
-    return normalizeBrokerInspectObservation(payload, observed, grant.destination)
+    const dest = grant.destination as GitHubGrantDestinationV2
+    return normalizeBrokerInspectObservation(payload, observed, {
+      classification: 'github-repository',
+      repository: dest.repository,
+      branch: dest.branch,
+      ...(dest.baseBranch === undefined ? {} : { baseBranch: dest.baseBranch }),
+    })
   } catch { return undefined }
 }
 
-function githubGrant(grant: ExternalGitHubGrant, allowPullRequest = false): ActionGrant {
-  return Object.freeze({ id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId, principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset, repository: grant.destination.repository, branch: grant.destination.branch, paths: [...grant.destination.paths], credentialHandle: grant.credentialId, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes,
-    ...(grant.destination.baseBranch === undefined ? {} : { repoWorkflow: Object.freeze({ baseBranch: grant.destination.baseBranch, allowBranchCreate: false, allowPullRequest }) }) })
+function githubGrant(grant: AnyExternalBrokerGrant, allowPullRequest = false): ActionGrant {
+  const dest = grant.destination as GitHubGrantDestinationV2
+  return Object.freeze({
+    id: grant.id,
+    revision: grant.revision,
+    principalDigest: grant.owner.principalDigest,
+    principalRecordId: grant.owner.principalRecordId,
+    principalVersion: grant.owner.principalVersion,
+    workspace: grant.owner.workspace,
+    agentPreset: grant.owner.preset,
+    repository: dest.repository,
+    branch: dest.branch,
+    paths: [...dest.paths],
+    credentialHandle: grant.credentialId,
+    expiresAt: grant.expiresAt,
+    maxActions: grant.maxActions,
+    maxTotalBytes: grant.maxTotalBytes,
+    ...(dest.baseBranch === undefined ? {} : { repoWorkflow: Object.freeze({ baseBranch: dest.baseBranch, allowBranchCreate: false, allowPullRequest }) }),
+  })
 }
 
-function response(record: BrokerLedgerRecord): BrokerResponse {
+function response(record: BrokerLedgerRecord): ActionBrokerResponse {
   const value = record.outcome
   if (!value) return { status: 'unknown', dispatched: record.status === 'dispatched', result: null, error: { code: 'transport-failed' }, completedAt: Date.now() }
   return { status: value.status, dispatched: value.dispatched, result: value.result, error: value.error, completedAt: value.completedAt }
@@ -211,14 +249,18 @@ function response(record: BrokerLedgerRecord): BrokerResponse {
 export class ExternalBrokerCore {
   readonly #ledger: ExternalBrokerLedger
   readonly #authority: BrokerAuthority
-  readonly #credentials: ReadonlyMap<string, BrokerProtectedFileCredential>
+  readonly #credentials: ReadonlyMap<string, BrokerCredentialSpec>
   readonly #commit: GitHubTransport
   readonly #inspect: InspectTransport
   readonly #pullRequest: PullRequestTransport
-  readonly #beforeCredentialOpen: (() => void | Promise<void>) | undefined
+  readonly #httpDeps: HttpGuardDeps | undefined
+  readonly #larkDeps: LarkGuardDeps | undefined
+  readonly #calendarDeps: CalendarGuardDeps | undefined
+  readonly #shellDeps: ShellGuardDeps | undefined
+  readonly #credentialHooks: BrokerCredentialReadHooks
   readonly #now: () => number
   readonly #credentialMaxBytes: number
-  readonly #pending = new Map<string, { controller: AbortController; done: Promise<BrokerResponse> }>()
+  readonly #pending = new Map<string, { controller: AbortController; done: Promise<ActionBrokerResponse> }>()
   readonly #renewal: ReturnType<typeof setInterval>
   #active = true
   #closing: Promise<void> | undefined
@@ -231,12 +273,26 @@ export class ExternalBrokerCore {
     this.#now = config.now ?? Date.now
     const credentials = [...config.credentials]
     this.#credentials = new Map(credentials.map(item => [item.id, item]))
-    const grants = [...config.grants]
+    const grants = [...config.grants, ...(config.actionGrants ?? [])]
     this.#commit = transports.commit ?? commitOnGitHub
     this.#inspect = transports.inspect ?? inspectGitHub
     this.#pullRequest = transports.pullRequest ?? createPullRequestOnGitHub
-    this.#beforeCredentialOpen = transports.beforeCredentialOpen
-    this.#ledger = new ExternalBrokerLedger(statePath, instanceId, { now: this.#now })
+    this.#httpDeps = transports.http
+    this.#larkDeps = transports.lark
+    this.#calendarDeps = transports.calendar
+    this.#shellDeps = transports.shell
+    this.#credentialHooks = {
+      ...(transports.beforeCredentialOpen === undefined ? {} : { beforeCredentialOpen: transports.beforeCredentialOpen }),
+      ...(config.platform === undefined ? {} : { platform: config.platform }),
+      ...(transports.credentialCommandRunner === undefined ? {} : { commandRunner: transports.credentialCommandRunner }),
+      ...(config.checkWindowsAcl === undefined ? {} : { checkWindowsAcl: config.checkWindowsAcl }),
+      ...(transports.readCredentialOverride === undefined ? {} : { readCredentialOverride: transports.readCredentialOverride }),
+    }
+    this.#ledger = new ExternalBrokerLedger(statePath, instanceId, {
+      now: this.#now,
+      ...(config.platform === undefined ? {} : { platform: config.platform }),
+      ...(config.checkWindowsAcl === undefined ? {} : { checkWindowsAcl: config.checkWindowsAcl }),
+    })
     try {
       this.#authority = this.#ledger.claimController(randomUUID(), controllerTtlMs)
       if (config.expectedGeneration !== undefined && this.#authority.generation !== config.expectedGeneration) fail('policy-changed')
@@ -251,6 +307,11 @@ export class ExternalBrokerCore {
   snapshot(): BrokerControlSnapshot { return this.#ledger.snapshot() }
 
   execute = async (request: BrokerClientRequest, signal: AbortSignal): Promise<BrokerResponse> => {
+    const out = await this.executeAction(request, signal)
+    return out as BrokerResponse
+  }
+
+  executeAction = async (request: BrokerClientRequest | ActionBrokerClientRequest, signal: AbortSignal): Promise<ActionBrokerResponse> => {
     if (!this.#active || signal.aborted) fail('aborted')
     let prepared
     try { prepared = this.#ledger.prepare(request, this.#authority) } catch (error) { return fail(safeCode(error)) }
@@ -265,73 +326,198 @@ export class ExternalBrokerCore {
     try { return await done } finally { this.#pending.delete(prepared.record.actionId) }
   }
 
-  async #executePrepared(request: BrokerClientRequest, initial: BrokerLedgerRecord, signal: AbortSignal): Promise<BrokerResponse> {
+  async #readAllSecrets(primary: BrokerCredentialSpec, signal: AbortSignal): Promise<{ token: string; secrets: string[] }> {
+    const token = await readBrokerCredential(primary, this.#credentialMaxBytes, this.#credentialHooks, signal)
+    const secrets: string[] = []
+    for (const configured of this.#credentials.values()) {
+      const value = configured.id === primary.id
+        ? token
+        : await readBrokerCredential(configured, this.#credentialMaxBytes, this.#credentialHooks, signal)
+      if (value.length > 0) secrets.push(value)
+    }
+    return { token, secrets }
+  }
+
+  async #executePrepared(request: BrokerClientRequest | ActionBrokerClientRequest, initial: BrokerLedgerRecord, signal: AbortSignal): Promise<ActionBrokerResponse> {
     let record = initial
     const requestDigestValue = brokerLedgerRequestDigest(request)
     try {
-      const grant = this.#ledger.grant(record.grantId), credential = grant && this.#credentials.get(grant.credentialId)
+      const grant = this.#ledger.anyGrant(record.grantId)
+      const credential = grant && this.#credentials.get(grant.credentialId)
       if (!grant || !credential) return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'credential-unavailable', this.#authority))
       if (signal.aborted || request.deadline <= this.#now()) return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'deadline-exceeded', this.#authority))
-      const token = await readProtectedCredential(credential, this.#credentialMaxBytes, this.#beforeCredentialOpen)
-      const secrets: string[] = []
-      try { for (const configured of this.#credentials.values()) secrets.push(configured.id === credential.id ? token : await readProtectedCredential(configured, this.#credentialMaxBytes, this.#beforeCredentialOpen)) } catch { return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'credential-unavailable', this.#authority)) }
-      if (secrets.some(secret => containsSecret(request.payload, secret)) || containsCredentialShape(request.payload)) return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'request-invalid', this.#authority))
+
+      let token: string
+      let secrets: string[]
+      try {
+        ({ token, secrets } = await this.#readAllSecrets(credential, signal))
+      } catch {
+        return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'credential-unavailable', this.#authority))
+      }
+
+      if (secrets.some(secret => containsSecret(request.payload, secret)) || containsCredentialShape(request.payload)) {
+        return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, 'request-invalid', this.#authority))
+      }
+
+      const domain = 'domain' in request ? request.domain : 'github'
+      if (domain === 'http') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        validateHttpAgainstGrant(
+          grant2.destination as HttpGrantDestination,
+          req2.destination as HttpRequestDestination,
+          req2.payload as HttpRequestPayload,
+        )
+      } else if (domain === 'lark') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        validateLarkAgainstGrant(
+          req2.operation as 'lark.send-message' | 'lark.reply-message' | 'lark.read-messages',
+          grant2.destination as LarkGrantDestination,
+          req2.destination as LarkRequestDestination,
+          req2.payload as LarkSendPayload | LarkReadPayload,
+        )
+      } else if (domain === 'calendar') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        validateCalendarAgainstGrant(
+          req2.operation as 'calendar.list-events' | 'calendar.get-event' | 'calendar.create-event' | 'calendar.update-event' | 'calendar.delete-event',
+          grant2.destination as CalendarGrantDestination,
+          req2.destination as CalendarRequestDestination,
+          req2.payload as CalendarActionPayload,
+          this.#now(),
+        )
+      } else if (domain === 'shell') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        await validateShellAgainstGrant(
+          grant2.destination as ShellGrantDestination,
+          req2.destination as ShellRequestDestination,
+          req2.payload as ShellExecPayload,
+          this.#shellDeps,
+        )
+      }
+
       const leaseExpiresAt = Math.min(request.deadline, grant.expiresAt, this.#now() + credential.maxLeaseMs)
       record = this.#ledger.dispatch(record.actionId, record.version, requestDigestValue, credential.id, leaseExpiresAt, this.#authority)
-      const deadline = AbortSignal.timeout(Math.max(1, leaseExpiresAt - this.#now()))
+      const remainingMs = Math.max(1, leaseExpiresAt - this.#now())
+      const deadline = AbortSignal.timeout(remainingMs)
       const combined = AbortSignal.any([signal, deadline])
-      let result: BrokerSuccessResult | null = null
-      if (request.operation === 'commit') {
-        const payload = request.payload as BrokerCommitPayload
-        const commit = await abortable(this.#commit({ actionId: request.actionId, grant: githubGrant(grant), request: { grantId: grant.id, idempotencyKey: request.actionId, expectedHeadOid: payload.expectedHeadOid, headline: payload.headline, files: payload.files.map(file => ({ ...file })) }, token, signal: combined }), combined)
-        if (commit.status === 'succeeded' && commit.commitOid) result = { operation: 'commit', repository: grant.destination.repository, branch: grant.destination.branch, parentOid: payload.expectedHeadOid, commitOid: commit.commitOid }
-      } else if (request.operation === 'pull-request') {
-        const payload = request.payload as BrokerPullRequestPayload
-        const created = await abortable(this.#pullRequest({ actionId: request.actionId, grant: githubGrant(grant, true), expectedHeadOid: payload.expectedHeadOid, title: payload.title, body: payload.body, token, signal: combined }), combined)
-        if (created.status === 'succeeded' && created.pullRequestNumber && grant.destination.baseBranch !== undefined) result = { operation: 'pull-request', repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch, expectedHeadOid: payload.expectedHeadOid, pullRequestNumber: created.pullRequestNumber }
-      } else {
-        const payload = request.payload as BrokerInspectPayload
-        const inspected = await abortable(this.#inspect({ grant: githubGrant(grant), kind: payload.kind, ...(payload.path === undefined ? {} : { path: payload.path }), ...(payload.pullRequestNumber === undefined ? {} : { pullRequestNumber: payload.pullRequestNumber }), token, signal: combined }), combined)
-        if (inspected) {
-          const projected = inspectProjection(payload, inspected.observed, grant)
-          if (projected && !secrets.some(secret => containsSecret(projected, secret)) && !containsCredentialShape(projected)) { const canonical = canonicalBrokerJson(projected); result = { operation: 'inspect', repository: grant.destination.repository, branch: grant.destination.branch, kind: payload.kind, observed: projected, observedDigest: createHash('sha256').update(canonical).digest('hex') } }
+
+      let result: ActionBrokerSuccessResult | null = null
+
+      if (domain === 'github') {
+        const dest = grant.destination as GitHubGrantDestinationV2
+        if (request.operation === 'commit') {
+          const payload = request.payload as BrokerCommitPayload
+          const commit = await abortable(this.#commit({ actionId: request.actionId, grant: githubGrant(grant), request: { grantId: grant.id, idempotencyKey: request.actionId, expectedHeadOid: payload.expectedHeadOid, headline: payload.headline, files: payload.files.map(file => ({ ...file })) }, token, signal: combined }), combined)
+          if (commit.status === 'succeeded' && commit.commitOid) result = { operation: 'commit', repository: dest.repository, branch: dest.branch, parentOid: payload.expectedHeadOid, commitOid: commit.commitOid }
+        } else if (request.operation === 'pull-request') {
+          const payload = request.payload as BrokerPullRequestPayload
+          const created = await abortable(this.#pullRequest({ actionId: request.actionId, grant: githubGrant(grant, true), expectedHeadOid: payload.expectedHeadOid, title: payload.title, body: payload.body, token, signal: combined }), combined)
+          if (created.status === 'succeeded' && created.pullRequestNumber && dest.baseBranch !== undefined) result = { operation: 'pull-request', repository: dest.repository, branch: dest.branch, baseBranch: dest.baseBranch, expectedHeadOid: payload.expectedHeadOid, pullRequestNumber: created.pullRequestNumber }
+        } else {
+          const payload = request.payload as BrokerInspectPayload
+          const inspected = await abortable(this.#inspect({ grant: githubGrant(grant), kind: payload.kind, ...(payload.path === undefined ? {} : { path: payload.path }), ...(payload.pullRequestNumber === undefined ? {} : { pullRequestNumber: payload.pullRequestNumber }), ...(payload.commitOid === undefined ? {} : { commitOid: payload.commitOid }), token, signal: combined }), combined)
+          if (inspected) {
+            const projected = inspectProjection(payload, inspected.observed, grant)
+            if (projected && !secrets.some(secret => containsSecret(projected, secret)) && !containsCredentialShape(projected)) {
+              const canonical = canonicalBrokerJson(projected)
+              result = { operation: 'inspect', repository: dest.repository, branch: dest.branch, kind: payload.kind, observed: projected, observedDigest: createHash('sha256').update(canonical).digest('hex') }
+            }
+          }
         }
+      } else if (domain === 'http') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        result = await executeHttpGuardedAction({
+          grantDestination: grant2.destination as HttpGrantDestination,
+          requestDestination: req2.destination as HttpRequestDestination,
+          payload: req2.payload as HttpRequestPayload,
+          token,
+          timeoutMs: remainingMs,
+          signal: combined,
+          deps: { ...this.#httpDeps, secrets },
+        })
+      } else if (domain === 'lark') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        result = await executeLarkGuardedAction({
+          actionId: req2.actionId,
+          operation: req2.operation as 'lark.send-message' | 'lark.reply-message' | 'lark.read-messages',
+          grantDestination: grant2.destination as LarkGrantDestination,
+          requestDestination: req2.destination as LarkRequestDestination,
+          payload: req2.payload as LarkSendPayload | LarkReadPayload,
+          token,
+          timeoutMs: remainingMs,
+          signal: combined,
+          deps: { ...this.#larkDeps, secrets },
+        })
+      } else if (domain === 'calendar') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        result = await executeCalendarGuardedAction({
+          operation: req2.operation as 'calendar.list-events' | 'calendar.get-event' | 'calendar.create-event' | 'calendar.update-event' | 'calendar.delete-event',
+          grantDestination: grant2.destination as CalendarGrantDestination,
+          requestDestination: req2.destination as CalendarRequestDestination,
+          payload: req2.payload as CalendarActionPayload,
+          token,
+          timeoutMs: remainingMs,
+          signal: combined,
+          deps: { now: this.#now, ...this.#calendarDeps, secrets },
+        })
+      } else if (domain === 'shell') {
+        const req2 = request as ActionBrokerClientRequest
+        const grant2 = grant as ExternalActionGrant
+        result = await executeShellGuardedAction({
+          grantDestination: grant2.destination as ShellGrantDestination,
+          requestDestination: req2.destination as ShellRequestDestination,
+          payload: req2.payload as ShellExecPayload,
+          remainingLeaseMs: remainingMs,
+          signal: combined,
+          deps: { ...this.#shellDeps, secrets },
+        })
+      }
+
+      if (result && (secrets.some(secret => containsSecret(result, secret)) || containsCredentialShape(result))) {
+        return response(this.#settle(record, requestDigestValue, null, 'request-invalid'))
       }
       if (combined.aborted || signal.aborted || this.#now() >= leaseExpiresAt) return response(this.#settle(record, requestDigestValue, null, 'aborted'))
       return response(result ? this.#ledger.settle(record.actionId, record.version, requestDigestValue, { status: 'succeeded', dispatched: true, result, error: null, completedAt: Math.max(1, this.#now()) }, this.#authority) : this.#settle(record, requestDigestValue, null, 'transport-failed'))
     } catch (error) {
       if (record.status === 'dispatched') {
-        try { return response(this.#settle(record, requestDigestValue, null, error instanceof BrokerCoreError ? error.code : 'transport-failed')) } catch { return fail('transport-failed', true) }
+        try { return response(this.#settle(record, requestDigestValue, null, safeCode(error))) } catch { return fail('transport-failed', true) }
       }
-      try { return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, error instanceof BrokerCoreError ? error.code : safeCode(error), this.#authority)) } catch { return fail(safeCode(error)) }
+      try { return response(this.#ledger.failPrepared(record.actionId, record.version, requestDigestValue, safeCode(error), this.#authority)) } catch { return fail(safeCode(error)) }
     }
   }
 
-  #settle(record: BrokerLedgerRecord, requestDigestValue: string, result: BrokerSuccessResult | null, code: string): BrokerLedgerRecord {
+  #settle(record: BrokerLedgerRecord, requestDigestValue: string, result: BrokerSuccessResult | ActionBrokerSuccessResult | null, code: string): BrokerLedgerRecord {
     const value: BrokerLedgerOutcome = result
       ? { status: 'succeeded', dispatched: true, result, error: null, completedAt: Math.max(1, this.#now()) }
       : { status: 'unknown', dispatched: true, result: null, error: { code }, completedAt: Math.max(1, this.#now()) }
     return this.#ledger.settle(record.actionId, record.version, requestDigestValue, value, this.#authority)
   }
 
-  admin = async (request: BrokerAdminRequest, signal: AbortSignal): Promise<BrokerAdminResponse> => {
+  admin = async (request: BrokerAdminRequest | ActionBrokerAdminRequest, signal: AbortSignal): Promise<BrokerAdminResponse> => {
     if (signal.aborted) fail('aborted')
-    // The signed request digest is deliberately evaluated even for status so
-    // malformed or secret-bearing admin input cannot reach the control plane.
-    const adminDigest = brokerAdminRequestDigest(request)
+    const adminDigest = 'protocol' in request && request.protocol === 'assistant-actions/action-broker/v2'
+      ? createHash('sha256').update(canonicalBrokerJson((() => { const { signature: _s, ...u } = request; return u })())).digest('hex')
+      : createHash('sha256').update(canonicalBrokerJson((() => { const { signature: _s, ...u } = request; return u })())).digest('hex')
     try {
       let mutation: BrokerControlMutation | undefined
       if (request.operation === 'stop') {
         const body = request.body as Extract<import('./broker-protocol.js').BrokerAdminIntent, { operation: 'stop' }>['body']
         mutation = this.#ledger.applyAdminMutation({ adminKeyId: request.adminKeyId, nonce: request.nonce, requestDigest: adminDigest, expiresAt: request.deadline, mutation: { operation: 'stop', expectedControlVersion: body.expectedControlVersion, reason: body.reason }, authority: this.#authority })
-      }
-      else if (request.operation === 'resume') {
+      } else if (request.operation === 'resume') {
         const body = request.body as Extract<import('./broker-protocol.js').BrokerAdminIntent, { operation: 'resume' }>['body']
         mutation = this.#ledger.applyAdminMutation({ adminKeyId: request.adminKeyId, nonce: request.nonce, requestDigest: adminDigest, expiresAt: request.deadline, mutation: { operation: 'resume', expectedControlVersion: body.expectedControlVersion, expectedGeneration: body.expectedGeneration, reason: 'operator-resume' }, authority: this.#authority })
       } else if (request.operation === 'revoke') {
         const body = request.body as Extract<import('./broker-protocol.js').BrokerAdminIntent, { operation: 'revoke' }>['body']
         mutation = this.#ledger.applyAdminMutation({ adminKeyId: request.adminKeyId, nonce: request.nonce, requestDigest: adminDigest, expiresAt: request.deadline, mutation: { operation: 'revoke', expectedControlVersion: body.expectedControlVersion, grantId: body.grantId, grantRevision: body.grantRevision, grantDigest: body.grantDigest, policyEpoch: body.policyEpoch, emergencyEpoch: body.emergencyEpoch, reason: body.reason }, authority: this.#authority })
-      } else this.#ledger.consumeAdminNonce(request.adminKeyId, request.nonce, adminDigest, request.deadline, this.#authority)
+      } else {
+        this.#ledger.consumeAdminNonce(request.adminKeyId, request.nonce, adminDigest, request.deadline, this.#authority)
+      }
       if (mutation) for (const actionId of mutation.abortActionIds) this.#pending.get(actionId)?.controller.abort()
       const state = this.#adminState()
       return { status: 'succeeded', state, error: null, completedAt: Math.max(1, this.#now()) }
@@ -348,7 +534,7 @@ export class ExternalBrokerCore {
     if (this.#pending.size === 0) return
     const pending = [...this.#pending.values()]
     if (await settleWithin(pending.map(value => value.done), Math.max(1, deadlineAt - this.#now()))) return
-    for (const pending of this.#pending.values()) pending.controller.abort()
+    for (const item of this.#pending.values()) item.controller.abort()
     try { this.#ledger.terminalizeActive('drain-deadline', this.#authority) } catch { /* Startup recovery keeps no-replay if the fence was lost. */ }
     await settleWithin(pending.map(value => value.done), FORCED_TEARDOWN_GRACE_MS)
   }
@@ -357,7 +543,7 @@ export class ExternalBrokerCore {
     this.#active = false
     clearInterval(this.#renewal)
     const pending = [...this.#pending.values()]
-    for (const pending of this.#pending.values()) pending.controller.abort()
+    for (const item of this.#pending.values()) item.controller.abort()
     try { this.#ledger.terminalizeActive('core-close', this.#authority) } catch { /* A successor will recover if the fence was lost. */ }
     await settleWithin(pending.map(value => value.done), FORCED_TEARDOWN_GRACE_MS)
     try { if (this.#ledger.hasController(this.#authority)) this.#ledger.releaseController(this.#authority) } finally { this.#ledger.close() }

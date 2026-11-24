@@ -4,12 +4,22 @@ import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { dirname, isAbsolute, resolve } from 'node:path'
-import { requestGitHubBrokerAdmin } from './broker-client.js'
-import { createExternalBrokerCore, normalizeExternalBrokerCoreConfig, type BrokerProtectedFileCredential } from './broker-core.js'
-import type { ExternalGitHubGrant } from './broker-ledger.js'
-import { inspectLinuxPeerCredentials, linuxPeerCredentialsAvailable } from './broker-peer-linux.js'
+import { requestActionBrokerAdmin, requestGitHubBrokerAdmin } from './broker-client.js'
+import { createExternalBrokerCore, normalizeExternalBrokerCoreConfig } from './broker-core.js'
+import type { BrokerCredentialSpec } from './broker-credentials.js'
+import type { AnyExternalBrokerGrant } from './broker-ledger.js'
+import { isWindowsNamedPipePath, verifyWindowsPrivatePath } from './broker-peer-windows.js'
 import type { BrokerAdminIntent, BrokerAdminResponse } from './broker-protocol.js'
+import type { ActionBrokerAdminResponse } from './broker-protocol-v2.js'
 import { startGitHubBrokerServer, type BrokerPeerCredentialInspector, type GitHubBrokerCorePort, type GitHubBrokerServerOptions } from './broker-server.js'
+import {
+  createBrokerTransportAdapter,
+  inspectPlatformPeerCredentials,
+  platformPeerCredentialsAvailable,
+  resolveBrokerTransportKind,
+  type BrokerPlatform,
+  type BrokerTransportKind,
+} from './broker-transport.js'
 
 const DIGEST = /^[0-9a-f]{64}$/u
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
@@ -34,6 +44,10 @@ export interface BrokerCliConfig {
   expectedAdminParentMode: number
   expectedBrokerPeerUid: number
   expectedBrokerPeerGid: number
+  expectedBrokerPeerSid?: string
+  platform?: BrokerPlatform
+  transport?: 'auto' | BrokerTransportKind
+  protocolMode?: 'github-v1' | 'action-v2'
   requestTimeoutMs: number
   helloTtlMs: number
 }
@@ -53,6 +67,8 @@ export interface BrokerServeConfig {
   expectedClientPeerGid: number
   expectedAdminPeerUid: number
   expectedAdminPeerGid: number
+  expectedClientPeerSid?: string
+  expectedAdminPeerSid?: string
   expectedActionSocketUid: number
   expectedActionSocketGid: number
   expectedActionParentMode: number
@@ -67,11 +83,15 @@ export interface BrokerServeConfig {
   requestTimeoutMs: number
   helloTtlMs: number
   drainTimeoutMs: number
-  credentials: readonly BrokerProtectedFileCredential[]
-  grants: readonly ExternalGitHubGrant[]
+  credentials: readonly BrokerCredentialSpec[]
+  grants: readonly AnyExternalBrokerGrant[]
+  actionGrants?: readonly AnyExternalBrokerGrant[]
   policyEpoch: number
   controllerTtlMs?: number
   credentialMaxBytes?: number
+  platform?: BrokerPlatform
+  transport?: 'auto' | BrokerTransportKind
+  protocolMode?: 'github-v1' | 'action-v2'
 }
 
 export interface BrokerCliDependencies {
@@ -92,11 +112,22 @@ function integer(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
 function canonicalPath(value: unknown): value is string {
   return typeof value === 'string' && isAbsolute(value) && resolve(value) === value && value !== '/' && !value.includes('\0')
 }
-function exact(input: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): void {
+function exactOptional(input: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): void {
   if (Object.keys(input).some(key => !allowed.includes(key)) || required.some(key => !Object.hasOwn(input, key))) throw new Error('invalid config')
 }
 
-async function privateFile(path: string, mode = 0o600, maximumBytes = 2 * 1024 * 1024): Promise<Buffer> {
+async function privateFile(path: string, mode = 0o600, maximumBytes = 2 * 1024 * 1024, platform: NodeJS.Platform = process.platform): Promise<Buffer> {
+  if (platform === 'win32') {
+    verifyWindowsPrivatePath(path, { platform })
+    const descriptor = await open(path, constants.O_RDONLY)
+    try {
+      const before = await descriptor.stat({ bigint: true })
+      if (!before.isFile() || before.size > BigInt(maximumBytes)) throw new Error('unsafe private file')
+      return await descriptor.readFile()
+    } finally {
+      await descriptor.close()
+    }
+  }
   const currentUid = BigInt(process.getuid?.() ?? -1), currentGid = BigInt(process.getgid?.() ?? -1), parentPath = resolve(path, '..')
   await safeAncestorChain(parentPath, Number(currentUid), Number(currentGid), true)
   const [canonicalParent, parent] = await Promise.all([realpath(parentPath), lstat(parentPath, { bigint: true })])
@@ -118,37 +149,60 @@ async function safeAncestorChain(path: string, expectedLeafUid: number, expected
     const [canonical, stat] = await Promise.all([realpath(cursor), lstat(cursor, { bigint: true })])
     const mode = Number(stat.mode & 0o7777n), uid = Number(stat.uid), gid = Number(stat.gid)
     const stickyRoot = uid === 0 && (mode & 0o1000) !== 0 && (mode & 0o022) !== 0
-    if (canonical !== cursor || stat.isSymbolicLink() || !stat.isDirectory() || !stickyRoot && (mode & 0o022) !== 0
-      || leaf && privateLeaf && (uid !== expectedLeafUid || gid !== expectedLeafGid || (mode & 0o077) !== 0)) throw new Error('unsafe path ancestry')
+    if (canonical !== cursor || stat.isSymbolicLink() || !stat.isDirectory() || (!stickyRoot && (mode & 0o022) !== 0)
+      || (leaf && privateLeaf && (uid !== expectedLeafUid || gid !== expectedLeafGid || (mode & 0o077) !== 0))) throw new Error('unsafe path ancestry')
     const parent = dirname(cursor)
     if (parent === cursor) return
     cursor = parent; leaf = false
   }
 }
 
+function validEndpointPath(value: unknown, kind: BrokerTransportKind): value is string {
+  if (kind === 'windows-pipe') return isWindowsNamedPipePath(value)
+  return canonicalPath(value) && Buffer.byteLength(value) <= 100
+}
+
 function normalizedConfig(value: unknown, serve: boolean): BrokerCliConfig | BrokerServeConfig {
   if (!plain(value)) throw new Error('invalid config')
-  const operator = ['adminSocketPath', 'brokerId', 'minimumBrokerGeneration', 'brokerPublicKeyPath', 'adminKeyId', 'adminPrivateKeyPath', 'adminInstanceId', 'adminGeneration', 'expectedAdminSocketUid', 'expectedAdminSocketGid', 'expectedAdminSocketMode', 'expectedAdminParentUid', 'expectedAdminParentGid', 'expectedAdminParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'requestTimeoutMs', 'helloTtlMs'] as const
-  const daemon = ['actionSocketPath', 'adminSocketPath', 'brokerId', 'minimumBrokerGeneration', 'serverPrivateKeyPath', 'clientKeyId', 'clientPublicKeyPath', 'adminKeyId', 'adminPublicKeyPath', 'statePath', 'expectedClientPeerUid', 'expectedClientPeerGid', 'expectedAdminPeerUid', 'expectedAdminPeerGid', 'expectedActionSocketUid', 'expectedActionSocketGid', 'expectedActionParentMode', 'expectedActionSocketMode', 'expectedAdminSocketUid', 'expectedAdminSocketGid', 'expectedAdminParentMode', 'expectedAdminSocketMode', 'maxActionConnections', 'maxAdminConnections', 'maxConcurrentRequests', 'requestTimeoutMs', 'helloTtlMs', 'drainTimeoutMs', 'credentials', 'grants', 'policyEpoch', 'controllerTtlMs', 'credentialMaxBytes'] as const
-  exact(value, serve ? daemon : operator, serve ? daemon.filter(key => key !== 'controllerTtlMs' && key !== 'credentialMaxBytes') : operator)
+  const operatorRequired = ['adminSocketPath', 'brokerId', 'minimumBrokerGeneration', 'brokerPublicKeyPath', 'adminKeyId', 'adminPrivateKeyPath', 'adminInstanceId', 'adminGeneration', 'expectedAdminSocketUid', 'expectedAdminSocketGid', 'expectedAdminSocketMode', 'expectedAdminParentUid', 'expectedAdminParentGid', 'expectedAdminParentMode', 'expectedBrokerPeerUid', 'expectedBrokerPeerGid', 'requestTimeoutMs', 'helloTtlMs'] as const
+  const operatorAllowed = [...operatorRequired, 'expectedBrokerPeerSid', 'platform', 'transport', 'protocolMode'] as const
+  const daemonRequired = ['actionSocketPath', 'adminSocketPath', 'brokerId', 'minimumBrokerGeneration', 'serverPrivateKeyPath', 'clientKeyId', 'clientPublicKeyPath', 'adminKeyId', 'adminPublicKeyPath', 'statePath', 'expectedClientPeerUid', 'expectedClientPeerGid', 'expectedAdminPeerUid', 'expectedAdminPeerGid', 'expectedActionSocketUid', 'expectedActionSocketGid', 'expectedActionParentMode', 'expectedActionSocketMode', 'expectedAdminSocketUid', 'expectedAdminSocketGid', 'expectedAdminParentMode', 'expectedAdminSocketMode', 'maxActionConnections', 'maxAdminConnections', 'maxConcurrentRequests', 'requestTimeoutMs', 'helloTtlMs', 'drainTimeoutMs', 'credentials', 'grants', 'policyEpoch'] as const
+  const daemonAllowed = [...daemonRequired, 'controllerTtlMs', 'credentialMaxBytes', 'actionGrants', 'expectedClientPeerSid', 'expectedAdminPeerSid', 'platform', 'transport', 'protocolMode'] as const
+  exactOptional(value, serve ? daemonAllowed : operatorAllowed, serve ? daemonRequired : operatorRequired)
+
+  const platformOpt = value.platform === undefined ? 'auto' : value.platform
+  const transportOpt = value.transport === undefined ? 'auto' : value.transport
+  if (!['auto', 'linux', 'darwin', 'win32'].includes(String(platformOpt)) || !['auto', 'posix-uds', 'windows-pipe'].includes(String(transportOpt))) {
+    throw new Error('invalid platform or transport')
+  }
+  if (value.protocolMode !== undefined && value.protocolMode !== 'github-v1' && value.protocolMode !== 'action-v2') {
+    throw new Error('invalid protocolMode')
+  }
+  const transportKind = resolveBrokerTransportKind(platformOpt as BrokerPlatform, transportOpt as 'auto' | BrokerTransportKind)
+
   if (!IDENTIFIER.test(String(value.brokerId)) || !integer(value.minimumBrokerGeneration, 1) || !integer(value.requestTimeoutMs, 1, 300_000) || !integer(value.helloTtlMs, 1, 300_000)) throw new Error('invalid config')
-  if (!serve && (!canonicalPath(value.adminSocketPath) || Buffer.byteLength(value.adminSocketPath) > 100 || !canonicalPath(value.brokerPublicKeyPath)
+  if (!serve && (!validEndpointPath(value.adminSocketPath, transportKind) || !canonicalPath(value.brokerPublicKeyPath)
     || !IDENTIFIER.test(String(value.adminKeyId)) || !canonicalPath(value.adminPrivateKeyPath) || !IDENTIFIER.test(String(value.adminInstanceId)) || !integer(value.adminGeneration, 1)
     || !integer(value.expectedAdminSocketUid, 0, 0x7fffffff) || !integer(value.expectedAdminSocketGid, 0, 0x7fffffff) || !integer(value.expectedAdminSocketMode, 0, 0o777)
     || !integer(value.expectedAdminParentUid, 0, 0x7fffffff) || !integer(value.expectedAdminParentGid, 0, 0x7fffffff) || !integer(value.expectedAdminParentMode, 0, 0o777)
-    || !integer(value.expectedBrokerPeerUid, 0, 0x7fffffff) || !integer(value.expectedBrokerPeerGid, 0, 0x7fffffff))) throw new Error('invalid operator config')
+    || !integer(value.expectedBrokerPeerUid, 0, 0x7fffffff) || !integer(value.expectedBrokerPeerGid, 0, 0x7fffffff)
+    || (value.expectedBrokerPeerSid !== undefined && typeof value.expectedBrokerPeerSid !== 'string'))) throw new Error('invalid operator config')
   if (serve && (!canonicalPath(value.serverPrivateKeyPath) || !IDENTIFIER.test(String(value.clientKeyId)) || !canonicalPath(value.clientPublicKeyPath) || !canonicalPath(value.adminPublicKeyPath)
     || !IDENTIFIER.test(String(value.adminKeyId)) || value.clientKeyId === value.adminKeyId || value.clientPublicKeyPath === value.adminPublicKeyPath
     || value.serverPrivateKeyPath === value.clientPublicKeyPath || value.serverPrivateKeyPath === value.adminPublicKeyPath
-    || !canonicalPath(value.actionSocketPath) || !canonicalPath(value.adminSocketPath) || value.actionSocketPath === value.adminSocketPath || Buffer.byteLength(value.actionSocketPath) > 100 || Buffer.byteLength(value.adminSocketPath) > 100
+    || !validEndpointPath(value.actionSocketPath, transportKind) || !validEndpointPath(value.adminSocketPath, transportKind) || value.actionSocketPath === value.adminSocketPath
     || !canonicalPath(value.statePath) || !integer(value.expectedClientPeerUid, 0, 0x7fffffff) || !integer(value.expectedClientPeerGid, 0, 0x7fffffff)
     || !integer(value.expectedAdminPeerUid, 0, 0x7fffffff) || !integer(value.expectedAdminPeerGid, 0, 0x7fffffff)
+    || (value.expectedClientPeerSid !== undefined && typeof value.expectedClientPeerSid !== 'string')
+    || (value.expectedAdminPeerSid !== undefined && typeof value.expectedAdminPeerSid !== 'string')
     || !integer(value.expectedActionSocketUid, 0, 0x7fffffff) || !integer(value.expectedActionSocketGid, 0, 0x7fffffff) || !integer(value.expectedActionParentMode, 0, 0o777) || !integer(value.expectedActionSocketMode, 0, 0o777)
     || !integer(value.expectedAdminSocketUid, 0, 0x7fffffff) || !integer(value.expectedAdminSocketGid, 0, 0x7fffffff) || !integer(value.expectedAdminParentMode, 0, 0o777) || !integer(value.expectedAdminSocketMode, 0, 0o777)
     || !integer(value.maxActionConnections, 1, 1_024) || !integer(value.maxAdminConnections, 1, 64) || !integer(value.maxConcurrentRequests, 1, value.maxActionConnections as number)
-    || !integer(value.drainTimeoutMs, 1, 300_000) || !Array.isArray(value.credentials) || !Array.isArray(value.grants) || !integer(value.policyEpoch, 0)
-    || value.controllerTtlMs !== undefined && !integer(value.controllerTtlMs, 1_000, 300_000)
-    || value.credentialMaxBytes !== undefined && !integer(value.credentialMaxBytes, 1, 65_536))) throw new Error('invalid serve config')
+    || !integer(value.drainTimeoutMs, 1, 300_000) || !Array.isArray(value.credentials) || !Array.isArray(value.grants)
+    || (value.actionGrants !== undefined && !Array.isArray(value.actionGrants))
+    || !integer(value.policyEpoch, 0)
+    || (value.controllerTtlMs !== undefined && !integer(value.controllerTtlMs, 1_000, 300_000))
+    || (value.credentialMaxBytes !== undefined && !integer(value.credentialMaxBytes, 1, 65_536)))) throw new Error('invalid serve config')
   return Object.freeze({ ...value }) as unknown as BrokerCliConfig | BrokerServeConfig
 }
 
@@ -202,50 +256,95 @@ async function key(path: string, kind: 'private' | 'public'): Promise<KeyObject>
   } finally { bytes.fill(0) }
 }
 
-function safeOutput(response: BrokerAdminResponse): string {
+function safeOutput(response: BrokerAdminResponse | ActionBrokerAdminResponse): string {
   return JSON.stringify({ status: response.status, state: response.state, ...(response.error === null ? {} : { error: response.error }) }) + '\n'
 }
 
-async function admin(command: string, config: BrokerCliConfig, args: readonly string[]): Promise<BrokerAdminResponse> {
+async function admin(command: string, config: BrokerCliConfig, args: readonly string[], dependencies: BrokerCliDependencies = {}): Promise<BrokerAdminResponse | ActionBrokerAdminResponse> {
   if (!config.adminPrivateKeyPath || !config.adminKeyId || !config.adminInstanceId || !config.adminGeneration) throw new Error('operator credentials required')
   const [serverPublicKey, adminPrivateKey] = await Promise.all([key(config.brokerPublicKeyPath, 'public'), key(config.adminPrivateKeyPath, 'private')])
   const intent = adminIntent(command, args, Date.now(), config.requestTimeoutMs)
-  return await requestGitHubBrokerAdmin({
-    socketPath: config.adminSocketPath, serverPublicKey, timeoutMs: config.requestTimeoutMs, maxHelloTtlMs: config.helloTtlMs, expectedSocketUid: config.expectedAdminSocketUid, expectedSocketGid: config.expectedAdminSocketGid,
-    expectedSocketMode: config.expectedAdminSocketMode, expectedSocketParentUid: config.expectedAdminParentUid, expectedSocketParentGid: config.expectedAdminParentGid, expectedSocketParentMode: config.expectedAdminParentMode,
-    inspectPeerCredentials: inspectLinuxPeerCredentials, expectedBrokerPeerUid: config.expectedBrokerPeerUid, expectedBrokerPeerGid: config.expectedBrokerPeerGid,
-    expectedServerInstanceId: config.brokerId, minimumServerGeneration: config.minimumBrokerGeneration,
-  }, intent, { kind: 'assistant-actions-admin', instanceId: config.adminInstanceId, generation: config.adminGeneration }, config.adminKeyId, adminPrivateKey)
+  const peerInspector = dependencies.peerInspector ?? inspectPlatformPeerCredentials(config.platform ?? 'auto', 'server')
+  const transport = createBrokerTransportAdapter({
+    platform: config.platform ?? 'auto',
+    transport: config.transport ?? 'auto',
+    role: 'server',
+    inspectPeer: peerInspector,
+  })
+  const connOptions = {
+    socketPath: config.adminSocketPath,
+    serverPublicKey,
+    timeoutMs: config.requestTimeoutMs,
+    maxHelloTtlMs: config.helloTtlMs,
+    expectedSocketUid: config.expectedAdminSocketUid,
+    expectedSocketGid: config.expectedAdminSocketGid,
+    expectedSocketMode: config.expectedAdminSocketMode,
+    expectedSocketParentUid: config.expectedAdminParentUid,
+    expectedSocketParentGid: config.expectedAdminParentGid,
+    expectedSocketParentMode: config.expectedAdminParentMode,
+    inspectPeerCredentials: peerInspector,
+    expectedBrokerPeerUid: config.expectedBrokerPeerUid,
+    expectedBrokerPeerGid: config.expectedBrokerPeerGid,
+    ...(config.expectedBrokerPeerSid === undefined ? {} : { expectedBrokerPeerSid: config.expectedBrokerPeerSid }),
+    expectedServerInstanceId: config.brokerId,
+    minimumServerGeneration: config.minimumBrokerGeneration,
+    ...(config.platform === undefined ? {} : { platform: config.platform }),
+    transport,
+  }
+  const source = { kind: 'assistant-actions-admin' as const, instanceId: config.adminInstanceId, generation: config.adminGeneration }
+  if (config.protocolMode === 'action-v2') {
+    return await requestActionBrokerAdmin(connOptions, intent, source, config.adminKeyId, adminPrivateKey)
+  }
+  return await requestGitHubBrokerAdmin(connOptions, intent, source, config.adminKeyId, adminPrivateKey)
 }
 
 function productionCore(config: BrokerServeConfig): GitHubBrokerCorePort {
-  return createExternalBrokerCore(normalizeExternalBrokerCoreConfig({ instanceId: config.brokerId, statePath: config.statePath, credentials: config.credentials, grants: config.grants, policyEpoch: config.policyEpoch,
+  return createExternalBrokerCore(normalizeExternalBrokerCoreConfig({
+    instanceId: config.brokerId,
+    statePath: config.statePath,
+    credentials: config.credentials,
+    grants: config.grants,
+    ...(config.actionGrants === undefined ? {} : { actionGrants: config.actionGrants }),
+    policyEpoch: config.policyEpoch,
     ...(config.controllerTtlMs === undefined ? {} : { controllerTtlMs: config.controllerTtlMs }),
-    ...(config.credentialMaxBytes === undefined ? {} : { credentialMaxBytes: config.credentialMaxBytes }) }))
+    ...(config.credentialMaxBytes === undefined ? {} : { credentialMaxBytes: config.credentialMaxBytes }),
+    ...(config.platform && config.platform !== 'auto' ? { platform: config.platform } : {}),
+  }))
 }
 
 async function serve(config: BrokerServeConfig, dependencies: BrokerCliDependencies): Promise<void> {
   const createCore = dependencies.createCore ?? productionCore
-  const available = dependencies.peerCredentialsAvailable?.() ?? (dependencies.peerInspector === undefined && linuxPeerCredentialsAvailable())
-  if (!available && dependencies.peerInspector === undefined) throw new Error('Linux peer credentials unavailable')
-  const peer = dependencies.peerInspector ?? inspectLinuxPeerCredentials
+  const platform = config.platform ?? 'auto'
+  const available = dependencies.peerCredentialsAvailable?.() ?? (dependencies.peerInspector === undefined && platformPeerCredentialsAvailable(platform))
+  if (!available && dependencies.peerInspector === undefined) throw new Error('Platform peer credentials unavailable')
+  const peer = dependencies.peerInspector ?? inspectPlatformPeerCredentials(platform, 'client')
+  const transport = createBrokerTransportAdapter({
+    platform,
+    transport: config.transport ?? 'auto',
+    role: 'client',
+    inspectPeer: peer,
+  })
   const [serverPrivateKey, clientPublicKey, adminPublicKey] = await Promise.all([key(config.serverPrivateKeyPath, 'private'), key(config.clientPublicKeyPath, 'public'), key(config.adminPublicKeyPath, 'public')])
   const serverPublicKey = createPublicKey(serverPrivateKey)
   if (config.clientKeyId === config.adminKeyId || serverPublicKey.equals(clientPublicKey) || serverPublicKey.equals(adminPublicKey) || clientPublicKey.equals(adminPublicKey)) throw new Error('broker signing keys must be distinct')
   const core = await createCore(config)
-  let server
+  let server: Awaited<ReturnType<typeof startGitHubBrokerServer>>
   try {
     const generation = core.snapshot().generation
     if (!integer(generation, config.minimumBrokerGeneration, Number.MAX_SAFE_INTEGER)) throw new Error('broker generation regressed')
+    const protocolMode = config.protocolMode ?? ((config.actionGrants && config.actionGrants.length > 0) ? 'action-v2' : 'github-v1')
     const options: GitHubBrokerServerOptions = {
       actionSocketPath: config.actionSocketPath, adminSocketPath: config.adminSocketPath, instanceId: config.brokerId, generation, serverPrivateKey, clientPublicKey, clientKeyId: config.clientKeyId,
       adminPublicKey, adminKeyId: config.adminKeyId, core, inspectPeerCredentials: peer,
       expectedClientPeerUid: config.expectedClientPeerUid, expectedClientPeerGid: config.expectedClientPeerGid, expectedAdminPeerUid: config.expectedAdminPeerUid, expectedAdminPeerGid: config.expectedAdminPeerGid,
+      ...(config.expectedClientPeerSid === undefined ? {} : { expectedClientPeerSid: config.expectedClientPeerSid }),
+      ...(config.expectedAdminPeerSid === undefined ? {} : { expectedAdminPeerSid: config.expectedAdminPeerSid }),
       expectedActionSocketUid: config.expectedActionSocketUid, expectedActionSocketGid: config.expectedActionSocketGid, expectedActionParentMode: config.expectedActionParentMode, expectedActionSocketMode: config.expectedActionSocketMode,
       expectedAdminSocketUid: config.expectedAdminSocketUid, expectedAdminSocketGid: config.expectedAdminSocketGid, expectedAdminParentMode: config.expectedAdminParentMode, expectedAdminSocketMode: config.expectedAdminSocketMode,
       maxActionConnections: config.maxActionConnections, maxAdminConnections: config.maxAdminConnections, maxConcurrentRequests: config.maxConcurrentRequests,
       firstByteTimeoutMs: Math.min(2_000, config.requestTimeoutMs), frameTimeoutMs: Math.min(10_000, config.requestTimeoutMs),
       totalTimeoutMs: config.requestTimeoutMs, helloTtlMs: config.helloTtlMs, drainTimeoutMs: config.drainTimeoutMs,
+      platform, transport, protocolMode,
     }
     dependencies.onServerReady?.(options)
     server = await startGitHubBrokerServer(options)
@@ -273,7 +372,7 @@ export async function runBrokerCli(argv: readonly string[], dependencies: Broker
     if (!command || !configPath || !['serve', 'status', 'stop', 'resume', 'revoke'].includes(command)) throw new Error('invalid command')
     const config = await loadBrokerCliConfig(configPath, command === 'serve')
     if (command === 'serve') { if (args.length !== 0) throw new Error('invalid arguments'); await serve(config as BrokerServeConfig, dependencies); return 0 }
-    const response = await admin(command, config as BrokerCliConfig, args)
+    const response = await admin(command, config as BrokerCliConfig, args, dependencies)
     stdout.write(safeOutput(response))
     return response.status === 'succeeded' ? 0 : 1
   } catch { stderr.write(FAILURE); return 1 }
