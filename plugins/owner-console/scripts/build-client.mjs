@@ -1,9 +1,10 @@
 import { mkdir, writeFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
 /** Wraps the browser bundle in the module-loader contract the Web shell expects. */
 const bundled = (await build({
-  entryPoints: [new URL('../src/client.ts', import.meta.url).pathname],
+  entryPoints: [fileURLToPath(new URL('../src/client.ts', import.meta.url))],
   bundle: true,
   format: 'cjs',
   platform: 'browser',

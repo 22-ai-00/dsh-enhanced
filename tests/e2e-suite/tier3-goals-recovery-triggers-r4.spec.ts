@@ -851,7 +851,7 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
     expect(resEn.ok).toBe(true)
     expect(resEn.state).toBe('enabled')
 
-    const resUpg = await handleControl(ctx, { dshHome: ws.dshHome, ownerAuthorized: true, action: cmdUpgrade!.action })
+    const resUpg = await handleControl(ctx, { dshHome: ws.dshHome, ownerAuthorized: true, action: cmdUpgrade!.action, env: {} })
     expect(resUpg.ok).toBe(true)
   })
 

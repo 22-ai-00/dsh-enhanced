@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
-import { renameSync } from 'node:fs'
+import { mkdirSync, renameSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, realpath, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -53,6 +53,21 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerLedger', () => {
     const databasePath = join(parent, 'ledger.sqlite')
     expect(() => new ExternalBrokerLedger(databasePath, 'broker', { now: () => now, beforeDatabaseOpen: () => { renameSync(parent, parked); renameSync(replacement, parent) } })).toThrow(/unsafe-file/)
     await rename(parent, replacement); await rename(parked, parent)
+  })
+
+  it('permits parent directory link-count growth from child entry creation when parent inode and mode stay pinned', async () => {
+    const outer = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-nlink-'))); roots.push(outer)
+    const parent = join(outer, 'state')
+    await mkdir(parent, { mode: 0o700 })
+    const databasePath = join(parent, 'ledger.sqlite')
+    const ledger = new ExternalBrokerLedger(databasePath, 'broker', {
+      now: () => now,
+      beforeDatabaseOpen: () => {
+        mkdirSync(join(parent, 'child-dir'), { mode: 0o700 })
+      },
+    })
+    expect(ledger.snapshot().instanceId).toBe('broker')
+    ledger.close()
   })
 
   it('requires exact grant base-branch scope for pull-request inspection', () => {

@@ -2395,7 +2395,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
         ],
       })
       const host = makeHost(dshHome, profileDir, 'desktop')
-      const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform })
+      const report = await inspectSetupDoctor({ host, status, descriptors: [], prober, platform, env: {} })
       return { host, status, report }
     }
 
@@ -2429,7 +2429,7 @@ describe('setup doctor, self-healing repair, binary discovery and easy feishu se
       } as unknown as PluginManagerService
       const repair = await applyDoctorRepair({
         host, status, descriptors: [], settings: undefined, manager, prober,
-        issueIds: ['unsupported-platform-isolation'], platform, now: 12345,
+        issueIds: ['unsupported-platform-isolation'], platform, env: {}, now: 12345,
       })
       expect(repair.applied).toBe(true)
       expect(toggledOff).toContain('@dsh-enhanced/assistant-isolation')

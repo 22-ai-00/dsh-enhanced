@@ -497,6 +497,7 @@ describe('handleOwnerConsoleControlAction', () => {
       dshHome,
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
+      env: {},
     })
     expect(minimalOk.ok).toBe(true)
     expect(minimalOk.state).toBe('upgraded')
@@ -512,6 +513,7 @@ describe('handleOwnerConsoleControlAction', () => {
       dshHome,
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
+      env: {},
     })
     expect(corruptHost.ok).toBe(false)
     expect(corruptHost.error ?? corruptHost.reason).toBeTruthy()
@@ -525,6 +527,7 @@ describe('handleOwnerConsoleControlAction', () => {
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
       platform: 'linux',
+      env: {},
     })
     expect(frozen.ok).toBe(false)
     expect(frozen.error ?? frozen.reason).toMatch(/frozen-linux-systemd/u)
@@ -542,6 +545,7 @@ describe('handleOwnerConsoleControlAction', () => {
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
       confirmDshHomeStopped: true,
+      env: {},
       deps: {
         runUpgrade: async () => {
           steps.push('upgrade')
@@ -564,6 +568,7 @@ describe('handleOwnerConsoleControlAction', () => {
       dshHome,
       ownerAuthorized: true,
       action: 'upgradeAssistantAndRecover',
+      env: {},
       deps: {
         runUpgrade: async () => ({ ok: true }),
         runDoctor: async () => ({

@@ -950,7 +950,7 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
   })
 
   it('rolls back #wp08Usage on pre-dispatch BrokerClientError in external-v2 mode and preserves usage when postDispatchUnknown is true', async () => {
-    const root = await makeTempDir('svc-v2-ext-rb-')
+    const root = await makeTempDir('v2-er-')
     const keyDir = join(root, 'keys')
     const sockDir = join(root, 's')
     const workDir = join(root, 'work')
@@ -1244,7 +1244,7 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
   })
 
   it('preserves concurrent lastSettledCommitDigest during rollbackUsage so mismatched predecessorDigest is rejected', async () => {
-    const root = await makeTempDir('svc-v2-concurrent-rb-')
+    const root = await makeTempDir('v2-cr-')
     const keyDir = join(root, 'keys')
     const sockDir = join(root, 's')
     const workDir = join(root, 'work')
@@ -1453,7 +1453,7 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
   })
 
   it('does not consume external-v2 maxUses=1 lease when canonicalBrokerJson throws BrokerProtocolError on forbidden HTTP headers or fractional shell timeoutMs', async () => {
-    const root = await makeTempDir('svc-v2-canon-rb-')
+    const root = await makeTempDir('v2-cn-')
     const keyDir = join(root, 'keys')
     const sockDir = join(root, 's')
     const workDir = join(root, 'work')
@@ -1691,7 +1691,7 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
   })
 
   it('rejects invalid estimatedCostMicros pre-dispatch without poisoning #wp08Usage when monetaryCostCapMicros is omitted', async () => {
-    const root = await makeTempDir('svc-v2-cost-guard-')
+    const root = await makeTempDir('v2-cg-')
     const keyDir = join(root, 'keys')
     const sockDir = join(root, 's')
     const workDir = join(root, 'work')
@@ -2153,10 +2153,10 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
 
   it('enforces per-request sensitivity escalation, anti-downgrade, and HTTP query-string pinning on executeAction and ExternalBrokerCore', async () => {
     const now = Date.now()
-    const root = await makeTempDir('broker-v2-wp08-pin-')
+    const root = await makeTempDir('v2-pin-')
     const credDir = join(root, 'creds')
-    const sockDir = join(root, 'sock')
-    const adminDir = join(root, 'admin')
+    const sockDir = join(root, 's')
+    const adminDir = join(root, 'a')
     const workDir = join(root, 'work')
     await Promise.all([
       mkdir(credDir, { mode: 0o700 }),
@@ -2880,9 +2880,9 @@ describe('ExternalBrokerCore v2 + Service Generalized Tools', () => {
   })
 
   it('never charges real AssistantPolicyService on external-v2 grant violations or !dispatched failures, while preserving dispatched/postDispatchUnknown charges', async () => {
-    const root = await makeTempDir('svc-v2-real-policy-rollback-')
+    const root = await makeTempDir('v2-pr-')
     const keyDir = join(root, 'keys')
-    const sockDir = join(root, 'sock')
+    const sockDir = join(root, 's')
     const workDir = join(root, 'work')
     await Promise.all([
       mkdir(keyDir, { mode: 0o700 }),

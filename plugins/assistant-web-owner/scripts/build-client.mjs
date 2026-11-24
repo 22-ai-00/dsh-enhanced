@@ -1,13 +1,13 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
 // Only our notice UI is distributed here. The owner Host adapter mounts the
 // installed DSH controller's native client through its own Loader metadata.
 // Copying the build-time peer here mixes old submission types with newer UI.
 const bundled = (await build({
-  entryPoints: [new URL('../src/client.ts', import.meta.url).pathname],
+  entryPoints: [fileURLToPath(new URL('../src/client.ts', import.meta.url))],
   bundle: true,
   format: 'cjs',
   platform: 'browser',

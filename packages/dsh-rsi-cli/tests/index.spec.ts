@@ -266,7 +266,7 @@ describe('standalone installation smoke test', () => {
       for (const dep of deps) {
         const targetLink = join(tmp, 'node_modules', dep)
         mkdirSync(dirname(targetLink), { recursive: true })
-        symlinkSync(resolveDepRoot(dep), targetLink, 'dir')
+        symlinkSync(resolveDepRoot(dep), targetLink, process.platform === 'win32' ? 'junction' : 'dir')
       }
 
       const upgradeHelpOut = execFileSync(
@@ -552,7 +552,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       // 4b. fail closed on symlinked dshHome (exact, /, and /.) without mutating target; allow real dshHome with / and /.
       writeFileSync(patchPath, initialPatch, { mode: 0o600 })
       const symlinkHome = join(root, 'dsh-home-link')
-      symlinkSync(dshHome, symlinkHome, 'dir')
+      symlinkSync(dshHome, symlinkHome, process.platform === 'win32' ? 'junction' : 'dir')
       for (const suffix of ['', '/', '/.']) {
         const symHomeRes = await captureRun(['disable', '--profile', 'web', '--dsh-home', `${symlinkHome}${suffix}`, '--json'])
         expect(symHomeRes.exitCode, `symlink dshHome suffix=${suffix}`).toBe(1)
@@ -579,7 +579,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
 
   test('upgradeAssistantAndRecover 按严格顺序执行并在任一步失败时 fail-closed', async () => {
     const order: string[] = []
-    const okRes = await upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', profile: 'web', yes: true }, {
+    const okRes = await upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), profile: 'web', yes: true }, {
       runUpgrade: async () => { order.push('upgrade'); return { ok: true, ready: true } },
       runDoctor: async () => { order.push('doctor'); return { ok: true, ready: true } },
       restartService: async () => { order.push('restart'); return { ok: true, restarted: true } },
@@ -588,7 +588,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     expect(order).toEqual(['upgrade', 'doctor', 'restart'])
 
     const upFailOrder: string[] = []
-    const upFail = await upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', profile: 'web', yes: true }, {
+    const upFail = await upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), profile: 'web', yes: true }, {
       runUpgrade: async () => { upFailOrder.push('upgrade'); return { ok: false, error: 'upgrade err' } },
       runDoctor: async () => { upFailOrder.push('doctor'); return { ok: true } },
       restartService: async () => { upFailOrder.push('restart'); return { ok: true } },
@@ -597,7 +597,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     expect(upFailOrder).toEqual(['upgrade'])
 
     const docFailOrder: string[] = []
-    const docFail = await upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', profile: 'web', yes: true }, {
+    const docFail = await upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), profile: 'web', yes: true }, {
       runUpgrade: async () => { docFailOrder.push('upgrade'); return { ok: true } },
       runDoctor: async () => { docFailOrder.push('doctor'); return { ok: false, ready: false, error: 'doctor err' } },
       restartService: async () => { docFailOrder.push('restart'); return { ok: true } },
@@ -635,7 +635,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     const checkCalls: string[] = []
     let capturedAllowMigration: unknown
     const checkRes = await upgradeAssistantAndRecover({
-      dshHome: '/tmp/dsh-test-abs',
+      dshHome: resolve('/tmp/dsh-test-abs'),
       profile: 'web',
       yes: false,
     }, {
@@ -660,7 +660,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     const dryCalls: string[] = []
     let explicitFalseMigration: unknown
     const dryRes = await upgradeAssistantAndRecover({
-      dshHome: '/tmp/dsh-test-abs',
+      dshHome: resolve('/tmp/dsh-test-abs'),
       profile: 'web',
       dryRun: true,
       allowNonEmptyHistoryMigration: false,
@@ -684,7 +684,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
     expect(explicitFalseMigration).toBe(false)
 
     // Thrown exceptions in runUpgrade, runDoctor, or restartService are caught cleanly.
-    await expect(upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', yes: true }, {
+    await expect(upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), yes: true }, {
       runUpgrade: async () => { throw new Error('boom in runUpgrade') },
       runDoctor: async () => ({ ok: true }),
       restartService: async () => ({ ok: true }),
@@ -696,7 +696,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       error: 'boom in runUpgrade',
     })
 
-    await expect(upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', yes: true }, {
+    await expect(upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), yes: true }, {
       runUpgrade: async () => ({ ok: true }),
       runDoctor: async () => { throw new Error('doctor crashed') },
       restartService: async () => ({ ok: true }),
@@ -708,7 +708,7 @@ describe('F21 enable / disable / upgradeAssistantAndRecover', () => {
       error: 'doctor crashed',
     })
 
-    await expect(upgradeAssistantAndRecover({ dshHome: '/tmp/dsh-test-abs', yes: true }, {
+    await expect(upgradeAssistantAndRecover({ dshHome: resolve('/tmp/dsh-test-abs'), yes: true }, {
       runUpgrade: async () => ({ ok: true }),
       runDoctor: async () => ({ ok: true }),
       restartService: async () => { throw new Error('restart crashed') },

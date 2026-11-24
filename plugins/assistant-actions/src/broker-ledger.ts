@@ -223,6 +223,7 @@ function normalizeAnyGrant(value: unknown): AnyExternalBrokerGrant {
 }
 
 function sameNode(left: BigIntStats, right: BigIntStats): boolean { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.gid === right.gid && left.mode === right.mode && left.nlink === right.nlink }
+function sameDirectoryNode(left: BigIntStats, right: BigIntStats): boolean { return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid && left.gid === right.gid && left.mode === right.mode }
 function safeAncestorChain(value: string, uid: number, gid: number): void {
   let cursor = value, leaf = true
   for (;;) {
@@ -304,7 +305,7 @@ function pinnedPathMatches(databasePath: string, pinned: PinnedDatabasePath): bo
   try {
     const parent = fstatSync(pinned.parentDescriptor, { bigint: true }), visibleParent = lstatSync(dirname(databasePath), { bigint: true })
     const file = fstatSync(pinned.fileDescriptor, { bigint: true }), visibleFile = lstatSync(databasePath, { bigint: true })
-    return sameNode(parent, pinned.parent) && sameNode(parent, visibleParent) && sameNode(file, pinned.file) && sameNode(file, visibleFile)
+    return sameDirectoryNode(parent, pinned.parent) && sameNode(parent, visibleParent) && sameNode(file, pinned.file) && sameNode(file, visibleFile)
   } catch { return false }
 }
 

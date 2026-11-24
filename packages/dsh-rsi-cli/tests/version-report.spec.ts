@@ -783,8 +783,8 @@ describe('collectVersionReport & formatVersionReport', () => {
     enabled: true
 `,
     )
-    // >128 diagnostics & >1024-char diagnostic path using valid nested subdirs (<255B per segment)
-    const nestedSegments = Array.from({ length: 12 }, (_, idx) => `seg-${String(idx).padStart(2, '0')}-${'x'.repeat(90)}`)
+    // >128 diagnostics & >1024-char diagnostic truncation while staying under macOS PATH_MAX=1024 on disk
+    const nestedSegments = Array.from({ length: 6 }, (_, idx) => `seg-${String(idx).padStart(2, '0')}-${'x'.repeat(90)}`)
     const longDiagDir = join(dshHome, 'assistant-recovery', ...nestedSegments)
     await mkdir(longDiagDir, { recursive: true })
     const longDiagDb = join(longDiagDir, 'corrupt.sqlite')
@@ -793,7 +793,7 @@ describe('collectVersionReport & formatVersionReport', () => {
     await writeFile(join(dshHome, 'assistant-recovery', 'recovery.sqlite'), 'corrupt-bytes', 'utf8')
     await writeFile(join(dshHome, 'assistant-recovery', 'web.sqlite'), 'corrupt-bytes', 'utf8')
     const escapeEntries = Array.from({ length: 124 }, (_, idx) =>
-      `- id: dsh-enhanced-assistant-skills-${idx}\n  name: "@dsh-enhanced/assistant-skills"\n  config:\n    databasePath: !js dshHomePath('..', 'outside-${idx}', 'db.sqlite')`,
+      `- id: dsh-enhanced-assistant-skills-${idx}\n  name: "@dsh-enhanced/assistant-skills"\n  config:\n    databasePath: !js dshHomePath('..', 'outside-${idx}${idx === 0 ? `-${'z'.repeat(1100)}` : ''}', 'db.sqlite')`,
     ).join('\n')
     await createProfileSkeleton(
       dshHome,
