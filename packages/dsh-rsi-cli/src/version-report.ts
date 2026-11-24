@@ -221,6 +221,11 @@ function addVerifierVariants(set: Set<string>, basePath: string): void {
   set.add(`${basePath}.revision-regressions`)
 }
 
+function normalizePluginKey(name: string): string {
+  const trimmed = name.trim()
+  return trimmed.startsWith('@dsh-enhanced/') ? trimmed.slice('@dsh-enhanced/'.length) : trimmed
+}
+
 function normalizePluginPackageName(id: string, name: string): string | undefined {
   if (name.startsWith('@dsh-enhanced/')) return name
   if (id.startsWith('dsh-enhanced-')) return `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}`
@@ -361,6 +366,25 @@ function queryCount(db: DatabaseSync, sql: string, ...params: Array<string | num
   return typeof val === 'number' && Number.isFinite(val) && val >= 0 ? Math.trunc(val) : 0
 }
 
+function queryDedupCount(
+  db: DatabaseSync,
+  realTarget: string,
+  countedTables: Set<string>,
+  tableName: string,
+  sql: string,
+  requiredColumns: readonly string[] = [],
+  claimKey?: string,
+): number | undefined {
+  if (!hasTable(db, tableName)) return undefined
+  for (const col of requiredColumns) {
+    if (!hasColumn(db, tableName, col)) return undefined
+  }
+  const dedupKey = `${realTarget}::${claimKey ?? tableName}`
+  if (countedTables.has(dedupKey)) return undefined
+  countedTables.add(dedupKey)
+  return queryCount(db, sql)
+}
+
 async function isAbsentOrZeroRegularFile(sidecarPath: string): Promise<boolean> {
   try {
     const st = await lstat(sidecarPath)
@@ -424,8 +448,8 @@ async function openReadOnlyDbs(
   canonicalHome: string,
   diagnostics: string[],
   inspected: Set<string>,
-): Promise<DatabaseSync[]> {
-  const opened: DatabaseSync[] = []
+): Promise<Array<{ db: DatabaseSync; realTarget: string }>> {
+  const opened: Array<{ db: DatabaseSync; realTarget: string }> = []
   const seenTargets = new Set<string>()
   const seenRealPaths = new Set<string>()
   for (const raw of candidates) {
@@ -475,7 +499,7 @@ async function openReadOnlyDbs(
       const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
       if (immutableRes.ok) {
         inspected.add(realTarget)
-        opened.push(immutableRes.db)
+        opened.push({ db: immutableRes.db, realTarget })
         continue
       }
       if (immutableRes.integrityFailed) {
@@ -485,7 +509,7 @@ async function openReadOnlyDbs(
       const fallbackPlain = tryOpenReadOnlySqlite(realTarget)
       if (fallbackPlain.ok) {
         inspected.add(realTarget)
-        opened.push(fallbackPlain.db)
+        opened.push({ db: fallbackPlain.db, realTarget })
         continue
       }
       if (fallbackPlain.integrityFailed) {
@@ -500,7 +524,7 @@ async function openReadOnlyDbs(
     const primaryRes = tryOpenReadOnlySqlite(realTarget)
     if (primaryRes.ok) {
       inspected.add(realTarget)
-      opened.push(primaryRes.db)
+      opened.push({ db: primaryRes.db, realTarget })
       continue
     }
     if (primaryRes.integrityFailed) {
@@ -511,7 +535,7 @@ async function openReadOnlyDbs(
       const immutableRes = tryOpenReadOnlySqlite(immutableUri.href)
       if (immutableRes.ok) {
         inspected.add(realTarget)
-        opened.push(immutableRes.db)
+        opened.push({ db: immutableRes.db, realTarget })
         continue
       }
       if (immutableRes.integrityFailed) {
@@ -526,9 +550,9 @@ async function openReadOnlyDbs(
   return opened
 }
 
-function closeAll(dbs: readonly DatabaseSync[]): void {
-  for (const db of dbs) {
-    try { db.close() } catch { /* ignore close error */ }
+function closeAll(dbs: ReadonlyArray<{ db: DatabaseSync }>): void {
+  for (const entry of dbs) {
+    try { entry.db.close() } catch { /* ignore close error */ }
   }
 }
 
@@ -719,7 +743,9 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     }
   }
   const activeProfile = options?.profile ?? (discoveredProfiles.length === 1 ? discoveredProfiles[0]! : null)
-  const targetProfiles = options?.profile !== undefined ? [options.profile] : discoveredProfiles
+  const targetProfiles = options?.profile !== undefined
+    ? [options.profile]
+    : (discoveredProfiles.length > 0 ? discoveredProfiles : ['web', 'lark', 'supervised'])
 
   const inspectBound = options?.inspectBoundHost ?? inspectBoundHostRuntime
   const boundHost = homeExists
@@ -811,106 +837,78 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       }
     }
 
-    const filterByProfile = options?.profile !== undefined
-    const allowFamily = (fam: LedgerFamily): boolean => !filterByProfile || configuredFamilies.has(fam)
+    const profNames = targetProfiles
 
-    const profNames = targetProfiles.length > 0 ? targetProfiles : (filterByProfile ? [options!.profile!] : ['web', 'lark', 'supervised'])
-
-    if (!filterByProfile || configuredFamilies.has('workItems')) {
-      dbMap.workItems.add(join(dshHome, 'assistant-work-items', 'state.sqlite'))
-    }
-    if (allowFamily('growthDriver')) {
-      dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', 'usage.sqlite'))
-      dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', 'state.sqlite'))
-    }
-    if (allowFamily('dreaming')) {
-      dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', 'state.sqlite'))
-      dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', 'dreaming.sqlite'))
-    }
-    if (allowFamily('recovery')) {
-      dbMap.recovery.add(join(dshHome, 'assistant-recovery', 'state.sqlite'))
-      dbMap.recovery.add(join(dshHome, 'assistant-recovery', 'recovery.sqlite'))
-    }
-    if (allowFamily('goals')) {
-      dbMap.goals.add(join(dshHome, 'assistant-goals.sqlite.strategies'))
-      dbMap.goals.add(join(dshHome, 'assistant-goals', 'state.sqlite.strategies'))
-      dbMap.goals.add(join(dshHome, 'assistant-goals', 'strategies.sqlite'))
-      dbMap.goals.add(join(dshHome, 'assistant-goals', 'strategy.sqlite'))
-    }
-    if (allowFamily('memoryLearning')) {
-      dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', 'state.sqlite'))
-      dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', 'learning.sqlite'))
-    }
-    if (allowFamily('memory')) {
-      dbMap.memory.add(join(dshHome, 'personal-memory', 'memory.sqlite'))
-      dbMap.memory.add(join(dshHome, 'personal-memory', 'state.sqlite'))
-    }
-    if (allowFamily('preference')) {
-      dbMap.preference.add(join(dshHome, 'preference-learning', 'preferences.sqlite'))
-      dbMap.preference.add(join(dshHome, 'preference-learning', 'state.sqlite'))
-    }
-    if (allowFamily('evolution')) {
-      dbMap.evolution.add(join(dshHome, 'assistant-evolution', 'evolution.sqlite'))
-      dbMap.evolution.add(join(dshHome, 'assistant-evolution', 'state.sqlite'))
-    }
-    if (allowFamily('skills')) {
-      dbMap.skills.add(join(dshHome, 'assistant-skills', 'skills.sqlite'))
-      dbMap.skills.add(join(dshHome, 'assistant-skills', 'state.sqlite'))
-    }
-    if (allowFamily('growthExperiments')) {
-      dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'growth.sqlite'))
-      dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'state.sqlite'))
-    }
-    if (allowFamily('association')) {
-      dbMap.association.add(join(dshHome, 'assistant-association', 'state.sqlite'))
-      dbMap.association.add(join(dshHome, 'assistant-association', 'association.sqlite'))
-      dbMap.association.add(join(dshHome, 'association.sqlite'))
-      dbMap.association.add(join(dshHome, 'assistant-association.sqlite'))
-    }
-    if (allowFamily('evaluation')) {
-      dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', 'evaluation.sqlite'))
-      dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', 'state.sqlite'))
-    }
-    if (allowFamily('verifier')) {
-      addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'verification.sqlite'))
-      addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'state.sqlite'))
-    }
+    dbMap.workItems.add(join(dshHome, 'assistant-work-items', 'state.sqlite'))
+    dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', 'usage.sqlite'))
+    dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', 'state.sqlite'))
+    dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', 'state.sqlite'))
+    dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', 'dreaming.sqlite'))
+    dbMap.recovery.add(join(dshHome, 'assistant-recovery', 'state.sqlite'))
+    dbMap.recovery.add(join(dshHome, 'assistant-recovery', 'recovery.sqlite'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals.sqlite'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals.sqlite.strategies'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'state.sqlite'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'state.sqlite.strategies'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'goals.sqlite'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'goals.sqlite.strategies'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'strategies.sqlite'))
+    dbMap.goals.add(join(dshHome, 'assistant-goals', 'strategy.sqlite'))
+    dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', 'learning.sqlite'))
+    dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', 'state.sqlite'))
+    dbMap.memory.add(join(dshHome, 'personal-memory', 'memory.sqlite'))
+    dbMap.memory.add(join(dshHome, 'personal-memory', 'state.sqlite'))
+    dbMap.preference.add(join(dshHome, 'preference-learning', 'preferences.sqlite'))
+    dbMap.preference.add(join(dshHome, 'preference-learning', 'state.sqlite'))
+    dbMap.evolution.add(join(dshHome, 'assistant-evolution', 'evolution.sqlite'))
+    dbMap.evolution.add(join(dshHome, 'assistant-evolution', 'state.sqlite'))
+    dbMap.skills.add(join(dshHome, 'assistant-skills', 'skills.sqlite'))
+    dbMap.skills.add(join(dshHome, 'assistant-skills', 'state.sqlite'))
+    dbMap.skills.add(join(dshHome, 'assistant-skills.sqlite'))
+    dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'growth.sqlite'))
+    dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', 'state.sqlite'))
+    dbMap.association.add(join(dshHome, 'assistant-association', 'association.sqlite'))
+    dbMap.association.add(join(dshHome, 'assistant-association', 'state.sqlite'))
+    dbMap.association.add(join(dshHome, 'association.sqlite'))
+    dbMap.association.add(join(dshHome, 'assistant-association.sqlite'))
+    dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', 'evaluation.sqlite'))
+    dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', 'state.sqlite'))
+    addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'verification.sqlite'))
+    addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', 'state.sqlite'))
     dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'control.sqlite'))
     dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'state.sqlite'))
     dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'creation-adoptions.sqlite'))
     dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', 'revision-adoptions.sqlite'))
 
     for (const prof of profNames) {
-      if (allowFamily('workItems')) dbMap.workItems.add(join(dshHome, 'assistant-work-items', `${prof}.sqlite`))
-      if (allowFamily('growthDriver')) {
-        dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', `${prof}-usage.sqlite`))
-        dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', `${prof}.sqlite`))
-      }
-      if (allowFamily('dreaming')) dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', `${prof}.sqlite`))
-      if (allowFamily('recovery')) dbMap.recovery.add(join(dshHome, 'assistant-recovery', `${prof}.sqlite`))
-      if (allowFamily('goals')) {
-        dbMap.goals.add(join(dshHome, 'assistant-goals', `${prof}.sqlite.strategies`))
-        dbMap.goals.add(join(dshHome, 'assistant-goals', `${prof}.sqlite`))
-      }
-      if (allowFamily('memoryLearning')) dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', `${prof}.sqlite`))
-      if (allowFamily('memory')) dbMap.memory.add(join(dshHome, 'personal-memory', `${prof}.sqlite`))
-      if (allowFamily('preference')) dbMap.preference.add(join(dshHome, 'preference-learning', `${prof}.sqlite`))
-      if (allowFamily('evolution')) dbMap.evolution.add(join(dshHome, 'assistant-evolution', `${prof}.sqlite`))
-      if (allowFamily('skills')) dbMap.skills.add(join(dshHome, 'assistant-skills', `${prof}.sqlite`))
-      if (allowFamily('growthExperiments')) dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', `${prof}.sqlite`))
-      if (allowFamily('association')) dbMap.association.add(join(dshHome, 'assistant-association', `${prof}.sqlite`))
-      if (allowFamily('evaluation')) dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', `${prof}.sqlite`))
-      if (allowFamily('verifier')) {
-        addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', `${prof}.sqlite`))
-      }
+      dbMap.workItems.add(join(dshHome, 'assistant-work-items', `${prof}.sqlite`))
+      dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', `${prof}-usage.sqlite`))
+      dbMap.growthDriver.add(join(dshHome, 'assistant-growth-driver', `${prof}.sqlite`))
+      dbMap.dreaming.add(join(dshHome, 'assistant-dreaming', `${prof}.sqlite`))
+      dbMap.recovery.add(join(dshHome, 'assistant-recovery', `${prof}.sqlite`))
+      dbMap.goals.add(join(dshHome, 'assistant-goals', `${prof}.sqlite.strategies`))
+      dbMap.goals.add(join(dshHome, 'assistant-goals', `${prof}.sqlite`))
+      dbMap.memoryLearning.add(join(dshHome, 'assistant-memory-learning', `${prof}.sqlite`))
+      dbMap.memory.add(join(dshHome, 'personal-memory', `${prof}.sqlite`))
+      dbMap.preference.add(join(dshHome, 'preference-learning', `${prof}.sqlite`))
+      dbMap.evolution.add(join(dshHome, 'assistant-evolution', `${prof}.sqlite`))
+      dbMap.skills.add(join(dshHome, 'assistant-skills', `${prof}.sqlite`))
+      dbMap.growthExperiments.add(join(dshHome, 'assistant-growth-experiments', `${prof}.sqlite`))
+      dbMap.association.add(join(dshHome, 'assistant-association', `${prof}.sqlite`))
+      dbMap.evaluation.add(join(dshHome, 'assistant-evaluation', `${prof}.sqlite`))
+      addVerifierVariants(dbMap.verifier, join(dshHome, 'assistant-verifier', `${prof}.sqlite`))
       dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}.sqlite`))
       dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-creation-adoptions.sqlite`))
       dbMap.controlPlane.add(join(dshHome, 'plugin-control-plane', `${prof}-revision-adoptions.sqlite`))
+      dbMap.controlPlane.add(join(dshHome, `${prof}-creation-adoptions.sqlite`))
+      dbMap.controlPlane.add(join(dshHome, `${prof}-revision-adoptions.sqlite`))
       dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'control.sqlite'))
       dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'creation-adoptions.sqlite'))
       dbMap.controlPlane.add(join(dshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'revision-adoptions.sqlite'))
     }
   }
+
+  const countedTables = new Set<string>()
 
   // Counters and saw-table flags
   let sawWorkItemsTotal = false
@@ -945,6 +943,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   let preferenceHypothesesTotal = 0
   let activePreferenceOverlays = 0
   let preferenceHypothesesActivatedFallback = 0
+  let preferenceHypothesesRolledBackFallback = 0
   let sawPreferenceTransitions = false
   let preferenceTransitionsCreated = 0
   let preferenceTransitionsActivated = 0
@@ -973,12 +972,18 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   let sawAssocParamEvents = false
   let associationProfileAdoptions = 0
   let associationProfileRollbacks = 0
+  let sawAssocRelaxProposals = false
+  let assocRelaxProposalsTotal = 0
+  let sawAssocSkillCandidates = false
+  let assocSkillCandidatesTotal = 0
 
   let sawEvalTuningEvents = false
   let evaluationAttentionTuningAdoptions = 0
   let evaluationAttentionTuningRollbacks = 0
   let sawEvalLoosening = false
   let evaluationLooseningDecisionsAdopted = 0
+  let sawEvalLooseningProposals = false
+  let evalLooseningProposalsTotal = 0
 
   let sawAcceptanceJobs = false
   let taskVerificationsDone = 0
@@ -997,47 +1002,81 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
 
   let controlSourcePlansTotal = 0
   let controlUnlinkedActivationPlans = 0
-  let controlActivatedPlans = 0
-  let controlUnlinkedCompletedSourcePlans = 0
   let controlRollbackPlans = 0
   let revisionRollbacksCount = 0
 
   const createdPlanIds = new Set<string>()
   const revisedPlanIds = new Set<string>()
-  const createdAdoptionCandidates = new Set<string>()
-  const revisedAdoptionCandidates = new Set<string>()
+  const controlAdoptedPlanIds = new Set<string>()
 
   interface MutableEvolvedEntry {
     name: string
     version: string | null
+    versionTier: 0 | 1 | 2 | 3 | 4
+    fromAdoptionJournal: boolean
     enabled: boolean
     installKind: 'adopted'
   }
   const evolvedByPlanId = new Map<string, MutableEvolvedEntry>()
   const evolvedByName = new Map<string, MutableEvolvedEntry>()
 
-  const upsertEvolvedByName = (name: string, next: MutableEvolvedEntry): void => {
-    const existing = evolvedByName.get(name)
+  const upsertEvolvedByName = (rawName: string, next: Omit<MutableEvolvedEntry, 'name'> & { name?: string }): MutableEvolvedEntry => {
+    const trimmed = rawName.trim()
+    const key = normalizePluginKey(trimmed)
+    const boundedName = boundNonEmptyString(trimmed, 200) ?? 'evolved-capability'
+    const existing = evolvedByName.get(key)
     if (!existing) {
-      evolvedByName.set(name, { ...next })
-      return
+      const created: MutableEvolvedEntry = {
+        name: boundedName,
+        version: next.version,
+        versionTier: next.versionTier,
+        fromAdoptionJournal: next.fromAdoptionJournal,
+        enabled: next.enabled,
+        installKind: 'adopted',
+      }
+      evolvedByName.set(key, created)
+      return created
     }
-    if (next.version !== null) existing.version = next.version
+    if (trimmed.startsWith('@dsh-enhanced/') && !existing.name.startsWith('@dsh-enhanced/')) {
+      existing.name = boundedName
+    }
+    if (next.fromAdoptionJournal) existing.fromAdoptionJournal = true
+    if (next.version !== null && (existing.version === null || next.versionTier <= existing.versionTier)) {
+      existing.version = next.version
+      existing.versionTier = next.versionTier
+    }
     existing.enabled = existing.enabled || next.enabled
+    return existing
   }
 
   // 1. Work Items
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.workItems, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'work_item')) {
+      for (const { db, realTarget } of dbs) {
+        const total = queryDedupCount(db, realTarget, countedTables, 'work_item', 'SELECT COUNT(*) AS cnt FROM work_item')
+        if (total !== undefined) {
           sawWorkItemsTotal = true
-          workItemsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM work_item')
+          workItemsTotal += total
         }
-        if (hasTable(db, 'work_item_outcome')) {
+        const outcomeSettled = queryDedupCount(
+          db, realTarget, countedTables, 'work_item_outcome',
+          'SELECT COUNT(DISTINCT item_id) AS cnt FROM work_item_outcome',
+          ['item_id'],
+        )
+        if (outcomeSettled !== undefined) {
           sawWorkItemsSettled = true
-          workItemsSettled += queryCount(db, 'SELECT COUNT(DISTINCT item_id) AS cnt FROM work_item_outcome')
+          workItemsSettled += outcomeSettled
+        } else {
+          const fallbackSettled = queryDedupCount(
+            db, realTarget, countedTables, 'work_item',
+            "SELECT COUNT(*) AS cnt FROM work_item WHERE state IN ('ready', 'blocked', 'failed', 'dropped')",
+            ['state'], 'work_item:settled_fallback',
+          )
+          if (fallbackSettled !== undefined) {
+            sawWorkItemsSettled = true
+            workItemsSettled += fallbackSettled
+          }
         }
       }
     } finally {
@@ -1049,10 +1088,11 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.growthDriver, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'usage_jobs')) {
+      for (const { db, realTarget } of dbs) {
+        const jobs = queryDedupCount(db, realTarget, countedTables, 'usage_jobs', 'SELECT COUNT(*) AS cnt FROM usage_jobs')
+        if (jobs !== undefined) {
           sawGrowthUsageJobs = true
-          growthUsageJobsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM usage_jobs')
+          growthUsageJobsTotal += jobs
         }
       }
     } finally {
@@ -1064,16 +1104,26 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.dreaming, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'dream_runs')) {
+      for (const { db, realTarget } of dbs) {
+        const runs = queryDedupCount(db, realTarget, countedTables, 'dream_runs', 'SELECT COUNT(*) AS cnt FROM dream_runs')
+        if (runs !== undefined) {
           sawDreamingRuns = true
-          dreamingRuns += queryCount(db, 'SELECT COUNT(*) AS cnt FROM dream_runs')
+          dreamingRuns += runs
         }
-        if (hasTable(db, 'dream_ideas')) {
+        const ideasTotal = queryDedupCount(db, realTarget, countedTables, 'dream_ideas', 'SELECT COUNT(*) AS cnt FROM dream_ideas')
+        if (ideasTotal !== undefined) {
           sawDreamingIdeas = true
-          dreamingIdeasTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM dream_ideas')
-          dreamingIdeasValidated += queryCount(db, "SELECT COUNT(*) AS cnt FROM dream_ideas WHERE state = 'validated'")
-          dreamingIdeasOwnerAck += queryCount(db, "SELECT COUNT(*) AS cnt FROM dream_ideas WHERE state = 'owner-acknowledged'")
+          dreamingIdeasTotal += ideasTotal
+          dreamingIdeasValidated += queryDedupCount(
+            db, realTarget, countedTables, 'dream_ideas',
+            "SELECT COUNT(*) AS cnt FROM dream_ideas WHERE state = 'validated'",
+            ['state'], 'dream_ideas:validated',
+          ) ?? 0
+          dreamingIdeasOwnerAck += queryDedupCount(
+            db, realTarget, countedTables, 'dream_ideas',
+            "SELECT COUNT(*) AS cnt FROM dream_ideas WHERE state = 'owner-acknowledged'",
+            ['state'], 'dream_ideas:owner_ack',
+          ) ?? 0
         }
       }
     } finally {
@@ -1085,10 +1135,11 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.recovery, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'recovery_runs')) {
+      for (const { db, realTarget } of dbs) {
+        const runs = queryDedupCount(db, realTarget, countedTables, 'recovery_runs', 'SELECT COUNT(*) AS cnt FROM recovery_runs')
+        if (runs !== undefined) {
           sawRecoveryRuns = true
-          recoveryRuns += queryCount(db, 'SELECT COUNT(*) AS cnt FROM recovery_runs')
+          recoveryRuns += runs
         }
       }
     } finally {
@@ -1100,10 +1151,11 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.goals, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'goal_strategy_records')) {
+      for (const { db, realTarget } of dbs) {
+        const runs = queryDedupCount(db, realTarget, countedTables, 'goal_strategy_records', 'SELECT COUNT(*) AS cnt FROM goal_strategy_records')
+        if (runs !== undefined) {
           sawGoalStrategyRuns = true
-          goalStrategyRuns += queryCount(db, 'SELECT COUNT(*) AS cnt FROM goal_strategy_records')
+          goalStrategyRuns += runs
         }
       }
     } finally {
@@ -1115,11 +1167,16 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.memoryLearning, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'jobs')) {
+      for (const { db, realTarget } of dbs) {
+        const jobsTotal = queryDedupCount(db, realTarget, countedTables, 'jobs', 'SELECT COUNT(*) AS cnt FROM jobs')
+        if (jobsTotal !== undefined) {
           sawMemoryLearningJobs = true
-          memoryLearningJobsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM jobs')
-          memoryLearningJobsAdopted += queryCount(db, "SELECT COUNT(*) AS cnt FROM jobs WHERE state = 'adopted'")
+          memoryLearningJobsTotal += jobsTotal
+          memoryLearningJobsAdopted += queryDedupCount(
+            db, realTarget, countedTables, 'jobs',
+            "SELECT COUNT(*) AS cnt FROM jobs WHERE state = 'adopted'",
+            ['state'], 'jobs:adopted',
+          ) ?? 0
         }
       }
     } finally {
@@ -1131,10 +1188,15 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.memory, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'memory_records')) {
+      for (const { db, realTarget } of dbs) {
+        const active = queryDedupCount(
+          db, realTarget, countedTables, 'memory_records',
+          "SELECT COUNT(*) AS cnt FROM memory_records WHERE status = 'active'",
+          ['status'], 'memory_records:active',
+        )
+        if (active !== undefined) {
           sawActiveMemories = true
-          activeMemories += queryCount(db, "SELECT COUNT(*) AS cnt FROM memory_records WHERE status = 'active'")
+          activeMemories += active
         }
       }
     } finally {
@@ -1146,26 +1208,42 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.preference, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'preference_hypotheses')) {
+      for (const { db, realTarget } of dbs) {
+        const hyps = queryDedupCount(db, realTarget, countedTables, 'preference_hypotheses', 'SELECT COUNT(*) AS cnt FROM preference_hypotheses')
+        if (hyps !== undefined) {
           sawPreferenceHypotheses = true
-          preferenceHypothesesTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM preference_hypotheses')
-          activePreferenceOverlays += queryCount(db, "SELECT COUNT(*) AS cnt FROM preference_hypotheses WHERE effect_state = 'active'")
-          if (hasColumn(db, 'preference_hypotheses', 'activated_at')) {
-            preferenceHypothesesActivatedFallback += queryCount(
-              db,
-              'SELECT COUNT(*) AS cnt FROM preference_hypotheses WHERE activated_at IS NOT NULL',
-            )
-          }
+          preferenceHypothesesTotal += hyps
+          const activeCount = queryDedupCount(
+            db, realTarget, countedTables, 'preference_hypotheses',
+            "SELECT COUNT(*) AS cnt FROM preference_hypotheses WHERE effect_state = 'active'",
+            ['effect_state'], 'preference_hypotheses:active',
+          ) ?? 0
+          activePreferenceOverlays += activeCount
+          preferenceHypothesesActivatedFallback += activeCount
+          preferenceHypothesesRolledBackFallback += queryDedupCount(
+            db, realTarget, countedTables, 'preference_hypotheses',
+            "SELECT COUNT(*) AS cnt FROM preference_hypotheses WHERE effect_state = 'rolled-back'",
+            ['effect_state'], 'preference_hypotheses:rolled_back',
+          ) ?? 0
         }
-        if (hasTable(db, 'preference_transitions')) {
+        const created = queryDedupCount(
+          db, realTarget, countedTables, 'preference_transitions',
+          "SELECT COUNT(*) AS cnt FROM preference_transitions WHERE reason = 'created'",
+          ['reason'], 'preference_transitions:created',
+        )
+        if (created !== undefined) {
           sawPreferenceTransitions = true
-          preferenceTransitionsCreated += queryCount(db, "SELECT COUNT(*) AS cnt FROM preference_transitions WHERE reason = 'created'")
-          preferenceTransitionsActivated += queryCount(db, "SELECT COUNT(*) AS cnt FROM preference_transitions WHERE reason = 'activated'")
-          preferenceTransitionsRolledBack += queryCount(
-            db,
+          preferenceTransitionsCreated += created
+          preferenceTransitionsActivated += queryDedupCount(
+            db, realTarget, countedTables, 'preference_transitions',
+            "SELECT COUNT(*) AS cnt FROM preference_transitions WHERE reason = 'activated'",
+            ['reason'], 'preference_transitions:activated',
+          ) ?? 0
+          preferenceTransitionsRolledBack += queryDedupCount(
+            db, realTarget, countedTables, 'preference_transitions',
             "SELECT COUNT(*) AS cnt FROM preference_transitions WHERE reason IN ('regression', 'operator-request')",
-          )
+            ['reason'], 'preference_transitions:rollback',
+          ) ?? 0
         }
       }
     } finally {
@@ -1177,18 +1255,21 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.evolution, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'evolution_proposals')) {
+      for (const { db, realTarget } of dbs) {
+        const props = queryDedupCount(db, realTarget, countedTables, 'evolution_proposals', 'SELECT COUNT(*) AS cnt FROM evolution_proposals')
+        if (props !== undefined) {
           sawEvolutionProposals = true
-          evolutionProposalsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM evolution_proposals')
+          evolutionProposalsTotal += props
         }
-        if (hasTable(db, 'evolution_rules')) {
+        const rules = queryDedupCount(db, realTarget, countedTables, 'evolution_rules', 'SELECT COUNT(*) AS cnt FROM evolution_rules')
+        if (rules !== undefined) {
           sawEvolutionRules = true
-          evolutionRulesAdopted += queryCount(db, 'SELECT COUNT(*) AS cnt FROM evolution_rules')
+          evolutionRulesAdopted += rules
         }
-        if (hasTable(db, 'evolution_autonomous_rollbacks')) {
+        const autoRb = queryDedupCount(db, realTarget, countedTables, 'evolution_autonomous_rollbacks', 'SELECT COUNT(*) AS cnt FROM evolution_autonomous_rollbacks')
+        if (autoRb !== undefined) {
           sawEvolutionRollbacks = true
-          evolutionRollbacks += queryCount(db, 'SELECT COUNT(*) AS cnt FROM evolution_autonomous_rollbacks')
+          evolutionRollbacks += autoRb
         }
       }
     } finally {
@@ -1200,15 +1281,25 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.skills, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'skill_candidates')) {
+      for (const { db, realTarget } of dbs) {
+        const cands = queryDedupCount(db, realTarget, countedTables, 'skill_candidates', 'SELECT COUNT(*) AS cnt FROM skill_candidates')
+        if (cands !== undefined) {
           sawSkillCandidates = true
-          skillCandidatesTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM skill_candidates')
+          skillCandidatesTotal += cands
         }
-        if (hasTable(db, 'skill_deployments')) {
+        const deps = queryDedupCount(
+          db, realTarget, countedTables, 'skill_deployments',
+          "SELECT COUNT(*) AS cnt FROM skill_deployments WHERE state IN ('canary', 'promoted')",
+          ['state'], 'skill_deployments:active',
+        )
+        if (deps !== undefined) {
           sawSkillDeployments = true
-          skillDeployments += queryCount(db, "SELECT COUNT(*) AS cnt FROM skill_deployments WHERE state IN ('canary', 'promoted')")
-          skillRollbacks += queryCount(db, "SELECT COUNT(*) AS cnt FROM skill_deployments WHERE state IN ('rolled-back', 'revoked')")
+          skillDeployments += deps
+          skillRollbacks += queryDedupCount(
+            db, realTarget, countedTables, 'skill_deployments',
+            "SELECT COUNT(*) AS cnt FROM skill_deployments WHERE state IN ('rolled-back', 'revoked')",
+            ['state'], 'skill_deployments:rollback',
+          ) ?? 0
         }
       }
     } finally {
@@ -1220,12 +1311,21 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.growthExperiments, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'workflow_candidates')) {
+      for (const { db, realTarget } of dbs) {
+        const wTotal = queryDedupCount(db, realTarget, countedTables, 'workflow_candidates', 'SELECT COUNT(*) AS cnt FROM workflow_candidates')
+        if (wTotal !== undefined) {
           sawWorkflowCandidates = true
-          workflowCandidatesTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM workflow_candidates')
-          workflowCandidatesPromoted += queryCount(db, "SELECT COUNT(*) AS cnt FROM workflow_candidates WHERE state = 'promoted'")
-          workflowRollbacks += queryCount(db, "SELECT COUNT(*) AS cnt FROM workflow_candidates WHERE state = 'rolled-back'")
+          workflowCandidatesTotal += wTotal
+          workflowCandidatesPromoted += queryDedupCount(
+            db, realTarget, countedTables, 'workflow_candidates',
+            "SELECT COUNT(*) AS cnt FROM workflow_candidates WHERE state = 'promoted'",
+            ['state'], 'workflow_candidates:promoted',
+          ) ?? 0
+          workflowRollbacks += queryDedupCount(
+            db, realTarget, countedTables, 'workflow_candidates',
+            "SELECT COUNT(*) AS cnt FROM workflow_candidates WHERE state = 'rolled-back'",
+            ['state'], 'workflow_candidates:rollback',
+          ) ?? 0
         }
       }
     } finally {
@@ -1237,19 +1337,42 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.association, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'assoc_param_profile_heads')) {
-          sawAssocParamHead = true
-          const row = db.prepare('SELECT MAX(active_version) AS max_ver FROM assoc_param_profile_heads').get() as {
-            max_ver?: unknown
-          } | undefined
-          const maxVer = nonNegInt(row?.max_ver) ?? 0
-          associationParamVersion = associationParamVersion === null ? maxVer : Math.max(associationParamVersion, maxVer)
+      for (const { db, realTarget } of dbs) {
+        if (hasTable(db, 'assoc_param_profile_heads') && hasColumn(db, 'assoc_param_profile_heads', 'active_version')) {
+          const headKey = `${realTarget}::assoc_param_profile_heads`
+          if (!countedTables.has(headKey)) {
+            countedTables.add(headKey)
+            sawAssocParamHead = true
+            const row = db.prepare('SELECT MAX(active_version) AS max_ver FROM assoc_param_profile_heads').get() as {
+              max_ver?: unknown
+            } | undefined
+            const maxVer = nonNegInt(row?.max_ver) ?? 0
+            associationParamVersion = associationParamVersion === null ? maxVer : Math.max(associationParamVersion, maxVer)
+          }
         }
-        if (hasTable(db, 'assoc_param_profile_events')) {
+        const adoptions = queryDedupCount(
+          db, realTarget, countedTables, 'assoc_param_profile_events',
+          "SELECT COUNT(*) AS cnt FROM assoc_param_profile_events WHERE kind = 'adopted'",
+          ['kind'], 'assoc_param_profile_events:adopted',
+        )
+        if (adoptions !== undefined) {
           sawAssocParamEvents = true
-          associationProfileAdoptions += queryCount(db, "SELECT COUNT(*) AS cnt FROM assoc_param_profile_events WHERE kind = 'adopted'")
-          associationProfileRollbacks += queryCount(db, "SELECT COUNT(*) AS cnt FROM assoc_param_profile_events WHERE kind = 'rolled-back'")
+          associationProfileAdoptions += adoptions
+          associationProfileRollbacks += queryDedupCount(
+            db, realTarget, countedTables, 'assoc_param_profile_events',
+            "SELECT COUNT(*) AS cnt FROM assoc_param_profile_events WHERE kind = 'rolled-back'",
+            ['kind'], 'assoc_param_profile_events:rollback',
+          ) ?? 0
+        }
+        const relaxProps = queryDedupCount(db, realTarget, countedTables, 'assoc_param_relax_proposals', 'SELECT COUNT(*) AS cnt FROM assoc_param_relax_proposals')
+        if (relaxProps !== undefined) {
+          sawAssocRelaxProposals = true
+          assocRelaxProposalsTotal += relaxProps
+        }
+        const skillCands = queryDedupCount(db, realTarget, countedTables, 'assoc_skill_candidates', 'SELECT COUNT(*) AS cnt FROM assoc_skill_candidates')
+        if (skillCands !== undefined) {
+          sawAssocSkillCandidates = true
+          assocSkillCandidatesTotal += skillCands
         }
       }
     } finally {
@@ -1261,24 +1384,37 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.evaluation, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'evaluation_attention_tuning_events')) {
+      for (const { db, realTarget } of dbs) {
+        const tuned = queryDedupCount(
+          db, realTarget, countedTables, 'evaluation_attention_tuning_events',
+          "SELECT COUNT(*) AS cnt FROM evaluation_attention_tuning_events WHERE kind = 'adopted'",
+          ['kind'], 'evaluation_attention_tuning_events:adopted',
+        )
+        if (tuned !== undefined) {
           sawEvalTuningEvents = true
-          evaluationAttentionTuningAdoptions += queryCount(
-            db,
-            "SELECT COUNT(*) AS cnt FROM evaluation_attention_tuning_events WHERE kind = 'adopted'",
-          )
-          evaluationAttentionTuningRollbacks += queryCount(
-            db,
+          evaluationAttentionTuningAdoptions += tuned
+          evaluationAttentionTuningRollbacks += queryDedupCount(
+            db, realTarget, countedTables, 'evaluation_attention_tuning_events',
             "SELECT COUNT(*) AS cnt FROM evaluation_attention_tuning_events WHERE kind = 'rolled-back'",
-          )
+            ['kind'], 'evaluation_attention_tuning_events:rollback',
+          ) ?? 0
         }
-        if (hasTable(db, 'evaluation_attention_loosening_decisions')) {
+        const looseProps = queryDedupCount(
+          db, realTarget, countedTables, 'evaluation_attention_loosening_proposals',
+          'SELECT COUNT(*) AS cnt FROM evaluation_attention_loosening_proposals',
+        )
+        if (looseProps !== undefined) {
+          sawEvalLooseningProposals = true
+          evalLooseningProposalsTotal += looseProps
+        }
+        const looseAdopted = queryDedupCount(
+          db, realTarget, countedTables, 'evaluation_attention_loosening_decisions',
+          "SELECT COUNT(*) AS cnt FROM evaluation_attention_loosening_decisions WHERE decision = 'adopted'",
+          ['decision'], 'evaluation_attention_loosening_decisions:adopted',
+        )
+        if (looseAdopted !== undefined) {
           sawEvalLoosening = true
-          evaluationLooseningDecisionsAdopted += queryCount(
-            db,
-            "SELECT COUNT(*) AS cnt FROM evaluation_attention_loosening_decisions WHERE decision = 'adopted'",
-          )
+          evaluationLooseningDecisionsAdopted += looseAdopted
         }
       }
     } finally {
@@ -1290,19 +1426,30 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.verifier, dshHome, canonicalHome, diagnostics, inspected)
     try {
-      for (const db of dbs) {
-        if (hasTable(db, 'acceptance_jobs')) {
+      for (const { db, realTarget } of dbs) {
+        const done = queryDedupCount(
+          db, realTarget, countedTables, 'acceptance_jobs',
+          "SELECT COUNT(*) AS cnt FROM acceptance_jobs WHERE state = 'done'",
+          ['state'], 'acceptance_jobs:done',
+        )
+        if (done !== undefined) {
           sawAcceptanceJobs = true
-          taskVerificationsDone += queryCount(db, "SELECT COUNT(*) AS cnt FROM acceptance_jobs WHERE state = 'done'")
+          taskVerificationsDone += done
         }
-        if (hasTable(db, 'verifications')) {
+        const verCount = queryDedupCount(db, realTarget, countedTables, 'verifications', 'SELECT COUNT(*) AS cnt FROM verifications')
+        if (verCount !== undefined) {
           sawVerifierReviews = true
-          verifierVerificationsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM verifications')
+          verifierVerificationsTotal += verCount
         }
-        if (hasTable(db, 'reviews')) {
+        const revCount = queryDedupCount(db, realTarget, countedTables, 'reviews', 'SELECT COUNT(*) AS cnt FROM reviews')
+        if (revCount !== undefined) {
           sawVerifierReviews = true
-          verifierReviewsTotal += queryCount(db, 'SELECT COUNT(*) AS cnt FROM reviews')
-          verifierReviewsApproved += queryCount(db, "SELECT COUNT(*) AS cnt FROM reviews WHERE state = 'approved'")
+          verifierReviewsTotal += revCount
+          verifierReviewsApproved += queryDedupCount(
+            db, realTarget, countedTables, 'reviews',
+            "SELECT COUNT(*) AS cnt FROM reviews WHERE state = 'approved'",
+            ['state'], 'reviews:approved',
+          ) ?? 0
         }
       }
     } finally {
@@ -1310,14 +1457,95 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     }
   }
 
-  // 15. Plugin Control Plane (creation-adoptions -> revision-adoptions -> control.sqlite)
+  // 15. Plugin Control Plane (Pass 0: source_adoptions links -> Pass A: creation-adoptions -> Pass B: revision-adoptions -> Pass C: control.sqlite)
   if (homeExists) {
     const dbs = await openReadOnlyDbs(dbMap.controlPlane, dshHome, canonicalHome, diagnostics, inspected)
     if (dbs.length > 0) sawControlPlaneDb = true
     try {
-      // Pass A: creation-adoptions.sqlite (`adoptions` without `parent_plan_id`)
-      for (const db of dbs) {
-        if (hasTable(db, 'adoptions') && !hasTable(db, 'entries') && !hasColumn(db, 'adoptions', 'parent_plan_id')) {
+      const sourceIdToActivationId = new Map<string, string>()
+      const linkedSourceIds = new Set<string>()
+      const linkedActivationIds = new Set<string>()
+      const sourcePlanIds = new Set<string>()
+      const sourceModeById = new Map<string, string | null>()
+      const watchClosedByPlan = new Set<string>()
+      const activatedActIds = new Set<string>()
+
+      // Pass 0: collect source_adoptions, source_plans ids/modes, activation_watch closures, activated plans
+      for (const { db, realTarget } of dbs) {
+        if (
+          hasTable(db, 'source_adoptions')
+          && hasColumn(db, 'source_adoptions', 'source_plan_id')
+          && hasColumn(db, 'source_adoptions', 'activation_plan_id')
+        ) {
+          const saKey = `${realTarget}::source_adoptions`
+          if (!countedTables.has(saKey)) {
+            countedTables.add(saKey)
+            const links = db.prepare('SELECT source_plan_id, activation_plan_id FROM source_adoptions').all() as Array<{
+              source_plan_id?: string
+              activation_plan_id?: string
+            }>
+            for (const link of links) {
+              if (typeof link.source_plan_id === 'string' && typeof link.activation_plan_id === 'string') {
+                linkedSourceIds.add(link.source_plan_id)
+                linkedActivationIds.add(link.activation_plan_id)
+                sourceIdToActivationId.set(link.source_plan_id, link.activation_plan_id)
+              }
+            }
+          }
+        }
+        if (hasTable(db, 'source_plans') && hasColumn(db, 'source_plans', 'id')) {
+          const hasMode = hasColumn(db, 'source_plans', 'mode')
+          const spRows = db.prepare(`SELECT id${hasMode ? ', mode' : ''} FROM source_plans`).all() as Array<{
+            id?: string
+            mode?: string | null
+          }>
+          for (const sp of spRows) {
+            if (typeof sp.id === 'string') {
+              sourcePlanIds.add(sp.id)
+              sourceModeById.set(sp.id, hasMode && typeof sp.mode === 'string' ? sp.mode : null)
+            }
+          }
+        }
+        if (hasTable(db, 'activation_watch') && hasColumn(db, 'activation_watch', 'plan_id') && hasColumn(db, 'activation_watch', 'state')) {
+          const watchRows = db.prepare('SELECT plan_id, state FROM activation_watch').all() as Array<{
+            plan_id?: string
+            state?: string
+          }>
+          for (const w of watchRows) {
+            if (typeof w.plan_id === 'string' && (w.state === 'closed-regressed' || w.state === 'closed-retracted')) {
+              watchClosedByPlan.add(w.plan_id)
+            }
+          }
+        }
+        if (hasTable(db, 'activation_plans') && hasColumn(db, 'activation_plans', 'id') && hasColumn(db, 'activation_plans', 'status')) {
+          const hasProfileCol = hasColumn(db, 'activation_plans', 'profile')
+          const actRows = db.prepare(
+            `SELECT id${hasProfileCol ? ', profile' : ''} FROM activation_plans WHERE status = 'activated'`,
+          ).all() as Array<{ id?: string; profile?: string }>
+          for (const row of actRows) {
+            if (typeof row.id !== 'string') continue
+            if (options?.profile !== undefined && hasProfileCol && typeof row.profile === 'string' && row.profile !== options.profile) {
+              continue
+            }
+            activatedActIds.add(row.id)
+          }
+        }
+      }
+
+      const normalizePlanId = (id: string): string => sourceIdToActivationId.get(id) ?? id
+
+      // Pass A: creation-adoptions.sqlite (`adoptions` without `entries` and without `parent_plan_id`)
+      for (const { db, realTarget } of dbs) {
+        if (
+          hasTable(db, 'adoptions')
+          && !hasTable(db, 'entries')
+          && !hasColumn(db, 'adoptions', 'parent_plan_id')
+          && hasColumn(db, 'adoptions', 'plan_id')
+          && hasColumn(db, 'adoptions', 'status')
+        ) {
+          const caKey = `${realTarget}::creation_adoptions`
+          if (countedTables.has(caKey)) continue
+          countedTables.add(caKey)
           sawCreationAdoptions = true
           const hasCertJson = hasColumn(db, 'adoptions', 'certificate_json')
           const hasReceiptJson = hasColumn(db, 'adoptions', 'receipt_json')
@@ -1349,8 +1577,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
                   : typeof cert.name === 'string' && cert.name.trim().length > 0
                     ? cert.name.trim()
                     : row.plan_id
-            const name = boundNonEmptyString(rawName, 200) ?? 'evolved-capability'
-            const rawVer = typeof receipt.version === 'string' && receipt.version.trim().length > 0
+            const rawExplicitVer = typeof receipt.version === 'string' && receipt.version.trim().length > 0
               ? receipt.version.trim()
               : typeof planObj?.version === 'string' && planObj.version.trim().length > 0
                 ? planObj.version.trim()
@@ -1358,277 +1585,290 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
                   ? cert.version.trim()
                   : typeof cert.pluginVersion === 'string' && cert.pluginVersion.trim().length > 0
                     ? cert.pluginVersion.trim()
-                    : 'v1'
-            const ver = boundNonEmptyString(rawVer, 128) ?? null
+                    : null
+            const ver = rawExplicitVer !== null ? (boundNonEmptyString(rawExplicitVer, 128) ?? null) : null
             const enabled = row.status === 'active'
-            const entry: MutableEvolvedEntry = {
-              name,
+            const entry = upsertEvolvedByName(rawName, {
               version: ver,
+              versionTier: ver !== null ? 1 : 0,
+              fromAdoptionJournal: true,
               enabled,
               installKind: 'adopted',
-            }
+            })
+            const canonicalId = normalizePlanId(row.plan_id)
             evolvedByPlanId.set(row.plan_id, entry)
-            upsertEvolvedByName(name, entry)
+            evolvedByPlanId.set(canonicalId, entry)
             if (row.status === 'active' || row.status === 'authorized') {
-              createdPlanIds.add(row.plan_id)
-              createdAdoptionCandidates.add(row.plan_id)
+              createdPlanIds.add(canonicalId)
+              controlAdoptedPlanIds.add(canonicalId)
             }
           }
         }
       }
 
       // Pass B: revision-adoptions.sqlite (`entries`, `versions`, `adoptions`, `rollbacks`)
-      for (const db of dbs) {
-        if (!hasTable(db, 'entries')) continue
+      for (const { db, realTarget } of dbs) {
+        const isRevisionJournal = hasTable(db, 'entries') || hasTable(db, 'versions') || hasTable(db, 'rollbacks')
+        if (!isRevisionJournal) continue
         const adoptionStatusByPlan = new Map<string, string>()
-        if (hasTable(db, 'adoptions')) {
-          sawRevisionAdoptions = true
-          const adoptRows = db.prepare('SELECT plan_id, status FROM adoptions').all() as Array<{
-            plan_id?: string
-            status?: string
-          }>
-          for (const row of adoptRows) {
-            if (typeof row.plan_id === 'string' && typeof row.status === 'string') {
-              adoptionStatusByPlan.set(row.plan_id, row.status)
-              if (row.status === 'active') {
-                revisedPlanIds.add(row.plan_id)
-                revisedAdoptionCandidates.add(row.plan_id)
+        if (hasTable(db, 'adoptions') && hasColumn(db, 'adoptions', 'plan_id') && hasColumn(db, 'adoptions', 'status')) {
+          const revAdoptKey = `${realTarget}::revision_adoptions`
+          if (!countedTables.has(revAdoptKey)) {
+            countedTables.add(revAdoptKey)
+            sawRevisionAdoptions = true
+            const adoptRows = db.prepare('SELECT plan_id, status FROM adoptions').all() as Array<{
+              plan_id?: string
+              status?: string
+            }>
+            for (const row of adoptRows) {
+              if (typeof row.plan_id === 'string' && typeof row.status === 'string') {
+                adoptionStatusByPlan.set(row.plan_id, row.status)
+                if (row.status === 'active') {
+                  const canonicalId = normalizePlanId(row.plan_id)
+                  revisedPlanIds.add(canonicalId)
+                  controlAdoptedPlanIds.add(canonicalId)
+                }
               }
             }
           }
-        } else if (hasTable(db, 'versions') && hasColumn(db, 'versions', 'role')) {
-          sawRevisionAdoptions = true
-          const revRows = db.prepare("SELECT plan_id FROM versions WHERE role = 'revision'").all() as Array<{
-            plan_id?: string
-          }>
-          for (const row of revRows) {
-            if (typeof row.plan_id === 'string') {
-              revisedPlanIds.add(row.plan_id)
+        } else if (hasTable(db, 'versions') && hasColumn(db, 'versions', 'plan_id') && hasColumn(db, 'versions', 'role')) {
+          const revVerKey = `${realTarget}::revision_versions`
+          if (!countedTables.has(revVerKey)) {
+            countedTables.add(revVerKey)
+            sawRevisionAdoptions = true
+            const revRows = db.prepare("SELECT plan_id FROM versions WHERE role = 'revision'").all() as Array<{
+              plan_id?: string
+            }>
+            for (const row of revRows) {
+              if (typeof row.plan_id === 'string') {
+                const canonicalId = normalizePlanId(row.plan_id)
+                revisedPlanIds.add(canonicalId)
+                controlAdoptedPlanIds.add(canonicalId)
+              }
             }
           }
         }
 
-        if (hasTable(db, 'rollbacks')) {
+        const revRb = queryDedupCount(db, realTarget, countedTables, 'rollbacks', 'SELECT COUNT(*) AS cnt FROM rollbacks')
+        if (revRb !== undefined) {
           sawRevisionRollbacks = true
-          revisionRollbacksCount += queryCount(db, 'SELECT COUNT(*) AS cnt FROM rollbacks')
+          revisionRollbacksCount += revRb
         }
 
-        const hasEntryId = hasColumn(db, 'entries', 'entry_id')
-        const hasEntryName = hasColumn(db, 'entries', 'name')
-        const hasParentPlanId = hasColumn(db, 'entries', 'parent_plan_id')
-        const hasCurrentPlanId = hasColumn(db, 'entries', 'current_plan_id')
-        const hasRevision = hasColumn(db, 'entries', 'revision')
-        const entryCols = [
-          hasEntryId ? 'entry_id' : null,
-          hasEntryName ? 'name' : null,
-          hasParentPlanId ? 'parent_plan_id' : null,
-          hasCurrentPlanId ? 'current_plan_id' : null,
-          hasRevision ? 'revision' : null,
-        ].filter((col): col is string => col !== null)
-        const entryRows = entryCols.length > 0
-          ? db.prepare(`SELECT ${entryCols.join(', ')} FROM entries`).all() as Array<{
-              entry_id?: string
-              name?: string
-              parent_plan_id?: string
-              current_plan_id?: string
-              revision?: number
-            }>
-          : []
-        for (const row of entryRows) {
-          const parentPlanId = typeof row.parent_plan_id === 'string' ? row.parent_plan_id : undefined
-          const currentPlanId = typeof row.current_plan_id === 'string' ? row.current_plan_id : undefined
-          const currentStatus = currentPlanId ? adoptionStatusByPlan.get(currentPlanId) : undefined
-          const revVersion = typeof row.revision === 'number' && Number.isFinite(row.revision)
-            ? `v${row.revision}`
-            : null
-          const parentEntry = parentPlanId ? evolvedByPlanId.get(parentPlanId) : undefined
-          if (parentEntry) {
-            if (revVersion !== null && (parentEntry.version === null || /^v\d+$/u.test(parentEntry.version))) {
-              parentEntry.version = revVersion
+        if (hasTable(db, 'entries')) {
+          const revEntriesKey = `${realTarget}::revision_entries`
+          if (!countedTables.has(revEntriesKey)) {
+            countedTables.add(revEntriesKey)
+            const hasEntryId = hasColumn(db, 'entries', 'entry_id')
+            const hasEntryName = hasColumn(db, 'entries', 'name')
+            const hasParentPlanId = hasColumn(db, 'entries', 'parent_plan_id')
+            const hasCurrentPlanId = hasColumn(db, 'entries', 'current_plan_id')
+            const hasRevision = hasColumn(db, 'entries', 'revision')
+            const entryCols = [
+              hasEntryId ? 'entry_id' : null,
+              hasEntryName ? 'name' : null,
+              hasParentPlanId ? 'parent_plan_id' : null,
+              hasCurrentPlanId ? 'current_plan_id' : null,
+              hasRevision ? 'revision' : null,
+            ].filter((col): col is string => col !== null)
+            const entryRows = entryCols.length > 0
+              ? db.prepare(`SELECT ${entryCols.join(', ')} FROM entries`).all() as Array<{
+                  entry_id?: string
+                  name?: string
+                  parent_plan_id?: string
+                  current_plan_id?: string
+                  revision?: number
+                }>
+              : []
+            for (const row of entryRows) {
+              const parentPlanId = typeof row.parent_plan_id === 'string' ? row.parent_plan_id : undefined
+              const currentPlanId = typeof row.current_plan_id === 'string' ? row.current_plan_id : undefined
+              const currentStatus = currentPlanId ? adoptionStatusByPlan.get(currentPlanId) : undefined
+              const revVersion = typeof row.revision === 'number' && Number.isFinite(row.revision)
+                ? `v${Math.trunc(row.revision)}`
+                : null
+              const parentEntry = parentPlanId
+                ? (evolvedByPlanId.get(normalizePlanId(parentPlanId)) ?? evolvedByPlanId.get(parentPlanId))
+                : undefined
+              if (parentEntry) {
+                upsertEvolvedByName(parentEntry.name, {
+                  version: revVersion,
+                  versionTier: revVersion !== null ? 2 : 0,
+                  fromAdoptionJournal: true,
+                  enabled: currentStatus === 'active',
+                  installKind: 'adopted',
+                })
+              } else {
+                const rawName = typeof row.name === 'string' && row.name.trim().length > 0
+                  ? row.name.trim()
+                  : (parentPlanId ?? row.entry_id ?? 'evolved-capability')
+                upsertEvolvedByName(rawName, {
+                  version: revVersion,
+                  versionTier: revVersion !== null ? 2 : 0,
+                  fromAdoptionJournal: true,
+                  enabled: currentStatus === 'active',
+                  installKind: 'adopted',
+                })
+              }
             }
-            if (currentStatus === 'active') parentEntry.enabled = true
-            upsertEvolvedByName(parentEntry.name, parentEntry)
-          } else {
-            const rawName = typeof row.name === 'string' && row.name.trim().length > 0
-              ? row.name.trim()
-              : (parentPlanId ?? row.entry_id ?? 'evolved-capability')
-            const name = boundNonEmptyString(rawName, 200) ?? 'evolved-capability'
-            upsertEvolvedByName(name, {
-              name,
-              version: revVersion ?? 'v1',
-              enabled: currentStatus === 'active',
-              installKind: 'adopted',
-            })
           }
         }
       }
 
-      // Pass C: control.sqlite (`source_plans`, `activation_plans`, `source_adoptions`, `activation_watch`)
-      for (const db of dbs) {
-        const hasSourcePlans = hasTable(db, 'source_plans')
-        const hasActivationPlans = hasTable(db, 'activation_plans')
-        const hasSourceAdoptions = hasTable(db, 'source_adoptions')
-        const hasWatch = hasTable(db, 'activation_watch')
-        if (!hasSourcePlans && !hasActivationPlans) continue
-
-        const sourceModeById = new Map<string, string | null>()
-        const linkedSourceIds = new Set<string>()
-        const linkedActivationIds = new Set<string>()
-        const sourceIdToActivationId = new Map<string, string>()
-
-        if (hasSourceAdoptions) {
-          const links = db.prepare('SELECT source_plan_id, activation_plan_id FROM source_adoptions').all() as Array<{
-            source_plan_id?: string
-            activation_plan_id?: string
-          }>
-          for (const link of links) {
-            if (typeof link.source_plan_id === 'string' && typeof link.activation_plan_id === 'string') {
-              linkedSourceIds.add(link.source_plan_id)
-              linkedActivationIds.add(link.activation_plan_id)
-              sourceIdToActivationId.set(link.source_plan_id, link.activation_plan_id)
-            }
-          }
+      // Pass C: control.sqlite (`source_plans`, `activation_plans`, `activation_watch`)
+      const sourceModeByActivationId = new Map<string, string | null>()
+      for (const [srcId, actId] of sourceIdToActivationId) {
+        if (sourceModeById.has(srcId)) {
+          sourceModeByActivationId.set(actId, sourceModeById.get(srcId) ?? null)
         }
+      }
 
-        const watchClosedByPlan = new Set<string>()
-        if (hasWatch) {
-          const watchRows = db.prepare('SELECT plan_id, state FROM activation_watch').all() as Array<{
-            plan_id?: string
-            state?: string
-          }>
-          for (const w of watchRows) {
-            if (typeof w.plan_id === 'string' && (w.state === 'closed-regressed' || w.state === 'closed-retracted')) {
-              watchClosedByPlan.add(w.plan_id)
-            }
-          }
-        }
-
-        const activatedActIds = new Set<string>()
-        if (hasActivationPlans) {
-          const actStatusRows = db.prepare("SELECT id FROM activation_plans WHERE status = 'activated'").all() as Array<{ id?: string }>
-          for (const row of actStatusRows) {
-            if (typeof row.id === 'string') activatedActIds.add(row.id)
-          }
-        }
-
-        if (hasSourcePlans) {
-          sawControlSourcePlans = true
-          const hasMode = hasColumn(db, 'source_plans', 'mode')
-          const spRows = db.prepare(
-            hasMode
-              ? 'SELECT id, plugin_name, mode, status FROM source_plans'
-              : 'SELECT id, plugin_name, status FROM source_plans',
-          ).all() as Array<{
-            id?: string
-            plugin_name?: string
-            mode?: string | null
-            status?: string
-          }>
-          controlSourcePlansTotal += spRows.length
-          for (const sp of spRows) {
-            if (typeof sp.id !== 'string') continue
-            const mode = hasMode && typeof sp.mode === 'string' ? sp.mode : null
-            sourceModeById.set(sp.id, mode)
-            if (sp.status === 'release-complete') {
-              const linkedActId = sourceIdToActivationId.get(sp.id)
-              if (mode === 'modify' || mode === 'prepared-revise') {
-                if (!linkedActId || !revisedPlanIds.has(linkedActId)) {
-                  revisedPlanIds.add(linkedActId ?? sp.id)
-                }
-              } else {
-                if (!linkedActId || !createdPlanIds.has(linkedActId)) {
-                  createdPlanIds.add(linkedActId ?? sp.id)
-                }
-                const pkgName = boundNonEmptyString(sp.plugin_name, 200)
-                if (pkgName !== undefined) {
-                  const existing = evolvedByName.get(pkgName)
-                  const isActEnabled = activatedActIds.has(linkedActId ?? sp.id)
-                  upsertEvolvedByName(pkgName, {
-                    name: pkgName,
-                    version: existing?.version ?? null,
-                    enabled: existing?.enabled === true || isActEnabled,
+      for (const { db, realTarget } of dbs) {
+        if (hasTable(db, 'activation_watch') && hasColumn(db, 'activation_watch', 'package_name')) {
+          const watchKey = `${realTarget}::activation_watch`
+          if (!countedTables.has(watchKey)) {
+            countedTables.add(watchKey)
+            const hasVer = hasColumn(db, 'activation_watch', 'package_version')
+            const hasState = hasColumn(db, 'activation_watch', 'state')
+            const watchRows = db.prepare(
+              `SELECT package_name${hasVer ? ', package_version' : ''}${hasState ? ', state' : ''} FROM activation_watch`,
+            ).all() as Array<{ package_name?: unknown; package_version?: unknown; state?: unknown }>
+            for (const w of watchRows) {
+              if (typeof w.package_name === 'string' && w.package_name.trim() !== '') {
+                const state = typeof w.state === 'string' ? w.state : ''
+                if (state === '' || state === 'watching') {
+                  const ver = typeof w.package_version === 'string' && w.package_version.trim() !== ''
+                    ? (boundNonEmptyString(w.package_version, 128) ?? null)
+                    : null
+                  upsertEvolvedByName(w.package_name, {
+                    version: ver,
+                    versionTier: ver !== null ? 1 : 0,
+                    fromAdoptionJournal: false,
+                    enabled: state === 'watching',
                     installKind: 'adopted',
                   })
                 }
               }
-              if (!hasSourceAdoptions || !linkedSourceIds.has(sp.id)) {
-                controlUnlinkedCompletedSourcePlans += 1
+            }
+          }
+        }
+
+        if (hasTable(db, 'source_plans') && hasColumn(db, 'source_plans', 'id')) {
+          const spKey = `${realTarget}::source_plans`
+          if (!countedTables.has(spKey)) {
+            countedTables.add(spKey)
+            sawControlSourcePlans = true
+            const hasMode = hasColumn(db, 'source_plans', 'mode')
+            const hasPluginName = hasColumn(db, 'source_plans', 'plugin_name')
+            const hasStatus = hasColumn(db, 'source_plans', 'status')
+            const cols = [
+              'id',
+              ...(hasPluginName ? ['plugin_name'] : []),
+              ...(hasMode ? ['mode'] : []),
+              ...(hasStatus ? ['status'] : []),
+            ]
+            const spRows = db.prepare(`SELECT ${cols.join(', ')} FROM source_plans`).all() as Array<{
+              id?: string
+              plugin_name?: string
+              mode?: string | null
+              status?: string
+            }>
+            controlSourcePlansTotal += spRows.length
+            for (const sp of spRows) {
+              if (typeof sp.id !== 'string') continue
+              const mode = hasMode && typeof sp.mode === 'string' ? sp.mode : null
+              if (hasStatus && sp.status === 'release-complete') {
+                const canonicalId = normalizePlanId(sp.id)
+                controlAdoptedPlanIds.add(canonicalId)
+                if (mode === 'modify' || mode === 'prepared-revise') {
+                  revisedPlanIds.add(canonicalId)
+                } else {
+                  createdPlanIds.add(canonicalId)
+                  const pkgName = boundNonEmptyString(sp.plugin_name, 200)
+                  if (pkgName !== undefined) {
+                    const isActEnabled = activatedActIds.has(canonicalId)
+                    upsertEvolvedByName(pkgName, {
+                      version: null,
+                      versionTier: 0,
+                      fromAdoptionJournal: false,
+                      enabled: isActEnabled,
+                      installKind: 'adopted',
+                    })
+                  }
+                }
               }
             }
           }
         }
 
-        if (hasActivationPlans) {
-          sawControlActivationPlans = true
-          const hasProfileCol = hasColumn(db, 'activation_plans', 'profile')
-          const hasCandidateCol = hasColumn(db, 'activation_plans', 'candidate_json')
-          const hasUpdatedCol = hasColumn(db, 'activation_plans', 'updated_at')
-          const actRows = db.prepare(
-            `SELECT id, ${hasProfileCol ? 'profile,' : ''} ${hasCandidateCol ? 'candidate_json,' : ''} status${hasUpdatedCol ? ', updated_at' : ''} FROM activation_plans${hasUpdatedCol ? ' ORDER BY updated_at ASC, rowid ASC' : ''}`,
-          ).all() as Array<{
-            id?: string
-            profile?: string
-            candidate_json?: string
-            status?: string
-          }>
+        if (hasTable(db, 'activation_plans') && hasColumn(db, 'activation_plans', 'id') && hasColumn(db, 'activation_plans', 'status')) {
+          const apKey = `${realTarget}::activation_plans`
+          if (!countedTables.has(apKey)) {
+            countedTables.add(apKey)
+            sawControlActivationPlans = true
+            const hasProfileCol = hasColumn(db, 'activation_plans', 'profile')
+            const hasCandidateCol = hasColumn(db, 'activation_plans', 'candidate_json')
+            const hasUpdatedCol = hasColumn(db, 'activation_plans', 'updated_at')
+            const actRows = db.prepare(
+              `SELECT id, ${hasProfileCol ? 'profile,' : ''} ${hasCandidateCol ? 'candidate_json,' : ''} status${hasUpdatedCol ? ', updated_at' : ''} FROM activation_plans${hasUpdatedCol ? ' ORDER BY updated_at ASC, rowid ASC' : ''}`,
+            ).all() as Array<{
+              id?: string
+              profile?: string
+              candidate_json?: string
+              status?: string
+            }>
 
-          const sourceModeByActivationId = new Map<string, string | null>()
-          if (hasSourceAdoptions) {
-            for (const [srcId, actId] of sourceIdToActivationId) {
-              if (sourceModeById.has(srcId)) {
-                sourceModeByActivationId.set(actId, sourceModeById.get(srcId) ?? null)
+            for (const act of actRows) {
+              if (typeof act.id !== 'string') continue
+              if (options?.profile !== undefined && hasProfileCol && typeof act.profile === 'string' && act.profile !== options.profile) {
+                continue
               }
-            }
-          }
+              if (!linkedActivationIds.has(act.id) && !sourcePlanIds.has(act.id)) {
+                controlUnlinkedActivationPlans += 1
+              }
+              if (act.status === 'activated') {
+                controlAdoptedPlanIds.add(act.id)
+              }
+              if (act.status === 'rolled-back' || act.status === 'rollback-pending') {
+                controlRollbackPlans += 1
+              }
 
-          for (const act of actRows) {
-            if (typeof act.id !== 'string') continue
-            if (options?.profile !== undefined && hasProfileCol && typeof act.profile === 'string' && act.profile !== options.profile) {
-              continue
-            }
-            if (hasSourceAdoptions && !linkedActivationIds.has(act.id)) {
-              controlUnlinkedActivationPlans += 1
-            } else if (!hasSourceAdoptions && !hasSourcePlans) {
-              controlUnlinkedActivationPlans += 1
-            }
-            if (act.status === 'activated') {
-              controlActivatedPlans += 1
-            }
-            if (act.status === 'rolled-back' || act.status === 'rollback-pending') {
-              controlRollbackPlans += 1
-            }
-
-            const linkedMode = sourceModeByActivationId.get(act.id)
-            if (linkedMode === 'modify' || linkedMode === 'prepared-revise') {
-              // In-place patch/revision on an existing core plugin; do not move out of core[].
-              continue
-            }
-            const candidate = hasCandidateCol ? parseJsonObject(act.candidate_json) : {}
-            const pkgName = typeof candidate.package === 'string' && candidate.package.trim().length > 0
-              ? candidate.package.trim()
-              : (typeof candidate.name === 'string' && candidate.name.trim().length > 0 ? candidate.name.trim() : undefined)
-            if (pkgName === undefined) {
-              continue
-            }
-            const pkgVer = typeof candidate.version === 'string' && candidate.version.trim().length > 0
-              ? candidate.version.trim()
-              : null
-            const patchDisabled = targetProfiles.length > 0
-              && targetProfiles.every(p => {
-                const ps = patchStatesByProfile.get(p)?.get(pkgName)
-                return ps?.disabled === true || ps?.configEnabled === false
+              const linkedMode = sourceModeByActivationId.get(act.id)
+              if (linkedMode === 'modify' || linkedMode === 'prepared-revise') {
+                continue
+              }
+              const candidate = hasCandidateCol ? parseJsonObject(act.candidate_json) : {}
+              const pkgName = typeof candidate.package === 'string' && candidate.package.trim().length > 0
+                ? candidate.package.trim()
+                : (typeof candidate.name === 'string' && candidate.name.trim().length > 0 ? candidate.name.trim() : undefined)
+              if (pkgName === undefined) {
+                continue
+              }
+              const pkgVer = typeof candidate.version === 'string' && candidate.version.trim().length > 0
+                ? (boundNonEmptyString(candidate.version.trim(), 128) ?? null)
+                : null
+              const patchDisabled = targetProfiles.length > 0
+                && targetProfiles.every(p => {
+                  const ps = patchStatesByProfile.get(p)?.get(pkgName)
+                  return ps?.disabled === true || ps?.configEnabled === false
+                })
+              const enabled = act.status === 'activated' && !watchClosedByPlan.has(act.id) && !patchDisabled
+              const boundedPkgName = boundNonEmptyString(pkgName, 200)
+              if (boundedPkgName === undefined) continue
+              const key = normalizePluginKey(boundedPkgName)
+              const existing = evolvedByName.get(key)
+              const resolvedVer = pkgVer ?? existing?.version ?? null
+              const resolvedTier: 0 | 1 | 2 | 3 | 4 = pkgVer !== null ? 1 : (existing?.versionTier ?? 0)
+              // Latest row wins for enabled & Tier 1 version
+              evolvedByName.set(key, {
+                name: boundedPkgName,
+                version: resolvedVer,
+                versionTier: resolvedTier,
+                fromAdoptionJournal: existing?.fromAdoptionJournal ?? false,
+                enabled,
+                installKind: 'adopted',
               })
-            const enabled = act.status === 'activated' && !watchClosedByPlan.has(act.id) && !patchDisabled
-            const boundedPkgName = boundNonEmptyString(pkgName, 200)
-            if (boundedPkgName === undefined) continue
-            const boundedPkgVer = boundNonEmptyString(pkgVer, 128) ?? evolvedByName.get(boundedPkgName)?.version ?? null
-            // Latest row wins for the same package name
-            evolvedByName.set(boundedPkgName, {
-              name: boundedPkgName,
-              version: boundedPkgVer,
-              enabled,
-              installKind: 'adopted',
-            })
+            }
           }
         }
       }
@@ -1654,10 +1894,11 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       for (const pkg of installed) {
         const slug = pkg.name.replace('@dsh-enhanced/', '')
         const diskVer = await readPackageVersionSafe(join(scopeDir, slug, 'package.json'))
-        const evolvedEntry = evolvedByName.get(pkg.name)
+        const evolvedEntry = evolvedByName.get(normalizePluginKey(pkg.name))
         if (evolvedEntry) {
-          if (evolvedEntry.version === null && diskVer !== null) {
+          if (diskVer !== null && (evolvedEntry.version === null || /^v\d+$/u.test(evolvedEntry.version))) {
             evolvedEntry.version = diskVer
+            evolvedEntry.versionTier = 3
           }
           continue
         }
@@ -1705,7 +1946,8 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     .map((entry): AssistantVersionPluginEntry | undefined => {
       const boundedName = boundNonEmptyString(entry.name, 200)
       if (!boundedName) return undefined
-      const boundedVer = entry.version === null ? null : boundNonEmptyString(entry.version, 128) ?? null
+      const rawVer = entry.version === null && entry.fromAdoptionJournal ? 'v1' : entry.version
+      const boundedVer = rawVer === null ? null : boundNonEmptyString(rawVer, 128) ?? null
       return Object.freeze({
         name: boundedName,
         version: boundedVer,
@@ -1745,6 +1987,9 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     || sawPreferenceTransitions
     || sawEvolutionProposals
     || sawWorkflowCandidates
+    || sawAssocRelaxProposals
+    || sawAssocSkillCandidates
+    || sawEvalLooseningProposals
   const candidatesGeneratedVal = sawCandidatesGenerated
     ? memoryLearningJobsTotal
       + controlSourcePlansTotal
@@ -1754,6 +1999,9 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       + (sawPreferenceHypotheses ? preferenceHypothesesTotal : preferenceTransitionsCreated)
       + evolutionProposalsTotal
       + workflowCandidatesTotal
+      + assocRelaxProposalsTotal
+      + assocSkillCandidatesTotal
+      + evalLooseningProposalsTotal
     : null
 
   const sawCandidatesAdopted = sawMemoryLearningJobs
@@ -1768,10 +2016,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     || sawWorkflowCandidates
   const candidatesAdoptedVal = sawCandidatesAdopted
     ? memoryLearningJobsAdopted
-      + createdAdoptionCandidates.size
-      + revisedAdoptionCandidates.size
-      + controlActivatedPlans
-      + controlUnlinkedCompletedSourcePlans
+      + controlAdoptedPlanIds.size
       + skillDeployments
       + (sawPreferenceTransitions ? preferenceTransitionsActivated : preferenceHypothesesActivatedFallback)
       + evolutionRulesAdopted
@@ -1790,6 +2035,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
     || sawSkillDeployments
     || sawWorkflowCandidates
     || sawPreferenceTransitions
+    || sawPreferenceHypotheses
     || sawAssocParamEvents
     || sawEvalTuningEvents
   const rollbacksVal = sawRollbacks
@@ -1798,7 +2044,7 @@ export async function collectVersionReport(options?: CollectVersionReportOptions
       + evolutionRollbacks
       + skillRollbacks
       + workflowRollbacks
-      + preferenceTransitionsRolledBack
+      + (sawPreferenceTransitions ? preferenceTransitionsRolledBack : preferenceHypothesesRolledBackFallback)
       + associationProfileRollbacks
       + evaluationAttentionTuningRollbacks
     : null

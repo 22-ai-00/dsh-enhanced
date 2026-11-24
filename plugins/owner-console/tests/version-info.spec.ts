@@ -378,12 +378,12 @@ describe('collectOwnerConsoleVersionInfo & OwnerConsoleService.versionInfo', () 
 
     // Zero double-counting checks
     expect(report.selfIteration.dataState).toBe('data')
-    expect(report.selfIteration.pluginsCreated).toBe(2) // p-create-1, p-create-closed
+    expect(report.selfIteration.pluginsCreated).toBe(1) // p-create-1 (closed p-create-closed excluded)
     expect(report.selfIteration.pluginsRevised).toBe(1) // p-rev-1
-    // control-plane distinct plans = {p-create-1, p-create-closed, p-rev-1} (3, NOT 5!) + ml(1) + skills(1) + pref(1) + evo(1) + wf(1) = 8
-    expect(report.selfIteration.candidatesAdopted).toBe(8)
-    // rollbacks: cp activation(1) + cp creation closed(1) + cp revision rollbacks(1) + evo(1) = 4
-    expect(report.selfIteration.rollbacks).toBe(4)
+    // control-plane distinct plans = {p-create-1, p-rev-1} (2) + ml(1) + skills(1) + pref(1) + evo(1) + wf(1) = 7
+    expect(report.selfIteration.candidatesAdopted).toBe(7)
+    // rollbacks: cp activation(1) + cp revision rollbacks(1) + evo(1) = 3
+    expect(report.selfIteration.rollbacks).toBe(3)
     expect(report.selfIteration.workItemsTotal).toBe(2)
     expect(report.selfIteration.workItemsSettled).toBe(1)
     expect(report.selfIteration.growthUsageJobsTotal).toBe(2)

@@ -1,6 +1,6 @@
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createHmac } from 'node:crypto'
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -1196,12 +1196,54 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
     )
 
     const profileDir = join(ws.dshHome, 'profiles', 'web')
-    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { recursive: true, mode: 0o700 })
+    const scopeDir = join(profileDir, 'node_modules', '@dsh-enhanced')
+    await mkdir(scopeDir, { recursive: true, mode: 0o700 })
     await writeFile(
-      join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery', 'package.json'),
+      join(profileDir, 'package.json'),
+      JSON.stringify({ name: 'dsh-profile-web', private: true }),
+      'utf8',
+    )
+    // Subset cordis.patch.yml (omits growth-driver, dreaming, recovery, goals, evolution, etc.)
+    await writeFile(
+      join(profileDir, 'cordis.patch.yml'),
+      `- id: dsh-enhanced-assistant-work-items
+  name: "@dsh-enhanced/assistant-work-items"
+  config:
+    enabled: true
+- id: dsh-enhanced-evolved-beta
+  name: "@dsh-enhanced/evolved-beta"
+  config:
+    enabled: true
+`,
+      'utf8',
+    )
+
+    // 1. Regular npm dir in node_modules
+    await mkdir(join(scopeDir, 'assistant-delivery'), { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(scopeDir, 'assistant-delivery', 'package.json'),
       JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }),
       'utf8',
     )
+    // 2. Local symlink checkout in node_modules
+    const localWiDir = join(ws.root, 'local-work-items')
+    await mkdir(localWiDir, { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(localWiDir, 'package.json'),
+      JSON.stringify({ name: '@dsh-enhanced/assistant-work-items', version: expectedVersion }),
+      'utf8',
+    )
+    await symlink(localWiDir, join(scopeDir, 'assistant-work-items'))
+    // 3. .pnpm store symlink for @dsh-enhanced/evolved-beta (0.2.0 overrides synthetic v2)
+    const pnpmBetaDir = join(profileDir, 'node_modules', '.pnpm', '@dsh-enhanced+evolved-beta@0.2.0', 'node_modules', '@dsh-enhanced', 'evolved-beta')
+    await mkdir(pnpmBetaDir, { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(pnpmBetaDir, 'package.json'),
+      JSON.stringify({ name: '@dsh-enhanced/evolved-beta', version: '0.2.0' }),
+      'utf8',
+    )
+    await symlink(pnpmBetaDir, join(scopeDir, 'evolved-beta'))
+
     await writeFile(
       join(ws.dshHome, '.dsh-rsi-host.json'),
       JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: ws.root, receiptDigest: sha256Hex('host-gr12') }),
@@ -1215,6 +1257,7 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
     )
     await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-1'), { recursive: true, mode: 0o700 })
     await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-2'), { recursive: true, mode: 0o700 })
+    await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', '.ignored-hidden'), { recursive: true, mode: 0o700 })
 
     const execSql = async (rel: string, sql: string) => {
       const full = join(ws.dshHome, rel)
@@ -1226,49 +1269,146 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
         db.close()
       }
     }
-    await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled');")
-    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp1', '@dsh-enhanced/evolved-gr12', 'create', 'release-complete'), ('sp2', '@dsh-enhanced/evolved-gr12', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp1', 'web', 'activated');")
-    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-gr12"}}', '{"version":"0.1.0"}');`)
-    await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-gr12', 'sp2', 2); INSERT INTO adoptions VALUES ('sp2', 'active', 'e1');")
+    // Populate ALL 15 plugin ledger families
+    await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; CREATE TABLE work_item_outcome (item_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY (item_id, revision)) STRICT; INSERT INTO work_item VALUES ('w1', 'ready'), ('w2', 'open');")
+    await execSql('assistant-growth-driver/usage.sqlite', "CREATE TABLE usage_jobs (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO usage_jobs VALUES ('uj1', 'reviewed');")
+    await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('dr1', 'completed'), ('dr2', 'completed');")
+    await execSql('assistant-recovery/state.sqlite', "CREATE TABLE recovery_runs (id TEXT PRIMARY KEY, status TEXT) STRICT; INSERT INTO recovery_runs VALUES ('rr1', 'succeeded');")
+    await execSql('assistant-goals/strategies.sqlite', "CREATE TABLE goal_strategy_records (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO goal_strategy_records VALUES ('gs1', 'settled');")
+    await execSql('assistant-memory-learning/learning.sqlite', "CREATE TABLE jobs (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO jobs VALUES ('ml1', 'adopted'), ('ml2', 'queued');")
+    await execSql('personal-memory/memory.sqlite', "CREATE TABLE memory_records (id TEXT PRIMARY KEY, status TEXT) STRICT; INSERT INTO memory_records VALUES ('m1', 'active'), ('m2', 'removed');")
+    await execSql('preference-learning/preferences.sqlite', "CREATE TABLE preference_hypotheses (id TEXT PRIMARY KEY, effect_state TEXT) STRICT; CREATE TABLE preference_transitions (id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT) STRICT; INSERT INTO preference_hypotheses VALUES ('ph1', 'active'), ('ph2', 'rolled-back'); INSERT INTO preference_transitions(reason) VALUES ('created'), ('activated'), ('regression');")
+    await execSql('assistant-evolution/evolution.sqlite', "CREATE TABLE evolution_proposals (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_rules (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_autonomous_rollbacks (idempotency_key TEXT PRIMARY KEY) STRICT; INSERT INTO evolution_proposals VALUES ('ep1', 'pending'); INSERT INTO evolution_rules VALUES ('er1', 'active'); INSERT INTO evolution_autonomous_rollbacks VALUES ('erb1');")
+    await execSql('assistant-skills/skills.sqlite', "CREATE TABLE skill_candidates (scope_key TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(scope_key, id)) STRICT; CREATE TABLE skill_deployments (scope_key TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(scope_key, id)) STRICT; INSERT INTO skill_candidates VALUES ('s', 'sc1'); INSERT INTO skill_deployments VALUES ('s', 'sd1', 'promoted'), ('s', 'sd2', 'revoked');")
+    await execSql('assistant-growth-experiments/growth.sqlite', "CREATE TABLE workflow_candidates (id TEXT PRIMARY KEY, state TEXT NOT NULL) STRICT; INSERT INTO workflow_candidates VALUES ('wc1', 'promoted'), ('wc2', 'rolled-back');")
+    await execSql('assistant-association/association.sqlite', "CREATE TABLE assoc_param_profile_heads (scope_key TEXT PRIMARY KEY, active_version INTEGER) STRICT; CREATE TABLE assoc_param_profile_events (seq INTEGER PRIMARY KEY, kind TEXT) STRICT; CREATE TABLE assoc_param_relax_proposals (proposal_id TEXT PRIMARY KEY) STRICT; CREATE TABLE assoc_skill_candidates (id TEXT PRIMARY KEY) STRICT; INSERT INTO assoc_param_profile_heads VALUES ('owner', 3); INSERT INTO assoc_param_profile_events VALUES (1, 'adopted'), (2, 'rolled-back'); INSERT INTO assoc_param_relax_proposals VALUES ('arp1'); INSERT INTO assoc_skill_candidates VALUES ('asc1');")
+    await execSql('assistant-evaluation/evaluation.sqlite', "CREATE TABLE evaluation_attention_tuning_events (seq INTEGER PRIMARY KEY, kind TEXT) STRICT; CREATE TABLE evaluation_attention_loosening_proposals (proposal_id TEXT PRIMARY KEY) STRICT; CREATE TABLE evaluation_attention_loosening_decisions (proposal_id TEXT PRIMARY KEY, decision TEXT) STRICT; INSERT INTO evaluation_attention_tuning_events VALUES (1, 'adopted'), (2, 'rolled-back'); INSERT INTO evaluation_attention_loosening_proposals VALUES ('lp1'); INSERT INTO evaluation_attention_loosening_decisions VALUES ('lp1', 'adopted');")
+    await execSql('assistant-verifier/verification.sqlite', "CREATE TABLE acceptance_jobs (contract_id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO acceptance_jobs VALUES ('aj1', 'done'), ('aj2', 'pending');")
+    await execSql(
+      'plugin-control-plane/control.sqlite',
+      `CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT;
+       CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, candidate_json TEXT, status TEXT, updated_at INTEGER) STRICT;
+       CREATE TABLE source_adoptions (source_plan_id TEXT NOT NULL, activation_plan_id TEXT NOT NULL) STRICT;
+       CREATE TABLE activation_watch (plan_id TEXT PRIMARY KEY, package_name TEXT, package_version TEXT, state TEXT) STRICT;
+       INSERT INTO source_plans VALUES
+         ('sp1', '@dsh-enhanced/evolved-gr12', 'create', 'release-complete'),
+         ('sp2', '@dsh-enhanced/assistant-work-items', 'modify', 'release-complete');
+       INSERT INTO activation_plans VALUES
+         ('ap1', 'web', '{"package":"@dsh-enhanced/evolved-gr12","version":"0.1.0"}', 'activated', 100),
+         ('ap2', 'web', '{"package":"@dsh-enhanced/assistant-work-items","version":"0.1.83"}', 'activated', 101),
+         ('ap3', 'web', '{"package":"@dsh-enhanced/evolved-unlinked","version":"0.3.0"}', 'rolled-back', 102);
+       INSERT INTO source_adoptions VALUES ('sp1', 'ap1'), ('sp2', 'ap2');
+       INSERT INTO activation_watch VALUES ('ap1', '@dsh-enhanced/evolved-gr12', '0.1.0', 'watching');`,
+    )
+    await execSql(
+      'plugin-control-plane/creation-adoptions.sqlite',
+      `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT;
+       INSERT INTO adoptions VALUES
+         ('sp1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-gr12"}}', '{"version":"0.1.0"}'),
+         ('sp-closed', 'closed', '{"plan":{"name":"@dsh-enhanced/evolved-closed"}}', '{"version":"0.0.9"}');`,
+    )
+    await execSql(
+      'plugin-control-plane/revision-adoptions.sqlite',
+      `CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, parent_plan_id TEXT, current_plan_id TEXT, revision INTEGER) STRICT;
+       CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT;
+       CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT;
+       INSERT INTO entries VALUES
+         ('e1', '@dsh-enhanced/evolved-gr12', 'sp1', 'sp2', 2),
+         ('e2', '@dsh-enhanced/evolved-beta', NULL, 'rev-beta', 2);
+       INSERT INTO adoptions VALUES ('sp2', 'active', 'e1'), ('rev-beta', 'active', 'e2');
+       INSERT INTO rollbacks VALUES (1, 'rb-1');`,
+    )
 
-    // 1. CLI
-    const cliRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
-    expect(cliRes.exitCode).toBe(0)
-    const cliReport = JSON.parse(cliRes.stdout) as Record<string, unknown>
-
-    // 2. OwnerConsoleService.versionInfo()
-    const ctx = harness.createContext()
-    await harness.mountPlugin(ctx, TypertRegistry)
-    harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
     const applyOwner = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
     const configOwner = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
-    applyOwner(ctx, configOwner({ feishuAppId: '' }))
-    const ownerSvc = ctx.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
-    const ownerReport = await ownerSvc.versionInfo()
 
-    // 3. Delivery standalone collector
-    const deliveryReport = await collectDelivery({ ctx, dshHome: ws.dshHome, profile: 'web' })
+    // Mode A: Without --profile
+    const cliNoProfRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+    expect(cliNoProfRes.exitCode).toBe(0)
+    const cliNoProf = JSON.parse(cliNoProfRes.stdout) as Record<string, unknown>
 
-    for (const report of [cliReport, ownerReport, deliveryReport]) {
-      expect(ReportSchema.parse(report)).toEqual(report)
-      expect(report.schemaVersion).toBe(1)
-      expect(report.protocol).toBe('dsh-rsi/version/v1')
-      expect((report.assistant as { version: string }).version).toBe(expectedVersion)
-      expect((report.host as { boundVersion: string | null }).boundVersion).toBe('0.2.2-rc.5')
-      expect(report.selfIteration).toMatchObject({
+    const ctxNoProf = harness.createContext()
+    await harness.mountPlugin(ctxNoProf, TypertRegistry)
+    harness.provideMockService(ctxNoProf, 'profileContext', { home: ws.dshHome })
+    applyOwner(ctxNoProf, configOwner({ feishuAppId: '' }))
+    const ownerSvcNoProf = ctxNoProf.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
+    const ownerNoProf = await ownerSvcNoProf.versionInfo()
+    const deliveryNoProf = await collectDelivery({ ctx: ctxNoProf, dshHome: ws.dshHome })
+
+    // Mode B: With --profile web
+    const cliWebRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome, '--profile', 'web'])
+    expect(cliWebRes.exitCode).toBe(0)
+    const cliWeb = JSON.parse(cliWebRes.stdout) as Record<string, unknown>
+
+    const ctxWeb = harness.createContext()
+    await harness.mountPlugin(ctxWeb, TypertRegistry)
+    harness.provideMockService(ctxWeb, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
+    applyOwner(ctxWeb, configOwner({ feishuAppId: '' }))
+    const ownerSvcWeb = ctxWeb.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
+    const ownerWeb = await ownerSvcWeb.versionInfo()
+    const deliveryWeb = await collectDelivery({ ctx: ctxWeb, dshHome: ws.dshHome, profile: 'web' })
+
+    for (const [cliRep, ownerRep, deliveryRep] of [
+      [cliNoProf, ownerNoProf, deliveryNoProf],
+      [cliWeb, ownerWeb, deliveryWeb],
+    ] as const) {
+      for (const report of [cliRep, ownerRep, deliveryRep]) {
+        expect(ReportSchema.parse(report)).toEqual(report)
+        expect(report.schemaVersion).toBe(1)
+        expect(report.protocol).toBe('dsh-rsi/version/v1')
+        expect((report.assistant as { version: string }).version).toBe(expectedVersion)
+        expect((report.host as { boundVersion: string | null }).boundVersion).toBe('0.2.2-rc.5')
+      }
+      expect(cliRep.selfIteration).toEqual(ownerRep.selfIteration)
+      expect(deliveryRep.selfIteration).toEqual(ownerRep.selfIteration)
+      expect(cliRep.plugins).toEqual(ownerRep.plugins)
+      expect(deliveryRep.plugins).toEqual(ownerRep.plugins)
+      expect(cliRep.inspectedLedgers).toEqual(ownerRep.inspectedLedgers)
+      expect(deliveryRep.inspectedLedgers).toEqual(ownerRep.inspectedLedgers)
+
+      expect(cliRep.selfIteration).toEqual({
         dataState: 'data',
-        totalIterations: 3,
+        totalIterations: 13,
+        workItemsTotal: 2,
+        workItemsSettled: 0,
+        growthUsageJobsTotal: 1,
+        dreamingRuns: 2,
+        recoveryRuns: 1,
+        goalStrategyRuns: 1,
+        candidatesGenerated: 15,
+        candidatesAdopted: 8,
         pluginsCreated: 1,
-        pluginsRevised: 1,
+        pluginsRevised: 2,
+        taskVerificationsDone: 1,
+        rollbacks: 8,
+        evolutionRulesAdopted: 1,
+        associationParamVersion: 3,
+        associationProfileAdoptions: 1,
+        evaluationAttentionTuningAdoptions: 1,
+        evaluationLooseningDecisionsAdopted: 1,
+        activeMemories: 1,
+        activePreferenceOverlays: 1,
+        workflowCandidatesPromoted: 1,
+        skillDeployments: 1,
         selfUpgrades: 2,
         backupSnapshotsCount: 2,
       })
+
+      const plugins = cliRep.plugins as {
+        core: Array<{ name: string; version: string | null; installKind?: string; enabled?: boolean }>
+        evolved: Array<{ name: string; version: string | null; installKind?: string; enabled?: boolean }>
+      }
+      expect(plugins.core).toEqual([
+        { name: '@dsh-enhanced/assistant-delivery', version: expectedVersion, kind: 'core', installKind: 'npm' },
+        { name: '@dsh-enhanced/assistant-work-items', version: expectedVersion, kind: 'core', installKind: 'local', enabled: true },
+      ])
+      expect(plugins.evolved).toEqual([
+        { name: '@dsh-enhanced/evolved-beta', version: '0.2.0', kind: 'evolved', installKind: 'adopted', enabled: true },
+        { name: '@dsh-enhanced/evolved-closed', version: '0.0.9', kind: 'evolved', installKind: 'adopted', enabled: false },
+        { name: '@dsh-enhanced/evolved-gr12', version: '0.1.0', kind: 'evolved', installKind: 'adopted', enabled: true },
+        { name: '@dsh-enhanced/evolved-unlinked', version: '0.3.0', kind: 'evolved', installKind: 'adopted', enabled: false },
+      ])
     }
-    const cliTotal = (cliReport.selfIteration as { totalIterations: number | null }).totalIterations
-    const ownerTotal = (ownerReport.selfIteration as { totalIterations: number | null }).totalIterations
-    const deliveryTotal = (deliveryReport.selfIteration as { totalIterations: number | null }).totalIterations
-    expect(cliTotal).toBe(ownerTotal)
-    expect(deliveryTotal).toBe(ownerTotal)
 
     // 4. Verify scripts/install/common.sh dsh_enhanced_ensure_rsi_cli probe against real bin/dsh-rsi.js
     const shimBin = join(ws.root, 'real-bin')

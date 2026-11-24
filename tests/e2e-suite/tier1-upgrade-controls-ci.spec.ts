@@ -778,7 +778,7 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       expect(parsed.selfIteration.dataState).toBe('data')
       expect(parsed.selfIteration.pluginsCreated).toBe(1)
       expect(parsed.selfIteration.pluginsRevised).toBe(1)
-      expect(parsed.selfIteration.candidatesAdopted).toBe(6) // 2 distinct cp plans (sp-create, sp-rev) + 1 evo + 1 assoc + 1 eval tuning + 1 eval loosen
+      expect(parsed.selfIteration.candidatesAdopted).toBe(3) // 2 distinct cp plans (sp-create, sp-rev) + 1 evo_rules
       expect(parsed.selfIteration.rollbacks).toBe(2) // 1 activation rollback + 1 evo rollback
       expect(parsed.selfIteration.selfUpgrades).toBe(1)
       expect(parsed.selfIteration.backupSnapshotsCount).toBe(1)

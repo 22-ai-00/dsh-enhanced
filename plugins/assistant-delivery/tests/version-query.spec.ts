@@ -281,8 +281,8 @@ describe('collectDeliveryVersionReport & formatAssistantVersionSummary', () => {
     expect(s.goalStrategyRuns).toBe(1)
     expect(s.pluginsCreated).toBe(1) // deduped sp1 across source_plans + adoptions
     expect(s.pluginsRevised).toBe(1) // sp2
-    expect(s.candidatesGenerated).toBe(6) // 3 source_plans + 1 evo + 1 pref + 1 workflow
-    expect(s.candidatesAdopted).toBe(6) // 1 activation + 1 evo + 1 eval loosen + 1 pref + 1 workflow + 1 skill
+    expect(s.candidatesGenerated).toBe(10) // 3 source_plans + 2 unlinked activation_plans + 2 usage_jobs + 1 evo + 1 pref + 1 workflow
+    expect(s.candidatesAdopted).toBe(7) // 3 distinct cp plans (sp1, sp2, ap1) + 1 evo_rules + 1 pref + 1 workflow + 1 skill
     expect(s.taskVerificationsDone).toBe(1)
     expect(s.rollbacks).toBe(2) // 1 activation rollback + 1 evo autonomous rollback
     expect(s.evolutionRulesAdopted).toBe(1)

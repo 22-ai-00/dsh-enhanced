@@ -24,9 +24,32 @@ interface SqlitePathBoundary {
   readonly canonicalDshHome: string
 }
 
-const DSH_HOME_EXPR_RE = /^(?:!!js\s+)?dshHomePath\(\s*(['"])([^'"\r\n]+)\1\s*\)$/u
 const VALID_PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
-const MAX_JSONL_BYTES = 2 * 1024 * 1024
+const MAX_JSONL_BYTES = 4 * 1024 * 1024
+
+type LedgerFamily =
+  | 'workItems'
+  | 'growthDriver'
+  | 'dreaming'
+  | 'recovery'
+  | 'goals'
+  | 'memoryLearning'
+  | 'memory'
+  | 'preference'
+  | 'evolution'
+  | 'skills'
+  | 'growthExperiments'
+  | 'association'
+  | 'evaluation'
+  | 'verifier'
+  | 'controlPlane'
+
+type PatchDbMap = Record<LedgerFamily, Set<string>>
+
+interface PatchPluginState {
+  disabled: boolean
+  configEnabled: boolean | undefined
+}
 
 const rec = (value: unknown): Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -148,32 +171,215 @@ function findLoaderEntryConfigs(
   return undefined
 }
 
-function resolvePathCandidate(rawValue: unknown, dshHome: string): string | undefined {
-  let exprSource: string | undefined
+function parseDshHomePathArgs(rawArgs: string): string[] | undefined {
+  const segments: string[] = []
+  let remainder = rawArgs.trim()
+  while (remainder.length > 0) {
+    const match = /^(?:'([^'\r\n]+)'|"([^"\r\n]+)")\s*(?:,\s*(.*))?$/u.exec(remainder)
+    if (!match) return undefined
+    const seg = match[1] ?? match[2]
+    if (!seg || seg.includes('\0')) return undefined
+    segments.push(seg)
+    remainder = (match[3] ?? '').trim()
+  }
+  return segments.length > 0 ? segments : undefined
+}
+
+function resolvePathCandidate(
+  rawValue: unknown,
+  dshHome: string,
+  canonicalHome?: string,
+  diagnostics?: string[],
+): string | undefined {
+  let trimmed: string | undefined
   if (typeof rawValue === 'string') {
-    const trimmed = rawValue.trim()
-    if (trimmed === '' || trimmed.includes('\0') || trimmed === ':memory:') return undefined
-    const match = DSH_HOME_EXPR_RE.exec(trimmed)
-    if (match?.[2]) {
-      exprSource = match[2]
-    } else if (isAbsolute(trimmed)) {
-      return resolve(trimmed)
-    } else {
-      return undefined
-    }
+    trimmed = rawValue.trim()
   } else if (typeof rawValue === 'object' && rawValue !== null && '__jsExpr' in rawValue) {
     const rawExpr = (rawValue as { __jsExpr?: unknown }).__jsExpr
     if (typeof rawExpr !== 'string') return undefined
-    const match = DSH_HOME_EXPR_RE.exec(rawExpr.trim())
-    if (!match?.[2]) return undefined
-    exprSource = match[2]
+    trimmed = rawExpr.trim()
   } else {
     return undefined
   }
-  if (exprSource.includes('\0') || isAbsolute(exprSource) || exprSource.split('/').some(seg => seg === '..' || seg === '.')) {
-    return undefined
+  if (!trimmed || trimmed === ':memory:' || trimmed.includes('\0')) return undefined
+  const jsMatch = /^(?:(?:!!js|!js)\s+)?dshHomePath\(\s*([\s\S]+?)\s*\)$/u.exec(trimmed)
+  if (jsMatch?.[1] !== undefined) {
+    const args = parseDshHomePathArgs(jsMatch[1])
+    if (!args) {
+      diagnostics?.push(`skipped unparseable dshHomePath ledger path: ${trimmed}`)
+      return undefined
+    }
+    const resolved = resolve(dshHome, ...args)
+    const canon = canonicalHome ?? dshHome
+    const within = resolved === dshHome
+      || resolved.startsWith(`${dshHome}${sep}`)
+      || resolved === canon
+      || resolved.startsWith(`${canon}${sep}`)
+    if (!within) {
+      diagnostics?.push(`skipped out-of-bounds dshHomePath ledger path: ${trimmed}`)
+      return undefined
+    }
+    return resolved
   }
-  return resolve(dshHome, exprSource)
+  if (isAbsolute(trimmed)) {
+    const resolved = resolve(trimmed)
+    const canon = canonicalHome ?? dshHome
+    const within = resolved === dshHome
+      || resolved.startsWith(`${dshHome}${sep}`)
+      || resolved === canon
+      || resolved.startsWith(`${canon}${sep}`)
+    if (!within) {
+      diagnostics?.push(`skipped out-of-bounds ledger path: ${trimmed}`)
+      return undefined
+    }
+    return resolved
+  }
+  return undefined
+}
+
+function classifyPluginFamily(idOrName: string): LedgerFamily | undefined {
+  if (idOrName.includes('assistant-work-items') || idOrName.endsWith('/assistant-work-items')) return 'workItems'
+  if (idOrName.includes('assistant-growth-driver') || idOrName.endsWith('/assistant-growth-driver')) return 'growthDriver'
+  if (idOrName.includes('assistant-dreaming') || idOrName.endsWith('/assistant-dreaming')) return 'dreaming'
+  if (idOrName.includes('assistant-recovery') || idOrName.endsWith('/assistant-recovery')) return 'recovery'
+  if (idOrName.includes('assistant-goals') || idOrName.endsWith('/assistant-goals')) return 'goals'
+  if (idOrName.includes('assistant-memory-learning') || idOrName.endsWith('/assistant-memory-learning')) return 'memoryLearning'
+  if (idOrName.includes('personal-memory') || idOrName.endsWith('/personal-memory')) return 'memory'
+  if (idOrName.includes('preference-learning') || idOrName.endsWith('/preference-learning')) return 'preference'
+  if (idOrName.includes('assistant-evolution') || idOrName.endsWith('/assistant-evolution')) return 'evolution'
+  if (idOrName.includes('assistant-skills') || idOrName.endsWith('/assistant-skills')) return 'skills'
+  if (idOrName.includes('assistant-growth-experiments') || idOrName.endsWith('/assistant-growth-experiments')) return 'growthExperiments'
+  if (idOrName.includes('assistant-association') || idOrName.endsWith('/assistant-association')) return 'association'
+  if (idOrName.includes('assistant-evaluation') || idOrName.endsWith('/assistant-evaluation')) return 'evaluation'
+  if (idOrName.includes('assistant-verifier') || idOrName.endsWith('/assistant-verifier')) return 'verifier'
+  if (idOrName.includes('plugin-control-plane') || idOrName.endsWith('/plugin-control-plane')) return 'controlPlane'
+  return undefined
+}
+
+function addVerifierVariants(set: Set<string>, basePath: string): void {
+  set.add(basePath)
+  set.add(`${basePath}.creation-reviews`)
+  set.add(`${basePath}.source-reviews`)
+  set.add(`${basePath}.memory-reviews`)
+  set.add(`${basePath}.revision-reviews`)
+  set.add(`${basePath}.revision-regressions`)
+}
+
+function normalizePluginPackageName(id: string, name: string): string | undefined {
+  if (name.startsWith('@dsh-enhanced/')) return name
+  if (id.startsWith('dsh-enhanced-')) return `@dsh-enhanced/${id.slice('dsh-enhanced-'.length)}`
+  return undefined
+}
+
+function collectPatchDbPaths(
+  patchPath: string,
+  boundary: SqlitePathBoundary,
+  into: PatchDbMap,
+  patchStates: Map<string, PatchPluginState> | undefined,
+  diagnostics: string[],
+): void {
+  let st
+  try {
+    st = lstatSync(patchPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    diagnostics.push(`failed to stat config ${patchPath}: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) {
+    diagnostics.push(`skipped non-regular, symlink, or hardlink config: ${patchPath}`)
+    return
+  }
+  let realPatch: string
+  try {
+    realPatch = realpathSync(patchPath)
+  } catch {
+    diagnostics.push(`skipped unresolvable config: ${patchPath}`)
+    return
+  }
+  if (!isWithinBoundary(resolve(patchPath), realPatch, boundary)) {
+    diagnostics.push(`skipped out-of-bounds config: ${patchPath}`)
+    return
+  }
+  let source: string
+  try {
+    source = readFileSync(realPatch, 'utf8')
+  } catch (error) {
+    diagnostics.push(`failed to read config ${patchPath}: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  const doc = parseDocument(source, {
+    customTags: [
+      { tag: '!js', resolve: (val: string) => val },
+      { tag: 'tag:yaml.org,2002:js', resolve: (val: string) => val },
+    ],
+  })
+  if (doc.errors.length > 0) {
+    diagnostics.push(`YAML parse warning in ${patchPath}: ${doc.errors[0]!.message}`)
+    return
+  }
+  const root = doc.toJS()
+  const walkRows = (items: unknown) => {
+    if (!Array.isArray(items)) return
+    for (const entry of items) {
+      if (!entry || typeof entry !== 'object') continue
+      const row = entry as Record<string, unknown>
+      const id = typeof row['id'] === 'string' ? row['id'] : ''
+      const name = typeof row['name'] === 'string' ? row['name'] : ''
+      const cfg = rec(row['config'])
+
+      const pkgName = normalizePluginPackageName(id, name)
+      if (pkgName && patchStates) {
+        patchStates.set(pkgName, {
+          disabled: row['disabled'] === true,
+          configEnabled: typeof cfg['enabled'] === 'boolean' ? cfg['enabled'] : undefined,
+        })
+      }
+
+      const fam = classifyPluginFamily(id) ?? classifyPluginFamily(name)
+      if (fam) {
+        if (fam === 'growthDriver') {
+          const usagePath = resolvePathCandidate(rec(cfg['usageLearning'])['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (usagePath) into.growthDriver.add(usagePath)
+          const dbPath = resolvePathCandidate(cfg['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (dbPath) into.growthDriver.add(dbPath)
+        } else if (fam === 'controlPlane') {
+          const dbPath = resolvePathCandidate(cfg['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (dbPath) into.controlPlane.add(dbPath)
+          const stateDir = resolvePathCandidate(cfg['statePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (stateDir) {
+            into.controlPlane.add(join(stateDir, 'control.sqlite'))
+            into.controlPlane.add(join(stateDir, 'creation-adoptions.sqlite'))
+            into.controlPlane.add(join(stateDir, 'revision-adoptions.sqlite'))
+          }
+        } else if (fam === 'goals') {
+          const dbPath = resolvePathCandidate(cfg['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (dbPath) {
+            into.goals.add(`${dbPath}.strategies`)
+            into.goals.add(dbPath)
+          }
+        } else if (fam === 'verifier') {
+          const dbPath = resolvePathCandidate(cfg['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (dbPath) addVerifierVariants(into.verifier, dbPath)
+        } else {
+          const dbPath = resolvePathCandidate(cfg['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+          if (dbPath) into[fam].add(dbPath)
+        }
+      }
+      if (id.includes('personal-assistant') || name.endsWith('/personal-assistant')) {
+        const pmPath = resolvePathCandidate(rec(cfg['personalMemory'])['databasePath'], boundary.dshHome, boundary.canonicalDshHome, diagnostics)
+        if (pmPath) into.memory.add(pmPath)
+      }
+      if (Array.isArray(row['insert'])) walkRows(row['insert'])
+      if (Array.isArray(row['config'])) walkRows(row['config'])
+      if (Array.isArray(row['plugins'])) walkRows(row['plugins'])
+    }
+  }
+  if (Array.isArray(root)) {
+    walkRows(root)
+  } else if (root && typeof root === 'object' && Array.isArray((root as Record<string, unknown>)['plugins'])) {
+    walkRows((root as Record<string, unknown>)['plugins'])
+  }
 }
 
 function findLoaderPathProp(
@@ -486,7 +692,9 @@ function inspectUpgradeHistoryAndBackups(
         const realBackups = realpathSync(backupsRoot)
         if (isWithinBoundary(backupsRoot, realBackups, boundary)) {
           const children = readdirSync(realBackups, { withFileTypes: true })
-          backupSnapshotsCount = children.filter(entry => entry.isDirectory() && !entry.isSymbolicLink()).length
+          backupSnapshotsCount = children.filter(
+            entry => !entry.name.startsWith('.') && entry.isDirectory() && !entry.isSymbolicLink(),
+          ).length
         }
       }
     } catch (error) {
@@ -515,42 +723,25 @@ function inspectProfileInstallKind(
   const slug = packageName.slice('@dsh-enhanced/'.length)
   if (!VALID_PROFILE_NAME_RE.test(slug)) return undefined
   const modPath = join(profileDir, 'node_modules', '@dsh-enhanced', slug)
+  const pnpmStoreRoot = resolve(profileDir, 'node_modules', '.pnpm')
   try {
     if (!existsSync(modPath)) return undefined
     const st = lstatSync(modPath)
-    return st.isSymbolicLink() ? 'local' : 'npm'
+    if (!st.isSymbolicLink()) return 'npm'
+    const resolvedTarget = realpathSync(modPath)
+    return (resolvedTarget === pnpmStoreRoot || resolvedTarget.startsWith(`${pnpmStoreRoot}${sep}`))
+      ? 'npm'
+      : 'local'
   } catch {
     return undefined
-  }
-}
-
-function readDisabledPatchPackages(profileDir: string | null): ReadonlySet<string> {
-  if (!profileDir) return new Set()
-  const patchPath = join(profileDir, 'cordis.patch.yml')
-  try {
-    if (!existsSync(patchPath)) return new Set()
-    const st = lstatSync(patchPath)
-    if (st.isSymbolicLink() || !st.isFile()) return new Set()
-    const doc = parseDocument(readFileSync(patchPath, 'utf8'))
-    const raw = doc.toJS() as unknown
-    if (!Array.isArray(raw)) return new Set()
-    const disabled = new Set<string>()
-    for (const row of raw) {
-      const r = rec(row)
-      if (r['disabled'] === true && typeof r['name'] === 'string' && isProjectPackage(r['name'])) {
-        disabled.add(r['name'])
-      }
-    }
-    return disabled
-  } catch {
-    return new Set()
   }
 }
 
 function candidateDbPaths(
   host: Context,
   boundary: SqlitePathBoundary,
-  profileName: string | null,
+  targetProfiles: readonly string[],
+  patchPaths: ReadonlySet<string>,
   moduleName: string,
   subDirName: string,
   defaultBasenames: readonly string[],
@@ -562,17 +753,18 @@ function candidateDbPaths(
     ?? (extraConfigKey ? findLoaderPathProp(host, boundary, moduleName, 'databasePath') : undefined)
   if (fromLoader) out.add(fromLoader)
 
+  for (const p of patchPaths) {
+    out.add(p)
+  }
+
   for (const base of defaultBasenames) {
     out.add(join(boundary.canonicalDshHome, subDirName, base))
     if (boundary.dshHome !== boundary.canonicalDshHome) {
       out.add(join(boundary.dshHome, subDirName, base))
     }
   }
-  if (profileName) {
-    for (const base of defaultBasenames) {
-      const ext = base.endsWith('.sqlite') ? `${profileName}.sqlite` : undefined
-      if (ext) out.add(join(boundary.canonicalDshHome, subDirName, ext))
-    }
+  for (const prof of targetProfiles) {
+    out.add(join(boundary.canonicalDshHome, subDirName, `${prof}.sqlite`))
   }
   for (const rootFile of includeRootNames) {
     out.add(join(boundary.canonicalDshHome, rootFile))
@@ -609,45 +801,94 @@ export async function collectOwnerConsoleVersionInfo(
   const resolved = resolveDshHomeAndProfile(host, options)
   const boundary = resolveSqliteBoundary(resolved.dshHome, diagnostics)
   const profiles = listProfiles(boundary)
+  const targetProfiles = resolved.profileName !== null
+    ? [resolved.profileName]
+    : (profiles && profiles.length > 0 ? profiles : ['web', 'lark', 'supervised'])
   const hostMeta = readBoundHostMetadata(boundary ? boundary.canonicalDshHome : resolved.dshHome)
   const runningHostVersion = readInstalledHostVersion()
   const cliVersion = readOptionalCliVersion()
+
+  const patchDbMap: PatchDbMap = {
+    workItems: new Set(),
+    growthDriver: new Set(),
+    dreaming: new Set(),
+    recovery: new Set(),
+    goals: new Set(),
+    memoryLearning: new Set(),
+    memory: new Set(),
+    preference: new Set(),
+    evolution: new Set(),
+    skills: new Set(),
+    growthExperiments: new Set(),
+    association: new Set(),
+    evaluation: new Set(),
+    verifier: new Set(),
+    controlPlane: new Set(),
+  }
+  const patchStatesByProfile = new Map<string, Map<string, PatchPluginState>>()
+  const homePatchStates = new Map<string, PatchPluginState>()
+
+  if (boundary) {
+    if (resolved.profileName === null) {
+      collectPatchDbPaths(join(boundary.dshHome, 'cordis.yml'), boundary, patchDbMap, homePatchStates, diagnostics)
+      collectPatchDbPaths(join(boundary.dshHome, 'cordis.patch.yml'), boundary, patchDbMap, homePatchStates, diagnostics)
+    }
+    for (const prof of targetProfiles) {
+      const profStates = new Map<string, PatchPluginState>(homePatchStates)
+      collectPatchDbPaths(join(boundary.dshHome, 'profiles', prof, 'cordis.yml'), boundary, patchDbMap, profStates, diagnostics)
+      collectPatchDbPaths(join(boundary.dshHome, 'profiles', prof, 'cordis.patch.yml'), boundary, patchDbMap, profStates, diagnostics)
+      patchStatesByProfile.set(prof, profStates)
+    }
+  }
 
   // Track evolved plugins & control-plane plan IDs to guarantee zero double-counting.
   interface MutablePluginEntry {
     name: string
     version: string | null
+    versionTier: 0 | 1 | 2 | 3 | 4
+    fromAdoptionJournal: boolean
     kind: 'core' | 'evolved'
     installKind?: 'npm' | 'local' | 'adopted'
     enabled?: boolean
   }
+  const evolvedByPlanId = new Map<string, MutablePluginEntry>()
   const evolvedMap = new Map<string, MutablePluginEntry>()
-  const upsertEvolved = (rawName: string, patch: { version?: string | null; enabled?: boolean }) => {
+  const upsertEvolved = (
+    rawName: string,
+    patch: { version?: string | null; versionTier?: 0 | 1 | 2 | 3 | 4; fromAdoptionJournal?: boolean; enabled?: boolean },
+  ): MutablePluginEntry | undefined => {
     const trimmed = rawName.trim()
-    if (trimmed === '') return
+    if (trimmed === '') return undefined
     const key = normalizePluginKey(trimmed)
     const boundedName = truncateText(trimmed, 200)
-    const boundedVersion = boundNonEmptyString(patch.version, 128)
+    const boundedVersion = boundNonEmptyString(patch.version, 128) ?? null
+    const nextTier: 0 | 1 | 2 | 3 | 4 = boundedVersion !== null ? (patch.versionTier ?? 1) : 0
     const existing = evolvedMap.get(key)
     if (existing) {
       if (trimmed.startsWith('@dsh-enhanced/') && !existing.name.startsWith('@dsh-enhanced/')) {
         existing.name = boundedName
       }
-      if (boundedVersion !== undefined && (existing.version === null || existing.version === 'created' || /^v\d+$/u.test(existing.version))) {
+      if (patch.fromAdoptionJournal) existing.fromAdoptionJournal = true
+      if (boundedVersion !== null && (existing.version === null || nextTier <= existing.versionTier)) {
         existing.version = boundedVersion
+        existing.versionTier = nextTier
       }
       if (patch.enabled !== undefined) {
         existing.enabled = existing.enabled === true || patch.enabled
       }
-      return
+      return existing
     }
-    evolvedMap.set(key, {
+    const created: MutablePluginEntry = {
       name: boundedName,
-      version: boundedVersion ?? null,
+      version: boundedVersion,
+      versionTier: nextTier,
+      fromAdoptionJournal: patch.fromAdoptionJournal === true,
       kind: 'evolved',
       installKind: 'adopted',
       ...(patch.enabled === undefined ? {} : { enabled: patch.enabled }),
-    })
+    }
+    evolvedMap.set(key, created)
+    return created
   }
 
   let workItemsTotal: number | null = null
@@ -674,9 +915,11 @@ export async function collectOwnerConsoleVersionInfo(
 
   const extensions: Record<string, unknown> = {}
 
+  let sawControlPlaneDb = false
+
   if (boundary) {
     // 1. plugin-control-plane (control.sqlite, creation-adoptions.sqlite, revision-adoptions.sqlite)
-    const cpPaths = new Set<string>()
+    const cpPaths = new Set<string>(patchDbMap.controlPlane)
     const cpDirect = findLoaderPathProp(host, boundary, '@dsh-enhanced/plugin-control-plane', 'databasePath')
     if (cpDirect) cpPaths.add(cpDirect)
     const cpStateDir = findLoaderPathProp(host, boundary, '@dsh-enhanced/plugin-control-plane', 'statePath')
@@ -688,97 +931,169 @@ export async function collectOwnerConsoleVersionInfo(
     for (const base of ['control.sqlite', 'state.sqlite', 'creation-adoptions.sqlite', 'revision-adoptions.sqlite']) {
       cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', base))
     }
-    if (resolved.profileName) {
-      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${resolved.profileName}.sqlite`))
-      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${resolved.profileName}-creation-adoptions.sqlite`))
-      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${resolved.profileName}-revision-adoptions.sqlite`))
-      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', resolved.profileName, 'state', 'control-plane', 'control.sqlite'))
-      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', resolved.profileName, 'state', 'control-plane', 'creation-adoptions.sqlite'))
-      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', resolved.profileName, 'state', 'control-plane', 'revision-adoptions.sqlite'))
+    for (const prof of targetProfiles) {
+      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${prof}.sqlite`))
+      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${prof}-creation-adoptions.sqlite`))
+      cpPaths.add(join(boundary.canonicalDshHome, 'plugin-control-plane', `${prof}-revision-adoptions.sqlite`))
+      cpPaths.add(join(boundary.canonicalDshHome, `${prof}-creation-adoptions.sqlite`))
+      cpPaths.add(join(boundary.canonicalDshHome, `${prof}-revision-adoptions.sqlite`))
+      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'control.sqlite'))
+      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'creation-adoptions.sqlite'))
+      cpPaths.add(join(boundary.canonicalDshHome, 'rsi-authorities', prof, 'state', 'control-plane', 'revision-adoptions.sqlite'))
     }
 
     const cpSeen = new Set<string>()
     const createdPlanIds = new Set<string>()
     const revisedPlanIds = new Set<string>()
-    const activatedPlanIds = new Set<string>()
+    const controlAdoptedPlanIds = new Set<string>()
     let sawCreatedSource = false
     let sawRevisedSource = false
     let sawControlAdoptionSource = false
 
+    const sourceIdToActivationId = new Map<string, string>()
+    const linkedActivationIds = new Set<string>()
+    const sourcePlanIds = new Set<string>()
+    const sourceModeById = new Map<string, string | null>()
+    const watchClosedByPlan = new Set<string>()
+    const activatedActIds = new Set<string>()
+
+    interface BufferedCreationRow {
+      planId: string
+      status: string
+      certificateJson?: string
+      receiptJson?: string
+    }
+    interface BufferedRevisionEntryRow {
+      entryId?: string
+      name?: string
+      parentPlanId?: string
+      currentPlanId?: string
+      revision?: number
+    }
+    interface BufferedRevisionDb {
+      adoptionStatusByPlan: Map<string, string>
+      entries: BufferedRevisionEntryRow[]
+    }
+    interface BufferedWatchRow {
+      packageName: string
+      packageVersion: string | null
+      state: string
+    }
+    interface BufferedSourcePlanRow {
+      id: string
+      pluginName?: string
+      mode: string | null
+      status?: string
+    }
+    interface BufferedActivationPlanRow {
+      id: string
+      profile?: string
+      candidateJson?: string
+      status: string
+    }
+
+    const bufferedCreations: BufferedCreationRow[] = []
+    const bufferedRevisions: BufferedRevisionDb[] = []
+    const bufferedWatches: BufferedWatchRow[] = []
+    const bufferedSourcePlans: BufferedSourcePlanRow[] = []
+    const bufferedActivationPlans: BufferedActivationPlanRow[] = []
+
     for (const p of cpPaths) {
       withReadOnlySqlite(p, boundary, cpSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
-        if (hasTable(db, 'source_plans')) {
-          const totalSp = queryCount(db, realTarget, countedTables, 'source_plans', 'SELECT COUNT(*) AS c FROM source_plans')
-          if (totalSp !== undefined) candidatesGenerated = addCounter(candidatesGenerated, totalSp)
-          if (hasColumn(db, 'source_plans', 'id') && hasColumn(db, 'source_plans', 'mode') && hasColumn(db, 'source_plans', 'status')) {
-            const dedupKey = `${realTarget}::source_plans:release`
-            if (!countedTables.has(dedupKey)) {
-              countedTables.add(dedupKey)
-              sawCreatedSource = true
-              sawRevisedSource = true
-              sawControlAdoptionSource = true
-              const hasPluginName = hasColumn(db, 'source_plans', 'plugin_name')
-              const rows = db.prepare(
-                `SELECT id, mode${hasPluginName ? ', plugin_name' : ''} FROM source_plans WHERE status = 'release-complete'`,
-              ).all() as Array<{ id?: unknown; mode?: unknown; plugin_name?: unknown }>
-              for (const row of rows) {
-                const pid = typeof row.id === 'string' ? row.id : ''
-                const isRevisionMode = row.mode === 'modify' || row.mode === 'prepared-revise'
-                if (pid !== '') {
-                  if (isRevisionMode) revisedPlanIds.add(pid)
-                  else createdPlanIds.add(pid)
-                }
-                if (!isRevisionMode && typeof row.plugin_name === 'string' && row.plugin_name.trim() !== '') {
-                  upsertEvolved(row.plugin_name, { version: null })
-                }
+        sawControlPlaneDb = true
+
+        if (
+          hasTable(db, 'source_adoptions')
+          && hasColumn(db, 'source_adoptions', 'source_plan_id')
+          && hasColumn(db, 'source_adoptions', 'activation_plan_id')
+        ) {
+          const saKey = `${realTarget}::source_adoptions`
+          if (!countedTables.has(saKey)) {
+            countedTables.add(saKey)
+            const links = db.prepare('SELECT source_plan_id, activation_plan_id FROM source_adoptions').all() as Array<{
+              source_plan_id?: unknown
+              activation_plan_id?: unknown
+            }>
+            for (const link of links) {
+              if (typeof link.source_plan_id === 'string' && typeof link.activation_plan_id === 'string') {
+                linkedActivationIds.add(link.activation_plan_id)
+                sourceIdToActivationId.set(link.source_plan_id, link.activation_plan_id)
               }
             }
           }
         }
 
-        if (hasTable(db, 'activation_plans')) {
-          const totalAp = queryCount(db, realTarget, countedTables, 'activation_plans', 'SELECT COUNT(*) AS c FROM activation_plans')
-          if (totalAp !== undefined) candidatesGenerated = addCounter(candidatesGenerated, totalAp)
-
-          if (hasColumn(db, 'activation_plans', 'id') && hasColumn(db, 'activation_plans', 'status')) {
-            const actKey = `${realTarget}::activation_plans:activated`
-            if (!countedTables.has(actKey)) {
-              countedTables.add(actKey)
-              sawControlAdoptionSource = true
-              const rows = db.prepare("SELECT id FROM activation_plans WHERE status = 'activated'").all() as Array<{ id?: unknown }>
-              for (const row of rows) {
-                if (typeof row.id === 'string' && row.id !== '') activatedPlanIds.add(row.id)
-              }
+        if (hasTable(db, 'source_plans') && hasColumn(db, 'source_plans', 'id')) {
+          const spKey = `${realTarget}::source_plans`
+          if (!countedTables.has(spKey)) {
+            countedTables.add(spKey)
+            sawCreatedSource = true
+            sawRevisedSource = true
+            sawControlAdoptionSource = true
+            const hasMode = hasColumn(db, 'source_plans', 'mode')
+            const hasPluginName = hasColumn(db, 'source_plans', 'plugin_name')
+            const hasStatus = hasColumn(db, 'source_plans', 'status')
+            const cols = [
+              'id',
+              ...(hasPluginName ? ['plugin_name'] : []),
+              ...(hasMode ? ['mode'] : []),
+              ...(hasStatus ? ['status'] : []),
+            ]
+            const rows = db.prepare(`SELECT ${cols.join(', ')} FROM source_plans`).all() as Array<{
+              id?: unknown
+              plugin_name?: unknown
+              mode?: unknown
+              status?: unknown
+            }>
+            candidatesGenerated = addCounter(candidatesGenerated, rows.length)
+            for (const row of rows) {
+              if (typeof row.id !== 'string') continue
+              const mode = hasMode && typeof row.mode === 'string' ? row.mode : null
+              sourcePlanIds.add(row.id)
+              sourceModeById.set(row.id, mode)
+              bufferedSourcePlans.push({
+                id: row.id,
+                ...(typeof row.plugin_name === 'string' ? { pluginName: row.plugin_name } : {}),
+                mode,
+                ...(hasStatus && typeof row.status === 'string' ? { status: row.status } : {}),
+              })
             }
-            const rbAp = queryCount(
-              db,
-              realTarget,
-              countedTables,
-              'activation_plans',
-              "SELECT COUNT(*) AS c FROM activation_plans WHERE status IN ('rolled-back', 'rollback-pending')",
-              ['status'],
-              'activation_plans:rollback',
-            )
-            if (rbAp !== undefined) rollbacks = addCounter(rollbacks, rbAp)
           }
         }
 
-        if (hasTable(db, 'activation_watch') && hasColumn(db, 'activation_watch', 'package_name')) {
+        if (hasTable(db, 'activation_watch')) {
           const watchKey = `${realTarget}::activation_watch`
           if (!countedTables.has(watchKey)) {
             countedTables.add(watchKey)
+            const hasPlanId = hasColumn(db, 'activation_watch', 'plan_id')
+            const hasPkgName = hasColumn(db, 'activation_watch', 'package_name')
             const hasVer = hasColumn(db, 'activation_watch', 'package_version')
             const hasState = hasColumn(db, 'activation_watch', 'state')
-            const rows = db.prepare(
-              `SELECT package_name${hasVer ? ', package_version' : ''}${hasState ? ', state' : ''} FROM activation_watch`,
-            ).all() as Array<{ package_name?: unknown; package_version?: unknown; state?: unknown }>
-            for (const row of rows) {
-              if (typeof row.package_name === 'string' && row.package_name.trim() !== '') {
+            const cols = [
+              ...(hasPlanId ? ['plan_id'] : []),
+              ...(hasPkgName ? ['package_name'] : []),
+              ...(hasVer ? ['package_version'] : []),
+              ...(hasState ? ['state'] : []),
+            ]
+            if (cols.length > 0) {
+              const rows = db.prepare(`SELECT ${cols.join(', ')} FROM activation_watch`).all() as Array<{
+                plan_id?: unknown
+                package_name?: unknown
+                package_version?: unknown
+                state?: unknown
+              }>
+              for (const row of rows) {
                 const state = typeof row.state === 'string' ? row.state : ''
-                if (state === '' || state === 'watching') {
-                  upsertEvolved(row.package_name, {
-                    version: typeof row.package_version === 'string' && row.package_version.trim() !== '' ? row.package_version.trim() : null,
-                    enabled: state === 'watching',
+                if (typeof row.plan_id === 'string' && (state === 'closed-regressed' || state === 'closed-retracted')) {
+                  watchClosedByPlan.add(row.plan_id)
+                }
+                if (typeof row.package_name === 'string' && row.package_name.trim() !== '') {
+                  bufferedWatches.push({
+                    packageName: row.package_name.trim(),
+                    packageVersion: typeof row.package_version === 'string' && row.package_version.trim() !== ''
+                      ? row.package_version.trim()
+                      : null,
+                    state,
                   })
                 }
               }
@@ -786,11 +1101,41 @@ export async function collectOwnerConsoleVersionInfo(
           }
         }
 
-        // creation-adoptions.sqlite vs revision-adoptions.sqlite share table name `adoptions`
-        // Distinguish revision journal by presence of `entries`/`versions`/`rollbacks` tables.
+        if (hasTable(db, 'activation_plans') && hasColumn(db, 'activation_plans', 'id') && hasColumn(db, 'activation_plans', 'status')) {
+          const apKey = `${realTarget}::activation_plans`
+          if (!countedTables.has(apKey)) {
+            countedTables.add(apKey)
+            sawControlAdoptionSource = true
+            const hasProfileCol = hasColumn(db, 'activation_plans', 'profile')
+            const hasCandidateCol = hasColumn(db, 'activation_plans', 'candidate_json')
+            const hasUpdatedCol = hasColumn(db, 'activation_plans', 'updated_at')
+            const actRows = db.prepare(
+              `SELECT id, ${hasProfileCol ? 'profile,' : ''} ${hasCandidateCol ? 'candidate_json,' : ''} status${hasUpdatedCol ? ', updated_at' : ''} FROM activation_plans${hasUpdatedCol ? ' ORDER BY updated_at ASC, rowid ASC' : ''}`,
+            ).all() as Array<{
+              id?: unknown
+              profile?: unknown
+              candidate_json?: unknown
+              status?: unknown
+            }>
+            for (const row of actRows) {
+              if (typeof row.id !== 'string' || typeof row.status !== 'string') continue
+              if (resolved.profileName !== null && hasProfileCol && typeof row.profile === 'string' && row.profile !== resolved.profileName) {
+                continue
+              }
+              if (row.status === 'activated') activatedActIds.add(row.id)
+              bufferedActivationPlans.push({
+                id: row.id,
+                ...(typeof row.profile === 'string' ? { profile: row.profile } : {}),
+                ...(typeof row.candidate_json === 'string' ? { candidateJson: row.candidate_json } : {}),
+                status: row.status,
+              })
+            }
+          }
+        }
+
         const isRevisionJournal = hasTable(db, 'entries') || hasTable(db, 'versions') || hasTable(db, 'rollbacks')
 
-        if (!isRevisionJournal && hasTable(db, 'adoptions') && hasColumn(db, 'adoptions', 'plan_id') && hasColumn(db, 'adoptions', 'status')) {
+        if (!isRevisionJournal && hasTable(db, 'adoptions') && !hasColumn(db, 'adoptions', 'parent_plan_id') && hasColumn(db, 'adoptions', 'plan_id') && hasColumn(db, 'adoptions', 'status')) {
           const creationKey = `${realTarget}::creation_adoptions`
           if (!countedTables.has(creationKey)) {
             countedTables.add(creationKey)
@@ -801,35 +1146,15 @@ export async function collectOwnerConsoleVersionInfo(
             const rows = db.prepare(
               `SELECT plan_id, status${hasCert ? ', certificate_json' : ''}${hasReceipt ? ', receipt_json' : ''} FROM adoptions`,
             ).all() as Array<{ plan_id?: unknown; status?: unknown; certificate_json?: unknown; receipt_json?: unknown }>
-            let closedCreationCount = 0
             for (const row of rows) {
-              const pid = typeof row.plan_id === 'string' ? row.plan_id : ''
-              const st = typeof row.status === 'string' ? row.status : ''
-              if (pid !== '' && (st === 'active' || st === 'authorized' || st === 'closed')) {
-                createdPlanIds.add(pid)
-                const cert = parseJsonObject(row.certificate_json)
-                const plan = rec(cert['plan'])
-                const receipt = parseJsonObject(row.receipt_json)
-                const capName = (typeof plan['name'] === 'string' && plan['name'].trim() !== '' ? plan['name'].trim() : undefined)
-                  ?? (typeof cert['packageName'] === 'string' && cert['packageName'].trim() !== '' ? cert['packageName'].trim() : undefined)
-                  ?? (typeof cert['pluginName'] === 'string' && cert['pluginName'].trim() !== '' ? cert['pluginName'].trim() : undefined)
-                  ?? (typeof cert['name'] === 'string' && cert['name'].trim() !== '' ? cert['name'].trim() : '')
-                const capVer = typeof receipt['version'] === 'string' && receipt['version'].trim() !== ''
-                  ? receipt['version'].trim()
-                  : typeof plan['version'] === 'string' && plan['version'].trim() !== ''
-                    ? plan['version'].trim()
-                    : typeof cert['version'] === 'string' && cert['version'].trim() !== ''
-                      ? cert['version'].trim()
-                      : typeof cert['pluginVersion'] === 'string' && cert['pluginVersion'].trim() !== ''
-                        ? cert['pluginVersion'].trim()
-                        : 'v1'
-                if (capName !== '') {
-                  upsertEvolved(capName, { version: capVer, enabled: st === 'active' })
-                }
-              }
-              if (st === 'closed') closedCreationCount += 1
+              if (typeof row.plan_id !== 'string' || typeof row.status !== 'string') continue
+              bufferedCreations.push({
+                planId: row.plan_id,
+                status: row.status,
+                ...(typeof row.certificate_json === 'string' ? { certificateJson: row.certificate_json } : {}),
+                ...(typeof row.receipt_json === 'string' ? { receiptJson: row.receipt_json } : {}),
+              })
             }
-            rollbacks = addCounter(rollbacks, closedCreationCount)
           }
         }
 
@@ -837,61 +1162,263 @@ export async function collectOwnerConsoleVersionInfo(
           const revRollbacks = queryCount(db, realTarget, countedTables, 'rollbacks', 'SELECT COUNT(*) AS c FROM rollbacks')
           if (revRollbacks !== undefined) rollbacks = addCounter(rollbacks, revRollbacks)
 
+          const adoptionStatusByPlan = new Map<string, string>()
           if (hasTable(db, 'adoptions') && hasColumn(db, 'adoptions', 'plan_id') && hasColumn(db, 'adoptions', 'status')) {
             const revAdoptionsKey = `${realTarget}::revision_adoptions`
             if (!countedTables.has(revAdoptionsKey)) {
               countedTables.add(revAdoptionsKey)
               sawRevisedSource = true
               sawControlAdoptionSource = true
-              const revisionPlanSet = new Set<string>()
-              if (hasTable(db, 'versions') && hasColumn(db, 'versions', 'plan_id') && hasColumn(db, 'versions', 'role')) {
-                const vRows = db.prepare("SELECT plan_id FROM versions WHERE role = 'revision'").all() as Array<{ plan_id?: unknown }>
-                for (const vr of vRows) {
-                  if (typeof vr.plan_id === 'string' && vr.plan_id !== '') revisionPlanSet.add(vr.plan_id)
-                }
-              }
-              const aRows = db.prepare("SELECT plan_id, status FROM adoptions WHERE status IN ('active', 'closed')").all() as Array<{ plan_id?: unknown; status?: unknown }>
-              const activeRevisionPlanIds = new Set<string>()
+              const aRows = db.prepare('SELECT plan_id, status FROM adoptions').all() as Array<{ plan_id?: unknown; status?: unknown }>
               for (const ar of aRows) {
-                const pid = typeof ar.plan_id === 'string' ? ar.plan_id : ''
-                if (pid === '') continue
-                if (revisionPlanSet.size === 0 || revisionPlanSet.has(pid)) {
-                  revisedPlanIds.add(pid)
+                if (typeof ar.plan_id === 'string' && typeof ar.status === 'string') {
+                  adoptionStatusByPlan.set(ar.plan_id, ar.status)
+                  if (ar.status === 'active') {
+                    const canonicalId = sourceIdToActivationId.get(ar.plan_id) ?? ar.plan_id
+                    revisedPlanIds.add(canonicalId)
+                    controlAdoptedPlanIds.add(canonicalId)
+                  }
                 }
-                if (ar.status === 'active') activeRevisionPlanIds.add(pid)
               }
-              if (hasTable(db, 'entries') && hasColumn(db, 'entries', 'name') && hasColumn(db, 'entries', 'current_plan_id')) {
-                const hasRevCol = hasColumn(db, 'entries', 'revision')
-                const eRows = db.prepare(`SELECT name, current_plan_id${hasRevCol ? ', revision' : ''} FROM entries`).all() as Array<{
-                  name?: unknown; current_plan_id?: unknown; revision?: unknown
+            }
+          } else if (hasTable(db, 'versions') && hasColumn(db, 'versions', 'plan_id') && hasColumn(db, 'versions', 'role')) {
+            const revVersionsKey = `${realTarget}::revision_versions`
+            if (!countedTables.has(revVersionsKey)) {
+              countedTables.add(revVersionsKey)
+              sawRevisedSource = true
+              sawControlAdoptionSource = true
+              const vRows = db.prepare("SELECT plan_id FROM versions WHERE role = 'revision'").all() as Array<{ plan_id?: unknown }>
+              for (const vr of vRows) {
+                if (typeof vr.plan_id === 'string' && vr.plan_id !== '') {
+                  const canonicalId = sourceIdToActivationId.get(vr.plan_id) ?? vr.plan_id
+                  revisedPlanIds.add(canonicalId)
+                  controlAdoptedPlanIds.add(canonicalId)
+                }
+              }
+            }
+          }
+
+          if (hasTable(db, 'entries')) {
+            const revEntriesKey = `${realTarget}::revision_entries`
+            if (!countedTables.has(revEntriesKey)) {
+              countedTables.add(revEntriesKey)
+              const hasEntryId = hasColumn(db, 'entries', 'entry_id')
+              const hasName = hasColumn(db, 'entries', 'name')
+              const hasParentPlan = hasColumn(db, 'entries', 'parent_plan_id')
+              const hasCurrentPlan = hasColumn(db, 'entries', 'current_plan_id')
+              const hasRev = hasColumn(db, 'entries', 'revision')
+              const cols = [
+                ...(hasEntryId ? ['entry_id'] : []),
+                ...(hasName ? ['name'] : []),
+                ...(hasParentPlan ? ['parent_plan_id'] : []),
+                ...(hasCurrentPlan ? ['current_plan_id'] : []),
+                ...(hasRev ? ['revision'] : []),
+              ]
+              const entryList: BufferedRevisionEntryRow[] = []
+              if (cols.length > 0) {
+                const eRows = db.prepare(`SELECT ${cols.join(', ')} FROM entries`).all() as Array<{
+                  entry_id?: unknown; name?: unknown; parent_plan_id?: unknown; current_plan_id?: unknown; revision?: unknown
                 }>
                 for (const er of eRows) {
-                  const ename = typeof er.name === 'string' ? er.name.trim() : ''
-                  if (ename === '') continue
-                  const revNum = typeof er.revision === 'number' && Number.isFinite(er.revision) ? Math.trunc(er.revision) : null
-                  const curPlan = typeof er.current_plan_id === 'string' ? er.current_plan_id : ''
-                  upsertEvolved(ename, {
-                    version: revNum !== null ? `v${revNum}` : null,
-                    enabled: curPlan !== '' && activeRevisionPlanIds.has(curPlan),
+                  entryList.push({
+                    ...(typeof er.entry_id === 'string' ? { entryId: er.entry_id } : {}),
+                    ...(typeof er.name === 'string' ? { name: er.name } : {}),
+                    ...(typeof er.parent_plan_id === 'string' ? { parentPlanId: er.parent_plan_id } : {}),
+                    ...(typeof er.current_plan_id === 'string' ? { currentPlanId: er.current_plan_id } : {}),
+                    ...(typeof er.revision === 'number' && Number.isFinite(er.revision) ? { revision: Math.trunc(er.revision) } : {}),
                   })
                 }
               }
+              bufferedRevisions.push({ adoptionStatusByPlan, entries: entryList })
             }
           }
         }
       })
     }
 
+    const normalizePlanId = (id: string): string => sourceIdToActivationId.get(id) ?? id
+
+    // Re-normalize any revision-adoptions IDs collected before source_adoptions was read
+    if (revisedPlanIds.size > 0) {
+      const normalizedRev = new Set<string>()
+      for (const pid of revisedPlanIds) normalizedRev.add(normalizePlanId(pid))
+      revisedPlanIds.clear()
+      for (const pid of normalizedRev) revisedPlanIds.add(pid)
+    }
+    if (controlAdoptedPlanIds.size > 0) {
+      const normalizedCtrl = new Set<string>()
+      for (const pid of controlAdoptedPlanIds) normalizedCtrl.add(normalizePlanId(pid))
+      controlAdoptedPlanIds.clear()
+      for (const pid of normalizedCtrl) controlAdoptedPlanIds.add(pid)
+    }
+
+    // Pass A: creation-adoptions
+    for (const row of bufferedCreations) {
+      const cert = parseJsonObject(row.certificateJson)
+      const plan = rec(cert['plan'])
+      const receipt = parseJsonObject(row.receiptJson)
+      const capName = (typeof plan['name'] === 'string' && plan['name'].trim() !== '' ? plan['name'].trim() : undefined)
+        ?? (typeof cert['packageName'] === 'string' && cert['packageName'].trim() !== '' ? cert['packageName'].trim() : undefined)
+        ?? (typeof cert['pluginName'] === 'string' && cert['pluginName'].trim() !== '' ? cert['pluginName'].trim() : undefined)
+        ?? (typeof cert['name'] === 'string' && cert['name'].trim() !== '' ? cert['name'].trim() : row.planId)
+      const capVer = typeof receipt['version'] === 'string' && receipt['version'].trim() !== ''
+        ? receipt['version'].trim()
+        : typeof plan['version'] === 'string' && plan['version'].trim() !== ''
+          ? plan['version'].trim()
+          : typeof cert['version'] === 'string' && cert['version'].trim() !== ''
+            ? cert['version'].trim()
+            : typeof cert['pluginVersion'] === 'string' && cert['pluginVersion'].trim() !== ''
+              ? cert['pluginVersion'].trim()
+              : null
+      const entry = upsertEvolved(capName, {
+        version: capVer,
+        versionTier: capVer !== null ? 1 : 0,
+        fromAdoptionJournal: true,
+        enabled: row.status === 'active',
+      })
+      const canonicalId = normalizePlanId(row.planId)
+      if (entry) {
+        evolvedByPlanId.set(row.planId, entry)
+        evolvedByPlanId.set(canonicalId, entry)
+      }
+      if (row.status === 'active' || row.status === 'authorized') {
+        createdPlanIds.add(canonicalId)
+        controlAdoptedPlanIds.add(canonicalId)
+      }
+    }
+
+    // Pass B: revision-adoptions entries
+    for (const revDb of bufferedRevisions) {
+      for (const er of revDb.entries) {
+        const currentStatus = er.currentPlanId ? revDb.adoptionStatusByPlan.get(er.currentPlanId) : undefined
+        const revVersion = er.revision !== undefined ? `v${er.revision}` : null
+        const parentEntry = er.parentPlanId
+          ? (evolvedByPlanId.get(normalizePlanId(er.parentPlanId)) ?? evolvedByPlanId.get(er.parentPlanId))
+          : undefined
+        if (parentEntry) {
+          upsertEvolved(parentEntry.name, {
+            version: revVersion,
+            versionTier: revVersion !== null ? 2 : 0,
+            fromAdoptionJournal: true,
+            enabled: currentStatus === 'active',
+          })
+        } else {
+          const rawName = (er.name && er.name.trim() !== '' ? er.name.trim() : undefined)
+            ?? er.parentPlanId
+            ?? er.entryId
+            ?? 'evolved-capability'
+          upsertEvolved(rawName, {
+            version: revVersion,
+            versionTier: revVersion !== null ? 2 : 0,
+            fromAdoptionJournal: true,
+            enabled: currentStatus === 'active',
+          })
+        }
+      }
+    }
+
+    // Pass C: control.sqlite (activation_watch -> source_plans -> activation_plans)
+    for (const w of bufferedWatches) {
+      if (w.state === '' || w.state === 'watching') {
+        upsertEvolved(w.packageName, {
+          version: w.packageVersion,
+          versionTier: w.packageVersion !== null ? 1 : 0,
+          enabled: w.state === 'watching',
+        })
+      }
+    }
+
+    for (const sp of bufferedSourcePlans) {
+      if (sp.status === 'release-complete') {
+        const canonicalId = normalizePlanId(sp.id)
+        controlAdoptedPlanIds.add(canonicalId)
+        if (sp.mode === 'modify' || sp.mode === 'prepared-revise') {
+          revisedPlanIds.add(canonicalId)
+        } else {
+          createdPlanIds.add(canonicalId)
+          if (sp.pluginName && sp.pluginName.trim() !== '') {
+            upsertEvolved(sp.pluginName, {
+              version: null,
+              versionTier: 0,
+              enabled: activatedActIds.has(canonicalId),
+            })
+          }
+        }
+      }
+    }
+
+    const sourceModeByActivationId = new Map<string, string | null>()
+    for (const [srcId, actId] of sourceIdToActivationId) {
+      if (sourceModeById.has(srcId)) {
+        sourceModeByActivationId.set(actId, sourceModeById.get(srcId) ?? null)
+      }
+    }
+
+    let unlinkedApCount = 0
+    let rollbackApCount = 0
+    for (const act of bufferedActivationPlans) {
+      if (!linkedActivationIds.has(act.id) && !sourcePlanIds.has(act.id)) {
+        unlinkedApCount += 1
+      }
+      if (act.status === 'activated') {
+        controlAdoptedPlanIds.add(act.id)
+      }
+      if (act.status === 'rolled-back' || act.status === 'rollback-pending') {
+        rollbackApCount += 1
+      }
+      const linkedMode = sourceModeByActivationId.get(act.id)
+      if (linkedMode === 'modify' || linkedMode === 'prepared-revise') {
+        continue
+      }
+      const candidate = parseJsonObject(act.candidateJson)
+      const pkgName = typeof candidate['package'] === 'string' && candidate['package'].trim() !== ''
+        ? candidate['package'].trim()
+        : (typeof candidate['name'] === 'string' && candidate['name'].trim() !== '' ? candidate['name'].trim() : undefined)
+      if (pkgName === undefined) continue
+      const pkgVer = typeof candidate['version'] === 'string' && candidate['version'].trim() !== ''
+        ? (boundNonEmptyString(candidate['version'].trim(), 128) ?? null)
+        : null
+      const patchDisabled = targetProfiles.length > 0
+        && targetProfiles.every(p => {
+          const ps = patchStatesByProfile.get(p)?.get(pkgName)
+          return ps?.disabled === true || ps?.configEnabled === false
+        })
+      const enabled = act.status === 'activated' && !watchClosedByPlan.has(act.id) && !patchDisabled
+      const boundedPkgName = boundNonEmptyString(pkgName, 200)
+      if (!boundedPkgName) continue
+      const key = normalizePluginKey(boundedPkgName)
+      const existing = evolvedMap.get(key)
+      evolvedMap.set(key, {
+        name: boundedPkgName,
+        version: pkgVer ?? existing?.version ?? null,
+        versionTier: pkgVer !== null ? 1 : (existing?.versionTier ?? 0),
+        fromAdoptionJournal: existing?.fromAdoptionJournal ?? false,
+        kind: 'evolved',
+        installKind: 'adopted',
+        enabled,
+      })
+    }
+    let sawActivationPlansTable = false
+    for (const k of countedTables) {
+      if (k.endsWith('::activation_plans')) {
+        sawActivationPlansTable = true
+        break
+      }
+    }
+    candidatesGenerated = addCounter(candidatesGenerated, unlinkedApCount)
+    if (sawActivationPlansTable) {
+      rollbacks = addCounter(rollbacks, rollbackApCount)
+    }
+
     if (sawCreatedSource) pluginsCreated = createdPlanIds.size
     if (sawRevisedSource) pluginsRevised = revisedPlanIds.size
     if (sawControlAdoptionSource) {
-      const unionAdoptedPlans = new Set<string>([...activatedPlanIds, ...createdPlanIds, ...revisedPlanIds])
-      candidatesAdopted = addCounter(candidatesAdopted, unionAdoptedPlans.size)
+      candidatesAdopted = addCounter(candidatesAdopted, controlAdoptedPlanIds.size)
     }
 
     // 2. assistant-evolution
     const evoSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-evolution', 'assistant-evolution', ['evolution.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evolution, '@dsh-enhanced/assistant-evolution', 'assistant-evolution', ['evolution.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, evoSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const props = queryCount(db, realTarget, countedTables, 'evolution_proposals', 'SELECT COUNT(*) AS c FROM evolution_proposals')
         if (props !== undefined) candidatesGenerated = addCounter(candidatesGenerated, props)
@@ -910,7 +1437,8 @@ export async function collectOwnerConsoleVersionInfo(
     for (const p of candidateDbPaths(
       host,
       boundary,
-      resolved.profileName,
+      targetProfiles,
+      patchDbMap.association,
       '@dsh-enhanced/assistant-association',
       'assistant-association',
       ['association.sqlite', 'state.sqlite'],
@@ -923,10 +1451,8 @@ export async function collectOwnerConsoleVersionInfo(
           if (!countedTables.has(headKey)) {
             countedTables.add(headKey)
             const row = db.prepare('SELECT MAX(active_version) AS max_v FROM assoc_param_profile_heads').get() as { max_v?: unknown } | undefined
-            const v = nonNegInt(row?.max_v)
-            if (v !== null) {
-              associationParamVersion = associationParamVersion === null ? v : Math.max(associationParamVersion, v)
-            }
+            const v = nonNegInt(row?.max_v) ?? 0
+            associationParamVersion = associationParamVersion === null ? v : Math.max(associationParamVersion, v)
           }
         }
         const adoptions = queryCount(
@@ -962,7 +1488,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 4. assistant-evaluation
     const evalSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-evaluation', 'assistant-evaluation', ['evaluation.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.evaluation, '@dsh-enhanced/assistant-evaluation', 'assistant-evaluation', ['evaluation.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, evalSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const tuned = queryCount(
           db, realTarget, countedTables, 'evaluation_attention_tuning_events',
@@ -992,7 +1518,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 5. assistant-work-items
     const wiSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-work-items', 'assistant-work-items', ['state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.workItems, '@dsh-enhanced/assistant-work-items', 'assistant-work-items', ['state.sqlite'])) {
       withReadOnlySqlite(p, boundary, wiSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const total = queryCount(db, realTarget, countedTables, 'work_item', 'SELECT COUNT(*) AS c FROM work_item')
         if (total !== undefined) workItemsTotal = addCounter(workItemsTotal, total)
@@ -1001,28 +1527,40 @@ export async function collectOwnerConsoleVersionInfo(
           'SELECT COUNT(DISTINCT item_id) AS c FROM work_item_outcome',
           ['item_id'],
         )
-        if (settled !== undefined) workItemsSettled = addCounter(workItemsSettled, settled)
+        if (settled !== undefined) {
+          workItemsSettled = addCounter(workItemsSettled, settled)
+        } else {
+          const fallbackSettled = queryCount(
+            db, realTarget, countedTables, 'work_item',
+            "SELECT COUNT(*) AS c FROM work_item WHERE state IN ('ready', 'blocked', 'failed', 'dropped')",
+            ['state'], 'work_item:settled_fallback',
+          )
+          if (fallbackSettled !== undefined) workItemsSettled = addCounter(workItemsSettled, fallbackSettled)
+        }
       })
     }
 
     // 6. assistant-growth-driver
     const gdSeen = new Set<string>()
     const gdPaths = new Set<string>(
-      candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-growth-driver', 'assistant-growth-driver', ['usage.sqlite', 'state.sqlite'], 'usageLearning'),
+      candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthDriver, '@dsh-enhanced/assistant-growth-driver', 'assistant-growth-driver', ['usage.sqlite', 'state.sqlite'], 'usageLearning'),
     )
-    if (resolved.profileName) {
-      gdPaths.add(join(boundary.canonicalDshHome, 'assistant-growth-driver', `${resolved.profileName}-usage.sqlite`))
+    for (const prof of targetProfiles) {
+      gdPaths.add(join(boundary.canonicalDshHome, 'assistant-growth-driver', `${prof}-usage.sqlite`))
     }
     for (const p of gdPaths) {
       withReadOnlySqlite(p, boundary, gdSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const jobs = queryCount(db, realTarget, countedTables, 'usage_jobs', 'SELECT COUNT(*) AS c FROM usage_jobs')
-        if (jobs !== undefined) growthUsageJobsTotal = addCounter(growthUsageJobsTotal, jobs)
+        if (jobs !== undefined) {
+          growthUsageJobsTotal = addCounter(growthUsageJobsTotal, jobs)
+          candidatesGenerated = addCounter(candidatesGenerated, jobs)
+        }
       })
     }
 
     // 7. assistant-dreaming
     const dreamSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-dreaming', 'assistant-dreaming', ['state.sqlite', 'dreaming.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.dreaming, '@dsh-enhanced/assistant-dreaming', 'assistant-dreaming', ['state.sqlite', 'dreaming.sqlite'])) {
       withReadOnlySqlite(p, boundary, dreamSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const runs = queryCount(db, realTarget, countedTables, 'dream_runs', 'SELECT COUNT(*) AS c FROM dream_runs')
         if (runs !== undefined) dreamingRuns = addCounter(dreamingRuns, runs)
@@ -1031,19 +1569,20 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 8. assistant-recovery
     const recSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-recovery', 'assistant-recovery', ['state.sqlite', 'recovery.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.recovery, '@dsh-enhanced/assistant-recovery', 'assistant-recovery', ['state.sqlite', 'recovery.sqlite'])) {
       withReadOnlySqlite(p, boundary, recSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const runs = queryCount(db, realTarget, countedTables, 'recovery_runs', 'SELECT COUNT(*) AS c FROM recovery_runs')
         if (runs !== undefined) recoveryRuns = addCounter(recoveryRuns, runs)
       })
     }
 
-    // 9. assistant-goals (+ `${databasePath}.strategies`)
+    // 9. assistant-goals (+ `${databasePath}.strategies` + strategies.sqlite + strategy.sqlite)
     const goalsSeen = new Set<string>()
     const baseGoalsPaths = candidateDbPaths(
       host,
       boundary,
-      resolved.profileName,
+      targetProfiles,
+      patchDbMap.goals,
       '@dsh-enhanced/assistant-goals',
       'assistant-goals',
       ['state.sqlite', 'goals.sqlite'],
@@ -1055,6 +1594,8 @@ export async function collectOwnerConsoleVersionInfo(
       goalsAndStrategiesPaths.add(`${gp}.strategies`)
       goalsAndStrategiesPaths.add(gp)
     }
+    goalsAndStrategiesPaths.add(join(boundary.canonicalDshHome, 'assistant-goals', 'strategies.sqlite'))
+    goalsAndStrategiesPaths.add(join(boundary.canonicalDshHome, 'assistant-goals', 'strategy.sqlite'))
     for (const p of goalsAndStrategiesPaths) {
       withReadOnlySqlite(p, boundary, goalsSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const runs = queryCount(db, realTarget, countedTables, 'goal_strategy_records', 'SELECT COUNT(*) AS c FROM goal_strategy_records')
@@ -1062,16 +1603,12 @@ export async function collectOwnerConsoleVersionInfo(
       })
     }
 
-    // 10. assistant-verifier (+ sidecar review DBs)
+    // 10. assistant-verifier (+ all 6 sidecar review DBs)
     const verSeen = new Set<string>()
-    const baseVerPaths = candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-verifier', 'assistant-verifier', ['verification.sqlite', 'state.sqlite'])
+    const baseVerPaths = candidateDbPaths(host, boundary, targetProfiles, patchDbMap.verifier, '@dsh-enhanced/assistant-verifier', 'assistant-verifier', ['verification.sqlite', 'state.sqlite'])
     const verifierPaths = new Set<string>()
     for (const vp of baseVerPaths) {
-      verifierPaths.add(vp)
-      verifierPaths.add(`${vp}.creation-reviews`)
-      verifierPaths.add(`${vp}.source-reviews`)
-      verifierPaths.add(`${vp}.revision-reviews`)
-      verifierPaths.add(`${vp}.revision-regressions`)
+      addVerifierVariants(verifierPaths, vp)
     }
     let creationCertificates = 0
     let sourceApproved = 0
@@ -1125,7 +1662,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 11. assistant-memory-learning
     const mlSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-memory-learning', 'assistant-memory-learning', ['learning.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memoryLearning, '@dsh-enhanced/assistant-memory-learning', 'assistant-memory-learning', ['learning.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, mlSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const totalJobs = queryCount(db, realTarget, countedTables, 'jobs', 'SELECT COUNT(*) AS c FROM jobs')
         if (totalJobs !== undefined) candidatesGenerated = addCounter(candidatesGenerated, totalJobs)
@@ -1140,7 +1677,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 12. personal-memory (also check personal-assistant personalMemory.databasePath)
     const pmSeen = new Set<string>()
-    const pmPaths = new Set<string>(candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/personal-memory', 'personal-memory', ['memory.sqlite', 'state.sqlite']))
+    const pmPaths = new Set<string>(candidateDbPaths(host, boundary, targetProfiles, patchDbMap.memory, '@dsh-enhanced/personal-memory', 'personal-memory', ['memory.sqlite', 'state.sqlite']))
     const paPmPath = findLoaderPathProp(host, boundary, '@dsh-enhanced/personal-assistant', 'databasePath', 'personalMemory')
     if (paPmPath) pmPaths.add(paPmPath)
     for (const p of pmPaths) {
@@ -1156,10 +1693,18 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 13. preference-learning
     const plSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/preference-learning', 'preference-learning', ['preferences.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.preference, '@dsh-enhanced/preference-learning', 'preference-learning', ['preferences.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, plSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const hyps = queryCount(db, realTarget, countedTables, 'preference_hypotheses', 'SELECT COUNT(*) AS c FROM preference_hypotheses')
         if (hyps !== undefined) candidatesGenerated = addCounter(candidatesGenerated, hyps)
+        else {
+          const transCreated = queryCount(
+            db, realTarget, countedTables, 'preference_transitions',
+            "SELECT COUNT(*) AS c FROM preference_transitions WHERE reason = 'created'",
+            ['reason'], 'preference_transitions:created',
+          )
+          if (transCreated !== undefined) candidatesGenerated = addCounter(candidatesGenerated, transCreated)
+        }
 
         const activePref = queryCount(
           db, realTarget, countedTables, 'preference_hypotheses',
@@ -1199,7 +1744,7 @@ export async function collectOwnerConsoleVersionInfo(
 
     // 14. assistant-growth-experiments
     const geSeen = new Set<string>()
-    for (const p of candidateDbPaths(host, boundary, resolved.profileName, '@dsh-enhanced/assistant-growth-experiments', 'assistant-growth-experiments', ['growth.sqlite', 'state.sqlite'])) {
+    for (const p of candidateDbPaths(host, boundary, targetProfiles, patchDbMap.growthExperiments, '@dsh-enhanced/assistant-growth-experiments', 'assistant-growth-experiments', ['growth.sqlite', 'state.sqlite'])) {
       withReadOnlySqlite(p, boundary, geSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
         const wTotal = queryCount(db, realTarget, countedTables, 'workflow_candidates', 'SELECT COUNT(*) AS c FROM workflow_candidates')
         if (wTotal !== undefined) candidatesGenerated = addCounter(candidatesGenerated, wTotal)
@@ -1226,7 +1771,7 @@ export async function collectOwnerConsoleVersionInfo(
     // 15. assistant-skills
     const skSeen = new Set<string>()
     for (const p of candidateDbPaths(
-      host, boundary, resolved.profileName, '@dsh-enhanced/assistant-skills', 'assistant-skills',
+      host, boundary, targetProfiles, patchDbMap.skills, '@dsh-enhanced/assistant-skills', 'assistant-skills',
       ['skills.sqlite', 'state.sqlite'], undefined, ['assistant-skills.sqlite'],
     )) {
       withReadOnlySqlite(p, boundary, skSeen, inspectedLedgersSet, diagnostics, (db, realTarget) => {
@@ -1390,9 +1935,29 @@ export async function collectOwnerConsoleVersionInfo(
   }
 
   // Plugins inventory: core vs evolved (never double-counted)
-  const corePlugins: AssistantVersionPluginEntry[] = []
-  const coreSeenKeys = new Set<string>()
+  interface CorePluginAcc {
+    name: string
+    version: string | null
+    installKind?: 'npm' | 'local'
+    enabledStates: Array<boolean | undefined>
+  }
+  const coreByKey = new Map<string, CorePluginAcc>()
   let pluginSourceAvailable = false
+
+  const readDiskPackageVersion = (profileDir: string | null, pkgName: string): string | null => {
+    if (!profileDir || !pkgName.startsWith('@dsh-enhanced/')) return null
+    const slug = pkgName.slice('@dsh-enhanced/'.length)
+    if (!VALID_PROFILE_NAME_RE.test(slug)) return null
+    const pkgJsonPath = join(profileDir, 'node_modules', '@dsh-enhanced', slug, 'package.json')
+    try {
+      const st = lstatSync(pkgJsonPath)
+      if (!st.isFile() || st.isSymbolicLink()) return null
+      const parsed = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as { version?: unknown }
+      return boundNonEmptyString(parsed.version, 128) ?? null
+    } catch {
+      return null
+    }
+  }
 
   const manager = host.get('pluginManager' as never) as Partial<PluginManagerService> | undefined
   if (manager && typeof manager.listBundles === 'function') {
@@ -1408,22 +1973,21 @@ export async function collectOwnerConsoleVersionInfo(
         const existingEvolved = evolvedMap.get(key)
         if (existingEvolved) {
           existingEvolved.name = boundedBundleName
-          if (boundedBundleVer !== null) {
+          if (boundedBundleVer !== null && (existingEvolved.version === null || /^v\d+$/u.test(existingEvolved.version))) {
             existingEvolved.version = boundedBundleVer
+            existingEvolved.versionTier = 3
           }
           existingEvolved.enabled = bundle.enabled
           continue
         }
-        if (coreSeenKeys.has(key)) continue
-        coreSeenKeys.add(key)
+        if (coreByKey.has(key)) continue
         const installKind = inspectProfileInstallKind(resolved.profileDir, boundary, bundle.name)
-        corePlugins.push(Object.freeze({
+        coreByKey.set(key, {
           name: boundedBundleName,
           version: boundedBundleVer,
-          kind: 'core' as const,
           ...(installKind === undefined ? {} : { installKind }),
-          enabled: bundle.enabled,
-        }))
+          enabledStates: [bundle.enabled],
+        })
       }
     } catch (error) {
       diagnostics.push(`pluginManager.listBundles() failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -1443,22 +2007,25 @@ export async function collectOwnerConsoleVersionInfo(
           if (!boundedModName) continue
           const key = normalizePluginKey(modName)
           const enabled = !isLoaderEntryDisabled(entry as { disabled?: unknown; options: { disabled?: unknown } })
+          const diskVer = readDiskPackageVersion(resolved.profileDir, modName)
           const existingEvolved = evolvedMap.get(key)
           if (existingEvolved) {
             existingEvolved.name = boundedModName
+            if (diskVer !== null && (existingEvolved.version === null || /^v\d+$/u.test(existingEvolved.version))) {
+              existingEvolved.version = diskVer
+              existingEvolved.versionTier = 3
+            }
             existingEvolved.enabled = enabled
             continue
           }
-          if (coreSeenKeys.has(key)) continue
-          coreSeenKeys.add(key)
+          if (coreByKey.has(key)) continue
           const installKind = inspectProfileInstallKind(resolved.profileDir, boundary, modName)
-          corePlugins.push(Object.freeze({
+          coreByKey.set(key, {
             name: boundedModName,
-            version: null,
-            kind: 'core' as const,
+            version: diskVer,
             ...(installKind === undefined ? {} : { installKind }),
-            enabled,
-          }))
+            enabledStates: [enabled],
+          })
         }
       } catch (error) {
         diagnostics.push(`loader.entries() failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -1466,16 +2033,41 @@ export async function collectOwnerConsoleVersionInfo(
     }
   }
 
-  if (!pluginSourceAvailable && resolved.profileDir && boundary) {
-    const scopeDir = join(resolved.profileDir, 'node_modules', '@dsh-enhanced')
-    try {
-      if (existsSync(scopeDir) && !lstatSync(scopeDir).isSymbolicLink()) {
-        const disabledPatch = readDisabledPatchPackages(resolved.profileDir)
+  if (!pluginSourceAvailable && boundary) {
+    const scanDirs: Array<{ profDir: string; profName: string | null }> = []
+    const seenProfDirs = new Set<string>()
+    for (const prof of targetProfiles) {
+      const pDir = join(boundary.canonicalDshHome, 'profiles', prof)
+      seenProfDirs.add(pDir)
+      scanDirs.push({ profDir: pDir, profName: prof })
+    }
+    if (resolved.profileDir && !seenProfDirs.has(resolve(resolved.profileDir))) {
+      scanDirs.push({ profDir: resolve(resolved.profileDir), profName: resolved.profileName })
+    }
+    for (const { profDir, profName } of scanDirs) {
+      const scopeDir = join(profDir, 'node_modules', '@dsh-enhanced')
+      const pnpmStoreRoot = resolve(profDir, 'node_modules', '.pnpm')
+      try {
+        if (!existsSync(scopeDir) || lstatSync(scopeDir).isSymbolicLink()) continue
+        const profPatchStates = profName ? patchStatesByProfile.get(profName) : undefined
         const entries = readdirSync(scopeDir, { withFileTypes: true })
         pluginSourceAvailable = true
         for (const entry of entries) {
+          if (entry.name.startsWith('.') || entry.name.startsWith('@')) continue
           if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
-          const pkgJsonPath = join(scopeDir, entry.name, 'package.json')
+          const entryPath = join(scopeDir, entry.name)
+          let installKind: 'npm' | 'local' = 'npm'
+          if (entry.isSymbolicLink()) {
+            try {
+              const realPkgDir = realpathSync(entryPath)
+              installKind = (realPkgDir === pnpmStoreRoot || realPkgDir.startsWith(`${pnpmStoreRoot}${sep}`))
+                ? 'npm'
+                : 'local'
+            } catch {
+              continue
+            }
+          }
+          const pkgJsonPath = join(entryPath, 'package.json')
           try {
             if (!existsSync(pkgJsonPath)) continue
             const pkgJson = JSON.parse(readFileSync(pkgJsonPath, 'utf8')) as { name?: unknown; version?: unknown }
@@ -1484,47 +2076,71 @@ export async function collectOwnerConsoleVersionInfo(
             if (!boundedPkgName) continue
             const key = normalizePluginKey(pkgJson.name)
             const pkgVer = boundNonEmptyString(pkgJson.version, 128) ?? null
-            const enabled = !disabledPatch.has(pkgJson.name)
             const existingEvolved = evolvedMap.get(key)
             if (existingEvolved) {
               existingEvolved.name = boundedPkgName
-              if (pkgVer !== null) existingEvolved.version = pkgVer
-              existingEvolved.enabled = enabled
+              if (pkgVer !== null && (existingEvolved.version === null || /^v\d+$/u.test(existingEvolved.version))) {
+                existingEvolved.version = pkgVer
+                existingEvolved.versionTier = 3
+              }
               continue
             }
-            if (coreSeenKeys.has(key)) continue
-            coreSeenKeys.add(key)
-            corePlugins.push(Object.freeze({
-              name: boundedPkgName,
-              version: pkgVer,
-              kind: 'core' as const,
-              installKind: entry.isSymbolicLink() ? 'local' : 'npm',
-              enabled,
-            }))
+            const ps = profPatchStates?.get(pkgJson.name)
+            const enabledVal = ps !== undefined
+              ? !(ps.disabled || ps.configEnabled === false)
+              : undefined
+            const existingCore = coreByKey.get(key)
+            if (!existingCore) {
+              coreByKey.set(key, {
+                name: boundedPkgName,
+                version: pkgVer,
+                installKind,
+                enabledStates: [enabledVal],
+              })
+            } else {
+              if (existingCore.version === null && pkgVer !== null) existingCore.version = pkgVer
+              if (installKind === 'local') existingCore.installKind = 'local'
+              existingCore.enabledStates.push(enabledVal)
+            }
           } catch {
             // Skip unreadable package.json
           }
         }
+      } catch {
+        // Ignore profile node_modules scan error
       }
-    } catch {
-      // Ignore profile node_modules scan error
     }
   }
 
-  corePlugins.sort((a, b) => a.name.localeCompare(b.name))
+  const corePlugins: AssistantVersionPluginEntry[] = [...coreByKey.values()]
+    .map(entry => {
+      const defined = entry.enabledStates.filter((v): v is boolean => v !== undefined)
+      const enabled = defined.length > 0 ? defined.some(Boolean) : undefined
+      return Object.freeze({
+        name: entry.name,
+        version: entry.version,
+        kind: 'core' as const,
+        ...(entry.installKind === undefined ? {} : { installKind: entry.installKind }),
+        ...(enabled === undefined ? {} : { enabled }),
+      })
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
   const evolvedPlugins: AssistantVersionPluginEntry[] = [...evolvedMap.values()]
-    .map(entry => Object.freeze({
-      name: truncateText(entry.name, 200),
-      version: entry.version === null ? null : boundNonEmptyString(entry.version, 128) ?? null,
-      kind: 'evolved' as const,
-      ...(entry.installKind === undefined ? {} : { installKind: entry.installKind }),
-      ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
-    }))
+    .map(entry => {
+      const rawVer = entry.version === null && entry.fromAdoptionJournal ? 'v1' : entry.version
+      return Object.freeze({
+        name: truncateText(entry.name, 200),
+        version: rawVer === null ? null : boundNonEmptyString(rawVer, 128) ?? null,
+        kind: 'evolved' as const,
+        ...(entry.installKind === undefined ? {} : { installKind: entry.installKind }),
+        ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
+      })
+    })
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const pluginsState = corePlugins.length > 0 || evolvedPlugins.length > 0
     ? 'ok'
-    : pluginSourceAvailable
+    : (pluginSourceAvailable || (profiles !== undefined && profiles.length > 0) || sawControlPlaneDb)
       ? 'zero'
       : 'unavailable'
 

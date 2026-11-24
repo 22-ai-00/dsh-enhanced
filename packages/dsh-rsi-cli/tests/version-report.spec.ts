@@ -463,7 +463,7 @@ describe('collectVersionReport & formatVersionReport', () => {
     ])
     expect(report.plugins.evolved.find(p => p.name === '@dsh-enhanced/evolved-tool-a')).toEqual({
       name: '@dsh-enhanced/evolved-tool-a',
-      version: 'v3',
+      version: '0.1.0',
       kind: 'evolved',
       installKind: 'adopted',
       enabled: true,
@@ -479,7 +479,7 @@ describe('collectVersionReport & formatVersionReport', () => {
     expect(text).toContain(`dsh-enhanced v${CLI_VERSION}`)
     expect(text).toContain('0.2.2-rc.5')
     expect(text).toContain('@dsh-enhanced/assistant-work-items@0.1.83')
-    expect(text).toContain('@dsh-enhanced/evolved-tool-a@v3')
+    expect(text).toContain('@dsh-enhanced/evolved-tool-a@0.1.0')
     expect(text).toContain('累计迭代次数：18')
   })
 
