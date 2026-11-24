@@ -552,28 +552,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate and lint repository
+        id: repository
+        run: pnpm run validate && pnpm run lint
+
       - name: Verify native macOS paths early
         shell: bash
         run: |
           set -euo pipefail
-          # Report platform fixture and launchd failures before the long
-          # Control Plane integration suite; the full check still follows.
+          # Report platform fixture, isolation, broker, control-plane, and
+          # launchd behavior on macOS before finishing.
           pnpm run build
-          pnpm --filter @dsh-enhanced/plugin-control-plane exec vitest run --testTimeout=15000 tests/source-build.spec.ts
-          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/native-macos.spec.ts tests/controller-startup.spec.ts tests/state-socket-binding.spec.ts tests/storage.spec.ts tests/mac-socket.spec.ts
-          pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-build.spec.ts tests/rsi-creation-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
+          pnpm --filter @dsh-enhanced/plugin-control-plane exec vitest run --testTimeout=15000 tests/source-build.spec.ts tests/runtime-observer.spec.ts tests/in-process-reload.spec.ts tests/adoption-coordinator.spec.ts tests/adoption-coordinator-binding.spec.ts
+          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/native-resources.spec.ts tests/controller-startup.spec.ts tests/storage.spec.ts tests/index.spec.ts tests/ledger.spec.ts tests/storage-ledger.spec.ts tests/audit-archive.spec.ts tests/audit-archive-cli.spec.ts tests/diagnostics.spec.ts tests/macos-seatbelt-backend.spec.ts tests/cross-platform-config.spec.ts tests/isolated-subprocess.spec.ts
+          pnpm --filter @dsh-enhanced/assistant-actions test -- --testTimeout=15000
+          pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/rsi-native-profile.spec.ts tests/rsi-native-install.spec.ts tests/rsi-native-launchd.spec.ts tests/rsi-native-runtime-bootstrap.spec.ts tests/native-lifecycle-lock.spec.ts tests/rsi-local-install.spec.ts tests/rsi-release-build.spec.ts tests/rsi-source.spec.ts tests/rsi-source-cli.spec.ts tests/setup.spec.ts
           pnpm --filter @dsh-enhanced/lark-channel exec vitest run --testTimeout=15000 tests/launchd.spec.ts tests/launchd-control.spec.ts
           pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000
-          pnpm exec vitest run --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts
-
-      # macOS only owns platform-specific behavior (launchd, /var symlinks,
-      # socket/state fixtures and the lark/rsi-cli native paths) covered by the
-      # early step above. Repository-wide validate/lint/build/package tests and
-      # pack checks already run on the Linux lanes, so a second full `pnpm check`
-      # here would duplicate ~20 minutes on the slower arm64 runner.
-      - name: Verify repository (macOS-specific only)
-        id: repository
-        run: pnpm run validate && pnpm run lint
+          pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/macos-launchd-lock.spec.ts tests/macos-launchd-service.spec.ts tests/macos-purge-fallback.spec.ts tests/install-setup-runtime.spec.ts tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts
 
   windows-acp-smoke:
     runs-on: windows-2025
@@ -598,8 +594,38 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate repository
+        shell: pwsh
+        run: |
+          pnpm run validate
+          if ($LASTEXITCODE -ne 0) { throw "pnpm run validate failed with exit code $LASTEXITCODE" }
+
+      - name: Build workspace packages
+        shell: pwsh
+        run: |
+          pnpm run build
+          if ($LASTEXITCODE -ne 0) { throw "pnpm run build failed with exit code $LASTEXITCODE" }
+
       - name: Test Windows mode policy
-        run: pnpm --filter @dsh-enhanced/acp test -- --testTimeout=15000
+        shell: pwsh
+        run: |
+          pnpm --filter @dsh-enhanced/acp test -- --testTimeout=15000
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/acp tests failed with exit code $LASTEXITCODE" }
+
+      - name: Test Windows cross-platform package suites
+        shell: pwsh
+        run: |
+          pnpm --filter @dsh-enhanced/dsh-rsi-cli exec vitest run --testTimeout=15000 tests/doctor.spec.ts tests/maintenance.spec.ts tests/process-guard.spec.ts tests/services.spec.ts tests/weburl.spec.ts tests/index.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/dsh-rsi-cli Windows suite failed with exit code $LASTEXITCODE" }
+
+          pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --testTimeout=15000 tests/index.spec.ts tests/controller-startup.spec.ts tests/grant-discovery.spec.ts tests/scoped-presentation.spec.ts tests/native-macos.spec.ts tests/native-verifier-runner.spec.ts tests/linux-repository-admission-ledger.spec.ts tests/workspace.spec.ts tests/cross-platform-config.spec.ts tests/windows-job-backend.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-isolation Windows suite failed with exit code $LASTEXITCODE" }
+
+          pnpm --filter @dsh-enhanced/assistant-actions exec vitest run --testTimeout=15000 tests/broker-protocol.spec.ts tests/github-http.spec.ts tests/github.spec.ts tests/repository-event-observation.spec.ts tests/repository-readback.spec.ts tests/verified-delivery.spec.ts tests/compensation-service.spec.ts tests/broker-core.spec.ts tests/broker-ledger.spec.ts tests/broker-ledger-migration.spec.ts tests/broker-peer-linux.spec.ts tests/service.spec.ts tests/broker-protocol-v2.spec.ts tests/broker-policy-wp08.spec.ts tests/broker-peer-cross-platform.spec.ts tests/broker-transport.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "@dsh-enhanced/assistant-actions Windows suite failed with exit code $LASTEXITCODE" }
+
+          pnpm exec vitest run --config ./tests/vitest.config.ts --testTimeout=15000 --dir tests tests/ci-workflows.spec.ts tests/verify-npm-release.spec.ts tests/workspace-version-alignment.spec.ts tests/dsh-compatibility.spec.ts tests/root-test-sequencer.spec.ts tests/require-pnpm-publish.spec.ts
+          if ($LASTEXITCODE -ne 0) { throw "Windows cross-platform root tests failed with exit code $LASTEXITCODE" }
 
       - name: Pack ACP plugin
         shell: pwsh

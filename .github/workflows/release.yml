@@ -225,8 +225,48 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  record:
+  verify-npm:
     needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      EXPECTED_RELEASE_SOURCE_COMMIT: ${{ needs.publish.outputs.source_commit }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked-out commit matches published source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${EXPECTED_RELEASE_SOURCE_COMMIT:-}" ]]; then
+            echo 'Publish job did not provide its verified source commit; refusing to verify.' >&2
+            exit 1
+          fi
+          checkout_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "${checkout_commit}" != "${EXPECTED_RELEASE_SOURCE_COMMIT}" ]]; then
+            echo "Checked-out commit ${checkout_commit} does not match published commit ${EXPECTED_RELEASE_SOURCE_COMMIT}." >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify all published packages on npm
+        run: node ./scripts/verify-npm-release.mjs --tag "${RELEASE_TAG}" --verify-tarball
+
+  record:
+    needs: [publish, verify-npm]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
