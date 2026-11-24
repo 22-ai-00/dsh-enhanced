@@ -1,13 +1,19 @@
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createServer } from 'node:http'
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
-import { getExportFn, sha256Hex } from './helpers/assertions.ts'
+import { pathToFileURL } from 'node:url'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
 import { runBashCommand, runDshRsiInProcess, runNodeScript, runPluginSetupInProcess } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantDelivery,
+  loadAssistantPolicy,
   loadAssistantWebOwnerSetup,
   loadDshRsiCli,
   loadDshRsiUpgrade,
@@ -905,6 +911,538 @@ describe('Tier 2 — F19–F23: Upgrade Migration, Setup, Controls, Release Gate
           expect(step.run).toContain('$LASTEXITCODE -ne 0')
         }
       }
+    })
+  })
+
+  describe('F26: Version command & read-only self-iteration stats error, security & delegation boundaries', () => {
+    test('T2-F26-01: CLI flag conflicts fail with exitCode 2 / PurgeError while preserving start --json & update/upgrade --version', async () => {
+      const cli = await loadDshRsiCli()
+      const parseArgs = getExportFn<(argv: readonly string[]) => Record<string, unknown>>(cli, 'parseArgs')
+
+      const badFlagCombos: string[][] = [
+        ['--version', '--json'],
+        ['--version', '--short'],
+        ['status', '--short'],
+        ['status', '-V'],
+        ['version', '--short', '--json'],
+      ]
+      for (const args of badFlagCombos) {
+        expect(() => parseArgs(args), `Expected parseArgs to throw for ${args.join(' ')}`).toThrow()
+        const res = await runDshRsiInProcess(args)
+        expect(res.exitCode, `Expected exitCode 2 for ${args.join(' ')}`).toBe(2)
+      }
+
+      expect(() => parseArgs(['start', '--json'])).toThrow(/仅适用于 status 与 doctor/)
+
+      const upd = parseArgs(['update', '--version', '0.1.84'])
+      expect(upd.command).toBe('update')
+      expect(upd.targetVersion).toBe('0.1.84')
+
+      const upg = parseArgs(['upgrade', '--version', '0.1.84'])
+      expect(upg.command).toBe('upgrade')
+      expect(upg.targetVersion).toBe('0.1.84')
+    })
+
+    test('T2-F26-02: Read-only SQLite safety enforces symlink boundary, mode=ro&immutable=1, zero sidecars, corrupt DB isolation & dataState=zero', async () => {
+      const ws = await workspaces.create('f26-sqlite-sec-')
+      const cli = await loadDshRsiCli()
+      const ownerMod = await loadOwnerConsole()
+      const collectCli = getExportFn<(opts: Record<string, unknown>) => Promise<{
+        selfIteration: { dataState: string; totalIterations: number | null; workItemsTotal: number | null; dreamingRuns: number | null }
+        diagnostics?: readonly string[]
+      }>>(cli, 'collectVersionReport')
+      const collectOwner = getExportFn<(ctx: unknown, opts?: Record<string, unknown>) => Promise<{
+        selfIteration: { dataState: string; totalIterations: number | null; workItemsTotal: number | null; dreamingRuns: number | null }
+        diagnostics?: readonly string[]
+      }>>(ownerMod, 'collectOwnerConsoleVersionInfo')
+
+      // 1. Empty tables -> dataState='zero' & totalIterations=0
+      const zeroHome = join(ws.root, 'zero-home')
+      await mkdir(join(zeroHome, 'assistant-work-items'), { recursive: true, mode: 0o700 })
+      const zeroDb = new DatabaseSync(join(zeroHome, 'assistant-work-items', 'state.sqlite'))
+      zeroDb.exec('CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT;')
+      zeroDb.close()
+      const zeroCli = await collectCli({ dshHome: zeroHome })
+      expect(zeroCli.selfIteration.dataState).toBe('zero')
+      expect(zeroCli.selfIteration.totalIterations).toBe(0)
+
+      // 2. Symlink escape, chmod 0555 WAL DB (no -wal/-shm sidecars), and corrupt sibling DB
+      const wiDir = join(ws.dshHome, 'assistant-work-items')
+      await mkdir(wiDir, { recursive: true, mode: 0o700 })
+      const wiDb = new DatabaseSync(join(wiDir, 'state.sqlite'))
+      wiDb.exec("PRAGMA journal_mode = WAL; CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled');")
+      wiDb.close()
+
+      const outsideDb = join(ws.root, 'outside-evil.sqlite')
+      const outConn = new DatabaseSync(outsideDb)
+      outConn.exec("CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('evil', 'completed');")
+      outConn.close()
+      await mkdir(join(ws.dshHome, 'assistant-dreaming'), { recursive: true, mode: 0o700 })
+      await symlink(outsideDb, join(ws.dshHome, 'assistant-dreaming', 'state.sqlite'))
+
+      await mkdir(join(ws.dshHome, 'assistant-recovery'), { recursive: true, mode: 0o700 })
+      await writeFile(join(ws.dshHome, 'assistant-recovery', 'recovery.sqlite'), 'not-a-valid-sqlite-file', { mode: 0o600 })
+
+      const wiFilesBefore = (await readdir(wiDir)).sort()
+      await chmod(wiDir, 0o555)
+      try {
+        const cliReport = await collectCli({ dshHome: ws.dshHome })
+        expect(cliReport.selfIteration.workItemsTotal).toBe(1)
+        expect(cliReport.selfIteration.dreamingRuns).toBeNull()
+        expect((cliReport.diagnostics ?? []).length).toBeGreaterThanOrEqual(2)
+
+        const ctx = harness.createContext()
+        harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, name: 'web' })
+        const ownerReport = await collectOwner(ctx)
+        expect(ownerReport.selfIteration.workItemsTotal).toBe(1)
+        expect(ownerReport.selfIteration.dreamingRuns).toBeNull()
+        expect((ownerReport.diagnostics ?? []).length).toBeGreaterThanOrEqual(2)
+      } finally {
+        await chmod(wiDir, 0o700)
+      }
+      const wiFilesAfter = (await readdir(wiDir)).sort()
+      expect(wiFilesAfter).toEqual(wiFilesBefore)
+      expect(wiFilesAfter.some(f => f.endsWith('-wal') || f.endsWith('-shm'))).toBe(false)
+    })
+
+    test('T2-F26-03: owner_console_version_info enforces fail-closed owner authorization & strict Typert schema bounds', async () => {
+      const ws = await workspaces.create('f26-owner-bounds-')
+      const profileDir = join(ws.dshHome, 'profiles', 'web')
+      await mkdir(profileDir, { recursive: true, mode: 0o700 })
+      const typertMod = await loadPackageModule('owner-console/typert')
+      const ownerMod = await loadOwnerConsole()
+      const ReportSchema = getExport<{ safeParse: (v: unknown) => { success: boolean } }>(typertMod, 'OwnerConsoleVersionReportSchema')
+      const TYPERT = getExport<{ invocations: Array<{ method: string; result: { create: () => { safeParse: (v: unknown) => { success: boolean } } } }> }>(typertMod, 'TYPERT')
+
+      const registeredTools: Array<{
+        def: { name: string; execute: (args: unknown, exec: unknown) => Promise<{ ok: boolean; error?: string }> }
+        opts?: { when?: (a: { agent?: unknown }) => boolean }
+      }> = []
+      const preauthPredicates: Array<(exec: { agent?: unknown }) => boolean> = []
+
+      const ctx = harness.createContext()
+      await harness.mountPlugin(ctx, TypertRegistry)
+      harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
+      harness.provideMockService(ctx, 'tools', {
+        register: (def: typeof registeredTools[number]['def'], opts?: typeof registeredTools[number]['opts']) => {
+          registeredTools.push({ def, opts })
+          return () => {}
+        },
+      })
+      harness.provideMockService(ctx, 'assistantPolicy', {
+        registerPreauthorizedTool: (_c: unknown, _d: unknown, pred: (exec: { agent?: unknown }) => boolean) => {
+          preauthPredicates.push(pred)
+          return () => {}
+        },
+      })
+
+      const applyFn = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
+      const configFn = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
+      applyFn(ctx, configFn({ feishuAppId: '' }))
+      await Promise.resolve()
+
+      const versionTool = registeredTools.find(t => t.def.name === 'owner_console_version_info')!
+      expect(versionTool).toBeDefined()
+      const foreignAgent = { id: 'foreign-session', session: { id: 'foreign-session' } }
+      expect(versionTool.opts?.when?.({ agent: foreignAgent })).toBe(false)
+      expect(preauthPredicates[1]?.({ agent: foreignAgent })).toBe(false)
+      const denied = await versionTool.def.execute({}, { agent: foreignAgent })
+      expect(denied.ok).toBe(false)
+
+      // Oversized diagnostics, plugin names, host version, and negative now must satisfy strict Typert bounds
+      await writeFile(
+        join(ws.dshHome, '.dsh-rsi-host.json'),
+        JSON.stringify({ schemaVersion: 1, version: `0.2.2-${'v'.repeat(200)}`, cacheRoot: ws.root, receiptDigest: 'a'.repeat(64) }),
+        { mode: 0o600 },
+      )
+      const ctxBounds = harness.createContext()
+      harness.provideMockService(ctxBounds, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
+      harness.provideMockService(ctxBounds, 'pluginManager', {
+        listBundles: async () => [{
+          name: `@dsh-enhanced/${'long-plugin-'.repeat(25)}`,
+          version: `1.0.0-${'b'.repeat(200)}`,
+          enabled: true,
+          installed: true,
+          removable: false,
+          optional: false,
+        }],
+        listPlugins: async () => [],
+      })
+      harness.provideMockService(ctxBounds, 'loader', {
+        entries: () => {
+          throw new Error(`E_FAIL: ${'x'.repeat(1_500)}`)
+        },
+      })
+      const collectOwner = getExportFn<(c: unknown, opts?: Record<string, unknown>) => Promise<Record<string, unknown>>>(
+        ownerMod,
+        'collectOwnerConsoleVersionInfo',
+      )
+      const boundedReport = await collectOwner(ctxBounds, { now: -10 })
+      const typertCodec = TYPERT.invocations.find(i => i.method === 'versionInfo')!.result.create()
+      expect(ReportSchema.safeParse(boundedReport).success).toBe(true)
+      expect(typertCodec.safeParse(boundedReport).success).toBe(true)
+    })
+
+    test('T2-F26-04: assistant-delivery & lark-channel reject invalid /version forms, attachments & unauthorized principals', async () => {
+      const ws = await workspaces.create('f26-delivery-neg-')
+      const { AssistantPolicyService } = await loadAssistantPolicy()
+      const deliveryMod = await loadAssistantDelivery()
+      const parseVersionQuery = getExportFn<(text: string) => unknown>(deliveryMod, 'parseOwnerVersionQuery')
+      const normalizeMod = await loadPackageModule('lark-channel/normalize')
+      const normalizeLarkMessage = getExportFn<(
+        cfg: Record<string, unknown>,
+        msg: Record<string, unknown>,
+        now: number,
+      ) => { outcome: string; envelope?: Record<string, unknown> }>(normalizeMod, 'normalizeLarkMessage')
+
+      expect(parseVersionQuery('/VERSION')).toBeUndefined()
+      expect(parseVersionQuery('查看版本？？')).toBeUndefined()
+      expect(parseVersionQuery('如果查看版本会有什么影响？')).toBeUndefined()
+
+      const ctx = harness.createContext()
+      ctx.baseUrl = pathToFileURL(`${ws.root}/`).href
+      await mountAgentLoopTestDependencies(ctx as never, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+      harness.provideMockService(ctx, 'fileUploads', {
+        registerAgentResolver: () => () => {},
+        resolve: () => { throw new Error('unexpected file receipt') },
+        bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }),
+      })
+      const llmRequests: GenerateOptions[] = []
+      class EchoLlmAdapter extends LlmAdapter {
+        override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+          llmRequests.push(options)
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'model-ok' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'model-ok' } }
+          yield { type: 'usage', usage: { inputTokens: 4, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        }
+      }
+      ;(ctx as unknown as { llm: { registerAdapter: (p: string[], a: LlmAdapter) => void } }).llm.registerAdapter(
+        ['mock'],
+        new EchoLlmAdapter('mock', ['delivery-model'], ['text']),
+      )
+      await harness.mountPlugin(ctx, AgentLoop, { agents: [] })
+
+      await harness.mountService(ctx, AssistantPolicyService, 'assistantPolicy', {
+        databasePath: ws.sqlitePath('policy'),
+        rules: [
+          {
+            id: 'pair',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'local:test' },
+            actions: ['pair.issue'],
+            resource: { kind: 'message', id: 'pairing' },
+            context: { initiators: ['foreground'] },
+          },
+          {
+            id: 'owner',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'lark/bot-1/t1/ou_owner' },
+            actions: ['pair.confirm', 'ingest'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['external'] },
+          },
+          {
+            id: 'reply-owner',
+            effect: 'allow',
+            subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/bot-1/t1/ou_owner' },
+            actions: ['history', 'reply'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['foreground', 'external'] },
+          },
+        ],
+      })
+
+      const savedSessions = new Map<string, { header: Record<string, unknown>; events: unknown[]; inheritedEventCount: number }>()
+      const activeWriters = new Map<string, { append: (events: readonly unknown[]) => Promise<void>; flush: () => Promise<void>; close: () => Promise<void> }>()
+      harness.provideMockService(ctx, 'sessionPersistence', {
+        coordinator: { assertEventsSupported() {} },
+        create: async (header: { id: string }, opts?: { inheritedEventCount?: number }) => {
+          const id = String(header.id)
+          savedSessions.set(id, { header: structuredClone(header), events: [], inheritedEventCount: opts?.inheritedEventCount ?? 0 })
+          const pending: unknown[] = []
+          const handle = {
+            id: header.id,
+            access: 'write' as const,
+            header: structuredClone(header),
+            inheritedEventCount: opts?.inheritedEventCount ?? 0,
+            read: async () => ({ eventState: 'detached' as const, events: [...savedSessions.get(id)!.events, ...pending] }),
+            append: async (events: readonly unknown[]) => { pending.push(...structuredClone(events)) },
+            flush: async () => {
+              const cur = savedSessions.get(id)!
+              savedSessions.set(id, { ...cur, events: [...cur.events, ...pending.splice(0)] })
+            },
+            close: async () => { activeWriters.delete(id) },
+            [Symbol.asyncDispose]: async () => { activeWriters.delete(id) },
+          }
+          activeWriters.set(id, handle)
+          return handle
+        },
+        open: async (id: string) => {
+          const cur = savedSessions.get(String(id))
+          if (!cur) throw Object.assign(new Error(`session ${id} not found`), { name: 'SessionPersistenceNotFoundError' })
+          const pending: unknown[] = []
+          const handle = {
+            id,
+            access: 'write' as const,
+            header: structuredClone(cur.header),
+            inheritedEventCount: cur.inheritedEventCount,
+            read: async () => ({ eventState: 'detached' as const, events: [...savedSessions.get(String(id))!.events, ...pending] }),
+            append: async (events: readonly unknown[]) => { pending.push(...structuredClone(events)) },
+            flush: async () => {
+              const latest = savedSessions.get(String(id))!
+              savedSessions.set(String(id), { ...latest, events: [...latest.events, ...pending.splice(0)] })
+            },
+            close: async () => { activeWriters.delete(String(id)) },
+            [Symbol.asyncDispose]: async () => { activeWriters.delete(String(id)) },
+          }
+          activeWriters.set(String(id), handle)
+          return handle
+        },
+        flush: async () => { await Promise.all([...activeWriters.values()].map(h => h.flush())) },
+        stat: async (id: string) => {
+          const cur = savedSessions.get(String(id))
+          return cur ? { header: structuredClone(cur.header), revision: `r-${cur.events.length}` } : undefined
+        },
+        list: async () => [...savedSessions.values()].map(v => ({ header: structuredClone(v.header), revision: `r-${v.events.length}` })),
+      })
+      ctx.on('session/event' as never, ((session: { id: string }, event: unknown) => {
+        void activeWriters.get(String(session.id))?.append([event])
+      }) as never)
+      ctx.on('session/flush' as never, ((session: { id: string }) => activeWriters.get(String(session.id))?.flush()) as never)
+      ctx.on('session/disposed' as never, ((session: { id: string }) => { void activeWriters.get(String(session.id))?.close() }) as never)
+
+      const delivery = await harness.mountService<{
+        registerAdapter: (a: Record<string, unknown>) => Promise<() => void>
+        issuePairing: (by: string, p: Record<string, unknown>) => { challenge: { id: string }; code: string }
+        confirmPairing: (req: Record<string, unknown>) => unknown
+        acceptInbound: (env: Record<string, unknown>) => Promise<unknown>
+        tick: () => Promise<void>
+        whenIdle: () => Promise<void>
+      }>(ctx, deliveryMod.AssistantDeliveryService, 'assistantDelivery', {
+        databasePath: ws.sqlitePath('delivery'),
+        spoolPath: join(ws.stateDir, 'spool'),
+        defaultWorkspace: ws.workspace,
+        defaultAgentPreset: 'primary',
+        agentProvider: 'mock',
+        agentModel: 'delivery-model',
+        schedulerEnabled: false,
+      })
+
+      const sends: Array<{ text: string }> = []
+      await delivery.registerAdapter({
+        channel: 'lark',
+        account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'model-picker', 'permission-picker'] },
+        start: async () => {},
+        send: async (input: { text?: string }) => {
+          sends.push({ text: input.text ?? '' })
+          return { outcome: 'accepted', providerMessageId: `om_out_${sends.length}` }
+        },
+      })
+
+      const ownerPrincipal = { channel: 'lark', account: 'bot-1', tenant: 't1', user: 'ou_owner' }
+      const ownerPair = delivery.issuePairing('test', ownerPrincipal)
+      delivery.confirmPairing({ challengeId: ownerPair.challenge.id, principal: ownerPrincipal, code: ownerPair.code })
+
+      const drive = async () => {
+        await delivery.tick()
+        await delivery.whenIdle()
+        await delivery.tick()
+        await delivery.whenIdle()
+      }
+      const mkEnv = (eventId: string, kind: 'command' | 'text', text: string, attachments?: unknown[], chat = 'oc_dm_owner') => ({
+        channel: 'lark',
+        account: 'bot-1',
+        eventId,
+        occurredAt: Date.now(),
+        principal: ownerPrincipal,
+        conversation: { channel: 'lark', account: 'bot-1', tenant: 't1', kind: 'dm', chat },
+        kind,
+        text,
+        ...(attachments === undefined ? {} : { attachments }),
+      })
+
+      await delivery.acceptInbound(mkEnv('e-extra', 'command', '/version extra'))
+      await drive()
+      expect(sends.at(-1)?.text).toContain('/version 不接受参数')
+
+      await delivery.acceptInbound(mkEnv('e-cmd-att', 'command', '/version', [{ resourceType: 'file', providerRef: 'f1', fileName: 'a.txt' }]))
+      await drive()
+      expect(sends.at(-1)?.text).toContain('不接受文件、图片或其他附件')
+      expect(llmRequests).toHaveLength(0)
+
+      // NL with attachment & conversational prose & double punctuation skip pre-LLM shortcut and reach the model
+      await delivery.acceptInbound(mkEnv('e-nl-att', 'text', '查看版本', [{ resourceType: 'file', providerRef: 'f2', fileName: 'b.txt' }], 'oc_dm_att'))
+      await drive()
+      await delivery.acceptInbound(mkEnv('e-punct', 'text', '查看版本？？', undefined, 'oc_dm_punct'))
+      await drive()
+      await delivery.acceptInbound(mkEnv('e-prose', 'text', '如果查看版本会有什么影响？', undefined, 'oc_dm_prose'))
+      await drive()
+      expect(llmRequests).toHaveLength(3)
+
+      // Unauthorized / unpaired Lark principal produces 0 outbound sends
+      const sendsBeforeStranger = sends.length
+      const inboundCfg = { account: 'bot-1', tenant: 't1', requireMentionInGroups: true, maxTextBytes: 4096, staleAfterMs: 300_000 }
+      const stranger = normalizeLarkMessage(inboundCfg, {
+        messageId: 'om_stranger',
+        chatId: 'oc_dm_stranger',
+        chatType: 'p2p',
+        senderId: 'ou_stranger',
+        content: '/version',
+        rawContentType: 'text',
+        resources: [],
+        mentionAll: false,
+        mentionedBot: false,
+        createTime: Date.now(),
+      }, Date.now())
+      if (stranger.outcome === 'accept' && stranger.envelope) {
+        await delivery.acceptInbound(stranger.envelope).catch(() => {})
+      }
+      await drive()
+      expect(sends.length).toBe(sendsBeforeStranger)
+    })
+
+    test('T2-F26-05: AssistantDeliveryService falls back cleanly without ownerConsole, when versionInfo throws, or on malformed payload', async () => {
+      const ws = await workspaces.create('f26-fallback-')
+      const { AssistantPolicyService } = await loadAssistantPolicy()
+      const { AssistantDeliveryService } = await loadAssistantDelivery()
+
+      const ctx = harness.createContext()
+      await harness.mountService(ctx, AssistantPolicyService, 'assistantPolicy', {
+        databasePath: ws.sqlitePath('policy'),
+        rules: [
+          {
+            id: 'pair',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'local:test' },
+            actions: ['pair.issue'],
+            resource: { kind: 'message', id: 'pairing' },
+            context: { initiators: ['foreground'] },
+          },
+          {
+            id: 'owner',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'lark/bot-1/t1/ou_owner' },
+            actions: ['pair.confirm', 'ingest'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['external'] },
+          },
+          {
+            id: 'reply-owner',
+            effect: 'allow',
+            subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/bot-1/t1/ou_owner' },
+            actions: ['history', 'reply'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['foreground', 'external'] },
+          },
+        ],
+      })
+      harness.provideMockService(ctx, 'agents', {
+        create: async (opts: { sessionId: string; meta?: { cwd?: string; agentPreset?: string }; setup?: (c: unknown, a?: unknown) => Promise<unknown> }) => {
+          const id = opts.sessionId
+          const session = {
+            id,
+            header: { id, cwd: opts.meta?.cwd ?? ws.workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+            append: () => {},
+            snapshotEvents: () => [],
+            deriveMessages: () => [],
+          }
+          const agent = {
+            id,
+            ctx,
+            session,
+            model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+            status: 'idle',
+            whenIdle: async () => {},
+            runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+            cancel: () => {},
+          }
+          await opts.setup?.(ctx, agent)
+          return { agent, dispose: async () => {} }
+        },
+        resume: vi.fn(async () => ({})),
+      })
+      harness.provideMockService(ctx, 'sessions', { list: async () => [], flush: async () => true })
+      harness.provideMockService(ctx, 'llm', { complete: async () => ({}) })
+
+      const delivery = await harness.mountService<{
+        dispatchVersionQuery: () => Promise<{
+          schemaVersion: number
+          protocol: string
+          selfIteration: { dataState: string }
+          diagnostics?: readonly string[]
+        }>
+        registerAdapter: (a: Record<string, unknown>) => Promise<() => void>
+        issuePairing: (by: string, p: Record<string, unknown>) => { challenge: { id: string }; code: string }
+        confirmPairing: (req: Record<string, unknown>) => unknown
+        acceptInbound: (env: Record<string, unknown>) => Promise<unknown>
+        tick: () => Promise<void>
+        whenIdle: () => Promise<void>
+      }>(ctx, AssistantDeliveryService, 'assistantDelivery', {
+        databasePath: ws.sqlitePath('delivery'),
+        spoolPath: join(ws.stateDir, 'spool'),
+        defaultWorkspace: ws.workspace,
+        defaultAgentPreset: 'primary',
+        schedulerEnabled: false,
+      })
+
+      const sends: string[] = []
+      await delivery.registerAdapter({
+        channel: 'lark',
+        account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'model-picker', 'permission-picker'] },
+        start: async () => {},
+        send: async (input: { text?: string }) => {
+          sends.push(input.text ?? '')
+          return { outcome: 'accepted', providerMessageId: `om_${sends.length}` }
+        },
+      })
+      const ownerPrincipal = { channel: 'lark', account: 'bot-1', tenant: 't1', user: 'ou_owner' }
+      const pair = delivery.issuePairing('test', ownerPrincipal)
+      delivery.confirmPairing({ challengeId: pair.challenge.id, principal: ownerPrincipal, code: pair.code })
+
+      // 1. Absent ownerConsole
+      const noConsoleReport = await delivery.dispatchVersionQuery()
+      expect(noConsoleReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(noConsoleReport.selfIteration.dataState).toBe('no-data')
+
+      // 2. Throwing ownerConsole.versionInfo()
+      let currentVersionInfo: () => Promise<unknown> = async () => {
+        throw new Error('console unavailable')
+      }
+      harness.provideMockService(ctx, 'ownerConsole', {
+        versionInfo: () => currentVersionInfo(),
+      })
+      const throwReport = await delivery.dispatchVersionQuery()
+      expect(throwReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(throwReport.diagnostics?.some(d => d.includes('ownerConsole.versionInfo failed'))).toBe(true)
+
+      // 3. Malformed ownerConsole.versionInfo() matching protocol string but missing required objects
+      currentVersionInfo = async () => ({ schemaVersion: 1, protocol: 'dsh-rsi/version/v1' })
+      const malformedReport = await delivery.dispatchVersionQuery()
+      expect(malformedReport.protocol).toBe('dsh-rsi/version/v1')
+      expect(malformedReport.selfIteration.dataState).toBe('no-data')
+      expect(malformedReport.diagnostics?.some(d => d.includes('ownerConsole.versionInfo returned unexpected payload'))).toBe(true)
+
+      await delivery.acceptInbound({
+        channel: 'lark',
+        account: 'bot-1',
+        eventId: 'evt-malformed-reply',
+        occurredAt: Date.now(),
+        principal: ownerPrincipal,
+        conversation: { channel: 'lark', account: 'bot-1', tenant: 't1', kind: 'dm', chat: 'oc_dm_owner' },
+        kind: 'command',
+        text: '/version',
+      })
+      await delivery.tick()
+      await delivery.whenIdle()
+      await delivery.tick()
+      await delivery.whenIdle()
+
+      expect(sends.at(-1)).toContain('助手版本：dsh-enhanced v')
+      expect(sends.at(-1)).not.toContain('自迭代控制服务尚未启用')
     })
   })
 })

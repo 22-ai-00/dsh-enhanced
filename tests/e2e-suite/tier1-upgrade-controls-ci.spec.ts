@@ -1,19 +1,22 @@
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createServer } from 'node:http'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
 import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
 import { runBashCommand, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
   loadAssistantDelivery,
+  loadAssistantPolicy,
   loadAssistantWebOwnerSetup,
   loadDshRsiCli,
   loadDshRsiUpgrade,
   loadLarkChannel,
   loadOwnerConsole,
+  loadPackageModule,
   loadUpgradeProgram,
   readAllWorkspaceManifests,
 } from './helpers/packages.ts'
@@ -631,6 +634,468 @@ describe('Tier 1 — F19–F23: Upgrade Migration, Standard Queues, R4 Controls,
       expect(runners.some(r => r.includes('ubuntu'))).toBe(true)
       expect(runners.some(r => r.includes('macos'))).toBe(true)
       expect(runners.some(r => r.includes('windows'))).toBe(true)
+    })
+  })
+
+  describe('F26: Multi-channel & CLI version command + read-only self-iteration statistics', () => {
+    test('T1-F26-01: dsh-rsi --version, -V, version --short, bin/dsh-rsi.js, absent DSH_HOME JSON & common.sh probe compatibility', async () => {
+      const ws = await workspaces.create('f26-cli-ver-')
+      const manifests = await readAllWorkspaceManifests()
+      const expectedVersion = manifests[0]!.version
+      const cli = await loadDshRsiCli()
+      expect(cli.version).toBe(expectedVersion)
+
+      for (const args of [['--version'], ['-V'], ['version', '--short']] as const) {
+        const res = await runDshRsiInProcess(args)
+        expect(res.exitCode, `Expected exit 0 for ${args.join(' ')}`).toBe(0)
+        expect(res.stdout.trim()).toBe(expectedVersion)
+      }
+
+      const binRes = await runNodeScript('packages/dsh-rsi-cli/bin/dsh-rsi.js', ['--version'])
+      expect(binRes.exitCode).toBe(0)
+      expect(binRes.stdout.trim()).toBe(expectedVersion)
+
+      const absentHome = join(ws.root, 'absent-dsh-home')
+      const jsonRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', absentHome], { DSH_HOME: absentHome })
+      expect(jsonRes.exitCode).toBe(0)
+      const report = JSON.parse(jsonRes.stdout) as {
+        schemaVersion: number
+        protocol: string
+        assistant: { version: string }
+        plugins: { state: string }
+        selfIteration: { dataState: string; totalIterations: number | null }
+      }
+      expect(report.schemaVersion).toBe(1)
+      expect(report.protocol).toBe('dsh-rsi/version/v1')
+      expect(report.assistant.version).toBe(expectedVersion)
+      expect(report.plugins.state).toBe('unavailable')
+      expect(report.selfIteration.dataState).toBe('no-data')
+      expect(report.selfIteration.totalIterations).toBeNull()
+
+      // Verify common.sh dsh_enhanced_ensure_rsi_cli works with both --version and legacy `version`-only mock
+      const shimBin = join(ws.root, 'shim-bin')
+      await mkdir(shimBin, { recursive: true, mode: 0o700 })
+      await writeFile(join(shimBin, 'npm'), '#!/usr/bin/env bash\nexit 0\n', 'utf8')
+      await chmod(join(shimBin, 'npm'), 0o755)
+
+      const legacyMock = join(shimBin, 'dsh-rsi')
+      await writeFile(
+        legacyMock,
+        `#!/usr/bin/env bash\nif [[ "\${1:-}" == version ]]; then printf "%s\\n" "${expectedVersion}"; fi\n`,
+        'utf8',
+      )
+      await chmod(legacyMock, 0o755)
+      const envLegacy = await createIsolatedEnv(ws, { PATH: `${shimBin}:${process.env.PATH ?? '/usr/bin:/bin'}` })
+      const legacyProbe = await runBashCommand([
+        '-c',
+        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_enhanced_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
+      ], { env: envLegacy })
+      expect(legacyProbe.exitCode).toBe(0)
+      expect(legacyProbe.stdout).toContain(`dsh-rsi 已就绪：${expectedVersion}`)
+
+      await writeFile(
+        legacyMock,
+        `#!/usr/bin/env bash\nif [[ "\${1:-}" == --version ]]; then printf "%s\\n" "${expectedVersion}"; fi\n`,
+        'utf8',
+      )
+      await chmod(legacyMock, 0o755)
+      const modernProbe = await runBashCommand([
+        '-c',
+        `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_enhanced_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
+      ], { env: envLegacy })
+      expect(modernProbe.exitCode).toBe(0)
+      expect(modernProbe.stdout).toContain(`dsh-rsi 已就绪：${expectedVersion}`)
+    })
+
+    test('T1-F26-02: dsh-rsi version --json aggregates read-only SQLite ledgers without double-counting and passes OwnerConsoleVersionReportSchema', async () => {
+      const ws = await workspaces.create('f26-cli-ledgers-')
+      const manifests = await readAllWorkspaceManifests()
+      const expectedVersion = manifests[0]!.version
+      const typertMod = await loadPackageModule('owner-console/typert')
+      const ReportSchema = getExport<{ parse: (input: unknown) => unknown }>(typertMod, 'OwnerConsoleVersionReportSchema')
+
+      const profilePkgDir = join(ws.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'owner-console')
+      await mkdir(profilePkgDir, { recursive: true, mode: 0o700 })
+      await writeFile(
+        join(ws.dshHome, 'profiles', 'web', 'package.json'),
+        JSON.stringify({ name: 'dsh-profile-web', private: true }),
+        'utf8',
+      )
+      await writeFile(
+        join(profilePkgDir, 'package.json'),
+        JSON.stringify({ name: '@dsh-enhanced/owner-console', version: expectedVersion }),
+        'utf8',
+      )
+      await writeFile(
+        join(ws.dshHome, '.dsh-rsi-host.json'),
+        JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: join(ws.root, 'cache'), receiptDigest: sha256Hex('host') }),
+        { mode: 0o600 },
+      )
+      await mkdir(join(ws.dshHome, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+      await writeFile(
+        join(ws.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl'),
+        `${JSON.stringify({ at: 100, toVersion: expectedVersion })}\n`,
+        'utf8',
+      )
+      await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-1'), { recursive: true, mode: 0o700 })
+
+      const execSql = async (rel: string, sql: string) => {
+        const full = join(ws.dshHome, rel)
+        await mkdir(join(full, '..'), { recursive: true, mode: 0o700 })
+        const db = new DatabaseSync(full)
+        try {
+          db.exec(sql)
+        } finally {
+          db.close()
+        }
+      }
+      await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled'), ('w2', 'open');")
+      await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
+      await execSql('assistant-evolution/evolution.sqlite', "CREATE TABLE evolution_proposals (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_rules (id TEXT PRIMARY KEY, status TEXT) STRICT; CREATE TABLE evolution_autonomous_rollbacks (idempotency_key TEXT PRIMARY KEY) STRICT; INSERT INTO evolution_proposals VALUES ('ep1', 'approved'); INSERT INTO evolution_rules VALUES ('er1', 'active'); INSERT INTO evolution_autonomous_rollbacks VALUES ('rb1');")
+      await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-create', '@dsh-enhanced/evolved-demo', 'create', 'release-complete'), ('sp-rev', '@dsh-enhanced/evolved-demo', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-create', 'web', 'activated'), ('sp-rb', 'web', 'rolled-back');")
+      await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-create', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-demo"}}', '{"version":"0.1.0"}');`)
+      await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-demo', 'sp-rev', 2); INSERT INTO adoptions VALUES ('sp-rev', 'active', 'e1');")
+      await execSql('assistant-association/association.sqlite', "CREATE TABLE assoc_param_profile_heads (scope_key TEXT PRIMARY KEY, active_version INTEGER) STRICT; CREATE TABLE assoc_param_profile_events (kind TEXT) STRICT; INSERT INTO assoc_param_profile_heads VALUES ('owner', 2); INSERT INTO assoc_param_profile_events VALUES ('adopted');")
+      await execSql('assistant-evaluation/evaluation.sqlite', "CREATE TABLE evaluation_attention_tuning_events (kind TEXT) STRICT; CREATE TABLE evaluation_attention_loosening_decisions (proposal_id TEXT PRIMARY KEY, decision TEXT) STRICT; INSERT INTO evaluation_attention_tuning_events VALUES ('adopted'); INSERT INTO evaluation_attention_loosening_decisions VALUES ('lp1', 'adopted');")
+
+      const res = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+      expect(res.exitCode).toBe(0)
+      const parsed = JSON.parse(res.stdout) as {
+        assistant: { version: string }
+        plugins: { core: Array<{ name: string }>; evolved: Array<{ name: string }>; evolvedCount: number }
+        selfIteration: {
+          dataState: string
+          pluginsCreated: number
+          pluginsRevised: number
+          candidatesAdopted: number
+          rollbacks: number
+          selfUpgrades: number
+          backupSnapshotsCount: number
+        }
+      }
+      expect(ReportSchema.parse(parsed)).toEqual(parsed)
+      expect(parsed.assistant.version).toBe(expectedVersion)
+      expect(parsed.selfIteration.dataState).toBe('data')
+      expect(parsed.selfIteration.pluginsCreated).toBe(1)
+      expect(parsed.selfIteration.pluginsRevised).toBe(1)
+      expect(parsed.selfIteration.candidatesAdopted).toBe(6) // 2 distinct cp plans (sp-create, sp-rev) + 1 evo + 1 assoc + 1 eval tuning + 1 eval loosen
+      expect(parsed.selfIteration.rollbacks).toBe(2) // 1 activation rollback + 1 evo rollback
+      expect(parsed.selfIteration.selfUpgrades).toBe(1)
+      expect(parsed.selfIteration.backupSnapshotsCount).toBe(1)
+      expect(parsed.plugins.core.some(p => p.name === '@dsh-enhanced/owner-console')).toBe(true)
+      expect(parsed.plugins.evolved.some(p => p.name === '@dsh-enhanced/evolved-demo')).toBe(true)
+      expect(parsed.plugins.evolvedCount).toBe(1)
+    })
+
+    test('T1-F26-03: owner-console exposes ownerConsole/versionInfo Typert descriptor, svc.versionInfo() & owner_console_version_info Host tool', async () => {
+      const ws = await workspaces.create('f26-owner-console-')
+      await mkdir(join(ws.dshHome, 'profiles', 'web'), { recursive: true, mode: 0o700 })
+      const ownerMod = await loadOwnerConsole()
+      const typertMod = await loadPackageModule('owner-console/typert')
+      const ReportSchema = getExport<{ parse: (input: unknown) => unknown }>(typertMod, 'OwnerConsoleVersionReportSchema')
+      const TYPERT = getExport<{ invocations: Array<{ method: string; parameters: unknown[] }> }>(typertMod, 'TYPERT')
+
+      const descriptor = TYPERT.invocations.find(i => i.method === 'versionInfo')
+      expect(descriptor).toBeDefined()
+      expect(descriptor?.parameters).toEqual([])
+
+      const registeredTools: Array<{
+        def: { name: string; execute: (args: unknown, exec: unknown) => Promise<Record<string, unknown>> }
+      }> = []
+      const preauthPredicates: Array<(exec: { agent?: unknown }) => boolean> = []
+
+      const ctx = harness.createContext()
+      await harness.mountPlugin(ctx, TypertRegistry)
+      harness.provideMockService(ctx, 'profileContext', {
+        home: ws.dshHome,
+        dir: join(ws.dshHome, 'profiles', 'web'),
+        name: 'web',
+      })
+      harness.provideMockService(ctx, 'tools', {
+        register: (def: typeof registeredTools[number]['def']) => {
+          registeredTools.push({ def })
+          return () => {}
+        },
+      })
+      harness.provideMockService(ctx, 'assistantPolicy', {
+        registerPreauthorizedTool: (_c: unknown, _d: unknown, pred: (exec: { agent?: unknown }) => boolean) => {
+          preauthPredicates.push(pred)
+          return () => {}
+        },
+      })
+
+      const applyFn = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
+      const configFn = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
+      applyFn(ctx, configFn({ feishuAppId: '' }))
+
+      const svc = ctx.get('ownerConsole' as never) as unknown as {
+        versionInfo: () => Promise<Record<string, unknown>>
+        registerAssistantSession: (id: string, makeActive: boolean) => Promise<unknown>
+      }
+      const report = await svc.versionInfo()
+      expect(ReportSchema.parse(report)).toEqual(report)
+
+      expect(registeredTools.map(t => t.def.name)).toEqual([
+        'owner_console_self_iteration_control',
+        'owner_console_version_info',
+      ])
+      expect(preauthPredicates).toHaveLength(2)
+
+      await svc.registerAssistantSession('wenyao-f26-session', true)
+      const ownerAgent = { id: 'wenyao-f26-session', session: { id: 'wenyao-f26-session' } }
+      expect(preauthPredicates[0]?.({ agent: ownerAgent })).toBe(true)
+      expect(preauthPredicates[1]?.({ agent: ownerAgent })).toBe(true)
+
+      const toolResult = await registeredTools[1]!.def.execute({}, { agent: ownerAgent })
+      expect(toolResult.ok).toBe(true)
+      expect(typeof toolResult.summary).toBe('string')
+      expect(ReportSchema.parse(toolResult.report)).toEqual(toolResult.report)
+    })
+
+    test('T1-F26-04: owner-console/nl-control is browser-safe and parses/formats version & iteration queries', async () => {
+      const nlControlSrc = await readFile(join(repoRoot, 'plugins/owner-console/src/nl-control.ts'), 'utf8')
+      expect(nlControlSrc).not.toMatch(/from\s+['"]node:/u)
+
+      const nlMod = await loadPackageModule('owner-console/nl-control')
+      const parseQuery = getExportFn<(text: string) => { intent: string } | undefined>(nlMod, 'parseOwnerVersionQuery')
+      const formatSummary = getExportFn<(report: Record<string, unknown>) => string>(nlMod, 'formatOwnerConsoleVersionSummary')
+
+      expect(parseQuery('/version')?.intent).toBe('slash')
+      expect(parseQuery('/version --short')?.intent).toBe('slash')
+      expect(parseQuery('/autonomy version')?.intent).toBe('slash')
+      expect(parseQuery('查看版本')?.intent).toBe('version')
+      expect(parseQuery('assistant version')?.intent).toBe('version')
+      expect(parseQuery('自己迭代了多少次？')?.intent).toBe('selfIterationCount')
+      expect(parseQuery('self-iteration count')?.intent).toBe('selfIterationCount')
+
+      const manifests = await readAllWorkspaceManifests()
+      const expectedVersion = manifests[0]!.version
+      const summary = formatSummary({
+        schemaVersion: 1,
+        protocol: 'dsh-rsi/version/v1',
+        generatedAt: 1_700_000_000_000,
+        assistant: { name: 'dsh-enhanced', version: expectedVersion, cliVersion: expectedVersion },
+        host: { packageName: '@deepseek-ai/dsh', boundVersion: '0.2.2-rc.5', boundStatus: 'ready', runningVersion: '0.2.2-rc.5' },
+        profile: 'web',
+        plugins: { state: 'ok', coreCount: 1, evolvedCount: 0, activeEvolvedCount: 0, core: [], evolved: [] },
+        selfIteration: {
+          dataState: 'zero',
+          totalIterations: 0,
+          workItemsTotal: 0,
+          workItemsSettled: 0,
+          growthUsageJobsTotal: 0,
+          dreamingRuns: 0,
+          recoveryRuns: 0,
+          goalStrategyRuns: 0,
+          candidatesGenerated: 0,
+          candidatesAdopted: 0,
+          pluginsCreated: 0,
+          pluginsRevised: 0,
+          taskVerificationsDone: 0,
+          rollbacks: 0,
+          evolutionRulesAdopted: 0,
+          associationParamVersion: null,
+          associationProfileAdoptions: 0,
+          evaluationAttentionTuningAdoptions: 0,
+          evaluationLooseningDecisionsAdopted: 0,
+          activeMemories: 0,
+          activePreferenceOverlays: 0,
+          workflowCandidatesPromoted: 0,
+          skillDeployments: 0,
+          selfUpgrades: 0,
+          backupSnapshotsCount: 0,
+        },
+      })
+      expect(summary).toContain(expectedVersion)
+      expect(summary).toContain('0.2.2-rc.5')
+    })
+
+    test('T1-F26-05: assistant-delivery + lark-channel handles DM/group /version, /autonomy version & NL queries with 0 LLM calls and /help coverage', async () => {
+      const ws = await workspaces.create('f26-delivery-lark-')
+      const { AssistantPolicyService } = await loadAssistantPolicy()
+      const { AssistantDeliveryService } = await loadAssistantDelivery()
+      const normalizeMod = await loadPackageModule('lark-channel/normalize')
+      const normalizeLarkMessage = getExportFn<(
+        cfg: Record<string, unknown>,
+        msg: Record<string, unknown>,
+        now: number,
+      ) => { outcome: string; envelope?: Record<string, unknown> }>(normalizeMod, 'normalizeLarkMessage')
+
+      const ctx = harness.createContext()
+      await harness.mountService(ctx, AssistantPolicyService, 'assistantPolicy', {
+        databasePath: ws.sqlitePath('policy'),
+        rules: [
+          {
+            id: 'pair',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'local:test' },
+            actions: ['pair.issue'],
+            resource: { kind: 'message', id: 'pairing' },
+            context: { initiators: ['foreground'] },
+          },
+          {
+            id: 'owner',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'lark/bot-1/t1/ou_owner' },
+            actions: ['pair.confirm', 'ingest'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['external'] },
+          },
+          {
+            id: 'linked',
+            effect: 'allow',
+            subject: { kind: 'external', id: 'lark/bot-1/t1/ou_linked' },
+            actions: ['pair.confirm', 'ingest'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['external'] },
+          },
+          {
+            id: 'reply-owner',
+            effect: 'allow',
+            subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/bot-1/t1/ou_owner' },
+            actions: ['history', 'reply'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['foreground', 'external'] },
+          },
+          {
+            id: 'reply-linked',
+            effect: 'allow',
+            subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/bot-1/t1/ou_linked' },
+            actions: ['history', 'reply'],
+            resource: { kind: 'message', id: '*' },
+            context: { initiators: ['foreground', 'external'] },
+          },
+        ],
+      })
+
+      const createAgentHandle = async (opts: {
+        sessionId?: string
+        resumeSessionId?: string
+        meta?: { cwd?: string; agentPreset?: string }
+        setup?: (c: unknown, a?: unknown) => Promise<unknown>
+      }) => {
+        const id = opts.sessionId ?? opts.resumeSessionId ?? 'sess-f26'
+        const session = {
+          id,
+          header: { id, cwd: opts.meta?.cwd ?? ws.workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+          append: () => {},
+          snapshotEvents: () => [],
+          deriveMessages: () => [],
+        }
+        const agent = {
+          id,
+          ctx,
+          session,
+          model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+          status: 'idle',
+          whenIdle: async () => {},
+          runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+          cancel: () => {},
+        }
+        await opts.setup?.(ctx, agent)
+        return { agent, dispose: async () => {} }
+      }
+      const resumeSpy = vi.fn(createAgentHandle)
+      const llmComplete = vi.fn(async () => ({}))
+      harness.provideMockService(ctx, 'agents', {
+        create: createAgentHandle,
+        resume: resumeSpy,
+      })
+      harness.provideMockService(ctx, 'sessions', { list: async () => [], flush: async () => true })
+      harness.provideMockService(ctx, 'llm', { complete: llmComplete })
+
+      const delivery = await harness.mountService<{
+        registerAdapter: (a: Record<string, unknown>) => Promise<() => void>
+        issuePairing: (by: string, p: Record<string, unknown>) => { challenge: { id: string }; code: string }
+        confirmPairing: (req: Record<string, unknown>) => unknown
+        acceptInbound: (env: Record<string, unknown>) => Promise<unknown>
+        tick: () => Promise<void>
+        whenIdle: () => Promise<void>
+      }>(ctx, AssistantDeliveryService, 'assistantDelivery', {
+        databasePath: ws.sqlitePath('delivery'),
+        spoolPath: join(ws.stateDir, 'spool'),
+        defaultWorkspace: ws.workspace,
+        defaultAgentPreset: 'primary',
+        schedulerEnabled: false,
+      })
+
+      const sends: Array<{ text: string }> = []
+      await delivery.registerAdapter({
+        channel: 'lark',
+        account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'model-picker', 'permission-picker'] },
+        start: async () => {},
+        send: async (input: { text?: string }) => {
+          sends.push({ text: input.text ?? '' })
+          return { outcome: 'accepted', providerMessageId: `om_out_${sends.length}` }
+        },
+      })
+
+      const ownerPrincipal = { channel: 'lark', account: 'bot-1', tenant: 't1', user: 'ou_owner' }
+      const ownerPair = delivery.issuePairing('test', ownerPrincipal)
+      delivery.confirmPairing({ challengeId: ownerPair.challenge.id, principal: ownerPrincipal, code: ownerPair.code })
+
+      const linkedPrincipal = { channel: 'lark', account: 'bot-1', tenant: 't1', user: 'ou_linked' }
+      const linkedPair = delivery.issuePairing('test', linkedPrincipal)
+      delivery.confirmPairing({ challengeId: linkedPair.challenge.id, principal: linkedPrincipal, code: linkedPair.code })
+
+      const inboundCfg = { account: 'bot-1', tenant: 't1', requireMentionInGroups: true, maxTextBytes: 4096, staleAfterMs: 300_000 }
+      const drive = async () => {
+        await delivery.tick()
+        await delivery.whenIdle()
+        await delivery.tick()
+        await delivery.whenIdle()
+      }
+      const now = Date.now()
+      const inputs = [
+        { id: 'm1', chatType: 'p2p', sender: 'ou_owner', content: '/version', mentioned: false },
+        { id: 'm2', chatType: 'p2p', sender: 'ou_owner', content: '自己迭代了多少次？', mentioned: false },
+        { id: 'm3', chatType: 'group', sender: 'ou_linked', content: '@_user_1 /autonomy version', mentioned: true },
+      ] as const
+      for (const [idx, item] of inputs.entries()) {
+        const res = normalizeLarkMessage(inboundCfg, {
+          messageId: item.id,
+          chatId: item.chatType === 'p2p' ? `oc_dm_${item.sender}` : 'oc_grp_1',
+          chatType: item.chatType,
+          senderId: item.sender,
+          content: item.content,
+          rawContentType: 'text',
+          resources: [],
+          mentionAll: false,
+          mentionedBot: item.mentioned,
+          createTime: now + idx,
+        }, now + idx)
+        expect(res.outcome).toBe('accept')
+        if (res.outcome === 'accept' && res.envelope) {
+          await delivery.acceptInbound(res.envelope)
+        }
+      }
+      await drive()
+      expect(sends).toHaveLength(3)
+      for (const reply of sends) {
+        expect(reply.text).toContain('助手版本：dsh-enhanced v')
+        expect(reply.text).toContain('自迭代演进统计')
+      }
+      expect(resumeSpy).not.toHaveBeenCalled()
+      expect(llmComplete).not.toHaveBeenCalled()
+
+      const helpMsg = normalizeLarkMessage(inboundCfg, {
+        messageId: 'm4',
+        chatId: 'oc_dm_ou_owner',
+        chatType: 'p2p',
+        senderId: 'ou_owner',
+        content: '/help',
+        rawContentType: 'text',
+        resources: [],
+        mentionAll: false,
+        mentionedBot: false,
+        createTime: now + 10,
+      }, now + 10)
+      if (helpMsg.outcome === 'accept' && helpMsg.envelope) {
+        await delivery.acceptInbound(helpMsg.envelope)
+      }
+      await drive()
+      expect(sends.at(-1)?.text).toContain('/version')
     })
   })
 })

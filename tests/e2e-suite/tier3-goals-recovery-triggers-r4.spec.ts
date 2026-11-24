@@ -1,11 +1,12 @@
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createHmac } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
-import { expectNoSecretLeak, getExportFn, sha256Hex } from './helpers/assertions.ts'
+import { expectNoSecretLeak, getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
 import { runBashCommand, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
@@ -964,5 +965,323 @@ describe('Tier 3 Pairwise — F15–F23, F04, F07 & F14: Goals, Recovery, Trigge
     const releaseRaw = await readFile(join(repoRoot, '.github/workflows/release.yml'), 'utf8')
     expect(releaseRaw).toContain('verify-npm-release.mjs')
     expect(manifests.length).toBe(40)
+  })
+
+  test('T3-GR-11 (F26+F21): Live OwnerConsole -> AssistantDelivery -> LarkChannel delegation & dsh-rsi disable/enable ledger preservation', async () => {
+    const ws = await workspaces.create('t3-gr11-')
+    const { AssistantPolicyService } = await loadAssistantPolicy()
+    const { AssistantDeliveryService } = await loadAssistantDelivery()
+    const ownerMod = await loadOwnerConsole()
+    const larkMod = await loadLarkChannel()
+    const normalizeMod = await loadPackageModule('lark-channel/normalize')
+    const normalizeLarkMessage = getExportFn<(
+      cfg: Record<string, unknown>,
+      msg: Record<string, unknown>,
+      now: number,
+    ) => { outcome: string; envelope?: Record<string, unknown> }>(normalizeMod, 'normalizeLarkMessage')
+
+    const profileDir = join(ws.dshHome, 'profiles', 'lark')
+    await mkdir(profileDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-lark', private: true }), { mode: 0o600 })
+    await writeFile(
+      join(profileDir, 'cordis.patch.yml'),
+      [
+        '- id: dsh-enhanced-owner-console',
+        '  name: "@dsh-enhanced/owner-console"',
+        '- id: dsh-enhanced-lark-channel',
+        '  name: "@dsh-enhanced/lark-channel"',
+        '- id: dsh-enhanced-assistant-delivery',
+        '  name: "@dsh-enhanced/assistant-delivery"',
+        '  config:',
+        '    ownerRoutes:',
+        '      - id: owner-route-1',
+        '        conversation: { channel: lark, account: primary-bot, tenant: tenant-a, kind: dm, chat: oc_dm_ou_owner }',
+        '- id: dsh-enhanced-assistant-work-items',
+        '  name: "@dsh-enhanced/assistant-work-items"',
+        '  config:',
+        '    enabled: true',
+      ].join('\n') + '\n',
+      { mode: 0o600 },
+    )
+
+    const execSql = async (rel: string, sql: string) => {
+      const full = join(ws.dshHome, rel)
+      await mkdir(join(full, '..'), { recursive: true, mode: 0o700 })
+      const db = new DatabaseSync(full)
+      try {
+        db.exec(sql)
+      } finally {
+        db.close()
+      }
+    }
+    await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled'), ('w2', 'settled');")
+    await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
+    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('p1', '@dsh-enhanced/evolved-alpha', 'create', 'release-complete'); INSERT INTO activation_plans VALUES ('p1', 'lark', 'activated');")
+    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('p1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-alpha"}}', '{"version":"0.1.0"}');`)
+
+    const ctx = harness.createContext()
+    await harness.mountPlugin(ctx, TypertRegistry)
+    harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'lark' })
+    await harness.mountService(ctx, AssistantPolicyService, 'assistantPolicy', {
+      databasePath: ws.sqlitePath('policy'),
+      rules: [
+        { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
+        { id: 'owner', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-a/ou_owner' }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'linked', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-a/ou_linked' }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'reply-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/primary-bot/tenant-a/ou_owner' }, actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+        { id: 'reply-linked', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/primary-bot/tenant-a/ou_linked' }, actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+      ],
+    })
+
+    const resumeSpy = vi.fn(async () => ({}))
+    harness.provideMockService(ctx, 'agents', {
+      create: async (opts: { sessionId: string; meta?: { cwd?: string; agentPreset?: string }; setup?: (c: unknown, a?: unknown) => Promise<unknown> }) => {
+        const id = opts.sessionId
+        const session = {
+          id,
+          header: { id, cwd: opts.meta?.cwd ?? ws.workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+          append: () => {},
+          snapshotEvents: () => [],
+          deriveMessages: () => [],
+        }
+        const agent = {
+          id,
+          ctx,
+          session,
+          model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+          status: 'idle',
+          whenIdle: async () => {},
+          runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+          cancel: () => {},
+        }
+        await opts.setup?.(ctx, agent)
+        return { agent, dispose: async () => {} }
+      },
+      resume: resumeSpy,
+    })
+    harness.provideMockService(ctx, 'sessions', { list: async () => [], flush: async () => true })
+    harness.provideMockService(ctx, 'llm', { complete: async () => ({}) })
+
+    const applyOwner = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
+    const configOwner = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
+    applyOwner(ctx, configOwner({ feishuAppId: '' }))
+    const ownerConsoleSvc = ctx.get('ownerConsole' as never) as unknown as {
+      versionInfo: () => Promise<{ selfIteration: { totalIterations: number | null }; plugins: { evolvedCount: number } }>
+    }
+    const expectedReport = await ownerConsoleSvc.versionInfo()
+    expect(expectedReport.selfIteration.totalIterations).toBeGreaterThan(0)
+    expect(expectedReport.plugins.evolvedCount).toBe(1)
+    const versionInfoSpy = vi.spyOn(ownerConsoleSvc, 'versionInfo')
+
+    const delivery = await harness.mountService<{
+      issuePairing: (by: string, p: Record<string, unknown>) => { challenge: { id: string }; code: string }
+      confirmPairing: (req: Record<string, unknown>) => unknown
+      acceptInbound: (env: Record<string, unknown>) => Promise<unknown>
+      tick: () => Promise<void>
+      whenIdle: () => Promise<void>
+    }>(ctx, AssistantDeliveryService, 'assistantDelivery', {
+      databasePath: ws.sqlitePath('delivery'),
+      spoolPath: join(ws.stateDir, 'spool'),
+      defaultWorkspace: ws.workspace,
+      defaultAgentPreset: 'primary',
+      schedulerEnabled: false,
+    })
+
+    const sends: string[] = []
+    const transport = {
+      subscribe: () => () => {},
+      connect: async () => {},
+      disconnect: async () => {},
+      addReaction: async () => 'r1',
+      createProgress: async () => ({ cotId: 'c1', messageId: 'om_cot' }),
+      writeProgress: async () => {},
+      send: async (_chatId: string, input: { text?: string }) => {
+        sends.push(input.text ?? JSON.stringify(input))
+        return { messageId: `om_out_${sends.length}` }
+      },
+    }
+    const LarkServiceCtor = larkMod.LarkChannelService as new (
+      c: unknown,
+      cfg: Record<string, unknown>,
+      deps: Record<string, unknown>,
+    ) => { whenReady: () => Promise<void> }
+    const larkSvc = new LarkServiceCtor(ctx, {
+      enabled: true,
+      account: 'primary-bot',
+      tenant: 'tenant-a',
+      appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET',
+    }, {
+      env: { LARK_APP_SECRET: 'secret-value' },
+      createTransport: () => transport,
+      writeLifecycleMarker: () => {},
+      dshHome: ws.dshHome,
+      profile: 'lark',
+    })
+    await larkSvc.whenReady()
+
+    const ownerPrincipal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' }
+    const ownerPair = delivery.issuePairing('test', ownerPrincipal)
+    delivery.confirmPairing({ challengeId: ownerPair.challenge.id, principal: ownerPrincipal, code: ownerPair.code })
+    const linkedPrincipal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_linked' }
+    const linkedPair = delivery.issuePairing('test', linkedPrincipal)
+    delivery.confirmPairing({ challengeId: linkedPair.challenge.id, principal: linkedPrincipal, code: linkedPair.code })
+
+    const inboundCfg = { account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true, maxTextBytes: 4096, staleAfterMs: 300_000 }
+    const drive = async () => {
+      await delivery.tick()
+      await delivery.whenIdle()
+      await delivery.tick()
+      await delivery.whenIdle()
+    }
+    const now = Date.now()
+    const dmMsg = normalizeLarkMessage(inboundCfg, {
+      messageId: 'om_gr11_dm',
+      chatId: 'oc_dm_ou_owner',
+      chatType: 'p2p',
+      senderId: 'ou_owner',
+      content: '/version',
+      rawContentType: 'text',
+      resources: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: now,
+    }, now)
+    const grpMsg = normalizeLarkMessage(inboundCfg, {
+      messageId: 'om_gr11_grp',
+      chatId: 'oc_group',
+      chatType: 'group',
+      senderId: 'ou_linked',
+      content: '@_user_1 自己迭代了多少次？',
+      rawContentType: 'text',
+      resources: [],
+      mentionAll: false,
+      mentionedBot: true,
+      createTime: now + 1,
+    }, now + 1)
+    if (dmMsg.outcome === 'accept' && dmMsg.envelope) await delivery.acceptInbound(dmMsg.envelope)
+    if (grpMsg.outcome === 'accept' && grpMsg.envelope) await delivery.acceptInbound(grpMsg.envelope)
+    await drive()
+
+    expect(versionInfoSpy).toHaveBeenCalledTimes(2)
+    expect(sends).toHaveLength(2)
+    for (const reply of sends) {
+      expect(reply).toContain(`累计自迭代次数：${expectedReport.selfIteration.totalIterations}`)
+      expect(reply).toContain('@dsh-enhanced/evolved-alpha')
+    }
+    expect(resumeSpy).not.toHaveBeenCalled()
+
+    // Toggle disable -> enable via dsh-rsi CLI and confirm historical ledgers remain intact
+    expect((await runDshRsiInProcess(['disable', '--profile', 'lark', '--dsh-home', ws.dshHome, '--json'])).exitCode).toBe(0)
+    expect((await runDshRsiInProcess(['enable', '--profile', 'lark', '--dsh-home', ws.dshHome, '--json'])).exitCode).toBe(0)
+
+    const postToggleCli = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+    expect(postToggleCli.exitCode).toBe(0)
+    const postJson = JSON.parse(postToggleCli.stdout) as { selfIteration: { totalIterations: number }; plugins: { evolvedCount: number } }
+    expect(postJson.selfIteration.totalIterations).toBe(expectedReport.selfIteration.totalIterations)
+    expect(postJson.plugins.evolvedCount).toBe(1)
+  })
+
+  test('T3-GR-12 (F26+F19+F20): Cross-surface dsh-rsi/version/v1 wire parity across CLI, OwnerConsole & Delivery + common.sh real bin probe', async () => {
+    const ws = await workspaces.create('t3-gr12-')
+    const manifests = await readAllWorkspaceManifests()
+    const expectedVersion = manifests[0]!.version
+    const typertMod = await loadPackageModule('owner-console/typert')
+    const ReportSchema = getExport<{ parse: (input: unknown) => unknown }>(typertMod, 'OwnerConsoleVersionReportSchema')
+    const ownerMod = await loadOwnerConsole()
+    const deliveryVerMod = await loadPackageModule('assistant-delivery/version-query')
+    const collectDelivery = getExportFn<(opts: Record<string, unknown>) => Promise<Record<string, unknown>>>(
+      deliveryVerMod,
+      'collectDeliveryVersionReport',
+    )
+
+    const profileDir = join(ws.dshHome, 'profiles', 'web')
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery', 'package.json'),
+      JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }),
+      'utf8',
+    )
+    await writeFile(
+      join(ws.dshHome, '.dsh-rsi-host.json'),
+      JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: ws.root, receiptDigest: sha256Hex('host-gr12') }),
+      { mode: 0o600 },
+    )
+    await mkdir(join(ws.dshHome, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(ws.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl'),
+      `${JSON.stringify({ at: 1, toVersion: expectedVersion })}\n${JSON.stringify({ at: 2, toVersion: expectedVersion })}\n`,
+      'utf8',
+    )
+    await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-1'), { recursive: true, mode: 0o700 })
+    await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-2'), { recursive: true, mode: 0o700 })
+
+    const execSql = async (rel: string, sql: string) => {
+      const full = join(ws.dshHome, rel)
+      await mkdir(join(full, '..'), { recursive: true, mode: 0o700 })
+      const db = new DatabaseSync(full)
+      try {
+        db.exec(sql)
+      } finally {
+        db.close()
+      }
+    }
+    await execSql('assistant-work-items/state.sqlite', "CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled');")
+    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp1', '@dsh-enhanced/evolved-gr12', 'create', 'release-complete'), ('sp2', '@dsh-enhanced/evolved-gr12', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp1', 'web', 'activated');")
+    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp1', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-gr12"}}', '{"version":"0.1.0"}');`)
+    await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-gr12', 'sp2', 2); INSERT INTO adoptions VALUES ('sp2', 'active', 'e1');")
+
+    // 1. CLI
+    const cliRes = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+    expect(cliRes.exitCode).toBe(0)
+    const cliReport = JSON.parse(cliRes.stdout) as Record<string, unknown>
+
+    // 2. OwnerConsoleService.versionInfo()
+    const ctx = harness.createContext()
+    await harness.mountPlugin(ctx, TypertRegistry)
+    harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'web' })
+    const applyOwner = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
+    const configOwner = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
+    applyOwner(ctx, configOwner({ feishuAppId: '' }))
+    const ownerSvc = ctx.get('ownerConsole' as never) as unknown as { versionInfo: () => Promise<Record<string, unknown>> }
+    const ownerReport = await ownerSvc.versionInfo()
+
+    // 3. Delivery standalone collector
+    const deliveryReport = await collectDelivery({ ctx, dshHome: ws.dshHome, profile: 'web' })
+
+    for (const report of [cliReport, ownerReport, deliveryReport]) {
+      expect(ReportSchema.parse(report)).toEqual(report)
+      expect(report.schemaVersion).toBe(1)
+      expect(report.protocol).toBe('dsh-rsi/version/v1')
+      expect((report.assistant as { version: string }).version).toBe(expectedVersion)
+      expect((report.host as { boundVersion: string | null }).boundVersion).toBe('0.2.2-rc.5')
+      expect(report.selfIteration).toMatchObject({
+        dataState: 'data',
+        pluginsCreated: 1,
+        pluginsRevised: 1,
+        selfUpgrades: 2,
+        backupSnapshotsCount: 2,
+      })
+    }
+
+    // 4. Verify scripts/install/common.sh dsh_enhanced_ensure_rsi_cli probe against real bin/dsh-rsi.js
+    const shimBin = join(ws.root, 'real-bin')
+    await mkdir(shimBin, { recursive: true, mode: 0o700 })
+    await writeFile(join(shimBin, 'npm'), '#!/usr/bin/env bash\nexit 0\n', 'utf8')
+    await chmod(join(shimBin, 'npm'), 0o755)
+    await writeFile(
+      join(shimBin, 'dsh-rsi'),
+      `#!/usr/bin/env bash\nexec "${process.execPath}" "${join(repoRoot, 'packages/dsh-rsi-cli/bin/dsh-rsi.js')}" "$@"\n`,
+      'utf8',
+    )
+    await chmod(join(shimBin, 'dsh-rsi'), 0o755)
+
+    const env = await createIsolatedEnv(ws, { PATH: `${shimBin}:${process.env.PATH ?? '/usr/bin:/bin'}` })
+    const probeRes = await runBashCommand([
+      '-c',
+      `source "${join(repoRoot, 'scripts/install/common.sh')}" && dsh_enhanced_ensure_rsi_cli npm "${repoRoot}" "${expectedVersion}" 0`,
+    ], { env })
+    expect(probeRes.exitCode).toBe(0)
+    expect(probeRes.stdout).toContain(`dsh-rsi 已就绪：${expectedVersion}`)
   })
 })

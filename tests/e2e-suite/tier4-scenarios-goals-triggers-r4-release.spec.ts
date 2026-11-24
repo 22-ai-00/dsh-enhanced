@@ -1,12 +1,13 @@
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { createHmac } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { isSeq, parseDocument } from 'yaml'
-import { getExportFn, sha256Hex } from './helpers/assertions.ts'
+import { getExport, getExportFn, sha256Hex } from './helpers/assertions.ts'
 import { runBashCommand, runDshRsiInProcess, runNodeScript } from './helpers/cli-runner.ts'
 import { createCordisHarness } from './helpers/cordis-harness.ts'
 import {
@@ -1143,5 +1144,293 @@ describe('Tier 4 Real-World Scenarios — S8–S11: Goals/Ablations, Triggers+Co
     } finally {
       await new Promise<void>(resolve => server.close(() => resolve()))
     }
+  })
+
+  test('T4-S12 (F26, F21, F19, F12–F14): Full lifecycle CLI -> Web OwnerConsole -> Feishu LarkChannel + standalone fallback with 0 LLM calls & 0 SQLite sidecars', async () => {
+    const ws = await workspaces.create('t4-s12-')
+    const manifests = await readAllWorkspaceManifests()
+    const expectedVersion = manifests[0]!.version
+    const cliMod = await loadDshRsiCli()
+    const ownerMod = await loadOwnerConsole()
+    const deliveryMod = await loadAssistantDelivery()
+    const larkMod = await loadLarkChannel()
+    const { AssistantPolicyService } = await loadAssistantPolicy()
+    const typertMod = await loadPackageModule('owner-console/typert')
+    const nlMod = await loadPackageModule('owner-console/nl-control')
+    const normalizeMod = await loadPackageModule('lark-channel/normalize')
+    const ReportSchema = getExport<{ parse: (input: unknown) => unknown }>(typertMod, 'OwnerConsoleVersionReportSchema')
+    const TYPERT = getExport<{ invocations: Array<{ method: string }> }>(typertMod, 'TYPERT')
+    const parseWebVersionQuery = getExportFn<(text: string) => { intent: string } | undefined>(nlMod, 'parseOwnerVersionQuery')
+    const normalizeLarkMessage = getExportFn<(
+      cfg: Record<string, unknown>,
+      msg: Record<string, unknown>,
+      now: number,
+    ) => { outcome: string; envelope?: Record<string, unknown> }>(normalizeMod, 'normalizeLarkMessage')
+
+    // Phase 1: Absent DSH_HOME -> no-data
+    const emptyHome = join(ws.root, 'empty-home')
+    const emptyCli = await runDshRsiInProcess(['version', '--json', '--dsh-home', emptyHome], { DSH_HOME: emptyHome })
+    expect(emptyCli.exitCode).toBe(0)
+    const emptyJson = JSON.parse(emptyCli.stdout) as {
+      assistant: { version: string }
+      plugins: { state: string }
+      selfIteration: { dataState: string; totalIterations: number | null }
+    }
+    expect(emptyJson.assistant.version).toBe(expectedVersion)
+    expect(emptyJson.plugins.state).toBe('unavailable')
+    expect(emptyJson.selfIteration.dataState).toBe('no-data')
+    expect(emptyJson.selfIteration.totalIterations).toBeNull()
+
+    // Phase 2: Execute upgradeAssistantAndRecover & seed R3 + WP16 evolved plugin creation/revision + ledgers
+    const upgradeAndRecover = getExportFn<(opts: Record<string, unknown>, deps?: Record<string, unknown>) => Promise<{ ok: boolean; healthy?: boolean }>>(
+      cliMod,
+      'upgradeAssistantAndRecover',
+    )
+    const upgRes = await upgradeAndRecover({ dshHome: ws.dshHome, profile: 'lark', yes: true }, {
+      runUpgrade: async () => ({ ok: true, ready: true }),
+      runDoctor: async () => ({ ok: true, ready: true }),
+      restartService: async () => ({ ok: true, restarted: true }),
+    })
+    expect(upgRes.ok).toBe(true)
+    expect(upgRes.healthy).toBe(true)
+
+    const profileDir = join(ws.dshHome, 'profiles', 'lark')
+    await mkdir(join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery'), { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(profileDir, 'node_modules', '@dsh-enhanced', 'assistant-delivery', 'package.json'),
+      JSON.stringify({ name: '@dsh-enhanced/assistant-delivery', version: expectedVersion }),
+      'utf8',
+    )
+    await writeFile(
+      join(ws.dshHome, '.dsh-rsi-host.json'),
+      JSON.stringify({ schemaVersion: 1, version: '0.2.2-rc.5', cacheRoot: ws.root, receiptDigest: sha256Hex('host-s12') }),
+      { mode: 0o600 },
+    )
+    await mkdir(join(ws.dshHome, '.dsh-enhanced'), { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(ws.dshHome, '.dsh-enhanced', 'upgrade-history.jsonl'),
+      `${JSON.stringify({ at: 100, toVersion: expectedVersion })}\n`,
+      'utf8',
+    )
+    await mkdir(join(ws.dshHome, '.dsh-rsi-upgrade-backups', 'snap-s12'), { recursive: true, mode: 0o700 })
+
+    const execSql = async (rel: string, sql: string) => {
+      const full = join(ws.dshHome, rel)
+      await mkdir(join(full, '..'), { recursive: true, mode: 0o700 })
+      const db = new DatabaseSync(full)
+      try {
+        db.exec(sql)
+      } finally {
+        db.close()
+      }
+    }
+    await execSql('assistant-work-items/state.sqlite', "PRAGMA journal_mode = WAL; CREATE TABLE work_item (id TEXT PRIMARY KEY, state TEXT) STRICT; INSERT INTO work_item VALUES ('w1', 'settled'), ('w2', 'settled');")
+    await execSql('assistant-dreaming/state.sqlite', "CREATE TABLE dream_runs (id TEXT PRIMARY KEY, outcome TEXT) STRICT; INSERT INTO dream_runs VALUES ('d1', 'completed');")
+    await execSql('assistant-evaluation/evaluation.sqlite', "CREATE TABLE evaluation_attention_tuning_events (kind TEXT) STRICT; CREATE TABLE evaluation_attention_loosening_decisions (proposal_id TEXT PRIMARY KEY, decision TEXT) STRICT; INSERT INTO evaluation_attention_tuning_events VALUES ('adopted'); INSERT INTO evaluation_attention_loosening_decisions VALUES ('lp1', 'adopted');")
+    await execSql('assistant-association/association.sqlite', "CREATE TABLE assoc_param_profile_heads (scope_key TEXT PRIMARY KEY, active_version INTEGER) STRICT; CREATE TABLE assoc_param_profile_events (kind TEXT) STRICT; INSERT INTO assoc_param_profile_heads VALUES ('owner', 3); INSERT INTO assoc_param_profile_events VALUES ('adopted');")
+    await execSql('plugin-control-plane/control.sqlite', "CREATE TABLE source_plans (id TEXT PRIMARY KEY, plugin_name TEXT, mode TEXT, status TEXT) STRICT; CREATE TABLE activation_plans (id TEXT PRIMARY KEY, profile TEXT, status TEXT) STRICT; INSERT INTO source_plans VALUES ('sp-c', '@dsh-enhanced/evolved-s12', 'create', 'release-complete'), ('sp-r', '@dsh-enhanced/evolved-s12', 'modify', 'release-complete'); INSERT INTO activation_plans VALUES ('sp-c', 'lark', 'activated');")
+    await execSql('plugin-control-plane/creation-adoptions.sqlite', `CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, certificate_json TEXT, receipt_json TEXT) STRICT; INSERT INTO adoptions VALUES ('sp-c', 'active', '{"plan":{"name":"@dsh-enhanced/evolved-s12"}}', '{"version":"0.1.0"}');`)
+    await execSql('plugin-control-plane/revision-adoptions.sqlite', "CREATE TABLE entries (entry_id TEXT PRIMARY KEY, name TEXT, current_plan_id TEXT, revision INTEGER) STRICT; CREATE TABLE adoptions (plan_id TEXT PRIMARY KEY, status TEXT, entry_id TEXT) STRICT; CREATE TABLE rollbacks (seq INTEGER PRIMARY KEY, rollback_id TEXT) STRICT; INSERT INTO entries VALUES ('e1', '@dsh-enhanced/evolved-s12', 'sp-r', 2); INSERT INTO adoptions VALUES ('sp-r', 'active', 'e1');")
+
+    const wiDir = join(ws.dshHome, 'assistant-work-items')
+    const wiFilesBefore = (await readdir(wiDir)).sort()
+    await chmod(wiDir, 0o555)
+    try {
+      // CLI checks
+      expect((await runDshRsiInProcess(['--version'])).stdout.trim()).toBe(expectedVersion)
+      expect((await runDshRsiInProcess(['version', '--short'])).stdout.trim()).toBe(expectedVersion)
+      const cliFull = await runDshRsiInProcess(['version', '--json', '--dsh-home', ws.dshHome])
+      expect(cliFull.exitCode).toBe(0)
+      const cliReport = JSON.parse(cliFull.stdout) as {
+        assistant: { version: string }
+        plugins: { evolvedCount: number }
+        selfIteration: { dataState: string; totalIterations: number; pluginsCreated: number; pluginsRevised: number; selfUpgrades: number }
+      }
+      expect(ReportSchema.parse(cliReport)).toEqual(cliReport)
+      expect(cliReport.selfIteration.dataState).toBe('data')
+      expect(cliReport.selfIteration.pluginsCreated).toBe(1)
+      expect(cliReport.selfIteration.pluginsRevised).toBe(1)
+      expect(cliReport.selfIteration.selfUpgrades).toBe(1)
+      expect(cliReport.plugins.evolvedCount).toBe(1)
+
+      // Phase 3 & 4: Web OwnerConsole + Feishu LarkChannel/AssistantDelivery live delegation -> standalone fallback
+      const ctx = harness.createContext()
+      await harness.mountPlugin(ctx, TypertRegistry)
+      harness.provideMockService(ctx, 'profileContext', { home: ws.dshHome, dir: profileDir, name: 'lark' })
+      const registeredTools: Array<{
+        def: { name: string; execute: (args: unknown, exec: unknown) => Promise<{ ok: boolean; summary?: string; report?: unknown }> }
+      }> = []
+      harness.provideMockService(ctx, 'tools', {
+        register: (def: typeof registeredTools[number]['def']) => {
+          registeredTools.push({ def })
+          return () => {}
+        },
+      })
+      await harness.mountService(ctx, AssistantPolicyService, 'assistantPolicy', {
+        databasePath: ws.sqlitePath('policy'),
+        rules: [
+          { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
+          { id: 'owner', effect: 'allow', subject: { kind: 'external', id: 'lark/primary-bot/tenant-a/ou_owner' }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+          { id: 'reply-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: ws.workspace, principal: 'lark/primary-bot/tenant-a/ou_owner' }, actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground', 'external'] } },
+        ],
+      })
+      const resumeSpy = vi.fn(async () => ({}))
+      harness.provideMockService(ctx, 'agents', {
+        create: async (opts: { sessionId: string; meta?: { cwd?: string; agentPreset?: string }; setup?: (c: unknown, a?: unknown) => Promise<unknown> }) => {
+          const id = opts.sessionId
+          const session = {
+            id,
+            header: { id, cwd: opts.meta?.cwd ?? ws.workspace, agentPreset: opts.meta?.agentPreset ?? 'primary' },
+            append: () => {},
+            snapshotEvents: () => [],
+            deriveMessages: () => [],
+          }
+          const agent = {
+            id,
+            ctx,
+            session,
+            model: { select: () => {}, current: () => ({ provider: 'fixture', model: 'fixture' }) },
+            status: 'idle',
+            whenIdle: async () => {},
+            runMaintenance: (fn: (signal: AbortSignal) => unknown) => fn(new AbortController().signal),
+            cancel: () => {},
+          }
+          await opts.setup?.(ctx, agent)
+          return { agent, dispose: async () => {} }
+        },
+        resume: resumeSpy,
+      })
+      harness.provideMockService(ctx, 'sessions', { list: async () => [], flush: async () => true })
+      harness.provideMockService(ctx, 'llm', { complete: async () => ({}) })
+
+      const applyOwner = getExportFn<(c: unknown, cfg: unknown) => void>(ownerMod, 'apply')
+      const configOwner = getExportFn<(input: Record<string, unknown>) => unknown>(ownerMod, 'Config')
+      applyOwner(ctx, configOwner({ feishuAppId: '' }))
+      const ownerSvc = ctx.get('ownerConsole' as never) as unknown as {
+        versionInfo: () => Promise<{
+          assistant: { version: string }
+          plugins: { evolvedCount: number }
+          selfIteration: { dataState: string; totalIterations: number; pluginsCreated: number; pluginsRevised: number; selfUpgrades: number }
+        }>
+        registerAssistantSession: (id: string, active: boolean) => Promise<unknown>
+      }
+      expect(TYPERT.invocations.some(i => i.method === 'versionInfo')).toBe(true)
+      expect(parseWebVersionQuery('/version --short')?.intent).toBe('slash')
+      expect(parseWebVersionQuery('自己迭代了多少次？')?.intent).toBe('selfIterationCount')
+
+      await ownerSvc.registerAssistantSession('wenyao-s12', true)
+      const versionTool = registeredTools.find(t => t.def.name === 'owner_console_version_info')!
+      const toolRes = await versionTool.def.execute({}, { agent: { id: 'wenyao-s12', session: { id: 'wenyao-s12' } } })
+      expect(toolRes.ok).toBe(true)
+      expect(ReportSchema.parse(toolRes.report)).toEqual(toolRes.report)
+
+      const ownerReport = await ownerSvc.versionInfo()
+      expect(ownerReport.assistant.version).toBe(expectedVersion)
+      expect(ownerReport.plugins.evolvedCount).toBe(1)
+      expect(ownerReport.selfIteration).toMatchObject({
+        dataState: 'data',
+        pluginsCreated: cliReport.selfIteration.pluginsCreated,
+        pluginsRevised: cliReport.selfIteration.pluginsRevised,
+        selfUpgrades: cliReport.selfIteration.selfUpgrades,
+      })
+      expect(ownerReport.selfIteration.totalIterations).toBeGreaterThan(0)
+
+      const delivery = await harness.mountService<{
+        issuePairing: (by: string, p: Record<string, unknown>) => { challenge: { id: string }; code: string }
+        confirmPairing: (req: Record<string, unknown>) => unknown
+        acceptInbound: (env: Record<string, unknown>) => Promise<unknown>
+        tick: () => Promise<void>
+        whenIdle: () => Promise<void>
+        dispatchVersionQuery: () => Promise<{
+          assistant: { version: string }
+          plugins: { evolvedCount: number }
+          selfIteration: { dataState: string; totalIterations: number | null; pluginsCreated: number | null; pluginsRevised: number | null; selfUpgrades: number | null }
+        }>
+      }>(ctx, deliveryMod.AssistantDeliveryService, 'assistantDelivery', {
+        databasePath: ws.sqlitePath('delivery'),
+        spoolPath: join(ws.stateDir, 'spool'),
+        defaultWorkspace: ws.workspace,
+        defaultAgentPreset: 'primary',
+        schedulerEnabled: false,
+      })
+
+      const sends: string[] = []
+      const LarkServiceCtor = larkMod.LarkChannelService as new (
+        c: unknown,
+        cfg: Record<string, unknown>,
+        deps: Record<string, unknown>,
+      ) => { whenReady: () => Promise<void> }
+      const larkSvc = new LarkServiceCtor(ctx, {
+        enabled: true,
+        account: 'primary-bot',
+        tenant: 'tenant-a',
+        appId: 'cli_0123456789abcdef',
+        appSecretEnv: 'LARK_APP_SECRET',
+      }, {
+        env: { LARK_APP_SECRET: 'secret-value' },
+        createTransport: () => ({
+          subscribe: () => () => {},
+          connect: async () => {},
+          disconnect: async () => {},
+          addReaction: async () => 'r1',
+          createProgress: async () => ({ cotId: 'c1', messageId: 'om_cot' }),
+          writeProgress: async () => {},
+          send: async (_chatId: string, input: { text?: string }) => {
+            sends.push(input.text ?? '')
+            return { messageId: `om_out_${sends.length}` }
+          },
+        }),
+        writeLifecycleMarker: () => {},
+        dshHome: ws.dshHome,
+        profile: 'lark',
+      })
+      await larkSvc.whenReady()
+
+      const ownerPrincipal = { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' }
+      const pair = delivery.issuePairing('test', ownerPrincipal)
+      delivery.confirmPairing({ challengeId: pair.challenge.id, principal: ownerPrincipal, code: pair.code })
+
+      const inboundCfg = { account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true, maxTextBytes: 4096, staleAfterMs: 300_000 }
+      const msg1 = normalizeLarkMessage(inboundCfg, {
+        messageId: 'om_s12_1',
+        chatId: 'oc_dm_ou_owner',
+        chatType: 'p2p',
+        senderId: 'ou_owner',
+        content: '/version',
+        rawContentType: 'text',
+        resources: [],
+        mentionAll: false,
+        mentionedBot: false,
+        createTime: Date.now(),
+      }, Date.now())
+      if (msg1.outcome === 'accept' && msg1.envelope) await delivery.acceptInbound(msg1.envelope)
+      await delivery.tick()
+      await delivery.whenIdle()
+      await delivery.tick()
+      await delivery.whenIdle()
+
+      expect(sends.at(-1)).toContain(expectedVersion)
+      expect(sends.at(-1)).toContain(`累计自迭代次数：${ownerReport.selfIteration.totalIterations}`)
+      expect(sends.at(-1)).toContain('@dsh-enhanced/evolved-s12')
+
+      // Remove ownerConsole service and verify standalone fallback via Delivery
+      ctx.set('ownerConsole' as never, undefined as never)
+      const fallbackReport = await delivery.dispatchVersionQuery()
+      expect(fallbackReport.assistant.version).toBe(expectedVersion)
+      expect(fallbackReport.plugins.evolvedCount).toBe(1)
+      expect(fallbackReport.selfIteration).toMatchObject({
+        dataState: 'data',
+        pluginsCreated: 1,
+        pluginsRevised: 1,
+        selfUpgrades: 1,
+      })
+      expect(fallbackReport.selfIteration.totalIterations).toBeGreaterThan(0)
+
+      expect(resumeSpy).not.toHaveBeenCalled()
+    } finally {
+      await chmod(wiDir, 0o700)
+    }
+    const wiFilesAfter = (await readdir(wiDir)).sort()
+    expect(wiFilesAfter).toEqual(wiFilesBefore)
   })
 })
