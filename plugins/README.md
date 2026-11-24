@@ -31,10 +31,10 @@
 
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
-| [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账；默认开启 WP19 注意力强制/超长转附件/跨车道保序（`attentionEnforce`/`attentionAttachOverCap`/`orderAcrossLanes`）、默认注册 `inProcessReload` 及 R4 会话控制指令。 |
+| [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账；默认开启 WP19 注意力强制/超长转附件/跨车道保序（`attentionEnforce`/`attentionAttachOverCap`/`orderAcrossLanes`）、默认注册 `inProcessReload`、R4 会话控制指令，以及 `/version`、`/autonomy version` 与自然语言只读版本及自迭代演进统计查询（支持委托 `ownerConsole.versionInfo()` 与独立只读回退）。 |
 | [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
-| [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding、R4 自然语言整体开启/关闭/升级与恢复控制，以及 launchd/systemd/Windows Task 常驻。 |
-| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性（`web`/`supervised` 包含） | 统一「文鳐」控制台与 DSH 原生左栏 Settings UI（`settings.section` / `general` / `models` / `plugins.bundle.config`）：飞书接入、TraeX / Antigravity `agy` 启用切换、R4 整体助手启停升级与恢复，以及 Dreaming/Proactive/WorkItems/Learning/Growth 只读状态与受控操作。 |
+| [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding、R4 自然语言整体开启/关闭/升级与恢复控制、`/version` 与自然语言只读版本及自迭代演进统计查询，以及 launchd/systemd/Windows Task 常驻。 |
+| [owner-console](owner-console) | `@dsh-enhanced/owner-console` | 实验性（`web`/`supervised` 包含） | 统一「文鳐」控制台与 DSH 原生左栏 Settings UI（`settings.section` / `general` / `models` / `plugins.bundle.config`）：飞书接入、TraeX / Antigravity `agy` 启用切换、R4 整体助手启停升级与恢复、`ownerConsole/versionInfo` / `owner_console_version_info` 只读版本与自迭代演进统计查询，以及 Dreaming/Proactive/WorkItems/Learning/Growth 只读状态与受控操作。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
 | [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态、滚动时间窗飞书日历、内置 `webhookListen` HTTP 监听、`task-system`、非飞书日历（`ics`/`json-events`）与邮件（`rest-json`/`jmap`）事件；默认开启 `pollerEnabled`，支持有限 owner 授权观察、opt-in intake 桥接与目标终态无轮询退订。 |
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性（`web`/`supervised`/`autonomy` 场景包含） | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；默认开启 `intakeEvaluation` 与 WP12 四因子动态效用/打扰成本计算（`computeDynamicUtility`），含主人注意力提问，实际执行仍经 Goals 验收。 |

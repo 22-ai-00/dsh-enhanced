@@ -86,6 +86,7 @@ dsh-rsi open --profile web
 | 检查或执行自助升级 | `dsh-rsi upgrade --check` / `dsh-rsi upgrade --dry-run` / `dsh-rsi upgrade --yes` |
 | 查看只读成长计分卡（含联想层对照） | `dsh-rsi growth-report --since 7d` |
 | 一键配置 Web-owner 自主授权 | `dsh-web-owner-setup --profile web --autonomy-setup --enable-memory-learning --enable-dreaming --enable-growth --dry-run` |
+| 查看助手/Host/插件版本与只读自迭代统计 | `dsh-rsi version [--json]` / `dsh-rsi --version` / 聊天 `/version` |
 | 查看运行状态（含 JSON） | `dsh-rsi status [--json]` |
 | 只读体检（含 `traex`/`agy` 与前提） | `dsh-rsi doctor [--profile web] [--json]` |
 | 仅获取已运行 Web 地址 | `dsh-rsi web-url --profile web` |
