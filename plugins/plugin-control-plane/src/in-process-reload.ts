@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import { lstatSync, readdirSync, readFileSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 import type { HostAttestationEvidence, HostAttestationRequirements } from './types.js'
 import { ControlPlaneStoreError } from './store.js'
 
@@ -73,8 +75,6 @@ const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]{0,213}$/u
 export const IN_PROCESS_RELOAD_DENYLIST: readonly string[] = Object.freeze([
   '@dsh-enhanced/plugin-control-plane',
   '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/assistant-isolation',
-  '@dsh-enhanced/lark-channel',
 ])
 
 function canonical(value: unknown): string {
@@ -305,11 +305,11 @@ function assertTarget(target: InProcessReloadTarget): void {
   }
 }
 
-function assertReloadable(target: InProcessReloadTarget): void {
+function assertReloadable(target: InProcessReloadTarget, mode: InProcessReloadMode = 'config-only'): void {
   if (IN_PROCESS_RELOAD_DENYLIST.includes(target.package)) {
     throw new InProcessReloadRefusal('never-hot-reload', `${target.package} must never be reloaded inside a live Host process`)
   }
-  if (target.changesProcessSubtree) {
+  if (mode === 'config-only' && target.changesProcessSubtree) {
     throw new InProcessReloadRefusal('process-subtree-change', `${target.package} changes the unit/dependency subtree and requires a process restart`)
   }
   if (target.holdsUnprovenProcessAuthority) {
@@ -373,11 +373,11 @@ export function prepareInProcessReload(input: PrepareInProcessReloadInput): InPr
   if (snapshot.status !== 'awaiting-reload') {
     throw new InProcessReloadRefusal('not-awaiting-reload', `in-process reload requires plan status awaiting-reload, got ${snapshot.status}`)
   }
-  assertReloadable(snapshot.target)
+  const mode = resolveMode(snapshot)
+  assertReloadable(snapshot.target, mode)
   assertInProcessScope(snapshot)
   integerOf(requestedAt, 'requestedAt', 0)
   integerOf(ttlMs, 'ttlMs')
-  const mode = resolveMode(snapshot)
   const body: InProcessReloadWarrantBody = {
     schemaVersion: 1,
     kind: 'dsh-in-process-reload-warrant',
@@ -486,9 +486,9 @@ export async function applyInProcessReload(input: {
   if (snapshot.status !== 'awaiting-reload') {
     throw new InProcessReloadRefusal('not-awaiting-reload', `in-process reload requires plan status awaiting-reload, got ${snapshot.status}`)
   }
-  assertReloadable(snapshot.target)
-  assertInProcessScope(snapshot)
   const mode = resolveMode(snapshot)
+  assertReloadable(snapshot.target, mode)
+  assertInProcessScope(snapshot)
   if ((warrant.mode ?? 'config-only') !== mode) {
     throw new InProcessReloadRefusal('artifact-digest-mismatch', 'in-process reload warrant mode does not match the plan snapshot')
   }
@@ -560,7 +560,7 @@ export async function rollbackInProcessReload(input: {
   if (snapshot.status !== 'rollback-pending' && snapshot.status !== 'reloaded') {
     throw new InProcessReloadRefusal('not-rollback-eligible', `in-process reload rollback requires rollback-pending or reloaded, got ${snapshot.status}`)
   }
-  assertReloadable(snapshot.target)
+  assertReloadable(snapshot.target, resolveMode(snapshot))
   let result: InProcessReloadHostRollbackResult
   try {
     result = await port.rollback({
@@ -634,6 +634,54 @@ export async function executeInProcessReloadHandoff(input: InProcessReloadHandof
     return { status: 'rolled-back', warrant, apply: applied, rollback: rolledBack }
   }
   return { status: 'rollback-pending', warrant, apply: applied, rollback: rolledBack }
+}
+
+function walkArtifactRegularFiles(rootDir: string): string[] {
+  const rootStat = lstatSync(rootDir)
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`in-process artifact source must be a non-symlink directory: ${rootDir}`)
+  }
+  const files: string[] = []
+  const visit = (currentDir: string): void => {
+    const entries = readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      if (entry.name === 'node_modules') {
+        throw new Error('in-process artifact must not bundle a node_modules dependency subtree')
+      }
+      const fullPath = join(currentDir, entry.name)
+      const stat = lstatSync(fullPath)
+      if (stat.isSymbolicLink()) {
+        throw new Error(`in-process artifact must not contain symlinks: ${fullPath}`)
+      }
+      if (stat.isDirectory()) {
+        visit(fullPath)
+      } else if (stat.isFile()) {
+        files.push(relative(rootDir, fullPath).split(sep).join('/'))
+      } else {
+        throw new Error(`in-process artifact contains non-regular file: ${fullPath}`)
+      }
+    }
+  }
+  visit(rootDir)
+  files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return files
+}
+
+export function computeInProcessDirectoryArtifactDigest(sourceDir: string): string {
+  const files = walkArtifactRegularFiles(sourceDir)
+  if (files.length === 0) throw new Error(`in-process artifact directory is empty: ${sourceDir}`)
+  const hash = createHash('sha256').update('dsh-in-process-artifact-v1\0')
+  for (const relPath of files) {
+    const bytes = readFileSync(join(sourceDir, ...relPath.split('/')))
+    hash.update(`${relPath}\0${bytes.length}\0`)
+    hash.update(bytes)
+    hash.update('\0')
+  }
+  return hash.digest('hex')
+}
+
+export function computeInProcessPatchTextDigest(input: string | Buffer): string {
+  return createHash('sha256').update(typeof input === 'string' ? Buffer.from(input, 'utf8') : input).digest('hex')
 }
 
 export function buildInProcessReloadRequirements(input: {

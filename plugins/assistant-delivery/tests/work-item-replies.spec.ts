@@ -53,7 +53,7 @@ async function fixture(options: { root?: string; allow?: boolean; unknown?: bool
     const target:WorkItemReportTarget={protocol:'assistant-delivery/work-item-report/v1',itemId,reportRevision:1,streamId,reportDigest:workItemReplyDigest(['report',itemId]),sourceId:producerId,scope,owner}
     const input={sourceId:producerId,workspace:scope.workspace,bindingId:binding.id,idempotencyKey:`report:${itemId}`,text:`Report ${itemId}`,format:'plain' as const,itemId,reportRevision:1}
     targets.set(itemId,{target,text:input.text,key:input.idempotencyKey,bindingId:binding.id})
-    const outbox=generic ? service.enqueueBackground({...input,metadata:{'work-item-report':itemId,'work-item-report.kind':'report'}}) : service.enqueueWorkItemReport(input)
+    const outbox=generic ? service.enqueueBackground({...input,attention:{purpose:'result'},metadata:{'work-item-report':itemId,'work-item-report.kind':'report'}}) : service.enqueueWorkItemReport(input)
     await service.tick();await service.whenIdle()
     return store.getOutbox(outbox.id)!
   }

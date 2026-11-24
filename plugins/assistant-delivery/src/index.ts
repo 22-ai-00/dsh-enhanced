@@ -79,3 +79,13 @@ export type { ProgressAttentionAuditEntry, ProgressAttentionAuditPage } from './
 export type { OwnerWorkItemLearningTask, OwnerLearningSourceExpectation, OwnerLearningSourceSnapshot, OwnerWorkItemLearningSourceExpectation, OwnerWorkItemLearningTaskFenceInput } from './work-item-feedback.js'
 
 export type { EngineeringReportRef, EngineeringNode, EngineeringRootInput, EngineeringContinuationInput, WorkItemEngineeringMaterial, OwnerWorkItemEngineeringManifest, OwnerWorkItemEngineeringContextLocator, OwnerWorkItemEngineeringContextExpectation, OwnerWorkItemEngineeringContextReadInput, OwnerWorkItemEngineeringContextPage, OwnerWorkItemEngineeringContext, OwnerWorkItemEngineeringContextSource } from './work-item-engineering-context.js'
+export {
+  parseOwnerSelfIterationCommand,
+  type OwnerSelfIterationAction,
+  type ParsedOwnerSelfIterationCommand,
+} from './session-commands.js'
+export type {
+  OwnerSelfIterationControlHandler,
+  OwnerSelfIterationControlRequest,
+  OwnerSelfIterationControlResult,
+} from './service.js'

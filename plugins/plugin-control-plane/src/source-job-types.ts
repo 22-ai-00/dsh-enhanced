@@ -1,7 +1,7 @@
 import type { LegacyDockerSourceBuildConfig, SourceBuildConfig } from './source-build.js'
 import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
-import type { SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
+import type { CandidatePluginKind, SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
 import type { SourceRevisionBinding, SourceRevisionGrant } from './source-revision.js'
 import type { RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 
@@ -150,6 +150,8 @@ export interface SourceJobIntent {
   baseline?: SourceBaselineConfig
   /** Absent on historical and current modify jobs. */
   mode?: 'create' | 'revise-created'
+  /** Omitted when `'tool'` for digest backward compatibility. */
+  pluginKind?: CandidatePluginKind
   creation?: SourceCreationBinding
   revision?: SourceRevisionBinding
   name: string
@@ -218,6 +220,7 @@ export interface SourceJobProjection {
   gapId: string
   baseCommit: string
   mode?: 'create' | 'revise-created'
+  pluginKind?: CandidatePluginKind
   status: SourceJobStatus
   createdAt: number
   expiresAt: number

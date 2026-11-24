@@ -71,6 +71,8 @@ export type { SourceBaselineConfig } from './source-baseline.js'
 export { parseSourceMaintenanceRecord, signSourceMaintenanceRecord, sourceBaselineChain, sourceMaintenanceDigest,
   sourceMaintenanceSourceFieldsDigest, verifySourceMaintenanceRecords } from './source-maintenance.js'
 export type { SourceMaintenanceRecord, SourceMaintenanceAnchor } from './source-maintenance.js'
+export { CANDIDATE_PLUGIN_KINDS, normalizeCandidatePluginKind } from './source-creation.js'
+export type { CandidatePluginKind } from './source-creation.js'
 export type { EnqueueSourceJobInput, SourceJobCaller } from './source-jobs.js'
 
 export function apply(ctx: Context, config: Config): void {

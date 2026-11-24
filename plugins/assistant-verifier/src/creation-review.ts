@@ -19,6 +19,21 @@ import { behaviorNativeRuntimeDigest, LINUX_BEHAVIOR_BOUNDARY, NATIVE_BEHAVIOR_B
   type CreationBehaviorDeploymentConfig, type LegacyDockerBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
+type PluginKind = import('./plugin-behavior-runner.js').PluginKind
+
+const PLUGIN_KINDS = new Set<PluginKind>(['tool', 'service', 'channel', 'ui'])
+export function pluginKindContractAddendum(kind: PluginKind | undefined): readonly string[] {
+  if (kind === 'service') {
+    return ['Candidate pluginKind is "service" (Cordis service/lifecycle plugin). Derive concrete lifecycle/health/method verification cases using the discovered service_lifecycle_probe and service_method_probe schemas.']
+  }
+  if (kind === 'channel') {
+    return ['Candidate pluginKind is "channel" (delivery adapter plugin). Derive concrete adapter/capability/health verification cases using the discovered channel_readiness_probe schema.']
+  }
+  if (kind === 'ui') {
+    return ['Candidate pluginKind is "ui" (UI/Typert contribution plugin). Derive concrete contribution/routes/settings verification cases using the discovered ui_declaration_probe schema.']
+  }
+  return []
+}
 
 const SHA = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
@@ -239,6 +254,7 @@ export interface WorkItemCreationReviewReadiness {
 
 interface PreparedCreationBase {
   plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+    pluginKind?: PluginKind;
     generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
     preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
       pack: { sha256: string; sizeBytes: number } };
@@ -523,6 +539,10 @@ export class CreationReviewRuntime {
       const snapshot = port.inspectPreparedCreation(request.planId)
       if (!['dsh-prepared-creation/v1', 'dsh-prepared-creation/v2'].includes(snapshot.protocol)) throw new Error('creation source protocol changed')
       const { plan, reference, artifact } = snapshot
+      const planPluginKind = plan.pluginKind
+      if (planPluginKind !== undefined && !PLUGIN_KINDS.has(planPluginKind)) {
+        throw new Error('prepared creation pluginKind invalid')
+      }
       const run = plan.creation?.growthRun
       validateAnySourceGrowthRunBinding(run)
       const frozen: AnySourceGrowthRunBinding = run
@@ -625,7 +645,8 @@ export class CreationReviewRuntime {
       const observer = await this.#loadRunner()
       signal.throwIfAborted(); fence(() => {})
       const discoverKey = growthObjectDigest([binding, 'discover'])
-      const discovery = await observer.run({ key: discoverKey, artifact, operation: { kind: 'discover' }, signal })
+      const discovery = await observer.run({ key: discoverKey, artifact, operation: { kind: 'discover' },
+        ...(planPluginKind !== undefined ? { pluginKind: planPluginKind } : {}), signal })
       if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
         || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256
         || nativeExecution && (discovery.boundary !== nativeExecution.boundary
@@ -633,10 +654,12 @@ export class CreationReviewRuntime {
         this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
         return { status: 'unknown', reason: 'schema-observation-unknown' }
       }
+      const effectiveKind = planPluginKind ?? discovery.pluginKind
       const projectedSchemas = projectCreationSchemas(discovery.schemas)
       fence(() => this.#store.discovered(plan.id, binding, { jobId: discovery.jobId!, schemaDigest: discovery.schemaDigest!,
         schemas: projectedSchemas, environment: discovery.environment! }))
-      const contractPrompt = [...CASE_RULES, ...(frozen.protocol === 'assistant-growth/source-run/v2' ? WORK_ITEM_RULES : []), `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n')
+      const contractPrompt = [...CASE_RULES, ...(frozen.protocol === 'assistant-growth/source-run/v2' ? WORK_ITEM_RULES : []),
+        ...pluginKindContractAddendum(effectiveKind), `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n')
       const contract = await runNativeCreationTurn(this.ctx, { sessionId: `creation-contract-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens - 1,
         prompt: contractPrompt, data: { task, schemas: projectedSchemas }, signal, assertCurrent: () => fence(() => {}) })
@@ -656,7 +679,8 @@ export class CreationReviewRuntime {
         const operationDigest = growthObjectDigest(operation)
         const key = growthObjectDigest([binding, 'invoke', operationDigest])
         fence(() => this.#store.claimCase(plan.id, binding, item.id, operationDigest))
-        const observed = await observer.run({ key, artifact, operation, signal })
+        const observed = await observer.run({ key, artifact, operation,
+          ...(effectiveKind !== undefined ? { pluginKind: effectiveKind } : {}), signal })
         if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
           || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
           || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
@@ -684,7 +708,9 @@ export class CreationReviewRuntime {
       const review = await runNativeCreationTurn(this.ctx, { sessionId: `creation-source-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes,
         maxOutputTokens: config.maxOutputTokens - contract.outputTokens,
-        prompt: [...REVIEW_RULES, ...(frozen.protocol === 'assistant-growth/source-run/v2' ? WORK_ITEM_RULES : []), `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        prompt: [...REVIEW_RULES, ...(frozen.protocol === 'assistant-growth/source-run/v2' ? WORK_ITEM_RULES : []),
+          ...(effectiveKind && effectiveKind !== 'tool' ? [`Candidate pluginKind: ${effectiveKind}.`] : []),
+          `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
         data: { task, cases: cases.cases, changedPaths: context.changedPaths, patch: context.patch },
         signal, assertCurrent: () => fence(() => {}) })
       const verdict = parseReview(review.value)

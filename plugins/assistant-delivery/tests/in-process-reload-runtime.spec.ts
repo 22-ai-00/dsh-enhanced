@@ -760,8 +760,8 @@ export function apply() {
     }
   })
 
-  test('registers inProcessReload in apply() only when explicitly configured and preserves default Config byte-for-byte', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-delivery-opt-in-')))
+  test('registers inProcessReload by default with dynamic Include discovery, respects enabled: false opt-out, and fences disposal', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-delivery-default-on-')))
     const baseInput = {
       databasePath: join(root, 'delivery.sqlite'),
       spoolPath: join(root, 'spool'),
@@ -769,35 +769,231 @@ export function apply() {
     }
 
     const dumped = assistantDeliveryPlugin.Config(baseInput)
-    expect(Object.hasOwn(dumped, 'inProcessReload')).toBe(false)
+    expect(dumped.inProcessReload).toEqual({ enabled: true })
 
-    // Without inProcessReload config, apply() must NOT register the service.
+    // Default config (omitting inProcessReload & profilePath) registers `inProcessReload`,
+    // resolves profileFile dynamically from the mounted Include root, and runs artifact-replace.
+    const profileDir = join(root, 'profile')
+    const v1Dir = join(root, 'bundles', 'dyn-v1')
+    const v2Dir = join(root, 'bundles', 'dyn-v2')
+    await mkdir(profileDir, { recursive: true })
+    await mkdir(join(v1Dir, 'lib'), { recursive: true })
+    await mkdir(join(v2Dir, 'lib'), { recursive: true })
+    await writeFile(join(v1Dir, 'package.json'), JSON.stringify({
+      name: '@dsh-enhanced/dyn-hot',
+      version: '0.1.0',
+      type: 'module',
+      exports: { '.': './lib/index.js' },
+    }))
+    await writeFile(join(v1Dir, 'lib', 'index.js'), `
+export const name = 'dyn-hot'
+export function apply(ctx) {
+  ctx.provide('dynService', { tag: () => 'v1' })
+}
+`, 'utf8')
+    await writeFile(join(v2Dir, 'package.json'), JSON.stringify({
+      name: '@dsh-enhanced/dyn-hot',
+      version: '0.2.0',
+      type: 'module',
+      exports: { '.': './lib/index.js' },
+    }))
+    await writeFile(join(v2Dir, 'lib', 'index.js'), `
+export const name = 'dyn-hot'
+export function apply(ctx) {
+  ctx.provide('dynService', { tag: () => 'v2' })
+}
+`, 'utf8')
+    const v2Digest = computeInProcessArtifactDigest({ sourceDir: v2Dir })
+    const profileFile = join(profileDir, 'cordis.yml')
+    await writeFile(profileFile, `- id: dyn\n  name: ../bundles/dyn-v1/lib/index.js\n`, 'utf8')
+
     const ctxDefault = new Context()
+    await ctxDefault.plugin(Loader)
+    ctxDefault.loader.builtins.include = Include
+    await ctxDefault.loader.create({
+      id: 'include',
+      name: 'cordis:include',
+      config: { path: pathToFileURL(profileFile).href },
+    } as unknown as Parameters<typeof ctxDefault.loader.create>[0])
+    await ctxDefault.loader.await()
     await ctxDefault.plugin(AssistantPolicyService, { databasePath: join(root, 'policy1.sqlite') })
     await ctxDefault.plugin(ctx => { assistantDeliveryPlugin.apply(ctx, { ...baseInput, schedulerEnabled: false }) })
-    expect(ctxDefault.get('inProcessReload')).toBeUndefined()
-    await ctxDefault.fiber.dispose()
 
-    // With explicit inProcessReload config, apply() registers the service cleanly and disposes with the fiber.
-    const profileDir = join(root, 'profile')
-    await mkdir(profileDir, { recursive: true })
-    const ctxConfigured = new Context()
-    await ctxConfigured.plugin(AssistantPolicyService, { databasePath: join(root, 'policy2.sqlite') })
-    await ctxConfigured.plugin(ctx => {
+    const defaultRuntime = ctxDefault.get('inProcessReload')
+    expect(defaultRuntime).toBeDefined()
+    expect(defaultRuntime?.snapshot()).toEqual({ hostGeneration: 1, inProcessGeneration: 1 })
+    expect((ctxDefault.get('dynService' as never) as unknown as { tag(): string }).tag()).toBe('v1')
+
+    const patchContent = 'config:\n  tag: v2\n'
+    const reloadRes = await defaultRuntime!.activate({
+      warrantDigest: digest('f'),
+      previousHostGeneration: 1,
+      previousInProcessGeneration: 1,
+      target: {
+        package: '@dsh-enhanced/dyn-hot',
+        version: '0.2.0',
+        artifactDigest: v2Digest,
+        patchDigest: computeInProcessPatchDigest(patchContent),
+        changesProcessSubtree: false,
+        holdsUnprovenProcessAuthority: false,
+        entryId: 'dyn',
+        artifact: { sourceDir: v2Dir, config: { tag: 'v2' }, patchContent },
+      },
+    })
+    expect(reloadRes.probe.reloaded).toBe(true)
+    expect((ctxDefault.get('dynService' as never) as unknown as { tag(): string }).tag()).toBe('v2')
+
+    await ctxDefault.fiber.dispose()
+    expect(ctxDefault.get('inProcessReload')).toBeUndefined()
+    await expect(defaultRuntime!.activate({
+      warrantDigest: digest('f'),
+      previousHostGeneration: 1,
+      previousInProcessGeneration: 2,
+      target: {
+        package: '@dsh-enhanced/dyn-hot',
+        version: '0.2.0',
+        artifactDigest: v2Digest,
+        patchDigest: computeInProcessPatchDigest(patchContent),
+        changesProcessSubtree: false,
+        holdsUnprovenProcessAuthority: false,
+      },
+    })).rejects.toThrow('disposed')
+
+    // Explicit opt-out: inProcessReload: { enabled: false } does NOT register the service,
+    // while invalid relative paths still fail config validation.
+    const ctxOptOut = new Context()
+    await ctxOptOut.plugin(AssistantPolicyService, { databasePath: join(root, 'policy2.sqlite') })
+    await ctxOptOut.plugin(ctx => {
       assistantDeliveryPlugin.apply(ctx, {
         ...baseInput,
         schedulerEnabled: false,
         databasePath: join(root, 'delivery2.sqlite'),
         spoolPath: join(root, 'spool2'),
-        inProcessReload: { profilePath: profileDir, hostGeneration: 7 },
+        inProcessReload: { enabled: false },
       })
     })
-    const runtime = ctxConfigured.get('inProcessReload')
-    expect(runtime).toBeDefined()
-    expect(runtime?.snapshot()).toEqual({ hostGeneration: 7, inProcessGeneration: 1 })
-    await ctxConfigured.fiber.dispose()
-    expect(ctxConfigured.get('inProcessReload')).toBeUndefined()
+    expect(ctxOptOut.get('inProcessReload')).toBeUndefined()
+    await ctxOptOut.fiber.dispose()
+
+    const ctxInvalid = new Context()
+    await ctxInvalid.plugin(AssistantPolicyService, { databasePath: join(root, 'policy3.sqlite') })
+    expect(() => assistantDeliveryPlugin.apply(ctxInvalid, {
+      ...baseInput,
+      schedulerEnabled: false,
+      databasePath: join(root, 'delivery3.sqlite'),
+      spoolPath: join(root, 'spool3'),
+      inProcessReload: { enabled: false, profilePath: 'relative/path' },
+    })).toThrow(/absolute/i)
+    await ctxInvalid.fiber.dispose()
 
     await rm(root, { recursive: true, force: true })
+  })
+
+  test('allows lark-channel, assistant-isolation, and changesProcessSubtree in artifact-replace mode with rollback fallback', async () => {
+    expect(IN_PROCESS_RELOAD_DENYLIST).toEqual([
+      '@dsh-enhanced/plugin-control-plane',
+      '@dsh-enhanced/assistant-delivery',
+    ])
+
+    for (const pkg of ['@dsh-enhanced/lark-channel', '@dsh-enhanced/assistant-isolation']) {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ipr-relaxed-')))
+      const profileDir = join(root, 'profile')
+      const v1Dir = join(root, 'bundles', 'pkg-v1')
+      const v2Dir = join(root, 'bundles', 'pkg-v2')
+      const badDir = join(root, 'bundles', 'pkg-bad')
+      await mkdir(profileDir, { recursive: true })
+      await mkdir(join(v1Dir, 'lib'), { recursive: true })
+      await mkdir(join(v2Dir, 'lib'), { recursive: true })
+      await mkdir(join(badDir, 'lib'), { recursive: true })
+
+      const writePkg = async (dir: string, version: string, body: string) => {
+        await writeFile(join(dir, 'package.json'), JSON.stringify({
+          name: pkg,
+          version,
+          type: 'module',
+          exports: { '.': './lib/index.js' },
+        }))
+        await writeFile(join(dir, 'lib', 'index.js'), body, 'utf8')
+        return computeInProcessArtifactDigest({ sourceDir: dir })
+      }
+      await writePkg(v1Dir, '0.1.0', `
+export const name = '${pkg}'
+export function apply(ctx) {
+  ctx.provide('relaxedTestSvc', { ver: () => 'v1' })
+}
+`)
+      const v2Digest = await writePkg(v2Dir, '0.2.0', `
+export const inject = ['hostPeerSvc']
+export const name = '${pkg}'
+export function apply(ctx) {
+  ctx.provide('relaxedTestSvc', { ver: () => 'v2:' + ctx.get('hostPeerSvc').ping() })
+}
+`)
+      const badDigest = await writePkg(badDir, '0.3.0', `
+export const inject = ['missingPeerSvc']
+export const name = '${pkg}'
+export function apply() { throw new Error('missing inject should keep this blocked') }
+`)
+
+      const profileFile = join(profileDir, 'cordis.yml')
+      await writeFile(profileFile, `- id: target\n  name: ../bundles/pkg-v1/lib/index.js\n`, 'utf8')
+
+      const ctx = new Context()
+      fixtures.push({ ctx, root })
+      ctx.provide('hostPeerSvc' as never, { ping: () => 'ok' } as never)
+      await ctx.plugin(Loader)
+      ctx.loader.builtins.include = Include
+      await ctx.loader.create({
+        id: 'include',
+        name: 'cordis:include',
+        config: { path: pathToFileURL(profileFile).href },
+      } as unknown as Parameters<typeof ctx.loader.create>[0])
+      await ctx.loader.await()
+
+      const runtime = createInProcessReloadRuntime(ctx, {
+        hostGeneration: () => 1,
+        entryId: 'target',
+      })
+
+      // Satisfied subtree change succeeds in artifact-replace mode.
+      const v2Patch = JSON.stringify({ config: { step: 2 } })
+      const ok = await runtime.activate({
+        warrantDigest: digest('a'),
+        previousHostGeneration: 1,
+        previousInProcessGeneration: 1,
+        target: {
+          package: pkg,
+          version: '0.2.0',
+          artifactDigest: v2Digest,
+          patchDigest: computeInProcessPatchDigest(v2Patch),
+          changesProcessSubtree: true,
+          holdsUnprovenProcessAuthority: false,
+          artifact: { sourceDir: v2Dir, config: { step: 2 }, patchContent: v2Patch },
+        },
+      })
+      expect(ok.probe.reloaded).toBe(true)
+      expect((ctx.get('relaxedTestSvc' as never) as unknown as { ver(): string }).ver()).toBe('v2:ok')
+
+      // Unsatisfied subtree change rolls back cleanly to v2!
+      const badPatch = JSON.stringify({ config: { step: 3 } })
+      const failed = await runtime.activate({
+        warrantDigest: digest('b'),
+        previousHostGeneration: 1,
+        previousInProcessGeneration: ok.currentInProcessGeneration,
+        target: {
+          package: pkg,
+          version: '0.3.0',
+          artifactDigest: badDigest,
+          patchDigest: computeInProcessPatchDigest(badPatch),
+          changesProcessSubtree: true,
+          holdsUnprovenProcessAuthority: false,
+          artifact: { sourceDir: badDir, config: { step: 3 }, patchContent: badPatch },
+        },
+      })
+      expect(failed.probe.reloaded).toBe(false)
+      expect(failed.probe.failedChecks).toContain('injections-satisfied')
+      expect(failed.probe.rolledBack).toBe(true)
+      expect((ctx.get('relaxedTestSvc' as never) as unknown as { ver(): string }).ver()).toBe('v2:ok')
+    }
   })
 })

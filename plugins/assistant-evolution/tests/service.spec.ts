@@ -291,7 +291,7 @@ async function harness(options: HarnessOptions = {}) {
     maxInjectedRules: options.maxInjectedRules ?? 12,
     maxEvidenceSamples: options.maxEvidenceSamples ?? 8,
     reconcileIntervalMs: 0,
-    autonomousRollback: options.autonomousRollback ?? false,
+    ...(options.autonomousRollback === undefined ? {} : { autonomousRollback: options.autonomousRollback }),
   }, options.now === undefined ? {} : { now: options.now })
   return { ctx, policy, evaluation, qualityResolver, service, root }
 }
@@ -1467,8 +1467,8 @@ describe('assistant evolution service', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('autonomous rollback is opt-in and never falls back to a proposal', async () => {
-    const fixture = await approvedRule('automation:rollback-disabled')
+  test('autonomous rollback can be explicitly disabled and never falls back to a proposal', async () => {
+    const fixture = await approvedRule('automation:rollback-disabled', { autonomousRollback: false })
     await recordAttributedOutcomes(
       fixture,
       ['failed', 'failed', 'failed', 'failed'],
@@ -1483,6 +1483,43 @@ describe('assistant evolution service', () => {
     expect(authorize).not.toHaveBeenCalled()
     expect(fixture.service.listRules(fixture.agent, 'active')).toHaveLength(1)
     expect(fixture.policy.listPendingApprovalDispatches()).toHaveLength(0)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('autonomous rollback is enabled by default and executes real rollback on regression evidence', async () => {
+    const fixture = await approvedRule('automation:auto-rollback-default')
+    const episodes = await recordAttributedOutcomes(
+      fixture,
+      ['failed', 'failed', 'failed', 'failed'],
+      'auto-rollback-default',
+    )
+    const scope = canonicalEvolutionHostScope({ workspace: '/work/alpha', preset: 'primary' })
+    const result = fixture.service.hostRollbackOne({
+      scope,
+      principal: 'owner:lark:123',
+      operationId: 'default-on-rollback-1',
+      ruleId: fixture.rule.id,
+      expectedVersion: fixture.rule.version,
+    })
+
+    expect(result).toMatchObject({
+      replayed: false,
+      rule: { id: fixture.rule.id, status: 'retired', version: 2 },
+      rollback: {
+        risk: 'low',
+        evaluation: { failures: 4, total: 4 },
+        baseline: { failures: 4, total: 4 },
+        evidence: { total: 4 },
+      },
+    })
+    expect(result.rollback.evidence.sampleEpisodeIds)
+      .toEqual(episodes.toReversed().map(episode => episode.id))
+    expect(fixture.service.guidance(fixture.agent)).toBe('')
+    expect(fixture.service.health()).toMatchObject({
+      activeRules: 0,
+      retiredRules: 1,
+      autonomousRollbacks: 1,
+    })
     await fixture.ctx.fiber.restart()
   })
 

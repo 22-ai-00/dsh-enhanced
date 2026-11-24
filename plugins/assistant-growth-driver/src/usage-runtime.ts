@@ -607,7 +607,9 @@ export class UsageLearningRuntime {
         }
         if (!page.hasMore) break
       }
-      if (this.config.usageLearning.workItemFailures) this.scanWorkItems(owner, scope)
+      if (this.config.usageLearning.workItemFailures
+        && (this.config.usageLearning.workItemAuthorities !== undefined
+          || this.config.usageLearning.workItemRevisionAuthorities !== undefined)) this.scanWorkItems(owner, scope)
       for (const job of this.store.pending(this.lane)) if (job.state === 'queued') {
         if (isWorkItemUsageIntent(job.intent)) { try { this.schedule(job) } catch (error) { if (error instanceof WorkItemSourceObsolete) this.store.settle(job.id, 'superseded', error.message) }; continue }
         try { this.schedule(job) } catch (error) { if (error instanceof ScannerOwnerUnavailable) throw error; this.store.settle(job.id, 'failed', 'schedule-rejected') }

@@ -5,10 +5,9 @@ import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 // WP19 guard: every in-repo caller of a Delivery background/owner notice
-// declares its purpose. `attentionEnforce` stays off by default, so an
-// undeclared caller would only be audited as `result`; this scan makes a new
-// undeclared caller fail here instead. Tests are not scanned: they exercise
-// undeclared legacy sends on purpose.
+// declares its purpose (`attentionEnforce` is enabled by default). This scan
+// catches any new undeclared caller in production sources. Tests are not scanned:
+// opt-out tests may exercise undeclared legacy sends when `attentionEnforce: false`.
 const root = fileURLToPath(new URL('../../../', import.meta.url))
 
 /** Public notice seams: the first argument must declare `attention`. */

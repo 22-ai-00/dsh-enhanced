@@ -2,6 +2,8 @@ import { createHash, createPrivateKey, createPublicKey, sign, verify, type KeyOb
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { gunzipSync } from 'node:zlib'
+import { normalizeCandidatePluginKind, type CandidatePluginKind } from './source-creation.js'
 import { canonicalGrowthJson, validatePluginCreationVerificationCertificate,
   type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateNativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
@@ -220,6 +222,42 @@ interface CallRow { plan_id: string; call_key: string; arguments_digest: string;
   result_json: string | null; job_id: string | null; tool_alias: string | null; foreground_json: string | null;
   claimed_at: number | null; settled_at: number | null }
 
+export function extractPluginKindFromTarGz(tgz: Buffer): CandidatePluginKind | undefined {
+  try {
+    if (!Buffer.isBuffer(tgz) || tgz.length < 3 || tgz[0] !== 0x1f || tgz[1] !== 0x8b) return undefined
+    const tar = gunzipSync(tgz, { maxOutputLength: 4 * 1024 * 1024 })
+    for (let offset = 0; offset + 512 <= tar.length;) {
+      const header = tar.subarray(offset, offset + 512)
+      if (header.every(byte => byte === 0)) break
+      const readStr = (start: number, len: number): string => {
+        const slice = header.subarray(start, start + len)
+        const end = slice.indexOf(0)
+        return slice.subarray(0, end < 0 ? len : end).toString('utf8')
+      }
+      const rawName = readStr(0, 100)
+      const prefix = readStr(345, 155)
+      const fullName = prefix ? `${prefix}/${rawName}` : rawName
+      const sizeStr = readStr(124, 12).trim()
+      const size = sizeStr ? Number.parseInt(sizeStr, 8) : 0
+      const typeFlag = header[156]!
+      offset += 512
+      if (!Number.isSafeInteger(size) || size < 0 || offset + size > tar.length) break
+      if (fullName === 'package/package.json' && (typeFlag === 0 || typeFlag === 48)) {
+        const manifest = JSON.parse(tar.subarray(offset, offset + size).toString('utf8')) as {
+          dsh?: { pluginKind?: unknown; kind?: unknown }
+        }
+        const rawKind = manifest?.dsh?.pluginKind ?? manifest?.dsh?.kind
+        if (rawKind === 'service' || rawKind === 'channel' || rawKind === 'ui') return rawKind
+        return undefined
+      }
+      offset += Math.ceil(size / 512) * 512
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Reservations consume quota before any external invocation; recovery only marks uncertainty. */
 export class CreationCapabilityJournal implements CreationCapabilityJournalPort {
   readonly authorityDigest: string
@@ -232,6 +270,8 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
   /** Usage sealed away by a Docker→Linux handoff; counted against the same grant, never refunded. */
   private inherited = { adoptions: 0, calls: 0 }
   private sealedPlans: ReadonlySet<string> = new Set()
+  private readonly claimedKinds = new Map<string, CandidatePluginKind>()
+  private readonly artifactKinds = new Map<string, CandidatePluginKind | null>()
   constructor(input: { path: string; config: CreationCapabilityConfig }) {
     validateCreationCapabilityConfig(input.config)
     this.config = canonicalCapabilityConfig(input.config)
@@ -334,7 +374,21 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
     if (!compatibleExecution(certificate, this.config)) fail()
     if (json(certificate) !== row.certificate_json || certificate.plan.id !== row.plan_id
       || certificate.plan.artifactSha256 !== row.artifact_sha || certificate.plan.artifactBytes !== row.artifact.length) fail()
-    const record: CreationCapabilityRecord = { planId: row.plan_id, status: row.status, certificate, artifact: Buffer.from(row.artifact) }
+    const artifact = Buffer.from(row.artifact)
+    let pluginKind = this.claimedKinds.get(row.plan_id)
+    if (pluginKind === undefined) {
+      if (!this.artifactKinds.has(row.artifact_sha)) {
+        this.artifactKinds.set(row.artifact_sha, extractPluginKindFromTarGz(artifact) ?? null)
+      }
+      pluginKind = this.artifactKinds.get(row.artifact_sha) ?? undefined
+    }
+    const record: CreationCapabilityRecord = {
+      planId: row.plan_id,
+      status: row.status,
+      ...(pluginKind === undefined || pluginKind === 'tool' ? {} : { pluginKind }),
+      certificate,
+      artifact,
+    }
     if (row.tools_json !== null) {
       if (Buffer.byteLength(row.tools_json) > 65536 || digest(JSON.parse(row.tools_json)) !== row.tools_digest) fail()
       const tools = JSON.parse(row.tools_json) as CreationCapabilityTool[]
@@ -427,8 +481,9 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
     return call
   }
   claim(input: { certificate: CreationCapabilityRecord['certificate']; artifact: Buffer;
-    source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord } {
+    pluginKind?: CandidatePluginKind; source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord } {
     validatePluginCreationVerificationCertificate(input.certificate)
+    const normalizedKind = input.pluginKind === undefined ? undefined : normalizeCandidatePluginKind(input.pluginKind)
     if (!Buffer.isBuffer(input.artifact) || input.artifact.length < 1 || input.artifact.length > 524288) fail()
     const certificate = input.certificate, now = Date.now(), bytes = Buffer.from(input.artifact)
     if (!compatibleExecution(certificate, this.config)) fail()
@@ -453,6 +508,9 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       if (this.sealedPlans.has(certificate.plan.id)) fail()
       const prior = this.row(certificate.plan.id)
       if (prior) {
+        if (normalizedKind !== undefined && normalizedKind !== 'tool') {
+          this.claimedKinds.set(certificate.plan.id, normalizedKind)
+        }
         const record = this.decode(prior)
         if (prior.certificate_digest !== sha(certificateJson) || prior.artifact_sha !== sha(bytes)
           || !record.artifact.equals(bytes)) fail()
@@ -467,6 +525,9 @@ export class CreationCapabilityJournal implements CreationCapabilityJournalPort 
       this.db.prepare("INSERT INTO adoptions(plan_id,status,certificate_json,certificate_digest,artifact,artifact_sha) VALUES (?,'claimed',?,?,?,?)")
         .run(certificate.plan.id, certificateJson, sha(certificateJson), bytes, sha(bytes))
       if (archiveJson !== undefined) this.db.prepare('INSERT INTO source_archives VALUES (?,?)').run(certificate.plan.id, archiveJson)
+      if (normalizedKind !== undefined && normalizedKind !== 'tool') {
+        this.claimedKinds.set(certificate.plan.id, normalizedKind)
+      }
       return { created: true, record: this.decode(this.row(certificate.plan.id)!) }
     })
   }

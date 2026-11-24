@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -12,7 +12,12 @@ import {
   computeInProcessPatchDigest,
 } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { afterEach, describe, expect, test } from 'vitest'
+import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-enhanced/assistant-automations'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import * as releaseModule from '../src/release.ts'
+
+vi.mock('../src/release.ts', async original => ({ ...await original<typeof releaseModule>(), invokeSourceReleaseAdapter: vi.fn() }))
+
 import { coordinateAdoptionHandoff } from '../src/adoption-coordinator.js'
 import { Ed25519ApprovalAuthority, approvalSigningPayload } from '../src/approval.js'
 import { exampleIntegrityPinnedCatalog } from '../src/catalog.js'
@@ -30,12 +35,15 @@ import {
 } from '../src/attestation.js'
 import { ControlPlaneStore, ControlPlaneStoreError, controlPlaneDigest } from '../src/store.js'
 import { resolveSystemdHostAuthority } from '../src/systemd-host-authority.js'
+import { hostAuthorizationPlan } from './helpers/host-authorization.js'
+import { cleanupReleaseFixtures } from './helpers/source-release-runner.js'
 
 const cleanupCallbacks: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const cleanup of cleanupCallbacks.splice(0).reverse()) {
     await cleanup()
   }
+  await cleanupReleaseFixtures()
 })
 import type {
   ApprovalReceipt, HostAttestationEvidence, HostAttestationReceipt, HostAttestationRequest,
@@ -415,7 +423,12 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
     expect(warrant.mode).toBe('artifact-replace')
     expect(warrant.target.artifact).toEqual(artifactSpec)
 
-    // Still refuses denylist, subtree change, and unproven authority even in artifact-replace mode.
+    // Still refuses denylist and unproven authority even in artifact-replace mode,
+    // while allowing changesProcessSubtree: true under artifact-replace.
+    expect(IN_PROCESS_RELOAD_DENYLIST).toEqual([
+      '@dsh-enhanced/plugin-control-plane',
+      '@dsh-enhanced/assistant-delivery',
+    ])
     for (const pkg of IN_PROCESS_RELOAD_DENYLIST) {
       await expect(Promise.resolve().then(() => prepareInProcessReload({
         snapshot: snapshot({
@@ -427,15 +440,28 @@ describe('artifact-replace mode, store isolation, and Host control-plane handoff
         ttlMs: 10_000,
       }))).rejects.toMatchObject({ reason: 'never-hot-reload' })
     }
-    await expect(Promise.resolve().then(() => prepareInProcessReload({
+    const subtreeArtifactWarrant = prepareInProcessReload({
       snapshot: snapshot({
         mode: 'artifact-replace',
         running: { artifactDigest: digest('f'), patchDigest: digest('d') },
-        target: { ...target, changesProcessSubtree: true, artifact: artifactSpec },
+        target: { ...target, package: '@dsh-enhanced/assistant-isolation', changesProcessSubtree: true, artifact: artifactSpec },
       }),
       requestedAt: now,
       ttlMs: 10_000,
-    }))).rejects.toMatchObject({ reason: 'process-subtree-change' })
+    })
+    expect(subtreeArtifactWarrant.mode).toBe('artifact-replace')
+    expect(subtreeArtifactWarrant.target.changesProcessSubtree).toBe(true)
+
+    const larkChannelWarrant = prepareInProcessReload({
+      snapshot: snapshot({
+        mode: 'artifact-replace',
+        running: { artifactDigest: digest('f'), patchDigest: digest('d') },
+        target: { ...target, package: '@dsh-enhanced/lark-channel', changesProcessSubtree: true, artifact: artifactSpec },
+      }),
+      requestedAt: now,
+      ttlMs: 10_000,
+    })
+    expect(larkChannelWarrant.target.package).toBe('@dsh-enhanced/lark-channel')
 
     // Tampered artifact spec after warrant issuance is rejected without calling Host port.
     const { port: host, calls } = port()
@@ -834,20 +860,35 @@ export function apply(ctx) {
       hostAttestationKeys: [],
     }), 'utf8')
 
-    // Unconfigured delivery never registers inProcessReload and PluginControlPlaneService still activates cleanly.
-    const unconfigured = new Context()
-    cleanupCallbacks.push(async () => { await unconfigured.fiber.dispose() })
-    await unconfigured.plugin(AssistantPolicyService, { databasePath: join(root, 'policy-unconf.sqlite') })
-    await unconfigured.plugin(ctx => {
+    // Default delivery registers inProcessReload automatically; explicit enabled: false opts out cleanly.
+    const defaultEnabled = new Context()
+    cleanupCallbacks.push(async () => { await defaultEnabled.fiber.dispose() })
+    await defaultEnabled.plugin(AssistantPolicyService, { databasePath: join(root, 'policy-def.sqlite') })
+    await defaultEnabled.plugin(ctx => {
+      assistantDeliveryPlugin.apply(ctx, {
+        databasePath: join(root, 'delivery-def.sqlite'),
+        spoolPath: join(root, 'spool-def'),
+        defaultWorkspace: root,
+        schedulerEnabled: false,
+      })
+    })
+    await defaultEnabled.plugin(PluginControlPlaneService, { catalogPath, statePath: join(root, 'state-def'), trustPath })
+    expect((defaultEnabled.get('pluginControlPlane' as never) as unknown as PluginControlPlaneService).canInProcessReload()).toBe(true)
+
+    const optedOut = new Context()
+    cleanupCallbacks.push(async () => { await optedOut.fiber.dispose() })
+    await optedOut.plugin(AssistantPolicyService, { databasePath: join(root, 'policy-unconf.sqlite') })
+    await optedOut.plugin(ctx => {
       assistantDeliveryPlugin.apply(ctx, {
         databasePath: join(root, 'delivery-unconf.sqlite'),
         spoolPath: join(root, 'spool-unconf'),
         defaultWorkspace: root,
         schedulerEnabled: false,
+        inProcessReload: { enabled: false },
       })
     })
-    await unconfigured.plugin(PluginControlPlaneService, { catalogPath, statePath: join(root, 'state-unconf'), trustPath })
-    expect((unconfigured.get('pluginControlPlane' as never) as unknown as PluginControlPlaneService).canInProcessReload()).toBe(false)
+    await optedOut.plugin(PluginControlPlaneService, { catalogPath, statePath: join(root, 'state-unconf'), trustPath })
+    expect((optedOut.get('pluginControlPlane' as never) as unknown as PluginControlPlaneService).canInProcessReload()).toBe(false)
 
     await app.plugin(PluginControlPlaneService, { catalogPath, statePath, trustPath })
     const controlPlane = app.get('pluginControlPlane' as never) as unknown as PluginControlPlaneService
@@ -992,4 +1033,400 @@ export function apply() {}
     })
     expect(reloadedCoord.status).toBe('commit-pending')
   })
+
+  test('hot-reloads @dsh-enhanced/lark-channel with omitted profilePath and changesProcessSubtree: true, rolling back on broken inject', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-pcp-lark-sub-')))
+    cleanupCallbacks.push(async () => { await rm(root, { recursive: true, force: true }) })
+
+    class TestJsonInclude extends EntryTree {
+      static [EntryGroup.key] = true
+      filename: string
+      type = 'application/json' as const
+      cache: { content: string; data: unknown } | undefined
+      constructor(ctx: Context, config: { path: string }) {
+        super(ctx)
+        this.filename = config.path.startsWith('file://') ? new URL(config.path).pathname : config.path
+        this.ctx.baseUrl = new URL('.', pathToFileURL(this.filename)).href
+      }
+      dump(data: unknown): string { return JSON.stringify(data, null, 2) }
+      commit(): void {}
+      async refresh(): Promise<void> {
+        const content = readFileSync(this.filename, 'utf8')
+        if (content === this.cache?.content) return
+        const data = JSON.parse(content) as Array<Record<string, unknown>>
+        this.cache = { content, data }
+        await this.root.update(data as never)
+        await this.await()
+      }
+      async *[Service.init]() {
+        yield () => { this.root.stop() }
+        await this.refresh()
+      }
+    }
+
+    const writePkg = async (dir: string, version: string, body: string) => {
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'package.json'), JSON.stringify({
+        name: '@dsh-enhanced/lark-channel', version, type: 'module', exports: { '.': './lib/index.js' },
+      }))
+      await writeFile(join(dir, 'lib', 'index.js'), body, 'utf8')
+      return computeInProcessArtifactDigest({ sourceDir: dir })
+    }
+
+    const profileDir = join(root, 'profile')
+    const profileFile = join(profileDir, 'cordis.json')
+    const v1Dir = join(root, 'bundles', 'lark-v1')
+    const v2Dir = join(root, 'bundles', 'lark-v2')
+    const v3BadDir = join(root, 'bundles', 'lark-v3-bad')
+    await mkdir(profileDir, { recursive: true })
+
+    const v1Digest = await writePkg(v1Dir, '0.1.0', `
+export function apply(ctx, config) {
+  ctx.provide('larkChannelSvc', () => 'lark-v1:' + String(config?.tag ?? 'a'))
+}
+`)
+    const v2Digest = await writePkg(v2Dir, '0.2.0', `
+export function apply(ctx, config) {
+  ctx.provide('larkChannelSvc', () => 'lark-v2:' + String(config?.tag ?? 'b'))
+}
+`)
+    const v3Digest = await writePkg(v3BadDir, '0.3.0', `
+export const inject = ['nonExistentLarkPeer']
+export function apply() {}
+`)
+
+    await writeFile(profileFile, JSON.stringify([
+      { id: 'lark-channel', name: '../bundles/lark-v1/lib/index.js', config: { tag: 'a' } },
+    ], null, 2), 'utf8')
+
+    const app = new Context()
+    cleanupCallbacks.push(async () => { await app.fiber.dispose() })
+    await app.plugin(Loader)
+    app.loader.builtins.include = TestJsonInclude as never
+    await app.loader.create({ id: 'include', name: 'cordis:include', config: { path: pathToFileURL(profileFile).href } } as never)
+    await app.loader.await()
+
+    await app.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite') })
+    await app.plugin(ctx => {
+      assistantDeliveryPlugin.apply(ctx, {
+        databasePath: join(root, 'delivery.sqlite'),
+        spoolPath: join(root, 'spool'),
+        defaultWorkspace: root,
+        schedulerEnabled: false,
+      })
+    })
+
+    const catalogPath = join(root, 'catalog.json')
+    const statePath = join(root, 'state')
+    const trustPath = join(root, 'trust.json')
+    const ownerKey = generateKeyPairSync('ed25519')
+    await writeFile(catalogPath, JSON.stringify(exampleIntegrityPinnedCatalog), 'utf8')
+    await writeFile(trustPath, JSON.stringify({
+      schemaVersion: 1,
+      installationId: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00',
+      ledger: { id: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01', path: join(root, 'cp.sqlite') },
+      dsh: { binaryPath: join(root, 'dsh'), expectedVersion: '0.1.73' },
+      approvalKeys: [{ authority: 'owner', keyId: 'owner-1', publicKeyPem: ownerKey.publicKey.export({ type: 'spki', format: 'pem' }) }],
+      hostAttestationKeys: [],
+    }), 'utf8')
+
+    await app.plugin(PluginControlPlaneService, { catalogPath, statePath, trustPath })
+    const controlPlane = app.get('pluginControlPlane' as never) as unknown as PluginControlPlaneService
+    expect(controlPlane.canInProcessReload()).toBe(true)
+
+    const v2Patch = computeInProcessPatchDigest({ config: { tag: 'b' } })
+    const ok = await controlPlane.reloadInProcess({
+      now,
+      snapshot: {
+        planId: 'plan:lark-subtree',
+        planDigest: digest('a'),
+        status: 'awaiting-reload',
+        activation: { id: 'activation:1', fence: 1 },
+        hostGeneration: 1,
+        inProcessGeneration: 1,
+        running: { artifactDigest: v1Digest, patchDigest: digest('0') },
+        mode: 'artifact-replace',
+        target: {
+          package: '@dsh-enhanced/lark-channel',
+          version: '0.2.0',
+          artifactDigest: v2Digest,
+          patchDigest: v2Patch,
+          changesProcessSubtree: true,
+          holdsUnprovenProcessAuthority: false,
+          artifact: { sourceDir: v2Dir, config: { tag: 'b' } },
+        },
+      },
+    })
+    expect(ok.status).toBe('reloaded')
+    expect((app.get('larkChannelSvc' as never) as unknown as () => string)()).toBe('lark-v2:b')
+
+    const v3Patch = computeInProcessPatchDigest({ config: { tag: 'c' } })
+    const rolled = await controlPlane.reloadInProcess({
+      now,
+      snapshot: {
+        planId: 'plan:lark-subtree-bad',
+        planDigest: digest('b'),
+        status: 'awaiting-reload',
+        activation: { id: 'activation:2', fence: 1 },
+        hostGeneration: 1,
+        inProcessGeneration: 2,
+        running: { artifactDigest: v2Digest, patchDigest: v2Patch },
+        mode: 'artifact-replace',
+        target: {
+          package: '@dsh-enhanced/lark-channel',
+          version: '0.3.0',
+          artifactDigest: v3Digest,
+          patchDigest: v3Patch,
+          changesProcessSubtree: true,
+          holdsUnprovenProcessAuthority: false,
+          artifact: { sourceDir: v3BadDir, config: { tag: 'c' } },
+        },
+      },
+    })
+    expect(rolled.status).toBe('rolled-back')
+    expect((app.get('larkChannelSvc' as never) as unknown as () => string)()).toBe('lark-v2:b')
+  })
+
+  test('AdoptionCoordinatorRuntime buildReloadSnapshot handles pnpm-symlinked node_modules/<pkg> and rejects symlink escapes', async () => {
+    const auth = await hostAuthorizationPlan()
+    cleanupCallbacks.push(async () => { auth.coordinator.close() })
+    const root = auth.f.root
+    const candidate = auth.plan.candidate
+    const pkgParts = candidate.package.split('/')
+    const profileDir = auth.plan.target.profilePath
+    const profileFile = join(profileDir, 'cordis.json')
+    const v1Dir = join(root, 'bundles', 'v1')
+    const pnpmStoreDir = join(profileDir, 'node_modules', '.pnpm', `${candidate.package.replace('/', '+')}@${candidate.version}`, 'node_modules', ...pkgParts)
+    const symlinkPkgDir = join(profileDir, 'node_modules', ...pkgParts)
+    const outsideDir = join(root, 'outside-pkg')
+
+    for (const [dir, tag] of [[v1Dir, 'v1'], [pnpmStoreDir, 'v2-pnpm'], [outsideDir, 'outside']] as const) {
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'package.json'), JSON.stringify({
+        name: candidate.package, version: candidate.version, type: 'module', exports: { '.': './lib/index.js' },
+      }))
+      await writeFile(join(dir, 'lib', 'index.js'), `
+export function apply(ctx) {
+  ctx.provide('pnpmSymlinkSvc', () => '${tag}')
+}
+`, 'utf8')
+    }
+    await mkdir(join(profileDir, 'node_modules', pkgParts[0]!), { recursive: true })
+    await symlink(join('..', '.pnpm', `${candidate.package.replace('/', '+')}@${candidate.version}`, 'node_modules', ...pkgParts), symlinkPkgDir)
+    await writeFile(profileFile, JSON.stringify([
+      { id: 'candidate', name: '../../bundles/v1/lib/index.js', config: {} },
+    ], null, 2), 'utf8')
+
+    // Advance the staged plan to awaiting-reload
+    let currentPlan = auth.coordinator.recordActivationHostInputWitness(auth.witnessInput)
+    currentPlan = auth.coordinator.markActivationHostExposure({
+      planId: currentPlan.id, expectedRevision: currentPlan.revision, fence: currentPlan.activation!.fence,
+    })
+    currentPlan = auth.coordinator.advanceActivation({
+      planId: currentPlan.id, expectedRevision: currentPlan.revision, fence: currentPlan.activation!.fence,
+      from: 'staging', to: 'awaiting-reload',
+    })
+    const planIdOk = currentPlan.id
+
+    class TestJsonInclude extends EntryTree {
+      static [EntryGroup.key] = true
+      filename: string
+      type = 'application/json' as const
+      cache: { content: string; data: unknown } | undefined
+      constructor(ctx: Context, config: { path: string }) {
+        super(ctx)
+        this.filename = config.path.startsWith('file://') ? new URL(config.path).pathname : config.path
+        this.ctx.baseUrl = new URL('.', pathToFileURL(this.filename)).href
+      }
+      dump(data: unknown): string { return JSON.stringify(data, null, 2) }
+      commit(): void {}
+      async refresh(): Promise<void> {
+        const content = readFileSync(this.filename, 'utf8')
+        if (content === this.cache?.content) return
+        const data = JSON.parse(content) as Array<Record<string, unknown>>
+        this.cache = { content, data }
+        await this.root.update(data as never)
+        await this.await()
+      }
+      async *[Service.init]() {
+        yield () => { this.root.stop() }
+        await this.refresh()
+      }
+    }
+
+    const baseTrust = JSON.parse(readFileSync(join(auth.f.root, 'trust.json'), 'utf8')) as Record<string, unknown>
+    const trustPath = join(root, 'trust-coordinator.json')
+    await writeFile(trustPath, JSON.stringify({
+      ...baseTrust,
+      hostAttestor: null,
+      approvalKeys: [{ authority: 'owner', keyId: 'key', publicKeyPem: auth.approvalPublicKeyPem }],
+    }), { mode: 0o600 })
+
+    const app = new Context()
+    cleanupCallbacks.push(async () => { await app.fiber.dispose() })
+    await app.plugin(Loader)
+    app.loader.builtins.include = TestJsonInclude as never
+    await app.loader.create({ id: 'include', name: 'cordis:include', config: { path: pathToFileURL(profileFile).href } } as never)
+    await app.loader.await()
+    expect((app.get('pnpmSymlinkSvc' as never) as unknown as () => string)()).toBe('v1')
+
+    await app.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite') })
+    await app.plugin(ctx => {
+      assistantDeliveryPlugin.apply(ctx, {
+        databasePath: join(root, 'delivery.sqlite'),
+        spoolPath: join(root, 'spool'),
+        defaultWorkspace: root,
+        schedulerEnabled: false,
+        inProcessReload: { profilePath: profileFile, entryId: 'candidate', hostGeneration: 1 },
+      })
+    })
+
+    let coordinatorExecutor: HostAutomationExecutor | undefined
+    let activeDef: { automationId: string; definitionHash: string; activationNonce: string } | undefined
+    app.provide('assistantAutomations' as never, {
+      registerHostExecutor: (exec: HostAutomationExecutor) => {
+        coordinatorExecutor = exec
+        return () => { coordinatorExecutor = undefined }
+      },
+      reconcileSystem: (req: { automationId: string; definition: { execution?: { activationNonce: string } } }) => {
+        activeDef = {
+          automationId: req.automationId,
+          definitionHash: digest('d'),
+          activationNonce: req.definition.execution!.activationNonce,
+        }
+        return {}
+      },
+      inspectSystemOwnedActivation: () => activeDef,
+      registerHostShutdown: () => () => {},
+    } as never)
+
+    await app.plugin(PluginControlPlaneService, {
+      catalogPath: auth.f.options.trust.catalog.path,
+      statePath: join(root, 'coord-state'),
+      trustPath,
+      adoptionCoordinator: {
+        coordinatorId: auth.handoff.coordinatorId,
+        scope: { workspace: root, preset: 'primary', principalId: 'owner', ownerRouteId: 'owner-route' },
+        timeoutMs: 30_000,
+        budgetId: 'adoption-runs',
+        budgetAmount: 2,
+      },
+    })
+
+    for (let i = 0; i < 40 && (!coordinatorExecutor || !activeDef); i++) {
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    expect(coordinatorExecutor).toBeDefined()
+    expect(activeDef).toBeDefined()
+
+    // 1. Pnpm-symlinked package inside profilePath/node_modules succeeds in-process reload
+    const execOk = await coordinatorExecutor!.execute({
+      automationId: activeDef!.automationId,
+      executionMode: 'production',
+      activationNonce: activeDef!.activationNonce,
+      definitionHash: activeDef!.definitionHash,
+      catalogDigest: coordinatorExecutor!.descriptor.catalogDigest,
+      ownerRouteId: 'owner-route',
+      principal: 'owner',
+      targetScope: { workspace: root, preset: 'primary' },
+      signal: new AbortController().signal,
+    } as HostAutomationExecutorInput)
+    expect(execOk, JSON.stringify({ execOk, planStatus: auth.f.store.getPlan(planIdOk).status, activation: auth.f.store.getPlan(planIdOk).activation })).toMatchObject({ outcome: 'succeeded' })
+    expect(auth.f.store.getPlan(planIdOk).activation?.failureCode).toBeUndefined()
+    expect(auth.f.store.getPlan(planIdOk).status).toBe('awaiting-reload')
+    expect((app.get('pnpmSymlinkSvc' as never) as unknown as () => string)()).toBe('v2-pnpm')
+
+    // 2. Symlink escaping outside node_modules (both outside profilePath and inside profilePath/outside-modules) is rejected cleanly and triggers rollback
+    const runEscapeCase = async (targetDir: string) => {
+      const authEsc = await hostAuthorizationPlan()
+      cleanupCallbacks.push(async () => { authEsc.coordinator.close() })
+      const escProfileDir = authEsc.plan.target.profilePath
+      const escProfileFile = join(escProfileDir, 'cordis.json')
+      await mkdir(join(escProfileDir, 'node_modules', pkgParts[0]!), { recursive: true })
+      await writeFile(escProfileFile, '[]\n', 'utf8')
+      const resolvedTarget = targetDir.startsWith('<profile>')
+        ? join(escProfileDir, targetDir.slice('<profile>/'.length))
+        : targetDir
+      if (targetDir.startsWith('<profile>')) {
+        await mkdir(join(resolvedTarget, 'lib'), { recursive: true })
+        await writeFile(join(resolvedTarget, 'package.json'), JSON.stringify({
+          name: candidate.package, version: candidate.version, type: 'module', exports: { '.': './lib/index.js' },
+        }))
+        await writeFile(join(resolvedTarget, 'lib', 'index.js'), 'export function apply() {}\n', 'utf8')
+      }
+      const escLink = join(escProfileDir, 'node_modules', ...pkgParts)
+      await symlink(resolvedTarget, escLink)
+      let escPlan = authEsc.coordinator.recordActivationHostInputWitness(authEsc.witnessInput)
+      escPlan = authEsc.coordinator.markActivationHostExposure({
+        planId: escPlan.id, expectedRevision: escPlan.revision, fence: escPlan.activation!.fence,
+      })
+      escPlan = authEsc.coordinator.advanceActivation({
+        planId: escPlan.id, expectedRevision: escPlan.revision, fence: escPlan.activation!.fence,
+        from: 'staging', to: 'awaiting-reload',
+      })
+      const escBaseTrust = JSON.parse(readFileSync(join(authEsc.f.root, 'trust.json'), 'utf8')) as Record<string, unknown>
+      const escTrustPath = join(authEsc.f.root, 'trust-esc.json')
+      await writeFile(escTrustPath, JSON.stringify({
+        ...escBaseTrust,
+        hostAttestor: null,
+        approvalKeys: [{ authority: 'owner', keyId: 'key', publicKeyPem: authEsc.approvalPublicKeyPem }],
+      }), { mode: 0o600 })
+      const escApp = new Context()
+      cleanupCallbacks.push(async () => { await escApp.fiber.dispose() })
+      await escApp.plugin(AssistantPolicyService, { databasePath: join(authEsc.f.root, 'policy-esc.sqlite') })
+      await escApp.plugin(ctx => {
+        assistantDeliveryPlugin.apply(ctx, {
+          databasePath: join(authEsc.f.root, 'delivery-esc.sqlite'),
+          spoolPath: join(authEsc.f.root, 'spool-esc'),
+          defaultWorkspace: authEsc.f.root,
+          schedulerEnabled: false,
+          inProcessReload: { profilePath: escProfileFile, entryId: 'candidate', hostGeneration: 1 },
+        })
+      })
+      let escExec: HostAutomationExecutor | undefined
+      let escDef: { automationId: string; definitionHash: string; activationNonce: string } | undefined
+      escApp.provide('assistantAutomations' as never, {
+        registerHostExecutor: (exec: HostAutomationExecutor) => { escExec = exec; return () => { escExec = undefined } },
+        reconcileSystem: (req: { automationId: string; definition: { execution?: { activationNonce: string } } }) => {
+          escDef = { automationId: req.automationId, definitionHash: digest('e'), activationNonce: req.definition.execution!.activationNonce }
+          return {}
+        },
+        inspectSystemOwnedActivation: () => escDef,
+        registerHostShutdown: () => () => {},
+      } as never)
+      await escApp.plugin(PluginControlPlaneService, {
+        catalogPath: authEsc.f.options.trust.catalog.path,
+        statePath: join(authEsc.f.root, 'coord-esc'),
+        trustPath: escTrustPath,
+        adoptionCoordinator: {
+          coordinatorId: authEsc.handoff.coordinatorId,
+          scope: { workspace: authEsc.f.root, preset: 'primary', principalId: 'owner', ownerRouteId: 'owner-route' },
+          timeoutMs: 30_000,
+          budgetId: 'adoption-runs',
+          budgetAmount: 2,
+        },
+      })
+      for (let i = 0; i < 40 && (!escExec || !escDef); i++) {
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      expect(escExec).toBeDefined()
+      const execEscape = await escExec!.execute({
+        automationId: escDef!.automationId,
+        executionMode: 'production',
+        activationNonce: escDef!.activationNonce,
+        definitionHash: escDef!.definitionHash,
+        catalogDigest: escExec!.descriptor.catalogDigest,
+        ownerRouteId: 'owner-route',
+        principal: 'owner',
+        targetScope: { workspace: authEsc.f.root, preset: 'primary' },
+        signal: new AbortController().signal,
+      } as HostAutomationExecutorInput)
+      expect(execEscape.outcome).toBe('succeeded')
+      const escapedPlan = authEsc.f.store.getPlan(escPlan.id)
+      expect(escapedPlan.status).toBe('rollback-pending')
+      expect(escapedPlan.activation?.failureCode).toBe('in-process-reload-error')
+    }
+    await runEscapeCase(outsideDir)
+    await runEscapeCase('<profile>/outside-modules')
+  }, 45_000)
 })

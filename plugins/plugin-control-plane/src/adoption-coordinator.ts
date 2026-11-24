@@ -52,6 +52,9 @@ export interface AdoptionInProcessReloadHook {
     | { status: 'reloaded'; plan: PluginActivationPlan }
     | { status: 'rolled-back' | 'rollback-pending'; plan?: PluginActivationPlan; failureCode?: string }
   >
+  rollback?(plan: PluginActivationPlan, failureCode: string): Promise<
+    | { status: 'rolled-back' | 'rollback-pending'; plan?: PluginActivationPlan; failureCode?: string }
+  >
 }
 
 /**
@@ -72,12 +75,26 @@ export async function coordinateAdoptionHandoff(options: {
     await options.assertCurrent?.()
     options.signal?.throwIfAborted()
   }
+  let inProcessReloadApplied = false
   const finishRollback = async (plan: PluginActivationPlan): Promise<PluginActivationPlan> => {
     if (plan.status !== 'rollback-pending' || plan.activation === undefined) return plan
-    const rollback = plan
+    let rollback = plan
+    if (inProcessReloadApplied && options.inProcessReload?.rollback) {
+      const failureCode = rollback.activation?.failureCode ?? 'adoption-rollback'
+      try {
+        const rb = await options.inProcessReload.rollback(rollback, failureCode)
+        if (rb.plan !== undefined) rollback = rb.plan
+        if (rb.status === 'rolled-back' && (rollback.status === 'rolled-back' || options.trust.hostAttestor === undefined)) {
+          return rollback
+        }
+      } catch {
+        // Fall through to physical recovery path if in-process rollback throws.
+      }
+    }
+    if (rollback.status !== 'rollback-pending' || rollback.activation === undefined) return rollback
     const activation = rollback.activation
-    if (activation === undefined) return rollback
     if (activation.rollbackProfileRestored) {
+      if (inProcessReloadApplied && options.trust.hostAttestor === undefined) return rollback
       await current()
       return probePluginPlan({ store: options.store, trust: options.trust, planId: rollback.id,
         expectedRevision: rollback.revision, expectedFence: activation.fence, deferCommit: true, ...(options.signal === undefined ? {} : { signal: options.signal }) })
@@ -126,8 +143,21 @@ export async function coordinateAdoptionHandoff(options: {
       if (plan.activation === undefined) throw new Error('plugin-control-plane: adoption plan awaiting Host attestation has no fence')
       options.store.assertAdoptionHandoff(plan.id)
       if (plan.status === 'awaiting-reload' && options.inProcessReload?.canHandle(plan)) {
-        const outcome = await options.inProcessReload.execute(plan)
+        let outcome: Awaited<ReturnType<AdoptionInProcessReloadHook['execute']>>
+        try {
+          outcome = await options.inProcessReload.execute(plan)
+        } catch {
+          const failureCode = 'in-process-reload-error'
+          if (options.inProcessReload.rollback) {
+            try {
+              const rb = await options.inProcessReload.rollback(plan, failureCode)
+              if (rb.status === 'rolled-back' && rb.plan !== undefined) return rb.plan
+            } catch { /* fall through to recoverExpired */ }
+          }
+          return recoverExpired(plan, failureCode)
+        }
         if (outcome.status === 'reloaded') {
+          inProcessReloadApplied = true
           plan = outcome.plan
         } else if (outcome.status === 'rolled-back' && outcome.plan !== undefined) {
           return outcome.plan
@@ -135,8 +165,20 @@ export async function coordinateAdoptionHandoff(options: {
           return recoverExpired(outcome.plan ?? plan, outcome.failureCode ?? 'in-process-reload-failed')
         }
       } else {
-        plan = await probePluginPlan({ store: options.store, trust: options.trust, planId: plan.id,
-          expectedRevision: plan.revision, expectedFence: plan.activation.fence, deferCommit: true, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+        try {
+          plan = await probePluginPlan({ store: options.store, trust: options.trust, planId: plan.id,
+            expectedRevision: plan.revision, expectedFence: plan.activation.fence, deferCommit: true, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+        } catch (error) {
+          if (inProcessReloadApplied) {
+            const latest = options.store.getPlan(plan.id)
+            const failureCode = latest.status === 'awaiting-readiness' ? 'in-process-readiness-failed' : 'in-process-adoption-probe-failed'
+            return recoverExpired(latest, failureCode)
+          }
+          throw error
+        }
+        if (plan.status === 'rollback-pending' && inProcessReloadApplied) {
+          return finishRollback(plan)
+        }
       }
     } else if (plan.status === 'commit-pending') {
       return plan
@@ -163,7 +205,14 @@ export class AdoptionCoordinatorRuntime {
   private unregister?: () => void
   private closing?: Promise<void>
   private lastError: string | null = null
-  constructor(private readonly options: { config: AdoptionCoordinatorConfig; store: ControlPlaneStore; trust: PluginControlTrustConfig; automations: Automations; assertCurrent: () => void }) {
+  constructor(private readonly options: {
+    config: AdoptionCoordinatorConfig
+    store: ControlPlaneStore
+    trust: PluginControlTrustConfig
+    automations: Automations
+    assertCurrent: () => void
+    inProcessReload?: AdoptionInProcessReloadHook | (() => AdoptionInProcessReloadHook | undefined)
+  }) {
     validateAdoptionCoordinatorConfig(options.config)
     const identity = controlPlaneDigest({ coordinatorId: options.config.coordinatorId, scope: options.config.scope })
     this.automationId = `adoption-coordinator-${identity.slice(0, 40)}`
@@ -258,8 +307,12 @@ export class AdoptionCoordinatorRuntime {
       } else if (handoffs.length) {
         const handoff = handoffs[this.cursor++ % handoffs.length]!
         began = true
+        const inProcessReload = typeof this.options.inProcessReload === 'function'
+          ? this.options.inProcessReload()
+          : this.options.inProcessReload
         await coordinateAdoptionHandoff({ store: this.options.store, trust: this.options.trust, planId: handoff.planId, signal,
-          assertCurrent: () => this.current(signal) })
+          assertCurrent: () => this.current(signal),
+          ...(inProcessReload === undefined ? {} : { inProcessReload }) })
         this.current(signal)
       }
       this.lastError = null

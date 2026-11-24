@@ -5,12 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { automationDefinitionDigest, type HostAutomationExecutor, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
-import { isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { isSourceOwnerContinuation, validateAnySourceGrowthRunBinding, type AnySourceGrowthRunBinding,
+  type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
+import { captureCreationCapabilitySource } from '../src/creation-capability-source.js'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
 import { cleanedLinuxSourcePreflight, consumeCleanedLinuxSourcePreflight } from '../src/linux-source-preflight.ts'
+import { inspectSourceCreationContext, prepareCreatedPluginWorkspace } from '../src/source-creation.js'
 import { SourceJobRuntime, instructionReviewWindowFor } from '../src/source-jobs.ts'
+import { checkedSourceSnapshot, createIsolatedWorktree } from '../src/source-workspace.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest, createOwnerInstructionReviewFreeze } from '../src/store.ts'
 import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import type { SourceJobRecord, SourceJobsConfig } from '../src/source-job-types.ts'
@@ -1349,3 +1353,188 @@ it.each([undefined, ['modify']] as const)('work-item readiness inherits ordinary
     expect(f.prepare).not.toHaveBeenCalled()
   } finally { await f.runtime.close(); f.store.close() }
 }, 20_000)
+
+it.each([
+  { field: 'pluginKind' as const, kind: 'service' as const },
+  { field: 'kind' as const, kind: 'ui' as const },
+  { field: 'kind' as const, kind: 'channel' as const },
+])('preserves parent $kind ($field) during revise-created when package.json is omitted from input.files', async ({ field, kind }) => {
+  const f = await fixture({ instruction: true, creation: true, allowedModes: ['revise-created'] })
+  const pluginName = `agent-inherit-${kind}`
+  const wtRoot = await realpath(await mkdtemp(join(tmpdir(), 'cp-revise-inherit-')))
+  roots.push(wtRoot)
+  const worker = await createIsolatedWorktree({
+    stateRoot: wtRoot, repository: sharedCreationSource!.repository, baseCommit: sharedCreationSource!.baseCommit, environment: process.env,
+  })
+  try {
+    const createGrant = { id: 'create-parent', expiresAt: Date.now() + 60_000, maxCreates: 2, namePrefix: 'agent-' }
+    const inspected = await inspectSourceCreationContext({
+      repository: sharedCreationSource!.repository, name: pluginName, paths: ['package.json'],
+      baseCommit: sharedCreationSource!.baseCommit, environment: process.env, signal: new AbortController().signal,
+      assertCurrent: () => undefined, grant: createGrant,
+    })
+    const basePkg = JSON.parse(inspected.contents.find(c => c.path === 'package.json')!.content) as Record<string, unknown>
+    const parentPkg = JSON.stringify({
+      ...basePkg,
+      dsh: { ...(basePkg.dsh as Record<string, unknown>), [field]: kind },
+    }, null, 2) + '\n'
+    await prepareCreatedPluginWorkspace({
+      worktree: worker.worktree, baseCommit: sharedCreationSource!.baseCommit, name: pluginName,
+      environment: process.env, signal: new AbortController().signal, assertCurrent: () => undefined,
+      creation: { grant: createGrant, generatorDigest: inspected.generatorDigest },
+      files: [{ path: 'package.json', content: parentPkg }, { path: 'src/index.ts', content: 'export const v = 1\n' }],
+    })
+    const scope = [`plugins/${pluginName}`, 'plugins/README.md', 'pnpm-lock.yaml']
+    const checked = await checkedSourceSnapshot(worker.worktree, sharedCreationSource!.baseCommit, scope, process.env)
+    const now = Date.now()
+    const parentCert: PluginCreationVerificationCertificate = {
+      protocol: 'assistant-growth/creation-verification/v1', verificationId: `verify-${pluginName}`,
+      authority: { protocol: 'assistant-growth/creation-acceptance-authority/v1', authorityId: 'parent-verifier',
+        keyId: 'verifier-key', authorityDigest: hex('auth'), namePrefix: 'agent-', expiresAt: now + 120_000 },
+      plan: { id: 'parent-plan', digest: hex('plan'), name: pluginName, sourceTreeDigest: checked.checkedTreeDigest,
+        sourcePatchDigest: checked.checkedPatchDigest, artifactSha256: hex('art'), artifactBytes: 1024,
+        generatorDigest: inspected.generatorDigest },
+      source: { referenceDigest: hex('ref'), ownerDigest: hex('own'), growthRunDigest: hex('run') },
+      contractDigest: hex('contract'), schemaDigest: hex('schema'),
+      environment: { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' },
+      model: { provider: 'fixture', model: 'model' },
+      budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 2 },
+      sessions: { contract: 'contract-s', sourceReview: 'review-s' },
+      observations: [{ caseId: 'c1', jobId: 'j1', operationDigest: hex('op1'), observationDigest: hex('ob1') },
+        { caseId: 'c2', jobId: 'j2', operationDigest: hex('op2'), observationDigest: hex('ob2') }],
+      reviewDigest: hex('review'), verifiedAt: now - 1000, expiresAt: now + 120_000, signature: 'A'.repeat(86),
+    }
+    const parentSource = await captureCreationCapabilitySource({
+      worktree: worker.worktree, baseCommit: sharedCreationSource!.baseCommit,
+      scope: [...scope].sort(), certificate: parentCert, environment: process.env, signal: new AbortController().signal,
+    })
+
+    const revisionFiles = [{ path: 'src/index.ts', content: 'export const v = 2\n' }]
+    const instructionId = `instruction-inherit-${kind}`
+    const reviewFreeze = createOwnerInstructionReviewFreeze({
+      supplier: { provider: 'supplier', model: 'review-model' },
+      budget: {
+        protocol: 'plugin-control-plane/owner-instruction-review-budget/v1',
+        authority: { ...instructionReviewAuthority, namePrefix: 'agent-' },
+        verifierKeyDigest: 'a'.repeat(64),
+        window: instructionReviewWindowFor({ linuxBackend: true, verification: true, regression: false, adoption: false }),
+      },
+    })
+    const storedInstr = f.store.recordOwnerInstruction({
+      instructionId, ownerReceipt: receipt(), ownerRouteId: OWNER.ownerRouteId,
+      planId: 'parent-plan', pluginName,
+      filesDigest: controlPlaneDigest(revisionFiles),
+      createdAt: Date.now(), expiresAt: Date.now() + 900_000,
+      idempotencyKey: `instr-inherit-${kind}`, review: reviewFreeze,
+    })
+    const gap = f.store.recordGap({
+      idempotencyKey: `owner-instruction:${instructionId}`, capability: `plugin-revision:${pluginName}`,
+      context: 'instruction', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0,
+    })
+
+    const revConfig: SourceJobsConfig = {
+      ...f.config,
+      repository: sharedCreationSource!.repository,
+      revision: { id: 'source-runtime-revise', expiresAt: Date.now() + 30_000, maxRevisions: 2, namePrefix: 'agent-' },
+    }
+    const executors = new Map<string, HostAutomationExecutor>()
+    const regs = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string; version: number; status: 'active' | 'paused' }>()
+    const automations = {
+      registerHostExecutor: (exec: HostAutomationExecutor) => { executors.set(exec.descriptor.executorId, exec); return () => {} },
+      reconcileSystem: (req: SystemAutomationReconcileInput) => {
+        const previous = regs.get(req.automationId)
+        regs.set(req.automationId, {
+          definitionHash: automationDefinitionDigest(req.definition),
+          activationNonce: req.definition.execution!.activationNonce,
+          ownerRouteId: req.definition.execution!.ownerRouteId,
+          version: (previous?.version ?? 0) + 1,
+          status: req.desiredStatus ?? 'active',
+        })
+        return {}
+      },
+      inspectSystemOwnedActivation: (input: { automationId: string }) => regs.get(input.automationId),
+      inspectSystemOwned: (input: { automationId: string }) => {
+        const reg = regs.get(input.automationId)!
+        return {
+          latestTerminalRuns: {},
+          definitionHash: reg.definitionHash,
+          definitionVersion: reg.version,
+          automationStatus: reg.status,
+        }
+      },
+    }
+    const runtime = new SourceJobRuntime({
+      config: revConfig, build: f.build, statePath: f.root, store: f.store,
+      ports: { automations: automations as never, delivery: f.delivery },
+      trust: async () => f.trust as never,
+      verifyPreparedRevision: vi.fn(async () => {}),
+      prepare: async (job, _signal, assertCurrent) => {
+        await assertCurrent()
+        return f.store.createSourcePlan({
+          gapId: job.intent.gapId, repository: job.intent.repository, worktree: job.intent.worktree,
+          baseCommit: job.intent.baseCommit, name: job.intent.name,
+          generatorDigest: job.intent.revision!.generatorDigest,
+          scope: ['plugins/README.md', `plugins/${job.intent.name}`, 'pnpm-lock.yaml'].sort(),
+          mode: 'prepared-revise',
+          revision: job.intent.revision!,
+          ttlMs: job.intent.ttlMs,
+          idempotencyKey: `source-job-plan:${job.id}`,
+          sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! },
+          prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: evidence() as SourcePreparedEvidence },
+        }).result
+      },
+      inspectRevisionParent: () => ({
+        name: pluginName,
+        parent: {
+          planId: 'parent-plan', certificateDigest: controlPlaneDigest(parentCert),
+          artifactSha256: parentCert.plan.artifactSha256, sourceArchiveDigest: hex('arch'), sourceDigest: parentSource.digest,
+        },
+        source: parentSource,
+        certificate: parentCert,
+      }),
+    })
+    runtime.start()
+    try {
+      // 1) Explicit pluginKind disagreeing with inherited parent manifest rejects
+      await expect(runtime.enqueue({
+        gapId: gap.id, name: pluginName, repository: sharedCreationSource!.repository,
+        files: revisionFiles, mode: 'revise-created', parentPlanId: 'parent-plan',
+        pluginKind: 'tool',
+        ownerInstruction: { instructionId, digest: controlPlaneDigest(storedInstr) },
+        idempotencyKey: `revise-disagree-${kind}`, expectedBaseCommit: sharedCreationSource!.baseCommit, ttlMs: 900_000,
+        owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined,
+      })).rejects.toThrow(/disagrees with package\.json manifest kind/u)
+
+      // 2) Omitting package.json AND omitting pluginKind inherits parent's kind into stored.intent and plan
+      const queued = await runtime.enqueue({
+        gapId: gap.id, name: pluginName, repository: sharedCreationSource!.repository,
+        files: revisionFiles, mode: 'revise-created', parentPlanId: 'parent-plan',
+        ownerInstruction: { instructionId, digest: controlPlaneDigest(storedInstr) },
+        idempotencyKey: `revise-inherit-${kind}`, expectedBaseCommit: sharedCreationSource!.baseCommit, ttlMs: 900_000,
+        owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined,
+      })
+      expect(queued.pluginKind).toBe(kind)
+      const stored = f.store.getSourceJob(queued.id)!
+      expect(stored.intent.pluginKind).toBe(kind)
+
+      const executor = executors.get('plugin-control-plane-source-check')!
+      const reg = regs.get(stored.automationId)!
+      const outcome = await executor.execute({
+        occurrenceId: `occ-${kind}`, automationId: queued.id, definitionHash: reg.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset },
+        principal: OWNER.principalId, ownerRouteId: OWNER.ownerRouteId, activationNonce: reg.activationNonce,
+        catalogDigest: executor.descriptor.catalogDigest, signal: new AbortController().signal,
+      })
+      expect(outcome.outcome).toBe('succeeded')
+      const preparedJob = f.store.getSourceJob(queued.id)!
+      expect(preparedJob.planId).toBeDefined()
+      expect(f.store.getSourcePlan(preparedJob.planId!).pluginKind).toBe(kind)
+    } finally {
+      await runtime.close()
+    }
+  } finally {
+    await worker.remove()
+    await f.runtime.close()
+    f.store.close()
+  }
+}, 40_000)

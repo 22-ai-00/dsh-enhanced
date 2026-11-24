@@ -51,6 +51,7 @@ async function fixture() {
   await ctx.plugin(AssistantDeliveryService, {
     databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
     retryBaseMs: 1, retryMaxMs: 1, ownerRoutes: [authority],
+    attentionEnforce: false, attentionAttachOverCap: false,
   })
   const service = ctx.assistantDelivery
   const store = (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore

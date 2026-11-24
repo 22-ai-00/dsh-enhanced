@@ -109,7 +109,12 @@ import {
   ownerRouteAuthorityHash,
   ownerRouteBindingSnapshot,
 } from './canonical.js'
-import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
+import {
+  isExactDeliveryCommand,
+  parseDeliveryCommand,
+  type OwnerSelfIterationAction,
+  type ParsedOwnerSelfIterationCommand,
+} from './session-commands.js'
 import { deliveryT1PreferenceKeys, deliveryT1PreferenceValues } from './learning-command.js'
 import {
   assertReplyReplayAllowed,
@@ -530,26 +535,26 @@ export interface Config {
   /** Host-owned stable routes. They are never exposed as Agent tools or prompt input. */
   ownerRoutes?: readonly OwnerRouteAuthority[]
   /**
-   * WP19 stage 2b opt-in (default off): over-cap background/owner notices are
+   * WP19 stage 2b (default on): over-cap background/owner notices are
    * queued as a short body plus a text attachment, and a burst of inline
    * notices that together exceed the cap is rejected as split evasion.
    */
   attentionAttachOverCap?: boolean
   /**
-   * WP19 stage 3 opt-in (default off): background/owner notices whose purpose
+   * WP19 stage 3 (default on): background/owner notices whose purpose
    * is missing or fails the Host checks are rejected before they are queued,
    * as are over-cap notices unless `attentionAttachOverCap` attaches them.
    */
   attentionEnforce?: boolean
   /**
-   * Opt-in (default off): `routeWorkItemReport` keeps a report on the route of
+   * Default on: `routeWorkItemReport` keeps a report on the route of
    * the same item's earlier still-unsettled report, so one lane orders both.
    */
   ownerReportRouting?: { orderAcrossLanes?: boolean }
   /**
-   * Opt-in (default off): widen the deterministic grammar for authenticated
-   * owner replies to one exact result. Off means the legacy exact-phrase parser
-   * and its admission fences are unchanged.
+   * Default on: widen the deterministic grammar for authenticated
+   * owner replies to one exact result. Explicit `false` preserves the legacy
+   * exact-phrase parser and its admission fences.
    * - `coverage`: accept synonym/multilingual result assertions plus an
    *   untrusted trailing reason/evidence clause. Questions, hypotheticals,
    *   quoted prose, negated reports, contradictions, hedges and withdrawal
@@ -563,8 +568,9 @@ export interface Config {
    */
   naturalFeedback?: { coverage?: boolean; mixedIntent?: boolean }
   /**
-   * Opt-in Host-side Cordis in-process reload runtime registration.
-   * When omitted, no `inProcessReload` service is registered and `--dump-config` is unchanged.
+   * Host-side Cordis in-process reload runtime registration (default on).
+   * Set `inProcessReload: { enabled: false }` to opt out. When `profilePath` is
+   * omitted, the runtime resolves it dynamically from the mounted Cordis `include` root.
    */
   inProcessReload?: InProcessReloadServiceConfig
   /**
@@ -578,7 +584,8 @@ export interface Config {
 }
 
 export interface InProcessReloadServiceConfig {
-  profilePath: string
+  enabled?: boolean
+  profilePath?: string
   entryId?: string
   package?: string
   stagingDir?: string
@@ -820,6 +827,28 @@ export interface OwnerAnchoredWorkflowAuthority {
 /** Result of one Host-only owner-anchored learning commit. */
 export type CommitOwnerAnchoredWorkflowTraceServiceResult = CommitOwnerAnchoredWorkflowTraceResult
 
+export interface OwnerSelfIterationControlRequest {
+  readonly action: OwnerSelfIterationAction
+  readonly sourceText: string
+  readonly bindingId: string
+  readonly principalId: string
+  readonly workspace: string
+  readonly agentPreset: string
+  readonly eventId: string
+}
+
+export interface OwnerSelfIterationControlResult {
+  readonly ok: boolean
+  readonly state?: 'enabled' | 'disabled' | 'upgraded'
+  readonly message?: string
+  readonly error?: string
+  readonly reason?: string
+}
+
+export type OwnerSelfIterationControlHandler = (
+  request: Readonly<OwnerSelfIterationControlRequest>,
+) => Promise<OwnerSelfIterationControlResult>
+
 function isOwnerAnchoredGoalsCapability(value: unknown): value is OwnerAnchoredGoalsCapability {
   return typeof value === 'object' && value !== null
     && typeof (value as { inspectOwnerVerifiedWorkflowSource?: unknown }).inspectOwnerVerifiedWorkflowSource === 'function'
@@ -841,14 +870,15 @@ function isOwnerGoalSnapshotLocator(value: unknown): value is OwnerGoalExecution
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
   spoolPath: Schema.string().required(),
-  inProcessReload: Schema.union([Schema.object({
-    profilePath: Schema.string().min(1).required(),
+  inProcessReload: Schema.object({
+    enabled: Schema.boolean().default(true),
+    profilePath: Schema.string().min(1),
     entryId: Schema.string().min(1),
     package: Schema.string().min(1),
     stagingDir: Schema.string().min(1),
     hostGeneration: Schema.number().step(1).min(1),
     timeoutMs: Schema.number().step(1).min(1_000).max(120_000),
-  })]),
+  }),
   restart: Schema.union([Schema.object({
     databasePath: Schema.string().required(),
     ownerRouteId: Schema.string().min(1).required(),
@@ -880,12 +910,12 @@ const configSchema = Schema.object({
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
   toolApprovalPreparationTimeoutMs: Schema.number().step(1).min(100).max(30_000).default(10_000),
-  attentionAttachOverCap: Schema.boolean().default(false),
-  attentionEnforce: Schema.boolean().default(false),
-  ownerReportRouting: Schema.object({ orderAcrossLanes: Schema.boolean().default(false) }),
+  attentionAttachOverCap: Schema.boolean().default(true),
+  attentionEnforce: Schema.boolean().default(true),
+  ownerReportRouting: Schema.object({ orderAcrossLanes: Schema.boolean().default(true) }),
   naturalFeedback: Schema.object({
-    coverage: Schema.boolean().default(false),
-    mixedIntent: Schema.boolean().default(false),
+    coverage: Schema.boolean().default(true),
+    mixedIntent: Schema.boolean().default(true),
   }),
   peerAgents: Schema.array(Schema.object({
     channel: Schema.string().min(1).required(),
@@ -1408,6 +1438,9 @@ export class AssistantDeliveryService extends Service {
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
   private workItemReplyConsumer: WorkItemReplyConsumerRegistration | undefined
   private inboundIntakeObserver: DeliveryInboundIntakeObserver | undefined
+  private ownerSelfIterationHandler:
+    | Readonly<{ token: symbol; handler: OwnerSelfIterationControlHandler; dispose: () => void }>
+    | undefined
   private readonly foregroundTaskCompletionListeners = new Set<() => void>()
   /** Send-time withdrawal checks for `withdrawable` owner notices, one per (authority, canonical source id). */
   private readonly ownerNotificationWithdrawals = new Map<string, Readonly<{ handle: string; authority: string; sourceId: string; registration: OwnerNotificationWithdrawal }>>()
@@ -1426,6 +1459,7 @@ export class AssistantDeliveryService extends Service {
     bindingVersion: number; principalRecordId: string; principalVersion: number; linkedToId: string;
     sourceEventId: string; sourceInboxId: string; turn: number }>>()
   private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => DeliveryGoalWakeResultPublication>()
+  private tickFlight: Promise<void> | undefined
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
   private workflowTraceFlight: Promise<void> | undefined
@@ -1504,22 +1538,25 @@ export class AssistantDeliveryService extends Service {
       || config.restart.databasePath === config.databasePath || !this.ownerRoutes.has(config.restart.ownerRouteId))) {
       throw new Error('assistant-delivery: restart requires a separate absolute journal and an exact configured owner route')
     }
-    if (config.inProcessReload !== undefined) {
-      const reloadConfig = config.inProcessReload
-      if (!isAbsolute(reloadConfig.profilePath)
-        || (reloadConfig.stagingDir !== undefined && !isAbsolute(reloadConfig.stagingDir))) {
-        throw new Error('assistant-delivery: inProcessReload requires absolute profilePath and stagingDir paths')
-      }
-      if (reloadConfig.package !== undefined && IN_PROCESS_RELOAD_DENYLIST.includes(reloadConfig.package)) {
+    const reloadConfig = config.inProcessReload
+    if (reloadConfig?.profilePath !== undefined && !isAbsolute(reloadConfig.profilePath)) {
+      throw new Error('assistant-delivery: inProcessReload requires absolute profilePath and stagingDir paths')
+    }
+    if (reloadConfig?.stagingDir !== undefined && !isAbsolute(reloadConfig.stagingDir)) {
+      throw new Error('assistant-delivery: inProcessReload requires absolute profilePath and stagingDir paths')
+    }
+    if (reloadConfig?.enabled !== false) {
+      if (reloadConfig?.package !== undefined && IN_PROCESS_RELOAD_DENYLIST.includes(reloadConfig.package)) {
         throw new Error(`assistant-delivery: inProcessReload package ${reloadConfig.package} is denied`)
       }
       const runtime = createInProcessReloadRuntime(ctx, {
-        profilePath: reloadConfig.profilePath,
-        ...(reloadConfig.entryId === undefined ? {} : { entryId: reloadConfig.entryId }),
-        ...(reloadConfig.package === undefined ? {} : { package: reloadConfig.package }),
-        ...(reloadConfig.stagingDir === undefined ? {} : { stagingDir: reloadConfig.stagingDir }),
-        hostGeneration: () => reloadConfig.hostGeneration ?? 1,
-        ...(reloadConfig.timeoutMs === undefined ? {} : { timeoutMs: reloadConfig.timeoutMs }),
+        ...(reloadConfig?.profilePath === undefined ? {} : { profilePath: reloadConfig.profilePath }),
+        ...(reloadConfig?.entryId === undefined ? {} : { entryId: reloadConfig.entryId }),
+        ...(reloadConfig?.package === undefined ? {} : { package: reloadConfig.package }),
+        ...(reloadConfig?.stagingDir === undefined ? {} : { stagingDir: reloadConfig.stagingDir }),
+        hostGeneration: () => reloadConfig?.hostGeneration ?? 1,
+        isActive: () => this.active,
+        ...(reloadConfig?.timeoutMs === undefined ? {} : { timeoutMs: reloadConfig.timeoutMs }),
       })
       ctx.reflect.provide('inProcessReload', runtime, () => this.active)
     }
@@ -1672,6 +1709,8 @@ export class AssistantDeliveryService extends Service {
           this.dispatchWorkflowCommand(binding, envelope, command),
         dispatchLearningCommand: (binding, envelope, action, preferenceKey) =>
           this.dispatchLearningCommand(binding, envelope, action, preferenceKey),
+        dispatchOwnerSelfIterationCommand: (binding, envelope, command) =>
+          this.dispatchOwnerSelfIterationCommand(binding, envelope, command),
         authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
@@ -1697,7 +1736,7 @@ export class AssistantDeliveryService extends Service {
           ...(reply.permissionPicker === undefined ? {} : { permissionPicker: reply.permissionPicker }),
         }) },
       }))
-      void this.drainModelSelectionSettlements()
+      void this.drainModelSelectionSettlements().catch(() => {})
       return unregister
     })
     // Register behind Policy's risk reviewer, but before the generic Web remote.
@@ -1759,6 +1798,7 @@ export class AssistantDeliveryService extends Service {
       this.workItemReplyConsumer = undefined
       this.evaluationSink = undefined
       this.workflowTraceSink = undefined
+      this.ownerSelfIterationHandler = undefined
       this.automationPresentationBinding?.dispose()
       this.evolutionPresentationBinding?.dispose()
       this.cancelModelSelectionWaiters()
@@ -1975,7 +2015,7 @@ export class AssistantDeliveryService extends Service {
       createIfMissing: Date.now() < picker.expiresAt,
     })
     if (settlement.result !== undefined) return settlement.result as ModelSelectionResult
-    void this.drainModelSelectionSettlements()
+    void this.drainModelSelectionSettlements().catch(() => {})
     return { status: 'pending' }
   }
 
@@ -3293,6 +3333,30 @@ export class AssistantDeliveryService extends Service {
     return receipt
   }
 
+  registerOwnerSelfIterationHandler(
+    handler: OwnerSelfIterationControlHandler,
+  ): () => void {
+    this.assertActive()
+    if (typeof handler !== 'function') {
+      throw new AssistantDeliveryError('runtime-conflict', 'owner self-iteration control handler is invalid')
+    }
+    if (this.ownerSelfIterationHandler !== undefined) {
+      if (this.ownerSelfIterationHandler.handler === handler) {
+        return this.ownerSelfIterationHandler.dispose
+      }
+      throw new AssistantDeliveryError('runtime-conflict', 'owner self-iteration control handler is already registered')
+    }
+    const token = Symbol('assistant-delivery.owner-self-iteration')
+    let active = true
+    const dispose = () => {
+      if (!active) return
+      active = false
+      if (this.ownerSelfIterationHandler?.token === token) this.ownerSelfIterationHandler = undefined
+    }
+    this.ownerSelfIterationHandler = Object.freeze({ token, handler, dispose })
+    return dispose
+  }
+
   resolveWorkflowAutomationTemplate(input: Readonly<{
     contractVersion: 1
     template: Readonly<WorkflowAutomationTemplate>
@@ -3997,6 +4061,88 @@ export class AssistantDeliveryService extends Service {
     } catch {
       return 'unknown'
     }
+  }
+
+  private async dispatchOwnerSelfIterationCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    command: Readonly<ParsedOwnerSelfIterationCommand>,
+  ): Promise<'forbidden' | 'unavailable' | OwnerSelfIterationControlResult> {
+    if (!this.isOwnerFeedbackController(binding, envelope)) return 'forbidden'
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) return 'forbidden'
+    if (this.ownerLineageForBinding(binding) === undefined) return 'forbidden'
+
+    const request: Readonly<OwnerSelfIterationControlRequest> = Object.freeze({
+      action: command.action,
+      sourceText: command.sourceText,
+      bindingId: binding.id,
+      principalId: externalPrincipalId(binding.principal),
+      workspace: binding.workspace,
+      agentPreset: binding.agentPreset,
+      eventId: envelope.eventId,
+    })
+    if (this.ownerSelfIterationHandler !== undefined) {
+      try {
+        return await this.ownerSelfIterationHandler.handler(request)
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }
+    const ownerConsole = this.context.get('ownerConsole' as never) as Readonly<{
+      controlSelfIteration?: (
+        action: OwnerSelfIterationAction,
+        confirmed: boolean,
+      ) => Promise<Readonly<{
+        ok: boolean
+        state?: 'enabled' | 'disabled' | 'upgraded'
+        error?: string
+        reason?: string
+        note?: string
+        message?: string
+      }>>
+      handleControlAction?: (req: Readonly<Record<string, unknown>>) => Promise<OwnerSelfIterationControlResult>
+    }> | undefined
+    if (typeof ownerConsole?.controlSelfIteration === 'function') {
+      try {
+        const result = await ownerConsole.controlSelfIteration(command.action, true)
+        const message = result.note ?? result.message
+        return {
+          ok: result.ok,
+          ...(result.state === undefined ? {} : { state: result.state }),
+          ...(result.error === undefined ? {} : { error: result.error }),
+          ...(result.reason === undefined ? {} : { reason: result.reason }),
+          ...(message === undefined ? {} : { message }),
+        }
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }
+    if (typeof ownerConsole?.handleControlAction === 'function') {
+      try {
+        return await ownerConsole.handleControlAction(Object.freeze({
+          ownerAuthorized: true,
+          action: command.action,
+        }))
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }
+    return 'unavailable'
   }
 
   private completedPreferenceEvents(
@@ -5309,9 +5455,9 @@ export class AssistantDeliveryService extends Service {
       || workItemReplyCanonical(report.outbox.intent.target.principal) !== workItemReplyCanonical(binding.principal)) return { kind: 'none' }
     let target: WorkItemReportTarget
     try {
+      const payload = this.workItemOutboxReportPayload(report.outbox.intent)
       target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId, reportRevision: report.target.reportRevision,
-        bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey, text: report.outbox.intent.text,
-        format: report.outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+        bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey, ...payload }, true)
     } catch { return { kind: 'none' } }
     if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return { kind: 'none' }
     const continuation = parsed.continuation
@@ -5356,8 +5502,9 @@ export class AssistantDeliveryService extends Service {
     const registration=this.workItemFeedbackFence(intent,recorded), source=intent.source
     const report=this.deliveryStore.workItemReplies.replyReport(this.deliveryStore.getInbox(source.inboxId)!.channel,this.deliveryStore.getInbox(source.inboxId)!.account,source.target.providerMessageId)
     if(!report || report.outbox.id!==source.target.outboxId || !['accepted','delivered','read'].includes(report.outbox.status))throw new Error('work item feedback report changed')
+    const payload=this.workItemOutboxReportPayload(report.outbox.intent)
     const target=this.inspectWorkItemReport({sourceId:registration.sourceId,itemId:source.target.itemId,reportRevision:source.target.reportRevision,
-      bindingId:report.outbox.intent.bindingId,idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,format:report.outbox.intent.format==='markdown'?'markdown':'plain'},true)
+      bindingId:report.outbox.intent.bindingId,idempotencyKey:report.outbox.intent.idempotencyKey,...payload},true)
     if(workItemReplyCanonical(target)!==workItemReplyCanonical(report.target))throw new Error('work item feedback target changed')
     this.workItemFeedbackFence(intent,recorded)
     const peer=this.context.get('assistantWorkItems' as never,false) as unknown as {issueOwnerWorkItemFeedbackTarget?(input:{itemId:string;reportRevision:number;reportDigest:string}):unknown;resolveOwnerWorkItemFeedbackTarget?(capability:unknown):Readonly<TrustedWorkItemOwnerFeedbackProof>|undefined}|undefined
@@ -5741,6 +5888,14 @@ export class AssistantDeliveryService extends Service {
     try { this.currentWorkItemReplyConsumer()?.onCancelled(Object.freeze([...childIds])) }
     catch (error) { this.context.logger.warn(`assistant-delivery: work item reply cancellation failed: ${String(error)}`) }
   }
+  private workItemOutboxReportPayload(intent: OutboxRecord['intent']): { text: string; format: 'markdown' | 'plain' } {
+    return {
+      text: intent.attachment?.text ?? intent.text,
+      format: intent.attachment !== undefined
+        ? (intent.attachment.mediaType === 'text/markdown' ? 'markdown' : 'plain')
+        : (intent.format === 'markdown' ? 'markdown' : 'plain'),
+    }
+  }
   private inspectWorkItemReport(input: { sourceId: string; itemId: string; reportRevision: number; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain' }, historical = false): WorkItemReportTarget {
     const registration = this.currentWorkItemReplyConsumer()
     const binding = this.deliveryStore.getBinding(input.bindingId)
@@ -5975,12 +6130,13 @@ export class AssistantDeliveryService extends Service {
     if (!report || !outbox || !['accepted','delivered','read'].includes(outbox.status) || workItemReplyCanonical(outbox.intent.target.principal) !== workItemReplyCanonical(binding.principal)
       || workItemReplyCanonical(outbox.intent.target.conversation) !== workItemReplyCanonical(envelope.conversation)) return undefined
     try {
+      const payload = this.workItemOutboxReportPayload(outbox.intent)
       const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: report.target.itemId,
         reportRevision: report.target.reportRevision, bindingId: outbox.intent.bindingId, idempotencyKey: outbox.intent.idempotencyKey,
-        text: outbox.intent.text, format: outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+        ...payload }, true)
       if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) return undefined
       if (registration.canContinueReport?.({ itemId:target.itemId,reportRevision:target.reportRevision,bindingId:outbox.intent.bindingId,
-        idempotencyKey:outbox.intent.idempotencyKey,text:outbox.intent.text,format:outbox.intent.format==='markdown'?'markdown':'plain' }) === false) return undefined
+        idempotencyKey:outbox.intent.idempotencyKey,...payload }) === false) return undefined
       if (this.currentWorkItemReplyConsumer()!==registration || !this.workItemReplyPermission(binding,registration)) return undefined
     } catch { return undefined }
     return report
@@ -6013,12 +6169,13 @@ export class AssistantDeliveryService extends Service {
   private validateWorkItemReply(source: WorkItemReplySource): void {
     const registration = this.workItemReplyFence(source)
     const report = this.deliveryStore.workItemReplies.report(source.target.outboxId)!
+    const payload = this.workItemOutboxReportPayload(report.outbox.intent)
     const target = this.inspectWorkItemReport({ sourceId: registration.sourceId, itemId: source.target.itemId,
       reportRevision: source.target.reportRevision, bindingId: report.outbox.intent.bindingId, idempotencyKey: report.outbox.intent.idempotencyKey,
-      text: report.outbox.intent.text, format: report.outbox.intent.format === 'markdown' ? 'markdown' : 'plain' }, true)
+      ...payload }, true)
     if (workItemReplyCanonical(target) !== workItemReplyCanonical(report.target)) throw new Error('work item reply report changed')
     if (registration.canContinueReport?.({itemId:target.itemId,reportRevision:target.reportRevision,bindingId:report.outbox.intent.bindingId,
-      idempotencyKey:report.outbox.intent.idempotencyKey,text:report.outbox.intent.text,format:report.outbox.intent.format==='markdown'?'markdown':'plain'})===false) throw new Error('report continuation authority expired')
+      idempotencyKey:report.outbox.intent.idempotencyKey,...payload})===false) throw new Error('report continuation authority expired')
     if (this.workItemReplyFence(source) !== registration) throw new Error('work item reply authority changed')
   }
   listPendingWorkItemReplies(input: WorkItemReplyListInput): { items: readonly WorkItemReplySource[]; hasMore: boolean; nextAfterSequence: number | null } {
@@ -8157,7 +8314,18 @@ export class AssistantDeliveryService extends Service {
   async tick(): Promise<void> {
     // Timer-driven entry: a tick that fires after dispose is a no-op, not an error.
     if (!this.active) return
+    if (this.tickFlight !== undefined) return await this.tickFlight
+    const flight = this.runTick().finally(() => {
+      if (this.tickFlight === flight) this.tickFlight = undefined
+    })
+    this.tickFlight = flight
+    await flight
+  }
+
+  private async runTick(): Promise<void> {
+    if (!this.active) return
     await this.drainInboundAdmissions()
+    if (!this.active) return
     this.drainRestartContinuations()
     const restartFence = this.deliveryStore.getRestartFence()
     if (restartFence !== undefined) {
@@ -8167,22 +8335,34 @@ export class AssistantDeliveryService extends Service {
       }
     }
     const maintenance = this.restartStore?.listRequests({ statuses: ['requested', 'checkpoint', 'ready', 'restarting', 'restarted'], limit: 1 })
-    if (maintenance === undefined || maintenance.length === 0) await this.inbound.tick()
+    if (maintenance === undefined || maintenance.length === 0) {
+      await this.inbound.tick()
+      if (!this.active) return
+    }
     this.drainRestartFailureNotices()
     await this.drainInterruptedInboxNotices()
+    if (!this.active) return
     await this.drainModelSelectionSettlements()
+    if (!this.active) return
     this.drainApprovalDispatches()
+    if (!this.active) return
     await this.outbound.tick()
+    if (!this.active) return
     await this.drainDeliveryPresentations()
+    if (!this.active) return
     await this.drainPreferenceProjections()
+    if (!this.active) return
     await this.drainNaturalObjectiveIntents()
+    if (!this.active) return
     await this.drainWorkItemFeedback()
+    if (!this.active) return
     await this.drainWorkflowTraces()
   }
 
   async whenIdle(): Promise<void> {
     this.assertActive()
     await Promise.all([
+      this.tickFlight,
       this.inbound.whenIdle(),
       this.outbound.whenIdle(),
       this.modelSelectionFlight,
@@ -8200,9 +8380,9 @@ export class AssistantDeliveryService extends Service {
   start(): void {
     this.assertActive()
     if (this.timer !== undefined) return
-    this.timer = setInterval(() => void this.tick(), this.config.tickIntervalMs)
+    this.timer = setInterval(() => void this.tick().catch(() => {}), this.config.tickIntervalMs)
     this.timer.unref?.()
-    void this.tick()
+    void this.tick().catch(() => {})
   }
 
   async stop(): Promise<void> {
@@ -8498,7 +8678,17 @@ export class AssistantDeliveryService extends Service {
             timeout.unref?.()
           }),
         ])
+    const tickDrain = this.tickFlight === undefined
+      ? undefined
+      : Promise.race([
+          this.tickFlight.catch(() => {}),
+          new Promise<void>(resolve => {
+            const timeout = setTimeout(resolve, Math.max(1, Math.floor(this.config.leaseMs / 3)))
+            timeout.unref?.()
+          }),
+        ])
     await Promise.all([
+      tickDrain,
       this.inbound.stop(),
       this.outbound.stop(),
       admissionRecovery,
@@ -8589,7 +8779,7 @@ export class AssistantDeliveryService extends Service {
       && this.preferenceProjectionRetryTimer === undefined) {
       this.preferenceProjectionRetryTimer = setTimeout(() => {
         this.preferenceProjectionRetryTimer = undefined
-        if (this.active) void this.drainPreferenceProjections()
+        if (this.active) void this.drainPreferenceProjections().catch(() => {})
       }, Math.max(1, Math.min(2_147_483_647, nextRetryAt - Date.now())))
       this.preferenceProjectionRetryTimer.unref?.()
     }
@@ -8682,6 +8872,7 @@ export class AssistantDeliveryService extends Service {
   }
 
   private drainApprovalDispatches(): void {
+    if (!this.active) return
     const cursor = this.deliveryStore.getApprovalDispatchCursor()
     const dispatches = this.policy.listPendingApprovalDispatches(100, cursor.after)
     for (const dispatch of dispatches) {
@@ -8908,7 +9099,7 @@ export class AssistantDeliveryService extends Service {
           const delay = Math.max(1, Math.min(2_147_483_647, next - Date.now()))
           this.modelSelectionRetryTimer = setTimeout(() => {
             this.modelSelectionRetryTimer = undefined
-            if (this.active) void this.drainModelSelectionSettlements()
+            if (this.active) void this.drainModelSelectionSettlements().catch(() => {})
           }, delay)
           this.modelSelectionRetryTimer.unref?.()
         }

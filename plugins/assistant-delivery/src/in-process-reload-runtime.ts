@@ -45,8 +45,6 @@ const MAX_TIMEOUT_MS = 120_000
 export const IN_PROCESS_RELOAD_DENYLIST: readonly string[] = Object.freeze([
   '@dsh-enhanced/plugin-control-plane',
   '@dsh-enhanced/assistant-delivery',
-  '@dsh-enhanced/assistant-isolation',
-  '@dsh-enhanced/lark-channel',
 ])
 
 const DENIED_PACKAGES = new Set(IN_PROCESS_RELOAD_DENYLIST)
@@ -186,11 +184,12 @@ export interface InProcessReloadRuntime {
 }
 
 export interface InProcessReloadRuntimeOptions {
-  profilePath: string
+  profilePath?: string
   entryId?: string
   package?: string
   stagingDir?: string
   hostGeneration: () => number
+  isActive?: () => boolean
   apply?: () => Promise<void> | void
   restore?: () => Promise<void> | void
   timeoutMs?: number
@@ -356,7 +355,7 @@ export function stageInProcessArtifact(options: {
   if (DENIED_PACKAGES.has(target.package)) {
     throw new Error(`in-process reload target ${target.package} is denied and requires a process restart`)
   }
-  if (target.changesProcessSubtree || target.holdsUnprovenProcessAuthority) {
+  if (target.holdsUnprovenProcessAuthority) {
     throw new Error(`in-process reload target ${target.package} requires a process restart`)
   }
   if (!DIGEST.test(target.artifactDigest)) {
@@ -573,14 +572,71 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     throw new Error(`in-process reload target ${options.package} is denied and requires a process restart`)
   }
   const defaultEntryId = options.entryId !== undefined ? normalizeEntryId(options.entryId) : undefined
-  const profileFile = resolveProfileFilePath(options.profilePath)
-  const profileUrl = pathToFileURL(profileFile).href
-  const stagingDir = options.stagingDir ?? join(dirname(profileFile), '.dsh-in-process-artifacts')
   const timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(1_000, options.timeoutMs ?? DEFAULT_TIMEOUT_MS))
   const pid = process.pid
   const invocationId = /^[a-f0-9]{32}$/u.test(process.env.INVOCATION_ID ?? '') ? process.env.INVOCATION_ID! : null
   let inProcessGeneration = 1
   let lastBaseline: ArtifactRollbackBaseline | undefined
+
+  function assertRuntimeActive(): void {
+    if (options.isActive && !options.isActive()) {
+      throw new Error('assistant-delivery inProcessReload runtime is disposed')
+    }
+  }
+
+  function resolveIncludeRootEntry(activeLoader?: RuntimeLoader): RuntimeEntry {
+    const active = activeLoader ?? loader()
+    let root: unknown
+    try { root = active.resolve('include') } catch { throw new Error('the Cordis include root is not mounted') }
+    if (!root || typeof root !== 'object') throw new Error('the Cordis include root is not mounted')
+    const rootEntry = root as RuntimeEntry
+    const tree = rootEntry.subtree
+    if (rootEntry.options?.id !== 'include' || rootEntry.options.name !== 'cordis:include'
+      || rootEntry.parent !== active.root || !tree || tree.ctx?.fiber?.entry !== rootEntry) {
+      throw new Error('the Cordis include root is not the profile include tree')
+    }
+    return rootEntry
+  }
+
+  function resolveProfileContext(activeLoader?: RuntimeLoader): {
+    profileFile: string
+    profileUrl: string
+    stagingDir: string
+  } {
+    if (options.profilePath !== undefined) {
+      const profileFile = resolveProfileFilePath(options.profilePath)
+      return {
+        profileFile,
+        profileUrl: pathToFileURL(profileFile).href,
+        stagingDir: options.stagingDir ?? join(dirname(profileFile), '.dsh-in-process-artifacts'),
+      }
+    }
+    const rootEntry = resolveIncludeRootEntry(activeLoader)
+    const tree = rootEntry.subtree
+    const config = rootEntry.options?.config
+    const configuredPath = config && typeof config === 'object' && !Array.isArray(config)
+      ? (config as Record<string, unknown>).path : undefined
+    let rawProfilePath: string | undefined
+    if (typeof tree?.filename === 'string' && tree.filename.length > 0) {
+      rawProfilePath = tree.filename.startsWith('file://') ? fileURLToPath(tree.filename) : tree.filename
+    } else if (typeof configuredPath === 'string' && configuredPath.length > 0) {
+      if (configuredPath.startsWith('file://')) {
+        rawProfilePath = fileURLToPath(configuredPath)
+      } else {
+        const base = tree?.ctx?.baseUrl
+        rawProfilePath = base ? fileURLToPath(new URL(configuredPath, base)) : configuredPath
+      }
+    }
+    if (!rawProfilePath) {
+      throw new Error('the Cordis include root does not expose a profile file path')
+    }
+    const profileFile = resolveProfileFilePath(rawProfilePath)
+    return {
+      profileFile,
+      profileUrl: pathToFileURL(profileFile).href,
+      stagingDir: options.stagingDir ?? join(dirname(profileFile), '.dsh-in-process-artifacts'),
+    }
+  }
 
   function withDeadline<T>(work: () => Promise<T>, label = 'operation'): Promise<T> {
     return new Promise<T>((resolvePromise, rejectPromise) => {
@@ -598,7 +654,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     return value
   }
 
-  function resolveEntryId(active: RuntimeLoader, target: InProcessReloadRuntimeTarget, allowSearch: boolean): string {
+  function resolveEntryId(active: RuntimeLoader, target: InProcessReloadRuntimeTarget, profileFile: string, allowSearch: boolean): string {
     if (target.entryId !== undefined) return normalizeEntryId(target.entryId)
     if (defaultEntryId !== undefined) return defaultEntryId
     if (!allowSearch) throw new Error('in-process reload requires an entryId')
@@ -606,9 +662,10 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     const store = rootEntry?.subtree?.store ?? {}
     for (const [id, entry] of Object.entries(store)) {
       if (entry?.options?.name === target.package) return id
-      if (typeof entry?.options?.name === 'string' && rootEntry?.subtree?.ctx?.baseUrl) {
+      if (typeof entry?.options?.name === 'string') {
         try {
-          const resolved = fileURLToPath(new URL(entry.options.name, rootEntry.subtree.ctx.baseUrl))
+          const baseUrl = rootEntry?.subtree?.ctx?.baseUrl ?? pathToFileURL(profileFile).href
+          const resolved = fileURLToPath(new URL(entry.options.name, baseUrl))
           const pkgInfo = findPackageRootForEntry(resolved)
           if (pkgInfo?.packageName === target.package) return id
         } catch {}
@@ -620,31 +677,41 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
   function resolveMount(
     target: InProcessReloadRuntimeTarget,
     optionsResolve?: { allowMissingTarget?: boolean; verifyPackageMatch?: boolean },
-  ): { loader: RuntimeLoader; root: RuntimeEntry; tree: RuntimeTree; target: RuntimeEntry | undefined; localEntryId: string } {
+  ): {
+    loader: RuntimeLoader
+    root: RuntimeEntry
+    tree: RuntimeTree
+    target: RuntimeEntry | undefined
+    localEntryId: string
+    profileFile: string
+    stagingDir: string
+  } {
     const active = loader()
-    let root: unknown
-    try { root = active.resolve('include') } catch { throw new Error('the Cordis include root is not mounted') }
-    if (!root || typeof root !== 'object') throw new Error('the Cordis include root is not mounted')
-    const rootEntry = root as RuntimeEntry
-    const tree = rootEntry.subtree
-    if (rootEntry.options?.id !== 'include' || rootEntry.options.name !== 'cordis:include'
-      || rootEntry.parent !== active.root || !tree || tree.ctx?.fiber?.entry !== rootEntry) {
-      throw new Error('the Cordis include root is not the profile include tree')
-    }
-    const config = rootEntry.options.config
+    const rootEntry = resolveIncludeRootEntry(active)
+    const tree = rootEntry.subtree!
+    const profile = resolveProfileContext(active)
+    const config = rootEntry.options?.config
     const configuredPath = config && typeof config === 'object' && !Array.isArray(config)
       ? (config as Record<string, unknown>).path : undefined
-    if (configuredPath !== profileUrl && tree.filename !== profileFile) {
+    if (options.profilePath !== undefined && configuredPath !== profile.profileUrl && tree.filename !== profile.profileFile) {
       throw new Error('the Cordis include root is not bound to this profile')
     }
     const rootFiber = fiberOf(rootEntry)
     if (!rootFiber || rootFiber.state !== ACTIVE) throw new Error('the Cordis include root is not active')
-    const localEntryId = resolveEntryId(active, target, true)
+    const localEntryId = resolveEntryId(active, target, profile.profileFile, true)
     let resolvedTarget: unknown
     try { resolvedTarget = active.resolve(`include:${localEntryId}`) } catch { resolvedTarget = undefined }
     if (!resolvedTarget || typeof resolvedTarget !== 'object') {
       if (optionsResolve?.allowMissingTarget) {
-        return { loader: active, root: rootEntry, tree, target: undefined, localEntryId }
+        return {
+          loader: active,
+          root: rootEntry,
+          tree,
+          target: undefined,
+          localEntryId,
+          profileFile: profile.profileFile,
+          stagingDir: profile.stagingDir,
+        }
       }
       throw new Error(`the target entry ${localEntryId} is not mounted`)
     }
@@ -668,17 +735,25 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
           ? fileURLToPath(mountedName)
           : tree.ctx?.baseUrl
             ? fileURLToPath(new URL(mountedName, tree.ctx.baseUrl))
-            : resolve(dirname(profileFile), mountedName)
+            : resolve(dirname(profile.profileFile), mountedName)
         const pkgInfo = existsSync(entryAbs) ? findPackageRootForEntry(entryAbs) : undefined
         if (pkgInfo && pkgInfo.packageName !== target.package && (!options.package || pkgInfo.packageName !== options.package)) {
           throw new Error(`the target entry ${localEntryId} is not mounted from ${target.package}`)
         }
       }
     }
-    return { loader: active, root: rootEntry, tree, target: targetEntry, localEntryId }
+    return {
+      loader: active,
+      root: rootEntry,
+      tree,
+      target: targetEntry,
+      localEntryId,
+      profileFile: profile.profileFile,
+      stagingDir: profile.stagingDir,
+    }
   }
 
-  async function profileDigest(): Promise<string> {
+  async function profileDigest(profileFile: string): Promise<string> {
     return createHash('sha256').update(await readFile(profileFile)).digest('hex')
   }
 
@@ -696,7 +771,15 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
   }
 
   async function capture(target: InProcessReloadRuntimeTarget): Promise<{
-    mount: { loader: RuntimeLoader; root: RuntimeEntry; tree: RuntimeTree; target: RuntimeEntry; localEntryId: string }
+    mount: {
+      loader: RuntimeLoader
+      root: RuntimeEntry
+      tree: RuntimeTree
+      target: RuntimeEntry
+      localEntryId: string
+      profileFile: string
+      stagingDir: string
+    }
     identity: MountIdentity
   }> {
     const resolved = resolveMount(target)
@@ -711,7 +794,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
         committed: fiber.committed ?? null,
         state: fiber.state,
         moduleNamespace: entry.moduleNamespace,
-        profileDigest: await profileDigest(),
+        profileDigest: await profileDigest(resolved.profileFile),
         pid,
         invocationId,
         hostGeneration: options.hostGeneration(),
@@ -759,7 +842,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       const mount = resolveMount(target)
       const entry = mount.target!
       const fiber = fiberOf(entry)
-      const currentProfileDigest = await profileDigest()
+      const currentProfileDigest = await profileDigest(mount.profileFile)
       const hostGeneration = options.hostGeneration()
       after = {
         fiber: fiber ?? before.fiber,
@@ -806,7 +889,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     if (typeof tree.await === 'function') await tree.await()
   }
 
-  function assertTarget(target: InProcessReloadRuntimeTarget): void {
+  function assertTarget(target: InProcessReloadRuntimeTarget, optionsAssert?: { allowSubtreeChange?: boolean }): void {
     if (DENIED_PACKAGES.has(target.package)) {
       throw new Error(`in-process reload target ${target.package} is denied and requires a process restart`)
     }
@@ -816,7 +899,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     if (!DIGEST.test(target.artifactDigest) || !DIGEST.test(target.patchDigest)) {
       throw new Error('in-process reload target digests are invalid')
     }
-    if (target.changesProcessSubtree || target.holdsUnprovenProcessAuthority) {
+    if ((!optionsAssert?.allowSubtreeChange && target.changesProcessSubtree) || target.holdsUnprovenProcessAuthority) {
       throw new Error(`in-process reload target ${target.package} requires a process restart`)
     }
   }
@@ -964,6 +1047,8 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     beforeSpec: string,
     tree: RuntimeTree,
     targetPackage: string,
+    profileFile: string,
+    stagingDir: string,
   ): ArtifactRollbackBaseline['backedUpSource'] | undefined {
     const isPathSpec = beforeSpec.startsWith('.') || beforeSpec.startsWith('file://') || isAbsolute(beforeSpec)
     if (!isPathSpec) return undefined
@@ -1004,6 +1089,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     target: InProcessReloadRuntimeTarget,
     expectedHostGeneration: number,
     nonTargetSnapshots: readonly NonTargetSnapshot[],
+    profileFile: string,
   ): Promise<InProcessReloadRuntimeProbe> {
     let checks = 0; let failures = 0
     const failedChecks: string[] = []
@@ -1047,6 +1133,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     target: InProcessReloadRuntimeTarget,
     expectedHostGeneration: number,
     nonTargetSnapshots: readonly NonTargetSnapshot[],
+    profileFile: string,
   ): Promise<{ restored: boolean; rollbackProbe: InProcessReloadRuntimeProbe }> {
     const existingCandidate = tree.store?.[baseline.localEntryId]
     if (existingCandidate) {
@@ -1087,7 +1174,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       const restoredEntry = tree.store?.[baseline.localEntryId]
       await settleEntryAndFiber(restoredEntry)
     }, 'rollback')
-    const rollbackProbe = await probeRestoredBaseline(baseline, target, expectedHostGeneration, nonTargetSnapshots)
+    const rollbackProbe = await probeRestoredBaseline(baseline, target, expectedHostGeneration, nonTargetSnapshots, profileFile)
     return { restored: rollbackProbe.failures === 0 && rollbackProbe.reloaded, rollbackProbe }
   }
 
@@ -1095,14 +1182,15 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     snapshot: () => ({ hostGeneration: options.hostGeneration(), inProcessGeneration }),
 
     async activate(input) {
+      assertRuntimeActive()
       if (!DIGEST.test(input.warrantDigest)) throw new Error('in-process reload warrant digest is invalid')
-      assertTarget(input.target)
+      const artifactReplace = input.target.artifact !== undefined || input.mode === 'artifact-replace'
+      assertTarget(input.target, { allowSubtreeChange: artifactReplace })
       const currentHostGeneration = options.hostGeneration()
       if (input.previousHostGeneration !== currentHostGeneration) {
         throw new Error('in-process reload warrant is bound to another Host generation')
       }
 
-      const artifactReplace = input.target.artifact !== undefined || input.mode === 'artifact-replace'
       if (input.mode === 'artifact-replace' && input.target.artifact === undefined) {
         throw new Error('in-process artifact replacement requires a target artifact descriptor')
       }
@@ -1112,10 +1200,12 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       if (observedGeneration !== input.previousHostGeneration) {
         throw new Error('in-process reload started across a Host generation change')
       }
+      const { profileFile, stagingDir } = before.mount
 
       if (!artifactReplace) {
         try {
           await withDeadline(async () => {
+            assertRuntimeActive()
             if (options.apply) await options.apply()
             await refreshTree(before.mount.tree)
           })
@@ -1148,7 +1238,10 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       let nextProfileText: string
       if (options.apply) {
         try {
-          await withDeadline(async () => { await options.apply!() }, 'apply')
+          await withDeadline(async () => {
+            assertRuntimeActive()
+            await options.apply!()
+          }, 'apply')
           nextProfileText = await readFile(profileFile, 'utf8')
           if (!hasExplicitPatch) {
             verifyCandidatePatchDigest(artifactSpec, input.target, staged.stagedDir, nextProfileText)
@@ -1168,6 +1261,8 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
         before.identity.entry.options?.name ?? '',
         before.mount.tree,
         input.target.package,
+        profileFile,
+        stagingDir,
       )
       const baseline: ArtifactRollbackBaseline = {
         warrantDigest: input.warrantDigest,
@@ -1198,6 +1293,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
         // Phase 2: Persist verified profile update (if not already written by options.apply) & reload entry.
         const collector = attachErrorCollector()
         try {
+          assertRuntimeActive()
           if (!options.apply) writeTextAtomic(profileFile, nextProfileText)
           await withDeadline(async () => {
             await refreshTree(before.mount.tree)
@@ -1226,7 +1322,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       if (disposeOutcome.errors.length === 0) passCheck(); else failCheck('disposer-clean')
       if (startupErrors.length === 0) passCheck(); else failCheck('startup-clean')
 
-      const afterProfileDigest = await profileDigest()
+      const afterProfileDigest = await profileDigest(profileFile)
       if (afterProfileDigest !== before.identity.profileDigest) passCheck(); else failCheck('profile-changed')
       if (afterEntry !== undefined && afterEntry !== before.identity.entry && afterFiber !== undefined) passCheck(); else failCheck('target-present')
       if (afterFiber !== undefined && afterFiber !== before.identity.fiber && afterFiber.uid !== null && afterFiber.uid !== before.identity.uid) passCheck(); else failCheck('new-fiber-replaced')
@@ -1278,6 +1374,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
         input.target,
         input.previousHostGeneration,
         nonTargetSnapshots,
+        profileFile,
       )
       if (rollbackResult.restored) {
         baseline.autoRolledBack = {
@@ -1300,8 +1397,13 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
     },
 
     async rollback(input) {
+      assertRuntimeActive()
       if (!DIGEST.test(input.warrantDigest)) throw new Error('in-process reload warrant digest is invalid')
-      assertTarget(input.target)
+      const allowSubtreeChange = input.target.artifact !== undefined
+        || (lastBaseline !== undefined
+          && lastBaseline.warrantDigest === input.warrantDigest
+          && lastBaseline.targetPackage === input.target.package)
+      assertTarget(input.target, { allowSubtreeChange })
       const currentHostGeneration = options.hostGeneration()
       const mountBefore = resolveMount(input.target, { allowMissingTarget: true, verifyPackageMatch: false })
 
@@ -1320,6 +1422,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
             input.target,
             currentHostGeneration,
             baseline.autoRolledBack.nonTargetSnapshots,
+            mountBefore.profileFile,
           )
           const profileRestored = resultProbe.failures === 0
           return {
@@ -1333,7 +1436,14 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
         // Explicit rollback after a previously succeeded artifact replacement (`status === 'reloaded'`).
         const nonTargetSnapshots = captureNonTargetEntries(mountBefore.tree, baseline.localEntryId)
         try {
-          const outcome = await executeArtifactRollback(baseline, mountBefore.tree, input.target, currentHostGeneration, nonTargetSnapshots)
+          const outcome = await executeArtifactRollback(
+            baseline,
+            mountBefore.tree,
+            input.target,
+            currentHostGeneration,
+            nonTargetSnapshots,
+            mountBefore.profileFile,
+          )
           inProcessGeneration += 1
           return {
             hostGeneration: options.hostGeneration(),
@@ -1356,6 +1466,7 @@ export function createInProcessReloadRuntime(ctx: Context, options: InProcessRel
       let profileRestored = false
       try {
         await withDeadline(async () => {
+          assertRuntimeActive()
           if (options.restore) { await options.restore(); profileRestored = true }
           await refreshTree(before.mount.tree)
         })

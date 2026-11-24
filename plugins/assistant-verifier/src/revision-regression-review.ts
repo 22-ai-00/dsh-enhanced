@@ -17,6 +17,8 @@ import { LINUX_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig } fro
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
 type Observation = import('./plugin-behavior-runner.js').PluginBehaviorObservation
+type PluginKind = import('./plugin-behavior-runner.js').PluginKind
+const PLUGIN_KINDS = new Set<PluginKind>(['tool', 'service', 'channel', 'ui'])
 const PURPOSE = 'assistant-growth/revision-regression-review/v1'
 const RULES = 'retained-creation-cases-v1:private-certificate-and-case-proof;fresh-parent-and-candidate-isolated-observations;both-compare-expected;exact-sanitized-schema-and-environment;no-model'
 const SHA = /^[a-f0-9]{64}$/u
@@ -76,6 +78,7 @@ interface PreparedRegressionPort {
   inspectPreparedRevisionRegression(planId: string): {
     protocol: 'dsh-prepared-revision-regression/v1'
     plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      pluginKind?: PluginKind;
       sourceRevision?: { grant: { expiresAt: number }; growthRun: unknown; parent: PluginRevisionParentBinding } }
     job: { intent: { revision?: { growthRun?: unknown; parent?: unknown } } }
     reference: { owner: Record<string, unknown> }
@@ -276,6 +279,10 @@ export class RevisionRegressionReviewRuntime {
       if (claim.state !== 'new') return { status: 'unknown', reason: claim.reason ?? 'previous-unknown' }
       admitted = { planId: plan.id, binding }
 
+      const planPluginKind = plan.pluginKind
+      if (planPluginKind !== undefined && !PLUGIN_KINDS.has(planPluginKind)) {
+        throw new Error('revision regression pluginKind invalid')
+      }
       const retained = retainedCases(this.readParentCases(parent.certificate), parent.certificate, config.maxCases)
       fence(() => {})
       const observer = await this.#loadRunner()
@@ -283,7 +290,8 @@ export class RevisionRegressionReviewRuntime {
       const discover = async (side: 'parent' | 'candidate', artifact: Buffer, expectedSha: string): Promise<Observation> => {
         signal.throwIfAborted(); fence(() => {})
         const result = await observer.run({ key: growthObjectDigest([binding, side, 'discover']),
-          artifact, operation: { kind: 'discover' }, signal })
+          artifact, operation: { kind: 'discover' },
+          ...(planPluginKind !== undefined ? { pluginKind: planPluginKind } : {}), signal })
         if (result.status !== 'observed' || !result.quiescent || !result.jobId || jobs.has(result.jobId)
           || result.artifactSha256 !== expectedSha || !result.schemaDigest || !result.schemas || !result.environment
           || linuxExecution && (result.boundary !== linuxExecution.boundary
@@ -297,7 +305,8 @@ export class RevisionRegressionReviewRuntime {
       const candidateDiscovery = await discover('candidate', candidate.artifact, candidate.certificate.plan.artifactSha256)
       const parentSchemas = projectCreationSchemas(parentDiscovery.schemas!)
       const candidateSchemas = projectCreationSchemas(candidateDiscovery.schemas!)
-      if (parentDiscovery.schemaDigest !== parent.certificate.schemaDigest
+      if ((parentDiscovery.pluginKind ?? 'tool') !== (candidateDiscovery.pluginKind ?? 'tool')
+        || parentDiscovery.schemaDigest !== parent.certificate.schemaDigest
         || candidateDiscovery.schemaDigest !== candidate.certificate.schemaDigest
         || canonicalGrowthJson(parentSchemas) !== canonicalGrowthJson(retained.schemas)
         || canonicalGrowthJson(parentSchemas) !== canonicalGrowthJson(candidateSchemas)
@@ -308,6 +317,7 @@ export class RevisionRegressionReviewRuntime {
         admitted = undefined
         return { status: 'rejected', reason: 'schema-or-environment-mismatch' }
       }
+      const observedKind = planPluginKind ?? parentDiscovery.pluginKind
       fence(() => this.#store.discovered(plan.id, binding, { parent: parentDiscovery.jobId, candidate: candidateDiscovery.jobId }))
       fence(() => this.#store.contract(plan.id, binding, { cases: retained.cases }))
       const observations: PluginRevisionRegressionCertificate['observations'][number][] = []
@@ -325,7 +335,8 @@ export class RevisionRegressionReviewRuntime {
         for (const side of ['parent', 'candidate'] as const) {
           const operation = operations[side]
           const observed = await observer.run({ key: growthObjectDigest([binding, side, item.id, growthObjectDigest(operation)]),
-            artifact: side === 'parent' ? parent.artifact : candidate.artifact, operation, signal })
+            artifact: side === 'parent' ? parent.artifact : candidate.artifact, operation,
+            ...(observedKind !== undefined ? { pluginKind: observedKind } : {}), signal })
           if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId || jobs.has(observed.jobId)
             || observed.artifactSha256 !== (side === 'parent' ? parent.binding.artifactSha256 : candidate.certificate.plan.artifactSha256)
             || observed.schemaDigest !== operation.schemaDigest

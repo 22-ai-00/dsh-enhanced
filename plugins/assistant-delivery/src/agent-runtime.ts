@@ -76,8 +76,10 @@ import {
   isExactDeliveryCommand,
   learningDispatchRecoveryCode,
   parseDeliveryCommand,
+  parseOwnerSelfIterationCommand,
   permissionDispatchRecoveryCode,
   type ParsedDeliveryCommand,
+  type ParsedOwnerSelfIterationCommand,
   type PermissionDispatchRecovery,
 } from './session-commands.js'
 import { DeliveryStoreError } from './store.js'
@@ -210,6 +212,11 @@ interface DshDeliveryRuntimeOptions {
     action: DeliveryLearningControlAction,
     preferenceKey?: string,
   ): Promise<'forbidden' | 'unavailable' | 'unknown' | Readonly<DeliveryLearningControlReceipt>>
+  dispatchOwnerSelfIterationCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    command: Readonly<ParsedOwnerSelfIterationCommand>,
+  ): Promise<'forbidden' | 'unavailable' | import('./service.js').OwnerSelfIterationControlResult>
   /** Durably reserve the exact terminal reply authorization before permission state can change. */
   authorizePermissionReply(
     binding: Readonly<ConversationBinding>,
@@ -246,6 +253,38 @@ interface ModelCommandReply {
 }
 
 const SAFE_NATIVE_COMMANDS = new Set(['compact'])
+
+const ownerSelfIterationUsage = [
+  '自迭代控制命令（仅限 owner，不进入模型）：',
+  '- /autonomy enable（或「开启自迭代」）',
+  '- /autonomy disable（或「关闭自迭代」）',
+  '- /autonomy upgrade（或「升级整体助手」）',
+].join('\n')
+
+function formatOwnerSelfIterationResult(
+  action: ParsedOwnerSelfIterationCommand['action'],
+  result: import('./service.js').OwnerSelfIterationControlResult,
+): string {
+  if (result.ok) {
+    if (typeof result.message === 'string' && result.message.trim() !== '') return result.message
+    if (action === 'enableSelfIteration' || result.state === 'enabled') {
+      return '已开启当前助手自迭代能力；受保护的核心交互与策略组件保持启用。'
+    }
+    if (action === 'disableSelfIteration' || result.state === 'disabled') {
+      return '已关闭当前助手自迭代能力；核心对话与控制通道仍保持可用。'
+    }
+    return '已完成整体助手升级、健康检查与恢复；当前服务可用。'
+  }
+  const detail = result.error ?? result.message ?? result.reason
+  const prefix = action === 'enableSelfIteration'
+    ? '开启自迭代未完成'
+    : action === 'disableSelfIteration'
+      ? '关闭自迭代未完成'
+      : '升级整体助手未完成'
+  return typeof detail === 'string' && detail.trim() !== ''
+    ? `${prefix}：${detail}`
+    : `${prefix}；未修改现有配置。`
+}
 
 class AgentTaskTimeoutError extends Error {
   constructor() {
@@ -3679,6 +3718,66 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     return { outcome: 'processed' }
   }
 
+  private async runOwnerSelfIterationCommand(
+    command: ParsedOwnerSelfIterationCommand | undefined,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    if ((envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '自迭代控制命令不接受文件、图片或其他附件；本次未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (command === undefined) {
+      return this.replySessionCommand(binding, envelope, {
+        text: ownerSelfIterationUsage,
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.isOwnerFeedbackController(binding, envelope)
+    } catch {
+      return { outcome: 'not-processed', failureCode: 'self-iteration-authorization-check-failed', retryable: true }
+    }
+    if (!authorized) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前身份不是此会话的 owner；本次自迭代控制未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+    const result = await this.options.dispatchOwnerSelfIterationCommand(binding, envelope, command)
+    signal.throwIfAborted()
+    if (result === 'forbidden') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: 'owner 或会话绑定已变化；本次自迭代控制未执行。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    if (result === 'unavailable') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: '自迭代控制服务尚未启用；本次控制未执行。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    this.options.replyCommand(binding, envelope.eventId, {
+      text: formatOwnerSelfIterationResult(command.action, result),
+      format: 'plain',
+    })
+    return { outcome: 'processed' }
+  }
+
   private sessionHelp(native: readonly CommandDescriptor[]): string {
     const lines = [
       '会话命令：',
@@ -3689,6 +3788,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /permission：查看或切换运行权限。',
       '- /feedback：提交结构化偏好；回复自动化结果可记录 achieved/partial/not-achieved；不进入模型。',
       '- /learning：查看、导出、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
+      '- /autonomy：开启、关闭或升级整体助手自迭代能力；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
     const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))
@@ -3896,7 +3996,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     restartContinuation?: RestartRecord,
   ): Promise<InboundProcessResult> {
     const sessionCommand = parseDeliveryCommand(envelope)
-    if (envelope.kind === 'command' && sessionCommand === undefined) {
+    const isAutonomyCommand = envelope.kind === 'command' && /^\/autonomy(?:[\t ]|$)/iu.test(envelope.text)
+    if (envelope.kind === 'command' && sessionCommand === undefined && !isAutonomyCommand) {
       return this.replySessionCommand(binding, envelope, {
         text: '命令格式无效。命令必须以小写 /name 开头，并使用普通空格分隔参数；发送 /help 查看用法。',
         format: 'plain',
@@ -4006,6 +4107,17 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (sessionCommand?.name === 'learning') {
       return await this.runLearningCommand(
         sessionCommand,
+        binding,
+        envelope,
+        signal,
+        markDispatching,
+      )
+    }
+    const rawSelfIterationCommand = parseOwnerSelfIterationCommand(envelope.text)
+    const isAutonomyCommand = envelope.kind === 'command' && /^\/autonomy(?:[\t ]|$)/iu.test(envelope.text)
+    if (sessionCommand?.name === 'autonomy' || isAutonomyCommand || rawSelfIterationCommand !== undefined) {
+      return await this.runOwnerSelfIterationCommand(
+        rawSelfIterationCommand,
         binding,
         envelope,
         signal,

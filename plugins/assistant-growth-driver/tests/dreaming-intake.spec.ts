@@ -71,9 +71,12 @@ function activeAuthority(): GrowthAuthority {
 }
 
 describe('dreamingIdeas config validation', () => {
-  it('defaults off and enforces enabled/scope invariants and bounds', () => {
-    expect(normalizeConfig().dreamingIdeas).toEqual({ enabled: false, maxIdeasPerWake: 3 })
-    expect(() => normalizeConfig({ dreamingIdeas: { enabled: true } })).toThrow(/dreamingIdeas\.enabled requires the driver itself/u)
+  it('defaults on and enforces enabled/scope invariants, cascade opt-out, and bounds', () => {
+    expect(normalizeConfig().dreamingIdeas).toEqual({ enabled: true, maxIdeasPerWake: 3 })
+    expect(normalizeConfig({ enabled: false }).dreamingIdeas).toEqual({ enabled: false, maxIdeasPerWake: 3 })
+    expect(normalizeConfig({ dreamingIdeas: { enabled: false } }).dreamingIdeas).toEqual({ enabled: false, maxIdeasPerWake: 3 })
+    expect(() => normalizeConfig({ enabled: false, dreamingIdeas: { enabled: true } })).toThrow(/dreamingIdeas\.enabled requires the driver itself/u)
+    expect(() => normalizeConfig({ dreamingIdeas: { enabled: true } })).toThrow(/explicit owner scope/u)
     expect(() => normalizeConfig({ enabled: true, dreamingIdeas: { enabled: true } })).toThrow(/explicit owner scope/u)
     expect(() => normalizeConfig({
       enabled: true,

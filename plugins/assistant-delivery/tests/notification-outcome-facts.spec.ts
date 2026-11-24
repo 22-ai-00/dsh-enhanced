@@ -52,7 +52,8 @@ async function fixture(readReceipts?: 'none' | 'best-effort' | 'complete') {
     capabilities: { reconcileUnknownSend: false, receipts: ['delivered', 'read'],
       ...(readReceipts === undefined ? {} : { readReceipts }), formats: ['plain', 'markdown'] }, start: async () => {}, send })
   const background = (idempotencyKey: string, text: string) => service.enqueueBackground({
-    sourceId: 'proactive-engine', workspace: '/work/alpha', bindingId: binding.id, idempotencyKey, text, format: 'plain' })
+    sourceId: 'proactive-engine', workspace: '/work/alpha', bindingId: binding.id, idempotencyKey, text, format: 'plain',
+    attention: { purpose: 'result' } })
   const drain = async () => {
     for (let calls = -1; calls !== send.mock.calls.length;) { calls = send.mock.calls.length; await service.tick(); await service.whenIdle() }
   }

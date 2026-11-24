@@ -35,7 +35,7 @@ class Producer implements TaskAcceptanceProducer {
   async inspectAcceptedExecution(_contract: TaskAcceptanceContract) { this.inspected++; return this.proof }
 }
 
-async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' = 'automation-run', required = false) {
+async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' = 'automation-run', required?: boolean) {
   const root = await mkdtemp(join(tmpdir(), 'task-verifier-service-')); roots.push(root)
   await writeFile(join(root, 'report.md'), 'Confirmed result\n')
   const ctx = new Context(); contexts.push(ctx)
@@ -48,7 +48,9 @@ async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' 
       : kind === 'goal-outcome' ? { kind, ref: 'assessment-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), assessmentId: 'assessment-1', sessionId: 'session-1', nativeGoalId: 'native-1' } }
         : { kind, ref: 'run-1' }, objective: '  Keep original objective\n' }
   let now = 1_000
-  const config = { databasePath: join(root, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: required, authorities: [authority],
+  const config = { databasePath: join(root, 'verifier.sqlite'), tickIntervalMs: 0,
+    ...(required === undefined ? {} : { requireAcceptance: required }),
+    authorities: [authority],
     profiles: [{ id: 'report', version: 1, scope: task.scope, owner: task.owner, taskKind: kind, objective: task.objective,
       validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
       criteria: [{ id: 'result', kind: 'document-citations' as const, authority: { id: 'sources', digest: authorities[0]!.digest },
@@ -350,6 +352,43 @@ describe('Host acceptance service', () => {
     await service.tick()
     expect(attempts).toBe(2)
     expect(service.inspect(handle.contractId)?.attempts).toBe(1)
+  })
+
+  it('defaults requireAcceptance to true while preserving explicit false opt-out', async () => {
+    const defaulted = await harness('automation-run')
+    expect(defaulted.service.health().requireAcceptance).toBe(true)
+    expect(() => defaulted.producer.registration!.prepare({ ...defaulted.task, objective: 'unmatched task' }))
+      .toThrow('no Host-approved')
+
+    const optedOut = await harness('automation-run', false)
+    expect(optedOut.service.health().requireAcceptance).toBe(false)
+    expect(optedOut.producer.registration!.prepare({ ...optedOut.task, objective: 'unmatched task' })).toBeNull()
+
+    // Explicit profiles: [] check for foreground-turn (e.g., memoryReviews-only mount without profiles)
+    const root = await mkdtemp(join(tmpdir(), 'task-verifier-empty-profiles-')); roots.push(root)
+    const task: AcceptanceTask = {
+      scope: { workspace: root, preset: 'primary' },
+      owner: { principalRecordId: 'owner-1', principalVersion: 1 },
+      task: { kind: 'foreground-turn', ref: 'turn-1' },
+      objective: 'ordinary turn without profile',
+    }
+    const ctxDefault = new Context(); contexts.push(ctxDefault)
+    const prodDefault = new Producer()
+    ctxDefault.provide('assistantDelivery' as never, prodDefault as never)
+    const svcDefault = new AssistantVerifierService(ctxDefault, {
+      databasePath: join(root, 'default.sqlite'), tickIntervalMs: 0, authorities: [], profiles: [],
+    })
+    expect(svcDefault.health().requireAcceptance).toBe(true)
+    expect(() => prodDefault.registration!.prepare(task)).toThrow('no Host-approved')
+
+    const ctxOptOut = new Context(); contexts.push(ctxOptOut)
+    const prodOptOut = new Producer()
+    ctxOptOut.provide('assistantDelivery' as never, prodOptOut as never)
+    const svcOptOut = new AssistantVerifierService(ctxOptOut, {
+      databasePath: join(root, 'optout.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [], profiles: [],
+    })
+    expect(svcOptOut.health().requireAcceptance).toBe(false)
+    expect(prodOptOut.registration!.prepare(task)).toBeNull()
   })
 
   it('does not turn missing or expired proof into success', async () => {

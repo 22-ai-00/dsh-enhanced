@@ -24,6 +24,21 @@ const HOST_INPUTS = ['scripts/create-plugin.mjs', 'LICENSE', 'plugins/README.md'
 /** Host-generated plugin metadata outside candidate authority. */
 export const RESERVED_OUTPUTS = ['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconfig.json',
   'tsconfig.build.json', 'src/version.ts'] as const
+/** Strictly immutable Host-generated files that candidates can never edit. */
+export const IMMUTABLE_OUTPUTS = ['LICENSE', 'tsconfig.json', 'tsconfig.build.json', 'src/version.ts'] as const
+/** Controlled metadata files editable within strict schema/security invariants. */
+export const CONTROLLED_OUTPUTS = ['package.json', 'cordis.patch.yml'] as const
+
+export type CandidatePluginKind = 'tool' | 'service' | 'channel' | 'ui'
+export const CANDIDATE_PLUGIN_KINDS: readonly CandidatePluginKind[] = Object.freeze(['tool', 'service', 'channel', 'ui'])
+
+export function normalizeCandidatePluginKind(value: unknown): CandidatePluginKind {
+  if (value === undefined) return 'tool'
+  if (typeof value === 'string' && (CANDIDATE_PLUGIN_KINDS as readonly string[]).includes(value)) {
+    return value as CandidatePluginKind
+  }
+  throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate pluginKind is invalid: ${String(value)}`)
+}
 
 export interface SourceCreationGrant {
   id: string
@@ -63,10 +78,533 @@ export function normalizeSourceCreationGrant(value:SourceCreationGrant):SourceCr
   return result
 }
 
-/** Candidate authority is limited to runtime source, documentation, and tests. */
+const VALID_PKG_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]{0,213}$/u
+const ALLOWED_MANIFEST_KEYS = new Set([
+  'name', 'version', 'description', 'license', 'type', 'main', 'types', 'exports', 'files',
+  'scripts', 'engines', 'publishConfig', 'repository', 'keywords', 'dsh',
+  'dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta',
+])
+const ALLOWED_DSH_KEYS = new Set(['bundle', 'pluginKind', 'kind', 'ui', 'channel', 'client'])
+const ALLOWED_DSH_META_KEYS = ['ui', 'channel', 'client'] as const
+const ALLOWED_PATCH_DECL_KEYS = ['ui', 'routes', 'sections', 'settings', 'channel', 'services', 'provides'] as const
+const ALLOWED_PATCH_ROW_KEYS = new Set(['id', 'name', 'inject', 'config', 'disabled', ...ALLOWED_PATCH_DECL_KEYS])
+const ALLOWED_EXPORT_KEYS = new Set(['.', './cordis.patch.yml', './package.json', './client'])
+const CONTROL_CHAR_RE = /[\p{Cc}]/u
+const CLIENT_JS_EXPORT_RE = /^\.\/lib\/[A-Za-z0-9._/-]+\.js$/u
+const CLIENT_DTS_EXPORT_RE = /^\.\/lib\/[A-Za-z0-9._/-]+\.d\.ts$/u
+
+function isSafePeerDependencyRange(range: string): boolean {
+  if (range === 'catalog:' || range === 'workspace:*' || range === 'workspace:^' || range === 'workspace:~') return true
+  if (range.length === 0 || range.length > 128 || CONTROL_CHAR_RE.test(range)) return false
+  if (range.includes(':') || range.includes('/') || range.includes('\\')) return false
+  return /^[~^>=<0-9*][~^>=<0-9A-Za-z.*| -]*$/u.test(range)
+}
+
+function isSafeClientExportPath(pathValue: unknown, pattern: RegExp): boolean {
+  return typeof pathValue === 'string'
+    && pathValue.length <= 256
+    && !CONTROL_CHAR_RE.test(pathValue)
+    && pattern.test(pathValue)
+    && !pathValue.split('/').includes('..')
+    && !pathValue.includes('//')
+}
+
+function validateCandidateClientExport(entry: unknown): void {
+  if (typeof entry === 'string') {
+    if (!isSafeClientExportPath(entry, CLIENT_JS_EXPORT_RE)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"]')
+    }
+    return
+  }
+  if (!record(entry)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"]')
+  }
+  const keys = Object.keys(entry)
+  if (keys.length === 0 || keys.some(key => key !== 'types' && key !== 'import' && key !== 'default')
+    || (entry.default === undefined && entry.import === undefined)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"]')
+  }
+  if (entry.default !== undefined && !isSafeClientExportPath(entry.default, CLIENT_JS_EXPORT_RE)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"].default')
+  }
+  if (entry.import !== undefined && !isSafeClientExportPath(entry.import, CLIENT_JS_EXPORT_RE)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"].import')
+  }
+  if (entry.types !== undefined && !isSafeClientExportPath(entry.types, CLIENT_DTS_EXPORT_RE)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports["./client"].types')
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function assertSafeJsonData(value: unknown, label: string, depth = 0): void {
+  if (depth > 12) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `${label} exceeds nesting depth`)
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `${label} contains non-finite number`)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeJsonData(item, label, depth + 1)
+    return
+  }
+  if (!record(value)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `${label} must be plain JSON object`)
+  for (const [key, item] of Object.entries(value)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `${label} contains unsafe property ${key}`)
+    }
+    assertSafeJsonData(item, label, depth + 1)
+  }
+}
+
+function validateControlledManifestShape(content: string): Record<string, unknown> {
+  if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: exceeds size limit')
+  }
+  let parsed: unknown
+  try { parsed = JSON.parse(content) as unknown } catch {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid JSON')
+  }
+  if (!record(parsed)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: manifest must be a plain object')
+  }
+  assertSafeJsonData(parsed, 'package.json')
+  for (const key of Object.keys(parsed)) {
+    if (!ALLOWED_MANIFEST_KEYS.has(key)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: disallowed key ${key}`)
+    }
+  }
+  if (typeof parsed.name !== 'string' || !VALID_PKG_NAME.test(parsed.name) || typeof parsed.version !== 'string' || parsed.version.length === 0) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: missing name or version')
+  }
+  if (parsed.description !== undefined && (typeof parsed.description !== 'string'
+    || Buffer.byteLength(parsed.description, 'utf8') > 512 || CONTROL_CHAR_RE.test(parsed.description))) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid description')
+  }
+  if (parsed.keywords !== undefined) {
+    if (!Array.isArray(parsed.keywords) || parsed.keywords.length > 16
+      || parsed.keywords.some(kw => typeof kw !== 'string' || kw.length === 0 || Buffer.byteLength(kw, 'utf8') > 64 || CONTROL_CHAR_RE.test(kw))) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid keywords')
+    }
+  }
+  if (parsed.exports !== undefined) {
+    if (!record(parsed.exports)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid exports')
+    }
+    for (const key of Object.keys(parsed.exports)) {
+      if (!ALLOWED_EXPORT_KEYS.has(key)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: disallowed exports key ${key}`)
+      }
+    }
+    if (Object.hasOwn(parsed.exports, './client')) {
+      validateCandidateClientExport(parsed.exports['./client'])
+    }
+  }
+  if (parsed.dsh !== undefined) {
+    if (!record(parsed.dsh)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid dsh metadata')
+    }
+    for (const key of Object.keys(parsed.dsh)) {
+      if (!ALLOWED_DSH_KEYS.has(key)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: disallowed dsh key ${key}`)
+      }
+    }
+    const normalizedPluginKind = parsed.dsh.pluginKind !== undefined ? normalizeCandidatePluginKind(parsed.dsh.pluginKind) : undefined
+    const normalizedKind = parsed.dsh.kind !== undefined ? normalizeCandidatePluginKind(parsed.dsh.kind) : undefined
+    if (normalizedPluginKind !== undefined && normalizedKind !== undefined && normalizedPluginKind !== normalizedKind) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: dsh.pluginKind and dsh.kind disagree')
+    }
+    for (const metaKey of ALLOWED_DSH_META_KEYS) {
+      const metaVal = parsed.dsh[metaKey]
+      if (metaVal === undefined) continue
+      if (!record(metaVal) || Object.keys(metaVal).length > 32) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: invalid dsh.${metaKey}`)
+      }
+      assertSafeJsonData(metaVal, `package.json dsh.${metaKey}`)
+      if (Buffer.byteLength(JSON.stringify(metaVal), 'utf8') > 8_192) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: dsh.${metaKey} exceeds size limit`)
+      }
+    }
+    if (parsed.dsh.bundle !== undefined && (!record(parsed.dsh.bundle) || parsed.dsh.bundle.patch !== './cordis.patch.yml'
+      || Object.keys(parsed.dsh.bundle).length !== 1)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid dsh.bundle')
+    }
+  }
+  const seenDeps = new Set<string>()
+  for (const group of ['dependencies', 'devDependencies', 'optionalDependencies'] as const) {
+    const map = parsed[group]
+    if (map === undefined) continue
+    if (!record(map) || Object.keys(map).length > 64) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: invalid ${group}`)
+    }
+    for (const [depName, spec] of Object.entries(map)) {
+      if (!VALID_PKG_NAME.test(depName) || spec !== 'catalog:' || seenDeps.has(depName)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: dependency ${depName} must use catalog:`)
+      }
+      seenDeps.add(depName)
+    }
+  }
+  if (parsed.peerDependencies !== undefined) {
+    if (!record(parsed.peerDependencies) || Object.keys(parsed.peerDependencies).length > 32) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid peerDependencies')
+    }
+    const meta = parsed.peerDependenciesMeta
+    if (!record(meta)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: peerDependencies requires peerDependenciesMeta')
+    }
+    for (const [peerName, range] of Object.entries(parsed.peerDependencies)) {
+      if ((!peerName.startsWith('@deepseek-ai/') && !peerName.startsWith('@dsh-enhanced/'))
+        || !VALID_PKG_NAME.test(peerName) || typeof range !== 'string' || !isSafePeerDependencyRange(range)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: invalid peer ${peerName}`)
+      }
+      const peerMeta = meta[peerName]
+      if (!record(peerMeta) || peerMeta.optional !== true) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: peer ${peerName} must be marked optional`)
+      }
+    }
+  }
+  if (parsed.peerDependenciesMeta !== undefined) {
+    if (!record(parsed.peerDependenciesMeta)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "package.json" is outside candidate authority: invalid peerDependenciesMeta')
+    }
+    for (const [peerName, entry] of Object.entries(parsed.peerDependenciesMeta)) {
+      if (!VALID_PKG_NAME.test(peerName) || !record(entry) || typeof entry.optional !== 'boolean' || Object.keys(entry).length !== 1) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "package.json" is outside candidate authority: invalid peerDependenciesMeta for ${peerName}`)
+      }
+    }
+  }
+  return parsed
+}
+
+export function validateCandidatePackageJson(name: string, baseManifestText: string, candidateText: string): Record<string, unknown> {
+  const base = JSON.parse(baseManifestText) as Record<string, unknown>
+  const cand = validateControlledManifestShape(candidateText)
+  if (cand.name !== `@dsh-enhanced/${name}` || cand.name !== base.name) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'candidate package.json cannot alter package name')
+  }
+  for (const field of ['version', 'license', 'type', 'main', 'types', 'files', 'scripts', 'engines', 'publishConfig', 'repository'] as const) {
+    if (canonicalJson(cand[field]) !== canonicalJson(base[field])) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json cannot alter immutable field ${field}`)
+    }
+  }
+  const baseExports = record(base.exports) ? base.exports : undefined
+  const candExports = record(cand.exports) ? cand.exports : undefined
+  if (baseExports === undefined || candExports === undefined) {
+    if (canonicalJson(cand.exports) !== canonicalJson(base.exports)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'candidate package.json cannot alter immutable field exports')
+    }
+  } else {
+    for (const key of Object.keys(candExports)) {
+      if (!ALLOWED_EXPORT_KEYS.has(key)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json exports key is disallowed: ${key}`)
+      }
+    }
+    for (const key of ['.', './cordis.patch.yml', './package.json'] as const) {
+      if (canonicalJson(candExports[key]) !== canonicalJson(baseExports[key])) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json cannot alter immutable field exports[${key}]`)
+      }
+    }
+  }
+  const baseDsh = record(base.dsh) ? base.dsh : {}
+  const candDsh = record(cand.dsh) ? cand.dsh : undefined
+  if (candDsh === undefined || canonicalJson(candDsh.bundle) !== canonicalJson(baseDsh.bundle)
+    || canonicalJson(candDsh.protection) !== canonicalJson(baseDsh.protection)) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'candidate package.json cannot alter dsh.bundle or dsh.protection')
+  }
+  if (cand.keywords !== undefined) {
+    const kws = cand.keywords as string[]
+    for (const reqKw of ['deepseek', 'deepseek-harness', 'dsh-plugin']) {
+      if (!kws.includes(reqKw)) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json keywords must retain ${reqKw}`)
+      }
+    }
+  }
+  const baseDev = record(base.devDependencies) ? base.devDependencies : {}
+  const candDev = record(cand.devDependencies) ? cand.devDependencies : {}
+  for (const [dep, spec] of Object.entries(baseDev)) {
+    if (candDev[dep] !== spec) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json must retain scaffold devDependency ${dep}`)
+    }
+  }
+  const basePeers = record(base.peerDependencies) ? base.peerDependencies : {}
+  const candPeers = record(cand.peerDependencies) ? cand.peerDependencies : {}
+  for (const [peer, range] of Object.entries(basePeers)) {
+    if (candPeers[peer] !== range) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate package.json must retain scaffold peerDependency ${peer}`)
+    }
+  }
+  return cand
+}
+
+interface YamlLine { indent: number; text: string }
+
+function stripYamlComment(line: string): string {
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote === "'") {
+      if (ch === "'" && line[i + 1] === "'") { i++; continue }
+      if (ch === "'") quote = undefined
+    } else if (quote === '"') {
+      if (ch === '\\') { i++; continue }
+      if (ch === '"') quote = undefined
+    } else {
+      if (ch === "'" || ch === '"') quote = ch
+      else if (ch === '#' && (i === 0 || line[i - 1] === ' ')) return line.slice(0, i).trimEnd()
+    }
+  }
+  return line.trimEnd()
+}
+
+function parseYamlScalar(raw: string): unknown {
+  const s = raw.trim()
+  if (s === '') return ''
+  if (s.startsWith('&') || s.startsWith('*') || s.startsWith('!') || s.includes('<<:')) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'cordis.patch.yml uses forbidden YAML anchors, tags, or merges')
+  }
+  if (s === 'true') return true
+  if (s === 'false') return false
+  if (s === 'null' || s === '~') return null
+  if (/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/u.test(s)) {
+    const num = Number(s)
+    if (!Number.isFinite(num)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'cordis.patch.yml number is not finite')
+    return num
+  }
+  if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) {
+    return s.slice(1, -1).replaceAll("''", "'")
+  }
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    try { return JSON.parse(s) as unknown } catch {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'cordis.patch.yml contains invalid double-quoted string')
+    }
+  }
+  if (s.startsWith('[') || s.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(s) as unknown
+      assertSafeJsonData(parsed, 'cordis.patch.yml')
+      return parsed
+    } catch (error) {
+      if (error instanceof ControlPlaneCliError) throw error
+      if (s.startsWith('[') && s.endsWith(']') && !s.includes('{') && !s.includes('}')) {
+        const inner = s.slice(1, -1).trim()
+        if (inner === '') return []
+        if (!inner.includes('[') && !inner.includes(']')) {
+          const items = inner.split(',').map(part => part.trim())
+          if (items.every(part => part.length > 0)) {
+            const parsedItems = items.map(part => parseYamlScalar(part))
+            assertSafeJsonData(parsedItems, 'cordis.patch.yml')
+            return parsedItems
+          }
+        }
+      }
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'cordis.patch.yml contains invalid inline flow collection')
+    }
+  }
+  return s
+}
+
+function splitKeyVal(text: string): { key: string; rest: string } {
+  const colonIdx = text.indexOf(':')
+  if (colonIdx <= 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `cordis.patch.yml invalid mapping line: ${text}`)
+  const rawKey = text.slice(0, colonIdx).trim()
+  const after = text.slice(colonIdx + 1)
+  if (after.length > 0 && after[0] !== ' ') {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', `cordis.patch.yml invalid mapping syntax: ${text}`)
+  }
+  const keyVal = parseYamlScalar(rawKey)
+  if (typeof keyVal !== 'string' || keyVal.length === 0 || keyVal === '<<' || keyVal === '__proto__' || keyVal === 'constructor' || keyVal === 'prototype') {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', `cordis.patch.yml invalid key: ${rawKey}`)
+  }
+  return { key: keyVal, rest: after.trim() }
+}
+
+function parseYamlBlock(lines: readonly YamlLine[], start: number, indent: number): { value: unknown; next: number } {
+  if (start >= lines.length) return { value: {}, next: start }
+  const first = lines[start]!
+  if (first.indent < indent) return { value: {}, next: start }
+  if (first.text === '-' || first.text.startsWith('- ')) {
+    const arr: unknown[] = []
+    let idx = start
+    while (idx < lines.length && lines[idx]!.indent === first.indent && (lines[idx]!.text === '-' || lines[idx]!.text.startsWith('- '))) {
+      const itemText = lines[idx]!.text.slice(1).trim()
+      idx += 1
+      if (itemText === '') {
+        const nested = parseYamlBlock(lines, idx, first.indent + 1)
+        arr.push(nested.value); idx = nested.next
+      } else if (/^[a-zA-Z0-9_'"@./-]+:(?:\s.*)?$/u.test(itemText) && !itemText.startsWith("'") && !itemText.startsWith('"') && itemText.includes(':')) {
+        const { key, rest } = splitKeyVal(itemText)
+        const obj: Record<string, unknown> = {}
+        const itemIndent = first.indent + 2
+        if (rest === '') {
+          const nextIsSeq = idx < lines.length && (lines[idx]!.text === '-' || lines[idx]!.text.startsWith('- '))
+          const nested = parseYamlBlock(lines, idx, nextIsSeq ? itemIndent : itemIndent + 1)
+          obj[key] = nested.value; idx = nested.next
+        } else {
+          obj[key] = parseYamlScalar(rest)
+        }
+        while (idx < lines.length && lines[idx]!.indent >= itemIndent) {
+          if (lines[idx]!.indent !== itemIndent || lines[idx]!.text.startsWith('-')) {
+            throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'cordis.patch.yml has inconsistent indentation')
+          }
+          const nextPair = splitKeyVal(lines[idx]!.text)
+          idx += 1
+          if (nextPair.rest === '') {
+            const nextIsSeq = idx < lines.length && (lines[idx]!.text === '-' || lines[idx]!.text.startsWith('- '))
+            const nested = parseYamlBlock(lines, idx, nextIsSeq ? itemIndent : itemIndent + 1)
+            obj[nextPair.key] = nested.value; idx = nested.next
+          } else {
+            obj[nextPair.key] = parseYamlScalar(nextPair.rest)
+          }
+        }
+        arr.push(obj)
+      } else {
+        arr.push(parseYamlScalar(itemText))
+      }
+    }
+    return { value: arr, next: idx }
+  }
+  const obj: Record<string, unknown> = {}
+  let idx = start
+  while (idx < lines.length && lines[idx]!.indent === first.indent) {
+    if (lines[idx]!.text.startsWith('-')) break
+    const { key, rest } = splitKeyVal(lines[idx]!.text)
+    idx += 1
+    if (rest === '') {
+      const nextIsSeq = idx < lines.length && (lines[idx]!.text === '-' || lines[idx]!.text.startsWith('- '))
+      const nested = parseYamlBlock(lines, idx, nextIsSeq ? first.indent : first.indent + 1)
+      obj[key] = nested.value; idx = nested.next
+    } else {
+      obj[key] = parseYamlScalar(rest)
+    }
+  }
+  return { value: obj, next: idx }
+}
+
+export interface ControlledPatchRow {
+  id: string
+  name: string
+  inject?: string[] | Record<string, boolean>
+  config?: Record<string, unknown>
+  disabled?: boolean
+  ui?: unknown
+  routes?: unknown
+  sections?: unknown
+  settings?: unknown
+  channel?: unknown
+  services?: unknown
+  provides?: unknown
+}
+
+export function parseControlledPatchYaml(content: string): ControlledPatchRow {
+  if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES || content.includes('\t') || content.includes('\r')
+    || content.includes('\0') || content.includes('{{')) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: forbidden characters or tokens')
+  }
+  const parsedLines: YamlLine[] = []
+  for (const rawLine of content.split('\n')) {
+    const stripped = stripYamlComment(rawLine)
+    if (stripped.trim() === '') continue
+    if (stripped.trim() === '---' || stripped.trim() === '...') {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: document markers forbidden')
+    }
+    const leading = stripped.length - stripped.trimStart().length
+    parsedLines.push({ indent: leading, text: stripped.trimStart() })
+  }
+  if (parsedLines.length === 0) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: empty patch')
+  }
+  const root = parseYamlBlock(parsedLines, 0, 0)
+  if (root.next !== parsedLines.length || !Array.isArray(root.value) || root.value.length !== 1 || !record(root.value[0])) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: must contain single - insert block')
+  }
+  const insertBlock = root.value[0]
+  if (Object.keys(insertBlock).length !== 1 || !Array.isArray(insertBlock.insert) || insertBlock.insert.length !== 1 || !record(insertBlock.insert[0])) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: - insert must contain exactly one entry')
+  }
+  const row = insertBlock.insert[0]
+  for (const key of Object.keys(row)) {
+    if (!ALLOWED_PATCH_ROW_KEYS.has(key)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "cordis.patch.yml" is outside candidate authority: disallowed patch key ${key}`)
+    }
+  }
+  if (typeof row.id !== 'string' || typeof row.name !== 'string' || row.id.length === 0 || row.name.length === 0) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: entry requires string id and name')
+  }
+  if (row.disabled !== undefined && typeof row.disabled !== 'boolean') {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: disabled must be boolean')
+  }
+  if (row.inject !== undefined) {
+    if (Array.isArray(row.inject)) {
+      if (row.inject.length > 32 || row.inject.some(item => typeof item !== 'string' || !/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/u.test(item))) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: invalid inject array')
+      }
+    } else if (record(row.inject)) {
+      if (Object.keys(row.inject).length > 32 || Object.entries(row.inject).some(([k, v]) => !/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/u.test(k) || typeof v !== 'boolean')) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: invalid inject map')
+      }
+    } else {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: invalid inject')
+    }
+  }
+  if (row.config !== undefined) {
+    if (!record(row.config)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source creation file "cordis.patch.yml" is outside candidate authority: config must be a plain object')
+    }
+    assertSafeJsonData(row.config, 'cordis.patch.yml config')
+  }
+  for (const declKey of ALLOWED_PATCH_DECL_KEYS) {
+    const declVal = row[declKey]
+    if (declVal === undefined) continue
+    assertSafeJsonData(declVal, `cordis.patch.yml ${declKey}`)
+    if (Buffer.byteLength(JSON.stringify(declVal), 'utf8') > 16_384) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source creation file "cordis.patch.yml" is outside candidate authority: ${declKey} exceeds size limit`)
+    }
+  }
+  return row as unknown as ControlledPatchRow
+}
+
+export function validateCandidateCordisPatch(name: string, _basePatchText: string, candidateText: string): void {
+  const row = parseControlledPatchYaml(candidateText)
+  if (row.id !== `dsh-enhanced-${name}` || row.name !== `@dsh-enhanced/${name}`) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', `candidate cordis.patch.yml must mount @dsh-enhanced/${name} with id dsh-enhanced-${name}`)
+  }
+}
+
+export function extractCandidatePluginKindFromManifestText(content: string): CandidatePluginKind {
+  const parsed = validateControlledManifestShape(content)
+  if (!record(parsed.dsh)) return 'tool'
+  if (parsed.dsh.pluginKind !== undefined) return normalizeCandidatePluginKind(parsed.dsh.pluginKind)
+  if (parsed.dsh.kind !== undefined) return normalizeCandidatePluginKind(parsed.dsh.kind)
+  return 'tool'
+}
+
+export function extractCandidatePluginKindFromFiles(files: readonly ScopedPluginFile[]): CandidatePluginKind {
+  const pkg = files.find(file => file.path === 'package.json')
+  if (!pkg) return 'tool'
+  return extractCandidatePluginKindFromManifestText(pkg.content)
+}
+
+/** Candidate authority includes runtime source, documentation, tests, and controlled manifest/patch metadata. */
 export function validateSourceCreationFiles(files: readonly ScopedPluginFile[]): void {
   validateScopedPluginFiles(files)
   for (const file of files) {
+    if (file.path === 'package.json') {
+      validateControlledManifestShape(file.content)
+      continue
+    }
+    if (file.path === 'cordis.patch.yml') {
+      parseControlledPatchYaml(file.content)
+      continue
+    }
     if (file.path !== file.path.normalize('NFC')
       || !(file.path === 'README.md' || /^(?:src|tests)\/(?:[a-zA-Z0-9][a-zA-Z0-9._-]*\/)*[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(file.path))
       || file.path === 'src/version.ts' || file.path.endsWith('/package.json')
@@ -504,14 +1042,34 @@ export async function verifyCreatedPluginWorkspace(input: {
   const observed = await generatedFiles(worktree, input.name)
   const existing = new Map(observed.map(file => [file.path, file]))
   const initial = new Map(expected.files.map(file => [file.path, file]))
-  for (const path of RESERVED_OUTPUTS) {
+  for (const path of IMMUTABLE_OUTPUTS) {
     if (existing.get(path)?.content !== initial.get(path)?.content) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', `Host-owned generated file changed: ${path}`)
     }
   }
+  const submittedPkg = input.files?.find(file => file.path === 'package.json')
+  if (input.files !== undefined && submittedPkg === undefined) {
+    if (existing.get('package.json')?.content !== initial.get('package.json')?.content) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: package.json')
+    }
+  } else if (existing.get('package.json')?.content === undefined) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: package.json')
+  } else {
+    validateCandidatePackageJson(input.name, initial.get('package.json')!.content, existing.get('package.json')!.content)
+  }
+  const submittedPatch = input.files?.find(file => file.path === 'cordis.patch.yml')
+  if (input.files !== undefined && submittedPatch === undefined) {
+    if (existing.get('cordis.patch.yml')?.content !== initial.get('cordis.patch.yml')?.content) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: cordis.patch.yml')
+    }
+  } else if (existing.get('cordis.patch.yml')?.content === undefined) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: cordis.patch.yml')
+  } else {
+    validateCandidateCordisPatch(input.name, initial.get('cordis.patch.yml')!.content, existing.get('cordis.patch.yml')!.content)
+  }
   const catalog = await safeBytes(join(worktree, 'plugins', 'README.md'), MAX_FILE_BYTES)
   if (!catalog.equals(expected.catalog)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated catalog changed')
-  const manifest = JSON.parse(initial.get('package.json')!.content) as Record<string, unknown>
+  const manifest = JSON.parse(existing.get('package.json')!.content) as Record<string, unknown>
   const baseLock = (await gitBlob(worktree, assets.blobs.get('pnpm-lock.yaml')!, input.environment, signal)).toString('utf8')
   const expectedLock = lockImporter(baseLock, manifest, input.name)
   if (!(await safeBytes(join(worktree, 'pnpm-lock.yaml'), 8_388_608)).equals(Buffer.from(expectedLock))) {
@@ -545,6 +1103,7 @@ export async function verifyCreatedPluginWorkspace(input: {
 }
 
 function creationCandidatePath(path: string): boolean {
+  if (path === 'package.json' || path === 'cordis.patch.yml' || path === 'README.md') return true
   try { validateSourceCreationFiles([{ path, content: '' }]); return true } catch { return false }
 }
 
@@ -556,6 +1115,7 @@ export interface SourceCreationHostScaffold {
   files: readonly { path: string; bytes: number; content: string }[]
   catalog: Buffer
   lock: string
+  baseLock: string
 }
 
 type SourceCreationHostInput = {
@@ -574,7 +1134,7 @@ async function hostScaffold(assets: BaseAssets, name: string, environment: NodeJ
     const baseLock = (await gitBlob(assets.repository, assets.blobs.get('pnpm-lock.yaml')!, environment, signal)).toString('utf8')
     return Object.freeze({ baseCommit: assets.baseCommit, generatorDigest: assets.generatorDigest, files,
       catalog: await safeBytes(join(capsule, 'plugins', 'README.md'), MAX_FILE_BYTES),
-      lock: lockImporter(baseLock, manifest, name) })
+      lock: lockImporter(baseLock, manifest, name), baseLock })
   })
 }
 
@@ -640,19 +1200,40 @@ export async function verifyCreationHostScaffold(input: Omit<SourceCreationHostI
       content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) })
   }))
   const existing = new Map(actual.map(file => [file.path, file]))
-  for (const file of expected.files.filter(file => RESERVED_OUTPUTS.includes(file.path as typeof RESERVED_OUTPUTS[number]))) {
+  for (const file of expected.files.filter(file => IMMUTABLE_OUTPUTS.includes(file.path as typeof IMMUTABLE_OUTPUTS[number]))) {
     if (existing.get(file.path)?.content !== file.content) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', `Host-owned generated file changed: ${file.path}`)
     }
   }
+  const baseManifestFile = expected.files.find(file => file.path === 'package.json')
+  const actualManifestFile = existing.get('package.json')
+  if (!baseManifestFile || !actualManifestFile) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: package.json')
+  }
+  const actualManifest = actualManifestFile.content === baseManifestFile.content
+    ? (JSON.parse(baseManifestFile.content) as Record<string, unknown>)
+    : validateCandidatePackageJson(input.name, baseManifestFile.content, actualManifestFile.content)
+  const basePatchFile = expected.files.find(file => file.path === 'cordis.patch.yml')
+  const actualPatchFile = existing.get('cordis.patch.yml')
+  if (!basePatchFile || !actualPatchFile) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned generated file changed: cordis.patch.yml')
+  }
+  if (actualPatchFile.content !== basePatchFile.content) {
+    validateCandidateCordisPatch(input.name, basePatchFile.content, actualPatchFile.content)
+  }
   if (!(await safeBytes(join(assets.repository, 'plugins', 'README.md'), MAX_FILE_BYTES)).equals(expected.catalog)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'generated catalog changed')
   }
-  if (!(await safeBytes(join(assets.repository, 'pnpm-lock.yaml'), 8_388_608)).equals(Buffer.from(expected.lock))) {
+  const expectedLock = lockImporter(expected.baseLock, actualManifest, input.name)
+  if (!(await safeBytes(join(assets.repository, 'pnpm-lock.yaml'), 8_388_608)).equals(Buffer.from(expectedLock))) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'Host-owned new lock importer changed')
   }
   await checked(input.signal, input.assertCurrent, () => Promise.resolve())
   return Object.freeze({ expected, actual: Object.freeze(actual) })
+}
+
+export function computeLockImporter(baseLock: string, manifest: Record<string, unknown>, name: string): string {
+  return lockImporter(baseLock, manifest, name)
 }
 
 export async function prepareCreatedPluginWorkspace(input: {
@@ -679,13 +1260,23 @@ export async function prepareCreatedPluginWorkspace(input: {
   await checked(signal, input.assertCurrent, () => assertCleanBase(worktree, assets, input.environment, signal))
   const generated = await checked(signal, input.assertCurrent,
     () => generateChecked(worktree, input.name, assets, input.environment, signal))
-  const manifest = JSON.parse(generated.find(file => file.path === 'package.json')!.content) as Record<string, unknown>
+  const baseManifestText = generated.find(file => file.path === 'package.json')!.content
+  const basePatchText = generated.find(file => file.path === 'cordis.patch.yml')!.content
+  const manifest = JSON.parse(baseManifestText) as Record<string, unknown>
   if (manifest.name !== `@dsh-enhanced/${input.name}` || typeof manifest.version !== 'string'
     || !record(manifest.dsh) || !record(manifest.dsh.bundle) || manifest.dsh.bundle.patch !== './cordis.patch.yml') {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'public generator emitted invalid plugin identity')
   }
+  const candidateManifestFile = input.files.find(file => file.path === 'package.json')
+  const effectiveManifest = candidateManifestFile === undefined
+    ? manifest
+    : validateCandidatePackageJson(input.name, baseManifestText, candidateManifestFile.content)
+  const candidatePatchFile = input.files.find(file => file.path === 'cordis.patch.yml')
+  if (candidatePatchFile !== undefined) {
+    validateCandidateCordisPatch(input.name, basePatchText, candidatePatchFile.content)
+  }
   const lockBase = (await gitBlob(worktree, assets.blobs.get('pnpm-lock.yaml')!, input.environment, signal)).toString('utf8')
-  const lock = lockImporter(lockBase, manifest, input.name)
+  const lock = lockImporter(lockBase, effectiveManifest, input.name)
   await checked(signal, input.assertCurrent, () => writeFile(join(worktree, 'pnpm-lock.yaml'), lock, { flag: 'w' }))
   await checked(signal, input.assertCurrent, () => assertOnlyCreationChanges(worktree, assets.baseCommit, input.name, input.environment, signal))
   await checked(signal, input.assertCurrent, () => writeCreatedPluginFiles({ worktree, name: input.name, files: input.files }))

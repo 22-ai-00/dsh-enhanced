@@ -24,16 +24,20 @@ const locator = (itemId = 'item', version = 1): WorkItemUsageLocator => ({ proto
   owner: { authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'primary' },
   itemId, canonical: { outcomeId: `objective-${version}`, version, digest: String(version).repeat(64), objectiveStatus: 'not-achieved' }, createdAt: 10, expiresAt: 10_000 })
 
-test('strict work item opt-in retains the absent/false normalized config bytes and freezes explicit pins', () => {
-  const original = normalizeConfig(base()), disabled = normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: false } })
-  expect(disabled).toEqual(original); expect(acceptanceDigest(disabled)).toBe(acceptanceDigest(original))
+test('work item failures default on in durable creation, support explicit false opt-out, and freeze pins without requiring redundant flag', () => {
+  const defaulted = normalizeConfig(base())
+  const disabled = normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: false } })
+  expect(defaulted.usageLearning.workItemFailures).toBe(true)
   expect(disabled.usageLearning).not.toHaveProperty('workItemFailures')
-  const enabled = normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: true, workItemAuthorities: pins } })
-  expect(acceptanceDigest(enabled)).not.toBe(acceptanceDigest(original)); expect(enabled.budgetId).toBe(original.budgetId)
-  expect(Object.isFrozen(enabled.usageLearning.workItemAuthorities?.creationGrant)).toBe(true)
+  expect(acceptanceDigest(disabled)).not.toBe(acceptanceDigest(defaulted))
+  const enabledExplicit = normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: true, workItemAuthorities: pins } })
+  const enabledImplicit = normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemAuthorities: pins } })
+  expect(enabledImplicit).toEqual(enabledExplicit)
+  expect(acceptanceDigest(enabledExplicit)).not.toBe(acceptanceDigest(disabled)); expect(enabledExplicit.budgetId).toBe(defaulted.budgetId)
+  expect(Object.isFrozen(enabledExplicit.usageLearning.workItemAuthorities?.creationGrant)).toBe(true)
   for (const flag of ['true', 1, null, undefined]) expect(() => normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: flag } } as never)).toThrow()
   expect(() => normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: true } })).toThrow(/explicit authorities/)
-  expect(() => normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemAuthorities: pins } })).toThrow(/require workItemFailures/)
+  expect(() => normalizeConfig({ ...base(), usageLearning: { ...base().usageLearning, workItemFailures: false, workItemAuthorities: pins } })).toThrow(/require workItemFailures/)
 })
 
 test('schema2 migration preserves exact legacy rows/cursor/source-run/unknown and introduces an independent zero cursor', () => {

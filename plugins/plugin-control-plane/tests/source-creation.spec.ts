@@ -7,7 +7,10 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createIsolatedWorktree } from '../src/source-workspace.ts'
 import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, validateSourceCreationFiles,
-  validateSourceCreationGrant, verifyCreatedPluginWorkspace, type SourceCreationGrant } from '../src/source-creation.ts'
+  validateSourceCreationGrant, verifyCreatedPluginWorkspace, CANDIDATE_PLUGIN_KINDS, normalizeCandidatePluginKind,
+  extractCandidatePluginKindFromFiles, extractCandidatePluginKindFromManifestText,
+  parseControlledPatchYaml, type SourceCreationGrant } from '../src/source-creation.ts'
+import { controlPlaneDigest } from '../src/store.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 
 const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
@@ -204,13 +207,26 @@ describe('prepared source creation using the real public generator and base lock
     const current = await worktree()
     const view = await inspected()
     const creation = { grant: grant(), generatorDigest: view.generatorDigest }
+    const candidateFiles = [{ path: 'README.md', content: '# source\n' }]
     const options = { worktree: current, baseCommit, name: view.name, environment, signal,
       assertCurrent: () => undefined, creation }
-    await prepareCreatedPluginWorkspace({ ...options, files: [{ path: 'README.md', content: '# source\n' }] })
+    await prepareCreatedPluginWorkspace({ ...options, files: candidateFiles })
     const manifest = join(current, 'plugins', view.name, 'package.json')
-    await writeFile(manifest, `${await readFile(manifest, 'utf8')}\n`)
+    const originalManifest = await readFile(manifest, 'utf8')
+    await writeFile(manifest, `${originalManifest}\n`)
+    await expect(verifyCreatedPluginWorkspace({ ...options, files: candidateFiles })).rejects.toThrow('Host-owned generated file')
+    const tamperedScripts = JSON.stringify({
+      ...JSON.parse(originalManifest) as Record<string, unknown>,
+      scripts: { build: 'echo pwned' },
+    }, null, 2) + '\n'
+    await writeFile(manifest, tamperedScripts)
+    await expect(verifyCreatedPluginWorkspace(options)).rejects.toThrow('cannot alter immutable field scripts')
+    await writeFile(manifest, originalManifest)
+    const tsconfig = join(current, 'plugins', view.name, 'tsconfig.json')
+    const originalTsconfig = await readFile(tsconfig, 'utf8')
+    await writeFile(tsconfig, `${originalTsconfig}\n`)
     await expect(verifyCreatedPluginWorkspace(options)).rejects.toThrow('Host-owned generated file')
-    await writeFile(manifest, (await readFile(manifest, 'utf8')).trimEnd() + '\n')
+    await writeFile(tsconfig, originalTsconfig)
     const lockPath = join(current, 'pnpm-lock.yaml')
     await writeFile(lockPath, (await readFile(lockPath, 'utf8')).replace("lockfileVersion: '9.0'", "lockfileVersion: '8.0'"))
     await expect(verifyCreatedPluginWorkspace(options)).rejects.toThrow('lock importer changed')
@@ -278,7 +294,7 @@ describe('prepared source creation using the real public generator and base lock
     expect(changed).not.toBe(original)
     await writeFile(lockPath, changed)
     execFileSync('/usr/bin/git', ['add', 'pnpm-lock.yaml'], { cwd: current })
-    execFileSync('/usr/bin/git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'lock fixture'], { cwd: current })
+    execFileSync('/usr/bin/git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'lock fixture'], { cwd: current })
     const changedBase = execFileSync('/usr/bin/git', ['rev-parse', 'HEAD'], { cwd: current, encoding: 'utf8' }).trim()
     const view = await inspectSourceCreationContext({ repository: current, name: 'rsi-created-example', paths: [],
       baseCommit: changedBase, environment, signal, assertCurrent: () => undefined, grant: grant() })
@@ -286,4 +302,260 @@ describe('prepared source creation using the real public generator and base lock
       files: [{ path: 'README.md', content: '# source\n' }], environment, signal,
       assertCurrent: () => undefined, creation: { grant: grant(), generatorDigest: view.generatorDigest } })).rejects.toThrow(message)
   }, 20_000)
+
+  it('supports tool/service/channel/ui creation with controlled package.json, cordis.patch.yml, and lockfile sync, and rejects tampering', async () => {
+    expect(CANDIDATE_PLUGIN_KINDS).toEqual(['tool', 'service', 'channel', 'ui'])
+    expect(normalizeCandidatePluginKind(undefined)).toBe('tool')
+
+    // Digest compatibility: omitted pluginKind and explicit 'tool' strip pluginKind in persisted intents,
+    // whereas 'service' / 'channel' / 'ui' produce distinct bound digests.
+    const normalizeIntent = (intent: { mode: 'create'; name: string; files: { path: string; content: string }[]; baseCommit: string; pluginKind?: 'tool' | 'service' | 'channel' | 'ui' }) =>
+      intent.pluginKind === undefined || intent.pluginKind === 'tool'
+        ? { mode: intent.mode, name: intent.name, files: intent.files, baseCommit: intent.baseCommit }
+        : intent
+    const baseIntent = { mode: 'create' as const, name: 'rsi-created-service',
+      files: [{ path: 'README.md', content: '# svc\n' }], baseCommit }
+    const digestDefault = controlPlaneDigest(normalizeIntent(baseIntent))
+    const digestTool = controlPlaneDigest(normalizeIntent({ ...baseIntent, pluginKind: 'tool' }))
+    const digestService = controlPlaneDigest(normalizeIntent({ ...baseIntent, pluginKind: 'service' }))
+    expect(digestTool).toBe(digestDefault)
+    expect(digestService).not.toBe(digestDefault)
+
+    for (const kind of ['service', 'channel', 'ui'] as const) {
+      const pluginName = `rsi-created-${kind}`
+      const view = await inspectSourceCreationContext({
+        repository, name: pluginName, paths: ['package.json', 'cordis.patch.yml'],
+        baseCommit, environment, signal, assertCurrent: () => undefined, grant: grant(),
+      })
+      const baseManifest = JSON.parse(view.contents.find(c => c.path === 'package.json')!.content) as Record<string, unknown>
+      const updatedManifest = {
+        ...baseManifest,
+        description: `Candidate ${kind} capability`,
+        dsh: {
+          ...(baseManifest.dsh as Record<string, unknown>),
+          pluginKind: kind,
+        },
+        dependencies: {
+          ...(baseManifest.dependencies as Record<string, string> | undefined),
+          '@deepseek-ai/schemastery': 'catalog:',
+        },
+        peerDependencies: {
+          ...(baseManifest.peerDependencies as Record<string, string> | undefined),
+          '@dsh-enhanced/assistant-delivery': '>=0.1.0',
+        },
+        peerDependenciesMeta: {
+          ...(baseManifest.peerDependenciesMeta as Record<string, { optional: boolean }> | undefined),
+          '@dsh-enhanced/assistant-delivery': { optional: true },
+        },
+      }
+      const updatedPatch = [
+        '- insert:',
+        `    - id: dsh-enhanced-${pluginName}`,
+        `      name: '@dsh-enhanced/${pluginName}'`,
+        '      inject:',
+        '        - assistantAutomations',
+        '      config:',
+        '        enabled: true',
+        '',
+      ].join('\n')
+      const files = [
+        { path: 'README.md', content: `# ${kind} plugin\n` },
+        { path: 'package.json', content: `${JSON.stringify(updatedManifest, null, 2)}\n` },
+        { path: 'cordis.patch.yml', content: updatedPatch },
+      ]
+      expect(extractCandidatePluginKindFromFiles(files)).toBe(kind)
+
+      const current = await worktree()
+      const creation = { grant: grant(), generatorDigest: view.generatorDigest }
+      const prep = await prepareCreatedPluginWorkspace({
+        worktree: current, baseCommit, name: pluginName, files,
+        environment, signal, assertCurrent: () => undefined, creation,
+      })
+      expect(prep.scope).toContain('pnpm-lock.yaml')
+      const verified = await verifyCreatedPluginWorkspace({
+        worktree: current, baseCommit, name: pluginName, files,
+        environment, signal, assertCurrent: () => undefined, creation,
+      })
+      expect(verified.generatorDigest).toBe(view.generatorDigest)
+      const lockContent = await readFile(join(current, 'pnpm-lock.yaml'), 'utf8')
+      expect(lockContent).toContain(`plugins/${pluginName}:`)
+      expect(lockContent).toContain("'@deepseek-ai/schemastery':")
+    }
+
+    // Tamper checks against controlled manifest & patch invariants
+    const tamperView = await inspectSourceCreationContext({
+      repository, name: 'rsi-created-tamper', paths: ['package.json', 'cordis.patch.yml'],
+      baseCommit, environment, signal, assertCurrent: () => undefined, grant: grant(),
+    })
+    const tamperBase = JSON.parse(tamperView.contents.find(c => c.path === 'package.json')!.content) as Record<string, unknown>
+    const creation = { grant: grant(), generatorDigest: tamperView.generatorDigest }
+
+    const rejectCases: { label: string; files: { path: string; content: string }[]; pattern: RegExp }[] = [
+      {
+        label: 'invalid pluginKind in dsh metadata',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, dsh: { ...(tamperBase.dsh as object), pluginKind: 'kernel' } }) }],
+        pattern: /pluginKind is invalid/u,
+      },
+      {
+        label: 'altering package name',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, name: '@dsh-enhanced/hijacked' }) }],
+        pattern: /cannot alter package name/u,
+      },
+      {
+        label: 'altering scripts',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, scripts: { postinstall: 'curl bad' } }) }],
+        pattern: /cannot alter immutable field scripts/u,
+      },
+      {
+        label: 'adding dsh.protection',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, dsh: { ...(tamperBase.dsh as object), protection: { sealed: false } } }) }],
+        pattern: /disallowed dsh key protection/u,
+      },
+      {
+        label: 'non-catalog dependency',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, dependencies: { lodash: '^4.17.21' } }) }],
+        pattern: /must use catalog:/u,
+      },
+      {
+        label: 'non-optional peerDependency',
+        files: [{ path: 'package.json', content: JSON.stringify({ ...tamperBase, peerDependencies: { '@dsh-enhanced/assistant-delivery': '*' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: false } } }) }],
+        pattern: /must be marked optional/u,
+      },
+      {
+        label: 'cordis.patch.yml wrong package name',
+        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-enhanced-rsi-created-tamper\n      name: "@dsh-enhanced/other"\n' }],
+        pattern: /must mount @dsh-enhanced\/rsi-created-tamper/u,
+      },
+      {
+        label: 'cordis.patch.yml multiple insert entries',
+        files: [{ path: 'cordis.patch.yml', content: '- insert:\n    - id: dsh-enhanced-rsi-created-tamper\n      name: "@dsh-enhanced/rsi-created-tamper"\n    - id: extra\n      name: "@dsh-enhanced/extra"\n' }],
+        pattern: /insert must contain exactly one entry/u,
+      },
+    ]
+
+    for (const c of rejectCases) {
+      const current = await worktree()
+      await expect(prepareCreatedPluginWorkspace({
+        worktree: current, baseCommit, name: 'rsi-created-tamper', files: c.files,
+        environment, signal, assertCurrent: () => undefined, creation,
+      })).rejects.toThrow(c.pattern)
+    }
+  }, 90_000)
+
+  it('aligns dsh.kind, dsh.ui/channel/client, exports["./client"], cordis.patch.yml declarations, and peer range security with assistant-verifier', async () => {
+    const view = await inspectSourceCreationContext({
+      repository, name: 'rsi-created-verifier-ui', paths: ['package.json', 'cordis.patch.yml'],
+      baseCommit, environment, signal, assertCurrent: () => undefined, grant: grant(),
+    })
+    const baseManifest = JSON.parse(view.contents.find(c => c.path === 'package.json')!.content) as Record<string, unknown>
+    const baseExports = baseManifest.exports as Record<string, unknown>
+    const uiManifest = {
+      ...baseManifest,
+      exports: {
+        ...baseExports,
+        './client': { types: './lib/client.d.ts', default: './lib/client.js' },
+      },
+      dsh: {
+        ...(baseManifest.dsh as Record<string, unknown>),
+        kind: 'ui',
+        ui: { routes: ['/rsi-created-verifier-ui'], title: 'UI Panel' },
+        client: { entry: './lib/client.js' },
+      },
+      peerDependencies: {
+        ...(baseManifest.peerDependencies as Record<string, string>),
+        '@dsh-enhanced/assistant-delivery': 'workspace:*',
+      },
+      peerDependenciesMeta: {
+        ...(baseManifest.peerDependenciesMeta as Record<string, { optional: boolean }>),
+        '@dsh-enhanced/assistant-delivery': { optional: true },
+      },
+    }
+    const uiPatch = [
+      '- insert:',
+      '    - id: dsh-enhanced-rsi-created-verifier-ui',
+      "      name: '@dsh-enhanced/rsi-created-verifier-ui'",
+      '      inject: [typert]',
+      '      ui:',
+      '        panel: true',
+      '      routes:',
+      '        - path: /rsi-created-verifier-ui',
+      '          label: Verifier UI',
+      '      sections:',
+      '        - id: main',
+      '      settings:',
+      '        refreshMs: 5000',
+      '      channel:',
+      '        bridge: false',
+      '      services:',
+      '        - uiHelper',
+      '      provides:',
+      '        - uiHelper',
+      '',
+    ].join('\n')
+    const uiFiles = [
+      { path: 'README.md', content: '# UI plugin\n' },
+      { path: 'package.json', content: `${JSON.stringify(uiManifest, null, 2)}\n` },
+      { path: 'cordis.patch.yml', content: uiPatch },
+    ]
+    expect(extractCandidatePluginKindFromFiles(uiFiles)).toBe('ui')
+    expect(extractCandidatePluginKindFromManifestText(uiFiles[1]!.content)).toBe('ui')
+    const parsedPatch = parseControlledPatchYaml(uiPatch)
+    expect(parsedPatch.inject).toEqual(['typert'])
+    expect(parsedPatch.routes).toEqual([{ path: '/rsi-created-verifier-ui', label: 'Verifier UI' }])
+    expect(parsedPatch.provides).toEqual(['uiHelper'])
+
+    const current = await worktree()
+    const creation = { grant: grant(), generatorDigest: view.generatorDigest }
+    await prepareCreatedPluginWorkspace({
+      worktree: current, baseCommit, name: 'rsi-created-verifier-ui', files: uiFiles,
+      environment, signal, assertCurrent: () => undefined, creation,
+    })
+    await expect(verifyCreatedPluginWorkspace({
+      worktree: current, baseCommit, name: 'rsi-created-verifier-ui', files: uiFiles,
+      environment, signal, assertCurrent: () => undefined, creation,
+    })).resolves.toMatchObject({ generatorDigest: view.generatorDigest })
+
+    // Channel manifest with dsh.kind + dsh.channel + string exports['./client']
+    const chanManifest = {
+      ...baseManifest,
+      exports: { ...baseExports, './client': './lib/client.js' },
+      dsh: { ...(baseManifest.dsh as Record<string, unknown>), kind: 'channel', channel: { adapter: 'webhook' } },
+    }
+    expect(extractCandidatePluginKindFromManifestText(JSON.stringify(chanManifest))).toBe('channel')
+
+    // Rejections for mismatched dsh.kind vs dsh.pluginKind, unsafe exports['./client'], unsafe peerDependencies, and YAML attack vectors
+    const badManifests = [
+      JSON.stringify({ ...baseManifest, dsh: { ...(baseManifest.dsh as object), kind: 'ui', pluginKind: 'service' } }),
+      JSON.stringify({ ...baseManifest, exports: { ...baseExports, './client': '../escape.js' } }),
+      JSON.stringify({ ...baseManifest, exports: { ...baseExports, './client': './src/client.js' } }),
+      JSON.stringify({ ...baseManifest, exports: { ...baseExports, './secret': './package.json' } }),
+      JSON.stringify({ ...baseManifest, exports: { ...baseExports, '.': './lib/hijack.js' } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'file:../evil' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'http://evil.invalid/pkg.tgz' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
+      JSON.stringify({ ...baseManifest, peerDependencies: { '@dsh-enhanced/assistant-delivery': 'git+https://evil.invalid/repo.git' }, peerDependenciesMeta: { '@dsh-enhanced/assistant-delivery': { optional: true } } }),
+    ]
+    for (const content of badManifests) {
+      const wt = await worktree()
+      await expect(prepareCreatedPluginWorkspace({
+        worktree: wt, baseCommit, name: 'rsi-created-verifier-ui',
+        files: [{ path: 'package.json', content }],
+        environment, signal, assertCurrent: () => undefined, creation,
+      })).rejects.toThrow(/outside candidate authority|cannot alter immutable|disallowed/u)
+    }
+
+    const badYamls = [
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui: !!js/function 'function(){}'\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      routes: &a [1]\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      routes: *a\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      <<: *a\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n\tdisabled: false\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui: '{{secret}}'\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\r\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\r\n",
+      "---\n- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n",
+      "- insert:\n    - id: dsh-enhanced-rsi-created-verifier-ui\n      name: '@dsh-enhanced/rsi-created-verifier-ui'\n      ui:\n        __proto__: {}\n",
+    ]
+    for (const content of badYamls) {
+      expect(() => validateSourceCreationFiles([{ path: 'cordis.patch.yml', content }])).toThrow(/outside candidate authority|forbidden|unsafe|invalid key/u)
+    }
+  }, 90_000)
 })

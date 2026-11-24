@@ -389,4 +389,62 @@ describe('owner-instruction revision corridor (v3)', () => {
     portToInstructionCorridor(other, { instructionId: 'instruction-2', digest: 'e'.repeat(64) })
     expect((await other.runtime.run(other.request)).status).toBe('verified')
   })
+
+  test('verifies a service plugin revision with pluginKind forwarded across discover and invoke', async () => {
+    const f = await fixture()
+    const svcSchema = {
+      name: 'service_lifecycle_probe',
+      parameters: {
+        type: 'object',
+        properties: {
+          check: { type: 'string', enum: ['status', 'health', 'provisions'] },
+          service: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+    }
+    const svcDigest = createHash('sha256').update(JSON.stringify([svcSchema])).digest('hex')
+    const svcCases = [
+      { id: 'ordinary', toolName: 'service_lifecycle_probe', arguments: { check: 'status' }, purpose: 'ordinary',
+        expected: { kind: 'json-value', value: { kind: 'service', active: true } }, rationale: 'Verify service activation.' },
+      { id: 'challenge', toolName: 'service_lifecycle_probe', arguments: { check: 'health' }, purpose: 'challenge',
+        expected: { kind: 'json-value', value: { kind: 'service', ready: true } }, rationale: 'Verify service health check.' },
+    ]
+    const baseInspect = f.cp.inspectPreparedRevision.getMockImplementation()!
+    f.cp.inspectPreparedRevision.mockImplementation(() => {
+      const snap = baseInspect() as { plan: Record<string, unknown> }
+      return { ...snap, plan: { ...snap.plan, pluginKind: 'service' } } as never
+    })
+    let calls = 0
+    vi.spyOn(f.adapter, 'stream').mockImplementation(async function* (options: GenerateOptions) {
+      f.adapter.requests.push(options)
+      const val = ++calls === 1
+        ? { status: 'cases', cases: svcCases }
+        : { decision: 'approved', reason: 'Service revision verified cleanly.' }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: JSON.stringify(val) } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    let job = 0
+    observer.run.mockImplementation(async (_k: string, _f: unknown, stdin: string) => {
+      const req = JSON.parse(stdin) as { nonce: string; artifactSha256: string; pluginKind?: string; operation: { kind: string; calls?: { id: string; arguments: { check: string } }[] } }
+      expect(req.pluginKind).toBe('service')
+      const frame = req.operation.kind === 'discover'
+        ? { wireVersion: 1, nonce: req.nonce, artifactSha256: req.artifactSha256,
+            operationDigest: createHash('sha256').update(JSON.stringify(req.operation)).digest('hex'),
+            status: 'result', pluginKind: 'service', schemaDigest: svcDigest, schemas: [svcSchema] }
+        : { wireVersion: 1, nonce: req.nonce, artifactSha256: req.artifactSha256,
+            operationDigest: createHash('sha256').update(JSON.stringify(req.operation)).digest('hex'),
+            status: 'result', pluginKind: 'service', schemaDigest: svcDigest,
+            calls: [{ id: req.operation.calls![0]!.id, toolName: 'service_lifecycle_probe',
+              result: { isError: false, value: req.operation.calls![0]!.arguments.check === 'health'
+                ? { kind: 'service', ready: true } : { kind: 'service', active: true } } }] }
+      return { jobId: `svc-rev-${++job}`, status: 'succeeded', quiescent: true, exitCode: 0,
+        stdout: JSON.stringify(frame) + '\n', stderr: '', artifacts: [] }
+    })
+    const res = await f.runtime.run(f.request)
+    expect(res.status).toBe('verified')
+    expect(JSON.stringify(f.adapter.requests[0]!.messages)).toContain('Candidate pluginKind is \\"service\\"')
+  })
 })

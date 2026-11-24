@@ -38,7 +38,7 @@ export const Config: Schema<Config> = Schema.object({
   authorities: Schema.array(Schema.any()).default([]),
   profiles: Schema.array(Schema.any()).default([]),
   tickIntervalMs: Schema.number().step(1).min(0).max(60_000).default(5_000),
-  requireAcceptance: Schema.boolean().default(false),
+  requireAcceptance: Schema.boolean().default(true),
   sourceReviews: Schema.any(),
   memoryReviews: Schema.any(),
   creationReviews: Schema.any(),

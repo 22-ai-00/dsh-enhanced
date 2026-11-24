@@ -117,7 +117,7 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
     databasePath: join(root, 'evolution.sqlite'),
     minSample: 4,
     reconcileIntervalMs: 0,
-    autonomousRollback: options.autonomousRollback ?? true,
+    ...(options.autonomousRollback === undefined ? {} : { autonomousRollback: options.autonomousRollback }),
   })
   return { ctx, agent: agent() }
 }

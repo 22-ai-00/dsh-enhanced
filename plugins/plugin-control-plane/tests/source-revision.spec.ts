@@ -234,4 +234,100 @@ describe('revision of archived created plugin through the real Git generator', (
     expect(() => validateSourceRevisionBinding(getter)).toThrow()
     expect(read).toBe(false)
   }, 30_000)
+
+  it('revises a created plugin with controlled package.json, cordis.patch.yml, pluginKind, and synchronized pnpm-lock.yaml while rejecting tampering', async () => {
+    const parent = await parentFixture()
+    const current = await worktree()
+    const parentManifestFile = parent.source.files.find(file => file.path === `plugins/${name}/package.json`)!
+    const parsedManifest = JSON.parse(parentManifestFile.content) as Record<string, unknown>
+    const revisedManifest = {
+      ...parsedManifest,
+      description: 'Revised channel plugin',
+      dsh: { ...(parsedManifest.dsh as Record<string, unknown>), pluginKind: 'channel' },
+      dependencies: {
+        ...(parsedManifest.dependencies as Record<string, string> | undefined),
+        '@deepseek-ai/schemastery': 'catalog:',
+      },
+      peerDependencies: {
+        ...(parsedManifest.peerDependencies as Record<string, string> | undefined),
+        '@dsh-enhanced/assistant-delivery': '>=0.1.0',
+      },
+      peerDependenciesMeta: {
+        ...(parsedManifest.peerDependenciesMeta as Record<string, { optional: boolean }> | undefined),
+        '@dsh-enhanced/assistant-delivery': { optional: true },
+      },
+    }
+    const revisedPatch = [
+      '- insert:',
+      `    - id: dsh-enhanced-${name}`,
+      `      name: '@dsh-enhanced/${name}'`,
+      '      inject:',
+      '        - assistantDelivery',
+      '      config:',
+      '        mode: strict',
+      '',
+    ].join('\n')
+    const revisedFiles = [
+      { path: 'README.md', content: '# Revised channel plugin\n' },
+      { path: 'package.json', content: `${JSON.stringify(revisedManifest, null, 2)}\n` },
+      { path: 'cordis.patch.yml', content: revisedPatch },
+    ]
+    const input = {
+      worktree: current, baseCommit, name, files: revisedFiles,
+      environment, signal, assertCurrent: () => undefined, revision: parent.binding,
+      parentSource: parent.source, parentCertificate: parent.cert,
+    }
+    const prepared = await prepareRevisedPluginWorkspace(input)
+    expect(prepared.scope).toContain('pnpm-lock.yaml')
+    const verified = await verifyRevisedPluginWorkspace(input)
+    expect(verified.generatorDigest).toBe(parent.binding.generatorDigest)
+    const lockText = await readFile(join(current, 'pnpm-lock.yaml'), 'utf8')
+    expect(lockText).toContain(`plugins/${name}:`)
+    expect(lockText).toContain("'@deepseek-ai/schemastery':")
+
+    const tamperedWorktree = await worktree()
+    await expect(prepareRevisedPluginWorkspace({
+      ...input,
+      worktree: tamperedWorktree,
+      files: [
+        { path: 'package.json', content: JSON.stringify({ ...parsedManifest, scripts: { build: 'evil' } }) },
+      ],
+    })).rejects.toThrow('cannot alter immutable field scripts')
+
+    // Aligned verifier schema in revision: dsh.kind, dsh.ui, dsh.client, exports['./client'], cordis.patch.yml declarations
+    const uiWorktree = await worktree()
+    const baseExports = parsedManifest.exports as Record<string, unknown>
+    const uiRevisedManifest = {
+      ...parsedManifest,
+      exports: { ...baseExports, './client': './lib/client.js' },
+      dsh: { ...(parsedManifest.dsh as Record<string, unknown>), kind: 'ui', ui: { panel: true }, client: { entry: './lib/client.js' } },
+    }
+    const uiRevisedPatch = [
+      '- insert:',
+      `    - id: dsh-enhanced-${name}`,
+      `      name: '@dsh-enhanced/${name}'`,
+      '      inject:',
+      '        - typert',
+      '      ui:',
+      '        routes:',
+      '          - /revised-ui',
+      '      sections:',
+      '        - id: overview',
+      '',
+    ].join('\n')
+    const uiRevisionFiles = [
+      { path: 'package.json', content: `${JSON.stringify(uiRevisedManifest, null, 2)}\n` },
+      { path: 'cordis.patch.yml', content: uiRevisedPatch },
+    ]
+    await prepareRevisedPluginWorkspace({ ...input, worktree: uiWorktree, files: uiRevisionFiles })
+    await expect(verifyRevisedPluginWorkspace({ ...input, worktree: uiWorktree, files: uiRevisionFiles }))
+      .resolves.toMatchObject({ generatorDigest: parent.binding.generatorDigest })
+
+    const mismatchWorktree = await worktree()
+    await expect(prepareRevisedPluginWorkspace({
+      ...input,
+      worktree: mismatchWorktree,
+      files: [{ path: 'package.json', content: JSON.stringify({ ...parsedManifest, dsh: { ...(parsedManifest.dsh as object), kind: 'ui', pluginKind: 'channel' } }) }],
+    })).rejects.toThrow(/dsh\.pluginKind and dsh\.kind disagree/u)
+  }, 45_000)
 })

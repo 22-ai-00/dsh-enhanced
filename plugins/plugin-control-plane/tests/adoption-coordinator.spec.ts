@@ -22,8 +22,9 @@ function storeFixture(status: PluginActivationPlan['status'] = 'awaiting-health'
   return { store: {
     getPlan: vi.fn(() => current), getAdoptionHandoff: vi.fn(() => handoff), getLiveQualificationDeadline: vi.fn<() => number | undefined>(() => undefined),
     assertAdoptionHandoff: vi.fn(() => { if (handoff.expiresAt <= Date.now() || 'revokedAt' in handoff) throw new Error('inactive') }),
-    requestActivationRollback: vi.fn(() => current = { ...current, status: 'rollback-pending', revision: current.revision + 1,
-      activation: { ...current.activation!, rollbackProfileRestored: true } }),
+    requestActivationRollback: vi.fn((input?: { failureCode?: string }) => current = { ...current, status: 'rollback-pending', revision: current.revision + 1,
+      activation: { ...current.activation!, rollbackProfileRestored: true,
+        ...(input?.failureCode === undefined ? {} : { failureCode: input.failureCode }) } }),
     listAdoptionHandoffs: vi.fn(() => [handoff]), pendingRuntimeEpochs: vi.fn(() => [] as any[]),
     claimRuntimeEpoch: vi.fn(), applyRuntimeEpoch: vi.fn(), close: vi.fn(),
   }, state: () => current, set: (value: PluginActivationPlan) => { current = value } }
@@ -174,4 +175,96 @@ test('native coordinator independently attests a queued runtime epoch under its 
   expect(f.store.applyRuntimeEpoch).toHaveBeenCalledWith(receipt, trust)
   expect(activatePluginPlan).not.toHaveBeenCalled(); expect(probePluginPlan).not.toHaveBeenCalled()
   await runtime.close()
+})
+
+test('AdoptionCoordinatorRuntime dynamically resolves inProcessReload and rolls back on reload or readiness failures', async () => {
+  // 1. Coordinator invokes inProcessReload.execute() for awaiting-reload and commits via probePluginPlan()
+  const f1 = storeFixture('awaiting-reload')
+  let activeExecutor: HostAutomationExecutor | undefined
+  let registration: { definitionHash: string; activationNonce: string } | undefined
+  const automations1 = {
+    registerHostExecutor: vi.fn((exec: HostAutomationExecutor) => { activeExecutor = exec; return () => {} }),
+    reconcileSystem: vi.fn((input: any) => { registration = { definitionHash: 'definition', activationNonce: input.definition.execution.activationNonce }; return {} }),
+    inspectSystemOwnedActivation: vi.fn(() => registration),
+    pauseSystemOwned: vi.fn(),
+  }
+  const dynamicHook = {
+    canHandle: vi.fn(() => true),
+    execute: vi.fn(async () => {
+      const next = { ...f1.state(), status: 'awaiting-readiness' as const, revision: f1.state().revision + 1 }
+      f1.set(next)
+      return { status: 'reloaded' as const, plan: next }
+    }),
+    rollback: vi.fn(async (p: PluginActivationPlan, failureCode: string) => ({
+      status: 'rolled-back' as const,
+      plan: {
+        ...p, status: 'rolled-back' as const, revision: p.revision + 1,
+        activation: { ...p.activation!, failureCode },
+      },
+    })),
+  }
+  vi.mocked(probePluginPlan).mockImplementationOnce(async () => ({ ...f1.state(), status: 'commit-pending', revision: 3, activation: f1.state().activation! }))
+  const runtime = new AdoptionCoordinatorRuntime({
+    config: {
+      coordinatorId: 'coordinator',
+      scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' },
+      timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 7,
+    },
+    store: f1.store as never,
+    trust: {} as never,
+    automations: automations1 as never,
+    assertCurrent() {},
+    inProcessReload: () => dynamicHook,
+  })
+  runtime.start()
+  const res1 = await activeExecutor!.execute({
+    automationId: (automations1.reconcileSystem.mock.calls[0]![0] as any).automationId,
+    executionMode: 'production', activationNonce: registration!.activationNonce,
+    definitionHash: 'definition', catalogDigest: activeExecutor!.descriptor.catalogDigest,
+    ownerRouteId: 'route', principal: 'owner',
+    targetScope: { workspace: '/workspace', preset: 'primary' }, signal: new AbortController().signal,
+  } as HostAutomationExecutorInput)
+  expect(res1.outcome).toBe('succeeded')
+  expect(dynamicHook.execute).toHaveBeenCalledTimes(1)
+  expect(probePluginPlan).toHaveBeenCalledWith(expect.objectContaining({ deferCommit: true }))
+  expect(dynamicHook.rollback).not.toHaveBeenCalled()
+  await runtime.close()
+
+  // 2. When inProcessReload.execute() throws, coordinateAdoptionHandoff invokes inProcessReload.rollback & requestActivationRollback
+  const f2 = storeFixture('awaiting-reload')
+  const hook2 = {
+    canHandle: () => true,
+    execute: vi.fn(async () => { throw new Error('in-process load boom') }),
+    rollback: vi.fn(async (p: PluginActivationPlan, failureCode: string) => {
+      const rb = { ...p, status: 'rollback-pending' as const, revision: p.revision + 1, activation: { ...p.activation!, failureCode } }
+      f2.set(rb)
+      return { status: 'rollback-pending' as const, plan: rb }
+    }),
+  }
+  vi.mocked(probePluginPlan).mockImplementationOnce(async () => ({ ...f2.state(), status: 'rolled-back' }))
+  const out2 = await coordinateAdoptionHandoff({ store: f2.store as never, trust: {} as never, planId: 'plan', inProcessReload: hook2 })
+  expect(hook2.rollback).toHaveBeenCalledWith(expect.objectContaining({ id: 'plan' }), 'in-process-reload-error')
+  expect(f2.store.requestActivationRollback).toHaveBeenCalledTimes(1)
+  expect(out2.status).toBe('rolled-back')
+
+  // 3. When post-reload readiness (probePluginPlan) fails/throws after awaiting-readiness, rollback executes automatically
+  const f3 = storeFixture('awaiting-reload')
+  const hook3 = {
+    canHandle: () => true,
+    execute: vi.fn(async () => {
+      const next = { ...f3.state(), status: 'awaiting-readiness' as const, revision: f3.state().revision + 1 }
+      f3.set(next)
+      return { status: 'reloaded' as const, plan: next }
+    }),
+    rollback: vi.fn(async (p: PluginActivationPlan, failureCode: string) => {
+      const rb = { ...p, status: 'rollback-pending' as const, revision: p.revision + 1, activation: { ...p.activation!, failureCode } }
+      f3.set(rb)
+      return { status: 'rollback-pending' as const, plan: rb }
+    }),
+  }
+  vi.mocked(probePluginPlan).mockRejectedValueOnce(new Error('health probe failed'))
+  const out3 = await coordinateAdoptionHandoff({ store: f3.store as never, trust: {} as never, planId: 'plan', inProcessReload: hook3 })
+  expect(hook3.rollback).toHaveBeenCalledWith(expect.objectContaining({ id: 'plan' }), 'in-process-readiness-failed')
+  expect(f3.store.requestActivationRollback).toHaveBeenCalledTimes(1)
+  expect(out3.status).toBe('rollback-pending')
 })

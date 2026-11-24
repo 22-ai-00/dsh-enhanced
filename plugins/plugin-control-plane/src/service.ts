@@ -1,13 +1,21 @@
 import { cleanedLinuxSourceBuildFailure, cleanedLinuxSourcePreflight, consumeCleanedLinuxSourceBuildFailure, consumeCleanedLinuxSourcePreflight,
   consumeLinuxSourceBuildFailed, consumeLinuxSourceNotStarted, isLinuxSourceBuildFailed } from './linux-source-preflight.js'
-import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
+import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig, type AdoptionInProcessReloadHook } from './adoption-coordinator.js'
 import {
+  IN_PROCESS_RELOAD_DENYLIST,
   InProcessReloadRefusal,
+  buildInProcessReloadRequirements,
+  computeInProcessDirectoryArtifactDigest,
+  computeInProcessPatchTextDigest,
   executeInProcessReloadHandoff,
+  rollbackInProcessReload,
   type InProcessReloadHandoffResult,
   type InProcessReloadHostPort,
   type InProcessReloadSnapshot,
+  type InProcessReloadWarrant,
 } from './in-process-reload.js'
+import { invokeConfiguredHostAttestor } from './host-attestor.js'
+import { Ed25519HostAttestationAuthority } from './attestation.js'
 import { CreationCapabilityJournal, creationCapabilityAuthorityDigest, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
 import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
 import { RevisionCapabilityJournal, revisionCapabilityAuthorityDigest, revisionCapabilityPublicKey, validateRevisionCapabilityConfig } from './revision-capability-journal.js'
@@ -22,8 +30,8 @@ import { autoRollbackInferiorRevision, evaluateRevisionBenefitEvidence,
 import { captureCreationCapabilitySource } from './creation-capability-source.js'
 import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { existsSync, lstatSync, realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -491,6 +499,191 @@ export class PluginControlPlaneService extends Service {
         this.abort.signal.throwIfAborted()
         const store = new ControlPlaneStore({ path: trust.ledger.path, adoptionCoordinatorId: this.config.adoptionCoordinator!.coordinatorId })
         const automations = () => coordinatorCtx.get('assistantAutomations' as never) as unknown as AssistantAutomationsService
+        const getInProcessReload = (): InProcessReloadHostPort | undefined =>
+          coordinatorCtx.get('inProcessReload' as never) as InProcessReloadHostPort | undefined
+        const reloadRecords = new Map<string, { warrant: InProcessReloadWarrant; snapshot: InProcessReloadSnapshot }>()
+        const buildReloadSnapshot = async (
+          plan: PluginActivationPlan,
+          port: InProcessReloadHostPort,
+        ): Promise<InProcessReloadSnapshot> => {
+          const portSnapshot = typeof (port as { snapshot?: unknown }).snapshot === 'function'
+            ? (port as unknown as { snapshot(): { hostGeneration: number; inProcessGeneration: number } }).snapshot()
+            : { hostGeneration: Math.max(1, store.latestHostGeneration(plan.installationId)), inProcessGeneration: 1 }
+          const pkgDir = join(plan.target.profilePath, 'node_modules', ...plan.candidate.package.split('/'))
+          let hasPkgDir = false
+          try {
+            lstatSync(pkgDir)
+            hasPkgDir = true
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+          let resolvedPkgDir: string | undefined
+          if (hasPkgDir) {
+            const canonicalProfileRoot = realpathSync(plan.target.profilePath)
+            const canonicalModulesRoot = realpathSync(join(plan.target.profilePath, 'node_modules'))
+            const candidateResolvedDir = realpathSync(pkgDir)
+            const isStrictlyWithin = (root: string, target: string): boolean => {
+              const rel = relative(root, target)
+              return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+            }
+            if (!isStrictlyWithin(canonicalProfileRoot, canonicalModulesRoot) || !isStrictlyWithin(canonicalModulesRoot, candidateResolvedDir)) {
+              throw new Error(`in-process reload package directory escapes node_modules directory: ${pkgDir}`)
+            }
+            resolvedPkgDir = candidateResolvedDir
+          }
+          const targetArtifactDigest = resolvedPkgDir !== undefined
+            ? computeInProcessDirectoryArtifactDigest(resolvedPkgDir)
+            : controlPlaneDigest({ package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity })
+          const profileYamlPath = join(plan.target.profilePath, 'cordis.yml')
+          const profileJsonPath = join(plan.target.profilePath, 'cordis.json')
+          const patchFilePath = existsSync(profileYamlPath) ? profileYamlPath : existsSync(profileJsonPath) ? profileJsonPath : undefined
+          const patchContent = patchFilePath !== undefined ? await readFile(patchFilePath, 'utf8') : undefined
+          const targetPatchDigest = patchContent !== undefined
+            ? computeInProcessPatchTextDigest(patchContent)
+            : controlPlaneDigest({ profile: plan.profile, planId: plan.id, fence: plan.activation!.fence })
+          const runningArtifactDigest = resolvedPkgDir !== undefined
+            ? controlPlaneDigest({ priorArtifactFor: plan.id, fence: plan.activation!.fence })
+            : targetArtifactDigest
+          const runningPatchDigest = controlPlaneDigest({ priorPatchFor: plan.id, fence: plan.activation!.fence })
+          return {
+            planId: plan.id,
+            planDigest: plan.digest,
+            status: 'awaiting-reload',
+            activation: { id: plan.activation!.id, fence: plan.activation!.fence },
+            hostGeneration: portSnapshot.hostGeneration,
+            inProcessGeneration: portSnapshot.inProcessGeneration,
+            running: { artifactDigest: runningArtifactDigest, patchDigest: runningPatchDigest },
+            ...(resolvedPkgDir !== undefined ? { mode: 'artifact-replace' as const } : {}),
+            target: {
+              package: plan.candidate.package,
+              version: plan.candidate.version,
+              artifactDigest: targetArtifactDigest,
+              patchDigest: targetPatchDigest,
+              changesProcessSubtree: false,
+              holdsUnprovenProcessAuthority: false,
+              ...(resolvedPkgDir !== undefined ? { artifact: { sourceDir: resolvedPkgDir, ...(patchContent === undefined ? {} : { patchContent }) } } : {}),
+            },
+          }
+        }
+        const createAdoptionReloadHook = (): AdoptionInProcessReloadHook | undefined => {
+          if (getInProcessReload() === undefined) return undefined
+          return {
+            canHandle: plan =>
+              plan.status === 'awaiting-reload'
+              && plan.activation !== undefined
+              && getInProcessReload() !== undefined
+              && !IN_PROCESS_RELOAD_DENYLIST.includes(plan.candidate.package),
+            execute: async plan => {
+              const port = getInProcessReload()
+              if (port === undefined || plan.activation === undefined) {
+                return { status: 'rollback-pending', failureCode: 'in-process-reload-unavailable' }
+              }
+              const reloadSnapshot = await buildReloadSnapshot(plan, port)
+              const result = await executeInProcessReloadHandoff({
+                snapshot: reloadSnapshot,
+                port,
+                autoRollback: true,
+              })
+              const key = `${plan.id}:${plan.activation.fence}`
+              if (reloadRecords.size >= 64) {
+                const oldest = reloadRecords.keys().next().value
+                if (oldest !== undefined) reloadRecords.delete(oldest)
+              }
+              reloadRecords.set(key, { warrant: result.warrant, snapshot: reloadSnapshot })
+              if (result.status !== 'reloaded') {
+                const failureCode = result.status === 'rolled-back' ? 'in-process-reload-rolled-back' : result.apply.code
+                const rollbackPlan = store.requestActivationRollback({
+                  planId: plan.id,
+                  expectedRevision: plan.revision,
+                  fence: plan.activation.fence,
+                  failureCode,
+                })
+                return { status: result.status, plan: rollbackPlan, failureCode }
+              }
+              if (trust.hostAttestor !== undefined) {
+                const attestor = trust.hostAttestor
+                const operation = store.prepareHostAttestationOperation({
+                  planId: plan.id,
+                  expectedRevision: plan.revision,
+                  expectedFence: plan.activation.fence,
+                  issuer: {
+                    mode: 'configured-executable',
+                    id: attestor.id,
+                    version: attestor.version,
+                    path: attestor.path,
+                    sha256: attestor.sha256,
+                    interpreter: attestor.interpreter,
+                    authority: attestor.authority,
+                    keyId: attestor.keyId,
+                  },
+                  requirements: buildInProcessReloadRequirements({
+                    previousHostGeneration: result.apply.previousHostGeneration,
+                    previousInProcessGeneration: result.apply.previousInProcessGeneration,
+                    artifactDigest: reloadSnapshot.target.artifactDigest,
+                    patchDigest: reloadSnapshot.target.patchDigest,
+                    minimumChecks: 1,
+                  }),
+                  receiptTtlMs: trust.hostPolicy.receiptTtlMs,
+                })
+                const resolveAuthority = (value: { authority: string; keyId: string }): Ed25519HostAttestationAuthority => {
+                  const key = resolveTrustKey(trust, 'host-attestation', value.authority, value.keyId)
+                  return new Ed25519HostAttestationAuthority(key.publicKeyPem, key.authority, key.keyId)
+                }
+                const receipt = await store.runHostAttestationOperation({
+                  operationId: operation.operationId,
+                  expectedRevision: plan.revision,
+                  expectedFence: plan.activation.fence,
+                  execute: request => invokeConfiguredHostAttestor(trust, request, this.abort.signal),
+                  resolveAuthority,
+                })
+                const applied = await store.applyHostAttestation({
+                  planId: plan.id,
+                  expectedRevision: plan.revision,
+                  expectedFence: plan.activation.fence,
+                  receipt,
+                  idempotencyKey: `host-attestation:${operation.operationId}`,
+                  resolveAuthority,
+                })
+                return { status: 'reloaded', plan: applied.result }
+              }
+              return { status: 'reloaded', plan }
+            },
+            rollback: async (plan, failureCode) => {
+              const port = getInProcessReload()
+              const fence = plan.activation?.fence
+              const key = fence === undefined ? undefined : `${plan.id}:${fence}`
+              const recorded = key === undefined ? undefined : reloadRecords.get(key)
+              if (key !== undefined) reloadRecords.delete(key)
+              let rolledBack = true
+              if (port !== undefined && recorded !== undefined) {
+                const portSnapshot = typeof (port as { snapshot?: unknown }).snapshot === 'function'
+                  ? (port as unknown as { snapshot(): { hostGeneration: number; inProcessGeneration: number } }).snapshot()
+                  : { hostGeneration: recorded.snapshot.hostGeneration, inProcessGeneration: recorded.snapshot.inProcessGeneration + 1 }
+                const rb = await rollbackInProcessReload({
+                  warrant: recorded.warrant,
+                  snapshot: {
+                    ...recorded.snapshot,
+                    status: 'rollback-pending',
+                    inProcessGeneration: portSnapshot.inProcessGeneration,
+                  },
+                  port,
+                  now: Date.now(),
+                })
+                rolledBack = rb.status === 'rolled-back'
+              }
+              let currentPlan = store.getPlan(plan.id)
+              if (currentPlan.status !== 'rollback-pending' && currentPlan.status !== 'rolled-back' && currentPlan.activation !== undefined) {
+                currentPlan = store.requestActivationRollback({
+                  planId: currentPlan.id,
+                  expectedRevision: currentPlan.revision,
+                  fence: currentPlan.activation.fence,
+                  failureCode,
+                })
+              }
+              return { status: rolledBack ? 'rolled-back' : 'rollback-pending', plan: currentPlan, failureCode }
+            },
+          }
+        }
         let runtime: AdoptionCoordinatorRuntime | undefined
         try {
           runtime = new AdoptionCoordinatorRuntime({ config: this.config.adoptionCoordinator!, store, trust,
@@ -498,6 +691,7 @@ export class PluginControlPlaneService extends Service {
               this.abort.signal.throwIfAborted()
               if (foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('adoption coordinator trust changed')
             },
+            inProcessReload: () => createAdoptionReloadHook(),
             automations: {
               registerHostExecutor: input => automations().registerHostExecutor(input),
               reconcileSystem: input => automations().reconcileSystem(input),
@@ -667,7 +861,7 @@ export class PluginControlPlaneService extends Service {
                 if (Object.keys(owner).some(key => prepared.reference.owner[key as keyof typeof owner] !== owner[key as keyof typeof owner])) {
                   throw new Error('created capability owner differs from the finite grant')
                 }
-                return { certificate, artifact: prepared.artifact, owner,...(prepared.protocol==='dsh-prepared-creation/v2'?{sourceRun:prepared.plan.creation!.growthRun!}:{}) }
+                return { certificate, artifact: prepared.artifact, owner, ...(prepared.plan.pluginKind === undefined ? {} : { pluginKind: prepared.plan.pluginKind }), ...(prepared.protocol==='dsh-prepared-creation/v2'?{sourceRun:prepared.plan.creation!.growthRun!}:{}) }
               },
               recheck: async (planId, signal) => {
                 await this.inspectPreparedCreationReviewContext(planId, signal)
@@ -694,8 +888,18 @@ export class PluginControlPlaneService extends Service {
                 }
                 return source
               },
-              inspectRetained: record => this.withRetainedCreatedCapabilityCurrent(record, () => ({
-                certificate: record.certificate, artifact: record.artifact, owner: config.owner,...(this.store.getRetainedPreparedCreation(record.planId).plan.creation?.growthRun?.protocol==='assistant-growth/source-run/v2'?{sourceRun:this.store.getRetainedPreparedCreation(record.planId).plan.creation!.growthRun!}:{}) })),
+              inspectRetained: record => this.withRetainedCreatedCapabilityCurrent(record, () => {
+                const retained = this.store.getRetainedPreparedCreation(record.planId)
+                return {
+                  certificate: record.certificate,
+                  artifact: record.artifact,
+                  owner: config.owner,
+                  ...(retained.plan.pluginKind === undefined ? {} : { pluginKind: retained.plan.pluginKind }),
+                  ...(retained.plan.creation?.growthRun?.protocol === 'assistant-growth/source-run/v2'
+                    ? { sourceRun: retained.plan.creation!.growthRun! }
+                    : {}),
+                }
+              }),
               recheckRetained: async (record, signal) => {
                 signal.throwIfAborted()
                 this.withRetainedCreatedCapabilityCurrent(record, () => undefined)

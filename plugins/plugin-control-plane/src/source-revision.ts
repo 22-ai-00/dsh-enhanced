@@ -1,4 +1,4 @@
-import { lstat } from 'node:fs/promises'
+import { lstat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { validatePluginCreationVerificationCertificate, validatePluginRevisionParentBinding,
   validateSourceGrowthRunBinding,
@@ -6,7 +6,8 @@ import { validatePluginCreationVerificationCertificate, validatePluginRevisionPa
   type SourceGrowthRunBinding, type WorkItemRevisionSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { ControlPlaneCliError } from './errors.js'
-import { inspectCreationHostScaffold, prepareCreationHostScaffold, validateSourceCreationFiles,
+import { IMMUTABLE_OUTPUTS, computeLockImporter, inspectCreationHostScaffold, prepareCreationHostScaffold,
+  validateCandidateCordisPatch, validateCandidatePackageJson, validateSourceCreationFiles,
   verifyCreationHostScaffold, type SourceCreationHostScaffold } from './source-creation.js'
 import type { SourceInspection } from './source-context.js'
 import { controlPlaneDigest } from './store.js'
@@ -15,8 +16,7 @@ import { writeCreatedPluginFiles, type ScopedPluginFile } from './source-workspa
 const NAME = /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const GRANT_ID = /^(?=.{1,128}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const DIGEST = /^[a-f0-9]{64}$/u
-const RESERVED = new Set(['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconfig.json',
-  'tsconfig.build.json', 'src/version.ts'])
+const IMMUTABLE_SET = new Set<string>(IMMUTABLE_OUTPUTS)
 const MAX_FILES = 64
 const MAX_FILE_BYTES = 65_536
 const MAX_TOTAL_BYTES = 262_144
@@ -137,15 +137,29 @@ function parentFiles(name: string, parent: PluginRevisionParentBinding, parentSo
     if (!file.path.startsWith(root)) fail('parent root')
     const path = file.path.slice(root.length)
     if (file.mode !== '100644') fail('parent file mode')
-    if (RESERVED.has(path)) {
+    if (IMMUTABLE_SET.has(path)) {
       if (generated.get(path) !== file.content) fail(`parent protected metadata changed: ${path}`)
+    } else if (path === 'package.json') {
+      try {
+        validateCandidatePackageJson(name, generated.get('package.json')!, file.content)
+      } catch {
+        fail(`parent protected metadata changed: ${path}`)
+      }
+      source.set(path, file.content)
+    } else if (path === 'cordis.patch.yml') {
+      try {
+        validateCandidateCordisPatch(name, generated.get('cordis.patch.yml')!, file.content)
+      } catch {
+        fail(`parent protected metadata changed: ${path}`)
+      }
+      source.set(path, file.content)
     } else {
       validateSourceCreationFiles([{ path, content: file.content }])
       source.set(path, file.content)
     }
   }
   for (const file of scaffold.files) {
-    if (!RESERVED.has(file.path) && !source.has(file.path)) fail(`parent lacks generated candidate: ${file.path}`)
+    if (!IMMUTABLE_SET.has(file.path) && !source.has(file.path)) fail(`parent lacks generated candidate: ${file.path}`)
   }
   return source
 }
@@ -165,7 +179,7 @@ function proposedFiles(parent: Map<string, string>, files: readonly ScopedPlugin
 function assertFinalBudget(scaffold: SourceCreationHostScaffold, candidate: Map<string, string>): void {
   let total = 0
   let count = 0
-  for (const content of [...scaffold.files.filter(file => RESERVED.has(file.path)).map(file => file.content), ...candidate.values()]) {
+  for (const content of [...scaffold.files.filter(file => IMMUTABLE_SET.has(file.path)).map(file => file.content), ...candidate.values()]) {
     const bytes = Buffer.byteLength(content, 'utf8')
     if (++count > MAX_FILES || bytes > MAX_FILE_BYTES || (total += bytes) > MAX_TOTAL_BYTES) fail('final source exceeds bounds')
   }
@@ -214,9 +228,17 @@ export async function prepareRevisedPluginWorkspace(input: RevisionWorkspaceInpu
   if (preflight.generatorDigest !== input.revision.generatorDigest) fail('generator inputs changed')
   const parent = parentFiles(input.name, input.revision.parent, input.parentSource, input.parentCertificate, preflight)
   const expected = proposedFiles(parent, input.files)
+  const baseManifestText = preflight.files.find(file => file.path === 'package.json')!.content
+  const basePatchText = preflight.files.find(file => file.path === 'cordis.patch.yml')!.content
+  const revisedManifest = validateCandidatePackageJson(input.name, baseManifestText, expected.get('package.json')!)
+  validateCandidateCordisPatch(input.name, basePatchText, expected.get('cordis.patch.yml')!)
   assertFinalBudget(preflight, expected)
   const scaffold = await prepareCreationHostScaffold({ ...input, expectedGeneratorDigest: input.revision.generatorDigest })
   if (scaffold.generatorDigest !== preflight.generatorDigest || scaffold.baseCommit !== preflight.baseCommit) fail('Host scaffold drift')
+  const updatedLock = computeLockImporter(scaffold.baseLock, revisedManifest, input.name)
+  if (updatedLock !== scaffold.lock) {
+    await writeFile(join(input.worktree, 'pnpm-lock.yaml'), updatedLock, { flag: 'w' })
+  }
   await writeCreatedPluginFiles({ worktree: input.worktree, name: input.name,
     files: [...parent].map(([path, content]) => ({ path, content })) })
   await writeCreatedPluginFiles({ worktree: input.worktree, name: input.name, files: input.files })
@@ -228,12 +250,16 @@ export async function verifyRevisedPluginWorkspace(input: RevisionWorkspaceInput
   const { expected: scaffold, actual } = await verifyCreationHostScaffold({ ...input, expectedGeneratorDigest: input.revision.generatorDigest })
   const parent = parentFiles(input.name, input.revision.parent, input.parentSource, input.parentCertificate, scaffold)
   const expected = proposedFiles(parent, input.files)
+  const baseManifestText = scaffold.files.find(file => file.path === 'package.json')!.content
+  const basePatchText = scaffold.files.find(file => file.path === 'cordis.patch.yml')!.content
+  validateCandidatePackageJson(input.name, baseManifestText, expected.get('package.json')!)
+  validateCandidateCordisPatch(input.name, basePatchText, expected.get('cordis.patch.yml')!)
   assertFinalBudget(scaffold, expected)
-  const complete = new Map([...scaffold.files.filter(file => RESERVED.has(file.path)).map(file => [file.path, file.content] as const), ...expected])
+  const complete = new Map([...scaffold.files.filter(file => IMMUTABLE_SET.has(file.path)).map(file => [file.path, file.content] as const), ...expected])
   if (actual.length !== complete.size) fail('actual source file set changed')
   for (const file of actual) {
     if (complete.get(file.path) !== file.content || file.bytes !== Buffer.byteLength(file.content, 'utf8')) fail(`actual source changed: ${file.path}`)
-    if (!RESERVED.has(file.path)) {
+    if (!IMMUTABLE_SET.has(file.path)) {
       const stat = await lstat(join(input.worktree, 'plugins', input.name, file.path))
       if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) !== 0) fail(`candidate mode changed: ${file.path}`)
     }

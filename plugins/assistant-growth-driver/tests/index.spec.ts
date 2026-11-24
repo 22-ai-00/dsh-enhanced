@@ -27,7 +27,7 @@ import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assis
 import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunProducer,
   type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
-import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
+import plugin, { apply, AssistantGrowthDriverService, Config, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
 import { ptcTrajectory, runGrowthAgent, SOURCE_REVISION_PROMPT, SOURCE_SECURE_CODING_GUIDANCE, splitGrowthToolSurface } from '../src/growth-agent.ts'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
@@ -553,6 +553,28 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(() => normalizeConfig({ model: 'model' })).toThrow(/together/)
     expect(() => normalizeConfig({ reasoningEffort: 'high' })).toThrow(/explicit provider/)
     expect(() => normalizeConfig({ provider: ' bad ', model: 'model' })).toThrow(/invalid model/)
+    expect(() => Config({
+      scope: { workspace: '   ', preset: 'p', principalId: 'u', ownerRouteId: 'r' },
+    })).toThrow()
+    expect(() => Config({
+      scope: { workspace: '/work', preset: '   ', principalId: '   ', ownerRouteId: '   ' },
+    })).toThrow()
+    expect(() => Config({ budgetId: '   ', budgetAmount: 1 })).toThrow()
+    expect(() => normalizeConfig({ budgetId: '   ', budgetAmount: 1 })).toThrow()
+    expect(() => Config({
+      scope: { workspace: '/tmp/ws\n', preset: 'primary', principalId: 'u', ownerRouteId: 'r' },
+    })).toThrow()
+    expect(() => normalizeConfig({
+      scope: { workspace: '/tmp/ws\n', preset: 'primary', principalId: 'u', ownerRouteId: 'r' },
+    })).toThrow()
+    expect(() => Config({
+      scope: { workspace: '/tmp/ws', preset: ' primary ', principalId: 'u', ownerRouteId: 'r' },
+    })).toThrow()
+    expect(() => normalizeConfig({
+      scope: { workspace: '/tmp/ws', preset: ' primary ', principalId: 'u', ownerRouteId: 'r' },
+    })).toThrow()
+    expect(() => Config({ budgetId: 'b\x00id', budgetAmount: 1 })).toThrow()
+    expect(() => normalizeConfig({ budgetId: 'b\x00id', budgetAmount: 1 })).toThrow()
   })
 
   it('exposes stable plugin identity', () => {
@@ -560,19 +582,42 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(version).toBe(manifest.version)
   })
 
-  it('loads disabled through the Cordis entrypoint and never runs', async () => {
-    // apply() IS the Cordis entrypoint; it must accept the empty config.
+  it('loads in default-on standby through the Cordis entrypoint and supports cascade opt-out', async () => {
+    // apply() IS the Cordis entrypoint; it must accept the empty config without crashing.
     const entryCtx = new Context()
     contexts.push(entryCtx)
     expect(() => apply(entryCtx, {})).not.toThrow()
 
-    // Hold a constructor instance on a separate ctx for the health assertions:
-    // a ctx only accepts one registration per service name.
+    // Without scope, default-on standby skips wake safely instead of throwing on startup.
+    const standbyCtx = new Context()
+    contexts.push(standbyCtx)
+    const standby = new AssistantGrowthDriverService(standbyCtx, {})
+    await standby.wake()
+    expect(standby.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-scope', run: null })
+    expect(normalizeConfig({})).toMatchObject({
+      enabled: true,
+      scope: null,
+      workflowOwnerAnchored: { enabled: true },
+      pluginSourceProposals: { enabled: true, allowCreation: true, allowRevision: true, preparationMode: 'durable' },
+      dreamingIdeas: { enabled: true },
+      associationCandidates: { enabled: true },
+      usageLearning: { enabled: true, workItemFailures: true },
+    })
+
+    // Explicit enabled: false disables the driver and cascades omitted sub-tracks to false.
     const ctx = new Context()
     contexts.push(ctx)
-    const service = new AssistantGrowthDriverService(ctx, {})
-    await service.wake()
-    expect(service.health()).toMatchObject({ outcome: 'never-run', reason: null, run: null })
+    const disabled = new AssistantGrowthDriverService(ctx, { enabled: false })
+    await disabled.wake()
+    expect(disabled.health()).toMatchObject({ outcome: 'never-run', reason: null, run: null })
+    expect(normalizeConfig({ enabled: false })).toMatchObject({
+      enabled: false,
+      workflowOwnerAnchored: { enabled: false },
+      pluginSourceProposals: { enabled: false, allowCreation: false, allowRevision: false },
+      dreamingIdeas: { enabled: false },
+      associationCandidates: { enabled: false },
+      usageLearning: { enabled: false },
+    })
   })
 
   it('refuses to enable without an explicit frozen owner scope', () => {
@@ -756,9 +801,17 @@ const OA_WS = 'owner-anchored-ws'
 // Delivery response is a scripted engineering-layer fixture — never real
 // owner-root evidence or a real external provider.
 describe('assistant-growth-driver owner-anchored workflow track (engineering layer, not real Goals/provider evidence)', () => {
-  it('leaves the track off by default: zero commits and no ownerAnchored health field', async () => {
+  it('runs the track by default when omitted and skips cleanly when explicitly disabled', async () => {
+    const hDefault = await mount({ ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 2) })
+    const defaultService = new AssistantGrowthDriverService(hDefault.ctx, driverConfig(hDefault.root))
+    await runWake(defaultService)
+    expect(hDefault.ownerAnchoredCommit).toHaveBeenCalledTimes(2)
+    expect(defaultService.health().ownerAnchored).toMatchObject({ considered: 2, attempted: 2, recorded: 2, stopped: null })
+
     const h = await mount({ ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3) })
-    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: false },
+    }))
     await runWake(service)
     expect(h.ownerAnchoredCommit).not.toHaveBeenCalled()
     expect(service.health().ownerAnchored).toBeUndefined()
@@ -924,7 +977,7 @@ describe('opt-in plugin source proposals', () => {
     { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: ['README.md'] } },
     { name: 'plugin_source_prepare', args: sourceArgs },
   ]
-  const options = (root: string) => ({ enabled: true, repository: root, maxPlansPerWake: 1 })
+  const options = (root: string) => ({ enabled: true, preparationMode: 'inline' as const, repository: root, maxPlansPerWake: 1 })
   function sourceService() {
     return {
       canPrepareSource: () => true,
@@ -1513,7 +1566,7 @@ describe('opt-in plugin source proposals', () => {
       } finally { db.close() }
     }
     const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
-      sourceConfig: { preparationMode: 'durable', allowRevision: true } })
+      sourceConfig: { preparationMode: 'durable', allowCreation: false, allowRevision: true } })
     expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
     expect(source.gaps).not.toHaveBeenCalled()
     expect(source.inspectCreatedCapabilityRevisionTargets).toHaveBeenCalled()
@@ -1613,12 +1666,20 @@ describe('opt-in plugin source proposals', () => {
     expect(source.enqueueSourceJob).not.toHaveBeenCalled()
   })
 
-  it('keeps the revision lane off without explicit opt-in and rejects reserved candidate files', async () => {
+  it('enables revision by default in durable mode, supports explicit opt-out, and rejects reserved candidate files', async () => {
+    const defaultAdapter = new ScriptedAdapter([])
+    const defaultHarness = await mount({ adapter: defaultAdapter, provider: 'conversation-provider' })
+    const defaultSource = revisionService()
+    await startUsageReview({ h: defaultHarness, source: defaultSource, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable' } })
+    expect(defaultAdapter.surfaces[0]).toContain('plugin_source_revise')
+    expect(defaultAdapter.surfaces[0]).toContain('plugin_source_create')
+
     const unoptedAdapter = new ScriptedAdapter([])
     const unoptedHarness = await mount({ adapter: unoptedAdapter, provider: 'conversation-provider' })
     const unoptedSource = revisionService()
     await startUsageReview({ h: unoptedHarness, source: unoptedSource, objectiveStatus: 'not-achieved',
-      sourceConfig: { preparationMode: 'durable', allowCreation: true } })
+      sourceConfig: { preparationMode: 'durable', allowCreation: true, allowRevision: false } })
     expect(unoptedAdapter.surfaces[0]).not.toContain('plugin_source_revise')
 
     const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} },
@@ -1697,6 +1758,44 @@ describe('opt-in plugin source proposals', () => {
       .toThrow(/requires enabled durable source proposals/)
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), allowRevision: true } })))
       .toThrow(/requires enabled durable source proposals and usage learning/)
+    expect(normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: options('/tmp') })).pluginSourceProposals).toMatchObject({
+      enabled: true, preparationMode: 'inline', allowCreation: false, allowRevision: false,
+    })
+  })
+
+  it('falls back gracefully on transient optional-peer intake errors while still aborting on authority failure', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    h.ctx.provide('assistantDreaming' as never, {
+      health: () => { throw new Error('dreaming sqlite busy') },
+    } as never)
+    h.ctx.provide('assistantAssociation' as never, {
+      enabled: true,
+      listSkillCandidates: () => { throw new Error('association peer transient error') },
+    } as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({
+      outcome: 'ran',
+      dreamingIntake: { enabled: false, ingested: 0 },
+      associationIntake: { enabled: false, ingested: 0 },
+    })
+
+    const revokedHarness = await mount({ adapter: new ScriptedAdapter([]) })
+    let routeGeneration = 1
+    revokedHarness.receipts.mockImplementation(() => buildReceipt(revokedHarness.root, routeGeneration))
+    revokedHarness.ctx.provide('assistantDreaming' as never, {
+      health: () => {
+        routeGeneration = 2
+        throw new Error('dreaming unavailable')
+      },
+    } as never)
+    const revokedService = new AssistantGrowthDriverService(revokedHarness.ctx, driverConfig(revokedHarness.root))
+    await runWake(revokedService)
+    expect(revokedService.health()).toMatchObject({
+      outcome: 'failed',
+      reason: expect.stringMatching(/generation|route|changed/iu),
+    })
   })
 
   it('exposes creation only with explicit owner opt-in and the optional creation reader', async () => {

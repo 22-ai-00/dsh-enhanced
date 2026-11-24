@@ -6,4 +6,4 @@
         tickIntervalMs: 5000
         authorities: []
         profiles: []
-        requireAcceptance: false
+        requireAcceptance: true

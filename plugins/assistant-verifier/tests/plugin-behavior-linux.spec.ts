@@ -264,3 +264,25 @@ it('bounds verification by authority expiry without detaching its cleanup', asyn
     expect(vi.getTimerCount()).toBe(0)
   } finally { vi.useRealTimers() }
 })
+
+it('forwards optional pluginKind on Linux stdin and validates frame pluginKind strictly', async () => {
+  const runner = new PluginBehaviorRunner(config())
+  seam.run.mockResolvedValueOnce(result(frame({ pluginKind: 'service' })))
+  const observed = await runner.run({ ...input('linux-svc'), pluginKind: 'service' })
+  expect(observed).toMatchObject({ status: 'observed', pluginKind: 'service', boundary: LINUX_BEHAVIOR_BOUNDARY })
+  expect(seam.run).toHaveBeenCalledWith('linux-svc', artifact.toString('base64'), JSON.stringify({
+    schemaVersion: 1, sha256: artifactSha256, sizeBytes: artifact.length, operation: { kind: 'discover' }, pluginKind: 'service',
+  }), expect.any(AbortSignal))
+
+  // Mismatched or invalid pluginKind on frame is rejected, as are unknown extra keys alongside pluginKind.
+  for (const badFrame of [
+    frame({ pluginKind: 'ui' }),
+    frame({ pluginKind: 'bogus' }),
+    frame({ pluginKind: 'service', candidateClaim: 'approved' }),
+  ]) {
+    seam.run.mockResolvedValueOnce(result(badFrame))
+    const bad = await runner.run({ ...input('linux-bad'), pluginKind: 'service' })
+    expect(bad).toMatchObject({ status: 'unknown', reason: 'plugin-worker-observation-invalid' })
+  }
+  await runner.close()
+})

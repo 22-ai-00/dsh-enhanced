@@ -2,6 +2,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { AnySourceGrowthRunBinding, PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { LinuxCgroupRoots, LinuxRunnerStateSeal, NativeMacRuntime } from '@dsh-enhanced/assistant-isolation'
 import type { LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/linux-behavior-runtime'
+import type { CandidatePluginKind } from './source-creation.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 
@@ -87,6 +88,7 @@ export interface CreationCapabilityReceipt {
 export interface CreationCapabilityRecord {
   planId: string
   status: 'claimed' | 'authorized' | 'active' | 'closed' | 'unknown' | 'rejected'
+  pluginKind?: CandidatePluginKind
   receipt?: CreationCapabilityReceipt
   certificate: PluginCreationVerificationCertificate
   tools?: readonly CreationCapabilityTool[]
@@ -102,6 +104,7 @@ export interface CreationCapabilityObservation {
   /** Evidence can describe an unsupported backend; adoption still requires its certificate boundary. */
   boundary?: 'process-seccomp-v1' | 'macos-seatbelt-single-process-v1' | 'linux-native-process-seccomp-v1'
   runtimeDigest?: string
+  pluginKind?: CandidatePluginKind
   reason?: string
   environment?: PluginCreationVerificationCertificate['environment']
   schemaDigest?: string
@@ -112,18 +115,18 @@ export interface CreationCapabilityObservation {
 export interface CreationCapabilityRunner {
   run(input: { key: string; artifact: Buffer; operation: { kind: 'discover' }
     | { kind: 'invoke'; schemaDigest: string; calls: readonly { id: string; toolName: string; arguments: unknown }[] };
-    signal: AbortSignal }): Promise<CreationCapabilityObservation>
+    pluginKind?: CandidatePluginKind; signal: AbortSignal }): Promise<CreationCapabilityObservation>
   close(): Promise<void>
 }
 
 /** The integration owns current authenticated task/owner fences, not model parameters. */
 export interface CreationCapabilityPorts {
-  inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; sourceRun?: AnySourceGrowthRunBinding }
+  inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; pluginKind?: CandidatePluginKind; sourceRun?: AnySourceGrowthRunBinding }
   recheck(planId: string, signal: AbortSignal): Promise<void>
   /** Capture checked staged source before first claim; legacy ports may have no archive. */
   captureSource?(planId: string, signal: AbortSignal): Promise<CreationCapabilitySourceSnapshot>
   /** Historical evidence read for a v2 receipt; must recheck the current owner and frozen source. */
-  inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; sourceRun?: AnySourceGrowthRunBinding }
+  inspectRetained?(record: CreationCapabilityRecord): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner; pluginKind?: CandidatePluginKind; sourceRun?: AnySourceGrowthRunBinding }
   recheckRetained?(record: CreationCapabilityRecord, signal: AbortSignal): Promise<void>
   /** The trusted source fence supplies the actual v2 run; legacy v1 ports call back without it. */
   withCurrent<T>(record: CreationCapabilityRecord, callback: (sourceRun?: AnySourceGrowthRunBinding) => T): T
@@ -399,7 +402,7 @@ export interface CreationCapabilityJournalPort {
   /** Live rows plus usage inherited from a sealed adoption handoff; grant limits count this total. */
   usage(): { adoptions: number; calls: number }
   claim(input: { certificate: PluginCreationVerificationCertificate; artifact: Buffer;
-    source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord }
+    pluginKind?: CandidatePluginKind; source?: CreationCapabilitySourceSnapshot }): { created: boolean; record: CreationCapabilityRecord }
   /** Lazy historical read; legacy rows have no archive and are never inferred or backfilled. */
   inspectSourceArchive?(planId: string): CreationCapabilitySourceArchive | undefined
   authorize(planId: string, tools: readonly CreationCapabilityTool[]): CreationCapabilityRecord

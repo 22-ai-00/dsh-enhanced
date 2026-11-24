@@ -83,6 +83,7 @@ function notificationInput(f: Fixture, overrides: Partial<{ expiresAt: number; i
       preset: overrides.preset ?? 'primary' },
     sessionId: overrides.sessionId ?? 'session-1', idempotencyKey: overrides.idempotencyKey ?? 'notice-1',
     text: 'A supervised action needs your attention.', expiresAt: overrides.expiresAt ?? Date.now() + 60_000,
+    attention: { purpose: 'result' as const },
   }
 }
 

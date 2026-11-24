@@ -1361,12 +1361,12 @@ describe('real native Delivery Agent runtime', () => {
       const store = runtimeStore(fixture.service) as unknown as DeliveryStore
       const binding = store.createBinding({ conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', sessionId: 'web-owner-session', policyRef: 'web-owner' })
       const owner = store.getPrincipal(webPrincipal)!
-      const notice = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-accepted', text: 'Private repair update.', expiresAt: Date.now() + 60_000 })
+      const notice = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-accepted', text: 'Private repair update.', expiresAt: Date.now() + 60_000, attention: { purpose: 'result' } })
       await drive(fixture.service)
       expect(store.getOutbox(notice.id)).toMatchObject({ status: 'accepted' })
       expect(access.notifications(binding.sessionId)).toEqual([expect.objectContaining({ id: notice.id, text: 'Private repair update.' })])
 
-      const mixed = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-mixed', text: 'Must not deliver.', expiresAt: Date.now() + 60_000 })
+      const mixed = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-mixed', text: 'Must not deliver.', expiresAt: Date.now() + 60_000, attention: { purpose: 'result' } })
       const database = new DatabaseSync(join(root, 'delivery.sqlite'))
       try { database.prepare("UPDATE outbox_messages SET intent_json=json_set(intent_json, '$.metadata.\"dsh.learning.kind\"', 'goal-outcome') WHERE id=?").run(mixed.id) } finally { database.close() }
       await drive(fixture.service)
@@ -1396,7 +1396,7 @@ describe('real native Delivery Agent runtime', () => {
       const enqueue = (idempotencyKey: string, text: string, expiresAt = Date.now() + 60_000) => fixture.service.enqueueOwnerNotification({
         sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice',
         scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' },
-        sessionId: binding.sessionId, idempotencyKey, text, expiresAt,
+        sessionId: binding.sessionId, idempotencyKey, text, expiresAt, attention: { purpose: 'result' },
       })
       const receiptCount = (providerId: string) =>
         (database.prepare('SELECT count(*) AS n FROM delivery_receipts WHERE provider_message_id=?').get(providerId) as { n: number }).n
@@ -1502,7 +1502,7 @@ describe('real native Delivery Agent runtime', () => {
       const registration: OwnerNotificationWithdrawal = Object.freeze({ protocol: ownerNotificationWithdrawalProtocol, authority: 'noticeAuthority', sourceId: 'proactive-engine', isWithdrawn: () => verdict() })
       owned.add(registration)
       const withdrawal = fixture.service.registerOwnerNotificationWithdrawal(registration)
-      const enqueue = (idempotencyKey: string, text: string) => fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey, text, expiresAt: Date.now() + 60_000, withdrawable: true, withdrawalHandle: withdrawal.handle })
+      const enqueue = (idempotencyKey: string, text: string) => fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey, text, expiresAt: Date.now() + 60_000, withdrawable: true, withdrawalHandle: withdrawal.handle, attention: { purpose: 'result' } })
 
       const accepted = enqueue('native-notice-withdrawable', 'Open owner question.')
       await drive(fixture.service)
@@ -6944,6 +6944,169 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('owner self-iteration NL and /autonomy commands execute before LLM without waking the model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-autonomy-owner-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+    const handled: string[] = []
+    const dispose = fixture.service.registerOwnerSelfIterationHandler(async req => {
+      handled.push(`${req.action}:${req.sourceText}`)
+      return {
+        ok: true,
+        state: req.action === 'enableSelfIteration'
+          ? 'enabled'
+          : req.action === 'disableSelfIteration'
+            ? 'disabled'
+            : 'upgraded',
+      }
+    })
+
+    await fixture.service.acceptInbound(message('evt-autonomy-nl-enable', '开启自迭代', 'text'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已开启当前助手自迭代能力')
+
+    await fixture.service.acceptInbound(message('evt-autonomy-slash-disable', '/autonomy disable', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已关闭当前助手自迭代能力')
+
+    await fixture.service.acceptInbound(message('evt-autonomy-nl-upgrade', '升级整体助手', 'text'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已完成整体助手升级')
+
+    expect(handled).toEqual([
+      'enableSelfIteration:开启自迭代',
+      'disableSelfIteration:/autonomy disable',
+      'upgradeAssistantAndRecover:升级整体助手',
+    ])
+    expect(fixture.llm.requests).toEqual([])
+    expect(resume).not.toHaveBeenCalled()
+    dispose()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('owner self-iteration control rejects linked principals, attachments, and missing handlers fail-closed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-autonomy-guards-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const ownerPairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: ownerPairing.challenge.id, principal, code: ownerPairing.code })
+    const linkedPrincipal = { ...principal, user: 'ou_linked' }
+    const linkedConversation = { ...conversation, chat: 'oc_autonomy_linked' }
+    const linkedPairing = fixture.service.issuePairing('test', linkedPrincipal)
+    fixture.service.confirmPairing({
+      challengeId: linkedPairing.challenge.id,
+      principal: linkedPrincipal,
+      code: linkedPairing.code,
+    })
+
+    const handler = vi.fn(async () => ({ ok: true as const, state: 'disabled' as const }))
+    const dispose = fixture.service.registerOwnerSelfIterationHandler(handler)
+
+    await fixture.service.acceptInbound({
+      channel: 'lark',
+      account: 'bot-1',
+      eventId: 'evt-autonomy-linked-nl',
+      occurredAt: Date.now(),
+      principal: linkedPrincipal,
+      conversation: linkedConversation,
+      kind: 'text',
+      text: '关闭自迭代',
+    })
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('当前身份不是此会话的 owner')
+
+    await fixture.service.acceptInbound({
+      ...message('evt-autonomy-attachment', '/autonomy enable', 'command'),
+      attachments: [{
+        resourceType: 'file',
+        providerRef: 'file-autonomy-1',
+        fileName: 'control.txt',
+      }],
+    })
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('不接受文件、图片或其他附件')
+
+    await fixture.service.acceptInbound(message('evt-autonomy-usage', '/autonomy', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('/autonomy enable')
+
+    dispose()
+    await fixture.service.acceptInbound(message('evt-autonomy-unavailable', '关闭自迭代', 'text'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('自迭代控制服务尚未启用')
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('conversational mention of self-iteration proceeds to the model rather than triggering control', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-autonomy-chat-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const handler = vi.fn(async () => ({ ok: true as const, state: 'enabled' as const }))
+    fixture.service.registerOwnerSelfIterationHandler(handler)
+
+    await fixture.service.acceptInbound(message('evt-autonomy-prose', '如果开启自迭代会有什么影响？', 'text'))
+    await drive(fixture.service)
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toHaveLength(1)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('routes uppercase /AUTONOMY commands, text /autonomy attachments, and ownerConsole.controlSelfIteration pre-LLM', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-autonomy-r2-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+
+    const controlSelfIteration = vi.fn(async (action: string, confirmed: boolean) => ({
+      ok: true,
+      action,
+      state: action === 'enableSelfIteration' ? 'enabled' : action === 'disableSelfIteration' ? 'disabled' : 'upgraded',
+      note: `ownerConsole:${action}:${confirmed}`,
+    }))
+    fixture.ctx.provide('ownerConsole' as never, { controlSelfIteration } as never)
+
+    await fixture.service.acceptInbound(message('evt-autonomy-upper-disable', '/AUTONOMY DISABLE', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toBe('ownerConsole:disableSelfIteration:true')
+
+    await fixture.service.acceptInbound(message('evt-autonomy-mixed-enable', '/Autonomy   Enable', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toBe('ownerConsole:enableSelfIteration:true')
+
+    await fixture.service.acceptInbound(message('evt-autonomy-upper-usage', '/AUTONOMY', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('/autonomy enable')
+
+    await fixture.service.acceptInbound({
+      ...message('evt-autonomy-text-attachment', '/autonomy enable', 'text'),
+      attachments: [{
+        resourceType: 'file',
+        providerRef: 'file-autonomy-text-1',
+        fileName: 'note.txt',
+      }],
+    })
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('不接受文件、图片或其他附件')
+
+    expect(controlSelfIteration).toHaveBeenCalledTimes(2)
+    expect(controlSelfIteration).toHaveBeenNthCalledWith(1, 'disableSelfIteration', true)
+    expect(controlSelfIteration).toHaveBeenNthCalledWith(2, 'enableSelfIteration', true)
+    expect(fixture.llm.requests).toEqual([])
+    expect(resume).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('/feedback emits an owner-attested typed event only after the durable dispatch gate', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-owner-'))
     roots.push(root)
@@ -7467,10 +7630,11 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('default natural feedback path still abstains from widened phrases', async () => {
+  test('explicit opt-out natural feedback path abstains from widened phrases', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-default-natural-'))
     roots.push(root)
-    const fixture = await runtimeHarness(root, new Map())
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined,
+      { naturalFeedback: { coverage: false, mixedIntent: false } })
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })

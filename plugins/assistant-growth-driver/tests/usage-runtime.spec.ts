@@ -339,7 +339,7 @@ test('freezes the optional parent regression policy before dispatch and rechecks
 
 test.each([true, false])('preserves historical usage digest unless modification is restricted: %s', async allowModification => {
   const f = await fixture(); f.append('legacy-compatible-task')
-  f.create({ ...f.config, pluginSourceProposals: { ...f.config.pluginSourceProposals, allowModification } })
+  f.create({ ...f.config, pluginSourceProposals: { ...f.config.pluginSourceProposals, allowRevision: false, allowModification } })
   const { allowRevision: _absentRevision, allowModification: _absentModification, ...legacySourceConfig } = f.config.pluginSourceProposals
   const historical = acceptanceDigest({ ...f.config, pluginSourceProposals: legacySourceConfig })
   const expected = allowModification ? historical : acceptanceDigest({ ...f.config, pluginSourceProposals: { ...legacySourceConfig, allowModification: false } })
@@ -491,8 +491,10 @@ test('the native periodic scan discovers later cross-process feedback without a 
   expect(runtime.health().counts).toEqual({ reviewed: 1 })
 })
 
-test('automatic learning requires its owner scope, budget and native scheduling', () => {
-  expect(normalizeConfig({}).usageLearning.enabled).toBe(false)
+test('automatic learning defaults on in standby, supports opt-out, and requires its owner scope, budget and native scheduling when explicitly configured', () => {
+  expect(normalizeConfig({}).usageLearning.enabled).toBe(true)
+  expect(normalizeConfig({ usageLearning: { enabled: false } }).usageLearning.enabled).toBe(false)
+  expect(normalizeConfig({ enabled: false }).usageLearning.enabled).toBe(false)
   expect(() => normalizeConfig({ usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: '/tmp/usage.sqlite' } })).toThrow(/usageLearning/)
   expect(() => normalizeConfig({ enabled: true, scope: { workspace: '/work', preset: 'p', principalId: 'u', ownerRouteId: 'r' },
     budgetId: 'b', budgetAmount: 1, intervalMs: 1000, usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: '/tmp/usage.sqlite' } })).toThrow(/intervalMs/)

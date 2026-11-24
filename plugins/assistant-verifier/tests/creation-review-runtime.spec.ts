@@ -538,3 +538,98 @@ test.each(['receiptVersion', 'bindingVersion', 'generation'] as const)('an incom
   expect(observer.run).not.toHaveBeenCalled(); expect(f.adapter.requests).toHaveLength(0)
   expect(f.runtime.inspectWorkItemCreationReviewReadiness()).toMatchObject({ remainingVerifications: 1 })
 })
+
+test('verifies a service plugin end-to-end without mutating tool authorityDigest', async () => {
+  const f = await fixture()
+  const toolDigest = compileCreationReviewConfig(f.config).authority.authorityDigest
+  expect(toolDigest).toBe(f.compiled.authority.authorityDigest)
+
+  const svcSchema = {
+    name: 'service_lifecycle_probe',
+    parameters: {
+      type: 'object',
+      properties: {
+        check: { type: 'string', enum: ['status', 'health', 'provisions'] },
+        service: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+  }
+  const svcSchemaDigest = createHash('sha256').update(JSON.stringify([svcSchema])).digest('hex')
+  const svcCases = [
+    {
+      id: 'ordinary',
+      toolName: 'service_lifecycle_probe',
+      arguments: { check: 'status', service: 'ownerSvc' },
+      purpose: 'ordinary',
+      expected: { kind: 'json-value', value: { kind: 'service', active: true } },
+      rationale: 'Verify the service activates cleanly and registers ownerSvc.',
+    },
+    {
+      id: 'challenge',
+      toolName: 'service_lifecycle_probe',
+      arguments: { check: 'health', service: 'ownerSvc' },
+      purpose: 'challenge',
+      expected: { kind: 'json-value', value: { kind: 'service', ready: true } },
+      rationale: 'Verify health probe confirms ready state on the registered service.',
+    },
+  ]
+
+  class ServiceAdapter extends LlmAdapter {
+    requests: GenerateOptions[] = []
+    override async resolveModel(provider: string, model: string) {
+      return { provider, id: model, name: model, reasoning: { efforts: [{ id: ReasoningEffortId('high'), name: 'High' }] } }
+    }
+    override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      this.requests.push(options)
+      const value = this.requests.length === 1
+        ? { status: 'cases', cases: svcCases }
+        : { decision: 'approved', reason: 'The service activates cleanly and exposes verified health.' }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: JSON.stringify(value) } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+
+  const ctx = new Context(); contexts.push(ctx)
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true, systemPrompt: { personaPrefix: '' } })
+  await ctx.plugin(AssistantPolicyService, { databasePath: join(f.root, 'svc-policy.sqlite'), rules: [] })
+  const svcAdapter = new ServiceAdapter()
+  ctx.llm.registerAdapter(['supplier'], svcAdapter)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  const basePort = f.cp
+  const baseInspect = basePort.inspectPreparedCreation.getMockImplementation()!
+  basePort.inspectPreparedCreation.mockImplementation(() => {
+    const snap = baseInspect() as { plan: Record<string, unknown> }
+    return { ...snap, plan: { ...snap.plan, pluginKind: 'service' } } as never
+  })
+  ctx.provide('pluginControlPlane' as never, basePort as never)
+
+  let job = 0
+  observer.run.mockImplementation(async (_key: string, _files: unknown, stdin: string) => {
+    const req = JSON.parse(stdin) as { nonce: string; artifactSha256: string; pluginKind?: string; operation: { kind: string; calls?: { id: string; toolName: string; arguments: { check: string } }[] } }
+    expect(req.pluginKind).toBe('service')
+    const frame = req.operation.kind === 'discover'
+      ? { wireVersion: 1, nonce: req.nonce, artifactSha256: req.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(req.operation)).digest('hex'),
+          status: 'result', pluginKind: 'service', schemaDigest: svcSchemaDigest, schemas: [svcSchema] }
+      : { wireVersion: 1, nonce: req.nonce, artifactSha256: req.artifactSha256,
+          operationDigest: createHash('sha256').update(JSON.stringify(req.operation)).digest('hex'),
+          status: 'result', pluginKind: 'service', schemaDigest: svcSchemaDigest,
+          calls: [{ id: req.operation.calls![0]!.id, toolName: 'service_lifecycle_probe',
+            result: { isError: false, value: req.operation.calls![0]!.arguments.check === 'health'
+              ? { kind: 'service', ready: true } : { kind: 'service', active: true } } }] }
+    return { jobId: `svc-job-${++job}`, status: 'succeeded', quiescent: true, exitCode: 0,
+      stdout: JSON.stringify(frame) + '\n', stderr: '', artifacts: [] }
+  })
+
+  const runtime = new CreationReviewRuntime(ctx, f.config, join(f.root, 'svc-verifier.sqlite'))
+  runtimes.push(runtime)
+  const verified = await runtime.run(f.request)
+  expect(verified.status).toBe('verified')
+  if (verified.status === 'verified') {
+    expect(verifyPluginCreationVerificationCertificate(verified.certificate, f.compiled.authority, f.compiled.publicKey)).toBe(true)
+  }
+  expect(JSON.stringify(svcAdapter.requests[0]!.messages)).toContain('Candidate pluginKind is \\"service\\"')
+})

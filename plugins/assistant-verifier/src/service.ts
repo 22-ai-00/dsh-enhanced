@@ -200,7 +200,7 @@ export class AssistantVerifierService extends Service<Config> {
     this.#memoryReviewConfig = memoryReviews
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
-    this.#requireAcceptance = normalized.requireAcceptance ?? false
+    this.#requireAcceptance = normalized.requireAcceptance ?? true
     this.#store = new AcceptanceStore(normalized.databasePath)
     for (const name of producerNames) {
       const current = ctx.get(name as never) as unknown

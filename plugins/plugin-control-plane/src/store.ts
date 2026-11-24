@@ -17,7 +17,8 @@ import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './sou
 import { validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
 import { validateCreationCapabilitySource, type CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import { validateSourceRevisionBinding, type SourceRevisionBinding } from './source-revision.js'
-import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
+import { validateSourceCreationFiles, validateSourceCreationGrant, normalizeSourceCreationGrant,
+  type CandidatePluginKind, type SourceCreationBinding } from './source-creation.js'
 import { anySourceGrowthRunDigest as sourceGrowthRunDigest, growthObjectDigest, isSourceOwnerContinuation, isPluginRevisionTaskSource, validateAnySourceGrowthRunBinding, validatePluginRevisionRegressionCertificate, validatePluginRevisionVerificationCertificate, validatePluginCreationVerificationCertificate, validateRevisionAcceptanceAuthorityRef,
   type PluginCreationVerificationCertificate, type PluginRevisionRegressionCertificate, type PluginRevisionVerificationCertificate, type RevisionAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
@@ -1158,9 +1159,14 @@ function sourceSnapshotFromStored(value: unknown, allowWithoutGrowthRun = false)
   // `mode` was introduced in schema v13; receipt rows written by older binaries
   // omit it and are backfilled to 'create'. `preparedEvidence` exists only on
   // 'modify' plans.
-  const optional = ['approval', 'sourceCheck', 'preparedEvidence', 'creation', 'sourceRevision', 'releaseAuthorization', 'release']
+  const optional = ['approval', 'sourceCheck', 'preparedEvidence', 'creation', 'sourceRevision', 'releaseAuthorization', 'release', 'pluginKind']
     .filter(key => Object.hasOwn(item, key))
   exactKeys(item, [...SOURCE_PLAN_KEYS, 'mode', ...optional], 'stored source plan snapshot')
+  const rawKind = item['pluginKind']
+  if (rawKind !== undefined && !['service', 'channel', 'ui'].includes(String(rawKind))) {
+    throw new ControlPlaneStoreError('invalid-state', 'stored source plan pluginKind is corrupt')
+  }
+  const pluginKind = rawKind as CandidatePluginKind | undefined
   const rawMode = item['mode']; const mode: PluginSourcePlan['mode'] = rawMode === undefined
     ? 'create'
     : rawMode === 'create' || rawMode === 'modify' || rawMode === 'prepared-create' || rawMode === 'prepared-revise' ? rawMode : 'create'
@@ -1254,7 +1260,7 @@ function sourceSnapshotFromStored(value: unknown, allowWithoutGrowthRun = false)
     || (!requiresRelease && (releaseAuthorization !== undefined || release !== undefined))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan snapshot fields do not match its status')
   }
-  return { ...immutable, mode, ...(creation === undefined ? {} : { creation }), ...(revision === undefined ? {} : { sourceRevision: revision }), digest: item['digest'], status: item['status'] as SourcePlanStatus, revision: Number(item['revision']),
+  return { ...immutable, mode, ...(pluginKind === undefined ? {} : { pluginKind }), ...(creation === undefined ? {} : { creation }), ...(revision === undefined ? {} : { sourceRevision: revision }), digest: item['digest'], status: item['status'] as SourcePlanStatus, revision: Number(item['revision']),
     ...(approval === undefined ? {} : { approval }), ...(sourceCheck === undefined ? {} : { sourceCheck }),
     ...(preparedEvidence === undefined ? {} : { preparedEvidence }),
     ...(releaseAuthorization === undefined ? {} : { releaseAuthorization }),
@@ -1524,7 +1530,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   const native = backend === 'macos-seatbelt' || backend === 'linux-native'
   exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
     'baseCommit', 'files', 'ttlMs', 'build', 'worktree', native ? 'nativeResource' : 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : []),
-    ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : []), ...(Object.hasOwn(intent, 'revision') ? ['revision'] : []),
+    ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'pluginKind') ? ['pluginKind'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : []), ...(Object.hasOwn(intent, 'revision') ? ['revision'] : []),
     ...(Object.hasOwn(intent, 'ownerInstruction') ? ['ownerInstruction'] : [])], 'source job intent')
   const authority = objectRecord(intent['authority'], 'source job authority')
   exactKeys(authority, ['id', 'digest', 'expiresAt', 'maxSubmissions'], 'source job authority')
@@ -1550,6 +1556,8 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     || (!native && (typeof intent['containerName'] !== 'string' || !/^dsh-source-job-[a-f0-9]{64}$/u.test(intent['containerName'] as string)))
     || (backend === 'macos-seatbelt' && (intent['mode'] !== 'create' && intent['mode'] !== 'revise-created'))
     || (intent['mode'] !== undefined && intent['mode'] !== 'create' && intent['mode'] !== 'revise-created')
+    || (Object.hasOwn(intent, 'pluginKind') && ((intent['mode'] !== 'create' && intent['mode'] !== 'revise-created')
+      || !['service', 'channel', 'ui'].includes(String(intent['pluginKind']))))
     || (intent['mode'] === 'create') !== Object.hasOwn(intent, 'creation')
     || (intent['mode'] === 'revise-created') !== Object.hasOwn(intent, 'revision')
     || (Object.hasOwn(intent, 'ownerInstruction') && intent['mode'] !== 'revise-created')
@@ -1632,6 +1640,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
       : { containerName: intent['containerName'] as string }),
     ...(creation === undefined ? {} : { mode: 'create' as const, creation }),
     ...(revision === undefined ? {} : { mode: 'revise-created' as const, revision }),
+    ...(Object.hasOwn(intent, 'pluginKind') ? { pluginKind: intent['pluginKind'] as CandidatePluginKind } : {}),
     ...(Object.hasOwn(intent, 'baseline') ? { baseline: Object.freeze(intent['baseline']) as NonNullable<SourceJobIntent['baseline']> } : {}),
     ...(ownerInstruction === undefined ? {} : { ownerInstruction }) })
 }
@@ -3424,6 +3433,15 @@ export class ControlPlaneStore {
         throw new ControlPlaneStoreError('invalid-state', 'prepared revision owner sources conflict')
       }
       this.#assertRevisionInstruction(this.#retainedPreparedRevisionJob(plan))
+    }
+    if (plan.mode === 'prepared-create' || plan.mode === 'prepared-revise') {
+      const jobRow = this.#database.prepare('SELECT intent_json FROM source_jobs WHERE plan_id = ?').get(plan.id) as { intent_json: string } | undefined
+      if (jobRow !== undefined) {
+        const parsedIntent = JSON.parse(jobRow.intent_json) as { pluginKind?: unknown }
+        if (typeof parsedIntent.pluginKind === 'string' && ['service', 'channel', 'ui'].includes(parsedIntent.pluginKind)) {
+          return { ...plan, pluginKind: parsedIntent.pluginKind as CandidatePluginKind }
+        }
+      }
     }
     return plan
   }

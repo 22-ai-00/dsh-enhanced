@@ -124,7 +124,7 @@ export class AssistantGrowthDriverService extends Service {
     super(ctx, 'assistantGrowthDriver')
     this.#config = normalizeConfig(input)
     ctx.effect(() => {
-      const timer = this.#config.enabled && this.#config.intervalMs > 0
+      const timer = this.#config.enabled && this.#config.scope !== null && this.#config.intervalMs > 0
         ? setInterval(() => { void this.wake().catch(() => undefined) }, this.#config.intervalMs) : undefined
       timer?.unref?.()
       return async () => {
@@ -134,7 +134,15 @@ export class AssistantGrowthDriverService extends Service {
         await this.#flight
       }
     }, 'assistant-growth-driver.runtime')
-    if (this.#config.usageLearning.enabled) {
+    const usagePrerequisitesReady = this.#config.usageLearning.enabled
+      && this.#config.scope !== null
+      && this.#config.budgetId !== null
+      && this.#config.budgetAmount !== null
+      && this.#config.intervalMs === 0
+      && this.#config.usageLearning.databasePath !== null
+      && this.#config.usageLearning.scanBudgetId !== null
+      && this.#config.usageLearning.scanBudgetAmount !== null
+    if (usagePrerequisitesReady) {
       ctx.inject(['assistantEvaluation', 'assistantAutomations'], usageCtx => {
         const usage = new UsageLearningRuntime(this.#config, {
           evaluation: usageCtx.assistantEvaluation, automations: usageCtx.assistantAutomations,
@@ -172,7 +180,9 @@ export class AssistantGrowthDriverService extends Service {
         this.#sourceBinding?.nudge()
       })
     }
-    if (this.#config.pluginSourceProposals.enabled) {
+    if (this.#config.pluginSourceProposals.enabled
+      && this.#config.scope !== null
+      && this.#config.pluginSourceProposals.repository !== null) {
       // Optional provider lives in a nested injection. Its generation owns the
       // source capability and cancellation; the outer driver remains usable
       // when the control plane is absent or is being replaced.
@@ -494,16 +504,26 @@ export class AssistantGrowthDriverService extends Service {
     try {
       let validatedDreamIdeas: readonly ValidatedDreamIdeaInput[] = []
       if (config.dreamingIdeas.enabled && input.usage === undefined) {
-        const intake = readValidatedDreamIdeas(this.ctx, authority, config.dreamingIdeas.maxIdeasPerWake)
-        validatedDreamIdeas = intake.ideas
-        dreamingIntake = intake.summary
+        try {
+          const intake = readValidatedDreamIdeas(this.ctx, authority, config.dreamingIdeas.maxIdeasPerWake)
+          validatedDreamIdeas = intake.ideas
+          dreamingIntake = intake.summary
+        } catch (error) {
+          authority.assertCurrent()
+          this.ctx.logger.warn(`assistant-growth-driver: dreamingIdeas intake fallback: ${errorMessage(error)}`)
+        }
       }
       const nextDreamingHealth = dreamingIntake === undefined ? {} : { dreamingIntake }
       let associationCandidates: readonly AssociationSkillCandidateInput[] = []
       if (config.associationCandidates.enabled && input.usage === undefined) {
-        const intake = readAssociationCandidates(this.ctx, authority, config.associationCandidates.maxCandidatesPerWake)
-        associationCandidates = intake.candidates
-        associationIntake = intake.summary
+        try {
+          const intake = readAssociationCandidates(this.ctx, authority, config.associationCandidates.maxCandidatesPerWake)
+          associationCandidates = intake.candidates
+          associationIntake = intake.summary
+        } catch (error) {
+          authority.assertCurrent()
+          this.ctx.logger.warn(`assistant-growth-driver: associationCandidates intake fallback: ${errorMessage(error)}`)
+        }
       }
       const nextAssociationHealth = associationIntake === undefined ? {} : { associationIntake }
       agentSubmitted = true

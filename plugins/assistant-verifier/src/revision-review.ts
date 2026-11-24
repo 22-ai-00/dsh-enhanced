@@ -14,11 +14,13 @@ import { canonicalGrowthJson, growthObjectDigest, pluginRevisionVerificationSign
 import { CreationReviewStore } from './creation-review-store.js'
 import { CASE_RULES, COMPARISON_RULES, REVIEW_RULES, RULES_VERSION, SCHEMA_RULES,
   compareCase, compileCreationReviewConfig, linuxPreparedBuildEvidenceDigest, parseCases, parseReview,
-  projectCreationSchemas, type CreationReviewConfig, type WorkItemPreparedCreationSource } from './creation-review.js'
+  pluginKindContractAddendum, projectCreationSchemas, type CreationReviewConfig, type WorkItemPreparedCreationSource } from './creation-review.js'
 import { LINUX_BEHAVIOR_BOUNDARY, validateCreationBehaviorDeploymentConfig } from './plugin-behavior-config.js'
 import { runNativeCreationTurn, type CreationModel } from './creation-review-native.js'
 
 type PluginBehaviorRunner = import('./plugin-behavior-runner.js').PluginBehaviorRunner
+type PluginKind = import('./plugin-behavior-runner.js').PluginKind
+const PLUGIN_KINDS = new Set<PluginKind>(['tool', 'service', 'channel', 'ui'])
 
 const SHA = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u
@@ -82,6 +84,7 @@ export interface PreparedRevisionPort {
   inspectPreparedRevision(planId: string): {
     protocol: 'dsh-prepared-revision/v1'
     plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      pluginKind?: PluginKind;
       generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
       preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
         pack: { sha256: string; sizeBytes: number } };
@@ -95,6 +98,7 @@ export interface PreparedRevisionPort {
   } | {
     protocol: 'dsh-prepared-revision/v2'
     plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      pluginKind?: PluginKind;
       generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
       preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
         pack: { sha256: string; sizeBytes: number } };
@@ -112,6 +116,7 @@ export interface PreparedRevisionPort {
     /** Owner-instruction revision: no task failure and no growth run on either side. */
     protocol: 'dsh-prepared-revision/v3'
     plan: { id: string; digest: string; name: string; mode: string; status: string; expiresAt: number;
+      pluginKind?: PluginKind;
       generatorDigest: string; sourceCheck?: { treeDigest: string; patchDigest: string };
       preparedEvidence?: { schemaVersion?: number; boundary?: string; runtimeDigest?: string;
         pack: { sha256: string; sizeBytes: number } };
@@ -358,9 +363,14 @@ export class RevisionReviewRuntime {
       if (claim.state !== 'new') return { status: 'unknown', reason: claim.reason ?? 'previous-unknown' }
       admitted = { planId: plan.id, binding }
 
+      const planPluginKind = plan.pluginKind
+      if (planPluginKind !== undefined && !PLUGIN_KINDS.has(planPluginKind)) {
+        throw new Error('prepared revision pluginKind invalid')
+      }
       const observer = await this.#loadRunner()
       signal.throwIfAborted(); fence(() => {})
-      const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' }, signal })
+      const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' },
+        ...(planPluginKind !== undefined ? { pluginKind: planPluginKind } : {}), signal })
       if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
         || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256
         || linuxExecution && (discovery.boundary !== linuxExecution.boundary
@@ -368,6 +378,7 @@ export class RevisionReviewRuntime {
         this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
         return { status: 'unknown', reason: 'schema-observation-unknown' }
       }
+      const effectiveKind = planPluginKind ?? discovery.pluginKind
       const projectedSchemas = projectCreationSchemas(discovery.schemas)
       fence(() => this.#store.discovered(plan.id, binding, { jobId: discovery.jobId!, schemaDigest: discovery.schemaDigest!,
         schemas: projectedSchemas, environment: discovery.environment! }))
@@ -375,7 +386,7 @@ export class RevisionReviewRuntime {
         judgement: v1Source!.judgement, name: plan.name }
       const contract = await runNativeCreationTurn(this.ctx, { sessionId: `revision-contract-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens - 1,
-        prompt: [...CASE_RULES, `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        prompt: [...CASE_RULES, ...pluginKindContractAddendum(effectiveKind), `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
         data: { task, schemas: projectedSchemas }, signal, assertCurrent: () => fence(() => {}) })
       const cases = parseCases(contract.value, config.maxCases, projectedSchemas)
       if (cases.status === 'insufficient') {
@@ -392,7 +403,8 @@ export class RevisionReviewRuntime {
           calls: [{ id: item.id, toolName: item.toolName, arguments: item.arguments }] }
         const operationDigest = growthObjectDigest(operation)
         fence(() => this.#store.claimCase(plan.id, binding, item.id, operationDigest))
-        const observed = await observer.run({ key: growthObjectDigest([binding, 'invoke', operationDigest]), artifact, operation, signal })
+        const observed = await observer.run({ key: growthObjectDigest([binding, 'invoke', operationDigest]), artifact, operation,
+          ...(effectiveKind !== undefined ? { pluginKind: effectiveKind } : {}), signal })
         if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
           || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
           || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
@@ -420,7 +432,9 @@ export class RevisionReviewRuntime {
       const review = await runNativeCreationTurn(this.ctx, { sessionId: `revision-source-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes,
         maxOutputTokens: config.maxOutputTokens - contract.outputTokens,
-        prompt: [...REVIEW_RULES, ...REVISION_RULES, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        prompt: [...REVIEW_RULES, ...REVISION_RULES,
+          ...(effectiveKind && effectiveKind !== 'tool' ? [`Candidate pluginKind: ${effectiveKind}.`] : []),
+          `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
         data: { task, parent, cases: cases.cases, changedPaths: context.changedPaths, patch: context.patch },
         signal, assertCurrent: () => fence(() => {}) })
       const verdict = parseReview(review.value)
@@ -521,14 +535,20 @@ export class RevisionReviewRuntime {
       if (claim.state !== 'new') return { status: 'unknown', reason: claim.reason ?? 'previous-unknown' }
       admitted = { planId: plan.id, binding }
 
+      const planPluginKind = plan.pluginKind
+      if (planPluginKind !== undefined && !PLUGIN_KINDS.has(planPluginKind)) {
+        throw new Error('prepared instruction revision pluginKind invalid')
+      }
       const observer = await this.#loadRunner()
       signal.throwIfAborted(); fence(() => {})
-      const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' }, signal })
+      const discovery = await observer.run({ key: growthObjectDigest([binding, 'discover']), artifact, operation: { kind: 'discover' },
+        ...(planPluginKind !== undefined ? { pluginKind: planPluginKind } : {}), signal })
       if (discovery.status !== 'observed' || !discovery.quiescent || !discovery.schemaDigest || !discovery.schemas
         || !discovery.environment || !discovery.jobId || discovery.artifactSha256 !== plan.preparedEvidence.pack.sha256) {
         this.#store.unknown(plan.id, binding, 'schema-observation-unknown')
         return { status: 'unknown', reason: 'schema-observation-unknown' }
       }
+      const effectiveKind = planPluginKind ?? discovery.pluginKind
       const projectedSchemas = projectCreationSchemas(discovery.schemas)
       fence(() => this.#store.discovered(plan.id, binding, { jobId: discovery.jobId!, schemaDigest: discovery.schemaDigest!,
         schemas: projectedSchemas, environment: discovery.environment! }))
@@ -536,7 +556,7 @@ export class RevisionReviewRuntime {
         feedback: null, judgement: 'owner-instruction', name: plan.name }
       const contract = await runNativeCreationTurn(this.ctx, { sessionId: `revision-contract-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes, maxOutputTokens: config.maxOutputTokens - 1,
-        prompt: [...CASE_RULES, `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        prompt: [...CASE_RULES, ...pluginKindContractAddendum(effectiveKind), `Case limit: ${config.maxCases}.`, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
         data: { task, schemas: projectedSchemas }, signal, assertCurrent: () => fence(() => {}) })
       const cases = parseCases(contract.value, config.maxCases, projectedSchemas)
       if (cases.status === 'insufficient') {
@@ -553,7 +573,8 @@ export class RevisionReviewRuntime {
           calls: [{ id: item.id, toolName: item.toolName, arguments: item.arguments }] }
         const operationDigest = growthObjectDigest(operation)
         fence(() => this.#store.claimCase(plan.id, binding, item.id, operationDigest))
-        const observed = await observer.run({ key: growthObjectDigest([binding, 'invoke', operationDigest]), artifact, operation, signal })
+        const observed = await observer.run({ key: growthObjectDigest([binding, 'invoke', operationDigest]), artifact, operation,
+          ...(effectiveKind !== undefined ? { pluginKind: effectiveKind } : {}), signal })
         if (observed.status !== 'observed' || !observed.quiescent || !observed.jobId
           || observed.schemaDigest !== discovery.schemaDigest || observed.artifactSha256 !== plan.preparedEvidence.pack.sha256
           || canonicalGrowthJson(observed.environment) !== canonicalGrowthJson(discovery.environment)
@@ -579,7 +600,9 @@ export class RevisionReviewRuntime {
       const review = await runNativeCreationTurn(this.ctx, { sessionId: `revision-source-${binding.slice(0, 40)}`,
         owner: config.owner, model, maxInputBytes: config.maxInputBytes,
         maxOutputTokens: config.maxOutputTokens - contract.outputTokens,
-        prompt: [...REVIEW_RULES, ...REVISION_RULES, `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
+        prompt: [...REVIEW_RULES, ...REVISION_RULES,
+          ...(effectiveKind && effectiveKind !== 'tool' ? [`Candidate pluginKind: ${effectiveKind}.`] : []),
+          `Fixed owner acceptance policy: ${config.policy}`].join('\n'),
         data: { task, parent, cases: cases.cases, changedPaths: context.changedPaths, patch: context.patch },
         signal, assertCurrent: () => fence(() => {}) })
       const verdict = parseReview(review.value)

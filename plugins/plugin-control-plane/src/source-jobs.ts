@@ -15,7 +15,9 @@ import { validateSourceBuildConfig, type SourceBuildConfig } from './source-buil
 import { inspectSourceRevisionContext, normalizeSourceRevisionGrant, validateSourceRevisionGrant } from './source-revision.js'
 import type { CreationCapabilitySourceSnapshot } from './creation-capability-source.js'
 import type { PluginCreationVerificationCertificate, PluginRevisionParentBinding } from '@dsh-enhanced/assistant-growth-contract'
-import { inspectSourceCreationContext, validateSourceCreationFiles, validateSourceCreationGrant } from './source-creation.js'
+import { extractCandidatePluginKindFromFiles, extractCandidatePluginKindFromManifestText,
+  inspectSourceCreationContext, normalizeCandidatePluginKind,
+  validateSourceCreationFiles, validateSourceCreationGrant, type CandidatePluginKind } from './source-creation.js'
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
 import type { OwnerInstructionReviewFreeze, OwnerInstructionReviewWindow,
@@ -57,6 +59,7 @@ export interface SourceJobCaller {
 export interface EnqueueSourceJobInput {
   gapId: string; name: string; repository: string; files: readonly ScopedPluginFile[]; idempotencyKey: string
   mode?: 'create' | 'revise-created'
+  pluginKind?: CandidatePluginKind
   parentPlanId?: string
   /** Host expectation only; authoritative bytes are reread through the registered producer. */
   growthRun?: SourceGrowthRunBinding
@@ -120,6 +123,7 @@ export function normalizeSourceJobsConfig(value:SourceJobsConfig,build?:SourceBu
 function projection(job: SourceJobRecord, diagnostics?: SourceBuildDiagnostics): SourceJobProjection {
   return { id: job.id, name: job.intent.name, gapId: job.intent.gapId, baseCommit: job.intent.baseCommit,
     ...(job.intent.mode === undefined ? {} : { mode: job.intent.mode }),
+    ...(job.intent.pluginKind === undefined ? {} : { pluginKind: job.intent.pluginKind }),
     status: job.status, createdAt: job.createdAt, expiresAt: job.expiresAt,
     ...(job.planId === undefined ? {} : { planId: job.planId }), ...(job.failureCode === undefined ? {} : { failureCode: job.failureCode }),
     ...(diagnostics !== undefined && job.status === 'failed' && job.failureCode === SOURCE_BUILD_CHECK_FAILED ? { diagnostics } : {}) }
@@ -599,8 +603,16 @@ export class SourceJobRuntime {
     if (input.mode === 'create' || input.mode === 'revise-created') validateSourceCreationFiles(input.files)
     else {
       if (input.mode !== undefined) throw new Error('invalid source job mode')
+      if (input.pluginKind !== undefined) throw new Error('pluginKind is only valid in create or revise-created mode')
       validateScopedPluginFiles(input.files)
       if (this.options.build.versioning === 'patch') assertManagedVersionPaths(input.files)
+    }
+    const normalizedKind = input.pluginKind !== undefined ? normalizeCandidatePluginKind(input.pluginKind) : undefined
+    if (normalizedKind !== undefined && input.files.some(file => file.path === 'package.json')) {
+      const manifestKind = extractCandidatePluginKindFromFiles(input.files)
+      if (manifestKind !== normalizedKind) {
+        throw new Error(`candidate pluginKind (${normalizedKind}) disagrees with package.json dsh.pluginKind (${manifestKind})`)
+      }
     }
     if ((input.mode === 'revise-created') !== (typeof input.parentPlanId === 'string' && input.parentPlanId.length > 0)) throw new Error('source revision parent is missing or outside revision mode')
     return this.track(this.enqueueOwned({ ...input, files: structuredClone(input.files), owner: structuredClone(input.owner),
@@ -645,6 +657,23 @@ export class SourceJobRuntime {
     for (const outstanding of this.options.store.listSourceJobs(1)) this.refreshQueued(outstanding)
     const token = createHash('sha256').update(config.authorityId).update('\0').update(input.idempotencyKey).digest('hex')
     const id = `source-job-${token}`
+    const submittedManifest = input.files.find(file => file.path === 'package.json')
+    let manifestKind: CandidatePluginKind = 'tool'
+    if (submittedManifest !== undefined) {
+      manifestKind = extractCandidatePluginKindFromManifestText(submittedManifest.content)
+    } else if (input.mode === 'revise-created' && parent !== undefined) {
+      const parentManifest = parent.source?.files?.find(file => file.path === `plugins/${input.name}/package.json`)
+      if (parentManifest !== undefined) {
+        manifestKind = extractCandidatePluginKindFromManifestText(parentManifest.content)
+      }
+    }
+    const resolvedKind = input.pluginKind !== undefined
+      ? normalizeCandidatePluginKind(input.pluginKind)
+      : manifestKind
+    if (input.pluginKind !== undefined && (submittedManifest !== undefined || input.mode === 'revise-created') && manifestKind !== resolvedKind) {
+      throw new Error(`candidate pluginKind (${resolvedKind}) disagrees with package.json manifest kind (${manifestKind})`)
+    }
+    const storedPluginKind = resolvedKind === 'tool' ? undefined : resolvedKind
     const prior = this.options.store.getSourceJob(id)
     if (prior !== undefined) {
       const frozen = prior.intent
@@ -653,7 +682,7 @@ export class SourceJobRuntime {
         && frozen.ownerInstruction.reviewWindow !== undefined
         && controlPlaneDigest(frozen.ownerInstruction.reviewWindow) === controlPlaneDigest(ownerInstruction.freeze.budget.window))
       if (frozen.authority.digest !== this.authorityDigest || frozen.ownerDigest !== controlPlaneDigest(owner) || frozen.trustDigest !== controlPlaneDigest(trust)
-        || frozen.mode !== input.mode || (input.mode === 'create' && (controlPlaneDigest(frozen.creation?.grant) !== controlPlaneDigest(config.creation)
+        || frozen.mode !== input.mode || frozen.pluginKind !== storedPluginKind || (input.mode === 'create' && (controlPlaneDigest(frozen.creation?.grant) !== controlPlaneDigest(config.creation)
           || (frozen.creation?.growthRun === undefined) !== (input.growthRun === undefined)
           || (input.growthRun !== undefined && controlPlaneDigest(frozen.creation?.growthRun) !== controlPlaneDigest(input.growthRun))))
         || (input.mode === 'revise-created' && (controlPlaneDigest(frozen.revision?.grant) !== controlPlaneDigest(config.revision)
@@ -685,9 +714,9 @@ export class SourceJobRuntime {
       authority: { id: config.authorityId, digest: this.authorityDigest, expiresAt: config.expiresAt, maxSubmissions: config.maxSubmissions },
       owner, ownerDigest: controlPlaneDigest(owner), trustDigest: controlPlaneDigest(trust), repository: config.repository, name: input.name,
       ...(config.baseline === undefined ? {} : { baseline: structuredClone(config.baseline) }),
-      ...(input.mode === 'create' ? { mode: 'create' as const, creation: { grant: structuredClone(config.creation!), generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceCreationContext>>).generatorDigest,
+      ...(input.mode === 'create' ? { mode: 'create' as const, ...(storedPluginKind === undefined ? {} : { pluginKind: storedPluginKind }), creation: { grant: structuredClone(config.creation!), generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceCreationContext>>).generatorDigest,
         ...(input.growthRun === undefined ? {} : { growthRun: structuredClone(input.growthRun) }) } } : {}),
-      ...(input.mode === 'revise-created' ? { mode: 'revise-created' as const, revision: { grant: structuredClone(config.revision!),
+      ...(input.mode === 'revise-created' ? { mode: 'revise-created' as const, ...(storedPluginKind === undefined ? {} : { pluginKind: storedPluginKind }), revision: { grant: structuredClone(config.revision!),
         generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceRevisionContext>>).generatorDigest, parent: structuredClone(parent!.parent),
         // Task-failure revisions pin a growth run; owner-instruction revisions have none.
         ...(input.growthRun === undefined ? {}

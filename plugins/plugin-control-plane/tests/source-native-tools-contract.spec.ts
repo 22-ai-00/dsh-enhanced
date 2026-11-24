@@ -144,10 +144,12 @@ it('provides the native Tools SDK through the real generator and a single frozen
     environment, signal, assertCurrent: () => undefined, creation, files: candidate })).resolves.toEqual(prepared)
 }, 240_000)
 
-it('keeps the candidate write boundary at README, src and tests', () => {
-  for (const path of ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml', 'src/version.ts',
+it('keeps the candidate write boundary at controlled manifest/patch plus README, src and tests', () => {
+  for (const path of ['pnpm-lock.yaml', 'tsconfig.json', 'tsconfig.build.json', 'LICENSE', 'src/version.ts',
     'tests/native/package.json']) {
     expect(() => validateSourceCreationFiles([{ path, content: 'tampered' }])).toThrow('candidate authority')
   }
+  expect(() => validateSourceCreationFiles([{ path: 'package.json', content: '{}' }])).toThrow('outside candidate authority')
+  expect(() => validateSourceCreationFiles([{ path: 'cordis.patch.yml', content: 'tampered' }])).toThrow('cordis.patch.yml')
   expect(() => validateSourceCreationFiles(candidate)).not.toThrow()
 })

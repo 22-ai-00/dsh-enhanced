@@ -312,9 +312,9 @@ export class DeliveryCoordinator {
     if (this.timer !== undefined) return
     this.stopping = false
     const interval = this.options.tickIntervalMs ?? 1_000
-    this.timer = setInterval(() => void this.tick(), interval)
+    this.timer = setInterval(() => void this.tick().catch(() => {}), interval)
     this.timer.unref?.()
-    void this.tick()
+    void this.tick().catch(() => {})
   }
 
   async stop(): Promise<void> {

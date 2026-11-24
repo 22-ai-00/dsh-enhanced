@@ -805,6 +805,11 @@ describe('assistant delivery Cordis service', () => {
     expect(config.defaultAgentPreset).toBe('standard')
     expect(config.toolApprovalTtlMs).toBe(300_000)
     expect(config.agentMaxAutoContinuationTurns).toBe(2)
+    expect(config.attentionAttachOverCap).toBe(true)
+    expect(config.attentionEnforce).toBe(true)
+    expect(config.ownerReportRouting).toEqual({ orderAcrossLanes: true })
+    expect(config.naturalFeedback).toEqual({ coverage: true, mixedIntent: true })
+    expect(config.inProcessReload).toEqual({ enabled: true })
     for (const agentMaxAutoContinuationTurns of [0, 8]) {
       expect(AssistantDeliveryService.Config({
         databasePath: '/tmp/delivery.sqlite',
@@ -1713,9 +1718,9 @@ describe('assistant delivery Cordis service', () => {
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
     expect(service.enqueueBackground({ sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
-      idempotencyKey: 'automation:1', text: 'done' })).toMatchObject({ status: 'pending', intent: { target: { conversation } } })
+      idempotencyKey: 'automation:1', text: 'done', attention: { purpose: 'result' } })).toMatchObject({ status: 'pending', intent: { target: { conversation } } })
     expect(() => service.enqueueBackground({ sourceId: 'automation-1', workspace: '/work/other', bindingId: binding.id,
-      idempotencyKey: 'automation:cross-workspace', text: 'no' }))
+      idempotencyKey: 'automation:cross-workspace', text: 'no', attention: { purpose: 'result' } }))
       .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     expect(service.reply(foreground('delivery-session-1'), { idempotencyKey: 'reply:1', text: 'reply' }))
       .toMatchObject({ status: 'pending', intent: { bindingId: binding.id } })
@@ -1723,10 +1728,11 @@ describe('assistant delivery Cordis service', () => {
       idempotencyKey: 'reply:to-event', text: 'reply', replyToEventId: 'om_original',
     })).toMatchObject({ intent: { replyToEventId: 'om_original' } })
     expect(() => service.enqueueBackground({ sourceId: 'forged', workspace: '/work/alpha', bindingId: binding.id,
-      idempotencyKey: 'forged', text: 'no' })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+      idempotencyKey: 'forged', text: 'no', attention: { purpose: 'result' } })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
     expect(() => service.enqueueBackground({
       sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
       idempotencyKey: 'automation:forged-learning', text: 'forged result',
+      attention: { purpose: 'result' },
       metadata: { 'dsh.learning.runId': 'run-from-somewhere-else' },
     })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
     const outputPreview = 'verified automation result'
@@ -3532,7 +3538,7 @@ describe('assistant delivery Cordis service', () => {
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
     service.enqueueBackground({ sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
-      idempotencyKey: 'ambiguous-1', text: 'possibly sent' })
+      idempotencyKey: 'ambiguous-1', text: 'possibly sent', attention: { purpose: 'result' } })
     await service.registerAdapter({ channel: 'lark', account: 'bot-1',
       capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] }, start: async () => {},
       send: async () => ({ outcome: 'unknown', failureCode: 'response-lost' }) })

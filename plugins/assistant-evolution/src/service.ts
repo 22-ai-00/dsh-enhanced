@@ -99,8 +99,8 @@ export interface Config {
   reconcileIntervalMs?: number
   reconcileLimit?: number
   /**
-   * Permit the narrow evidence-gated rollback lane. This only enables the code
-   * path; Policy must independently allow exact `rollback` actions.
+   * Permit the narrow evidence-gated rollback lane. Enabled by default;
+   * set `false` to disable. Policy must independently allow exact `rollback` actions.
    */
   autonomousRollback?: boolean
 }
@@ -119,7 +119,7 @@ const configSchema = Schema.object({
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
   reconcileIntervalMs: Schema.number().step(1).min(0).default(15_000),
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
-  autonomousRollback: Schema.boolean().default(false),
+  autonomousRollback: Schema.boolean().default(true),
 }) as Schema<Config>
 
 const evolutionApprovalSource = 'dsh-enhanced-assistant-evolution'

@@ -327,6 +327,7 @@ describe('Web owner over-cap plain-text attachment delivery', () => {
         idempotencyKey: 'web-attach-expired',
         text: words(attentionWordCaps.result + 5),
         expiresAt: Date.now() + 10_000,
+        attention: { purpose: 'result' },
       })
       await f.drain()
       const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 20_000)
@@ -351,6 +352,7 @@ describe('Web owner over-cap plain-text attachment delivery', () => {
         idempotencyKey: 'web-attach-revoked',
         text: words(attentionWordCaps.result + 5),
         expiresAt: Date.now() + 60_000,
+        attention: { purpose: 'result' },
       })
       await f.drain()
       expect(f.access.notifications(f.binding.sessionId).map(n => n.id)).toContain(revocable.id)

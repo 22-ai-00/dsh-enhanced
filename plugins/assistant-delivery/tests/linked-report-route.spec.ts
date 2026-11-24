@@ -292,9 +292,9 @@ describe('linked work-item report routing', () => {
   test('WP22 outcome facts tag only a Host-routed linked report with its origin binding', async () => {
     const f = await fixture()
     f.link()
-    const direct = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-1', text: 'direct' })
+    const direct = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-1', text: 'direct', attention: { purpose: 'result' } })
     // A marker without the reserved key prefix (only reachable by tampering) is not a linked route.
-    const tampered = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-2', text: 'tampered' })
+    const tampered = f.service.enqueueBackground({ sourceId, workspace, bindingId: f.origin.id, idempotencyKey: 'direct-2', text: 'tampered', attention: { purpose: 'result' } })
     const db = new DatabaseSync(join(f.root, 'delivery.sqlite'))
     try {
       db.prepare(`UPDATE outbox_messages SET intent_json=json_set(intent_json,'$.metadata',json_object('dsh.linked-report','v1',
@@ -329,6 +329,11 @@ describe('linked work-item report routing', () => {
       vi.spyOn(f.ctx.assistantPolicy, 'evaluate').mockImplementation(request =>
         request.action === 'send' && request.subject.principal === id(denied)
           ? { ...evaluate(request), effect: 'allow' } as ReturnType<typeof evaluate> : evaluate(request))
+      const authorize = f.ctx.assistantPolicy.authorize.bind(f.ctx.assistantPolicy)
+      vi.spyOn(f.ctx.assistantPolicy, 'authorize').mockImplementation((request, options) =>
+        request.action === 'send' && request.subject.principal === id(denied)
+          ? { ...authorize(request, options), effect: 'allow', ruleId: 'test-allow-denied' } as ReturnType<typeof authorize>
+          : authorize(request, options))
     }
 
     test("default and explicit 'origin' keep the available origin even when the alias spoke last", async () => {
@@ -358,7 +363,7 @@ describe('linked work-item report routing', () => {
     })
 
     test('the newest inbound wins over list order; ties keep the origin, then list order', async () => {
-      const f = await fixture()
+      const f = await fixture({ orderAcrossLanes: false })
       f.link(denied)
       f.link()
       allowDeniedSend(f)
@@ -539,8 +544,12 @@ describe('linked work-item report routing', () => {
       expect(f.sends.lark).not.toHaveBeenCalled()
     })
 
-    test('flag off keeps the existing routing for both cases', async () => {
-      const f = await fixture()
+    test('default on keeps ordering across lanes while explicit false preserves the existing routing', async () => {
+      const defaultOn = await fixture()
+      await originWaiting(defaultOn, 'typed')
+      expect(defaultOn.service.routeWorkItemReport(revision(defaultOn, [id(alias)], 2, { prefer: 'recent' }))).toEqual({ route: 'origin' })
+
+      const f = await fixture({ orderAcrossLanes: false })
       await originWaiting(f, 'typed')
       expect(f.service.routeWorkItemReport(revision(f, [id(alias)], 2, { prefer: 'recent' }))).toMatchObject({ route: 'linked' })
       const g = await fixture({ orderAcrossLanes: false })

@@ -50,6 +50,7 @@ async function fixture(options: Readonly<{ attach?: boolean; textAttachments?: b
   await ctx.plugin(AssistantDeliveryService, {
     databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false,
     retryBaseMs: 1, retryMaxMs: 1, ownerRoutes: [authority],
+    attentionEnforce: false,
     ...(options.attach === undefined ? {} : { attentionAttachOverCap: options.attach }),
   })
   const service = ctx.assistantDelivery
@@ -126,9 +127,22 @@ describe('over-cap conversion (pure)', () => {
   })
 })
 
-describe('over-cap conversion (service, opt-in)', () => {
-  test('default off: over-cap text is queued and sent inline unchanged', async () => {
+describe('over-cap conversion (service)', () => {
+  test('default on: over-cap text converts automatically when adapter supports textAttachments', async () => {
     const f = await fixture({ textAttachments: true })
+    const text = words(attentionWordCaps.result + 5)
+    const queued = f.background('long-default', text)
+    expect(queued.intent.attachment).toEqual({
+      kind: 'text',
+      name: `notice-${sha256(text).slice(0, 12)}.txt`,
+      mediaType: 'text/plain',
+      text,
+      sha256: sha256(text),
+    })
+  })
+
+  test('explicit opt-out: over-cap text is queued and sent inline unchanged when attach is false', async () => {
+    const f = await fixture({ attach: false, textAttachments: true })
     const text = words(attentionWordCaps.result + 5)
     const queued = f.background('long', text)
     expect(queued.intent).not.toHaveProperty('attachment')
@@ -162,10 +176,10 @@ describe('over-cap conversion (service, opt-in)', () => {
     expect(f.background('long', text).id).toBe(queued.id)
     const routed = (() => {
       ;(f.service as unknown as { config: { attentionAttachOverCap?: boolean } }).config.attentionAttachOverCap = true
-      return f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text })
+      return f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text, attention: { purpose: 'result' } })
     })()
     ;(f.service as unknown as { config: { attentionAttachOverCap?: boolean } }).config.attentionAttachOverCap = false
-    expect(f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text }).id)
+    expect(f.service.enqueueBackgroundRoute({ sourceId: 'route-source', authorityId: authority.id, idempotencyKey: 'route-long', text, attention: { purpose: 'result' } }).id)
       .toBe(routed.id)
     // New keys with the flag off are untouched.
     expect(f.background('long-2', text).intent).not.toHaveProperty('attachment')
@@ -210,11 +224,12 @@ describe('over-cap conversion (service, opt-in)', () => {
     const text = words(attentionWordCaps.result + 5)
     const notice = f.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: authority.id,
       scope: { principalId: 'lark/bot-1/tenant-a/ou_owner', principalRecordId: owner.id, principalVersion: owner.version,
-        workspace: '/work/alpha', preset: 'primary' }, sessionId: 'session-1', idempotencyKey: 'n-1', text, expiresAt: Date.now() + 60_000 })
+        workspace: '/work/alpha', preset: 'primary' }, sessionId: 'session-1', idempotencyKey: 'n-1', text, expiresAt: Date.now() + 60_000,
+      attention: { purpose: 'result' } })
     expect(notice.intent.attachment?.text).toBe(text)
-    const routed = f.service.enqueueBackgroundRoute({ sourceId: 'proactive-engine', authorityId: authority.id, idempotencyKey: 'route-1', text })
+    const routed = f.service.enqueueBackgroundRoute({ sourceId: 'proactive-engine', authorityId: authority.id, idempotencyKey: 'route-1', text, attention: { purpose: 'result' } })
     expect(routed.intent.attachment?.text).toBe(text)
-    expect(f.service.enqueueBackgroundRoute({ sourceId: 'proactive-engine', authorityId: authority.id, idempotencyKey: 'route-1', text }).id)
+    expect(f.service.enqueueBackgroundRoute({ sourceId: 'proactive-engine', authorityId: authority.id, idempotencyKey: 'route-1', text, attention: { purpose: 'result' } }).id)
       .toBe(routed.id)
   })
 })

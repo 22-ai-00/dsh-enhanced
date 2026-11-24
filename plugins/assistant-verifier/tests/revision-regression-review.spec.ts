@@ -365,3 +365,18 @@ test('service exposes only a Host method while the regression peer is mounted an
   await provider.dispose(); await new Promise(resolve => setImmediate(resolve))
   expect(service.inspectRevisionRegressionAcceptanceAuthority({ owner: f.regressionConfig.owner })).toBeUndefined()
 })
+
+test('rejects pluginKind mismatch between parent and candidate as schema-or-environment-mismatch', async () => {
+  const f = await fixture()
+  const base = observer.run.getMockImplementation()!
+  observer.run.mockImplementation(async (...args: unknown[]) => {
+    const res = await base(...args)
+    const frame = JSON.parse(res.stdout)
+    if (frame.artifactSha256 === f.snapshot.candidate.certificate.plan.artifactSha256 && frame.schemas) {
+      frame.pluginKind = 'service'
+    }
+    return { ...res, stdout: JSON.stringify(frame) + '\n' }
+  })
+  expect(await f.regressionRuntime.run(f.request))
+    .toEqual({ status: 'rejected', reason: 'schema-or-environment-mismatch' })
+})

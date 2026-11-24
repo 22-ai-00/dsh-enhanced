@@ -84,9 +84,12 @@ Host-only 工程来源使用独立 `assistant-delivery/work-item-engineering-con
 | `permissionPickerTtlMs` | `900000` | `/permissions` 三档权限卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
 | `toolApprovalPreparationTimeoutMs` | `10000` | 卡片前持久化准备上限；范围 100–30000 毫秒，且不超过即时审批总有效期；超时不出卡、不执行 |
-| `ownerReportRouting.orderAcrossLanes` | `false` | 仅在 `linkedFallback` 报告路由已启用时有实际意义：同一工作项仍有未结算的早期报告时，新报告沿用该报告的 origin 或同一合格别名，由既有 per-lane claim 顺序按 revision 先后发送；保序限于同一 lane（typed 与普通 background 分开），origin 已被 `/new` 轮换时不粘滞 origin；sticky 去向不可用时回退普通路由，不阻塞投递 |
-| `naturalFeedback.coverage` | `false` | 可选：启用加宽的自然结果解析（同义/多语言、结果后允许附带原因或证据）。关闭时行为与旧版完全一致：前台仍只按旧版短语解析（含“还是不行，<原因>”形式），后台报告反馈仍只接受旧版整句白名单。开启后问句、假设/条件、引号内文本、否定引用（“并没有解决”）、矛盾陈述、含糊情绪与撤回命令仍不产生结果证据 |
-| `naturalFeedback.mixedIntent` | `false` | 可选，依赖 `naturalFeedback.coverage`：同一条认证主人的 WorkItems 报告回复同时含结果判断与明确续办指令时，拆成两件各自鉴权/幂等/目标绑定的决定——先记 canonical 结果，再按既有续办队列入队；任一侧未获授权时只做允许的一件并在 Host 日志记录原因。关闭时不拆分，行为与旧版一致 |
+| `attentionAttachOverCap` | `true` | 默认开启：超出所属目的字数或字素上限的后台/主人通知转为短正文加文本附件，并拦截拆条规避；设为 `false` 可回退到第 1 阶段 |
+| `attentionEnforce` | `true` | 默认开启：在 Policy 授权前强制检查后台/主人通知的 `attention` 目的声明与问答约束（未开启 `attentionAttachOverCap` 时同时拦截超长）；设为 `false` 可关闭 |
+| `ownerReportRouting.orderAcrossLanes` | `true` | 默认开启，仅在 `linkedFallback` 报告路由已启用时有实际意义：同一工作项仍有未结算的早期报告时，新报告沿用该报告的 origin 或同一合格别名，由既有 per-lane claim 顺序按 revision 先后发送；保序限于同一 lane（typed 与普通 background 分开），origin 已被 `/new` 轮换时不粘滞 origin；sticky 去向不可用时回退普通路由，不阻塞投递；设为 `false` 可关闭 |
+| `naturalFeedback.coverage` | `true` | 默认开启：启用加宽的自然结果解析（同义/多语言、结果后允许附带原因或证据）。设为 `false` 时行为与旧版完全一致：前台仍只按旧版短语解析（含“还是不行，<原因>”形式），后台报告反馈仍只接受旧版整句白名单。开启后问句、假设/条件、引号内文本、否定引用（“并没有解决”）、矛盾陈述、含糊情绪与撤回命令仍不产生结果证据 |
+| `naturalFeedback.mixedIntent` | `true` | 默认开启，依赖 `naturalFeedback.coverage`：同一条认证主人的 WorkItems 报告回复同时含结果判断与明确续办指令时，拆成两件各自鉴权/幂等/目标绑定的决定——先记 canonical 结果，再按既有续办队列入队；任一侧未获授权时只做允许的一件并在 Host 日志记录原因。设为 `false` 时不拆分，行为与旧版一致 |
+| `inProcessReload.enabled` | `true` | 默认开启：由 `apply()` 注册 Cordis `inProcessReload` 服务；省略 `profilePath` 时自动从当前挂载的 Cordis `include` 根解析 profile 路径；设为 `inProcessReload: { enabled: false }` 可关闭 |
 | `peerAgents` | `[]` | 可选、默认空的精确 peer bot 白名单（channel/account/tenant/user）。仅当入站 envelope 带 `senderIsBot=true` 且完整元组匹配时，才把该 bot 激活为当前 owner 的 linked principal 并进入它自己的会话；它保留独立 Policy subject，不继承 owner 的工具、记忆、WorkItem 反馈或续办通道。未列入的 bot 仍是 `unauthorized-principal` |
 | `ownerRoutes` | `[]` | Host-owned 稳定 owner 路由；每项精确固定 id、conversation、principal、绝对 workspace、preset、policyRef 和 minimumGeneration |
 
@@ -286,7 +289,7 @@ Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlement
 
 普通前台任务也支持自然反馈：同一 owner 直接回复原任务结果，说“问题解决了”“还是不行，保存报错”或“撤回刚才的任务反馈”，Host 会记录明确判断，原文仍交给 Agent 正常续答。已有判断会自动按当前版本更正，无需先查询版本。只有明确、可确定解析的表述才记录；感谢、疑问、假设、引用、附件和没有精确回复目标的文字仍按普通聊天处理。该入口不覆盖 Automation、whole-goal 或原生 Web 结果；这些结果继续使用原有入口。
 
-可选配置 `naturalFeedback.coverage`（默认关闭）把同一个解析器扩展到明确的结果同义族：中文“已解决/问题已修复/修好了/恢复正常了/现在可以正常用了/现在没问题了/可以了”与“不行/仍然不行/还是失败/没有修复/返回值仍然是空的/仍有报错”等，英文 `fixed` / `resolved` / `works now` / `not fixed` / `still broken` / `still empty` 等，并允许结果后附带原因或证据（如“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”）。结果判断仍必须是整条消息开头的直接断言；附带部分只是不可信上下文，不进入证据等级、版本、预算或 Growth 采用判定。问句、假设/条件、引号内文本、否定引用（“并没有解决”）、与结果相反的矛盾断言、单独的情绪（“谢谢”“太好了”“还行”）以及撤回命令仍然不产生结果证据。关闭该开关时前台行为与旧版完全一致；该开关不改变 `/feedback` 显式命令、Automation/whole-goal 反馈或 Evaluation 的任何既有入口。
+配置 `naturalFeedback.coverage`（默认开启，可显式设为 `false` 关闭）把同一个解析器扩展到明确的结果同义族：中文“已解决/问题已修复/修好了/恢复正常了/现在可以正常用了/现在没问题了/可以了”与“不行/仍然不行/还是失败/没有修复/返回值仍然是空的/仍有报错”等，英文 `fixed` / `resolved` / `works now` / `not fixed` / `still broken` / `still empty` 等，并允许结果后附带原因或证据（如“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”）。结果判断仍必须是整条消息开头的直接断言；附带部分只是不可信上下文，不进入证据等级、版本、预算或 Growth 采用判定。问句、假设/条件、引号内文本、否定引用（“并没有解决”）、与结果相反的矛盾断言、单独的情绪（“谢谢”“太好了”“还行”）以及撤回命令仍然不产生结果证据。关闭该开关时前台行为与旧版完全一致；该开关不改变 `/feedback` 显式命令、Automation/whole-goal 反馈或 Evaluation 的任何既有入口。
 
 自然反馈使用 Delivery schema 24 的持久日志，绑定原始 Inbox、目标 Outbox、owner、入站顺序和一次冻结的修订参数。Evaluation 暂不可用时，普通聊天继续，日志等待后续补记；恢复只重试反馈记录，不重新运行用户的 Agent 请求。若旁路反馈日志本身未能持久化，Host 记诊断并继续普通聊天，不声称该条反馈已保存；普通派发仍须通过自身授权与持久化检查。版本冲突不自动改用新版本重试；明显早于当前反馈或无法确定顺序的相反判断不会覆盖当前结果。自然纠正原因可随精确 canonical 修订交给 Growth，最多 4096 字，作为不可信任务材料，不授予任何新权限。
 
@@ -448,7 +451,7 @@ schema v27 持久保存渠道进度句柄及待发送终态。终态先入账，
 
 ### 同进程重载 adapter
 
-`createInProcessReloadRuntime(ctx, options)` 是 control plane `in-process-reload` 合同的 Host 侧适配器。它仅在显式配置 `inProcessReload` 时由 `apply()` 注册为 Cordis `inProcessReload` 服务；省略该配置时默认不注册服务、没有后台轮询，`--dump-config` 输出逐字节不变。
+`createInProcessReloadRuntime(ctx, options)` 是 control plane `in-process-reload` 合同的 Host 侧适配器。默认配置下（`inProcessReload.enabled` 默认 `true`）由 `apply()` 注册为 Cordis `inProcessReload` 服务；省略 `profilePath` 时在重载/回滚阶段按当前挂载的 Cordis `include` 根动态解析 profile 路径，没有后台轮询；显式设置 `inProcessReload: { enabled: false }` 可关闭注册。
 
 能力边界：
 
@@ -458,7 +461,7 @@ schema v27 持久保存渠道进度句柄及待发送终态。终态先入账，
 - 代数：`hostGeneration` 必须由调用方注入（不自行发明）；`inProcessGeneration` 由 adapter 单调维护，每次完成的挂载尝试 +1。无法解析 Loader/include root/目标 entry、目标包不匹配、目标要求进程重启、warrant/artifact/patch 摘要非法、Host 代次变化都在触碰树之前拒绝。
 - rollback 复用同一 warrant；对于调用方直接提供的 `restore` 钩子或由 runtime 接管的不可变 artifact baseline，只在探针证明已恢复且重新激活为 `ACTIVE` 时报告 `profileRestored:true`/`restored:true`。
 - 权限：只读取/更新配置指定的 profile 与 `stagingDir` 下的不可变 artifact 目录并在既有 Cordis 树内重启/替换目标 entry；不启动 subprocess、不访问网络；不持有额外凭据。
-- 永不同进程热重载：control plane、assistant-delivery（本包）、assistant-isolation、lark-channel、改变依赖子树的插件、持有没有被证明的进程/cgroup 权限的插件。
+- 永不同进程热重载：control plane、assistant-delivery（本包）以及持有没有被证明的进程/cgroup 权限的插件；`config-only` 模式也不支持改变依赖子树。`artifact-replace` 模式支持改变依赖子树以及 `assistant-isolation`、`lark-channel` 等其它插件的热重载，并在缺失依赖或启动失败时自动回滚至先前的不可变 artifact。
 
 ## Goals 单次唤醒边界
 
@@ -548,7 +551,7 @@ schema 30 为显式启用 `ownerReportFeedback` 的 WorkItems 保存独占反馈
 
 生产终态、静止及预算结算证明尚未就绪时，反馈持久等待，不伪造成功、不派新 worker。结果是主人证言，不是独立 verifier 验收；更正和撤回使用冻结版本 CAS，重投、冷恢复或丢失 ACK 不增加票数。`/stop`、`/new`、`/clear` 持久取消较早未完成意图。实际状态通过既有 background send 权限发送稳定 ACK；没有票的 `status` 明确返回暂无反馈，不造 revision。发送拒绝或 unknown 不回滚已记录结果、不盲目重发。
 
-可选 `naturalFeedback.coverage`（默认关闭）对该入口同样生效：报告回复可以是同义/多语言结果并附带原因（“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”），后台仍只做确定性分类，不把任意文本当结果、不调用模型。可选 `naturalFeedback.mixedIntent`（默认关闭，依赖 `coverage`）把一条混合回复拆成两件事：先按独立的 `feedback-work-items` 权限形成 canonical 结果证据（既有 feedback intent → Evaluation 通道），再按独立的 `continue-work-items-from-reply` 权限把同一原文放进既有续办队列。两件事沿用同一 Inbox 的确定性幂等键，并各自重验当前 owner/binding/report/Policy 与目标绑定；两件都允许时在同一个 Delivery 事务内原子写入（结果行拥有唯一 Inbox handoff，续办行复用已处理 Inbox），任一侧未授权或写入不可用时只做允许的一件，并通过 Host 日志记录 `continuation-not-admitted` / `feedback-not-admitted` / `neither-lane-admitted`。该拆分不新增 schema、无新 Loop/timer、无模型调用；关闭时“还是不行，继续修复”仍沿用旧行为（只进续办队列、不写 canonical 结果），而纯结果回复（“问题解决了”“还是不行”）不会因为该开关变成一次执行。
+`naturalFeedback.coverage`（默认开启，可显式设为 `false` 关闭）对该入口同样生效：报告回复可以是同义/多语言结果并附带原因（“现在可以正常用了，谢谢”“返回值仍然是空的，请检查分页”），后台仍只做确定性分类，不把任意文本当结果、不调用模型。`naturalFeedback.mixedIntent`（默认开启，依赖 `coverage`，可显式设为 `false` 关闭）把一条混合回复拆成两件事：先按独立的 `feedback-work-items` 权限形成 canonical 结果证据（既有 feedback intent → Evaluation 通道），再按独立的 `continue-work-items-from-reply` 权限把同一原文放进既有续办队列。两件事沿用同一 Inbox 的确定性幂等键，并各自重验当前 owner/binding/report/Policy 与目标绑定；两件都允许时在同一个 Delivery 事务内原子写入（结果行拥有唯一 Inbox handoff，续办行复用已处理 Inbox），任一侧未授权或写入不可用时只做允许的一件，并通过 Host 日志记录 `continuation-not-admitted` / `feedback-not-admitted` / `neither-lane-admitted`。该拆分不新增 schema、无新 Loop/timer、无模型调用；关闭时“还是不行，继续修复”仍沿用旧行为（只进续办队列、不写 canonical 结果），而纯结果回复（“问题解决了”“还是不行”）不会因为该开关变成一次执行。
 
 Host-only `inspectOwnerWorkItemLearningTask` 使用独立 `assistant-delivery/owner-work-item-learning/v1` 协议，重验当前主人、报告生产者、全量 WorkItems proof 与 canonical owner 修订。返回去正文的 `proofIdentity`，其 proofDigest 绑定内部原文；`presentation` 的 brief/report/feedback 独立限长与常见凭据过滤，presentationDigest 不冒充原文摘要。sourceDigest 绑定持久来源及修订，不绑定读取时的新 Session 代次；同主人 `/new` 后仍可召回已记录反馈，撤回、更正、换主人或失效证明会拒绝旧来源。它不冒充前台来源，不授予学习、采用或修复执行权限；Growth 后续消费仍是另一项能力。
 
@@ -562,18 +565,18 @@ schema 31 新增只追加的 `delivery_attention_audit`，按 outbox id 去重�
 
 本阶段不改变任何发送（强制见第 3 阶段）：判定为 `would-reject` 或 `would-attach` 的消息照常入队、原文发送。`inspectAttentionAudit({ afterSequence?, limit? })` 按序分页只读返回判定（默认 100、最多 500），不含正文，并附两项缺口指标：`processLocalWriteFailures` 是本进程启动以来的审计写入失败数，重启清零；`unauditedOutbox` 每次由持久数据查询得出，统计首条审计行之后创建、带审计通道持久标记（owner 通知、owner route、Automation 结果、Goal 结果、WorkItem 报告）却没有审计行的 Outbox。普通 `enqueueBackground` 行没有持久通道标记，不计入 `unauditedOutbox`，只能由进程内计数发现；首条审计行之前的缺口也无法发现。审计表无保留期与清理，任何未来的保留策略都需新 schema。回复与审批通道不在本阶段范围。
 
-### 第 2b 阶段：超长转附件与拒绝拆条（opt-in，默认关闭）
+### 第 2b 阶段：超长转附件与拒绝拆条（默认开启）
 
-配置 `attentionAttachOverCap: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（及走同一后台通道的 WorkItem 报告）在入队前处理；默认关闭时行为与第 1 阶段完全一致。typed Automation/Goal 结果通道不转换，只审计。
+默认 `attentionAttachOverCap: true` 时，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification`（及走同一后台通道的 WorkItem 报告）在入队前处理；显式设为 `false` 时行为与第 1 阶段完全一致。typed Automation/Goal 结果通道不转换，只审计。
 
 - 超出所属目的字数或字素上限的通知改为一条消息：短正文（最多 60 词、360 非空白字素的整单元前缀，URL 与 Markdown 链接整体保留或整体移出，绝不截断）加固定说明 `（全文较长，共 N 词，已转为附件 notice-<sha256 前 12 位>.txt|md）`，format 为 `plain`；原文完整放入 `intent.attachment`（`kind: 'text'`、`mediaType` 随原 format、`sha256` 绑定原文）。转换为纯函数 `convertOverCapAttention`，同一原文逐字节相同；同一幂等键重放返回原记录。链接文字与 URL 计入上限。
 - 通道适配器须声明 `capabilities.textAttachments: true`；未声明时超长通知在入队时以 `policy-denied` 拒绝，不入队、不拆条；无适配器时为 `runtime-unavailable`。Coordinator 另有兜底：带附件的 Outbox 遇到不支持附件的适配器直接 `dead`（`attachment-unsupported`），绝不只发摘要。`bindNativeWebOwner` 注册的原生 Web 通知适配器现已声明 `textAttachments: true`（并继续保留 `dsh.native-notice` 校验与 `NativeWebOwnerAccess.notifications` 对可选只读 `OutboundTextAttachment` 的透传）；其他未声明该能力的适配器继续拒绝附件发送。
 - 拒绝拆条：同一 binding、同一通道、同一来源在 `attentionSplitWindowMs`（5 分钟）内已审计的内联正文，与本条合计超过本条目的上限时，以 `policy-denied`（`attention split evasion`）拒绝；单条不受影响，补救方式是发一条（超长则自动转附件）。窗口按审计行持久化的 `recorded_at` 与 Delivery Store 时钟比较，重启不会重置。判断依赖尽力而为的审计行，审计写入失败的通知不计入（可由 `processLocalWriteFailures` 发现）。关闭开关后，新通知按第 1 阶段原样入队，已转换的幂等键重放仍返回原记录。
 - Store 校验附件：仅 `plain` intent，键集固定，名称 `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，正文非空且不超过 `maxTextBytes`，`sha256` 与正文一致。附件存于 `intent_json`，不改 schema（仍为 31）。审计按附件原文计词，因此转换后的行仍记 `would-attach`。
 
-### 第 3 阶段：目的强制（opt-in，默认关闭）
+### 第 3 阶段：目的强制（默认开启）
 
-配置 `attentionEnforce: true` 后，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification` 在入队前按第 1 阶段判定强制；WorkItem 只有 typed 报告通道（`enqueueWorkItemReport`）由通道声明 `result`，因此只受上限约束（仅上限），走 `enqueueBackground` 的非 typed 报告按普通后台通知强制。判定与拒绝发生在 Policy 授权之前，被拒绝的通知不写 Policy 审计行、不扣预算。默认关闭时行为与错误文案与第 2b 阶段完全一致。typed Automation/Goal 结果通道、前台进度、回复与审批通道不受影响。
+默认 `attentionEnforce: true` 时，`enqueueBackground`、`enqueueBackgroundRoute`、`enqueueOwnerNotification` 在入队前按第 1 阶段判定强制；WorkItem 只有 typed 报告通道（`enqueueWorkItemReport`）由通道声明 `result`，因此只受上限约束（仅上限），走 `enqueueBackground` 的非 typed 报告按普通后台通知强制。判定与拒绝发生在 Policy 授权之前，被拒绝的通知不写 Policy 审计行、不扣预算。默认关闭时行为与错误文案与第 2b 阶段完全一致。typed Automation/Goal 结果通道、前台进度、回复与审批通道不受影响。
 
 - 目的缺失（`missing-purpose`）或任一 would-reject 原因（`invalid-envelope`、`attention-missing-work-item`、`attention-question-*`、`answer-*`）直接拒绝：抛 `AttentionRejectedError`（`code: 'policy-denied'`，`reasons` 为结构化原因码），不入队、不写 Outbox。`text-exposes-*` 仍只审计。
 - 超出字数或字素上限：`attentionAttachOverCap` 开时走第 2b 附件路径；关时以 `over-word-cap` / `over-grapheme-cap` 拒绝。开启附件但适配器不支持时原因为 `attachment-unsupported`，拆条为 `split-evasion`（错误信息与第 2b 相同）。仅开强制不增加拆条检查。

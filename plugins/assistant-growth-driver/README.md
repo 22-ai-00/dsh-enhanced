@@ -1,10 +1,10 @@
 # @dsh-enhanced/assistant-growth-driver
 
-默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，另经显式 `workItemFailures` 授权消费后台失败反馈，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
+默认开启的有界后台成长驱动（当未声明 `scope` / `repository` / `usageLearning` 路径与预算等宿主外部资源时自动处于安全休眠待命，可通过显式 `enabled: false` 级联关闭）。在宿主机配置好对应资源后，可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业、消费后台失败反馈，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；源码轨可准备已有 gap 对应的插件修改、创建与修订提案。在配套 Control Plane、有限授权和独立验收配置齐备时，工具创建轨已接通持久构建、独立行为验收和受限动态采用。技能候选仍须另经独立验证与重复成功门；修改、修订和持续观察各有自己的授权与验收条件，不能由一次 `reviewed` 推定完成。`reviewed` 仅表示本次成长复盘结束，不代表完整长期成长闭环已验收。
 
 有源码接口且普通认证反馈的 objective 为 `not-achieved` 时，本轮先查看当前 owner 的任务缺口与任务证据，再按相关性读取目标清单、源码或已授权的创建模板。文件清单只供发现路径，替换前仍须读取正文；证据不足时可以不提案。成功、周期唤醒和缺少源码接口的反馈仍用通用成功工作流；技能候选始终经过独立验证与重复成功门。新运行将实际发送的完整提示（含脱敏反馈数据）绑定到执行摘要；旧来源绑定不补写，也不自动重放 unknown。
 
-同一插件内还有**第二条、独立开关**的学习轨 `workflowOwnerAnchored`（默认关闭）：它不起模型、不触网，只在本地枚举最近完成的 owner-root goal，把 locator（不含任何 prompt/步骤/验收结论）交给 `assistant-delivery`；由 Delivery 自己再调 goals 的 `inspectOwnerVerifiedWorkflowSource` 独立复核（owner-root、whole-goal succeeded 且 quiescent、cwd/preset 精确匹配），只接受可诚实归约为**单步零工具 agent-turn** 的 goal，通过后经 content-free trace v2 沉淀为 workflow growth candidate，并由 Growth 以 **paused** automation 落库待 owner 批准。自由 objective 无法跨任务聚齐重复门，故该轨**单条即沉淀**：每个独立复核通过的成功 goal 产一条独立 paused 候选。候选带冻结的**占位 cron**（`0 0 29 2 *` UTC，由 store 的激活门阻断执行）；automations 在 store 层 fail-closed——Growth 所属且仍带占位 schedule 的 workflow 无法经 owner 批准 `resume` 或系统 reconcile 转 active，必须先由 owner 显式做一次 schedule mutation（换真 cron）。该轨同样零 approve/activate/install。
+同一插件内还有**第二条、独立开关**的学习轨 `workflowOwnerAnchored`（默认开启，随 `enabled: false` 级联关闭或单独设 `false` 关闭）：它不起模型、不触网，只在本地枚举最近完成的 owner-root goal，把 locator（不含任何 prompt/步骤/验收结论）交给 `assistant-delivery`；由 Delivery 自己再调 goals 的 `inspectOwnerVerifiedWorkflowSource` 独立复核（owner-root、whole-goal succeeded 且 quiescent、cwd/preset 精确匹配），只接受可诚实归约为**单步零工具 agent-turn** 的 goal，通过后经 content-free trace v2 沉淀为 workflow growth candidate，并由 Growth 以 **paused** automation 落库待 owner 批准。自由 objective 无法跨任务聚齐重复门，故该轨**单条即沉淀**：每个独立复核通过的成功 goal 产一条独立 paused 候选。候选带冻结的**占位 cron**（`0 0 29 2 *` UTC，由 store 的激活门阻断执行）；automations 在 store 层 fail-closed——Growth 所属且仍带占位 schedule 的 workflow 无法经 owner 批准 `resume` 或系统 reconcile 转 active，必须先由 owner 显式做一次 schedule mutation（换真 cron）。该轨同样零 approve/activate/install。
 
 自动成长默认继承 Delivery 随来源任务保存的实际 `request/header` 模型快照，包括 adapter 默认 reasoning effort；历史来源不读取后来切换的会话模型。可同时配置 `provider` / `model` 固定覆盖。Host 显式 `wake({ sourceAgent })` 读取该 Agent 的实际请求，普通周期 wake 仍读取外部会话当前选择。原生 Web 无来源时不猜模型。`health().run.model` 记录本轮模型；已派发但中断的持久作业保持 unknown，不换模型或自动重放。
 
@@ -19,7 +19,7 @@ dsh plugin --profile web add @dsh-enhanced/assistant-growth-driver
 dsh --profile web --dump-config
 ```
 
-单独添加本包时，包内 `cordis.patch.yml` 只注册插件、不带任何 `enabled` 配置，因此**处于休眠状态**：无 timer、不起 Agent、零写入。安装器在取得 owner 授权并完成资源准备后生成的原生 RSI 组合会显式启用本包及 `usageLearning`，固定 owner scope、期限和有限预算，并设置 `intervalMs: 0` 复用原生调度。该组合允许工具创建提案，不默认开放修改或修订；这与单独添加本包的休眠默认值不同。
+单独添加本包时，包内 `cordis.patch.yml` 只注册插件、不带任何 `enabled` 配置，所有自迭代开关默认开启并在未配置宿主外部资源（`scope` / `repository` / `usageLearning` 路径与预算等）时**处于安全休眠待命状态**：无 timer、不起 Agent、零写入；显式设 `enabled: false` 可级联关闭。安装器在取得 owner 授权并完成资源准备后生成的原生 RSI 组合会显式固定 owner scope、期限和有限预算，并设置 `intervalMs: 0` 复用原生调度。
 
 ## 工作机制
 
@@ -82,7 +82,7 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `enabled` | `false` | 必须显式置 `true` 才运行；且启用时必须同时声明 `scope`，否则启动报错。 |
+| `enabled` | `true` | 默认开启（未配置 `scope` 时安全休眠待命）；显式设 `true` 时必须同时声明 `scope`，显式设 `false` 可级联关闭所有子轨。 |
 | `scope` | 无 | 冻结的 owner 四字段 `workspace` / `preset` / `principalId` / `ownerRouteId`。driver 只在该 scope 内动作，identity 不从模型输出派生。`ownerRouteId` 必须是 Delivery 中既有的、已认证的 owner route id；route 不存在/不匹配时每轮跳过并记 `missing-binding`。 |
 | `intervalMs` | `0` | 显式 wake 的可选周期（上限 24h）；启用 `usageLearning` 时必须为 `0`，由 Automations 负责调度。 |
 | `minRepeatedSuccesses` | `3` | Host 侧重复门下限（1–32），模型提交值只允许更高。 |
@@ -95,25 +95,25 @@ devDependency 或锁文件变更）。聚焦测试用最小 fake `ctx.ptcRuntime
 | `provider` / `model` | 继承会话 | 同时配置以固定修复/成长模型；只配置一个会拒绝。不会自动回退到 Day1。 |
 | `reasoningEffort` | 继承会话；固定模型时用供应默认 | 只有同时配置固定 provider/model 时可覆盖。 |
 | `apiKeyEnv` | 随供应 | 可选凭据引用名；未设置时由对应 adapter 管理凭据。引用优先经 credentials 解析，再读同名环境变量；不接受或打印明文 key。 |
-| `workflowOwnerAnchored.enabled` | `false` | owner-anchored workflow 轨独立开关；置 `true` 时要求驱动本体 `enabled: true` 且已声明 `scope`，否则启动报错。 |
+| `workflowOwnerAnchored.enabled` | `true` | owner-anchored workflow 轨独立开关（默认开启，可设 `false` 关闭）；显式置 `true` 时要求驱动本体 `enabled: true` 且已声明 `scope`，否则启动报错。 |
 | `workflowOwnerAnchored.maxCommitsPerWake` | `5` | 单轮最多尝试提交的候选数（1–50）；goals/delivery 不可用、authority/route 漂移即中断本轮。幂等重放代价很低。 |
-| `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
-| `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
-| `pluginSourceProposals.preparationMode` | `inline` | `inline` 保持本轮隔离构建；`durable` 只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
-| `pluginSourceProposals.allowCreation` | `false` | 仅 `durable` 可开启新插件候选。还须配置 Control Plane 的独立 `sourceJobs.creation` 授权；缺少创建读取接口或有效命名规则时保持既有修改工具。 |
+| `pluginSourceProposals.enabled` | `true` | 默认开启（未配置 `repository` 时安全待命）；通过可选 `pluginControlPlane` 服务准备插件提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
+| `pluginSourceProposals.repository` | 无 | 显式启用或提供路径时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
+| `pluginSourceProposals.preparationMode` | `durable` | `inline` 保持本轮隔离构建；`durable`（默认）只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
+| `pluginSourceProposals.allowCreation` | `true` | `durable` 模式下默认开启（`inline` 下自动关闭，可设 `false` 关闭）新插件候选。还须配置 Control Plane 的独立 `sourceJobs.creation` 授权；缺少创建读取接口或有效命名规则时保持既有修改工具。 |
 | `pluginSourceProposals.allowModification` | `true` | 设为 `false` 时不提供既有插件修改工具；创建读取必须显式使用 `mode: create`。原生创建路径应同时配置 Control Plane 的 `sourceJobs.allowedModes: [create]`。 |
-| `pluginSourceProposals.allowRevision` | `false` | 仅在 `pluginSourceProposals.enabled: true`、`preparationMode: durable` 且 `usageLearning.enabled: true` 时可显式开启已采用插件的修订候选；另需 Control Plane 的独立有限修订授权和验收引用。`allowCreation` 不会开启此轨。 |
+| `pluginSourceProposals.allowRevision` | `true` | `durable` 且 `usageLearning.enabled` 时默认开启（`inline` 下自动关闭，可设 `false` 关闭）已采用插件的修订候选；另需 Control Plane 的独立有限修订授权和验收引用。 |
 | `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
 | `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |
 | `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。所选隔离后端须预先准备运行时和依赖。 |
 | `pluginSourceProposals.planTtlMs` | `86400000` | 待批 worktree 保留期限（15 分钟–24 小时）。 |
 | `workflowOwnerAnchored.lookbackMs` | `86400000` | 只枚举该回看窗口内更新过的 owner goal（1 分钟–7 天）。 |
-| `dreamingIdeas.enabled` | `false` | 可选读取同 scope 下 owner 已验证（`state === 'validated'` 且含 owner 审计事件）的 `assistant-dreaming` idea，作为普通背景成长 wake 的有界建议输入；永不接收未验证/已拒绝/已撤回 idea，也不绕过现有预算、权限、受保护插件清单或独立验收。启用时要求驱动本体 `enabled: true` 且已声明 `scope`。 |
+| `dreamingIdeas.enabled` | `true` | 默认开启（可设 `false` 关闭，可选 peer 不可用时安全降级跳过）；读取同 scope 下 owner 已验证（`state === 'validated'` 且含 owner 审计事件）的 `assistant-dreaming` idea，作为普通背景成长 wake 的有界建议输入；永不接收未验证/已拒绝/已撤回 idea，也不绕过现有预算、权限、受保护插件清单或独立验收。 |
 | `dreamingIdeas.maxIdeasPerWake` | `3` | 单轮最多纳入提示的已验证 dreaming idea 条数上限（1–10）。 |
-| `associationCandidates.enabled` | `false` | 可选只读消费可选 `assistant-association` 服务产出的同 scope `status === 'pending'` 且 `wp04Verified === true` 技能候选，作为背景成长 wake 的有界建议输入（拒绝非 pending、未通过 WP04 校验、摘要不符或跨 scope 候选，且不绕过既有重复门、预算、Policy 与独立验收）。启用时要求驱动本体 `enabled: true` 且已声明 `scope`。 |
+| `associationCandidates.enabled` | `true` | 默认开启（可设 `false` 关闭，可选 peer 不可用时安全降级跳过）；只读消费可选 `assistant-association` 服务产出的同 scope `status === 'pending'` 且 `wp04Verified === true` 技能候选，作为背景成长 wake 的有界建议输入（拒绝非 pending、未通过 WP04 校验、摘要不符或跨 scope 候选，且不绕过既有重复门、预算、Policy 与独立验收）。 |
 | `associationCandidates.maxCandidatesPerWake` | `3` | 单轮最多纳入提示的 `assistant-association` 待处理技能候选条数上限（1–10）。 |
-| `usageLearning.enabled` | `false` | 真实任务触发开关；要求主开关、owner scope、预算及 Evaluation/Automations 服务。 |
-| `usageLearning.workItemFailures` | `false` | 严格可选布尔值；缺失/false 在授权摘要中省略，true 要求 usageLearning、durable source、allowCreation 与显式 workItemAuthorities。只允许后台新工具创建；前台 modify/revise 开关不改变。 |
+| `usageLearning.enabled` | `true` | 真实任务触发开关（默认开启，未配置 `databasePath`/`scanBudget` 时安全待命；可设 `false` 关闭）；显式启用时要求主开关、owner scope、预算及 Evaluation/Automations 服务。 |
+| `usageLearning.workItemFailures` | `true` | `durable` 创建且 `usageLearning` 启用时默认开启（可设 `false` 关闭；配置 `workItemAuthorities` 时自动生效，仅在实际配置了 pins 时扫描后台 work items）；只允许后台创建/修订走廊，前台 modify 开关不变。 |
 | `usageLearning.workItemAuthorities` | 无 | 后台开关开启时必填的准确四份 pins：sourceJobs（authorityId/authorityDigest/expiresAt）、creationGrant（id/digest/expiresAt）、creationAcceptance（完整独立验收引用）、adoption（authorityId/authorityDigest/expiresAt），外层 protocol 为 `assistant-growth/work-item-authorities/v1`。从已授权当前 CP 免费 readiness 获取并由 owner 显式冻结，不自动补签或扩大旧 grant。 |
 | `usageLearning.workItemRevisionAuthorities` | 无 | 可选修订 pins（protocol `assistant-growth/work-item-revision-authorities/v1`）：sourceJobs、带 `workItemFailures: true` 的 revisionGrant、revisionAcceptance，及可选 revisionRegressionAcceptance/revisionAdoption。要求 durable `allowRevision`；配置后只在修订 peer 在线且目标唯一命中时把作业冻结为 v3 修订走廊，缺失任何一环均回退创建走廊。 |
 | `usageLearning.databasePath` | 无 | 开启时必填的私有 SQLite 绝对路径，保存游标、冻结来源与作业状态。 |
@@ -225,7 +225,7 @@ gap 的 `capability` 是问题分类，不是现有 `plugin_name`。任务证据
 
 ### 已采用插件的新任务修订候选
 
-本轨默认关闭。在上述 `durable` 源码配置中显式增加 `allowRevision: true`，同时启用下述 `usageLearning`，并为 Control Plane 配置独立的 `sourceJobs.revision` 有限授权、`revisionVerifications` 公开验收引用和已采用插件源码归档；Verifier 对应配置 `revisionReviews`。缺少当前授权、归档读取接口、原生 Usage 来源或验收引用时，不向模型提供修订工具。历史配置省略 `allowRevision` 仍按 `false` 处理，既有运行不会补写新验收引用。
+本轨在 `durable` 且 `usageLearning.enabled` 时默认开启（可通过 `allowRevision: false` 关闭）；`inline` 模式下自动关闭。在完整配置中，为 Control Plane 配置独立的 `sourceJobs.revision` 有限授权、`revisionVerifications` 公开验收引用和已采用插件源码归档；Verifier 对应配置 `revisionReviews`。缺少当前授权、归档读取接口、原生 Usage 来源或验收引用时，不向模型提供修订工具。
 
 只有**新的、当前仍有效的普通认证失败任务**可进入此轨。Agent 先读取该任务专属的当前 gap，再用 `plugin_source_revision_targets({})` 查看 Host 提供的至多 64 个同 owner 已采用父版本线索 `{parentPlanId, name, parentSourceDigest}`。线索不证明根因。模型只能从该清单选父计划和插件名，再调用 `plugin_source_revision_inspect({parent_plan_id, plugin_name, paths})` 读取父版本冻结的 staged 归档源码；`paths: []` 返回完整清单。路径仅限 `README.md` 与直接位于 `src/`、`tests/` 的代码文件。替换既有文件前必须先读正文，随后以 `plugin_source_revise({parent_plan_id, plugin_name, files: [{path, content}]})` 排队；该工具不接收 `gap_id`、仓库、基线、授权、模型、预算、期限或验收政策。Host 重新核对父归档、当前任务、owner、源码基线和权限。任务纠正、撤回或来源漂移会阻止旧上下文继续提交。
 

@@ -183,7 +183,7 @@ describe('read-only owner route state inspection', () => {
       eventId: 'state-inspection-history', occurredAt: 1, principal, conversation,
       kind: 'text', text: 'Private owner message must stay in the ledger.' })
     f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'state-inspection-history', text: 'Private historical response.' })
+      idempotencyKey: 'state-inspection-history', text: 'Private historical response.', attention: { purpose: 'result' } })
     const receipt = f.service.validateOwnerRoute(ownerScope)
     const inspection = inspectWithoutChanges(f)
     expect(inspection).toEqual({ status: 'active', receipt })
@@ -413,7 +413,7 @@ describe('stable owner route authority', () => {
     })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     const authorize = vi.spyOn(f.ctx.assistantPolicy, 'authorize')
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:1', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:1', text: 'Growth run failed.', attention: { purpose: 'result' } })
     expect(queued).toMatchObject({
       status: 'pending',
       intent: { bindingId: second.id, target: { conversation, principal } },
@@ -448,7 +448,7 @@ describe('stable owner route authority', () => {
     expect(() => f.service.resolveOwnerRoute(authority.id))
       .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     expect(() => f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: `drift:${_label}`, text: 'must not send' }))
+      idempotencyKey: `drift:${_label}`, text: 'must not send', attention: { purpose: 'result' } }))
       .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
   })
 
@@ -478,7 +478,7 @@ describe('stable owner route authority', () => {
     })
 
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:race', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:race', text: 'Growth run failed.', attention: { purpose: 'result' } })
     expect(queued.intent.bindingId).toBe(f.store.getActiveBinding(conversation)!.id)
     expect(queued.intent.bindingId).not.toBe(first.id)
   })
@@ -487,7 +487,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     const first = pairAndBind(f)
     const input = { sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:stable', text: 'Growth run failed.' }
+      idempotencyKey: 'growth-alert:stable', text: 'Growth run failed.', attention: { purpose: 'result' as const } }
     const queued = f.service.enqueueBackgroundRoute(input)
     f.store.rotateBinding({ bindingId: first.id, expectedVersion: first.version,
       sessionId: 'delivery-session-2' })
@@ -502,7 +502,7 @@ describe('stable owner route authority', () => {
     const first = await fixture()
     pairAndBind(first)
     const input = { sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:restart', text: 'Growth run failed.' }
+      idempotencyKey: 'growth-alert:restart', text: 'Growth run failed.', attention: { purpose: 'result' as const } }
     const queued = first.service.enqueueBackgroundRoute(input)
     const root = first.root
     await dispose(first)
@@ -520,7 +520,7 @@ describe('stable owner route authority', () => {
       capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
       start: async () => {}, send })
     const input = { sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:ambiguous', text: 'Growth run failed.' }
+      idempotencyKey: 'growth-alert:ambiguous', text: 'Growth run failed.', attention: { purpose: 'result' as const } }
     f.service.enqueueBackgroundRoute(input)
     await f.service.tick()
     await f.service.whenIdle()
@@ -545,7 +545,7 @@ describe('stable owner route authority', () => {
       capabilities: { reconcileUnknownSend: true, receipts: [], formats: ['plain'] },
       start: async () => {}, send, reconcileUnknownSend, updatePresentation })
     f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}` })
+      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}`, attention: { purpose: 'result' } })
     f.store.publishDeliveryPresentation(open)
     f.store.publishDeliveryPresentation(incidentUpdate(incidentId, 2, 'resolved'))
 
@@ -587,7 +587,7 @@ describe('stable owner route authority', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_incident_route' }),
       updatePresentation })
     f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}` })
+      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}`, attention: { purpose: 'result' } })
     f.store.publishDeliveryPresentation(open)
     await f.service.tick()
     await f.service.whenIdle()
@@ -620,7 +620,7 @@ describe('stable owner route authority', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_incident_restart' }),
       updatePresentation: failedUpdate })
     first.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}` })
+      idempotencyKey: open.originalOutboxIdempotencyKey, text: `Automation incident ${incidentId}`, attention: { purpose: 'result' } })
     first.store.publishDeliveryPresentation(open)
     await first.service.tick()
     await first.service.whenIdle()
@@ -686,7 +686,7 @@ describe('stable owner route authority', () => {
     const migrated = await mount(root)
     expect(migrated.service.resolveOwnerRoute(authority.id).binding).toMatchObject({ generation: 1, status: 'active' })
     expect(migrated.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:migrated-v8', text: 'Migration still routes.' })).toMatchObject({ status: 'pending' })
+      idempotencyKey: 'growth-alert:migrated-v8', text: 'Migration still routes.', attention: { purpose: 'result' } })).toMatchObject({ status: 'pending' })
     const version = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
     expect(version.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
     version.close()
@@ -708,7 +708,7 @@ describe('stable owner route authority', () => {
     pairAndBind(f)
     const before = f.ctx.assistantPolicy.health().lastAuditSequence
     expect(() => f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'bad\nkey', text: 'must not send' }))
+      idempotencyKey: 'bad\nkey', text: 'must not send', attention: { purpose: 'result' } }))
       .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
     expect(f.ctx.assistantPolicy.health().lastAuditSequence).toBe(before)
   })
@@ -717,7 +717,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     const first = pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:pending-rotation', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:pending-rotation', text: 'Growth run failed.', attention: { purpose: 'result' } })
     const second = f.store.rotateBinding({ bindingId: first.id, expectedVersion: first.version,
       sessionId: 'delivery-session-pending-rotation' })
     const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_pending_rotation' }))
@@ -739,7 +739,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     const first = pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:retry-rotation', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:retry-rotation', text: 'Growth run failed.', attention: { purpose: 'result' } })
     const send = vi.fn()
       .mockResolvedValueOnce({ outcome: 'not-sent' as const, failureCode: 'provider-unavailable', retryable: true })
       .mockResolvedValueOnce({ outcome: 'accepted' as const, providerMessageId: 'om_retry_rotation' })
@@ -765,7 +765,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     const first = pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:claim-race', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:claim-race', text: 'Growth run failed.', attention: { purpose: 'result' } })
     const original = DeliveryStore.prototype.claimOutbox
     vi.spyOn(DeliveryStore.prototype, 'claimOutbox').mockImplementationOnce(function (this: DeliveryStore, input) {
       const claims = original.call(this, input)
@@ -788,7 +788,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:policy-after-claim', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:policy-after-claim', text: 'Growth run failed.', attention: { purpose: 'result' } })
     const original = DeliveryStore.prototype.claimOutbox
     vi.spyOn(DeliveryStore.prototype, 'claimOutbox').mockImplementationOnce(function (this: DeliveryStore, input) {
       const claims = original.call(this, input)
@@ -814,7 +814,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:policy-check-busy-before-claim', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:policy-check-busy-before-claim', text: 'Growth run failed.', attention: { purpose: 'result' } })
     vi.spyOn(f.ctx.assistantPolicy, 'authorize').mockImplementationOnce(() => {
       throw new Error('simulated Policy SQLite busy')
     })
@@ -835,7 +835,7 @@ describe('stable owner route authority', () => {
     const f = await fixture()
     pairAndBind(f)
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:policy-check-busy-after-claim', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:policy-check-busy-after-claim', text: 'Growth run failed.', attention: { purpose: 'result' } })
     const original = DeliveryStore.prototype.claimOutbox
     vi.spyOn(DeliveryStore.prototype, 'claimOutbox').mockImplementationOnce(function (this: DeliveryStore, input) {
       const claims = original.call(this, input)
@@ -874,7 +874,7 @@ describe('stable owner route authority', () => {
     const first = await fixture()
     pairAndBind(first)
     const queued = first.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: `growth-alert:t3-revocation:${_label}`, text: 'Growth run failed.' })
+      idempotencyKey: `growth-alert:t3-revocation:${_label}`, text: 'Growth run failed.', attention: { purpose: 'result' } })
     const root = first.root
     await dispose(first)
 
@@ -904,7 +904,7 @@ describe('stable owner route authority', () => {
     const first = await fixture()
     pairAndBind(first)
     const queued = first.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: `growth-alert:authority-drift:${_field}`, text: 'Growth run failed.' })
+      idempotencyKey: `growth-alert:authority-drift:${_field}`, text: 'Growth run failed.', attention: { purpose: 'result' } })
     const root = first.root
     await dispose(first)
 
@@ -927,7 +927,7 @@ describe('stable owner route authority', () => {
     const second = f.store.rotateBinding({ bindingId: first.id, expectedVersion: first.version,
       sessionId: 'delivery-session-generation-2' })
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:generation-regression', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:generation-regression', text: 'Growth run failed.', attention: { purpose: 'result' } })
 
     // Fault injection models corrupt/rolled-back Host state that public APIs cannot create.
     const database = new DatabaseSync(join(f.root, 'delivery.sqlite'))
@@ -961,7 +961,7 @@ describe('stable owner route authority', () => {
       capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
       start: async () => {}, send })
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:unknown-rotation', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:unknown-rotation', text: 'Growth run failed.', attention: { purpose: 'result' } })
     await f.service.tick()
     await f.service.whenIdle()
     f.store.rotateBinding({ bindingId: first.id, expectedVersion: first.version,
@@ -987,7 +987,7 @@ describe('stable owner route authority', () => {
       capabilities: { reconcileUnknownSend: true, receipts: [], formats: ['plain'] },
       start: async () => {}, send, reconcileUnknownSend })
     const queued = f.service.enqueueBackgroundRoute({ sourceId: 'growth-supervisor', authorityId: authority.id,
-      idempotencyKey: 'growth-alert:unknown-proved-not-sent', text: 'Growth run failed.' })
+      idempotencyKey: 'growth-alert:unknown-proved-not-sent', text: 'Growth run failed.', attention: { purpose: 'result' } })
 
     await f.service.tick()
     await f.service.whenIdle()

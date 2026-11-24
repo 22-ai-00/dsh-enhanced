@@ -126,9 +126,17 @@ describe('enforcement reasons (pure)', () => {
   })
 })
 
-describe('purpose enforcement (service, opt-in)', () => {
-  test('default off: legacy and invalid notices are queued and audited exactly as before', async () => {
-    const f = await fixture()
+describe('purpose enforcement (service)', () => {
+  test('default on: undeclared purpose is rejected and over-cap attaches when supported', async () => {
+    const f = await fixture({ textAttachments: true })
+    expect(f.rejection(() => f.background('legacy-default', 'done')).reasons).toEqual(['missing-purpose'])
+    const long = words(attentionWordCaps.result + 5)
+    const attached = f.background('long-default', long, { purpose: 'result' })
+    expect(attached.intent.attachment?.text).toBe(long)
+  })
+
+  test('explicit opt-out: legacy and invalid notices are queued and audited when enforcement and attachment are disabled', async () => {
+    const f = await fixture({ enforce: false, attach: false })
     const legacy = f.background('legacy', 'done')
     const invalid = f.background('invalid', 'done', { purpose: 'progress' })
     const long = f.background('long', words(attentionWordCaps.result + 5))
@@ -183,7 +191,7 @@ describe('purpose enforcement (service, opt-in)', () => {
   })
 
   test('on with attachment off: over-cap text is rejected by word or grapheme cap', async () => {
-    const f = await fixture({ enforce: true, textAttachments: true })
+    const f = await fixture({ enforce: true, attach: false, textAttachments: true })
     expect(f.rejection(() => f.background('words', words(attentionWordCaps.result + 1), { purpose: 'result' })).reasons).toEqual(['over-word-cap'])
     expect(f.rejection(() => f.background('graphemes', 'x'.repeat(2401), { purpose: 'result' })).reasons).toEqual(['over-grapheme-cap'])
     expect(f.rejection(() => f.background('both', words(attentionWordCaps.result + 1))).reasons).toEqual(['missing-purpose', 'over-word-cap'])
@@ -210,7 +218,7 @@ describe('purpose enforcement (service, opt-in)', () => {
   })
 
   test('on: owner notification and owner route lanes are enforced; the work-item report lane only by caps', async () => {
-    const f = await fixture({ enforce: true })
+    const f = await fixture({ enforce: true, attach: false })
     expect(f.rejection(() => f.notify('n-1', 'Heads up')).rejection).toMatchObject({ lane: 'owner-notification', reasons: ['missing-purpose'] })
     expect(f.notify('n-2', 'Heads up', { purpose: 'result' }).intent.text).toBe('Heads up')
     expect(f.rejection(() => f.route('r-1', 'Heads up')).rejection).toMatchObject({ lane: 'background-route', reasons: ['missing-purpose'] })
@@ -239,7 +247,7 @@ describe('purpose enforcement (service, opt-in)', () => {
   })
 
   test('off: a legacy send authorizes exactly as before (one audit row, one budget unit)', async () => {
-    const f = await fixture({ budget: 1 })
+    const f = await fixture({ enforce: false, attach: false, budget: 1 })
     const before = f.policy.queryAudit({ limit: 100 }).filter(event => event.action === 'send').length
     expect(f.background('legacy', 'Heads up').intent.text).toBe('Heads up')
     expect(f.policy.queryAudit({ limit: 100 }).filter(event => event.action === 'send')).toHaveLength(before + 1)
@@ -255,12 +263,12 @@ describe('purpose enforcement (service, opt-in)', () => {
   })
 
   test('after restart with enforcement on: accepted keys replay, rejected keys are rejected again', async () => {
-    const before = await fixture()
+    const before = await fixture({ enforce: false, attach: false })
     const legacy = before.background('legacy', 'done')
     const long = before.background('long', words(attentionWordCaps.result + 5), { purpose: 'result' })
     await before.ctx.fiber.dispose()
     contexts.delete(before.ctx)
-    const on = await fixture({ root: before.root, enforce: true })
+    const on = await fixture({ root: before.root, enforce: true, attach: false })
     // Existing Outbox rows are replays and are never re-judged, so the flip does not break idempotency.
     expect(on.background('legacy', 'done').id).toBe(legacy.id)
     expect(on.background('long', words(attentionWordCaps.result + 5), { purpose: 'result' }).id).toBe(long.id)
@@ -269,7 +277,7 @@ describe('purpose enforcement (service, opt-in)', () => {
     expect(on.service.inspectAttentionRejections().entries).toHaveLength(1)
     await on.ctx.fiber.dispose()
     contexts.delete(on.ctx)
-    const again = await fixture({ root: before.root, enforce: true })
+    const again = await fixture({ root: before.root, enforce: true, attach: false })
     // The rejection log is process-local; the ledger that decided it is durable and unchanged.
     expect(again.service.inspectAttentionRejections().entries).toEqual([])
     expect(again.rejection(() => again.background('new', 'done')).reasons).toEqual(rejected.reasons)
@@ -277,7 +285,7 @@ describe('purpose enforcement (service, opt-in)', () => {
     await again.ctx.fiber.dispose()
     contexts.delete(again.ctx)
     // Turning enforcement off again accepts the same key as before.
-    const off = await fixture({ root: before.root })
+    const off = await fixture({ root: before.root, enforce: false, attach: false })
     expect(off.store.attentionAudit.get(off.background('new', 'done').id)).toMatchObject({ verdict: 'would-accept', reasons: ['missing-purpose'] })
   })
 })

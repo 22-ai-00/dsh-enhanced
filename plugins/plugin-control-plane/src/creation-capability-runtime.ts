@@ -4,10 +4,12 @@ import type { JsonSchemaNode, ToolDefinition, ToolRunContext } from '@deepseek-a
 import { anySourceGrowthRunDigest, canonicalGrowthJson, SourceGrowthRunUnavailableError, validateAnySourceGrowthRunBinding,
   type AnySourceGrowthRunBinding, type PluginCreationVerificationCertificate,
   type PluginRevisionVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import { extractPluginKindFromTarGz } from './creation-capability-journal.js'
 import { creationCapabilityExecutionMatches, revisionCapabilityExecutionMatches,
   verifyCreationCapabilityExecution, verifyRevisionCapabilityExecution } from './creation-capability-execution.js'
 import type { CreationCapabilityCallEvidence, CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner, CreationCapabilityTool } from './creation-capability-types.js'
+import type { CandidatePluginKind } from './source-creation.js'
 
 const sha = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
 const safeName = /^[a-z][a-z0-9_-]{0,95}$/u
@@ -193,7 +195,7 @@ export class CreationCapabilityRuntime {
     if (!['authorized', 'active'].includes(record.status)) fail('adoption is not authorized')
   }
 
-  private async checked(record: CreationCapabilityRecord, signal: AbortSignal, firstAdoption = false): Promise<void> {
+  private async checked(record: CreationCapabilityRecord, signal: AbortSignal, firstAdoption = false): Promise<CandidatePluginKind | undefined> {
     this.live(record)
     const retained = !firstAdoption && record.status === 'active'
       && record.receipt?.protocol === 'dsh-created-capability-adoption/v2'
@@ -211,6 +213,7 @@ export class CreationCapabilityRuntime {
         || current.artifact.length !== record.certificate.plan.artifactBytes) fail('source or artifact changed')
     })
     this.live(record)
+    return current.pluginKind ?? record.pluginKind ?? extractPluginKindFromTarGz(record.artifact)
   }
 
   private makeTools(record: CreationCapabilityRecord, schemas: readonly unknown[]): CreationCapabilityTool[] {
@@ -284,15 +287,20 @@ export class CreationCapabilityRuntime {
       if (!sameCertificate(current.certificate, latestBeforeClaim.certificate)
         || sha(current.artifact) !== sha(latestBeforeClaim.artifact)) fail('source changed during source capture')
       const claimRecord: CreationCapabilityRecord = { planId, status: 'claimed',
+        ...(current.pluginKind !== undefined && current.pluginKind !== 'tool' ? { pluginKind: current.pluginKind } : {}),
         certificate: current.certificate, artifact: current.artifact }
       const claimed = this.withCurrent(claimRecord, () => this.journal.claim({
-        certificate: current.certificate, artifact: current.artifact, ...(source ? { source } : {}) }))
+        certificate: current.certificate, artifact: current.artifact,
+        ...(current.pluginKind !== undefined && current.pluginKind !== 'tool' ? { pluginKind: current.pluginKind } : {}),
+        ...(source ? { source } : {}) }))
       if (!claimed.created) fail('plan already claimed')
       const record = claimed.record
       try {
         const result = await this.runner!.run({ key: sha(json({ operation: 'discover',
           authorityDigest: this.journal.authorityDigest, planId }, 1024)),
-          artifact: record.artifact, operation: { kind: 'discover' }, signal: activeSignal })
+          artifact: record.artifact, operation: { kind: 'discover' },
+          ...(current.pluginKind !== undefined && current.pluginKind !== 'tool' ? { pluginKind: current.pluginKind } : {}),
+          signal: activeSignal })
         if (!observed(record, result) || !result.schemas || sha(JSON.stringify(result.schemas)) !== result.schemaDigest)
           fail('discovery unknown or certificate mismatch')
         const tools = this.makeTools(record, result.schemas)
@@ -406,7 +414,7 @@ export class CreationCapabilityRuntime {
     exec.signal.addEventListener('abort', cancel, { once: true })
     if (exec.signal.aborted) cancel()
     try {
-      await this.checked(record, controller.signal)
+      const checkedKind = await this.checked(record, controller.signal)
       const call = this.withCurrent(record, () => {
         this.ports.assertCaller(record, exec)
         controller.signal.throwIfAborted()
@@ -425,10 +433,13 @@ export class CreationCapabilityRuntime {
           this.ports.assertCaller(record, exec)
           controller.signal.throwIfAborted()
         })
+        const resolvedKind = checkedKind ?? record.pluginKind ?? extractPluginKindFromTarGz(record.artifact)
         const result = await this.runner!.run({ key: sha(json({ operation: 'invoke',
           authorityDigest: this.journal.authorityDigest, key }, 1024)),
           artifact: record.artifact, operation: { kind: 'invoke', schemaDigest: record.certificate.schemaDigest,
-            calls: [{ id: key, toolName: tool.originalName, arguments: JSON.parse(encoded) }] }, signal: controller.signal })
+            calls: [{ id: key, toolName: tool.originalName, arguments: JSON.parse(encoded) }] },
+          ...(resolvedKind !== undefined && resolvedKind !== 'tool' ? { pluginKind: resolvedKind } : {}),
+          signal: controller.signal })
         if (!observed(record, result) || result.calls?.length !== 1 || result.calls[0]?.id !== key
           || result.calls[0]?.toolName !== tool.originalName) fail('invocation unknown or changed')
         const raw = result.calls[0].result as Record<string, unknown>
@@ -580,7 +591,9 @@ export class CreationCapabilityRuntime {
       || sha(input.artifact) !== input.certificate.plan.artifactSha256) fail('revision artifact changed')
     const operation = input.operation.kind === 'discover' ? { kind: 'discover' as const }
       : { kind: 'invoke' as const, schemaDigest: input.certificate.schemaDigest, calls: input.operation.calls }
-    return this.runner.run({ key: input.key, artifact: Buffer.from(input.artifact), operation, signal: input.signal })
+    const pluginKind = extractPluginKindFromTarGz(input.artifact)
+    return this.runner.run({ key: input.key, artifact: Buffer.from(input.artifact), operation,
+      ...(pluginKind !== undefined && pluginKind !== 'tool' ? { pluginKind } : {}), signal: input.signal })
   }
 
   /** Host-only evidence lookup remains available for terminal adoptions. */

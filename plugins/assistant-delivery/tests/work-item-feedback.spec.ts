@@ -18,7 +18,7 @@ const authority={id:'owner-route',conversation,principal,workspace:scope.workspa
 const sql=<T>(path:string,fn:(db:DatabaseSync)=>T):T=>{const db=new DatabaseSync(path);try{return fn(db)}finally{db.close()}}
 afterEach(async()=>{for(const ctx of contexts.splice(0))await ctx.fiber.dispose();for(const path of roots.splice(0))await rm(path,{recursive:true,force:true})})
 function currentTestStack():string{const old=Error.stackTraceLimit;try{Error.stackTraceLimit=50;return new Error().stack??''}finally{Error.stackTraceLimit=old}}
-async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowContinuation?:boolean;allowSend?:boolean;unknownAck?:boolean;enforce?:boolean;naturalFeedback?:{coverage?:boolean;mixedIntent?:boolean}}={}){
+async function fixture(options:{root?:string;feedback?:boolean;continuation?:boolean;allowFeedback?:boolean;allowContinuation?:boolean;allowSend?:boolean;unknownAck?:boolean;enforce?:boolean;textAttachments?:boolean;naturalFeedback?:{coverage?:boolean;mixedIntent?:boolean}}={}){
  const root=options.root??await mkdtemp(join(tmpdir(),'delivery-work-item-feedback-'));if(!options.root)roots.push(root)
  const ctx=new Context();contexts.push(ctx);const path=join(root,'delivery.sqlite')
  await ctx.plugin(AssistantPolicyService,{databasePath:join(root,'policy.sqlite'),rules:[
@@ -61,12 +61,12 @@ async function fixture(options:{root?:string;feedback?:boolean;continuation?:boo
  service.registerInboundRuntime({createSession:async input=>({sessionId:`session-${input.generation}`,workspace:scope.workspace,agentPreset:scope.preset,policyRef:'owner'}),process:vi.fn(async()=>({outcome:'processed' as const}))})
  let sendSequence=sql(path,db=>Number(db.prepare("SELECT count(*) AS n FROM outbox_messages WHERE provider_message_id IS NOT NULL").get()?.n))
  const send=vi.fn(async(intent:{idempotencyKey:string})=>options.unknownAck&&intent.idempotencyKey.startsWith('feedback:')?{outcome:'unknown' as const,failureCode:'unknown'}:{outcome:'accepted' as const,providerMessageId:`provider-${++sendSequence}`})
- await service.registerAdapter({channel:'lark',account:'feedback',capabilities:{formats:['plain','markdown'],receipts:[],reconcileUnknownSend:false},start:async()=>{},send})
+ await service.registerAdapter({channel:'lark',account:'feedback',capabilities:{formats:['plain','markdown'],receipts:[],reconcileUnknownSend:false,...(options.textAttachments===undefined?{}:{textAttachments:options.textAttachments})},start:async()=>{},send})
  // Delivery settles its own work, but Evaluation projects trusted outcomes asynchronously
  // and can still append a receipt-driven fact on a later turn of the event loop. Every
  // reader here validates an exact projection digest, so drain both lanes to quiescence.
  const settle=async()=>{for(let round=0;round<6;round++){await service.tick();await service.whenIdle();await evaluation.reconcileProjections();await evaluation.whenProjectionIdle();await new Promise<void>(resolve=>setTimeout(resolve,1))}}
- async function report(itemId='P',streamId=itemId){const target:WorkItemReportTarget={protocol:'assistant-delivery/work-item-report/v1',itemId,reportRevision:1,streamId,reportDigest:workItemReplyDigest(['report',itemId]),sourceId,scope,owner};const text=`Report for ${itemId}`,key=`report:${itemId}`;reports.set(itemId,{target,bindingId:binding.id,text,key,createdAt:Date.now()});const outbox=service.enqueueWorkItemReport({sourceId,workspace:scope.workspace,bindingId:binding.id,idempotencyKey:key,text,itemId,reportRevision:1});reports.get(itemId)!.createdAt=outbox.createdAt;await service.tick();await settle();return store.getOutbox(outbox.id)!}
+ async function report(itemId='P',streamId=itemId,custom?:{text?:string;format?:'markdown'|'plain'}){const target:WorkItemReportTarget={protocol:'assistant-delivery/work-item-report/v1',itemId,reportRevision:1,streamId,reportDigest:workItemReplyDigest(['report',itemId]),sourceId,scope,owner};const text=custom?.text??`Report for ${itemId}`,key=`report:${itemId}`;reports.set(itemId,{target,bindingId:binding.id,text,key,createdAt:Date.now()});const outbox=service.enqueueWorkItemReport({sourceId,workspace:scope.workspace,bindingId:binding.id,idempotencyKey:key,text,...(custom?.format===undefined?{}:{format:custom.format}),itemId,reportRevision:1});reports.get(itemId)!.createdAt=outbox.createdAt;await service.tick();await settle();return store.getOutbox(outbox.id)!}
  function envelope(eventId:string,text:string,providerMessageId='provider-1'){return{channel:'lark',account:'feedback',eventId,occurredAt:Date.now(),principal,conversation,kind:text.startsWith('/')?'command' as const:'text' as const,text,metadata:{replyToProviderMessageId:providerMessageId}}}
  const canonical=(itemId='P')=>evaluation.getTrustedWorkItemLearningProjection({scope:evaluation.canonicalHostScope(scope),itemId})
  const learning=(outcomeId:string)=>service.inspectOwnerWorkItemLearningTask({authorityId:authority.id,principalId:'lark/feedback/tenant/owner',workspace:scope.workspace,agentPreset:scope.preset,outcomeId})
@@ -170,15 +170,22 @@ describe('owner work-item result feedback through real Delivery and Evaluation',
   const canonical=f.canonical();console.log('FINAL_RESOLVE_POLICY_OBSERVATION',JSON.stringify({policy:policy.effect,canonical,source:f.store.workItemFeedback.get(accepted.inboxId)?.state}))
   expect(policy.effect).toBe('deny');expect(canonical?.objective?.source.kind).not.toBe('user-feedback')
  })
- test('preserves mixed negative feedback plus explicit further instructions as an ordinary continuation request',async()=>{
-  const f=await fixture({continuation:true});await f.report();const input=await f.service.acceptInbound(f.envelope('mixed','还是不行，继续修复'));await f.settle();expect(input.status).toBe('processed');expect(f.canonical()).toBeUndefined()
+ test('default on enables widened coverage and mixedIntent without explicit flags',async()=>{
+  const f=await fixture({continuation:true});await f.report()
+  const input=await f.service.acceptInbound(f.envelope('default-mixed','还是不行，继续修复'));await f.settle()
+  expect(input.status).toBe('processed');expect(f.canonical()?.objective?.status).toBe('not-achieved')
+  expect(f.store.workItemFeedback.get(input.inboxId)).toMatchObject({state:'recorded'})
+  sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
+ })
+ test('explicit opt-out preserves mixed negative feedback plus explicit further instructions as an ordinary continuation request',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:false,mixedIntent:false}});await f.report();const input=await f.service.acceptInbound(f.envelope('mixed','还是不行，继续修复'));await f.settle();expect(input.status).toBe('processed');expect(f.canonical()).toBeUndefined()
   sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
  })
- test('widened coverage records ordinary synonyms only behind the opt-in and keeps default routing unchanged',async()=>{
-  const off=await fixture({continuation:true});await off.report();const offInput=await off.service.acceptInbound(off.envelope('widened-off','现在可以正常用了，谢谢'));await off.settle()
+ test('widened coverage records ordinary synonyms only behind coverage and respects explicit opt-out',async()=>{
+  const off=await fixture({continuation:true,naturalFeedback:{coverage:false,mixedIntent:false}});await off.report();const offInput=await off.service.acceptInbound(off.envelope('widened-off','现在可以正常用了，谢谢'));await off.settle()
   expect(offInput.status).toBe('processed');expect(off.canonical()).toBeUndefined()
   sql(off.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(0);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
-  const on=await fixture({continuation:true,naturalFeedback:{coverage:true}});await on.report();const onInput=await on.service.acceptInbound(on.envelope('widened-on','现在可以正常用了，谢谢'));await on.settle()
+  const on=await fixture({continuation:true,naturalFeedback:{coverage:true,mixedIntent:false}});await on.report();const onInput=await on.service.acceptInbound(on.envelope('widened-on','现在可以正常用了，谢谢'));await on.settle()
   expect(onInput.status).toBe('processed');expect(on.canonical()?.objective?.status).toBe('achieved')
   sql(on.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0)})
  })
@@ -191,8 +198,8 @@ describe('owner work-item result feedback through real Delivery and Evaluation',
   expect(replies.map(reply=>reply.inputText)).toEqual(['还是不行，继续修复'])
   sql(f.path,db=>{expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_feedback').get()?.n).toBe(1);expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(1)})
  })
- test('mixed continuation stays closed when only widened result coverage is enabled',async()=>{
-  const f=await fixture({continuation:true,naturalFeedback:{coverage:true}});await f.report()
+ test('mixed continuation stays closed when only widened result coverage is enabled and mixedIntent is false',async()=>{
+  const f=await fixture({continuation:true,naturalFeedback:{coverage:true,mixedIntent:false}});await f.report()
   const input=await f.service.acceptInbound(f.envelope('mixed-coverage-only','还是不行，继续修复'));await f.settle()
   expect(input.status).toBe('processed');expect(f.canonical()?.objective?.status).toBe('not-achieved')
   sql(f.path,db=>expect(db.prepare('SELECT count(*) AS n FROM delivery_work_item_replies').get()?.n).toBe(0))
@@ -375,5 +382,26 @@ describe('work-item Memory source fences',()=>{
   expect(()=>f.service.withOwnerLearningSourcesFence({...base,sources:Array.from({length:1001},()=>source)},callback)).toThrow(/batch/)
   let reads=0;const accessor={...source};Object.defineProperty(accessor,'itemId',{enumerable:true,get:()=>{reads++;return 'P'}})
   expect(()=>f.service.withOwnerLearningSourcesFence({...base,sources:[accessor]},callback)).toThrow(/accessors/);expect(reads).toBe(0);expect(callback).not.toHaveBeenCalled()
+ })
+ test('default-on attentionAttachOverCap preserves owner work-item feedback and continuation over attachment-converted reports',async()=>{
+  const f=await fixture({continuation:true,textAttachments:true})
+  const longText=Array.from({length:450},(_,i)=>`word${i}`).join(' ')
+  const sent=await f.report('overcap','overcap',{text:longText,format:'markdown'})
+  expect(sent.intent.text).not.toBe(longText)
+  expect(sent.intent.format).toBe('plain')
+  expect(sent.intent.attachment?.text).toBe(longText)
+  expect(sent.intent.attachment?.mediaType).toBe('text/markdown')
+
+  const fbInput=await f.service.acceptInbound(f.envelope('fb-overcap','还是不行',sent.providerMessageId!))
+  await f.settle()
+  expect(fbInput.status).toBe('processed')
+  expect(f.canonical('overcap')?.objective?.status).toBe('not-achieved')
+  expect(f.store.workItemFeedback.get(fbInput.inboxId)?.state).toBe('recorded')
+
+  const contInput=await f.service.acceptInbound(f.envelope('cont-overcap','请再补充详细日志',sent.providerMessageId!))
+  await f.settle()
+  expect(contInput.status).toBe('processed')
+  const pending=f.service.listPendingWorkItemReplies({scope,owner:f.owner,limit:10})
+  expect(pending.items.map(item=>item.id)).toContain(contInput.inboxId)
  })
 })

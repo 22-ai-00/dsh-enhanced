@@ -13,12 +13,18 @@ describe('dsh-enhanced-assistant-verifier', () => {
     expect(version).toBe(manifest.version)
   })
 
-  it('loads through the Cordis entrypoint and disposes its database', async () => {
+  it('loads through the Cordis entrypoint, defaults requireAcceptance to true, and supports explicit false opt-out', async () => {
     const ctx = new Context()
     apply(ctx, { databasePath: ':memory:', tickIntervalMs: 0 })
     const service = ctx.assistantVerifier
+    expect(service.health().requireAcceptance).toBe(true)
     expect(service.continuations()).toEqual([])
     await ctx.fiber.restart()
     expect(() => service.continuations()).toThrow('disposed')
+
+    const optOutCtx = new Context()
+    apply(optOutCtx, { databasePath: ':memory:', tickIntervalMs: 0, requireAcceptance: false })
+    expect(optOutCtx.assistantVerifier.health().requireAcceptance).toBe(false)
+    await optOutCtx.fiber.restart()
   })
 })

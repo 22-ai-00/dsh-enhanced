@@ -4,8 +4,10 @@ import { validateWorkItemGrowthAuthorityPins, validateWorkItemRevisionAuthorityP
   type WorkItemGrowthAuthorityPins, type WorkItemRevisionAuthorityPins } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
- * The growth driver is opt-in and fail-closed: it never runs until `enabled`
- * is explicitly true and a concrete owner scope is declared. Model selection
+ * The growth driver is enabled by default with fail-closed standby when
+ * host-provisioned prerequisites (such as owner `scope`, `repository`, or
+ * `usageLearning` paths/budgets) are omitted; explicit `enabled: false`
+ * disables the driver and cascades to omitted sub-tracks. Model selection
  * follows the owner's conversation unless an explicit fixed pair overrides it.
  */
 
@@ -193,7 +195,7 @@ const fields = new Set([
 ])
 
 const ref = Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/u)
-const boundedText = (max: number) => Schema.string().min(1).max(max)
+const boundedText = (max: number) => Schema.string().min(1).max(max).pattern(/^[^\s\p{Cc}](?:[^\p{Cc}]*[^\s\p{Cc}])?$/u)
 
 // schemastery gives every object schema a default of {}, which would otherwise
 // deep-validate a missing scope against the required inner fields.  Pin the
@@ -213,7 +215,7 @@ const scopeSchema = Schema.object({
 // so cast the object schema to that optional-input type before pinning its
 // missing-object default to undefined.
 const workflowOwnerAnchoredObjectSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
   maxCommitsPerWake: Schema.natural().min(1).max(50).default(5),
   lookbackMs: Schema.natural().min(60_000).max(604_800_000).default(86_400_000),
 }) as unknown as Schema<WorkflowOwnerAnchoredConfig>
@@ -222,11 +224,11 @@ const workflowOwnerAnchoredSchema = workflowOwnerAnchoredObjectSchema
 
 // Same missing-object default rationale as workflowOwnerAnchoredSchema above.
 const pluginSourceProposalsObjectSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
-  allowCreation: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
+  allowCreation: Schema.boolean().default(true),
   allowModification: Schema.boolean().default(true),
-  allowRevision: Schema.boolean().default(false),
-  preparationMode: Schema.union(['inline', 'durable']).default('inline'),
+  allowRevision: Schema.boolean().default(true),
+  preparationMode: Schema.union(['inline', 'durable']).default('durable'),
   repository: boundedText(4_096),
   maxPlansPerWake: Schema.natural().min(1).max(5).default(1),
   // Security root: the isolated build gate must finish well inside the 300000 ms
@@ -239,21 +241,21 @@ const pluginSourceProposalsSchema = pluginSourceProposalsObjectSchema
   .default(undefined as unknown as PluginSourceProposalsConfig) as Schema<PluginSourceProposalsConfig | undefined>
 
 const dreamingIdeasObjectSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
   maxIdeasPerWake: Schema.natural().min(1).max(10).default(3),
 }) as unknown as Schema<DreamingIdeasIntakeConfig>
 const dreamingIdeasSchema = dreamingIdeasObjectSchema
   .default(undefined as unknown as DreamingIdeasIntakeConfig) as Schema<DreamingIdeasIntakeConfig | undefined>
 
 const associationCandidatesObjectSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
   maxCandidatesPerWake: Schema.natural().min(1).max(10).default(3),
 }) as unknown as Schema<AssociationCandidatesIntakeConfig>
 const associationCandidatesSchema = associationCandidatesObjectSchema
   .default(undefined as unknown as AssociationCandidatesIntakeConfig) as Schema<AssociationCandidatesIntakeConfig | undefined>
 
 const schema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean().default(true),
   intervalMs: Schema.natural().min(0).max(86_400_000).default(0),
   maxReviewsPerWake: Schema.natural().min(1).max(50).default(10),
   minRepeatedSuccesses: Schema.natural().min(1).max(32).default(3),
@@ -271,7 +273,7 @@ const schema = Schema.object({
   provider: boundedText(256),
   model: boundedText(256),
   reasoningEffort: boundedText(128),
-  budgetId: Schema.string().min(1).max(128),
+  budgetId: boundedText(128),
   budgetAmount: Schema.natural().min(1).max(1_000_000_000),
   apiKeyEnv: ref,
   scope: scopeSchema,
@@ -279,8 +281,8 @@ const schema = Schema.object({
   pluginSourceProposals: pluginSourceProposalsSchema,
   dreamingIdeas: dreamingIdeasSchema,
   associationCandidates: associationCandidatesSchema,
-  usageLearning: Schema.object({ workItemFailures: Schema.boolean(), workItemAuthorities: Schema.any(), workItemRevisionAuthorities: Schema.any(),
-    enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
+  usageLearning: Schema.object({ workItemFailures: Schema.boolean().default(true), workItemAuthorities: Schema.any(), workItemRevisionAuthorities: Schema.any(),
+    enabled: Schema.boolean().default(true), databasePath: boundedText(4096),
     scanBudgetId: boundedText(128),
     scanBudgetAmount: Schema.natural().min(1).max(10_000_000),
     maxPending: Schema.natural().min(1).max(100).default(16),
@@ -300,14 +302,45 @@ export const Config = new Proxy(schema, {
 export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<NormalizedGrowthDriverConfig> {
   if (input?.usageLearning && Object.hasOwn(input.usageLearning, 'workItemFailures')
     && typeof input.usageLearning.workItemFailures !== 'boolean') throw new Error('assistant-growth-driver: workItemFailures must be a boolean')
+  const rawInput = (input !== undefined && input !== null && typeof input === 'object' && !Array.isArray(input)) ? input : undefined
+  const explicitEnabled = rawInput?.enabled
+  const explicitWorkflow = rawInput?.workflowOwnerAnchored?.enabled
+  const explicitSource = rawInput?.pluginSourceProposals?.enabled
+  const explicitCreation = rawInput?.pluginSourceProposals?.allowCreation
+  const explicitRevision = rawInput?.pluginSourceProposals?.allowRevision
+  const explicitPrepMode = rawInput?.pluginSourceProposals?.preparationMode
+  const explicitDreaming = rawInput?.dreamingIdeas?.enabled
+  const explicitAssociation = rawInput?.associationCandidates?.enabled
+  const explicitUsage = rawInput?.usageLearning?.enabled
+  const explicitWorkItemFailures = rawInput?.usageLearning?.workItemFailures
+  const explicitRepositoryProvided = rawInput?.pluginSourceProposals !== undefined
+    && Object.hasOwn(rawInput.pluginSourceProposals, 'repository')
+    && rawInput.pluginSourceProposals.repository !== undefined
+  const explicitUsageFieldsProvided = rawInput?.usageLearning !== undefined
+    && (rawInput.usageLearning.databasePath !== undefined
+      || rawInput.usageLearning.scanBudgetId !== undefined
+      || rawInput.usageLearning.scanBudgetAmount !== undefined)
+
+  const rawProvider = rawInput?.provider
+  const rawModel = rawInput?.model
+  const rawReasoning = rawInput?.reasoningEffort
+  for (const value of [rawProvider, rawModel, rawReasoning]) {
+    if (typeof value === 'string' && value.length > 0 && (value.trim() !== value || [...value].some(character => {
+      const code = character.codePointAt(0)!
+      return code <= 31 || code === 127
+    }))) {
+      throw new Error('assistant-growth-driver: invalid model route')
+    }
+  }
+
   const config = Config(input) as AssistantGrowthDriverConfig
   if (config.apiKeyEnv !== undefined && !/^[A-Z_][A-Z0-9_]*$/u.test(config.apiKeyEnv)) throw new Error('assistant-growth-driver: invalid apiKeyEnv')
   const pins = config.usageLearning?.workItemAuthorities
   if (pins !== undefined) validateWorkItemGrowthAuthorityPins(pins)
-  if (pins !== undefined && config.usageLearning?.workItemFailures !== true) throw new Error('assistant-growth-driver: workItemAuthorities require workItemFailures')
+  if (pins !== undefined && explicitWorkItemFailures === false) throw new Error('assistant-growth-driver: workItemAuthorities require workItemFailures')
   const revisionPins = config.usageLearning?.workItemRevisionAuthorities
   if (revisionPins !== undefined) validateWorkItemRevisionAuthorityPins(revisionPins)
-  if (revisionPins !== undefined && config.usageLearning?.workItemFailures !== true) {
+  if (revisionPins !== undefined && explicitWorkItemFailures === false) {
     throw new Error('assistant-growth-driver: workItemRevisionAuthorities require workItemFailures')
   }
   const frozenPins = pins === undefined ? undefined : Object.freeze({ ...pins,
@@ -318,8 +351,21 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     revisionAcceptance: Object.freeze({ ...revisionPins.revisionAcceptance }),
     ...(revisionPins.revisionRegressionAcceptance === undefined ? {} : { revisionRegressionAcceptance: Object.freeze({ ...revisionPins.revisionRegressionAcceptance }) }),
     ...(revisionPins.revisionAdoption === undefined ? {} : { revisionAdoption: Object.freeze({ ...revisionPins.revisionAdoption }) }) })
+
+  const driverEnabled = explicitEnabled ?? true
+  const workflowEnabled = driverEnabled ? (explicitWorkflow ?? true) : false
+  const sourceEnabled = driverEnabled ? (explicitSource ?? true) : false
+  const prepMode = explicitPrepMode ?? 'durable'
+  const allowCreation = sourceEnabled ? (explicitCreation ?? (explicitPrepMode === 'inline' ? false : true)) : false
+  const dreamingEnabled = driverEnabled ? (explicitDreaming ?? true) : false
+  const associationEnabled = driverEnabled ? (explicitAssociation ?? true) : false
+  const usageEnabled = driverEnabled ? (explicitUsage ?? true) : false
+  const allowRevision = sourceEnabled && prepMode === 'durable' && usageEnabled ? (explicitRevision ?? true) : false
+  const workItemFailuresEnabled = usageEnabled && sourceEnabled && prepMode === 'durable' && allowCreation
+    ? (explicitWorkItemFailures ?? true) : false
+
   const normalized: NormalizedGrowthDriverConfig = Object.freeze({
-    enabled: config.enabled ?? false,
+    enabled: driverEnabled,
     intervalMs: config.intervalMs ?? 0,
     maxReviewsPerWake: config.maxReviewsPerWake ?? 10,
     minRepeatedSuccesses: config.minRepeatedSuccesses ?? 3,
@@ -337,16 +383,16 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     apiKeyEnv: config.apiKeyEnv ?? null,
     scope: config.scope ? Object.freeze({ ...config.scope }) : null,
     workflowOwnerAnchored: Object.freeze({
-      enabled: config.workflowOwnerAnchored?.enabled ?? false,
+      enabled: workflowEnabled,
       maxCommitsPerWake: config.workflowOwnerAnchored?.maxCommitsPerWake ?? 5,
       lookbackMs: config.workflowOwnerAnchored?.lookbackMs ?? 86_400_000,
     }),
     pluginSourceProposals: Object.freeze({
-      enabled: config.pluginSourceProposals?.enabled ?? false,
-      allowCreation: config.pluginSourceProposals?.allowCreation ?? false,
+      enabled: sourceEnabled,
+      allowCreation,
       allowModification: config.pluginSourceProposals?.allowModification ?? true,
-      allowRevision: config.pluginSourceProposals?.allowRevision ?? false,
-      preparationMode: config.pluginSourceProposals?.preparationMode ?? 'inline',
+      allowRevision,
+      preparationMode: prepMode,
       repository: config.pluginSourceProposals?.repository?.normalize('NFC').trim() ?? null,
       maxPlansPerWake: config.pluginSourceProposals?.maxPlansPerWake ?? 1,
       isolatedBuildTimeoutMs: config.pluginSourceProposals?.isolatedBuildTimeoutMs ?? 180_000,
@@ -354,22 +400,23 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
     }),
     dreamingIdeas: Object.freeze({
-      enabled: config.dreamingIdeas?.enabled ?? false,
+      enabled: dreamingEnabled,
       maxIdeasPerWake: config.dreamingIdeas?.maxIdeasPerWake ?? 3,
     }),
     associationCandidates: Object.freeze({
-      enabled: config.associationCandidates?.enabled ?? false,
+      enabled: associationEnabled,
       maxCandidatesPerWake: config.associationCandidates?.maxCandidatesPerWake ?? 3,
     }),
-    usageLearning: Object.freeze({ ...(config.usageLearning?.workItemFailures === true ? { workItemFailures: true as const, workItemAuthorities: frozenPins! } : {}),
+    usageLearning: Object.freeze({ ...(workItemFailuresEnabled ? { workItemFailures: true as const,
+        ...(frozenPins === undefined ? {} : { workItemAuthorities: frozenPins }) } : {}),
       ...(frozenRevisionPins === undefined ? {} : { workItemRevisionAuthorities: frozenRevisionPins }),
-      enabled: config.usageLearning?.enabled ?? false,
+      enabled: usageEnabled,
       scanBudgetId: config.usageLearning?.scanBudgetId ?? null,
       scanBudgetAmount: config.usageLearning?.scanBudgetAmount ?? null,
       databasePath: config.usageLearning?.databasePath ?? null, maxPending: config.usageLearning?.maxPending ?? 16,
       lookbackMs: config.usageLearning?.lookbackMs ?? 86_400_000 }),
   })
-  if (normalized.enabled && !normalized.scope) throw new Error('assistant-growth-driver: enabled requires an explicit owner scope')
+  if (explicitEnabled === true && !normalized.scope) throw new Error('assistant-growth-driver: enabled requires an explicit owner scope')
   if ((normalized.provider === null) !== (normalized.model === null)) {
     throw new Error('assistant-growth-driver: provider and model must be configured together')
   }
@@ -384,29 +431,32 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       throw new Error('assistant-growth-driver: invalid model route')
     }
   }
-  if (normalized.workflowOwnerAnchored.enabled && !normalized.enabled) {
+  if (explicitWorkflow === true && !normalized.enabled) {
     throw new Error('assistant-growth-driver: workflowOwnerAnchored.enabled requires the driver itself to be enabled')
   }
-  if (normalized.workflowOwnerAnchored.enabled && !normalized.scope) {
+  if (explicitWorkflow === true && !normalized.scope) {
     throw new Error('assistant-growth-driver: workflowOwnerAnchored.enabled requires an explicit owner scope')
   }
+  if (explicitSource === true && !normalized.enabled) {
+    throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires the driver itself to be enabled')
+  }
+  if (explicitSource === true && !normalized.scope) {
+    throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires an explicit owner scope')
+  }
   if (normalized.pluginSourceProposals.enabled) {
-    if (!normalized.enabled) {
-      throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires the driver itself to be enabled')
-    }
-    if (!normalized.scope) {
-      throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires an explicit owner scope')
-    }
     if (!normalized.pluginSourceProposals.offline) throw new Error('assistant-growth-driver: source preparation requires offline mode')
     const repository = normalized.pluginSourceProposals.repository
     // Canonical TEXT only here (the control-plane service performs the realpath
     // canonicalization against the live filesystem at prepare time): absolute,
     // non-empty and free of '.'/'..' normalization segments.
-    if (repository === null || !isAbsolute(repository) || resolve(repository) !== repository) {
+    if (repository !== null && (!isAbsolute(repository) || resolve(repository) !== repository)) {
+      throw new Error('assistant-growth-driver: pluginSourceProposals.repository must be a canonical absolute path when enabled')
+    }
+    if ((explicitSource === true || explicitRepositoryProvided) && repository === null) {
       throw new Error('assistant-growth-driver: pluginSourceProposals.repository must be a canonical absolute path when enabled')
     }
   }
-  if (normalized.pluginSourceProposals.allowCreation
+  if (explicitCreation === true
     && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable')) {
     throw new Error('assistant-growth-driver: source creation requires enabled durable source proposals')
   }
@@ -414,19 +464,19 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     && !normalized.pluginSourceProposals.allowCreation && !normalized.pluginSourceProposals.allowRevision) {
     throw new Error('assistant-growth-driver: source proposals require at least one allowed mode')
   }
-  if (normalized.dreamingIdeas.enabled && !normalized.enabled) {
+  if (explicitDreaming === true && !normalized.enabled) {
     throw new Error('assistant-growth-driver: dreamingIdeas.enabled requires the driver itself to be enabled')
   }
-  if (normalized.dreamingIdeas.enabled && !normalized.scope) {
+  if (explicitDreaming === true && !normalized.scope) {
     throw new Error('assistant-growth-driver: dreamingIdeas.enabled requires an explicit owner scope')
   }
-  if (normalized.associationCandidates.enabled && !normalized.enabled) {
+  if (explicitAssociation === true && !normalized.enabled) {
     throw new Error('assistant-growth-driver: associationCandidates.enabled requires the driver itself to be enabled')
   }
-  if (normalized.associationCandidates.enabled && !normalized.scope) {
+  if (explicitAssociation === true && !normalized.scope) {
     throw new Error('assistant-growth-driver: associationCandidates.enabled requires an explicit owner scope')
   }
-  if (normalized.pluginSourceProposals.allowRevision
+  if (explicitRevision === true
     && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'
       || !normalized.usageLearning.enabled)) {
     throw new Error('assistant-growth-driver: source revision requires enabled durable source proposals and usage learning')
@@ -434,7 +484,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   if ((normalized.budgetId === null) !== (normalized.budgetAmount === null)) {
     throw new Error('assistant-growth-driver: budgetId and budgetAmount must be configured together')
   }
-  if (normalized.usageLearning.workItemFailures && (!normalized.usageLearning.enabled
+  if (explicitWorkItemFailures === true && (!normalized.usageLearning.enabled
     || !normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable'
     || !normalized.pluginSourceProposals.allowCreation || frozenPins === undefined)) {
     throw new Error('assistant-growth-driver: work item failures require durable creation, usage learning and explicit authorities')
@@ -443,7 +493,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     || normalized.pluginSourceProposals.preparationMode !== 'durable')) {
     throw new Error('assistant-growth-driver: work item revision authorities require durable revision proposals')
   }
-  if (normalized.usageLearning.enabled) {
+  if (explicitUsage === true || (normalized.usageLearning.enabled && explicitUsageFieldsProvided)) {
     const path = normalized.usageLearning.databasePath
     if (!normalized.enabled || !normalized.scope || !normalized.budgetId || normalized.intervalMs !== 0
       || path === null || !isAbsolute(path) || resolve(path) !== path) {
@@ -454,6 +504,11 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       || scanBudget.normalize('NFC') !== scanBudget || /[\p{Cc}]/u.test(scanBudget)
       || normalized.usageLearning.scanBudgetAmount === null) {
       throw new Error('assistant-growth-driver: usageLearning requires scanBudgetId and scanBudgetAmount for native discovery')
+    }
+  } else if (normalized.usageLearning.databasePath !== null) {
+    const path = normalized.usageLearning.databasePath
+    if (!isAbsolute(path) || resolve(path) !== path) {
+      throw new Error('assistant-growth-driver: usageLearning requires enabled owner scope, budget, absolute databasePath and intervalMs=0')
     }
   }
   return normalized

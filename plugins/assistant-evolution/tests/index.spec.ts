@@ -33,7 +33,7 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
     expect(bundle).toContain('maxEvidenceSamples: 8')
     expect(bundle).toContain('maxGuidanceBytes: 4096')
     expect(bundle).toContain('reconcileIntervalMs: 15000')
-    expect(bundle).toContain('autonomousRollback: false')
+    expect(bundle).toContain('autonomousRollback: true')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.2.2-rc.5 <0.3.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
@@ -51,6 +51,12 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
       expect(ctx.assistantEvolution).toBeInstanceOf(entrypoint.AssistantEvolutionService)
       // Nothing is learned before an owner approves anything.
       expect(ctx.assistantEvolution.guidance()).toBe('')
+      // autonomousRollback is enabled by default (not rejected as disabled).
+      const scope = entrypoint.canonicalEvolutionHostScope({ workspace: root, preset: 'primary' })
+      expect(() => ctx.assistantEvolution.hostRollbackOne({
+        scope, principal: 'owner:lark:123', operationId: 'check-default',
+        ruleId: 'rule-00000000-0000-4000-8000-000000000000', expectedVersion: 1,
+      })).toThrowError(/denied|policy|not-found/iu)
     } finally {
       await ctx.fiber.restart()
       rmSync(root, { recursive: true, force: true })

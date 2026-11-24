@@ -170,10 +170,15 @@ function makeBenchmarkPlan(split: 'development' | 'holdout', id = 'assoc-plan'):
 }
 
 describe('associationCandidates config validation', () => {
-  it('defaults off and enforces enabled/scope invariants and bounds', () => {
-    expect(normalizeConfig().associationCandidates).toEqual({ enabled: false, maxCandidatesPerWake: 3 })
-    expect(() => normalizeConfig({ associationCandidates: { enabled: true } })).toThrow(
+  it('defaults on and enforces enabled/scope invariants, cascade opt-out, and bounds', () => {
+    expect(normalizeConfig().associationCandidates).toEqual({ enabled: true, maxCandidatesPerWake: 3 })
+    expect(normalizeConfig({ enabled: false }).associationCandidates).toEqual({ enabled: false, maxCandidatesPerWake: 3 })
+    expect(normalizeConfig({ associationCandidates: { enabled: false } }).associationCandidates).toEqual({ enabled: false, maxCandidatesPerWake: 3 })
+    expect(() => normalizeConfig({ enabled: false, associationCandidates: { enabled: true } })).toThrow(
       /associationCandidates\.enabled requires the driver itself/u,
+    )
+    expect(() => normalizeConfig({ associationCandidates: { enabled: true } })).toThrow(
+      /explicit owner scope/u,
     )
     expect(() => normalizeConfig({ enabled: true, associationCandidates: { enabled: true } })).toThrow(
       /explicit owner scope/u,

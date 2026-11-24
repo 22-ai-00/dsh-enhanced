@@ -1,5 +1,10 @@
+import { spawnSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { resolve } from 'node:path'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -11,7 +16,10 @@ import { nativeMacRuntimeDigest, type NativeMacRuntime } from '@dsh-enhanced/ass
 import { linuxPluginBehaviorRuntimeDigest, type LinuxPluginBehaviorRuntime } from '@dsh-enhanced/assistant-verifier/plugin-behavior-runner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import * as execution from '../src/creation-capability-execution.js'
+import { CreationCapabilityJournal } from '../src/creation-capability-journal.js'
 import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.js'
+import { extractCandidatePluginKindFromFiles, validateCandidateCordisPatch,
+  validateCandidatePackageJson, validateSourceCreationFiles } from '../src/source-creation.js'
 import type { CreationCapabilityConfig, CreationCapabilityJournalPort, CreationCapabilityObservation,
   CreationCapabilityPorts, CreationCapabilityRecord, CreationCapabilityRunner } from '../src/creation-capability-types.js'
 
@@ -70,9 +78,9 @@ function fixture() {
   const journal: CreationCapabilityJournalPort = {
     authorityDigest: 'b'.repeat(64), publicKey: verifierPublicKey, inspect: () => record, list: () => record ? [record] : [],
     usage: () => ({ adoptions: record ? 1 : 0, calls: calls.size }),
-    claim: ({ certificate: cert, artifact: bytes }) => {
+    claim: ({ certificate: cert, artifact: bytes, pluginKind }) => {
       if (record) return { created: false, record }
-      record = { planId: 'plan-1', status: 'claimed', certificate: cert, artifact: bytes }
+      record = { planId: 'plan-1', status: 'claimed', ...(pluginKind === undefined ? {} : { pluginKind }), certificate: cert, artifact: bytes }
       return { created: true, record }
     },
     authorize: (_plan, tools) => {
@@ -1066,3 +1074,333 @@ test('retained work-item source uses frozen history without the producer and kee
   expect(f.journal.list()).toHaveLength(1)
   await restored.close()
 })
+
+test('CreationCapabilityRuntime forwards non-tool pluginKind and adopts probe schemas without rejecting service plugins', async () => {
+  const f = fixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const probeSchemas = [{
+    name: 'service_lifecycle_probe',
+    parameters: { type: 'object', additionalProperties: false, properties: { check: { type: 'string' } } },
+  }]
+  const probeSchemaDigest = digest(JSON.stringify(probeSchemas))
+  const svcCertificate = { ...f.certificate, schemaDigest: probeSchemaDigest }
+  f.ports.inspect = () => ({ certificate: svcCertificate, artifact: f.artifact, owner: f.config.owner, pluginKind: 'service' as const })
+  const runnerInputs: Parameters<CreationCapabilityRunner['run']>[0][] = []
+  f.runner.run = async input => {
+    runnerInputs.push(input)
+    if (input.operation.kind === 'discover') {
+      return {
+        status: 'observed',
+        quiescent: true,
+        artifactSha256: f.certificate.plan.artifactSha256,
+        environment: f.certificate.environment,
+        schemaDigest: probeSchemaDigest,
+        schemas: probeSchemas,
+        pluginKind: 'service',
+        boundary: 'process-seccomp-v1',
+      }
+    }
+    return {
+      status: 'observed',
+      quiescent: true,
+      artifactSha256: f.certificate.plan.artifactSha256,
+      environment: f.certificate.environment,
+      schemaDigest: probeSchemaDigest,
+      pluginKind: 'service',
+      boundary: 'process-seccomp-v1',
+      calls: [{ id: input.operation.calls[0]!.id, toolName: 'service_lifecycle_probe', result: { isError: false, value: { ok: true }, content: [{ type: 'text', text: 'ok' }] } }],
+    }
+  }
+  const runtime = f.runtime()
+  await runtime.start()
+  await runtime.adopt('plan-1', new AbortController().signal)
+  expect(runnerInputs[0]?.pluginKind).toBe('service')
+  const record = f.journal.inspect('plan-1')
+  expect(record?.status).toBe('active')
+  expect(record?.tools?.map(t => t.originalName)).toEqual(['service_lifecycle_probe'])
+  await runtime.close()
+})
+
+test.each(['ui', 'channel'] as const)('CreationCapabilityRuntime forwards %s pluginKind during post-adoption invoke and inspectRetained', async kind => {
+  const f = fixture()
+  await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  const toolName = kind === 'ui' ? 'ui_declaration_probe' : 'channel_readiness_probe'
+  const probeSchemas = [{
+    name: toolName,
+    parameters: { type: 'object', additionalProperties: false, properties: { check: { type: 'string' } } },
+  }]
+  const probeSchemaDigest = digest(JSON.stringify(probeSchemas))
+  const kindCert = { ...f.certificate, schemaDigest: probeSchemaDigest }
+  const { signature: _sig, ...unsigned } = kindCert
+  const signedCert = { ...unsigned, signature: sign(null, Buffer.from(canonicalGrowthJson(unsigned)), verifier.privateKey).toString('base64url') }
+  f.ports.inspect = () => ({ certificate: signedCert, artifact: f.artifact, owner: f.config.owner, pluginKind: kind })
+  f.ports.inspectRetained = vi.fn(() => ({ certificate: signedCert, artifact: f.artifact, owner: f.config.owner, pluginKind: kind }))
+  f.ports.recheckRetained = vi.fn(async () => {})
+
+  const runnerInputs: Parameters<CreationCapabilityRunner['run']>[0][] = []
+  f.runner.run = async input => {
+    runnerInputs.push(input)
+    if (input.operation.kind === 'discover') {
+      return {
+        status: 'observed', quiescent: true, artifactSha256: signedCert.plan.artifactSha256,
+        environment: signedCert.environment, schemaDigest: probeSchemaDigest, schemas: probeSchemas,
+        pluginKind: kind, boundary: 'process-seccomp-v1',
+      }
+    }
+    return {
+      status: 'observed', quiescent: true, artifactSha256: signedCert.plan.artifactSha256,
+      environment: signedCert.environment, schemaDigest: probeSchemaDigest,
+      pluginKind: kind, boundary: 'process-seccomp-v1',
+      calls: [{ id: input.operation.calls[0]!.id, toolName, result: { isError: false, value: { kind, ready: true }, content: [{ type: 'text', text: kind }] } }],
+    }
+  }
+  const runtime = f.runtime()
+  await runtime.start()
+  await runtime.adopt('plan-1', new AbortController().signal)
+  const record = f.journal.inspect('plan-1')!
+  const alias = record.tools![0]!.name
+  expect(record.pluginKind).toBe(kind)
+  await f.ctx.tools.get(alias)!.execute({ check: 'status' }, {
+    callId: `${kind}-call-1`, agent: { session: { id: 'session-kind' } }, signal: new AbortController().signal,
+  } as unknown as ToolRunContext)
+  expect(runnerInputs).toHaveLength(2)
+  expect(runnerInputs[0]?.pluginKind).toBe(kind)
+  expect(runnerInputs[1]?.pluginKind).toBe(kind)
+
+  // Switch to retained v2 mode and restart runtime, clearing in-memory pluginKind to verify inspectRetained supplies it
+  record.receipt!.protocol = 'dsh-created-capability-adoption/v2'
+  delete record.pluginKind
+  await runtime.close()
+  f.ports.inspect = vi.fn(() => { throw new Error('original source GCed') })
+  const restored = f.runtime()
+  await restored.start()
+  const retainedRes = await f.ctx.tools.get(alias)!.execute({ check: 'status' }, {
+    callId: `${kind}-call-retained`, agent: { session: { id: 'session-kind' } }, signal: new AbortController().signal,
+  } as unknown as ToolRunContext)
+  expect(retainedRes).toMatchObject({ value: { kind, ready: true } })
+  expect(f.ports.inspectRetained).toHaveBeenCalled()
+  expect(runnerInputs[2]?.pluginKind).toBe(kind)
+  await restored.close()
+})
+
+test('source-creation validated service/channel/ui plugins pass real assistant-verifier NATIVE_BEHAVIOR_SOURCE on discover and invoke', async () => {
+  const packTarGz = (entries: Record<string, string>): Buffer => {
+    const records: Buffer[] = []
+    for (const [name, content] of Object.entries(entries)) {
+      const bytes = Buffer.from(content, 'utf8')
+      const header = Buffer.alloc(512)
+      header.write(name); header.write('0000644\0', 100); header.write('0000000\0', 108); header.write('0000000\0', 116)
+      header.write(bytes.length.toString(8).padStart(11, '0') + '\0', 124); header.write('00000000000\0', 136)
+      header.fill(32, 148, 156); header.write('0', 156); header.write('ustar\0', 257); header.write('00', 263)
+      header.write(header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
+      records.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512))
+    }
+    return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]))
+  }
+
+  const { NATIVE_BEHAVIOR_SOURCE } = await import('../../assistant-verifier/lib/native-behavior-worker.js') as { NATIVE_BEHAVIOR_SOURCE: string }
+  const modulesPath = fileURLToPath(new URL('../../assistant-verifier/node_modules', import.meta.url))
+  const tempRoot = await mkdtemp(join(tmpdir(), 'pcp-verifier-contract-'))
+  await chmod(tempRoot, 0o700)
+  try {
+    const basePkg = (pluginName: string) => ({
+      name: `@dsh-enhanced/${pluginName}`, version: '0.1.0', description: 'test', license: 'MIT', type: 'module',
+      main: './lib/index.js', types: './lib/index.d.ts',
+      exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' }, './cordis.patch.yml': './cordis.patch.yml', './package.json': './package.json' },
+      files: ['lib', 'cordis.patch.yml', 'README.md', 'LICENSE'],
+      scripts: { build: 'tsc -p tsconfig.build.json', typecheck: 'tsc -p tsconfig.json --noEmit', test: 'vitest run' },
+      engines: { node: '>=24.9.0' },
+      publishConfig: { access: 'public' },
+      repository: { type: 'git', url: 'https://example.invalid/repo.git', directory: `plugins/${pluginName}` },
+      keywords: ['deepseek', 'deepseek-harness', 'dsh-plugin'],
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+      peerDependencies: { '@deepseek-ai/cordis': '^4.1.0', '@deepseek-ai/dsh-tools': '>=0.2.2-rc.5 <0.3.0' },
+      peerDependenciesMeta: { '@deepseek-ai/cordis': { optional: true }, '@deepseek-ai/dsh-tools': { optional: true } },
+      devDependencies: { '@deepseek-ai/cordis': 'catalog:', '@deepseek-ai/dsh-tools': 'catalog:' },
+    })
+
+    const cases = [
+      {
+        kind: 'service' as const,
+        pluginName: 'tool-contract-svc',
+        toolName: 'service_lifecycle_probe',
+        toolArgs: { check: 'status' },
+        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-svc\n      name: '@dsh-enhanced/tool-contract-svc'\n      services:\n        - sampleSvc\n      provides:\n        - sampleSvc\n",
+        pkgExtra: { dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'service' } },
+        entries: {
+          'package/lib/index.js': "export function apply(ctx) { ctx.provide('sampleSvc', { health: () => ({ ready: true }), ping: () => ({ ok: true }) }) }\n",
+        },
+      },
+      {
+        kind: 'channel' as const,
+        pluginName: 'tool-contract-chan',
+        toolName: 'channel_readiness_probe',
+        toolArgs: { check: 'adapters' },
+        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-chan\n      name: '@dsh-enhanced/tool-contract-chan'\n      inject: [assistantDelivery]\n      channel:\n        transport: webhook\n",
+        pkgExtra: { dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'channel', channel: { transport: 'webhook' } } },
+        entries: {
+          'package/lib/index.js': [
+            "export const inject = ['assistantDelivery']",
+            'export function apply(ctx) {',
+            '  const stop = ctx.assistantDelivery.registerAdapter({',
+            "    channel: 'hook', account: 'default', capabilities: { textAttachments: true },",
+            '    start: async () => {}, send: async () => ({ ok: true }),',
+            '  })',
+            '  ctx.effect(() => () => stop())',
+            '}',
+          ].join('\n'),
+        },
+      },
+      {
+        kind: 'ui' as const,
+        pluginName: 'tool-contract-ui',
+        toolName: 'ui_declaration_probe',
+        toolArgs: { check: 'contributions' },
+        patchYaml: "- insert:\n    - id: dsh-enhanced-tool-contract-ui\n      name: '@dsh-enhanced/tool-contract-ui'\n      inject: [typert]\n      ui:\n        panel: true\n      routes:\n        - /contract-ui\n      sections:\n        - id: main\n      settings:\n        theme: light\n",
+        pkgExtra: {
+          exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' }, './cordis.patch.yml': './cordis.patch.yml', './package.json': './package.json', './client': './lib/client.js' },
+          dsh: { bundle: { patch: './cordis.patch.yml' }, kind: 'ui', ui: { panel: true }, client: { entry: './lib/client.js' } },
+        },
+        entries: {
+          'package/lib/client.js': 'export const renderClient = () => null\n',
+          'package/lib/index.js': [
+            "export const inject = ['typert']",
+            'export function apply(ctx) {',
+            '  ctx.typert.register({',
+            "    package: '@dsh-enhanced/tool-contract-ui',",
+            '    routes: [{ path: "/contract-ui" }],',
+            '    sections: [{ id: "main" }],',
+            '  })',
+            '}',
+          ].join('\n'),
+        },
+      },
+    ]
+
+    for (const c of cases) {
+      const base = basePkg(c.pluginName)
+      const baseText = JSON.stringify(base, null, 2)
+      const candText = JSON.stringify({ ...base, ...c.pkgExtra }, null, 2)
+      const basePatch = `- insert:\n    - id: dsh-enhanced-${c.pluginName}\n      name: '@dsh-enhanced/${c.pluginName}'\n`
+      validateCandidatePackageJson(c.pluginName, baseText, candText)
+      validateCandidateCordisPatch(c.pluginName, basePatch, c.patchYaml)
+      validateSourceCreationFiles([{ path: 'package.json', content: candText }, { path: 'cordis.patch.yml', content: c.patchYaml }])
+      expect(extractCandidatePluginKindFromFiles([{ path: 'package.json', content: candText }])).toBe(c.kind)
+
+      const tgz = packTarGz({
+        'package/package.json': candText,
+        'package/cordis.patch.yml': c.patchYaml,
+        ...c.entries,
+      })
+      const artSha = digest(tgz)
+
+      // Persist in real CreationCapabilityJournal and verify reopen preserves pluginKind
+      const jDir = join(tempRoot, `journal-${c.kind}`)
+      await mkdir(jDir, { mode: 0o700 })
+      const keyPath = join(jDir, 'key.pem')
+      const jKey = generateKeyPairSync('ed25519')
+      await writeFile(keyPath, jKey.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+
+      const runRealWorker = async (input: Parameters<CreationCapabilityRunner['run']>[0]): Promise<CreationCapabilityObservation> => {
+        const workDir = join(tempRoot, `worker-${c.kind}-${input.operation.kind}-${Math.random().toString(16).slice(2, 8)}`)
+        await mkdir(join(workDir, 'package', 'lib'), { recursive: true })
+        await writeFile(join(workDir, 'package', 'package.json'), candText, 'utf8')
+        await writeFile(join(workDir, 'package', 'cordis.patch.yml'), c.patchYaml, 'utf8')
+        for (const [entryPath, entryContent] of Object.entries(c.entries)) {
+          const out = join(workDir, entryPath)
+          await mkdir(dirname(out), { recursive: true })
+          await writeFile(out, entryContent, 'utf8')
+        }
+        const workerScript = join(workDir, 'worker.mjs')
+        await writeFile(workerScript, NATIVE_BEHAVIOR_SOURCE, 'utf8')
+        const res = spawnSync(process.execPath, [workerScript], {
+          cwd: workDir,
+          input: JSON.stringify({
+            schemaVersion: 1,
+            nonce: 'a'.repeat(64),
+            artifactSha256: artSha,
+            entry: 'package/lib/index.js',
+            modulesPath,
+            operation: input.operation,
+            ...(input.pluginKind === undefined ? {} : { pluginKind: input.pluginKind }),
+          }),
+          encoding: 'utf8',
+          timeout: 15_000,
+        })
+        expect(res.status, res.stderr).toBe(0)
+        const frame = JSON.parse(res.stdout.trim()) as {
+          status: string; reason?: string; schemaDigest?: string; schemas?: unknown[];
+          calls?: { id: string; toolName: string; result: unknown }[]; pluginKind?: 'tool' | 'service' | 'channel' | 'ui'
+        }
+        expect(frame.status, JSON.stringify(frame)).toBe('result')
+        return {
+          status: 'observed',
+          quiescent: true,
+          artifactSha256: artSha,
+          environment: { node: 'v22.19.0', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' },
+          schemaDigest: frame.schemaDigest!,
+          ...(frame.schemas !== undefined ? { schemas: frame.schemas } : {}),
+          ...(frame.calls !== undefined ? { calls: frame.calls } : {}),
+          ...(frame.pluginKind !== undefined ? { pluginKind: frame.pluginKind } : {}),
+        }
+      }
+
+      // First discover schemas via real NATIVE_BEHAVIOR_SOURCE so certificate binds exact schemaDigest
+      const discObs = await runRealWorker({
+        key: 'discover-key', artifact: tgz, operation: { kind: 'discover' }, pluginKind: c.kind, signal: new AbortController().signal,
+      })
+      const f = fixture()
+      const cert = legacyCertificate(`plan-${c.kind}`, c.pluginName, tgz, discObs.schemaDigest!, discObs.environment!)
+      const owner = f.config.owner
+      const jConfig: CreationCapabilityConfig = {
+        authorityId: f.config.authorityId,
+        keyId: 'j-key',
+        keyPath,
+        owner: f.config.owner,
+        namePrefix: f.config.namePrefix,
+        expiresAt: f.config.expiresAt,
+        maxAdoptions: f.config.maxAdoptions,
+        maxTools: f.config.maxTools,
+        maxCallsPerAdoption: 16,
+        maxCallRecords: 64,
+        maxInputBytes: f.config.maxInputBytes,
+        runner: {
+          stateRoot: jDir,
+          image: `fixture@sha256:${'a'.repeat(64)}`,
+          dockerPath: '/usr/bin/docker',
+          expiresAt: f.config.runner.expiresAt,
+          maxRuns: 8,
+          maxTotalDurationMs: 60_000,
+          maxDurationMs: 10_000,
+          maxOutputBytes: 65_536,
+        },
+      }
+      // Verify CreationCapabilityJournal persists pluginKind from .tgz across close + reopen
+      const journal = new CreationCapabilityJournal({ path: join(jDir, 'creation-adoptions.sqlite'), config: jConfig })
+      journal.claim({ certificate: cert, artifact: tgz, pluginKind: c.kind })
+      expect(journal.inspect(cert.plan.id)?.pluginKind).toBe(c.kind)
+      journal.close()
+      const reopenedJournal = new CreationCapabilityJournal({ path: join(jDir, 'creation-adoptions.sqlite'), config: jConfig })
+      expect(reopenedJournal.inspect(cert.plan.id)?.pluginKind).toBe(c.kind)
+      reopenedJournal.close()
+
+      // Verify CreationCapabilityRuntime.adopt + post-adoption tool invoke against real NATIVE_BEHAVIOR_SOURCE
+      await mountAgentLoopTestDependencies(f.ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+      f.ports.inspect = () => ({ certificate: cert, artifact: tgz, owner, pluginKind: c.kind })
+      const runtime = new CreationCapabilityRuntime({
+        ctx: f.ctx, config: f.config, journal: f.journal, ports: f.ports,
+        createRunner: async () => ({ run: runRealWorker, close: async () => {} }),
+      })
+      await runtime.start()
+      await runtime.adopt(cert.plan.id, new AbortController().signal)
+      const alias = f.journal.inspect(cert.plan.id)!.tools!.find(t => t.originalName === c.toolName)!.name
+      const invokeRes = await f.ctx.tools.get(alias)!.execute(c.toolArgs, {
+        callId: `real-${c.kind}`, agent: { session: { id: 'session-real' } }, signal: new AbortController().signal,
+      } as unknown as ToolRunContext)
+      expect((invokeRes as { value: Record<string, unknown> }).value).toMatchObject({ kind: c.kind })
+      await runtime.close()
+    }
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+}, 45_000)

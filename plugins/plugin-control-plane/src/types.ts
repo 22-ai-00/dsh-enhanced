@@ -2,7 +2,7 @@ import type { LinuxReceiptBinding } from '@dsh-enhanced/assistant-isolation'
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
 import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'
-import type { SourceCreationBinding } from './source-creation.js'
+import type { CandidatePluginKind, SourceCreationBinding } from './source-creation.js'
 import type { SourceRevisionBinding } from './source-revision.js'
 
 export type PlanStatus =
@@ -234,6 +234,8 @@ export interface PluginSourcePlan {
    * original shape.
    */
   mode: 'create' | 'modify' | 'prepared-create' | 'prepared-revise'
+  /** Optional non-tool plugin kind propagated from prepared source job intent. */
+  pluginKind?: CandidatePluginKind
   /** Frozen only for an owner-granted, prepared create candidate. */
   creation?: SourceCreationBinding
   /** A new task's independent preparation grant and exact historical parent. */

@@ -99,3 +99,74 @@ export function permissionDispatchRecoveryFromFailureCode(
   if (failureCode === permissionDispatchRecoveryCodes['failure-notice']) return 'failure-notice'
   return undefined
 }
+
+export type OwnerSelfIterationAction =
+  | 'enableSelfIteration'
+  | 'disableSelfIteration'
+  | 'upgradeAssistantAndRecover'
+
+export interface ParsedOwnerSelfIterationCommand {
+  readonly action: OwnerSelfIterationAction
+  readonly sourceText: string
+}
+
+const ownerSelfIterationExactPhrases: Readonly<Record<string, OwnerSelfIterationAction>> = Object.freeze({
+  开启自迭代: 'enableSelfIteration',
+  打开自迭代: 'enableSelfIteration',
+  启用自迭代: 'enableSelfIteration',
+  开启助手自迭代: 'enableSelfIteration',
+  打开助手自迭代: 'enableSelfIteration',
+  启用助手自迭代: 'enableSelfIteration',
+  开启整体自迭代: 'enableSelfIteration',
+  启用整体自迭代: 'enableSelfIteration',
+  'enable self-iteration': 'enableSelfIteration',
+  'enable self iteration': 'enableSelfIteration',
+  'enable autonomy': 'enableSelfIteration',
+  关闭自迭代: 'disableSelfIteration',
+  停用自迭代: 'disableSelfIteration',
+  暂停自迭代: 'disableSelfIteration',
+  关闭助手自迭代: 'disableSelfIteration',
+  停用助手自迭代: 'disableSelfIteration',
+  暂停助手自迭代: 'disableSelfIteration',
+  关闭整体自迭代: 'disableSelfIteration',
+  停用整体自迭代: 'disableSelfIteration',
+  'disable self-iteration': 'disableSelfIteration',
+  'disable self iteration': 'disableSelfIteration',
+  'disable autonomy': 'disableSelfIteration',
+  升级整体助手: 'upgradeAssistantAndRecover',
+  升级助手: 'upgradeAssistantAndRecover',
+  升级并恢复助手: 'upgradeAssistantAndRecover',
+  升级并恢复整体助手: 'upgradeAssistantAndRecover',
+  整体升级助手: 'upgradeAssistantAndRecover',
+  'upgrade assistant': 'upgradeAssistantAndRecover',
+  'upgrade autonomy': 'upgradeAssistantAndRecover',
+})
+
+const ownerSelfIterationSlashActions: Readonly<Record<string, OwnerSelfIterationAction>> = Object.freeze({
+  enable: 'enableSelfIteration',
+  disable: 'disableSelfIteration',
+  upgrade: 'upgradeAssistantAndRecover',
+})
+
+/**
+ * Deterministic closed-set parser for owner self-iteration control intents.
+ * Rejects questions, multi-clause prose, and conversational mentions of "自迭代"/"升级".
+ */
+export function parseOwnerSelfIterationCommand(
+  text: string,
+): ParsedOwnerSelfIterationCommand | undefined {
+  if (typeof text !== 'string') return undefined
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+
+  const slashMatch = /^\/autonomy[\t ]+([a-z]+)$/iu.exec(trimmed)
+  if (slashMatch !== null) {
+    const action = ownerSelfIterationSlashActions[slashMatch[1]!.toLowerCase()]
+    return action === undefined ? undefined : Object.freeze({ action, sourceText: text })
+  }
+
+  if (/[?？]$/u.test(trimmed)) return undefined
+  const normalized = trimmed.replace(/[。.!！]$/u, '').trim().replace(/[\t ]+/gu, ' ').toLowerCase()
+  const action = ownerSelfIterationExactPhrases[normalized]
+  return action === undefined ? undefined : Object.freeze({ action, sourceText: text })
+}

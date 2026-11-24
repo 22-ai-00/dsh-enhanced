@@ -137,6 +137,7 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
       sessionId: binding.sessionId, idempotencyKey: overrides.idempotencyKey ?? noticeKey,
       text: overrides.text ?? 'Attention settings: reply "authorize-once" or "decline".',
       expiresAt: Date.now() + 60_000, withdrawable: true, withdrawalHandle,
+      attention: { purpose: 'result' },
     })
     return {
       ctx, path, service, store, ownerAuthority, consume, withdrawal, withdrawalHandle, enqueueNotice,
@@ -200,6 +201,7 @@ describe('owner question reply matching', () => {
       scope: { principalId: 'lark/bot-1/tenant-a/ou_owner', principalRecordId: owner.id, principalVersion: owner.version,
         workspace: '/work/alpha', preset: 'primary' }, sessionId: 'session-1', idempotencyKey: 'plain-notice',
       text: 'A proactive reminder.', expiresAt: Date.now() + 60_000,
+      attention: { purpose: 'result' },
     })
     await f.drain()
     expect(f.store.getOutbox(other.id)).toMatchObject({ status: 'accepted' })

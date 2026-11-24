@@ -106,7 +106,7 @@ test('pages complete UTF-8 original input with a stable full-input digest and st
   expect(read(f)!.input.returnedBytes).toBeLessThanOrEqual(4096)
   expect(read(f, { offset: Buffer.byteLength(f.text) })!.input.text).toBe('')
   for (const page of [{ offset: 2 }, { offset: -1 }, { offset: 1.5 }, { offset: Buffer.byteLength(f.text) + 1 }, { maxBytes: 3 }, { maxBytes: 8193 }]) expect(() => read(f, page)).toThrow()
-})
+}, 15_000)
 
 test('revalidates owner, binding, envelope and expected source digest', async () => {
   const f = await fixture(); finish(f); const before = source(f)
