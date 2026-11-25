@@ -18,16 +18,19 @@ concurrency:
 env:
   VITEST_MAX_WORKERS: '2'
   DSH_TEST_CONCURRENCY: '2'
+  DSH_NIGHTLY_FULL_MATRIX: '0'
 
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 45
     environment: npm-release
     outputs:
       source_commit: ${{ steps.release_source.outputs.source_commit }}
     permissions:
       contents: read
+      actions: read
+      id-token: write
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
@@ -74,110 +77,12 @@ jobs:
           version: 11.7.0
           run_install: false
 
-      - name: Set up pinned Linux test Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: '22.23.2'
-
-      - name: Install pinned Linux test Node
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = 'v22.23.2'
-          test_node="$(node -p 'process.execPath')"
-          # Namespace tests expose /usr read-only; workspace Node stays separate.
-          sudo install --owner=root --group=root --mode=0755 "${test_node}" /usr/bin/node
-          cmp "${test_node}" /usr/bin/node
-          test "$(/usr/bin/node --version)" = 'v22.23.2'
-
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
           cache: pnpm
           registry-url: https://registry.npmjs.org
-
-      - name: Verify Linux E2E prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(node --version)" = "v$(cat .node-version)"
-          test "$(/usr/bin/node --version)" = 'v22.23.2'
-          sudo apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-            bubblewrap \
-            file \
-            git \
-            python3 \
-            tar
-
-          command -v bwrap >/dev/null
-          command -v git >/dev/null
-          command -v tar >/dev/null
-          command -v python3 >/dev/null
-          test -d /proc/self/fd
-
-          # ubuntu-latest enables an AppArmor restriction that lets bwrap create
-          # most namespaces but blocks the loopback setup for --unshare-net.
-          # The hosted runner is ephemeral; relax it here so the adapter test
-          # still exercises its real, network-isolated bubblewrap sandbox.
-          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] \
-            && [[ "$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == '1' ]]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          /usr/bin/bwrap \
-            --unshare-all \
-            --die-with-parent \
-            --new-session \
-            --ro-bind /usr /usr \
-            --ro-bind /lib /lib \
-            --ro-bind /lib64 /lib64 \
-            --proc /proc \
-            --dev /dev \
-            /usr/bin/true
-
-      - name: Install native pnpm test runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          runtime_prefix="${RUNNER_TEMP}/dsh-test-pnpm"
-          npm install \
-            --prefix "${runtime_prefix}" \
-            --no-audit \
-            --no-fund \
-            --no-save \
-            --package-lock=false \
-            @pnpm/exe@11.7.0
-
-          pnpm_root="${runtime_prefix}/node_modules/@pnpm/exe"
-          node -e '
-            const manifest = require(process.argv[1]);
-            if (manifest.name !== "@pnpm/exe" || manifest.version !== "11.7.0") {
-              throw new Error(`unexpected pnpm runtime: ${manifest.name}@${manifest.version}`);
-            }
-          ' "${pnpm_root}/package.json"
-          test -x "${pnpm_root}/pnpm"
-          file "${pnpm_root}/pnpm" | grep -Eq 'ELF .* executable'
-          printf 'DSH_TEST_PNPM_ROOT=%s\n' "${pnpm_root}" >> "${GITHUB_ENV}"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify repository
-        shell: bash
-        run: |
-          set -o pipefail
-          verify_log="${RUNNER_TEMP}/verify-repository.log"
-          verify_status=0
-          pnpm check 2>&1 | tee "${verify_log}" || verify_status=$?
-          if [ "${verify_status}" -ne 0 ]; then
-            printf 'verify repository status: %s\n' "${verify_status}"
-            grep -aE '(^| )(FAIL|×) |AssertionError|Error: |ERR_PNPM' "${verify_log}" \
-              | grep -av 'ExperimentalWarning' | head -40 \
-              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
-            tail -30 "${verify_log}" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
-            exit 1
-          fi
 
       - name: Verify release tag and pending versions
         run: node ./scripts/release-version.mjs verify-tag "${RELEASE_TAG}"
@@ -188,11 +93,99 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo 'NPM_TOKEN is not configured.' >&2
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            npm whoami --registry=https://registry.npmjs.org
+          elif [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            echo 'NODE_AUTH_TOKEN is not set; using GitHub OIDC trusted publishing.'
+          else
+            echo 'Neither NPM_TOKEN nor GitHub OIDC (ACTIONS_ID_TOKEN_REQUEST_URL) is available.' >&2
             exit 1
           fi
-          npm whoami --registry=https://registry.npmjs.org
+
+      - name: Verify CI gate and build release packages
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const repo = process.env.GITHUB_REPOSITORY;
+            const sha = process.env.RELEASE_SOURCE_COMMIT;
+            const token = process.env.GITHUB_TOKEN;
+            if (!repo || !sha || !token) {
+              throw new Error("Missing GITHUB_REPOSITORY, RELEASE_SOURCE_COMMIT, or GITHUB_TOKEN");
+            }
+            const headers = {
+              Accept: "application/vnd.github+json",
+              Authorization: `Bearer ${token}`,
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "dsh-enhanced-release-ci-gate",
+            };
+            const requiredLanes = [
+              "linux-packages",
+              "linux-slow-package-tests",
+              "linux-root-tests",
+              "macos-verify",
+              "windows-acp-smoke",
+              "verify",
+            ];
+            async function ghJson(path) {
+              const res = await fetch(`https://api.github.com${path}`, { headers });
+              if (!res.ok) {
+                throw new Error(`GitHub API ${path} returned HTTP ${res.status}: ${await res.text()}`);
+              }
+              return await res.json();
+            }
+            const deadline = Date.now() + 30 * 60 * 1000;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            (async () => {
+              while (true) {
+                const data = await ghJson(`/repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${encodeURIComponent(sha)}&per_page=20`);
+                const matching = (data.workflow_runs || []).filter((r) => r.head_sha === sha);
+                for (const run of matching) {
+                  if (run.status === "completed" && run.conclusion === "success") {
+                    const jobsData = await ghJson(`/repos/${repo}/actions/runs/${run.id}/jobs?per_page=50`);
+                    const jobs = jobsData.jobs || [];
+                    const verifyJob = jobs.find((j) => j.name === "verify");
+                    const lanesOk = requiredLanes.every((prefix) => {
+                      const laneJobs = jobs.filter((j) => j.name === prefix || j.name.startsWith(`${prefix} (`));
+                      return laneJobs.length > 0 && laneJobs.every((j) => j.status === "completed" && j.conclusion === "success");
+                    });
+                    if (verifyJob && verifyJob.status === "completed" && verifyJob.conclusion === "success" && lanesOk) {
+                      console.log(`CI gate passed via ci.yml run ${run.id} (${run.html_url}) for ${sha}`);
+                      return;
+                    }
+                  }
+                }
+                const active = matching.some((r) => ["queued", "in_progress", "waiting", "requested", "pending"].includes(r.status));
+                if (!active) {
+                  const summary = matching.map((r) => `${r.id}:${r.status}:${r.conclusion}`).join(", ") || "<none>";
+                  throw new Error(`CI gate (ci.yml + verify) has not passed for ${sha}. Runs: ${summary}`);
+                }
+                if (Date.now() >= deadline) {
+                  throw new Error(`Timed out after 30m waiting for ci.yml on ${sha}`);
+                }
+                console.log(`Waiting for ci.yml run on ${sha}...`);
+                await sleep(15_000);
+              }
+            })().catch((err) => {
+              console.error(err instanceof Error ? err.message : String(err));
+              process.exit(1);
+            });
+          '
+
+          pnpm install --frozen-lockfile
+          verify_log="${RUNNER_TEMP}/verify-release-build.log"
+          verify_status=0
+          (pnpm run validate && pnpm run lint && pnpm run build && pnpm run typecheck:built && pnpm run pack:check) 2>&1 | tee "${verify_log}" || verify_status=$?
+          if [ "${verify_status}" -ne 0 ]; then
+            printf 'verify release build status: %s\n' "${verify_status}"
+            grep -aE '(^| )(FAIL|×) |AssertionError|Error: |ERR_PNPM|error TS' "${verify_log}" \
+              | grep -av 'ExperimentalWarning' | head -40 \
+              | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            tail -30 "${verify_log}" | sed -e 's/%/%25/g' -e 's/\r//g' -e 's/^/::error::/' || true
+            exit 1
+          fi
 
       - name: Recheck release source and tracked tree
         shell: bash
@@ -221,9 +214,21 @@ jobs:
           fi
 
       - name: Publish packages
-        run: pnpm release:publish
+        shell: bash
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${NPM_TOKEN_SECRET:-}" ]]; then
+            export NODE_AUTH_TOKEN="${NPM_TOKEN_SECRET}"
+          else
+            unset NODE_AUTH_TOKEN || true
+            if [[ -n "${NPM_CONFIG_USERCONFIG:-}" && -f "${NPM_CONFIG_USERCONFIG}" ]]; then
+              grep -v '_authToken=' "${NPM_CONFIG_USERCONFIG}" > "${NPM_CONFIG_USERCONFIG}.tmp" || true
+              mv "${NPM_CONFIG_USERCONFIG}.tmp" "${NPM_CONFIG_USERCONFIG}"
+            fi
+          fi
+          pnpm release:publish
 
   verify-npm:
     needs: publish

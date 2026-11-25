@@ -1177,12 +1177,13 @@ describe('release version workflow', () => {
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts['typecheck:built']).toBe('pnpm --recursive --if-present run typecheck')
     expect(manifest.scripts.check).toBe('pnpm run validate && pnpm run lint && pnpm run build && pnpm run typecheck:built && pnpm run test:built && pnpm run pack:check')
-    expect(releaseWorkflow).toContain('- name: Verify Linux E2E prerequisites')
-    expect(releaseWorkflow).toContain('- name: Install native pnpm test runtime')
-    expect(releaseWorkflow).toContain("@pnpm/exe@11.7.0")
-    expect(releaseWorkflow).toContain('kernel.apparmor_restrict_unprivileged_userns=0')
-    expect(releaseWorkflow).toContain('/usr/bin/bwrap')
-    expect(releaseWorkflow).toContain('--unshare-all')
+    expect(releaseWorkflow).toContain('- name: Verify release tag and pending versions')
+    expect(releaseWorkflow).toContain('- name: Verify npm credentials')
+    expect(releaseWorkflow).toContain('- name: Verify CI gate and build release packages')
+    expect(releaseWorkflow).toContain('actions/workflows/ci.yml/runs')
+    expect(releaseWorkflow).toContain('verifyJob')
+    expect(releaseWorkflow).toContain('pnpm run validate && pnpm run lint && pnpm run build && pnpm run typecheck:built && pnpm run pack:check')
+    expect(releaseWorkflow).not.toContain('- name: Verify Linux E2E prerequisites')
     const ciWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
     // The package lane pins its four slots explicitly (two background slow-package slots plus a
     // two-wide foreground filter), so the top-level env no longer carries the workspace-concurrency
@@ -1266,7 +1267,8 @@ describe('release version workflow', () => {
     expect(ciWorkflow).toContain(`@deepseek-ai/dsh@${releaseManifest.nextPinnedHostVersion}`)
     expect(ciWorkflow).not.toContain("printf 'TMPDIR=")
     expect(ciWorkflow).toContain('tests/native-macos.spec.ts')
-    expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
+    expect(releaseWorkflow).not.toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
+    expect(releaseWorkflow).not.toContain('- name: Install native pnpm test runtime')
   })
 
   test('status shows the recorded version and next default patch', async () => {

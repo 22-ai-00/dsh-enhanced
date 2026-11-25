@@ -6,9 +6,9 @@
 
 实验性版本可以先发布供用户安装，再通过真实普通任务持续验证学习、后续复用、质量、成本与回归收益。完整普通使用闭环尚未验收，不再单独阻止实验性 npm 发布；发行说明必须保留这一边界，不能把工程测试或服务就绪说成自迭代收益证明。
 
-发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。CI 与 Release 共同读取根目录 `.node-version`，并按各自 runner 规格显式固定 Vitest 并发上限（共享 lane 为 `2`，CI 专用慢包 runner 为 `3`，见 `.github/workflows/ci.yml` 与 `release.yml`）。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
+发布前仍须通过仓库完整检查、精确发布源码的跨平台 CI、安装器版本与摘要一致性检查，以及已实现能力的安装和运行就绪验证。CI 读取根目录 `.node-version` 并按各自 runner 规格显式固定 Vitest 并发上限（共享 lane 为 `2`，CI 专用慢包 runner 为 `3`，见 `.github/workflows/ci.yml`）；Release workflow（`.github/workflows/release.yml`）复用精确同一提交的跨平台 `ci.yml` 全量通过门禁（含 `verify` 汇总及 Linux/macOS/Windows 各 lane），并在发布节点立即前置校验 tag/账本一致性与 npm 凭据，随后重跑静态、构建、类型与打包校验（`validate`、`lint`、`build`、`typecheck:built`、`pack:check`）。身份校验、有限预算、独立验收与回滚保护不因实验性发布而放宽；已知的安装失败或安全问题不能留给用户探索。
 
-Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 与 Release 的 Linux job 先将该版本安装到只读 namespace 可见的 `/usr/bin/node`，再按 `.node-version` 切回工作区 Node，并分别校验两个版本。不能用工作区 Node 替代隔离运行时基线。跨平台测试继续验证可移植的源码准备契约；非 Linux Host 验证 Linux 专用执行入口在派发前拒绝。
+Linux 原生隔离测试另使用固定的 Node `22.23.2`：CI 的 Linux 测试 job 先将该版本安装到只读 namespace 可见的 `/usr/bin/node`，再按 `.node-version` 切回工作区 Node，并分别校验两个版本。不能用工作区 Node 替代隔离运行时基线。跨平台测试继续验证可移植的源码准备契约；非 Linux Host 验证 Linux 专用执行入口在派发前拒绝。
 
 开发与发布准备（包括版本变更和失败修复）都在 `dev` 提交并推送；独立复核和完整检查通过后，才在发布时合入 `main`。本地与远端只保留 `dev`、`main`，不新建 feature 或 release 分支。标签仍只从下述验证过的精确 `origin/main` 提交创建。
 
@@ -48,9 +48,9 @@ git tag -a vX.Y.Z -m 'vX.Y.Z'
 git push origin refs/tags/vX.Y.Z
 ```
 
-推送 `v*` 标签会触发 GitHub Actions（[`.github/workflows/release.yml`](../.github/workflows/release.yml)）。workflow 检出标签本身，并在任何发布动作之前 fail closed：标签必须严格为 `vX.Y.Z`、peeled commit 必须等于当前 `origin/main` HEAD，且标签版本、`pending`、根版本、完整的 `plugins/*` / `packages/*` 包集合、各包 `package.json` 与 `src/version.ts` 必须全部一致。
+推送 `v*` 标签会触发 GitHub Actions（[`.github/workflows/release.yml`](../.github/workflows/release.yml)）。workflow 检出标签本身，并在任何发布动作之前 fail closed：标签必须严格为 `vX.Y.Z`、peeled commit 必须等于当前 `origin/main` HEAD，首先在数秒内校验标签版本、`pending`、根版本、完整的 `plugins/*` / `packages/*` 包集合、各包 `package.json`、`src/version.ts` 一致性与 npm 凭据（或 OIDC 上下文）；接着校验该精确提交 `RELEASE_SOURCE_COMMIT` 的全平台 `.github/workflows/ci.yml`（含 `verify` 及全部 Linux/macOS/Windows lane）已全部 `success`，再执行 `pnpm install --frozen-lockfile` 与 `validate`、`lint`、`build`、`typecheck:built`、`pack:check` 产出干净的发布产物与打包清单。
 
-通过 `pnpm check` 和上述校验后，才会从标签所指源码提交用 pnpm 发布：
+确认上述 CI 门禁与发布产物构建/打包校验全部通过后，才会从标签所指源码提交用 pnpm 发布：
 
 ```sh
 pnpm release:publish
