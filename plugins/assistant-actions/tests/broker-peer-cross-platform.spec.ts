@@ -60,33 +60,29 @@ async function socketPair(): Promise<{ serverSocket: Socket; clientSocket: Socke
 }
 
 describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
-  it('parses macOS struct xucred (76 bytes) and LOCAL_PEERPID via injected libSystem binding', async () => {
-    const pair = await socketPair()
-    try {
-      const inspector = createMacosPeerCredentialInspector(() => ({
-        getsockopt: (_fd, level, option, value, length) => {
-          if (level !== MACOS_SOL_LOCAL) return -1
-          if (option === MACOS_LOCAL_PEERCRED) {
-            value.writeUInt32LE(0, 0)     // cr_version = 0
-            value.writeUInt32LE(501, 4)   // cr_uid = 501
-            value.writeInt16LE(2, 8)      // cr_ngroups = 2
-            value.writeUInt32LE(20, 12)   // cr_groups[0] = 20
-            length[0] = MACOS_XUCRED_SIZE
-            return 0
-          }
-          if (option === MACOS_LOCAL_PEERPID) {
-            value.writeInt32LE(4242, 0)
-            length[0] = 4
-            return 0
-          }
-          return -1
-        },
-      }), 'darwin')
+  it('parses macOS struct xucred (76 bytes) and LOCAL_PEERPID via injected libSystem binding', () => {
+    const mockSocket = { _handle: { fd: 42 } } as unknown as Socket
+    const inspector = createMacosPeerCredentialInspector(() => ({
+      getsockopt: (_fd, level, option, value, length) => {
+        if (level !== MACOS_SOL_LOCAL) return -1
+        if (option === MACOS_LOCAL_PEERCRED) {
+          value.writeUInt32LE(0, 0)     // cr_version = 0
+          value.writeUInt32LE(501, 4)   // cr_uid = 501
+          value.writeInt16LE(2, 8)      // cr_ngroups = 2
+          value.writeUInt32LE(20, 12)   // cr_groups[0] = 20
+          length[0] = MACOS_XUCRED_SIZE
+          return 0
+        }
+        if (option === MACOS_LOCAL_PEERPID) {
+          value.writeInt32LE(4242, 0)
+          length[0] = 4
+          return 0
+        }
+        return -1
+      },
+    }), 'darwin')
 
-      expect(inspector(pair.serverSocket, new AbortController().signal)).toEqual({ uid: 501, gid: 20, pid: 4242 })
-    } finally {
-      await pair.close()
-    }
+    expect(inspector(mockSocket, new AbortController().signal)).toEqual({ uid: 501, gid: 20, pid: 4242 })
   })
 
   it('fails closed for invalid macOS xucred version, ngroups, short buffer, or non-darwin platform', async () => {
@@ -102,14 +98,14 @@ describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
 
     const pair = await socketPair()
     try {
-      // On Linux, default macOS inspector fails closed
+      // On non-darwin platforms, default macOS inspector fails closed
       if (process.platform !== 'darwin') {
         expect(inspectMacosPeerCredentials(pair.serverSocket, new AbortController().signal)).toBeUndefined()
       }
       const shortLen = createMacosPeerCredentialInspector(() => ({
         getsockopt: (_fd, _lvl, _opt, _val, len) => { len[0] = 12; return 0 },
       }), 'darwin')
-      expect(shortLen(pair.serverSocket, new AbortController().signal)).toBeUndefined()
+      expect(shortLen({ _handle: { fd: 42 } } as unknown as Socket, new AbortController().signal)).toBeUndefined()
     } finally {
       await pair.close()
     }
@@ -149,16 +145,23 @@ describe('Cross-Platform Peer Authentication (macOS & Windows)', () => {
         closeHandle: () => 1,
       })
       const inspector = createWindowsPeerInspector(() => binding, 'win32', 'client')
-      expect(inspector(pair.serverSocket, new AbortController().signal)).toEqual({
+      expect(inspector({ _handle: { handle: 123 } } as unknown as Socket, new AbortController().signal)).toEqual({
         uid: 0,
         gid: 0,
         pid: 8888,
         sid: 'S-1-5-21-1000-2000-3000-1001',
       })
+      expect(inspector({ _handle: { fd: 42 } } as unknown as Socket, new AbortController().signal)).toEqual({
+        uid: 0,
+        gid: 0,
+        pid: 8888,
+        sid: 'S-1-5-21-1000-2000-3000-1001',
+      })
+      expect(inspector({} as unknown as Socket, new AbortController().signal)).toBeUndefined()
 
-      if (process.platform !== 'win32') {
-        expect(inspectWindowsPeerCredentials(pair.serverSocket, new AbortController().signal)).toBeUndefined()
-      }
+      // On win32, standard Node.js Named Pipe net.Socket has _handle.fd === -1 and _handle.handle === undefined
+      // and therefore fails closed unless an OS HANDLE is supplied.
+      expect(inspectWindowsPeerCredentials(pair.serverSocket, new AbortController().signal)).toBeUndefined()
     } finally {
       await pair.close()
     }

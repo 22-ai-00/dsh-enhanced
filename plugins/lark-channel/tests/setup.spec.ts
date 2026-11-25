@@ -3839,41 +3839,65 @@ setInterval(() => {}, 1000)`,
   })
 
   test('runs credential preflight before journal recovery or cloud authorization', async () => {
-    const providerForPlatform = (lark as Record<string, unknown>).credentialProviderForPlatform
-    expect(providerForPlatform).toBeTypeOf('function')
-    let observedProvider: unknown
-    await expect(lark.runLarkSetup([
-      '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef', '--no-service',
-    ], {
-      preflightCredentialProvider(provider) {
-        observedProvider = provider
-        throw new Error('preflight stopped setup')
-      },
-      readEffectiveProfile() {
-        throw new Error('profile recovery must not run before preflight')
-      },
-    })).rejects.toThrow('preflight stopped setup')
-    expect(observedProvider).toBe((providerForPlatform as (platform: NodeJS.Platform) => unknown)(process.platform))
+    const dshHome = await mkdtemp(join(tmpdir(), 'lark-setup-preflight-'))
+    const { dshHomeLifecycleRendezvousPath } = await import('../src/setup.ts')
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      const providerForPlatform = (lark as Record<string, unknown>).credentialProviderForPlatform
+      expect(providerForPlatform).toBeTypeOf('function')
+      let observedProvider: unknown
+      await expect(lark.runLarkSetup([
+        '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef', '--no-service',
+      ], {
+        preflightCredentialProvider(provider) {
+          observedProvider = provider
+          throw new Error('preflight stopped setup')
+        },
+        readEffectiveProfile() {
+          throw new Error('profile recovery must not run before preflight')
+        },
+      })).rejects.toThrow('preflight stopped setup')
+      expect(observedProvider).toBe((providerForPlatform as (platform: NodeJS.Platform) => unknown)(process.platform))
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+      await rm(dshHome, { recursive: true, force: true })
+    }
   })
 
   test.runIf(process.platform === 'linux')('prepares logout-persistent systemd before credential or cloud work', async () => {
-    const events: string[] = []
-    await expect(lark.runLarkSetup([
-      '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef',
-    ], {
-      prepareResidentService() {
-        events.push('resident-preflight')
-        throw new Error('resident preflight stopped setup')
-      },
-      preflightCredentialProvider() {
-        events.push('credential-preflight')
-      },
-      readEffectiveProfile() {
-        events.push('profile-recovery')
-        throw new Error('must not recover')
-      },
-    })).rejects.toThrow('resident preflight stopped setup')
-    expect(events).toEqual(['resident-preflight'])
+    const dshHome = await mkdtemp(join(tmpdir(), 'lark-setup-resident-preflight-'))
+    const { dshHomeLifecycleRendezvousPath } = await import('../src/setup.ts')
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      const events: string[] = []
+      await expect(lark.runLarkSetup([
+        '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef',
+      ], {
+        prepareResidentService() {
+          events.push('resident-preflight')
+          throw new Error('resident preflight stopped setup')
+        },
+        preflightCredentialProvider() {
+          events.push('credential-preflight')
+        },
+        readEffectiveProfile() {
+          events.push('profile-recovery')
+          throw new Error('must not recover')
+        },
+      })).rejects.toThrow('resident preflight stopped setup')
+      expect(events).toEqual(['resident-preflight'])
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+      await rm(dshHome, { recursive: true, force: true })
+    }
   })
 
   test('recognizes a package-bin symlink as the main CLI entry', async () => {
