@@ -815,7 +815,7 @@ describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation
     })
 
   test('真实子进程执行 --version/-V/version/status/update/upgrade 时 stderr 零 SQLite ExperimentalWarning', async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-rsi-f27-')))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-rsi-f27-')))
     const server = createServer((req, res) => {
       const url = req.url ?? '/'
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -909,7 +909,7 @@ describe('F27: subprocess stderr cleanliness and non-SQLite warning preservation
   })
 
   test('保留非 SQLite 的 ExperimentalWarning 与 DeprecationWarning 输出', () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-rsi-warn-preserve-')))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-rsi-warn-preserve-')))
     try {
       const preloadPath = join(root, 'emit-warnings.mjs')
       writeFileSync(
